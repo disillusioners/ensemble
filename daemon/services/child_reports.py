@@ -4083,16 +4083,144 @@ Provide a concise summary:"""
 
         # Phase 5: "root_skipped_terminal_job" outcome removed — guard is gone
 
-        # Root completed: commit + SSE + CompletionRegistry + lifecycle + title
+        # Root completed: commit + SSE + CompletionRegistry + lifecycle + title.
+        #
+        # v0.13.9 iteration-2 fix — DEFECT 2 (5e197a30 premature terminal) +
+        # DEFECT 4 (dead-letter failed-terminal):
+        #
+        # The sync helper at ``_process_child_completion_db_sync`` has already
+        # committed ``Instance.status = COMPLETED`` by the time we reach this
+        # branch. The cascade path is bus-authoritative — pending-children
+        # counting is owned by the bus (``count_pending_for_target_sync``),
+        # and the cascade no longer has an inline completion decision on this
+        # lineage. For the ROOT lane, however, the bus's pending-count model
+        # does not apply (a root has no parent to be pending on). The
+        # freshness leg of the gate — "did the root respond AFTER its last
+        # child report?" — is therefore NOT covered by the bus and must be
+        # evaluated here. We re-run the full predicate (waiting_for + pending
+        # count + freshness, the latter wedge-resolved by terminal-message
+        # detection) before publishing the terminal lifecycle event; if the
+        # gate regressed between the helper's stamp and emission (a new
+        # message landed during the awaits above), we downgrade the instance
+        # back to WAITING_CHILDREN and suppress the publish. The next
+        # message-completed signal will re-invoke this handler and re-check.
+        #
+        # Additionally, the publish site branches on the LATEST terminal
+        # message's state: if the root's last terminal message is FAILED
+        # (the dead-letter wedge path — completion-report transitioned to
+        # FAILED after max retries), we emit ``status="failed"`` with the
+        # dead-letter's error body so the JobFeedbackObserver finalizes the
+        # job as ERROR via ``_resolve_finalize_status`` (which normalizes
+        # ``"failed"`` → ``InstanceStatus.ERROR.value``). The instance row
+        # stays COMPLETED (the helper already stamped it); the job-level
+        # terminal event carries the failure, not the instance.
         if outcome == "root_completed":
+            # ── Emission-time gate: re-verify the full predicate.
+            # The helper at ``_process_child_completion_db_sync`` did NOT
+            # call this gate (sync thread cannot await); the cascade path
+            # is bus-driven. ROOT is the only path that needs the gate,
+            # so the call site lives here at the root emission point.
+            # Single call (matching the test's reality once Finding 6
+            # adapts the assertion). Fail-open wrap: a gate exception must
+            # never block the publish — the production fail-open contract
+            # is mirrored from the cascade emission-time block.
+            _gate_pass = None
+            _gate_block_reason: str | None = None
+            try:
+                _gate_pass = await self._root_completion_gate(
+                    None, instance_id
+                )
+            except Exception as _gate_exc:
+                # Fail-open: a gate exception must NOT block the publish
+                # (mirrors the cascade emission-time wrap at the production
+                # fail-open contract). Log at WARNING so the operator sees
+                # the regression.
+                logger.warning(
+                    "root_completion: gate raised for %s... (%s); "
+                    "treating as passed (fail-open)",
+                    instance_id[:8], _gate_exc,
+                )
+                _gate_pass = (True, None)
+
+            if not _gate_pass[0]:
+                _gate_block_reason = _gate_pass[1]
+                logger.warning(
+                    "root_completion: emission-time gate blocked for %s... "
+                    "(reason=%s); downgrading to WAITING_CHILDREN and "
+                    "suppressing publish",
+                    instance_id[:8], _gate_block_reason,
+                )
+                try:
+                    with Session(self._manager._engine) as _downgrade_session:
+                        _inst = _downgrade_session.get(Instance, instance_id)
+                        if (
+                            _inst is not None
+                            and _inst.status == InstanceStatus.COMPLETED.value
+                        ):
+                            _inst.status = InstanceStatus.WAITING_CHILDREN.value
+                            _inst.updated_at = datetime.now(timezone.utc).isoformat()
+                            _inst.version = (_inst.version or 1) + 1
+                            _downgrade_session.add(_inst)
+                            _downgrade_session.commit()
+                except Exception as _dg_exc:
+                    logger.error(
+                        f"root_completion: downgrade failed for "
+                        f"{instance_id[:8]}...: {_dg_exc}"
+                    )
+                # Emit the SSE waiting_children reflection so the UI sees
+                # the held state, then return (skip the lifecycle publish
+                # AND the watcher notify below).
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(
+                            instance_id, "waiting_children", agent_id=agent_id
+                        )
+                    except Exception as _sse_exc:
+                        logger.warning(
+                            f"root_completion: downgrade SSE failed for "
+                            f"{instance_id[:8]}...: {_sse_exc}"
+                        )
+                return
+
+            # ── Terminal-status determination: branch on the latest
+            # terminal message for this instance. FAILED → "failed" with
+            # error body (dead-letter); COMPLETED or no terminal message
+            # → "completed" with no error (normal root terminal).
+            _publish_status = "completed"
+            _publish_error: str | None = None
+            try:
+                with Session(self._manager._engine) as _publish_session:
+                    _last_terminal = self._latest_terminal_message(
+                        _publish_session, instance_id
+                    )
+                    if (
+                        _last_terminal is not None
+                        and _last_terminal.status == MessageStatus.FAILED.value
+                    ):
+                        _publish_status = "failed"
+                        _publish_error = (
+                            getattr(_last_terminal, "error_message", None)
+                            or "dead-letter terminal message"
+                        )
+            except Exception as _lt_exc:
+                # Fail-open: if the terminal-message lookup fails (DB
+                # hiccup, etc.), default to "completed" — better than
+                # over-reporting failure for a root that may have just
+                # finished cleanly.
+                logger.warning(
+                    "root_completion: terminal-message lookup failed for "
+                    "%s... (%s); defaulting to 'completed'",
+                    instance_id[:8], _lt_exc,
+                )
+
             if self._manager._live_hub:
                 try:
                     await self._manager._live_hub.stream_status_change(
-                        instance_id, "completed", agent_id=agent_id
+                        instance_id, _publish_status, agent_id=agent_id
                     )
                 except Exception as e:
                     logger.warning(
-                        f"Failed to emit status_change for completed root instance: {e}"
+                        f"Failed to emit status_change for root instance: {e}"
                     )
             from .completion_registry import get_completion_registry
             get_completion_registry().complete(instance_id, result=last_content)
@@ -4100,8 +4228,8 @@ Provide a concise summary:"""
                 try:
                     await self._events_service._publish_instance_lifecycle_event(
                         instance_id=instance_id,
-                        status="completed",
-                        error=None,
+                        status=_publish_status,
+                        error=_publish_error,
                         parent_id=None,
                     )
                 except Exception as e:

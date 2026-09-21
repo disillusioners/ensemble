@@ -69,7 +69,6 @@ from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from daemon.services.dependency_bus import get_dependency_bus
-from daemon.services.completion_content import get_last_assistant_message
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.messaging_types import _assert_linkage_contract
@@ -963,42 +962,6 @@ class JobFeedbackObserver:
             )
             return None
 
-    async def _extract_result_summary(self, instance_id: str) -> str | None:
-        """Best-effort extraction of the instance's last assistant message.
-
-        Used as the job ``result_summary`` on terminal transitions so watcher
-        notifications carry a non-empty "Result:" body and job_get returns a
-        populated result_summary (fix for empty completed-event results).
-
-        DEADLOCK GUARD: this must NEVER block a terminal transition — any
-        failure (no checkpointer, unreadable history, no assistant content)
-        yields None and the job still terminates. The observer is
-        predicate-blind: whenever the instance reaches a terminal lifecycle
-        state (completed/error; terminated is handled by terminate_instance),
-        the job terminates regardless of result availability. No eternal
-        PROCESSING.
-
-        Args:
-            instance_id: The instance that reached a terminal state.
-
-        Returns:
-            The last assistant message content, or None when unavailable.
-        """
-        try:
-            checkpointer = getattr(self._instance_manager, "_checkpointer", None)
-            if checkpointer is None:
-                return None
-            content, _created_at = await get_last_assistant_message(
-                checkpointer, instance_id
-            )
-            return content
-        except Exception as e:
-            logger.debug(
-                f"result_summary extraction failed for instance "
-                f"{instance_id[:8]}...: {e}"
-            )
-            return None
-
     async def _process_event(self, event: dict) -> None:
         """Process a single instance_lifecycle event.
 
@@ -1108,8 +1071,20 @@ class JobFeedbackObserver:
             return  # Lookup raised; skip silently.
 
         # Phase 2: decide between in_progress and terminal based on bus state.
+        #
+        # v0.13.9 iteration-2 fix (Finding 3): bind ``bus`` BEFORE the
+        # ``if status in (COMPLETED, ERROR)`` block so the shared terminal
+        # transition path below can pass it to ``_resolve_finalize_status``
+        # for the dead-letter ``status="failed"`` lifecycle event (see
+        # Finding 2 wiring at child_reports.py root emission site).
+        # Previously the assignment lived inside the if-block; a "failed"
+        # event skipped the if, leaving ``bus`` unbound and the terminal
+        # transition raising ``UnboundLocalError`` on the next line. The
+        # ``status="failed"`` branch correctly bypasses the bus-pending
+        # in-progress gate (dead-letter means we want to TERMINATE, not
+        # wait) — only the variable binding needs to be visible.
+        bus = get_dependency_bus()
         if status in (InstanceStatus.COMPLETED.value, InstanceStatus.ERROR.value):
-            bus = get_dependency_bus()
             if bus is not None:
                 # Bus is active and authoritative (the bus is the
                 # SOLE completion authority; CM was removed).

@@ -411,24 +411,36 @@ class TestCascadeEmissionGateFailOpen:
 
 
 class TestRootMirrorGate:
-    """Finding 5: root lane emission-time mirror gate (new in Round 2).
+    """Finding 5: root lane emission-time gate (iteration-2 fix).
 
-    Mirror of the cascade emission-time gate, for symmetry between the two
-    lanes. If the root lane's gate regresses between commit and publish,
-    downgrade to WAITING_CHILDREN.
+    The HEAD lineage routes cascade completion through the bus
+    (``count_pending_for_target_sync``); the ROOT lane is the only path
+    that needs the gate because the bus's pending-count model does not
+    apply (a root has no parent to be pending on). The freshness leg
+    ("did the root respond AFTER its last child report?") is independent
+    of the bus, so the gate must be evaluated at the root emission point.
+
+    Iteration-2 fix wires a SINGLE gate call at
+    ``_dispatch_post_commit_side_effects`` (root_completed branch) instead
+    of the source-commit's two-call pattern (decision-site + emission-site),
+    because the HEAD's sync helper runs on a worker thread and cannot
+    ``await`` the gate directly — the cascade is bus-authoritative and
+    only the root emission point needs the predicate. The downgrade path
+    (gate blocked → UPDATE instance back to WAITING_CHILDREN → suppress
+    publish) is preserved.
     """
 
     @pytest.mark.asyncio
     async def test_root_mirror_downgrades_when_pending_message_arrives(
         self, job_engine
     ):
-        """Race: the decision gate passes and the root commits to COMPLETED,
-        but by emission time the mirror gate regresses (a new READY message
-        arrived in the window). Drives the REAL handler path via the round-1
-        side_effect pattern — decision gate (True, None), emission-time
-        mirror (False, "pending_count=1") — so the PRODUCTION downgrade
-        branch (child_reports.py:886-915) executes: the row is downgraded
-        back to WAITING_CHILDREN and the completed publish is suppressed."""
+        """Race: by emission time a new READY message arrived in the
+        window (simulated by patching the gate to return a regression).
+        Drives the REAL handler path — the production downgrade branch
+        (child_reports.py:4186-4221 in iteration-2) executes: the row is
+        downgraded back to WAITING_CHILDREN and the completed publish is
+        suppressed. Single gate call (HEAD lineage; bus-authoritative
+        cascade removes the source commit's decision-site call)."""
         with Session(job_engine) as session:
             session.add(Instance(
                 instance_id="root-instance-1", agent_id="leader",
@@ -443,21 +455,28 @@ class TestRootMirrorGate:
             job_engine, make_history("fresh response", T_FRESH_ASSISTANT)
         )
 
-        # Decision gate passes; emission-time mirror regresses (simulated
+        # Single gate call: at emission time the gate regresses (simulated
         # race). No manual SQL replication — the REAL downgrade branch runs.
-        gate_effects = [(True, None), (False, "pending_count=1")]
         with patcher, \
              patch("daemon.services.child_reports.MainLoopBridge.run_async_no_wait"), \
              patch.object(
                  service, "_root_completion_gate",
-                 new_callable=AsyncMock, side_effect=gate_effects,
+                 new_callable=AsyncMock, return_value=(False, "pending_count=1"),
              ) as gate_mock:
             await service._process_child_completion_and_notify_parent(
                 "root-instance-1", "root-turn-1"
             )
-            # Both gate effects consumed: decision passed, mirror blocked, and
-            # the production downgrade branch did the downgrade (not this test).
-            assert gate_mock.await_count == 2
+            # HEAD-lineage wiring: single emission-time call. The source
+            # commit's decision-site call (in the sync helper) does not
+            # apply here — the bus owns cascade completion and the sync
+            # helper runs on a worker thread (cannot await the gate).
+            assert gate_mock.await_count == 1, (
+                "HEAD-lineage ROOT emission gate is single-call; bus owns "
+                "the cascade pending-count semantics and the sync helper "
+                "cannot await from its worker thread. If this fires with "
+                "await_count > 1, the gate has been wired at a second "
+                "call point that the production code does not exercise."
+            )
         events_service._publish_instance_lifecycle_event.assert_not_awaited()
         assert get_instance_row(
             job_engine, "root-instance-1"
@@ -962,11 +981,14 @@ class TestMessageJobDeferral:
 
         # The instance transitions to COMPLETED (no more pending). Fire the
         # lifecycle event so the observer terminates the job with result_summary.
-        # Patch _extract_result_summary so we get a deterministic body without
-        # needing the real checkpointer.
+        # Patch the production seam (``manager._get_last_assistant_message_raw``)
+        # so we get a deterministic body without needing the real checkpointer.
+        # The source-commit mock target ``observer._extract_result_summary`` is
+        # dead on this lineage — see Finding 4 in the iteration-2 commit.
         with patch.object(
-            observer, "_extract_result_summary",
-            new=AsyncMock(return_value="FIRST MESSAGE RESPONSE"),
+            manager, "_get_last_assistant_message_raw",
+            new_callable=AsyncMock,
+            return_value="FIRST MESSAGE RESPONSE",
         ):
             await observer._process_event({
                 "event_type": "instance_lifecycle",

@@ -198,10 +198,19 @@ class TestObserverResultSummary:
         """DEFECT 1: completed event writes result_summary extracted from history."""
         observer, manager, job_repo, job = observer_env
 
-        with patch(
-            "daemon.services.job_feedback_observer.get_last_assistant_message",
+        # Production seam (job_feedback_observer.py:1541) calls
+        # ``self._instance_manager._get_last_assistant_message_raw(instance_id)``
+        # to populate ``result_summary`` on terminal transitions. Patch that
+        # seam — the prior ``daemon.services.job_feedback_observer.
+        # get_last_assistant_message`` patch was a stale mock target from
+        # the source commit (614ab41f) where the observer held its own
+        # ``_extract_result_summary`` helper; on this lineage the helper
+        # was dead and the extraction was unified into
+        # ``_finalize_job`` via ``_get_last_assistant_message_raw``.
+        with patch.object(
+            manager, "_get_last_assistant_message_raw",
             new_callable=AsyncMock,
-            return_value=("FINAL REPORT BODY", T_FRESH_ASSISTANT),
+            return_value="FINAL REPORT BODY",
         ):
             await observer._process_event({
                 "event_type": "instance_lifecycle",
@@ -219,10 +228,12 @@ class TestObserverResultSummary:
         """DEFECT 1 (error branch): error_message kept AND best-effort result_summary."""
         observer, manager, job_repo, job = observer_env
 
-        with patch(
-            "daemon.services.job_feedback_observer.get_last_assistant_message",
+        # See note in ``test_completed_event_carries_result_summary`` —
+        # the production seam is ``_get_last_assistant_message_raw``.
+        with patch.object(
+            manager, "_get_last_assistant_message_raw",
             new_callable=AsyncMock,
-            return_value=("partial progress notes", T_STALE_ASSISTANT),
+            return_value="partial progress notes",
         ):
             await observer._process_event({
                 "event_type": "instance_lifecycle",
@@ -276,10 +287,12 @@ class TestObserverResultSummary:
         # register a real watch for the job
         observer._job_queue_service._watcher_repo.add_watch(job.job_id, "watcher-1")
 
-        with patch(
-            "daemon.services.job_feedback_observer.get_last_assistant_message",
+        # See note in ``test_completed_event_carries_result_summary`` —
+        # the production seam is ``_get_last_assistant_message_raw``.
+        with patch.object(
+            manager, "_get_last_assistant_message_raw",
             new_callable=AsyncMock,
-            return_value=("FINAL REPORT BODY", T_FRESH_ASSISTANT),
+            return_value="FINAL REPORT BODY",
         ):
             await observer._process_event({
                 "event_type": "instance_lifecycle",
