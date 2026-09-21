@@ -562,18 +562,39 @@ _js_lock_release() {
 }
 
 # _js_flip_current <install_dir> <ver> — rename(2)-semantics symlink flip:
-# build current.new.$$ then mv -hf over `current` (the mv is the atomic
+# build current.new.$$ then mv -f over `current` (the mv is the atomic
 # point). Target is RELATIVE ("releases/<ver>") so the layout stays
 # relocatable; the symlink lives at the INSTALL ROOT — exactly what
 # resolve_binary expects ($INSTALL_DIR/current/ensemble-prod, ADR-004).
-# NOTE: plain `mv -f` is WRONG here — BSD mv follows a symlink-to-directory
-# DEST and would move the temp link INSIDE the target release; `-h` ("do
-# not follow it... rename the file source to the destination path") is
-# what makes this a true atomic replace (mv -T is GNU-only).
+# NOTE: plain `mv -f` is WRONG here on either platform — it follows
+# current→releases/<old> and moves the temp link INSIDE the old
+# release, silently leaving `current` on the OLD release.
+#   BSD/macOS: `mv -h -f`  — swap the SYMLINK itself (don't follow DEST).
+#   GNU/Linux: `mv -T -f`  — no-follow DEST (treat DEST as a normal file).
+# Unrecognized platforms refuse (fail-closed). Verified on macOS mv(1)
+# and GNU coreutils 9.4 (Linux). Mirrors scripts/upgrade/lib.sh's
+# atomic_flip; launcher.sh is staged standalone and cannot source lib.sh
+# (see comment at top-of-file).
 _js_flip_current() {
-    local install_dir="$1" ver="$2"
+    local install_dir="$1"
+    local ver="$2"
+    local mv_args=""
+    case "$(uname -s)" in
+        Darwin|*BSD*|*bsd*)
+            mv_args="-h -f"
+            ;;
+        Linux|GNU*|*GNU*)
+            mv_args="-T -f"
+            ;;
+        *)
+            _log "WARN: _js_flip_current: unrecognized platform '$(uname -s)' — refusing to repoint (fail-closed; BSD or Linux required)"
+            return 1
+            ;;
+    esac
     ln -sfn "releases/$ver" "$install_dir/current.new.$$" 2>/dev/null || return 1
-    if ! mv -hf "$install_dir/current.new.$$" "$install_dir/current" 2>/dev/null; then
+    # mv_args intentionally word-split (a single string of options)
+    # shellcheck disable=SC2086
+    if ! mv $mv_args "$install_dir/current.new.$$" "$install_dir/current" 2>/dev/null; then
         rm -f "$install_dir/current.new.$$" 2>/dev/null
         return 1
     fi

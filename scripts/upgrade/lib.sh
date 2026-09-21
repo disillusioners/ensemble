@@ -1128,14 +1128,41 @@ launcher_swap() {
 # resolver looks there FIRST (launcher.sh resolve_binary:
 # $INSTALL_DIR/current/ensemble-prod, verified foundation) — and its target
 # is "releases/<ver>", relative to the install dir.
+#
+# Portability (fix/portable-atomic-flip-linux, 2026-09-21): the flip
+# MUST work identically on BSD/macOS and GNU/Linux. Plain `mv -f` is
+# WRONG on either — it would follow current→releases/<old> and move the
+# temp link INSIDE the old release dir, silently leaving `current` on
+# the OLD release.
+#   BSD/macOS: `mv -h -f`  — swap the SYMLINK itself (don't follow
+#     DEST when DEST is a symlink-to-dir).
+#   GNU/Linux: `mv -T -f`  — treat DEST as a normal file (no-follow
+#     DEST semantics).
+# We dispatch on `uname -s` rather than chaining `mv -h -f X Y ||
+# mv -T -f X Y`: on BSD a REAL -h failure (permission denied, missing
+# source, RO filesystem) would otherwise hit an invalid -T and surface
+# a wrong-platform error, hiding the real cause. Unrecognized platforms
+# refuse (fail-closed; we never guess). Verified on macOS mv(1) and
+# GNU coreutils 9.4 (Linux).
 atomic_flip() {
     local ver="$1"
+    local mv_args=""
+    case "$(uname -s)" in
+        Darwin|*BSD*|*bsd*)
+            mv_args="-h -f"
+            ;;
+        Linux|GNU*|*GNU*)
+            mv_args="-T -f"
+            ;;
+        *)
+            _warn "atomic_flip: unrecognized platform '$(uname -s)' — refusing to flip (fail-closed; BSD or Linux required)"
+            return 1
+            ;;
+    esac
     ln -sfn "releases/$ver" "$INSTALL_DIR/current.new.$$" || return 1
-    # mv -h: swap the SYMLINK ITSELF (BSD). Plain mv would follow the
-    # existing current→releases/<old> link and move the new link INTO the
-    # old release dir, silently leaving `current` pointing at the OLD
-    # release — verified on macOS mv(1).
-    if ! mv -h -f "$INSTALL_DIR/current.new.$$" "$INSTALL_DIR/current"; then
+    # mv_args intentionally word-split (a single string of options)
+    # shellcheck disable=SC2086
+    if ! mv $mv_args "$INSTALL_DIR/current.new.$$" "$INSTALL_DIR/current"; then
         rm -f "$INSTALL_DIR/current.new.$$"
         return 1
     fi
@@ -1334,7 +1361,8 @@ promote_entry_check() {
 #       manifest gate on previous FIRST (null / QUARANTINED (M4) / release
 #       dir missing / not rollback_safe → halt event, NO repoint, txn LEFT
 #       IN PLACE, exit 78), then repoint current→previous (atomic_flip —
-#       mv -h, the same rename(2) semantics the sweep uses), quarantine
+#       the portable rename(2) helper — see atomic_flip's portability
+#       comment for the BSD/GNU mv dispatch details), quarantine
 #       the failed target, count the rollback + arm cooldown (ADR-024),
 #       history event 'sweep_rollback' (P2.3's ledger consumes event
 #       names), clear txn. W3: every recovery state write (quarantine /
