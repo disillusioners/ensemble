@@ -3400,9 +3400,6 @@ class InstanceManager:
         (idempotent — only patches packs whose in-memory state is
         empty). Cost: O(paused tasks), once at boot, milliseconds.
         """
-        from sqlalchemy import text as _sql_text
-
-        from daemon.repositories.task.models import SuspensionReason as _SR
         from daemon.services.midflight_qa import (
             QUESTION_PACK_PAYLOAD_METADATA_KEY,
         )
@@ -3417,7 +3414,7 @@ class InstanceManager:
         # suspension_reason post-filter runs in Python (OQ-1).
         with engine.begin() as conn:
             rows = conn.execute(
-                _sql_text(
+                text(
                     "SELECT DISTINCT instance_id FROM task "
                     "WHERE status = 'paused'"
                 )

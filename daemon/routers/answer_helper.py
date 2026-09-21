@@ -51,6 +51,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
+from pydantic import BaseModel, Field
 
 from daemon.models.common import ErrorCodes, ErrorResponse
 from daemon.services.question_manager import QuestionPack, pack_to_dict
@@ -61,10 +62,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class AnswerRequestBodyMixin:
-    """Docs anchor only — see ``AnswerRequest`` definitions at the routers."""
+class AnswerRequest(BaseModel):
+    """Request body for the answer surfaces (mid-flight QA channel).
 
-    __slots__ = ()
+    ONE shared schema for both ``POST /api/instances/{id}/answer``
+    (FastAPI-validated) and ``POST /api/jobs/{work_id}/answer``
+    (lenient ``model_validate`` on a raw ``body: dict`` — 400 on
+    malformed, never a 422 flip).
+
+    Carries the user's answers to a pending question pack. The shape
+    of ``answers`` is intentionally flexible — callers may key by
+    question id (preferred) or by question text (for ad-hoc clients
+    that didn't capture the auto-generated ids).
+
+    Attributes:
+        answers: User-supplied answer dict. Shape is unconstrained
+            (any JSON-serializable dict); the manager stores it
+            verbatim and the resume-message formatter iterates it.
+        question_pack_id: Optional pack id for the T1″ stale-answers
+            correlation guard (mid-flight QA channel, 2026-09-21).
+            When present and ≠ the current pending pack's id the
+            request is rejected with ``400 QUESTION_PACK_MISMATCH``.
+            Absent = today's lenient behavior.
+        resume_message: Optional extra text appended to the Q↔A
+            delivery message (the job-addressed surface accepts it;
+            kept here so both bodies share one schema).
+    """
+
+    answers: dict = Field(
+        default_factory=dict,
+        description=(
+            "User-supplied answers. Shape is flexible: prefer keying "
+            "by question id (the field returned in the pending SSE "
+            "event) — text-keyed fallbacks are also accepted."
+        ),
+    )
+    question_pack_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional question pack id (from the QUESTION_REQUESTED "
+            "payload) — when present, must match the current pending "
+            "pack or the answer is rejected 400 QUESTION_PACK_MISMATCH."
+        ),
+    )
+    resume_message: str | None = Field(
+        default=None,
+        description=(
+            "Optional extra message text appended to the delivered "
+            "Q↔A HumanMessage (max 2000 chars)."
+        ),
+    )
 
 
 def _http(status: int, code: ErrorCodes, message: str, details: dict | None = None):

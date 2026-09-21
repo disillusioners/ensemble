@@ -20,6 +20,7 @@ from daemon.models import (
     InstanceStatus,
     ResumeRequest,
 )
+from daemon.routers.answer_helper import AnswerRequest
 from daemon.utils import parse_utc_datetime
 
 logger = logging.getLogger(__name__)
@@ -118,53 +119,6 @@ class TodoSubtaskUpdateRequest(BaseModel):
         description=(
             "If True, auto-complete the parent node when all its "
             "sub-tasks are done."
-        ),
-    )
-
-
-class AnswerRequest(BaseModel):
-    """Request body for ``POST /api/instances/{id}/answer``.
-
-    Carries the user's answers to a pending question pack. The shape
-    of ``answers`` is intentionally flexible — callers may key by
-    question id (preferred) or by question text (for ad-hoc clients
-    that didn't capture the auto-generated ids).
-
-    Attributes:
-        answers: User-supplied answer dict. Shape is unconstrained
-            (any JSON-serializable dict); the manager stores it
-            verbatim and the resume-message formatter iterates it.
-        question_pack_id: Optional pack id for the T1″ stale-answers
-            correlation guard (mid-flight QA channel, 2026-09-21).
-            When present and ≠ the current pending pack's id the
-            request is rejected with ``400 QUESTION_PACK_MISMATCH``.
-            Absent = today's lenient behavior.
-        resume_message: Optional extra text appended to the Q↔A
-            delivery message (the job-addressed surface accepts it;
-            kept here so both bodies share one schema).
-    """
-
-    answers: dict = Field(
-        default_factory=dict,
-        description=(
-            "User-supplied answers. Shape is flexible: prefer keying "
-            "by question id (the field returned in the pending SSE "
-            "event) — text-keyed fallbacks are also accepted."
-        ),
-    )
-    question_pack_id: str | None = Field(
-        default=None,
-        description=(
-            "Optional question pack id (from the QUESTION_REQUESTED "
-            "payload) — when present, must match the current pending "
-            "pack or the answer is rejected 400 QUESTION_PACK_MISMATCH."
-        ),
-    )
-    resume_message: str | None = Field(
-        default=None,
-        description=(
-            "Optional extra message text appended to the delivered "
-            "Q↔A HumanMessage (max 2000 chars)."
         ),
     )
 

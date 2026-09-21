@@ -1139,8 +1139,10 @@ async def answer_questions_job(
     ``WorkResolver.resolve_work(work_id)`` maps the work_id to the
     owning instance via Task.work_id / JobItem.job_id lookups.
     """
+    from pydantic import ValidationError
+
     from daemon.models.common import ErrorCodes, ErrorResponse
-    from daemon.routers.answer_helper import answer_questions_via_instance
+    from daemon.routers.answer_helper import AnswerRequest, answer_questions_via_instance
 
     manager = _get_manager(request)
     if manager.is_write_paused:
@@ -1188,10 +1190,17 @@ async def answer_questions_job(
             ).model_dump(),
         )
 
-    if not isinstance(body, dict):
-        body = {}
-    answers = body.get("answers") or {}
-    if not isinstance(answers, dict):
+    # M1 (lenient): share the sibling ``AnswerRequest`` schema
+    # (answer_helper.py) instead of hand-parsing the raw dict — but
+    # keep 400-on-malformed semantics: the route signature stays
+    # ``body: dict`` (no FastAPI 422), and only ``answers`` is
+    # schema-enforced; the optional fields pass through verbatim
+    # (lenient today, lenient after — zero behavior delta).
+    try:
+        parsed = AnswerRequest.model_validate(
+            {"answers": body.get("answers") or {}}
+        )
+    except ValidationError:
         raise HTTPException(
             status_code=400,
             detail=ErrorResponse(
@@ -1199,6 +1208,7 @@ async def answer_questions_job(
                 message="'answers' must be a JSON object.",
             ).model_dump(),
         )
+    answers = parsed.answers
     question_pack_id = body.get("question_pack_id")
     resume_message = body.get("resume_message")
 
