@@ -39,7 +39,6 @@ Plus supplementary smoke tests:
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -47,7 +46,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
 
@@ -81,6 +80,7 @@ from daemon.tools._tool_registry import (
     discover_source_only_tool_names,
 )
 from daemon.tools.job_queue import create_job_tools
+from daemon.tools.job_queue import _format_answer_http_error
 
 # Deterministic id matching the repo-wide autouse fixture
 # (``tests/conftest.py:_ensure_system_default_project_id``); explicit
@@ -265,9 +265,16 @@ def _make_job_answer_tool(
     harness, *, current_instance_id: str = ""
 ):
     """Build the ``job_answer`` tool via ``create_job_tools`` (the
-    factory the production wiring uses). The tool sits at the END of
-    the returned list (positional-index trap — ``watch_job`` /
-    ``watch_jobs`` were the previous last entries)."""
+    factory the production wiring uses).
+
+    Order-pin landmine (tidier #2 — Medium, 2026-09-22): NEVER index
+    by ``tools[-1]`` directly. The tool name is the only stable
+    contract; the append-at-END contract is enforced by the
+    ``TestJobAnswerRegistration`` test in this file. Use a
+    name-based lookup so a future insertion (which the docstring
+    on ``create_job_tools`` explicitly forbids) cannot silently
+    re-target this helper at a different tool.
+    """
     job_service = AsyncMock()
     job_service.get_work = AsyncMock(return_value=None)
     queue_mgmt_service = AsyncMock()
@@ -281,7 +288,7 @@ def _make_job_answer_tool(
         manager=harness.manager,
     )
 
-    return tools[-1]  # job_answer is appended at the END
+    return next(t for t in tools if t.name == "job_answer")
 
 
 # =============================================================================
@@ -654,15 +661,25 @@ class TestJobAnswerRegistration:
             manager=manager,
         )
 
-        # Last entry — never insert; append at the end.
+        # Order-pin landmine (tidier #2 — Medium, 2026-09-22): ``job_answer``
+        # is the LAST entry in the returned list. Pin that + the three
+        # witnesses ([16] = job_inject, [17] = watch_job, [20] =
+        # watch_jobs) so a future insertion (the docstring on
+        # ``create_job_tools`` explicitly forbids this) cannot silently
+        # shift either the new tool or the three witnesses.
+        # ``tools[-1]`` is the ONLY place this positional index is
+        # acceptable — every other test in this file uses the
+        # name-based ``next(t for t in tools if t.name == ...)``
+        # lookup so the append-at-END contract does not have to hold
+        # for them.
         last = tools[-1]
         assert last.name == "job_answer", (
             f"Last tool in create_job_tools() should be 'job_answer', "
             f"got {last.name!r}"
         )
-
-        # The previous-last entries are still in their places
-        # (positional-index pin for ``watch_job`` / ``watch_jobs``).
+        # Append-at-END witnesses: index 16/17/20 must NOT shift when
+        # ``job_answer`` is appended at index 21.
+        assert tools[16].name == "job_inject"
         assert tools[17].name == "watch_job"
         assert tools[20].name == "watch_jobs"
 
@@ -693,9 +710,11 @@ class TestJobAnswerRegistration:
             dead_letter_service=MagicMock(),
             manager=MagicMock(),
         )
-        job_answer = tools[-1]
+        # Name-based lookup (tidier #2 — Medium, 2026-09-22). See
+        # ``_make_job_answer_tool`` for the rationale.
+        job_answer = next(t for t in tools if t.name == "job_answer")
         docstring = job_answer.description or job_answer.__doc__ or ""
-        assert "tool_help" in docstring
+        assert 'tool_help("job_answer")' in docstring
 
 
 class TestJobAnswerWritePause:
@@ -762,7 +781,8 @@ class TestJobAnswerMissingManager:
             dead_letter_service=dead_letter_service,
             manager=None,  # the tool's defensive guard
         )
-        job_answer = tools[-1]
+        # Name-based lookup (tidier #2 — Medium, 2026-09-22).
+        job_answer = next(t for t in tools if t.name == "job_answer")
 
         result = await job_answer.ainvoke(
             {
@@ -774,3 +794,106 @@ class TestJobAnswerMissingManager:
 
         assert "error" in result
         assert "manager" in result["error"].lower()
+
+class TestJobAnswerLiveHubNone:
+    """live_hub=None degrade test (reviewer warning #1, 2026-09-22).
+
+    The harness always wires a mock ``manager._live_hub``, so the
+    ``if live_hub is not None`` guard at
+    ``answer_helper.py:304`` has no exercise at the tool level. When
+    ``live_hub is None`` the helper's SSE emission is a no-op (the
+    answer + resume paths still complete). This test exercises the
+    happy path with ``live_hub=None`` and asserts the tool completes
+    cleanly — no raise, answered status, resume info present.
+
+    Real-world trigger: tests / partial-bootstrap contexts where the
+    hub is not yet wired, AND the ``tools[-1]`` self-check that the
+    code-review pipeline runs (no hub means no SSE, but the answer
+    flow must still work).
+    """
+
+    @pytest.mark.asyncio
+    async def test_live_hub_none_happy_path_completes(self, harness):
+        """With ``manager._live_hub = None``, the tool still answers +
+        resumes — the SSE branch is a clean no-op."""
+        harness.manager._live_hub = None  # the seam the harness hides
+
+        asker, work_id, pack = _seed_paused_asker_with_pending_pack(harness)
+
+        tool = _make_job_answer_tool(harness)
+
+        result = await tool.ainvoke(
+            {
+                "work_id": work_id,
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": pack.id,
+            }
+        )
+
+        # No exception escaped the tool — the live_hub=None branch is
+        # genuinely a no-op (guarded at answer_helper.py:304), not a
+        # raise.
+        assert "error" not in result
+        assert result["work_id"] == work_id
+        assert result["status"] == "answered"
+        assert result["resume_route"] == "answer_gate_existing_turn"
+        assert result["instance_id"] == asker
+
+        # The resume cascade was still driven — live_hub controls SSE
+        # only; the CAS + resume path is independent of the hub.
+        harness.manager.resume_instance_cascade.assert_awaited_once_with(asker)
+
+        # The CAS flipped the RAM pack to ``answered``.
+        refreshed = harness.qm.get_question_pack(asker)
+        assert refreshed.status == "answered"
+
+
+class TestFormatAnswerHttpError503RaceWindow:
+    """503 race-window branch test (tidier paired item, 2026-09-22).
+
+    The plain-string 503 branch of ``_format_answer_http_error`` is
+    the one path the helper raises WITHOUT a typed ``ErrorResponse``
+    body — just ``HTTPException(503, "Writes are paused for database
+    migration")``. The docstring promises:
+      * ``"503"`` status prefix in the error string
+      * ``"migration"`` substring so an agent can branch on it
+      * NO branchable typed code (the tool's own pre-check owns the
+        ``WRITE_PAUSED`` token; this branch is the
+        "pre-check-cleared-but-helper-re-raised" race window).
+
+    The tool's pre-check path is covered by
+    ``test_write_paused_returns_503_error``; this test exercises the
+    helper directly with a synthetic HTTPException to pin the
+    race-window contract independently of the tool wiring.
+    """
+
+    def test_race_window_503_string_branch(self):
+        """Construct the plain-string HTTPException(503, ...) directly
+        and verify the helper's shaped output matches the
+        docstring-promised contract."""
+        # The helper raises with this exact phrasing (no typed
+        # ``ErrorResponse`` body — answer_helper.py:152-157).
+        exc = HTTPException(
+            status_code=503,
+            detail="Writes are paused for database migration",
+        )
+
+        result = _format_answer_http_error(
+            exc,
+            work_id="job-1",
+            instance_id="inst-1",
+        )
+
+        # Docstring promise: readable 503 message + no branchable
+        # typed code (the typed WRITE_PAUSED token is owned by the
+        # tool's own pre-check, not this race-window branch).
+        assert "error" in result
+        err = result["error"]
+        assert "503" in err
+        assert "migration" in err.lower()
+        assert "WRITE_PAUSED" not in err  # race-window: no typed token
+        # The work_id + instance_id are echoed so the agent can
+        # correlate (mirrors the typed-code path).
+        assert "job-1" in err
+        assert "inst-1" in err
+
