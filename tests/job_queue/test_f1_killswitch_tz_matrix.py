@@ -526,7 +526,9 @@ class TestF2MirrorUnderSwitch:
 
             _insert_instance(
                 f1_engine, "inst-ks-on-f2",
-                status="running",
+                # Mission-live guard doctrine (2026-09-22): terminal
+                # root so the f2 firing this test pins still lands.
+                status="completed",
                 created_at=now - timedelta(seconds=1800),
             )
             _insert_job_item(
@@ -590,7 +592,9 @@ class TestF2MirrorUnderSwitch:
 
             _insert_instance(
                 f1_engine, "inst-ks-off-f2-wrap",
-                status="running",
+                # Mission-live guard doctrine (2026-09-22): terminal
+                # root so the f2 firing this test pins still lands.
+                status="completed",
                 created_at=now - timedelta(seconds=1800),
             )
             _insert_job_item(

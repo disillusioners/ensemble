@@ -620,6 +620,12 @@ class TestPatternF2OrphanActiveCompletedTask:
             engine,
             "inst-f2-1",
             project_id="test-project",
+            # Mission-live guard doctrine (2026-09-22): f2's finalize
+            # requires the mission to be DEAD — the root instance must
+            # be terminal (the "mission ended, JobItem side lagged"
+            # shape). A RUNNING root is the mid-mission shape the new
+            # guard holds ACTIVE.
+            status="completed",
             created_at=datetime.now(timezone.utc) - timedelta(seconds=1800),
         )
         _insert_job_item(
@@ -1978,6 +1984,10 @@ class TestPatternFCouncilCritical2LockRelease:
             engine,
             "inst-f2-lock",
             project_id="test-project",
+            # Mission-live guard doctrine (2026-09-22): terminal root
+            # = mission dead; the lock-release mechanics under test
+            # are unchanged.
+            status="completed",
             created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
         )
         _insert_job_item(
@@ -2296,6 +2306,11 @@ class TestPatternFCouncilCritical3F2Gate:
             engine,
             "inst-f2-age-floor",
             project_id="test-project",
+            # Mission-live guard doctrine (2026-09-22): terminal root
+            # so the SECOND phase (completed_at past the floor) still
+            # exercises the age-floor → finalize boundary this test
+            # pins; the guard must not be the skip surface here.
+            status="completed",
             created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
         )
         _insert_job_item(
@@ -2374,6 +2389,9 @@ class TestPatternFCouncilCritical3F2Gate:
             engine,
             "inst-f2-age-past",
             project_id="test-project",
+            # Mission-live guard doctrine (2026-09-22): terminal root
+            # — this phase pins the past-floor → finalize boundary.
+            status="completed",
             created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
         )
         _insert_job_item(
@@ -3553,7 +3571,10 @@ class TestPatternF1KillSwitch:
             _insert_instance(
                 f1_engine,
                 "inst-ks-off-f2",
-                status="running",
+                # Mission-live guard doctrine (2026-09-22): terminal
+                # root so the f2 sub-shape (whose survival this test
+                # pins) actually fires past the new guard.
+                status="completed",
                 created_at=now - timedelta(seconds=1800),
             )
             _insert_job_item(
@@ -4012,6 +4033,10 @@ class TestFixBPatternFMessageSkipForMirrorSliceRetired:
             engine,
             "inst-f-mix-task",
             project_id="test-project",
+            # Mission-live guard doctrine (2026-09-22): terminal root
+            # so the task-row f2 finalize (whose survival this test
+            # pins) still fires past the new guard.
+            status="completed",
             created_at=datetime.now(timezone.utc) - timedelta(seconds=1800),
         )
         _insert_job_item(
