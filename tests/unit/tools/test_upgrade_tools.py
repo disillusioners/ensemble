@@ -117,6 +117,37 @@ def install(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def unresolved_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Force ``_self_env_marker()`` to return None (auto-derive signals all
+    silenced) — the new ``env-marker-absent`` contract requires explicit
+    setup because the auto-derive path would otherwise pick up ambient
+    ``POSTGRES_DB`` / install-dir topology from the host (e.g. this dev
+    host's ``~/agents-ensemble/.env`` carries POSTGRES_DB=ensemble_prod
+    and would auto-resolve live).
+
+    Silences every signal the resolver reads:
+    * ``ENSEMBLE_SELF_ENV`` unset
+    * ``POSTGRES_DB`` unset
+    * ``Path.home()`` redirected to ``<tmp>/fake-home`` — no
+      ``agents-ensemble`` / ``agents-ensemble-demo`` subdirs
+    * ``sys.frozen = False`` — disables the frozen-binary topology path
+
+    Returns ``tmp_path`` so callers can write install fixtures there.
+    Tests that need an install-dir pair the auto-derive-routed resolver
+    with an explicit ``monkeypatch.setattr(ut, "_resolve_install_dir",
+    ...)`` — the resolver receives the same path but the env string is
+    forced to None.
+    """
+    monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+    monkeypatch.delenv("POSTGRES_DB", raising=False)
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir(exist_ok=True)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+    return tmp_path
+
+
+@pytest.fixture
 def no_spawn(monkeypatch: pytest.MonkeyPatch) -> list:
     """Recorder replacing the executor-spawn seam — any spawn attempt inside
     a tool call lands here and fails the zero-spawn asserts (D2/D3: the
@@ -175,6 +206,215 @@ def test_static_no_direct_process_spawn_in_tools_module() -> None:
         )
     # The positive half of the contract: the seam itself stays imported.
     assert "spawn_executor" in imported
+
+
+def test_opt_out_falses_pinned_to_proactive_false_bools() -> None:
+    """S2 pin: ``_OPT_OUT_FALSES`` (in upgrade_tools.py) is hand-copied
+    from ``daemon.config._PROACTIVE_FALSE_BOOLS``. A drift between the two
+    would silently broaden or narrow the opt-out vocabulary — operators
+    who rely on the documented ``0|false|no|off`` set would get a
+    different result than ``ENSEMBLE_EMPTY_RESPONSE_GUARD`` does on the
+    same switch. We chose the test-pinned approach over an import because
+    ``daemon.config`` has heavy module-load cost and is not on the
+    critical path of the tool layer; the test imports it just-in-time
+    and asserts set equality.
+
+    If the canonical ``_PROACTIVE_FALSE_BOOLS`` ever changes, this test
+    fires — update ``_OPT_OUT_FALSES`` to match (the commit message
+    should call out the vocabulary change so operators know).
+    """
+    from daemon.config import _PROACTIVE_FALSE_BOOLS
+
+    assert set(ut._OPT_OUT_FALSES) == set(_PROACTIVE_FALSE_BOOLS), (
+        f"_OPT_OUT_FALSES drift: upgrade_tools={sorted(ut._OPT_OUT_FALSES)} "
+        f"vs daemon.config._PROACTIVE_FALSE_BOOLS={sorted(_PROACTIVE_FALSE_BOOLS)}"
+    )
+
+
+class TestReadEnvValue:
+    """Direct coverage of ``_read_env_value`` (S4 completion — reviewer
+    APPROVED-WITH-NOTES commissioned follow-up on commit ``beac30b9``).
+
+    The function is the shell-style .env parser used by
+    ``_auto_derive_env`` to cross-check POSTGRES_DB in the install-dir
+    ``.env`` files. Reviewer case shapes (a)-(f) all map cleanly to
+    real production branches in ``daemon/tools/upgrade_tools.py:303-333``
+    (none of the suggested cases were imagined — every shape is a
+    real code path):
+
+    * (a) ``export POSTGRES_DB=ensemble_prod\\n`` → tests ``export ``
+      prefix strip (line 320-321) + value trim (line 327) + return.
+    * (b) ``POSTGRES_DB="ensemble_prod"\\n`` (double quotes) → tests
+      quote-strip (line 328-329) + return.
+    * (c) ``POSTGRES_DB='ensemble_prod'\\n`` (single quotes) → tests
+      quote-strip single (line 328-329) + return.
+    * (d) ``# comment\\nPOSTGRES_DB=ensemble_prod\\n`` → tests comment
+      skip (line 318).
+    * (e) ``INVALID_LINE_NO_EQUALS\\nPOSTGRES_DB=ensemble_prod\\n`` →
+      tests malformed-line skip (line 322-323).
+    * (f) ``POSTGRES_DB= ensemble_prod  \\n`` (unquoted, padded) → tests
+      value trim (line 327).
+
+    Plus the error/refusal branches the reviewer's list implicitly
+    relies on: missing file, wrong key, OSError, blank-line skip,
+    mismatched quotes (NOT stripped — quote-strip is a matched-pair
+    check, single-side quotes pass through verbatim), and combined
+    shapes (export + quote; export + padded).
+    """
+
+    def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
+        """Missing file branch (line 314-315): ``not env_file.is_file()``
+        short-circuits to ``None`` — never raises. The resolver relies
+        on this for the "no install-dir .env yet" path."""
+        missing = tmp_path / "no-such.env"
+        assert ut._read_env_value(missing, "POSTGRES_DB") is None
+
+    def test_returns_none_when_key_absent(self, tmp_path: Path) -> None:
+        """Wrong-key skip branch (line 325-326): a file with OTHER
+        keys but not the queried one returns ``None`` (not the last
+        seen value). The resolver relies on this when cross-checking
+        POSTGRES_DB."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "PATH=/usr/bin\nOTHER_KEY=other_value\n", encoding="utf-8"
+        )
+        assert ut._read_env_value(env_file, "POSTGRES_DB") is None
+
+    def test_returns_none_when_file_unreadable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OSError branch (line 331-332): the parser never raises on a
+        read error — a corrupt .env must not crash the resolver.
+        ``read_text`` raises ``PermissionError`` (a subclass of
+        ``OSError``); we patch the file path resolution to force an
+        OSError on the read without depending on filesystem
+        permissions."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text("POSTGRES_DB=ensemble_prod\n", encoding="utf-8")
+
+        def _boom_read_text(*_args, **_kwargs):
+            raise PermissionError("read denied (test)")
+
+        monkeypatch.setattr(Path, "read_text", _boom_read_text)
+        assert ut._read_env_value(env_file, "POSTGRES_DB") is None
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            # Reviewer case (a) — 'export ' prefix strip + trim
+            ("export POSTGRES_DB=ensemble_prod\n", "ensemble_prod"),
+            # Reviewer case (b) — double-quote strip
+            ('POSTGRES_DB="ensemble_prod"\n', "ensemble_prod"),
+            # Reviewer case (c) — single-quote strip
+            ("POSTGRES_DB='ensemble_prod'\n", "ensemble_prod"),
+            # Reviewer case (d) — comment skip (leading # line)
+            ("# this is a comment\nPOSTGRES_DB=ensemble_prod\n", "ensemble_prod"),
+            # Reviewer case (e) — malformed-line skip (no '=')
+            (
+                "INVALID_LINE_NO_EQUALS\nPOSTGRES_DB=ensemble_prod\n",
+                "ensemble_prod",
+            ),
+            # Reviewer case (f) — value trim (unquoted, padded)
+            ("POSTGRES_DB=  ensemble_prod  \n", "ensemble_prod"),
+        ],
+    )
+    def test_reviewer_case_shapes(
+        self, raw: str, expected: str, tmp_path: Path
+    ) -> None:
+        """S4-COMPLETION: pins every reviewer-suggested case shape to
+        the real production branch it exercises. Each parametrize case
+        is a self-contained .env file; the assertion checks the
+        returned value matches the expected (post-parse) result."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(raw, encoding="utf-8")
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == expected
+
+    def test_blank_lines_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """Blank-line skip branch (line 318: ``if not line``). The
+        parser must skip blank lines between entries — common in
+        hand-edited .env files."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "\n"
+            "\n"
+            "POSTGRES_DB=ensemble_prod\n"
+            "\n",
+            encoding="utf-8",
+        )
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == "ensemble_prod"
+
+    def test_mismatched_quotes_not_stripped(self, tmp_path: Path) -> None:
+        """Quote-strip is a matched-pair check (line 328:
+        ``v[0] == v[-1] and v[0] in ("'", '"')``). A single-side quote
+        (``ensemble_prod"`` or ``"ensemble_prod``) does NOT match the
+        pair-check, so the quote(s) pass through verbatim. This pins
+        the parser to NOT over-eagerly strip."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            'POSTGRES_DB=ensemble_prod"\n', encoding="utf-8"
+        )
+        # Single trailing double-quote is NOT a matched pair → returned
+        # verbatim (with the trailing quote preserved).
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == 'ensemble_prod"'
+
+    def test_export_prefix_with_quoted_value(self, tmp_path: Path) -> None:
+        """Combined: ``export `` prefix + quoted value. Both
+        transforms apply — the prefix is stripped (line 320-321)
+        and the surrounding quotes are stripped (line 328-329)."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "export POSTGRES_DB=\"ensemble_prod\"\n", encoding="utf-8"
+        )
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == "ensemble_prod"
+
+    def test_export_prefix_with_leading_whitespace(self, tmp_path: Path) -> None:
+        """``export `` prefix with leading whitespace in the line —
+        the parser strips the prefix, then ``lstrip()`` removes any
+        whitespace between the prefix and the key (line 321).
+        """
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "    export   POSTGRES_DB=ensemble_prod\n", encoding="utf-8"
+        )
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == "ensemble_prod"
+
+    def test_quote_must_be_matching_not_just_single_side(
+        self, tmp_path: Path
+    ) -> None:
+        """Defensive: ``'ensemble_prod"`` (single+double mixed) does
+        NOT match the matched-pair check (line 328: ``v[0] == v[-1]``
+        — single quote != double quote). The value is returned
+        verbatim (NOT stripped)."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "POSTGRES_DB='ensemble_prod\"\n", encoding="utf-8"
+        )
+        # Mixed quotes → no strip.
+        assert (
+            ut._read_env_value(env_file, "POSTGRES_DB")
+            == "'ensemble_prod\""
+        )
+
+    def test_inline_whitespace_around_equals_is_tolerated(
+        self, tmp_path: Path
+    ) -> None:
+        """``POSTGRES_DB = ensemble_prod`` (spaces around ``=``) is
+        parsed as: ``k = "POSTGRES_DB "``, ``v = " ensemble_prod"``;
+        the key-side strip (``k.strip() != key`` on line 325)
+        removes the trailing space before the match, and the value-
+        side strip (line 327) removes the leading space from the
+        value. Result: the value is returned trimmed. This pins the
+        parser's actual lenient-on-whitespace behavior so a future
+        tightening doesn't surprise callers.
+        """
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "POSTGRES_DB = ensemble_prod\n", encoding="utf-8"
+        )
+        # Tolerates spaces around `=`: value returned trimmed.
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == "ensemble_prod"
 
 
 @pytest.fixture
@@ -594,18 +834,26 @@ class TestReadPairRefusals:
             await tools["upgrade_status"].ainvoke({"target_env": "prod"})
 
     async def test_marker_absent_reads_fail_open(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch
+        self, unresolved_env: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Marker absent: reads STILL answer (S-31 fail-open) — omitted
-        target and target=dev are both self-consistent."""
-        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
-        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: install)
+        """Marker absent + no auto-derive signal: reads STILL answer (S-31
+        fail-open) — omitted target and target=dev are both self-consistent
+        for the unresolved (dev-context) representation.
+
+        New contract (D-FA2.3 supersession 2026-09-22): the
+        ``unresolved_env`` fixture forces the resolver to return None by
+        silencing every signal the auto-derivation path reads. Without
+        that silencing, an ambient ``POSTGRES_DB=ensemble_prod`` (or a
+        canonical install-dir .env under ``$HOME``) would auto-derive
+        ``live``/``demo``/``dev`` instead.
+        """
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: None)
         manager = MagicMock()
         manager.config.daemon.port = 0
         manager._task_repo = None
         tools = _build_tools(manager)
         out = await tools["release_info"].ainvoke({})
-        assert "RELEASE INFO" in out and "ABSENT" in out
+        assert "RELEASE INFO" in out and "auto-derivation found no signal" in out
         assert "REFUSED" not in out
         out_dev = await tools["release_info"].ainvoke({"target_env": "dev"})
         assert "REFUSED" not in out_dev
@@ -697,9 +945,21 @@ class TestActorEnvGates:
             await tools["system_restart"].ainvoke({"reason": "x"})
 
     async def test_env_marker_absent_actor_fail_closed(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch
+        self, unresolved_env: Path, install: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        """New contract: actor tools refuse env-marker-absent only when
+        ``_self_env_marker()`` returns None — i.e. when no explicit
+        marker AND no auto-derive signal resolves. The
+        ``unresolved_env`` fixture silences every signal the resolver
+        reads so the contract is exercised cleanly (without the fixture
+        the test host's ambient ``POSTGRES_DB`` / install-dir topology
+        would auto-derive the env and the actor tool would not refuse).
+
+        The D-FA2.3 supersession keeps the SAME refusal token
+        (``env-marker-absent``) and the SAME fail-closed posture —
+        today's contract is preserved verbatim when the operator sets
+        ``ENSEMBLE_SELF_ENV=false`` (or has no launch evidence).
+        """
         monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: install)
         manager = MagicMock()
         manager.config.daemon.port = 0
@@ -726,11 +986,27 @@ class TestActorEnvGates:
         ["Live", "LIVE", "LIVE ", "livé", "production", "demo;live", "l i v e"],
     )
     async def test_spoofed_env_marker_unresolved(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch, spoof: str
+        self,
+        unresolved_env: Path,
+        install: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        spoof: str,
     ) -> None:
         """Case/unicode/punct-spoofed markers resolve to UNRESOLVED (the
         marker is a non-normalizing exact enum match) → actor tools refuse
-        env-marker-absent, never treating the spoof as live."""
+        env-marker-absent, never treating the spoof as live.
+
+        New contract (D-FA2.3 supersession 2026-09-22): the spoofed value
+        is NOT in ``VALID_ENVS`` so ``_explicit_marker()`` returns None;
+        the resolver then falls through to auto-derive. The
+        ``unresolved_env`` fixture silences every signal the auto-derive
+        path reads so the spoof → unresolved → fail-closed contract is
+        exercised cleanly. Without the silencing, a host whose ambient
+        ``POSTGRES_DB=ensemble_prod`` would resolve live through the
+        auto-derive path — that is INTENTIONAL behavior (the env is
+        independently live-shaped) and is covered by the new auto-
+        derive tests.
+        """
         monkeypatch.setenv("ENSEMBLE_SELF_ENV", spoof)
         monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: install)
         manager = MagicMock()
@@ -743,6 +1019,799 @@ class TestActorEnvGates:
         assert _refusal_reason(out) == "env-marker-absent", (spoof, out)
         out2 = await tools["system_upgrade"].ainvoke({"target_env": "live"})
         assert _refusal_reason(out2) == "env-marker-absent", (spoof, out2)
+
+
+# ── Auto-resolution (D-FA2.3 supersession, 2026-09-22 user directive) ────────
+
+
+class TestAutoResolution:
+    """The ENSEMBLE_SELF_ENV marker is OPTIONAL with explicit opt-out. The
+    resolver auto-derives the env from launch evidence when the marker is
+    absent and the operator did not opt out via a false-value marker.
+    Auto-derived envs apply the same gates as explicit-marker envs
+    (env-self-match, live 3-factor, live restart refusal).
+
+    These tests exercise the contract on a clean tmp_path home (no real
+    ``~/agents-ensemble*`` paths involved — the only thing being checked is
+    the resolver's classification of the configured launch evidence).
+    """
+
+    def test_explicit_marker_wins_over_auto_derive(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The highest-priority signal is the explicit marker. Even when
+        POSTGRES_DB would auto-derive a different env (here live), an
+        explicit ``ENSEMBLE_SELF_ENV=demo`` marker WINS — the operator's
+        staging intent overrides the daemon's ambient evidence.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        live_env = fake_home / "agents-ensemble" / ".env"
+        live_env.parent.mkdir()
+        live_env.write_text("POSTGRES_DB=ensemble_prod\nPORT=9797\n", encoding="utf-8")
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        # Sanity: without the marker, auto-derive WOULD resolve live.
+        assert ut._auto_derive_env() == "live"
+        # With an explicit demo marker, demo wins.
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "demo")
+        assert ut._self_env_marker() == "demo"
+        assert ut._self_env_source() == "explicit"
+
+    @pytest.mark.parametrize("opt_out", ["0", "false", "no", "off", "FALSE", "  off  "])
+    def test_opt_out_falses_preserve_fail_closed(
+        self, opt_out: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``ENSEMBLE_SELF_ENV=0|false|no|off`` (case-insensitive,
+        whitespace-trimmed — ``_PROACTIVE_FALSE_BOOLS`` vocabulary)
+        preserves today's fail-closed ``unresolved`` behavior verbatim.
+        The resolver returns None and ``_self_env_source() == "opted-out"``
+        so the marker-line display tells the operator the env was
+        deliberately disabled.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        live_env = fake_home / "agents-ensemble" / ".env"
+        live_env.parent.mkdir()
+        live_env.write_text("POSTGRES_DB=ensemble_prod\n", encoding="utf-8")
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", opt_out)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        # Sanity: without the opt-out, auto-derive WOULD resolve live.
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        assert ut._auto_derive_env() == "live"
+        # With the opt-out, fail-closed.
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", opt_out)
+        assert ut._self_env_marker() is None
+        assert ut._self_env_source() == "opted-out"
+
+    def test_auto_derive_live_via_install_dir_topology(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Auto-derive live when ``~/agents-ensemble/.env`` exists AND
+        POSTGRES_DB (either in the .env or in the daemon's env) is
+        ``ensemble_prod``. The cross-check is the reason a leftover .env
+        from a prior install cannot falsely label a dev checkout as live.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        live_env = fake_home / "agents-ensemble" / ".env"
+        live_env.parent.mkdir()
+        live_env.write_text(
+            "POSTGRES_DB=ensemble_prod\nPORT=9797\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        assert ut._self_env_marker() == "live"
+        assert ut._self_env_source() == "auto"
+
+    def test_auto_derive_live_via_ambient_postgres_db(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Auto-derive live when the daemon's own ``$POSTGRES_DB`` is
+        ``ensemble_prod`` AND ``~/agents-ensemble/.env`` exists with a
+        matching POSTGRES_DB. The install-dir topology + DB cross-check
+        is what enables the derivation.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        live_env = fake_home / "agents-ensemble" / ".env"
+        live_env.parent.mkdir()
+        live_env.write_text("POSTGRES_DB=ensemble_prod\n", encoding="utf-8")
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        assert ut._self_env_marker() == "live"
+
+    def test_auto_derive_demo_via_install_dir_topology(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Auto-derive demo when ``~/agents-ensemble-demo/.env`` exists
+        AND POSTGRES_DB (either source) is ``ensemble_demo``.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        demo_env = fake_home / "agents-ensemble-demo" / ".env"
+        demo_env.parent.mkdir()
+        demo_env.write_text(
+            "POSTGRES_DB=ensemble_demo\nPORT=7979\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        assert ut._self_env_marker() == "demo"
+
+    def test_auto_derive_dev_via_postgres_db(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Auto-derive dev when no install-dir topology resolves AND
+        ``$POSTGRES_DB=ensemble_dev``. Repo checkouts that point at the
+        docker-compose local PG resolve dev this way (matches the v0.13.9
+        demo launch flow that staged POSTGRES_DB for the dev checkout).
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_dev")
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        assert ut._self_env_marker() == "dev"
+        assert ut._self_env_source() == "auto"
+
+    def test_auto_derive_sandbox_via_frozen_binary(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Auto-derive sandbox when running as a frozen PyInstaller
+        binary AND ``<install>/releases/`` exists AND the install dir is
+        NOT the canonical live/demo home. The frozen-binary + releases/
+        pair is the most reliable signal because the staged payload
+        carries no ``INSTALL_DIR`` env.
+
+        Stage.sh stages the binary at
+        ``<install>/releases/<ver>/ensemble-prod`` (stage.sh:5-17), so
+        the test creates exactly that layout: install/releases/v0/ensemble-prod.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        sandbox_root = tmp_path / "sandbox-install"
+        sandbox_release = sandbox_root / "releases" / "v0.13.0"
+        sandbox_release.mkdir(parents=True)
+        binary = sandbox_release / "ensemble-prod"
+        binary.touch()
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(ut.sys, "executable", str(binary), raising=False)
+        assert ut._self_env_marker() == "sandbox"
+        # And _resolve_install_dir must also return the install dir.
+        assert ut._resolve_install_dir("sandbox") == sandbox_root
+
+    def test_auto_derive_sandbox_falls_back_when_install_matches_live_or_demo(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Frozen binary at ``<live-install>/releases/<ver>/ensemble-prod``
+        does NOT auto-derive sandbox — the install-dir match takes
+        precedence and the resolver continues the topology chain. The
+        frozen-binary sandbox requires the install dir to be UNCANONICAL.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        # Frozen binary at the canonical live install dir.
+        live_root = fake_home / "agents-ensemble"
+        live_release = live_root / "releases" / "v0.13.0"
+        live_release.mkdir(parents=True)
+        binary = live_release / "ensemble-prod"
+        binary.touch()
+        # Canonical live install .env matches.
+        live_env = fake_home / "agents-ensemble" / ".env"
+        live_env.write_text("POSTGRES_DB=ensemble_prod\n", encoding="utf-8")
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(ut.sys, "executable", str(binary), raising=False)
+        # Live topology wins (install-dir .env POSTGRES_DB=ensemble_prod).
+        assert ut._self_env_marker() == "live"
+
+    def test_auto_derive_unresolved_when_no_signal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No signal → ``unresolved`` (today's env-marker-absent contract
+        preserved). The marker-line display shows
+        ``auto-derivation found no signal`` so the operator can diagnose.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        assert ut._self_env_marker() is None
+        assert ut._self_env_source() == "auto-unresolved"
+
+    def test_auto_derive_ignores_unrelated_postgres_db(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An unrelated ``$POSTGRES_DB`` value (e.g. ``somedb``) does NOT
+        resolve any env — only the canonical DB names do. The single-
+        signal POSTGRES_DB fallback was rejected by D-FA2.3.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.setenv("POSTGRES_DB", "somedb")
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        assert ut._self_env_marker() is None
+
+    async def test_release_info_shows_auto_resolved_env_no_marker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``release_info`` with no marker set but unambiguous
+        auto-derive evidence reports the resolved env (the operator can
+        see exactly which path produced the resolution). The marker line
+        shows ``auto-derived self-env=live`` so a misconfiguration is
+        visible immediately — not silently attributed to the staged
+        marker.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        live_install = fake_home / "agents-ensemble"
+        live_install.mkdir()
+        (live_install / "releases").mkdir()
+        (live_install / ".env").write_text(
+            "POSTGRES_DB=ensemble_prod\nPORT=9797\n", encoding="utf-8"
+        )
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: live_install)
+        manager = MagicMock()
+        manager.config.daemon.port = 9797
+        manager._task_repo = None
+        tools = _build_tools(manager)
+        out = await tools["release_info"].ainvoke({})
+        assert "RELEASE INFO" in out
+        # The auto-derived env line is the operator-visible signal.
+        assert "auto-derived self-env=live" in out
+        assert "REFUSED" not in out
+
+    async def test_auto_resolved_live_still_requires_three_factor_gate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """An auto-resolved live daemon still goes through the 3-factor
+        live gate. This is the HARD SAFETY INVARIANT: auto-resolution
+        changes identity DETECTION, NEVER the gates. A live-resident
+        daemon whose env was auto-derived (no staged marker) still must
+        pass ``user_confirmed`` + user-origin window + nonce content
+        match BEFORE any live action.
+
+        Two scenarios pinned with concrete tokens (S3 strengthening — the
+        old assertion ``"REFUSED" in out or "CONFIRMATION" in out`` was
+        too weak; both tokens can fire for the wrong reasons and a
+        regression that flips one for the other would not have been
+        caught):
+
+        * **dry_run on auto-resolved live**: gate is NOT evaluated
+          (dry_run is a preflight that mints the nonce for live) — the
+          concrete token is ``CONFIRMATION REQUIRED (live)`` and the
+          mint persists exactly one ``pending_actions`` nonce record.
+          The env DID resolve as live (NOT as unresolved), so the gate
+          path is reachable on the armed follow-up.
+        * **armed on auto-resolved live WITHOUT a window**: factor 2
+          fails — the concrete token is ``user-confirmation-missing``
+          (and the marker-line shows ``auto-derived self-env=live``).
+          This is the user-direction invariant: auto-derive changes
+          identity DETECTION, NEVER the gate.
+        """
+        from daemon.tools import upgrade_journal as uj
+
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        live_install = fake_home / "agents-ensemble"
+        live_install.mkdir()
+        (live_install / "releases").mkdir()
+        # Real journal so the dry_run nonce mint can persist.
+        uj.journal_init(live_install)
+        uj.ensure_extensions(live_install)
+        (live_install / "releases" / "1.2.3").mkdir(parents=True, exist_ok=True)
+        (live_install / "releases" / "1.2.3" / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "version": "1.2.3",
+                    "binary_version": "v1.2.3",
+                    "staged_at": "2026-08-22T09:00:00Z",
+                    "rollback_safe": True,
+                    "known_schema_gen": 14,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (live_install / ".env").write_text(
+            "POSTGRES_DB=ensemble_prod\nPORT=9797\n", encoding="utf-8"
+        )
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: live_install)
+        manager = MagicMock(name="InstanceManager")
+        manager.config.daemon.port = 9797
+        manager._task_repo = None
+        manager._user_origin_windows = {}  # NO window → factor 2 fails on armed
+        manager.set_pending_system_execution = MagicMock()
+        tools = _build_tools(manager)
+
+        # Scenario A: dry_run on auto-resolved live. Env resolved (NOT
+        # unresolved) — concrete token is the live-nonce CONFIRMATION
+        # REQUIRED line. (The ``release_info`` marker-line that shows
+        # ``auto-derived self-env=live`` is exercised separately by
+        # ``test_release_info_shows_auto_resolved_env_no_marker``.)
+        out_dry = await tools["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3"}
+        )
+        assert "CONFIRMATION REQUIRED (live): nonce CONFIRM-" in out_dry, out_dry
+        assert "env-marker-absent" not in out_dry
+        # The dry_run mint persisted exactly one pending_actions nonce
+        # record (the labeled mutation).
+        journal = uj.journal_read(live_install)
+        assert len(journal.get("pending_actions", {})) == 1
+
+        # Scenario B: armed on auto-resolved live WITHOUT a window.
+        # 3-factor gate fires — concrete token is user-confirmation-missing
+        # (factor 2 binding). The nonce record from scenario A is
+        # irrelevant to the gate (no window stamped on this turn).
+        # We fabricate a nonce string to prove the gate cannot be
+        # bypassed by supplying ANY nonce.
+        out_armed = await tools["system_upgrade"].ainvoke(
+            {
+                "target_env": "live",
+                "version": "1.2.3",
+                "dry_run": False,
+                "user_confirmed": True,
+                "nonce": "CONFIRM-FABRICATED-BYPASS-PROBE",
+            }
+        )
+        assert _refusal_reason(out_armed) == "user-confirmation-missing", out_armed
+        assert "whitelisted user-origin" in out_armed
+        # Nothing armed; no markers; no spawn.
+        assert manager.set_pending_system_execution.call_count == 0
+
+    async def test_auto_resolved_live_refuses_restart_outright(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """An auto-resolved live daemon refuses ``system_restart``
+        outright (A2/§3.1), matching the explicit-marker live contract.
+        Auto-detection does NOT weaken the restart-refused invariant.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        live_install = fake_home / "agents-ensemble"
+        live_install.mkdir()
+        (live_install / "releases").mkdir()
+        (live_install / ".env").write_text(
+            "POSTGRES_DB=ensemble_prod\nPORT=9797\n", encoding="utf-8"
+        )
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: live_install)
+        manager = MagicMock()
+        manager.config.daemon.port = 9797
+        manager._task_repo = None
+        tools = _build_tools(manager)
+        # Every dry_run mode + every confirmation shape — still refused.
+        for dry in (True, False):
+            out = await tools["system_restart"].ainvoke(
+                {
+                    "target_env": "live",
+                    "reason": "x",
+                    "dry_run": dry,
+                    "user_confirmed": True,
+                    "nonce": "CONFIRM-ABCDEFGH",
+                }
+            )
+            assert _refusal_reason(out) == "live-restart-refused", (dry, out)
+
+    async def test_auto_derive_env_self_match_refuses_cross_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An auto-resolved demo daemon refuses a cross-env target
+        (live) with ``env-self-match``. Self-match applies to auto-
+        derived envs the same way it applies to explicit-marker envs —
+        the operator UX is identical from the tool surface's POV.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        demo_install = fake_home / "agents-ensemble-demo"
+        demo_install.mkdir()
+        (demo_install / "releases").mkdir()
+        (demo_install / ".env").write_text(
+            "POSTGRES_DB=ensemble_demo\nPORT=7979\n", encoding="utf-8"
+        )
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: demo_install)
+        manager = MagicMock()
+        manager.config.daemon.port = 7979
+        manager._task_repo = None
+        tools = _build_tools(manager)
+        out = await tools["release_info"].ainvoke({"target_env": "live"})
+        assert _refusal_reason(out) == "env-self-match", out
+
+    # ── W1: garbage marker handling ──────────────────────────────────────────
+    # Garbage markers (typo / wrong case / punct-spoof / unicode look-alike)
+    # are silently discarded by the resolver — the operator sees the
+    # auto-derive result, but the marker-line and refusal-text surface
+    # WHY their marker was not honored (reviewer APPROVED-WITH-NOTES
+    # commissioned item W1). Two outcomes are tested: garbage + auto-
+    # derive succeeds (self-env resolved, marker-line shows IGNORED);
+    # garbage + auto-derive fails (self-env unresolved, marker-line
+    # shows IGNORED + auto-derivation found no signal). Each emits a
+    # WARNING log.
+
+    def test_garbage_marker_falls_through_to_auto_derive(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """W1: ``ENSEMBLE_SELF_ENV=prod`` (typo / unrecognized value)
+        falls through to auto-derive. The resolver does NOT refuse; the
+        marker is silently IGNORED — but a WARNING is logged and the
+        marker-line surfaces the ignored state so the operator
+        understands WHY their marker was not honored.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        live_env = fake_home / "agents-ensemble" / ".env"
+        live_env.parent.mkdir()
+        live_env.write_text(
+            "POSTGRES_DB=ensemble_prod\nPORT=9797\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "prod")  # garbage
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        # Resolver falls through to auto-derive; the IGNORED marker
+        # does not prevent resolution.
+        assert ut._self_env_marker() == "live"
+        assert ut._self_env_source() == "ignored-garbage"
+
+    @pytest.mark.parametrize("garbage", ["prod", "flase", "production", "demo;live"])
+    def test_garbage_marker_wrong_case_or_typo(
+        self, garbage: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """W1 parametrize: every garbage shape (typo / wrong case /
+        punct-spoof) is detected and logged. Explicit enum match is
+        case-sensitive (the marker is a non-normalizing exact enum
+        match — wrong-case values like 'Live' / 'LIVE' are NOT
+        treated as 'live'; they are garbage). Punct-spoofs and typos
+        are garbage. The opt-out check is the only case-insensitive
+        comparison.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        live_env = fake_home / "agents-ensemble" / ".env"
+        live_env.parent.mkdir()
+        live_env.write_text(
+            "POSTGRES_DB=ensemble_prod\nPORT=9797\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", garbage)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        assert ut._is_garbage_marker() is True
+        # Resolver still resolves (auto-derive succeeds): the IGNORED
+        # marker does not block resolution.
+        assert ut._self_env_marker() == "live"
+        assert ut._self_env_source() == "ignored-garbage"
+
+    def test_garbage_marker_with_no_signal_logs_and_unresolved(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog
+    ) -> None:
+        """W1: garbage marker + no auto-derive signal → unresolved,
+        AND a WARNING log captures the ignored raw value so the
+        operator can see the typo in the daemon log. This is the
+        operator-facing signal that closes the silent fall-through
+        hole.
+        """
+        # Use the unresolved_env silencing pattern inline (the fixture
+        # already deletes ENSEMBLE_SELF_ENV; here we set it to
+        # garbage AFTER the silencing).
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "flase")  # typo of 'false'
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        # Resolver returns None (auto-derive found no signal), but the
+        # source is "ignored-garbage" — NOT "auto-unresolved".
+        with caplog.at_level("WARNING", logger="daemon.tools.upgrade_tools"):
+            assert ut._self_env_marker() is None
+            assert ut._self_env_source() == "ignored-garbage"
+        # WARNING was logged with the raw value. The log message uses
+        # ``%r`` so the raw value is repr'd (single-quoted) — the
+        # assertion checks for the rendered message fragment.
+        assert any(
+            "ENSEMBLE_SELF_ENV='flase'" in rec.getMessage()
+            for rec in caplog.records
+        ), [rec.getMessage() for rec in caplog.records]
+
+    def test_garbage_marker_line_reports_ignored_value_when_resolved(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """W1: when the marker is garbage AND auto-derive resolves,
+        the marker-line prints the IGNORED raw value AND the
+        auto-derived env (so the operator sees both: their typo was
+        ignored AND the resolver fell back to multi-signal
+        auto-derivation).
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        live_env = fake_home / "agents-ensemble" / ".env"
+        live_env.parent.mkdir()
+        live_env.write_text(
+            "POSTGRES_DB=ensemble_prod\nPORT=9797\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "prod")
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        line = ut._marker_line(ut._self_env_marker())
+        # Does NOT claim ABSENT — the marker IS set (just ignored).
+        assert "ABSENT" not in line, line
+        # Shows the raw value with an IGNORED annotation.
+        assert "ENSEMBLE_SELF_ENV=<prod>" in line, line
+        assert "IGNORED" in line, line
+        # Shows the auto-derived env with the multi-signal rationale.
+        assert "auto-derived self-env=live" in line, line
+
+    def test_garbage_marker_line_reports_ignored_when_unresolved(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """W1: when the marker is garbage AND auto-derive finds no
+        signal, the marker-line prints the IGNORED raw value AND
+        the auto-derivation-failed message — the operator sees the
+        typo, not a misleading ABSENT.
+        """
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "production")
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        line = ut._marker_line(ut._self_env_marker())
+        # Marker IS set, so the line must NOT say ABSENT — it must say
+        # IGNORED with the raw value.
+        assert "ABSENT" not in line, line
+        assert "ENSEMBLE_SELF_ENV=<production>" in line, line
+        assert "IGNORED" in line, line
+        # And the auto-derivation-failed clause is present so the
+        # operator knows the resolver also tried to auto-derive.
+        assert "auto-derivation found no signal" in line, line
+
+    # ── S1: refusal-text accuracy per source state ────────────────────────────
+    # The ``env-marker-absent`` refusal token is the SAME in every case
+    # (the fail-closed contract is preserved verbatim — the tool cannot
+    # resolve the env), but the remediation hint differs because the
+    # operator's next step differs. Three states are tested: explicit
+    # opt-out, ignored-garbage, and auto-unresolved. Without this
+    # branching the refusal would say "no opt-out via false" even when
+    # the operator DID opt out, misdirecting them.
+
+    async def test_refusal_text_accurate_when_operator_opted_out(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, install: Path
+    ) -> None:
+        """S1: opt-out (ENSEMBLE_SELF_ENV=false) → refusal text
+        tells the operator they explicitly opted out, and points them
+        at removing the opt-out to re-enable. NEVER claims "no opt-out
+        via false" — that wording is wrong here.
+        """
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "false")
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: install)
+        manager = MagicMock()
+        manager.config.daemon.port = 0
+        manager._task_repo = None
+        tools = _build_tools(manager)
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "x"}
+        )
+        assert _refusal_reason(out) == "env-marker-absent", out
+        # Operator DID opt out — the hint must reflect that.
+        assert "explicitly opted out" in out, out
+        assert "no opt-out via false" not in out, out
+        # And it points at the remediation (remove opt-out OR set
+        # explicit marker OR unset to auto-derive).
+        assert "remove the opt-out" in out, out
+
+    async def test_refusal_text_accurate_when_garbage_marker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, install: Path
+    ) -> None:
+        """S1: garbage marker (ENSEMBLE_SELF_ENV=prod) → refusal text
+        tells the operator the value was IGNORED, surfaces the valid
+        forms, and distinguishes from the opt-out / auto-unresolved
+        cases. Uses the ``unresolved_env``-equivalent silencing
+        (no ENSEMBLE_SELF_ENV, no POSTGRES_DB, no install-dir
+        evidence, sys.frozen=False) so the auto-derive path returns
+        None and the resolver falls through to the refused path.
+        """
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "prod")  # garbage
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: install)
+        manager = MagicMock()
+        manager.config.daemon.port = 0
+        manager._task_repo = None
+        tools = _build_tools(manager)
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "x"}
+        )
+        assert _refusal_reason(out) == "env-marker-absent", out
+        # Operator set a typo — the hint reflects that.
+        assert "IGNORED" in out, out
+        assert "warning" in out.lower() or "WARNING" in out, out
+        # And it lists the valid forms.
+        assert "dev|demo|live|sandbox" in out, out
+        # It does NOT conflate with the opt-out case.
+        assert "explicitly opted out" not in out, out
+        # It does NOT conflate with the auto-unresolved case either
+        # (which would say "no ENSEMBLE_SELF_ENV marker, no opt-out").
+        assert "no ENSEMBLE_SELF_ENV marker, no opt-out" not in out, out
+
+    async def test_refusal_text_accurate_when_no_signal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, install: Path
+    ) -> None:
+        """S1: no marker, no opt-out, no auto-derive signal → refusal
+        text tells the operator no marker is set and points at setting
+        one OR providing unambiguous launch evidence.
+        """
+        # unresolved_env-equivalent setup inline (fixture deletes
+        # ENSEMBLE_SELF_ENV; here we want the same effect without
+        # the fixture's home redirect interfering with install path).
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: install)
+        manager = MagicMock()
+        manager.config.daemon.port = 0
+        manager._task_repo = None
+        tools = _build_tools(manager)
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "x"}
+        )
+        assert _refusal_reason(out) == "env-marker-absent", out
+        # No marker, no opt-out — the hint reflects that.
+        assert "no ENSEMBLE_SELF_ENV marker" in out, out
+        # And points at the remediation.
+        assert "auto-derivation" in out, out
+        # Does NOT claim the operator opted out.
+        assert "explicitly opted out" not in out, out
+        # Does NOT claim the operator set garbage.
+        assert "IGNORED" not in out, out
+
+    # ── S4: empty / whitespace-only marker → auto-derive ─────────────────────
+    # The marker parser (``_read_marker_value``) trims whitespace and
+    # treats empty / whitespace-only as ABSENT (post-trim = empty → None).
+    # These tests cover the parsing branches end-to-end through
+    # ``_self_env_marker()`` so the contract is locked at the
+    # observable surface.
+
+    @pytest.mark.parametrize("empty_marker", ["", " ", "   ", "\t", "\n", "  \t  "])
+    def test_empty_or_whitespace_marker_means_absent(
+        self, empty_marker: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """S4: an empty-string OR whitespace-only marker is treated
+        as ABSENT — NOT as garbage — so the resolver falls through
+        to auto-derivation without logging a garbage WARNING. The
+        ``_read_marker_value`` parser trims and returns None for
+        these cases (the resolved-env source is ``auto`` or
+        ``auto-unresolved``, never ``ignored-garbage``).
+        """
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", empty_marker)
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        # _read_marker_value collapses these to None.
+        assert ut._read_marker_value() is None
+        # NOT garbage.
+        assert ut._is_garbage_marker() is False
+        # Source is auto / auto-unresolved — never ignored-garbage.
+        source = ut._self_env_source()
+        assert source in ("auto", "auto-unresolved"), source
+
+    # ── S5: parametrized explicit-wins over contradictory auto-evidence ──────
+    # The explicit marker is the highest-priority signal. The existing
+    # ``test_explicit_marker_wins_over_auto_derive`` covers ONE combo
+    # (marker='demo' + POSTGRES_DB=ensemble_prod). This parametrized
+    # test covers the four valid (marker, conflicting-POSTGRES_DB)
+    # combos so a regression that flips the precedence for any one
+    # env is caught.
+
+    @pytest.mark.parametrize(
+        "marker,planted_dir,planted_db,conflicting_auto",
+        [
+            # Each case plants install-dir evidence for one env (the
+            # auto-derive target) and sets the marker to a DIFFERENT
+            # env. The marker must win over the contradictory
+            # install-dir evidence. The 4 cases cover all 4 valid
+            # marker values.
+            ("demo", "agents-ensemble", "ensemble_prod", "live"),
+            ("live", "agents-ensemble-demo", "ensemble_demo", "demo"),
+            ("dev", "agents-ensemble", "ensemble_prod", "live"),
+            ("sandbox", "agents-ensemble", "ensemble_prod", "live"),
+        ],
+    )
+    def test_explicit_marker_wins_over_any_conflicting_auto_signal(
+        self,
+        marker: str,
+        planted_dir: str,
+        planted_db: str,
+        conflicting_auto: str,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """S5: the explicit marker wins over any contradictory auto-
+        evidence — the operator's staging intent overrides ambient
+        signals. Parametrized across the 4 valid marker values (one
+        case per value) so a regression that flipped precedence for
+        ONE env (e.g. dev losing to live) is caught.
+
+        Each case plants install-dir .env evidence for one env (the
+        conflicting auto target) and sets the marker to a DIFFERENT
+        env. Without the marker, auto-derive resolves to the planted
+        env; with the marker set, the marker wins.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        # Plant install-dir evidence for the conflicting auto target.
+        planted_env = fake_home / planted_dir / ".env"
+        planted_env.parent.mkdir()
+        planted_env.write_text(f"POSTGRES_DB={planted_db}\n", encoding="utf-8")
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", marker)
+        # Ambient POSTGRES_DB unset — the install-dir evidence is the
+        # sole signal for the auto-derive path (matches the live / demo
+        # branches in _auto_derive_env).
+        monkeypatch.delenv("POSTGRES_DB", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setattr(ut.sys, "frozen", False, raising=False)
+        # Sanity check: WITHOUT the marker, auto-derive resolves to
+        # conflicting_auto (the planted env). This proves the test
+        # scenario is meaningful — there IS contradictory evidence.
+        monkeypatch.delenv("ENSEMBLE_SELF_ENV", raising=False)
+        assert ut._auto_derive_env() == conflicting_auto, (
+            f"test sanity: planted {planted_dir}/{planted_db} must "
+            f"auto-derive to {conflicting_auto!r} for the explicit-wins "
+            f"assertion to be meaningful"
+        )
+        # With the marker set, the marker wins — auto-derive is bypassed.
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", marker)
+        assert ut._self_env_marker() == marker, (
+            f"explicit marker {marker} must win over "
+            f"conflicting auto={conflicting_auto} "
+            f"(planted {planted_dir}/{planted_db})"
+        )
+        assert ut._self_env_source() == "explicit"
 
 
 # ── system_restart matrix ────────────────────────────────────────────────────
@@ -1409,6 +2478,49 @@ class TestLiveThreeFactorGate:
         assert _refusal_reason(out) == "user-confirmation-missing"
         assert "whitelisted user-origin" in out  # factor 2 is the binding one
         # Nothing armed by the fabricated call.
+        assert live["markers"] == []
+
+    async def test_fabricated_nonce_with_no_window_refuses(self, live_harness) -> None:
+        """S3 armed-spoof case: user_confirmed=true with a FABRICATED
+        nonce string + NO genuine user-origin window → REFUSED. This is
+        the user-direction hard invariant: the gate cannot be bypassed
+        by supplying ANY nonce string. Without factor 2 (the server-
+        side window the dispatch seam stamps on whitelisted user-
+        origin turns), factor 1 (user_confirmed param) and factor 3
+        (nonce content match) cannot unlock live.
+
+        The threat model: an attacker / spoofed caller fabricates a
+        nonce string and sets user_confirmed=True, hoping the gate
+        will look at factors 1+3 and bypass factor 2. The gate's
+        factor-2 check fires first (window is None → fail), so the
+        fabricated nonce never gets evaluated — exactly the
+        invariant this test pins.
+        """
+        live = live_harness
+        # No window stamped on this turn (forged origin path).
+        assert live["windows"] == {}
+        # A fabricated nonce string — does NOT exist in the journal's
+        # pending_actions. Also NOT echoed in any human message (no
+        # window, no queue row).
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {
+                "target_env": "live",
+                "version": "1.2.3",
+                "dry_run": False,
+                "user_confirmed": True,
+                "nonce": "CONFIRM-FAKEFABFABFABFAB",  # arbitrary forged string
+            }
+        )
+        # The gate cannot be bypassed — factor 2 binds (no window).
+        assert _refusal_reason(out) == "user-confirmation-missing", out
+        assert "whitelisted user-origin" in out, out
+        # And the fabricated nonce is not in the journal's pending_actions
+        # (the gate never reached the nonce-content check).
+        data = uj.journal_read(live["install"])
+        assert (
+            "CONFIRM-FAKEFABFABFABFAB" not in data.get("pending_actions", {})
+        )
+        # Nothing armed.
         assert live["markers"] == []
 
     async def test_nonce_mismatch(self, live_harness) -> None:

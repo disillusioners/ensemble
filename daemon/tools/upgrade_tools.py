@@ -29,13 +29,25 @@ structurally (json.loads → dict → json.dumps), preserving lib.sh's ≥2
 occurrence escape tolerance for field divergence by construction.
 
 Self-match rule (§3.2, reviewer ruling 2026-08-22): ``target_env`` must
-equal the daemon's own env (staged ``ENSEMBLE_SELF_ENV`` marker,
-D-FA2.3 — PORT-derivation fallback REJECTED). Cross-env reads AND
-actions are refused structurally with ``env-self-match``; a
-dev/demo/sandbox daemon can NEVER address live, whatever parameters the
-LLM passes. Marker absent → read tools STILL answer (fail-open for
-reads only); ACTOR tools refuse ``env-marker-absent`` fail-closed
-(S-31).
+equal the daemon's own env. The self-env is resolved by
+``_self_env_marker()`` which honors the staged
+``ENSEMBLE_SELF_ENV=dev|demo|live|sandbox`` marker (D-FA2.3) as the
+highest-priority signal and AUTO-DERIVES the env from launch evidence
+when the marker is absent (D-FA2.3 supersession, 2026-09-22 user
+directive — multi-signal: frozen-binary + releases/ for sandbox;
+install-dir + POSTGRES_DB cross-check for live/demo; dev-shape
+POSTGRES_DB for dev). An explicit
+``ENSEMBLE_SELF_ENV=0|false|no|off`` preserves today's fail-closed
+``unresolved`` behavior verbatim for operators who want the strict
+old contract.
+
+Cross-env reads AND actions are refused structurally with
+``env-self-match``; a dev/demo/sandbox daemon can NEVER address live,
+whatever parameters the LLM passes. Auto-derived envs apply the same
+gates (env-self-match, live 3-factor, live restart refusal). When the
+self-env is unresolved (no marker, no opt-out, no auto-derive signal)
+read tools STILL answer (fail-open for reads only); ACTOR tools refuse
+``env-marker-absent`` fail-closed (S-31).
 
 L8 (tidier, P2.3 final batch): this module is deliberately large — the
 module split (reads / actor tools / gate) is fenced to the post-P2.3
@@ -102,9 +114,13 @@ pipeline (P2.1 pipeline, P2.2 tool surface).
   turn + nonce echoed by the user).
 
 All four tools target ONLY the running daemon's own environment
-(``target_env`` must equal the staged ENSEMBLE_SELF_ENV marker);
-cross-env calls are refused. Reads never mutate; actor tools mutate only
-through the journal (atomic writes) and the daemonized pipeline scripts.
+(``target_env`` must equal the resolved self-env — explicit
+``ENSEMBLE_SELF_ENV`` marker when staged, otherwise auto-derived from
+launch evidence; cross-env calls are refused). An explicit
+``ENSEMBLE_SELF_ENV=0|false|no|off`` preserves today's fail-closed
+``unresolved`` behavior for operators who want the strict-marker
+contract. Reads never mutate; actor tools mutate only through the
+journal (atomic writes) and the daemonized pipeline scripts.
 """
 
 # ─── P2.2 REGISTRATION CHECKLIST (T2 — re-verify on every tool change) ───────
@@ -177,38 +193,366 @@ _UPGRADE_LOG_TAIL_LINES = 50
 _PROBE_TIMEOUT_S = 3.0
 
 
-def _self_env_marker() -> str | None:
-    """Resolve the staged self-env marker (D-FA2.3).
+# Opt-out vocabulary for ``ENSEMBLE_SELF_ENV`` (matches
+# ``daemon.config._PROACTIVE_FALSE_BOOLS`` — same permissive bool parser the
+# repo already uses for kill-switch style env knobs like
+# ``ENSEMBLE_EMPTY_RESPONSE_GUARD``; reusing the vocabulary keeps the operator
+# UX consistent across switches). Lower-cased + whitespace-trimmed at the
+# compare site.
+_OPT_OUT_FALSES: frozenset[str] = frozenset({"0", "false", "no", "off"})
+
+# D-FA2.3 supersession note (2026-09-22, user directive):
+#   D-FA2.3 mandated the ENSEMBLE_SELF_ENV marker as the SOLE source for self-
+#   env resolution — staged into INSTALL_DIR/.env, exported by launcher.sh,
+#   read by the tool layer. The original ruling rejected PORT-derivation as a
+#   fallback because single-signal port derivation re-introduced the
+#   7979↔9797 one-digit-typo class the gate exists to prevent. The new design
+#   keeps the explicit marker as the HIGHEST-PRIORITY signal (stage.sh
+#   continues staging it; the marker is still consumed first) and ADDS a
+#   multi-signal auto-derivation path for the marker-absent case. The auto-
+#   derive path is intentionally multi-signal — it requires an install-dir
+#   topology match PLUS a POSTGRES_DB cross-check (live/demo) OR a frozen-
+#   binary + releases/ evidence (sandbox) — so the single-signal failure mode
+#   that D-FA2.3 closed cannot recur. An explicit opt-out (``ENSEMBLE_SELF_ENV
+#   =0|false|no|off``) preserves today's fail-closed ``unresolved`` behavior
+#   verbatim for operators who want the old strict-marker contract.
+
+
+def _read_marker_value() -> str | None:
+    """Raw marker string (trimmed) or None when unset/empty.
+
+    Splits the empty/missing case from the value-presence case so the opt-out
+    detector can distinguish ``ENSEMBLE_SELF_ENV=false`` (explicit) from
+    ``ENSEMBLE_SELF_ENV`` absent (no signal at all).
+    """
+    raw = os.environ.get("ENSEMBLE_SELF_ENV")
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
+def _explicit_marker() -> str | None:
+    """Validate the staged marker. Returns the validated enum value, or None
+    when the marker is unset, empty, or a non-enum value.
 
     The marker ``ENSEMBLE_SELF_ENV=dev|demo|live|sandbox`` is staged into
     ``INSTALL_DIR/.env`` by ``scripts/upgrade/stage.sh`` and exported into
     the daemon process by ``launcher.sh`` ``load_env_file`` (exports win
     over the frozen binary's own .env load). Reading the exported variable
-    IS reading the staged marker. PORT-derivation fallback is REJECTED by
-    ruling — absent marker stays absent (never guessed).
+    IS reading the staged marker.
+
+    A non-empty value that is NOT a recognized env name (case/unicode/punct
+    spoofed — the marker is a non-normalizing exact enum match) is treated
+    as unresolved; an explicit opt-out value (``0|false|no|off``) returns
+    None and is detected as an opt-out by :func:`_is_opt_out_marker`.
     """
-    raw = (os.environ.get("ENSEMBLE_SELF_ENV") or "").strip()
-    if not raw:
+    raw = _read_marker_value()
+    if raw is None:
         return None
-    return raw if raw in VALID_ENVS else None
+    if raw in VALID_ENVS:
+        return raw
+    # Non-empty but unrecognized — unresolved (spoofed / typoed).
+    return None
+
+
+def _is_opt_out_marker() -> bool:
+    """Did the operator set ``ENSEMBLE_SELF_ENV`` to an explicit false value?
+
+    Recognized opt-out spellings (case-insensitive, whitespace-trimmed):
+    ``"0"``/``"false"``/``"no"``/``"off"`` — mirrors the repo's
+    ``_PROACTIVE_FALSE_BOOLS`` vocabulary (``daemon.config``). Empty /
+    missing is NOT an opt-out (no signal at all → fall through to auto-
+    derive); an unrecognized enum value is also NOT an opt-out (treated as
+    garbage / ignored-garbage by ``_self_env_source``).
+    """
+    raw = _read_marker_value()
+    return raw is not None and raw.lower() in _OPT_OUT_FALSES
+
+
+def _is_garbage_marker() -> bool:
+    """Is the marker set to a value that is neither a valid enum NOR an
+    explicit opt-out?
+
+    True when ``_read_marker_value()`` returns a non-None string that fails
+    both ``_explicit_marker()`` (not in VALID_ENVS) AND
+    ``_is_opt_out_marker()`` (not in ``_OPT_OUT_FALSES``). Examples:
+    ``"prod"``, ``"flase"`` (typo), ``"Live"`` / ``"LIVE"`` (wrong case —
+    the explicit enum match is non-normalizing), ``"production"``,
+    ``"demo;live"`` (punct-spoof), unicode look-alikes.
+
+    The garbage case is NOT a refusal signal at the resolver level — the
+    resolver falls through to auto-derivation exactly like the marker-
+    absent case. What it DOES change: the marker-line and the
+    ``env-marker-absent`` refusal text surface the situation
+    factually (the operator DID set a value; it was ignored) rather
+    than silently printing "ABSENT". A WARNING is logged on each tool
+    invocation that classifies the marker so the operator notices
+    the typo in their daemon log.
+    """
+    raw = _read_marker_value()
+    if raw is None:
+        return False
+    if raw in VALID_ENVS:
+        return False
+    if raw.lower() in _OPT_OUT_FALSES:
+        return False
+    return True
+
+
+def _read_env_value(env_file: Path, key: str) -> str | None:
+    """Read a single ``KEY=value`` line from a shell-style env file.
+
+    Mirrors the parsing shape of ``launcher.sh`` ``load_env_file`` —
+    strips an optional ``export `` prefix, trims whitespace, and strips one
+    layer of matching surrounding quotes. Used to cross-check POSTGRES_DB in
+    the install-dir .env (auto-derive evidence). Returns None on a missing
+    file, an absent key, or a malformed line — never raises (a corrupt .env
+    must not crash the resolver).
+    """
+    try:
+        if not env_file.is_file():
+            return None
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            if "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() != key:
+                continue
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                v = v[1:-1]
+            return v
+    except OSError:
+        return None
+    return None
+
+
+def _auto_derive_env() -> str | None:
+    """Auto-derive the daemon's own env from launch evidence (multi-signal).
+
+    Called only when the explicit marker is absent AND the operator did
+    NOT opt out via a false-value marker. Returns the derived env
+    (``dev``/``demo``/``live``/``sandbox``) or None when no signal
+    resolves (the resolver preserves today's fail-closed ``unresolved``
+    behavior for that case).
+
+    Hierarchy (strongest first; D-FA2.3 supersession note at module top
+    explains why this is intentionally multi-signal):
+
+    1. **Frozen-binary topology → ``sandbox``.** Running as a PyInstaller
+       bundle, the binary lives at
+       ``<INSTALL_DIR>/releases/<ver>/ensemble-prod`` (stage.sh:5-17 —
+       the canonical staged-binary layout), so the install dir is
+       ``binary.parent.parent.parent`` (TWO ``.parent``s up from the
+       binary: ``<ver>`` → ``releases`` → ``INSTALL_DIR``). If that
+       install dir has a ``releases/`` subdirectory AND is NOT one of
+       the canonical HOME installs (live ``~/agents-ensemble`` / demo
+       ``~/agents-ensemble-demo``), resolve ``sandbox``. The frozen-
+       binary + releases/ pair is the single strongest sandbox signal
+       because a sandbox daemon has no other reliable evidence (the
+       staged payload carries no ``INSTALL_DIR`` env, the only
+       canonical handle is the binary path).
+
+    2. **Install-dir topology + DB cross-check → ``live``/``demo``.**
+       A canonical install dir (``~/agents-ensemble`` or
+       ``~/agents-ensemble-demo``) MUST have its ``.env`` file present AND
+       its ``POSTGRES_DB`` entry (read from the .env OR inherited from the
+       daemon's own ``$POSTGRES_DB``) MUST match the env's expected DB
+       name (``ensemble_prod`` for live, ``ensemble_demo`` for demo). The
+       DB cross-check is the reason a leftover .env from a prior install
+       cannot falsely label a dev checkout as live (the original D-FA2.3
+       single-signal failure mode).
+
+    3. **Dev-shape POSTGRES_DB → ``dev``.** When no install-dir topology
+       resolves AND the daemon's own ``$POSTGRES_DB`` (or a
+       ``$ENSEMBLE_DB`` fallback) is ``ensemble_dev``, resolve ``dev``.
+       Repository checkouts (``uv run python -m daemon.main`` etc.) set
+       ``POSTGRES_DB=ensemble_dev`` for the local docker-compose DB.
+
+    Returns None when no signal resolves (today's ``env-marker-absent``
+    refusal path is preserved for that case).
+    """
+    # 1. Frozen-binary topology → sandbox.
+    #   Stage.sh stages the binary at
+    #   ``<INSTALL_DIR>/releases/<ver>/ensemble-prod`` (stage.sh:5-17), so
+    #   the install dir is TWO `.parent`s up from the binary. The pair
+    #   ``frozen-binary + releases/`` is the strongest sandbox signal:
+    #   the staged payload carries no ``INSTALL_DIR`` env, so the binary
+    #   path is the only canonical handle.
+    if getattr(sys, "frozen", False):
+        try:
+            exe = Path(sys.executable).resolve()
+        except OSError:
+            exe = None
+        if exe is not None:
+            install_dir = exe.parent.parent.parent
+            if (install_dir / "releases").is_dir():
+                home = Path.home()
+                if (
+                    install_dir != home / "agents-ensemble"
+                    and install_dir != home / "agents-ensemble-demo"
+                ):
+                    return "sandbox"
+
+    # 2. Install-dir topology + DB cross-check → live / demo.
+    home = Path.home()
+    db_hint = (os.environ.get("POSTGRES_DB") or "").strip().lower()
+
+    live_env = home / "agents-ensemble" / ".env"
+    if live_env.is_file():
+        env_db = (_read_env_value(live_env, "POSTGRES_DB") or "").strip().lower()
+        if env_db == "ensemble_prod" or db_hint == "ensemble_prod":
+            return "live"
+
+    demo_env = home / "agents-ensemble-demo" / ".env"
+    if demo_env.is_file():
+        env_db = (_read_env_value(demo_env, "POSTGRES_DB") or "").strip().lower()
+        if env_db == "ensemble_demo" or db_hint == "ensemble_demo":
+            return "demo"
+
+    # 3. Dev-shape POSTGRES_DB → dev.
+    if db_hint == "ensemble_dev":
+        return "dev"
+
+    return None  # No signal → fail-closed preserved.
+
+
+def _self_env_marker() -> str | None:
+    """Resolve the daemon's own env (auto-resolution ACTIVE BY DEFAULT).
+
+    Supersedes D-FA2.3 (2026-09-22, user directive). D-FA2.3 mandated the
+    ``ENSEMBLE_SELF_ENV`` marker as the SOLE source; the new design makes
+    the marker OPTIONAL with explicit opt-out, eliminating the marker
+    requirement for installs that never had one (e.g. the LIVE daemon at
+    port 9797, ~/agents-ensemble — pre-P2.1 install with no releases/ dir
+    and no staged marker).
+
+    Resolution order (highest priority first — the explicit marker still
+    WINS when present; the change is that absence is no longer fatal):
+
+    1. **Explicit marker wins.** A staged ``ENSEMBLE_SELF_ENV`` marker
+       (``dev``/``demo``/``live``/``sandbox``) is read first via
+       ``_explicit_marker``. When the value is a valid enum, it takes
+       precedence over any auto-derived signal — operators retain the
+       exact staging/launching control they had under D-FA2.3.
+
+    2. **Explicit opt-out → today's fail-closed behavior preserved.**
+       ``ENSEMBLE_SELF_ENV=0|false|no|off`` (case-insensitive, whitespace-
+       trimmed — matches ``daemon.config._PROACTIVE_FALSE_BOOLS``) returns
+       None. Actor tools then refuse ``env-marker-absent`` fail-closed;
+       read tools accept only omitted target or ``target_env="dev"``. The
+       operator who wants the strict old contract gets it verbatim.
+
+    3. **Auto-derive.** When the marker is absent (and not opted-out),
+       infer the env via :_auto_derive_env — a multi-signal hierarchy
+       (frozen-binary + releases/ for sandbox; install-dir + POSTGRES_DB
+       cross-check for live/demo; dev-shape POSTGRES_DB for dev). The
+       original D-FA2.3 rejected single-signal PORT-derivation; the new
+       design is intentionally multi-signal so that single-signal failure
+       mode cannot recur.
+
+    Returns the resolved env string, or None when unresolved (fail-closed
+    preserved).
+    """
+    explicit = _explicit_marker()
+    if explicit is not None:
+        return explicit  # explicit marker wins (D-FA2.3 precedence preserved)
+    if _is_opt_out_marker():
+        return None  # opt-out → today's fail-closed 'unresolved' verbatim
+    return _auto_derive_env()  # may be None → fail-closed preserved
+
+
+def _self_env_source() -> str:
+    """How ``_self_env_marker`` resolved the current self_env. One of:
+
+    * ``"explicit"`` — staged ``ENSEMBLE_SELF_ENV=<dev|demo|live|sandbox>``
+      won.
+    * ``"opted-out"`` — operator set the marker to a false value; the
+      resolver returned None (today's fail-closed contract).
+    * ``"auto"`` — auto-derivation resolved the env (frozen-binary +
+      releases/ for sandbox; install-dir + POSTGRES_DB cross-check for
+      live/demo; dev-shape POSTGRES_DB for dev).
+    * ``"auto-unresolved"`` — auto-derivation found no signal (the
+      resolver returned None; today's fail-closed contract).
+    * ``"ignored-garbage"`` — operator set the marker to a value that is
+      neither a valid enum NOR an explicit opt-out (typo / wrong case /
+      punct-spoof / unicode). The garbage value was silently discarded;
+      the resolver fell through to auto-derivation. If auto-derivation
+      resolved, ``_self_env_marker`` returns the resolved env (gates
+      apply normally); if auto-derivation found no signal, the resolver
+      returns None (fail-closed preserved). The marker-line and
+      ``env-marker-absent`` refusal text surface the ignored-garbage
+      state so the operator sees WHY the marker they set was not
+      honored.
+
+    Used by the marker-line display AND the ``env-marker-absent`` refusal
+    text so operators can see WHICH path produced the resolution (and
+    whether to expect a marker in ``INSTALL_DIR/.env``).
+
+    The garbage path emits a WARNING log each call so the typo is
+    visible in the daemon log (this is the only call site that
+    classifies the marker).
+    """
+    raw = _read_marker_value()
+    if raw is not None:
+        # Marker is set (post-trim, non-empty). Check the explicit enum
+        # first, then opt-out, then garbage.
+        if raw in VALID_ENVS:
+            return "explicit"
+        if raw.lower() in _OPT_OUT_FALSES:
+            return "opted-out"
+        # Garbage: log once per resolution so the operator sees the
+        # typo in their daemon log. repr() ensures any odd whitespace
+        # / control chars are visible.
+        logger.warning(
+            "ENSEMBLE_SELF_ENV=%r is not a recognized value "
+            "(valid: %s; opt-out: %s) — IGNORED, falling through to "
+            "auto-derivation",
+            raw,
+            "|".join(VALID_ENVS),
+            "|".join(sorted(_OPT_OUT_FALSES)),
+        )
+        return "ignored-garbage"
+    # Marker absent / empty — auto-derive path.
+    if _auto_derive_env() is not None:
+        return "auto"
+    return "auto-unresolved"
 
 
 def _resolve_install_dir(self_env: str | None) -> Path | None:
     """Resolve the SELF env's install dir (topology mirrors lib.sh resolve_env).
 
     demo/live use the fixed topology table; sandbox derives from the frozen
-    binary location (``INSTALL_DIR/current/ensemble-prod`` → parent.parent)
-    — a sandbox daemon is always a staged frozen install with an explicit
-    throwaway dir; dev / unresolved have no staged install dir at all.
-    Returns ``None`` when no staged install applies (read tools then answer
-    honestly: "not in staged mode").
+    binary location. The staged payload places the binary at
+    ``<INSTALL_DIR>/releases/<ver>/ensemble-prod`` (stage.sh:5-17 —
+    ``releases/<ver>/ensemble-prod`` is the canonical staged-binary path),
+    so the install dir is ``binary.parent.parent.parent`` (TWO `.parent`s
+    up from the binary: `<ver>` → `releases` → install dir). Pre-fix the
+    resolver used `.parent.parent` which resolved to
+    ``<INSTALL_DIR>/releases`` and never matched — the test
+    ``test_auto_derive_sandbox_via_frozen_binary`` (auto-derive batch,
+    2026-09-22) caught it.
+
+    dev / unresolved have no staged install dir at all. Returns ``None``
+    when no staged install applies (read tools then answer honestly:
+    "not in staged mode").
     """
     if self_env == "demo":
         return Path.home() / "agents-ensemble-demo"
     if self_env == "live":
         return Path.home() / "agents-ensemble"
     if self_env == "sandbox" and getattr(sys, "frozen", False):
-        candidate = Path(sys.executable).resolve().parent.parent
+        try:
+            exe = Path(sys.executable).resolve()
+        except OSError:
+            return None
+        candidate = exe.parent.parent.parent
         return candidate if (candidate / "releases").is_dir() else None
     return None
 
@@ -555,13 +899,80 @@ def _env_triple_line(self_env: str | None, install_dir: Path | None, port: int |
 
 
 def _marker_line(self_env: str | None) -> str:
-    if self_env:
+    """How the resolver produced the self-env string (D-FA2.3 supersession).
+
+    Today the line tells the operator EXACTLY which path the resolver took
+    (explicit marker / opted-out / auto-derived / unresolved / ignored-
+    garbage) so they can confirm whether to expect a marker in
+    INSTALL_DIR/.env or rely on auto-derivation. Auto-derived envs are
+    valid (gates still apply — env-self-match, live 3-factor, live
+    restart refusal), but they are visibly auto-derived so a
+    misconfiguration surfaces immediately.
+
+    Five branches keyed on ``_self_env_source()``:
+
+    * ``explicit`` — marker line prints the staged enum value.
+    * ``auto`` (env resolved from launch evidence) — marker line says
+      "ABSENT" (the marker truly is absent) and attributes the env to
+      multi-signal auto-derivation.
+    * ``opted-out`` — operator set a false value; line tells them the
+      strict-marker contract is preserved verbatim.
+    * ``auto-unresolved`` (no marker, no signal) — line tells them
+      auto-derivation found nothing; dev-context representation.
+    * ``ignored-garbage`` — operator set a typo / wrong-case / spoof
+      value; line prints the IGNORED raw value so the operator can
+      see WHY the marker they set was not honored. Self-env may be
+      resolved (auto-derive succeeded after the garbage was dropped) or
+      unresolved (auto-derive also found no signal) — both rendered.
+    """
+    source = _self_env_source()
+    raw = _read_marker_value()  # raw trimmed value, None when absent
+    if self_env is None:
+        if source == "opted-out":
+            return (
+                "env-marker: ENSEMBLE_SELF_ENV=<false> (operator opt-out — "
+                "self-env unresolved, today's env-marker-absent contract "
+                "preserved verbatim)"
+            )
+        if source == "ignored-garbage":
+            # Garbage set, no signal: tell the operator what they set
+            # was ignored and why they're still unresolved.
+            return (
+                f"env-marker: ENSEMBLE_SELF_ENV=<{raw}> IGNORED "
+                "(unrecognized value — must be dev|demo|live|sandbox or "
+                "0|false|no|off for opt-out) — auto-derivation found no "
+                "signal (self-env unresolved, dev-context). Read tools "
+                "answer fail-open; actor tools refuse env-marker-absent "
+                "fail-closed. Only target_env omitted or \"dev\" is "
+                "accepted."
+            )
+        # auto-unresolved (no marker, no signal)
+        return (
+            "env-marker: ENSEMBLE_SELF_ENV ABSENT — auto-derivation found "
+            "no signal (self-env unresolved, dev-context). Read tools "
+            "answer fail-open; actor tools refuse env-marker-absent "
+            "fail-closed. Only target_env omitted or \"dev\" is accepted."
+        )
+    if source == "explicit":
         return f"env-marker: ENSEMBLE_SELF_ENV={self_env} (staged marker — D-FA2.3)"
+    if source == "ignored-garbage":
+        # Garbage set, but auto-derive succeeded: tell the operator the
+        # garbage was ignored AND which env the resolver fell back to.
+        return (
+            f"env-marker: ENSEMBLE_SELF_ENV=<{raw}> IGNORED "
+            "(unrecognized value — must be dev|demo|live|sandbox or "
+            "0|false|no|off for opt-out) — auto-derived self-env="
+            f"{self_env} (multi-signal resolution: frozen-binary + "
+            "releases/ for sandbox; install-dir + POSTGRES_DB cross-check "
+            "for live/demo; dev-shape POSTGRES_DB for dev). All gates "
+            "apply normally."
+        )
+    # source == "auto" (env resolved from launch evidence)
     return (
-        "env-marker: ENSEMBLE_SELF_ENV ABSENT — self-env unresolved (dev-context). "
-        "Read tools answer fail-open; actor tools (Dispatch B) refuse "
-        "env-marker-absent fail-closed. Only target_env omitted or \"dev\" is "
-        "accepted while unresolved."
+        f"env-marker: ENSEMBLE_SELF_ENV ABSENT — auto-derived self-env="
+        f"{self_env} (multi-signal resolution: frozen-binary + releases/ "
+        f"for sandbox; install-dir + POSTGRES_DB cross-check for live/"
+        f"demo; dev-shape POSTGRES_DB for dev). All gates apply normally."
     )
 
 
@@ -571,8 +982,11 @@ def _check_target_env(
     """Self-match + enum validation for the read pair. Returns refusal or None.
 
     §3.2 (reviewer ruling 2026-08-22): self-match applies to READS.
-    Unresolved self-env accepts only an omitted target or "dev" (the
-    marker-less repo checkout IS the dev context — flagged representation).
+    When self_env resolves (explicit marker OR auto-derivation), the only
+    acceptable target_env is the same value (or omitted). Unresolved
+    self-env (no marker, no opt-out, no auto-derive signal) accepts only
+    an omitted target or ``"dev"`` — the marker-less repo checkout is the
+    dev context (flagged representation).
     """
     if target_env is None:
         return None
@@ -585,18 +999,21 @@ def _check_target_env(
         if target_env != self_env:
             return (
                 f"Error: {tool_label} REFUSED — reason=env-self-match: "
-                f"target_env={target_env} but self-env={self_env}. Tools cannot "
-                "target a different environment than the running daemon "
-                "(self-match applies to reads — reviewer ruling 2026-08-22)."
+                f"target_env={target_env} but self-env={self_env} "
+                f"({_self_env_source()}). Tools cannot target a different "
+                "environment than the running daemon (self-match applies "
+                "to reads — reviewer ruling 2026-08-22)."
             )
         return None
-    # Marker absent: only the dev-context representation is self-consistent.
+    # Self-env unresolved (no marker + no opt-out + no auto-derive signal):
+    # only the dev-context representation is self-consistent.
     if target_env != "dev":
         return (
             f"Error: {tool_label} REFUSED — reason=env-self-match: "
             f"target_env={target_env} but self-env=unresolved (dev-context — "
-            "ENSEMBLE_SELF_ENV marker absent). Tools cannot target a different "
-            "environment than the running daemon."
+            "no ENSEMBLE_SELF_ENV marker, no opt-out, no auto-derive signal). "
+            "Tools cannot target a different environment than the running "
+            "daemon."
         )
     return None
 
@@ -723,6 +1140,58 @@ def _refusal(label: str, reason: str, message: str) -> str:
     return f"Error: {label} REFUSED — reason={reason}: {message}"
 
 
+def _env_marker_absent_hint(source: str) -> str:
+    """State-specific refusal hint for ``env-marker-absent``.
+
+    Branched on ``_self_env_source()`` so the hint matches the operator's
+    actual situation — the rejection is the SAME token in every case
+    (the fail-closed contract is preserved verbatim — the tool cannot
+    resolve the env), but the remediation hint differs because the
+    operator's next step differs. Without this branching the refusal
+    text would say "no opt-out via false" even when the operator DID
+    opt out, which misdirects them. Three branches (the ``explicit``
+    case is unreachable here — a valid marker means self_env resolved
+    and we never enter the refusal path).
+    """
+    if source == "opted-out":
+        return (
+            "self-env unresolved — operator explicitly opted out via "
+            "ENSEMBLE_SELF_ENV=0|false|no|off (case-insensitive, "
+            "whitespace-trimmed). Today's strict-marker contract preserved "
+            "verbatim; actor tools refuse fail-closed. To re-enable: "
+            "remove the opt-out and either set ENSEMBLE_SELF_ENV to "
+            "dev|demo|live|sandbox (explicit) OR unset the marker so "
+            "auto-derivation can resolve from launch evidence "
+            "(frozen-binary + releases/ for sandbox; install-dir + "
+            "matching POSTGRES_DB for live/demo; POSTGRES_DB=ensemble_dev "
+            "for dev)."
+        )
+    if source == "ignored-garbage":
+        return (
+            "self-env unresolved — ENSEMBLE_SELF_ENV was set to a value "
+            "that is neither dev|demo|live|sandbox nor an opt-out "
+            "(0|false|no|off). The garbage value was IGNORED (a WARNING "
+            "was logged with the raw value); auto-derivation found no "
+            "signal. Actor tools refuse fail-closed. Fix: set "
+            "ENSEMBLE_SELF_ENV to one of dev|demo|live|sandbox "
+            "(explicit), unset it (auto-derive from launch evidence), "
+            "OR set it to 0|false|no|off (opt-out of auto-derivation)."
+        )
+    # source == "auto-unresolved" — no marker, no opt-out, no signal
+    return (
+        "self-env unresolved (no ENSEMBLE_SELF_ENV marker, no opt-out, "
+        "and no auto-derivation signal) — actor tools refuse fail-closed "
+        "(S-31/D-FA2.3). Set ENSEMBLE_SELF_ENV=dev|demo|live|sandbox "
+        "explicitly, OR opt in to auto-derivation by leaving "
+        "ENSEMBLE_SELF_ENV unset and ensuring the launch evidence is "
+        "unambiguous (frozen-binary + releases/ for sandbox; install-dir "
+        "+ matching POSTGRES_DB for live/demo; POSTGRES_DB=ensemble_dev "
+        "for dev). PORT-derivation is deliberately NOT attempted "
+        "(D-FA2.3; multi-signal auto-derive supersedes it without "
+        "single-signal fragility)."
+    )
+
+
 def _actor_env_gate(
     label: str, target_env: str | None
 ) -> tuple[str | None, Path | None, str | None]:
@@ -731,7 +1200,10 @@ def _actor_env_gate(
 
     1. enum validation (invalid-target-env)
     2. staged-marker resolution — absent → env-marker-absent (S-31:
-       ACTOR tools fail-closed; the read pair answers fail-open)
+       ACTOR tools fail-closed; the read pair answers fail-open). The
+       refusal hint is branched on ``_self_env_source()`` so the
+       operator sees the right remediation for THEIR state (opt-out,
+       garbage, or auto-unresolved).
     3. self-match (env-self-match) — BEFORE any live-gate logic, so a
        cross-env attempt can never reach the live branch.
     """
@@ -746,9 +1218,7 @@ def _actor_env_gate(
         return None, None, _refusal(
             label,
             "env-marker-absent",
-            "ENSEMBLE_SELF_ENV marker absent/invalid — the daemon's own env is "
-            "unresolved, so actor tools refuse fail-closed (S-31/D-FA2.3; read "
-            "tools still answer). PORT-derivation is deliberately NOT attempted.",
+            _env_marker_absent_hint(_self_env_source()),
         )
     if target_env != self_env:
         return None, None, _refusal(
@@ -1195,11 +1665,16 @@ daemon's own environment (P2.1 scripts/upgrade/ pipeline state).
 
 Args:
     target_env: Must equal the running daemon's own environment
-        (dev|demo|live|sandbox). Omit to target self. Cross-env reads are
+        (dev|demo|live|sandbox). Omit to target self. The self-env
+        resolves from the staged ``ENSEMBLE_SELF_ENV`` marker when
+        present, or auto-derives from launch evidence otherwise
+        (D-FA2.3 supersession, 2026-09-22 — frozen-binary + releases/
+        for sandbox; install-dir + POSTGRES_DB cross-check for live/
+        demo; dev-shape POSTGRES_DB for dev). Cross-env reads are
         REFUSED (env-self-match — reads are covered by the self-match
-        rule, reviewer ruling 2026-08-22). When the ENSEMBLE_SELF_ENV
-        marker is absent (dev repo checkout), only an omitted target_env
-        or "dev" is accepted.
+        rule, reviewer ruling 2026-08-22). When the self-env is
+        unresolved (no marker, no opt-out via false, no auto-derive
+        signal), only an omitted target_env or "dev" is accepted.
     section: One of:
         * "all" (default) — current + journal + releases + changelog +
           upgrade.log tail.
@@ -1684,9 +2159,12 @@ kill) followed by a detached launcher re-exec and a /livez ≤60s gate.
 
 Args:
     target_env: MUST equal the daemon's own environment
-        (dev|demo|live|sandbox; the staged ENSEMBLE_SELF_ENV marker).
-        Marker absent → refused env-marker-absent (fail-closed; the read
-        tools still answer). Cross-env → refused env-self-match.
+        (dev|demo|live|sandbox; explicit ENSEMBLE_SELF_ENV marker when
+        staged, otherwise auto-derived from launch evidence —
+        D-FA2.3 supersession, 2026-09-22). Self-env unresolved (no
+        marker, no opt-out via false, no auto-derive signal) →
+        refused env-marker-absent (fail-closed; the read tools still
+        answer). Cross-env → refused env-self-match.
     reason: Free-text, journaled (audit trail).
     user_confirmed: Accepted for schema stability; ignored on non-live
         (no human-confirmation gate per the user directive).
@@ -2177,8 +2655,11 @@ Track it with upgrade_status(run_id=...); the terminal state
 
 Args:
     target_env: MUST equal the daemon's own environment
-        (dev|demo|live|sandbox; staged ENSEMBLE_SELF_ENV marker).
-        Marker absent → env-marker-absent; cross-env → env-self-match.
+        (dev|demo|live|sandbox; explicit ENSEMBLE_SELF_ENV marker when
+        staged, otherwise auto-derived from launch evidence —
+        D-FA2.3 supersession, 2026-09-22). Self-env unresolved (no
+        marker, no opt-out via false, no auto-derive signal) →
+        env-marker-absent; cross-env → env-self-match.
     version: Target release name; default: latest staged-but-not-current
         release (quarantined ones skipped; "latest" is semver-aware —
         1.2.10 outranks 1.2.9, non-numeric tags sort lexically below

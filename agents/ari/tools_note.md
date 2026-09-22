@@ -417,9 +417,14 @@ protocol.
 
 ### Gotchas
 
-- **`target_env` must be my own environment** (the staged
-  `ENSEMBLE_SELF_ENV` marker). Cross-env calls are refused
-  (`env-self-match`) — by construction, not convention.
+- **`target_env` must be my own environment** (resolved from the
+  staged `ENSEMBLE_SELF_ENV` marker when present, or auto-derived
+  from launch evidence — frozen-binary + releases/ for sandbox;
+  install-dir + POSTGRES_DB cross-check for live/demo; dev-shape
+  POSTGRES_DB for dev. The marker is OPTIONAL with explicit opt-out
+  via `ENSEMBLE_SELF_ENV=0|false|no|off` which preserves the strict
+  fail-closed contract). Cross-env calls are refused (`env-self-match`)
+  — by construction, not convention.
 - **Both actor tools return before acting.** After `SCHEDULED`, the
   outcome arrives via `upgrade_status(run_id=...)` — possibly after a
   restart, when the user asks "did it work?".
