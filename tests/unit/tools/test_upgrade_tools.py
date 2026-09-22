@@ -231,6 +231,192 @@ def test_opt_out_falses_pinned_to_proactive_false_bools() -> None:
     )
 
 
+class TestReadEnvValue:
+    """Direct coverage of ``_read_env_value`` (S4 completion — reviewer
+    APPROVED-WITH-NOTES commissioned follow-up on commit ``beac30b9``).
+
+    The function is the shell-style .env parser used by
+    ``_auto_derive_env`` to cross-check POSTGRES_DB in the install-dir
+    ``.env`` files. Reviewer case shapes (a)-(f) all map cleanly to
+    real production branches in ``daemon/tools/upgrade_tools.py:303-333``
+    (none of the suggested cases were imagined — every shape is a
+    real code path):
+
+    * (a) ``export POSTGRES_DB=ensemble_prod\\n`` → tests ``export ``
+      prefix strip (line 320-321) + value trim (line 327) + return.
+    * (b) ``POSTGRES_DB="ensemble_prod"\\n`` (double quotes) → tests
+      quote-strip (line 328-329) + return.
+    * (c) ``POSTGRES_DB='ensemble_prod'\\n`` (single quotes) → tests
+      quote-strip single (line 328-329) + return.
+    * (d) ``# comment\\nPOSTGRES_DB=ensemble_prod\\n`` → tests comment
+      skip (line 318).
+    * (e) ``INVALID_LINE_NO_EQUALS\\nPOSTGRES_DB=ensemble_prod\\n`` →
+      tests malformed-line skip (line 322-323).
+    * (f) ``POSTGRES_DB= ensemble_prod  \\n`` (unquoted, padded) → tests
+      value trim (line 327).
+
+    Plus the error/refusal branches the reviewer's list implicitly
+    relies on: missing file, wrong key, OSError, blank-line skip,
+    mismatched quotes (NOT stripped — quote-strip is a matched-pair
+    check, single-side quotes pass through verbatim), and combined
+    shapes (export + quote; export + padded).
+    """
+
+    def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
+        """Missing file branch (line 314-315): ``not env_file.is_file()``
+        short-circuits to ``None`` — never raises. The resolver relies
+        on this for the "no install-dir .env yet" path."""
+        missing = tmp_path / "no-such.env"
+        assert ut._read_env_value(missing, "POSTGRES_DB") is None
+
+    def test_returns_none_when_key_absent(self, tmp_path: Path) -> None:
+        """Wrong-key skip branch (line 325-326): a file with OTHER
+        keys but not the queried one returns ``None`` (not the last
+        seen value). The resolver relies on this when cross-checking
+        POSTGRES_DB."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "PATH=/usr/bin\nOTHER_KEY=other_value\n", encoding="utf-8"
+        )
+        assert ut._read_env_value(env_file, "POSTGRES_DB") is None
+
+    def test_returns_none_when_file_unreadable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OSError branch (line 331-332): the parser never raises on a
+        read error — a corrupt .env must not crash the resolver.
+        ``read_text`` raises ``PermissionError`` (a subclass of
+        ``OSError``); we patch the file path resolution to force an
+        OSError on the read without depending on filesystem
+        permissions."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text("POSTGRES_DB=ensemble_prod\n", encoding="utf-8")
+
+        def _boom_read_text(*_args, **_kwargs):
+            raise PermissionError("read denied (test)")
+
+        monkeypatch.setattr(Path, "read_text", _boom_read_text)
+        assert ut._read_env_value(env_file, "POSTGRES_DB") is None
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            # Reviewer case (a) — 'export ' prefix strip + trim
+            ("export POSTGRES_DB=ensemble_prod\n", "ensemble_prod"),
+            # Reviewer case (b) — double-quote strip
+            ('POSTGRES_DB="ensemble_prod"\n', "ensemble_prod"),
+            # Reviewer case (c) — single-quote strip
+            ("POSTGRES_DB='ensemble_prod'\n", "ensemble_prod"),
+            # Reviewer case (d) — comment skip (leading # line)
+            ("# this is a comment\nPOSTGRES_DB=ensemble_prod\n", "ensemble_prod"),
+            # Reviewer case (e) — malformed-line skip (no '=')
+            (
+                "INVALID_LINE_NO_EQUALS\nPOSTGRES_DB=ensemble_prod\n",
+                "ensemble_prod",
+            ),
+            # Reviewer case (f) — value trim (unquoted, padded)
+            ("POSTGRES_DB=  ensemble_prod  \n", "ensemble_prod"),
+        ],
+    )
+    def test_reviewer_case_shapes(
+        self, raw: str, expected: str, tmp_path: Path
+    ) -> None:
+        """S4-COMPLETION: pins every reviewer-suggested case shape to
+        the real production branch it exercises. Each parametrize case
+        is a self-contained .env file; the assertion checks the
+        returned value matches the expected (post-parse) result."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(raw, encoding="utf-8")
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == expected
+
+    def test_blank_lines_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """Blank-line skip branch (line 318: ``if not line``). The
+        parser must skip blank lines between entries — common in
+        hand-edited .env files."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "\n"
+            "\n"
+            "POSTGRES_DB=ensemble_prod\n"
+            "\n",
+            encoding="utf-8",
+        )
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == "ensemble_prod"
+
+    def test_mismatched_quotes_not_stripped(self, tmp_path: Path) -> None:
+        """Quote-strip is a matched-pair check (line 328:
+        ``v[0] == v[-1] and v[0] in ("'", '"')``). A single-side quote
+        (``ensemble_prod"`` or ``"ensemble_prod``) does NOT match the
+        pair-check, so the quote(s) pass through verbatim. This pins
+        the parser to NOT over-eagerly strip."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            'POSTGRES_DB=ensemble_prod"\n', encoding="utf-8"
+        )
+        # Single trailing double-quote is NOT a matched pair → returned
+        # verbatim (with the trailing quote preserved).
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == 'ensemble_prod"'
+
+    def test_export_prefix_with_quoted_value(self, tmp_path: Path) -> None:
+        """Combined: ``export `` prefix + quoted value. Both
+        transforms apply — the prefix is stripped (line 320-321)
+        and the surrounding quotes are stripped (line 328-329)."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "export POSTGRES_DB=\"ensemble_prod\"\n", encoding="utf-8"
+        )
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == "ensemble_prod"
+
+    def test_export_prefix_with_leading_whitespace(self, tmp_path: Path) -> None:
+        """``export `` prefix with leading whitespace in the line —
+        the parser strips the prefix, then ``lstrip()`` removes any
+        whitespace between the prefix and the key (line 321).
+        """
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "    export   POSTGRES_DB=ensemble_prod\n", encoding="utf-8"
+        )
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == "ensemble_prod"
+
+    def test_quote_must_be_matching_not_just_single_side(
+        self, tmp_path: Path
+    ) -> None:
+        """Defensive: ``'ensemble_prod"`` (single+double mixed) does
+        NOT match the matched-pair check (line 328: ``v[0] == v[-1]``
+        — single quote != double quote). The value is returned
+        verbatim (NOT stripped)."""
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "POSTGRES_DB='ensemble_prod\"\n", encoding="utf-8"
+        )
+        # Mixed quotes → no strip.
+        assert (
+            ut._read_env_value(env_file, "POSTGRES_DB")
+            == "'ensemble_prod\""
+        )
+
+    def test_inline_whitespace_around_equals_is_tolerated(
+        self, tmp_path: Path
+    ) -> None:
+        """``POSTGRES_DB = ensemble_prod`` (spaces around ``=``) is
+        parsed as: ``k = "POSTGRES_DB "``, ``v = " ensemble_prod"``;
+        the key-side strip (``k.strip() != key`` on line 325)
+        removes the trailing space before the match, and the value-
+        side strip (line 327) removes the leading space from the
+        value. Result: the value is returned trimmed. This pins the
+        parser's actual lenient-on-whitespace behavior so a future
+        tightening doesn't surprise callers.
+        """
+        env_file = tmp_path / "install.env"
+        env_file.write_text(
+            "POSTGRES_DB = ensemble_prod\n", encoding="utf-8"
+        )
+        # Tolerates spaces around `=`: value returned trimmed.
+        assert ut._read_env_value(env_file, "POSTGRES_DB") == "ensemble_prod"
+
+
 @pytest.fixture
 def parity_port_free() -> None:
     """Pre-flight guard for the parity fixture: status.sh probes
@@ -1357,10 +1543,11 @@ class TestAutoResolution:
         with caplog.at_level("WARNING", logger="daemon.tools.upgrade_tools"):
             assert ut._self_env_marker() is None
             assert ut._self_env_source() == "ignored-garbage"
-        # WARNING was logged with the raw value.
+        # WARNING was logged with the raw value. The log message uses
+        # ``%r`` so the raw value is repr'd (single-quoted) — the
+        # assertion checks for the rendered message fragment.
         assert any(
-            "ENSEMBLE_SELFENV='flase'" in rec.getMessage().replace(" ", "").replace("_","")
-            or "ENSEMBLE_SELF_ENV='flase'" in rec.getMessage()
+            "ENSEMBLE_SELF_ENV='flase'" in rec.getMessage()
             for rec in caplog.records
         ), [rec.getMessage() for rec in caplog.records]
 
