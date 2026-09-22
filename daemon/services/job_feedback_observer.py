@@ -2078,6 +2078,14 @@ class JobFeedbackObserver:
                     parent_id=db_result.parent_id,
                     agent_id=db_result.agent_id,
                     last_content=result_summary,
+                    # v0.13.9 fix (fix/job-completed-result-arm,
+                    # 2026-09-22): thread the JobItem primary key
+                    # through the dispatcher so Step 4 can publish
+                    # the sibling JOB_COMPLETED event row. Post-D13
+                    # MESSAGE-driven instances have ``ctx.job_id =
+                    # None`` — the sibling publish is skipped on
+                    # that path (no JobItem exists to address).
+                    job_id=ctx.job_id,
                 )
 
             # ─── Trigger next job (zero-delay handoff) ───
@@ -2847,6 +2855,7 @@ class JobFeedbackObserver:
         parent_id: str | None,
         agent_id: str | None,
         last_content: str | None,
+        job_id: str | None = None,
     ) -> None:
         """Fire post-commit instance-side side effects after the DB transition.
 
@@ -2861,6 +2870,16 @@ class JobFeedbackObserver:
         — the DB is already committed, so the worst case is a missing
         notification (recoverable by the orphan-detector / recovery sweep).
 
+        v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
+        ``job_id`` is the optional JobItem primary key for the
+        JobItem-backed terminal transition (``_finalize_job`` path).
+        When supplied (and not ``None``), Step 4 publishes a sibling
+        ``JOB_COMPLETED`` event row carrying the pre-fetched
+        ``result_summary`` (``last_content``) — see Item 3b. The
+        standalone ``_finalize_instance`` path passes ``job_id=None``
+        so the sibling publish is skipped (no JobItem exists for
+        message-only instances).
+
         Args:
             instance_id: The instance ID for SSE / CompletionRegistry / lifecycle.
             terminal_status: ``"completed"`` or ``"error"``.
@@ -2868,6 +2887,20 @@ class JobFeedbackObserver:
             parent_id: Captured from the instance row before commit.
             agent_id: Captured from the instance row before commit.
             last_content: Pre-fetched last assistant message (for the
+                CompletionRegistry COMPLETED path AND the JOB_COMPLETED
+                sibling publish AND the global notification
+                broadcaster). If ``None``, the dispatcher fetches it
+                on-demand via ``_get_last_assistant_message_raw`` for
+                the CompletionRegistry path; the JOB_COMPLETED sibling
+                and notification broadcaster pass ``None`` through
+                verbatim (a ``None`` result_summary just means the
+                field is absent from the broadcast dict — pre-fix
+                shape).
+            job_id: Optional JobItem primary key. When not ``None``,
+                Step 4 publishes a sibling ``JOB_COMPLETED`` event
+                row (Item 3b). Defaults to ``None`` for the
+                standalone ``_finalize_instance`` path which has no
+                JobItem to address.
                 CompletionRegistry COMPLETED path). If ``None``, the
                 dispatcher fetches it on-demand via
                 ``_get_last_assistant_message_raw``.
@@ -3026,6 +3059,24 @@ class JobFeedbackObserver:
         # ``_process_event`` re-entry is caught by the ``job.admission_state !=
         # ACTIVE`` idempotency guard (the job is already terminal at
         # this point, set by ``_finalize_job`` immediately before this call).
+        #
+        # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
+        # the lifecycle event gains two new surfaces:
+        #
+        #   1. ``result_summary=last_content`` is threaded through
+        #      ``events_service._publish_instance_lifecycle_event`` →
+        #      ``_emit_root_completion_notification`` →
+        #      ``NotificationBroadcaster.emit_root_completion`` (Item 3c).
+        #      Backward-compatible — older callers omit the kwarg; the
+        #      field is simply absent from the broadcast dict.
+        #
+        #   2. A sibling ``JOB_COMPLETED`` event publish via the
+        #      EventBus, guarded on ``job_id is not None`` (Item 3b).
+        #      Standalone ``_finalize_instance`` calls pass ``job_id=None``
+        #      so the sibling publish is skipped — no JobItem exists
+        #      for message-only instances (post-D13). The two
+        #      publishes share the same ``try/except`` isolation
+        #      contract: a failure in one must NOT block the other.
         events_service = getattr(self._instance_manager, "_events_service", None)
         if events_service is not None:
             try:
@@ -3034,12 +3085,49 @@ class JobFeedbackObserver:
                     status=terminal_status,
                     error=error,
                     parent_id=parent_id,
+                    result_summary=last_content,
                 )
             except Exception as e:
                 logger.warning(
                     f"Observer: failed to publish lifecycle event for "
                     f"{instance_id[:8]}...: {e}"
                 )
+            # Sibling JOB_COMPLETED event publish. Guarded on
+            # ``job_id is not None`` so the post-D13 message-only
+            # path (no JobItem exists for the instance) does not
+            # stamp an unaddressed ``job_completed`` row. The
+            # ``try/except`` isolation matches Step 4's: a failure in
+            # the sibling publish must NOT block the lifecycle
+            # publish above (DB is already committed; a missing
+            # sibling row is recoverable by the recovery sweep).
+            if job_id is not None:
+                try:
+                    # Local import to avoid a circular import at
+                    # module-load time (the observer is imported by
+                    # ``event_bus`` subscribers; importing the
+                    # publisher module at top-level would create a
+                    # cycle via the EventBus wiring).
+                    from ..repositories.event.models import EventKind
+                    await events_service._event_bus.create_event(
+                        instance_id=instance_id,
+                        kind=EventKind.JOB_COMPLETED.value,
+                        data={
+                            "job_id": job_id,
+                            "status": terminal_status,
+                            "result_summary": last_content,
+                        },
+                    )
+                    logger.debug(
+                        f"Observer: published JOB_COMPLETED event for "
+                        f"job {job_id[:8]}... (instance "
+                        f"{instance_id[:8]}...)"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Observer: failed to publish JOB_COMPLETED "
+                        f"event for job {job_id[:8]}... "
+                        f"(instance {instance_id[:8]}...): {e}"
+                    )
 
     async def _cleanup_descendants_of(self, root_id: str) -> list[str]:
         """Return the descendant ``instance_id`` list for ``root_id``.
