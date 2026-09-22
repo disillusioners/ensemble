@@ -237,6 +237,7 @@ from .chart_tools import create_chart_tools
 from .image_tools import create_image_tools
 from .todo_tools import create_todo_tools
 from .question_tools import create_question_tools
+from .midflight_report import create_midflight_tools
 from .skill_tools import create_skill_tools
 from .skill_evolution_tools import create_skill_evolution_tools
 from .external_opencode import create_opencode_tools
@@ -4687,6 +4688,18 @@ Returns:
         getattr(manager, "_live_hub", None),
     )
     tools.extend(question_tool_list)
+
+    # ── Mid-flight report tools (non-blocking progress to watchers) ──
+    # Mid-flight QA channel (2026-09-21): the single ``mid_flight_report``
+    # tool emits a MIDFLIGHT_REPORT event on the push lanes (EventBus +
+    # LiveEventHub banner + work_notifier ``[JOB_EVENT] ... mid-flight
+    # report ⟳``) WITHOUT pausing. Opt-in per agent via ``tools.allow:
+    # ["midflight"]`` — not auto-granted through any innate-skill mapping.
+    midflight_tool_list = create_midflight_tools(
+        manager,
+        current_instance_id,
+    )
+    tools.extend(midflight_tool_list)
 
     # ── Dynamic Skill tools (per-instance dynamic-skill surface, always available) ──
     # Mirrors the todo/chart pattern above. These tools are auto-granted to

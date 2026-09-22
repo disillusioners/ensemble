@@ -183,6 +183,51 @@ class NotificationBroadcaster:
             notification["result_summary"] = result_summary
         return await self.emit(notification)
 
+    async def emit_question_escalation(
+        self,
+        instance_id: str,
+        agent_id: str | None,
+        question_pack_id: str | None,
+        emission_index: int = 3,
+    ) -> int:
+        """Emit a wedge-guard question escalation to ALL connected clients.
+
+        Mid-flight QA channel (design §4.4 / §8.7, 2026-09-21): fired
+        UNCONDITIONALLY at ``emission_index=3`` (the wedge-guard
+        escalation) so the operator sees the stuck question even when
+        every ``watch_job`` row has been garbage-collected. Without
+        this fan-out the escalation is logs-only. Parallel to
+        ``emit_root_completion`` — never fired for the normal
+        question/report paths.
+
+        Args:
+            instance_id: The wedged asker instance.
+            agent_id: The asker's agent id (e.g. "leader").
+            question_pack_id: The pending pack's durable id.
+            emission_index: The wedge-guard emission index at escalation
+                (3 by contract; parameterized for tests).
+
+        Returns:
+            Number of clients that received the notification.
+        """
+        notification = {
+            "event_type": "question_escalation",
+            "instance_id": instance_id,
+            "agent_id": agent_id,
+            "name": (agent_id or "unknown").title(),
+            "status": "STUCK_AWAITING_ANSWER",
+            "question_pack_id": question_pack_id,
+            "emission_index": emission_index,
+            "message": (
+                f"Instance {(agent_id or 'unknown').title()} has been paused "
+                f"awaiting an answer for ~60 minutes "
+                f"({emission_index} heartbeat emissions). The wedge guard "
+                f"terminated the asker — answer or re-dispatch the work."
+            ),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        return await self.emit(notification)
+
     async def emit_instance_created(self, instance_data: dict[str, Any]) -> int:
         """Emit a notification for newly created root instance (no parent).
 

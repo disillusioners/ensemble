@@ -115,7 +115,8 @@ class TestSetQuestionPack:
             "inst-1",
             [{"text": "First question"}],
         )
-        answered = mgr.set_answers("inst-1", {"first-id": "answer-1"})
+        answered, transitioned = mgr.set_answers("inst-1", {"first-id": "answer-1"})
+        assert transitioned is True
         assert answered.status == "answered"
 
         replacement = mgr.set_question_pack(
@@ -289,7 +290,14 @@ class TestGetQuestionPack:
 
 
 class TestSetAnswers:
-    """``QuestionManager.set_answers(instance_id, answers)`` — status transition."""
+    """``QuestionManager.set_answers(instance_id, answers)`` — CAS status transition.
+
+    Mid-flight QA channel (OQ-3): the return is a ``(pack, transitioned)``
+    tuple — ``pending → answered`` exactly-once; a second call on an
+    answered pack returns ``(pack, False)`` WITHOUT overwriting the
+    stored answers (the old overwrite-idempotent contract was revoked;
+    the CAS loser is the ``already_delivered`` no-op).
+    """
 
     def test_set_answers_flips_status_and_stores_answers(self):
         """After ``set_answers`` the pack is ``answered`` and answers are stored as-is."""
@@ -299,20 +307,38 @@ class TestSetAnswers:
             [{"id": "color", "text": "Color?"}],
         )
 
-        updated = mgr.set_answers(
+        updated, transitioned = mgr.set_answers(
             "inst-1",
             {"color": "blue"},
         )
 
         assert updated is not None
+        assert transitioned is True
         assert updated.status == "answered"
         assert updated.answers == {"color": "blue"}
 
+    def test_set_answers_cas_loser_does_not_overwrite(self):
+        """Second call on an answered pack → ``(pack, False)``, answers NOT clobbered."""
+        mgr = QuestionManager()
+        mgr.set_question_pack("inst-1", [{"id": "color", "text": "Color?"}])
+
+        winner, t1 = mgr.set_answers("inst-1", {"color": "blue"})
+        loser, t2 = mgr.set_answers("inst-1", {"color": "RED-HIJACK"})
+
+        assert t1 is True
+        assert t2 is False
+        # The CAS loser must NOT overwrite the winner's answers.
+        assert winner.answers == {"color": "blue"}
+        assert loser.answers == {"color": "blue"}
+        assert loser.status == "answered"
+
     def test_set_answers_returns_none_when_no_pack(self):
-        """``set_answers`` returns ``None`` for an unknown instance_id (no pack stored)."""
+        """``set_answers`` returns ``(None, False)`` for an unknown instance_id."""
         mgr = QuestionManager()
 
-        assert mgr.set_answers("nope", {"x": 1}) is None
+        pack, transitioned = mgr.set_answers("nope", {"x": 1})
+        assert pack is None
+        assert transitioned is False
 
 
 # =============================================================================

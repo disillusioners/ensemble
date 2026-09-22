@@ -10,7 +10,20 @@ from sqlmodel import SQLModel, Field
 
 
 class EventKind(str, enum.Enum):
-    """Event kind enum."""
+    """Event kind enum.
+
+    Mid-flight QA channel (2026-09-21, ``feature/midflight-qa-channel``)
+    adds five kinds. Lane safety: none of them enter
+    ``JobFeedbackObserver``'s accepted set — ``_process_event`` hard-filters
+    ``event_type != "instance_lifecycle"`` (job_feedback_observer.py:998),
+    so these kinds never reach ``atomic_transition`` / the root completion
+    gate. The four work_notifier statuses (``question_requested``,
+    ``answer_received``, ``midflight_report``, ``stuck_awaiting_answer``)
+    are NON-TERMINAL by definition — the notifier's non-terminal branch
+    preserves watcher rows; the fifth (``child_question_still_pending``)
+    is dispatch-only via EventBus + LiveEventHub and never enters the
+    work_notifier status map.
+    """
     MESSAGE_RECEIVED = "message_received"
     PROCESSING_STARTED = "processing_started"
     PROCESSING_COMPLETED = "processing_completed"
@@ -34,6 +47,11 @@ class EventKind(str, enum.Enum):
     # kind is additive — older readers ignore unknown kinds (the
     # SSE parser surfaces ``kind`` as a string, not as a typed enum).
     JOB_COMPLETED = "job_completed"
+    QUESTION_REQUESTED = "question_requested"
+    QUESTION_ANSWERED = "question_answered"
+    MIDFLIGHT_REPORT = "midflight_report"
+    STUCK_AWAITING_ANSWER = "stuck_awaiting_answer"
+    CHILD_QUESTION_STILL_PENDING = "child_question_still_pending"
 
 
 class Event(SQLModel, table=True):

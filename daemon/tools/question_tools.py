@@ -10,12 +10,21 @@ SSE event before setting the pause flag.
 Lifecycle:
     1. Agent calls ``ask_questions(questions=[...])``.
     2. Tool stores the pack via ``QuestionManager.set_question_pack``
-       (rejects duplicate pending packs — F8/F11).
+       (rejects duplicate pending packs — F8/F11) and stamps the
+       durable shadow into ``instance_metadata``
+       (``question_pack_id`` + ``question_pack_payload``).
     3. Tool emits ``question_pack`` SSE event with ``status="pending"``.
        Emission is best-effort and runs synchronously BEFORE the pause
        flag is set, because the subsequent pause cascade cancels the
        graph task mid-execution and skips any post-commit SSE code
        (F3 / SSE-timing note).
+    3b. Mid-flight QA channel (2026-09-21): the tool ALSO emits
+       ``EventKind.QUESTION_REQUESTED`` on the EventBus and fans
+       ``notify_work_watchers(status="question_requested")`` out over
+       every live work_id (``daemon/services/midflight_qa.py``) so
+       job watchers / orchestrators receive a
+       ``[JOB_EVENT] Job {work_id}... question requested ❓`` line
+       with the pack payload — still BEFORE the pause flag (F3).
     4. Tool sets the pause flag via
        ``manager.set_question_pause_requested(current_instance_id)``.
     5. Tool returns a string that ECHOES the question text (F7
@@ -396,6 +405,17 @@ def create_question_tools(
                 "Wait for answers before asking more."
             )
 
+        # 2b. DURABILITY HOOK (design §4.1 step [1] / §5.4): stamp the
+        #     pack id + full payload into ``instance_metadata`` (one
+        #     atomic dialect-aware JSONB write). This is the ONLY
+        #     durable state the answer route needs to find the pack
+        #     after a daemon restart. Best-effort — a stamp failure
+        #     never blocks the question flow (the boot rehydration
+        #     pass simply won't find this pack).
+        from daemon.services.midflight_qa import stamp_question_pack_metadata
+
+        stamp_question_pack_metadata(manager, current_instance_id, pack)
+
         # 3. Emit SSE best-effort BEFORE setting the pause flag. The
         #    conditional post-tools edge routes the graph to
         #    ``question_pause_node``, which sets the deferred-pause
@@ -408,6 +428,29 @@ def create_question_tools(
         #    ``question_pack`` event before the user's interaction
         #    surface changes (status_change → PAUSED).
         await _emit_pending_pack(live_event_hub, current_instance_id, pack)
+
+        # 3b. MID-FLIGHT QA CHANNEL (design §4.1 steps [3]+[4]):
+        #     emit ``QUESTION_REQUESTED`` on the load-bearing push lanes
+        #     — EventBus (persists + global broadcast) and
+        #     ``notify_work_watchers`` fanned out over EVERY live
+        #     work_id (MAJOR-1) so every watcher's instance receives
+        #     ``[JOB_EVENT] Job {work_id}... question requested ❓``
+        #     with the pack payload in the body. These MUST run BEFORE
+        #     the pause flag (step 5) — the pause cascade cancels the
+        #     graph task and any post-pause tool-side code is moot (F3
+        #     timing constraint, §8.6). All emissions are best-effort
+        #     (wrapped in try/except inside the helper): if every lane
+        #     fails, the question is still stored, the SSE above fired,
+        #     and the pause still happens.
+        from daemon.services.midflight_qa import emit_question_requested
+
+        try:
+            await emit_question_requested(manager, current_instance_id, pack)
+        except Exception as e:  # noqa: BLE001 — §8.6: emission failure must not break the asker
+            logger.warning(
+                f"QUESTION_REQUESTED emission failed for instance "
+                f"{current_instance_id} ({len(pack.questions)} questions): {e}"
+            )
 
         # 4. Set pause flag — read by ``create_post_tools_router`` in
         #    ``daemon.graph`` to route to ``question_pause_node`` after

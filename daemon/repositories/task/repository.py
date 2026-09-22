@@ -265,9 +265,105 @@ class TaskRepository:
             db_session.refresh(task)
             return task
 
-    # --------------------------------------------------------
-    # READ
-    # --------------------------------------------------------
+    def create_one_shot_heartbeat(
+        self,
+        task_type: str,
+        instance_id: str,
+        next_retry_at: datetime,
+    ) -> Task:
+        """Create a FUTURE-DATED one-shot Task (wedge-guard substrate).
+
+        Mid-flight QA channel (design §4.3, 2026-09-21). The stock
+        :meth:`create` signature has no ``status`` / ``next_retry_at``
+        kwargs and the Task model has NO metadata column, so the
+        one-shot row is minted via direct ``Task(...)`` construction
+        (precedents: ``c_revival`` at manager.py:8648-8657; the
+        RetryTurn child INSERT). The row:
+
+        * is bound to the ASKER instance (``instance_id``) — the claim
+          gate's pause exclusion is bypassed for the
+          ``heartbeat_emit_stuck`` type via the type-scoped carve-out
+          in :meth:`claim_pending_task`, because this row's purpose is
+          to observe the paused asker;
+        * sits PENDING with ``next_retry_at`` ahead of time — the
+          claim's ``next_retry_at <= :now`` gate holds it back until
+          the moment arrives; the condition-timeout claim loop wakes
+          it within ≤3s (worker_pool.py:371);
+        * carries NO ``message_id`` (there is no message_queue row to
+          deliver — the processor emits events, not messages).
+
+        This is a ONE-SHOT: the caller mints exactly one link; the
+        processor's re-arm clause decides whether a successor link is
+        ever minted. There is no loop.
+
+        Args:
+            task_type: Must be ``TaskType.HEARTBEAT_EMIT_STUCK.value``
+                (typed narrow for documentation; the carve-out binds
+                this exact literal).
+            instance_id: The ASKER instance the heartbeat observes.
+            next_retry_at: Absolute fire time (aware UTC; stored as
+                naive-UTC string digits consistent with the claim
+                gate's ``now_str`` comparison).
+
+        Returns:
+            The created Task row.
+        """
+        now_aware = datetime.now(timezone.utc)
+        # Same offset-bearing TEXT convention as ``schedule_retry``
+        # (:2285-2316) and the retry-child mint — the claim gate's
+        # ``next_retry_at <= :now_str`` comparison uses the identical
+        # ``%Y-%m-%dT%H:%M:%S.%f%z`` shape.
+        next_retry_at_str = (
+            next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f")
+            + next_retry_at.strftime("%z")
+        )
+        with SQLModelSession(self.engine) as db_session:
+            task = Task(
+                task_type=task_type,
+                instance_id=instance_id,
+                message_id=None,
+                status=TaskStatus.PENDING.value,
+                next_retry_at=next_retry_at_str,
+                created_at=now_utc_naive(),
+            )
+            db_session.add(task)
+            db_session.commit()
+            db_session.refresh(task)
+            return task
+
+    def has_pending_of_type_for_instance(
+        self, instance_id: str, task_type: str
+    ) -> bool:
+        """True if a PENDING row of ``task_type`` exists for ``instance_id``.
+
+        Mid-flight QA channel fix pass (MINOR-2/MINOR-3, 2026-09-21):
+        the wedge-guard PENDING-row cap. ``mint_stuck_heartbeat_one_shot``
+        consults this before minting so an asker never carries MORE THAN
+        ONE pending ``heartbeat_emit_stuck`` row at a time — the re-ask
+        stale-link fix (a second chain would double-fire emissions for
+        the new pack id → early escalation) and the finiteness bound on
+        the chain. Deliberately scoped to status ``pending`` ONLY: a
+        claimed (``running``) row does not count, so the re-arm site's
+        successor mint (which runs while the CURRENT link is still
+        ``running``) is never self-blocked.
+
+        Args:
+            instance_id: The ASKER instance the row observes.
+            task_type: Task type literal (``TaskType.HEARTBEAT_EMIT_STUCK.value``
+                for the wedge guard).
+
+        Returns:
+            True if at least one PENDING row of that type exists.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(func.count())
+                .select_from(Task)
+                .where(Task.instance_id == instance_id)
+                .where(Task.task_type == task_type)
+                .where(Task.status == TaskStatus.PENDING.value)
+            )
+            return bool(db_session.exec(stmt).one())
 
     def get(self, task_id: int) -> Task | None:
         """Get a task by ID.
@@ -1003,7 +1099,9 @@ class TaskRepository:
             )
             return list(db_session.exec(stmt))
 
-    def list_pending_tasks_older_than(self, age_seconds: int) -> list[Task]:
+    def list_pending_tasks_older_than(
+        self, age_seconds: int, exclude_task_types: list[str] | None = None
+    ) -> list[Task]:
         """Return PENDING ``task`` rows whose ``created_at`` is older than
         ``age_seconds`` ago AND whose ``last_heartbeat_at`` IS NULL.
 
@@ -1017,14 +1115,26 @@ class TaskRepository:
         tasks heart-beat; a PENDING+NULL-heartbeat is only stale if
         it's been waiting longer than the threshold).
 
+        Mid-flight QA channel (leader decision 3, 2026-09-21): the
+        wedge-guard ``heartbeat_emit_stuck`` rows sit PENDING >300s
+        with a NULL heartbeat BY DESIGN (future-dated one-shots) —
+        without exclusion they would trigger a Pattern (a) WARNING
+        on every 300s drift-reconciler cycle. Safe but noisy; the
+        caller excludes the type (registered in the reconciler's
+        type table via ``exclude_task_types``).
+
         Args:
             age_seconds: Minimum age in seconds for a task to be
                 considered drift-eligible.
+            exclude_task_types: Task types to exclude from the drift
+                scan (default: the wedge-guard heartbeat type only).
 
         Returns:
             List of PENDING ``Task`` rows older than ``age_seconds``
-            with a NULL ``last_heartbeat_at``.
+            with a NULL ``last_heartbeat_at``, minus excluded types.
         """
+        if exclude_task_types is None:
+            exclude_task_types = [TaskType.HEARTBEAT_EMIT_STUCK.value]
         # Naive-UTC frame (DC-A fix) — created_at stores naive-UTC
         # digits; comparing against an aware threshold makes PG cast
         # the column through the session TimeZone (+07).
@@ -1035,8 +1145,12 @@ class TaskRepository:
                 .where(Task.status == TaskStatus.PENDING.value)
                 .where(Task.last_heartbeat_at.is_(None))
                 .where(Task.created_at < threshold)
-                .order_by(col(Task.created_at).asc())
             )
+            if exclude_task_types:
+                stmt = stmt.where(
+                    col(Task.task_type).notin_(exclude_task_types)
+                )
+            stmt = stmt.order_by(col(Task.created_at).asc())
             return list(db_session.exec(stmt))
 
     def list_live_process_report_carriers_for_instance(
@@ -1928,27 +2042,51 @@ class TaskRepository:
                         SELECT instance_id FROM task
                         WHERE status = :status_running_guard
                     )
-                    AND instance_id NOT IN (
-                        -- Phase 1 (2026-06-24, report-lane decoupling):
-                        -- Pause gate. Excludes instances whose status is
-                        -- PAUSED or TERMINATED for ALL task types. Before
-                        -- this change, pause protection for report tasks
-                        -- was accidental — it fell out of the cross-system
-                        -- job guard (the instance's status was checked
-                        -- inside that guard against ``waiting_children``,
-                        -- which is orthogonal to pause). Now that the
-                        -- cross-system guard is scoped to PROCESS_MESSAGE
-                        -- only (see below), pause protection for reports
-                        -- would have been lost. This explicit gate
-                        -- restores it uniformly for every task type —
-                        -- user messages and reports alike — and mirrors
-                        -- the existing recovery exclusions in
-                        -- ``find_stale_running_tasks`` /
-                        -- ``find_cancellable_tasks`` (parameterized
-                        -- ``IN (status_paused, status_terminated)`` works
-                        -- on both SQLite and PostgreSQL).
-                        SELECT instance_id FROM instances
-                        WHERE status IN (:status_paused, :status_terminated)
+                    AND (
+                        -- Mid-flight QA channel (2026-09-21, design
+                        -- §4.3 / §1.4 — R2 mitigation): type-scoped
+                        -- carve-out WRAPPING the pause gate. The
+                        -- ``heartbeat_emit_stuck`` one-shot row exists
+                        -- precisely to OBSERVE a paused asker, so the
+                        -- pause exclusion must not hold it back.
+                        -- Precedent: the cross-system guard below is
+                        -- already type-scoped (task_type !=
+                        -- process_message literal OR ...). Deliberately
+                        -- broad over TERMINATED as well — the
+                        -- processor's terminal no-op IS the cleanup
+                        -- path, making invisible-row orphans
+                        -- impossible by construction. The per-instance
+                        -- concurrency gate above is UNTOUCHED
+                        -- (status='running'-only) — it is what makes
+                        -- the resume race deterministic (OQ-4 #3).
+                        -- RUNNING-asker protection lives in the
+                        -- per-instance concurrency gate above; this
+                        -- disjunct widens claim eligibility ONLY for
+                        -- the heartbeat_emit_stuck type over
+                        -- PAUSED/TERMINATED instances.
+                        task.task_type = :heartbeat_emit_stuck
+                        OR instance_id NOT IN (
+                            -- Phase 1 (2026-06-24, report-lane decoupling):
+                            -- Pause gate. Excludes instances whose status is
+                            -- PAUSED or TERMINATED for ALL task types. Before
+                            -- this change, pause protection for report tasks
+                            -- was accidental — it fell out of the cross-system
+                            -- job guard (the instance's status was checked
+                            -- inside that guard against ``waiting_children``,
+                            -- which is orthogonal to pause). Now that the
+                            -- cross-system guard is scoped to PROCESS_MESSAGE
+                            -- only (see below), pause protection for reports
+                            -- would have been lost. This explicit gate
+                            -- restores it uniformly for every task type —
+                            -- user messages and reports alike — and mirrors
+                            -- the existing recovery exclusions in
+                            -- ``find_stale_running_tasks`` /
+                            -- ``find_cancellable_tasks`` (parameterized
+                            -- ``IN (status_paused, status_terminated)`` works
+                            -- on both SQLite and PostgreSQL).
+                            SELECT instance_id FROM instances
+                            WHERE status IN (:status_paused, :status_terminated)
+                        )
                     )
                     AND (
                         -- Cross-system guard: JOB COORDINATION ONLY —
@@ -2068,6 +2206,12 @@ class TaskRepository:
                 "status_paused": TaskStatus.PAUSED.value,
                 "status_terminated": InstanceStatus.TERMINATED.value,
                 "process_message_type": TaskType.PROCESS_MESSAGE.value,
+                # Mid-flight QA channel (§1.4 carve-out): the fixed
+                # literal for the type-scoped pause-gate bypass. Same
+                # bind-literal convention as ``:process_message_type``
+                # (an enum value, not user input; dual-driver safe as
+                # a plain string bind).
+                "heartbeat_emit_stuck": TaskType.HEARTBEAT_EMIT_STUCK.value,
                 # PROCESS_REPORT wake lane (Debug Phase 4 fix #1) —
                 # see the ORDER BY comment above for the full
                 # rationale. Enum value (a fixed literal, not user

@@ -10,7 +10,14 @@ the pack transitions to ``"answered"`` but stays readable until
 
 Question packs are NOT persisted — they exist for the lifetime of the
 daemon process and are used by the question tool surface during a single
-instance pause/resume cycle.
+instance pause/resume cycle. Mid-flight QA channel (2026-09-21) adds a
+durable SHADOW: at ask time the pack is serialized into
+``instance_metadata['question_pack_payload']`` (+ ``question_pack_id``)
+via the InstanceRepository's dialect-aware JSONB setters, and a boot-time
+rehydration pass (:meth:`QuestionManager.rehydrate_from_payloads`)
+restores pending packs from that shadow after a daemon restart. The
+metadata keys are cleared at ANSWER CONSUMPTION time (the shared answer
+helper's CAS win AND no-op branches — R3), never at pack-create time.
 
 Thread Safety:
     All state mutations and snapshot reads are guarded by a single
@@ -180,6 +187,12 @@ class QuestionPack:
             (for backward compatibility with ad-hoc clients).
         created_at: ISO-8601 UTC timestamp at which the pack was
             created. Auto-generated at construction time.
+        id: Stable UUID4 identifier for the pack (mid-flight QA
+            channel, 2026-09-21). The durable handle stamped into
+            ``instance_metadata['question_pack_id']`` and echoed in
+            ``QUESTION_REQUESTED`` payloads so the orchestrator can
+            correlate its answer with the exact pack (the T1″
+            ``QUESTION_PACK_MISMATCH`` stale-answers guard).
     """
 
     instance_id: str
@@ -187,6 +200,7 @@ class QuestionPack:
     status: str = "pending"
     answers: dict = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 class QuestionManager:
@@ -308,13 +322,27 @@ class QuestionManager:
         self,
         instance_id: str,
         answers: dict,
-    ) -> QuestionPack | None:
-        """Transition the pack to ``"answered"`` and store ``answers``.
+    ) -> tuple[QuestionPack | None, bool]:
+        """Transition the pack ``pending → answered`` exactly-once (CAS).
 
-        Idempotent on already-answered packs: a second call overwrites
-        ``answers`` and keeps ``status="answered"``. This matches the
-        PAUSED-branch semantics in the answer endpoint (the second call
-        would be a retry from the frontend).
+        Mid-flight QA channel (OQ-3, promoted to REQUIREMENT): the
+        return is a ``(pack, transitioned)`` tuple under the existing
+        ``_lock`` — the single arbitrating primitive for answer
+        exactly-once. The prior behavior was overwrite-idempotent (a
+        second call CLOBBERED the first caller's answers), which made
+        ``find_suspended_turn_for_answer``'s read-not-claim contract a
+        TOCTOU hole. Now:
+
+        * ``status == "pending"`` → stores answers, flips to
+          ``"answered"``, returns ``(pack, True)``. This caller is the
+          CAS WINNER and owns the SSE/event/resume fan-out.
+        * ``status == "answered"`` → returns ``(pack, False)`` WITHOUT
+          overwriting the stored answers. This caller is the CAS LOSER
+          (duplicate answer) and must short-circuit to the
+          ``already_delivered`` no-op — no SSE, no events, no resume,
+          no Defect-3 fallback.
+        * no pack at all → ``(None, False)`` — the caller surfaces
+          ``NO_PENDING_QUESTION`` / ``QUESTION_PACK_LOST``.
 
         Args:
             instance_id: Owning instance identifier.
@@ -322,9 +350,7 @@ class QuestionManager:
                 flexible — accepted as-is.
 
         Returns:
-            The updated :class:`QuestionPack`, or ``None`` when no pack
-            exists for the instance. The Phase 2 API translates
-            ``None`` into a 404.
+            ``(pack, transitioned)`` — see the CAS contract above.
         """
         with self._lock:
             pack = self._packs.get(instance_id)
@@ -333,10 +359,155 @@ class QuestionManager:
                     "QuestionManager.set_answers: no pack for instance %s",
                     instance_id,
                 )
-                return None
+                return None, False
+            if pack.status == "answered":
+                # CAS LOST — the pack was already answered by a
+                # concurrent request. Do NOT overwrite the stored
+                # answers (the winner's payload is authoritative).
+                logger.info(
+                    "QuestionManager.set_answers: CAS lost for instance "
+                    "%s — pack already answered; returning "
+                    "transitioned=False (already_delivered no-op)",
+                    instance_id,
+                )
+                return pack, False
             pack.status = "answered"
             pack.answers = dict(answers) if isinstance(answers, dict) else {}
-            return pack
+            return pack, True
+
+    def get_pending_packs_for_instances(
+        self, instance_ids: list[str]
+    ) -> dict[str, QuestionPack]:
+        """Return the PENDING pack for each instance in ``instance_ids``.
+
+        Mid-flight QA channel (OQ-2 decision B): the read API used by
+        ``_resume_cascade_db_sync`` post-commit to detect
+        child-question-still-pending — a resumed instance whose own
+        question pack is still ``pending`` while its cascade-wiped
+        ``awaiting_answer`` handle is gone. Read-only; snapshots under
+        the same ``_lock`` as every other accessor.
+
+        Note: packs are NOT filtered by suspension reason (MAJOR-4) —
+        a ``paused_by_parent``-stamped cascade artifact still owns a
+        live pending pack that this API must surface.
+
+        Args:
+            instance_ids: Instances to probe (the cascade tree ids).
+
+        Returns:
+            ``{instance_id: QuestionPack}`` for every instance that
+            currently holds a ``status="pending"`` pack.
+        """
+        with self._lock:
+            return {
+                iid: pack
+                for iid, pack in self._packs.items()
+                if iid in instance_ids and pack.status == "pending"
+            }
+
+    def rehydrate_from_payloads(
+        self, payloads: dict[str, dict]
+    ) -> int:
+        """Reconstruct packs from durable ``instance_metadata`` payloads.
+
+        Mid-flight QA channel (§5.4 durability): ``QuestionManager``
+        packs are RAM-only, but the pack payload is shadowed into
+        ``instance_metadata['question_pack_payload']`` at ask time.
+        After a daemon restart the in-memory store is empty while the
+        durable handle (``task.suspension_reason='awaiting_answer'``)
+        survives — this pass rehydrates the packs so the answer
+        endpoint works across restarts.
+
+        Idempotent: only patches packs whose in-memory state is EMPTY
+        (a live pack always wins — it is at least as fresh as the
+        metadata shadow). Only ``status="pending"`` payloads are
+        restored; an answered pack after restart carries no forward
+        value (the handle is consumed).
+
+        Args:
+            payloads: ``{instance_id: pack_to_dict(payload)}`` — the
+                boot scan reads ``instance_metadata`` for every
+                instance with a paused ``awaiting_answer`` task and
+                hands the payloads here.
+
+        Returns:
+            Number of packs rehydrated.
+        """
+        restored = 0
+        with self._lock:
+            for instance_id, payload in payloads.items():
+                existing = self._packs.get(instance_id)
+                if existing is not None:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("status") != "pending":
+                    continue
+                questions_payload = payload.get("questions")
+                if not isinstance(questions_payload, list):
+                    continue
+                questions: list[Question] = []
+                for q in questions_payload:
+                    if not isinstance(q, dict):
+                        continue
+                    qid = q.get("id") or str(uuid.uuid4())
+                    text = q.get("text") if isinstance(q.get("text"), str) else ""
+                    options_raw = q.get("options")
+                    options = (
+                        [str(o) for o in options_raw]
+                        if isinstance(options_raw, list)
+                        else []
+                    )
+                    descriptions_raw = q.get("option_descriptions")
+                    descriptions = (
+                        {
+                            str(k): str(v)
+                            for k, v in descriptions_raw.items()
+                            if isinstance(k, str) and isinstance(v, str)
+                        }
+                        if isinstance(descriptions_raw, dict)
+                        else {}
+                    )
+                    questions.append(
+                        Question(
+                            id=str(qid),
+                            text=text,
+                            options=options,
+                            allow_custom=bool(q.get("allow_custom", True)),
+                            required=bool(q.get("required", True)),
+                            option_descriptions=descriptions,
+                        )
+                    )
+                if not questions:
+                    continue
+                pack = QuestionPack(
+                    instance_id=instance_id,
+                    questions=questions,
+                    status="pending",
+                    answers={},
+                )
+                # Fix pass (MINOR-5 verification surfaced this): preserve
+                # the ORIGINAL pack id from the durable shadow. A fresh
+                # uuid here would break the T1″ correlation contract
+                # (§5.4 stamps ``question_pack_id`` precisely so a
+                # post-restart answer echoing it passes the
+                # QUESTION_PACK_MISMATCH guard) and desync the wedge
+                # guard's metadata pack-id reads from the RAM pack.
+                shadowed_id = payload.get("pack_id")
+                if isinstance(shadowed_id, str) and shadowed_id:
+                    pack.id = shadowed_id
+                created_at = payload.get("created_at")
+                if isinstance(created_at, str) and created_at:
+                    pack.created_at = created_at
+                self._packs[instance_id] = pack
+                restored += 1
+        if restored:
+            logger.info(
+                "QuestionManager.rehydrate_from_payloads: restored %d "
+                "pending question pack(s) from instance_metadata",
+                restored,
+            )
+        return restored
 
     def clear_question_pack(self, instance_id: str) -> None:
         """Drop the pack for ``instance_id`` entirely.
@@ -365,6 +536,8 @@ def pack_to_dict(pack: QuestionPack) -> dict[str, Any]:
 
         {
             "instance_id": str,
+            "pack_id": str,               # additive (2026-09-21) — stable
+                                          # pack UUID for answer correlation
             "status": "pending" | "answered",
             "created_at": str,             # ISO-8601 UTC
             "questions": [
@@ -394,6 +567,7 @@ def pack_to_dict(pack: QuestionPack) -> dict[str, Any]:
     """
     return {
         "instance_id": pack.instance_id,
+        "pack_id": pack.id,
         "status": pack.status,
         "created_at": pack.created_at,
         "questions": [
