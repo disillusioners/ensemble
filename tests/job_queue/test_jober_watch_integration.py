@@ -682,8 +682,8 @@ class TestJoberWatchIntegration:
             watcher_repo=watcher_repo
         )
 
-        # Task 4: Should have 21 tools (12 original + 4 watch tools + job_continue + 4 Ari orchestrator tools)
-        assert len(tools) == 21
+        # Task 4: Should have 22 tools (12 original + 4 watch tools + job_continue + 4 Ari orchestrator tools + job_answer)
+        assert len(tools) == 22
 
         # Task 5: All tools should have job category
         for tool in tools:

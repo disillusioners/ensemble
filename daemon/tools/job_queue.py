@@ -1,22 +1,40 @@
 """Job queue management tools for LangGraph agents.
 
-Size/seam note (M3 fix round, 2026-09-03, ``feature/mission-class``):
-this module is 2,300+ lines and hosts BOTH the LangGraph ``@tool``
-wrappers AND significant non-tool logic (the legacy ``list_jobs``
-fallback, the watch-job immediate-notify branch, the mission-tool
-opt-in helper, the WC-wake enqueue toggle resolver). Future work
-should consider splitting into:
+Size/seam note (M3 fix round, 2026-09-03, ``feature/mission-class``;
+size refresh 2026-09-22, ``feature/job-answer-tool`` M-tidier pass):
+this module is 3,321 lines (was 2,300+ when the note was authored)
+and hosts BOTH the LangGraph ``@tool`` wrappers AND significant
+non-tool logic (the legacy ``list_jobs`` fallback, the watch-job
+immediate-notify branch, the mission-tool opt-in helper, the WC-wake
+enqueue toggle resolver, and the answer-tool HTTPException →
+error-string shaper). Future work should consider splitting into:
 
 * ``job_queue_tools.py`` — the LangGraph ``@tool`` surface only
   (the ``@register_tool_category`` entries).
 * ``job_queue_runtime.py`` — the legacy ``list_jobs`` resolver,
-  watch-job notify branches, mission opt-in helper.
+  watch-job notify branches, mission opt-in helper, answer-tool
+  error shaper.
+
+First extraction slice (action-anchored, 2026-09-22
+``feature/job-answer-tool`` M-tidier round): ``_format_answer_http_error``
+(``daemon/tools/job_queue.py:733-825``) — the HTTPException-to-error-
+string shaper used by the ``job_answer`` tool — has no production
+dependency on the rest of this module's state and is the cleanest
+first extraction target. Move to a new ``daemon/tools/_answer_runtime.py``
+beside its producer in ``daemon/routers/`` so the helper can also be
+unit-tested without the full ``create_job_tools`` factory. Extraction
+is a FOLLOW-UP PR; the docstring anchors the slice so the next refactor
+pass has an unambiguous starting point.
 
 The tool surface (additive through M3 — no removal):
 job_create, job_get, job_list, job_cancel, job_retry, watch_job,
 watch_jobs, plus the M2 mission-side get_mission / await_mission
 / list_mission helpers (re-exported from
-``daemon.tools.missions``).
+``daemon.tools.missions``). The ``job_answer`` tool joins the surface
+via ``create_job_tools`` (appended at END, ``feature/job-answer-tool``,
+2026-09-22) — agent-facing counterpart of
+``POST /api/jobs/{work_id}/answer``; both surfaces share the SAME
+underlying helper (``daemon/routers/answer_helper.py``).
 
 Toolset reshape (2026-09-19, ``feature/mission-watch-toolset``):
 ``watch_mission`` joins the surface via the standalone
@@ -35,6 +53,7 @@ import uuid
 from datetime import datetime, UTC
 from typing import Annotated, Any, Optional, TYPE_CHECKING
 
+from fastapi import HTTPException
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
@@ -42,6 +61,7 @@ from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
 from daemon import constants
 from daemon.constants import INJECTION_ELIGIBLE_STATUSES
+from daemon.models.common import ErrorCodes
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
@@ -70,6 +90,16 @@ TERMINAL_STATES = set(ALL_TERMINAL_STATES)
 # number and the error sentence so the per-tool wordings cannot drift
 # (tidier round 2026-09-20, #7).
 MAX_WATCHES_PER_INSTANCE = 50
+
+# Typed token for the agent-readable error string emitted by the
+# ``job_answer`` tool's 503 write-paused pre-check (and any future
+# caller that wants to branch on it). NOT in ``ErrorCodes`` (the
+# HTTP wire schema) because the HTTP route raises a plain-string 503
+# with no typed token; the agent-tool is the surface that introduces
+# the token so it owns the spelling. Single source for the literal so
+# it cannot drift between the docstring, the pre-check, and any test
+# that branches on it (tidier round 2026-09-22, #3 — Medium).
+WRITE_PAUSED_TOKEN = "WRITE_PAUSED"
 
 
 def _watch_cap_error(current: int, attempted_clause: str | None = None) -> str:
@@ -555,6 +585,99 @@ Returns:
 
 Example:
     job_inject(job_id=\"job_abc123\", message=\"Also remember to add tests\")""",
+
+    "job_answer": """Submit the orchestrator's answer to a pending question pack on a watched job.
+
+The agent-facing counterpart of ``POST /api/jobs/{work_id}/answer`` —
+delivers an answer to a pending ``ask_questions`` pack owned by the
+work_id's asker instance, then resumes the asker cascade. The underlying
+logic is the SAME shared helper ``answer_questions_via_instance``
+(``daemon/routers/answer_helper.py``) that both HTTP surfaces use — there
+is no second implementation. The route's optional ``resume_message``
+body field is NOT exposed on the agent tool surface (hardcoded to
+``None``).
+
+Use this when the agent has been watching a job (``watch_job`` /
+``watch_jobs``) and received a ``[JOB_EVENT] Job {work_id}...
+question requested ❓`` line with a pack payload: relay the question to
+the human, capture the reply, and submit it via ``job_answer``.
+
+Args:
+    work_id: The job / work_id whose instance asked the question
+        (matches the ``work_id`` on the ``question requested`` event).
+    answers: Dict of user-supplied answers keyed by question id
+        (preferred) or question text.
+    question_pack_id: The pack id echoed by the caller for the T1″
+        stale-answers correlation guard. When present and ≠ the
+        current pending pack's id the call is refused with a 400
+        ``QUESTION_PACK_MISMATCH`` error string.
+
+Access control: the caller's ``project_id`` must match the job's
+``project_id`` (when both are set); system-default (unscoped-or-root)
+callers act as global operators and may answer packs in any project.
+The check reuses the same ``_check_job_access`` helper as the
+``job_messages`` / ``job_tree`` / ``job_progress`` / ``job_inject``
+visibility tools.
+
+Returns:
+    Dictionary with the job-addressed envelope and the helper's
+    instance-addressed body: ``work_id``, ``status`` (``answered`` /
+    ``already_delivered`` / ``answer_fallback_enqueued`` /
+    ``no_active_job``), ``instance_id``, ``question_pack``,
+    ``resume_route`` (one of ``answer_gate_existing_turn``,
+    ``revived_error_target``, ``enqueue_as_fresh_message``,
+    ``already_delivered``), and ``resume_info`` (cascade-resume
+    details: ``resumed``, ``resumed_ids``, ``skipped_ids``,
+    ``target_id``, ``resume_results``).
+
+    ``{"error": "..."}`` on every guarded failure. Error strings
+    carry the typed code (the same vocabulary the HTTP route emits)
+    so a downstream agent can branch on the exact cause:
+
+      * ``400 QUESTION_PACK_MISMATCH: ...`` — stale answers for a
+        superseded pack (T1″ hijack guard); the agent should re-fetch
+        the pending pack id and retry.
+      * ``404 JOB_NOT_FOUND: ...`` — ``work_id`` does not resolve to
+        any task or job; the work is unknown to the daemon.
+      * ``404 INSTANCE_NOT_FOUND: ...`` — the resolved ``instance_id``
+        is UNKNOWN to the manager (the work_id → instance_id resolver
+        returned a row but the manager's instance repository does not
+        know it). The work is reachable from the job surface but the
+        asker is not; the answer cannot be routed. Hint: re-fetch the
+        work_id and confirm the instance still exists.
+      * ``404 NO_PENDING_QUESTION: ...`` — the instance exists but has
+        no pending pack. Hint: for completed instances use
+        ``job_continue`` instead.
+      * ``410 ANSWER_TARGET_TERMINAL: ...`` — asker reached a terminal
+        state while the question was pending; the answer cannot be
+        delivered (no silent-revive — leader decision 1).
+      * ``410 QUESTION_PACK_LOST: ...`` — durable handle but neither
+        RAM pack nor ``instance_metadata`` payload survived a daemon
+        restart.
+      * ``503 WRITE_PAUSED: ...`` — daemon migration posture. The
+        tool's own pre-check emits the typed ``WRITE_PAUSED`` token;
+        a helper-race-window hit (pre-check cleared, then helper
+        re-raised) surfaces as
+        ``"503: Writes are paused for database migration"`` with no
+        branchable token — match on the ``503`` status + ``migration``
+        substring in that case.
+      * ``Access denied: job does not belong to caller's project`` —
+        project-scoped check refused.
+
+Tool gate is stricter than HTTP ``/api/jobs/{work_id}/answer`` route:
+the tool requires non-empty ``answers`` + non-empty ``question_pack_id``
+and rejects them up-front; the HTTP route leniently defaults both
+(deliberate posture — a non-tool caller can still POST partial bodies
+without the strict gate, but the agent surface commits to the strict
+shape so a downstream agent never sees a partial-pack error string it
+did not actually trigger).
+
+Example:
+    job_answer(
+        work_id="job_abc123",
+        answers={"q1": "yes", "q2": "no"},
+        question_pack_id="pack-xyz",
+    )""",
 }
 
 
@@ -648,6 +771,114 @@ def _resolve_mission_record(
             exc,
         )
         return None
+
+
+def _format_answer_http_error(
+    exc: HTTPException,
+    work_id: str,
+    instance_id: str,
+) -> dict:
+    """Convert a ``HTTPException`` from ``answer_questions_via_instance``
+    into a clean, agent-readable error dict.
+
+    The helper raises ``HTTPException`` on every guarded failure with a
+    typed ``ErrorResponse(code=..., message=..., details=...)`` body —
+    the ``code`` is the agent-routable vocabulary (400
+    ``QUESTION_PACK_MISMATCH`` / 404 ``NO_PENDING_QUESTION`` / 410
+    ``ANSWER_TARGET_TERMINAL`` / ``QUESTION_PACK_LOST``). The
+    write-pause guard (503) is the one exception — it raises with a
+    plain ``"Writes are paused for database migration"`` STRING
+    detail, NOT a typed ``ErrorResponse``, so the helper path emits
+    no branchable ``WRITE_PAUSED`` token (only the tool's own
+    pre-check does). The HTTP route's exception handler serializes
+    the typed body; this tool has no exception handler, so we
+    synthesize a single ``{"error": ...}`` string carrying:
+
+    * the HTTP status + typed code (so an agent can branch on the
+      exact cause), and
+    * the helper's message verbatim (the human-readable explanation),
+      plus
+    * a ``job_continue`` hint on the no-pending/terminal states (the
+      brief asks for this hint so the agent doesn't loop on a job
+      whose asker is past the answer window).
+
+    Args:
+        exc: The :class:`HTTPException` the helper raised.
+        work_id: The work_id the caller submitted (echoed in the error
+            so the agent can correlate).
+        instance_id: The instance_id the work resolved to (also
+            echoed; useful for 410 terminal logs).
+
+    Returns:
+        ``{"error": "..."}`` dict — never raises.
+    """
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        # ``answer_helper._http`` calls ``ErrorResponse(...).model_dump()``
+        # which keeps ``code: ErrorCodes`` as the enum object (Pydantic's
+        # default — ``mode='json'`` is needed to coerce to the string
+        # value). Normalize to ``.value`` here so the agent-facing
+        # error string is always a clean string regardless of how the
+        # helper serialized the body.
+        raw_code = detail.get("code", "")
+        code = getattr(raw_code, "value", raw_code) or ""
+        message = detail.get("message", "") or str(detail)
+        # The HTTP status code lives on the exception itself;
+        # ``detail["status"]`` is the helper's body and is the same.
+        status = getattr(exc, "status_code", None) or detail.get("status")
+    else:
+        code = ""
+        message = str(detail) if detail is not None else str(exc)
+        status = getattr(exc, "status_code", None)
+
+    code_token = f"{code}" if code else ""
+    status_token = f"{status}" if status else ""
+
+    # Friendly hint for the no-pending / terminal states (the brief
+    # asks for this). For 404 NO_PENDING_QUESTION the asker exists
+    # but has no pending pack — the right follow-up primitive is
+    # ``job_continue``, not a retry on the same work_id.
+    # INSTANCE_NOT_FOUND is a routing failure (the resolved
+    # ``instance_id`` is unknown to the manager — see
+    # ``answer_helper.py:25, 179-183``) and gets a DIFFERENT hint
+    # because retrying with the same work_id cannot help; the
+    # caller must re-fetch the work_id + confirm the instance still
+    # exists. Both hint branches come from the typed ErrorCodes
+    # enum so the raw-string drift class cannot re-introduce this
+    # split (tidier #1 — Medium, 2026-09-22).
+    no_pack_hint = ""
+    if code in {
+        ErrorCodes.NO_PENDING_QUESTION.value,
+        ErrorCodes.ANSWER_TARGET_TERMINAL.value,
+        ErrorCodes.QUESTION_PACK_LOST.value,
+    }:
+        no_pack_hint = (
+            " — no pending question pack for this job; "
+            "use job_continue for completed instances"
+        )
+    elif code == ErrorCodes.INSTANCE_NOT_FOUND.value:
+        no_pack_hint = (
+            " — resolved instance_id is unknown to the manager; "
+            "re-fetch the work_id and confirm the asker instance "
+            "still exists"
+        )
+
+    if code_token and status_token:
+        head = f"{status_token} {code_token}:"
+    elif code_token:
+        head = f"{code_token}:"
+    elif status_token:
+        head = f"{status_token}:"
+    else:
+        head = "Error:"
+
+    return {
+        "error": (
+            f"{head} {message} "
+            f"(work_id={work_id}, instance_id={instance_id})"
+            f"{no_pack_hint}"
+        )
+    }
 
 
 def _check_job_access(
@@ -2574,6 +2805,242 @@ def create_job_tools(
 
     job_inject._full_doc_ = _FULL_DOCS["job_inject"]
 
+    class JobAnswerInput(BaseModel):
+        """Input schema for job_answer tool."""
+
+        work_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "The work_id whose instance asked the question "
+                    "(matches the work_id on the "
+                    "``[JOB_EVENT] Job ... question requested ❓`` line "
+                    "that the watcher received)."
+                )
+            ),
+        ]
+        answers: Annotated[
+            dict[str, str],
+            Field(
+                description=(
+                    "User-supplied answers. Key by question id (the id "
+                    "carried in the pending pack payload) — text-keyed "
+                    "fallbacks are also accepted by the helper."
+                )
+            ),
+        ]
+        question_pack_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "The pack id from the pending question payload "
+                    "(``question_pack.id`` echoed in the "
+                    "``[JOB_EVENT]`` body). Mandatory for the T1″ "
+                    "stale-answers hijack guard; a mismatch is "
+                    "rejected with ``QUESTION_PACK_MISMATCH``."
+                )
+            ),
+        ]
+
+    @register_tool_category("job")
+    @tool(args_schema=JobAnswerInput)
+    # Descriptions live ONLY in ``JobAnswerInput`` (the args_schema) —
+    # the signature carries plain types so the two copies cannot drift
+    # (tidier #4 — Medium, ``feature/job-answer-tool`` M-tidier round,
+    # 2026-09-22). Mirrors the ``watch_mission`` precedent at
+    # ``daemon/tools/job_queue.py:3104-3112``.
+    async def job_answer(
+        work_id: str,
+        answers: dict[str, str],
+        question_pack_id: str,
+    ) -> dict:
+        """Submit the orchestrator's answer to a pending question pack on a watched job.
+
+        Use tool_help("job_answer") for details."""
+        # The job_answer tool is the agent-facing counterpart of
+        # ``POST /api/jobs/{work_id}/answer`` — both surfaces share the
+        # SAME underlying helper ``answer_questions_via_instance``
+        # (``daemon/routers/answer_helper.py``). There is no second
+        # implementation. The seam is:
+        #   1. write-pause guard 503 (also enforced inside the helper)
+        #   2. ``work_resolver.resolve_work(work_id)`` → ``WorkRecord``
+        #      (404 when record is None or ``record.instance_id`` is None)
+        #   3. project-scoped access via the SAME ``_check_job_access``
+        #      helper the four visibility tools (``job_messages`` /
+        #      ``job_tree`` / ``job_progress`` / ``job_inject``) use.
+        #   4. ``answer_questions_via_instance(manager, instance_id,
+        #      answers, question_pack_id, live_hub, resume_message)``.
+        # The helper raises ``HTTPException`` on every guarded failure —
+        # we catch and convert to clear agent-readable error STRINGS so
+        # the tool never raises mid-tool-call (LangGraph ``@tool``
+        # tools that raise bubble up the graph task). The error code +
+        # human-readable message are both included so an agent can
+        # branch on the exact cause (400 stale-pack → re-fetch the
+        # pending pack id; 410 terminal → give up; 503 → daemon in
+        # migration, retry later).
+        try:
+            if manager is None:
+                return {
+                    "error": (
+                        "Instance manager not available — job_answer "
+                        "requires manager access"
+                    )
+                }
+
+            # 0. Write-pause guard (503 migration posture) — mirrors
+            #    the HTTP route's pre-flight (jobs_management.py:1148).
+            #    We refuse before doing any DB work; the helper itself
+            #    also enforces this so the seam is closed end-to-end.
+            if manager.is_write_paused:
+                return {
+                    "error": (
+                        f"503 {WRITE_PAUSED_TOKEN}: writes are paused "
+                        f"for database migration — retry once the "
+                        f"daemon leaves migration mode"
+                    )
+                }
+
+            # 1. Resolve work_id → instance_id via the SAME
+            #    ``work_resolver`` the HTTP route uses
+            #    (``jobs_management.py:1154-1175``). The helper accepts
+            #    an instance_id only; work_id → instance_id translation
+            #    is the one piece of routing that differs between the
+            #    instance-addressed and job-addressed surfaces, so it
+            #    stays at the tool boundary.
+            work_resolver = getattr(manager, "_work_resolver", None)
+            if work_resolver is None:
+                return {
+                    "error": (
+                        "503 SERVICE_UNAVAILABLE: work resolver not "
+                        "wired on this daemon"
+                    )
+                }
+
+            try:
+                record = await asyncio.to_thread(
+                    work_resolver.resolve_work, work_id
+                )
+            except Exception as resolve_err:  # noqa: BLE001
+                # Resolver RAISE is a transient DB failure — surface as
+                # 500 so the caller knows to retry, NOT as a not-found
+                # (the brief distinguishes the two).
+                # Suffix-preserving truncation (judgment call, tidier
+                # #11 — Medium, 2026-09-22): bound ``str(resolve_err)``
+                # so internal traceback fragments do not leak into the
+                # 500 error path. The full exception is already on the
+                # ``logger.error(... exc_info=True)`` line above; this
+                # only bounds the agent-readable surface. 500-char cap
+                # is a defensive ceiling — typical ``resolve_work``
+                # failures (DB connection error, row not in repository)
+                # are <200 chars.
+                err_text = str(resolve_err)
+                if len(err_text) > 500:
+                    err_text = err_text[:497] + "..."
+                logger.error(
+                    "job_answer: work_resolver.resolve_work(%s) "
+                    "raised: %s",
+                    work_id,
+                    resolve_err,
+                    exc_info=True,
+                )
+                return {
+                    "error": (
+                        f"500 INTERNAL_ERROR: work resolver raised "
+                        f"while resolving {work_id!r}: {err_text}"
+                    )
+                }
+
+            if record is None:
+                return {
+                    "error": (
+                        f"404 JOB_NOT_FOUND: no work unit found for "
+                        f"work_id {work_id!r}"
+                    )
+                }
+
+            # MINOR-13 (jobs_management.py:1176-1191): a WorkRecord
+            # without an instance_id would AttributeError deep inside
+            # the helper; surface a typed 404 instead.
+            instance_id = getattr(record, "instance_id", None)
+            if not instance_id:
+                return {
+                    "error": (
+                        f"404 JOB_NOT_FOUND: work unit {work_id!r} has "
+                        f"no owning instance — the answer cannot be "
+                        f"routed"
+                    )
+                }
+
+            # 2. Access control — REUSE the SAME ``_check_job_access``
+            #    helper the four visibility tools use. The check is
+            #    applied AFTER work resolution (so the caller pays
+            #    the resolve cost first) but BEFORE the helper call
+            #    (so a denied caller never reaches the answer flow).
+            deny = _check_job_access(manager, current_instance_id, record)
+            if deny is not None:
+                return deny
+
+            # 3. The actual answer flow — delegate to the shared
+            #    helper. ``live_hub`` is read defensively via getattr
+            #    so the tool still works in test/partial-bootstrap
+            #    contexts where the hub is not wired (mirrors the
+            #    ``todo_tools`` / ``question_tools`` pattern at
+            #    ``daemon/tools/instance.py:4668-4688`` — neither
+            #    the HTTP nor the agent-tool lane has a different
+            #    way to reach the hub; both go through
+            #    ``manager._live_hub``). When ``None`` the helper's
+            #    SSE emission is a no-op (best-effort, guarded) so
+            #    callers still get the answer + resume. The HTTP
+            #    route's ``request.app.state.live_hub`` is the SAME
+            #    object — ``daemon/api.py:1261`` wires
+            #    ``app.state.live_hub = manager._live_hub`` — so the
+            #    push-lane delivery is preserved byte-for-byte across
+            #    both surfaces (no SSE silently dropped).
+            live_hub = getattr(manager, "_live_hub", None)
+
+            from daemon.routers.answer_helper import answer_questions_via_instance
+
+            try:
+                result = await answer_questions_via_instance(
+                    manager=manager,
+                    instance_id=instance_id,
+                    answers=answers,
+                    question_pack_id=question_pack_id,
+                    live_hub=live_hub,
+                    resume_message=None,
+                )
+            except HTTPException as exc:
+                # Convert the typed HTTPException the helper raised
+                # into a clear agent-readable error string. The HTTP
+                # ``detail`` carries ``ErrorResponse(code=..., message=
+                # ...)`` — surface the code verbatim so the agent
+                # can branch on it (the brief calls out 400/404/410/503
+                # as the codes that matter for the answer flow).
+                return _format_answer_http_error(exc, work_id, instance_id)
+
+            # Job-addressed envelope (mirrors the HTTP route at
+            # ``jobs_management.py:1225`` — surface the work_id the
+            # caller used alongside the helper's instance-addressed
+            # body).
+            return {"work_id": work_id, **result}
+        except Exception as e:  # noqa: BLE001
+            # Defensive backstop — never let the tool-call raise into
+            # the graph. A tool that raises mid-call bubbles the
+            # exception into the graph task and strands the turn
+            # (the F-pattern in earlier tool-history incidents); the
+            # agent-readable error string keeps the turn alive.
+            logger.error(
+                "job_answer(%s) failed: %s", work_id, e, exc_info=True
+            )
+            return {
+                "error": (
+                    f"Internal error submitting answer for {work_id}: "
+                    f"{type(e).__name__}"
+                )
+            }
+
+    job_answer._full_doc_ = _FULL_DOCS["job_answer"]
+
     return [
         job_create, job_get, job_list, job_cancel, job_retry,
         job_delete, job_restore, queue_list, queue_create,
@@ -2581,6 +3048,7 @@ def create_job_tools(
         job_continue,   # moved to end of non-watch tools (was index 7)
         job_messages, job_tree, job_progress, job_inject,
         watch_job, unwatch_job, list_watched_jobs, watch_jobs,
+        job_answer,     # appended at END — never insert (positional-index trap)
     ]
 
 
