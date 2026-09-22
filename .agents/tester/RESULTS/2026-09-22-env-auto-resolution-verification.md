@@ -104,3 +104,31 @@ NONE. No daemon restart/boot, no staging/promote/tag, no live(9797)/demo(9799?�
 - Mock audit: ✅ no invalidating divergence; frozen-path gap closed
 - ensure.md (scoped): ✅
 - **Testing verdict: GATES-PASS — merge-ready from the testing perspective, with the 3 non-blocking follow-ups above.**
+
+---
+
+# ADDENDUM — Re-gate on INTEGRATED tree (2026-09-22, second session)
+
+**Trigger**: Q&A-channel merge landed on origin/latest (`f583cd7b`, 20 commits: event models UNION, POST /jobs/{work_id}/answer, mid_flight_report tool, wedge guard) and was merged into `feature/env-auto-resolution`. Integrated tree @ **`bdc340c8`** (`bdc340c85b2661ed56cc9b8b007ffcb4f02009c9` = merge of `5e1aa0b1` [our 5 commits incl. tester artifacts] + `f583cd7b`). Code overlap vs Q&A side: NONE (doc overlaps CHANGELOG/PACKS.md resolved by proven-union). Verify-only, no fixes, no commits.
+
+**Re-gate verdict: ✅ GATES-PASS for the integrated tree — zero drift vs the pre-merge gate on every re-run item.**
+
+| Item | Worker / Instance | Result | vs Prior run |
+|---|---|---|---|
+| Import sanity | R1 `db256988-132b-454d-b900-76d7cc969502` | ✅ `import daemon` → `/home/nea/ensemble-worktrees/env-autodetect/daemon/__init__.py` (inside worktree; editable-install trap avoided) | n/a (new check) |
+| Our lane pack: `tests/unit/tools/test_upgrade_tools.py` | R1 | ✅ **144 passed / 0 failed / 0 skipped** in 8.24s, exit 0 | EXACT match (144P/0F @ ba295fec, 7.07s; +1.17s = normal variance) |
+| CORE spot-check C1 — auto-resolved LIVE keeps 3-factor gate + restart refusal (5 sub-checks: identity `live`/`auto`; `live-restart-refused`; `user-confirmation-missing` ×2 factor-drop legs; `nonce-mismatch`) | R2 `936e17ea-0bec-470c-ad34-79988eb161c4` | ✅ 5/5 PASS | IDENTICAL tokens/bodies vs prior S4 |
+| CORE spot-check C2 — false marker ⇒ fail-closed (7 sub-checks: resolution `None`/`opted-out` with live shape on disk ×3 variants; tool-layer `env-marker-absent` on system_upgrade + system_restart ×3 variants) | R2 | ✅ 7/7 PASS | IDENTICAL vs prior S3 |
+| CORE spot-check C3 — release_info marker-less surfaces `env=live` + `ENSEMBLE_SELF_ENV ABSENT — auto-derived` line | R2 | ✅ 1/1 PASS | IDENTICAL output shape vs prior S5 |
+| Q&A good-neighbor slice: `test_midflight_qa.py` + `test_answer_gate_resume_chain.py` + `test_answer_resume_real_chain.py` | R3 `c013f967-bd0e-40aa-bc87-b6681c1c8a20` | ✅ **54/54** (42+10+2, all files present, no fallback) in 7.00s, exit 0 | Zero deviation vs latest post-merge gate (54/54 @ ca4ab125) — merge did NOT break the Q&A side |
+
+**Method notes (R2)**: prior driver `/tmp/envres-matrix/driver.py` reused as module + trimmed runner `/tmp/envres-regate/runner_regate.py`; per-check wiped scratch homes (`/tmp/envres-regate/{c1,c2,c3}/`); `spawn_executor` patched to RAISE across C1 — never fired (refusals resolve upstream of the spawn seam). Full evidence at `/tmp/envres-regate/`.
+
+**Cross-lane intersection**: `daemon.tools.upgrade_tools` + `daemon.tools.upgrade_journal` import cleanly on the merged tree; all harness seams intact; no behavioral change in the upgrade-tools lane attributable to the 20 Q&A commits; no unexpected warnings / new refusal tokens / changed output text.
+
+**Scope note**: per commission, the prior 45-scenario matrix was NOT fully re-run (144 + C1/C2/C3 passing satisfies the re-gate). The prior S4d fully-sandboxed all-3-factors ARM sub-case was likewise not re-run — its gate-reachability proof stands from the pre-merge session (@ ba295fec, code unchanged in our lane by the merge).
+
+**Side effects**: NONE — no daemon boot, no staging/promote/tag, live(9797)/demo(7979) untouched, POSTGRES_*/DATABASE_URL/PG* scrubbed on every invocation (×12 `env -u`), zero worker edits/commits/pushes. Clean worktree apart from this uncommitted documentation (giter to commit).
+
+**Integrated-tree verdict: GATES-PASS.**
+
