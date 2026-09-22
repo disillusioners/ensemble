@@ -22,6 +22,12 @@ Asserts on FOUR surfaces:
   (d) /api/notifications/stream SSE opened BEFORE terminal → at least
       one notification for this instance carries ``result_summary``.
 
+F6a (2026-09-22): on the two envelope-carrying surfaces (a) and (b),
+``result_summary`` is the resolver's ``Task.result`` JSON envelope —
+the test additionally asserts ``json.loads(result_summary)["content"]``
+is truthy, so a content-stamp regression inside the envelope fails the
+test. Payload shapes are NOT unified across surfaces (F6b DEFERRED).
+
 Run against the dev daemon (``./dev.sh`` / ``./dev_with_mock.sh`` on
 port 8079). Skips when the daemon is unreachable. The mock LLM server
 (``tests/mock_llm_server.py``) returns deterministic canned responses,
@@ -437,6 +443,24 @@ def test_result_summary_emission_surface_intent5():
             f"pre-fix fallback marker — content path was not exercised. "
             f"got={sse_result!r}"
         )
+        # F6a (2026-09-22): on this envelope-carrying surface the
+        # result_summary is the resolver's Task.result JSON envelope
+        # (``work_resolver._parse_task_result_summary`` json.dumps-es
+        # the producer dict ``{"success": ..., "message_id": ...,
+        # "content": ...}``). Assert the envelope's ``content`` key is
+        # TRUTHY so a content-stamp regression INSIDE the envelope
+        # (envelope present, content stripped/empty) fails the test —
+        # result_summary-is-not-None alone cannot catch it. Shapes are
+        # NOT unified across surfaces (F6b DEFERRED).
+        try:
+            sse_envelope_content = json.loads(sse_result).get("content")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            sse_envelope_content = None
+        assert sse_envelope_content, (
+            f"[Intent5(a/F6a)] SSE result_summary envelope does not "
+            f"carry a truthy 'content' key — content-stamp regression "
+            f"inside the envelope. result_summary={sse_result!r}"
+        )
 
         # 3. (b) GET /api/jobs/{job_id} — resolver surfaces
         #    result_summary sourced from Task.result via
@@ -452,6 +476,19 @@ def test_result_summary_emission_surface_intent5():
         assert get_result != FALLBACK_MARKER, (
             f"[Intent5(b)] GET result_summary is the fallback marker — "
             f"got={get_result!r}"
+        )
+        # F6a (2026-09-22): same envelope contract as (a) — the GET
+        # body's result_summary is sourced via the resolver
+        # (``_parse_task_result_summary``), so its ``content`` key must
+        # be TRUTHY too. Envelope-present/content-stripped now fails.
+        try:
+            get_envelope_content = json.loads(get_result).get("content")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            get_envelope_content = None
+        assert get_envelope_content, (
+            f"[Intent5(b/F6a)] GET result_summary envelope does not "
+            f"carry a truthy 'content' key — content-stamp regression "
+            f"inside the envelope. result_summary={get_result!r}"
         )
 
         # 4. (c) Read-only DB query — event row kind='job_completed'
