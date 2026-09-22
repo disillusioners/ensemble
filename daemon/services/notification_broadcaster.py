@@ -132,6 +132,7 @@ class NotificationBroadcaster:
         status: str,
         project_id: str | None = None,
         instance_name: str | None = None,
+        result_summary: str | None = None,
     ) -> int:
         """Emit a notification for root instance completion.
 
@@ -145,6 +146,16 @@ class NotificationBroadcaster:
             status: The terminal status (COMPLETED, ERROR, TERMINATED, FAILED).
             project_id: Optional project ID the instance belongs to.
             instance_name: Optional instance display name/title.
+            result_summary: Optional pre-fetched agent's last assistant
+                message content (the production extraction seam
+                ``manager._get_last_assistant_message_raw``). When
+                not ``None`` it's added to the broadcast data dict
+                so ``/api/notifications/stream`` SSE subscribers
+                receive it on the notification frame. v0.13.9 fix
+                (fix/job-completed-result-arm, 2026-09-22): the
+                keyword is backward-compatible — older callers omit
+                it and the field is silently absent from the
+                payload, matching the pre-fix shape exactly.
 
         Returns:
             Number of clients that received the notification.
@@ -163,6 +174,13 @@ class NotificationBroadcaster:
             "instance_name": instance_name,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22): add
+        # ``result_summary`` to the broadcast data dict when the caller
+        # supplied one. Older callers (no kwarg → ``None``) keep the
+        # pre-fix shape exactly — the field is absent, not ``"None"`` —
+        # so SSE consumers that gate on key presence still work.
+        if result_summary is not None:
+            notification["result_summary"] = result_summary
         return await self.emit(notification)
 
     async def emit_instance_created(self, instance_data: dict[str, Any]) -> int:
