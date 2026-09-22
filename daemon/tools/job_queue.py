@@ -564,7 +564,9 @@ delivers an answer to a pending ``ask_questions`` pack owned by the
 work_id's asker instance, then resumes the asker cascade. The underlying
 logic is the SAME shared helper ``answer_questions_via_instance``
 (``daemon/routers/answer_helper.py``) that both HTTP surfaces use — there
-is no second implementation.
+is no second implementation. The route's optional ``resume_message``
+body field is NOT exposed on the agent tool surface (hardcoded to
+``None``).
 
 Use this when the agent has been watching a job (``watch_job`` /
 ``watch_jobs``) and received a ``[JOB_EVENT] Job {work_id}...
@@ -617,7 +619,13 @@ Returns:
       * ``410 QUESTION_PACK_LOST: ...`` — durable handle but neither
         RAM pack nor ``instance_metadata`` payload survived a daemon
         restart.
-      * ``503 WRITE_PAUSED: ...`` — daemon migration posture.
+      * ``503 WRITE_PAUSED: ...`` — daemon migration posture. The
+        tool's own pre-check emits the typed ``WRITE_PAUSED`` token;
+        a helper-race-window hit (pre-check cleared, then helper
+        re-raised) surfaces as
+        ``"503: Writes are paused for database migration"`` with no
+        branchable token — match on the ``503`` status + ``migration``
+        substring in that case.
       * ``Access denied: job does not belong to caller's project`` —
         project-scoped check refused.
 
@@ -734,9 +742,13 @@ def _format_answer_http_error(
     typed ``ErrorResponse(code=..., message=..., details=...)`` body —
     the ``code`` is the agent-routable vocabulary (400
     ``QUESTION_PACK_MISMATCH`` / 404 ``NO_PENDING_QUESTION`` / 410
-    ``ANSWER_TARGET_TERMINAL`` / ``QUESTION_PACK_LOST`` / 503
-    ``WRITE_PAUSED``). The HTTP route's exception handler serializes
-    that to a typed response; this tool has no exception handler, so we
+    ``ANSWER_TARGET_TERMINAL`` / ``QUESTION_PACK_LOST``). The
+    write-pause guard (503) is the one exception — it raises with a
+    plain ``"Writes are paused for database migration"`` STRING
+    detail, NOT a typed ``ErrorResponse``, so the helper path emits
+    no branchable ``WRITE_PAUSED`` token (only the tool's own
+    pre-check does). The HTTP route's exception handler serializes
+    the typed body; this tool has no exception handler, so we
     synthesize a single ``{"error": ...}`` string carrying:
 
     * the HTTP status + typed code (so an agent can branch on the
