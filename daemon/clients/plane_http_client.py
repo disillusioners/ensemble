@@ -216,6 +216,83 @@ def derive_plane_identifier(name: str, *, attempt: int = 1) -> str:
     return (base[:base_len] + suffix)[:_IDENTIFIER_MAX_LEN]
 
 
+# ── Plane name sanitization ─────────────────────────────────────────────
+#
+# Plane project ``name`` is server-validated (unlike ``identifier``,
+# whose validation we pre-empt in :func:`derive_plane_identifier`).
+# Live-probed against plane.ensem.dev 2026-09-22 (workspace ``nea``,
+# X-Api-Key, throwaway projects created + deleted):
+#
+# ================  ======  ================================================
+# Probe name        Status  Body
+# ================  ======  ================================================
+# ``probe-hyphen…``  400    ``{"non_field_errors":["Project name cannot
+#                           contain special characters."]}``
+# ``probe space…``   201    created (name stored verbatim); DELETE → 204
+# ``probe_under…``   201    created (name stored verbatim); DELETE → 204
+# ``probe (paren)``, 400    same ``non_field_errors`` body (name validation
+# ``ünï``                    fires before description is examined)
+# ================  ======  ================================================
+#
+# Pinned acceptance rule for ``name``: letters, digits, spaces and
+# underscores are ACCEPTED; hyphens, parentheses and non-ASCII letters
+# are REJECTED with HTTP 400. The ``description`` field was NOT
+# independently probed with special characters (the P4 rejection was
+# name-driven), so description is deliberately NOT sanitized here.
+#
+# Strategy: every disallowed character RUN collapses to a single space
+# (the confirmed-accepted separator) so ``agents-ensemble`` becomes
+# ``agents ensemble`` — readable, and idempotent because the output
+# alphabet ⊆ accepted set. Empty input (or input that sanitizes to
+# nothing) falls back to a fixed accepted-charset name so the payload
+# never carries an empty ``name``.
+_NAME_ALLOWED = re.compile(r"[^A-Za-z0-9 _]")
+_NAME_WHITESPACE_RUN = re.compile(r"\s+")
+_PLANE_NAME_EMPTY_FALLBACK: str = "Ensemble Project"
+
+
+def sanitize_plane_name(name: str) -> str:
+    """Sanitize a project name into the Plane-accepted character set.
+
+    Pinned rule (live-probed against plane.ensem.dev 2026-09-22 — see
+    the module comment above for the full request/response matrix):
+
+    1. Replace every character NOT in ``[A-Za-z0-9 _]`` with a space.
+    2. Collapse whitespace runs to a single space; strip the ends.
+    3. If the result is empty (empty input, or input made entirely of
+       disallowed characters), return the fixed fallback
+       :data:`_PLANE_NAME_EMPTY_FALLBACK` — deterministic, so a
+       nameless project converges to the same Plane name on every
+       retry instead of flip-flopping between create/update.
+
+    Determinism + idempotency contract:
+        ``sanitize_plane_name(x) == sanitize_plane_name(x)`` always,
+        and ``sanitize_plane_name(sanitize_plane_name(x)) ==
+        sanitize_plane_name(x)`` for every ``x`` — the output alphabet
+        is a subset of the accepted set, so the second pass is a no-op.
+
+    Apply at every point a name crosses the Ensemble → Plane boundary:
+    the create/update payload, the adoption-by-name match, and the
+    drift identity comparison. Comparing RAW Ensemble names against
+    SANITIZED Plane-side names (or vice versa) makes hyphenated
+    projects perpetually mismatch → duplicate-create attempts and
+    false drift.
+
+    Args:
+        name: Raw project name (typically the Ensemble project's
+            ``name`` column).
+
+    Returns:
+        A name containing only accepted characters, safe to POST/PATCH
+        as the ``name`` field on Plane projects.
+    """
+    if not name:
+        return _PLANE_NAME_EMPTY_FALLBACK
+    cleaned = _NAME_ALLOWED.sub(" ", name)
+    cleaned = _NAME_WHITESPACE_RUN.sub(" ", cleaned).strip()
+    return cleaned or _PLANE_NAME_EMPTY_FALLBACK
+
+
 def _rest_base_url() -> str | None:
     """Compose the REST base URL.
 
@@ -509,7 +586,13 @@ class PlaneHttpClient:
         """
         if not self._base_url:
             raise PlaneAPIError("Plane base URL not configured")
-        body: dict[str, Any] = {"name": name}
+        # Plane rejects names containing characters outside
+        # [A-Za-z0-9 _] with HTTP 400 ("Project name cannot contain
+        # special characters." — live-probed 2026-09-22). Sanitize at
+        # the contract boundary so hyphenated Ensemble names sync
+        # instead of 400-ing (deterministic + idempotent — see
+        # :func:`sanitize_plane_name`).
+        body: dict[str, Any] = {"name": sanitize_plane_name(name)}
         if description is not None:
             body["description"] = description
         body.update(extra)
@@ -549,7 +632,9 @@ class PlaneHttpClient:
             raise PlaneAPIError("Plane base URL not configured")
         body: dict[str, Any] = {}
         if name is not None:
-            body["name"] = name
+            # Same Plane-side rejection rule as create (sanitize at the
+            # boundary — see :func:`sanitize_plane_name`).
+            body["name"] = sanitize_plane_name(name)
         if description is not None:
             body["description"] = description
         body.update(extra)

@@ -740,6 +740,36 @@ class TestFindPlaneIdByName:
         projects = [{"id": 12345, "name": "Alpha"}]
         assert _find_plane_id_by_name(projects, "Alpha") == "12345"
 
+    # ── Sanitized-name adoption (prod hot-fix 2026-09-22) ───────────
+
+    def test_sanitized_adoption_hyphenated_matches_plane_spaced(self):
+        """THE hot-fix pin: Plane stores the SANITIZED name (hyphens are
+        rejected at create with 400), so the adoption lookup MUST match
+        the raw hyphenated Ensemble name against the sanitized
+        Plane-side name — else every re-sync duplicate-creates."""
+        projects = [{"id": "p9", "name": "agents ensemble"}]
+        assert _find_plane_id_by_name(projects, "agents-ensemble") == "p9"
+
+    def test_sanitized_adoption_is_symmetric(self):
+        """A Plane-side project named with hyphens (pre-fix create, or
+        out-of-band) matches a space-separated Ensemble query the same
+        way — sanitize is applied to BOTH sides."""
+        projects = [{"id": "p7", "name": "agents-ensemble"}]
+        assert _find_plane_id_by_name(projects, "agents ensemble") == "p7"
+
+    def test_sanitized_adoption_case_insensitive_after_sanitize(self):
+        projects = [{"id": "p5", "name": "Agents Ensemble"}]
+        assert _find_plane_id_by_name(projects, "AGENTS-ENSEMBLE") == "p5"
+
+    def test_empty_plane_name_never_false_matches_fallback(self):
+        """A Plane row with an empty name is SKIPPED — its sanitized
+        form would be the non-empty fallback constant, which must not
+        adopt for a query that sanitizes to that same fallback."""
+        projects = [{"id": "p1", "name": ""}, {"id": "p2", "name": None}]
+        # "+++" sanitizes to empty → fallback "Ensemble Project"; the
+        # empty-named rows must NOT match it.
+        assert _find_plane_id_by_name(projects, "+++") is None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Class 9: TestPlaneSyncServiceSync

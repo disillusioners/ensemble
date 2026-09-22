@@ -30,14 +30,17 @@ from __future__ import annotations
 import os
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from daemon.clients.plane_http_client import (
     PlaneAPIError,
     PlaneAuthError,
+    PlaneHttpClient,
     PlaneIdentifierCollisionError,
     PlaneNotFoundError,
     _env,
     derive_plane_identifier,
+    sanitize_plane_name,
 )
 
 
@@ -269,3 +272,133 @@ class TestErrorHierarchy:
     def test_not_found_error_is_a_plane_api_error(self):
         err = PlaneNotFoundError("404", status_code=404)
         assert isinstance(err, PlaneAPIError)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Name sanitization (prod hot-fix 2026-09-22)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSanitizePlaneName:
+    """``sanitize_plane_name`` — Plane REJECTS project names containing
+    characters outside ``[A-Za-z0-9 _]`` with HTTP 400
+    ``{"non_field_errors":["Project name cannot contain special
+    characters."]}`` (live-probed against plane.ensem.dev 2026-09-22:
+    hyphen → 400, space → 201, underscore → 201, parens/unicode → 400).
+    Ensemble names are commonly hyphenated (``agents-ensemble``), so
+    every raw-name create 400'd and the boot sweep cycled.
+
+    Pinned semantics: disallowed char RUNS collapse to a single space;
+    ends stripped; empty input → deterministic fallback
+    ``"Ensemble Project"``; output idempotent + deterministic.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            # The prod-bug shape: hyphenated ensemble name.
+            ("agents-ensemble", "agents ensemble"),
+            ("data-center-scripts", "data center scripts"),
+            # Underscore and space are Plane-ACCEPTED → preserved.
+            ("probe_under_score_del", "probe_under_score_del"),
+            ("LLM Proxy", "LLM Proxy"),
+            # Disallowed runs collapse to ONE space (no double-space).
+            ("a--b (c) d", "a b c d"),
+            # Non-ASCII letters each become a space; interior ASCII
+            # letters survive ("ünï" → " n " → "n").
+            ("probe (paren) ünï d", "probe paren n d"),
+            # Ends stripped even when the raw starts/ends disallowed.
+            ("-agents-", "agents"),
+            # Tabs/newlines are disallowed chars → single space.
+            ("a\tb\nc", "a b c"),
+        ],
+    )
+    def test_matrix(self, raw, expected):
+        assert sanitize_plane_name(raw) == expected
+
+    def test_clean_name_is_noop(self):
+        """Names already in the accepted set pass through unchanged —
+        guarantees existing all-clean adoption targets keep matching."""
+        for name in ("Ensemble", "NEA", "LLM Proxy", "Dashboard Frontend",
+                     "yedda_raw_data"):
+            assert sanitize_plane_name(name) == name
+
+    @pytest.mark.parametrize("raw", ["", "   ", "---", "()[]{}", "üï"])
+    def test_empty_result_falls_back_deterministically(self, raw):
+        """Empty / all-disallowed input → the SAME fixed fallback every
+        time (retries must converge to one Plane name, not flip-flop)."""
+        assert sanitize_plane_name(raw) == "Ensemble Project"
+
+    def test_deterministic(self):
+        samples = ["agents-ensemble", "", "a--b", "Yedda Dashboard Provider"]
+        for s in samples:
+            assert sanitize_plane_name(s) == sanitize_plane_name(s)
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["agents-ensemble", "a -- b", "", "---", "x (y) z", "ünï"],
+    )
+    def test_idempotent(self, raw):
+        """``sanitize(sanitize(x)) == sanitize(x)`` — output alphabet is
+        a subset of the accepted set, so a second pass is a no-op. This
+        is what makes create-then-update / retry flows converge."""
+        once = sanitize_plane_name(raw)
+        assert sanitize_plane_name(once) == once
+
+
+class TestClientWireNameSanitized:
+    """Touchpoint (a): the create/update PAYLOAD ``name`` is sanitized
+    at the client boundary — the raw Ensemble name must never reach the
+    wire, or Plane 400s (the exact prod failure).
+
+    ``description`` is deliberately forwarded VERBATIM: its validation
+    behavior was not independently pinned by the probes (the 400 body
+    was name-driven ``non_field_errors``), so we do not sanitize what
+    we have not proven Plane rejects.
+    """
+
+    def _client(self):
+        breaker = MagicMock(
+            can_execute=AsyncMock(return_value=True),
+            record_success=AsyncMock(),
+            record_failure=AsyncMock(),
+        )
+        client = PlaneHttpClient(
+            base_url="https://plane.test/api/v1/workspaces/nea/projects/",
+            api_key="test-key-value",
+            workspace_slug="nea",
+            breaker=breaker,
+        )
+        client._request = AsyncMock(return_value={"id": "plane-1"})
+        return client
+
+    @pytest.mark.asyncio
+    async def test_create_payload_name_is_sanitized(self):
+        client = self._client()
+        await client.create_project(
+            name="agents-ensemble", description="d", identifier="AGENTS"
+        )
+        body = client._request.await_args.kwargs["json_body"]
+        assert body["name"] == "agents ensemble"
+        assert body["identifier"] == "AGENTS"
+
+    @pytest.mark.asyncio
+    async def test_update_payload_name_is_sanitized(self):
+        """The UPDATE path (linked projects' steady-state sync AND the
+        adoption-path update) sends the same wire field — a raw
+        hyphenated name here 400s identically to create."""
+        client = self._client()
+        await client.update_project("plane-1", name="data-center-scripts")
+        body = client._request.await_args.kwargs["json_body"]
+        assert body["name"] == "data center scripts"
+
+    @pytest.mark.asyncio
+    async def test_description_forwarded_verbatim(self):
+        """Documented disposition: description is NOT sanitized —
+        Plane-side description validation is unproven (probe P4's 400
+        was name-field-driven), so we leave it untouched."""
+        client = self._client()
+        tricky = "special descr (paren) hyphen-x & ünïcode"
+        await client.create_project(name="agents-ensemble", description=tricky)
+        body = client._request.await_args.kwargs["json_body"]
+        assert body["description"] == tricky
+        assert body["name"] == "agents ensemble"

@@ -230,6 +230,42 @@ class TestIsDrift:
         # Plane response omits description entirely.
         assert _is_drift(project, {"name": "Foo"}) is False
 
+    # ── Sanitized-name drift (prod hot-fix 2026-09-22) ──────────────
+
+    def test_sanitized_name_agreement_is_not_drift(self):
+        """THE hot-fix pin: Plane stores the SANITIZED name
+        (``agents-ensemble`` → ``agents ensemble`` — raw hyphens 400 at
+        create/update), so comparing raw-vs-stored would flag perpetual
+        false drift on every hyphenated project. Sanitized-vs-sanitized
+        agreement must read as linked, NOT drift."""
+        project = MagicMock(spec=Project)
+        project.name = "agents-ensemble"
+        project.description = None
+        assert (
+            _is_drift(project, {"name": "agents ensemble", "description": None})
+            is False
+        )
+
+    def test_sanitizer_does_not_blind_real_drift(self):
+        """Sanitizing both sides must not swallow genuine divergence —
+        names that disagree AFTER sanitization still flag drift."""
+        project = MagicMock(spec=Project)
+        project.name = "agents-ensemble"
+        project.description = None
+        assert (
+            _is_drift(project, {"name": "agents ensemble two", "description": None})
+            is True
+        )
+
+    def test_empty_raw_project_name_is_no_info_not_drift(self):
+        """Emptiness is judged on RAW values: an empty Ensemble name has
+        no information to compare, and the sanitizer's non-empty
+        fallback constant must not fabricate a drift signal."""
+        project = MagicMock(spec=Project)
+        project.name = ""
+        project.description = None
+        assert _is_drift(project, {"name": "Foo", "description": None}) is False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # State machine integration (sync_project)
