@@ -17,6 +17,11 @@ Meanwhile the premature-terminal arm of the same fix IS live and working (single
 ## Why the gate missed it
 Phase-D acceptance pack `job_completion_acceptance_test` (29/29 PASS) proves the seam under its own harness (real resolver/repos but tool-layer conditions) — it does not drive the actual streaming-router emission + DB persistence path demo uses. A test that passes while the production path emits null = the acceptance test must be extended to drive the REAL emission path (SSE payload + `event`-table row for a public-API task job).
 
+## Re-confirmed 2026-09-22 (pre-fix evidence, mission 02:21–02:25 UTC)
+Reproduced identically on the same stable lineage (pid 422286, up since Sep 21 16:15:46): job `da13791e…` (kb-writer, system_fifo_queue, completed in 15.32s) → `result_summary=null` + `outcome=null` in record AND terminal event; **0 completion-kind rows in the ENTIRE event table**; zero global notifications; premature-terminal arm fixed (exactly one terminal, co-incident with completed_at). Full evidence: RESULTS/2026-09-22-demo-result-summary-repro.md.
+
+**NEW secondary clue — double observer-finalize:** two `Observer: finalized job …` lines same second, first with `instance_was_terminal=True`, second without. SSE stayed single-shot; no extra DB row. Candidate seam for the fix commission.
+
 ## Lessons
 1. Acceptance packs for event-payload fixes must assert on the REAL emission surface (SSE payload + persisted event row), not only on repository/publisher seams.
 2. Null-valued fields in a terminal event are indistinguishable from "feature absent" — when verifying an event-payload fix, assert each fixed field non-null on the emitted artifact itself.
