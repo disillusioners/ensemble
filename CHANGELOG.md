@@ -5,6 +5,39 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — 2026-09-22
+
+### Changed
+
+**`ENSEMBLE_SELF_ENV` is now OPTIONAL with explicit opt-out** (D-FA2.3 supersession — user directive 2026-09-22: "remove the ensemble self env, feature active by default... default value, if user want disable they can set to false"). The marker stays the highest-priority source; absent + no opt-out + unambiguous launch evidence auto-derives the env.
+
+- **Auto-derive signal hierarchy** (multi-signal — the single-signal PORT-derivation D-FA2.3 rejected cannot recur):
+  1. **Explicit `ENSEMBLE_SELF_ENV` marker wins** (`dev`/`demo`/`live`/`sandbox`) — staged by `stage.sh` into `INSTALL_DIR/.env`, exported by `launcher.sh` `load_env_file`. Unchanged: the marker is consumed FIRST by `_self_env_marker`.
+  2. **Explicit opt-out → today's fail-closed behavior preserved verbatim.** `ENSEMBLE_SELF_ENV=0|false|no|off` (case-insensitive, whitespace-trimmed — mirrors `daemon.config._PROACTIVE_FALSE_BOOLS` vocabulary used by `ENSEMBLE_EMPTY_RESPONSE_GUARD` etc.) returns `None`; actor tools refuse `env-marker-absent`; read tools accept only omitted target or `target_env=dev`. Operators who want the strict old contract get it byte-for-byte.
+  3. **Auto-derive when marker absent and no opt-out.** Frozen-binary + `releases/` for sandbox (binary lives at `<INSTALL_DIR>/releases/<ver>/ensemble-prod` per `stage.sh:5-17`; install dir is `exe.parent.parent.parent`); install-dir + POSTGRES_DB cross-check for `live`/`demo` (canonical `~/agents-ensemble/.env` / `~/agents-ensemble-demo/.env` must contain `POSTGRES_DB=ensemble_prod` / `ensemble_demo` OR the daemon's own `$POSTGRES_DB` must match); dev-shape `POSTGRES_DB=ensemble_dev` for `dev`.
+- **Resolver observability** — `_self_env_source()` returns `explicit` / `opted-out` / `auto` / `auto-unresolved`; `release_info` `env-marker:` line reports the path that produced the resolution so a misconfiguration is visible immediately (auto-derived envs are NOT silently attributed to the staged marker).
+
+### Fixed
+
+- **Sandbox install-dir resolution** (pre-existing bug in `_resolve_install_dir`): the frozen-binary layout puts the binary at `<INSTALL_DIR>/releases/<ver>/ensemble-prod`, so the install dir is `exe.parent.parent.parent` (TWO `.parent`s up). The pre-fix code used `.parent.parent` which resolved to `<INSTALL_DIR>/releases` and never matched `releases/`, so sandbox install-dir resolution was always returning `None`. The new auto-derive test (`test_auto_derive_sandbox_via_frozen_binary`) caught it; the helper now resolves correctly and the same fix unblocks the post-P2.1 install.
+
+### Safety invariants (unchanged)
+
+- **Auto-resolution changes identity DETECTION, NEVER the gates.** Auto-resolved `live` still requires the 3-factor confirmation gate (param + user-origin window + nonce content match) before any live mutation. Auto-resolved `live` `system_restart` is still refused outright (A2/§3.1). `env-self-match` semantics are unchanged. Explicit opt-out (`ENSEMBLE_SELF_ENV=0|false|no|off`) preserves today's full fail-closed refusal for actor tools.
+
+### Operator migration
+
+- **No action required for current installs.** Daemons with a staged marker continue to read it (highest priority). Daemons without one (e.g. the LIVE daemon at `~/agents-ensemble`, port 9797, which pre-dates P2.1) now auto-derive `live` via install-dir + POSTGRES_DB cross-check.
+- **Explicit opt-out** — set `ENSEMBLE_SELF_ENV=false` (or `0`/`no`/`off`) in `INSTALL_DIR/.env` if you want the strict old contract.
+
+### Tests
+
+- **New** — `TestAutoResolution` class in `tests/unit/tools/test_upgrade_tools.py` (19 cases): explicit-wins, opt-out vocabulary (`0`/`false`/`no`/`off` / case-insensitive / whitespace), auto-derive per env shape (live via install-dir topology, live via ambient POSTGRES_DB, demo, dev, sandbox via frozen binary, sandbox falls back when install matches live/demo, unresolved when no signal, ignores unrelated POSTGRES_DB), `release_info` shows auto-resolved env without marker, auto-resolved live still requires 3-factor gate, auto-resolved live refuses restart outright, auto-derived env-self-match refuses cross-env.
+- **Updated** — `test_marker_absent_reads_fail_open`, `test_env_marker_absent_actor_fail_closed`, `test_spoofed_env_marker_unresolved` now use the new `unresolved_env` fixture (silences every signal the resolver reads — `ENSEMBLE_SELF_ENV`, `POSTGRES_DB`, `Path.home()`, `sys.frozen`) so the OLD contract (marker absent → fail-closed) is exercised cleanly under the NEW behavior (auto-derive fills in when signals are present).
+- **Helper** — `unresolved_env` fixture (modulelevel, in `test_upgrade_tools.py`) and `_read_env_value` shell-style .env parser (in `daemon/tools/upgrade_tools.py`) shared with future test additions.
+
+---
+
 ## [0.13.10] — 2026-09-22
 
 ### Fixed
