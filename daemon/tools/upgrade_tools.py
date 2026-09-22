@@ -264,10 +264,40 @@ def _is_opt_out_marker() -> bool:
     ``_PROACTIVE_FALSE_BOOLS`` vocabulary (``daemon.config``). Empty /
     missing is NOT an opt-out (no signal at all → fall through to auto-
     derive); an unrecognized enum value is also NOT an opt-out (treated as
-    spoofed / unresolved by ``_explicit_marker``).
+    garbage / ignored-garbage by ``_self_env_source``).
     """
     raw = _read_marker_value()
     return raw is not None and raw.lower() in _OPT_OUT_FALSES
+
+
+def _is_garbage_marker() -> bool:
+    """Is the marker set to a value that is neither a valid enum NOR an
+    explicit opt-out?
+
+    True when ``_read_marker_value()`` returns a non-None string that fails
+    both ``_explicit_marker()`` (not in VALID_ENVS) AND
+    ``_is_opt_out_marker()`` (not in ``_OPT_OUT_FALSES``). Examples:
+    ``"prod"``, ``"flase"`` (typo), ``"Live"`` / ``"LIVE"`` (wrong case —
+    the explicit enum match is non-normalizing), ``"production"``,
+    ``"demo;live"`` (punct-spoof), unicode look-alikes.
+
+    The garbage case is NOT a refusal signal at the resolver level — the
+    resolver falls through to auto-derivation exactly like the marker-
+    absent case. What it DOES change: the marker-line and the
+    ``env-marker-absent`` refusal text surface the situation
+    factually (the operator DID set a value; it was ignored) rather
+    than silently printing "ABSENT". A WARNING is logged on each tool
+    invocation that classifies the marker so the operator notices
+    the typo in their daemon log.
+    """
+    raw = _read_marker_value()
+    if raw is None:
+        return False
+    if raw in VALID_ENVS:
+        return False
+    if raw.lower() in _OPT_OUT_FALSES:
+        return False
+    return True
 
 
 def _read_env_value(env_file: Path, key: str) -> str | None:
@@ -450,16 +480,46 @@ def _self_env_source() -> str:
       live/demo; dev-shape POSTGRES_DB for dev).
     * ``"auto-unresolved"`` — auto-derivation found no signal (the
       resolver returned None; today's fail-closed contract).
+    * ``"ignored-garbage"`` — operator set the marker to a value that is
+      neither a valid enum NOR an explicit opt-out (typo / wrong case /
+      punct-spoof / unicode). The garbage value was silently discarded;
+      the resolver fell through to auto-derivation. If auto-derivation
+      resolved, ``_self_env_marker`` returns the resolved env (gates
+      apply normally); if auto-derivation found no signal, the resolver
+      returns None (fail-closed preserved). The marker-line and
+      ``env-marker-absent`` refusal text surface the ignored-garbage
+      state so the operator sees WHY the marker they set was not
+      honored.
 
-    Used by the marker-line display so operators can see WHICH path
-    produced the resolution (and whether to expect a marker in
-    ``INSTALL_DIR/.env``).
+    Used by the marker-line display AND the ``env-marker-absent`` refusal
+    text so operators can see WHICH path produced the resolution (and
+    whether to expect a marker in ``INSTALL_DIR/.env``).
+
+    The garbage path emits a WARNING log each call so the typo is
+    visible in the daemon log (this is the only call site that
+    classifies the marker).
     """
-    explicit = _explicit_marker()
-    if explicit is not None:
-        return "explicit"
-    if _is_opt_out_marker():
-        return "opted-out"
+    raw = _read_marker_value()
+    if raw is not None:
+        # Marker is set (post-trim, non-empty). Check the explicit enum
+        # first, then opt-out, then garbage.
+        if raw in VALID_ENVS:
+            return "explicit"
+        if raw.lower() in _OPT_OUT_FALSES:
+            return "opted-out"
+        # Garbage: log once per resolution so the operator sees the
+        # typo in their daemon log. repr() ensures any odd whitespace
+        # / control chars are visible.
+        logger.warning(
+            "ENSEMBLE_SELF_ENV=%r is not a recognized value "
+            "(valid: %s; opt-out: %s) — IGNORED, falling through to "
+            "auto-derivation",
+            raw,
+            "|".join(VALID_ENVS),
+            "|".join(sorted(_OPT_OUT_FALSES)),
+        )
+        return "ignored-garbage"
+    # Marker absent / empty — auto-derive path.
     if _auto_derive_env() is not None:
         return "auto"
     return "auto-unresolved"
@@ -842,13 +902,31 @@ def _marker_line(self_env: str | None) -> str:
     """How the resolver produced the self-env string (D-FA2.3 supersession).
 
     Today the line tells the operator EXACTLY which path the resolver took
-    (explicit marker / opted-out / auto-derived / unresolved) so they can
-    confirm whether to expect a marker in INSTALL_DIR/.env or rely on
-    auto-derivation. Auto-derived envs are valid (gates still apply —
-    env-self-match, live 3-factor, live restart refusal), but they are
-    visibly auto-derived so a misconfiguration surfaces immediately.
+    (explicit marker / opted-out / auto-derived / unresolved / ignored-
+    garbage) so they can confirm whether to expect a marker in
+    INSTALL_DIR/.env or rely on auto-derivation. Auto-derived envs are
+    valid (gates still apply — env-self-match, live 3-factor, live
+    restart refusal), but they are visibly auto-derived so a
+    misconfiguration surfaces immediately.
+
+    Five branches keyed on ``_self_env_source()``:
+
+    * ``explicit`` — marker line prints the staged enum value.
+    * ``auto`` (env resolved from launch evidence) — marker line says
+      "ABSENT" (the marker truly is absent) and attributes the env to
+      multi-signal auto-derivation.
+    * ``opted-out`` — operator set a false value; line tells them the
+      strict-marker contract is preserved verbatim.
+    * ``auto-unresolved`` (no marker, no signal) — line tells them
+      auto-derivation found nothing; dev-context representation.
+    * ``ignored-garbage`` — operator set a typo / wrong-case / spoof
+      value; line prints the IGNORED raw value so the operator can
+      see WHY the marker they set was not honored. Self-env may be
+      resolved (auto-derive succeeded after the garbage was dropped) or
+      unresolved (auto-derive also found no signal) — both rendered.
     """
     source = _self_env_source()
+    raw = _read_marker_value()  # raw trimmed value, None when absent
     if self_env is None:
         if source == "opted-out":
             return (
@@ -856,6 +934,19 @@ def _marker_line(self_env: str | None) -> str:
                 "self-env unresolved, today's env-marker-absent contract "
                 "preserved verbatim)"
             )
+        if source == "ignored-garbage":
+            # Garbage set, no signal: tell the operator what they set
+            # was ignored and why they're still unresolved.
+            return (
+                f"env-marker: ENSEMBLE_SELF_ENV=<{raw}> IGNORED "
+                "(unrecognized value — must be dev|demo|live|sandbox or "
+                "0|false|no|off for opt-out) — auto-derivation found no "
+                "signal (self-env unresolved, dev-context). Read tools "
+                "answer fail-open; actor tools refuse env-marker-absent "
+                "fail-closed. Only target_env omitted or \"dev\" is "
+                "accepted."
+            )
+        # auto-unresolved (no marker, no signal)
         return (
             "env-marker: ENSEMBLE_SELF_ENV ABSENT — auto-derivation found "
             "no signal (self-env unresolved, dev-context). Read tools "
@@ -864,7 +955,19 @@ def _marker_line(self_env: str | None) -> str:
         )
     if source == "explicit":
         return f"env-marker: ENSEMBLE_SELF_ENV={self_env} (staged marker — D-FA2.3)"
-    # self-env is non-None and source is "auto".
+    if source == "ignored-garbage":
+        # Garbage set, but auto-derive succeeded: tell the operator the
+        # garbage was ignored AND which env the resolver fell back to.
+        return (
+            f"env-marker: ENSEMBLE_SELF_ENV=<{raw}> IGNORED "
+            "(unrecognized value — must be dev|demo|live|sandbox or "
+            "0|false|no|off for opt-out) — auto-derived self-env="
+            f"{self_env} (multi-signal resolution: frozen-binary + "
+            "releases/ for sandbox; install-dir + POSTGRES_DB cross-check "
+            "for live/demo; dev-shape POSTGRES_DB for dev). All gates "
+            "apply normally."
+        )
+    # source == "auto" (env resolved from launch evidence)
     return (
         f"env-marker: ENSEMBLE_SELF_ENV ABSENT — auto-derived self-env="
         f"{self_env} (multi-signal resolution: frozen-binary + releases/ "
@@ -1037,6 +1140,58 @@ def _refusal(label: str, reason: str, message: str) -> str:
     return f"Error: {label} REFUSED — reason={reason}: {message}"
 
 
+def _env_marker_absent_hint(source: str) -> str:
+    """State-specific refusal hint for ``env-marker-absent``.
+
+    Branched on ``_self_env_source()`` so the hint matches the operator's
+    actual situation — the rejection is the SAME token in every case
+    (the fail-closed contract is preserved verbatim — the tool cannot
+    resolve the env), but the remediation hint differs because the
+    operator's next step differs. Without this branching the refusal
+    text would say "no opt-out via false" even when the operator DID
+    opt out, which misdirects them. Three branches (the ``explicit``
+    case is unreachable here — a valid marker means self_env resolved
+    and we never enter the refusal path).
+    """
+    if source == "opted-out":
+        return (
+            "self-env unresolved — operator explicitly opted out via "
+            "ENSEMBLE_SELF_ENV=0|false|no|off (case-insensitive, "
+            "whitespace-trimmed). Today's strict-marker contract preserved "
+            "verbatim; actor tools refuse fail-closed. To re-enable: "
+            "remove the opt-out and either set ENSEMBLE_SELF_ENV to "
+            "dev|demo|live|sandbox (explicit) OR unset the marker so "
+            "auto-derivation can resolve from launch evidence "
+            "(frozen-binary + releases/ for sandbox; install-dir + "
+            "matching POSTGRES_DB for live/demo; POSTGRES_DB=ensemble_dev "
+            "for dev)."
+        )
+    if source == "ignored-garbage":
+        return (
+            "self-env unresolved — ENSEMBLE_SELF_ENV was set to a value "
+            "that is neither dev|demo|live|sandbox nor an opt-out "
+            "(0|false|no|off). The garbage value was IGNORED (a WARNING "
+            "was logged with the raw value); auto-derivation found no "
+            "signal. Actor tools refuse fail-closed. Fix: set "
+            "ENSEMBLE_SELF_ENV to one of dev|demo|live|sandbox "
+            "(explicit), unset it (auto-derive from launch evidence), "
+            "OR set it to 0|false|no|off (opt-out of auto-derivation)."
+        )
+    # source == "auto-unresolved" — no marker, no opt-out, no signal
+    return (
+        "self-env unresolved (no ENSEMBLE_SELF_ENV marker, no opt-out, "
+        "and no auto-derivation signal) — actor tools refuse fail-closed "
+        "(S-31/D-FA2.3). Set ENSEMBLE_SELF_ENV=dev|demo|live|sandbox "
+        "explicitly, OR opt in to auto-derivation by leaving "
+        "ENSEMBLE_SELF_ENV unset and ensuring the launch evidence is "
+        "unambiguous (frozen-binary + releases/ for sandbox; install-dir "
+        "+ matching POSTGRES_DB for live/demo; POSTGRES_DB=ensemble_dev "
+        "for dev). PORT-derivation is deliberately NOT attempted "
+        "(D-FA2.3; multi-signal auto-derive supersedes it without "
+        "single-signal fragility)."
+    )
+
+
 def _actor_env_gate(
     label: str, target_env: str | None
 ) -> tuple[str | None, Path | None, str | None]:
@@ -1045,7 +1200,10 @@ def _actor_env_gate(
 
     1. enum validation (invalid-target-env)
     2. staged-marker resolution — absent → env-marker-absent (S-31:
-       ACTOR tools fail-closed; the read pair answers fail-open)
+       ACTOR tools fail-closed; the read pair answers fail-open). The
+       refusal hint is branched on ``_self_env_source()`` so the
+       operator sees the right remediation for THEIR state (opt-out,
+       garbage, or auto-unresolved).
     3. self-match (env-self-match) — BEFORE any live-gate logic, so a
        cross-env attempt can never reach the live branch.
     """
@@ -1060,16 +1218,7 @@ def _actor_env_gate(
         return None, None, _refusal(
             label,
             "env-marker-absent",
-            "self-env unresolved (no ENSEMBLE_SELF_ENV marker, no opt-out "
-            "via false, and no auto-derivation signal) — actor tools "
-            "refuse fail-closed (S-31/D-FA2.3). Set ENSEMBLE_SELF_ENV="
-            "<dev|demo|live|sandbox> explicitly, OR opt in to auto-"
-            "derivation by leaving ENSEMBLE_SELF_ENV unset and ensuring "
-            "the launch evidence is unambiguous (frozen-binary + "
-            "releases/ for sandbox; install-dir + matching POSTGRES_DB for "
-            "live/demo; POSTGRES_DB=ensemble_dev for dev). PORT-derivation "
-            "is deliberately NOT attempted (D-FA2.3; multi-signal "
-            "auto-derive supersedes it without single-signal fragility).",
+            _env_marker_absent_hint(_self_env_source()),
         )
     if target_env != self_env:
         return None, None, _refusal(
