@@ -667,6 +667,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "infra_type_list",
     "infra_type_register",
     "inner_soul",
+    "job_answer",
     "job_cancel",
     "job_continue",
     "job_create",
