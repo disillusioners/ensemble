@@ -5,6 +5,32 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.11] — 2026-09-22
+
+### Added — Mid-flight question/answer channel (`feature/midflight-qa-channel`, merge `ca4ab125`)
+
+Questions asked mid-flight (`ask_questions`) now surface to the job watcher / orchestrator over the existing push lanes, the human's answer routes back through a new job-addressed HTTP endpoint, and non-blocking `mid_flight_report` progress events ride the same substrate. Event-driven only — no polling introduced anywhere. Resolves the `ask_questions` pause deadlock (incident 1) and adds a one-shot wedge guard (incident 2) so paused chains surface the ask rather than sitting silent.
+
+- **New watchable event statuses** (`question requested ❓`, `answer received ✓`, `mid-flight report ⟳`, `stuck awaiting answer ⏳`) — all NON-terminal: watcher rows survive for the eventual terminal event. `watch_job` accepts them in `events=[...]`; the job-orchestration skill's status action table documents the relay flow.
+- **New agent tool** `mid_flight_report(summary, details, level, decision_required)` — opt-in via `tools.allow: ["midflight"]` (enabled on leader / developer / coder / tester / devops). Emits a `MIDFLIGHT_REPORT` event (EventBus + FE banner + `[JOB_EVENT]` to watchers) WITHOUT pausing.
+- **New answer endpoint** `POST /api/jobs/{work_id}/answer` — the orchestrator relay path. Resolves `work_id → instance` via the WorkResolver (watcher-independent) and delegates to the shared answer helper. Body: `{"answers": {...}, "question_pack_id": "...", "resume_message": "..."}`.
+- **Wedge guard** — a finite one-shot chain (3 emissions, 30 min apart) of future-dated `heartbeat_emit_stuck` Task rows re-emits `stuck_awaiting_answer` while an asker stays paused awaiting an answer; at the 3rd emission (~60 min) the guard terminates the asker and broadcasts an operator escalation via NotificationBroadcaster. The claim gate gained a type-scoped carve-out so the one-shot is claimable while the asker is PAUSED (no seq-scan degradation, no UNION reshape).
+- **Answer-path hardening (both answer surfaces)** — `POST /api/instances/{id}/answer` and the new job-addressed route share one helper with a tightened, exactly-once contract: duplicate answers are a 200 no-op (CAS loses the second), stale `question_pack_id` mismatches are rejected 400, and a **BREAKING** 410 `ANSWER_TARGET_TERMINAL` replaces the silent revive of a finished instance (FE wizard: no impact — non-optimistic, error-toast driven). Error-code relabeling (404 `NO_PENDING_QUESTION` / 410 `QUESTION_PACK_LOST` / 410 `ANSWER_TARGET_TERMINAL`).
+- **Durability** — question packs are shadowed into `instance_metadata` (`question_pack_id` + payload) at ask time and rehydrated at boot; answers survive daemon restarts (410 `QUESTION_PACK_LOST` only when both copies are gone).
+
+### Changed — `ENSEMBLE_SELF_ENV` auto-resolution (`feature/openspace-mcp-integration`, merge `1b3f0795`)
+
+`ENSEMBLE_SELF_ENV` is now OPTIONAL with explicit opt-out (D-FA2.3 supersession — user directive 2026-09-22). The marker is the highest-priority source; absent + no opt-out + unambiguous launch evidence auto-derives the env. Explicit marker still wins, explicit opt-out (`false`/`0`/`no`/`off`) preserves today's fail-closed byte-for-byte, and auto-resolved envs still pass through every live-rung gate unchanged.
+
+- **Auto-derive signal hierarchy** (multi-signal — single-signal PORT-derivation D-FA2.3 cannot recur): explicit marker wins → explicit opt-out returns `None` (actor tools refuse `env-marker-absent`, read tools accept only `target_env=dev`) → absent marker + no opt-out → frozen-binary + `releases/` for sandbox (`exe.parent.parent.parent`); install-dir + `POSTGRES_DB` cross-check for `live`/`demo` (canonical `~/agents-ensemble` / `~/agents-ensemble-demo` `.env` must contain `ensemble_prod` / `ensemble_demo`); dev-shape `POSTGRES_DB=ensemble_dev` for `dev`.
+- **Resolver observability** — `_self_env_source()` returns `explicit` / `opted-out` / `auto` / `auto-unresolved` / `ignored-garbage`; `release_info` `env-marker:` line reports the path that produced the resolution. Garbage markers (e.g. `prod`, `flase`, `Live`) are NOT silently attributed to the staged marker — they show the IGNORED raw value with a WARNING in the daemon log.
+- **Sandbox install-dir resolution fix** — pre-existing bug in `_resolve_install_dir` used `.parent.parent` (resolved to `<INSTALL_DIR>/releases` and never matched `releases/`); now `.parent.parent.parent` (binary at `<INSTALL_DIR>/releases/<ver>/ensemble-prod`). Same fix unblocks the post-P2.1 install.
+- **Refusal text branched on source state** (S1) — `opted-out` points at removing the opt-out; `ignored-garbage` points at valid forms / opt-out / unset; `auto-unresolved` points at explicit marker or unambiguous launch evidence. Fail-closed contract (refusal token `env-marker-absent`) unchanged.
+- **Safety invariants unchanged** — auto-resolution changes identity DETECTION, NEVER the gates. Auto-resolved `live` still requires the 3-factor confirmation gate (param + user-origin window + nonce content match) before any live mutation. Auto-resolved `live` `system_restart` is still refused outright (A2/§3.1). `env-self-match` semantics unchanged. Explicit opt-out preserves the full fail-closed refusal for actor tools.
+- **Operator migration** — no action required for current installs (daemons with a staged marker continue reading it; daemons without one — e.g. the LIVE daemon at `~/agents-ensemble`, port 9797 — auto-derive `live` via install-dir + POSTGRES_DB cross-check). Set `ENSEMBLE_SELF_ENV=false` to land the strict old contract. Multi-install hosts: a dev daemon picking up ambient `POSTGRES_DB=ensemble_prod` OR a leftover `~/agents-ensemble/.env` will now auto-derive `live` — fail-closed (gates apply), but the resolved env IS `live`. Set explicit `ENSEMBLE_SELF_ENV=dev` to stay `dev`.
+
+---
+
 ## [Unreleased] — 2026-09-22
 
 ### Changed
