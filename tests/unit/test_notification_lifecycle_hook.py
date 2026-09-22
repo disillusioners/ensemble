@@ -118,6 +118,20 @@ class TestRootInstanceNotification:
             status="COMPLETED",
             project_id="project-123",
             instance_name="Spawned Developer",
+            # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22,
+            # Item 3c): the EventPublisherService now threads
+            # ``result_summary`` through ``emit_root_completion`` so
+            # the global ``/api/notifications/stream`` SSE
+            # notification frame carries the agent's last assistant
+            # message. The new kwarg defaults to ``None`` when the
+            # caller omits it (backward-compatible), and the
+            # broadcaster only adds the field to the broadcast dict
+            # when not ``None``. This assertion uses
+            # ``assert_awaited_once_with`` which is kwarg-EXACT —
+            # the new kwarg must be enumerated explicitly here, or
+            # the test fails with "expected kwargs not found" on the
+            # post-fix signature.
+            result_summary=None,
         )
 
     @pytest.mark.asyncio
