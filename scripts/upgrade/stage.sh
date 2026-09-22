@@ -17,7 +17,16 @@
 #
 # NO `.env` EVER inside the release dir (ADR-014/m6) — the env marker
 # ENSEMBLE_SELF_ENV=<dev|demo|live|sandbox> is staged into INSTALL_DIR/.env
-# (D-FA2.3 RATIFIED — P2.2's env self-match consumes this marker).
+# (D-FA2.3 RATIFIED). The marker stays the HIGHEST-PRIORITY signal — the
+# tool layer reads it first (P2.2 env self-match consumes it). 2026-09-22
+# supersession (user directive): the marker is OPTIONAL with explicit
+# opt-out; a marker-absent daemon auto-derives the env from launch
+# evidence (multi-signal — frozen-binary + releases/ for sandbox;
+# install-dir + POSTGRES_DB cross-check for live/demo; dev-shape
+# POSTGRES_DB for dev). Stage.sh still stages the marker so the
+# operator's staging intent overrides any ambient host evidence
+# (e.g. the LIVE daemon at port 9797 which pre-dates P2.1 had no
+# marker; re-staging now seeds the explicit marker on a fresh promote).
 #
 # NO FLIP: staging never touches `current` (that is promote.sh).
 #
@@ -328,7 +337,18 @@ journal_init
 # longer describes it (the operator explicitly rebuilt + re-verified it)
 journal_quarantine_clear "$VERSION"
 
-# ── ENSEMBLE_SELF_ENV marker → INSTALL_DIR/.env (D-FA2.3; NEVER in release) ─
+# ── ENSEMBLE_SELF_ENV marker → INSTALL_DIR/.env (D-FA2.3; HIGHEST-PRIORITY) ─
+#
+# 2026-09-22 supersession: the marker is OPTIONAL (operator opt-out via
+# ``ENSEMBLE_SELF_ENV=0|false|no|off`` preserves today's fail-closed
+# contract verbatim). Auto-derivation (frozen-binary + releases/ for
+# sandbox; install-dir + POSTGRES_DB cross-check for live/demo; dev-
+# shape POSTGRES_DB for dev) covers installs that never had a marker
+# (e.g. the LIVE daemon at port 9797 which pre-dates P2.1). Stage.sh
+# still stages the marker so an explicit staging intent overrides any
+# ambient host evidence AND so older daemons pick it up on the next
+# stage. The marker is consumed first by ``_self_env_marker`` (P2.2
+# tool layer).
 ENV_FILE="$INSTALL_DIR/.env"
 MARKER="ENSEMBLE_SELF_ENV=$UP_TARGET"
 if [ -f "$ENV_FILE" ]; then
