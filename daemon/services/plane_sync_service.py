@@ -112,6 +112,7 @@ from daemon.clients.plane_http_client import (
     PlaneIdentifierCollisionError,
     PlaneNotFoundError,
     derive_plane_identifier,
+    sanitize_plane_name,
 )
 from daemon.constants import (
     PLANE_ATTEMPT_COUNT_METADATA_KEY,
@@ -1237,14 +1238,27 @@ def _find_plane_id_by_name(
 ) -> str | None:
     """Return the first Plane project ID whose ``name`` matches, case-insensitive.
 
+    BOTH sides are passed through :func:`sanitize_plane_name` before
+    comparison: Plane stores the SANITIZED form of the Ensemble name
+    (e.g. ``agents-ensemble`` → ``agents ensemble`` — hyphens are
+    rejected with HTTP 400), so matching raw-vs-Plane-side names would
+    never match for hyphenated projects → duplicate-create attempts on
+    every sync. Sanitizing both sides makes the adoption lookup agree
+    with what create/update actually store.
+
     Defensive against missing ``id``/``name`` keys — Plane's API is not
-    strictly typed and we should not crash on a shape mismatch.
+    strictly typed and we should not crash on a shape mismatch. Projects
+    with empty/missing names are skipped (their sanitized form would be
+    the non-empty fallback constant, which must never false-match).
     """
     if not name:
         return None
-    target = name.strip().lower()
+    target = sanitize_plane_name(name).strip().lower()
     for proj in plane_projects:
-        proj_name = (proj.get("name") or "").strip().lower()
+        raw_name = str(proj.get("name") or "")
+        if not raw_name.strip():
+            continue
+        proj_name = sanitize_plane_name(raw_name).strip().lower()
         if proj_name == target:
             pid = proj.get("id")
             if pid is not None:
@@ -1307,18 +1321,32 @@ def _is_drift(project: Project, plane_response: dict[str, Any]) -> bool:
     cosmetic edits (capitalization, trailing whitespace) do not flag
     drift.
 
+    Name comparison is done on SANITIZED forms (:func:`sanitize_plane_name`):
+    Plane stores the sanitized name (hyphens etc. are rejected with
+    HTTP 400 at create/update), so comparing the raw Ensemble name
+    against the stored Plane name would flag perpetual false drift on
+    every hyphenated project — each corrective sync would rewrite the
+    same sanitized value and re-flag drift forever. Sanitizing both
+    sides compares like-for-like.
+
     Returns True when the row has drifted; False when the fields
     agree OR when Plane's response carries no information to compare.
     """
     if not plane_response:
         return False
-    # Name check — only fire if BOTH sides have a non-empty value.
+    # Name check — only fire if BOTH sides have a non-empty RAW value.
+    # (Emptiness is judged on the raw values so the sanitizer's
+    # non-empty fallback constant can't fabricate a comparison where
+    # one side has no name at all.)
     plane_name_raw = plane_response.get("name")
     if plane_name_raw is not None:
-        plane_name = str(plane_name_raw).strip().lower()
-        ens_name = (project.name or "").strip().lower()
-        if plane_name and ens_name and plane_name != ens_name:
-            return True
+        plane_name_str = str(plane_name_raw).strip()
+        ens_name_str = (project.name or "").strip()
+        if plane_name_str and ens_name_str:
+            plane_name = sanitize_plane_name(plane_name_str).lower()
+            ens_name = sanitize_plane_name(ens_name_str).lower()
+            if plane_name != ens_name:
+                return True
     # Description check — same rule. Absence on Plane side is "no info".
     plane_desc_raw = plane_response.get("description")
     if plane_desc_raw is not None:
