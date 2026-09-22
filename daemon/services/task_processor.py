@@ -960,10 +960,30 @@ class ProcessMessageProcessor(BaseProcessor):
             # already won the status=running guard (e.g. stale recovery
             # raced us); skipping the notify in that branch is what
             # gives us exactly-once notifications.
+            #
+            # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
+            # the durable home for the agent's last assistant message
+            # is ``Task.result`` (the JobItem ``result_summary`` /
+            # ``error_message`` mirror columns were dropped in Phase 5
+            # Batch 2 — commit 41633433 — and writes to those names
+            # are stripped at the JobRepository layer). The producer
+            # here stamps the pipeline's ``ProcessingResult.result_content``
+            # under the canonical ``content`` key so the dual-backed
+            # resolver (``work_resolver._job_to_record``) can surface it
+            # via ``_parse_task_result_summary(task)`` on the next read.
+            # The OBSERVER-side pre-fetch (``_get_last_assistant_message_raw``
+            # at job_feedback_observer.py:1540-1544) still runs and
+            # remains the source for the JOB_COMPLETED event row and
+            # the global notification — this ``content`` key is the
+            # producer→consumer path that surfaces through the resolver.
             completed_task = await asyncio.to_thread(
                 task_repo.complete_task,
                 task_id,
-                {"success": True, "message_id": message_id},
+                {
+                    "success": True,
+                    "message_id": message_id,
+                    "content": result.result_content,
+                },
             )
             if (
                 completed_task is not None
