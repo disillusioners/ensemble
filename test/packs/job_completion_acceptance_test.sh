@@ -93,11 +93,15 @@ cd "$PROJECT_DIR"
 # section; this acceptance set is xdist-sensitive).
 # Self-timer (Layer 2): 280s
 # Caller wraps `timeout 300` (Layer 1) per PACKS.md dual-layer pattern.
+# ``EXIT_CODE=0; ... || EXIT_CODE=$?`` mirrors the Intent5 wrap at :131-134 —
+# closes the set -euo pipefail trap (a bare failing pytest terminates the
+# shell before the verdict logic at :153-156 runs, so the mock-FAIL and
+# TIMEOUT verdict lines become unreachable dead code).
+EXIT_CODE=0
 timeout 280s .venv/bin/pytest \
   tests/job_queue/test_job_result_summary_and_gate.py \
   tests/job_queue/test_round2_council_fixes.py \
-  -v --override-ini="addopts=" --tb=short -q 2>&1
-EXIT_CODE=$?
+  -v --override-ini="addopts=" --tb=short -q 2>&1 || EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"
   exit 124
