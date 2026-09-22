@@ -1,22 +1,40 @@
 """Job queue management tools for LangGraph agents.
 
-Size/seam note (M3 fix round, 2026-09-03, ``feature/mission-class``):
-this module is 2,300+ lines and hosts BOTH the LangGraph ``@tool``
-wrappers AND significant non-tool logic (the legacy ``list_jobs``
-fallback, the watch-job immediate-notify branch, the mission-tool
-opt-in helper, the WC-wake enqueue toggle resolver). Future work
-should consider splitting into:
+Size/seam note (M3 fix round, 2026-09-03, ``feature/mission-class``;
+size refresh 2026-09-22, ``feature/job-answer-tool`` M-tidier pass):
+this module is 3,321 lines (was 2,300+ when the note was authored)
+and hosts BOTH the LangGraph ``@tool`` wrappers AND significant
+non-tool logic (the legacy ``list_jobs`` fallback, the watch-job
+immediate-notify branch, the mission-tool opt-in helper, the WC-wake
+enqueue toggle resolver, and the answer-tool HTTPException →
+error-string shaper). Future work should consider splitting into:
 
 * ``job_queue_tools.py`` — the LangGraph ``@tool`` surface only
   (the ``@register_tool_category`` entries).
 * ``job_queue_runtime.py`` — the legacy ``list_jobs`` resolver,
-  watch-job notify branches, mission opt-in helper.
+  watch-job notify branches, mission opt-in helper, answer-tool
+  error shaper.
+
+First extraction slice (action-anchored, 2026-09-22
+``feature/job-answer-tool`` M-tidier round): ``_format_answer_http_error``
+(``daemon/tools/job_queue.py:733-825``) — the HTTPException-to-error-
+string shaper used by the ``job_answer`` tool — has no production
+dependency on the rest of this module's state and is the cleanest
+first extraction target. Move to a new ``daemon/tools/_answer_runtime.py``
+beside its producer in ``daemon/routers/`` so the helper can also be
+unit-tested without the full ``create_job_tools`` factory. Extraction
+is a FOLLOW-UP PR; the docstring anchors the slice so the next refactor
+pass has an unambiguous starting point.
 
 The tool surface (additive through M3 — no removal):
 job_create, job_get, job_list, job_cancel, job_retry, watch_job,
 watch_jobs, plus the M2 mission-side get_mission / await_mission
 / list_mission helpers (re-exported from
-``daemon.tools.missions``).
+``daemon.tools.missions``). The ``job_answer`` tool joins the surface
+via ``create_job_tools`` (appended at END, ``feature/job-answer-tool``,
+2026-09-22) — agent-facing counterpart of
+``POST /api/jobs/{work_id}/answer``; both surfaces share the SAME
+underlying helper (``daemon/routers/answer_helper.py``).
 
 Toolset reshape (2026-09-19, ``feature/mission-watch-toolset``):
 ``watch_mission`` joins the surface via the standalone
@@ -610,9 +628,15 @@ Returns:
         the pending pack id and retry.
       * ``404 JOB_NOT_FOUND: ...`` — ``work_id`` does not resolve to
         any task or job; the work is unknown to the daemon.
-      * ``404 INSTANCE_NOT_FOUND / NO_PENDING_QUESTION: ...`` — the
-        instance exists but has no pending pack. Hint: for completed
-        instances use ``job_continue`` instead.
+      * ``404 INSTANCE_NOT_FOUND: ...`` — the resolved ``instance_id``
+        is UNKNOWN to the manager (the work_id → instance_id resolver
+        returned a row but the manager's instance repository does not
+        know it). The work is reachable from the job surface but the
+        asker is not; the answer cannot be routed. Hint: re-fetch the
+        work_id and confirm the instance still exists.
+      * ``404 NO_PENDING_QUESTION: ...`` — the instance exists but has
+        no pending pack. Hint: for completed instances use
+        ``job_continue`` instead.
       * ``410 ANSWER_TARGET_TERMINAL: ...`` — asker reached a terminal
         state while the question was pending; the answer cannot be
         delivered (no silent-revive — leader decision 1).
@@ -628,6 +652,14 @@ Returns:
         substring in that case.
       * ``Access denied: job does not belong to caller's project`` —
         project-scoped check refused.
+
+Tool gate is stricter than HTTP ``/api/jobs/{work_id}/answer`` route:
+the tool requires non-empty ``answers`` + non-empty ``question_pack_id``
+and rejects them up-front; the HTTP route leniently defaults both
+(deliberate posture — a non-tool caller can still POST partial bodies
+without the strict gate, but the agent surface commits to the strict
+shape so a downstream agent never sees a partial-pack error string it
+did not actually trigger).
 
 Example:
     job_answer(
