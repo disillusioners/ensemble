@@ -29,6 +29,7 @@ from daemon.repositories.job_queue.models import AdmissionState, Decision
 from daemon.repositories.task.models import TaskStatus
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_state_machine import InvalidTransitionError
+from daemon.services.mission_live_guard import evaluate_mission_live
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc_naive
 from daemon.services.pool_orchestrator import safe_notify_all_pools
 
@@ -2848,6 +2849,70 @@ class JobRecoveryService:
                             "reason": age_floor_reason,
                         })
                         continue
+                    # ── Gate 4: mission-live guard (2026-09-22) ──
+                    # For task-type LEADER jobs, ``JobItem ACTIVE +
+                    # per-turn Task COMPLETED`` is a LEGITIMATE
+                    # mid-mission shape: child_reports defers the
+                    # JobItem finalize behind still-running children
+                    # (the 2026-09-22 events 79328/79349 false
+                    # ``completed ✓`` class — f2 force-finalized a
+                    # deferred leader and the F10 notify arm
+                    # CAS-deleted the mission watcher row). The
+                    # guard consults mission liveness (bus pending,
+                    # permanent instance-tree walk — root + each
+                    # descendant — against the canonical terminal
+                    # set; ``idle`` counts live per the mission
+                    # resolver's IDLE → ``processing`` mapping) and
+                    # SKIPs finalize + notify while the mission is
+                    # live. The zombie backstop (completed_at older
+                    # than ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``)
+                    # falls through so at-least-once terminal
+                    # delivery is preserved even against stuck
+                    # children. Internal guard errors fail OPEN
+                    # (finalize proceeds) — a missing terminal is
+                    # worse than an extra premature one.
+                    mission_verdict = await evaluate_mission_live(
+                        instance_repository=self._instance_repository,
+                        instance_id=instance_id,
+                        task_completed_at=task_completed_at,
+                        # Leg (a): Gate 1 already computed the bus
+                        # pending count for this task; pass it so the
+                        # guard's bus leg agrees with the gate seam.
+                        bus_pending_count=bus_pending_count,
+                    )
+                    if mission_verdict.live:
+                        details.append({
+                            "pattern": (
+                                "orphan_active_skipped_mission_live"
+                            ),
+                            "job_id": job_id,
+                            "task_id": task_id,
+                            "instance_id": instance_id,
+                            "reason": (
+                                f"mission-live guard: {mission_verdict.reason} "
+                                f"— JobItem left ACTIVE (correct-by-design "
+                                f"while the mission defers pending "
+                                f"children); finalize + notify skipped, "
+                                f"watcher rows untouched this sweep"
+                            ),
+                        })
+                        logger.info(
+                            f"reconcile_drift_states: Pattern (f2) "
+                            f"skip — mission-live guard holds JobItem "
+                            f"{job_id[:8]}... (task {task_id}, instance "
+                            f"{instance_id[:8]}...): "
+                            f"{mission_verdict.reason}"
+                        )
+                        continue
+                    if mission_verdict.error or mission_verdict.timed_out:
+                        logger.warning(
+                            f"reconcile_drift_states: Pattern (f2) "
+                            f"mission-live guard opened the finalize "
+                            f"door for job {job_id[:8]}... "
+                            f"(error={mission_verdict.error}, "
+                            f"timed_out={mission_verdict.timed_out}): "
+                            f"{mission_verdict.reason}"
+                        )
                     f2_ok, f2_reason = await self._pattern_f_finalize_done(
                         job=self._job_repository,
                         lock=self._lock_repository,

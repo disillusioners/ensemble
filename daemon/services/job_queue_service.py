@@ -30,6 +30,7 @@ from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.task.models import TaskStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
+from daemon.services.mission_live_guard import evaluate_mission_live
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.services.work_notifier import _format_status_display, notify_work_watchers
 from daemon.services.work_status import (
@@ -514,12 +515,108 @@ class JobQueueService:
                 continue
             if not _work_status_is_terminal(record.status):
                 continue
+            # ── Mission-live guard (2026-09-22 parity with the drift
+            # f2 gate) ─────────────────────────────────────────────
+            # A mission-keyed (``mission_terminal``) watch on a
+            # task-kind job whose work row settled must NOT fire a
+            # terminal while the mission behind it is still live —
+            # ``notify_watchers`` fires the event AND CAS-claims /
+            # removes the watcher row, so a premature fire here is a
+            # lost mission_terminal (the 2026-09-22 false
+            # ``completed ✓`` class, boot-sweep re-occurrence vector:
+            # settled receipts at restart with no liveness consult).
+            # Receipt-kind watches (no ``mission_terminal`` event) and
+            # non-task-kind rows are UNCHANGED.
+            if (
+                "mission_terminal" in (watch.watch_events or [])
+                and getattr(record, "job_type", None) == "task"
+            ):
+                guard_held = await self._mission_live_guard_holds(
+                    instance_id=getattr(record, "instance_id", None),
+                    completed_at_anchor=getattr(record, "completed_at", None),
+                )
+                if guard_held:
+                    logger.info(
+                        "reconcile_terminal_watches: mission-live guard "
+                        "held terminal notify for watch job=%s (watcher "
+                        "instance=%s) — mission still live; watcher row "
+                        "left untouched, next sweep re-evaluates",
+                        watch.job_id[:8],
+                        getattr(watch, "instance_id", None) or "?",
+                    )
+                    continue
             await self.notify_watchers(
                 watch.job_id, record.status, record.error
             )
             reconciled += 1
 
         return reconciled
+
+    async def _mission_live_guard_holds(
+        self,
+        *,
+        instance_id: str | None,
+        completed_at_anchor,
+    ) -> bool:
+        """Evaluate the shared mission-live guard for the boot sweep.
+
+        Returns ``True`` when the mission is still live (caller must
+        SKIP the terminal notify so the watcher row survives). Any
+        internal error resolves to ``False`` (fail-open — proceed with
+        notify; at-least-once terminal delivery takes precedence), and
+        the zombie backstop (``completed_at`` older than
+        ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``) also resolves to
+        ``False`` so a stuck mission cannot strand its watchers
+        forever.
+
+        Leg (a) uses the bus's target-side pending count (children
+        reports still expected by the mission instance); a missing bus
+        singleton simply skips the leg. Legs (b)/(c) walk the
+        permanent instance tree via the instance repository reached
+        through the instance manager.
+        """
+        instance_repository = None
+        if self._instance_manager is not None:
+            instance_repository = getattr(
+                self._instance_manager, "_instance_repository", None
+            )
+        bus = None
+        try:
+            from daemon.services.dependency_bus import get_dependency_bus
+
+            bus = get_dependency_bus()
+        except Exception:
+            bus = None
+        bus_pending_count = None
+        if bus is not None and instance_id:
+            try:
+                bus_pending_count = await bus.count_pending_for_target(
+                    instance_id
+                )
+            except Exception as bus_err:
+                logger.debug(
+                    "mission-live guard: bus count_pending_for_target "
+                    "failed for %s: %s — leg (a) skipped",
+                    instance_id[:8],
+                    bus_err,
+                )
+        verdict = await evaluate_mission_live(
+            instance_repository=instance_repository,
+            instance_id=instance_id,
+            task_completed_at=completed_at_anchor,
+            bus_pending_count=bus_pending_count,
+        )
+        if verdict.live:
+            return True
+        if verdict.error or verdict.timed_out:
+            logger.warning(
+                "mission-live guard opened the terminal door at the "
+                "boot sweep (error=%s, timed_out=%s): %s",
+                verdict.error,
+                verdict.timed_out,
+                verdict.reason,
+            )
+        return False
 
     async def _reconcile_terminal_watches_legacy(self) -> int:
         """Legacy JobItem-only reconcile path used when no resolver is wired.
