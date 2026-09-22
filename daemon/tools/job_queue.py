@@ -61,6 +61,7 @@ from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
 from daemon import constants
 from daemon.constants import INJECTION_ELIGIBLE_STATUSES
+from daemon.models.common import ErrorCodes
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
@@ -89,6 +90,16 @@ TERMINAL_STATES = set(ALL_TERMINAL_STATES)
 # number and the error sentence so the per-tool wordings cannot drift
 # (tidier round 2026-09-20, #7).
 MAX_WATCHES_PER_INSTANCE = 50
+
+# Typed token for the agent-readable error string emitted by the
+# ``job_answer`` tool's 503 write-paused pre-check (and any future
+# caller that wants to branch on it). NOT in ``ErrorCodes`` (the
+# HTTP wire schema) because the HTTP route raises a plain-string 503
+# with no typed token; the agent-tool is the surface that introduces
+# the token so it owns the spelling. Single source for the literal so
+# it cannot drift between the docstring, the pre-check, and any test
+# that branches on it (tidier round 2026-09-22, #3 — Medium).
+WRITE_PAUSED_TOKEN = "WRITE_PAUSED"
 
 
 def _watch_cap_error(current: int, attempted_clause: str | None = None) -> str:
@@ -827,16 +838,29 @@ def _format_answer_http_error(
     # asks for this). For 404 NO_PENDING_QUESTION the asker exists
     # but has no pending pack — the right follow-up primitive is
     # ``job_continue``, not a retry on the same work_id.
+    # INSTANCE_NOT_FOUND is a routing failure (the resolved
+    # ``instance_id`` is unknown to the manager — see
+    # ``answer_helper.py:25, 179-183``) and gets a DIFFERENT hint
+    # because retrying with the same work_id cannot help; the
+    # caller must re-fetch the work_id + confirm the instance still
+    # exists. Both hint branches come from the typed ErrorCodes
+    # enum so the raw-string drift class cannot re-introduce this
+    # split (tidier #1 — Medium, 2026-09-22).
     no_pack_hint = ""
     if code in {
-        "NO_PENDING_QUESTION",
-        "INSTANCE_NOT_FOUND",
-        "ANSWER_TARGET_TERMINAL",
-        "QUESTION_PACK_LOST",
+        ErrorCodes.NO_PENDING_QUESTION.value,
+        ErrorCodes.ANSWER_TARGET_TERMINAL.value,
+        ErrorCodes.QUESTION_PACK_LOST.value,
     }:
         no_pack_hint = (
             " — no pending question pack for this job; "
             "use job_continue for completed instances"
+        )
+    elif code == ErrorCodes.INSTANCE_NOT_FOUND.value:
+        no_pack_hint = (
+            " — resolved instance_id is unknown to the manager; "
+            "re-fetch the work_id and confirm the asker instance "
+            "still exists"
         )
 
     if code_token and status_token:
@@ -2820,39 +2844,15 @@ def create_job_tools(
 
     @register_tool_category("job")
     @tool(args_schema=JobAnswerInput)
+    # Descriptions live ONLY in ``JobAnswerInput`` (the args_schema) —
+    # the signature carries plain types so the two copies cannot drift
+    # (tidier #4 — Medium, ``feature/job-answer-tool`` M-tidier round,
+    # 2026-09-22). Mirrors the ``watch_mission`` precedent at
+    # ``daemon/tools/job_queue.py:3104-3112``.
     async def job_answer(
-        work_id: Annotated[
-            str,
-            Field(
-                description=(
-                    "The work_id whose instance asked the question "
-                    "(matches the work_id on the "
-                    "``[JOB_EVENT] Job ... question requested ❓`` line "
-                    "that the watcher received)."
-                )
-            ),
-        ],
-        answers: Annotated[
-            dict[str, str],
-            Field(
-                description=(
-                    "User-supplied answers. Key by question id (the id "
-                    "carried in the pending pack payload) — text-keyed "
-                    "fallbacks are also accepted by the helper."
-                )
-            ),
-        ],
-        question_pack_id: Annotated[
-            str,
-            Field(
-                description=(
-                    "The pack id from the pending question payload. "
-                    "Mandatory for the T1″ stale-answers hijack guard; "
-                    "a mismatch is rejected with "
-                    "``QUESTION_PACK_MISMATCH``."
-                )
-            ),
-        ],
+        work_id: str,
+        answers: dict[str, str],
+        question_pack_id: str,
     ) -> dict:
         """Submit the orchestrator's answer to a pending question pack on a watched job.
 
@@ -2894,9 +2894,9 @@ def create_job_tools(
             if manager.is_write_paused:
                 return {
                     "error": (
-                        "503 WRITE_PAUSED: writes are paused for "
-                        "database migration — retry once the daemon "
-                        "leaves migration mode"
+                        f"503 {WRITE_PAUSED_TOKEN}: writes are paused "
+                        f"for database migration — retry once the "
+                        f"daemon leaves migration mode"
                     )
                 }
 
@@ -2924,6 +2924,18 @@ def create_job_tools(
                 # Resolver RAISE is a transient DB failure — surface as
                 # 500 so the caller knows to retry, NOT as a not-found
                 # (the brief distinguishes the two).
+                # Suffix-preserving truncation (judgment call, tidier
+                # #11 — Medium, 2026-09-22): bound ``str(resolve_err)``
+                # so internal traceback fragments do not leak into the
+                # 500 error path. The full exception is already on the
+                # ``logger.error(... exc_info=True)`` line above; this
+                # only bounds the agent-readable surface. 500-char cap
+                # is a defensive ceiling — typical ``resolve_work``
+                # failures (DB connection error, row not in repository)
+                # are <200 chars.
+                err_text = str(resolve_err)
+                if len(err_text) > 500:
+                    err_text = err_text[:497] + "..."
                 logger.error(
                     "job_answer: work_resolver.resolve_work(%s) "
                     "raised: %s",
@@ -2934,7 +2946,7 @@ def create_job_tools(
                 return {
                     "error": (
                         f"500 INTERNAL_ERROR: work resolver raised "
-                        f"while resolving {work_id!r}: {resolve_err}"
+                        f"while resolving {work_id!r}: {err_text}"
                     )
                 }
 
