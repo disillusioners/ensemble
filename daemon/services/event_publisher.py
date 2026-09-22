@@ -41,6 +41,7 @@ class EventPublisherService:
         status: str,
         error: str | None = None,
         parent_id: str | None = None,
+        result_summary: str | None = None,
     ) -> None:
         """Publish an instance lifecycle event via the EventBus.
 
@@ -49,6 +50,17 @@ class EventPublisherService:
             status: Lifecycle status ("completed", "terminated", "error").
             error: Optional error message for error status.
             parent_id: Optional parent instance ID.
+            result_summary: Optional pre-fetched agent's last assistant
+                message content (the production extraction seam
+                ``manager._get_last_assistant_message_raw``). When
+                not ``None`` it's added to the broadcast data dict
+                via :meth:`NotificationBroadcaster.emit_root_completion`
+                so the global ``/api/notifications/stream`` SSE
+                subscribers receive it. v0.13.9 fix
+                (fix/job-completed-result-arm, 2026-09-22): the
+                keyword is backward-compatible — older callers omit
+                it, and ``emit_root_completion`` only adds the field
+                to the broadcast dict when it's not ``None``.
         """
         # Import here to avoid circular imports
         from ..repositories.event.models import EventKind
@@ -72,23 +84,33 @@ class EventPublisherService:
         except Exception as e:
             logger.warning(f"Failed to publish INSTANCE_LIFECYCLE event for {instance_id[:8]}...: {e}")
 
-        # Emit global notification for root instances (parent_id is None) reaching terminal state
+        # Emit global notification for root instances (parent_id is None) reaching terminal state.
+        # Thread ``result_summary`` through to the broadcaster so the
+        # ``/api/notifications/stream`` SSE payload carries it for
+        # root completions (the v0.13.9 fix surface — see Item 3c).
         if parent_id is None:
             await self._emit_root_completion_notification(
                 instance_id=instance_id,
                 status=status,
+                result_summary=result_summary,
             )
 
     async def _emit_root_completion_notification(
         self,
         instance_id: str,
         status: str,
+        result_summary: str | None = None,
     ) -> None:
         """Emit a notification for root instance terminal state.
 
         Args:
             instance_id: The root instance ID.
             status: The terminal status.
+            result_summary: Optional pre-fetched agent's last assistant
+                message content (forwarded verbatim to
+                :meth:`NotificationBroadcaster.emit_root_completion`,
+                which adds it to the broadcast dict when not ``None``).
+                v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22).
         """
         broadcaster = self._manager._notification_broadcaster
         if broadcaster is None:
@@ -120,6 +142,7 @@ class EventPublisherService:
                 status=status,
                 project_id=meta.project_id,
                 instance_name=instance_name,
+                result_summary=result_summary,
             )
             logger.debug(
                 f"Emitted notification for root instance {instance_id[:8]}...: status={status}"

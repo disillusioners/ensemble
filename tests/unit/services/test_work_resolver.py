@@ -417,6 +417,26 @@ class TestResolveWork:
             instance_id="inst-1",
             result_summary="all done",
         )
+        # Dual-backed path (JobItem + linked Task): the v0.13.9 fix
+        # surfaces the agent's last assistant message through
+        # ``_parse_task_result_summary(task)`` — the durable home is
+        # the Task's ``result`` JSON column. Pre-fix the resolver
+        # hard-coded ``None`` here because the JobItem mirror columns
+        # were dropped in Phase 5 Batch 2 and no consumer was re-wired.
+        # Seed the paired Task row so the resolver exercises the
+        # dual-backed extraction (Item 2 of the commission).
+        task_json = json.dumps({
+            "success": True,
+            "message_id": "msg-x",
+            "content": "all done",
+        })
+        _seed_task(
+            engine,
+            work_id=jid,
+            instance_id="inst-1",
+            status=TaskStatus.COMPLETED.value,
+            result=task_json,
+        )
 
         record = resolver.resolve_work(jid)
 
@@ -429,10 +449,29 @@ class TestResolveWork:
         assert record.project_id == "test-project"
         assert record.agent_id == "developer"
         # Phase 5: ``JobItem.result_summary`` column was dropped;
-        # the resolver surfaces ``None`` for these fields. Result/error
-        # live on the joined ``Instance`` row (see WorkResolver for the
-        # canonical-vocabulary mapping).
-        assert record.result_summary is None
+        # the dual-backed resolver surfaces ``Task.result`` (JSON
+        # ``content`` key) via ``_parse_task_result_summary(task)``
+        # — the same helper the task-only branch uses at :1500.
+        # Pre-fix this branch hard-coded ``None`` here because the
+        # mirror columns were dropped and no consumer was re-wired;
+        # post-fix (v0.13.9 commission) the agent's last assistant
+        # message flows through the durable Task.result JSON column.
+        #
+        # Contract note: ``Task.result`` is the JSON-serialized dict
+        # written by ``TaskRepository.complete_task`` (``result_json =
+        # json.dumps(result)`` at repository.py:2458). ``_parse_task_
+        # result_summary`` parses that JSON; when the parsed value is
+        # a dict (production shape), it ``json.dumps`` it back — so
+        # the surfaced string round-trips through the original dict.
+        # Production callers read ``result_summary`` as the JSON
+        # payload; the frontend's GET /api/jobs decodes it the same
+        # way the Task-only branch has since the helper was added.
+        parsed = json.loads(record.result_summary) if record.result_summary else None
+        assert isinstance(parsed, dict), (
+            f"expected dict-shaped result_summary, got {type(record.result_summary)}: "
+            f"{record.result_summary!r}"
+        )
+        assert parsed["content"] == "all done"
         assert record.error is None
         # Sanity-check the underlying row really is what we asked for.
         assert job_repo.get(jid) is not None

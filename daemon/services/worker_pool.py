@@ -788,6 +788,23 @@ class Worker(threading.Thread):
                         f"creation (underlying coroutine finished after "
                         f"the thread-side timeout)."
                     )
+                    # Result-envelope note (doc-only correction,
+                    # 2026-09-22): this grace path DOES call
+                    # ``complete_task`` below — the reason its result
+                    # dict carries no ``content`` key (the producer
+                    # stamp added at
+                    # ``task_processor.ProcessMessageProcessor
+                    # .on_success``) is NOT that the task row's result
+                    # is still empty here. The real blocker: the
+                    # coroutine's ``ProcessingResult`` (whose
+                    # ``result_content`` holds the agent response) is
+                    # not in scope on this path — the timeout lane
+                    # never held that object; the underlying coroutine
+                    # finished outside this thread's hands during the
+                    # grace window. The agent's response for such tasks
+                    # remains recoverable downstream via the observer
+                    # seam (``_get_last_assistant_message_raw``), not
+                    # from Task.result.
                     completed_task = None
                     try:
                         completed_task = self._task_processor._task_repo.complete_task(

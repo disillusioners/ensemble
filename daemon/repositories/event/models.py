@@ -21,6 +21,19 @@ class EventKind(str, enum.Enum):
     INSTANCE_LIFECYCLE = "instance_lifecycle"
     ERROR = "error"
     MESSAGE_COMPLETED = "message_completed"
+    # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
+    # JobItem mirror columns were dropped in Phase 5 Batch 2 (commit
+    # 41633433); the existing ``instance_lifecycle`` event was the only
+    # terminal marker for JobItem-backed work, but the consumer-side
+    # ``result_summary`` derivation never made it through to that event's
+    # data dict — pre-fix observers had to fall back to a second
+    # ``_get_last_assistant_message_raw`` seam to recover the content.
+    # Add a NEW EventKind so the observer can stamp a dedicated,
+    # ``job_id``-addressed event row carrying ``result_summary`` (the
+    # production extraction seam, NOT a publisher mock). The new
+    # kind is additive — older readers ignore unknown kinds (the
+    # SSE parser surfaces ``kind`` as a string, not as a typed enum).
+    JOB_COMPLETED = "job_completed"
 
 
 class Event(SQLModel, table=True):

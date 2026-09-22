@@ -5,11 +5,28 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.10] — 2026-09-22
+
+### Fixed
+
+Fixes the job-completed result arm on the true lineage (`fix/job-completed-result-arm`, `ae9264dc..93804b1b` + ship-prep round). The v0.13.9 cherry-pick fixed the premature-terminal arm, but its result arm was stale-master intent that was never wired on the post-Phase-5 pipeline — where the JobItem mirror columns are gone and `Task.result` is the durable home for the agent's last response (re-confirmed live on demo 2026-09-21/22: `result_summary=null`, zero `job_completed` rows).
+
+- **Task.result content stamping** — `ProcessMessageProcessor.on_success` stamps `content: result.result_content` into the `complete_task` payload (producer side of the pipeline).
+- **Resolver surfacing** — the dual-backed resolver (`work_resolver._job_to_record`) surfaces `Task.result` via `_parse_task_result_summary`, so `GET /api/jobs/{id}` and the SSE `event: completed` payload carry the agent's response instead of null.
+- **EventKind.JOB_COMPLETED + persistence + notification kwarg** — new event kind; observer sibling publish (per-JobItem, fired outside the `instance_was_terminal` gate so shared-instance JobItems each get a row); `result_summary` threaded through publisher → broadcaster so `/api/notifications/stream` frames carry it.
+- **ERROR-branch extraction restoration** — failed terminals extract best-effort result content again.
+- **Intent5 emission-surface regression test** — real-daemon test asserting all four emission surfaces (SSE payload, GET body, persisted `job_completed` event row, notifications), strengthened (F6a) to assert truthy `content` inside the `result_summary` envelope.
+- **Review-hardening (F1/F5/F6a)** — F1 env foot-gun guard: the e2e refuses to run when the resolved `POSTGRES_DB` is prod-like (`ensemble_prod`/`ensemble_live`/`ensemble_demo`) without an explicit `E2E_PG_DB` override — the exact ambient-fallback pattern that caused the 2026-09-21 live-DB incident. F5 acceptance-pack Intent5 gating: Intent5 failure with a daemon available ⇒ pack FAIL; no-daemon skip ⇒ LOUD `PASS-WITH-SKIP` verdict instead of a silent PASS. F6a envelope content assertions.
+
+---
+
 ## [0.13.9] — 2026-09-21
 
 ### Fixed
 
 Cherry-picked from `fix/empty-job-completed-event` (round-1 + round-2 + round-3 council fixes) onto the `release/prepare-v0.13.9` lineage (`origin/latest` @ `ea6a3944`, plus the four round-1/2/3 cherry-picks). job-completed events now carry Result body; result_summary written at completion; premature terminal emission gated on true subtree completion; failed/dead-letter events carry Error body — event-driven, no polling.
+
+> **⚠ Superseded by [0.13.10] (2026-09-22):** the claim "job-completed events now carry Result body; result_summary written at completion" described stale-master (`fix/empty-job-completed-event`) intent and was **never true on this lineage** — the post-Phase-5 pipeline (JobItem mirror columns dropped, `Task.result` as the durable home) was never re-wired. Re-confirmed live on demo 2026-09-21/22: `result_summary=null`, no `job_completed` event rows. 0.13.10 fixes the result arm on the true lineage. The premature-terminal gating and failed/dead-letter Error-body claims from this entry WERE live and are unaffected.
 
 ---
 

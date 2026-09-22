@@ -61,6 +61,24 @@ cd "$PROJECT_DIR"
 #   the SAME intent via ``JobFeedbackObserver._process_event`` with
 #   ``bus_pending`` toggled to simulate the defer + finalize path
 #
+# Intent 5 — v0.13.9 result_summary / job-completed emission-surface
+# regression test (fix/job-completed-result-arm, 2026-09-22):
+# - The producer→consumer→event-row pipeline was never re-wired on the
+#   new ``Task.result`` durable home after Phase 5 Batch 2 dropped the
+#   JobItem mirror columns. The Intent5 regression test exercises the
+#   FULL real-daemon emission surface against a running daemon (skip-if-
+#   not-running guard; mock LLM is fine — the seam under test is the
+#   daemon's, not the LLM's). It asserts on FOUR surfaces:
+#     (a) /api/jobs/{job_id}/events SSE → terminal ``event: completed``
+#         → ``data.result_summary`` non-null and not the fallback marker.
+#     (b) GET /api/jobs/{job_id} → ``result_summary`` non-null.
+#     (c) Read-only DB query — event row ``kind='job_completed'`` for
+#         the ``job_id`` with ``data.result_summary`` non-null.
+#     (d) /api/notifications/stream SSE → notification for the instance
+#         carries ``result_summary``.
+# - Pre-fix (v0.13.9 base): all four surfaces fail. Post-fix (this
+#   commit set): all four pass.
+#
 # KNOWN PRODUCTION-CODE DEFECT (BLOCKER — flagged in dispatch):
 # - ``child_reports.py:2007`` reads ``instance.waiting_for`` which doesn't
 #   exist on this lineage's SQLModel; the production fail-open wrap at
@@ -75,18 +93,76 @@ cd "$PROJECT_DIR"
 # section; this acceptance set is xdist-sensitive).
 # Self-timer (Layer 2): 280s
 # Caller wraps `timeout 300` (Layer 1) per PACKS.md dual-layer pattern.
+# ``EXIT_CODE=0; ... || EXIT_CODE=$?`` mirrors the Intent5 wrap at :131-134 —
+# closes the set -euo pipefail trap (a bare failing pytest terminates the
+# shell before the verdict logic at :153-156 runs, so the mock-FAIL and
+# TIMEOUT verdict lines become unreachable dead code).
+EXIT_CODE=0
 timeout 280s .venv/bin/pytest \
   tests/job_queue/test_job_result_summary_and_gate.py \
   tests/job_queue/test_round2_council_fixes.py \
-  -v --override-ini="addopts=" --tb=short -q 2>&1
-EXIT_CODE=$?
+  -v --override-ini="addopts=" --tb=short -q 2>&1 || EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"
   exit 124
-elif [ $EXIT_CODE -eq 0 ]; then
-  echo "RESULT: PASS"
-  exit 0
+fi
+
+# Intent5 — real-daemon emission-surface test. Skip-if-no-daemon guard
+# inside the test (pytest.mark.skipif on ``_daemon_running()``; plus the
+# F1 env guard, which refuses a prod-like resolved POSTGRES_DB).
+# Mock LLM is fine — the seam under test is the daemon's, not the LLM's.
+# NOTE: Intent5 needs a daemon WITH an LLM upstream — use
+# ``./dev_with_mock.sh`` (sanctioned mock LLM); plain ``./dev.sh`` has no
+# upstream (:4001 refused) and no job can complete.
+#
+# F5 gating contract (2026-09-22) — implements LESSONS/
+# 2026-09-22-intent5-skip-guard-coverage-hole.md rule 2 ("a PASS without
+# proof the flagship EXECUTED is a partial verdict") and closes council
+# MINOR #4 ("Intent5 exit code recorded but never gated"):
+#   * Intent5 RAN and FAILED (daemon available) → pack FAILS (exit 1).
+#     A live emission-surface regression can no longer hide behind the
+#     mock layer.
+#   * Intent5 SKIPPED (no daemon / PG unreachable / F1 env refusal /
+#     nothing collected) → LOUD distinct verdict
+#     "RESULT: PASS-WITH-SKIP (intent5=SKIPPED: <reason>)", exit 0.
+#     Exit-choice rationale: the 30 mock-layer cases are the pack's core
+#     contract and the pack must stay runnable in daemon-less
+#     environments (CI/cron) — a nonzero exit on skip would regress
+#     that. The LESSONS hazard (silent exit-0 PASS masking an
+#     unexecuted flagship) is closed by making the skip LOUD and
+#     NAMED instead; consumers can grep the verdict line to tell the
+#     two PASS shapes apart.
+INTENT5_CODE=0
+INTENT5_OUT="$(timeout 90s .venv/bin/pytest \
+  tests/e2e/test_result_summary_emission.py \
+  -v --override-ini="addopts=" --tb=short -ra -q 2>&1)" || INTENT5_CODE=$?
+echo "$INTENT5_OUT"
+echo "RESULT: intent5_exit_code=$INTENT5_CODE"
+
+SKIP_REASON=""
+if [ "$INTENT5_CODE" -eq 5 ]; then
+  SKIP_REASON="exit 5: no tests collected — e2e prerequisites absent in this environment"
+elif [ "$INTENT5_CODE" -ne 0 ]; then
+  # Nonzero and not the "nothing collected" code: tests RAN (daemon was
+  # available) and failed — this is exactly the regression the pack
+  # must surface. 124 (timeout) lands here too.
+  echo "RESULT: FAIL (intent5 failed with daemon available — emission-surface regression; exit=$INTENT5_CODE)"
+  exit 1
 else
-  echo "RESULT: FAIL"
+  # Exit 0: either executed-and-passed (no SKIPPED lines) or
+  # skipped-by-guard (LOUD SKIPPED reason lines via -ra).
+  SKIP_REASON="$(printf '%s\n' "$INTENT5_OUT" | grep -m1 '^SKIPPED' || true)"
+fi
+
+if [ "$EXIT_CODE" -ne 0 ]; then
+  echo "RESULT: FAIL (mock layer exit=$EXIT_CODE)"
   exit 1
 fi
+
+if [ -n "$SKIP_REASON" ]; then
+  echo "RESULT: PASS-WITH-SKIP (mock layer PASS; intent5=SKIPPED: $SKIP_REASON)"
+  exit 0
+fi
+
+echo "RESULT: PASS (mock layer PASS; intent5 EXECUTED and PASSED — all four emission surfaces asserted)"
+exit 0

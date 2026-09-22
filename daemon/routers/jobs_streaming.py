@@ -352,6 +352,50 @@ async def stream_job_events(
 
                     # Check if work reached terminal state
                     if current.status in TERMINAL_STATUSES:
+                        # v0.13.9 fix (fix/job-completed-result-arm,
+                        # 2026-09-22): the resolver's snapshot can briefly
+                        # see JobItem=done while Task.result is still
+                        # empty (a race between ``_finalize_job_db_sync``
+                        # committing JobItem=done and ``complete_task``
+                        # committing Task.result — both transactions
+                        # touch the same work unit concurrently). The
+                        # producer is guaranteed to commit before the
+                        # pipeline returns (Item 1 awaits the
+                        # ``complete_task`` future), but the SSE
+                        # consumer's poll can land in the brief window
+                        # where the snapshot is inconsistent. Retry a
+                        # few times with brief backoff to drain the
+                        # race window before emitting the completed
+                        # event — bounded so a permanent seam failure
+                        # (LLM fetch returning None, true producer
+                        # failure) does NOT block the SSE stream
+                        # forever. Bounded retry count + short sleeps
+                        # (10 × 50ms = 500ms ceiling) covers the
+                        # typical race window without masking real
+                        # production failures.
+                        for _retry in range(10):
+                            if current.result_summary is not None:
+                                break
+                            await asyncio.sleep(0.05)
+                            current = await _resolve(
+                                service, job_id, use_resolver
+                            )
+                            if current is None:
+                                break
+                        # v0.13.9 follow-up (fix/job-completed-result-arm,
+                        # 2026-09-22, review MINOR): if the retry loop
+                        # exited because _resolve returned None
+                        # (job row deleted during the 500ms window),
+                        # fall-through to the completed yield would
+                        # AttributeError on `current` and uncleanly
+                        # kill the SSE connection. Mirror the
+                        # pre-existing None guard (lines ~330-336).
+                        if current is None:
+                            yield {
+                                "event": "error",
+                                "data": json.dumps({"error": "Job not found"})
+                            }
+                            break
                         yield {
                             "event": "completed",
                             "data": json.dumps(current.to_completed_payload(work_id=job_id))

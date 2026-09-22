@@ -1553,6 +1553,37 @@ class JobFeedbackObserver:
                 error_message = error
         elif terminal_status == InstanceStatus.ERROR.value:
             error_message = error if error else "Unknown error"
+            # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
+            # mirror the COMPLETED branch's best-effort extraction so
+            # the ERROR path surfaces whatever the agent last produced
+            # before failing. Pre-fix the ERROR branch hard-coded
+            # ``result_summary = None`` (the variable was initialized
+            # above and never overwritten here), so the resolver and
+            # the JOB_COMPLETED sibling publish (Item 3b) saw an empty
+            # ``result_summary`` even when the LLM had produced a
+            # partial response. Fallback is ``None`` (NOT the
+            # COMPLETED-branch fallback marker) because the agent's
+            # last assistant message on the failure path may be
+            # truncated or missing entirely — the fail-open contract
+            # here is to surface whatever the seam returns or admit
+            # we have nothing.
+            try:
+                result_summary = (
+                    await self._instance_manager._get_last_assistant_message_raw(
+                        instance_id
+                    )
+                )
+            except Exception as e:
+                # Best-effort — log at DEBUG (not WARNING) so a failed
+                # seam on an already-failing terminal does not spam
+                # the production log. The DB write below uses
+                # ``result_summary=None`` as the surface value.
+                logger.debug(
+                    f"Observer: best-effort result_summary fetch failed "
+                    f"for instance {instance_id[:8]}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                result_summary = None
         else:
             logger.warning(
                 f"Unknown terminal status '{terminal_status}' for "
@@ -2078,7 +2109,74 @@ class JobFeedbackObserver:
                     parent_id=db_result.parent_id,
                     agent_id=db_result.agent_id,
                     last_content=result_summary,
+                    # v0.13.9 fix (fix/job-completed-result-arm,
+                    # 2026-09-22): thread the JobItem primary key
+                    # through the dispatcher so the global SSE
+                    # notification frame can carry ``result_summary``
+                    # (Item 3c) on root completions. The sibling
+                    # JOB_COMPLETED event row (Item 3b) is published
+                    # BELOW — outside this ``instance_was_terminal``
+                    # gate — because it must fire for EVERY
+                    # JobItem-backed terminal transition, not only the
+                    # first one (when ``instance_was_terminal=True``
+                    # the lifecycle event has already fired by a
+                    # prior actor, but THAT actor may not have
+                    # addressed THIS ``job_id``).
+                    job_id=ctx.job_id,
                 )
+
+            # ─── JOB_COMPLETED sibling publish (JobItem-level) ───
+            # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
+            # publish the JOB_COMPLETED event row OUTSIDE the
+            # ``instance_was_terminal`` gate. The lifecycle event is
+            # an instance-level signal (the bus notifies subscribers
+            # once per instance terminal); the JOB_COMPLETED event is
+            # a job-level signal (one row per JobItem that
+            # transitions to terminal). When two JobItems share an
+            # instance (e.g. a parent leader whose child developer
+            # completes first), the instance-side fan-out fires
+            # ONCE (gated on ``instance_was_terminal``) but the
+            # JOB_COMPLETED row must fire per-JobItem — otherwise
+            # the second JobItem's row is silently dropped.
+            #
+            # Guarded on ``ctx.job_id is not None`` (post-D13
+            # MESSAGE-driven instances have no JobItem) and on
+            # ``db_result.skip`` is ``False`` (the
+            # ``_finalize_job_db_sync`` path actually committed).
+            if not db_result.skip and ctx.job_id is not None:
+                events_service = getattr(
+                    self._instance_manager, "_events_service", None
+                )
+                if events_service is not None:
+                    try:
+                        # Local import to avoid a circular import at
+                        # module-load time (the observer is imported
+                        # by ``event_bus`` subscribers; importing the
+                        # publisher module at top-level would create
+                        # a cycle via the EventBus wiring).
+                        from ..repositories.event.models import EventKind
+                        await events_service._event_bus.create_event(
+                            instance_id=instance_id,
+                            kind=EventKind.JOB_COMPLETED.value,
+                            data={
+                                "job_id": ctx.job_id,
+                                "status": db_result.terminal_status,
+                                "result_summary": result_summary,
+                            },
+                        )
+                        logger.debug(
+                            f"Observer: published JOB_COMPLETED event "
+                            f"for job {ctx.job_id[:8]}... (instance "
+                            f"{instance_id[:8]}..., "
+                            f"instance_was_terminal="
+                            f"{db_result.instance_was_terminal})"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Observer: failed to publish JOB_COMPLETED "
+                            f"event for job {ctx.job_id[:8]}... "
+                            f"(instance {instance_id[:8]}...): {e}"
+                        )
 
             # ─── Trigger next job (zero-delay handoff) ───
             # Phase 2.5 (Task 2.5.4): skipped when ``ctx.job_id is
@@ -2847,6 +2945,7 @@ class JobFeedbackObserver:
         parent_id: str | None,
         agent_id: str | None,
         last_content: str | None,
+        job_id: str | None = None,
     ) -> None:
         """Fire post-commit instance-side side effects after the DB transition.
 
@@ -2861,16 +2960,41 @@ class JobFeedbackObserver:
         — the DB is already committed, so the worst case is a missing
         notification (recoverable by the orphan-detector / recovery sweep).
 
+        ``job_id`` is the optional JobItem primary key for the
+        JobItem-backed terminal transition (``_finalize_job`` path).
+        When supplied, the CALLER (``_finalize_job``) publishes the
+        sibling ``JOB_COMPLETED`` event row (Item 3b) OUTSIDE this
+        dispatcher — after the ``instance_was_terminal`` gate — so the
+        dispatcher itself only threads the value through for the
+        SSE/notification frame (Item 3c). The standalone
+        ``_finalize_instance`` path passes ``job_id=None``
+        (no JobItem exists for message-only instances).
+
         Args:
             instance_id: The instance ID for SSE / CompletionRegistry / lifecycle.
             terminal_status: ``"completed"`` or ``"error"``.
             error: Optional error message (for the ERROR path).
             parent_id: Captured from the instance row before commit.
             agent_id: Captured from the instance row before commit.
-            last_content: Pre-fetched last assistant message (for the
-                CompletionRegistry COMPLETED path). If ``None``, the
-                dispatcher fetches it on-demand via
-                ``_get_last_assistant_message_raw``.
+            last_content: Pre-fetched last assistant message feeding the
+                CompletionRegistry COMPLETED path (Step 3) and the
+                global notification broadcaster (Step 4). When ``None``
+                (the standalone ``_finalize_instance`` shape), the
+                dispatcher performs ONE hoisted on-demand fetch via
+                ``_get_last_assistant_message_raw`` (F2, 2026-09-22 —
+                previously Step 3 and Step 4 each fetched, costing a
+                double LLM repair) and BOTH consumers read the shared
+                value. The fetch is best-effort: any seam failure logs
+                at DEBUG and surfaces ``None`` (a ``None``
+                result_summary just means the field is absent from the
+                broadcast dict — pre-fix shape). The JOB_COMPLETED
+                sibling publish is NOT fed by this argument — the
+                caller publishes it from its own pre-fetched value.
+            job_id: Optional JobItem primary key. When not ``None``,
+                the caller (``_finalize_job``) publishes the sibling
+                ``JOB_COMPLETED`` event row (Item 3b). Defaults to
+                ``None`` for the standalone ``_finalize_instance``
+                path, which has no JobItem to address.
         """
         # Step 1: TWO-TIER proc cleanup. Added in Phase 1 of the
         # "auto-kill background processes on root instance completion"
@@ -2986,6 +3110,39 @@ class JobFeedbackObserver:
                     f"{instance_id[:8]}...: {e}"
                 )
 
+        # ── F2 hoisted seam fetch (fix/job-completed-result-arm,
+        # 2026-09-22) ─────────────────────────────────────────────────
+        # The dispatcher used to fetch the seam TWICE when the caller
+        # did not pre-fetch (``last_content=None`` — the standalone
+        # ``_finalize_instance`` shape): once in Step 3
+        # (CompletionRegistry signal) and once in Step 4 (lifecycle
+        # event / notification broadcaster; the on-demand fetch added
+        # in 540a5f16). ``_get_last_assistant_message_raw`` is
+        # LLM-repair-capable, so a double fetch costs a double repair.
+        # Hoisted to ONE fetch here, shared by both consumers.
+        # Semantics preserved: gated on the COMPLETED branch (the
+        # ERROR branch signals the error string and never needed the
+        # content), best-effort (any seam failure logs at DEBUG and
+        # surfaces ``None`` to both consumers — fail-open, None-safe),
+        # and ``agent_id`` is passed so the exclusion check can skip
+        # repair for wanderer/explorer reports (2026-08-11 note).
+        resolved_content: str | None = last_content
+        if resolved_content is None and terminal_status == "completed":
+            try:
+                resolved_content = (
+                    await self._instance_manager._get_last_assistant_message_raw(
+                        instance_id,
+                        agent_id=agent_id,
+                    )
+                )
+            except Exception as e:
+                logger.debug(
+                    f"Observer: on-demand result_summary fetch failed "
+                    f"for instance {instance_id[:8]}... (hoisted Step "
+                    f"3+4 seam fetch): {type(e).__name__}: {e}"
+                )
+                resolved_content = None
+
         # Step 3: Signal CompletionRegistry. For "error", pass the error
         # string as the result with ``is_error=True`` (matches
         # ``error_reporting.py:380-384``). For "completed", pass the last
@@ -3001,19 +3158,10 @@ class JobFeedbackObserver:
                     is_error=True,
                 )
             else:
-                content = last_content
-                if content is None:
-                    # 2026-08-11: terminal completion path. Pass
-                    # agent_id (already in scope) so the exclusion check
-                    # can skip repair for wanderer/explorer reports.
-                    content = (
-                        await self._instance_manager._get_last_assistant_message_raw(
-                            instance_id,
-                            agent_id=agent_id,
-                        )
-                    )
+                # F2: reads the single hoisted fetch above — no
+                # on-demand fetch inside Step 3 anymore.
                 get_completion_registry().complete(
-                    instance_id, result=content
+                    instance_id, result=resolved_content
                 )
         except Exception as e:
             logger.warning(
@@ -3026,6 +3174,35 @@ class JobFeedbackObserver:
         # ``_process_event`` re-entry is caught by the ``job.admission_state !=
         # ACTIVE`` idempotency guard (the job is already terminal at
         # this point, set by ``_finalize_job`` immediately before this call).
+        #
+        # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
+        # ``result_summary`` is threaded through the publisher +
+        # broadcaster (Item 3c) so the global
+        # ``/api/notifications/stream`` SSE notification frame
+        # carries the field on root completions. When the caller
+        # pre-fetched (``last_content`` set, COMPLETED branch of
+        # ``_finalize_job``), the value is forwarded verbatim.
+        # When ``last_content`` is ``None`` (standalone
+        # ``_finalize_instance`` path — the instance-side terminal
+        # transition may complete BEFORE the job-side finalize runs,
+        # which is the common case for non-bus dispatch flows), the
+        # F2 hoisted fetch above supplies the value so the
+        # notification carries the agent's last response instead of
+        # an empty ``result_summary`` field. The fetch is
+        # best-effort: any seam failure logs at DEBUG and surfaces
+        # ``None`` — the notification still broadcasts, just without
+        # the field. Backward-compatible — older callers omit the
+        # kwarg; the field is simply absent from the broadcast dict.
+        #
+        # Note: the sibling JOB_COMPLETED event row (Item 3b) is
+        # NOT published here — it lives at the outer ``_finalize_job``
+        # block so it fires for EVERY JobItem-backed terminal
+        # transition, regardless of ``instance_was_terminal``. The
+        # dispatcher's lifecycle publish stays instance-scoped and
+        # gated on the ``instance_was_terminal=False`` precondition
+        # the caller checks (see the call site at :2104).
+        effective_result_summary: str | None = resolved_content
+
         events_service = getattr(self._instance_manager, "_events_service", None)
         if events_service is not None:
             try:
@@ -3034,6 +3211,7 @@ class JobFeedbackObserver:
                     status=terminal_status,
                     error=error,
                     parent_id=parent_id,
+                    result_summary=effective_result_summary,
                 )
             except Exception as e:
                 logger.warning(

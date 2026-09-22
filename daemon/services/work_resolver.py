@@ -1004,13 +1004,20 @@ class WorkResolverService:
         primary key. Dual-backed work units (dispatch flow: the
         JobItem and its linked Task share ``work_id == job_id``)
         resolve to the JobItem record with the Task's execution
-        timing fed through: D3 keeps ``created_at`` byte-stable from
-        the JobItem TEXT column, D1 sources ``started_at`` /
-        ``completed_at`` from the Task row (the DC-C shadow-row
-        substitution where a task-first branch overrode
-        ``created_at`` is gone). Task-only rows are the report lane
-        (``process_report`` / ``send_report``); Job-only rows are
-        message-driven work (turns are JobItems post-collapse).
+        timing AND ``task.result`` (JSON content) fed through: D3 keeps
+        ``created_at`` byte-stable from the JobItem TEXT column, D1
+        sources ``started_at`` / ``completed_at`` from the Task row
+        (the DC-C shadow-row substitution where a task-first branch
+        overrode ``created_at`` is gone). The v0.13.9 fix
+        (fix/job-completed-result-arm, 2026-09-22) threads the Task
+        through ``_job_to_record`` so the consumer side can derive
+        ``result_summary`` via ``_parse_task_result_summary(task)``
+        from the durable ``Task.result`` JSON column — JobItem's
+        mirror columns ``result_summary`` / ``error_message`` were
+        dropped in Phase 5 Batch 2 (commit 41633433). Task-only rows
+        are the report lane (``process_report`` / ``send_report``);
+        Job-only rows are message-driven work (turns are JobItems
+        post-collapse).
 
         Args:
             work_id: The UUID4 work identifier (Task.work_id or
@@ -1027,14 +1034,22 @@ class WorkResolverService:
             # Dual-backed work unit (dispatch flow: the JobItem and
             # its linked Task share work_id == job_id). D3: the
             # JobItem owns created_at (byte-stable TEXT column); D1:
-            # the Task row owns execution timing. Building the
-            # record from the JobItem (with the Task's timing fed
-            # through) keeps BOTH invariants and kills the DC-C
+            # the Task row owns execution timing; v0.13.9 fix: the
+            # Task row ALSO owns ``result_summary`` (via the
+            # ``Task.result`` JSON column — JobItem mirror columns
+            # were dropped in Phase 5 Batch 2). Threading the task
+            # through ``_job_to_record`` lets the consumer surface
+            # the agent's last assistant message via
+            # ``_parse_task_result_summary(task)`` (same shape the
+            # task-only branch uses at :1500). Building the record
+            # from the JobItem (with the Task's timing AND result
+            # fed through) keeps BOTH invariants and kills the DC-C
             # shadow-row substitution where the task-first branch
             # overrode created_at with the Task row's naive digits.
             return self._job_to_record(
                 job,
                 task_timing=(task.started_at, task.completed_at),
+                task=task,
             )
         if task is not None:
             # Task-only work unit (report lane). D4: timing sourced
@@ -1523,6 +1538,7 @@ class WorkResolverService:
         instance: "Instance | None" = None,
         mission_fields: "tuple[str | None, int | None, str | None] | None" = None,
         task_timing: "tuple[datetime | None, datetime | None] | None" = None,
+        task: "Task | None" = None,
     ) -> WorkRecord:
         """Build a :class:`WorkRecord` from a JobItem row.
 
@@ -1549,25 +1565,29 @@ class WorkResolverService:
         creation). ``created_at`` also stays from the JobItem — it's a
         queue-creation timestamp, not execution state.
 
-        ``result_summary`` / ``error`` are still sourced from the
-        JobItem mirror columns in this phase. ``Instance`` does not
-        currently model result/error columns; those storage locations
-        will land with the column-drop work in Phase 5 (the JobItem
-        columns are deprecated in Phase 4 and dropped in Phase 5 per
-        the migration plan). Until then the JobItem mirror is the only
-        available source. The exit criterion is satisfied for ``status``
-        (the load-bearing execution-state field) — the mirror is still
-        read for result/error only because there is no Instance column
-        to source them from yet.
+        ``result_summary`` / ``error`` are sourced from the linked
+        ``Task`` row's ``Task.result`` JSON column when ``task`` is
+        supplied (the dual-backed dispatch path); JobItem mirror
+        columns were dropped in Phase 5 Batch 2 (commit 41633433).
+        ``Instance`` does not model result/error columns; the durable
+        home on this lineage is the Task's JSON ``content`` key, which
+        ``_parse_task_result_summary`` flattens to a string for the
+        WorkRecord surface. Job-only rows (legacy / JobItem without a
+        paired Task — e.g. virtual message-driven JobItems post-D13)
+        surface ``None`` — the resolver still accepts that shape
+        because the contract test suite covers it.
 
-        Field-name mapping from JobItem → WorkRecord:
+        Field-name mapping from JobItem / Task → WorkRecord:
 
-        * ``result_summary`` ← ``JobItem.result_summary`` (already a
-          string in the DB — no JSON parse required).
-        * ``error`` ← ``JobItem.error_message`` (the JobItem column is
-          named ``error_message`` for historical reasons; the
-          WorkRecord view-model calls it ``error`` because that's what
-          the virtual job surface wants to display).
+        * ``result_summary`` ← ``Task.result`` (JSON string) when
+          ``task`` is supplied; ``None`` otherwise. The JSON parse
+          rule lives in :func:`_parse_task_result_summary` (mirrors
+          the rule in ``daemon/routers/messages.py:251-263`` so the
+          virtual job surface and the legacy status route agree on
+          shape).
+        * ``error`` ← ``Task.error`` for the dual-backed path (same
+          thread-through via ``task``). Job-only rows surface
+          ``None``.
         * ``created_at`` ← ISO-8601 string, parsed to ``datetime``
           via :func:`_parse_iso_datetime` for sort compatibility.
 
@@ -1593,6 +1613,22 @@ class WorkResolverService:
                 SELECT per row — never runs on the list path.
                 Defaults to ``None`` (per-row path; single-row call
                 sites unaffected).
+            task_timing: Optional ``(started_at, completed_at)`` tuple
+                from the linked Task row (``work_id`` linkage).
+                ``None`` means no Task row exists for this work unit.
+                Sourced from the Task row regardless of whether
+                ``task`` itself is threaded through — kept separate so
+                the S4 batched ``list_work`` callers that only need
+                timing don't have to construct a partial Task.
+            task: Optional Task row for the dual-backed path. When
+                supplied, the resolver derives ``result_summary`` and
+                ``error`` from this Task's ``result`` / ``error``
+                columns (Phase 5 Batch 2 dropped the JobItem mirror
+                columns; this is the v0.13.9 fix surface). Defaults
+                to ``None`` — preserved for callers that only need
+                timing (``_parse_iso_datetime`` callers and the S4
+                batched path that reads result/error through their
+                own pre-fetch).
         """
         # Phase 4 cleanup: the frozen ``status`` column is no longer
         # written — ``admission_state`` is the sole authority. Dead
@@ -1781,6 +1817,26 @@ class WorkResolverService:
                 self._mission_fields_for_instance(instance)
             )
 
+        # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
+        # the JobItem ``result_summary`` / ``error_message`` mirror
+        # columns were dropped in Phase 5 Batch 2 (commit 41633433).
+        # The durable home is the linked ``Task.result`` JSON column
+        # (stamped by ``WorkerPool.on_success`` at
+        # task_processor.py:963-967 — see Item 1 of the commission).
+        # Surface the parsed ``Task.result`` through the same helper
+        # the task-only branch uses at :1500 — mirror shape so the
+        # dual-backed and task-only records agree on the field's
+        # contract. ``task=None`` (legacy / JobItem-without-Task —
+        # e.g. virtual message-driven JobItems post-D13) returns
+        # ``None``; pre-fix this branch also returned ``None`` so the
+        # backward-compatible default is unchanged.
+        if task is not None:
+            result_summary = _parse_task_result_summary(task)
+            error = task.error
+        else:
+            result_summary = None
+            error = None
+
         return WorkRecord(
             work_id=job.job_id,
             kind="job",
@@ -1788,13 +1844,8 @@ class WorkResolverService:
             instance_id=job.instance_id,
             project_id=job.project_id,
             agent_id=job.agent_id,
-            # Phase 5: ``job.result_summary`` and ``job.error_message``
-            # mirror columns were dropped from the JobItem model in
-            # Phase B. Source from the Instance/WorkRecord resolver
-            # path; pass ``None`` here so the caller can rely on the
-            # resolver's derived values instead of stale mirror fields.
-            result_summary=None,
-            error=None,
+            result_summary=result_summary,
+            error=error,
             created_at=_parse_iso_datetime(job.created_at),
             # Phase 1 F1: surface ``message_id`` from
             # ``job.job_metadata['message_id']`` (stamped by

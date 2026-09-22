@@ -299,15 +299,18 @@ class TestObserverResultSummary:
         # See note in ``test_completed_event_carries_result_summary`` —
         # the production seam is ``_get_last_assistant_message_raw``.
         #
-        # BEHAVIORAL DELTA: the COMPLETED branch fetches the result
-        # via ``_get_last_assistant_message_raw`` (job_feedback_observer.py:1541);
-        # the ERROR branch (line 1554-1555) only carries the error_message
-        # — the best-effort result fetch was dropped in the iteration-2
-        # wiring. The ERROR path's INTENT — "terminal transition completes
-        # with error carried through" — is verified via the watcher
-        # notification below (we register a watcher so the notify
-        # dispatch fires). The watcher notification is the user-visible
-        # surface for the error.
+        # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
+        # the ERROR branch now mirrors the COMPLETED branch's
+        # best-effort extraction at
+        # ``job_feedback_observer.py:1554-1555`` (Item 4). The
+        # ``_get_last_assistant_message_raw`` seam IS awaited on the
+        # ERROR path; the surfaced ``result_summary`` flows into
+        # ``_finalize_job_db_sync`` / ``_FinalizeJobResult`` like the
+        # COMPLETED branch does (the variable is already threaded
+        # through to ``_dispatch_instance_post_commit_side_effects``
+        # via the dispatcher). Fallback is ``None`` on seam failure
+        # — the fail-open contract on the error path is to surface
+        # whatever the agent produced or admit we have nothing.
         observer._job_queue_service._watcher_repo.add_watch(job.job_id, "watcher-1")
 
         with patch.object(
@@ -331,11 +334,12 @@ class TestObserverResultSummary:
         assert "child exploded" in notification, (
             f"Expected error message in notification, got: {notification!r}"
         )
-        # BEHAVIORAL DELTA: the COMPLETED branch is the only one that
-        # extracts result_summary via ``_get_last_assistant_message_raw``.
-        # The ERROR branch was simplified — no best-effort LLM fetch.
-        # The seam is therefore NOT awaited on this path.
-        raw_mock.assert_not_awaited()
+        # v0.13.9 fix: the ERROR branch's best-effort extraction IS
+        # awaited (pre-fix the branch was simplified — no
+        # best-effort LLM fetch — and ``raw_mock.assert_not_awaited()``
+        # was the encoded contract). Post-fix the seam is awaited
+        # for the same instance_id as the COMPLETED branch.
+        raw_mock.assert_awaited_once_with("root-instance-1")
 
     @pytest.mark.asyncio
     async def test_deadlock_guard_terminal_without_result_still_terminates(

@@ -666,3 +666,135 @@ class TestDbTransitionFailureReraises:
         mocks[
             "events_service"
         ]._publish_instance_lifecycle_event.assert_not_called()
+
+
+# ─── Test 11: F2 seam-fetch hoist (2026-09-22) ───────────────────────────────
+
+
+class TestSeamFetchHoisted:
+    """F2: exactly ONE ``_get_last_assistant_message_raw`` fetch on the path.
+
+    The standalone ``_finalize_instance`` path enters the dispatcher
+    (``_dispatch_instance_post_commit_side_effects``) with
+    ``last_content=None``. Pre-F2, Step 3 (CompletionRegistry signal) and
+    Step 4 (lifecycle event / notification broadcaster) EACH issued an
+    on-demand fetch — two seam calls per terminal transition. The seam is
+    LLM-repair-capable (``manager._get_last_assistant_message_raw``), so a
+    double fetch costs a double repair. Post-F2 the dispatcher hoists a
+    single shared fetch that both consumers read.
+    """
+
+    @pytest.mark.asyncio
+    async def test_completed_path_fetches_seam_exactly_once(self, engine):
+        instance_id = seed_instance(
+            engine,
+            status=InstanceStatus.RUNNING.value,
+            agent_id="writer",
+        )
+        observer, mocks = make_observer(
+            engine, get_last_message_returns="agent response"
+        )
+        seam = mocks["instance_manager"]._get_last_assistant_message_raw
+
+        with patched_completion_registry() as (mock_registry, _patched):
+            await observer._finalize_instance(instance_id, "completed")
+
+        # THE F2 assertion: exactly one seam fetch — not two.
+        assert seam.await_count == 1, (
+            f"F2 violation: standalone-finalize completed path fetched "
+            f"_get_last_assistant_message_raw {seam.await_count} times "
+            f"(expected exactly 1 — one hoisted fetch shared by Step 3 "
+            f"and Step 4)."
+        )
+        # The single fetched value must reach BOTH consumers.
+        registry_call = mock_registry.complete.call_args
+        assert registry_call.kwargs.get("result") == "agent response"
+        events = mocks["events_service"]
+        events._publish_instance_lifecycle_event.assert_awaited_once()
+        assert (
+            events._publish_instance_lifecycle_event.await_args.kwargs.get(
+                "result_summary"
+            )
+            == "agent response"
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_path_never_fetches_seam(self, engine):
+        """Control: the ERROR path signals the error string — zero fetches.
+
+        The hoisted fetch is gated on the COMPLETED branch (Step 3 passes
+        the error string to the registry; Step 4 forwards ``last_content``
+        verbatim). F2 must not introduce a fetch here either.
+        """
+        instance_id = seed_instance(
+            engine,
+            status=InstanceStatus.RUNNING.value,
+            agent_id="writer",
+        )
+        observer, mocks = make_observer(engine)
+        seam = mocks["instance_manager"]._get_last_assistant_message_raw
+
+        with patched_completion_registry() as (mock_registry, _patched):
+            await observer._finalize_instance(
+                instance_id, "error", error="boom"
+            )
+
+        assert seam.await_count == 0
+        assert (
+            mock_registry.complete.call_args.kwargs.get("result")
+            == "Agent error: boom"
+        )
+
+    @pytest.mark.asyncio
+    async def test_failure_path_signals_registry_with_none(self, engine):
+        """F2 fail-open: hoisted seam fetch raises → registry signaled with
+        ``result=None`` (NOT skipped), lifecycle event carries
+        ``result_summary=None``.
+
+        Pins the reviewer-adjudicated edge delta (2026-09-22): pre-F2
+        a seam-fetch failure on the COMPLETED branch caused
+        ``registry.complete`` to be SKIPPED — the waiter wedged because
+        the registry never received the terminal signal. Post-F2 the
+        seam is wrapped in a try/except that surfaces ``None`` to both
+        consumers, so the registry still receives exactly one
+        ``complete()`` call (with ``result=None``), closing the wedge
+        without surfacing the seam error to the caller.
+
+        RED-if-unfixed proof: run this test against the pre-F2
+        ``fedec720~1`` commit. The pre-F2 dispatcher fetches the seam
+        TWICE inside Step 3 (registry signal) and Step 4 (lifecycle
+        event). On fetch failure both consumers skip the registry
+        signal entirely, so ``mock_registry.complete`` is NEVER called
+        and ``assert_called_once_with(instance_id, result=None)`` FAILS
+        with ``AssertionError: expected call not found``.
+        """
+        instance_id = seed_instance(
+            engine,
+            status=InstanceStatus.RUNNING.value,
+            agent_id="writer",
+        )
+        observer, mocks = make_observer(engine)
+        seam = mocks["instance_manager"]._get_last_assistant_message_raw
+        # Hoisted seam raises — whatever the production failure mode
+        # is (langgraph-state mismatch, repair-replay crash,
+        # async-cancelled, etc.), the dispatcher must fail-open with
+        # ``None`` (F2 edge-delta: signaled, not skipped).
+        seam.side_effect = RuntimeError("simulated hoisted seam failure")
+
+        with patched_completion_registry() as (mock_registry, _patched):
+            await observer._finalize_instance(instance_id, "completed")
+
+        # Fail-open #1: registry signaled EXACTLY ONCE with
+        # result=None (NOT skipped, NOT absent).
+        mock_registry.complete.assert_called_once_with(
+            instance_id, result=None
+        )
+        # Fail-open #2: lifecycle event carries result_summary=None.
+        events = mocks["events_service"]
+        events._publish_instance_lifecycle_event.assert_awaited_once()
+        assert (
+            events._publish_instance_lifecycle_event.await_args.kwargs.get(
+                "result_summary"
+            )
+            is None
+        )
