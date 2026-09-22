@@ -398,3 +398,13 @@ Diff f2611f07..HEAD, 5 FE files (+487/−10). 0 High / 4 Medium / 8 Low.
 - Deferred to Reviewer: boot rehydration sequential per-instance to_thread (perf, O(paused)); 400-vs-422 API validation-semantics delta if strict Pydantic adopted on jobs route.
 - Pre-staged known fix for Developer: answer_helper.py:137-139 comment "NIT-9" → "NIT-8" (docs(qa-channel) commit).
 - Process nit: skill_feedback tool-call evidence not visible in any of the 3 final reports (3rd consecutive pass — reports otherwise complete + anchor-verified).
+
+
+## 2026-09-22 — job-answer-tool tidy pass (feature/job-answer-tool @ b8fdec3a, range 0062e6fc..HEAD, main checkout), Iteration 001
+- Dispatch: 2 parallel workers (readable 20824c1b, hygiene e8fe369d), 3 files +1201. Both reported fully, evidence-rich (anchors re-located by symbol; b8fdec3a docstring claims re-verified against source). Verdict: NEEDS-WORK — 1 High / 5 Medium / 10 Low after dedup (2 merges: description-drift H+M→Medium; unused-imports M+L→Medium).
+- High 1: job_queue.py 2897→3321L crosses >3000 flag-for-refactor line; module docstring size note stale ("2,300+"). Fix = refresh note + action-anchor first slice (_format_answer_http_error extraction).
+- Mediums: INSTANCE_NOT_FOUND misdescribed in _FULL_DOCS :613-615/:797-806 (merged with NO_PENDING_QUESTION; ground truth answer_helper.py:25,:179-183); test helper `tools[-1]` + last-entry pin contradicts append-at-END convention (:284/:658-661) — next append breaks 14 tests; error-code literals vs ErrorCodes enum (:797-802/:2864-2868, _watch_cap_error tidier-#7 single-source precedent); JobAnswerInput question_pack_id description drift schema-vs-signature (RECURRENCE of tidier-#6 class — watch_mission comment at :3104-3108 documents the single-source fix); 3 unused imports in test file (:42/:49/:50).
+- b8fdec3a claims VERIFIED HOLDING (WRITE_PAUSED vocab split + resume_message parity) — remaining truthfulness defect is the INSTANCE_NOT_FOUND merge above.
+- KEY PATTERN: severity split across workers on same finding (H vs M) — dedupe by canonical table, not by loudest worker; state reasoning in report.
+- Deferred to Reviewer: wiring-failure posture (direct is_write_paused :2862 vs defensive getattr :2878/:2958); double broad-except (:2887+:2978); INSTANCE_NOT_FOUND reachability; lazy router import seam (:2957).
+- Process nit (repeat of 09-16): neither worker evidenced skill_feedback tool-call-first; accepted on evidence-rich reports.
