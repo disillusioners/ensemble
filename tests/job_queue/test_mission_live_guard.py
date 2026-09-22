@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -58,6 +57,7 @@ from daemon.services.job_queue_service import JobQueueService
 from daemon.services.job_recovery_service import JobRecoveryService
 from daemon.services.stale_task_recovery import StaleTaskRecovery
 from daemon.services.timestamps import now_utc_naive
+from daemon.services.work_resolver import WorkResolverService
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -209,23 +209,126 @@ def _add_watch(
     watcher_repo.add_watch(job_id, instance_id, watch_events=events)
 
 
+class _EmptyBusStub:
+    async def pending_watchers(self, source_task_id):
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real-delivery-chain helpers (iteration 2 — tester M1/claim-witness bar).
+#
+# The critical-path tests below NO LONGER mock ``notify_watchers``. The
+# whole delivery chain is real except the TRANSPORT boundary:
+#
+#   real WorkResolverService ── real JobQueueService.notify_watchers
+#     ── real work_notifier.notify_work_watchers
+#       ── real JobWatcherRepository.claim_watchers_for_job_for_instances
+#          (the claim-first CAS DELETE...RETURNING — durable state)
+#       ── instance_manager.enqueue_message  ← AsyncMock (transport seam)
+#
+# Durable outcomes are witnessed in the repository (row presence /
+# claim-emptiness), not by mock-not-called; deliveries are witnessed on
+# the transport seam including the ``[JOB_EVENT]`` byte-path and the
+# ``internal_agent:job_event:`` source contract.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_real_queue_service(
+    engine, repository, task_repository, instance_repo,
+) -> tuple[JobQueueService, MagicMock]:
+    """Build a REAL JobQueueService over the test engine.
+
+    Returns ``(service, transport)`` — ``transport`` is the instance
+    manager whose ``enqueue_message`` is the mocked transport boundary;
+    every production seam between the sweep and the enqueue is real.
+    """
+    resolver = WorkResolverService(
+        task_repo=task_repository,
+        job_repo=repository,
+        instance_repo=instance_repo,
+    )
+    transport = MagicMock()
+    transport._instance_repository = instance_repo
+    transport.enqueue_message = AsyncMock(
+        return_value=MagicMock(message_id="msg-1")
+    )
+    service = JobQueueService(
+        repository=repository,
+        lock_manager=MagicMock(),
+        queue_repo=MagicMock(),
+        instance_manager=transport,
+    )
+    service.set_watcher_repo(JobWatcherRepository(engine))
+    service.set_work_resolver(resolver)
+    return service, transport
+
+
 def _make_recovery_service(
     repository, task_repository, lock_repo, instance_repo,
-    job_queue_service_mock,
+    queue_service,
 ) -> JobRecoveryService:
+    """JobRecoveryService wired to the REAL queue service (real notify)."""
     return JobRecoveryService(
         job_repository=repository,
         lock_repository=lock_repo,
         instance_repository=instance_repo,
-        job_queue_service=job_queue_service_mock,
+        job_queue_service=queue_service,
         task_repository=task_repository,
         stale_task_recovery=None,
     )
 
 
-class _EmptyBusStub:
-    async def pending_watchers(self, source_task_id):
-        return []
+def _set_instance_status(engine, instance_id: str, status: str) -> None:
+    """Test-phase instance transition (raw SQL, seeder convention)."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE instances SET status = :s "
+                "WHERE instance_id = :i"
+            ),
+            {"s": status, "i": instance_id},
+        )
+
+
+def _job_event_calls(transport) -> list:
+    return list(transport.enqueue_message.await_args_list)
+
+
+def _assert_completed_event(call, job_id: str, watcher_instance: str) -> None:
+    """Pin the emission byte-path + source contract (work_notifier)."""
+    assert call.kwargs["instance_id"] == watcher_instance
+    message = call.kwargs["message"]
+    assert message.startswith(
+        f"[JOB_EVENT] Job {job_id[:8]}... completed ✓"
+    ), f"unexpected emission bytes: {message!r}"
+    assert call.kwargs["source"] == (
+        f"internal_agent:job_event:{job_id}:completed"
+    )
+
+
+def _assert_rows_claimed(watcher_repo, job_id: str) -> None:
+    """Durable claim witness — the CAS DELETE...RETURNING consumed the
+    rows; the REPOSITORY (not a mock) shows them gone."""
+    assert watcher_repo.get_watchers_for_job(job_id) == [], (
+        f"watcher rows for {job_id[:8]}... must be CAS-claimed"
+    )
+    assert all(
+        w.job_id != job_id
+        for w in watcher_repo.get_all_active_watches()
+    ), "no active watch row may survive for the delivered job"
+
+
+def _assert_rows_survive(watcher_repo, job_id: str) -> None:
+    """Durable hold witness — the guard held the sweep, so the rows are
+    still registered in the REPOSITORY for the future terminal."""
+    rows = watcher_repo.get_watchers_for_job(job_id)
+    assert rows, (
+        f"watcher rows for {job_id[:8]}... must SURVIVE a guard-held "
+        f"sweep (they are the at-least-once delivery contract)"
+    )
+    assert any(
+        w.job_id == job_id for w in watcher_repo.get_all_active_watches()
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -369,29 +472,44 @@ class TestMissionLiveGuardUnit:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Part B — drift Pattern f2 site (REAL delivery chain)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class TestPatternF2MissionLiveGuard:
+    """Every test here runs the REAL notify chain: real
+    ``WorkResolverService`` → real ``JobQueueService.notify_watchers``
+    → real ``notify_work_watchers`` → real watcher-row CAS claim —
+    only ``enqueue_message`` is a transport-boundary mock. Durable
+    state is witnessed in the ``job_watchers`` repository."""
+
     @pytest.mark.asyncio
     async def test_mid_mission_leader_not_finalized(
         self, engine, repository, task_repository, lock_repo,
         instance_repo,
     ):
-        """(i) Leader turn ends with children running → f2 sweep must
-        NOT emit ``completed ✓``, must leave the JobItem ACTIVE, and
-        must NOT claim/delete the mission watcher row. The turn-end
-        ``in progress ⟳`` lane is untouched (notify_watchers never
-        called by the sweep here)."""
+        """(i)+(4) Leader turn ends with children running → f2 sweep
+        must NOT emit ``completed ✓``, must leave the JobItem ACTIVE,
+        and the mission watcher row must SURVIVE IN THE REPOSITORY.
+
+        The guard is then proven to be the ONLY difference: once the
+        mission goes truly terminal, the very same settled state
+        delivers exactly once through the real claim-first CAS path.
+        """
         from unittest.mock import patch
 
         watcher_repo = JobWatcherRepository(engine)
-        job_queue_mock = MagicMock()
-        job_queue_mock.notify_watchers = AsyncMock(return_value=0)
+        queue_service, transport = _make_real_queue_service(
+            engine, repository, task_repository, instance_repo,
+        )
 
         _insert_instance(engine, "leader-1", status="running")
         _insert_instance(
             engine, "worker-1", status="running", parent_id="leader-1"
         )
         _insert_job_item(engine, job_id="job-mlg-1", instance_id="leader-1")
-        task_id = _insert_completed_task(
+        _insert_completed_task(
             engine,
             work_id="job-mlg-1",
             instance_id="leader-1",
@@ -405,7 +523,7 @@ class TestPatternF2MissionLiveGuard:
 
         service = _make_recovery_service(
             repository, task_repository, lock_repo, instance_repo,
-            job_queue_mock,
+            queue_service,
         )
         with patch(
             "daemon.services.job_recovery_service.get_dependency_bus",
@@ -416,43 +534,85 @@ class TestPatternF2MissionLiveGuard:
                 min_orphan_age_seconds=0,
             )
 
-        # No finalize.
+        # No finalize; the observable skip seam.
         assert not [
             d for d in stats["details"]
             if d.get("pattern") == "orphan_active_completed_task_done"
         ]
-        # The observable skip seam.
         skips = [
             d for d in stats["details"]
             if d.get("pattern") == "orphan_active_skipped_mission_live"
             and d.get("job_id") == "job-mlg-1"
         ]
         assert skips, f"mission-live skip must be observable: {stats['details']}"
-        assert "b (descendant" in skips[0]["reason"] or (
-            "c (root instance)" in skips[0]["reason"]
-        )
         # JobItem stays ACTIVE — correct-by-design mid-mission.
-        job_after = repository.get("job-mlg-1")
-        assert job_after.admission_state == AdmissionState.ACTIVE.value
-        # Watcher row NOT claimed; no terminal/in_progress emission.
-        assert watcher_repo.get_watchers_for_job("job-mlg-1"), (
-            "mission watcher row must survive the guard-held sweep"
+        assert repository.get("job-mlg-1").admission_state == (
+            AdmissionState.ACTIVE.value
         )
-        job_queue_mock.notify_watchers.assert_not_called()
+        # DURABLE WITNESS: the watcher row survives IN THE REPOSITORY
+        # (guard held the sweep BEFORE notify → no CAS claim ran).
+        _assert_rows_survive(watcher_repo, "job-mlg-1")
+        # No emission of any kind (terminal OR in_progress) from the
+        # sweep — the turn-end 'in progress ⟳' lane is not touched.
+        assert _job_event_calls(transport) == []
+
+        # ── Guard is the only difference: mission goes truly
+        # terminal (root + descendant terminal, bus quiet) → the same
+        # settled state now delivers exactly once via the REAL path.
+        _set_instance_status(engine, "leader-1", "completed")
+        _set_instance_status(engine, "worker-1", "completed")
+        with patch(
+            "daemon.services.job_recovery_service.get_dependency_bus",
+            return_value=_EmptyBusStub(),
+        ):
+            stats2 = await service.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=0,
+            )
+
+        done = [
+            d for d in stats2["details"]
+            if d.get("pattern") == "orphan_active_completed_task_done"
+            and d.get("job_id") == "job-mlg-1"
+        ]
+        assert done, f"mission-dead shape must finalize: {stats2['details']}"
+        assert repository.get("job-mlg-1").admission_state == (
+            AdmissionState.DONE.value
+        )
+        calls = _job_event_calls(transport)
+        assert len(calls) == 1, (
+            f"exactly ONE terminal delivery expected, got {len(calls)}"
+        )
+        _assert_completed_event(calls[0], "job-mlg-1", "watcher-inst")
+        _assert_rows_claimed(watcher_repo, "job-mlg-1")
+
+        # Idempotency: a THIRD sweep on the settled state no-ops —
+        # the claim-first CAS already consumed the row.
+        with patch(
+            "daemon.services.job_recovery_service.get_dependency_bus",
+            return_value=_EmptyBusStub(),
+        ):
+            await service.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=0,
+            )
+        assert len(_job_event_calls(transport)) == 1
+        _assert_rows_claimed(watcher_repo, "job-mlg-1")
 
     @pytest.mark.asyncio
     async def test_true_terminal_finalizes_and_notifies_once(
         self, engine, repository, task_repository, lock_repo,
         instance_repo,
     ):
-        """(ii) Root completes, bus empty, descendants terminal → the
-        terminal event is delivered exactly once via the normal
-        fan-out seam; no double-fire."""
+        """(ii) True mission terminal → terminal delivered exactly once
+        via the REAL fan-out path; an adversarial SECOND sweep against
+        the same settled state cannot produce a duplicate."""
         from unittest.mock import patch
 
         watcher_repo = JobWatcherRepository(engine)
-        job_queue_mock = MagicMock()
-        job_queue_mock.notify_watchers = AsyncMock(return_value=0)
+        queue_service, transport = _make_real_queue_service(
+            engine, repository, task_repository, instance_repo,
+        )
 
         _insert_instance(engine, "leader-2", status="completed")
         _insert_job_item(engine, job_id="job-mlg-2", instance_id="leader-2")
@@ -466,7 +626,7 @@ class TestPatternF2MissionLiveGuard:
 
         service = _make_recovery_service(
             repository, task_repository, lock_repo, instance_repo,
-            job_queue_mock,
+            queue_service,
         )
         with patch(
             "daemon.services.job_recovery_service.get_dependency_bus",
@@ -486,29 +646,217 @@ class TestPatternF2MissionLiveGuard:
         assert repository.get("job-mlg-2").admission_state == (
             AdmissionState.DONE.value
         )
-        # Exactly ONE terminal emission through the canonical seam.
-        assert job_queue_mock.notify_watchers.await_count == 1
-        args = job_queue_mock.notify_watchers.await_args
-        assert args.args[0] == "job-mlg-2"
-        assert args.args[1] == "completed"
+        # Byte-path + exactly-once on the REAL delivery chain.
+        calls = _job_event_calls(transport)
+        assert len(calls) == 1, (
+            f"exactly ONE terminal delivery expected, got {len(calls)}"
+        )
+        _assert_completed_event(calls[0], "job-mlg-2", "watcher-inst")
+        _assert_rows_claimed(watcher_repo, "job-mlg-2")
+
+        # ADVERSARIAL double-sweep: same settled state, sweep again —
+        # the JobItem is DONE (no longer an f2 candidate) and the
+        # watcher rows are CAS-consumed. Zero new deliveries.
+        with patch(
+            "daemon.services.job_recovery_service.get_dependency_bus",
+            return_value=_EmptyBusStub(),
+        ):
+            stats2 = await service.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=0,
+            )
+        assert not [
+            d for d in stats2["details"]
+            if d.get("pattern") == "orphan_active_completed_task_done"
+        ], "settled job must not re-appear as an f2 candidate"
+        assert len(_job_event_calls(transport)) == 1
+        _assert_rows_claimed(watcher_repo, "job-mlg-2")
 
     @pytest.mark.asyncio
-    async def test_crash_after_mission_end_still_delivers_backstop(
+    async def test_true_terminal_two_watchers_deliver_once_each(
         self, engine, repository, task_repository, lock_repo,
         instance_repo,
     ):
-        """(iii) Mission dead + JobItem stuck ACTIVE (crash after the
-        mission ended) → f2 finalizes + notifies. The ORIGINAL
-        missing-report bug's fix must NOT regress.
-
-        Revive variant: the instance was revived mid-mission (root
-        RUNNING again) → the guard skips; once the true terminal
-        lands, the terminal is still emitted."""
+        """(ii) Two watcher rows on ONE job (distinct watching
+        instances) → one sweep delivers to EACH exactly once, and the
+        claim-first CAS consumes both rows in the same pass; a second
+        sweep delivers nothing more."""
         from unittest.mock import patch
 
         watcher_repo = JobWatcherRepository(engine)
-        job_queue_mock = MagicMock()
-        job_queue_mock.notify_watchers = AsyncMock(return_value=0)
+        queue_service, transport = _make_real_queue_service(
+            engine, repository, task_repository, instance_repo,
+        )
+
+        _insert_instance(engine, "leader-2b", status="completed")
+        _insert_job_item(engine, job_id="job-mlg-2b", instance_id="leader-2b")
+        _insert_completed_task(
+            engine,
+            work_id="job-mlg-2b",
+            instance_id="leader-2b",
+            completed_at=now_utc_naive() - timedelta(seconds=300),
+        )
+        _add_watch(watcher_repo, "job-mlg-2b", instance_id="watcher-a")
+        _add_watch(
+            watcher_repo,
+            "job-mlg-2b",
+            instance_id="watcher-b",
+            events=["mission_terminal", "completed"],
+        )
+
+        service = _make_recovery_service(
+            repository, task_repository, lock_repo, instance_repo,
+            queue_service,
+        )
+        with patch(
+            "daemon.services.job_recovery_service.get_dependency_bus",
+            return_value=_EmptyBusStub(),
+        ):
+            await service.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=0,
+            )
+
+        calls = _job_event_calls(transport)
+        assert len(calls) == 2, (
+            f"one delivery PER watcher expected, got {len(calls)}"
+        )
+        delivered_to = {c.kwargs["instance_id"] for c in calls}
+        assert delivered_to == {"watcher-a", "watcher-b"}
+        for c in calls:
+            _assert_completed_event(c, "job-mlg-2b", c.kwargs["instance_id"])
+        _assert_rows_claimed(watcher_repo, "job-mlg-2b")
+
+        # Second sweep — rows consumed, no duplicate deliveries.
+        with patch(
+            "daemon.services.job_recovery_service.get_dependency_bus",
+            return_value=_EmptyBusStub(),
+        ):
+            await service.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=0,
+            )
+        assert len(_job_event_calls(transport)) == 2
+
+    @pytest.mark.asyncio
+    async def test_crash_before_finalize_restart_sweep_delivers_exactly_once(
+        self, engine, repository, task_repository, lock_repo,
+        instance_repo,
+    ):
+        """(iii) THE original missing-report non-regression, built as
+        the real crash→restart narrative:
+
+        A mission runs to true completion (instance tree ALL-terminal,
+        bus quiet) but the daemon crashes BETWEEN mission end and the
+        JobItem finalize — the row is left stuck ACTIVE with its
+        backing Task COMPLETED and an UNCLAIMED mission watcher row.
+
+        On restart, a FRESH recovery service + queue service over the
+        surviving durable state runs the drift sweep (the restart-path
+        owner of the stuck-ACTIVE shape — a dual-backed ACTIVE JobItem
+        resolves 'processing', so ``reconcile_terminal_watches``
+        correctly skips it and Pattern f2 owns the repair). The sweep
+        must finalize AND deliver the terminal through the REAL
+        notify path: watcher row CAS-claimed exactly once, one
+        ``[JOB_EVENT] ... completed ✓`` emission, byte-path + source
+        contract pinned, and an adversarial second sweep cannot
+        duplicate the delivery."""
+        from unittest.mock import patch
+
+        watcher_repo = JobWatcherRepository(engine)
+
+        # ── Durable state the crash leaves behind ──
+        _insert_instance(engine, "leader-crash", status="completed")
+        _insert_instance(
+            engine,
+            "worker-crash",
+            status="completed",
+            parent_id="leader-crash",
+        )
+        _insert_job_item(
+            engine, job_id="job-crash-1", instance_id="leader-crash"
+        )
+        _insert_completed_task(
+            engine,
+            work_id="job-crash-1",
+            instance_id="leader-crash",
+            completed_at=now_utc_naive() - timedelta(seconds=300),
+        )
+        _add_watch(
+            watcher_repo,
+            "job-crash-1",
+            events=["mission_terminal", "completed"],
+        )
+        # Pre-restart sanity: the stranded shape is really stranded.
+        assert repository.get("job-crash-1").admission_state == (
+            AdmissionState.ACTIVE.value
+        )
+        _assert_rows_survive(watcher_repo, "job-crash-1")
+
+        # ── RESTART: fresh services over the surviving state (no
+        # in-memory carryover — the repos re-read the same engine). ──
+        queue_service, transport = _make_real_queue_service(
+            engine, repository, task_repository, instance_repo,
+        )
+        recovery = _make_recovery_service(
+            repository, task_repository, lock_repo, instance_repo,
+            queue_service,
+        )
+        with patch(
+            "daemon.services.job_recovery_service.get_dependency_bus",
+            return_value=_EmptyBusStub(),
+        ):
+            stats = await recovery.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=0,
+            )
+
+        done = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_active_completed_task_done"
+            and d.get("job_id") == "job-crash-1"
+        ]
+        assert done, (
+            f"crash-after-mission-end MUST finalize on the restart "
+            f"sweep (the original missing-report bug must not "
+            f"regress): {stats['details']}"
+        )
+        assert repository.get("job-crash-1").admission_state == (
+            AdmissionState.DONE.value
+        )
+        calls = _job_event_calls(transport)
+        assert len(calls) == 1, (
+            f"exactly ONE terminal delivery expected, got {len(calls)}"
+        )
+        _assert_completed_event(calls[0], "job-crash-1", "watcher-inst")
+        _assert_rows_claimed(watcher_repo, "job-crash-1")
+
+        # Adversarial second sweep — no duplicate terminal.
+        with patch(
+            "daemon.services.job_recovery_service.get_dependency_bus",
+            return_value=_EmptyBusStub(),
+        ):
+            await recovery.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=0,
+            )
+        assert len(_job_event_calls(transport)) == 1
+
+    @pytest.mark.asyncio
+    async def test_revive_mid_mission_holds_then_terminal_delivers(
+        self, engine, repository, task_repository, lock_repo,
+        instance_repo,
+    ):
+        """(iv) Instance REVIVED mid-mission (root terminal → RUNNING
+        again) → the guard holds the finalize and the watcher row
+        survives; once the true terminal lands, the terminal is still
+        delivered exactly once via the REAL claim path."""
+        from unittest.mock import patch
+
+        watcher_repo = JobWatcherRepository(engine)
+        queue_service, transport = _make_real_queue_service(
+            engine, repository, task_repository, instance_repo,
+        )
 
         _insert_job_item(engine, job_id="job-mlg-3", instance_id="leader-3")
         _insert_completed_task(
@@ -521,7 +869,7 @@ class TestPatternF2MissionLiveGuard:
 
         service = _make_recovery_service(
             repository, task_repository, lock_repo, instance_repo,
-            job_queue_mock,
+            queue_service,
         )
 
         # Phase 1 — root REVIVED mid-mission (running): guard skips.
@@ -537,15 +885,12 @@ class TestPatternF2MissionLiveGuard:
         assert repository.get("job-mlg-3").admission_state == (
             AdmissionState.ACTIVE.value
         )
-        job_queue_mock.notify_watchers.assert_not_called()
+        assert _job_event_calls(transport) == []
+        _assert_rows_survive(watcher_repo, "job-mlg-3")
 
         # Phase 2 — the true terminal lands (root completes): the
         # terminal is delivered (at-least-once preserved).
-        instance_repo.transition_status_if(
-            "leader-3",
-            new_status="completed",
-            allowed_from=("running",),
-        )
+        _set_instance_status(engine, "leader-3", "completed")
         with patch(
             "daemon.services.job_recovery_service.get_dependency_bus",
             return_value=_EmptyBusStub(),
@@ -557,11 +902,14 @@ class TestPatternF2MissionLiveGuard:
         assert repository.get("job-mlg-3").admission_state == (
             AdmissionState.DONE.value
         )
-        assert job_queue_mock.notify_watchers.await_count == 1
+        calls = _job_event_calls(transport)
+        assert len(calls) == 1
+        _assert_completed_event(calls[0], "job-mlg-3", "watcher-inst")
+        _assert_rows_claimed(watcher_repo, "job-mlg-3")
         assert [
             d for d in stats["details"]
             if d.get("pattern") == "orphan_active_completed_task_done"
-        ], "crash-after-mission-end must finalize (backstop preserved)"
+        ], "revive→terminal must finalize (backstop preserved)"
 
     @pytest.mark.asyncio
     async def test_orphan_timeout_fires_while_guard_sees_live(
@@ -570,11 +918,14 @@ class TestPatternF2MissionLiveGuard:
     ):
         """(v) Guard still seeing live (root running) but the backing
         task's ``completed_at`` is older than the zombie window → the
-        finalize fires (starvation impossible)."""
+        finalize fires through the REAL notify path (starvation
+        impossible)."""
         from unittest.mock import patch
 
-        job_queue_mock = MagicMock()
-        job_queue_mock.notify_watchers = AsyncMock(return_value=0)
+        watcher_repo = JobWatcherRepository(engine)
+        queue_service, transport = _make_real_queue_service(
+            engine, repository, task_repository, instance_repo,
+        )
 
         _insert_instance(engine, "leader-5", status="running")
         _insert_job_item(engine, job_id="job-mlg-5", instance_id="leader-5")
@@ -587,10 +938,11 @@ class TestPatternF2MissionLiveGuard:
                 seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 300
             ),
         )
+        _add_watch(watcher_repo, "job-mlg-5")
 
         service = _make_recovery_service(
             repository, task_repository, lock_repo, instance_repo,
-            job_queue_mock,
+            queue_service,
         )
         with patch(
             "daemon.services.job_recovery_service.get_dependency_bus",
@@ -613,23 +965,29 @@ class TestPatternF2MissionLiveGuard:
         assert repository.get("job-mlg-5").admission_state == (
             AdmissionState.DONE.value
         )
-        job_queue_mock.notify_watchers.assert_awaited_once()
+        calls = _job_event_calls(transport)
+        assert len(calls) == 1
+        _assert_completed_event(calls[0], "job-mlg-5", "watcher-inst")
+        _assert_rows_claimed(watcher_repo, "job-mlg-5")
 
     @pytest.mark.asyncio
     async def test_guard_error_fails_open_to_finalize(
         self, engine, repository, task_repository, lock_repo,
+        instance_repo,
     ):
         """(vi) Resolver/DB error inside the guard → fail-open: the
-        finalize fires (an extra premature event is acceptable; a
-        missing terminal is NOT)."""
+        finalize fires through the REAL notify path (an extra
+        premature event is acceptable; a missing terminal is NOT)."""
         from unittest.mock import patch
 
         broken_repo = MagicMock(spec=SQLModelInstanceRepository)
         broken_repo.get_tree_ids_permanent = MagicMock(
             side_effect=RuntimeError("resolver exploded")
         )
-        job_queue_mock = MagicMock()
-        job_queue_mock.notify_watchers = AsyncMock(return_value=0)
+        watcher_repo = JobWatcherRepository(engine)
+        queue_service, transport = _make_real_queue_service(
+            engine, repository, task_repository, instance_repo,
+        )
 
         _insert_instance(engine, "leader-6", status="running")
         _insert_job_item(engine, job_id="job-mlg-6", instance_id="leader-6")
@@ -639,12 +997,13 @@ class TestPatternF2MissionLiveGuard:
             instance_id="leader-6",
             completed_at=now_utc_naive() - timedelta(seconds=300),
         )
+        _add_watch(watcher_repo, "job-mlg-6")
 
         service = JobRecoveryService(
             job_repository=repository,
             lock_repository=lock_repo,
             instance_repository=broken_repo,
-            job_queue_service=job_queue_mock,
+            job_queue_service=queue_service,
             task_repository=task_repository,
             stale_task_recovery=None,
         )
@@ -665,184 +1024,242 @@ class TestPatternF2MissionLiveGuard:
         assert done, (
             f"guard errors must FAIL OPEN to finalize: {stats['details']}"
         )
-        job_queue_mock.notify_watchers.assert_awaited_once()
+        calls = _job_event_calls(transport)
+        assert len(calls) == 1
+        _assert_completed_event(calls[0], "job-mlg-6", "watcher-inst")
+        _assert_rows_claimed(watcher_repo, "job-mlg-6")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Part C — boot-sweep parity (``reconcile_terminal_watches``)
+# Part C — boot-sweep parity (``reconcile_terminal_watches``; REAL resolver
+# + REAL notify chain)
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def _terminal_job_record(
-    *,
-    job_id: str,
-    instance_id: str,
-    completed_at: datetime,
-) -> SimpleNamespace:
-    """WorkRecord-shaped resolver return: a settled task-kind JOB row
-    whose mission instance is still to be consulted by the guard."""
-    return SimpleNamespace(
-        work_id=job_id,
-        kind="job",
-        status="completed",
-        instance_id=instance_id,
-        project_id="test-project",
-        agent_id="developer",
-        result_summary=None,
-        error=None,
-        created_at=completed_at - timedelta(minutes=5),
-        started_at=None,
-        completed_at=completed_at.isoformat(),
-        job_type="task",
-        mission_liveness=None,
-        mission_terminal_reason=None,
-        message_id=None,
-        metadata={},
-    )
 
 
 class TestBootSweepMissionLiveGuard:
-    def _service(
-        self,
-        engine,
-        repository,
-        watcher_repo,
-        resolver,
-    ) -> tuple[JobQueueService, MagicMock]:
-        instance_manager = MagicMock()
-        instance_manager._instance_repository = (
-            SQLModelInstanceRepository(engine=engine)
+    """The sweep runs against the REAL ``WorkResolverService`` over
+    real Task + JobItem rows and the REAL notify chain; only
+    ``enqueue_message`` is a transport-boundary mock.
+
+    Mechanic note (verified against ``WorkResolverService.resolve_work``):
+    a dual-backed work unit resolves to the JOBITEM record, so the boot
+    sweep only ever fires when the JobItem row itself is settled — the
+    stuck-ACTIVE crash shape belongs to the drift f2 sweep (Part B,
+    ``test_crash_before_finalize_restart_sweep_delivers_exactly_once``).
+    The boot sweep's crash narrative is crash-AFTER-finalize: the row
+    settled but the notify was lost."""
+
+    def _boot_sweep_service(
+        self, engine, repository, task_repository, instance_repo,
+    ) -> tuple[JobQueueService, MagicMock, JobWatcherRepository]:
+        service, transport = _make_real_queue_service(
+            engine, repository, task_repository, instance_repo,
         )
-        instance_manager.enqueue_message = AsyncMock(
-            return_value=MagicMock(message_id="msg-1")
-        )
-        lock_repo = LockRepository(engine)
-        service = JobQueueService(
-            repository=repository,
-            lock_manager=MagicMock(),
-            queue_repo=MagicMock(),
-            instance_manager=instance_manager,
-        )
-        service.set_watcher_repo(watcher_repo)
-        service._work_resolver = resolver
-        return service, instance_manager
+        return service, transport, service._watcher_repo
 
     @pytest.mark.asyncio
-    async def test_boot_sweep_holds_live_mission(
-        self, engine, repository
+    async def test_boot_sweep_holds_live_mission_then_delivers_once(
+        self, engine, repository, task_repository, instance_repo,
     ):
-        """(iv)a Mission live + settled receipt + active
+        """(i)+(4) boot twin — Mission LIVE + settled receipt + active
         mission_terminal watch → NO false terminal at boot, watcher
-        row not claimed."""
-        watcher_repo = JobWatcherRepository(engine)
+        row survives IN THE REPOSITORY. The guard is proven to be the
+        only difference: once the mission goes terminal, the same
+        settled state delivers exactly once through the real CAS
+        claim path."""
+        service, transport, watcher_repo = self._boot_sweep_service(
+            engine, repository, task_repository, instance_repo,
+        )
+
         _insert_instance(engine, "leader-boot-1", status="waiting_children")
         _insert_job_item(
             engine,
             job_id="job-boot-1",
             instance_id="leader-boot-1",
-            admission_state=AdmissionState.ACTIVE.value,
+            admission_state=AdmissionState.DONE.value,
+        )
+        _insert_completed_task(
+            engine,
+            work_id="job-boot-1",
+            instance_id="leader-boot-1",
+            completed_at=now_utc_naive() - timedelta(seconds=120),
         )
         _add_watch(
             watcher_repo,
             "job-boot-1",
             events=["mission_terminal", "completed"],
         )
-        resolver = MagicMock()
-        resolver.resolve_work = MagicMock(
-            return_value=_terminal_job_record(
-                job_id="job-boot-1",
-                instance_id="leader-boot-1",
-                completed_at=now_utc_naive() - timedelta(seconds=120),
-            )
-        )
-        service, instance_manager = self._service(
-            engine, repository, watcher_repo, resolver
-        )
-        with patch.object(
-            service, "notify_watchers", new=AsyncMock(return_value=0)
-        ) as notify_mock:
-            count = await service.reconcile_terminal_watches()
+        # Sanity: the work row really resolves terminal (settled
+        # receipt) — the ONLY thing standing between the watcher and
+        # a premature event is the guard.
+        record = service._work_resolver.resolve_work("job-boot-1")
+        assert record.status == "completed"
+        assert record.job_type == "task"
+
+        count = await service.reconcile_terminal_watches()
 
         assert count == 0
-        notify_mock.assert_not_awaited()
-        assert watcher_repo.get_watchers_for_job("job-boot-1"), (
-            "boot sweep must NOT claim the watcher row of a live mission"
-        )
-        instance_manager.enqueue_message.assert_not_called()
+        assert _job_event_calls(transport) == []
+        # DURABLE WITNESS: rows survive in the repository.
+        _assert_rows_survive(watcher_repo, "job-boot-1")
+
+        # Guard is the only difference: mission goes terminal → the
+        # same settled state delivers exactly once.
+        _set_instance_status(engine, "leader-boot-1", "completed")
+        count = await service.reconcile_terminal_watches()
+
+        assert count == 1
+        calls = _job_event_calls(transport)
+        assert len(calls) == 1
+        _assert_completed_event(calls[0], "job-boot-1", "watcher-inst")
+        _assert_rows_claimed(watcher_repo, "job-boot-1")
+
+        # Adversarial re-sweep — nothing left to deliver.
+        assert await service.reconcile_terminal_watches() == 0
+        assert len(_job_event_calls(transport)) == 1
 
     @pytest.mark.asyncio
-    async def test_boot_sweep_fires_for_dead_mission(
-        self, engine, repository
+    async def test_crash_after_finalize_restart_boot_sweep_delivers_exactly_once(
+        self, engine, repository, task_repository, instance_repo,
     ):
-        """(iv)b Mission dead → the boot sweep DOES fire the terminal
-        (at-least-once across restarts)."""
-        watcher_repo = JobWatcherRepository(engine)
+        """(iii) boot half of the crash narrative — the mission
+        genuinely ended (tree all-terminal, bus quiet), the JobItem
+        finalized (DONE), but the daemon crashed BEFORE the terminal
+        notification reached the watcher (row stranded, unclaimed).
+        On restart the boot sweep ``reconcile_terminal_watches`` fires
+        through the REAL notify path: watcher row CAS-claimed exactly
+        once, one ``[JOB_EVENT] ... completed ✓`` emission, and an
+        adversarial second sweep cannot duplicate it (at-least-once
+        ACROSS restarts — the original missing-report bug's boot
+        vector must not regress)."""
+        service, transport, watcher_repo = self._boot_sweep_service(
+            engine, repository, task_repository, instance_repo,
+        )
+
         _insert_instance(engine, "leader-boot-2", status="completed")
+        _insert_instance(
+            engine,
+            "worker-boot-2",
+            status="completed",
+            parent_id="leader-boot-2",
+        )
         _insert_job_item(
             engine,
             job_id="job-boot-2",
             instance_id="leader-boot-2",
-            admission_state=AdmissionState.ACTIVE.value,
+            admission_state=AdmissionState.DONE.value,
+        )
+        _insert_completed_task(
+            engine,
+            work_id="job-boot-2",
+            instance_id="leader-boot-2",
+            completed_at=now_utc_naive() - timedelta(seconds=120),
         )
         _add_watch(
             watcher_repo,
             "job-boot-2",
             events=["mission_terminal", "completed"],
         )
-        resolver = MagicMock()
-        resolver.resolve_work = MagicMock(
-            return_value=_terminal_job_record(
-                job_id="job-boot-2",
-                instance_id="leader-boot-2",
-                completed_at=now_utc_naive() - timedelta(seconds=120),
-            )
-        )
-        service, _ = self._service(
-            engine, repository, watcher_repo, resolver
-        )
-        with patch.object(
-            service, "notify_watchers", new=AsyncMock(return_value=0)
-        ) as notify_mock:
-            count = await service.reconcile_terminal_watches()
+        # Pre-restart sanity: the stranded shape is really stranded.
+        _assert_rows_survive(watcher_repo, "job-boot-2")
+        assert _job_event_calls(transport) == []
+
+        # RESTART sweep.
+        count = await service.reconcile_terminal_watches()
 
         assert count == 1
-        notify_mock.assert_awaited_once()
-        args = notify_mock.await_args
-        assert args.args[0] == "job-boot-2"
-        assert args.args[1] == "completed"
+        calls = _job_event_calls(transport)
+        assert len(calls) == 1, (
+            f"exactly ONE terminal delivery expected, got {len(calls)}"
+        )
+        _assert_completed_event(calls[0], "job-boot-2", "watcher-inst")
+        _assert_rows_claimed(watcher_repo, "job-boot-2")
+
+        # Adversarial second sweep — rows consumed, no duplicates.
+        assert await service.reconcile_terminal_watches() == 0
+        assert len(_job_event_calls(transport)) == 1
+        _assert_rows_claimed(watcher_repo, "job-boot-2")
 
     @pytest.mark.asyncio
-    async def test_boot_sweep_receipt_kind_semantics_unchanged(
-        self, engine, repository
+    async def test_boot_sweep_two_watchers_deliver_once_each(
+        self, engine, repository, task_repository, instance_repo,
     ):
-        """(iv)c Receipt-kind watches (no ``mission_terminal`` event)
-        are UNCHANGED: the terminal fires even when the mission
-        instance is still live."""
-        watcher_repo = JobWatcherRepository(engine)
-        _insert_instance(engine, "leader-boot-3", status="running")
+        """(ii) boot twin — two watcher rows on ONE settled job → the
+        sweep delivers to EACH exactly once and the claim-first CAS
+        consumes both rows in one pass; a second sweep delivers
+        nothing more."""
+        service, transport, watcher_repo = self._boot_sweep_service(
+            engine, repository, task_repository, instance_repo,
+        )
+
+        _insert_instance(engine, "leader-boot-3", status="completed")
         _insert_job_item(
             engine,
             job_id="job-boot-3",
             instance_id="leader-boot-3",
-            admission_state=AdmissionState.ACTIVE.value,
+            admission_state=AdmissionState.DONE.value,
+        )
+        _insert_completed_task(
+            engine,
+            work_id="job-boot-3",
+            instance_id="leader-boot-3",
+            completed_at=now_utc_naive() - timedelta(seconds=120),
+        )
+        _add_watch(watcher_repo, "job-boot-3", instance_id="watcher-a")
+        _add_watch(
+            watcher_repo,
+            "job-boot-3",
+            instance_id="watcher-b",
+            events=["mission_terminal", "completed"],
+        )
+
+        count = await service.reconcile_terminal_watches()
+
+        assert count == 2
+        calls = _job_event_calls(transport)
+        assert len(calls) == 2
+        delivered_to = {c.kwargs["instance_id"] for c in calls}
+        assert delivered_to == {"watcher-a", "watcher-b"}
+        for c in calls:
+            _assert_completed_event(c, "job-boot-3", c.kwargs["instance_id"])
+        _assert_rows_claimed(watcher_repo, "job-boot-3")
+
+        # Second sweep — no duplicate deliveries.
+        assert await service.reconcile_terminal_watches() == 0
+        assert len(_job_event_calls(transport)) == 2
+
+    @pytest.mark.asyncio
+    async def test_boot_sweep_receipt_kind_semantics_unchanged(
+        self, engine, repository, task_repository, instance_repo,
+    ):
+        """(iv)c Receipt-kind watches (no ``mission_terminal`` event)
+        are UNCHANGED: the terminal fires through the REAL notify path
+        even when the mission instance is still live (the sweep-level
+        guard is scoped to mission-keyed watches only)."""
+        service, transport, watcher_repo = self._boot_sweep_service(
+            engine, repository, task_repository, instance_repo,
+        )
+
+        _insert_instance(engine, "leader-boot-4", status="running")
+        _insert_job_item(
+            engine,
+            job_id="job-boot-4",
+            instance_id="leader-boot-4",
+            admission_state=AdmissionState.DONE.value,
+        )
+        _insert_completed_task(
+            engine,
+            work_id="job-boot-4",
+            instance_id="leader-boot-4",
+            completed_at=now_utc_naive() - timedelta(seconds=120),
         )
         # Default (receipt) events only — NO mission_terminal.
-        _add_watch(watcher_repo, "job-boot-3")
-        resolver = MagicMock()
-        resolver.resolve_work = MagicMock(
-            return_value=_terminal_job_record(
-                job_id="job-boot-3",
-                instance_id="leader-boot-3",
-                completed_at=now_utc_naive() - timedelta(seconds=120),
-            )
-        )
-        service, _ = self._service(
-            engine, repository, watcher_repo, resolver
-        )
-        with patch.object(
-            service, "notify_watchers", new=AsyncMock(return_value=0)
-        ) as notify_mock:
-            count = await service.reconcile_terminal_watches()
+        _add_watch(watcher_repo, "job-boot-4", instance_id="watcher-inst")
+
+        count = await service.reconcile_terminal_watches()
 
         assert count == 1
-        notify_mock.assert_awaited_once()
+        calls = _job_event_calls(transport)
+        assert len(calls) == 1
+        _assert_completed_event(calls[0], "job-boot-4", "watcher-inst")
+        _assert_rows_claimed(watcher_repo, "job-boot-4")
