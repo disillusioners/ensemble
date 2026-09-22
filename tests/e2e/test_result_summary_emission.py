@@ -189,10 +189,10 @@ def _pg_reachable() -> bool:
 
 pytestmark = [
     pytest.mark.integration,
-    # F1 env guard MUST be first: pytest evaluates skipif conditions in
-    # order and the ``_pg_reachable`` probe below opens a real DB
-    # connection during collection. A prod-like resolution is refused
-    # before any connection attempt.
+    # F1 env guard: refusal is eager at module-import via
+    # ``_PG_ENV_REFUSAL = _pg_env_refusal_reason()`` (line 125) — runs
+    # before any skipif probe opens a connection. The pytestmark ORDER
+    # is cosmetic; the real fence is the guard function itself.
     pytest.mark.skipif(
         _PG_ENV_REFUSAL is not None,
         reason=_PG_ENV_REFUSAL or "PG env guard passed",

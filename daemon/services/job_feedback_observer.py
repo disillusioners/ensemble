@@ -2960,7 +2960,6 @@ class JobFeedbackObserver:
         — the DB is already committed, so the worst case is a missing
         notification (recoverable by the orphan-detector / recovery sweep).
 
-        v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
         ``job_id`` is the optional JobItem primary key for the
         JobItem-backed terminal transition (``_finalize_job`` path).
         When supplied, the CALLER (``_finalize_job``) publishes the
