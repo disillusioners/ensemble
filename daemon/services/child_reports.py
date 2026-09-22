@@ -4245,11 +4245,20 @@ Provide a concise summary:"""
             get_completion_registry().complete(instance_id, result=last_content)
             if self._events_service:
                 try:
+                    # v0.13.9 fix (fix/job-completed-result-arm,
+                    # 2026-09-22): thread ``result_summary=last_content``
+                    # so the lifecycle event + global notification
+                    # broadcaster carry the agent's last assistant
+                    # message (Item 3c). Pre-fix this call omitted the
+                    # kwarg and the notification dict never carried
+                    # ``result_summary``. ``last_content`` is already
+                    # in scope from the inline cascade above.
                     await self._events_service._publish_instance_lifecycle_event(
                         instance_id=instance_id,
                         status=_publish_status,
                         error=_publish_error,
                         parent_id=None,
+                        result_summary=last_content,
                     )
                 except Exception as e:
                     logger.warning(
@@ -4526,11 +4535,17 @@ Provide a concise summary:"""
             get_completion_registry().complete(instance_id, result=last_content)
             if self._events_service:
                 try:
+                    # v0.13.9 fix (fix/job-completed-result-arm,
+                    # 2026-09-22): thread ``result_summary=last_content``
+                    # — same Item 3c contract as the root-completion
+                    # call site above. ``last_content`` is already in
+                    # scope from the tool-invocation completion flow.
                     await self._events_service._publish_instance_lifecycle_event(
                         instance_id=instance_id,
                         status="completed",
                         error=None,
                         parent_id=parent_id,
+                        result_summary=last_content,
                     )
                 except Exception as e:
                     logger.warning(
@@ -4697,11 +4712,21 @@ Provide a concise summary:"""
                         )
                 if self._events_service:
                     try:
+                        # v0.13.9 fix (fix/job-completed-result-arm,
+                        # 2026-09-22): the ``last_content`` for this
+                        # completed-parent emit is the parent's last
+                        # assistant message — same Item 3c contract.
+                        # The completed-parent cascade fires on the
+                        # bus callback path; without this kwarg the
+                        # parent-completion notification reaches the
+                        # SSE /notifications/stream without
+                        # ``result_summary``.
                         await self._events_service._publish_instance_lifecycle_event(
                             instance_id=result.completed_parent_id,
                             status="completed",
                             error=None,
                             parent_id=result.completed_parent_parent_id,
+                            result_summary=last_content,
                         )
                     except Exception as e:
                         logger.warning(
