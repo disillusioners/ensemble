@@ -71,23 +71,49 @@ def _make_manager_for_answer_endpoint(
     # Write-paused gate — every happy-path test wants this False.
     manager.is_write_paused = False
 
-    # Instance-existence check.
+    # Instance-existence check (mid-flight QA channel: the shared
+    # ``answer_questions_via_instance`` helper reads the instance row
+    # via ``manager._instance_repository.get`` — sync — to obtain the
+    # asker status for the T3 terminal pre-check).
+    instance_repo = MagicMock()
     if get_instance_raises:
-        async def _raise(iid: str):
-            raise KeyError(iid)
-        manager.get_instance = _raise
+        instance_repo.get.side_effect = KeyError(question_pack)
     elif instance_exists:
-        async def _ok(iid: str):
-            return MagicMock(instance_id=iid)
-        manager.get_instance = _ok
+        # A PAUSED asker passes the three-way T3 discriminator.
+        instance_repo.get.return_value = MagicMock(
+            instance_id="inst-answer", status="paused"
+        )
     else:
-        async def _missing(iid: str):
-            raise KeyError(iid)
-        manager.get_instance = _missing
+        instance_repo.get.return_value = None
+    instance_repo.get_metadata_value.return_value = None
+    manager._instance_repository = instance_repo
 
-    # Question manager — pre-loaded with the pack the endpoint should answer.
+    # Mid-flight QA channel: work-id enumeration + EventBus fan-out are
+    # disabled in these unit tests (None short-circuits both lanes).
+    manager._work_resolver = None
+    manager._task_repo = None
+    manager._watcher_repo = None
+    manager._event_bus = None
+
+    # Question manager — pre-loaded with the pack the endpoint should
+    # answer. ``set_answers`` returns the (pack, transitioned) CAS
+    # tuple (OQ-3): a non-None pack ⇒ the pack pre-transitioned to
+    # "answered" ⇒ transitioned=True (the CAS-winner path).
+    def _cas(iid: str, answers: dict):
+        if question_pack is None:
+            return (None, False)
+        # Real CAS semantics: pending -> answered exactly-once.
+        if question_pack.status == "pending":
+            question_pack.status = "answered"
+            question_pack.answers = dict(answers)
+            return (question_pack, True)
+        return (question_pack, False)
+
     manager._question_manager = MagicMock()
-    manager._question_manager.set_answers = MagicMock(return_value=question_pack)
+    manager._question_manager.set_answers = MagicMock(side_effect=_cas)
+    manager._question_manager.get_question_pack = MagicMock(
+        return_value=question_pack
+    )
 
     # resume_instance_cascade — fan-out the resume across the tree.
     manager.resume_instance_cascade = AsyncMock(
@@ -107,9 +133,10 @@ def _make_manager_for_answer_endpoint(
 
 
 def _make_live_hub() -> MagicMock:
-    """Build a mock live-event-hub whose ``stream_question_pack`` is an AsyncMock."""
+    """Build a mock live-event-hub with async stream methods."""
     hub = MagicMock()
     hub.stream_question_pack = AsyncMock(return_value=None)
+    hub.stream_answer_received = AsyncMock(return_value=None)
     return hub
 
 
@@ -160,8 +187,8 @@ class TestAnswerEndpointStoresAndReturns:
         # documented schema (instance_id, status, created_at, questions,
         # answers).
         pack = QuestionPack(instance_id="inst-answer", questions=[])
-        pack.answers = {"approach": "A"}
-        pack.status = "answered"
+        pack.answers = {}
+        pack.status = "pending"
 
         client, state = client_and_state_for_answer
         state["manager"] = _make_manager_for_answer_endpoint(
@@ -204,8 +231,8 @@ class TestAnswerEndpointStoresAndReturns:
         from daemon.services.question_manager import QuestionPack
 
         pack = QuestionPack(instance_id="inst-answer", questions=[])
-        pack.status = "answered"
-        pack.answers = {"x": "y"}
+        pack.status = "pending"
+        pack.answers = {}
 
         client, state = client_and_state_for_answer
         state["manager"] = _make_manager_for_answer_endpoint(
@@ -239,7 +266,8 @@ class TestAnswerEndpointStoresAndReturns:
         from daemon.services.question_manager import QuestionPack
 
         pack = QuestionPack(instance_id="inst-answer", questions=[])
-        pack.status = "answered"
+        pack.status = "pending"
+        pack.answers = {}
 
         client, state = client_and_state_for_answer
         state["manager"] = _make_manager_for_answer_endpoint(
@@ -271,21 +299,27 @@ class TestAnswerEndpointStoresAndReturns:
 
 
 class TestAnswerEndpointNoPendingPack:
-    """No pending pack → 404 (the ``set_answers`` returns ``None`` path)."""
+    """No pack anywhere → 410 QUESTION_PACK_LOST (mid-flight QA channel T7).
 
-    def test_post_answer_without_pack_returns_404(
+    The shared helper's no-pack contract (design §5.3): when neither
+    the RAM pack NOR the durable ``instance_metadata`` payload exists,
+    the pack was LOST (daemon restart without a shadow) — surfaced as
+    ``410 QUESTION_PACK_LOST`` instead of the pre-2026-09-21
+    mislabeled ``404 INSTANCE_NOT_FOUND``. A pack that exists but is
+    already answered is the distinct ``404 NO_PENDING_QUESTION``.
+    """
+
+    def test_post_answer_without_pack_returns_410_pack_lost(
         self, client_and_state_for_answer,
     ):
-        """POST when ``set_answers`` returns ``None`` → 404 INSTANCE_NOT_FOUND.
+        """POST with no RAM pack and no metadata shadow → 410 QUESTION_PACK_LOST.
 
-        The endpoint distinguishes "answer without a question" from
-        "answer stored" by returning 404 in the no-pack case. The
-        resume cascade must NOT fire (no work to do).
+        The resume cascade must NOT fire (no work to do).
         """
         client, state = client_and_state_for_answer
         manager = _make_manager_for_answer_endpoint(
             instance_exists=True,
-            question_pack=None,  # set_answers → None
+            question_pack=None,  # set_answers → (None, False)
         )
         state["manager"] = manager
         state["live_hub"] = _make_live_hub()
@@ -295,11 +329,9 @@ class TestAnswerEndpointNoPendingPack:
             json={"answers": {"any": "value"}},
         )
 
-        assert response.status_code == 404, response.text
+        assert response.status_code == 410, response.text
         body = response.json()
-        # The 404 uses ErrorResponse shape; ``detail`` may be a dict
-        # (Pydantic model_dump) or a string. Verify the code path runs.
-        assert "detail" in body
+        assert body["detail"]["code"] == "QUESTION_PACK_LOST"
 
         # No resume fired — there was no pack to resume against.
         manager.resume_instance_cascade.assert_not_awaited()

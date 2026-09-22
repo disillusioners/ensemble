@@ -48,11 +48,25 @@ class TaskType(str, enum.Enum):
     apply to them. Reports have no ``JobItem`` to collide with, so the
     original job guard is irrelevant for them — only the per-instance
     serialization guard (one RUNNING task per instance) applies.
+
+    ``HEARTBEAT_EMIT_STUCK`` (2026-09-21, mid-flight QA channel): the
+    wedge-guard one-shot wake. A single future-dated Task row bound to
+    the ASKER instance (``Task.instance_id`` is the asker) whose
+    ``next_retry_at`` sits ahead of time. It exists to observe the
+    paused asker, so the claim gate's pause exclusion is deliberately
+    BYPASSED for this type via a type-scoped disjunct in
+    ``claim_pending_task`` (design §4.3 / R2 mitigation). The row is
+    claimed exactly once by the atomic claim; the processor re-checks
+    the durable no-op predicate (``find_suspended_turn_for_answer``),
+    emits the ``stuck_awaiting_answer`` event, and mints exactly one
+    successor while ``emission_index < 3``. No polling anywhere — each
+    link of the chain is a one-shot DB row.
     """
     PROCESS_MESSAGE = "process_message"
     PROCESS_REPORT = "process_report"
     SEND_REPORT = "send_report"
     CLEANUP = "cleanup"
+    HEARTBEAT_EMIT_STUCK = "heartbeat_emit_stuck"
 
 
 class TaskStatus(str, enum.Enum):
@@ -84,12 +98,26 @@ class SuspensionReason(str, enum.Enum):
     window (T3.5) so that downstream observers (operator dashboards,
     future resume routing) can distinguish a watchover-induced pause
     from a generic external pause.
+
+    ``PAUSED_BY_PARENT`` (2026-09-21, mid-flight QA channel — leader
+    decision 2) is stamped at ``_pause_cascade_db_sync`` on
+    cascade-INHERITED artifacts: tasks whose instance did not itself
+    call ``ask_questions`` but was suspended because the asker's
+    question pause cascaded through the tree. Read-side effect:
+    ``find_suspended_turn_for_answer`` filters ONLY
+    ``suspension_reason='awaiting_answer'``, so an answer aimed at the
+    parent can never consume a cascade artifact mid-pause. Cascade
+    RESUME is reason-agnostic (the resume db-sync selects every paused
+    task in the tree with no suspension-reason filter), so children
+    still resume on parent answer. Read APIs that enumerate packs do
+    NOT filter on this value (MAJOR-4).
     """
 
     AWAITING_ANSWER = "awaiting_answer"
     AWAITING_CHILDREN = "awaiting_children"
     PAUSED_EXTERNAL = "paused_external"
     WATCHOVER_SETUP = "watchover_setup"
+    PAUSED_BY_PARENT = "paused_by_parent"
 
 
 # Module-level Column kept as a reference for use in Task.__mapper_args__.

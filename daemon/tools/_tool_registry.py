@@ -531,6 +531,9 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "image": "daemon.tools.image_tools",
     "todo": "daemon.tools.todo_tools",
     "question": "daemon.tools.question_tools",
+    # Mid-flight QA channel (2026-09-21) — non-blocking progress
+    # surfacing to job watchers; opt-in per agent via tools.allow.
+    "midflight": "daemon.tools.midflight_report",
     "rag": "daemon.tools.rag_tools",
     "mcp": "daemon.tools.mcp_tools",
     "external_opencode": "daemon.tools.external_opencode",
@@ -682,6 +685,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "list_instances",
     "list_missions",
     "list_watched_jobs",
+    "mid_flight_report",
     "plane_sync_project",
     "proc_list",
     "proc_logs",

@@ -1245,6 +1245,298 @@ class CleanupProcessor(BaseProcessor):
         raise NotImplementedError(f"CleanupProcessor.process() not yet implemented for task {task.id}")
 
 
+class HeartbeatEmitStuckProcessor(BaseProcessor):
+    """Processor for ``heartbeat_emit_stuck`` one-shot wedge-guard wakes.
+
+    Mid-flight QA channel (design §4.3 / §8.7, 2026-09-21). Each
+    ``heartbeat_emit_stuck`` Task row is ONE link of a FINITE chain
+    (max 3 emissions) — the wedge guard. The row is future-dated
+    (``next_retry_at``) at pause time and at each re-arm; the standard
+    atomic claim wakes it exactly once, ≤3s after the due time. There
+    is no loop, no poll, no periodic scan.
+
+    Processing sequence (first statement after claim is the durable
+    no-op predicate — OQ-4 #2):
+
+    1. **No-op predicate (durable, never in-RAM pack status):**
+       ``find_suspended_turn_for_answer(asker)`` returns ``None``
+       once the answer consumed the handle (``ResumeTurn`` clears
+       ``suspension_reason``/``resume_target_turn_id``) — that is the
+       "answer already landed" signal. Also read the asker instance
+       status: TERMINATED/COMPLETED/ERROR/FAILED → silent no-op
+       completion (the claim-gate carve-out is deliberately broad
+       over TERMINATED so this row is claimable — the terminal no-op
+       IS its cleanup path; no orphaned invisible rows by
+       construction).
+    2. **Wedge alive → emit** ``stuck_awaiting_answer`` on the push
+       lanes (EventBus + LiveEventHub + work_notifier non-terminal
+       fan-out). ``emission_index`` derives from PERSISTED event
+       history (count of prior stuck events for the pack id + 1).
+    3. **Re-arm clause (MAJOR-2):** when ``emission_index < 3`` (the
+       escalation threshold), mint EXACTLY ONE successor one-shot at
+       ``now + STUCK_HEARTBEAT_AFTER_SECONDS`` for the SAME asker.
+       No successor when ``emission_index >= 3`` OR the no-op
+       predicate fired (self-cancel).
+    4. **Escalation at ``emission_index == 3``:** call
+       ``manager.terminate_instance`` DIRECTLY (NOT via task-ERROR →
+       ``JobFeedbackObserver`` inference — that drifts into the
+       deferred error-lane defect, ``error_reporting.py:222-296``)
+       and fan out UNCONDITIONALLY to ``NotificationBroadcaster``
+       (``emit_question_escalation``) so operators see the wedge even
+       when every watch row was GC'd. The terminate cascade lives
+       inside ``terminate_instance`` itself.
+
+    Concurrency-gate interaction (approver item H7): the heartbeat
+    row's ``instance_id`` IS the asker. When the asker has resumed
+    and another of its tasks is RUNNING, the per-instance
+    concurrency gate (``status='running'``-only, untouched by the
+    carve-out) holds this row PENDING for that turn's duration —
+    deterministic, bounded interference (~ms), accepted per OQ-4 #3.
+    The processor itself consumes NO asker concurrency slot beyond
+    its own claimed row.
+
+    Crash between claim and emit: ``StaleTaskRecovery`` force-cancels
+    and mints a retry child preserving ``task_type`` / ``instance_id``
+    / ``next_retry_at`` → re-claim → the no-op check re-runs. At-least-
+    once in the crash window, exactly-once normally — the same
+    contract as PROCESS_REPORT delivery.
+    """
+
+    def __init__(
+        self,
+        instance_manager,
+        task_repo: "TaskRepository",
+        event_repo: "EventRepository | None",
+    ):
+        self._manager = instance_manager
+        self._task_repo = task_repo
+        self._event_repo = event_repo
+
+    async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
+        """Emit one wedge-guard heartbeat (or no-op / escalate).
+
+        Args:
+            task: The claimed ``heartbeat_emit_stuck`` task. Its
+                ``instance_id`` is the ASKER.
+            cancellation_token: Optional token (unused — the emission
+                is short-lived; completion is idempotent).
+
+        Returns:
+            Result dictionary for the worker log.
+        """
+        from daemon.constants import (
+            STUCK_HEARTBEAT_AFTER_SECONDS,
+            STUCK_HEARTBEAT_ESCALATION_INDEX,
+        )
+        from daemon.repositories.instance.models import InstanceStatus
+        from daemon.repositories.task.models import SuspensionReason
+        from daemon.services.midflight_qa import (
+            emit_question_escalation_notification,
+            emit_stuck_awaiting_answer,
+            mint_stuck_heartbeat_one_shot,
+            read_question_pack_id_from_metadata,
+        )
+
+        asker_id = task.instance_id
+        logger.info(
+            f"HeartbeatEmitStuck task {task.id}: checking wedge for asker "
+            f"{asker_id[:8]}..."
+        )
+
+        # ── 1. Durable no-op predicate (OQ-4 #2) ─────────────────────
+        # find_suspended_turn_for_answer is the durable "answer already
+        # landed" check — NOT the in-RAM QuestionManager pack status
+        # (gone on restart). A ValueError (ambiguous rows) is treated
+        # as "handle present" — the wedge check errs on the side of
+        # emitting (bounded: 3 emissions, then escalation).
+        handle = None
+        try:
+            handle = await asyncio.to_thread(
+                self._task_repo.find_suspended_turn_for_answer, asker_id
+            )
+        except Exception as e:  # noqa: BLE001 — ambiguity still counts as alive
+            logger.warning(
+                f"HeartbeatEmitStuck task {task.id}: handle lookup raised "
+                f"({type(e).__name__}: {e}) — treating wedge as alive"
+            )
+            handle = "ambiguous"
+
+        asker_status: str | None = None
+        try:
+            instance = await asyncio.to_thread(
+                getattr(self._manager, "_instance_repository").get, asker_id
+            )
+            asker_status = getattr(instance, "status", None) if instance else None
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"HeartbeatEmitStuck task {task.id}: asker status read "
+                f"failed ({type(e).__name__}: {e})"
+            )
+
+        _TERMINAL = {
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        }
+        if handle is None or asker_status in _TERMINAL or asker_status is None:
+            # Answer already landed (handle consumed) OR asker
+            # terminal/missing → the heartbeat SELF-CANCELS: complete
+            # silently, mint NO successor.
+            logger.info(
+                f"HeartbeatEmitStuck task {task.id}: no-op (handle={handle!r}, "
+                f"asker_status={asker_status!r}) — self-cancelling, no successor"
+            )
+            await asyncio.to_thread(
+                self._task_repo.complete_task,
+                task.id,
+                {
+                    "success": True,
+                    "emission": "no_op",
+                    "reason": "handle_consumed_or_terminal",
+                },
+            )
+            return {
+                "success": True,
+                "content": "heartbeat no-op (wedge resolved or asker terminal)",
+                "emission": "no_op",
+            }
+
+        # ── 2. Wedge alive → emit ────────────────────────────────────
+        pack_id = read_question_pack_id_from_metadata(self._manager, asker_id)
+        # Fix pass MINOR-1: report ``1800 × prior`` — the number of
+        # PERSISTED prior stuck events for this pack IS the number of
+        # full 1800s intervals elapsed since pause (emission #1 fires
+        # at pause time with waiting_for_seconds=0, heartbeat #k lands
+        # at t = k×1800s with k prior rows). The old ``× (prior+1)``
+        # double-counted the current interval (heartbeat #2 at t=1800s
+        # reported 3600s) and drifted from the "~60 min escalation"
+        # prose (escalation fires at heartbeat #3, t≈3600s).
+        waiting_for_seconds = STUCK_HEARTBEAT_AFTER_SECONDS * (
+            await self._derive_prior_emissions(asker_id, pack_id)
+        )
+        emission_index, _notified = await emit_stuck_awaiting_answer(
+            self._manager,
+            asker_id,
+            pack_id,
+            waiting_for_seconds=waiting_for_seconds,
+        )
+
+        escalated = False
+        if emission_index >= STUCK_HEARTBEAT_ESCALATION_INDEX:
+            # ── 4. Escalation: terminate + unconditional broadcast ──
+            escalated = True
+            logger.warning(
+                f"HeartbeatEmitStuck task {task.id}: ESCALATION — asker "
+                f"{asker_id[:8]}... wedged awaiting answer after "
+                f"{emission_index} emissions; terminating asker and "
+                f"broadcasting operator escalation"
+            )
+            try:
+                await asyncio.to_thread(
+                    self._task_repo.complete_task,
+                    task.id,
+                    {
+                        "success": True,
+                        "emission": "escalated",
+                        "emission_index": emission_index,
+                    },
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"HeartbeatEmitStuck task {task.id}: complete-before-"
+                    f"escalate failed: {e}"
+                )
+            # terminate_instance DIRECTLY (never via observer inference
+            # — the deferred error-lane defect is out of scope). The
+            # terminate cascade (children, cleanup, mirrors) lives
+            # inside terminate_instance itself.
+            try:
+                await self._manager.terminate_instance(
+                    asker_id,
+                    terminal_reason="wedge_guard_terminated",
+                )
+            except Exception as e:  # noqa: BLE001 — escalation must never crash the worker
+                logger.warning(
+                    f"HeartbeatEmitStuck task {task.id}: escalation "
+                    f"terminate failed for asker {asker_id[:8]}...: "
+                    f"{type(e).__name__}: {e}"
+                )
+            # Unconditional NotificationBroadcaster fan-out (MINOR-7:
+            # WARN-carried, never raises).
+            asker_agent_id = None
+            try:
+                instance = await asyncio.to_thread(
+                    getattr(self._manager, "_instance_repository").get, asker_id
+                )
+                asker_agent_id = getattr(instance, "agent_id", None)
+            except Exception:  # noqa: BLE001
+                pass
+            await emit_question_escalation_notification(
+                self._manager,
+                asker_id,
+                asker_agent_id,
+                pack_id,
+                emission_index,
+            )
+            return {
+                "success": True,
+                "content": (
+                    f"heartbeat escalated at emission_index={emission_index}"
+                ),
+                "emission": "escalated",
+                "emission_index": emission_index,
+            }
+
+        # ── 3. Re-arm: exactly ONE successor (MAJOR-2) ──────────────
+        mint_stuck_heartbeat_one_shot(self._manager, asker_id)
+        await asyncio.to_thread(
+            self._task_repo.complete_task,
+            task.id,
+            {
+                "success": True,
+                "emission": "stuck_awaiting_answer",
+                "emission_index": emission_index,
+                "re_armed": True,
+            },
+        )
+        return {
+            "success": True,
+            "content": (
+                f"heartbeat emission_index={emission_index}; successor minted"
+            ),
+            "emission": "stuck_awaiting_answer",
+            "emission_index": emission_index,
+            "re_armed": True,
+        }
+
+    async def _derive_prior_emissions(
+        self, asker_id: str, pack_id: str | None
+    ) -> int:
+        """Count prior stuck emissions for the pack (best-effort, 0 on miss)."""
+        from daemon.repositories.event.models import EventKind
+
+        event_repo = getattr(self._manager, "_event_repo", None)
+        if event_repo is None or not pack_id:
+            return 0
+        try:
+            return int(
+                event_repo.count_kind_for_instance_matching(
+                    instance_id=asker_id,
+                    kind=EventKind.STUCK_AWAITING_ANSWER.value,
+                    data_like=pack_id,
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "HeartbeatEmitStuck: prior-emission count failed for asker "
+                "%s: %s",
+                asker_id[:8],
+                e,
+            )
+            return 0
+
+
 class TaskProcessor:
     """Routes tasks to type-specific processors and provides thread-safe execution.
 
@@ -1321,6 +1613,20 @@ class TaskProcessor:
                 instance_manager, task_repo, event_repo,
             ),
             "cleanup": CleanupProcessor(
+                instance_manager, task_repo, event_repo,
+            ),
+            # Mid-flight QA channel (2026-09-21, design §4.3): the
+            # wedge-guard one-shot wake. Default-lane fuel; wake
+            # latency ≤3s after ``next_retry_at`` via the existing
+            # condition-timeout claim loop. The asker-bound row is
+            # claimable while the asker is PAUSED via the type-scoped
+            # carve-out in ``claim_pending_task`` (repository.py — the
+            # ``heartbeat_emit_stuck`` disjunct around the pause gate).
+            # Per-instance concurrency gate interaction: when the asker
+            # is RUNNING (resumed mid-chain), the gate serializes this
+            # row behind the asker's live turn — deterministic, bounded
+            # (see HeartbeatEmitStuckProcessor docstring / OQ-4 #3).
+            "heartbeat_emit_stuck": HeartbeatEmitStuckProcessor(
                 instance_manager, task_repo, event_repo,
             ),
         }

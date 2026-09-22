@@ -137,6 +137,38 @@ class EventRepository:
             )
             return session.exec(stmt).one()
 
+    def count_kind_for_instance_matching(
+        self,
+        instance_id: str,
+        kind: str,
+        data_like: str,
+    ) -> int:
+        """Count events of ``kind`` for ``instance_id`` whose serialized
+        ``data`` contains ``data_like``.
+
+        Mid-flight QA channel (design §4.3): derives the wedge-guard
+        ``emission_index`` from PERSISTED event history — count prior
+        ``stuck_awaiting_answer`` rows whose payload references the
+        question_pack_id. This survives ``StaleTaskRecovery``'s
+        retry-child minting (which drops unknown Task columns) and
+        daemon restarts, unlike any in-RAM counter.
+
+        The LIKE probe on the JSON-serialized ``data`` TEXT column is
+        intentionally simple: the ``question_pack_id`` is a UUID4 —
+        a substring match on the serialized payload cannot collide
+        with unrelated fields. Works identically on SQLite and
+        PostgreSQL (``data`` is TEXT on both).
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(func.count())
+                .select_from(Event)
+                .where(Event.instance_id == instance_id)
+                .where(Event.kind == kind)
+                .where(Event.data.like(f"%{data_like}%"))
+            )
+            return session.exec(stmt).one()
+
     # --------------------------------------------------------
     # CLEANUP
     # --------------------------------------------------------

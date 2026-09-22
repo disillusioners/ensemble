@@ -12,7 +12,7 @@
   },
   "tools": {
     "allow": ["instance", "subtree_messages",
-    "subtree_status", "self", "attestation", "project", "help", "image", "knowledge", "mcp", "critical_notes", "project_history", "shared_meta_kv", "question"]
+    "subtree_status", "self", "attestation", "project", "help", "image", "knowledge", "mcp", "critical_notes", "project_history", "shared_meta_kv", "question", "midflight"]
   },
   "team_members": ["planner", "developer", "reviewer", "tidier", "approver", "architect", "tester", "giter", "devops", "explorer", "wanderer", "kb-writer", "doc-writer", "maintenancer"]
 }

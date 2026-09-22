@@ -2482,6 +2482,26 @@ class InstanceManager:
             asyncio.create_task(self._eager_warm_loader_caches())
         )
 
+        # Mid-flight QA channel (§5.4 durability, 2026-09-21): one-shot
+        # boot rehydration of pending question packs from the durable
+        # ``instance_metadata`` shadow. RAM packs are lost on restart
+        # while the task handle (suspension_reason='awaiting_answer')
+        # survives — without this pass every answer after a restart
+        # would 410 QUESTION_PACK_LOST. The scan reads ONLY
+        # ``status='paused'`` tasks (served by the
+        # idx_task_status_type_created prefix) and post-filters
+        # ``suspension_reason`` in Python — NEVER a suspension_reason
+        # table scan (OQ-1: no index change). One-shot at boot, not
+        # periodic — constraint-compliant.
+        try:
+            await self._rehydrate_question_packs_at_boot()
+        except Exception as e:  # noqa: BLE001 — boot must never fail on this
+            logger.warning(
+                f"Question-pack boot rehydration failed (non-fatal): "
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
+            )
+
         # Initialize maintenance service with checkpoint cleanup
         self._maintenance_service = MaintenanceService(
             check_interval_minutes=self.config.persistence.maintenance_check_interval_minutes
@@ -3361,6 +3381,87 @@ class InstanceManager:
             instance_id: Owning instance identifier.
         """
         self._question_pause_requested[instance_id] = True
+
+    async def _rehydrate_question_packs_at_boot(self) -> int:
+        """One-shot boot pass: restore pending question packs (§5.4).
+
+        Mid-flight QA channel (2026-09-21). After a daemon restart the
+        in-memory ``QuestionManager._packs`` store is empty while the
+        durable task handle (``suspension_reason='awaiting_answer'`` +
+        ``resume_target_turn_id``) survives — the asker stays PAUSED
+        and answerable, but the answer endpoint would 410
+        QUESTION_PACK_LOST without this pass.
+
+        Scan shape (OQ-1 — NO index change): select ``instance_id`` from
+        ``task`` where ``status='paused'`` (served by the
+        ``idx_task_status_type_created`` status prefix), post-filter
+        ``suspension_reason='awaiting_answer'`` in Python, then read
+        each instance's ``question_pack_payload`` metadata shadow and
+        hand the payloads to ``QuestionManager.rehydrate_from_payloads``
+        (idempotent — only patches packs whose in-memory state is
+        empty). Cost: O(paused tasks), once at boot, milliseconds.
+        """
+        from daemon.services.midflight_qa import (
+            QUESTION_PACK_PAYLOAD_METADATA_KEY,
+        )
+
+        engine = getattr(self, "_engine", None)
+        instance_repo = getattr(self, "_instance_repository", None)
+        if engine is None or instance_repo is None:
+            return 0
+
+        # Index-served prefix scan: ``status='paused'`` only — the
+        # idx_task_status_type_created prefix serves it; the
+        # suspension_reason post-filter runs in Python (OQ-1).
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT DISTINCT instance_id FROM task "
+                    "WHERE status = 'paused'"
+                )
+            ).fetchall()
+        paused_candidates = {str(r[0]) for r in rows if r[0]}
+        if not paused_candidates:
+            return 0
+
+        # Python post-filter on the suspension reason (never a
+        # suspension_reason SQL scan).
+        paused_instances: set[str] = set()
+        for iid in paused_candidates:
+            try:
+                handle = await asyncio.to_thread(
+                    self._task_repo.find_suspended_turn_for_answer, iid
+                )
+            except Exception as e:  # noqa: BLE001 — per-instance best-effort
+                logger.warning(
+                    f"Question-pack boot rehydration: suspended-turn "
+                    f"lookup failed for {iid[:8]}...: {e}"
+                )
+                continue
+            if handle is not None:
+                paused_instances.add(iid)
+        if not paused_instances:
+            return 0
+
+        payloads: dict[str, dict] = {}
+        for iid in paused_instances:
+            try:
+                payload = await asyncio.to_thread(
+                    instance_repo.get_metadata_value,
+                    iid,
+                    QUESTION_PACK_PAYLOAD_METADATA_KEY,
+                )
+            except Exception as e:  # noqa: BLE001 — per-instance best-effort
+                logger.warning(
+                    f"Question-pack boot rehydration: pack payload read "
+                    f"failed for {iid[:8]}...: {e}"
+                )
+                continue
+            if isinstance(payload, dict):
+                payloads[iid] = payload
+        if not payloads:
+            return 0
+        return self._question_manager.rehydrate_from_payloads(payloads)
 
     def is_question_pause_requested(self, instance_id: str) -> bool:
         """Return True if a question-initiated pause is pending.

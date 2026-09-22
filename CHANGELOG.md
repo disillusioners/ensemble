@@ -47,6 +47,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] — 2026-09-21
+
+### Added — Mid-flight question/answer channel (`feature/midflight-qa-channel`)
+
+Questions asked mid-flight (`ask_questions`) now surface to the job
+watcher / orchestrator over the existing push lanes, the human's answer
+routes back through a new job-addressed HTTP endpoint, and
+non-blocking `mid_flight_report` progress events ride the same
+substrate. Event-driven only — no polling introduced anywhere.
+
+- **New watchable event statuses** (`question requested ❓`,
+  `answer received ✓`, `mid-flight report ⟳`,
+  `stuck awaiting answer ⏳`) — all NON-terminal: watcher rows survive
+  for the eventual terminal event. `watch_job` accepts them in
+  `events=[...]`; the job-orchestration skill's status action table
+  documents the relay flow.
+- **New agent tool** `mid_flight_report(summary, details, level,
+  decision_required)` — opt-in via `tools.allow: ["midflight"]`
+  (enabled on leader / developer / coder / tester / devops). Emits a
+  `MIDFLIGHT_REPORT` event (EventBus + FE banner + `[JOB_EVENT]` to
+  watchers) WITHOUT pausing.
+- **New answer endpoint** `POST /api/jobs/{work_id}/answer` — the
+  orchestrator relay path. Resolves `work_id → instance` via the
+  WorkResolver (watcher-independent) and delegates to the shared
+  answer helper. Body: `{"answers": {...}, "question_pack_id": "...",
+  "resume_message": "..."}`.
+- **Wedge guard** — a finite one-shot chain (3 emissions, 30 min
+  apart) of future-dated `heartbeat_emit_stuck` Task rows re-emits
+  `stuck_awaiting_answer` while an asker stays paused awaiting an
+  answer; at the 3rd emission (~60 min) the guard terminates the
+  asker and broadcasts an operator escalation via
+  NotificationBroadcaster. The claim gate gained a type-scoped
+  carve-out so the one-shot is claimable while the asker is PAUSED
+  (EXPLAIN verdict: outer scan stays index-driven on
+  `idx_task_status_created (status=?)`; the carve-out is a residual
+  filter, same predicate class as the pre-existing cross-system
+  guard — no seq-scan degradation, no UNION reshape needed).
+- **Durability** — question packs are shadowed into
+  `instance_metadata` (`question_pack_id` + payload) at ask time and
+  rehydrated at boot; answers survive daemon restarts (410
+  `QUESTION_PACK_LOST` only when both copies are gone).
+
+### Changed — answer-path contract (both answer surfaces)
+
+`POST /api/instances/{id}/answer` and the new job-addressed route now
+share one helper with a tightened, exactly-once contract:
+
+- **Duplicate answers are a 200 no-op** (`resume_route:
+  "already_delivered"`) — the second concurrent POST loses the CAS and
+  skips SSE/events/resume entirely. Previously the second answer
+  OVERWROTE the first's stored answers (clobber bug).
+- **Stale-answer hijack guard** — a body carrying a
+  `question_pack_id` that does not match the current pending pack is
+  rejected `400 QUESTION_PACK_MISMATCH` (strict-check-when-present;
+  absent field keeps today's lenient behavior). **FE wizard impact:
+  none** — the wizard does not send the field today.
+- **BREAKING (tightened, intentional):** an answer arriving after the
+  asker reached COMPLETED or TERMINATED is now rejected `410
+  ANSWER_TARGET_TERMINAL` instead of SILENTLY REVIVING the finished
+  instance (the revive restarted it from scratch with no LangGraph
+  checkpoint — a latent data-loss hazard). **Frontend finding
+  (MAJOR-3):** no FE/wizard code relies on the silent-revive — the
+  wizard is non-optimistic, error-toast driven, and hides via the
+  `question_pack` SSE, so the 410 renders through its existing error
+  handler with zero FE changes. ERROR/FAILED askers are still revived
+  to deliver the answer (flagged `resume_route:
+  "revived_error_target"`; no revive-budget consumption).
+- **Error-code relabeling** — the missing-pack 404 (previously
+  mislabeled `INSTANCE_NOT_FOUND`) is now `404 NO_PENDING_QUESTION`
+  (pack exists but is not pending, durable shadow non-pending) or
+  `410 QUESTION_PACK_LOST` (pack gone after restart without a
+  shadow). The `POST /answer` T3 pre-check (terminal asker) now runs
+  BEFORE the CAS + SSE + events.
+- **`ask_questions` payload additive field** — the question pack dict
+  (`pack_to_dict`, the frozen SSE schema, `QUESTION_REQUESTED`
+  payloads, and the `[JOB_EVENT]` body) gained a `pack_id` key;
+  consumers that pattern-match on known keys are unaffected.
+
+---
+
 ## [0.13.10] — 2026-09-22
 
 ### Fixed

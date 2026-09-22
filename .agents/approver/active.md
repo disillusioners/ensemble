@@ -1,9 +1,9 @@
 # Approver Active State
 
-Plan: Clipboard-Image-Chat — web-chatbox clipboard image paste → daemon tmp image store (30-day auto-clear) → image-reader text conversion before agent turn (no vision switch) → thumbnails + popup viewer (9-file package: plan-overview + phase1–6-plan.md + decisions.md + architecture-recommendation.md; 2,386 lines)
-Slug: clipboard-image-chat
+Plan: Mid-flight Question/Answer Channel — question/report/stuck events to watcher, human answer routed back to resume paused asker (doubles as scoped unpause primitive), non-blocking mid-flight reports, wedge guard — all event-driven, no polling (design.md, 921 lines; worktree feature/midflight-qa-channel @ 246b7325)
+Slug: midflight-qa-channel
 Status: APPROVED
-Iteration: 001 (001 APPROVED 2026-09-19 — 3/3 section workers APPROVED, 0 blocking; merged notes in clipboard-image-chat-tracking.md)
-Started: 2026-09-19T18:55:00Z
-Last Verdict: APPROVED (iteration 001, 2026-09-19 — workers 312d5ff0 backend + 94c36f07 frontend + 675f3ed1 decisions, skill plan-approval)
-Note: closed APPROVED iteration 001. Pre-merge polish notes (non-blocking): phase4 Exit-Criterion rewrite, 3 missed chat.component.ts image_refs sites, phase6 Task-2 architect pick, phase-1 probe (#36) before phase-2 dispatch. Previous: chat-source-worker-lane closed APPROVED iteration 003 2026-09-19.
+Iteration: 001 (001 APPROVED 2026-09-21 — 1 worker plan-approval, 0 blocking, 7 non-blocking notes in midflight-qa-channel-tracking.md)
+Started: 2026-09-21T13:29:00Z
+Last Verdict: APPROVED (iteration 001, 2026-09-21 — worker f98755a8 skill plan-approval; pre-impl polish notes: add watcher_models.py row to §4.4, fix ALL_MISSION_TERMINAL_WATCHABLE_EVENTS symbol name, extend AC-(d) grep coverage)
+Note: closed APPROVED iteration 001. Previous: clipboard-image-chat closed APPROVED iteration 001 2026-09-19 (history in clipboard-image-chat-tracking.md). Constraint observed: reads confined to /home/nea/ensemble-worktrees/qa-channel.

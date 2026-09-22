@@ -104,6 +104,18 @@ _STATUS_DISPLAY_MAP: dict[str, str] = {
     "failed": "failed ✗",
     "in_progress": "in progress ⟳",
     "paused": "paused ⏸",
+    # Mid-flight QA channel (2026-09-21, feature/midflight-qa-channel).
+    # Four NEW NON-TERMINAL statuses — they take the non-terminal
+    # branch (:417-447 area) which NEVER claims (no CAS DELETE...
+    # RETURNING), so the watcher row survives for the eventual
+    # terminal event. Icon glyphs match the existing vocabulary
+    # (✓ ✗ ⟳ ⏸ ❓ ⏳). The parser keys off the ``[JOB_EVENT] Job
+    # {work_id}... {status_display}`` header; these are additive
+    # words inside that header (byte-compatible with the parser).
+    "question_requested": "question requested ❓",
+    "answer_received": "answer received ✓",
+    "midflight_report": "mid-flight report ⟳",
+    "stuck_awaiting_answer": "stuck awaiting answer ⏳",
 }
 
 

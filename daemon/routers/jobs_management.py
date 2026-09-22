@@ -1091,4 +1091,138 @@ async def resend_deferred_foreground(
     )
 
 
+# ── Mid-flight QA channel (2026-09-21, design §5.2/§5.3) ──────────────
+#
+# POST /jobs/{work_id}/answer — the JOB-ADDRESSED answer surface.
+#
+# The orchestrator (job creator / watcher) holds the work_id, not the
+# asker's instance_id: the ``[JOB_EVENT] Job {work_id}... question
+# requested ❓`` line names the work_id, and that is the identity the
+# chat relay has. This route resolves work_id → instance_id via the
+# WorkResolver (2 indexed SELECTs, read-only — watcher-independent)
+# and delegates to the SAME shared helper as the instance-addressed
+# FE-wizard route. Auth posture is sibling-consistent with the other
+# six per-job POST actions (app-level guard; source='api' semantics
+# — no F2-style forging surface added).
+
+
+@router.post(
+    "/{work_id}/answer",
+    responses={
+        200: {"description": "Answer stored and delivered"},
+        400: {"description": "question_pack_id mismatch (QUESTION_PACK_MISMATCH)"},
+        404: {"description": "Unknown work_id (JOB_NOT_FOUND) or no pending question"},
+        410: {"description": "Asker terminal (ANSWER_TARGET_TERMINAL) or pack lost (QUESTION_PACK_LOST)"},
+        503: {"description": "Writes paused (migration)"},
+    },
+)
+async def answer_questions_job(
+    work_id: str,
+    body: dict,
+    request: Request,
+) -> dict:
+    """Submit the human's answer to a question asked by ``work_id``'s instance.
+
+    The orchestrator relay path for the mid-flight QA channel: when a
+    watched instance calls ``ask_questions``, its watchers receive a
+    ``[JOB_EVENT] Job {work_id}... question requested ❓`` line with
+    the pack payload; the orchestrator relays the question to the
+    human in chat and POSTs the reply here.
+
+    Body:
+        ``answers`` (dict, required) — keyed by question id (preferred)
+        or question text; ``question_pack_id`` (str, optional) — echo
+        of the pack id from the question payload for the stale-answers
+        correlation guard; ``resume_message`` (str, optional).
+
+    Resolution is watcher-independent: the pack lives on the ASKER;
+    ``WorkResolver.resolve_work(work_id)`` maps the work_id to the
+    owning instance via Task.work_id / JobItem.job_id lookups.
+    """
+    from pydantic import ValidationError
+
+    from daemon.models.common import ErrorCodes, ErrorResponse
+    from daemon.routers.answer_helper import AnswerRequest, answer_questions_via_instance
+
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(
+            status_code=503,
+            detail="Writes are paused for database migration",
+        )
+
+    work_resolver = getattr(manager, "_work_resolver", None)
+    if work_resolver is None:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                code=ErrorCodes.SERVICE_UNAVAILABLE,
+                message="Work resolver not wired on this daemon.",
+            ).model_dump(),
+        )
+
+    import asyncio
+
+    record = await asyncio.to_thread(work_resolver.resolve_work, work_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.JOB_NOT_FOUND,
+                message=f"No work unit found for work_id {work_id!r}.",
+                details={"work_id": work_id},
+            ).model_dump(),
+        )
+    # MINOR-13: resolve_work's record must carry an instance_id; a
+    # None/absent value would otherwise AttributeError deep inside the
+    # helper — surface a typed 404 instead.
+    instance_id = getattr(record, "instance_id", None)
+    if not instance_id:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.JOB_NOT_FOUND,
+                message=(
+                    f"Work unit {work_id!r} has no owning instance — "
+                    f"the answer cannot be routed."
+                ),
+                details={"work_id": work_id},
+            ).model_dump(),
+        )
+
+    # M1 (lenient): share the sibling ``AnswerRequest`` schema
+    # (answer_helper.py) instead of hand-parsing the raw dict — but
+    # keep 400-on-malformed semantics: the route signature stays
+    # ``body: dict`` (no FastAPI 422), and only ``answers`` is
+    # schema-enforced; the optional fields pass through verbatim
+    # (lenient today, lenient after — zero behavior delta).
+    try:
+        parsed = AnswerRequest.model_validate(
+            {"answers": body.get("answers") or {}}
+        )
+    except ValidationError:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message="'answers' must be a JSON object.",
+            ).model_dump(),
+        )
+    answers = parsed.answers
+    question_pack_id = body.get("question_pack_id")
+    resume_message = body.get("resume_message")
+
+    result = await answer_questions_via_instance(
+        manager=manager,
+        instance_id=instance_id,
+        answers=answers,
+        question_pack_id=question_pack_id,
+        live_hub=getattr(request.app.state, "live_hub", None),
+        resume_message=resume_message,
+    )
+    # Job-addressed envelope (§5.2): surface the work_id the caller
+    # used alongside the helper's instance-addressed body.
+    return {"work_id": work_id, **result}
+
+
 __all__ = ["router"]

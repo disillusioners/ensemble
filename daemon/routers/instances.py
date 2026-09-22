@@ -20,6 +20,7 @@ from daemon.models import (
     InstanceStatus,
     ResumeRequest,
 )
+from daemon.routers.answer_helper import AnswerRequest
 from daemon.utils import parse_utc_datetime
 
 logger = logging.getLogger(__name__)
@@ -118,30 +119,6 @@ class TodoSubtaskUpdateRequest(BaseModel):
         description=(
             "If True, auto-complete the parent node when all its "
             "sub-tasks are done."
-        ),
-    )
-
-
-class AnswerRequest(BaseModel):
-    """Request body for ``POST /api/instances/{id}/answer``.
-
-    Carries the user's answers to a pending question pack. The shape
-    of ``answers`` is intentionally flexible — callers may key by
-    question id (preferred) or by question text (for ad-hoc clients
-    that didn't capture the auto-generated ids).
-
-    Attributes:
-        answers: User-supplied answer dict. Shape is unconstrained
-            (any JSON-serializable dict); the manager stores it
-            verbatim and the resume-message formatter iterates it.
-    """
-
-    answers: dict = Field(
-        default_factory=dict,
-        description=(
-            "User-supplied answers. Shape is flexible: prefer keying "
-            "by question id (the field returned in the pending SSE "
-            "event) — text-keyed fallbacks are also accepted."
         ),
     )
 
@@ -775,6 +752,15 @@ async def resume_instance(
 
         # Unwind question state — mirror dismiss_question (lines ~1280-1290)
         manager._question_manager.clear_question_pack(instance_id)
+        # M1 (fix pass, council-verified): ALSO clear the DURABLE
+        # metadata shadow. ``clear_question_pack`` is RAM-only; a
+        # surviving ``question_pack_payload`` shadow would let a late
+        # answer (or a daemon restart's boot hydration) resurrect the
+        # dismissed/superseded pack and rehydrate/CAS-win/inject into
+        # the resumed, dismissed-past agent.
+        from daemon.services.midflight_qa import clear_question_pack_metadata
+
+        clear_question_pack_metadata(manager, instance_id)
         manager.clear_question_pause_requested(instance_id)
         manager._deferred_question_pause.discard(instance_id)
 
@@ -1058,249 +1044,42 @@ async def answer_questions(
 ) -> dict:
     """Submit answers to a pending question pack; resume the instance cascade.
 
+    Delegates to the shared ``answer_questions_via_instance`` helper
+    (``daemon/routers/answer_helper.py`` — mid-flight QA channel,
+    2026-09-21) so the instance-addressed FE-wizard surface and the
+    job-addressed orchestrator surface share ONE implementation.
+
     The instance must have a pending question pack (set by the
-    ``question`` tool before the graph paused). Stores the answers,
-    emits a ``question_pack`` SSE event with ``status="answered"``, then
-    mirrors the PAUSED-branch resume fan-out: cascade-resumes target +
-    all paused children, and for each resumed instance calls
-    ``resume_processing_job`` — the target receives the formatted
-    Q↔A HumanMessage; children resume silently from their checkpoint.
+    ``question`` tool before the graph paused). Stores the answers
+    under the exactly-once CAS, emits a ``question_pack`` SSE event
+    with ``status="answered"``, notifies job watchers
+    (``answer_received``), then mirrors the PAUSED-branch resume
+    fan-out: cascade-resumes target + all paused children; the target
+    receives the formatted Q↔A HumanMessage (F7 compaction-safe echo);
+    children resume silently from their checkpoint.
 
-    The Q↔A HumanMessage intentionally echoes the question text (F7
-    compaction safety) so the agent can correlate Q↔A from this message
-    alone even after the original tool call result has been compacted.
+    Errors (shared helper contract — both answer surfaces inherit):
 
-    Errors:
         * ``404`` if the instance is unknown to the manager.
-        * ``404`` if no pending (or answered — second answer is allowed)
-          question pack exists for the instance.
+        * ``404 NO_PENDING_QUESTION`` if no pack is pending.
+        * ``410 QUESTION_PACK_LOST`` if the pack is gone post-restart.
+        * ``400 QUESTION_PACK_MISMATCH`` on a stale ``question_pack_id``.
+        * ``410 ANSWER_TARGET_TERMINAL`` for COMPLETED/TERMINATED askers.
+        * ``200 {resume_route: "already_delivered"}`` when a duplicate
+          answer loses the exactly-once CAS (idempotent no-op).
         * ``503`` if the daemon is in write-paused mode (migration).
     """
+    from daemon.routers.answer_helper import answer_questions_via_instance
+
     manager = _get_manager(request)
-    if manager.is_write_paused:
-        raise HTTPException(
-            status_code=503,
-            detail="Writes are paused for database migration",
-        )
-
-    # 1. Validate instance exists — uniform 404 contract with every other
-    #    instance-scoped endpoint in this router.
-    await _check_instance_exists(manager, instance_id)
-
-    # 2. Store answers via QuestionManager. ``None`` means there is no
-    #    pack for this instance — surface as 404 so the frontend can
-    #    distinguish "answer without a question" from "answer stored".
-    #    We import here to avoid pulling the service into every
-    #    request that doesn't need it (lazy import).
-    from daemon.services.question_manager import pack_to_dict
-
-    pack = manager._question_manager.set_answers(instance_id, body.answers)
-    if pack is None:
-        raise HTTPException(
-            status_code=404,
-            detail=ErrorResponse(
-                code=ErrorCodes.INSTANCE_NOT_FOUND,
-                message=(
-                    f"No question pack for instance {instance_id!r}. "
-                    "The user can only answer a question that was "
-                    "actually asked."
-                ),
-            ).model_dump(),
-        )
-
-    # 3. Emit SSE: question_pack with status="answered". Best-effort —
-    #    the resume cascade must proceed even if SSE fails. Mirrors
-    #    Phase 1's pattern where the tool emits SSE synchronously
-    #    BEFORE setting the pause flag, for the same F3 timing reason.
-    live_hub = getattr(request.app.state, "live_hub", None)
-    if live_hub is not None:
-        try:
-            await live_hub.stream_question_pack(instance_id, pack_to_dict(pack))
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                f"question_pack SSE emission failed for answer on "
-                f"instance {instance_id}: {e}"
-            )
-
-    # 4. Format answers as a HumanMessage string. The echo of question
-    #    text is F7 — even if the tool result was compacted, the agent
-    #    can correlate Q↔A from this message alone.
-    answer_lines = ["Here are the user's answers to your questions:", ""]
-    for i, q in enumerate(pack.questions):
-        # Prefer keying by id (the canonical contract); fall back to
-        # text-keyed lookups for ad-hoc clients that didn't capture the
-        # auto-generated ids.
-        answer = (
-            pack.answers.get(q.id)
-            if q.id in pack.answers
-            else pack.answers.get(q.text, "(no answer)")
-        )
-        answer_lines.append(f"**Q{i + 1}:** {q.text}")
-        answer_lines.append(f"**A{i + 1}:** {answer}")
-        answer_lines.append("")
-    answer_msg = "\n".join(answer_lines)
-
-    # 5. Resolve the answer handle FIRST (while the task is still PAUSED),
-    #    THEN cascade-resume. This ordering is critical:
-    #    ``resume_processing_job`` calls ``find_suspended_turn_for_answer``,
-    #    which requires ``Task.status == 'paused'``.
-    #    ``resume_instance_cascade`` transitions tasks PAUSED → PENDING, so
-    #    calling it first would leave the handle unresolvable and the
-    #    answer would never be injected into the checkpoint.
-    #
-    #    ``_schedule_explicit_handle_resume`` only injects the message and
-    #    schedules ``_resume_processing_background`` via asyncio.create_task
-    #    (manager.py:6494) — it does NOT touch instance status. The
-    #    scheduled background task survives ``resume_instance_cascade``
-    #    because that cascade does NOT cancel ``_graph_tasks`` or any
-    #    in-flight tasks (unlike ``pause_instance_cascade``).
-    try:
-        job_result = await manager.resume_processing_job(
-            instance_id,
-            message=answer_msg,
-            silent=False,
-        )
-    except Exception as e:
-        logger.warning(
-            f"answer_questions: resume_processing_job failed for "
-            f"{instance_id[:8]}...: {e}"
-        )
-        job_result = {"status": "error", "error": str(e)}
-    if job_result is None:
-        # Defect-3 (answer-gate resume chain, 2026-09-10): the
-        # previous behavior here was a silent 200-mask — log a warning,
-        # still run the cascade (which flips PAUSED → RUNNING DB-only),
-        # and return ``no_active_job``. The user's answer was lost: no
-        # task row to resume, no message enqueued, no event emitted,
-        # the instance ended up ``running`` but idle, and the FE kept
-        # polling GET /question against the stale pending pack.
-        #
-        # The fix NEVER drops the answer payload. Two guarantees:
-        #   (a) The answer content reaches the agent as a fresh user
-        #       message via ``enqueue_message``. The user typed the
-        #       answer; the system must deliver it.
-        #   (b) No DB-only paused→running flip that leaves the
-        #       instance running-idle. If the cascade has no work to
-        #       do (no paused children, no handle), the instance
-        #       stays in whatever state it was. We enqueue real work
-        #       and let the cascade deliver the instance to RUNNING
-        #       with a real Task row to drive.
-        logger.warning(
-            f"answer_questions: resume_processing_job returned None "
-            f"for {instance_id[:8]}... — no awaiting_answer handle "
-            f"found. Defect-3 fallback: enqueueing answer as fresh "
-            f"user message (NEVER 200-mask an undeliverable answer)."
-        )
-        try:
-            fallback_result = await manager.enqueue_message(
-                instance_id=instance_id,
-                # Wrap the original Q↔A text with a marker so the
-                # agent can correlate this is the answer payload
-                # (the original ask_questions tool's questions are
-                # already in the checkpoint; the agent can match by
-                # content). The full structured answer is preserved.
-                message=answer_msg,
-                source="api_answer_fallback",
-            )
-            job_result = {
-                "status": "enqueued_as_fresh_message",
-                "message_id": fallback_result.message_id,
-                "job_id": fallback_result.job_id,
-                "instance_id": instance_id,
-                "route": "api_answer_fallback",
-            }
-        except Exception as enqueue_err:
-            logger.error(
-                f"answer_questions: Defect-3 fallback enqueue failed "
-                f"for {instance_id[:8]}...: {enqueue_err}"
-            )
-            # The cascade below would flip the instance to RUNNING
-            # DB-only. Surface the failure so the caller knows the
-            # answer was not delivered and the instance was not
-            # resumed.
-            raise HTTPException(
-                status_code=500,
-                detail=ErrorResponse(
-                    code=ErrorCodes.INTERNAL_ERROR,
-                    message=(
-                        f"Failed to deliver answer: no awaiting_answer "
-                        f"handle and fallback enqueue also failed: "
-                        f"{enqueue_err}"
-                    ),
-                ).model_dump(),
-            )
-
-    # Cascade-resume the instance tree (transitions PAUSED → RUNNING for
-    # instances, PAUSED → PENDING for tasks). The background resume task
-    # scheduled above survives this — resume_instance_cascade does NOT
-    # touch _graph_tasks or cancel existing tasks.
-    try:
-        resume_result = await manager.resume_instance_cascade(instance_id)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                code=ErrorCodes.INTERNAL_ERROR,
-                message=f"Failed to resume instance: {e}",
-            ).model_dump(),
-        )
-
-    target_id = resume_result.get("target_id", instance_id)
-
-    # Children resume silently from their checkpoint — they were paused
-    # as a side effect of the parent's question. The target's resume was
-    # already scheduled above; here we only handle non-target children.
-    resume_results: dict = {instance_id: job_result}
-    for resumed_id in resume_result["resumed_ids"]:
-        if resumed_id == target_id:
-            continue  # already handled above
-        try:
-            child_result = await manager.resume_processing_job(
-                resumed_id,
-                message="resume",
-                silent=True,
-            )
-        except Exception as e:
-            logger.warning(
-                f"Failed to resume processing for "
-                f"{resumed_id[:8]}...: {e}"
-            )
-            child_result = {"status": "error", "error": str(e)}
-        if child_result is None:
-            logger.debug(
-                f"No active PROCESSING job for instance "
-                f"{resumed_id[:8]}... (was IDLE/WAITING_CHILDREN)"
-            )
-            child_result = {"status": "no_active_job"}
-        resume_results[resumed_id] = child_result
-
-    # W1: Surface a degraded status when the answer couldn't be routed.
-    # The cascade still ran (children unblocked), but the target's
-    # answer was lost — return a distinct status so the caller knows.
-    # Defect-3 fix (2026-09-10): the fallback path now enqueues the
-    # answer as a fresh user message, so the answer is NEVER lost —
-    # surface ``answer_fallback_enqueued`` as a distinct status so the
-    # FE can distinguish a normal answer-resume from a fallback
-    # enqueue (different lifecycle / message_id).
-    if job_result.get("status") == "enqueued_as_fresh_message":
-        answer_status = "answer_fallback_enqueued"
-    elif job_result.get("status") != "no_active_job":
-        answer_status = "answered"
-    else:
-        answer_status = "no_active_job"
-
-    return {
-        "status": answer_status,
-        "instance_id": instance_id,
-        "question_pack": pack_to_dict(pack),
-        "resume_info": {
-            "resumed": True,
-            "resumed_ids": resume_result["resumed_ids"],
-            "skipped_ids": resume_result["skipped_ids"],
-            "target_id": target_id,
-            "resume_results": resume_results,
-        },
-    }
+    return await answer_questions_via_instance(
+        manager=manager,
+        instance_id=instance_id,
+        answers=body.answers,
+        question_pack_id=body.question_pack_id,
+        live_hub=getattr(request.app.state, "live_hub", None),
+        resume_message=body.resume_message,
+    )
 
 
 # 6c. GET /instances/{instance_id}/question - Get pending question pack
@@ -1444,6 +1223,15 @@ async def dismiss_question(
     #    (graph_task / pending_injections / request_registry).
     #    The instance is being resumed, NOT terminated.
     manager._question_manager.clear_question_pack(instance_id)
+    # M1 (fix pass, council-verified): ALSO clear the DURABLE metadata
+    # shadow — same rationale as the gate-supersession site above.
+    # Without this, a late answer after dismiss rehydrates the pack
+    # from ``instance_metadata`` (answer_helper §3) and injects into
+    # the running dismissed-past agent; a daemon restart's boot
+    # hydration would resurrect it the same way.
+    from daemon.services.midflight_qa import clear_question_pack_metadata
+
+    clear_question_pack_metadata(manager, instance_id)
     manager.clear_question_pause_requested(instance_id)
     # C2 fix — drop the deferred-pause marker. Without this discard the
     # post-graph completion path in instance_messaging would still fire
