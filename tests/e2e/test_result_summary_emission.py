@@ -81,6 +81,44 @@ E2E_PG_USER = os.environ.get("E2E_PG_USER", os.environ.get("POSTGRES_USER", "ens
 E2E_PG_PASSWORD = os.environ.get("E2E_PG_PASSWORD", os.environ.get("POSTGRES_PASSWORD", "testpw"))
 
 
+# --------------------------------------------------------------------------- #
+# F1 — env foot-gun guard (fix/job-completed-result-arm, 2026-09-22)
+# --------------------------------------------------------------------------- #
+# The ambient-POSTGRES_* fallback above re-normalized the exact foot-gun
+# that caused the 2026-09-21 live-DB incident: a host with
+# ``POSTGRES_DB=ensemble_prod`` exported makes the read-only event-table
+# query below resolve against the LIVE database. Refuse to run when the
+# resolved DB is prod-like, unless an explicit ``E2E_PG_DB`` override is
+# set (the override wins — an operator who explicitly names a DB has
+# made the dev intent unambiguous).
+PROD_LIKE_DBS = frozenset({"ensemble_prod", "ensemble_live", "ensemble_demo"})
+_E2E_PG_DB_EXPLICIT = bool(os.environ.get("E2E_PG_DB"))
+
+
+def _pg_env_refusal_reason() -> str | None:
+    """Return the F1 refusal message, or ``None`` when the env is safe.
+
+    Fail-fast contract: evaluated at import/collection time (before the
+    ``_pg_reachable()`` skipif probe below, which opens a real DB
+    connection during collection) so a prod-like resolution is caught
+    before ANY connection attempt is made.
+    """
+    if _E2E_PG_DB_EXPLICIT:
+        return None
+    if E2E_PG_DB in PROD_LIKE_DBS:
+        return (
+            f"REFUSED (F1 env guard): resolved POSTGRES_DB={E2E_PG_DB!r} is a "
+            f"prod-like database ({', '.join(sorted(PROD_LIKE_DBS))}). This "
+            f"ambient-POSTGRES_* fallback caused the 2026-09-21 live-DB "
+            f"incident. Set an explicit E2E_PG_DB (override wins) or scrub "
+            f"POSTGRES_* from the environment before running this test."
+        )
+    return None
+
+
+_PG_ENV_REFUSAL = _pg_env_refusal_reason()
+
+
 # Real-daemon timeouts — generous, mock LLM is fast.
 COMPLETION_TIMEOUT = 90
 POLL_INTERVAL = 2
@@ -117,6 +155,10 @@ def _daemon_running() -> bool:
 
 def _pg_url() -> str:
     """Return a sync postgresql+psycopg:// URL for the E2E test DB."""
+    # Belt-and-suspenders behind the F1 pytestmark guard: a direct
+    # programmatic call can never build a prod-like URL either.
+    if _PG_ENV_REFUSAL is not None:
+        raise RuntimeError(_PG_ENV_REFUSAL)
     return (
         f"postgresql+psycopg://{E2E_PG_USER}:{E2E_PG_PASSWORD}"
         f"@{E2E_PG_HOST}:{E2E_PG_PORT}/{E2E_PG_DB}"
@@ -124,6 +166,10 @@ def _pg_url() -> str:
 
 
 def _pg_reachable() -> bool:
+    if _PG_ENV_REFUSAL is not None:
+        # The F1 refusal skipif (first in pytestmark) already names the
+        # reason; never open a connection to a refused target.
+        return False
     try:
         eng = create_engine(_pg_url(), pool_pre_ping=True)
         with eng.connect() as conn:
@@ -137,6 +183,14 @@ def _pg_reachable() -> bool:
 
 pytestmark = [
     pytest.mark.integration,
+    # F1 env guard MUST be first: pytest evaluates skipif conditions in
+    # order and the ``_pg_reachable`` probe below opens a real DB
+    # connection during collection. A prod-like resolution is refused
+    # before any connection attempt.
+    pytest.mark.skipif(
+        _PG_ENV_REFUSAL is not None,
+        reason=_PG_ENV_REFUSAL or "PG env guard passed",
+    ),
     pytest.mark.skipif(
         not _daemon_running(),
         reason="Daemon not running at localhost:8079 — start with ./dev.sh",
