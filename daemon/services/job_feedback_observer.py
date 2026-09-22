@@ -1553,6 +1553,37 @@ class JobFeedbackObserver:
                 error_message = error
         elif terminal_status == InstanceStatus.ERROR.value:
             error_message = error if error else "Unknown error"
+            # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
+            # mirror the COMPLETED branch's best-effort extraction so
+            # the ERROR path surfaces whatever the agent last produced
+            # before failing. Pre-fix the ERROR branch hard-coded
+            # ``result_summary = None`` (the variable was initialized
+            # above and never overwritten here), so the resolver and
+            # the JOB_COMPLETED sibling publish (Item 3b) saw an empty
+            # ``result_summary`` even when the LLM had produced a
+            # partial response. Fallback is ``None`` (NOT the
+            # COMPLETED-branch fallback marker) because the agent's
+            # last assistant message on the failure path may be
+            # truncated or missing entirely — the fail-open contract
+            # here is to surface whatever the seam returns or admit
+            # we have nothing.
+            try:
+                result_summary = (
+                    await self._instance_manager._get_last_assistant_message_raw(
+                        instance_id
+                    )
+                )
+            except Exception as e:
+                # Best-effort — log at DEBUG (not WARNING) so a failed
+                # seam on an already-failing terminal does not spam
+                # the production log. The DB write below uses
+                # ``result_summary=None`` as the surface value.
+                logger.debug(
+                    f"Observer: best-effort result_summary fetch failed "
+                    f"for instance {instance_id[:8]}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                result_summary = None
         else:
             logger.warning(
                 f"Unknown terminal status '{terminal_status}' for "
