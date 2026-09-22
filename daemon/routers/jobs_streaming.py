@@ -382,6 +382,20 @@ async def stream_job_events(
                             )
                             if current is None:
                                 break
+                        # v0.13.9 follow-up (fix/job-completed-result-arm,
+                        # 2026-09-22, review MINOR): if the retry loop
+                        # exited because _resolve returned None
+                        # (job row deleted during the 500ms window),
+                        # fall-through to the completed yield would
+                        # AttributeError on `current` and uncleanly
+                        # kill the SSE connection. Mirror the
+                        # pre-existing None guard (lines ~330-336).
+                        if current is None:
+                            yield {
+                                "event": "error",
+                                "data": json.dumps({"error": "Job not found"})
+                            }
+                            break
                         yield {
                             "event": "completed",
                             "data": json.dumps(current.to_completed_payload(work_id=job_id))
