@@ -406,7 +406,37 @@ def test_result_summary_emission_surface_intent5():
         #    (daemon/repositories/event/models.py:12-23) and the
         #    observer's Step 4 publishes it (job_feedback_observer.py
         #    sibling publish at :3029-3042).
-        matched = _query_event_table(job_id)
+        #
+        # v0.13.9 fix follow-up (2026-09-22): the JOB_COMPLETED sibling
+        # publish runs in the OBSERVER's ``_finalize_job`` block AFTER
+        # ``_finalize_job_db_sync`` commits JobItem=done. The SSE
+        # consumer's polling loop fires the completed event based on
+        # the JobItem=done commit, so the test's per-job SSE event
+        # can land in the brief window where the JOB_COMPLETED event
+        # row hasn't been written yet (the observer's sibling publish
+        # runs on the event loop right after the sync DB half
+        # returns — microsecond-scale race). Retry the read-only
+        # query with brief backoff to drain the race window before
+        # asserting. Bounded so a permanent seam failure does NOT
+        # block the test forever.
+        #
+        # 30 × 200ms = 6s ceiling. The retry count is generous
+        # because the daemon has multiple JobItem-transition paths
+        # (observer via lifecycle event, JobProcessor's natural
+        # completion, bus callback) and the JOB_COMPLETED sibling
+        # publish only fires on the observer path. On a path that
+        # transitions the JobItem to done WITHOUT firing the
+        # observer, the JOB_COMPLETED row never appears — but those
+        # paths are the same paths that miss the entire lifecycle
+        # event chain (a deeper multi-path race that the commission
+        # doesn't address). The 6s ceiling gives the observer enough
+        # time to fire on the common path.
+        matched: list[dict[str, Any]] = []
+        for _retry in range(30):
+            matched = _query_event_table(job_id)
+            if matched:
+                break
+            time.sleep(0.2)
         assert EventKind is not None and hasattr(
             EventKind, "JOB_COMPLETED"
         ), (
