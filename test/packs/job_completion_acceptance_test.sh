@@ -104,26 +104,61 @@ if [ $EXIT_CODE -eq 124 ]; then
 fi
 
 # Intent5 — real-daemon emission-surface test. Skip-if-no-daemon guard
-# inside the test (pytest.mark.skipif on ``_daemon_running()``).
-# Mock LLM is fine — the seam under test is the daemon's, not the
-# LLM's. Run AFTER the mock-layer cases so the mock-layer result is
-# the gating signal; if Intent5 skips (daemon not running) the pack
-# still PASSes on the 29 mock cases (Intent5 is informational — its
-# presence in the pack is a sibling-drift hedge per the
-# commission's "ship tests+code in ONE commit set" guard).
-timeout 90s .venv/bin/pytest \
+# inside the test (pytest.mark.skipif on ``_daemon_running()``; plus the
+# F1 env guard, which refuses a prod-like resolved POSTGRES_DB).
+# Mock LLM is fine — the seam under test is the daemon's, not the LLM's.
+# NOTE: Intent5 needs a daemon WITH an LLM upstream — use
+# ``./dev_with_mock.sh`` (sanctioned mock LLM); plain ``./dev.sh`` has no
+# upstream (:4001 refused) and no job can complete.
+#
+# F5 gating contract (2026-09-22) — implements LESSONS/
+# 2026-09-22-intent5-skip-guard-coverage-hole.md rule 2 ("a PASS without
+# proof the flagship EXECUTED is a partial verdict") and closes council
+# MINOR #4 ("Intent5 exit code recorded but never gated"):
+#   * Intent5 RAN and FAILED (daemon available) → pack FAILS (exit 1).
+#     A live emission-surface regression can no longer hide behind the
+#     mock layer.
+#   * Intent5 SKIPPED (no daemon / PG unreachable / F1 env refusal /
+#     nothing collected) → LOUD distinct verdict
+#     "RESULT: PASS-WITH-SKIP (intent5=SKIPPED: <reason>)", exit 0.
+#     Exit-choice rationale: the 30 mock-layer cases are the pack's core
+#     contract and the pack must stay runnable in daemon-less
+#     environments (CI/cron) — a nonzero exit on skip would regress
+#     that. The LESSONS hazard (silent exit-0 PASS masking an
+#     unexecuted flagship) is closed by making the skip LOUD and
+#     NAMED instead; consumers can grep the verdict line to tell the
+#     two PASS shapes apart.
+INTENT5_CODE=0
+INTENT5_OUT="$(timeout 90s .venv/bin/pytest \
   tests/e2e/test_result_summary_emission.py \
-  -v --override-ini="addopts=" --tb=short -q 2>&1
-INTENT5_CODE=$?
-# Intent5 skip (exit 5 / 0 tests collected + skipped) is acceptable —
-# the mock-layer cases above already gated the pack. Record but
-# don't fail the pack on Intent5 skip.
+  -v --override-ini="addopts=" --tb=short -ra -q 2>&1)" || INTENT5_CODE=$?
+echo "$INTENT5_OUT"
 echo "RESULT: intent5_exit_code=$INTENT5_CODE"
 
-if [ $EXIT_CODE -eq 0 ]; then
-  echo "RESULT: PASS"
-  exit 0
+SKIP_REASON=""
+if [ "$INTENT5_CODE" -eq 5 ]; then
+  SKIP_REASON="exit 5: no tests collected — e2e prerequisites absent in this environment"
+elif [ "$INTENT5_CODE" -ne 0 ]; then
+  # Nonzero and not the "nothing collected" code: tests RAN (daemon was
+  # available) and failed — this is exactly the regression the pack
+  # must surface. 124 (timeout) lands here too.
+  echo "RESULT: FAIL (intent5 failed with daemon available — emission-surface regression; exit=$INTENT5_CODE)"
+  exit 1
 else
-  echo "RESULT: FAIL"
+  # Exit 0: either executed-and-passed (no SKIPPED lines) or
+  # skipped-by-guard (LOUD SKIPPED reason lines via -ra).
+  SKIP_REASON="$(printf '%s\n' "$INTENT5_OUT" | grep -m1 '^SKIPPED' || true)"
+fi
+
+if [ "$EXIT_CODE" -ne 0 ]; then
+  echo "RESULT: FAIL (mock layer exit=$EXIT_CODE)"
   exit 1
 fi
+
+if [ -n "$SKIP_REASON" ]; then
+  echo "RESULT: PASS-WITH-SKIP (mock layer PASS; intent5=SKIPPED: $SKIP_REASON)"
+  exit 0
+fi
+
+echo "RESULT: PASS (mock layer PASS; intent5 EXECUTED and PASSED — all four emission surfaces asserted)"
+exit 0
