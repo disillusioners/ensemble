@@ -2963,12 +2963,13 @@ class JobFeedbackObserver:
         v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
         ``job_id`` is the optional JobItem primary key for the
         JobItem-backed terminal transition (``_finalize_job`` path).
-        When supplied (and not ``None``), Step 4 publishes a sibling
-        ``JOB_COMPLETED`` event row carrying the pre-fetched
-        ``result_summary`` (``last_content``) — see Item 3b. The
-        standalone ``_finalize_instance`` path passes ``job_id=None``
-        so the sibling publish is skipped (no JobItem exists for
-        message-only instances).
+        When supplied, the CALLER (``_finalize_job``) publishes the
+        sibling ``JOB_COMPLETED`` event row (Item 3b) OUTSIDE this
+        dispatcher — after the ``instance_was_terminal`` gate — so the
+        dispatcher itself only threads the value through for the
+        SSE/notification frame (Item 3c). The standalone
+        ``_finalize_instance`` path passes ``job_id=None``
+        (no JobItem exists for message-only instances).
 
         Args:
             instance_id: The instance ID for SSE / CompletionRegistry / lifecycle.
@@ -2976,24 +2977,25 @@ class JobFeedbackObserver:
             error: Optional error message (for the ERROR path).
             parent_id: Captured from the instance row before commit.
             agent_id: Captured from the instance row before commit.
-            last_content: Pre-fetched last assistant message (for the
-                CompletionRegistry COMPLETED path AND the JOB_COMPLETED
-                sibling publish AND the global notification
-                broadcaster). If ``None``, the dispatcher fetches it
-                on-demand via ``_get_last_assistant_message_raw`` for
-                the CompletionRegistry path; the JOB_COMPLETED sibling
-                and notification broadcaster pass ``None`` through
-                verbatim (a ``None`` result_summary just means the
-                field is absent from the broadcast dict — pre-fix
-                shape).
+            last_content: Pre-fetched last assistant message feeding the
+                CompletionRegistry COMPLETED path (Step 3) and the
+                global notification broadcaster (Step 4). When ``None``
+                (the standalone ``_finalize_instance`` shape), the
+                dispatcher performs ONE hoisted on-demand fetch via
+                ``_get_last_assistant_message_raw`` (F2, 2026-09-22 —
+                previously Step 3 and Step 4 each fetched, costing a
+                double LLM repair) and BOTH consumers read the shared
+                value. The fetch is best-effort: any seam failure logs
+                at DEBUG and surfaces ``None`` (a ``None``
+                result_summary just means the field is absent from the
+                broadcast dict — pre-fix shape). The JOB_COMPLETED
+                sibling publish is NOT fed by this argument — the
+                caller publishes it from its own pre-fetched value.
             job_id: Optional JobItem primary key. When not ``None``,
-                Step 4 publishes a sibling ``JOB_COMPLETED`` event
-                row (Item 3b). Defaults to ``None`` for the
-                standalone ``_finalize_instance`` path which has no
-                JobItem to address.
-                CompletionRegistry COMPLETED path). If ``None``, the
-                dispatcher fetches it on-demand via
-                ``_get_last_assistant_message_raw``.
+                the caller (``_finalize_job``) publishes the sibling
+                ``JOB_COMPLETED`` event row (Item 3b). Defaults to
+                ``None`` for the standalone ``_finalize_instance``
+                path, which has no JobItem to address.
         """
         # Step 1: TWO-TIER proc cleanup. Added in Phase 1 of the
         # "auto-kill background processes on root instance completion"
@@ -3109,6 +3111,39 @@ class JobFeedbackObserver:
                     f"{instance_id[:8]}...: {e}"
                 )
 
+        # ── F2 hoisted seam fetch (fix/job-completed-result-arm,
+        # 2026-09-22) ─────────────────────────────────────────────────
+        # The dispatcher used to fetch the seam TWICE when the caller
+        # did not pre-fetch (``last_content=None`` — the standalone
+        # ``_finalize_instance`` shape): once in Step 3
+        # (CompletionRegistry signal) and once in Step 4 (lifecycle
+        # event / notification broadcaster; the on-demand fetch added
+        # in 540a5f16). ``_get_last_assistant_message_raw`` is
+        # LLM-repair-capable, so a double fetch costs a double repair.
+        # Hoisted to ONE fetch here, shared by both consumers.
+        # Semantics preserved: gated on the COMPLETED branch (the
+        # ERROR branch signals the error string and never needed the
+        # content), best-effort (any seam failure logs at DEBUG and
+        # surfaces ``None`` to both consumers — fail-open, None-safe),
+        # and ``agent_id`` is passed so the exclusion check can skip
+        # repair for wanderer/explorer reports (2026-08-11 note).
+        resolved_content: str | None = last_content
+        if resolved_content is None and terminal_status == "completed":
+            try:
+                resolved_content = (
+                    await self._instance_manager._get_last_assistant_message_raw(
+                        instance_id,
+                        agent_id=agent_id,
+                    )
+                )
+            except Exception as e:
+                logger.debug(
+                    f"Observer: on-demand result_summary fetch failed "
+                    f"for instance {instance_id[:8]}... (hoisted Step "
+                    f"3+4 seam fetch): {type(e).__name__}: {e}"
+                )
+                resolved_content = None
+
         # Step 3: Signal CompletionRegistry. For "error", pass the error
         # string as the result with ``is_error=True`` (matches
         # ``error_reporting.py:380-384``). For "completed", pass the last
@@ -3124,19 +3159,10 @@ class JobFeedbackObserver:
                     is_error=True,
                 )
             else:
-                content = last_content
-                if content is None:
-                    # 2026-08-11: terminal completion path. Pass
-                    # agent_id (already in scope) so the exclusion check
-                    # can skip repair for wanderer/explorer reports.
-                    content = (
-                        await self._instance_manager._get_last_assistant_message_raw(
-                            instance_id,
-                            agent_id=agent_id,
-                        )
-                    )
+                # F2: reads the single hoisted fetch above — no
+                # on-demand fetch inside Step 3 anymore.
                 get_completion_registry().complete(
-                    instance_id, result=content
+                    instance_id, result=resolved_content
                 )
         except Exception as e:
             logger.warning(
@@ -3160,14 +3186,14 @@ class JobFeedbackObserver:
         # When ``last_content`` is ``None`` (standalone
         # ``_finalize_instance`` path — the instance-side terminal
         # transition may complete BEFORE the job-side finalize runs,
-        # which is the common case for non-bus dispatch flows), we
-        # fetch on-demand here so the notification carries the
-        # agent's last response instead of an empty
-        # ``result_summary`` field. The fetch is best-effort: any
-        # seam failure logs at DEBUG and surfaces ``None`` — the
-        # notification still broadcasts, just without the field.
-        # Backward-compatible — older callers omit the kwarg; the
-        # field is simply absent from the broadcast dict.
+        # which is the common case for non-bus dispatch flows), the
+        # F2 hoisted fetch above supplies the value so the
+        # notification carries the agent's last response instead of
+        # an empty ``result_summary`` field. The fetch is
+        # best-effort: any seam failure logs at DEBUG and surfaces
+        # ``None`` — the notification still broadcasts, just without
+        # the field. Backward-compatible — older callers omit the
+        # kwarg; the field is simply absent from the broadcast dict.
         #
         # Note: the sibling JOB_COMPLETED event row (Item 3b) is
         # NOT published here — it lives at the outer ``_finalize_job``
@@ -3176,22 +3202,7 @@ class JobFeedbackObserver:
         # dispatcher's lifecycle publish stays instance-scoped and
         # gated on the ``instance_was_terminal=False`` precondition
         # the caller checks (see the call site at :2104).
-        effective_result_summary: str | None = last_content
-        if effective_result_summary is None and terminal_status == "completed":
-            try:
-                effective_result_summary = (
-                    await self._instance_manager._get_last_assistant_message_raw(
-                        instance_id,
-                        agent_id=agent_id,
-                    )
-                )
-            except Exception as e:
-                logger.debug(
-                    f"Observer: on-demand result_summary fetch failed "
-                    f"for instance {instance_id[:8]}... (Step 4 "
-                    f"lifecycle event): {type(e).__name__}: {e}"
-                )
-                effective_result_summary = None
+        effective_result_summary: str | None = resolved_content
 
         events_service = getattr(self._instance_manager, "_events_service", None)
         if events_service is not None:
