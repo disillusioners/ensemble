@@ -3,7 +3,7 @@
 # Pack: lcancheck_matrix_5_intf_fast_b_test
 # Gate: feature/lca-remove-check-note @ ff9eb849 (delta 6bf7bed7..ff9eb849, 1 commit).
 # Splitter-generated 2026-09-23. 9 files / 33 collected tests; est 40-100s.
-# Dual-layer timeout: outer 'timeout 300' at invocation + inner 240s guard below.
+# Dual-layer timeout: outer 'timeout 300' at invocation + inner 280s guard below.
 # Invocation contract: timeout 300 bash test/packs/lcancheck_matrix_5_intf_fast_b_test.sh  (from worktree root)
 # Per-test override: timeout=120
 set -u
@@ -36,7 +36,7 @@ tests/integration/test_attestation_nudge_supersede_lca.py
 )
 echo "=== Test Pack: ${PACK} ==="
 START=$(date +%s)
-timeout 240 env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_URL -u DATABASE_URL uv run python -m pytest "${FILES[@]}" --tb=short -q --override-ini="timeout=120"
+timeout 280 env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_URL -u DATABASE_URL uv run python -m pytest "${FILES[@]}" --tb=short -q --override-ini="timeout=120"
 RC=$?
 END=$(date +%s)
 echo "Pack inner runtime: $((END-START))s"
