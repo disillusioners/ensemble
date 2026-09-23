@@ -2885,6 +2885,64 @@ class TestNotifySlotWiring:
             c.kwargs.get("result_summary") is None
         )
 
+    @pytest.mark.asyncio
+    async def test_refire_nonfailed_with_payload_maps_to_result_slot_not_error(
+        self,
+    ):
+        """Latent twin with NON-None payload: a non-failed held-watcher
+        re-fire maps the payload to ``result_summary=`` and leaves
+        ``error=`` None. Catches a regression to positional passing at
+        the latent-twin site — which would slip the payload into
+        ``error=`` (the third positional of ``notify_watchers``).
+        The companion ``test_terminated_refire_cancel_status_uses_result_slot``
+        passes ``result_summary=None`` and therefore cannot distinguish
+        keyword from positional; this test fills that gap.
+        """
+        receipt = "66666666-6666-4666-8666-666666666666"
+        payload = "latent twin payload — assistant text would ride here"
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=None)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=1)
+        mock_job_queue_service._work_resolver = _FakePerKindResolver({})
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._task_repo = MagicMock()
+        mock_instance_manager._task_repo.get_by_instance = MagicMock(
+            return_value=[SimpleNamespace(work_id=receipt)]
+        )
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=mock_job_queue_service,
+            job_repo=MagicMock(spec=JobRepository),
+            lock_repo=MagicMock(spec=LockRepository),
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+        )
+
+        await observer._fire_watcher_notify_for_terminal(
+            "instance-rc2",
+            notify_status="cancelled",
+            result_summary=payload,
+            error_message=None,
+        )
+
+        calls = mock_job_queue_service.notify_watchers.await_args_list
+        assert len(calls) == 1
+        c = calls[0]
+        assert c.args[0] == receipt
+        assert c.args[1] == "cancelled"
+        # The post-fix wiring is keyword-only: payload → result_summary=,
+        # never error=. A regression to positional passing would land
+        # `payload` in error= (notify_watchers' third positional), so
+        # this assertion catches that.
+        assert c.kwargs.get("error") is None, (
+            f"non-failed re-fire must never land payload in error=, "
+            f"got {c.kwargs!r}"
+        )
+        assert c.kwargs.get("result_summary") == payload, (
+            f"non-failed re-fire must map payload to result_summary=, "
+            f"got {c.kwargs!r}"
+        )
+
 
 _EVENT_COMPLETED_RC2 = {
     "event_type": "instance_lifecycle",
