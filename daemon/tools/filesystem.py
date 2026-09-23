@@ -1049,15 +1049,29 @@ def grep_files(
         # (recursive + single-level brace expansion).
         candidate_files = _filter_candidates_by_include(search_path, include, walk.files)
 
+        # Stamp ONE phase deadline (shared by stat + read phases below).
+        # Reuses the walker's stamped deadline so a slow walk + slow post-walk
+        # phases cannot combine into a worker stall past WALK_TIMEOUT_SECONDS
+        # — N1 review patch. glob_files does the same for its mtime-stat loop.
+        phase_deadline = walk.deadline_monotonic or (
+            time.monotonic() + globals()["WALK_TIMEOUT_SECONDS"]
+        )
+
         # Per-file size cap (the 2026-09-23 incident showed that read_text()
         # on a multi-GB file is itself a crash vector). Stat-then-skip — we
         # never even open files above the cap. Read at call time so
-        # monkeypatch.setattr works in unit tests.
+        # monkeypatch.setattr works in unit tests. Deadline also enforced
+        # per-candidate so a slow stat() (network FS, contention-stalled disk)
+        # cannot stall the worker past WALK_TIMEOUT_SECONDS — closes the N1
+        # gap left over after W-A's walk-layer + read-layer fixes.
         max_file_size_bytes = globals()["WALK_MAX_FILE_SIZE_BYTES"]
         max_matches_per_call = globals()["WALK_MAX_MATCHES_PER_CALL"]
         oversized_skips = 0
         readable_files: list[Path] = []
         for f in candidate_files:
+            if time.monotonic() > phase_deadline:
+                walk.post_walk_phase_timed_out = "stat"
+                break
             try:
                 size = f.stat().st_size
             except OSError:
@@ -1073,15 +1087,18 @@ def grep_files(
         # caps. The user's `limit` then trims to their preferred pagination.
         # Deadline also enforced per-file so a slow read_text / line scan
         # cannot stall the worker past WALK_TIMEOUT_SECONDS — W-A review patch.
+        # Shares the same phase_deadline as the stat loop above; the None-guard
+        # prevents the read-phase check from overwriting a "stat" reason
+        # stamped by the size-prefilter loop — N1 review patch.
         match_capped = False
         matches: list[str] = []
         read_budget = max_matches_per_call
-        read_deadline = walk.deadline_monotonic or (
-            time.monotonic() + globals()["WALK_TIMEOUT_SECONDS"]
-        )
 
         for file_path in readable_files:
-            if time.monotonic() > read_deadline:
+            if (
+                walk.post_walk_phase_timed_out is None
+                and time.monotonic() > phase_deadline
+            ):
                 walk.post_walk_phase_timed_out = "read"
                 break
             try:
