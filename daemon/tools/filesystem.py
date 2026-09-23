@@ -1,4 +1,19 @@
-"""File system tools for reading files and directories."""
+"""File system tools for reading, writing, and listing files and directories.
+
+This module is intentionally a single file: six ``@tool`` registrations
+(``list_directory``, ``read_file``, ``glob_files``, ``write_file``,
+``grep_files``, ``edit_file``), the bounded-walk subsystem
+(``_bounded_walk`` / ``WalkReport`` / ``_file_matches_pattern`` /
+``_walk_truncation_notice``) shared by ``glob_files`` and ``grep_files``,
+and the WorkspaceGuard resolution shims
+(``_resolve_within_workdir`` / ``_resolve_search_root`` / family) all
+live here on one ``register_tool_category("filesystem")`` surface. Keeping
+them together gives a single authorization surface (one category, one
+allowlist) and a single shared resolution/walk machinery — splitting them
+would either duplicate the workdir-aware path resolution or force a
+second category and a second allowlist seam, both of which have bitten
+this codebase before.
+"""
 
 import os
 import re
@@ -57,6 +72,15 @@ WALK_MAX_FILE_COUNT: int = 10_000  # bound the materialized candidate list
 WALK_MAX_FILE_SIZE_BYTES: int = 1_500_000  # ~1.5 MB — grep_files per-file read cap
 WALK_TIMEOUT_SECONDS: float = 20.0  # per-call wall-clock cap (monotonic check)
 WALK_MAX_MATCHES_PER_CALL: int = 10_000  # grep_files inner match-accumulation cap
+
+# Tool-output character cap — NOT a walk-traversal guardrail. Bounds the
+# joined content string that ``list_directory`` / ``read_file`` /
+# ``glob_files`` / ``grep_files`` hand back before pagination kicks in.
+# Distinct from WALK_* above: those bound TRAVERSAL (depth, count, file
+# size, time); this bounds RESULT SIZE. Pinning the value in one place
+# keeps the 5 call sites in lockstep — divergence here is a regression
+# hazard the test suite pins via truncation-notice verbatim checks.
+_MAX_OUTPUT_CHARS: int = 6000
 
 CATEGORY_NAME = "File Operations"
 CATEGORY_DOC = """\
@@ -313,8 +337,9 @@ class WalkReport:
             ``stopped_reason``.
         stopped_reason: ``None`` if the walk completed normally; one of
             ``"file_count"`` / ``"depth"`` / ``"timeout"`` if a cap fired.
-            Drives the "Search incomplete" notice appended to tool results.
-        timed_out_at: Path where the timeout fired (``None`` if no timeout).
+            Drives the "Search incomplete" notice appended to tool results
+            and pins WHERE the walker stalled — the only diagnostic callers
+            need to act on (no separate path field).
         deadline_monotonic: ``time.monotonic()`` deadline the walker enforced
             (start + ``WALK_TIMEOUT_SECONDS``). Exposed so post-walk phases
             (grep read loop, glob stat loop) can reuse the SAME budget
@@ -329,7 +354,6 @@ class WalkReport:
 
     files: list[Path] = field(default_factory=list)
     stopped_reason: str | None = None
-    timed_out_at: Path | None = None
     deadline_monotonic: float = 0.0
     post_walk_phase_timed_out: str | None = None
 
@@ -391,7 +415,6 @@ def _bounded_walk(
     files: list[Path] = []
     deadline = time.monotonic() + timeout_seconds
     timed_out = False
-    timed_out_at: Path | None = None
     saw_depth_cap = False
 
     for dirpath, dirs, fnames in os.walk(
@@ -400,7 +423,6 @@ def _bounded_walk(
         # Timeout check (cheap — done once per directory entry).
         if time.monotonic() > deadline:
             timed_out = True
-            timed_out_at = Path(dirpath)
             break
 
         current = Path(dirpath)
@@ -447,7 +469,6 @@ def _bounded_walk(
                 return WalkReport(
                     files=files,
                     stopped_reason="file_count",
-                    timed_out_at=None,
                     deadline_monotonic=deadline,
                 )
 
@@ -461,7 +482,6 @@ def _bounded_walk(
     return WalkReport(
         files=files,
         stopped_reason=stopped_reason,
-        timed_out_at=timed_out_at,
         deadline_monotonic=deadline,
     )
 
@@ -605,7 +625,7 @@ def list_directory(
         result = truncate_output(
             content,
             tool_name="list_directory",
-            max_chars=6000,
+            max_chars=_MAX_OUTPUT_CHARS,
             max_lines=150,
             offset_indexed=False,  # 1-indexed offset (for consistency with other tools)
         )
@@ -673,12 +693,12 @@ def read_file(
         formatted_content = header + "\n".join(result)
         
         # Check if truncation needed (character limit for safety)
-        if len(formatted_content) > 6000:
+        if len(formatted_content) > _MAX_OUTPUT_CHARS:
             # Find a good truncation point at line boundary
             truncated_lines = []
             char_count = 0
             for line in result:
-                if char_count + len(line) + 1 > 6000:
+                if char_count + len(line) + 1 > _MAX_OUTPUT_CHARS:
                     break
                 truncated_lines.append(line)
                 char_count += len(line) + 1
@@ -809,7 +829,7 @@ def glob_files(
         content = "\n".join(result)
 
         # Check if truncation needed
-        if len(content) > 6000 or len(result) > limit:
+        if len(content) > _MAX_OUTPUT_CHARS or len(result) > limit:
             # Truncate at line boundary
             truncated_lines = result[:limit]
             shown = len(truncated_lines)
@@ -1139,7 +1159,7 @@ def grep_files(
         content = "\n".join(matches)
 
         # Check if truncation needed
-        if len(content) > 6000 or len(matches) > limit:
+        if len(content) > _MAX_OUTPUT_CHARS or len(matches) > limit:
             # Truncate at line boundary
             truncated_matches = matches[:limit]
             shown = len(truncated_matches)
@@ -1198,7 +1218,8 @@ Args:
 Traversal guardrails: excluded dirs (node_modules, .venv, venv, .git,
 __pycache__, Library, .cache, .next, dist, build, target, and any hidden
 dir), depth cap (10 levels), file-count cap (10,000), per-file size cap
-(1.5 MB; oversized files are skipped silently — counted in the notice),
+(1.5 MB; oversized files are excluded from matching and counted in the
+"Search incomplete" notice),
 match-accumulation cap (10,000), and a 20-second wall-clock timeout. When
 a cap fires the result carries a loud "Search incomplete" notice pointing
 the caller to narrow the root or raise pattern specificity.

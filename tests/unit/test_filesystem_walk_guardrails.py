@@ -37,9 +37,6 @@ fixture; ``monkeypatch.undo`` runs automatically at test teardown.
 
 from __future__ import annotations
 
-import os
-import re
-import time
 from pathlib import Path
 
 import pytest
@@ -80,17 +77,17 @@ class TestExclusions:
 
     def test_named_exclusion_venv_and_dot_venv(self, tmp_path: Path):
         for venv_name in ("venv", ".venv"):
-                (tmp_path / "kept.py").write_text("x")
-                v = tmp_path / venv_name
-                v.mkdir()
-                (v / "lib.py").write_text("x")
-                result = fs.glob_files.invoke(
-                    {"pattern": "**/*.py", "path": str(tmp_path)}
-                )
-                assert "kept.py" in result, f"kept.py missing for {venv_name}:\n{result}"
-                assert "lib.py" not in result, (
-                    f"{venv_name} not excluded (lib.py leaked):\n{result}"
-                )
+            (tmp_path / "kept.py").write_text("x")
+            v = tmp_path / venv_name
+            v.mkdir()
+            (v / "lib.py").write_text("x")
+            result = fs.glob_files.invoke(
+                {"pattern": "**/*.py", "path": str(tmp_path)}
+            )
+            assert "kept.py" in result, f"kept.py missing for {venv_name}:\n{result}"
+            assert "lib.py" not in result, (
+                f"{venv_name} not excluded (lib.py leaked):\n{result}"
+            )
 
     def test_named_exclusion_dist_build_target(self, tmp_path: Path):
         for d in ("dist", "build", "target"):
@@ -386,8 +383,9 @@ class TestPerFileSizeSkip:
     """WALK_MAX_FILE_SIZE_BYTES gates grep_files' per-file read."""
 
     def test_oversized_file_skipped_with_notice(self, tmp_path, monkeypatch):
-        """A 2 MB file must be skipped (no read_text, no match), and the
-        truncation notice must mention the skip count."""
+        """A file larger than the (monkeypatched) cap must be skipped (no
+        read_text, no match), and the truncation notice must mention the
+        skip count."""
         monkeypatch.setattr(fs, "WALK_MAX_FILE_SIZE_BYTES", 100)  # tiny cap
         small = tmp_path / "small.py"
         small.write_text("MATCH_HIT = 'found'\n")
@@ -549,7 +547,7 @@ class TestTimeoutFires:
             f"Stat-phase deadline check un-pinned — the size-prefilter loop "
             f"ran past the deadline without breaking. Removing the new "
             f"`time.monotonic() > phase_deadline` check in grep_files' "
-            f"stat loop (filesystem.py:1062-1071 area) would flip this RED. "
+            f"size-prefilter stat loop would flip this RED. "
             f"Result:\n{result}"
         )
         # Negative pins — phase isolation. Walker passed (kept under cap),
@@ -572,8 +570,8 @@ class TestTimeoutFires:
         past the deadline. The shared ``phase_deadline`` lets the read loop
         see the same cap, and the None-guard prevents any leftover walker/
         stat state from being overwritten. Removing the ``time.monotonic() >
-        phase_deadline`` check in the read loop (filesystem.py:1086-1092 area)
-        flips this test RED — pin discipline matches the W-A read-loop fix.
+        phase_deadline`` check in the read_text loop of grep_files would
+        flip this test RED — pin discipline matches the W-A read-loop fix.
         """
         (tmp_path / "f.py").write_text("MATCH_TOKEN = 'x'\n")
         monkeypatch.setattr(fs, "WALK_TIMEOUT_SECONDS", 100.0)
@@ -599,7 +597,7 @@ class TestTimeoutFires:
             f"Read-phase deadline check un-pinned — the read loop ran past "
             f"the deadline without breaking. Removing the new "
             f"`time.monotonic() > phase_deadline` check in grep_files' "
-            f"read loop (filesystem.py:1086-1092 area) flips this RED. "
+            f"read_text loop flips this RED. "
             f"Result:\n{result}"
         )
         # Negative pins — walker + stat completed cleanly.
@@ -640,15 +638,13 @@ class TestAbsolutePathGuard:
         assert "ERROR" not in result
         assert "x.py" in result
 
-    def test_abs_outside_workdir_no_workdir_refused(self, tmp_path):
+    def test_abs_outside_workdir_no_workdir_refused(self):
         """Bare absolute path outside workdir + outside temp is REFUSED.
 
         This is the 2026-09-23 incident shape (bare ``/Users/...`` walk).
         The error must redirect them to scope the walk.
         """
-        # Use a sibling-of-tmp_path as a non-temp absolute root. pytest's
-        # tmp_path is under /var/folders/.../T/...; its PARENT (under
-        # /var/folders/.../) is also in temp, so climb to a non-temp root.
+        # Repo root derived from this test file's location — NEVER hardcode.
         non_temp_root = Path(__file__).resolve().parent.parent.parent
         # The repo root might still be in temp on CI; assert non-temp first.
         assert not fs.WorkspaceGuard._is_in_temp_dir(non_temp_root), (
@@ -1001,7 +997,12 @@ class TestBoundedWalkUnit:
         assert isinstance(report, fs.WalkReport)
         assert hasattr(report, "files")
         assert hasattr(report, "stopped_reason")
-        assert hasattr(report, "timed_out_at")
+        # Negative pin — WalkReport.timed_out_at was removed (dead write-only
+        # field; stopped_reason already tells callers WHERE the walker stalled).
+        assert not hasattr(report, "timed_out_at"), (
+            "WalkReport.timed_out_at was dropped as a dead field — its "
+            "presence here means a re-introduction slipped past review."
+        )
 
 
 class TestFileMatchesPattern:
@@ -1067,10 +1068,13 @@ class TestResolveSearchRoot:
 
         The 2026-09-23 incident shape.
         """
+        # Repo root derived from this test file's location — NEVER hardcode.
         non_temp = Path(__file__).resolve().parent.parent.parent
         # Sanity: must actually be outside temp for this test to be meaningful.
-        if fs.WorkspaceGuard._is_in_temp_dir(non_temp):
-            pytest.skip(f"Test root {non_temp} is in temp on this filesystem")
+        assert not fs.WorkspaceGuard._is_in_temp_dir(non_temp), (
+            f"Test root {non_temp} unexpectedly in temp dir — pin "
+            "meaningless on this filesystem"
+        )
         target, err = fs._resolve_search_root(str(non_temp), None)
         assert target is None
         assert err is not None
