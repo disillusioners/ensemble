@@ -293,19 +293,32 @@ class TestTimeoutFires:
     def test_timeout_fires_with_monkeypatched_small_constant(
         self, tmp_path, monkeypatch
     ):
-        """Patch ``time.monotonic`` so the deadline provably fires mid-walk.
+        """Patch ``time.monotonic`` so the walker-layer deadline provably fires.
 
-        The walker enforces the deadline via ``time.monotonic() > deadline``
-        at the start of each directory iteration (filesystem.py:379). The
-        previous version of this test only asserted that the notice was
-        "either absent or present" — that pin was un-pinned: removing the
-        ``time.monotonic() > deadline`` check entirely would stay GREEN.
+        This pin isolates the WALKER-layer deadline check in ``_bounded_walk``
+        (``daemon/tools/filesystem.py``, the ``time.monotonic() > deadline``
+        comparison at the top of the os.walk loop) — not the post-walk stat /
+        read phase deadlines. The earlier version of this test only asserted
+        "timeout appears somewhere in result", which let a walker-only strip
+        stay GREEN because W-A's post-walk stat-phase reason also contains the
+        substring ``"timeout"``.
 
-        W-D review patch: replace ``time.monotonic`` with a counter that
-        returns values strictly past the deadline by the 2nd call, so the
-        walker's deadline check fires deterministically. Notice assertions
-        are now UNCONDITIONAL — the only way to make this test GREEN is to
-        keep the timeout enforcement in place.
+        W-D contract:
+          * With the walker-layer deadline check in place, the fake monotonic
+            counter (1st call → 1.0, 2nd call → 2.0) makes the walker break
+            out on its 2nd tick, stamping ``stopped_reason="timeout"`` —
+            notice builder emits ``"timeout (Ns)"`` (the only reason
+            containing the substring ``"timeout ("``). The walk never reaches
+            the post-walk stat phase, so the phase-timeout reasons are absent.
+          * Walker-only strip (mutate the walker-loop deadline comparison):
+            the walker no longer breaks mid-loop, the walk completes, but
+            W-A's post-walk stat phase sees the fake counter past the
+            stamped deadline and fires ``"timeout during stat phase"``. The
+            negative assertions (no phase-timeout reason, but the walker-layer
+            ``"timeout ("`` prefix is required) flip RED.
+          * All-three strip (walker + post-walk stat + post-walk read):
+            no deadline ever fires, the walk completes without a notice, the
+            "Search incomplete" assertion flips RED.
 
         Hermetic and fast (no real sleeps, <1 s on CI).
         """
@@ -324,15 +337,42 @@ class TestTimeoutFires:
 
         monkeypatch.setattr(fs.time, "monotonic", fake_monotonic)
         result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
-        # UNCONDITIONAL pins — without the deadline check, these go RED.
+        # UNCONDITIONAL positive pins — without ANY deadline check, the walk
+        # completes silently and these go RED.
         assert "Search incomplete" in result, (
             f"Deadline enforcement un-pinned — the walker should have "
-            f"stopped with a 'Search incomplete' notice. Removing the "
-            f"time.monotonic() check at filesystem.py:379 would still "
-            f"pass this test. Result:\n{result}"
+            f"stopped with a 'Search incomplete' notice. Removing every "
+            f"deadline check in the walker + post-walk stat/read phases "
+            f"would still pass this test. Result:\n{result}"
         )
-        assert "timeout" in result, (
-            f"Notice should mention timeout when the deadline fires:\n{result}"
+        # Walker-layer isolation: the walker's deadline break stamps
+        # stopped_reason="timeout", which the notice builder formats as
+        # f"timeout ({timeout_seconds:g}s)". The substring "timeout (" is
+        # UNIQUE to the walker-layer reason — the post-walk phase reasons
+        # use "timeout during stat phase" / "timeout during read phase".
+        # Asserting the prefix (not the full digits) keeps the pin stable
+        # against monkeypatched-time formatting drift.
+        assert "timeout (" in result, (
+            f"Walker-layer deadline check un-pinned — only the walker-layer "
+            f"reason emits the 'timeout (' prefix; stripping just the "
+            f"walker's deadline check makes this assertion RED. Result:\n{result}"
+        )
+        # NEGATIVE pins: with the fake counter the walker fires first, so
+        # healthy code never reaches a post-walk phase timeout in this test.
+        # A walker-only strip lets the walk complete, after which W-A's
+        # post-walk stat phase (with the same already-stamped deadline) fires
+        # "timeout during stat phase" — those mutations go RED here.
+        assert "timeout during stat phase" not in result, (
+            f"Walker's deadline check missing — the walk completed past the "
+            f"deadline and the post-walk stat phase fired instead. The "
+            f"walker-layer check in _bounded_walk must break the loop "
+            f"before stat phase sees the deadline. Result:\n{result}"
+        )
+        assert "timeout during read phase" not in result, (
+            f"Walker's deadline check missing — the walk completed past the "
+            f"deadline and the post-walk read phase fired instead. The "
+            f"walker-layer check in _bounded_walk must break the loop "
+            f"before read phase sees the deadline. Result:\n{result}"
         )
         # Sanity: the patched monotonic was actually called (we need at
         # least the deadline-set + one check for the timeout to fire).
