@@ -393,13 +393,6 @@ class GateDecision:
     #: ``b_fires`` term consumes.
     marker_hit: bool = False
     marker_terms: tuple[str, ...] = ()
-    #: Checkpoint-durable hint HumanMessage the graph node should
-    #: inject when the fused judge maps a not-complete verdict with
-    #: real pending work to allow+hint. ``None`` on every other path.
-    #: The construction-time ``id`` invariant is upheld (the
-    #: ``_make_context_message`` factory mints a fresh ``uuid4`` when
-    #: no explicit id is passed).
-    marker_hint_message: "BaseMessage | None" = None
     #: 2026-09-12 length trigger — True when the LAST AIMessage word
     #: count is strictly less than :data:`SHORT_REPORT_WORD_THRESHOLD`
     #: (i.e. brevity-class). Logged alongside the marker fields;
@@ -1371,12 +1364,11 @@ def evaluate(
         else:
             # Lazy import: the reminder-text constants live in
             # ``daemon/graph.py`` (the canonical home — NFR-6 parity
-            # with ``ATTESTATION_NUDGE_TEXT`` + ``COMPLETION_CHECK_NOTE_TEXT``).
-            # We pass the strings through to ``decide()`` rather than
-            # reading the constants here to keep ``attestation_gate.py``
-            # dependency-light (graph.py is the runtime seam that
-            # already owns the reminder-text body — same pattern as
-            # the marker-hint factory in graph.py:5504).
+            # with ``ATTESTATION_NUDGE_TEXT``). We pass the strings
+            # through to ``decide()`` rather than reading the constants
+            # here to keep ``attestation_gate.py`` dependency-light
+            # (graph.py is the runtime seam that already owns the
+            # reminder-text body).
             from daemon.graph import (
                 ATTESTATION_BUNDLED_REMINDER,
                 ATTESTATION_FINAL_REPORT_REMINDER,

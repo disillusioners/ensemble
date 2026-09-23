@@ -183,7 +183,6 @@ def _stable_id_for(
     ========================  =============================================  =========================
     ``project``               ``project:{instance_id}``                       ``instance_id``
     ``shared_meta_kv``        ``kv:{context_key}``                            ``context_key``
-    ``completion_check_note`` ``completion_check_note:{instance_id}``         ``instance_id``
     ``attestation_nudge``     ``attestation_nudge:{instance_id}``             ``instance_id``
     ========================  =============================================  =========================
 
@@ -193,26 +192,15 @@ def _stable_id_for(
     the key (e.g. ``context_key.split(':')[-1]``) is a WRONG-ID hazard
     and must never be reintroduced (S19/D3 erratum).
 
-    ``completion_check_note`` (2026-09-12, F1 Shape A landed per the
-    external reviewer's W2 ordered fix) mints a stable id per
-    ``instance_id`` so each subsequent (b)-event Completion Check
-    Note hint SUPERSEDES the prior checkpoint entry in place via
-    LangGraph's ``add_messages`` reducer — without a stable id,
-    repeated hints on the same instance compound as a permanently-
-    hoisted ``context_kind=task_context`` tail under three-bucket
-    compaction (merge 77ce4ae8) and dominate the budget
-    (``INJECTIONS_DOMINATE`` skip). The id is what collapses the
-    unbounded hint accumulation the original F1 backlog flagged.
-
     ``attestation_nudge`` (2026-09-16, incident 6a0d60c9 fix cycle
     FIX-3) mints a stable id per ``instance_id`` for the
     attestation-gate deny nudge so CONSECUTIVE denies on the same
     instance supersede the prior nudge block in place via LangGraph's
-    ``add_messages`` reducer (mirroring the ``completion_check_note``
-    contract). Both deny producers — the plain ``decide()`` deny and
-    the marker-path (a)/(d) allow-to-deny conversions — funnel through
-    the single nudge construction site in ``daemon/graph.py``, so all
-    three mint the SAME id and supersede each other.
+    ``add_messages`` reducer. Both deny producers — the plain
+    ``decide()`` deny and the marker-path (a)/(d) allow-to-deny
+    conversions — funnel through the single nudge construction site in
+    ``daemon/graph.py``, so all three mint the SAME id and supersede
+    each other.
 
     ``child_report_check`` kind REMOVED 2026-09-18 (D-CTD-7): the
     producer mint site in ``daemon/services/child_reports.py`` was
@@ -224,10 +212,21 @@ def _stable_id_for(
     preserved through compaction; that surface is the
     A-signal path the user pinned as untouched.
 
+    ``completion_check_note`` kind REMOVED 2026-09-23 (D-entry
+    2026-09-23, incident b2f4dae9): the producer mint site in
+    ``daemon/graph.py::_make_completion_check_note_message`` was
+    deleted end-to-end; the (b)/(d)-with-pending route resolves to
+    allow on the resolver row but emits NO message. The stable-id
+    table row was removed too — there is no surviving
+    ``completion_check_note:{instance_id}`` consumer. The
+    ``_stable_id_for`` kind-list value-error message and this
+    docstring entry are the only remaining witnesses; the kind
+    literal is now a sentinel for the negative census pin in
+    ``tests/unit/test_attestation_lca_note_removed.py``.
+
     Args:
         kind: The block kind (see table above).
-        instance_id: Owning instance id (``project`` /
-            ``completion_check_note`` kind).
+        instance_id: Owning instance id (``project`` kind).
         context_key: Full resolved tree-root partition key
             (``shared_meta_kv`` kind).
         agent_id: Agent id. Accepted for signature stability across the
@@ -253,13 +252,6 @@ def _stable_id_for(
                 "context_key (resolved tree-root partition key)"
             )
         return f"kv:{context_key}"
-    if kind == "completion_check_note":
-        if not instance_id:
-            raise ValueError(
-                "_stable_id_for('completion_check_note') requires "
-                "instance_id"
-            )
-        return f"completion_check_note:{instance_id}"
     if kind == "attestation_nudge":
         if not instance_id:
             raise ValueError(
@@ -271,13 +263,11 @@ def _stable_id_for(
         # 2026-09-19 (attest-first contract, c5d9a38a remediation):
         # the HOLD-state Final Report Reminder carries the SAME
         # stable-id supersede contract as the existing
-        # ``attestation_nudge`` and ``completion_check_note``
-        # kinds. Consecutive HOLD events on the SAME instance
-        # collapse to ONE reminder block in the resulting state
-        # via LangGraph's ``add_messages`` reducer upsert (F1
-        # Shape A applied to the HOLD-state) — the unbounded
-        # ``context_kind=task_context`` tail under three-bucket
-        # compaction is closed. The cap
+        # ``attestation_nudge`` kind. Consecutive HOLD events on the
+        # SAME instance collapse to ONE reminder block in the
+        # resulting state via LangGraph's ``add_messages`` reducer
+        # upsert — the unbounded ``context_kind=task_context`` tail
+        # under three-bucket compaction is closed. The cap
         # (``daemon.graph.ATTESTATION_REMINDER_CAP = 2``) prevents
         # the supersede chain from running forever in the
         # degenerate case.
@@ -289,9 +279,8 @@ def _stable_id_for(
         return f"attestation_final_report_reminder:{instance_id}"
     raise ValueError(
         f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
-        "for 'project', 'shared_meta_kv', 'completion_check_note', "
-        "'attestation_nudge', and 'attestation_final_report_reminder' "
-        "blocks"
+        "for 'project', 'shared_meta_kv', 'attestation_nudge', and "
+        "'attestation_final_report_reminder' blocks"
     )
 
 

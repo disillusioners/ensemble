@@ -948,7 +948,9 @@ ver |
 
 ## Mid-work marker scan (LCA Phase 6.5 follow-up, 2026-09-11)
 
-> **Stage-3 retirement note (2026-09-17).** The scanner itself (16-pattern catalog + length threshold) SURVIVES as an activation-signal producer for the unified resolver's `b_fires` term. The route plumbing documented below is HISTORICAL: the `(a)/(b)/(c)/(d)` routing, the `marker_path`/`marker_judge_*`/`trigger_source`/`trigger_suppressed_by` log fields, and the `*_marker_judge*` event family were DELETED (R5/R6/R7/R8 — decisions.md D-RES4). The fused judge + the band matrix above own the routing now; the Completion Check Note hint still fires on the fused path's allow+hint outcome.
+> **Stage-3 retirement note (2026-09-17).** The scanner itself (16-pattern catalog + length threshold) SURVIVES as an activation-signal producer for the unified resolver's `b_fires` term. The route plumbing documented below is HISTORICAL: the `(a)/(b)/(c)/(d)` routing, the `marker_path`/`marker_judge_*`/`trigger_source`/`trigger_suppressed_by` log fields, and the `*_marker_judge*` event family were DELETED (R5/R6/R7/R8 — decisions.md D-RES4). The fused judge + the band matrix above own the routing now.
+
+> **2026-09-23 retirement note (incident b2f4dae9).** The Completion Check Note hint surface is RETIRED end-to-end along the (b)/(d)-with-pending route (the route STILL EXISTS on the resolver row as a logged decision — `resolver_outcome=allow_hint` + the `[AttestationGate]` log line's `would_be_route=allow_hint` — but emits NO message). The `Completion Check Note` constant, `_make_completion_check_note_message` factory, `_fused_hint_citation` helper, `_COMPLETION_CHECK_NOTE_TITLE` literal, the `marker_hint_message` `GateDecision` field, and the `completion_check_note` row in `_stable_id_for`'s canonical id-format table are ALL removed. The deny path + the HOLD + attest-first reminders (the Final Report Reminder family is DIFFERENT and STAYS untouched) are byte-identical. See decisions.md D-entry 2026-09-23 + the b2f4dae9 regression pin in `tests/unit/test_attestation_lca_note_removed.py`.
 
 The completion gate's ALLOW branches (`Decision.ALLOWED` not-attested + `Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP`) trigger a cheap mid-work marker scan before the END. Markers fire → the existing inline-LLM judge runs (verdict) → verdict + R2 inputs drive the (a)/(b)/(c)/(d) routing. This is the incident b08f40fe-class kill: a leader whose final AIMessage reads mid-work phrasing while the R2 inputs are clean would otherwise complete silently.
 
@@ -977,11 +979,35 @@ The marker path respects the existing judge kill-switch `ENSEMBLE_LEADER_ATTESTA
 
 **Stage-3 update:** the marker scan still runs in `dry` mode (pure LOG-ONLY: `marker_hit` / `marker_terms` on the canonical row) — but ONLY on DELEGATED missions (the R4/D10 mirror skips suspicion scans on non-delegated turn-ends). No judge ever fires in dry (the fused node requires enforce mode), no hint, no deny, no counter. The retired `marker_path` sentinel no longer appears.
 
-### Completion Check Note (path (b))
+### Completion Check Note (path (b)) — RETIRED 2026-09-23
 
-Injected alongside END on path (b). Canonical home `daemon/graph.py::COMPLETION_CHECK_NOTE_TEXT`. The note is a `HumanMessage` with `[SYSTEM CONTEXT: Completion Check Note]` header (reuses the existing prefix convention so `is_real_user_message` in `attestation_scanner.py` recognizes it as not-a-real-user-message). Content: confirms the gate noticed mid-work phrasing while real pending work is outstanding; asks the leader to confirm the wake-up arrives on the next turn; reminds about the two-step attestation protocol.
+> **RETIRED 2026-09-23 (incident b2f4dae9).** The (b)/(d)-with-pending
+> route STILL EXISTS as a logged decision — the resolver_eval row
+> carries `resolver_outcome=allow_hint` + the `[AttestationGate]`
+> log line carries `would_be_route=allow_hint` — but NO message is
+> injected. The Completion Check Note constant (`COMPLETION_CHECK_NOTE_TEXT`),
+> the `_make_completion_check_note_message` factory, the
+> `_fused_hint_citation` D4 evidence-citation helper, the
+> `_COMPLETION_CHECK_NOTE_TITLE` literal, the `marker_hint_message`
+> `GateDecision` field, and the `completion_check_note` row in
+> `_stable_id_for`'s canonical id-format table are ALL removed.
 
-The hint carries a **stable id per instance** minted via `_stable_id_for("completion_check_note", instance_id=...)` — a new row in the canonical `_stable_id_for` id-format table at `daemon/services/context_messages.py` (F1 Shape A, 2026-09-12). Each subsequent (b) event on the same instance SUPERSEDES the prior checkpoint entry in place via LangGraph's `add_messages` reducer — the resulting state carries EXACTLY ONE Completion Check Note block regardless of how many (b) events fired. Without the stable id, repeated (b) hints compound as a permanently-hoisted `context_kind=task_context` tail under three-bucket compaction (merge 77ce4ae8) and dominate the budget (`INJECTIONS_DOMINATE` skip); the stable id collapses that unbounded hint accumulation. The factory's `instance_id=None` fallback preserves the pre-F1 fresh-uuid4 behavior for degenerate / test-only call sites.
+Pre-retirement (historical, 2026-09-11 → 2026-09-23): injected
+alongside END on path (b). Canonical home `daemon/graph.py::COMPLETION_CHECK_NOTE_TEXT`.
+The note was a `HumanMessage` with `[SYSTEM CONTEXT: Completion Check Note]`
+header (reuses the existing prefix convention so `is_real_user_message` in
+`attestation_scanner.py` recognized it as not-a-real-user-message). The
+hint carried a **stable id per instance** minted via
+`_stable_id_for("completion_check_note", instance_id=...)` — F1 Shape A
+(2026-09-12).
+
+Post-retirement (current, 2026-09-23 →): the (b)/(d)-with-pending route
+resolves to ALLOW log-only. The route label survives on the resolver row
++ the `[AttestationGate]` log line so operators can distinguish
+(b)/(d)-with-pending from plain (c) allow. NO message is injected, NO
+context_kind is minted, NO stable-id is required. The deny path
+(preventing) + the watchdog (acting at 1h) are the protection surfaces;
+the note never prevented anything.
 
 ### Log schema (additive)
 
@@ -1013,6 +1039,8 @@ The completion gate's ALLOW branches also fire a word-count trigger on the LAST 
 
 A leader awaiting a healthy child (RUNNING/WAITING/WAITING_CHILDREN) writing a short mid-work ACK triggers BOTH the marker substring scan AND the length trigger on the ALLOW path — pre-fix this would call the judge, return `is_complete_report=false`, and inject a checkpoint-durable Completion Check Note on essentially every awaiting turn-end. The hint on healthy waits is noise. The LCA busy trigger suppression disarms the WHOLE trigger when at least one descendant is in the unconditional-busy subset `{RUNNING, WAITING, WAITING_CHILDREN}` — NO judge call, NO route-(b) hint, plain allow. The marker/length signal STAYS RECORDED on the canonical log row for forensics.
 
+**2026-09-23 retirement note (incident b2f4dae9):** even WITHOUT busy descendants the (b)/(d)-with-pending route resolves to ALLOW log-only — NO hint injected (the hint surface is RETIRED end-to-end). The LCA busy suppression's behavioral shape (NO judge call, NO hint) is preserved end-to-end; the post-fix change is that the (b) route is log-only on BOTH branches (busy-muted OR not-busy). The marker/length signal + the `[AttestationGate]` log line's `would_be_route=allow_hint` + the resolver_eval row's `resolver_outcome=allow_hint` are the surviving forensic surfaces.
+
 **Stage-3 update (R5):** the busy-mute now lives INSIDE the unified predicate's `b_fires` term — `(marker_hit ∨ length_trigger) ∧ busy_descendants == 0`. A busy tree mutes the marker band (no judge, no hint, plain allow); Source-A suspicion is deliberately NOT busy-muted (approved Δ2). The `trigger_suppressed_by`/`trigger_source`/`marker_path` fields retired; the suppression is observable via `busy_descendants>0` on the canonical row plus zero fused-judge rows and zero hints.
 
 **Busy subset:** `InstanceManager.count_busy_descendants(instance_id) -> int` counts descendants in `{RUNNING, WAITING, WAITING_CHILDREN}` ONLY. PAUSED is NOT busy (suspect, not healthy — the trigger stays armed so a stuck child is caught). Conditional-live dormant `IDLE`/`QUEUED` are NOT busy either (no execution — work is merely en route; the trigger stays armed so en-route-only work is caught). Terminal `COMPLETED`/`TERMINATED`/`ERROR`/`FAILED` are excluded. The busy subset is derived from the SAME BFS as `count_live_descendants` via the shared private helper `InstanceManager._count_descendants_busy_and_live` — single source of truth for the descendant scan.
@@ -1040,14 +1068,15 @@ grep "event=leader_completion_gate" data/logs/ensemble.log | grep -E "marker_hit
 
 ### References
 
-- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-11 (marker scan); D-ENTRY 2026-09-12 (length trigger); D-ENTRY 2026-09-12 (LCA busy trigger suppression); F1 amendment 2026-09-12 (Shape A landed); D-ENTRY 2026-09-12 (import-typo fix)
-- `.agents/shared/planning/leader-completion-attestation/requirements.md` — AC-M1..AC-M16 (marker scan acceptance); AC-L1..AC-L19 (length trigger acceptance); AC-BUSY-1..AC-BUSY-15 (LCA busy trigger suppression acceptance)
+- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-11 (marker scan); D-ENTRY 2026-09-12 (length trigger); D-ENTRY 2026-09-12 (LCA busy trigger suppression); F1 amendment 2026-09-12 (Shape A landed); D-ENTRY 2026-09-12 (import-typo fix); D-ENTRY 2026-09-23 (Completion Check Note RETIRED, incident b2f4dae9)
+- `.agents/shared/planning/leader-completion-attestation/requirements.md` — AC-M1..AC-M16 (marker scan acceptance); AC-L1..AC-L19 (length trigger acceptance); AC-BUSY-1..AC-BUSY-15 (LCA busy trigger suppression acceptance); SUPERSESSION ENTRY 2026-09-23 (Completion Check Note (b)/(d)-with-pending → LOG-ONLY)
 - `daemon/services/attestation_marker_scanner.py` — pure-function scanners (marker substring + length word-count) + `SHORT_REPORT_WORD_THRESHOLD` constant
-- `daemon/services/attestation_gate.py` — gate integration + additive log fields (28 → 31 → 33 placeholders); busy trigger suppression at `evaluate():993-1037`
-- `daemon/services/context_messages.py` — `_stable_id_for("completion_check_note", instance_id=...)` (F1 Shape A id-format table row)
-- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + `_make_completion_check_note_message` (stable-id plumbing) + the fused block (the historical marker-path wiring retired in Stage 3 — the OR-composition and the busy-mute live in the predicate's `b_fires` term)
+- `daemon/services/attestation_gate.py` — gate integration + additive log fields (28 → 31 → 33 placeholders); busy trigger suppression at `evaluate():993-1037`. The `marker_hint_message` `GateDecision` field was RETIRED 2026-09-23 (along with the entire hint surface).
+- `daemon/graph.py` — fused block + the historical marker-path wiring retired in Stage 3 (the OR-composition and the busy-mute live in the predicate's `b_fires` term). The `COMPLETION_CHECK_NOTE_TEXT` constant + `_make_completion_check_note_message` factory + `_fused_hint_citation` helper + the marker-hint emit site were RETIRED 2026-09-23 (along with the entire (b)/(d)-with-pending hint surface).
+- `daemon/services/context_messages.py` — `_stable_id_for` for the surviving kinds (`project`, `shared_meta_kv`, `attestation_nudge`, `attestation_final_report_reminder`); the `completion_check_note` row was RETIRED 2026-09-23.
 - `daemon/manager.py` — `count_busy_descendants` (new LCA input) + `_count_descendants_busy_and_live` shared BFS helper
-- `tests/unit/test_attestation_marker_scanner.py` (54 tests; +16 length-trigger tests) + `tests/unit/test_attestation_marker_wiring.py` (42 tests; +11 LCA busy trigger suppression tests, including the 2026-09-12 W1/W2/green fixes for dry-mode marker logging, Completion Check Note stable-id supersede, kill-switch OFF `<skipped>` stamp, catalog pin RuntimeError conversion, and the dead-import removal)
+- `tests/unit/test_attestation_marker_scanner.py` (54 tests; +16 length-trigger tests) + `tests/unit/test_attestation_marker_wiring.py` (40 tests; +11 LCA busy trigger suppression tests — the 2026-09-23 retirement re-anchored 3 tests from "hint content byte-pins" to "messages not in result + would_be_route=allow_hint"; the W2 Shape A stable-id tests were retired in `tests/unit/test_attestation_marker_supersede_lca.py`).
+- `tests/unit/test_attestation_lca_note_removed.py` — the canonical 2026-09-23 retirement witness (6 tests: b2f4dae9 regression pin, suspect-pending PAUSED + en-route-only shapes, two negative census pins on the retired SYMBOLS + the needle title, and the `_stable_id_for` table rejection pin).
 
 
 ---
@@ -1200,7 +1229,13 @@ Three fixes shipped always-on (fix/flag policy — no new `ENSEMBLE_*` flags; re
 
 2. **New canonical log field `user_answer_pending` (the 18th field at introduction, 2026-09-16; the canonical schema is 17 fields today — R1 retired the then-18th field `attest_seen_outside_window`, decisions.md D-RES4).** When the leader holds an OPEN awaiting-answer suspension handle at gate time (`task.suspension_reason='awaiting_answer'` + `resume_target_turn_id IS NOT NULL` + `status='paused'`, read via the DB-backed `InstanceManager.has_open_user_answer` → `TaskRepository.has_open_answer_handle_for_gate` — the SAME handle the answer endpoint's `answer_gate_existing_turn` resume consumes), the gate PLAIN ALLOWS before ANY trigger/judge work: no marker scan, no judge call, no nudge, no hint, no counter movement (`decision=allowed_legitimate_pending_wakeup` when the gate is otherwise armed, `decision=allowed` on the conditional-off path — in both cases `user_answer_pending=True` on the row). The pending party is the USER; the leader cannot progress alone. The handle self-clears when the answer is consumed (`ResumeTurn` flips `status='paused' → 'pending'` and nulls the handle columns in one atomic guarded UPDATE) — no stale-allow window — and a freshness guard (the handle must be the instance's NEWEST task row) expires any leaked pre-revive handle so the plain-allow can never become a permanent allow bypass. Grep: `user_answer_pending=True`.
 
-3. **Stable attestation-nudge id.** The deny nudge `HumanMessage` previously minted a fresh `uuid4` per injection, so consecutive denies accumulated one nudge block per deny in the leader's context (incident 6a0d60c9: 115 accumulated blocks). The nudge now carries the stable per-instance id `attestation_nudge:{instance_id}` (minted via `_stable_id_for`, mirroring the `completion_check_note:{instance_id}` F1 Shape A contract); ALL deny producers — the plain `decide()` deny and BOTH marker-path conversions, which funnel through the single construction site — mint the SAME id, so LangGraph's `add_messages` reducer SUPERSEDES the prior nudge block in place and the channel holds exactly ONE nudge block regardless of how many denies fire. `additional_kwargs` (`attestation_nudge`, `injected_message`, `attestation_nudge_denied_count`) are unchanged; the surviving block carries the LATEST deny's counter stamp. Nudge text (`ATTESTATION_NUDGE_TEXT`) is unchanged.
+3. **Stable attestation-nudge id.** The deny nudge `HumanMessage` previously minted a fresh `uuid4` per injection, so consecutive denies accumulated one nudge block per deny in the leader's context (incident 6a0d60c9: 115 accumulated blocks). The nudge now carries the stable per-instance id `attestation_nudge:{instance_id}` (minted via `_stable_id_for`); ALL deny producers — the plain `decide()` deny and BOTH marker-path conversions, which funnel through the single construction site — mint the SAME id, so LangGraph's `add_messages` reducer SUPERSEDES the prior nudge block in place and the channel holds exactly ONE nudge block regardless of how many denies fire. `additional_kwargs` (`attestation_nudge`, `injected_message`, `attestation_nudge_denied_count`) are unchanged; the surviving block carries the LATEST deny's counter stamp. Nudge text (`ATTESTATION_NUDGE_TEXT`) is unchanged.
+
+> **2026-09-23 retirement note (incident b2f4dae9):** the
+> ``completion_check_note`` F1 Shape A contract referenced in the
+> historical nudge-id paragraph was RETIRED along with the entire
+> (b)/(d)-with-pending hint surface. The deny-side
+> ``attestation_nudge`` supersede contract is unchanged.
 
 **Related files:** `daemon/services/attestation_gate.py` (shared `deny_bound_exceeded` helper; `decide()` arm 3.b; `user_answer_pending` GateDecision field + 17-field `CANONICAL_LOG_SCHEMA_FIELDS`); `daemon/graph.py` (marker-path bound consultations; stable nudge id); `daemon/manager.py` (`has_open_user_answer` facade); `daemon/repositories/task/repository.py` (`has_open_answer_handle_for_gate`); `daemon/services/context_messages.py` (`attestation_nudge` stable-id kind).
 

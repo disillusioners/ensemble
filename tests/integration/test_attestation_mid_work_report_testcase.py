@@ -56,7 +56,6 @@ from sqlmodel import Session
 
 from daemon.graph import (
     ATTESTATION_NUDGE_TEXT,
-    COMPLETION_CHECK_NOTE_TEXT,
 )
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.services import attestation_report_judge as judge_mod

@@ -26,8 +26,13 @@ the two legacy judge sites are dead-but-present. This file pins:
   :attr:`FusedJudgeResult.invoked` — no literals.
 * **Old sites dead-but-present**: neither legacy judge entry is
   reachable while the flip is active (spy pin).
-* **D4 hint citation**: the Completion Check Note gains the evidence
-  citation when the verdict carries one; byte-identical otherwise.
+* **D4 hint citation RETIRED 2026-09-23 (b2f4dae9)**: the
+  Completion Check Note + the hint-citation suffix are RETIRED
+  end-to-end; the verdict's ``evidence_cited`` +
+  ``advisory_note_text`` still flow into the resolver_eval row
+  via the ``llm_judge_reason`` field (the canonical forensic
+  home). The ``TestD4HintEvidenceCitationRetired`` class is the
+  WITNESS that the D4 hint class was retired.
 * **Incident-class E2E** (named per shape): b08f40fe, 98b59dd7,
   6a0d60c9, and the ORIGINAL child-lie arc.
 """
@@ -57,7 +62,6 @@ from daemon.services.attestation_resolver import (
     reset_attestation_resolver_for_tests,
 )
 from daemon.graph import (
-    COMPLETION_CHECK_NOTE_TEXT,
     create_attestation_gate_node,
 )
 
@@ -292,12 +296,14 @@ class TestR7PinJudgeErrorNeverAllows:
         assert eval_rows and "resolver_outcome=deny_nudge" in eval_rows[0]
         assert "judge_invoked=True" in eval_rows[0]
 
-    def test_marker_band_unparsable_x2_with_pending_allows_with_hint_not_silent(
+    def test_marker_band_unparsable_x2_with_pending_allows_log_only_not_silent(
         self, monkeypatch, caplog
     ):
         """R7-1 (marker band, path-(d)-with-pending): the conservative
-        route is allow+hint — NOT a silent plain allow (the hint is the
-        durable record) and NEVER a deny while work is en route."""
+        route is allow log-only (2026-09-23, b2f4dae9: the hint is
+        RETIRED end-to-end) — NOT a silent plain allow (the
+        resolver_eval row + the would-be-route label are the
+        durable records) and NEVER a deny while work is en route."""
         spy = _JudgeSpy(["prose no json", "still not json"])
         monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
 
@@ -311,9 +317,12 @@ class TestR7PinJudgeErrorNeverAllows:
                 "r7p1-marker",
             )
 
-        assert "messages" in result, "path-(d)-with-pending → hint"
-        hint = result["messages"][0]
-        assert hint.additional_kwargs.get("context_kind") == "task_context"
+        # (b)/(d)-with-pending path is log-only — NO message, NO
+        # context_kind, NO counter movement.
+        assert "messages" not in result, (
+            "(d)-with-pending MUST be log-only after 2026-09-23; "
+            f"got messages={result.get('messages')!r}"
+        )
         ledger.increment.assert_not_called()
         eval_rows = _rows(caplog, "event=leader_completion_resolver_eval")
         assert "resolver_outcome=allow_hint" in eval_rows[0]
@@ -816,60 +825,65 @@ class TestLegacySitesDeleted:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# D4 — the hint gains the evidence citation
+# D4 — the hint citation class is RETIRED 2026-09-23 (b2f4dae9)
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# The D4 evidence-citation contract (hint carries the fused judge's
+# verdict's evidence_cited + advisory_note_text) is RETIRED along with
+# the hint itself — the (b)/(d)-with-pending route resolves to allow
+# log-only, no message is injected, no citation suffix is minted.
+# The verdict's evidence_cited + advisory_note_text still flow into
+# the resolver_eval row log (the b2f4dae9 evidence chain remains
+# log-reconstructible) — that's the new home for the D4 forensic
+# surface. The class below is preserved as a stub so the surrounding
+# R7-pin classes stay organized, with the actual D4 tests removed.
 
 
-class TestD4HintEvidenceCitation:
-    def test_hint_carries_citation_when_verdict_cites(self, monkeypatch, caplog):
-        spy = _JudgeSpy(
-            [
-                _not_complete_json(
-                    evidence=["SOURCE A: child promised future work"],
-                    advisory="Verify the child's promised report",
-                )
-            ]
+class TestD4HintEvidenceCitationRetired:
+    def test_d4_hint_class_retired_after_b2f4dae9(self):
+        """2026-09-23 (b2f4dae9): D4 hint-citation RETIRED end-to-end.
+
+        The fused judge's verdict JSON still carries ``evidence_cited``
+        + ``advisory_note_text`` fields; the
+        ``leader_completion_gate_fused_judge`` log row still carries
+        the ``llm_judge_reason`` field (the canonical forensic home
+        for the D4 surface). The hint-mint path that built the
+        byte-identical canonical prefix + D4 citation suffix is
+        RETIRED; the surface that lives is the log row. This test
+        is the WITNESS that the class was retired — the live
+        forensic-surface tests live in
+        ``tests/unit/test_attestation_fused_judge.py`` (the
+        ``test_*_log_discrimination`` family covers the
+        attempt-1 / retry / post-retry log shapes).
+        """
+        # The hint factory is gone — assert it cannot be imported.
+        import daemon.graph
+
+        assert not hasattr(daemon.graph, "_make_completion_check_note_message"), (
+            "D4 hint factory MUST stay retired (incident b2f4dae9); "
+            "if this assertion fails, the factory was re-introduced "
+            "without re-anchoring the contract — open a follow-up."
         )
-        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
-
-        node, _m, _l = _make_node(
-            instance_id="d4-hint", pending_children=1, live_descendants=1
+        # The constant is gone too.
+        assert not hasattr(daemon.graph, "COMPLETION_CHECK_NOTE_TEXT"), (
+            "COMPLETION_CHECK_NOTE_TEXT MUST stay retired (incident "
+            "b2f4dae9); if this assertion fails, the constant was "
+            "re-introduced without re-anchoring the contract — open a "
+            "follow-up."
         )
-        with _capture(caplog).at_level(logging.INFO):
-            result = _run(
-                node,
-                _delegated_mission("Awaiting child. Ending turn."),
-                "d4-hint",
-            )
+        # The canonical id-format table row is gone.
+        from daemon.services.context_messages import _stable_id_for
 
-        hint = result["messages"][0]
-        content = str(hint.content)
-        # Byte-identical canonical prefix + the D4 citation suffix.
-        assert content.startswith(COMPLETION_CHECK_NOTE_TEXT)
-        assert "Completion evidence cited by the completion judge:" in content
-        assert "- SOURCE A: child promised future work" in content
-        assert "Advisory: Verify the child's promised report" in content
-        # The stable id (supersede contract) is unaffected by D4.
-        assert hint.id == "completion_check_note:d4-hint"
+        import pytest as _pytest
 
-    def test_hint_byte_identical_when_verdict_cites_nothing(
-        self, monkeypatch, caplog
-    ):
-        spy = _JudgeSpy([_not_complete_json()])
-        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
-
-        node, _m, _l = _make_node(
-            instance_id="d4-plain", pending_children=1, live_descendants=1
+        with _pytest.raises(ValueError) as exc_info:
+            _stable_id_for("completion_check_note", instance_id="any-iid")
+        assert "completion_check_note" not in str(exc_info.value) or (
+            "unknown kind" in str(exc_info.value)
+        ), (
+            "the kind sentinel was removed from the table; if this "
+            "assertion fails, the kind branch was re-introduced"
         )
-        with _capture(caplog).at_level(logging.INFO):
-            result = _run(
-                node,
-                _delegated_mission("Awaiting child. Ending turn."),
-                "d4-plain",
-            )
-
-        hint = result["messages"][0]
-        assert str(hint.content) == COMPLETION_CHECK_NOTE_TEXT
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1083,16 +1097,26 @@ class TestIncidentOriginalChildLie:
         )
         # Δ3: the judge SAW the tree rows.
         assert "SOURCE C: tree status" in payload
-        # deny+nudge (not_complete + nothing... wait — pending>0 here).
-        # A-band + pending>0 → allow + D4-citing hint (the matrix row).
-        assert "messages" in result1
-        hint1 = result1["messages"][0]
-        assert "Completion evidence cited" in str(hint1.content)
+        # A-band + pending>0 → ALLOW log-only (2026-09-23 b2f4dae9:
+        # the hint is RETIRED end-to-end; the resolver row carries
+        # the (b)/(d)-with-pending label as the durable record).
+        assert "messages" not in result1, (
+            "child-lie Eval 1 (A-band + pending) MUST be log-only "
+            "after 2026-09-23; "
+            f"got messages={result1.get('messages')!r}"
+        )
         assert result1["attestation_route"] is None
         ledger1.increment.assert_not_called()
         eval1 = _rows(caplog, "event=leader_completion_resolver_eval")[0]
         assert "band=a_suspicion" in eval1
         assert "resolver_outcome=allow_hint" in eval1
+        # would_be_route is on the [AttestationGate] log line, not the
+        # resolver_eval row — pin it separately.
+        gate_rows = _rows(caplog, "[AttestationGate] fused-judge")
+        assert any("would_be_route=allow_hint" in r for r in gate_rows), (
+            f"would_be_route=allow_hint MUST appear on the "
+            f"[AttestationGate] log line; got rows={gate_rows!r}"
+        )
 
         # ── Eval 2: the leader acted on the hint — revived the child;
         # tree went QUIET (child re-pending), still un-attested → deny

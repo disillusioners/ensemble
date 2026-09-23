@@ -256,9 +256,18 @@ class TestR5R6CensusTriggerPlumbingDeleted:
             "length_trigger",
             "final_word_count",
             "busy_descendants",
-            "marker_hint_message",
         ):
             assert kept in fields, kept
+        # 2026-09-23 (b2f4dae9): marker_hint_message RETIRED along with
+        # the entire (b)/(d)-with-pending hint injection surface. The
+        # field is gone from GateDecision; the (b) route resolves to
+        # allow log-only on the resolver row.
+        assert "marker_hint_message" not in fields, (
+            "marker_hint_message MUST stay retired (incident b2f4dae9); "
+            "if this assertion fails, the field was re-introduced "
+            "without re-anchoring the contract — see decisions.md "
+            "D-entry 2026-09-23"
+        )
 
     def test_marker_path_constants_absent(self) -> None:
         for const in (
