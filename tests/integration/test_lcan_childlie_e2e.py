@@ -701,25 +701,40 @@ async def test_s3_a_band_fires_alone_with_busy_descendant_real_graph(
     assert "judge_verdict=not_complete" in row, row
     assert "resolver_outcome=allow_hint" in row, row
 
-    # Outcome: allow + checkpoint-durable hint (NOT deny, NOT plain allow).
-    assert "allowing END and injecting checkpoint-durable hint" in caplog.text
+    # Outcome: allow log-only (2026-09-23 b2f4dae9: the Completion
+    # Check Note hint is RETIRED end-to-end; the A-band route
+    # resolves to ALLOW with the ``allow_hint`` label as the
+    # forensic record — NOT deny, NOT plain allow, NOT hint
+    # injection).
+    assert "allowing END" in caplog.text and (
+        "log-only" in caplog.text or "would_be_route=allow_hint" in caplog.text
+    ), (
+        f"the [AttestationGate] log line MUST surface the log-only "
+        f"posture; got caplog.text={caplog.text[:2000]!r}"
+    )
     messages = state["messages"]
+    # NO Completion Check Note hint injected — ZERO messages
+    # carrying ``context_kind=task_context`` from the (b)/(d)-with-
+    # pending factory (the kind is RETIRED; the factory is RETIRED).
     hints = [
         m
         for m in messages
         if isinstance(m, HumanMessage)
         and (m.additional_kwargs or {}).get("context_kind") == "task_context"
     ]
-    assert len(hints) == 1, [m.content for m in hints]
-    assert hints[-1].content.startswith("[SYSTEM CONTEXT:"), (
-        hints[-1].content[:120]
+    assert len(hints) == 0, (
+        f"Completion Check Note hint MUST NOT be injected after "
+        f"2026-09-23 (b2f4dae9); got {[m.content[:80] for m in hints]!r}"
     )
-    assert "Completion Check Note" in hints[-1].content
     # No nudge, no counter movement, graph ENDED.
     assert _nudges(messages) == []
     assert repo.get_attestation_denied_count(INSTANCE_ID) == 0
     assert state.get("attestation_nudge_denied_count", 0) == 0
-    assert messages[-1] is hints[-1] or messages[-1].content == hints[-1].content
+    # 2026-09-23 (b2f4dae9): no hint rides the END anymore — the
+    # ``messages[-1] is hints[-1]`` check is retired along with the
+    # hint surface itself. The graph still ends; the last message is
+    # whatever the LLM produced. We don't pin it here (the prior
+    # shape pinned the hint-as-last, which is no longer a thing).
 
     # ── GLOBAL: no note anywhere ──
     _assert_no_note_artifacts(messages, manager, file_sqlite_engine)

@@ -1209,6 +1209,124 @@ The fused bundle MUST carry the user's original request so the completion judge 
 * **Pinned by** `tests/unit/test_attestation_resolver_user_intent.py` (intent-match / intent-mismatch / anchor-absent / caps+redaction / witnesses / row fields / prompt+cap identity).
 
 
+# SUPERSESSION ENTRY (2026-09-23) — Completion Check Note (b)/(d)-with-pending → LOG-ONLY
+
+The OLD contract for the (b)/(d)-with-pending route was: ALLOW +
+checkpoint-durable ``[SYSTEM CONTEXT: Completion Check Note]`` HumanMessage
+injection, stable-id ``completion_check_note:{instance_id}`` minted via
+``_stable_id_for`` (the F1 Shape A supersede pattern), ``context_kind=task_context``,
+content = ``COMPLETION_CHECK_NOTE_TEXT`` byte-for-byte (+ the D4 evidence-citation
+suffix when the fused judge verdict carried ``evidence_cited`` /
+``advisory_note_text``). This was the marker-path allow-with-hint surface
+introduced 2026-09-11 (incident b08f40fe) and refined through F1 Shape A
+(2026-09-12) + the LCA busy trigger suppression (2026-09-12) + the D4
+evidence citation (2026-09-16).
+
+This contract is RETIRED end-to-end 2026-09-23 (incident b2f4dae9). The
+NEW contract is: the (b)/(d)-with-pending route resolves to ALLOW
+log-only — NO message is injected, NO context_kind is minted, NO
+stable-id is required. The route STILL EXISTS as a logged decision:
+the resolver_eval row carries ``resolver_outcome=allow_hint`` and the
+``[AttestationGate]`` log line carries ``would_be_route=allow_hint`` so
+operators can distinguish (b)/(d)-with-pending from plain (c) allow.
+The full evidence chain must remain log-reconstructible (the
+``leader_completion_gate_fused_judge`` row carries the verdict + reason
++ band + terms + judge_invoked flag).
+
+Superseded ACs (2026-09-23):
+* **AC-M9**: judge-not-complete + real pending → ALLOW + checkpoint-durable
+  hint (the canonical ``HumanMessage`` with
+  ``[SYSTEM CONTEXT: Completion Check Note]`` header, construction-time
+  ``id`` invariant via ``_make_context_message`` factory). The "hint"
+  clause is RETIRED; the "ALLOW" outcome is unchanged.
+* **AC-M16**: ``Completion Check Note`` text is a single-source-of-truth
+  constant in ``daemon/graph.py`` (canonical home; NFR-6 parity with
+  ``ATTESTATION_NUDGE_TEXT``). The text constant
+  ``COMPLETION_CHECK_NOTE_TEXT`` is RETIRED along with the entire hint
+  surface (the constant home is the canonical witness, the text is
+  deleted). The NFR-6 parity is preserved with the surviving
+  ``ATTESTATION_NUDGE_TEXT`` + ``ATTESTATION_FINAL_REPORT_REMINDER`` +
+  ``ATTESTATION_BUNDLED_REMINDER`` constants.
+* **AC-L12**: short AIMessage with real pending work → judge fires,
+  judge-no → path (b) → ALLOW + checkpoint-durable Completion Check
+  Note (no counter, no deny, no re-route; the turn still ends). The
+  "Completion Check Note" clause is RETIRED; the ALLOW + no-counter +
+  no-deny + no-re-route outcome is unchanged. The turn still ends;
+  the route label survives on logs only.
+* **R-IMP5**: ``COMPLETION_CHECK_NOTE_TEXT`` MUST name ``send_message``
+  as the continuation mechanism — the parenthetical clause
+  "(check your children's status and continue or revive their work via
+  send_message if needed)". The constant is RETIRED; the parenthetical
+  clause is no longer a contract anchor.
+
+Acceptance criteria (NEW, 2026-09-23):
+* **AC-LCA-NOTE-RM-1**: the (b)/(d)-with-pending route resolves to
+  ALLOW log-only — ZERO injected messages (assert
+  ``"messages" not in result``), NO counter movement, NO deny, NO
+  re-route. The turn still ends. Pinned by
+  ``tests/unit/test_attestation_lca_note_removed.py::test_b2f4dae9_regression_pin_healthy_busy_a_band_lexical_fp_allow_log_only``
+  (the b2f4dae9 incident shape: Source A suspicion + busy descendants
+  + judge-no → log-only ALLOW).
+* **AC-LCA-NOTE-RM-2**: the route label survives on logs — the
+  ``[AttestationGate]`` log line carries
+  ``would_be_route=allow_hint`` AND the resolver_eval row carries
+  ``resolver_outcome=allow_hint`` AND the
+  ``leader_completion_gate_fused_judge`` row carries the verdict +
+  reason + band + terms + judge_invoked flag. Pinned by the b2f4dae9
+  regression pin (same test as AC-LCA-NOTE-RM-1) — the three log-row
+  assertions are the canonical log-fidelity contract.
+* **AC-LCA-NOTE-RM-3**: suspect-pending shapes (PAUSED + en-route-only)
+  STILL hit the full gate (deny path intact) — the protection lives
+  in the deny path, not the hint. NO hint is injected on the
+  suspect-pending case; the fused judge still fires; the
+  (b)/(d)-with-pending route resolves to ALLOW log-only. Pinned by
+  ``tests/unit/test_attestation_lca_note_removed.py::test_suspect_pending_paused_child_completion_still_hits_full_gate``
+  + ``tests/unit/test_attestation_lca_note_removed.py::test_suspect_pending_en_route_only_completion_still_hits_full_gate``.
+* **AC-LCA-NOTE-RM-4**: whole-tree negative census pin — ZERO
+  ``Completion Check Note`` references in ``daemon/`` (the
+  production-code surface) AND ZERO references to the five retired
+  SYMBOLS (``COMPLETION_CHECK_NOTE_TEXT``,
+  ``_make_completion_check_note_message``,
+  ``_COMPLETION_CHECK_NOTE_TITLE``, ``_fused_hint_citation``,
+  ``marker_hint_message``) in ``daemon/``. The
+  ``_stable_id_for`` table rejects the ``"completion_check_note"``
+  kind (the supported-kinds list shrunk to 4 rows:
+  ``project``, ``shared_meta_kv``, ``attestation_nudge``,
+  ``attestation_final_report_reminder``). Pinned by the three
+  negative census tests in
+  ``tests/unit/test_attestation_lca_note_removed.py``.
+
+Files (this supersession): ``daemon/graph.py`` (deleted constant +
+factory + citation helper + title + injection site + emit site);
+``daemon/services/attestation_gate.py`` (deleted
+``marker_hint_message`` field); ``daemon/services/context_messages.py``
+(deleted table row + kind branch; updated docstring);
+``docs/setup.md`` (retirement notes + updated References);
+``tests/unit/test_attestation_marker_wiring.py`` (re-anchored 3 tests
+to log-only contract — ``test_completion_check_note_stable_id_*`` and
+``test_completion_check_note_compaction_seam_hoists_once`` RETIRED);
+``tests/unit/test_attestation_marker_supersede_lca.py`` (entire file
+retired — replaced by single retirement-witness test);
+``tests/unit/test_attestation_resolver_stage2.py`` (D4 hint class
+retired — replaced by ``TestD4HintEvidenceCitationRetired`` stub);
+``tests/unit/test_attestation_resolver_user_intent.py`` (false-rescue
+test re-anchored to log-only);
+``tests/unit/test_attestation_stage3_census.py`` (replaced
+kept-list assertion with explicit RETIRED pin);
+``tests/unit/test_attestation_attest_first_contract.py`` (updated
+NFR-6 docstring);
+``tests/unit/test_attestation_lca_note_removed.py`` (NEW FILE — 6
+tests: b2f4dae9 regression + 2 suspect-pending + 3 negative census);
+``tests/integration/test_attestation_marker_routing_lca.py``
+(re-anchored scenario-(b) and (d2) tests to log-only contract);
+``tests/integration/test_attestation_mid_work_report_testcase.py``
+(removed unused ``COMPLETION_CHECK_NOTE_TEXT`` import);
+``tests/integration/test_attestation_stage2_failopen.py``
+(re-anchored 4 tests to log-only contract);
+``tests/integration/test_lcan_childlie_e2e.py`` (re-anchored
+s3_a_band_fires_alone test to log-only contract). NO other test
+files were modified.
+
 # SUPERSESSION ENTRY (2026-09-19) — Attest-first pure-toolcall-turn contract
 
 The acceptance criteria for the 2026-09-06 conditional-attestation teaching

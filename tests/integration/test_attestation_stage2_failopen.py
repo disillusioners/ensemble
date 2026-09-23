@@ -777,13 +777,16 @@ class TestSeamIIIJudgeInvocationRaises:
         self, monkeypatch, caplog
     ):
         """Marker-band with pending wakeup + judge wrapper fault →
-        per §4.3: nothing-pending check fails (pending=1) → ALLOW +
-        checkpoint-durable hint (D4 path-(d)-with-pending).
+        per §4.3: nothing-pending check fails (pending=1) → ALLOW
+        log-only (2026-09-23 b2f4dae9: the hint is RETIRED
+        end-to-end; the (d)-with-pending route resolves to ALLOW
+        with the ``allow_hint`` label as the forensic record).
 
-        The hint is a HumanMessage carrying the (b)-path
-        Completion Check Note — an additive return that the
-        graph's add_messages reducer will surface on the NEXT
-        turn."""
+        The hint surface that used to ride the result messages is
+        RETIRED — the gate now returns NO messages; the resolver
+        row + the [AttestationGate] log line carry the
+        ``would_be_route=allow_hint`` label.
+        """
         _drift_pin()
         self._install_judge_boom(monkeypatch)
 
@@ -806,26 +809,12 @@ class TestSeamIIIJudgeInvocationRaises:
             "Seam (iii) marker-band: fused-judge-error row MUST fire"
         )
         assert any("error_class=RuntimeError" in r for r in fje_rows)
-        # Per-band conservative: hint injected, NO nudge, NO counter.
-        # The hint is in the returned messages list (HumanMessage
-        # with ``additional_kwargs.context_kind=task_context`` —
-        # the factory's symmetric build via _make_context_message).
-        # We assert "messages" is present and the message body
-        # carries the canonical Completion Check Note title.
-        assert "messages" in result, (
-            "Seam (iii) marker-band: ALLOW + hint — messages "
-            "key MUST be in the return"
-        )
-        msgs = result["messages"]
-        assert len(msgs) == 1, (
-            f"Seam (iii) marker-band: expected exactly 1 hint "
-            f"message, got {len(msgs)}"
-        )
-        hint_msg = msgs[0]
-        assert isinstance(hint_msg, HumanMessage)
-        assert "Completion Check Note" in hint_msg.content, (
-            "Seam (iii) marker-band: hint MUST carry the canonical "
-            "Completion Check Note title"
+        # Per-band conservative: ALLOW log-only — NO messages, NO nudge,
+        # NO counter. The route label is on the resolver row + the
+        # [AttestationGate] log line.
+        assert "messages" not in result, (
+            f"Seam (iii) marker-band: ALLOW log-only after 2026-09-23 "
+            f"(NO hint injected); got messages={result.get('messages')!r}"
         )
         assert result["attestation_route"] is None
         ledger.increment.assert_not_called()
@@ -838,12 +827,25 @@ class TestSeamIIIJudgeInvocationRaises:
         assert "resolver_outcome=allow_hint" in row
         assert "judge_verdict=error" in row
         assert "judge_invoked=False" in row
+        # The would-be-route label MUST land on the [AttestationGate]
+        # log line so the b2f4dae9 evidence chain is log-reconstructible.
+        assert any(
+            "would_be_route=allow_hint" in r
+            for r in _rows(caplog, "[AttestationGate] fused-judge")
+        ), (
+            "Seam (iii) marker-band: would_be_route=allow_hint MUST "
+            "land on the [AttestationGate] log line"
+        )
 
     def test_seam_iii_a_band_allow_with_hint(self, monkeypatch, caplog):
-        """A-band with pending + judge wrapper fault → allow + hint.
+        """A-band with pending + judge wrapper fault → allow log-only.
 
-        Same code path as marker-band (the A-band arm mirrors the
-        marker-band arm in the fused block)."""
+        2026-09-23 (b2f4dae9): the same code path as marker-band (the
+        A-band arm mirrors the marker-band arm in the fused block);
+        the (b)/(d)-with-pending route resolves to ALLOW with NO
+        message injection — the ``resolver_outcome=allow_hint`` row
+        label is the forensic surface.
+        """
         _drift_pin()
         self._install_judge_boom(monkeypatch)
 
@@ -865,10 +867,10 @@ class TestSeamIIIJudgeInvocationRaises:
         )
         assert fje_rows
         assert any("error_class=RuntimeError" in r for r in fje_rows)
-        assert "messages" in result
-        msgs = result["messages"]
-        assert len(msgs) == 1
-        assert "Completion Check Note" in msgs[0].content
+        assert "messages" not in result, (
+            f"Seam (iii) A-band: ALLOW log-only after 2026-09-23 "
+            f"(NO hint injected); got messages={result.get('messages')!r}"
+        )
         assert result["attestation_route"] is None
         ledger.increment.assert_not_called()
         eval_rows = _rows(caplog, "event=leader_completion_resolver_eval ")
@@ -1131,13 +1133,14 @@ class TestF2WakeupRefire:
       ``pending_children`` dropped to 0 because the wakeup has
       landed) → produces a real outcome.
 
-    * **S2 (Seam (iii) marker-band allow+hint path):** the first
-      call with the wrapper-fault installed produces an ALLOW +
-      hint (Completion Check Note). The hint is the
-      checkpoint-durable record. The second ``node()`` call AFTER
-      the fault is removed → the gate evaluates AGAIN through
-      the fused block — the resolver-eval row fires; the judge
-      runs.
+    * **S2 (Seam (iii) marker-band allow-with-log-only path):**
+      the first call with the wrapper-fault installed produces an
+      ALLOW log-only (2026-09-23 b2f4dae9: the Completion Check
+      Note hint is RETIRED end-to-end; the
+      ``resolver_outcome=allow_hint`` row label is the
+      checkpoint-durable record). The second ``node()`` call AFTER
+      the fault is removed → the gate evaluates AGAIN through the
+      fused block — the resolver-eval row fires; the judge runs.
 
     Documented assertions:
 
@@ -1145,7 +1148,7 @@ class TestF2WakeupRefire:
       counter — fail-open allow with the wakeup pending.
     * **S1 second call:** resolver-eval row fires (gate evaluates
       again); judge_invoked=True; a real outcome emerges.
-    * **S2 first call:** ALLOW + hint, NO nudge, NO counter.
+    * **S2 first call:** ALLOW log-only, NO nudge, NO counter.
     * **S2 second call:** resolver-eval row fires; judge_invoked=True.
     """
 
@@ -1242,17 +1245,15 @@ class TestF2WakeupRefire:
         )
         # Real outcome reached — verdict is "error" (real
         # _invoke_judge_llm fails on MagicMock config) → path-d →
-        # ALLOW + hint (the same per-band conservative mapping
-        # as a real transport failure).
+        # ALLOW log-only (2026-09-23 b2f4dae9: hint RETIRED
+        # end-to-end; the ``resolver_outcome=allow_hint`` row label
+        # is the durable record).
         assert "resolver_outcome=allow_hint" in row
-        # Second call's hint becomes the messages return.
-        assert "messages" in second_result, (
-            "F2 S1 second call: real judge returned verdict=error "
-            "(MagicMock config can't construct LLM) → ALLOW + hint "
-            "(path-d-with-pending) — exactly the per-band conservative "
-            "mapping for a real transport failure"
+        # Second call is log-only too — NO hint injected.
+        assert "messages" not in second_result, (
+            f"F2 S1 second call: ALLOW log-only after 2026-09-23; "
+            f"got messages={second_result.get('messages')!r}"
         )
-        assert "Completion Check Note" in second_result["messages"][0].content
         assert second_result["attestation_route"] is None
 
     def test_f2_s2_seam_iii_refires_after_fault_removal(
@@ -1302,10 +1303,11 @@ class TestF2WakeupRefire:
         assert _rows(
             caplog, "event=leader_completion_gate_fused_judge_error"
         ), "F2 S2 first call: fused-judge-error row MUST fire"
-        # Hint injected, ALLOW+HINT path.
-        assert "messages" in first_result
-        assert len(first_result["messages"]) == 1
-        assert "Completion Check Note" in first_result["messages"][0].content
+        # ALLOW log-only — NO hint injected (2026-09-23 b2f4dae9).
+        assert "messages" not in first_result, (
+            f"F2 S2 first call: ALLOW log-only after 2026-09-23; "
+            f"got messages={first_result.get('messages')!r}"
+        )
         assert first_result["attestation_route"] is None
         # judge_invoked=False on the FIRST-call row (fault active).
         first_eval_rows = _rows(

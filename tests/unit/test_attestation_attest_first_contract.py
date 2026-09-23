@@ -721,7 +721,9 @@ class TestGateNodeAttestFirstContract:
 class TestAttestFirstConstants:
     """Pin the canonical constants the new contract surfaces.
     Single-source-of-truth check (NFR-6 parity with
-    ATTESTATION_NUDGE_TEXT / COMPLETION_CHECK_NOTE_TEXT)."""
+    ATTESTATION_NUDGE_TEXT — ``COMPLETION_CHECK_NOTE_TEXT`` was
+    RETIRED 2026-09-23 along with the entire (b)-path hint injection
+    surface; see decisions.md D-entry 2026-09-23)."""
 
     def test_attestation_final_report_reminder_is_canonical(self) -> None:
         """``ATTESTATION_FINAL_REPORT_REMINDER`` leads with the

@@ -56,7 +56,6 @@ from daemon.services.attestation_resolver import (
     reset_attestation_resolver_for_tests,
 )
 from daemon.graph import (
-    COMPLETION_CHECK_NOTE_TEXT,
     create_attestation_gate_node,
 )
 
@@ -360,12 +359,19 @@ def test_marker_a_deny_nudge_counter_increments(monkeypatch, caplog):
 
 
 def test_marker_b_hint_injection_no_deny_no_counter(monkeypatch, caplog):
-    """(b) markers + judge-no + real pending → ALLOW + hint, no deny.
+    """(b) markers + judge-no + real pending → ALLOW log-only, no deny.
 
-    The "real wakeup is en route" branch — the gate allows the turn
-    to end so the wake-up arrives, but injects a checkpoint-durable
-    Completion Check Note alongside END so the leader has a record
-    of the mid-work phrasing on the next turn.
+    2026-09-23 (b2f4dae9): the (b)/(d)-with-pending route STILL EXISTS
+    on the resolver row (label ``allow_hint``) so operators can
+    distinguish it from the plain (c) allow — the
+    ``leader_completion_gate_fused_judge`` row carries the verdict +
+    the ``would_be_route=allow_hint`` field, the resolver_eval row
+    carries ``resolver_outcome=allow_hint``. The Completion Check Note
+    hint is RETIRED end-to-end (no message injection, no
+    context_kind minting, no stable-id table row). The "real wakeup
+    is en route" branch is now a logged decision only — the turn
+    still ends (the gate ALLOWS) but the leader carries no checkpoint
+    record of the mid-work phrasing.
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_no)
 
@@ -412,28 +418,29 @@ def test_marker_b_hint_injection_no_deny_no_counter(monkeypatch, caplog):
             )
         )
 
-    # ALLOWED + hint — NO counter, NO deny, NO re-route.
-    assert "messages" in result
+    # ALLOWED + log-only — 2026-09-23 (b2f4dae9): the Completion Check
+    # Note hint is RETIRED end-to-end. The (b) route still resolves to
+    # allow on the resolver row (label ``allow_hint``), but NO message
+    # is injected, NO context_kind is minted, NO counter movement.
+    assert "messages" not in result, (
+        "(b) path MUST be log-only after 2026-09-23 retirement; "
+        f"got messages={result.get('messages')!r}"
+    )
     # NO attestation_route hint → END.
     assert result["attestation_route"] is None
-    # NO counter increment — (b) path is allow-with-hint, not deny.
+    # NO counter increment — (b) path is allow-log-only, not deny.
     ledger.increment.assert_not_called()
     ledger.reset.assert_not_called()
     ledger.set_escalated_and_reset.assert_not_called()
 
-    # Hint message rides the state — checkpoint-durable HumanMessage
-    # with the canonical Completion Check Note body.
-    hint = result["messages"][0]
-    assert hint.content == COMPLETION_CHECK_NOTE_TEXT
-    assert hint.content.startswith(
-        "[SYSTEM CONTEXT: Completion Check Note]"
-    )
-
-    # Log fields present.
+    # Log fidelity — the resolver row carries the would-be-route label
+    # so the (b)/(d)-with-pending path is still observable in logs
+    # (the b2f4dae9 evidence chain must remain log-reconstructible).
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "event=leader_completion_gate_fused_judge" in log_text
     assert "verdict=not_complete" in log_text
     assert "fused-judge not-complete" in log_text
+    assert "would_be_route=allow_hint" in log_text
     assert "resolver_outcome=allow_hint" in log_text
 
 
@@ -583,17 +590,19 @@ def test_marker_d_timeout_with_real_pending_hint(monkeypatch, caplog):
             )
         )
 
-    # ALLOWED + hint — NO counter, NO deny, NO re-route.
-    assert "messages" in result
+    # ALLOWED + log-only — 2026-09-23 (b2f4dae9): Completion Check Note
+    # hint RETIRED end-to-end; (d2) is now allow-with-no-side-effect.
+    assert "messages" not in result, (
+        "(d2) path MUST be log-only after 2026-09-23 retirement; "
+        f"got messages={result.get('messages')!r}"
+    )
     assert result["attestation_route"] is None
     ledger.increment.assert_not_called()
-
-    hint = result["messages"][0]
-    assert hint.content == COMPLETION_CHECK_NOTE_TEXT
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "verdict=timeout" in log_text
     assert "fused-judge path-d" in log_text
+    assert "would_be_route=allow_hint" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -770,19 +779,18 @@ def test_marker_wrapper_fault_with_real_pending_hint(monkeypatch, caplog):
             )
         )
 
-    # ALLOWED + hint — NO counter, NO deny, NO re-route.
-    assert "messages" in result
+    # ALLOWED + log-only — 2026-09-23 (b2f4dae9): the Completion Check
+    # Note hint is RETIRED end-to-end. The wrapper-fault row still
+    # fires (the (b)/(d)-with-pending route exists in logs only);
+    # NO message is injected.
+    assert "messages" not in result, (
+        "(d) wrapper-fault path MUST be log-only after 2026-09-23; "
+        f"got messages={result.get('messages')!r}"
+    )
     assert result["attestation_route"] is None
     ledger.increment.assert_not_called()
     ledger.reset.assert_not_called()
     ledger.set_escalated_and_reset.assert_not_called()
-
-    # Hint rides — the helper-built (b)-path Completion Check Note.
-    hint = result["messages"][0]
-    assert hint.content == COMPLETION_CHECK_NOTE_TEXT
-    assert hint.content.startswith(
-        "[SYSTEM CONTEXT: Completion Check Note]"
-    )
 
     # Log rows: the wrapper-fault error row + the (d)-path routing
     # line via the hint path.
@@ -1419,8 +1427,9 @@ def test_dry_mode_marker_hit_logs_signal_no_side_effects(
         "hint/deny/counter side effect"
     )
     assert "messages" not in result, (
-        "W1: dry mode + marker MUST NOT inject a hint (no judge → no "
-        "(b)-path Completion Check Note injection)"
+        "W1: dry mode + marker MUST NOT inject a hint — "
+        "2026-09-23 (b2f4dae9): hint RETIRED end-to-end, so the "
+        "dry path carries zero side effects regardless"
     )
     assert result["attestation_route"] is None, (
         "W1: dry mode + marker MUST NOT re-route — plain END preserved"
@@ -1474,157 +1483,24 @@ def test_dry_mode_marker_hit_logs_signal_no_side_effects(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Review pass W2 (2026-09-12) — Completion Check Note stable id supersede
+# 2026-09-23 — Incident b2f4dae9: Completion Check Note RETIRED end-to-end
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def _langgraph_upsert_by_id(left, right):
-    """Mimic langgraph 1.0.9's ``add_messages`` upsert-by-id behavior.
-
-    The test conftest mocks out ``langgraph`` as a MagicMock namespace
-    (so importing ``from langgraph.graph import add_messages`` raises
-    ImportError under pytest). The Shape A contract — "same id ⇒
-    upsert ⇒ one block in resulting state" — is invariant on the
-    upsert rule itself, not on the import path. This helper mirrors
-    ``langgraph/graph/message.py::add_messages`` source-verified
-    behavior: ``merged[existing_idx] = m`` (line 225) for same-id
-    messages in ``right``.
-    """
-    merged = list(left)
-    merged_by_id = {m.id: i for i, m in enumerate(merged) if m.id}
-    for m in right:
-        if not getattr(m, "id", None):
-            merged.append(m)
-            continue
-        existing_idx = merged_by_id.get(m.id)
-        if existing_idx is not None:
-            merged[existing_idx] = m
-        else:
-            merged_by_id[m.id] = len(merged)
-            merged.append(m)
-    return merged
-
-
-def test_completion_check_note_stable_id_collapses_on_supersede():
-    """W2 (Shape A): two (b) events on the SAME instance → ONE block.
-
-    The F1 Shape A contract: ``_stable_id_for("completion_check_note",
-    instance_id=...)`` mints a stable id per instance, so each
-    subsequent (b) event on the same instance SUPERSEDES the prior
-    checkpoint entry in place via LangGraph's ``add_messages``
-    reducer. Pin the contract end-to-end: same id → upsert → one
-    block in the resulting state.
-    """
-    from daemon.graph import _make_completion_check_note_message
-
-    instance_id = "lca-supersede-it"
-
-    hint_1 = _make_completion_check_note_message(instance_id)
-    hint_2 = _make_completion_check_note_message(instance_id)
-
-    # Stable id is the F1 Shape A contract — same instance ⇒ same id.
-    assert hint_1.id == hint_2.id, (
-        "W2 (Shape A): same instance_id MUST mint the same stable id "
-        "so LangGraph's add_messages reducer supersedes in place"
-    )
-    assert hint_1.id == f"completion_check_note:{instance_id}"
-
-    # Body content unchanged — the supersede must NOT alter the hint
-    # body or the canonical prefix.
-    assert hint_1.content == COMPLETION_CHECK_NOTE_TEXT
-    assert hint_2.content == COMPLETION_CHECK_NOTE_TEXT
-    assert hint_1.content.startswith(
-        "[SYSTEM CONTEXT: Completion Check Note]"
-    )
-
-    # Upsert-by-id collapses the two same-id hints to ONE. The
-    # behavior is source-verified on langgraph 1.0.9
-    # (``langgraph/graph/message.py::add_messages`` line 225:
-    # ``merged[existing_idx] = m`` for same-id messages in right).
-    merged = _langgraph_upsert_by_id([hint_1], [hint_2])
-    assert len(merged) == 1, (
-        "W2: LangGraph add_messages MUST collapse the two same-id "
-        "Completion Check Note hints to ONE block — the supersede "
-        f"got {len(merged)} blocks instead"
-    )
-    assert merged[0].id == hint_2.id
-    # context_kind is preserved on the surviving block so the three-
-    # bucket compaction seam still classifies it as a permanent
-    # injected message.
-    assert merged[0].additional_kwargs.get("context_kind") == (
-        "task_context"
-    )
-
-
-def test_completion_check_note_stable_id_isolates_per_instance():
-    """W2 (Shape A): two (b) events on DIFFERENT instances → TWO blocks.
-
-    The stable id is per-instance, not global — instances do not
-    collide. Two leaders mid-work phrasing on the same turn-end
-    each get their own Completion Check Note block.
-    """
-    from daemon.graph import _make_completion_check_note_message
-
-    hint_a = _make_completion_check_note_message("lca-iso-A")
-    hint_b = _make_completion_check_note_message("lca-iso-B")
-
-    # Distinct ids — the id format is ``completion_check_note:{instance_id}``.
-    assert hint_a.id != hint_b.id
-    assert hint_a.id == "completion_check_note:lca-iso-A"
-    assert hint_b.id == "completion_check_note:lca-iso-B"
-
-    # And the fallback (instance_id=None) preserves the pre-F1
-    # fresh-uuid4 behavior — degenerate / test-only call sites
-    # stay green.
-    hint_unbound = _make_completion_check_note_message()
-    assert hint_unbound.id != hint_a.id
-    assert hint_unbound.id != hint_b.id
-
-
-def test_completion_check_note_compaction_seam_hoists_once():
-    """W2 (Shape A): compaction seam hoists exactly ONE hint after upsert.
-
-    After LangGraph's add_messages reducer collapses the two same-id
-    hints to ONE in the channel, the three-bucket compaction seam
-    (``daemon/compaction.py::_partition_injected_for_compaction``)
-    sees ONE Completion Check Note and hoists ONE — the partition
-    is dedupe-by-id-correct downstream of the LangGraph upsert.
-    """
-    from daemon.compaction import _partition_injected_for_compaction
-    from daemon.graph import _make_completion_check_note_message
-
-    instance_id = "lca-compact-it"
-    hint_1 = _make_completion_check_note_message(instance_id)
-    hint_2 = _make_completion_check_note_message(instance_id)
-
-    # Pre-channel mix: one AIMessage user-turn + two same-id hints.
-    # The LangGraph upsert happens BEFORE the compaction seam reads
-    # the channel — so we feed the seam the post-upsert state.
-    user_turn = AIMessage(content="user prompt")
-    seeded = [user_turn, hint_1, hint_2]
-    post_upsert = _langgraph_upsert_by_id([], seeded)
-    # Two hints collapse to ONE (and the user AIMessage stays).
-    assert len(post_upsert) == 2
-
-    # Three-bucket partition. The post-upsert channel has ONE hint;
-    # the seam hoists it via the ``context_kind`` predicate
-    # (``_has_context_kind(msg) == True`` → hoisted verbatim).
-    selectable, preserved_injected, _ = _partition_injected_for_compaction(
-        post_upsert
-    )
-    hint_blocks = [
-        m
-        for m in preserved_injected
-        if getattr(m, "id", "").startswith("completion_check_note:")
-    ]
-    assert len(hint_blocks) == 1, (
-        "W2 (Shape A): the three-bucket compaction seam MUST hoist "
-        f"exactly ONE Completion Check Note; got {len(hint_blocks)}"
-    )
-    assert hint_blocks[0].id == f"completion_check_note:{instance_id}"
-    # The user-turn AIMessage stays in the selectable pool (no
-    # context_kind, not bare-flag injected).
-    assert any(m is user_turn for m in selectable)
+#
+# The Completion Check Note stable-id contract (F1 Shape A) is RETIRED
+# along with the entire (b)/(d)-with-pending hint injection surface.
+# The three W2 supersede tests (stable-id-collapses / per-instance /
+# compaction-seam-hoists) are removed because the factory
+# ``_make_completion_check_note_message`` is gone — there is no
+# surviving producer to mint a stable id for, and the
+# ``completion_check_note`` row was removed from
+# ``_stable_id_for``'s canonical id-format table.
+#
+# The b2f4dae9 regression pin lives in
+# ``tests/unit/test_attestation_lca_note_removed.py`` (a new file)
+# where it is the canonical witness: healthy busy wait + A-band
+# lexical FP trigger + judge not-complete → allowed, ZERO injected
+# messages (assert message count unchanged pre/post gate), full log
+# row present (verdict + would-be-route allow_hint).
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1851,9 +1727,15 @@ def test_length_short_no_marker_judge_fires(monkeypatch, caplog):
             )
         )
 
-    # Allow + hint — length trigger fired, judge said not-complete,
-    # real pending work is en route.
-    assert "messages" in result
+    # Allow + log-only — 2026-09-23 (b2f4dae9): the (b) hint is
+    # RETIRED end-to-end. Length trigger fired, judge said not-
+    # complete, real pending work is en route. (b)/(d)-with-pending
+    # route resolves to allow on the resolver row, NO message
+    # injected.
+    assert "messages" not in result, (
+        "length-only (b) MUST be log-only after 2026-09-23; "
+        f"got messages={result.get('messages')!r}"
+    )
     assert result["attestation_route"] is None
     ledger.increment.assert_not_called()
 
@@ -2014,19 +1896,24 @@ def test_length_short_real_pending_hint(monkeypatch, caplog):
             )
         )
 
-    # ALLOWED + hint — NO counter, NO deny, NO re-route.
-    assert "messages" in result
+    # ALLOWED + log-only — 2026-09-23 (b2f4dae9): Completion Check
+    # Note hint RETIRED end-to-end; length-trigger (b) path is now
+    # allow-with-no-side-effect (still routes through the predicate's
+    # b_fires term so the (b)/(d)-with-pending label is observable
+    # in logs).
+    assert "messages" not in result, (
+        "length-trigger (b) MUST be log-only after 2026-09-23; "
+        f"got messages={result.get('messages')!r}"
+    )
     assert result["attestation_route"] is None
     ledger.increment.assert_not_called()
-
-    hint = result["messages"][0]
-    assert hint.content == COMPLETION_CHECK_NOTE_TEXT
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "length_trigger=True" in log_text
     assert "marker_hit=False" in log_text
     assert "trigger_source=" not in log_text
     assert "verdict=not_complete" in log_text
+    assert "would_be_route=allow_hint" in log_text
     assert "resolver_outcome=allow_hint" in log_text
 
 
@@ -2062,8 +1949,14 @@ def test_length_short_markers_judge_combined_trigger_source(
             )
         )
 
-    # Allow + hint — both triggers fire; judge-not-complete; pending.
-    assert "messages" in result
+    # Allow + log-only — 2026-09-23 (b2f4dae9): the (b) hint is
+    # RETIRED end-to-end. Both triggers still fire → judge runs →
+    # judge-no → (b)/(d)-with-pending route resolves to allow on the
+    # resolver row, NO message injected.
+    assert "messages" not in result, (
+        "(b) combined-trigger path MUST be log-only after 2026-09-23; "
+        f"got messages={result.get('messages')!r}"
+    )
     assert result["attestation_route"] is None
     ledger.increment.assert_not_called()
 
@@ -2073,6 +1966,7 @@ def test_length_short_markers_judge_combined_trigger_source(
     assert "length_trigger=True" in log_text
     assert "trigger_source=" not in log_text
     assert "resolver_outcome=allow_hint" in log_text
+    assert "would_be_route=allow_hint" in log_text
     assert "verdict=not_complete" in log_text
 
 
@@ -2102,8 +1996,13 @@ def test_length_trigger_source_markers_only(monkeypatch, caplog):
             )
         )
 
-    # Allow + hint — markers fired; judge-not-complete; pending.
-    assert "messages" in result
+    # Allow + log-only — 2026-09-23 (b2f4dae9): the (b) hint is
+    # RETIRED end-to-end. Markers fired; judge-not-complete; pending;
+    # route resolves to allow, NO message injected.
+    assert "messages" not in result, (
+        "(b) markers-only path MUST be log-only after 2026-09-23; "
+        f"got messages={result.get('messages')!r}"
+    )
     assert result["attestation_route"] is None
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
@@ -2111,6 +2010,7 @@ def test_length_trigger_source_markers_only(monkeypatch, caplog):
     assert "length_trigger=False" in log_text
     assert "trigger_source=" not in log_text
     assert "resolver_outcome=allow_hint" in log_text
+    assert "would_be_route=allow_hint" in log_text
 
 
 def test_length_dry_mode_log_only_no_judge(monkeypatch, caplog):
@@ -2429,17 +2329,19 @@ def test_busy_running_child_suppresses_marker_trigger_no_judge_no_hint(
     monkeypatch, caplog
 ):
     """(AC-B1, spec point 5a) RUNNING child + marker-triggering
-    short "awaiting" ack → NO judge call, NO route-(b) hint, plain
+    short "awaiting" ack → NO judge call, NO route-(b) log row, plain
     allow, ``trigger_suppressed_by="busy_descendants"``.
 
     The false-positive class: leader awaiting a RUNNING child writes
     a short mid-work ACK. The marker substring scan fires; the
     length trigger also fires (the AIMessage is short). Without busy
     suppression, the gate would route through the judge and — on
-    judge-no — inject a checkpoint-durable Completion Check Note on
-    essentially every awaiting turn-end. Busy suppression disarms
-    the WHOLE trigger so the leader is allowed silently and the
-    healthy-wait noise is gone.
+    judge-no — log a (b)/(d)-with-pending resolver row on essentially
+    every awaiting turn-end (the would-be-route label survives in
+    logs only, since 2026-09-23 the Completion Check Note hint is
+    RETIRED end-to-end). Busy suppression disarms the WHOLE trigger
+    so the leader is allowed silently and the healthy-wait noise is
+    gone.
     """
     call_count = {"n": 0}
 
@@ -2591,9 +2493,12 @@ def test_busy_waiting_children_child_suppresses_marker_trigger(
 def test_paused_child_keeps_trigger_armed_no_suppression(
     monkeypatch, caplog
 ):
-    """(AC-B4, spec point 5d) PAUSED child + trigger → judge + route-
-    (b) hint STILL fire (PAUSED is suspect, not healthy — busy
-    suppression MUST NOT disarm the trigger).
+    """(AC-B4, spec point 5d) PAUSED child + trigger → judge still fires
+    (PAUSED is suspect, not healthy — busy suppression MUST NOT disarm
+    the trigger). 2026-09-23 (b2f4dae9): the route-(b) hint is RETIRED
+    end-to-end; the judge + resolver row still fire so the suspect-
+    pending case remains log-reconstructible, but NO message is
+    injected. Deny path intact.
 
     Pin: ``busy_descendants=0`` when only PAUSED descendants exist
     (the live count is 1 — PAUSED is live-for-deny-protection, but
@@ -2625,10 +2530,13 @@ def test_paused_child_keeps_trigger_armed_no_suppression(
             )
         )
 
-    # Path (b): ALLOW + hint (NOT suppress) — judge fires, judge-no,
-    # real pending → Completion Check Note injected.
-    assert "messages" in result
-    assert result["messages"][0].content == COMPLETION_CHECK_NOTE_TEXT
+    # Path (b): ALLOW log-only (NOT suppress) — judge fires, judge-no,
+    # real pending → ALLOW with the (b)/(d)-with-pending route label
+    # on the resolver row, but NO message injected.
+    assert "messages" not in result, (
+        "PAUSED-not-busy (b) path MUST be log-only after 2026-09-23; "
+        f"got messages={result.get('messages')!r}"
+    )
     ledger.increment.assert_not_called()  # (b) does not increment
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)

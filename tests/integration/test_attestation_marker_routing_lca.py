@@ -38,16 +38,16 @@ checklist):
   * (h) no markers → no judge call (cost control — assert judge client
     not invoked)
 
-The (b)-supersede-on-real-add_messages scenario — the W2 Shape A
-contract that LangGraph's ``add_messages`` reducer collapses the same-
-id Completion Check Note in the resulting channel — is pinned on the
-REAL ``langgraph.graph.message.add_messages`` function in
-``tests/unit/test_attestation_marker_supersede_lca.py`` (a parallel
-unit file). The gate-node E2E here verifies that the same-id hint is
-EMITTED with the expected stable id; the parallel unit file then
-verifies that ``add_messages`` itself performs the upsert on the real
-package so two consecutive (b) turns → exactly one hint block in the
-final channel.
+2026-09-23 (b2f4dae9): the (b)/(d)-with-pending route STILL EXISTS
+on the resolver row (label ``allow_hint``) — the gate-node E2E here
+verifies the (b)/(d) path resolves to ALLOW log-only, the resolver
+row carries ``resolver_outcome=allow_hint``, and the
+[AttestationGate] log line carries ``would_be_route=allow_hint``;
+NO message is injected. The Completion Check Note hint +
+supersede-on-real-add_messages scenario that previously pinned
+the W2 Shape A contract is RETIRED — see the retirement witness
+``tests/unit/test_attestation_marker_supersede_lca.py::
+test_lca_note_supersede_class_retired``.
 
 Constraints (pinned by the LCA merge gate):
 
@@ -87,7 +87,6 @@ from daemon.services.attestation_resolver import (
     reset_attestation_resolver_for_tests,
 )
 from daemon.graph import (
-    COMPLETION_CHECK_NOTE_TEXT,
     create_attestation_gate_node,
 )
 
@@ -472,16 +471,21 @@ def test_scenario_a_markers_judge_no_nothing_pending_denies(monkeypatch, caplog)
 
 
 def test_scenario_b_markers_judge_no_real_pending_allows_with_hint(monkeypatch, caplog):
-    """(b) markers + judge-no + real pending (live RUNNING child) → ALLOW + hint.
+    """(b) markers + judge-no + real pending (live RUNNING child) →
+    ALLOW log-only (2026-09-23 b2f4dae9: the Completion Check Note
+    hint is RETIRED end-to-end).
 
     Scenario contract (LCA merge gate §b): when the leader's last
     AIMessage carries mid-work phrasing AND a real RUNNING child is
     en route (manager.count_pending_children > 0), the gate MUST allow
-    the turn to end so the wake-up can still arrive (R2/§b contract) —
-    but it MUST inject a checkpoint-durable Completion Check Note as a
-    record of the mid-work phrasing for the next turn. NO counter
-    increment, NO deny, NO re-route — the (b) path is allow-with-hint,
-    not deny.
+    the turn to end so the wake-up can still arrive (R2/§b contract).
+    2026-09-23 (b2f4dae9): the (b) route resolves to ALLOW log-only —
+    the resolver_eval row carries ``resolver_outcome=allow_hint`` as
+    the durable forensic record; the gate node's [AttestationGate]
+    log line carries ``would_be_route=allow_hint``. NO message is
+    injected, NO context_kind is minted, NO stable-id is required.
+    NO counter increment, NO deny, NO re-route — the (b) path is
+    allow-with-no-side-effect, not deny.
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _judge_incomplete)
 
@@ -513,15 +517,17 @@ def test_scenario_b_markers_judge_no_real_pending_allows_with_hint(monkeypatch, 
             )
         )
 
-    # ALLOWED + hint — NO counter, NO deny, NO re-route.
-    assert "messages" in result, (
-        "(b): ALLOW-with-hint path MUST inject a Completion Check Note"
+    # ALLOWED log-only — NO counter, NO deny, NO re-route, NO hint
+    # injection (2026-09-23 b2f4dae9).
+    assert "messages" not in result, (
+        "(b): ALLOW-with-log-only path MUST NOT inject a hint; "
+        f"got messages={result.get('messages')!r}"
     )
     assert result["attestation_route"] is None, (
-        "(b): ALLOW-with-hint path MUST end the turn (no re-route)"
+        "(b): ALLOW-with-log-only path MUST end the turn (no re-route)"
     )
     ledger.increment.assert_not_called(), (
-        "(b): NO counter increment — (b) path is allow-with-hint, not deny"
+        "(b): NO counter increment — (b) path is allow-log-only, not deny"
     )
     ledger.reset.assert_not_called(), (
         "(b): NO counter reset on the (b) path — reset fires only on "
@@ -529,31 +535,17 @@ def test_scenario_b_markers_judge_no_real_pending_allows_with_hint(monkeypatch, 
     )
     ledger.set_escalated_and_reset.assert_not_called()
 
-    # Hint message rides the state — checkpoint-durable HumanMessage
-    # with the canonical Completion Check Note body. The W2 Shape A
-    # contract pins the id format to ``completion_check_note:{instance_id}``
-    # so repeated (b) events on the same instance supersede in place via
-    # LangGraph's ``add_messages`` reducer (the
-    # ``tests/unit/test_attestation_marker_supersede_lca.py`` test
-    # verifies the upsert behavior on the REAL add_messages function).
-    hint = result["messages"][0]
-    assert hint.content == COMPLETION_CHECK_NOTE_TEXT, (
-        "(b): hint content MUST be the canonical Completion Check Note body"
-    )
-    assert hint.content.startswith(
-        "[SYSTEM CONTEXT: Completion Check Note]"
-    )
-    assert hint.id == "completion_check_note:lca-scen-b-it", (
-        "(b): hint MUST carry the stable id ``completion_check_note:"
-        "{instance_id}`` so repeated (b) events on the same instance "
-        "supersede via add_messages"
-    )
-    # context_kind rides alongside so the three-bucket compaction seam
-    # still classifies the hint as a permanent injected message.
-    assert hint.additional_kwargs.get("context_kind") == "task_context", (
-        "(b): hint MUST carry context_kind=task_context so the "
-        "compaction seam hoists it (per docs/setup.md three-bucket contract)"
-    )
+    # Log fidelity — the (b)/(d)-with-pending route label survives on
+    # the resolver row + the [AttestationGate] log line so the b2f4dae9
+    # evidence chain remains log-reconstructible.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "event=leader_completion_gate_fused_judge" in log_text
+    assert "verdict=not_complete" in log_text
+    assert "resolver_outcome=allow_hint" in log_text
+    assert "would_be_route=allow_hint" in log_text
+    # 2026-09-23 (b2f4dae9): NO context_kind rides — the hint surface
+    # is RETIRED end-to-end, so there is no permanent-hoist block to
+    # classify. The (b)/(d)-with-pending label survives ONLY on logs.
 
     # Diagnostic fields on the fused rows (LCA Stage-2 flip
     # re-contract, 2026-09-16).
@@ -740,25 +732,27 @@ def test_scenario_d2_xxx_with_real_pending_allows_with_hint(
             )
         )
 
-    # ALLOWED + hint — NO counter, NO deny, NO re-route.
-    assert "messages" in result, (
-        f"(d2-{expected_path_label}): ALLOW-with-hint path MUST inject a hint"
+    # ALLOWED log-only — NO counter, NO deny, NO re-route, NO hint
+    # injection (2026-09-23 b2f4dae9: the (d)-with-pending route
+    # resolves to ALLOW log-only).
+    assert "messages" not in result, (
+        f"(d2-{expected_path_label}): ALLOW-log-only path MUST NOT "
+        f"inject a hint; got messages={result.get('messages')!r}"
     )
     assert result["attestation_route"] is None, (
-        f"(d2-{expected_path_label}): ALLOW-with-hint path MUST end the turn"
+        f"(d2-{expected_path_label}): ALLOW-log-only path MUST end the turn"
     )
     ledger.increment.assert_not_called()
-
-    hint = result["messages"][0]
-    assert hint.content == COMPLETION_CHECK_NOTE_TEXT, (
-        f"(d2-{expected_path_label}): hint content MUST be the canonical "
-        "Completion Check Note body"
-    )
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "resolver_outcome=allow_hint" in log_text, (
         f"(d2-{expected_path_label}): the hint outcome MUST land on the "
         "resolver row (path-(d)-with-pending)"
+    )
+    assert "would_be_route=allow_hint" in log_text, (
+        f"(d2-{expected_path_label}): the would-be-route label MUST land "
+        "on the [AttestationGate] log line so the b2f4dae9 evidence "
+        "chain is log-reconstructible"
     )
 
 
@@ -837,13 +831,12 @@ def test_scenario_d3_wrapper_fault_routes_conservatively(monkeypatch, caplog):
             )
         )
 
-    assert "messages" in result_hint, (
-        "(d3b): wrapper fault + real pending → ALLOW + hint"
+    assert "messages" not in result_hint, (
+        f"(d3b): wrapper fault + real pending → ALLOW log-only after "
+        f"2026-09-23; got messages={result_hint.get('messages')!r}"
     )
     assert result_hint["attestation_route"] is None
     ledger2.increment.assert_not_called()
-    hint = result_hint["messages"][0]
-    assert hint.content == COMPLETION_CHECK_NOTE_TEXT
 
 
 # ─────────────────────────────────────────────────────────────────────────────

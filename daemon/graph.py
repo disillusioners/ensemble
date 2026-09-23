@@ -4666,36 +4666,6 @@ ATTESTATION_NUDGE_TEXT = (
     "```"
 )
 
-#: Server-authored Completion Check Note text (2026-09-11, incident
-#: b08f40fe; FR-3 marker-path (b) hint). This is the SINGLE home of
-#: the hint text — never hardcode the literal elsewhere (NFR-6 parity
-#: with :data:`ATTESTATION_NUDGE_TEXT`). Injected by the gate node on
-#: marker path (b) only (markers + judge-not-complete + real pending
-## work). Like the nudge, the note leads with a single non-blank
-#: header line ``[SYSTEM CONTEXT: Completion Check Note]`` so the LLM
-#: recognizes it as system-origin at parse time (per the established
-#: ``_make_context_message`` factory style — same prefix discipline).
-#: NO counter write, NO deny, NO re-route — the turn still ends; the
-#: hint rides alongside the END as a checkpoint-durable reminder for
-#: the next turn.
-COMPLETION_CHECK_NOTE_TEXT = (
-    "[SYSTEM CONTEXT: Completion Check Note]\n\n"
-    "The completion gate noticed mid-work phrasing on a turn where "
-    "real pending work is still outstanding (children, wakeups, or "
-    "live descendants remained). The gate allowed the turn to end so "
-    "the wake-up you expected can still arrive, but please confirm on "
-    "your next turn that the wake-up actually comes (check your "
-    "children's status and continue or revive their work via "
-    "send_message if needed) — if the pending "
-    "work was orphaned or already idle, clean it up or call "
-    "attest_completion once the work is truly done. Reminder: when "
-    "you do finish, the ATTEST-FIRST PURE-TOOLCALL-TURN CONTRACT "
-    "(2026-09-19) applies — FIRST call attest_completion ALONE in a "
-    "PURE TOOLCALL TURN (empty content), THEN deliver your full "
-    "detailed final report as its own standalone AI message — never "
-    "bundle the report into the attestation tool-call message."
-)
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Attest-first contract (2026-09-19, c5d9a38a remediation)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4706,12 +4676,11 @@ COMPLETION_CHECK_NOTE_TEXT = (
 # ``attestation_gate.Decision.HOLD`` + ``classify_final_ai_shape``).
 # These two reminder constants are the SINGLE home of the in-graph
 # reminder text the gate injects on HOLD (mirroring the
-# ATTESTATION_NUDGE_TEXT / COMPLETION_CHECK_NOTE_TEXT NFR-6
-# single-source-of-truth discipline). Like the nudge and the note,
-# each reminder leads with a single non-blank header line so the
-# LLM recognizes it as system-origin at parse time. The header
-# prefix reuses the established ``_make_context_message`` factory
-# style — same prefix discipline.
+# ATTESTATION_NUDGE_TEXT NFR-6 single-source-of-truth discipline).
+# Like the nudge, each reminder leads with a single non-blank
+# header line so the LLM recognizes it as system-origin at parse
+# time. The header prefix reuses the established ``_make_context_message``
+# factory style — same prefix discipline.
 #
 # Hold-state accounting: the reminder injection does NOT increment
 # ``attestation_denied_count`` (no bound / escalation interaction).
@@ -4763,146 +4732,24 @@ ATTESTATION_REMINDER_CAP: int = 2
 #: path that resets ``attestation_denied_count``).
 ATTESTATION_REMINDER_COUNT_KEY: str = "attestation_reminder_count"
 
-# Single-source the body derivation for the (b)-path hint. The header
-# string below is sourced from ``context_messages.CONTEXT_PREFIX`` +
-# title + ``CONTEXT_SUFFIX`` — the SAME triplet the
-# ``_make_context_message`` factory re-prepends — so callers never
-# re-literal the ``[SYSTEM CONTEXT: Completion Check Note]\n\n`` prefix
-# in this module (defends against a future header edit silently
-# shifting the hint body). F1 backlog hint accumulation lives here too
-# (a stable id plumbed through ``instance_id`` is the natural fix site).
-_COMPLETION_CHECK_NOTE_TITLE = "Completion Check Note"
-
-
-def _make_completion_check_note_message(
-    instance_id: str | None = None,
-    evidence_citation: str | None = None,
-) -> HumanMessage:
-    """Build the (b)-path Completion Check Note hint as a HumanMessage.
-
-    Single-source — derives the body from :data:`COMPLETION_CHECK_NOTE_TEXT`
-    by slicing past the canonical header (the header string is sourced
-    from ``context_messages.CONTEXT_PREFIX`` + title + ``CONTEXT_SUFFIX``,
-    the same triplet the ``_make_context_message`` factory re-emits).
-    The returned ``HumanMessage.content`` equals
-    :data:`COMPLETION_CHECK_NOTE_TEXT` byte-for-byte when
-    ``evidence_citation`` is ``None`` — the existing hint-content test
-    pins this invariant.
-
-    D4 (2026-09-16, resolver Stage-2 flip, user-approved Δ4): when
-    ``evidence_citation`` is a non-empty string, it is appended to the
-    body as a server-authored suffix (the fused judge's
-    ``evidence_cited`` + ``advisory_note_text`` from the verdict JSON —
-    already length-capped by the parser in
-    ``attestation_report_judge._parse_fused_judge_response``). The
-    canonical note text itself is UNCHANGED (byte-identical prefix);
-    only the D4 suffix differs, and the stable id (supersede contract)
-    is unaffected.
-
-    F1 Shape A (2026-09-12, review W2 — Shape A landed): when an
-    ``instance_id`` is supplied, the hint carries a stable id minted
-    via :func:`_stable_id_for('completion_check_note', instance_id=...)`
-    — the canonical id-format table row added in this pass. The
-    stable id collapses repeated (b) events on the same instance:
-    LangGraph's ``add_messages`` reducer SUPERSEDES the prior
-    checkpoint entry in place, so the Completion Check Note block
-    appears EXACTLY ONCE in the resulting state regardless of how
-    many (b) events fire — the unbounded ``context_kind=task_context``
-    tail under three-bucket compaction (merge 77ce4ae8) is closed.
-    When ``instance_id`` is ``None`` (degenerate / test-only call
-    sites) the factory falls back to the pre-F1 fresh-uuid4 behavior
-    so tests that don't care about supersede semantics stay green.
-
-    Args:
-        instance_id: Owning instance id. When supplied, the hint
-            carries a stable id so repeated (b) events on the SAME
-            instance supersede in place (Shape A contract). When
-            ``None``, the factory falls back to a fresh ``uuid4``
-            (the pre-F1 behavior).
-        evidence_citation: D4 suffix — the evidence-citation block
-            derived from the fused judge verdict (see
-            :func:`_fused_hint_citation`). ``None`` / empty → the
-            byte-identical pre-D4 note.
-
-    Returns:
-        A ``HumanMessage`` with the canonical Completion Check Note
-        body (+ optional D4 suffix) and the ``CONTEXT_KIND_TASK_CONTEXT``
-        ``context_kind``.
-    """
-    from .services.context_messages import (
-        CONTEXT_KIND_TASK_CONTEXT,
-        CONTEXT_PREFIX,
-        CONTEXT_SUFFIX,
-        _make_context_message,
-        _stable_id_for,
-    )
-    header = CONTEXT_PREFIX + _COMPLETION_CHECK_NOTE_TITLE + CONTEXT_SUFFIX
-    body = COMPLETION_CHECK_NOTE_TEXT[len(header):]
-    if evidence_citation:
-        body = body + "\n\n" + evidence_citation
-    stable_id = (
-        _stable_id_for("completion_check_note", instance_id=instance_id)
-        if instance_id
-        else None
-    )
-    return _make_context_message(
-        kind=CONTEXT_KIND_TASK_CONTEXT,
-        title=_COMPLETION_CHECK_NOTE_TITLE,
-        content=body,
-        id_=stable_id,
-    )
-
-
-def _fused_hint_citation(fused_result: Any) -> str | None:
-    """Build the D4 evidence-citation suffix for the Completion Check Note.
-
-    D4 (user-approved Δ4, resolver Stage-2 flip 2026-09-16): the fused
-    judge's verdict JSON carries ``evidence_cited`` +
-    ``advisory_note_text``; when the verdict produced any of them the
-    hint cites them verbatim (already length-capped by
-    ``attestation_report_judge._parse_fused_judge_response`` — items
-    ≤120 chars, ≤5 items, advisory ≤240). Returns ``None`` when the
-    verdict carries nothing (error/timeout/unparsable verdicts and
-    kill-switch-off rows produce the byte-identical pre-D4 note).
-    """
-    if fused_result is None:
-        return None
-    blocks: list[str] = []
-    evidence = getattr(fused_result, "evidence_cited", None) or ()
-    if evidence:
-        lines = ["Completion evidence cited by the completion judge:"]
-        for item in evidence:
-            lines.append(f"- {item}")
-        blocks.append("\n".join(lines))
-    advisory = getattr(fused_result, "advisory_note_text", "") or ""
-    if advisory:
-        blocks.append(f"Advisory: {advisory}")
-    if not blocks:
-        return None
-    return "\n\n".join(blocks)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Attest-first HOLD-state factory (2026-09-19, c5d9a38a remediation)
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# The HOLD-state reminder factory mirrors the marker-hint factory
-# (``_make_completion_check_note_message``) but is structurally
-# simpler — no evidence citation suffix, no advisory note. The
-# reminder body is the canonical :data:`ATTESTATION_FINAL_REPORT_REMINDER`
-# (clean-call HOLD) or :data:`ATTESTATION_BUNDLED_REMINDER` (bundled-
-# shape HOLD). The factory slices the body past the canonical header
-# (the same `_make_context_message`-sourced triplet used by the
-# Completion Check Note factory) and rebuilds the message via the
-# SAME factory so the header discipline is single-source.
+# The HOLD-state reminder factory is structurally simple — no
+# evidence citation suffix, no advisory note. The reminder body is
+# the canonical :data:`ATTESTATION_FINAL_REPORT_REMINDER` (clean-call
+# HOLD) or :data:`ATTESTATION_BUNDLED_REMINDER` (bundled-shape HOLD).
+# The factory slices the body past the canonical header (the same
+# `_make_context_message`-sourced triplet) and rebuilds the message
+# via the SAME factory so the header discipline is single-source.
 #
 # Stable id contract: every reminder message carries
 # ``attestation_final_report_reminder:{instance_id}`` so consecutive
 # HOLD-state reminders on the SAME instance SUPERSEDE in place via
 # LangGraph's ``add_messages`` reducer upsert — the unbounded
 # ``context_kind=task_context`` tail under three-bucket compaction
-# (cf. the F1 Shape A precedent for the Completion Check Note) is
-# closed. The cap (``ATTESTATION_REMINDER_CAP = 2``) prevents the
+# is closed. The cap (``ATTESTATION_REMINDER_CAP = 2``) prevents the
 # supersede chain from running forever in the degenerate case.
 _FINAL_REPORT_REMINDER_TITLE = "Final Report Reminder"
 
@@ -4921,8 +4768,7 @@ def _make_attestation_final_report_reminder_message(
     supplied with the bundled body — the gate node picks which
     based on the ``is_bundled_call`` decision field). Single-source:
     the reminder body lives ONLY in this module, mirroring the
-    ATTESTATION_NUDGE_TEXT / COMPLETION_CHECK_NOTE_TEXT NFR-6
-    discipline.
+    ATTESTATION_NUDGE_TEXT NFR-6 discipline.
 
     Args:
         instance_id: Owning instance id. When supplied, the reminder
@@ -5651,16 +5497,28 @@ def create_attestation_gate_node(
                                     )
                                     resolver_outcome = _RES_DENY_NUDGE
                             else:
-                                # (b)/(d)-with-pending → ALLOW +
-                                # checkpoint-durable hint (D4: the hint
-                                # gains the evidence citation when the
-                                # verdict carries one). NO counter write,
-                                # NO deny, NO re-route.
+                                # (b)/(d)-with-pending → ALLOW + LOG-ONLY
+                                # (2026-09-23, incident b2f4dae9: Completion
+                                # Check Note hint RETIRED end-to-end). The
+                                # route label ``allow_hint`` survives on the
+                                # resolver row so operators can still
+                                # distinguish (b)/(d)-with-pending from
+                                # plain (c) allow, but NO message is
+                                # injected, NO context_kind is minted, NO
+                                # stable-id row in the canonical table.
+                                # NO counter write, NO deny, NO re-route —
+                                # the turn still ends. The fused judge's
+                                # verdict + FULL reason + matched terms
+                                # remain on the resolver_eval row for
+                                # forensic reconstruction (the b2f4dae9
+                                # evidence chain must remain
+                                # log-reconstructible).
                                 logger.info(
                                     "[AttestationGate] fused-judge %s "
                                     "instance=%s band=%s verdict=%s; "
-                                    "allowing END and injecting "
-                                    "checkpoint-durable hint",
+                                    "allowing END (log-only — note "
+                                    "hint retired 2026-09-23, "
+                                    "would_be_route=allow_hint)",
                                     "path-d" if fused_wrapper_fault or (
                                         fused_result is not None
                                         and fused_result.verdict
@@ -5669,16 +5527,6 @@ def create_attestation_gate_node(
                                     effective_instance_id,
                                     act.band,
                                     judge_verdict,
-                                )
-                                hint_message = _make_completion_check_note_message(
-                                    effective_instance_id,
-                                    evidence_citation=_fused_hint_citation(
-                                        fused_result
-                                    ),
-                                )
-                                decision = _replace(
-                                    decision,
-                                    marker_hint_message=hint_message,
                                 )
                                 resolver_outcome = _RES_ALLOW_HINT
     
@@ -5862,9 +5710,8 @@ def create_attestation_gate_node(
             # plain ``decide()`` deny) AND the marker-path (a)/(d)
             # allow→deny conversions (which funnel into this same
             # branch) — mint the SAME id, so marker-path nudges
-            # supersede decide-path nudges and vice versa. Mirrors the
-            # ``completion_check_note:{id}`` supersede contract
-            # (F1 Shape A). ``additional_kwargs`` are unchanged.
+            # supersede decide-path nudges and vice versa (F1 Shape A
+            # pattern). ``additional_kwargs`` are unchanged.
             nudge = HumanMessage(
                 content=ATTESTATION_NUDGE_TEXT,
                 id=(
@@ -5960,8 +5807,8 @@ def create_attestation_gate_node(
                     ATTESTATION_REMINDER_CAP,
                 )
                 # Fall through to the allow branch below (same as
-                # the marker_hint_message path / dry_log /
-                # terminal_after_bound — all just return END).
+                # the dry_log / terminal_after_bound paths — all just
+                # return END).
             else:
                 # Cap NOT reached — inject the reminder and route
                 # back to agent. The reminder body comes from the
@@ -6003,27 +5850,16 @@ def create_attestation_gate_node(
         # effects on the routing. The canonical decision log line was
         # already emitted inside evaluate(); the ledger writes (or
         # skips) happened above.
-        # EXCEPTION (2026-09-11, marker path (b)): when the gate
-        # emitted a checkpoint-durable hint (markers + judge-no + real
-        # pending work), inject the hint alongside the END as a
-        # checkpoint-durable record for the next turn. NO re-route —
-        # the turn still ends; the hint is an informational record.
+        # 2026-09-23 (b2f4dae9): the marker-hint emit site is RETIRED.
+        # The (b)/(d)-with-pending route still resolves to allow on the
+        # resolver row (``allow_hint`` label) but emits NO message —
+        # the route EXISTS as a logged decision only.
         # EXCEPTION (2026-09-19, attest-first HOLD cap fall-through):
         # when prior_reminder_count reached ``ATTESTATION_REMINDER_CAP``
         # on a HOLD, this allow branch is reached with
         # ``decision.decision is Decision.HOLD`` — we MUST also reset
         # the per-mission reminder counter to 0 here so a future
         # sub-turn that delivers a real report gets a fresh start.
-        if decision.marker_hint_message is not None:
-            return {
-                "messages": [decision.marker_hint_message],
-                "attestation_route": None,
-            }
-        # HOLD cap fall-through: when ``decision.decision is HOLD`` and
-        # we already logged the cap event above, reset the reminder
-        # counter and allow END. Same return shape as the marker-hint
-        # path (zero side effects on the routing beyond the channel
-        # reset).
         if decision.decision is Decision.HOLD:
             return {
                 "attestation_route": None,

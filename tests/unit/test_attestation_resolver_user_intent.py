@@ -927,10 +927,12 @@ class TestFalseRescueChannelClosed:
     the A-band's hint arm while the dispatched deny outcome pins on the
     quiet-tree band):
     * C live descendant → ¬c_quiet → A-band → not_complete + pending
-      work → ALLOW + checkpoint-durable Completion Check Note hint
-      (deny is unreachable with a live descendant BY DESIGN — the
-      wakeup re-invokes the gate); the false rescue (plain allow, zero
-      trace) cannot fire.
+      work → ALLOW log-only (2026-09-23 b2f4dae9: the Completion
+      Check Note hint is RETIRED end-to-end; the
+      ``resolver_outcome=allow_hint`` row label is the forensic
+      record). Deny is unreachable with a live descendant BY DESIGN
+      — the wakeup re-invokes the gate; the false rescue (plain
+      allow, zero trace) cannot fire.
     * C quiet tree → deny band → deny+nudge + ledger increment.
     """
 
@@ -994,8 +996,11 @@ class TestFalseRescueChannelClosed:
         )
 
         # Scenario 1 — Source C shows a LIVE descendant (¬quiet →
-        # A-band): not_complete + pending work → ALLOW + hint, ledger
-        # untouched — the U-fulfilled shape buys NO clean rescue.
+        # A-band): not_complete + pending work → ALLOW log-only
+        # (2026-09-23 b2f4dae9: the hint is RETIRED end-to-end; the
+        # resolver row carries the (b)/(d)-with-pending label as the
+        # durable record). Ledger untouched — the U-fulfilled shape
+        # buys NO clean rescue.
         spy = _JudgeSpy([_not_complete_json()])
         monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
         node, _manager, ledger = _make_node(
@@ -1007,12 +1012,14 @@ class TestFalseRescueChannelClosed:
             )
         assert len(spy.attempts) == 1
         self._assert_contradictions_visible(spy, c_line="live_descendants=1")
-        # not_complete HONORED: the checkpoint-durable Completion Check
-        # Note hint rides the END (NOT a nudge, NOT a silent allow).
-        assert "messages" in result
-        hint = result["messages"][0]
-        assert hint.additional_kwargs.get("attestation_nudge") is not True
-        assert "Completion Check Note" in hint.content
+        # not_complete HONORED: the (b)/(d)-with-pending route resolves
+        # to ALLOW on the resolver row (NOT a nudge, NOT a silent
+        # plain allow — the resolver_outcome=allow_hint label is the
+        # forensic surface).
+        assert "messages" not in result, (
+            "false-rescue LIVE A-band path MUST be log-only after "
+            f"2026-09-23; got messages={result.get('messages')!r}"
+        )
         assert result["attestation_route"] is None
         ledger.increment.assert_not_called()
         rows = _rows(caplog, "event=leader_completion_resolver_eval ")
