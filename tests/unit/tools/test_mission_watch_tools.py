@@ -11,9 +11,11 @@ Toolset reshape (2026-09-19, ``feature/mission-watch-toolset``; design:
   registers a row on the pre-generated UUID (design §2b: the receipt IS the
   future mission's first task receipt; a mission-keyed row would strand —
   ``watcher_repository.get_watchers_for_job`` is strictly receipt-keyed).
-* **Already-terminal** (§9.3) — completed / failed / dead_letter (W4 flip)
-  missions register-then-notify-immediately; the ``terminal_reason`` is
-  surfaced; non-terminal receipts do NOT fire a spurious notify.
+* **Already-terminal** (§9.3) — an already-terminal mission replays
+  NOTHING (F1 registration-time terminal filter): settled receipts are
+  skipped (no row, no immediate notification) and the tool reply itself
+  carries the ``terminal_reason``; a dead_letter-since-revived mission
+  (W4 shape) arms its live receipts and waits.
 * **Multi-receipt fan-in** (§9.4) — N receipts → N rows with
   ``events=["mission_terminal"]``; each row CAS-claims exactly once via the
   REAL ``JobWatcherRepository`` claim primitive; ``add_watch`` UPSERT keeps
@@ -765,6 +767,37 @@ class TestCap:
         assert "mission has 2 receipt watch(es)" in result
         # Nothing was minted — all-or-nothing.
         assert len(watcher_repo.get_watches_for_instance(CALLER)) == 49
+
+    def test_cap_counts_only_live_rows_settled_receipts_excluded(
+        self, engine, job_service, watch_mission, watcher_repo
+    ):
+        """F1 terminal filter meets the cap: settled receipts arm NO
+        row and count NOTHING against the cap — a mission whose
+        receipts are ALL already-settled reports ``0 receipt
+        watch(es)`` in the armed wording even with the caller over
+        the cap (a broken filter would arm the settled receipts,
+        report 2, and overflow)."""
+        mid = _seed_instance(engine)
+        _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+        _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+
+        async def _get_work(work_id):
+            return _work_record(work_id, "report", "completed", instance_id=mid)
+
+        job_service.get_work = AsyncMock(side_effect=_get_work)
+
+        # Caller already watches 51 receipts: only a non-zero LIVE
+        # count can trip the would-exceed cap shape — a fully-settled
+        # mission must stay at "0 receipt watch(es)".
+        for _ in range(51):
+            watcher_repo.add_watch(str(uuid.uuid4()), CALLER)
+
+        result = asyncio.run(watch_mission.ainvoke({"target": mid}))
+
+        assert "Would exceed maximum watch limit (50)" in result
+        assert "mission has 0 receipt watch(es)" in result
+        # Nothing was minted — settled receipts arm no rows.
+        assert len(watcher_repo.get_watches_for_instance(CALLER)) == 51
 
     def test_cap_boundary_is_allowed(self, engine, watch_mission, watcher_repo):
         mid = _seed_instance(engine)

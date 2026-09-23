@@ -221,13 +221,7 @@ Extract from the notification text:
 
 ## Edge Cases
 
-### Watching an Already-Terminal Mission
-
-If I call `watch_mission()` on a mission that's already in a terminal state (completed, failed, etc.):
-
-**I receive an immediate notification** with the current status — one per watched receipt.
-
-This is expected behavior. The FIRST notification is the signal; later events on the same mission's other receipts are echoes. Parse and handle once, just like any other notification.
+If I call `watch_mission()` on a mission that is already settled (all receipts terminal), nothing replays: settled receipts get no watch row and NO `[JOB_EVENT]` fires for them — the tool reply itself carries the mission's terminal reason/status, so I read the outcome from the reply instead of waiting for a notification that will never come. Past states stay queryable via `job_get` / `get_mission`. To watch NEW receipts (e.g. after `job_continue` or an instance revive) I call `watch_mission()` again — the re-call is a delta-arm: receipts already settled at call time are skipped (no row, no replay).
 
 ### Multiple Notifications for Same Mission
 

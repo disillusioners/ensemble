@@ -3074,10 +3074,12 @@ def create_mission_watch_tools(
     * The resolved mission's current receipts are enumerated via
       ``task_repo.get_by_instance`` (ALL Tasks, newest first, no status
       filter — terminal Tasks persist, and mirror receipts are
-      ``Task.work_id`` rows too), and ONE ``job_watchers`` row is
-      registered per receipt with ``events=["mission_terminal"]``
-      (HOLD semantics — the engine's ``work_notifier`` gate fires the
-      row only when the mission's liveness is terminal).
+      ``Task.work_id`` rows too), then filtered to currently-LIVE
+      receipts (``get_work`` + terminal-status check): ONE
+      ``job_watchers`` row is registered per LIVE receipt with
+      ``events=["mission_terminal"]`` (HOLD semantics — the engine's
+      ``work_notifier`` gate fires the row only when the mission's
+      liveness is terminal); already-settled receipts arm nothing.
     * The engine's notify path is strictly receipt-keyed
       (``get_watchers_for_job`` queries ``WHERE job_id == work_id``), so
       a mission-keyed row would never resolve and strand silently —
@@ -3085,10 +3087,13 @@ def create_mission_watch_tools(
     * ``add_watch`` is an atomic UPSERT on (job_id, instance_id), so a
       re-watch after ``job_continue`` updates existing rows and mints
       rows only for genuinely new receipts.
-    * The 50-watch cap is replicated counting EVERY row minted (N
-      receipts = N rows against the cap).
-    * An already-terminal mission registers then notifies immediately
-      per terminal receipt (mirror of ``watch_job``'s terminal branch).
+    * The 50-watch cap is replicated counting EVERY row minted — the
+      terminal filter runs first, so only LIVE receipts mint rows
+      against the cap (a 99-settled/1-live mission arms 1 row).
+    * An already-terminal mission is a NO-REPLAY short-circuit: settled
+      receipts mint no rows and fire nothing — the tool reply itself
+      carries the terminal reason/status (live receipts of a
+      dead_letter-since-revived mission stay armed for the next flip).
 
     Mission-not-yet-born edge (design §2b): a receipt from ``job_create``
     resolves with ``instance_id=None`` until dispatch; registering on
@@ -3371,6 +3376,12 @@ def create_mission_watch_tools(
         "re-call is a delta-arm: already-settled receipts are "
         "skipped, never replayed, so re-calling cannot duplicate "
         "deliveries.\n"
+        "    * Delivery is AT-MOST-ONCE with possible delay: the "
+        "registration-time classification gates ROW EXISTENCE only — "
+        "the emit-time CAS claim is the authoritative exactly-once "
+        "gate. A receipt that settles between classification and "
+        "mint delivers at the NEXT mission-terminal flip or boot "
+        "sweep (delayed, never duplicated).\n"
         "    * A revived mission needs a FRESH watch_mission — the row "
         "is claimed and deleted at the first terminal; the event "
         "carries no epoch (call get_mission for details).\n"
