@@ -5,6 +5,37 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.12] — 2026-09-23
+
+### Added — `job_answer` Job Queue tool (`feature/job-answer-tool`, merge `0deee66d`)
+
+First-class answer submission for orchestrator agents (Ari / jober). The tool surface gains a new `@tool` (`daemon/tools/job_queue.py:2852`) that wraps the same `answer_questions_via_instance` helper the HTTP `POST /api/jobs/{work_id}/answer` route already calls — there is no second implementation; both surfaces share the seam end-to-end. Replaces the brittle bash+curl port-scanning procedure the orchestrator previously used to relay an answer back through the daemon.
+
+- **Signature** — `job_answer(work_id: str, answers: dict[str, str], question_pack_id: str)` → `dict`. `JobAnswerInput` (args_schema) is the single source of truth for both description and field-level constraints; the wrapper carries plain types so the two copies cannot drift. Registered via `@register_tool_category("job")` and added to `KNOWN_TOOL_NAMES` — `ari` / `jober` inherit the `"job"` category automatically.
+- **Stricter tool-layer contract than HTTP** — non-empty `answers` and non-empty `question_pack_id` are required at the tool boundary (the HTTP route accepts optional fields; the tool refuses to call the helper when either is missing and returns an agent-readable error string). Duplicate-pack / stale-pack / terminal-target / write-pause / 503 outcomes are converted to clear error STRINGS so the tool never raises mid-tool-call (LangGraph `@tool` exceptions bubble up the graph task). The same error vocabulary (`QUESTION_PACK_MISMATCH` / `ANSWER_TARGET_TERMINAL` / `WRITE_PAUSED` / etc.) survives end-to-end.
+- **Access control + write-pause guard** — `_check_job_access` runs before any mutation (same seam as the four visibility tools: `job_messages` / `job_tree` / `job_progress` / `job_inject`); the write-pause 503 migration posture is enforced both at the tool boundary and inside the helper (fail-closed end-to-end).
+- **Routing** — `work_id → instance_id` via the SAME `work_resolver.resolve_work(work_id)` the HTTP route uses; project scoping rides on `_check_job_access`. The helper does not know whether it was called from HTTP or from a tool.
+- **Tests** — `tests/job_queue/test_job_answer_tool.py` (NEW, 899 lines): happy-path, stale-pack rejection, no-pending-pack rejection, access denied, plus the tidier M-round pins (count bumps, imports cleanup, `live_hub=None`, 503 race-window, order-pin, tightened pin). Pre-existing 13 `tests/job_queue` failures re-proven base-identical — re-confirmed not attributable to this merge.
+
+### Fixed — mission-live guard stops premature `completed ✓` job events (`fix/job-event-premature-completed`, merge `4c3bb506`)
+
+`MissionLiveGuard` (`daemon/services/mission_live_guard.py`, NEW, 318 lines) closes the bug class observed 2026-09-22 (events 79328/79349): a task-kind LEADER job is legitimately `JobItem ACTIVE + backing Task COMPLETED` mid-mission — the per-turn task row settles while `child_reports` defers the JobItem finalize behind still-running children (bus held, mission live). The drift reconciler's Pattern f2 (`job_recovery_service.reconcile_drift_states`) saw "Task COMPLETED but JobItem never transitioned", force-finalized the JobItem, and the F10 notify arm delivered a false `completed ✓` event and CAS-deleted the mission watcher row. The boot-time `reconcile_terminal_watches` sweep (`job_queue_service`) is an independent re-occurrence vector: it fires terminal for mission-keyed watches on settled work rows without consulting mission liveness.
+
+- **One-question API** — `evaluate_mission_live(...)` returns a frozen `MissionLiveVerdict(live, reason, error, timed_out)`. The mission is LIVE when ANY of:
+  - (a) the dependency bus reports pending watchers for this work (caller-supplied count — each call site already owns its bus seam);
+  - (b) any DESCENDANT instance of the work row's instance is non-terminal. Reference semantics: the mission resolver / `child_reports` instance-tree walk over `instances.parent_id` (the permanent record) with the canonical terminal set `TERMINAL_INSTANCE_STATUSES` — non-terminal therefore includes `running` / `waiting_children` / `queued` / `paused` AND `idle` (the resolver canonicalizes IDLE → `"processing"`, i.e. live);
+  - (c) the root instance itself is non-terminal (same status set).
+- **Fail-open contract (binding)** — any exception inside the guard returns `live=False` with `error=True` so the caller proceeds with finalize + notify. A missing terminal report is WORSE than an extra premature one — at-least-once terminal delivery is preserved.
+- **Zombie backstop** — `MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS = 6 * 60 * 60` (6h, hardcoded constant; no env flag, no schema change — repo policy: bugfixes are not user-togglable; the constant is the tuning knob). When the work's `completed_at` anchor is older than the timeout the guard falls through to `live=False` — finalize fires; starvation impossible. The anchor is the backing task's `completed_at` at the f2 site and the settled work row's `completed_at` at the boot-sweep site; age math uses `now_utc_naive()` per the naive-UTC binding convention.
+- **Integrated into both finalize/notify sites** — `daemon/services/job_queue_service.py` (+97 lines, boot-sweep hook) and `daemon/services/job_recovery_service.py` (+65 lines, drift f2 hook). While `MissionLiveVerdict.live is True` the caller skips `finalize`, skips `notify`, and leaves the watcher row alone. Verdict is recorded on the drift `details` for forensics.
+- **Tests** — `tests/job_queue/test_mission_live_guard.py` (NEW, 1265 lines): real-notify path, crash-restart backstop, descendant-tree coverage, idle canonicalization, anchor-age timeout, fail-open on resolver errors, plus leg-by-leg isolation. `tests/job_queue/test_f1_killswitch_tz_matrix.py` and `tests/job_queue/test_orphan_active_job_recovery.py` updated for the new hook.
+
+### Changed — tester gate artifacts (`694ed596`)
+
+Follow-up chore to the `job_answer` merge: `job_answer` tester verification report under `.agents/tester/RESULTS/`, `job_answer` row added to `.agents/tester/QUARANTINE.md`, and tidier round notes appended to `.agents/tidier/notes.md`. Documentation-only.
+
+---
+
 ## [0.13.11] — 2026-09-22
 
 ### Added — Mid-flight question/answer channel (`feature/midflight-qa-channel`, merge `ca4ab125`)
