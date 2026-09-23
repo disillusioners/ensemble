@@ -1,0 +1,1137 @@
+"""Bounded-traversal guardrails for glob_files and grep_files (2026-09-23 fix).
+
+The 2026-09-23 incident: an explorer agent hunting ``stage.sh`` widened its
+search roots (bare home → ``All/Code`` → repo) via ABSOLUTE paths, each call
+materializing entire directory trees in memory; the daemon hit ~16 GB RAM
+and was SIGKILLed. The fix replaces ``Path.glob`` / bare ``os.walk`` with a
+bounded walker that enforces:
+
+  - **Traversal exclusions** — named dirs (node_modules, .venv, venv, .git,
+    __pycache__, Library, .cache, .next, dist, build, target) AND any hidden
+    dir (name starts with ``.``).
+  - **Depth cap** — visit dirs at depths 0..10 (files at depths 0..10).
+  - **Per-call file-count cap** — STOP the walk the moment 10,000 files are
+    materialized (don't keep walking to discard later).
+  - **Per-file size cap** (grep_files only) — skip files above 1.5 MB before
+    ``read_text()``.
+  - **Per-call timeout** — ``time.monotonic()`` checked at the start of each
+    directory; default 20 s.
+  - **Walk-tool absolute-path guard** — glob_files / grep_files refuse bare
+    absolute paths that are outside both the workdir AND allowed temp dirs;
+    bare ``/Users/...`` is REFUSED to prevent recurrence.
+  - **Loud truncation notice** — when a cap fires, the tool result carries a
+    "Search incomplete" notice pointing the caller to narrow the root or
+    raise pattern specificity. Happy-path result format is unchanged.
+
+Family conventions followed (mirrors ``tests/unit/test_filesystem_*.py``):
+- Direct import from ``daemon.tools.filesystem``
+- ``tool.invoke({...kwargs})`` to call the ``@tool``-decorated StructuredTool
+- ``tmp_path`` hermetic trees; guardrail constants monkey-patched small for
+  timeout / count / size tests
+- Absolute paths so workdir is not required (tmp_path lives in temp dir)
+
+The constants live at module scope on ``daemon.tools.filesystem`` so tests
+can monkey-patch them safely. ``monkeypatch.setattr`` is the standard
+fixture; ``monkeypatch.undo`` runs automatically at test teardown.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from daemon.tools import filesystem as fs
+
+
+# ---------------------------------------------------------------------------
+# Per-guardrail unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestExclusions:
+    """WALK_EXCLUDED_DIRS dirs are pruned during the walk; hidden dirs too."""
+
+    def test_named_exclusion_node_modules(self, tmp_path: Path):
+        (tmp_path / "kept.py").write_text("x")
+        nm = tmp_path / "node_modules"
+        nm.mkdir()
+        (nm / "huge.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        assert "kept.py" in result
+        assert "node_modules" not in result, (
+            f"node_modules must be excluded:\n{result}"
+        )
+        assert "huge.py" not in result
+
+    def test_named_exclusion_dot_git(self, tmp_path: Path):
+        (tmp_path / "kept.py").write_text("x")
+        git = tmp_path / ".git"
+        git.mkdir()
+        (git / "HEAD").write_text("ref: refs/heads/main")
+        (git / "deep.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        assert "kept.py" in result
+        assert "HEAD" not in result, f".git must be excluded:\n{result}"
+        assert "deep.py" not in result
+
+    def test_named_exclusion_venv_and_dot_venv(self, tmp_path: Path):
+        for venv_name in ("venv", ".venv"):
+            (tmp_path / "kept.py").write_text("x")
+            v = tmp_path / venv_name
+            v.mkdir()
+            (v / "lib.py").write_text("x")
+            result = fs.glob_files.invoke(
+                {"pattern": "**/*.py", "path": str(tmp_path)}
+            )
+            assert "kept.py" in result, f"kept.py missing for {venv_name}:\n{result}"
+            assert "lib.py" not in result, (
+                f"{venv_name} not excluded (lib.py leaked):\n{result}"
+            )
+
+    def test_named_exclusion_dist_build_target(self, tmp_path: Path):
+        for d in ("dist", "build", "target"):
+            (tmp_path / "kept.py").write_text("x")
+            sub = tmp_path / d
+            sub.mkdir()
+            (sub / "x.py").write_text("x")
+            result = fs.glob_files.invoke(
+                {"pattern": "**/*.py", "path": str(tmp_path)}
+            )
+            assert "kept.py" in result, f"kept.py missing for {d}:\n{result}"
+            assert "x.py" not in result, (
+                f"{d} not excluded (x.py leaked):\n{result}"
+            )
+
+    def test_named_exclusion_library_and_cache(self, tmp_path: Path):
+        for d in ("Library", ".cache", "__pycache__", ".next"):
+            (tmp_path / "kept.py").write_text("x")
+            sub = tmp_path / d
+            sub.mkdir()
+            (sub / "x.py").write_text("x")
+            result = fs.glob_files.invoke(
+                {"pattern": "**/*.py", "path": str(tmp_path)}
+            )
+            assert "kept.py" in result, f"kept.py missing for {d}:\n{result}"
+            assert "x.py" not in result, (
+                f"{d} not excluded (x.py leaked):\n{result}"
+            )
+
+    def test_hidden_directory_excluded(self, tmp_path: Path):
+        (tmp_path / "kept.py").write_text("x")
+        hd = tmp_path / ".hidden_dir"
+        hd.mkdir()
+        (hd / "inside.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        assert "kept.py" in result
+        assert "inside.py" not in result, (
+            f"Hidden dir .hidden_dir not excluded (inside.py leaked):\n{result}"
+        )
+
+    def test_hidden_file_NOT_excluded(self, tmp_path: Path):
+        """Hidden FILES must not be excluded — matches Path.glob semantics.
+
+        ``*.py`` matches ``.hidden.py`` under pathlib; the walker only prunes
+        hidden DIRS. Pins that we don't accidentally hide dotfiles.
+        """
+        (tmp_path / "visible.py").write_text("x")
+        (tmp_path / ".hidden.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        assert "visible.py" in result
+        assert ".hidden.py" in result, (
+            f"Hidden FILE was excluded (should match Path.glob semantics):\n{result}"
+        )
+
+    def test_excluded_set_constant_is_extensible(self):
+        """The WALK_EXCLUDED_DIRS constant is module-level and a frozenset.
+
+        Pinned so future contributors know the extensibility contract: add
+        new noise dirs at the call-site via this set, NOT by mutating dirs
+        inside the walker.
+        """
+        assert isinstance(fs.WALK_EXCLUDED_DIRS, frozenset)
+        # Spot-check the documented exclusions.
+        for name in ("node_modules", ".venv", "venv", ".git", "__pycache__",
+                     "Library", ".cache", ".next", "dist", "build", "target"):
+            assert name in fs.WALK_EXCLUDED_DIRS, (
+                f"WALK_EXCLUDED_DIRS missing documented name: {name}"
+            )
+
+    def test_allowlist_trio_exact_name_matching(self, tmp_path):
+        """WALK_ALLOWED_HIDDEN_DIRS is an EXACT-name allowlist.
+
+        ``.agents/`` stays traversable (plans/conventions/memories live
+        there — the W-B review patch). Near-miss names with the same prefix
+        must remain hidden and pruned by the ``startswith(".")`` rule.
+        Pins a flat allowlist match — a refactor to ``startswith(".agents")``
+        or to any substring rule would let ``.agents-x`` /
+        ``.agentss`` leak in and flip this test RED.
+        """
+        # Inside the allowlist — must be VISIBLE.
+        agents = tmp_path / ".agents"
+        agents.mkdir()
+        (agents / "x.py").write_text("x")
+        # Near-miss: dash suffix. NOT in the allowlist → starts with "." →
+        # pruned by the hidden-dir rule.
+        agentsx = tmp_path / ".agents-x"
+        agentsx.mkdir()
+        (agentsx / "leak.py").write_text("x")
+        # Near-miss: doubled ``s``. Same: hidden-dir pruned.
+        agentss = tmp_path / ".agentss"
+        agentss.mkdir()
+        (agentss / "leak.py").write_text("x")
+
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        # Allowlist hit — the file under .agents/ must show up.
+        assert ".agents/x.py" in result, (
+            f"Allowlist match missed: .agents/x.py should be VISIBLE "
+            f"(WALK_ALLOWED_HIDDEN_DIRS = {{'.agents'}}):\n{result}"
+        )
+        # Near-miss #1: hidden-dir rule must prune .agents-x/.
+        assert ".agents-x/leak.py" not in result, (
+            f"Near-miss '.agents-x/' leaked past the allowlist — the "
+            f"match is exact-name, not prefix:\n{result}"
+        )
+        # Near-miss #2: hidden-dir rule must prune .agentss/.
+        assert ".agentss/leak.py" not in result, (
+            f"Near-miss '.agentss/' leaked past the allowlist — the "
+            f"match is exact-name, not prefix:\n{result}"
+        )
+
+
+class TestDepthCap:
+    """WALK_MAX_DEPTH caps recursion at 10 levels (depths 0..10)."""
+
+    def test_depth_cap_fires_at_max_depth(self, tmp_path: Path, monkeypatch):
+        """Files at depth == max_depth are visible; files at depth > max_depth
+        are pruned.
+
+        Pins the "depth cap fires when the walker actually has to prune"
+        surface — the truncation notice must mention the depth cap. The cap
+        is NOT a notice trigger when the tree never reaches max_depth.
+        """
+        monkeypatch.setattr(fs, "WALK_MAX_DEPTH", 3)
+        # depth 0: tmp_path/root.py
+        (tmp_path / "root.py").write_text("x")
+        # depth 1: tmp_path/lvl1/file.py
+        lvl1 = tmp_path / "lvl1"
+        lvl1.mkdir()
+        (lvl1 / "file.py").write_text("x")
+        # depth 2: tmp_path/lvl1/lvl2/file.py
+        lvl2 = lvl1 / "lvl2"
+        lvl2.mkdir()
+        (lvl2 / "file.py").write_text("x")
+        # depth 3: tmp_path/lvl1/lvl2/lvl3/file.py (visible at depth=3)
+        lvl3 = lvl2 / "lvl3"
+        lvl3.mkdir()
+        (lvl3 / "file.py").write_text("x")
+        # depth 4: tmp_path/lvl1/lvl2/lvl3/lvl4/file.py (PRUNED at depth>3)
+        lvl4 = lvl3 / "lvl4"
+        lvl4.mkdir()
+        (lvl4 / "file.py").write_text("x")
+
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+
+        # depth 0,1,2,3 visible.
+        assert "root.py" in result
+        assert "lvl1/file.py" in result
+        assert "lvl1/lvl2/file.py" in result
+        assert "lvl1/lvl2/lvl3/file.py" in result
+        # depth 4+ pruned.
+        assert "lvl4/file.py" not in result, (
+            f"Files beyond depth cap leaked:\n{result}"
+        )
+        # Notice fires because the depth cap actually pruned something.
+        assert "depth cap" in result, (
+            f"Expected depth-cap notice when cap fired:\n{result}"
+        )
+
+    def test_depth_cap_does_not_fire_when_shallow_tree(self, tmp_path, monkeypatch):
+        """A 2-level tree under WALK_MAX_DEPTH=10 must NOT trigger the notice."""
+        monkeypatch.setattr(fs, "WALK_MAX_DEPTH", 10)
+        (tmp_path / "a.py").write_text("x")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "b.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        assert "depth cap" not in result, (
+            f"Shallow tree triggered depth-cap notice (false positive):\n{result}"
+        )
+
+    def test_depth_cap_no_notice_when_tree_ends_at_max_depth(
+        self, tmp_path, monkeypatch
+    ):
+        """WALK_MAX_DEPTH=3 with a tree that GENUINELY ends at depth 3 (no
+        dirs past the cap to prune) must NOT trigger the depth-cap notice —
+        W-F review patch.
+
+        Pins the ``saw_depth_cap = dirs and ...`` invariant in the walker:
+        a flat-finish tree (dirs==[] at the cap) is not "incomplete" — the
+        cap saw nothing to prune. Removing the `and dirs` guard (or any
+        refactor that reports the cap based on depth alone) flips this test
+        RED via a false-positive "depth cap" substring.
+        """
+        monkeypatch.setattr(fs, "WALK_MAX_DEPTH", 3)
+        # depth 0: tmp_path itself, depth 1: lvl1, depth 2: lvl2, depth 3: lvl3.
+        (tmp_path / "lvl0.py").write_text("x")
+        lvl1 = tmp_path / "lvl1"
+        lvl1.mkdir()
+        (lvl1 / "f.py").write_text("x")
+        lvl2 = lvl1 / "lvl2"
+        lvl2.mkdir()
+        (lvl2 / "f.py").write_text("x")
+        lvl3 = lvl2 / "lvl3"
+        lvl3.mkdir()
+        # lvl3 contains a file at depth 3 — but NO lvl4 dir.
+        (lvl3 / "f.py").write_text("x")
+        # Sanity check: only the dirs we created exist.
+        assert list(lvl3.iterdir()) and all(
+            p.name == "f.py" for p in lvl3.iterdir()
+        ), "fixture misconfigured — lvl3 should hold only f.py"
+
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        # The depth-3 file is at the cap and must be VISIBLE.
+        assert "lvl3/f.py" in result, (
+            f"depth-3 file should be VISIBLE at WALK_MAX_DEPTH=3:\n{result}"
+        )
+        # Critical pin: no depth-cap notice when the tree naturally ends.
+        assert "depth cap" not in result, (
+            f"W-F false-positive fired — depth-cap notice emitted for a "
+            f"tree that genuinely ends at the cap with no dirs to prune. "
+            f"Removing the `and dirs` guard in _bounded_walk's depth-cap "
+            f"check (filesystem.py depth-cap block) flips this RED. Result:\n{result}"
+        )
+
+    def test_depth_cap_notice_fires_with_4_level_chain(self, tmp_path, monkeypatch):
+        """WALK_MAX_DEPTH=3 with a 4-level chain (lvl4 dir present at depth 4)
+        must trigger the depth-cap notice.
+
+        Companion to the at-cap-complete pin above: same cap, same depth,
+        but lvl3 has a `lvl4` subdir that the walker MUST prune. The
+        ``and dirs`` clause flips True, saw_depth_cap is stamped, and the
+        notice fires. The two tests together pin both branches of the
+        ``if dirs: saw_depth_cap = True`` guard.
+        """
+        monkeypatch.setattr(fs, "WALK_MAX_DEPTH", 3)
+        (tmp_path / "lvl0.py").write_text("x")
+        lvl1 = tmp_path / "lvl1"
+        lvl1.mkdir()
+        (lvl1 / "f.py").write_text("x")
+        lvl2 = lvl1 / "lvl2"
+        lvl2.mkdir()
+        (lvl2 / "f.py").write_text("x")
+        lvl3 = lvl2 / "lvl3"
+        lvl3.mkdir()
+        (lvl3 / "f.py").write_text("x")
+        # lvl4 IS present at depth 4 — the cap must prune it.
+        lvl4 = lvl3 / "lvl4"
+        lvl4.mkdir()
+        (lvl4 / "f.py").write_text("x")
+
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        # depth-3 file visible.
+        assert "lvl3/f.py" in result, (
+            f"depth-3 file should be VISIBLE at WALK_MAX_DEPTH=3:\n{result}"
+        )
+        # depth-4 file MUST be pruned (the cap refused to descend).
+        assert "lvl4/f.py" not in result, (
+            f"depth-4 file leaked past the cap:\n{result}"
+        )
+        # Critical pin: notice DOES fire when content past the cap exists.
+        assert "depth cap" in result, (
+            f"Depth-cap notice MUST fire when lvl4 dir was pruned — the "
+            f"`and dirs` guard on saw_depth_cap should have caught it. "
+            f"Removing the guard flips this RED via a false-NEGATIVE. "
+            f"Result:\n{result}"
+        )
+
+
+class TestFileCountCap:
+    """WALK_MAX_FILE_COUNT caps the materialized candidate list."""
+
+    def test_file_count_cap_stops_walk(self, tmp_path, monkeypatch):
+        """When the file count exceeds the cap, the walk STOPS — files after
+        the cap are NOT scanned even if they would match.
+
+        Pins the "stop-the-walk, don't keep walking to discard later"
+        property. We monkeypatch the cap small (5) and create 20 files; only
+        5 should appear in the result, AND the notice must mention the cap.
+        """
+        monkeypatch.setattr(fs, "WALK_MAX_FILE_COUNT", 5)
+        for i in range(20):
+            (tmp_path / f"file_{i:02d}.py").write_text(f"x{i}")
+        result = fs.glob_files.invoke({"pattern": "*.py", "path": str(tmp_path)})
+        # Count match lines (everything before any "---" pagination hint).
+        match_lines = [
+            line for line in result.split("\n")
+            if line and not line.startswith("---") and not line.startswith("Showing")
+            and "Search incomplete" not in line
+        ]
+        assert len(match_lines) == 5, (
+            f"Expected 5 files under cap, got {len(match_lines)}:\n{result}"
+        )
+        assert "file-count cap" in result, (
+            f"Expected file-count-cap notice:\n{result}"
+        )
+
+    def test_file_count_cap_uses_constant(self):
+        """Pinned at 10,000 — large enough that any sane project fits."""
+        assert fs.WALK_MAX_FILE_COUNT == 10_000
+
+
+class TestPerFileSizeSkip:
+    """WALK_MAX_FILE_SIZE_BYTES gates grep_files' per-file read."""
+
+    def test_oversized_file_skipped_with_notice(self, tmp_path, monkeypatch):
+        """A file larger than the (monkeypatched) cap must be skipped (no
+        read_text, no match), and the truncation notice must mention the
+        skip count."""
+        monkeypatch.setattr(fs, "WALK_MAX_FILE_SIZE_BYTES", 100)  # tiny cap
+        small = tmp_path / "small.py"
+        small.write_text("MATCH_HIT = 'found'\n")
+        big = tmp_path / "big.py"
+        # 1 KB > 100B cap.
+        big.write_text("MATCH_HIT = 'found'\n" + ("#" * 1000 + "\n") * 1)
+
+        result = fs.grep_files.invoke(
+            {"pattern": "MATCH_HIT", "path": str(tmp_path), "include": "*.py"}
+        )
+        # Small file's match is in the output.
+        assert "small.py" in result, (
+            f"Small file missing from result:\n{result}"
+        )
+        # Big file's match was skipped — no reference to big.py.
+        assert "big.py" not in result, (
+            f"Oversized file was scanned (read_text bypassed):\n{result}"
+        )
+        # Notice mentions oversized skip count.
+        assert "oversized file(s) skipped" in result, (
+            f"Expected oversized-skip notice:\n{result}"
+        )
+
+    def test_size_cap_uses_constant(self):
+        assert fs.WALK_MAX_FILE_SIZE_BYTES == 1_500_000
+
+
+class TestTimeoutFires:
+    """WALK_TIMEOUT_SECONDS bounds the walk duration."""
+
+    def test_timeout_fires_with_monkeypatched_small_constant(
+        self, tmp_path, monkeypatch
+    ):
+        """Patch ``time.monotonic`` so the walker-layer deadline provably fires.
+
+        This pin isolates the WALKER-layer deadline check in ``_bounded_walk``
+        (``daemon/tools/filesystem.py``, the ``time.monotonic() > deadline``
+        comparison at the top of the os.walk loop) — not the post-walk stat /
+        read phase deadlines. The earlier version of this test only asserted
+        "timeout appears somewhere in result", which let a walker-only strip
+        stay GREEN because W-A's post-walk stat-phase reason also contains the
+        substring ``"timeout"``.
+
+        W-D contract:
+          * With the walker-layer deadline check in place, the fake monotonic
+            counter (1st call → 1.0, 2nd call → 2.0) makes the walker break
+            out on its 2nd tick, stamping ``stopped_reason="timeout"`` —
+            notice builder emits ``"timeout (Ns)"`` (the only reason
+            containing the substring ``"timeout ("``). The walk never reaches
+            the post-walk stat phase, so the phase-timeout reasons are absent.
+          * Walker-only strip (mutate the walker-loop deadline comparison):
+            the walker no longer breaks mid-loop, the walk completes, but
+            W-A's post-walk stat phase sees the fake counter past the
+            stamped deadline and fires ``"timeout during stat phase"``. The
+            negative assertions (no phase-timeout reason, but the walker-layer
+            ``"timeout ("`` prefix is required) flip RED.
+          * All-three strip (walker + post-walk stat + post-walk read):
+            no deadline ever fires, the walk completes without a notice, the
+            "Search incomplete" assertion flips RED.
+
+        Hermetic and fast (no real sleeps, <1 s on CI).
+        """
+        # Single file is enough — the walker's deadline check fires on the
+        # 2nd time.monotonic() call (1st sets deadline, 2nd is the check).
+        (tmp_path / "f.py").write_text("x")
+        # Tiny timeout in "monotonic units".
+        monkeypatch.setattr(fs, "WALK_TIMEOUT_SECONDS", 0.001)
+        # fake_monotonic: 1st call → 1.0 (deadline becomes 1.001); 2nd call
+        # → 2.0 (2.0 > 1.001 ⇒ deadline check fires, walker breaks).
+        monotonic_counter = {"n": 0}
+
+        def fake_monotonic() -> float:
+            monotonic_counter["n"] += 1
+            return float(monotonic_counter["n"])
+
+        monkeypatch.setattr(fs.time, "monotonic", fake_monotonic)
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        # UNCONDITIONAL positive pins — without ANY deadline check, the walk
+        # completes silently and these go RED.
+        assert "Search incomplete" in result, (
+            f"Deadline enforcement un-pinned — the walker should have "
+            f"stopped with a 'Search incomplete' notice. Removing every "
+            f"deadline check in the walker + post-walk stat/read phases "
+            f"would still pass this test. Result:\n{result}"
+        )
+        # Walker-layer isolation: the walker's deadline break stamps
+        # stopped_reason="timeout", which the notice builder formats as
+        # f"timeout ({timeout_seconds:g}s)". The substring "timeout (" is
+        # UNIQUE to the walker-layer reason — the post-walk phase reasons
+        # use "timeout during stat phase" / "timeout during read phase".
+        # Asserting the prefix (not the full digits) keeps the pin stable
+        # against monkeypatched-time formatting drift.
+        assert "timeout (" in result, (
+            f"Walker-layer deadline check un-pinned — only the walker-layer "
+            f"reason emits the 'timeout (' prefix; stripping just the "
+            f"walker's deadline check makes this assertion RED. Result:\n{result}"
+        )
+        # NEGATIVE pins: with the fake counter the walker fires first, so
+        # healthy code never reaches a post-walk phase timeout in this test.
+        # A walker-only strip lets the walk complete, after which W-A's
+        # post-walk stat phase (with the same already-stamped deadline) fires
+        # "timeout during stat phase" — those mutations go RED here.
+        assert "timeout during stat phase" not in result, (
+            f"Walker's deadline check missing — the walk completed past the "
+            f"deadline and the post-walk stat phase fired instead. The "
+            f"walker-layer check in _bounded_walk must break the loop "
+            f"before stat phase sees the deadline. Result:\n{result}"
+        )
+        assert "timeout during read phase" not in result, (
+            f"Walker's deadline check missing — the walk completed past the "
+            f"deadline and the post-walk read phase fired instead. The "
+            f"walker-layer check in _bounded_walk must break the loop "
+            f"before read phase sees the deadline. Result:\n{result}"
+        )
+        # Sanity: the patched monotonic was actually called (we need at
+        # least the deadline-set + one check for the timeout to fire).
+        assert monotonic_counter["n"] >= 2, (
+            f"fake_monotonic called {monotonic_counter['n']} times — "
+            f"expected ≥ 2 (deadline-set + check)"
+        )
+
+    def test_stat_phase_timeout_fires(self, tmp_path, monkeypatch):
+        """Walk completes within budget, then the SIZE-PREFILTER stat loop
+        expires past the deadline.
+
+        Drives the walker past its checks (calls 1, 2 return small values)
+        then forces the stat-loop check (call 3 onwards) to return past the
+        deadline. With the N1 stat-loop deadline check in place, the loop
+        breaks on its FIRST check and stamps ``"timeout during stat phase"``;
+        the read loop never runs and cannot overwrite the reason — a None-guard
+        in the read loop guarantees this even if stat has not yet short-
+        circuited. Removing the new ``time.monotonic() > phase_deadline`` check
+        in the stat loop (or the None-guard in the read loop) flips this test
+        RED — pin discipline same as the W-D walker-layer pin.
+        """
+        (tmp_path / "f.py").write_text("MATCH_TOKEN = 'x'\n")
+        monkeypatch.setattr(fs, "WALK_TIMEOUT_SECONDS", 100.0)  # walker stays happy
+        monotonic_counter = {"n": 0}
+
+        def fake_monotonic() -> float:
+            monotonic_counter["n"] += 1
+            n = monotonic_counter["n"]
+            # Calls 1-2: walker stamps + checks the deadline — return small.
+            # Calls 3+ (stat loop): past the deadline → stat fires "stat".
+            if n <= 2:
+                return float(n)  # 1.0, 2.0 — deadline = 1.0 + 100.0 = 101.0
+            return 200.0  # 200 > 101 → stat-loop expires
+
+        monkeypatch.setattr(fs.time, "monotonic", fake_monotonic)
+        result = fs.grep_files.invoke({
+            "pattern": "MATCH_TOKEN",
+            "path": str(tmp_path),
+            "include": "*.py",
+        })
+        # POSITIVE phase pin — only the stat-phase reason contains this string.
+        # Distinct from the walker-layer "timeout (Ns)" prefix and from
+        # "timeout during read phase" (substring discipline preserved).
+        assert "timeout during stat phase" in result, (
+            f"Stat-phase deadline check un-pinned — the size-prefilter loop "
+            f"ran past the deadline without breaking. Removing the new "
+            f"`time.monotonic() > phase_deadline` check in grep_files' "
+            f"size-prefilter stat loop would flip this RED. "
+            f"Result:\n{result}"
+        )
+        # Negative pins — phase isolation. Walker passed (kept under cap),
+        # so the walker reason and the read-phase reason are both absent.
+        assert "timeout (" not in result, (
+            f"Walker-layer timeout fired — fake_monotonic choreography wrong: "
+            f"walker should have completed within budget. Result:\n{result}"
+        )
+        assert "timeout during read phase" not in result, (
+            f"Read-phase reason leaked into stat-phase pin — read loop "
+            f"should not have run after stat broke. Result:\n{result}"
+        )
+
+    def test_read_phase_timeout_fires(self, tmp_path, monkeypatch):
+        """Walk + stat prefilter complete within budget, then the READ loop
+        expires past the deadline.
+
+        Graduated fake_monotonic: calls 1-2 (walker) and call 3 (stat) return
+        small values so both phases complete; calls 4+ (read loop) return
+        past the deadline. The shared ``phase_deadline`` lets the read loop
+        see the same cap, and the None-guard prevents any leftover walker/
+        stat state from being overwritten. Removing the ``time.monotonic() >
+        phase_deadline`` check in the read_text loop of grep_files would
+        flip this test RED — pin discipline matches the W-A read-loop fix.
+        """
+        (tmp_path / "f.py").write_text("MATCH_TOKEN = 'x'\n")
+        monkeypatch.setattr(fs, "WALK_TIMEOUT_SECONDS", 100.0)
+        monotonic_counter = {"n": 0}
+
+        def fake_monotonic() -> float:
+            monotonic_counter["n"] += 1
+            n = monotonic_counter["n"]
+            if n <= 2:
+                return float(n)  # walker: 1.0, 2.0
+            if n == 3:
+                return 50.0  # stat: 50 < 101 → stat completes
+            return 200.0  # read: 200 > 101 → read expires
+
+        monkeypatch.setattr(fs.time, "monotonic", fake_monotonic)
+        result = fs.grep_files.invoke({
+            "pattern": "MATCH_TOKEN",
+            "path": str(tmp_path),
+            "include": "*.py",
+        })
+        # POSITIVE phase pin — only the read-phase reason contains this string.
+        assert "timeout during read phase" in result, (
+            f"Read-phase deadline check un-pinned — the read loop ran past "
+            f"the deadline without breaking. Removing the new "
+            f"`time.monotonic() > phase_deadline` check in grep_files' "
+            f"read_text loop flips this RED. "
+            f"Result:\n{result}"
+        )
+        # Negative pins — walker + stat completed cleanly.
+        assert "timeout (" not in result, (
+            f"Walker-layer timeout fired — fake_monotonic choreography wrong: "
+            f"walker should have completed within budget. Result:\n{result}"
+        )
+        assert "timeout during stat phase" not in result, (
+            f"Stat-phase reason leaked into read-phase pin — stat loop "
+            f"should have completed (call 3 = 50 < deadline = 101). Result:\n{result}"
+        )
+
+    def test_happy_path_does_not_trigger_timeout_notice(self, tmp_path, monkeypatch):
+        """A small tree within the default 20 s budget must NOT trigger the
+        timeout notice."""
+        (tmp_path / "a.py").write_text("x")
+        (tmp_path / "b.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "*.py", "path": str(tmp_path)})
+        assert "timeout" not in result, (
+            f"Small tree triggered timeout notice:\n{result}"
+        )
+
+
+class TestAbsolutePathGuard:
+    """Walk-tool absolute-path boundary — closes the 2026-09-23 incident shape.
+
+    Semantics (see ``_resolve_search_root``):
+      - Absolute path WITH workdir: allowed iff within workdir OR temp dir.
+      - Absolute path WITHOUT workdir: allowed ONLY if in temp dir.
+      - Relative path: same as file tools.
+      - Bare absolute path outside workdir AND outside temp: REFUSED.
+    """
+
+    def test_abs_in_temp_no_workdir_allowed(self, tmp_path):
+        """tmp_path is in the system temp dir; absolute-no-workdir is allowed."""
+        (tmp_path / "x.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "*.py", "path": str(tmp_path)})
+        assert "ERROR" not in result
+        assert "x.py" in result
+
+    def test_abs_outside_workdir_no_workdir_refused(self):
+        """Bare absolute path outside workdir + outside temp is REFUSED.
+
+        This is the 2026-09-23 incident shape (bare ``/Users/...`` walk).
+        The error must redirect them to scope the walk.
+        """
+        # Repo root derived from this test file's location — NEVER hardcode.
+        non_temp_root = Path(__file__).resolve().parent.parent.parent
+        # The repo root might still be in temp on CI; assert non-temp first.
+        assert not fs.WorkspaceGuard._is_in_temp_dir(non_temp_root), (
+            f"Test root {non_temp_root} unexpectedly in temp dir — pick another"
+        )
+        result = fs.glob_files.invoke(
+            {"pattern": "*.py", "path": str(non_temp_root)}
+        )
+        assert "ERROR" in result
+        # Error references the new contract.
+        assert "workdir" in result, (
+            f"Error should mention workdir requirement:\n{result}"
+        )
+
+    def test_abs_outside_workdir_with_workdir_inside_allowed(self, tmp_path):
+        """Absolute path WITH workdir, contained inside the workdir: OK."""
+        # The workdir is tmp_path itself; absolute search root is a child.
+        child = tmp_path / "child"
+        child.mkdir()
+        (child / "x.py").write_text("x")
+        result = fs.glob_files.invoke({
+            "pattern": "*.py",
+            "path": str(child),
+            "workdir": str(tmp_path),
+        })
+        assert "ERROR" not in result, result
+        assert "x.py" in result
+
+    def test_relative_path_requires_workdir(self, tmp_path):
+        """Relative path still requires workdir (unchanged semantics)."""
+        result = fs.glob_files.invoke({"pattern": "*.py", "path": "."})
+        assert "ERROR" in result
+        assert "workdir is required" in result
+
+    def test_abs_outside_workdir_refused_non_temp(self):
+        """Absolute path with workdir, OUTSIDE the workdir: REFUSED — pinned
+        unconditionally on a NON-temp fixture pair.
+
+        The sibling-of-tmp_path pin (now removed — N3) skipped on every
+        platform with ``tmp_path.parent`` under the system temp dir; the
+        temp-allowance made refusal N/A and the test silently skipped.
+        This test uses the repo's own ``tests/`` and ``daemon/`` directories
+        (non-temp on the primary dev platform) so the refusal pin runs
+        UNCONDITIONALLY — removing the workdir-containment check in
+        ``_resolve_search_root`` would flip this test RED. — W-E review patch.
+        """
+        # Repo root derived from this test file's location — NEVER hardcode.
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        workdir = repo_root / "tests"
+        outside_root = repo_root / "daemon"
+        # Sanity guards — HARD-RED (not skip) under temp-dir CI checkouts
+        # by design: the pin is unconditional so a skip would defeat its
+        # purpose. A skip here means the fixture pair drifted; loud-fail
+        # beats silent-skip.
+        assert workdir.exists() and workdir.is_dir(), (
+            f"workdir {workdir} does not exist — test fixture broken"
+        )
+        assert outside_root.exists() and outside_root.is_dir(), (
+            f"outside_root {outside_root} does not exist — test fixture broken"
+        )
+        assert not fs.WorkspaceGuard._is_in_temp_dir(workdir), (
+            f"workdir {workdir} unexpectedly in temp dir — pin meaningless"
+        )
+        assert not fs.WorkspaceGuard._is_in_temp_dir(outside_root), (
+            f"outside_root {outside_root} unexpectedly in temp dir — pin meaningless"
+        )
+        assert workdir.resolve() not in outside_root.resolve().parents, (
+            "fixture misconfigured: outside_root is inside workdir"
+        )
+        result = fs.glob_files.invoke({
+            "pattern": "**/*.py",
+            "path": str(outside_root),
+            "workdir": str(workdir),
+        })
+        assert "ERROR" in result, (
+            f"Non-temp refusal not pinned — outside_root must be REFUSED "
+            f"when workdir is a sibling. Result:\n{result}"
+        )
+        assert "outside workspace boundary" in result, (
+            f"Error should mention workspace boundary:\n{result}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Incident-shape repro: a wide tree with the actual exclusion list + size cap
+# + deep chain, asserting bounded candidate count + exclusions + size skips
+# + loud truncation messaging.
+# ---------------------------------------------------------------------------
+
+
+class TestIncidentShapeRepro:
+    """Synthetic tree mirroring the 2026-09-23 incident's worst shape."""
+
+    def test_bounded_candidate_count_under_exclusion_storm(
+        self, tmp_path, monkeypatch
+    ):
+        """Stuff the tree with excluded dirs (node_modules, .venv, venv, .git,
+        __pycache__, .cache, .next, dist, build, target) full of junk files.
+        The walker must prune ALL of them — the materialized candidate list
+        must be small and bounded, never the inflated count.
+        """
+        # Monkeypatch the cap small so we can clearly observe the bound.
+        monkeypatch.setattr(fs, "WALK_MAX_FILE_COUNT", 10)
+        # One real kept file at root.
+        (tmp_path / "real.py").write_text("REAL_TOKEN = 'x'\n")
+        # Ten excluded dirs, each with 50 junk files (would be 500 candidates
+        # under the unbounded walker — 50× the cap).
+        for excl in ("node_modules", ".venv", "venv", ".git", "__pycache__",
+                     ".cache", ".next", "dist", "build", "target"):
+            d = tmp_path / excl
+            d.mkdir()
+            for i in range(50):
+                (d / f"junk_{i:03d}.py").write_text("junk")
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        # Only real.py should appear (everything under excluded dirs pruned).
+        assert "real.py" in result
+        for excl in ("node_modules", ".venv", "venv", ".git", "__pycache__",
+                     ".cache", ".next", "dist", "build", "target"):
+            assert excl not in result, (
+                f"Excluded dir {excl} leaked into output:\n{result}"
+            )
+
+    def test_oversized_file_skipped_in_incident_shape(
+        self, tmp_path, monkeypatch
+    ):
+        """An oversized file in the search root is skipped (no read_text)."""
+        monkeypatch.setattr(fs, "WALK_MAX_FILE_SIZE_BYTES", 100)
+        (tmp_path / "small.py").write_text("MATCH = 'found'\n")
+        # 2 KB file > 100B cap.
+        big = tmp_path / "huge.py"
+        big.write_text("MATCH = 'found'\n" + ("padpadpad\n" * 200))
+        result = fs.grep_files.invoke({
+            "pattern": "MATCH", "path": str(tmp_path), "include": "*.py",
+        })
+        assert "small.py" in result, f"Small file missing:\n{result}"
+        assert "huge.py" not in result, (
+            f"Oversized huge.py was scanned (read_text bypassed):\n{result}"
+        )
+        assert "oversized" in result, (
+            f"Expected oversized-skip notice:\n{result}"
+        )
+
+    def test_deep_chain_bounded_by_depth_cap(self, tmp_path, monkeypatch):
+        """A 15-level deep chain under depth cap=5 is pruned at level 5+.
+
+        The walker visits dirs at depths 0..max_depth (= 0..5 here) and
+        scans files INSIDE those dirs (file_N.py lives in lvlN at depth
+        N+1, so file_0..file_4 land in depths 1..5). lvl5 is at depth 6 —
+        past the cap — so file_5+ are pruned.
+        """
+        monkeypatch.setattr(fs, "WALK_MAX_DEPTH", 5)
+        # Build chain of depth 15.
+        chain = tmp_path
+        for level in range(15):
+            chain = chain / f"lvl{level}"
+            chain.mkdir()
+            (chain / f"file_{level}.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        # Files at depths 1..5 visible (file_0 through file_4).
+        for level in range(5):
+            assert f"lvl{level}/file_{level}.py" in result, (
+                f"Depth {level} file missing:\n{result}"
+            )
+        # file_5..file_14 pruned (lvl5 at depth 6 is past max_depth=5).
+        for level in range(5, 15):
+            assert f"lvl{level}/file_{level}.py" not in result, (
+                f"Depth {level} file leaked past cap:\n{result}"
+            )
+        # Notice mentions the cap.
+        assert "depth cap" in result, f"Expected depth-cap notice:\n{result}"
+
+
+# ---------------------------------------------------------------------------
+# Truncation notice format / loud messaging
+# ---------------------------------------------------------------------------
+
+
+class TestTruncationNotice:
+    """When a cap fires the result carries a "Search incomplete" notice."""
+
+    def test_notice_format_under_file_count_cap(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(fs, "WALK_MAX_FILE_COUNT", 3)
+        for i in range(10):
+            (tmp_path / f"f_{i:02d}.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "*.py", "path": str(tmp_path)})
+        assert "⚠ Search incomplete" in result, (
+            f"Loud warning missing in result:\n{result}"
+        )
+        assert "file-count cap" in result
+        assert "narrow the root or raise pattern specificity" in result
+
+    def test_notice_format_under_depth_cap(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(fs, "WALK_MAX_DEPTH", 1)
+        (tmp_path / "root.py").write_text("x")
+        d = tmp_path / "sub"
+        d.mkdir()
+        (d / "sub.py").write_text("x")
+        sd = d / "subsub"
+        sd.mkdir()
+        (sd / "deep.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        assert "⚠ Search incomplete" in result, (
+            f"Loud warning missing in result:\n{result}"
+        )
+        assert "depth cap" in result
+
+    def test_no_notice_on_happy_path(self, tmp_path):
+        """A small tree within all caps must NOT carry the truncation notice."""
+        (tmp_path / "a.py").write_text("x")
+        (tmp_path / "b.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "*.py", "path": str(tmp_path)})
+        assert "⚠ Search incomplete" not in result, (
+            f"Happy-path result carried truncation notice:\n{result}"
+        )
+
+    def test_exclusions_alone_do_not_trigger_notice(self, tmp_path):
+        """Exclusions are ALWAYS on — not an incomplete signal by themselves."""
+        # Tree with excluded dirs but small enough that no cap fires.
+        (tmp_path / "real.py").write_text("x")
+        excl = tmp_path / "node_modules"
+        excl.mkdir()
+        (excl / "junk.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "*.py", "path": str(tmp_path)})
+        assert "⚠ Search incomplete" not in result, (
+            f"Exclusions alone triggered truncation notice (false positive):\n{result}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Pattern matching fidelity — preserve Path.glob semantics for the existing
+# pattern shapes that the rest of the tool ecosystem depends on.
+# ---------------------------------------------------------------------------
+
+
+class TestPatternFidelity:
+    """Pattern matching after the bounded walker must match Path.glob.
+
+    These pins protect the rewrite from regressing the documented glob
+    semantics. Where the walker introduces a deviation (e.g. hidden dirs
+    pruned, hidden files still matched), tests pin the deviation explicitly.
+    """
+
+    def test_star_py_is_root_only(self, tmp_path):
+        """``*.py`` matches direct children only (NOT subdirs)."""
+        (tmp_path / "root.py").write_text("x")
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        (nested / "child.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "*.py", "path": str(tmp_path)})
+        assert "root.py" in result
+        assert "child.py" not in result, (
+            f"*.py matched subdir file (should be root-only):\n{result}"
+        )
+
+    def test_double_star_py_is_recursive(self, tmp_path):
+        """``**/*.py`` matches at any depth."""
+        (tmp_path / "root.py").write_text("x")
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        (nested / "child.py").write_text("x")
+        deeper = nested / "deeper"
+        deeper.mkdir()
+        (deeper / "deep.py").write_text("x")
+        result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        assert "root.py" in result
+        assert "nested/child.py" in result
+        assert "nested/deeper/deep.py" in result
+
+    def test_src_double_star_ts_is_anchored(self, tmp_path):
+        """``src/**/*.ts`` is anchored to a src/ subtree."""
+        ok = tmp_path / "src" / "sub"
+        ok.mkdir(parents=True)
+        (ok / "ok.ts").write_text("x")
+        wrong = tmp_path / "other"
+        wrong.mkdir()
+        (wrong / "bad.ts").write_text("x")
+        result = fs.glob_files.invoke(
+            {"pattern": "src/**/*.ts", "path": str(tmp_path)}
+        )
+        assert "src/sub/ok.ts" in result
+        assert "other/bad.ts" not in result, (
+            f"Anchored pattern matched outside src/:\n{result}"
+        )
+
+    def test_no_include_recurses_all_files(self, tmp_path):
+        """Empty include matches all files (the ``**/*`` fallback)."""
+        (tmp_path / "a.py").write_text("x")
+        d = tmp_path / "d"
+        d.mkdir()
+        (d / "b.txt").write_text("x")
+        result = fs.grep_files.invoke({
+            "pattern": "x", "path": str(tmp_path),
+        })
+        assert "a.py" in result
+        assert "b.txt" in result
+
+    def test_brace_union_matches_both_extensions(self, tmp_path):
+        """Brace union ``*.{py,txt}`` matches both extensions recursively."""
+        (tmp_path / "a.py").write_text("TOKEN = 'x'\n")
+        d = tmp_path / "d"
+        d.mkdir()
+        (d / "b.txt").write_text("TOKEN = 'x'\n")
+        result = fs.grep_files.invoke({
+            "pattern": "TOKEN", "path": str(tmp_path), "include": "*.{py,txt}",
+        })
+        assert "a.py" in result
+        assert "b.txt" in result
+
+    def test_brace_form_in_braces_matches_both(self, tmp_path):
+        """``{*.py,*.txt}`` brace form also matches both extensions."""
+        (tmp_path / "a.py").write_text("TOKEN = 'x'\n")
+        d = tmp_path / "d"
+        d.mkdir()
+        (d / "b.txt").write_text("TOKEN = 'x'\n")
+        result = fs.grep_files.invoke({
+            "pattern": "TOKEN", "path": str(tmp_path), "include": "{*.py,*.txt}",
+        })
+        assert "a.py" in result
+        assert "b.txt" in result
+
+
+# ---------------------------------------------------------------------------
+# _bounded_walk / WalkReport unit-level pins
+# ---------------------------------------------------------------------------
+
+
+class TestBoundedWalkUnit:
+    """Unit tests on the walker itself (not through the @tool wrappers)."""
+
+    def test_walk_returns_empty_for_nonexistent_dir(self, tmp_path):
+        ghost = tmp_path / "ghost"
+        # Doesn't exist — caller is responsible for existence checks; the
+        # walker itself walks what's there (and 0 entries for a missing dir).
+        # On most platforms os.walk on a missing dir just yields nothing.
+        report = fs._bounded_walk(ghost)
+        assert report.files == []
+        assert report.stopped_reason is None
+
+    def test_walk_excludes_named_dirs(self, tmp_path):
+        (tmp_path / "kept.py").write_text("x")
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "junk.py").write_text("x")
+        report = fs._bounded_walk(tmp_path)
+        names = {f.name for f in report.files}
+        assert "kept.py" in names
+        assert "junk.py" not in names
+
+    def test_walk_returns_walk_report_dataclass(self, tmp_path):
+        report = fs._bounded_walk(tmp_path)
+        assert isinstance(report, fs.WalkReport)
+        assert hasattr(report, "files")
+        assert hasattr(report, "stopped_reason")
+        # Negative pin — WalkReport.timed_out_at was removed (dead write-only
+        # field; stopped_reason already tells callers WHERE the walker stalled).
+        assert not hasattr(report, "timed_out_at"), (
+            "WalkReport.timed_out_at was dropped as a dead field — its "
+            "presence here means a re-introduction slipped past review."
+        )
+
+
+class TestFileMatchesPattern:
+    """Unit tests on _file_matches_pattern (PurePath.full_match bridge)."""
+
+    def test_star_py_root(self, tmp_path):
+        f = tmp_path / "foo.py"
+        f.write_text("x")
+        assert fs._file_matches_pattern(f, tmp_path, "*.py") is True
+
+    def test_star_py_subdir_rejected(self, tmp_path):
+        sub = tmp_path / "nested"
+        sub.mkdir()
+        f = sub / "foo.py"
+        f.write_text("x")
+        # `*.py` does NOT match nested/foo.py — pathlib's `*` doesn't cross /.
+        assert fs._file_matches_pattern(f, tmp_path, "*.py") is False
+
+    def test_double_star_py_subdir_accepted(self, tmp_path):
+        sub = tmp_path / "nested"
+        sub.mkdir()
+        f = sub / "foo.py"
+        f.write_text("x")
+        assert fs._file_matches_pattern(f, tmp_path, "**/*.py") is True
+
+    def test_src_anchored(self, tmp_path):
+        ok_dir = tmp_path / "src" / "sub"
+        ok_dir.mkdir(parents=True)
+        ok = ok_dir / "foo.ts"
+        ok.write_text("x")
+        assert fs._file_matches_pattern(ok, tmp_path, "src/**/*.ts") is True
+        wrong_dir = tmp_path / "other"
+        wrong_dir.mkdir(parents=True)
+        wrong = wrong_dir / "foo.ts"
+        wrong.write_text("x")
+        assert fs._file_matches_pattern(wrong, tmp_path, "src/**/*.ts") is False
+
+
+class TestResolveSearchRoot:
+    """Unit tests on _resolve_search_root (walk-tool boundary)."""
+
+    def test_relative_path_delegates_to_resolve_within_workdir(self, tmp_path):
+        """Relative path uses the same resolver as read/write/edit."""
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        target, err = fs._resolve_search_root(".", str(sub))
+        assert err is None
+        assert target == sub.resolve()
+
+    def test_relative_path_without_workdir_errors(self):
+        target, err = fs._resolve_search_root(".", None)
+        assert err is not None
+        assert target is None
+
+    def test_absolute_temp_path_no_workdir_allowed(self, tmp_path):
+        """tmp_path is in temp; absolute-no-workdir is allowed."""
+        target, err = fs._resolve_search_root(str(tmp_path), None)
+        assert err is None
+        assert target == tmp_path.resolve()
+
+    def test_absolute_non_temp_no_workdir_refused(self):
+        """Bare absolute path outside workdir AND outside temp: REFUSED.
+
+        The 2026-09-23 incident shape.
+        """
+        # Repo root derived from this test file's location — NEVER hardcode.
+        non_temp = Path(__file__).resolve().parent.parent.parent
+        # Sanity: must actually be outside temp for this test to be meaningful.
+        assert not fs.WorkspaceGuard._is_in_temp_dir(non_temp), (
+            f"Test root {non_temp} unexpectedly in temp dir — pin "
+            "meaningless on this filesystem"
+        )
+        target, err = fs._resolve_search_root(str(non_temp), None)
+        assert target is None
+        assert err is not None
+        assert "workdir" in err
+
+    def test_absolute_within_workdir_allowed(self, tmp_path):
+        """Absolute path WITH workdir, inside workdir: allowed."""
+        child = tmp_path / "child"
+        child.mkdir()
+        target, err = fs._resolve_search_root(str(child), str(tmp_path))
+        assert err is None
+        assert target == child.resolve()
+
+    def test_absolute_outside_workdir_refused_non_temp(self):
+        """Absolute path with workdir, OUTSIDE workdir: REFUSED — pinned
+        unconditionally on a NON-temp fixture pair.
+
+        Mirrors the tool-level pin at
+        ``TestAbsolutePathGuard.test_abs_outside_workdir_refused_non_temp``:
+        the sibling-of-tmp_path pin (now removed — N3) skipped on every
+        platform with ``tmp_path.parent`` under the system temp dir; the
+        temp-allowance made refusal N/A and the test silently skipped.
+        This test uses the repo's own ``tests/`` (workdir) and ``daemon/``
+        (outside root) — both non-temp on the primary dev platform — so the
+        refusal pin runs UNCONDITIONALLY at the resolver layer too. Removing
+        the workdir-containment check in ``_resolve_search_root`` would flip
+        this test RED. — W-E review patch.
+        """
+        # Repo root derived from this test file's location — NEVER hardcode.
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        workdir = repo_root / "tests"
+        outside_root = repo_root / "daemon"
+        # Sanity guards — HARD-RED (not skip) under temp-dir CI checkouts
+        # by design: the pin is unconditional so a skip would defeat its
+        # purpose. A skip here means the fixture pair drifted; loud-fail
+        # beats silent-skip.
+        assert workdir.exists() and workdir.is_dir(), (
+            f"workdir {workdir} does not exist — test fixture broken"
+        )
+        assert outside_root.exists() and outside_root.is_dir(), (
+            f"outside_root {outside_root} does not exist — test fixture broken"
+        )
+        assert not fs.WorkspaceGuard._is_in_temp_dir(workdir), (
+            f"workdir {workdir} unexpectedly in temp dir — pin meaningless"
+        )
+        assert not fs.WorkspaceGuard._is_in_temp_dir(outside_root), (
+            f"outside_root {outside_root} unexpectedly in temp dir — pin meaningless"
+        )
+        assert workdir.resolve() not in outside_root.resolve().parents, (
+            "fixture misconfigured: outside_root is inside workdir"
+        )
+        target, err = fs._resolve_search_root(str(outside_root), str(workdir))
+        assert target is None, (
+            f"Non-temp refusal not pinned — outside_root must be REFUSED "
+            f"when workdir is a sibling. Got target={target}, err={err}"
+        )
+        assert err is not None
+        assert "outside workspace boundary" in err, (
+            f"Error should mention workspace boundary: {err}"
+        )
