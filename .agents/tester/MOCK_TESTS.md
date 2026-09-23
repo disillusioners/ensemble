@@ -474,3 +474,44 @@ Edit-Source modal agent selection fix (WeakMap memoization of toSelectOptions + 
 - **Result**: **PASS** — MIXED 11/11 (IDLE-ROOT + IDLE-CHILD absent panel-wide; RUN-ROOT visible aria-level=1; ORPHAN-CHILD promoted root aria-level=1; DONE-ROOT/ERR-ROOT in RECENT; receipts incl. MOCK-RCPT-IDLEPARENT Z4 bound to hidden idle root surfaced via recentFlat) + ALLIDLE 4/4 ("No jobs" + "Queue is currently idle", app responsive). 0 uncaught pageerrors (expected 404 noise: notifications SSE, /api/projects, /api/settings/*, /api/health, /api/agents, /api/migration/availability). Playwright-as-library 1.60.0 headless Chromium; browser-drive ~23s. Ports 10080/4199 verified freed; 8088/9797/8079 untouched.
 - **Quick Fixes**: none (smoke)
 - **Report**: `.agents/tester/RESULTS/2026-09-19-fe-job-queue-hide-idle-instances.md`; evidence `test/packs-fe-smoke-mock/evidence/`
+
+---
+
+## Mock Test: Job-Event Watch Replay Incident Scenario (branch fix/job-event-watch-replay)
+
+### Metadata
+- **Created**: 2026-09-23
+- **Script**: `test/scenarios/job_watch_replay_incident_scenario.py` (new; script-style, NOT pytest-collected)
+- **Language**: Python
+- **Status**: PLANNED
+
+### Configuration
+- **Timeout**: 120s script-internal / 300s command-level (dual-layer)
+- **Service Port**: NONE (in-process, no server)
+- **Mock Ports**: NONE
+- **Cleanup**: No ports; in-memory/temp-file SQLite only; delete temp DB files on exit
+- **ENV SAFETY (MANDATORY)**: `unset POSTGRES_PASSWORD POSTGRES_HOST POSTGRES_USER POSTGRES_PORT POSTGRES_DB POSTGRES_URL DATABASE_URL` before ANY execution — ambient POSTGRES_* points at LIVE ensemble_prod. The scenario MUST construct its own SQLite stack explicitly (never rely on ambient env).
+
+### What It Tests
+Reproduces the ORIGINAL incident shape from mission f27e2d15 on a synthetic SQLite stack (real resolver/repos where reachable, honest fakes otherwise — same atomicity contract). PARKED MISSION f27e2d15 MUST NOT BE TOUCHED — synthetic fixtures only.
+- Mission instance with N receipts: 9 already-terminal + several live
+- (a) `watch_mission` → ONLY live receipts armed (registration-time terminal filter)
+- (b) flip mission instance → completed: armed set fires EXACTLY ONCE; ZERO notifications for the 9 pre-terminal receipts
+- (c) re-call `watch_mission` → flip again → NO second burst (delta-arm; no duplicates)
+- (d) NO non-failed receipt ever carries assistant-message content in the `Error:` slot — inspect rendered payload if reachable, else the notify_watchers call args (failed→error=, else result_summary=)
+- (e) `unwatch_job` after consumption → NO NEW emissions after unwatch (already-enqueued backlog delivery semantics unchanged by design — only confirm zero new)
+
+### Reference Harness
+- `.agents/tester/RESULTS/2026-09-19-mission-watch-toolset-replay-script.py` (SQLite tool-layer, real resolver/repos, CAS exactly-once) — adapt its stack-construction pattern
+
+### Success Criteria
+- [ ] All five scenario verdicts (a)–(e) PASS with evidence (counts, payload/args excerpts)
+- [ ] Exit 0; RESULT: PASS line printed
+- [ ] Zero live-DB contact (no POSTGRES_* in env during run)
+
+### Last Run
+- **Date**: 2026-09-23T18:25Z
+- **Worker Instance**: c22292f3-1df1-4fc3-8214-348d5b7d2ef9 (verify-jw-scenario)
+- **Result**: ✅ PASS — 5/5 scenario verdicts (a)–(e); runtime 4.5s; commit `347896a2` (script only, parent ac789d45)
+- **Quick Fixes**: none
+- **Report**: RESULTS/2026-09-23-job-watch-replay-verification-ac789d45.md

@@ -221,13 +221,7 @@ Extract from the notification text:
 
 ## Edge Cases
 
-### Watching an Already-Terminal Mission
-
-If I call `watch_mission()` on a mission that's already in a terminal state (completed, failed, etc.):
-
-**I receive an immediate notification** with the current status — one per watched receipt.
-
-This is expected behavior. The FIRST notification is the signal; later events on the same mission's other receipts are echoes. Parse and handle once, just like any other notification.
+If I call `watch_mission()` on a mission that is already settled (all receipts terminal), nothing replays: settled receipts get no watch row and NO `[JOB_EVENT]` fires for them — the tool reply itself carries the mission's terminal reason/status, so I read the outcome from the reply instead of waiting for a notification that will never come. Past states stay queryable via `job_get` / `get_mission`. To watch NEW receipts (e.g. after `job_continue` or an instance revive) I call `watch_mission()` again — the re-call is a delta-arm: receipts already settled at call time are skipped (no row, no replay).
 
 ### Multiple Notifications for Same Mission
 
@@ -261,7 +255,7 @@ summary as my response, and the system routes it to my parent automatically.
 
 ### Handle Semantics: Jobs and Continued-Instance Work
 
-The `job_id` returned by `job_create` (and surfaced as `new_job_id` by `job_continue`) is a `work_id` handle — a stable UUID4 minted on Task/JobItem creation. The same handle is accepted by `watch_mission`, `job_get`, and `job_continue` for **both** traditional job queue items and continued-instance work (subsequent message turns on an instance). In practice this means: if you call `job_continue` against a completed instance to send a follow-up message, the returned `new_job_id` can be passed directly to `watch_mission` to receive a `[JOB_EVENT]` when the new turn finishes — no separate "instance watch" tool is needed. `job_continue` resolves both task and job work_ids (Phase 5 P-B, 2026-06-27), so continuing from the task `work_id` returned by a prior `job_continue` works without manual handle translation. `job_list` shows root-instance work by default (Phase 5 P-A, 2026-06-27) — child-instance turns/reports are filtered out by the resolver so the management view is not drowned in noise. `watch_mission` accepts the receipt handle OR the mission_id, and covers every receipt that exists at call time — after `job_continue`, call `watch_mission` again, because new receipts are not auto-watched.
+The `job_id` returned by `job_create` (and surfaced as `new_job_id` by `job_continue`) is a `work_id` handle — a stable UUID4 minted on Task/JobItem creation. The same handle is accepted by `watch_mission`, `job_get`, and `job_continue` for **both** traditional job queue items and continued-instance work (subsequent message turns on an instance). In practice this means: if you call `job_continue` against a completed instance to send a follow-up message, the returned `new_job_id` can be passed directly to `watch_mission` to receive a `[JOB_EVENT]` when the new turn finishes — no separate "instance watch" tool is needed. `job_continue` resolves both task and job work_ids (Phase 5 P-B, 2026-06-27), so continuing from the task `work_id` returned by a prior `job_continue` works without manual handle translation. `job_list` shows root-instance work by default (Phase 5 P-A, 2026-06-27) — child-instance turns/reports are filtered out by the resolver so the management view is not drowned in noise. `watch_mission` accepts the receipt handle OR the mission_id, and covers every receipt that exists at call time — after `job_continue`, call `watch_mission` again, because new receipts are not auto-watched. The re-call is a delta-arm: receipts already settled at call time are skipped (no row, no replay), so re-calling can never duplicate `[JOB_EVENT]` deliveries.
 
 ---
 

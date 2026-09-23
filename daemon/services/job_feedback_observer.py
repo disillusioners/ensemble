@@ -1440,10 +1440,22 @@ class JobFeedbackObserver:
                         )
                     else:
                         _per_kind_status = notify_status
-                    await self._job_queue_service.notify_watchers(
-                        _work_id, _per_kind_status,
-                        error_message if _per_kind_status == "failed" else result_summary,
-                    )
+                    # F2 (RC2 slot wiring, 2026-09-23): failed →
+                    # ``error=``; everything else → ``result_summary=``.
+                    # No positional passing — the third positional
+                    # parameter of ``notify_watchers`` is ``error``, and
+                    # a positional payload here slips the wrong text
+                    # into the rendered ``Error:`` slot.
+                    if _per_kind_status == "failed":
+                        await self._job_queue_service.notify_watchers(
+                            _work_id, _per_kind_status,
+                            error=error_message,
+                        )
+                    else:
+                        await self._job_queue_service.notify_watchers(
+                            _work_id, _per_kind_status,
+                            result_summary=result_summary,
+                        )
                 except Exception as e:
                     logger.warning(
                         f"Observer: held-watcher re-fire failed for "
@@ -2043,10 +2055,28 @@ class JobFeedbackObserver:
                         if _per_kind_status == "failed"
                         else _observ_extra
                     )
-                    await self._job_queue_service.notify_watchers(
-                        _work_id, _per_kind_status,
-                        _per_kind_extra,
-                    )
+                    # F2 (RC2 slot wiring, 2026-09-23): failed →
+                    # ``error=``; everything else → ``result_summary=``.
+                    # The pre-fix call passed ``_per_kind_extra``
+                    # POSITIONALLY — for a non-failed receipt that put
+                    # the mission instance's latest-assistant-message
+                    # into the third positional parameter (``error=``),
+                    # where caller-error precedence
+                    # (``effective_error = error if error is not None
+                    # else work_record.error``) masked the receipt's own
+                    # error in the rendered [JOB_EVENT] (incident
+                    # 2026-09-23: one shared assistant text on every
+                    # duplicate receipt; every task.error NULL).
+                    if _per_kind_status == "failed":
+                        await self._job_queue_service.notify_watchers(
+                            _work_id, _per_kind_status,
+                            error=_per_kind_extra,
+                        )
+                    else:
+                        await self._job_queue_service.notify_watchers(
+                            _work_id, _per_kind_status,
+                            result_summary=_per_kind_extra,
+                        )
                 except Exception as e:
                     logger.warning(
                         f"Observer: notify_watchers failed for job "

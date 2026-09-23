@@ -3074,10 +3074,12 @@ def create_mission_watch_tools(
     * The resolved mission's current receipts are enumerated via
       ``task_repo.get_by_instance`` (ALL Tasks, newest first, no status
       filter — terminal Tasks persist, and mirror receipts are
-      ``Task.work_id`` rows too), and ONE ``job_watchers`` row is
-      registered per receipt with ``events=["mission_terminal"]``
-      (HOLD semantics — the engine's ``work_notifier`` gate fires the
-      row only when the mission's liveness is terminal).
+      ``Task.work_id`` rows too), then filtered to currently-LIVE
+      receipts (``get_work`` + terminal-status check): ONE
+      ``job_watchers`` row is registered per LIVE receipt with
+      ``events=["mission_terminal"]`` (HOLD semantics — the engine's
+      ``work_notifier`` gate fires the row only when the mission's
+      liveness is terminal); already-settled receipts arm nothing.
     * The engine's notify path is strictly receipt-keyed
       (``get_watchers_for_job`` queries ``WHERE job_id == work_id``), so
       a mission-keyed row would never resolve and strand silently —
@@ -3085,10 +3087,13 @@ def create_mission_watch_tools(
     * ``add_watch`` is an atomic UPSERT on (job_id, instance_id), so a
       re-watch after ``job_continue`` updates existing rows and mints
       rows only for genuinely new receipts.
-    * The 50-watch cap is replicated counting EVERY row minted (N
-      receipts = N rows against the cap).
-    * An already-terminal mission registers then notifies immediately
-      per terminal receipt (mirror of ``watch_job``'s terminal branch).
+    * The 50-watch cap is replicated counting EVERY row minted — the
+      terminal filter runs first, so only LIVE receipts mint rows
+      against the cap (a 99-settled/1-live mission arms 1 row).
+    * An already-terminal mission is a NO-REPLAY short-circuit: settled
+      receipts mint no rows and fire nothing — the tool reply itself
+      carries the terminal reason/status (live receipts of a
+      dead_letter-since-revived mission stay armed for the next flip).
 
     Mission-not-yet-born edge (design §2b): a receipt from ``job_create``
     resolves with ``instance_id=None`` until dispatch; registering on
@@ -3157,8 +3162,9 @@ def create_mission_watch_tools(
         """Watch a MISSION (not a receipt) and be revived at mission-terminal.
 
         Accepts a mission_id or the job_id receipt returned by
-        job_create / job_continue, and registers one watcher row per
-        receipt that exists at call time.
+        job_create / job_continue, and arms one watcher row per
+        currently-live receipt (already-settled receipts are skipped —
+        no replay of historical receipts).
 
         Use tool_help("watch_mission") for details."""
         try:
@@ -3255,20 +3261,50 @@ def create_mission_watch_tools(
                     "the receipt registers before the mission exists."
                 )
 
+            # ── F1: registration-time terminal filter (2026-09-23) ────
+            # Arm ONLY currently-live receipts. A receipt whose task
+            # status is ALREADY terminal at registration time settled
+            # in a previous epoch — arming it makes every
+            # mission-instance terminal flip (chat missions flip
+            # ``completed`` after EVERY turn and revive on the next
+            # message) re-fire the whole historical receipt set
+            # (incident 2026-09-23: 9/14-row duplicate [JOB_EVENT]
+            # bursts; the documented re-call-after-job_continue
+            # workflow UPSERT-recreated the rows each turn). With the
+            # filter the re-call is a DELTA-ARM: only new live receipts
+            # get rows, so re-calling can no longer resurrect settled
+            # receipts. An unresolvable receipt (``get_work`` → None)
+            # is treated as live — arming is harmless (notify resolves
+            # the work record first and no-ops), while skipping could
+            # silently drop a genuinely-live receipt.
+            from daemon.services.work_status import is_terminal as _is_terminal
+
+            live_receipts: list[str] = []
+            settled_count = 0
+            for receipt_work_id in receipts:
+                receipt_record = await job_service.get_work(receipt_work_id)
+                if (
+                    receipt_record is not None
+                    and _is_terminal(receipt_record.status)
+                ):
+                    settled_count += 1
+                else:
+                    live_receipts.append(receipt_work_id)
+
             # ── 50-watch cap — count EVERY row minted ─────────────────
             count = watcher_repo.count_watches_for_instance(current_instance_id)
-            if count + len(receipts) > MAX_WATCHES_PER_INSTANCE:
+            if count + len(live_receipts) > MAX_WATCHES_PER_INSTANCE:
                 return _watch_cap_error(
-                    count, f"mission has {len(receipts)} receipt watch(es)"
+                    count, f"mission has {len(live_receipts)} receipt watch(es)"
                 )
 
-            # ── Register one row per receipt (UPSERT-safe) ────────────
-            for receipt_work_id in receipts:
+            # ── Register one row per LIVE receipt (UPSERT-safe) ───────
+            for receipt_work_id in live_receipts:
                 watcher_repo.add_watch(
                     receipt_work_id, current_instance_id, effective_events
                 )
 
-            # ── Already-terminal mission → register-then-notify (§4) ──
+            # ── Already-terminal mission → NO historical replay (F1) ──
             # Terminal set {completed, failed, cancelled, dead_letter}:
             # ``terminal_reason`` is non-None exactly when the mission is
             # terminal (it mirrors the liveness for terminal instances
@@ -3278,8 +3314,15 @@ def create_mission_watch_tools(
             # liveness has since returned to non-terminal (revive; W4
             # hazard encoding). Replying "already terminal" to a live,
             # since-revived mission is misleading — cross-check liveness
-            # before the short-circuit and register normally when the
-            # mission is actually live (M2, review council 2026-09-19).
+            # before the short-circuit (M2, review council 2026-09-19).
+            # v0.13.12 mission-live guard (9e596604) composes unchanged:
+            # a dead_letter-since-revived mission arms its live receipts
+            # above and waits. What F1 removes is the register-then-
+            # NOTIFY arm: with settled receipts skipped at registration
+            # there is nothing historical left to fire, so an
+            # already-terminal mission replays nothing (its live
+            # receipts — the contradictory W4-adjacent shape — stay
+            # armed for the next flip instead of being fired mid-call).
             terminal_reason = getattr(mission_record, "terminal_reason", None)
             liveness = getattr(mission_record, "liveness", None)
             mission_actually_terminal = (
@@ -3287,40 +3330,27 @@ def create_mission_watch_tools(
                 and liveness in {"completed", "failed", "cancelled"}
             )
             if mission_actually_terminal:
-                from daemon.services.work_status import is_terminal as _is_terminal
-
-                notified = 0
-                for receipt_work_id in receipts:
-                    # Per-receipt notify with the receipt's own resolved
-                    # status (per_kind_status). Only terminal receipts
-                    # fire — notifying a non-terminal receipt would emit
-                    # spurious progress events at OTHER instances'
-                    # transport watchers on the same receipt. The engine's
-                    # HOLD gate re-checks mission liveness per row.
-                    receipt_record = await job_service.get_work(receipt_work_id)
-                    if receipt_record is None:
-                        continue
-                    if not _is_terminal(receipt_record.status):
-                        continue
-                    notified += await job_service.notify_watchers(
-                        receipt_work_id,
-                        receipt_record.status,
-                        error=receipt_record.error,
-                        result_summary=receipt_record.result_summary,
-                    )
                 return (
                     f"Mission {mission_id[:8]}... is already terminal "
-                    f"({terminal_reason}). {len(receipts)} receipt "
-                    f"watch(es) registered; immediate notification sent "
-                    f"on {notified} receipt(s)."
+                    f"({terminal_reason}). Armed {len(live_receipts)} "
+                    f"live receipt(s), {settled_count} already-settled "
+                    f"receipt(s) skipped — no historical replay."
                 )
 
+            skipped_note = (
+                f"; {settled_count} already-settled receipt(s) skipped"
+                if settled_count
+                else ""
+            )
             return (
-                f"Mission watch registered: {len(receipts)} receipt(s) of "
-                f"mission {mission_id[:8]}... (events: "
-                f"{', '.join(effective_events)}). Will notify at "
-                f"mission-terminal. Re-call watch_mission after "
-                f"job_continue — new receipts are not auto-watched."
+                f"Mission watch registered: armed {len(live_receipts)} "
+                f"live receipt(s) of mission {mission_id[:8]}... "
+                f"(events: {', '.join(effective_events)})"
+                f"{skipped_note}. Will notify at mission-terminal. "
+                f"Re-call watch_mission after job_continue — new "
+                f"receipts are not auto-watched; the re-call is a "
+                f"delta-arm (already-settled receipts are skipped, "
+                f"never replayed)."
             )
         except Exception as e:
             return f"Error watching mission: {str(e)}"
@@ -3331,24 +3361,36 @@ def create_mission_watch_tools(
         "by job_create / job_continue — the receipt form works even "
         "before the mission is dispatched). The tool resolves the "
         "mission, enumerates EVERY receipt that exists at call time "
-        "(all Task.work_ids for the mission's instance), and registers "
-        "ONE job_watchers row per receipt with events="
+        "(all Task.work_ids for the mission's instance), and arms ONE "
+        "job_watchers row per currently-LIVE receipt with events="
         "['mission_terminal'] (HOLD semantics: the row fires only when "
-        "admission AND mission liveness are both terminal).\n\n"
+        "admission AND mission liveness are both terminal). Receipts "
+        "that are ALREADY terminal at call time are skipped — they "
+        "settled in a previous epoch and are never replayed.\n\n"
         "Semantics:\n"
         "    * One mission-terminal produces N [JOB_EVENT]s for N "
         "watched receipts — the FIRST event after your watch is the "
         "signal; the rest are echoes. Act once.\n"
         "    * Re-call watch_mission after every job_continue — "
-        "receipts minted after this call are NOT auto-watched.\n"
+        "receipts minted after this call are NOT auto-watched. The "
+        "re-call is a delta-arm: already-settled receipts are "
+        "skipped, never replayed, so re-calling cannot duplicate "
+        "deliveries.\n"
+        "    * Delivery is AT-MOST-ONCE with possible delay: the "
+        "registration-time classification gates ROW EXISTENCE only — "
+        "the emit-time CAS claim is the authoritative exactly-once "
+        "gate. A receipt that settles between classification and "
+        "mint delivers at the NEXT mission-terminal flip or boot "
+        "sweep (delayed, never duplicated).\n"
         "    * A revived mission needs a FRESH watch_mission — the row "
         "is claimed and deleted at the first terminal; the event "
         "carries no epoch (call get_mission for details).\n"
-        "    * An already-terminal mission registers then notifies "
-        "immediately (genuinely-terminal only — a "
-        "dead_letter-since-revived mission registers and waits).\n"
-        "    * The 50-watch cap counts every minted row (N receipts = "
-        "N rows).\n\n"
+        "    * An already-terminal mission replays NOTHING: its "
+        "settled receipts are skipped (no rows, no immediate "
+        "notification). A dead_letter-since-revived mission arms its "
+        "live receipts and waits.\n"
+        "    * The 50-watch cap counts every minted row (N live "
+        "receipts = N rows).\n\n"
         "Args:\n"
         "    target: mission_id OR the job_id receipt from "
         "job_create / job_continue.\n"

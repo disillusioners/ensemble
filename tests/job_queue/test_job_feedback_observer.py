@@ -8,6 +8,7 @@ without relying on the full async event loop to avoid timing issues.
 """
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, ANY
 
 from daemon.repositories.job_queue import JobRepository, AdmissionState
@@ -2640,3 +2641,316 @@ class TestDispatchTwoTierBashCleanup:
         ]
         assert any("Tier-1 bash cleanup failed" in msg for msg in warning_texts)
         assert any("Tier-2 bash cleanup failed" in msg for msg in warning_texts)
+
+
+# ─── F2: notify_watchers slot wiring (incident RC2) ───────────────────────
+
+
+class _FakePerKindResolver:
+    """Deterministic stand-in for ``WorkResolverService.per_kind_status_for``.
+
+    Maps selected work_ids to an explicit per-kind token (e.g. a mirror
+    JobItem row resolving ``settled`` while Task rows keep the default);
+    unlisted work_ids fall back to ``default`` — the production contract.
+    """
+
+    def __init__(self, mapping: dict):
+        self._mapping = mapping
+
+    def per_kind_status_for(self, work_id: str, default: str) -> str:
+        return self._mapping.get(work_id, default)
+
+
+def _build_finalize_env(
+    *,
+    terminal_status: str,
+    event_error: str | None,
+    assistant_text: str,
+    receipt_work_ids: list[str],
+    per_kind: dict,
+):
+    """Observer wired so the ``_finalize_job`` fan-out runs over
+    ``receipt_work_ids`` with a deterministic per-kind resolver.
+
+    Mirrors the incident shape (RC2): the mission instance's latest
+    assistant message is fetched via ``_get_last_assistant_message_raw``
+    and carried as ``_per_kind_extra`` into the fan-out; the receipts
+    resolve per-kind like Task rows (``completed`` / ``failed``) and
+    mirror rows (``settled``).
+    """
+    mock_job = create_mock_job(job_id="job-rc2", status="processing",
+                               instance_id="instance-rc2")
+    mock_job_queue_service = MagicMock()
+    mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+    mock_job_queue_service.notify_watchers = AsyncMock(return_value=1)
+    mock_job_queue_service._work_resolver = _FakePerKindResolver(per_kind)
+
+    mock_job_repo = MagicMock(spec=JobRepository)
+    mock_lock_repo = MagicMock(spec=LockRepository)
+    mock_lock_repo.release_by_instance.return_value = 1
+
+    mock_instance_manager = MagicMock()
+    mock_instance_manager._get_last_assistant_message_raw = AsyncMock(
+        return_value=assistant_text
+    )
+    # Receipt enumeration: Task rows with plain work_id attributes.
+    mock_instance_manager._task_repo = MagicMock()
+    mock_instance_manager._task_repo.get_by_instance = MagicMock(
+        return_value=[SimpleNamespace(work_id=w) for w in receipt_work_ids]
+    )
+
+    observer = JobFeedbackObserver(
+        event_bus=MagicMock(),
+        job_queue_service=mock_job_queue_service,
+        job_repo=mock_job_repo,
+        lock_repo=mock_lock_repo,
+        project_repo=MagicMock(),
+        instance_manager=mock_instance_manager,
+    )
+    _install_sync_mock(observer)
+
+    event = {
+        "event_type": "instance_lifecycle",
+        "data": {
+            "instance_id": "instance-rc2",
+            "status": terminal_status,
+            "error": event_error,
+        },
+    }
+    return observer, mock_job_queue_service
+
+
+class TestNotifySlotWiring:
+    """RC2 — the fan-out call sites must map payload to the RIGHT slot.
+
+    Incident mechanics (live ensemble_prod 2026-09-23): each duplicate
+    burst carried ONE shared text = the mission instance's latest
+    assistant message, and every receipt's ``task.error`` was NULL.
+    Cause: ``_finalize_job`` pre-fetched ``result_summary`` (the
+    assistant message) and passed it POSITIONALLY into the third
+    parameter of ``notify_watchers(job_id, status, error=None, ...)``
+    — so the assistant text landed in ``error=`` and masked the
+    receipt's own error via the caller-error precedence in
+    ``notify_work_watchers``. Same latent twin at the held-watcher
+    re-fire site.
+    """
+
+    MISSION_TEXT = "MISSION ASSISTANT REPLY — the one shared text"
+
+    @pytest.mark.asyncio
+    async def test_completed_finalize_success_content_lands_in_result_slot(
+        self,
+    ):
+        """(e) COMPLETED finalize: success content (the assistant
+        message) goes to ``result_summary=`` — NEVER ``error=`` — for
+        BOTH per-kind receipt shapes (Task ``completed`` and mirror
+        ``settled``)."""
+        receipt_task = "11111111-1111-4111-8111-111111111111"
+        receipt_mirror = "22222222-2222-4222-8222-222222222222"
+        observer, svc = _build_finalize_env(
+            terminal_status="completed",
+            event_error=None,
+            assistant_text=self.MISSION_TEXT,
+            receipt_work_ids=[receipt_task, receipt_mirror],
+            per_kind={receipt_mirror: "settled"},  # Task rows → default
+        )
+
+        await observer._process_event(_EVENT_COMPLETED_RC2)
+
+        calls = svc.notify_watchers.await_args_list
+        # candidate_work_ids = ctx.job_id ("job-rc2") ∪ the two Task
+        # receipts — the mission-context work_id rides the default
+        # per-kind token ("completed").
+        assert len(calls) == 3
+        by_work = {c.args[0]: c for c in calls}
+        assert set(by_work) == {"job-rc2", receipt_task, receipt_mirror}
+        # Per-kind status preserved (N8 contract unchanged)...
+        assert by_work[receipt_task].args[1] == "completed"
+        assert by_work[receipt_mirror].args[1] == "settled"
+        # ...but the payload lands in the RESULT slot for every
+        # non-failed receipt, and the error slot stays empty — the
+        # mission-level assistant text must NEVER appear as ``error=``.
+        for work_id, c in by_work.items():
+            assert c.kwargs.get("result_summary") == self.MISSION_TEXT, (
+                f"receipt {work_id}: success content must ride "
+                f"result_summary=, got {c.kwargs!r}"
+            )
+            assert c.kwargs.get("error") is None, (
+                f"receipt {work_id}: non-failed receipt must never "
+                f"carry an error payload, got {c.kwargs!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_failed_finalize_error_content_lands_in_error_slot(
+        self,
+    ):
+        """(e) ERROR finalize: the failure text goes to ``error=`` and
+        the assistant message does NOT leak into it."""
+        receipt = "33333333-3333-4333-8333-333333333333"
+        observer, svc = _build_finalize_env(
+            terminal_status="error",
+            event_error="child exploded",
+            assistant_text="partial progress notes",
+            receipt_work_ids=[receipt],
+            per_kind={},  # Task row → default "failed"
+        )
+
+        await observer._process_event(_EVENT_FAILED_RC2)
+
+        calls = svc.notify_watchers.await_args_list
+        # ctx.job_id + the one Task receipt, both default "failed".
+        assert len(calls) == 2
+        for c in calls:
+            assert c.args[1] == "failed"
+            assert c.kwargs.get("error") == "child exploded"
+            assert "result_summary" not in c.kwargs or (
+                c.kwargs.get("result_summary") is None
+            )
+
+    @pytest.mark.asyncio
+    async def test_terminated_refire_cancel_status_uses_result_slot(self):
+        """Latent twin (held-watcher re-fire site): a TERMINATED
+        mission-terminal re-fire maps the (None) payload to
+        ``result_summary=`` — no positional slip into ``error=``."""
+        receipt = "44444444-4444-4444-8444-444444444444"
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=None)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=1)
+        mock_job_queue_service._work_resolver = _FakePerKindResolver({})
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._task_repo = MagicMock()
+        mock_instance_manager._task_repo.get_by_instance = MagicMock(
+            return_value=[SimpleNamespace(work_id=receipt)]
+        )
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=mock_job_queue_service,
+            job_repo=MagicMock(spec=JobRepository),
+            lock_repo=MagicMock(spec=LockRepository),
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+        )
+
+        await observer._fire_watcher_notify_for_terminal(
+            "instance-rc2",
+            notify_status="cancelled",
+            result_summary=None,
+            error_message=None,
+        )
+
+        calls = mock_job_queue_service.notify_watchers.await_args_list
+        assert len(calls) == 1
+        c = calls[0]
+        assert c.args[0] == receipt
+        assert c.args[1] == "cancelled"
+        assert "error" not in c.kwargs
+        assert c.kwargs.get("result_summary") is None
+
+    @pytest.mark.asyncio
+    async def test_failed_refire_maps_error_message_to_error_slot(self):
+        """Latent twin, failed shape: ``error_message`` rides ``error=``
+        (the pre-fix code passed it positionally — same defect class)."""
+        receipt = "55555555-5555-4555-8555-555555555555"
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=None)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=1)
+        mock_job_queue_service._work_resolver = _FakePerKindResolver({})
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._task_repo = MagicMock()
+        mock_instance_manager._task_repo.get_by_instance = MagicMock(
+            return_value=[SimpleNamespace(work_id=receipt)]
+        )
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=mock_job_queue_service,
+            job_repo=MagicMock(spec=JobRepository),
+            lock_repo=MagicMock(spec=LockRepository),
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+        )
+
+        await observer._fire_watcher_notify_for_terminal(
+            "instance-rc2",
+            notify_status="failed",
+            result_summary=None,
+            error_message="boom",
+        )
+
+        calls = mock_job_queue_service.notify_watchers.await_args_list
+        assert len(calls) == 1
+        c = calls[0]
+        assert c.args[1] == "failed"
+        assert c.kwargs.get("error") == "boom"
+        assert "result_summary" not in c.kwargs or (
+            c.kwargs.get("result_summary") is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_refire_nonfailed_with_payload_maps_to_result_slot_not_error(
+        self,
+    ):
+        """Latent twin with NON-None payload: a non-failed held-watcher
+        re-fire maps the payload to ``result_summary=`` and leaves
+        ``error=`` None. Catches a regression to positional passing at
+        the latent-twin site — which would slip the payload into
+        ``error=`` (the third positional of ``notify_watchers``).
+        The companion ``test_terminated_refire_cancel_status_uses_result_slot``
+        passes ``result_summary=None`` and therefore cannot distinguish
+        keyword from positional; this test fills that gap.
+        """
+        receipt = "66666666-6666-4666-8666-666666666666"
+        payload = "latent twin payload — assistant text would ride here"
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=None)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=1)
+        mock_job_queue_service._work_resolver = _FakePerKindResolver({})
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._task_repo = MagicMock()
+        mock_instance_manager._task_repo.get_by_instance = MagicMock(
+            return_value=[SimpleNamespace(work_id=receipt)]
+        )
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=mock_job_queue_service,
+            job_repo=MagicMock(spec=JobRepository),
+            lock_repo=MagicMock(spec=LockRepository),
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+        )
+
+        await observer._fire_watcher_notify_for_terminal(
+            "instance-rc2",
+            notify_status="cancelled",
+            result_summary=payload,
+            error_message=None,
+        )
+
+        calls = mock_job_queue_service.notify_watchers.await_args_list
+        assert len(calls) == 1
+        c = calls[0]
+        assert c.args[0] == receipt
+        assert c.args[1] == "cancelled"
+        # The post-fix wiring is keyword-only: payload → result_summary=,
+        # never error=. A regression to positional passing would land
+        # `payload` in error= (notify_watchers' third positional), so
+        # this assertion catches that.
+        assert c.kwargs.get("error") is None, (
+            f"non-failed re-fire must never land payload in error=, "
+            f"got {c.kwargs!r}"
+        )
+        assert c.kwargs.get("result_summary") == payload, (
+            f"non-failed re-fire must map payload to result_summary=, "
+            f"got {c.kwargs!r}"
+        )
+
+
+_EVENT_COMPLETED_RC2 = {
+    "event_type": "instance_lifecycle",
+    "data": {"instance_id": "instance-rc2", "status": "completed", "error": None},
+}
+
+_EVENT_FAILED_RC2 = {
+    "event_type": "instance_lifecycle",
+    "data": {"instance_id": "instance-rc2", "status": "error",
+             "error": "child exploded"},
+}

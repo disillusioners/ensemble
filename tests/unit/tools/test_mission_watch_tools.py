@@ -11,9 +11,11 @@ Toolset reshape (2026-09-19, ``feature/mission-watch-toolset``; design:
   registers a row on the pre-generated UUID (design §2b: the receipt IS the
   future mission's first task receipt; a mission-keyed row would strand —
   ``watcher_repository.get_watchers_for_job`` is strictly receipt-keyed).
-* **Already-terminal** (§9.3) — completed / failed / dead_letter (W4 flip)
-  missions register-then-notify-immediately; the ``terminal_reason`` is
-  surfaced; non-terminal receipts do NOT fire a spurious notify.
+* **Already-terminal** (§9.3) — an already-terminal mission replays
+  NOTHING (F1 registration-time terminal filter): settled receipts are
+  skipped (no row, no immediate notification) and the tool reply itself
+  carries the ``terminal_reason``; a dead_letter-since-revived mission
+  (W4 shape) arms its live receipts and waits.
 * **Multi-receipt fan-in** (§9.4) — N receipts → N rows with
   ``events=["mission_terminal"]``; each row CAS-claims exactly once via the
   REAL ``JobWatcherRepository`` claim primitive; ``add_watch`` UPSERT keeps
@@ -257,7 +259,7 @@ class TestResolutionPaths:
         result = asyncio.run(watch_mission.ainvoke({"target": mid}))
 
         assert "Mission watch registered" in result
-        assert "2 receipt(s)" in result
+        assert "armed 2 live receipt(s)" in result
         watched = _watched_job_ids(watcher_repo)
         assert watched == {receipt_a, receipt_b}
         rows = watcher_repo.get_watches_for_instance(CALLER)
@@ -329,9 +331,19 @@ class TestPreRegistration:
 
 
 class TestAlreadyTerminal:
-    def test_completed_mission_registers_then_notifies_immediately(
+    def test_completed_mission_arms_nothing_skips_settled_no_replay(
         self, engine, job_service, watch_mission, watcher_repo
     ):
+        """F1 (fix/job-event-watch-replay): a genuinely-terminal mission
+        with an already-settled receipt arms NOTHING and replays NOTHING.
+
+        Incident mechanics (RC1, live DB 2026-09-23): the old
+        register-then-notify path minted a row for a receipt that had
+        settled hours earlier AND fired it immediately — every later
+        mission-instance flip re-fired the whole historical set
+        (bursts of 9/14 duplicate [JOB_EVENT] rows). The registration-
+        time terminal filter skips already-settled receipts entirely:
+        no row minted, no notify enqueued."""
         mid = _seed_instance(engine, status=InstanceStatus.COMPLETED.value)
         receipt = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
 
@@ -344,17 +356,16 @@ class TestAlreadyTerminal:
         result = asyncio.run(watch_mission.ainvoke({"target": mid}))
 
         assert "already terminal (completed)" in result
-        assert "immediate notification sent on 1 receipt(s)" in result
-        # register-then-notify: row exists AND notify fired on the receipt
-        assert _watched_job_ids(watcher_repo) == {receipt}
-        job_service.notify_watchers.assert_awaited_once()
-        args = job_service.notify_watchers.await_args
-        assert args.args[0] == receipt
-        assert args.args[1] == "completed"
+        assert "1 already-settled receipt(s) skipped" in result
+        # NO row minted for the historical receipt, NO notify enqueued.
+        assert _watched_job_ids(watcher_repo) == set()
+        job_service.notify_watchers.assert_not_awaited()
 
-    def test_failed_mission_terminal_reason_surfaced(
+    def test_failed_mission_terminal_reason_surfaced_no_replay(
         self, engine, job_service, watch_mission, watcher_repo
     ):
+        """F1: terminal_reason is surfaced AND the failed receipt is
+        skipped silently (no row, no immediate notify)."""
         mid = _seed_instance(engine, status=InstanceStatus.ERROR.value)
         receipt = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
 
@@ -367,8 +378,9 @@ class TestAlreadyTerminal:
         result = asyncio.run(watch_mission.ainvoke({"target": mid}))
 
         assert "already terminal (failed)" in result
-        job_service.notify_watchers.assert_awaited_once()
-        assert job_service.notify_watchers.await_args.args[0] == receipt
+        assert "1 already-settled receipt(s) skipped" in result
+        assert _watched_job_ids(watcher_repo) == set()
+        job_service.notify_watchers.assert_not_awaited()
 
     def test_dead_letter_since_revived_registers_normally_not_short_circuit(
         self, engine, job_service, watch_mission, watcher_repo
@@ -405,8 +417,9 @@ class TestAlreadyTerminal:
     ):
         """Complementary M2 pin: dead_letter where the instance liveness is
         ALSO terminal (ERROR → failed) is a genuinely-terminal mission —
-        register-then-notify-immediately applies and the resolver's
-        ``dead_letter`` terminal_reason is surfaced."""
+        the short-circuit applies and the resolver's ``dead_letter``
+        terminal_reason is surfaced. F1: the settled receipt is SKIPPED
+        (no row, no immediate replay notification)."""
         mid = _seed_instance(engine, status=InstanceStatus.ERROR.value)
         receipt = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
         _seed_job_item(
@@ -423,9 +436,199 @@ class TestAlreadyTerminal:
         result = asyncio.run(watch_mission.ainvoke({"target": mid}))
 
         assert "already terminal (dead_letter)" in result
-        assert "immediate notification sent on 1 receipt(s)" in result
+        assert "1 already-settled receipt(s) skipped" in result
+        assert _watched_job_ids(watcher_repo) == set()
+        job_service.notify_watchers.assert_not_awaited()
+
+
+# ─── F1: registration-time terminal filter (incident RC1) ─────────────────
+
+
+class TestRegistrationTerminalFilter:
+    """Regression pins for the 2026-09-23 replay-flood incident.
+
+    RC1 mechanics (live ensemble_prod evidence): ``watch_mission``
+    minted one held row per Task receipt with NO terminal-state
+    filter; the mission-finalize fan-out notified every receipt
+    work_id; the hold gate re-read mission liveness FRESH at emit
+    time, so every mission-instance terminal flip (chat missions flip
+    ``completed`` per turn) released ALL held rows — including rows
+    for receipts that had settled hours earlier. Re-calling
+    ``watch_mission`` (the documented workflow) UPSERT-recreated the
+    rows → the next flip re-fired them → duplicate bursts (9 then 14
+    ``[JOB_EVENT]`` rows per flip; burst intersection = exactly the
+    user-reported duplicates).
+
+    F1 invariant: ``watch_mission`` arms ONLY currently-live receipts;
+    already-settled receipts are skipped (no row, no notify) at
+    registration time AND in the already-terminal-mission branch.
+    """
+
+    def test_mixed_terminal_and_live_receipts_arms_only_live(
+        self, engine, job_service, watch_mission, watcher_repo
+    ):
+        """(a) 3 receipts — two settled, one live → exactly ONE row
+        minted (the live one); the settled pair is reported skipped."""
+        mid = _seed_instance(engine)
+        settled_a = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+        settled_b = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+        live_c = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+
+        statuses = {settled_a: "completed", settled_b: "settled", live_c: "processing"}
+
+        async def _get_work(work_id):
+            return _work_record(work_id, "report", statuses[work_id],
+                                instance_id=mid)
+
+        job_service.get_work = AsyncMock(side_effect=_get_work)
+
+        result = asyncio.run(watch_mission.ainvoke({"target": mid}))
+
+        assert "Mission watch registered" in result
+        assert "armed 1 live receipt(s)" in result
+        assert "2 already-settled receipt(s) skipped" in result
+        assert _watched_job_ids(watcher_repo) == {live_c}
+        job_service.notify_watchers.assert_not_awaited()
+
+    def test_terminal_flip_fires_exactly_armed_set_once_each(
+        self, engine, job_service, watch_mission, watcher_repo
+    ):
+        """(b) After arming the live set, a mission-instance terminal
+        flip delivers exactly the ARMED rows — each exactly once — and
+        the skipped settled receipt has NO row to fire (that is the
+        duplicate-burst killer: the historical receipts were re-fired
+        per flip because their rows kept being recreated)."""
+        mid = _seed_instance(engine)
+        settled = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+        live_a = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+        live_b = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+
+        statuses = {settled: "completed", live_a: "processing", live_b: "processing"}
+
+        async def _get_work(work_id):
+            return _work_record(work_id, "report", statuses[work_id],
+                                instance_id=mid)
+
+        job_service.get_work = AsyncMock(side_effect=_get_work)
+        result = asyncio.run(watch_mission.ainvoke({"target": mid}))
+        assert _watched_job_ids(watcher_repo) == {live_a, live_b}
+
+        # Mission-instance terminal flip: the engine CAS-claims each
+        # armed row (claim → notify → row gone). First claim wins once;
+        # the second is empty (exactly-once).
+        for receipt in (live_a, live_b):
+            first = watcher_repo.claim_watchers_for_job_for_instances(
+                receipt, [CALLER]
+            )
+            second = watcher_repo.claim_watchers_for_job_for_instances(
+                receipt, [CALLER]
+            )
+            assert len(first) == 1
+            assert second == []
+
+        # The skipped settled receipt: NO row ever existed to fire —
+        # under the old code this claim would have returned a row on
+        # the first call (it was registered despite being settled).
+        assert watcher_repo.claim_watchers_for_job_for_instances(
+            settled, [CALLER]
+        ) == []
+        assert "1 already-settled receipt(s) skipped" in result
+
+    def test_rewatch_after_flip_mints_no_rows_and_no_second_burst(
+        self, engine, job_service, watch_mission, watcher_repo
+    ):
+        """(c) The duplicates case: arm → flip (claim) → re-call
+        watch_mission (the documented workflow). The formerly-live
+        receipt is now settled → the re-call is a no-op delta-arm: no
+        row recreated, nothing to fire on the NEXT flip."""
+        mid = _seed_instance(engine)
+        receipt = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+
+        statuses = {receipt: "processing"}
+
+        async def _get_work(work_id):
+            return _work_record(work_id, "report", statuses[work_id],
+                                instance_id=mid)
+
+        job_service.get_work = AsyncMock(side_effect=_get_work)
+
+        # Turn 1: arm the live receipt.
+        asyncio.run(watch_mission.ainvoke({"target": mid}))
         assert _watched_job_ids(watcher_repo) == {receipt}
-        job_service.notify_watchers.assert_awaited_once()
+
+        # The turn ends: receipt settles, the flip claims + fires its row.
+        statuses[receipt] = "completed"
+        claimed = watcher_repo.claim_watchers_for_job_for_instances(
+            receipt, [CALLER]
+        )
+        assert len(claimed) == 1
+
+        # Turn 2 begins: the documented re-call. Under the old code the
+        # UPSERT re-created the row → the NEXT flip re-fired the
+        # already-delivered receipt (the duplicate burst).
+        result = asyncio.run(watch_mission.ainvoke({"target": mid}))
+
+        assert "armed 0 live receipt(s)" in result
+        assert "1 already-settled receipt(s) skipped" in result
+        assert _watched_job_ids(watcher_repo) == set()
+        job_service.notify_watchers.assert_not_awaited()
+        # Nothing can fire on a subsequent flip.
+        assert watcher_repo.claim_watchers_for_job_for_instances(
+            receipt, [CALLER]
+        ) == []
+
+    def test_already_terminal_mission_no_notifications_for_historical_receipts(
+        self, engine, job_service, watch_mission, watcher_repo
+    ):
+        """(d) Mission already terminal at call time → the historical
+        receipts are neither registered nor enqueued — the second
+        immediate-replay vector (job_queue.py register-then-notify §4
+        branch) is closed."""
+        mid = _seed_instance(engine, status=InstanceStatus.COMPLETED.value)
+        settled_a = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+        settled_b = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+
+        async def _get_work(work_id):
+            return _work_record(work_id, "report", "completed", instance_id=mid,
+                                result_summary="done")
+
+        job_service.get_work = AsyncMock(side_effect=_get_work)
+
+        result = asyncio.run(watch_mission.ainvoke({"target": mid}))
+
+        assert "already terminal (completed)" in result
+        assert "Armed 0 live receipt(s)" in result
+        assert "2 already-settled receipt(s) skipped" in result
+        assert "no historical replay" in result
+        assert _watched_job_ids(watcher_repo) == set()
+        job_service.notify_watchers.assert_not_awaited()
+
+    def test_dead_letter_since_revived_still_arms_live_receipt(
+        self, engine, job_service, watch_mission, watcher_repo
+    ):
+        """F1 composes with the v0.13.12 mission-live guard (9e596604):
+        a dead_letter-since-revived mission (stale terminal_reason,
+        live liveness) does NOT short-circuit and its LIVE receipt is
+        armed normally — the W4 hazard encoding is untouched."""
+        mid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        receipt = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+        _seed_job_item(
+            engine, instance_id=mid,
+            admission_state=AdmissionState.DEAD.value, terminal_reason=None,
+        )
+
+        async def _get_work(work_id):
+            return _work_record(work_id, "report", "processing", instance_id=mid)
+
+        job_service.get_work = AsyncMock(side_effect=_get_work)
+
+        result = asyncio.run(watch_mission.ainvoke({"target": mid}))
+
+        assert "Mission watch registered" in result
+        assert "armed 1 live receipt(s)" in result
+        assert "already terminal" not in result
+        assert _watched_job_ids(watcher_repo) == {receipt}
+        job_service.notify_watchers.assert_not_awaited()
 
 
 # ─── §9.4 Multi-receipt fan-in + exactly-once claim ───────────────────────
@@ -497,10 +700,11 @@ class TestPostMintGap:
         # Documented limitation: the new receipt is NOT auto-watched.
         assert _watched_job_ids(watcher_repo) == {receipt_a}
 
-        # Mitigation (prompt rule): re-call covers it.
+        # Mitigation (prompt rule): re-call covers it. F1: the re-call
+        # is a delta-arm — the new receipt is live, so it gets armed.
         result = asyncio.run(watch_mission.ainvoke({"target": mid}))
         assert "Mission watch registered" in result
-        assert "2 receipt(s)" in result
+        assert "armed 2 live receipt(s)" in result
         assert _watched_job_ids(watcher_repo) == {receipt_a, receipt_b}
 
 
@@ -563,6 +767,37 @@ class TestCap:
         assert "mission has 2 receipt watch(es)" in result
         # Nothing was minted — all-or-nothing.
         assert len(watcher_repo.get_watches_for_instance(CALLER)) == 49
+
+    def test_cap_counts_only_live_rows_settled_receipts_excluded(
+        self, engine, job_service, watch_mission, watcher_repo
+    ):
+        """F1 terminal filter meets the cap: settled receipts arm NO
+        row and count NOTHING against the cap — a mission whose
+        receipts are ALL already-settled reports ``0 receipt
+        watch(es)`` in the armed wording even with the caller over
+        the cap (a broken filter would arm the settled receipts,
+        report 2, and overflow)."""
+        mid = _seed_instance(engine)
+        _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+        _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+
+        async def _get_work(work_id):
+            return _work_record(work_id, "report", "completed", instance_id=mid)
+
+        job_service.get_work = AsyncMock(side_effect=_get_work)
+
+        # Caller already watches 51 receipts: only a non-zero LIVE
+        # count can trip the would-exceed cap shape — a fully-settled
+        # mission must stay at "0 receipt watch(es)".
+        for _ in range(51):
+            watcher_repo.add_watch(str(uuid.uuid4()), CALLER)
+
+        result = asyncio.run(watch_mission.ainvoke({"target": mid}))
+
+        assert "Would exceed maximum watch limit (50)" in result
+        assert "mission has 0 receipt watch(es)" in result
+        # Nothing was minted — settled receipts arm no rows.
+        assert len(watcher_repo.get_watches_for_instance(CALLER)) == 51
 
     def test_cap_boundary_is_allowed(self, engine, watch_mission, watcher_repo):
         mid = _seed_instance(engine)

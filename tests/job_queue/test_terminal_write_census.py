@@ -448,7 +448,9 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
     CensusEntry(
         file="daemon/services/job_feedback_observer.py", site="atomic_transition",
         anchor="_finalize_job", classification="hooked",
-        hooked_at="daemon/services/job_feedback_observer.py:1989",
+        # F2 slot-wiring split the fan-out call into failed/non-failed
+        # keyword branches; the (still single-site) notify lives at :2071.
+        hooked_at="daemon/services/job_feedback_observer.py:2071",
         reason="observer finalize; its own fan-out notify is the delivery "
                "(§5: redundant belt, CAS-deduped) — observer stays byte-identical",
     ),
