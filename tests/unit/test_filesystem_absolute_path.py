@@ -6,7 +6,18 @@ Covers:
   the workdir requirement
 - _resolve_target_path still requires workdir for relative paths
 - write_file, read_file, list_directory, edit_file, glob_files, grep_files all
-  accept an absolute path with no workdir (cross-platform safe).
+  accept an absolute path with no workdir (cross-platform safe) — within the
+  boundary semantics below.
+
+  Walk-tool boundary (2026-09-23 incident fix): ``glob_files`` and
+  ``grep_files`` accept absolute paths with no workdir ONLY when the resolved
+  root is within an allowed temp dir (matches ``WorkspaceGuard``'s
+  "trusted by design" temp-dir allowance — see ``_resolve_search_root``).
+  Absolute paths outside both the workdir AND the temp dirs require an
+  explicit workdir to scope the walk; bare absolute paths like ``/Users/...``
+  are REFUSED to prevent runaway memory walks. read_file/write_file/edit_file/
+  list_directory retain the looser absolute-no-workdir semantics — the
+  walk-tool tightening is the only contract change here.
 """
 
 from pathlib import Path
@@ -232,7 +243,17 @@ _DIR_TOOL_CASES = [
 
 @pytest.mark.parametrize("tool_fn,kwargs_for_abs,expected", _FILE_TOOL_CASES + _DIR_TOOL_CASES)
 def test_absolute_path_no_workdir(tool_fn, kwargs_for_abs, expected, tmp_path):
-    """All 6 filesystem tools accept an absolute path with no workdir."""
+    """All 6 filesystem tools accept an absolute path with no workdir.
+
+    Walk-tool boundary (2026-09-23 fix): the tmp_path fixture lives under
+    the system temp dir (pytest's standard ``tempfile.gettempdir()``), which
+    ``WorkspaceGuard._is_in_temp_dir`` recognises as a "trusted by design"
+    location. glob_files and grep_files therefore accept the absolute
+    path with no workdir in this fixture — the test family intentionally
+    uses temp paths for hermetic isolation. Bare absolute paths outside
+    temp + workdir are REFUSED; that case is pinned separately in
+    ``tests/unit/test_filesystem_walk_guardrails.py``.
+    """
     if tool_fn in (write_file, read_file, edit_file):
         # File-targeting: pre-create the file (write_file also creates it).
         target = tmp_path / "fixture.txt"

@@ -2,12 +2,53 @@
 
 import os
 import re
-from pathlib import Path
+import time
+from dataclasses import dataclass, field
+from pathlib import Path, PurePath
 from langchain_core.tools import tool
 
 from daemon.services.workspace_guard import WorkspaceGuard
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_output
+
+# ---------------------------------------------------------------------------
+# Walk-tool guardrail constants (2026-09-23 memory-leak incident fix)
+# ---------------------------------------------------------------------------
+#
+# These constants bound the traversal done by glob_files and grep_files.
+# Before this fix both tools materialized the entire match set in memory
+# with no cap, depth limit, or timeout. A bare absolute search root (e.g.
+# /Users/...) widened by an explorer that hadn't found its target pushed
+# the daemon past 16 GB RAM in ~3.5 minutes and it was SIGKILLed. The
+# bounded walker (_bounded_walk) is the shared enforcement point: glob_files
+# and grep_files both go through it.
+#
+# Module-level constants make these monkey-patchable from the unit tests
+# (small timeouts, tiny counts) without rewriting the walker.
+#
+# Exclusions deliberately OVERLAP with the hidden-dir rule (e.g. .venv and
+# .git both start with "."): the explicit list documents intent and covers
+# non-hidden noise dirs (node_modules, Library, dist, build, target). Keep
+# the two rules so future contributors understand which dirs are pruned
+# for what reason. WorkspaceGuard.IGNORE_PATTERNS is a SEPARATE list with
+# a SEPARATE purpose (HTTP workspace endpoints) — do not conflate.
+WALK_EXCLUDED_DIRS: frozenset[str] = frozenset({
+    "node_modules",  # JS deps — typically the largest dir in any JS project
+    ".venv", "venv",  # Python virtualenvs
+    ".git",  # Git internals (objects, refs, hooks)
+    "__pycache__",  # Python bytecode cache
+    "Library",  # macOS user Library dir (mitigates ~/ as a search root)
+    ".cache",  # Generic cache dirs (pip, npm, etc.)
+    ".next",  # Next.js build cache
+    "dist",  # JS / Python build output
+    "build",  # Various build outputs (setuptools, cmake, …)
+    "target",  # Rust / Java build output
+})
+WALK_MAX_DEPTH: int = 10  # visit dirs at depths 0..N, scan files at depths 0..N
+WALK_MAX_FILE_COUNT: int = 10_000  # bound the materialized candidate list
+WALK_MAX_FILE_SIZE_BYTES: int = 1_500_000  # ~1.5 MB — grep_files per-file read cap
+WALK_TIMEOUT_SECONDS: float = 20.0  # per-call wall-clock cap (monotonic check)
+WALK_MAX_MATCHES_PER_CALL: int = 10_000  # grep_files inner match-accumulation cap
 
 CATEGORY_NAME = "File Operations"
 CATEGORY_DOC = """\
@@ -15,11 +56,20 @@ Read, write, edit, and search files and directories.
 
 **Rules**:
 - `workdir` is required when `path` is relative. If `path` is absolute (e.g. `/abs/path`
-  on Unix or `C:\\path\\to\\file` on Windows), `workdir` may be omitted and the path is
-  used as-is.
+  on Unix or `C:\\path\\to\\file` on Windows), `workdir` is REQUIRED for the WALK tools
+  (`glob_files`, `grep_files`) — they walk unbounded trees and need an explicit scope.
+  For the file tools (`read_file`, `write_file`, `edit_file`) and `list_directory`,
+  `workdir` may be omitted for absolute paths and the path is used as-is.
 - When `path` is relative, it is resolved against `workdir` and must stay within it.
-- If you need to access files outside the project directory, pass an absolute path
-  explicitly (e.g. `/abs/path/to/file`).
+- WALK tools (`glob_files`, `grep_files`) further require the resolved root to be within
+  the workdir OR an allowed temp dir. Absolute roots outside the workdir (e.g. bare
+  `/Users/...`) are REFUSED — narrow the root to a directory inside the workdir.
+- Both walk tools apply traversal guardrails: excluded dirs (node_modules, .venv,
+  .git, __pycache__, Library, .cache, .next, dist, build, target, and any hidden
+  dir), depth cap (10 levels), file-count cap (10,000), per-file size cap
+  (1.5 MB; grep_files only), and a 20-second wall-clock timeout. When a cap
+  fires the result carries a loud "Search incomplete" notice pointing the
+  caller to narrow the root or raise pattern specificity.
 
 Example read_file (relative path):
 ```json
@@ -36,6 +86,14 @@ Example read_file (absolute path, workdir not required):
 }
 ```
 
+Example glob_files (absolute path, workdir REQUIRED for walk tools):
+```json
+{
+  "pattern": "**/*.py",
+  "path": "/abs/path/to/searchroot",
+  "workdir": "/path_to/current/working/project/directory"
+}
+```
 
 # Backward-compatible wrappers around WorkspaceGuard.
 #
@@ -43,6 +101,13 @@ Example read_file (absolute path, workdir not required):
 # thin wrappers preserve the original signatures/error messages so existing
 # @tool-decorated functions below and the test suite (``tests/unit/test_filesystem_*``)
 # continue to work unchanged.
+#
+# Walk-tool boundary: ``_resolve_search_root`` (used ONLY by glob_files /
+# grep_files) closes the absolute-path bypass that ``_resolve_within_workdir``
+# intentionally keeps open for read/write/edit/list_directory. The 2026-09-23
+# incident showed that an agent passing a bare ``/Users/...`` as a search
+# root caused a 16 GB RAM walk — walk tools now require workdir whenever an
+# absolute root is supplied.
 """
 
 
@@ -145,6 +210,311 @@ def _is_within_workdir(workdir: Path, target: Path) -> bool:
     if WorkspaceGuard._normed_contains(workdir, target):
         return True
     return WorkspaceGuard._is_in_temp_dir(target)
+
+
+def _resolve_search_root(
+    path: str,
+    workdir: str | None,
+) -> tuple[Path | None, str | None]:
+    """Resolve a search root for WALK tools (glob_files, grep_files) ONLY.
+
+    Closes the absolute-path bypass that ``_resolve_within_workdir`` keeps open
+    for read/write/edit/list_directory. Without this, an agent passing a bare
+    absolute path (e.g. ``/Users/...``) makes the walk unbounded — the
+    2026-09-23 incident root cause (16 GB RAM walk → SIGKILL).
+
+    Semantics:
+      - Relative path: delegates to ``_resolve_within_workdir`` (same workdir
+        requirement and behavior as the file tools — relative path stays
+        inside the workdir or temp dir).
+      - Absolute path + workdir: allowed iff the resolved root is within the
+        workdir (normed-contains, symlink-resolved via ``WorkspaceGuard``)
+        OR within an allowed temp dir. Otherwise REFUSED with a redirecting
+        error.
+      - Absolute path + no workdir: allowed ONLY if the resolved root is
+        within an allowed temp dir (matches ``WorkspaceGuard``'s existing
+        "trusted by design" temp-dir allowance — see
+        ``WorkspaceGuard._is_in_temp_dir``). Otherwise REFUSED — without
+        workdir and outside temp, the walk has no declared scope and can
+        grow to the whole filesystem (the incident shape).
+
+    Returns:
+        (target_path, error). On error, target_path is None.
+    """
+    if not _is_absolute_path(path):
+        # Relative paths keep the existing _resolve_within_workdir semantics.
+        return _resolve_within_workdir(path, workdir)
+
+    # Absolute path: resolve the target first, then check the boundary.
+    try:
+        target = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as e:
+        return None, f"ERROR: Invalid absolute path: {e}"
+
+    # Path inside any allowed temp dir: allowed unconditionally (matches
+    # WorkspaceGuard's "trusted by design" temp-dir allowance). Both with
+    # and without workdir — temp roots are considered safe by design.
+    if WorkspaceGuard._is_in_temp_dir(target):
+        return target, None
+
+    # Path outside temp + no workdir: REFUSE. This is the incident shape
+    # — a bare absolute path like /Users/... with no workdir declaration.
+    if not workdir or not workdir.strip():
+        return None, (
+            "ERROR: glob_files and grep_files require an explicit workdir when "
+            "using an absolute search root that is not within an allowed temp "
+            "directory. Bare absolute paths (e.g. /Users/...) can trigger "
+            "runaway memory walks — this is the 2026-09-23 incident root "
+            "cause. Pass workdir=<project_root> to scope the walk, or use "
+            "a path under /tmp, /var/tmp, or the system temp dir. "
+            f"Got path={path!r}, workdir={workdir!r}."
+        )
+
+    # Path outside temp + workdir provided: check workdir containment.
+    try:
+        guard = WorkspaceGuard(workdir)
+    except ValueError:
+        return None, (
+            f"ERROR: Working directory does not exist: {workdir} "
+            "— check the workdir path. Was it typed correctly?"
+        )
+
+    if not guard.is_within(target):
+        return None, (
+            f"ERROR: Search root outside workspace boundary: {path}. "
+            f"glob_files / grep_files walks are bounded to the workdir "
+            f"({workdir}) or allowed temp dirs — narrow the root to a "
+            f"directory inside the workdir."
+        )
+
+    return target, None
+
+
+@dataclass
+class WalkReport:
+    """Outcome of a bounded tree walk — drives both glob_files and grep_files.
+
+    Attributes:
+        files: All files (regular files only) found in the bounded walk.
+            Excludes anything under directories in ``WALK_EXCLUDED_DIRS`` or
+            hidden directories (name starts with ``.``). Bounded by
+            ``WALK_MAX_FILE_COUNT``, ``WALK_MAX_DEPTH``, and
+            ``WALK_TIMEOUT_SECONDS`` — once any of those caps fires, the
+            walk stops and the reason is recorded in ``stopped_reason``.
+        stopped_reason: ``None`` if the walk completed normally; one of
+            ``"file_count"`` / ``"depth"`` / ``"timeout"`` if a cap fired.
+            Drives the "Search incomplete" notice appended to tool results.
+        timed_out_at: Path where the timeout fired (``None`` if no timeout).
+    """
+
+    files: list[Path] = field(default_factory=list)
+    stopped_reason: str | None = None
+    timed_out_at: Path | None = None
+
+
+def _bounded_walk(
+    search_path: Path,
+    *,
+    max_depth: int | None = None,
+    max_file_count: int | None = None,
+    timeout_seconds: float | None = None,
+) -> WalkReport:
+    """Walk ``search_path`` with exclusions, depth cap, count cap, and timeout.
+
+    Replaces the naive ``Path.glob`` and ``search_path.glob('**/*')`` walks
+    for the walk tools. Pathlib's glob materializes the FULL match list with
+    no pruning hook — that's how the 2026-09-23 incident's 16 GB walk
+    happened. ``os.walk(topdown=True)`` lets us prune ``dirs[:]`` in-place to
+    honor exclusions and depth cap, AND stop the walk the moment a cap fires
+    (don't keep walking to discard later).
+
+    Symlinks: ``followlinks=False`` (default) — we do NOT follow symlinks. A
+    symlinked directory appears in the listing but its contents are not
+    iterated. This avoids symlink cycles and accidental escapes.
+
+    Hidden files: NOT excluded (matches ``Path.glob`` semantics — both
+    visible and hidden files match ``*.py``). Hidden DIRECTORIES are pruned
+    (per requirement).
+
+    Args:
+        search_path: Absolute path to walk.
+        max_depth: Visit dirs at depths ``0..max_depth`` (files at depths
+            ``0..max_depth``). Default: ``WALK_MAX_DEPTH`` (looked up at
+            CALL TIME via ``globals()`` so monkeypatch.setattr works in tests).
+        max_file_count: Hard limit on the candidate list size. The walk
+            STOPS the moment this is hit (stop-the-walk, not post-filter).
+            Default: ``WALK_MAX_FILE_COUNT`` (looked up at call time).
+        timeout_seconds: Per-call wall-clock budget via ``time.monotonic()``
+            checks at the start of each directory. Default:
+            ``WALK_TIMEOUT_SECONDS`` (looked up at call time).
+
+    Returns:
+        ``WalkReport`` with all matching files and ``stopped_reason`` set if
+        any cap fired.
+    """
+    # Look up module-level constants at CALL TIME (not at function-definition
+    # time) so monkeypatch.setattr in unit tests can override them. Defaults
+    # are ``None`` to distinguish "use the current module value" from an
+    # explicit caller override.
+    if max_depth is None:
+        max_depth = globals()["WALK_MAX_DEPTH"]
+    if max_file_count is None:
+        max_file_count = globals()["WALK_MAX_FILE_COUNT"]
+    if timeout_seconds is None:
+        timeout_seconds = globals()["WALK_TIMEOUT_SECONDS"]
+    # WALK_EXCLUDED_DIRS is read from globals() too (consistent semantics —
+    # tests can monkeypatch the exclusion set if they need a custom policy).
+    excluded = globals()["WALK_EXCLUDED_DIRS"]
+
+    files: list[Path] = []
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
+    timed_out_at: Path | None = None
+    saw_depth_cap = False
+
+    for dirpath, dirs, fnames in os.walk(
+        str(search_path), topdown=True, followlinks=False,
+    ):
+        # Timeout check (cheap — done once per directory entry).
+        if time.monotonic() > deadline:
+            timed_out = True
+            timed_out_at = Path(dirpath)
+            break
+
+        current = Path(dirpath)
+
+        # Depth computation (relative to search_path).
+        try:
+            rel = current.relative_to(search_path)
+            depth = len(rel.parts)
+        except ValueError:
+            depth = 0
+
+        # Prune excluded / hidden dirs (in-place for topdown=True).
+        # Sorted for deterministic walk order — helps test reproducibility.
+        kept_dirs = sorted(
+            d for d in dirs
+            if d not in excluded and not d.startswith(".")
+        )
+        dirs[:] = kept_dirs
+
+        # Depth cap: at max_depth we don't descend further (files at this
+        # depth are still scanned — only descent stops).
+        if depth >= max_depth:
+            dirs[:] = []
+            saw_depth_cap = True
+
+        # Add files (don't follow symlinks — already enforced by followlinks=False).
+        for fname in fnames:
+            full = current / fname
+            # is_file() filters out symlinks-to-directories, sockets, etc.
+            if not full.is_file():
+                continue
+            files.append(full)
+            # Stop-the-walk on count cap (don't keep walking to discard later).
+            if len(files) >= max_file_count:
+                return WalkReport(
+                    files=files,
+                    stopped_reason="file_count",
+                    timed_out_at=None,
+                )
+
+    # Determine final stopped_reason. Timeout wins over depth if both fired.
+    stopped_reason: str | None = None
+    if timed_out:
+        stopped_reason = "timeout"
+    elif saw_depth_cap:
+        stopped_reason = "depth"
+
+    return WalkReport(
+        files=files,
+        stopped_reason=stopped_reason,
+        timed_out_at=timed_out_at,
+    )
+
+
+def _file_matches_pattern(
+    file_path: Path,
+    search_path: Path,
+    pattern: str,
+) -> bool:
+    """Check if *file_path* (relative to *search_path*) matches the glob pattern.
+
+    Uses ``PurePath.full_match`` (Python 3.13+) which reproduces pathlib glob
+    semantics including ``**`` for recursive matching. The pattern is matched
+    against the path RELATIVE to ``search_path`` — the same way
+    ``search_path.glob(pattern)`` interprets it.
+
+    Brace expansion is the CALLER's responsibility (see
+    ``_expand_single_level_braces``); this function treats braces literally,
+    matching ``Path.glob``'s native behaviour.
+
+    Examples (search_path = /tmp/test):
+        /tmp/test/foo.py            pattern="*.py"        → rel="foo.py" → True
+        /tmp/test/nested/foo.py     pattern="*.py"        → rel="nested/foo.py"  → False (* doesn't cross /)
+        /tmp/test/nested/foo.py     pattern="**/*.py"     → rel="nested/foo.py"  → True
+        /tmp/test/src/sub/foo.py    pattern="src/**/*.py" → rel="src/sub/foo.py" → True
+        /tmp/test/other/foo.py      pattern="src/**/*.py" → rel="other/foo.py"   → False (anchored)
+    """
+    try:
+        rel = file_path.relative_to(search_path)
+    except ValueError:
+        return False
+    return PurePath(str(rel)).full_match(pattern)
+
+
+def _walk_truncation_notice(
+    report: WalkReport,
+    oversized_skips: int = 0,
+    match_capped: bool = False,
+) -> str:
+    """Build the loud "Search incomplete" notice — only when a cap fired.
+
+    Exclusions are ALWAYS on (not an incomplete signal). The notice fires
+    ONLY when a cap (file count / depth / timeout) or a size skip actually
+    tripped during the current call. Happy-path result format is unchanged
+    (notice is the empty string when nothing tripped).
+
+    The notice redirects the caller to narrow the root or raise pattern
+    specificity — the 2026-09-23 incident's behavioural driver was an agent
+    WIDENING roots when searches found nothing; silent truncation would
+    make that worse.
+
+    Module-level constants are read via ``globals()`` so monkeypatch.setattr
+    on the caller's module attribute surfaces in the notice text (tests
+    with tiny caps pin the exact wording).
+    """
+    g = globals()
+    max_file_count = g["WALK_MAX_FILE_COUNT"]
+    max_depth = g["WALK_MAX_DEPTH"]
+    timeout_seconds = g["WALK_TIMEOUT_SECONDS"]
+    max_file_size_bytes = g["WALK_MAX_FILE_SIZE_BYTES"]
+    max_matches = g["WALK_MAX_MATCHES_PER_CALL"]
+
+    reasons: list[str] = []
+    if report.stopped_reason == "file_count":
+        reasons.append(f"file-count cap reached ({max_file_count:,} files)")
+    elif report.stopped_reason == "depth":
+        reasons.append(f"depth cap reached ({max_depth} levels)")
+    elif report.stopped_reason == "timeout":
+        reasons.append(f"timeout ({timeout_seconds:g}s)")
+    if oversized_skips > 0:
+        size_mb = max_file_size_bytes / 1_048_576
+        reasons.append(
+            f"{oversized_skips} oversized file(s) skipped (>{size_mb:.1f}MB)"
+        )
+    if match_capped:
+        reasons.append(
+            f"match-count cap reached ({max_matches:,} matches)"
+        )
+
+    if not reasons:
+        return ""
+
+    return (
+        "\n⚠ Search incomplete: " + "; ".join(reasons) + ". "
+        "Results may be incomplete — narrow the root or raise pattern specificity."
+    )
 
 
 @register_tool_category("filesystem")
@@ -321,26 +691,46 @@ def glob_files(
     limit: int = 100,
 ) -> str:
     """Find files matching a glob pattern. Use tool_help("glob_files") for details."""
-    search_path, err = _resolve_within_workdir(path, workdir)
+    # Walk-tool absolute-path guard (2026-09-23 incident fix). Bare absolute
+    # roots outside the workdir are REFUSED — see _resolve_search_root.
+    search_path, err = _resolve_search_root(path, workdir)
     if err:
         return err
 
     try:
         if not search_path.exists():
             return f"ERROR: Path does not exist: {path}"
-        
-        # Find matching files
-        matches = list(search_path.glob(pattern))
-        
-        # Filter to only files (not directories)
+
+        # Bounded walk — applies exclusions / depth / count / timeout caps.
+        walk = _bounded_walk(search_path)
+        candidate_files = walk.files
+
+        # Filter candidates by the user's pattern (uses _file_matches_pattern
+        # internally; preserves Path.glob semantics including `**`).
+        matches = [f for f in candidate_files if _file_matches_pattern(f, search_path, pattern)]
+        # is_file() is already enforced by the walker, but a defensive double-
+        # check covers the rare case of a file disappearing mid-walk.
         files = [m for m in matches if m.is_file()]
-        
+
         if not files:
+            truncation_notice = _walk_truncation_notice(walk)
+            if truncation_notice:
+                return f"No files matching pattern: {pattern}{truncation_notice}"
             return f"No files matching pattern: {pattern}"
-        
-        # Sort by modification time (newest first)
-        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-        
+
+        # Sort by modification time (newest first). One stat() per file; with
+        # the walker's WALK_MAX_FILE_COUNT cap the syscall budget is bounded.
+        files_with_mtime: list[tuple[float, Path]] = []
+        for f in files:
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                # File disappeared between walk and stat — skip it.
+                continue
+            files_with_mtime.append((mtime, f))
+        files_with_mtime.sort(key=lambda x: x[0], reverse=True)
+        files = [f for _, f in files_with_mtime]
+
         # Format output relative to search_path
         result = []
         for f in files:
@@ -349,18 +739,22 @@ def glob_files(
                 result.append(str(rel_path))
             except ValueError:
                 result.append(str(f))
-        
+
         # Apply pagination
         if offset > 0:
             result = result[offset:]
         if limit and limit > 0:
             result = result[:limit]
-        
+
+        truncation_notice = _walk_truncation_notice(walk)
+
         if not result:
+            if truncation_notice:
+                return f"No files matching pattern: {pattern}{truncation_notice}"
             return f"No files matching pattern: {pattern}"
-        
+
         content = "\n".join(result)
-        
+
         # Check if truncation needed
         if len(content) > 6000 or len(result) > limit:
             # Truncate at line boundary
@@ -368,18 +762,18 @@ def glob_files(
             shown = len(truncated_lines)
             total = len(files)
             next_offset = offset + limit
-            
+
             # Build pagination hint
             pagination_hint = (
                 f"\n---\n"
                 f"Showing results {offset + 1} to {offset + shown} of {total}. "
                 f"Use offset={next_offset} for next page."
             )
-            
-            return "\n".join(truncated_lines) + pagination_hint
-        
-        return content
-        
+
+            return "\n".join(truncated_lines) + pagination_hint + truncation_notice
+
+        return content + truncation_notice
+
     except Exception as e:
         return f"ERROR: {str(e)}"
 
@@ -387,15 +781,26 @@ glob_files._full_doc_ = """Find files matching a glob pattern.
 
 Args:
     pattern: Glob pattern (e.g., "**/*.py", "*.md", "src/**/*.ts")
-    workdir: Base directory for relative paths. Required when `path` is relative;
-              optional (ignored) when `path` is absolute.
-    path: Directory to search in. Absolute paths are allowed (workdir not needed);
-          relative paths are resolved against `workdir`. Default: "."
+    workdir: Base directory for relative paths. REQUIRED when `path` is
+              absolute (walk-tool boundary — 2026-09-23 incident fix);
+              required as usual when `path` is relative.
+    path: Directory to search in. Absolute paths are accepted only when
+          workdir is provided AND the resolved root is within the workdir
+          or an allowed temp dir. Relative paths are resolved against
+          `workdir`. Default: "."
     offset: Number of results to skip (default: 0)
     limit: Maximum results to return (default: 100)
 
+Traversal guardrails: excluded dirs (node_modules, .venv, venv, .git,
+__pycache__, Library, .cache, .next, dist, build, target, and any hidden
+dir), depth cap (10 levels), file-count cap (10,000), and a 20-second
+wall-clock timeout. When a cap fires the result carries a loud "Search
+incomplete" notice pointing the caller to narrow the root or raise
+pattern specificity.
+
 Returns:
-    List of matching file paths, sorted by modification time (newest first)
+    List of matching file paths, sorted by modification time (newest first).
+    A trailing "Search incomplete" notice is appended only when a cap fired.
 """
 
 
@@ -466,32 +871,36 @@ def _expand_single_level_braces(pattern: str) -> list[str]:
     return [head + alt + tail for alt in alts]
 
 
-def _expand_include_glob(search_path: Path, include: str) -> list[Path]:
-    """Return the deduped, deterministically-ordered list of FILES under
-    ``search_path`` matched by ``include``.
+def _filter_candidates_by_include(
+    search_path: Path,
+    include: str,
+    candidate_files: list[Path],
+) -> list[Path]:
+    """Apply the user-supplied include filter to the bounded candidate list.
 
-    Behavior:
-    - Empty include falls back to the same ``**/*`` glob as the pre-fix baseline
-      (recursive over every file in the tree). Iteration order is now
-      deterministically sorted (pre-fix was platform-dependent pathlib.glob
-      walk order).
-    - When ``include`` contains no ``**`` segment, ``**/`` is prepended so the
-      filter is recursive at any depth under ``search_path`` (e.g. ``*.py`` →
-      ``**/*.py``).
-    - Patterns that already contain ``**`` (``**/*.ts``, ``src/**/*.py``,
-      ``**/{a,b}/*.py``) are used VERBATIM — the user has opted in to a
-      specific depth/prefix and we honor it.
-    - Single-level brace alternates (``{a,b,c}``) are expanded into concrete
-      globs; each is globbed independently and the union is deduped.
-    - Nested braces (``{a,{b,c}}``) are NOT expanded; the pattern is passed
-      through verbatim to ``Path.glob`` (which treats braces literally).
+    Pure filter — does NOT walk the tree (that's ``_bounded_walk``'s job).
+    Separating the walk from the pattern filter lets callers (notably
+    ``grep_files``) do ONE walk and reuse the WalkReport for both filtering
+    AND the truncation notice — otherwise the walk runs twice per call.
+
+    Behavior (preserved from the original ``_expand_include_glob``):
+    - Empty include returns the candidate list unchanged (the walker
+      already bounded it). Sorted for deterministic output.
+    - When ``include`` contains no ``**`` segment, ``**/`` is prepended so
+      the filter is recursive at any depth under ``search_path``.
+    - Patterns already containing ``**`` are used VERBATIM.
+    - Single-level brace alternates (``{a,b,c}``) are expanded; each is
+      matched against the candidate list and the union is deduped.
+    - Nested braces (``{a,{b,c}}``) are NOT expanded; the pattern is matched
+      literally against each candidate (matches ``Path.glob``'s native
+      treatment of braces).
     """
     pattern = include if include else ""
     if not pattern:
-        # Same `**/*` glob as the pre-fix baseline. Iteration order is now
-        # deterministically sorted (pre-fix was platform-dependent pathlib
-        # walk order) — a side-effect of the sorted() wrapper below.
-        return sorted(p for p in search_path.glob("**/*") if p.is_file())
+        # No-include path: every candidate passes (walker already bounded).
+        # Sorted for deterministic output — same observable property as the
+        # pre-fix baseline.
+        return sorted(candidate_files, key=str)
 
     # Recursion: prepend "**/" when the pattern does not already recurse.
     # ORDER MATTERS: the `**`-check runs BEFORE brace expansion. This keeps
@@ -512,18 +921,39 @@ def _expand_include_glob(search_path: Path, include: str) -> list[Path]:
     seen: set[str] = set()
     results: list[Path] = []
     for g in globs:
-        for p in search_path.glob(g):
-            if not p.is_file():
+        for f in candidate_files:
+            if not _file_matches_pattern(f, search_path, g):
                 continue
-            key = str(p)
+            key = str(f)
             if key in seen:
                 continue
             seen.add(key)
-            results.append(p)
+            results.append(f)
 
-    # Deterministic ordering across pathlib's arbitrary walk order.
-    results.sort(key=lambda p: str(p))
+    # Deterministic ordering.
+    results.sort(key=str)
     return results
+
+
+def _expand_include_glob(search_path: Path, include: str) -> list[Path]:
+    """Return the deduped, deterministically-ordered list of FILES under
+    ``search_path`` matched by ``include``.
+
+    Refactored (2026-09-23 memory-leak fix): the tree traversal itself is now
+    done by ``_bounded_walk`` (which applies the exclusions / depth / count /
+    timeout guardrails), then ``_filter_candidates_by_include`` applies the
+    user-supplied include filter on top of the bounded candidate list.
+
+    External callers see the same 2-arg signature and the same observable
+    semantics; the pin suite at
+    ``tests/unit/test_filesystem_grep_include_recursive_regression.py`` stays
+    green. Tool callers that need the WalkReport (e.g. ``grep_files``) should
+    call ``_bounded_walk`` directly and then ``_filter_candidates_by_include``
+    — that way the walk only runs once.
+    """
+    # Bounded walk — applies exclusions / depth / count / timeout caps.
+    walk = _bounded_walk(search_path)
+    return _filter_candidates_by_include(search_path, include, walk.files)
 
 
 @register_tool_category("filesystem")
@@ -539,18 +969,15 @@ def grep_files(
     limit: int = 100,
 ) -> str:
     """Search file contents using regex patterns. Use tool_help("grep_files") for details."""
-    search_path, err = _resolve_within_workdir(path, workdir)
+    # Walk-tool absolute-path guard (2026-09-23 incident fix). Bare absolute
+    # roots outside the workdir are REFUSED — see _resolve_search_root.
+    search_path, err = _resolve_search_root(path, workdir)
     if err:
         return err
 
     try:
         if not search_path.exists():
             return f"ERROR: Path does not exist: {path}"
-
-        # Resolve include filter (recursive + single-level brace expansion).
-        # No-include path uses the same "**/*" glob as the pre-fix baseline;
-        # iteration order is deterministically sorted.
-        candidate_files = _expand_include_glob(search_path, include)
 
         # Compile regex
         flags = 0 if case_sensitive else re.IGNORECASE
@@ -559,34 +986,80 @@ def grep_files(
 
         regex = re.compile(pattern, flags)
 
-        # Search files
-        matches = []
-        for file_path in candidate_files:
-            if not file_path.is_file():
+        # Bounded walk — applies exclusions / depth / count / timeout caps.
+        # Single walk reused for both the filtered candidate list AND the
+        # truncation notice (WalkReport.stoppped_reason). Walking twice would
+        # double the syscall budget on pathological trees.
+        walk = _bounded_walk(search_path)
+
+        # Resolve include filter on top of the bounded walk's output
+        # (recursive + single-level brace expansion).
+        candidate_files = _filter_candidates_by_include(search_path, include, walk.files)
+
+        # Per-file size cap (the 2026-09-23 incident showed that read_text()
+        # on a multi-GB file is itself a crash vector). Stat-then-skip — we
+        # never even open files above the cap. Read at call time so
+        # monkeypatch.setattr works in unit tests.
+        max_file_size_bytes = globals()["WALK_MAX_FILE_SIZE_BYTES"]
+        max_matches_per_call = globals()["WALK_MAX_MATCHES_PER_CALL"]
+        oversized_skips = 0
+        readable_files: list[Path] = []
+        for f in candidate_files:
+            try:
+                size = f.stat().st_size
+            except OSError:
                 continue
-            
+            if size > max_file_size_bytes:
+                oversized_skips += 1
+                continue
+            readable_files.append(f)
+
+        # Inner match-accumulation cap — even with the file-count cap, each
+        # candidate file can yield many lines. Stop reading once we hit the
+        # cap; this prevents one giant file from blowing past the worker's
+        # caps. The user's `limit` then trims to their preferred pagination.
+        match_capped = False
+        matches: list[str] = []
+        read_budget = max_matches_per_call
+
+        for file_path in readable_files:
             try:
                 lines = file_path.read_text(encoding="utf-8").splitlines()
             except (UnicodeDecodeError, PermissionError, IsADirectoryError):
                 continue
-            
+
             for line_num, line in enumerate(lines, start=1):
                 if regex.search(line):
                     # Truncate long lines
                     display_line = line[:500] + "..." if len(line) > 500 else line
                     matches.append(f"{file_path}:{line_num}: {display_line}")
-        
+                    if len(matches) >= read_budget:
+                        match_capped = True
+                        break
+            if match_capped:
+                break
+
         # Apply pagination
         if offset > 0:
             matches = matches[offset:]
         if limit and limit > 0:
             matches = matches[:limit]
-        
+
+        # Truncation notice combines walker-side caps (depth / file_count /
+        # timeout) with grep-specific signals (oversized skips, match cap).
+        truncation_notice = _walk_truncation_notice(
+            walk,
+            oversized_skips=oversized_skips,
+            match_capped=match_capped,
+        )
+
         if not matches:
+            if truncation_notice:
+                return f"No matches found for: {pattern}{truncation_notice}"
             return f"No matches found for: {pattern}"
-        
+
         content = "\n".join(matches)
-        
+
         # Check if truncation needed
         if len(content) > 6000 or len(matches) > limit:
             # Truncate at line boundary
@@ -594,18 +1067,18 @@ def grep_files(
             shown = len(truncated_matches)
             total = len(matches)
             next_offset = offset + limit
-            
+
             # Build pagination hint
             pagination_hint = (
                 f"\n---\n"
                 f"Showing results {offset + 1} to {offset + shown} of {total}. "
                 f"Use offset={next_offset} for next page."
             )
-            
-            return "\n".join(truncated_matches) + pagination_hint
-        
-        return content
-        
+
+            return "\n".join(truncated_matches) + pagination_hint + truncation_notice
+
+        return content + truncation_notice
+
     except re.error as e:
         return f"ERROR: Invalid regex pattern: {e}"
     except Exception as e:
@@ -615,10 +1088,13 @@ grep_files._full_doc_ = """Search file contents using regex patterns.
 
 Args:
     pattern: Regex pattern to search for
-    workdir: Base directory for relative paths. Required when `path` is relative;
-              optional (ignored) when `path` is absolute.
-    path: Directory to search in. Absolute paths are allowed (workdir not needed);
-          relative paths are resolved against `workdir`. Default: "."
+    workdir: Base directory for relative paths. REQUIRED when `path` is
+              absolute (walk-tool boundary — 2026-09-23 incident fix);
+              required as usual when `path` is relative.
+    path: Directory to search in. Absolute paths are accepted only when
+          workdir is provided AND the resolved root is within the workdir
+          or an allowed temp dir. Relative paths are resolved against
+          `workdir`. Default: "."
     include: Glob pattern to filter files. Recursive by default — prefix-less
               patterns (e.g. "*.py", "*.{py,html}") match at ANY depth under
               `path` (the tool prepends `**/`). Path-prefixed patterns (e.g.
@@ -641,8 +1117,17 @@ Args:
     offset: Number of results to skip (default: 0)
     limit: Maximum matches to return (default: 100)
 
+Traversal guardrails: excluded dirs (node_modules, .venv, venv, .git,
+__pycache__, Library, .cache, .next, dist, build, target, and any hidden
+dir), depth cap (10 levels), file-count cap (10,000), per-file size cap
+(1.5 MB; oversized files are skipped silently — counted in the notice),
+match-accumulation cap (10,000), and a 20-second wall-clock timeout. When
+a cap fires the result carries a loud "Search incomplete" notice pointing
+the caller to narrow the root or raise pattern specificity.
+
 Returns:
-    Matching lines with file path and line number (format: "path:line: content")
+    Matching lines with file path and line number (format: "path:line: content").
+    A trailing "Search incomplete" notice is appended only when a cap fired.
 """
 
 
