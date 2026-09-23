@@ -293,34 +293,53 @@ class TestTimeoutFires:
     def test_timeout_fires_with_monkeypatched_small_constant(
         self, tmp_path, monkeypatch
     ):
-        """Patch the timeout to a tiny value (1 ms) and force a tree large
-        enough to exceed it. The walk must STOP with timeout == stopped_reason.
+        """Patch ``time.monotonic`` so the deadline provably fires mid-walk.
 
-        We don't ``sleep`` long — the timeout is enforced by ``time.monotonic()``
-        checks at the start of each directory, so a 1 ms cap fires after one
-        or two directory entries (cheap).
+        The walker enforces the deadline via ``time.monotonic() > deadline``
+        at the start of each directory iteration (filesystem.py:379). The
+        previous version of this test only asserted that the notice was
+        "either absent or present" — that pin was un-pinned: removing the
+        ``time.monotonic() > deadline`` check entirely would stay GREEN.
+
+        W-D review patch: replace ``time.monotonic`` with a counter that
+        returns values strictly past the deadline by the 2nd call, so the
+        walker's deadline check fires deterministically. Notice assertions
+        are now UNCONDITIONAL — the only way to make this test GREEN is to
+        keep the timeout enforcement in place.
+
+        Hermetic and fast (no real sleeps, <1 s on CI).
         """
-        # Build a tree with enough dirs to keep the walker busy long enough
-        # for 1 ms to elapse (filesystem timing is volatile but a wide tree
-        # gives many chances).
-        for i in range(50):
-            d = tmp_path / f"d{i:02d}"
-            d.mkdir()
-            (d / "f.py").write_text("x")
-        # 1 ms timeout: forces the deadline check on the next iteration.
+        # Single file is enough — the walker's deadline check fires on the
+        # 2nd time.monotonic() call (1st sets deadline, 2nd is the check).
+        (tmp_path / "f.py").write_text("x")
+        # Tiny timeout in "monotonic units".
         monkeypatch.setattr(fs, "WALK_TIMEOUT_SECONDS", 0.001)
+        # fake_monotonic: 1st call → 1.0 (deadline becomes 1.001); 2nd call
+        # → 2.0 (2.0 > 1.001 ⇒ deadline check fires, walker breaks).
+        monotonic_counter = {"n": 0}
+
+        def fake_monotonic() -> float:
+            monotonic_counter["n"] += 1
+            return float(monotonic_counter["n"])
+
+        monkeypatch.setattr(fs.time, "monotonic", fake_monotonic)
         result = fs.glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
-        # The walker may or may not actually hit the cap within 1 ms on a
-        # small synthetic tree; what we CAN pin is that no test sleeps long,
-        # and that if timeout fires the notice mentions it.
-        # Acceptable: notice either absent (walk completed in time) or
-        # present mentioning timeout.
-        if "Search incomplete" in result:
-            assert "timeout" in result, (
-                f"Incomplete notice should mention timeout when cap fired:\n{result}"
-            )
-        # Sanity: did NOT block forever.
-        assert isinstance(result, str)
+        # UNCONDITIONAL pins — without the deadline check, these go RED.
+        assert "Search incomplete" in result, (
+            f"Deadline enforcement un-pinned — the walker should have "
+            f"stopped with a 'Search incomplete' notice. Removing the "
+            f"time.monotonic() check at filesystem.py:379 would still "
+            f"pass this test. Result:\n{result}"
+        )
+        assert "timeout" in result, (
+            f"Notice should mention timeout when the deadline fires:\n{result}"
+        )
+        # Sanity: the patched monotonic was actually called (we need at
+        # least the deadline-set + one check for the timeout to fire).
+        assert monotonic_counter["n"] >= 2, (
+            f"fake_monotonic called {monotonic_counter['n']} times — "
+            f"expected ≥ 2 (deadline-set + check)"
+        )
 
     def test_happy_path_does_not_trigger_timeout_notice(self, tmp_path, monkeypatch):
         """A small tree within the default 20 s budget must NOT trigger the
@@ -419,6 +438,51 @@ class TestAbsolutePathGuard:
         result = fs.glob_files.invoke({"pattern": "*.py", "path": "."})
         assert "ERROR" in result
         assert "workdir is required" in result
+
+    def test_abs_outside_workdir_refused_non_temp(self, request):
+        """Absolute path with workdir, OUTSIDE the workdir: REFUSED — pinned
+        unconditionally on a NON-temp fixture pair.
+
+        The sibling-of-tmp_path pin (test above) skips on macOS because
+        tmp_path's parent is in the system temp dir; on those filesystems
+        the temp-allowance makes refusal N/A and the test silently skips.
+        This test uses the repo's own ``tests/`` and ``daemon/`` directories
+        (non-temp on the primary dev platform) so the refusal pin runs
+        UNCONDITIONALLY — removing the workdir-containment check in
+        ``_resolve_search_root`` would flip this test RED. — W-E review patch.
+        """
+        # Repo root derived from this test file's location — NEVER hardcode.
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        workdir = repo_root / "tests"
+        outside_root = repo_root / "daemon"
+        # Sanity guards — fail loudly if the fixture pair is misconfigured.
+        assert workdir.exists() and workdir.is_dir(), (
+            f"workdir {workdir} does not exist — test fixture broken"
+        )
+        assert outside_root.exists() and outside_root.is_dir(), (
+            f"outside_root {outside_root} does not exist — test fixture broken"
+        )
+        assert not fs.WorkspaceGuard._is_in_temp_dir(workdir), (
+            f"workdir {workdir} unexpectedly in temp dir — pin meaningless"
+        )
+        assert not fs.WorkspaceGuard._is_in_temp_dir(outside_root), (
+            f"outside_root {outside_root} unexpectedly in temp dir — pin meaningless"
+        )
+        assert workdir.resolve() not in outside_root.resolve().parents, (
+            "fixture misconfigured: outside_root is inside workdir"
+        )
+        result = fs.glob_files.invoke({
+            "pattern": "**/*.py",
+            "path": str(outside_root),
+            "workdir": str(workdir),
+        })
+        assert "ERROR" in result, (
+            f"Non-temp refusal not pinned — outside_root must be REFUSED "
+            f"when workdir is a sibling. Result:\n{result}"
+        )
+        assert "outside workspace boundary" in result, (
+            f"Error should mention workspace boundary:\n{result}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -787,3 +851,48 @@ class TestResolveSearchRoot:
         finally:
             import shutil
             shutil.rmtree(sibling, ignore_errors=True)
+
+    def test_absolute_outside_workdir_refused_non_temp(self):
+        """Absolute path with workdir, OUTSIDE workdir: REFUSED — pinned
+        unconditionally on a NON-temp fixture pair.
+
+        Mirrors the tool-level pin at
+        ``TestAbsolutePathGuard.test_abs_outside_workdir_refused_non_temp``:
+        the sibling-of-tmp_path pin (test above) skips on macOS because
+        tmp_path's parent is in the system temp dir; on those filesystems
+        the temp-allowance makes refusal N/A and the test silently skips.
+        This test uses the repo's own ``tests/`` (workdir) and ``daemon/``
+        (outside root) — both non-temp on the primary dev platform — so the
+        refusal pin runs UNCONDITIONALLY at the resolver layer too. Removing
+        the workdir-containment check in ``_resolve_search_root`` would flip
+        this test RED. — W-E review patch.
+        """
+        # Repo root derived from this test file's location — NEVER hardcode.
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        workdir = repo_root / "tests"
+        outside_root = repo_root / "daemon"
+        # Sanity guards — fail loudly if the fixture pair is misconfigured.
+        assert workdir.exists() and workdir.is_dir(), (
+            f"workdir {workdir} does not exist — test fixture broken"
+        )
+        assert outside_root.exists() and outside_root.is_dir(), (
+            f"outside_root {outside_root} does not exist — test fixture broken"
+        )
+        assert not fs.WorkspaceGuard._is_in_temp_dir(workdir), (
+            f"workdir {workdir} unexpectedly in temp dir — pin meaningless"
+        )
+        assert not fs.WorkspaceGuard._is_in_temp_dir(outside_root), (
+            f"outside_root {outside_root} unexpectedly in temp dir — pin meaningless"
+        )
+        assert workdir.resolve() not in outside_root.resolve().parents, (
+            "fixture misconfigured: outside_root is inside workdir"
+        )
+        target, err = fs._resolve_search_root(str(outside_root), str(workdir))
+        assert target is None, (
+            f"Non-temp refusal not pinned — outside_root must be REFUSED "
+            f"when workdir is a sibling. Got target={target}, err={err}"
+        )
+        assert err is not None
+        assert "outside workspace boundary" in err, (
+            f"Error should mention workspace boundary: {err}"
+        )

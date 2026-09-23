@@ -44,6 +44,14 @@ WALK_EXCLUDED_DIRS: frozenset[str] = frozenset({
     "build",  # Various build outputs (setuptools, cmake, …)
     "target",  # Rust / Java build output
 })
+# Hidden-dir allowlist — dirs that start with "." but are intentionally NOT
+# pruned by the hidden-dir rule. ``.agents/`` is this repo's core collaboration
+# infra (plans/conventions/memories live there); pruning it silently would
+# make grep/glob miss the very files agents most often look for — W-B review
+# patch. Add to this set with care; the default is to KEEP hidden dirs hidden.
+WALK_ALLOWED_HIDDEN_DIRS: frozenset[str] = frozenset({
+    ".agents",
+})
 WALK_MAX_DEPTH: int = 10  # visit dirs at depths 0..N, scan files at depths 0..N
 WALK_MAX_FILE_COUNT: int = 10_000  # bound the materialized candidate list
 WALK_MAX_FILE_SIZE_BYTES: int = 1_500_000  # ~1.5 MB — grep_files per-file read cap
@@ -297,19 +305,33 @@ class WalkReport:
     Attributes:
         files: All files (regular files only) found in the bounded walk.
             Excludes anything under directories in ``WALK_EXCLUDED_DIRS`` or
-            hidden directories (name starts with ``.``). Bounded by
-            ``WALK_MAX_FILE_COUNT``, ``WALK_MAX_DEPTH``, and
-            ``WALK_TIMEOUT_SECONDS`` — once any of those caps fires, the
-            walk stops and the reason is recorded in ``stopped_reason``.
+            hidden directories (name starts with ``.``) — except dirs in
+            ``WALK_ALLOWED_HIDDEN_DIRS`` (``{".agents"}``), which stay
+            traversable. Bounded by ``WALK_MAX_FILE_COUNT``,
+            ``WALK_MAX_DEPTH``, and ``WALK_TIMEOUT_SECONDS`` — once any of
+            those caps fires, the walk stops and the reason is recorded in
+            ``stopped_reason``.
         stopped_reason: ``None`` if the walk completed normally; one of
             ``"file_count"`` / ``"depth"`` / ``"timeout"`` if a cap fired.
             Drives the "Search incomplete" notice appended to tool results.
         timed_out_at: Path where the timeout fired (``None`` if no timeout).
+        deadline_monotonic: ``time.monotonic()`` deadline the walker enforced
+            (start + ``WALK_TIMEOUT_SECONDS``). Exposed so post-walk phases
+            (grep read loop, glob stat loop) can reuse the SAME budget
+            instead of getting a fresh 20 s — prevents a slow walk + slow
+            read phase from stalling the worker pool. ``0.0`` sentinel when
+            the walker did not run (e.g. caller did not invoke it).
+        post_walk_phase_timed_out: ``None`` if the post-walk phase (grep read
+            or glob mtime-stat) completed within budget; ``"read"`` /
+            ``"stat"`` to flag which phase exceeded the deadline. Drives a
+            second clause of the truncation notice — W-A review patch.
     """
 
     files: list[Path] = field(default_factory=list)
     stopped_reason: str | None = None
     timed_out_at: Path | None = None
+    deadline_monotonic: float = 0.0
+    post_walk_phase_timed_out: str | None = None
 
 
 def _bounded_walk(
@@ -391,18 +413,27 @@ def _bounded_walk(
             depth = 0
 
         # Prune excluded / hidden dirs (in-place for topdown=True).
+        # Hidden-dir allowlist (WALK_ALLOWED_HIDDEN_DIRS) takes precedence
+        # over the startswith(".") rule — e.g. ".agents/" is allowlisted
+        # because plans/conventions live there and must stay searchable.
         # Sorted for deterministic walk order — helps test reproducibility.
+        allowed_hidden = globals()["WALK_ALLOWED_HIDDEN_DIRS"]
         kept_dirs = sorted(
             d for d in dirs
-            if d not in excluded and not d.startswith(".")
+            if d not in excluded
+            and (not d.startswith(".") or d in allowed_hidden)
         )
         dirs[:] = kept_dirs
 
         # Depth cap: at max_depth we don't descend further (files at this
-        # depth are still scanned — only descent stops).
+        # depth are still scanned — only descent stops). Only flag the cap
+        # when there were actually dirs to prune; a tree that GENUINELY ends
+        # at the cap (dirs already empty) is not "incomplete" and would
+        # otherwise emit a false truncation notice — W-F review patch.
         if depth >= max_depth:
+            if dirs:
+                saw_depth_cap = True
             dirs[:] = []
-            saw_depth_cap = True
 
         # Add files (don't follow symlinks — already enforced by followlinks=False).
         for fname in fnames:
@@ -417,6 +448,7 @@ def _bounded_walk(
                     files=files,
                     stopped_reason="file_count",
                     timed_out_at=None,
+                    deadline_monotonic=deadline,
                 )
 
     # Determine final stopped_reason. Timeout wins over depth if both fired.
@@ -430,6 +462,7 @@ def _bounded_walk(
         files=files,
         stopped_reason=stopped_reason,
         timed_out_at=timed_out_at,
+        deadline_monotonic=deadline,
     )
 
 
@@ -471,9 +504,9 @@ def _walk_truncation_notice(
     """Build the loud "Search incomplete" notice — only when a cap fired.
 
     Exclusions are ALWAYS on (not an incomplete signal). The notice fires
-    ONLY when a cap (file count / depth / timeout) or a size skip actually
-    tripped during the current call. Happy-path result format is unchanged
-    (notice is the empty string when nothing tripped).
+    ONLY when a cap (file count / depth / timeout / post-walk phase) or a
+    size skip actually tripped during the current call. Happy-path result
+    format is unchanged (notice is the empty string when nothing tripped).
 
     The notice redirects the caller to narrow the root or raise pattern
     specificity — the 2026-09-23 incident's behavioural driver was an agent
@@ -498,6 +531,16 @@ def _walk_truncation_notice(
         reasons.append(f"depth cap reached ({max_depth} levels)")
     elif report.stopped_reason == "timeout":
         reasons.append(f"timeout ({timeout_seconds:g}s)")
+    if report.post_walk_phase_timed_out == "read":
+        # Grep read phase (file read_text + line scan) ran past the
+        # walker's deadline. Reported as a separate reason so the caller
+        # can tell the walk itself was fine but the read loop was the
+        # bottleneck — W-A review patch.
+        reasons.append("timeout during read phase")
+    elif report.post_walk_phase_timed_out == "stat":
+        # Glob post-walk mtime-stat phase ran past the walker's deadline.
+        # Same W-A intent: stat() per file is the bottleneck.
+        reasons.append("timeout during stat phase")
     if oversized_skips > 0:
         size_mb = max_file_size_bytes / 1_048_576
         reasons.append(
@@ -720,8 +763,18 @@ def glob_files(
 
         # Sort by modification time (newest first). One stat() per file; with
         # the walker's WALK_MAX_FILE_COUNT cap the syscall budget is bounded.
+        # BUT a single slow stat() on a network FS or a contention-stalled
+        # disk can stall the worker — check the walker's deadline before
+        # each stat() so a no-match glob cannot hold a worker for minutes
+        # past WALK_TIMEOUT_SECONDS — W-A review patch.
         files_with_mtime: list[tuple[float, Path]] = []
+        stat_deadline = walk.deadline_monotonic or (
+            time.monotonic() + globals()["WALK_TIMEOUT_SECONDS"]
+        )
         for f in files:
+            if time.monotonic() > stat_deadline:
+                walk.post_walk_phase_timed_out = "stat"
+                break
             try:
                 mtime = f.stat().st_mtime
             except OSError:
@@ -1018,11 +1071,19 @@ def grep_files(
         # candidate file can yield many lines. Stop reading once we hit the
         # cap; this prevents one giant file from blowing past the worker's
         # caps. The user's `limit` then trims to their preferred pagination.
+        # Deadline also enforced per-file so a slow read_text / line scan
+        # cannot stall the worker past WALK_TIMEOUT_SECONDS — W-A review patch.
         match_capped = False
         matches: list[str] = []
         read_budget = max_matches_per_call
+        read_deadline = walk.deadline_monotonic or (
+            time.monotonic() + globals()["WALK_TIMEOUT_SECONDS"]
+        )
 
         for file_path in readable_files:
+            if time.monotonic() > read_deadline:
+                walk.post_walk_phase_timed_out = "read"
+                break
             try:
                 lines = file_path.read_text(encoding="utf-8").splitlines()
             except (UnicodeDecodeError, PermissionError, IsADirectoryError):
