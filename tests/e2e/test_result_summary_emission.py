@@ -22,11 +22,16 @@ Asserts on FOUR surfaces:
   (d) /api/notifications/stream SSE opened BEFORE terminal → at least
       one notification for this instance carries ``result_summary``.
 
-F6a (2026-09-22): on the two envelope-carrying surfaces (a) and (b),
-``result_summary`` is the resolver's ``Task.result`` JSON envelope —
-the test additionally asserts ``json.loads(result_summary)["content"]``
-is truthy, so a content-stamp regression inside the envelope fails the
-test. Payload shapes are NOT unified across surfaces (F6b DEFERRED).
+F6a (2026-09-22; updated 2026-09-24): on surfaces (a) and (b),
+``result_summary`` is CLEAN TEXT — the resolver helper
+(``_parse_task_result_summary``) extracts the producer envelope's
+``content`` key since the DEFECT-1 fix (commit 1e12944a) instead of
+dumping the whole envelope. The test pins the clean-text shape:
+non-empty, not the fallback marker, and NOT a ``{``-prefixed JSON
+dump (a regression to the pre-fix whole-envelope ``json.dumps``
+fails). Literal content is NOT asserted (canned mock LLM). Payload
+shapes are NOT unified across surfaces (F6b DEFERRED — the legacy
+``GET /messages/{id}/status`` route still dumps the whole envelope).
 
 Run against the dev daemon (``./dev.sh`` / ``./dev_with_mock.sh`` on
 port 8079). Skips when the daemon is unreachable. The mock LLM server
@@ -443,23 +448,25 @@ def test_result_summary_emission_surface_intent5():
             f"pre-fix fallback marker — content path was not exercised. "
             f"got={sse_result!r}"
         )
-        # F6a (2026-09-22): on this envelope-carrying surface the
-        # result_summary is the resolver's Task.result JSON envelope
-        # (``work_resolver._parse_task_result_summary`` json.dumps-es
-        # the producer dict ``{"success": ..., "message_id": ...,
-        # "content": ...}``). Assert the envelope's ``content`` key is
-        # TRUTHY so a content-stamp regression INSIDE the envelope
-        # (envelope present, content stripped/empty) fails the test —
-        # result_summary-is-not-None alone cannot catch it. Shapes are
-        # NOT unified across surfaces (F6b DEFERRED).
-        try:
-            sse_envelope_content = json.loads(sse_result).get("content")
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            sse_envelope_content = None
-        assert sse_envelope_content, (
-            f"[Intent5(a/F6a)] SSE result_summary envelope does not "
-            f"carry a truthy 'content' key — content-stamp regression "
-            f"inside the envelope. result_summary={sse_result!r}"
+        # F6a (2026-09-22; updated 2026-09-24): result_summary on this
+        # surface is now CLEAN TEXT — since the DEFECT-1 fix
+        # (commit 1e12944a) ``_parse_task_result_summary`` extracts the
+        # producer envelope's ``content`` key instead of json.dumps-ing
+        # the whole dict. Pin the clean-text shape: non-empty AND not a
+        # ``{``-prefixed JSON dump — so a regression to empty/None (the
+        # pre-v0.13.9 defect), the fallback marker, or the pre-fix
+        # whole-envelope dump ALL fail here. Literal content is NOT
+        # asserted (canned mock LLM). Shapes are NOT unified across
+        # surfaces (F6b DEFERRED).
+        assert isinstance(sse_result, str) and sse_result.strip(), (
+            f"[Intent5(a/F6a)] SSE result_summary is empty or "
+            f"non-string — clean-text contract regressed. "
+            f"result_summary={sse_result!r}"
+        )
+        assert not sse_result.lstrip().startswith("{"), (
+            f"[Intent5(a/F6a)] SSE result_summary is a JSON dump — "
+            f"regressed to the pre-fix whole-envelope json.dumps "
+            f"(clean-text contract). result_summary={sse_result!r}"
         )
 
         # 3. (b) GET /api/jobs/{job_id} — resolver surfaces
@@ -477,18 +484,22 @@ def test_result_summary_emission_surface_intent5():
             f"[Intent5(b)] GET result_summary is the fallback marker — "
             f"got={get_result!r}"
         )
-        # F6a (2026-09-22): same envelope contract as (a) — the GET
-        # body's result_summary is sourced via the resolver
-        # (``_parse_task_result_summary``), so its ``content`` key must
-        # be TRUTHY too. Envelope-present/content-stripped now fails.
-        try:
-            get_envelope_content = json.loads(get_result).get("content")
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            get_envelope_content = None
-        assert get_envelope_content, (
-            f"[Intent5(b/F6a)] GET result_summary envelope does not "
-            f"carry a truthy 'content' key — content-stamp regression "
-            f"inside the envelope. result_summary={get_result!r}"
+        # F6a (2026-09-22; updated 2026-09-24): same clean-text contract
+        # as (a) — the GET body's result_summary is sourced via the
+        # resolver (``_parse_task_result_summary``), which since the
+        # DEFECT-1 fix (commit 1e12944a) surfaces the envelope's
+        # ``content`` text verbatim. Pin non-empty AND not a
+        # ``{``-prefixed JSON dump: empty/None, the fallback marker, or
+        # the pre-fix whole-envelope dump all fail here.
+        assert isinstance(get_result, str) and get_result.strip(), (
+            f"[Intent5(b/F6a)] GET result_summary is empty or "
+            f"non-string — clean-text contract regressed. "
+            f"result_summary={get_result!r}"
+        )
+        assert not get_result.lstrip().startswith("{"), (
+            f"[Intent5(b/F6a)] GET result_summary is a JSON dump — "
+            f"regressed to the pre-fix whole-envelope json.dumps "
+            f"(clean-text contract). result_summary={get_result!r}"
         )
 
         # 4. (c) Read-only DB query — event row kind='job_completed'

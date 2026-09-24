@@ -251,6 +251,30 @@ class TestParseTaskResultSummary:
         result = _parse_task_result_summary(task)
         assert result == '{"nested": "value"}'
 
+    def test_content_none_falls_back_to_envelope_dump(self):
+        """Edge pin: envelope carries ``content: None``. The helper's
+        guard is ``content is not None`` — a None content does NOT
+        take the clean-text branch; it falls back to the whole-dict
+        ``json.dumps`` (reachable in production for content-less
+        completions)."""
+        payload = {
+            "success": True,
+            "message_id": "msg-2",
+            "content": None,
+        }
+        envelope = json.dumps(payload)
+        task = _make_task(
+            work_id="wid-test-1c", instance_id="inst-test-1c",
+            result=envelope,
+        )
+        result = _parse_task_result_summary(task)
+        assert result == json.dumps(payload), (
+            f"DEFECT-1 edge: envelope with ``content: None`` must fall "
+            f"back to the whole-dict json.dumps (guard is ``content "
+            f"is not None``), NOT surface None or clean text. "
+            f"Got {result!r}."
+        )
+
 
 class TestNotifyWorkWatchersResultBlock:
     """End-to-end: a TASK-side row with v0.13.9 envelope content
