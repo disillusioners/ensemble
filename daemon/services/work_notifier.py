@@ -85,6 +85,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import traceback
 from typing import TYPE_CHECKING, Any
 
 from daemon.services.work_status import is_terminal as _is_terminal
@@ -93,6 +95,55 @@ if TYPE_CHECKING:
     from daemon.services.work_resolver import WorkResolverService
 
 logger = logging.getLogger(__name__)
+
+
+def _caller_chain(max_frames: int = 3) -> str:
+    """Best-effort caller attribution for the ``[watch-cas]`` debug log.
+
+    Walks the stack newest→oldest, skipping frames that belong to this
+    module and to asyncio/contextlib plumbing, and renders the first
+    ``max_frames`` application frames as ``file:func:lineno`` joined by
+    `` <- `` (immediate caller first). Callers MUST guard behind
+    ``logger.isEnabledFor(logging.DEBUG)`` — the stack walk is never
+    paid on the hot INFO path.
+
+    DEFECT-1 round 3 (2026-09-24, fix/watch-notify-delivery-gaps):
+    this attribution is the arbitration primitive. Three consecutive
+    commits fixed producer sites that unit tests proved correct while
+    the LIVE completed-leg stayed content-less — because a different
+    caller won the CAS claim race. The chain at the claim chokepoint
+    names the winner unambiguously (e.g.
+    ``job_queue_service.py:notify_watchers:378 <-
+    job_feedback_observer.py:_finalize_job:2076``).
+    """
+    chain: list[str] = []
+    try:
+        for fi in reversed(traceback.extract_stack()[:-1]):
+            filename = fi.filename
+            if filename.endswith("work_notifier.py"):
+                continue
+            if (
+                "/asyncio/" in filename
+                or filename.endswith(("contextlib.py", "threading.py"))
+            ):
+                continue
+            chain.append(
+                f"{filename.rsplit('/', 1)[-1]}:{fi.name}:{fi.lineno}"
+            )
+            if len(chain) >= max_frames:
+                break
+    except Exception:  # noqa: BLE001 — attribution must never break notify
+        return "<caller-chain-unavailable>"
+    return " <- ".join(chain) if chain else "<unknown>"
+
+
+def _shape(v: str | None) -> str:
+    """Render a kwarg's presence/shape for the structured debug log."""
+    if v is None:
+        return "None"
+    if not v:
+        return "empty"
+    return f"len={len(v)}"
 
 
 # Status display mapping — must stay byte-for-byte identical to the
@@ -463,6 +514,33 @@ async def notify_work_watchers(
                 work_id,
                 [w.instance_id for w in matching],
             )
+            # DEFECT-1 round-3 arbitration instrumentation (2026-09-24,
+            # fix/watch-notify-delivery-gaps): permanent structured DEBUG
+            # log at the CAS claim chokepoint. Emits for BOTH outcomes —
+            # the claim winner (claimed>=1) AND the loser (claimed=0) —
+            # with ns timestamp, stack-derived caller chain, and the
+            # kwarg shape each side held. This is the ground-truth
+            # record of WHICH caller site won the exactly-once race and
+            # what content it carried (``kw_result_summary=None`` on a
+            # winning line IS the content-less-delivery proof).
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[watch-cas] ts=%d work=%s status=%s caller=%s "
+                    "kw_result_summary=%s resolver_result_summary=%s "
+                    "effective_result=%s kw_error=%s effective_error=%s "
+                    "matching=%d claimed=%d",
+                    time.time_ns(),
+                    work_id[:8],
+                    status,
+                    _caller_chain(),
+                    _shape(result_summary),
+                    _shape(getattr(work_record, "result_summary", None)),
+                    _shape(effective_result),
+                    _shape(error),
+                    _shape(effective_error),
+                    len(matching),
+                    len(claimed),
+                )
             if not claimed:
                 # Lost every CAS — every matching row was already
                 # claimed by a concurrent terminal caller. Their
@@ -510,6 +588,22 @@ async def notify_work_watchers(
                     notification_parts.append(f"  Error: {effective_error}")
 
             notification = "\n".join(notification_parts)
+
+            # DEFECT-1 round-3 arbitration instrumentation: full body at
+            # DEBUG so the delivered envelope can be byte-discriminated
+            # straight from the log (⟳-with-Result vs ✓-without), paired
+            # with the ``[watch-cas]`` claim line above.
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[watch-deliver] ts=%d work=%s status=%s to=%s "
+                    "body_bytes=%d body=%r",
+                    time.time_ns(),
+                    work_id[:8],
+                    status,
+                    watcher.instance_id[:8],
+                    len(notification),
+                    notification,
+                )
 
             # ``enqueue_message`` is async — call it directly since we
             # are already on the event loop. The watcher's instance
