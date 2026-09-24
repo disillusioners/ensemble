@@ -24,7 +24,7 @@ Scenario → test map (dispatch spec a–g):
      descendants
   d. idempotent re-pause           → TestPauseInstance::test_repause_already_paused_is_skipped
   e. resume running-turn           → TestResumeInstance::test_resume_running_turn_spins_job_resuming
-  f. resume waiting_children       → TestResumeInstance::test_resume_waiting_children_parent_silent_resume
+  f. resume silent lane            → TestResumeInstance::test_resume_silent_lane_status_passthrough
   g. access-control denial         → TestPauseResumeAccessControl::test_pause_project_mismatch_denied
                                     TestPauseResumeAccessControl::test_resume_project_mismatch_denied
                                     TestPauseResumeAccessControl::test_unscoped_*_allowed
@@ -295,21 +295,32 @@ class TestResumeInstance:
         manager.resume_instance_cascade.assert_awaited_once_with(TARGET_ID)
 
     @pytest.mark.asyncio
-    async def test_resume_waiting_children_parent_silent_resume(self, manager, resume_tool):
+    @pytest.mark.parametrize(
+        "parent_lane_status",
+        [
+            "silent_resume",  # non-WC parent — silent checkpoint continuation
+            "wake_enqueued",  # WAITING_CHILDREN parent — durable wake turn (B2)
+        ],
+    )
+    async def test_resume_silent_lane_status_passthrough(
+        self, manager, resume_tool, parent_lane_status
+    ):
         """(f) A parent resumed on the silent lane returns the service's
-        "silent_resume" status (internal_child_noop §9.3,
-        manager.py:10021) and non-target children resume with silent=True.
+        status VERBATIM (internal_child_noop §9.3, manager.py:10021) and
+        non-target children resume with silent=True.
 
-        Note (B2, 2026-09-11): a WAITING_CHILDREN parent + silent=True with
-        the lifecycle service wired enqueues a durable wake and returns
-        "wake_enqueued" instead — the tool NEVER re-interprets statuses;
-        whatever the service returns lands in resume_results verbatim."""
+        Parametrized over both silent-lane parent statuses (B2,
+        2026-09-11): "silent_resume" for the non-WC parent checkpoint
+        continuation, "wake_enqueued" for a WAITING_CHILDREN parent whose
+        silent wake was enqueued durably — the tool NEVER re-interprets
+        statuses; whatever the service returns lands in resume_results
+        verbatim."""
         manager.resume_processing_job = AsyncMock(
             side_effect=lambda iid, message, silent: {
                 "instance_id": iid,
                 "job_id": None,
                 "message_id": None,
-                "status": "silent_resume",
+                "status": parent_lane_status,
             }
         )
         manager.resume_instance_cascade = AsyncMock(
@@ -322,8 +333,8 @@ class TestResumeInstance:
 
         result = await resume_tool.coroutine(TARGET_ID, reason="daemon is back")
 
-        assert result["resume_results"][TARGET_ID]["status"] == "silent_resume"
-        assert result["resume_results"][CHILD_ID]["status"] == "silent_resume"
+        assert result["resume_results"][TARGET_ID]["status"] == parent_lane_status
+        assert result["resume_results"][CHILD_ID]["status"] == parent_lane_status
         # Children resume silently from checkpoint — no injected message.
         manager.resume_processing_job.assert_any_await(
             CHILD_ID, message="resume", silent=True
@@ -477,16 +488,16 @@ class TestResumeInstance:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "passthrough_status",
+        "passthrough_status, payload_field",
         [
-            "wake_enqueued",
-            "wake_failed",
-            "already_resuming",
-            "deferred_report_recovery",
+            ("wake_enqueued", "job_id"),
+            ("wake_failed", "refusal_kind"),
+            ("already_resuming", "job_id"),
+            ("deferred_report_recovery", "recovery_count"),
         ],
     )
     async def test_resume_status_passthrough_verbatim(
-        self, manager, resume_tool, passthrough_status
+        self, manager, resume_tool, passthrough_status, payload_field
     ):
         """S3 FIX: pin VERBATIM status pass-through for every status the
         ``resume_processing_job`` service can return, including the three
@@ -569,10 +580,13 @@ class TestResumeInstance:
         # continuation branch the service classified into).
         assert result["resumed"] is True
         assert result["target_id"] == TARGET_ID
-        # Sanity: the service-specific field landed too (pin the
-        # payload didn't get dropped or filtered — distinct from
-        # the existing ``silent_resume`` test which only checks
-        # the status string).
+        # The service-specific field landed too — pin the payload wasn't
+        # dropped or filtered (distinct from the silent-lane test, which
+        # pins the parent/child call shape).
+        assert payload_field in result["resume_results"][TARGET_ID], (
+            f"service-specific field {payload_field!r} missing from "
+            f"resume_results[{TARGET_ID!r}] for status {passthrough_status!r}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 """Instance management tools for multi-agent orchestration.
 
-Module size: ~4850 lines (2026-09-14 dispatch-lane stranding fix).
+Module size: 5357 lines (2026-09-14 dispatch-lane stranding fix;
++354 from agent-pause-resume-tools, 2026-09-24).
 Originally aimed for the 1000-3000 line band; post-move we are ~1600
 lines over the band. Routing logic (``_route_send_message``,
 ``_make_workdir_aware``, ``_make_instance_id_aware``) and the tool
@@ -473,7 +474,8 @@ def _check_instance_project_access(
     # delegated the project lookup to ``_get_instance_project_id``
     # which swallows ALL exceptions and returns ``None`` — the helper
     # is intentionally permissive because other callers
-    # (instance.py:2201 / :2449 / :2629 / :2824) use it for
+    # (the other ``_get_instance_project_id`` call sites in this
+    # module) use it for
     # non-authz project_id inheritance and want the swallow-and-default
     # semantics. On the authz path, however, the only legitimate
     # ``None`` return is "the row is genuinely absent or has no
@@ -4593,7 +4595,7 @@ Returns:
     ) -> dict:
         """Pause an instance and cascade to its lineage (resumable). Use tool_help("pause_instance") for details."""
         # Mirror the HTTP endpoint's write-paused migration gate
-        # (routers/instances.py:664-666) — parity, not re-implementation.
+        # (routers/instances.py ``pause_instance``) — parity, not re-implementation.
         if getattr(manager, "is_write_paused", False):
             return {"error": "Writes are paused for database migration", "paused": False}
         # Existence check — same KeyError contract as the endpoint's 404.
@@ -4602,7 +4604,7 @@ Returns:
         except KeyError:
             return {"error": f"Instance not found: {instance_id}", "paused": False}
         # Access control: project-scoped check (same pattern as job_messages /
-        # job_inject — see _check_instance_project_access below).
+        # job_inject — see _check_instance_project_access above).
         deny = _check_instance_project_access(manager, current_instance_id, instance_id)
         if deny is not None:
             return deny
@@ -4636,10 +4638,13 @@ Returns:
     success. paused_ids = every instance ID that transitioned to PAUSED;
     skipped_ids = IDs already paused / terminal / not found (idempotent —
     re-pausing a paused instance just reports it in skipped_ids).
-    {"error": ..., "paused": False} when the instance is missing, writes are
-    paused for a DB migration, or access is denied (project-scoped, same
-    rule as job_messages: a target in another project is refused unless I
-    run unscoped/in the system-default project).
+    Denials, as shipped: {"error": ..., "paused": False} when the instance
+    is missing or writes are paused for a DB migration; a BARE
+    {"error": ...} (no "paused" key) when access is denied (project-scoped,
+    same rule as job_messages: a target in another project is refused
+    unless I run unscoped/in the system-default project) — the access
+    helper's dict is returned verbatim. Branch on "error" presence, not
+    result["paused"].
 
 When to use — pre-restart choreography:
     Before a daemon restart or upgrade: pause in-flight instance work,
@@ -4689,7 +4694,7 @@ Caveats:
                         "instance_id": instance_id,
                     }
         # Mirror the HTTP endpoint's write-paused migration gate
-        # (routers/instances.py:695-697) — parity, not re-implementation.
+        # (routers/instances.py ``resume_instance``) — parity, not re-implementation.
         if getattr(manager, "is_write_paused", False):
             return {"error": "Writes are paused for database migration", "resumed": False}
         # Existence check — same KeyError contract as the endpoint's 404.
@@ -4698,7 +4703,7 @@ Caveats:
         except KeyError:
             return {"error": f"Instance not found: {instance_id}", "resumed": False}
         # Access control: project-scoped check (same pattern as job_messages /
-        # job_inject — see _check_instance_project_access below).
+        # job_inject — see _check_instance_project_access above).
         deny = _check_instance_project_access(manager, current_instance_id, instance_id)
         if deny is not None:
             return deny
@@ -4782,16 +4787,21 @@ Returns:
     (the router recovered one or more DEFERRED report rows for the
     target; check the recovery_count field), "no_active_job" (nothing to
     continue), "error" (the continuation failed — inspect the error field).
-    {"error": ..., "resumed": False} when the instance is missing, writes
-    are paused for a DB migration, or access is denied (project-scoped,
-    same rule as job_messages).
+    Denials, as shipped: {"error": ..., "resumed": False} when the
+    instance is missing or writes are paused for a DB migration;
+    {"error": ..., "resumed": False, "instance_id": ...} when a question
+    pack is pending (the refusal caveat below); a BARE {"error": ...}
+    (no "resumed" key) when access is denied (project-scoped, same rule
+    as job_messages) — the access helper's dict is returned verbatim.
+    Branch on "error" presence, not result["resumed"].
 
 Caveats:
     * This tool resumes WORK — it is NOT an answer channel. If the target
-      paused itself awaiting an answer (ask_questions gate), the answer
-      endpoint (POST /api/instances/{id}/answer) is the SOLE entry that
-      consumes the pending question; resuming here does not deliver one.
-      When a question pack is pending, resume_instance refuses
+      paused itself awaiting an answer (ask_questions gate), the
+      agent-facing surface for that is the job_answer(work_id) tool (the
+      POST /answer HTTP endpoint is its user-facing twin — both surfaces
+      share one implementation); resuming here does not deliver an
+      answer. When a question pack is pending, resume_instance refuses
       programmatically with an error before any service call — it never
       routes the literal "resume" message as answer content.
     * To give a resumed agent NEW instructions, wait for the resume to

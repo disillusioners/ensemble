@@ -515,8 +515,10 @@ read the `error` field).
 
 **Do NOT use for:**
 - ❌ Answering a pending question — if the instance paused itself
-  awaiting an answer, the answer endpoint is the ONLY entry that
-  delivers it; resume_instance refuses with an error if a question pack
+  awaiting an answer, answer it via `job_answer(work_id)` (the
+  agent-facing surface; the POST /answer HTTP endpoint is its
+  user-facing twin — both share one implementation).
+  resume_instance refuses with an error if a question pack
   is still pending
 - ❌ Cancelling work permanently → `job_cancel` / `terminate_instance`
 - ❌ Giving NEW instructions to a running agent → `job_inject`
