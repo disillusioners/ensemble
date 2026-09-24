@@ -5,6 +5,31 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] — 2026-09-24
+
+Patch release. Bug-fix-only content: two merges on top of v0.14.0 close the user-visible job-watch delivery loop. No schema changes, no breaking API changes, no config flips.
+
+### Fixed — Mission-watch notification replay flood + `Error:`-slot mis-wiring (`fix/job-event-watch-replay`, merge `5f4e35b0`)
+
+The mission-watch notify path was replaying already-settled receipts and mis-wiring the `Error:` slot to mission assistant-message content. Both classes are now dead.
+
+- **No replay of already-settled receipts** — registration-time terminal filter (`watch_mission` early-exits when the work row is already in a terminal state, the watcher row already carries a settled receipt, or the work is mid-flip). The previous "re-arm" path that re-fired `mission_watch` notifications for completed jobs is gone; exactly-once at the wire is now load-bearing.
+- **No post-unwatch continuation** — the `unwatch_mission` route clears the watcher row AND arms a delta-token at the consumer site (slot wiring); a follower that arrives after unwatch does not see a half-cleared watcher row and cannot synthesize a notification from the stale slot.
+- **No duplicates** — replay invariants pinned (`tests/job_queue/test_work_notifier_replay_pins.py` + `test_work_notifier_defect5_pins.py`): 7/7 exactly-once, zero replays, zero duplicates, zero flip re-fires against the incident scenario.
+- **`Error:`-slot mis-wiring dead** — the `notify` keyword slot wiring is now type-checked at registration; a `None` payload distinguishes "keyword not mapped" from "keyword mapped to None payload". Previously the slot could leak mission assistant-message content into an `Error:` field of an SSE event.
+- **`watch_mission` delta-arm log** — registration logs `armed N live / M skipped` where M is the count of watchers refused at the terminal filter. Operator can see the filter do its job.
+- **Regression + incident-scenario coverage** — 5/5 incident-scenario pins (replay 7/7, exactly-once, delta-arm, slot wiring, unwatch); latent-twin slot-wiring pin hardened against `None` payload.
+
+### Fixed — Mid-flight ⟳ notifications + completed-task Result: rendering (`fix/watch-notify-delivery-gaps`, merge `a79aba7a`)
+
+The remaining watch-delivery gaps: mid-flight `mid_flight_report` events were silently dropped at the emit path, and the `Result:` block was missing from completed task-kind envelopes. Both fixed at the CAS-winner site; the commit-visibility race that masked the result arm is closed.
+
+- **Mid-flight ⟳ delivery (DEFECT-5 closed live)** — `work_notifier._emit(...)` now delivers `MIDFLIGHT_REPORT` events to subscribed watchers at the CAS-winner site. Previous code returned at the "armed" branch before the notify arm could fire for non-terminal mid-flight rows; the row survives non-terminal events, so the watcher row was intact but the ⟳ event never reached the wire. ⟳ delivery now logged: `⟳ delivered (36ms, row survives non-terminal)`.
+- **Result: block on completed task-kind events (DEFECT-1/1b closed live)** — the producer-side `result_summary` is threaded into the completed-token envelope via the measured CAS-winner branch. Previous attempts measured at the wrong site (an instrumentation-orphaned branch) and stamped `result` against a payload-gap row; the producer-side fix threads `result_summary` into the SAME token the `notify` arm uses. 4/4 task-kind envelopes now byte-matched `Result:`-marker-present; settled-lean invariant held.
+- **M3 settled narrowing** — only the `completed` token fans out a result-arm notify; `failed` / `cancelled` / `dead` paths keep the previous contract (no `Result:` line for those). Reduces the surface area for accidental `Result:` leaks.
+- **Emit-path instrumentation** — `[watch-cas]` log instrumentation at the five notify sites lets operators see which branch won the CAS race; non-winner branches stay silent (no log flood). Filed a propagation gap for the closed-loop version.
+- **Regressions** — `test_work_notifier_defect1_pins.py` (491 lines), `test_work_notifier_defect1_round3_pin.py` (754 lines), `test_work_notifier_defect1b_pin.py` (578 lines), `test_work_notifier_defect5_pins.py` (608 lines). Mechanical 17/17 pins PASS, 3 dirs zero new reds.
+
 ## [0.13.12] — 2026-09-23
 
 ### Added — `job_answer` Job Queue tool (`feature/job-answer-tool`, merge `0deee66d`)
