@@ -46,6 +46,19 @@ This file pins:
    BECAUSE the watcher is dual-subscribed but the non-terminal fire
    didn't claim.
 
+6. ``test_dual_terminal_kind_settles_mid_mission_delivers_once_with_claim``
+   — A1 closure (reviewer-ratified, 2026-09-24): a dual-subscribed
+   row carrying a TERMINAL-kind event (``settled``) +
+   ``mission_terminal``. The receipt settles MID-MISSION (work
+   record still ``processing``); the watcher MUST deliver ONCE at
+   receipt-settle with the CAS claim, and a subsequent
+   mission-terminal flip (``completed``) produces ZERO additional
+   fires (the row was consumed). Pre-fix this was held silently
+   until the mission flip; post-fix the
+   ``mission_terminal_opt_in and not standard_match`` gate does not
+   hold when an explicit terminal-kind subscription matches the
+   firing kind.
+
 The recipe mirrors ``test_work_notifier_n1_pin.py`` (file-backed
 SQLite, real ``JobWatcherRepository``, ``WorkResolverService`` patched
 to a synthetic ``WorkRecord``, ``AsyncMock`` for the manager's
@@ -164,11 +177,31 @@ def _patch_complete(resolver, *, wid: str, job_type: str = "task"):
 
 
 class _NoOpJobRepo:
+    """Minimal stand-in for ``JobRepository`` — explicit allowlist (B2).
+
+    Pre-B2 this class's ``__getattr__`` auto-returned a no-op callable
+    for ANY attribute, so a future typo'd repo read silently passed.
+    B2 (reviewer-ratified A1+B2 closure, 2026-09-24) converts to an
+    explicit allowlist: only ``get`` (used by ``resolve_work``) is
+    supported, and any other attribute raises ``AttributeError`` —
+    a typo is more useful as an explicit failure than a silent
+    ``None`` downstream. ``WorkResolverService.list_work`` accesses
+    ``self._job_repo.engine`` on the JobItem SELECT branch, but the
+    defect5 pins never call ``list_work`` so ``engine`` is not in
+    the allowlist (intentional — if a future pin calls it, the
+    resulting ``SQLModelSession(None)`` failure surfaces loudly
+    instead of silently passing).
+    """
+
     def get(self, _job_id):
         return None
 
-    def __getattr__(self, name):
-        return lambda *_a, **_kw: None
+    def __getattr__(self, name: str):
+        raise AttributeError(
+            f"_NoOpJobRepo: unknown attribute {name!r} — "
+            f"the explicit allowlist is intentional (B2). "
+            f"Add the attribute to the class body if it is required."
+        )
 
 
 @pytest.fixture
@@ -408,6 +441,112 @@ class TestM2GateMultiKindRowSurvivesTerminal:
         )
         # Total deliveries: 1 non-terminal + 1 terminal = 2 enqueue.
         assert instance_manager.enqueue_message.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_dual_terminal_kind_settles_mid_mission_delivers_once_with_claim(
+        self, defect5_components,
+    ):
+        """A1 (reviewer-ratified A1+B2 closure, 2026-09-24): a
+        dual-subscription row carrying a TERMINAL-kind event
+        (``settled``) + ``mission_terminal``. The receipt settles
+        MID-MISSION (the work record's status is still
+        ``processing``), and the watcher MUST deliver EXACTLY ONCE
+        AT RECEIPT-SETTLE with the CAS claim. A subsequent
+        mission-terminal flip (the work reaches true terminal
+        liveness, ``completed``) produces NO second fire — the row
+        was consumed by the receipt-settle CAS.
+
+        Post-1e12944a gate: ``mission_terminal_opt_in and not
+        standard_match``. Here ``settled`` IS in ``watch_events``
+        (``standard_match=True``), so the M2 hold gate does NOT
+        hold — the row falls through to ``matching``, step 3's CAS
+        claims it (``_is_terminal("settled")`` is True — ``settled``
+        is canonical terminal per the comment at
+        ``work_notifier.py:417-419``), and step 4 delivers. The
+        pre-fix code held this row silently until the mission
+        flip; the post-fix code delivers at receipt-settle because
+        the explicit terminal-kind subscription matches, so the
+        hold gate does not trigger. Reviewer explicitly approved
+        this delivery semantic (same philosophy as DEFECT-5 — an
+        explicit subscription delivers).
+        """
+        engine = defect5_components["engine"]
+        watcher_repo = defect5_components["watcher_repo"]
+        resolver = defect5_components["resolver"]
+        instance_manager = defect5_components["instance_manager"]
+        wid = f"wid-{uuid4().hex[:8]}"
+        _seed_instances(engine, "inst-prod-1", "watcher-1")
+        _seed_task(engine, work_id=wid, instance_id="inst-prod-1",
+                   status=TaskStatus.RUNNING.value)
+        # Dual subscription: TERMINAL-kind ``settled`` + ``mission_terminal``.
+        _add_watch(engine, work_id=wid, instance_id="watcher-1",
+                   watch_events=["settled", "mission_terminal"])
+
+        # Step 1: receipt settles MID-MISSION — work record is still
+        # ``processing`` (resolver patch below), so the mission is not
+        # yet terminal. The watcher matches on ``settled`` (explicit
+        # terminal-kind subscription), the M2 hold gate does not
+        # trigger (``standard_match=True``), the CAS claim runs
+        # (``_is_terminal("settled")`` is True), and the watcher row
+        # is consumed.
+        original = _patch_running(resolver, wid=wid)
+        try:
+            n_settled = await notify_work_watchers(
+                wid, "settled", instance_manager=instance_manager,
+                work_resolver=resolver, watcher_repo=watcher_repo,
+            )
+        finally:
+            resolver.resolve_work = original
+
+        # Delivers EXACTLY ONCE at receipt-settle with the CAS claim.
+        assert n_settled == 1, (
+            "A1: dual-subscribed [settled, mission_terminal] watcher "
+            "must deliver ONCE at receipt-settle even mid-mission — "
+            "the M2 hold gate does NOT hold when the firing kind "
+            "matches an explicit terminal-kind subscription "
+            "(`mission_terminal_opt_in and not standard_match` is "
+            "False here because `settled` IS in watch_events). "
+            "Pre-fix the row was held until the mission-terminal "
+            "flip; the post-fix row delivers at receipt-settle and "
+            "the CAS consumes it. Got 0 deliveries."
+        )
+        assert instance_manager.enqueue_message.await_count == 1
+        # CAS consumed the row — no watchers left for the mission flip.
+        remaining = watcher_repo.get_watchers_for_job(wid)
+        assert len(remaining) == 0, (
+            "A1: receipt-settle CAS must consume the row — the "
+            "subsequent mission-terminal flip must find zero "
+            "watchers (no second fire)."
+        )
+
+        # Step 2: mission-terminal flip — work reaches true terminal
+        # liveness, the resolver returns ``completed``. A
+        # ``completed`` event would normally match the
+        # ``mission_terminal`` subscription on a row that survived;
+        # but the row was already consumed by the receipt-settle
+        # CAS, so there is nothing left to deliver to.
+        original2 = _patch_complete(resolver, wid=wid)
+        try:
+            n_term = await notify_work_watchers(
+                wid, "completed", instance_manager=instance_manager,
+                work_resolver=resolver, watcher_repo=watcher_repo,
+            )
+        finally:
+            resolver.resolve_work = original2
+
+        # NO second fire — row was consumed by receipt-settle CAS.
+        assert n_term == 0, (
+            "A1: subsequent mission-terminal flip on a row already "
+            "consumed by receipt-settle CAS must produce ZERO "
+            "deliveries — get_watchers_for_job returns 0 rows so "
+            "the matching bucket is empty. Got non-zero deliveries."
+        )
+        # Total deliveries: 1 (settled), not 2.
+        assert instance_manager.enqueue_message.await_count == 1, (
+            "A1: enqueue_message must be called exactly once across "
+            "receipt-settle + mission-terminal flip — the row was "
+            "CAS-claimed at receipt-settle."
+        )
 
     @pytest.mark.asyncio
     async def test_midflight_then_completed_canonical_subscription(

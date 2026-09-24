@@ -386,6 +386,15 @@ async def notify_work_watchers(
             # read-only ``matching`` bucket (no CAS claim); the
             # terminal mission_terminal fire claims the same row
             # when the work reaches terminal liveness, exactly once.
+            # A1 closure (2026-09-24): explicit terminal-kind
+            # subscriptions (``settled`` / ``completed`` /
+            # ``failed`` / ``cancelled`` / ``dead_letter``) deliver
+            # AT RECEIPT-SETTLE even mid-mission — the CAS claim
+            # runs and consumes the row; only PURE ``mission_terminal``
+            # rows (no explicit terminal kind in ``watch_events``)
+            # hold for the mission-terminal flip. See
+            # ``tests/job_queue/test_work_notifier_defect5_pins.py``
+            # ``test_dual_terminal_kind_settles_mid_mission_delivers_once_with_claim``.
             if mission_terminal_opt_in and not standard_match:
                 # Task row: ``mission_liveness`` is intentionally
                 # ``None`` by Fix C split-semantics design — the row
