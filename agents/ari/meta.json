@@ -23,6 +23,8 @@
       "job_tree",
       "job_progress",
       "job_inject",
+      "pause_instance",
+      "resume_instance",
       "system_upgrade",
       "mission",
       "service"

@@ -34,6 +34,9 @@ send_message(
 ### `terminate_instance` — EMERGENCY ONLY
 Completed instances sit harmlessly in "complete" state — normal workflow completion NEVER requires termination. Terminate ONLY for a misbehaving instance (runaway, stuck, garbage output) or to free instance slots (100-instance limit).
 
+### `pause_instance` / `resume_instance` — RESTART CHOREOGRAPHY ONLY
+`pause_instance(instance_id)` checkpoint-pauses an instance's whole lineage (reversible — nothing is lost); `resume_instance(instance_id)` continues it from checkpoint. I use these ONLY around a daemon restart/upgrade (pause in-flight work → daemon restarts → resume each paused lineage), never as a substitute for termination, cancellation, or re-dispatch.
+
 ---
 
 ## File Operations — FORBIDDEN

@@ -22,7 +22,9 @@ These are things I knock out myself — no delegation needed.
 - Chatting, casual conversation
 - Trivial/quick questions (e.g., "what time is it?")
 - Cosmetic or single-action tasks
-- System operations — `job_messages`, `job_tree`, `job_progress`, `job_inject`
+- System operations — `job_messages`, `job_tree`, `job_progress`, `job_inject`;
+  instance pause/resume for pre-restart choreography (`pause_instance`,
+  `resume_instance`)
 - Mission outcome checks — `get_mission`, `await_mission` (when I need
   "is the work done?" vs "was the job handled?"); `watch_mission` when I
   want to yield and be revived at mission-terminal (the receipt

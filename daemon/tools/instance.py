@@ -427,6 +427,69 @@ def _get_instance_project_id(manager: "InstanceManager", instance_id: str) -> st
     return None
 
 
+def _check_instance_project_access(
+    manager: "InstanceManager",
+    current_instance_id: str | None,
+    target_instance_id: str,
+) -> dict | None:
+    """Project-scoped access check for the pause/resume instance tools.
+
+    Mirrors ``_check_job_access`` (daemon/tools/job_queue.py:884) with the
+    target being an INSTANCE row instead of a WorkRecord — same pattern the
+    sibling ``job_messages`` / ``job_inject`` tools enforce at their call
+    sites (job_queue.py:2657).
+
+    Returns ``None`` when access is allowed, or a ``{"error": ...}`` dict
+    the caller returns verbatim when denied.
+
+    Semantics (identical to ``_check_job_access``):
+      * No ``current_instance_id`` (anonymous caller) → allowed.
+      * Caller instance not found in the repo → allowed (fail-open).
+      * Caller's ``project_id`` is None (unscoped) → allowed.
+      * Target instance's ``project_id`` is None (unscoped/legacy row)
+        → allowed (backward compat with non-project workflows).
+      * Caller's ``project_id == constants.SYSTEM_DEFAULT_PROJECT_ID``
+        → allowed (the "global operator" tier — chat-facing agents such
+        as Ari run unscoped and manage work in any project; the
+        pre-restart pause/resume choreography is exactly this tier).
+      * Otherwise: caller and target must share the same ``project_id``;
+        mismatch → DENIED with a clear error.
+
+    ``SYSTEM_DEFAULT_PROJECT_ID`` is read via the ``daemon.constants``
+    module at CALL time so the repo-wide autouse test fixture
+    (tests/conftest.py ``_ensure_system_default_project_id``) that
+    monkeypatches the module attribute takes effect — see the full
+    rationale on ``_check_job_access``.
+    """
+    if not (current_instance_id and target_instance_id):
+        return None
+    if manager is None:
+        # Defense-in-depth: the factory always receives a manager; kept
+        # so a future unguarded call site can't accidentally reintroduce
+        # an access-control regression (mirrors _check_job_access).
+        return None
+
+    caller_project = _get_instance_project_id(manager, current_instance_id)
+    target_project = _get_instance_project_id(manager, target_instance_id)
+    if caller_project is None or target_project is None:
+        # Unscoped caller or unscoped target → allow (job-tool parity).
+        return None
+
+    # Read at call time so test monkeypatching of the module attribute wins.
+    system_default = constants.SYSTEM_DEFAULT_PROJECT_ID
+    if system_default is not None and caller_project == system_default:
+        return None
+
+    if caller_project != target_project:
+        logger.warning(
+            "instance access denied: caller=%s caller_project=%s target=%s target_project=%s",
+            current_instance_id, caller_project, target_instance_id, target_project,
+        )
+        return {"error": "Access denied: instance does not belong to caller's project"}
+
+    return None
+
+
 async def _resolve_default_version_tag(
     project_repo: "SQLModelProjectRepository",
     agent_id: str,
@@ -4447,7 +4510,213 @@ Args:
 Returns:
     dict with "terminated" key: {"terminated": True} on success, {"error": ..., "terminated": False} on error
 """
-    
+
+    # ── pause_instance / resume_instance (agent-pause-resume-tools) ──
+    #
+    # THIN WRAPPERS over the same service layer the HTTP API uses —
+    # semantics live in the service, NOT here. All cascade / lineage /
+    # idempotency behavior comes for free by delegating to the manager
+    # facade; this closure only adds existence + project-scoped access
+    # checks and mirrors the HTTP handlers' call shape exactly:
+    #
+    #   * POST /api/instances/{id}/pause  (daemon/routers/instances.py:653)
+    #     → manager.pause_instance_cascade(id)  (daemon/manager.py:9562)
+    #   * POST /api/instances/{id}/resume (daemon/routers/instances.py:684)
+    #     → manager.resume_processing_job(target, silent=False) +
+    #       manager.resume_instance_cascade(id)  (daemon/manager.py:9602)
+    #       + manager.resume_processing_job(child, silent=True) per
+    #       non-target child
+    #
+    # Invariants (VERIFIED in the service — do NOT duplicate here):
+    #   * Cascade pauses/resumes the WHOLE instance lineage
+    #     (instance_lifecycle.py:3041 pause / :3614 resume; both
+    #     enumerate via repo.get_cascade_tree_ids so the
+    #     ENSEMBLE_CASCADE_LINEAGE kill-switch is honored).
+    #   * Pausing a child with a waiting ancestor pauses the whole
+    #     tree (cascade_to_root=True default — lifecycle.py:3062-3078).
+    #   * Already-paused / terminal / never-dispatched nodes are
+    #     skipped idempotently into skipped_ids (lifecycle.py:3162-3256
+    #     per-node classification; resume side lifecycle.py:3686-3690).
+    #   * Resume of a running-turn instance spins a message job to
+    #     continue the turn → status "resuming" (manager.py:10567).
+    #   * Resume of a parked parent via the silent child lane returns
+    #     status "silent_resume" (internal_child_noop §9.3,
+    #     manager.py:10021); a WAITING_CHILDREN parent + silent wake is
+    #     enqueued durably (B2, manager.py:~9970-10019) — statuses are
+    #     passed through VERBATIM, never re-interpreted here.
+    #
+    # Pre-restart choreography (the reason these tools exist): pause
+    # in-flight instance work BEFORE a daemon restart (turns checkpoint
+    # at node boundaries and survive), then resume_instance after the
+    # daemon returns. Proven in production — two paused instances
+    # carried through a restart with zero context loss.
+
+    @register_tool_category("instance")
+    @tool
+    async def pause_instance(
+        instance_id: Annotated[str, Field(description="The ID of the instance to pause (its whole lineage pauses with it)")],
+        reason: Annotated[str | None, Field(description="Optional free-text reason; persisted on the suspended task turns as the suspension reason")] = None,
+    ) -> dict:
+        """Pause an instance and cascade to its lineage (resumable). Use tool_help("pause_instance") for details."""
+        # Mirror the HTTP endpoint's write-paused migration gate
+        # (routers/instances.py:664-666) — parity, not re-implementation.
+        if getattr(manager, "is_write_paused", False):
+            return {"error": "Writes are paused for database migration", "paused": False}
+        # Existence check — same KeyError contract as the endpoint's 404.
+        try:
+            await manager.get_instance(instance_id)
+        except KeyError:
+            return {"error": f"Instance not found: {instance_id}", "paused": False}
+        # Access control: project-scoped check (same pattern as job_messages /
+        # job_inject — see _check_instance_project_access below).
+        deny = _check_instance_project_access(manager, current_instance_id, instance_id)
+        if deny is not None:
+            return deny
+        # Default kwargs ONLY (cascade_to_root=True, suspension_reason
+        # default) — mirrors the endpoint; no new flags invented here.
+        result = await manager.pause_instance_cascade(
+            instance_id, suspension_reason=reason,
+        )
+        return {
+            "paused": True,
+            "paused_ids": result["paused_ids"],
+            "skipped_ids": result["skipped_ids"],
+        }
+
+    pause_instance._full_doc_ = """Pause an instance and cascade-pause its whole lineage (soft pause, resumable).
+
+The target instance and every ancestor/descendant in its tree transition to
+PAUSED. In-flight turns are cancelled at the next graph checkpoint boundary —
+work state is checkpointed, NOT lost. Nothing is deleted: memory, locks, and
+history all survive. Use resume_instance to bring the lineage back.
+
+Args:
+    instance_id: The ID of the instance to pause. Its whole lineage pauses
+        with it (pausing a child also pauses its waiting ancestors).
+    reason: Optional free-text reason, persisted on the suspended task turns
+        (suspension_reason). Purely informational/audit — does not change
+        routing.
+
+Returns:
+    dict: {"paused": True, "paused_ids": [...], "skipped_ids": [...]} on
+    success. paused_ids = every instance ID that transitioned to PAUSED;
+    skipped_ids = IDs already paused / terminal / not found (idempotent —
+    re-pausing a paused instance just reports it in skipped_ids).
+    {"error": ..., "paused": False} when the instance is missing, writes are
+    paused for a DB migration, or access is denied (project-scoped, same
+    rule as job_messages: a target in another project is refused unless I
+    run unscoped/in the system-default project).
+
+When to use — pre-restart choreography:
+    Before a daemon restart or upgrade: pause in-flight instance work,
+    let the daemon restart, then resume_instance each paused lineage.
+    Instances checkpoint and survive the restart with zero context loss.
+
+Caveats:
+    * Pausing does NOT stop a synchronous tool call already running in a
+      worker thread — only the graph turn is cancelled at a boundary.
+    * After a pause, the instance cannot receive messages until resumed.
+"""
+
+    @register_tool_category("instance")
+    @tool
+    async def resume_instance(
+        instance_id: Annotated[str, Field(description="The ID of the paused instance to resume (its whole lineage resumes with it)")],
+        reason: Annotated[str | None, Field(description="Optional free-text reason; echoed in the result for audit (not persisted)")] = None,
+    ) -> dict:
+        """Resume a paused instance and cascade-resume its lineage. Use tool_help("resume_instance") for details."""
+        # Mirror the HTTP endpoint's write-paused migration gate
+        # (routers/instances.py:695-697) — parity, not re-implementation.
+        if getattr(manager, "is_write_paused", False):
+            return {"error": "Writes are paused for database migration", "resumed": False}
+        # Existence check — same KeyError contract as the endpoint's 404.
+        try:
+            await manager.get_instance(instance_id)
+        except KeyError:
+            return {"error": f"Instance not found: {instance_id}", "resumed": False}
+        # Access control: project-scoped check (same pattern as job_messages /
+        # job_inject — see _check_instance_project_access below).
+        deny = _check_instance_project_access(manager, current_instance_id, instance_id)
+        if deny is not None:
+            return deny
+        # EXACT same call shape as the HTTP resume handler
+        # (routers/instances.py:823-884): target turn continuation first,
+        # then the DB-only cascade flip, then silent child resumes.
+        try:
+            job_result = await manager.resume_processing_job(
+                instance_id,
+                message="resume",
+                silent=False,
+            )
+        except Exception as e:  # noqa: BLE001 — endpoint parity (:825-832)
+            job_result = {"status": "error", "error": str(e)}
+        if job_result is None:
+            job_result = {"status": "no_active_job"}
+
+        result = await manager.resume_instance_cascade(instance_id)
+        target_id = result.get("target_id", instance_id)
+
+        resume_results = {instance_id: job_result}
+        for rid in result["resumed_ids"]:
+            if rid == target_id:
+                continue  # already handled above
+            child_result = await manager.resume_processing_job(
+                rid,
+                message="resume",
+                silent=True,
+            )
+            if child_result is None:
+                child_result = {"status": "no_active_job"}
+            resume_results[rid] = child_result
+
+        response: dict = {
+            "resumed": True,
+            "resumed_ids": result["resumed_ids"],
+            "skipped_ids": result["skipped_ids"],
+            "target_id": target_id,
+            "resume_results": resume_results,
+        }
+        if reason:
+            response["reason"] = reason
+        return response
+
+    resume_instance._full_doc_ = """Resume a paused instance and cascade-resume its whole lineage.
+
+Flips the target and every paused descendant back to RUNNING and continues
+paused work from checkpoint. A running-turn instance gets a message job spun
+to continue its turn (status "resuming" in resume_results); children resume
+silently from checkpoint. Already-running / terminal instances are skipped
+idempotently (skipped_ids).
+
+Args:
+    instance_id: The ID of the paused instance to resume. Its whole paused
+        lineage resumes with it.
+    reason: Optional free-text reason, echoed back in the result for audit.
+        Does not change resume routing.
+
+Returns:
+    dict: {"resumed": True, "resumed_ids": [...], "skipped_ids": [...],
+    "target_id": ..., "resume_results": {instance_id: {"status": ...}}}.
+    resume_results statuses come VERBATIM from the resume service and are
+    never re-interpreted: "resuming" (turn continuation job spun),
+    "silent_resume" (silent checkpoint continuation — the non-WC parent /
+    child cascade contract), "wake_enqueued" (a parked WAITING_CHILDREN
+    parent got a durable wake turn), "no_active_job" (nothing to continue),
+    "error" (the continuation failed — inspect the error field).
+    {"error": ..., "resumed": False} when the instance is missing, writes
+    are paused for a DB migration, or access is denied (project-scoped,
+    same rule as job_messages).
+
+Caveats:
+    * This tool resumes WORK — it is NOT an answer channel. If the target
+      paused itself awaiting an answer (ask_questions gate), the answer
+      endpoint (POST /api/instances/{id}/answer) is the SOLE entry that
+      consumes the pending question; resuming here does not deliver one.
+    * To give a resumed agent NEW instructions, wait for the resume to
+      land, then send_message / job_inject as usual — the resume
+      continuation uses the standard "resume" message, not free text.
+"""
+
     @register_tool_category("instance")
     @tool
     def list_instances() -> list[dict]:
@@ -4551,6 +4820,8 @@ Returns:
         convene_council_with_skill,  # Council category — team-membership authorized (skill-injection variant)
         send_message,
         terminate_instance,
+        pause_instance,             # agent-pause-resume-tools: pre-restart choreography
+        resume_instance,            # agent-pause-resume-tools: pre-restart choreography
         list_instances,
         get_instance_info,
         subtree_messages,           # Phase 2: read-only subtree query (opt-in)
