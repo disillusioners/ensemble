@@ -91,6 +91,10 @@ def _make_pause_resume_manager() -> MagicMock:
     check via ``get_instance``) with the three async facade methods the
     tools wrap. ``is_write_paused`` MUST be an explicit False — a bare
     MagicMock attribute is truthy and would trip the migration gate.
+    ``_question_manager.get_question_pack`` is wired to return ``None``
+    by default (no pending question pack) so the resume tool's Defect-1
+    guard falls through on the existing happy-path tests; pending-pack
+    tests override the mock on a per-test basis.
     """
     manager = make_send_message_manager(status="running")
     manager.is_write_paused = False
@@ -112,6 +116,8 @@ def _make_pause_resume_manager() -> MagicMock:
             "status": "resuming",
         }
     )
+    manager._question_manager = MagicMock()
+    manager._question_manager.get_question_pack = MagicMock(return_value=None)
     return manager
 
 
@@ -372,6 +378,102 @@ class TestResumeInstance:
         assert result["resumed"] is False
         assert "database migration" in result["error"]
         manager.resume_instance_cascade.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resume_refused_when_question_pack_pending(
+        self, manager, resume_tool
+    ):
+        """Review finding #4 (Defect-1 guard): when a question pack is
+        still pending for the target, resume_instance refuses BEFORE any
+        service call — ``resume_processing_job`` and
+        ``resume_instance_cascade`` must NEVER be invoked, otherwise the
+        literal "resume" message would route through
+        ``answer_gate_existing_turn`` as answer content (Defect-1).
+
+        Mirrors the HTTP endpoint's gate-supersession check shape
+        (routers/instances.py:733): pending pack + status == "pending" →
+        error dict returned, no service work scheduled.
+        """
+        pending_pack = MagicMock(name="QuestionPack[pending]")
+        pending_pack.status = "pending"
+        manager._question_manager.get_question_pack = MagicMock(
+            return_value=pending_pack
+        )
+
+        result = await resume_tool.coroutine(TARGET_ID)
+
+        assert result == {
+            "error": (
+                "instance has a pending question; answer it via "
+                "the answer flow instead of resume_instance"
+            ),
+            "resumed": False,
+            "instance_id": TARGET_ID,
+        }
+        # CRITICAL: nothing downstream was called — guard fires BEFORE
+        # any service. This is what prevents Defect-1 (the "resume"
+        # message reaching answer_gate_existing_turn).
+        manager.resume_processing_job.assert_not_awaited()
+        manager.resume_instance_cascade.assert_not_awaited()
+        # And the question-pack check itself was made with the right id.
+        manager._question_manager.get_question_pack.assert_called_once_with(
+            TARGET_ID
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_proceeds_when_no_pending_question(
+        self, manager, resume_tool
+    ):
+        """Happy-path companion to the guard test: explicit
+        ``get_question_pack`` returning ``None`` (no pack at all) lets the
+        tool fall through to the normal resume flow.
+        """
+        # Factory default already returns None, but set it explicitly so
+        # the test pins the contract independently of the factory.
+        manager._question_manager.get_question_pack = MagicMock(return_value=None)
+
+        result = await resume_tool.coroutine(TARGET_ID)
+
+        assert result["resumed"] is True
+        assert result["resume_results"][TARGET_ID]["status"] == "resuming"
+        manager._question_manager.get_question_pack.assert_called_once_with(
+            TARGET_ID
+        )
+        manager.resume_processing_job.assert_awaited_once_with(
+            TARGET_ID, message="resume", silent=False
+        )
+        manager.resume_instance_cascade.assert_awaited_once_with(TARGET_ID)
+
+    @pytest.mark.asyncio
+    async def test_resume_guard_fails_open_on_introspection_error(
+        self, manager, resume_tool, caplog
+    ):
+        """Fail-open contract (review finding #4): if the question-pack
+        introspection itself raises, the guard must NOT block resume — a
+        broken introspection surface must not wedge restart recovery. A
+        WARNING is logged so the failure is observable.
+        """
+        manager._question_manager.get_question_pack = MagicMock(
+            side_effect=RuntimeError("question-manager surface broken")
+        )
+
+        # caplog captures WARNING+ on the root logger by default; we just
+        # assert the warning landed (the level config is irrelevant for
+        # the contract — we want a WARNING-level log, not a CRITICAL).
+        result = await resume_tool.coroutine(TARGET_ID)
+
+        # Normal resume flow ran despite the introspection error.
+        assert result["resumed"] is True
+        assert result["resume_results"][TARGET_ID]["status"] == "resuming"
+        manager.resume_processing_job.assert_awaited_once_with(
+            TARGET_ID, message="resume", silent=False
+        )
+        manager.resume_instance_cascade.assert_awaited_once_with(TARGET_ID)
+        # Warning was emitted (observability for the fail-open).
+        assert any(
+            "question-pack introspection failed" in rec.message
+            for rec in caplog.records
+        ), f"expected warn log; got {[r.message for r in caplog.records]}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────────

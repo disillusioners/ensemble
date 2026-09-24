@@ -4625,6 +4625,35 @@ Caveats:
         reason: Annotated[str | None, Field(description="Optional free-text reason; echoed in the result for audit (not persisted)")] = None,
     ) -> dict:
         """Resume a paused instance and cascade-resume its lineage. Use tool_help("resume_instance") for details."""
+        # Defect-1 guard (review finding #4): refuse early when the target
+        # has a pending question pack. Same check shape as the HTTP
+        # endpoint's gate-supersession branch (routers/instances.py:733) —
+        # the standard resume path routes ``resume_processing_job`` →
+        # ``answer_gate_existing_turn``, which would treat the literal
+        # "resume" message as answer content. The endpoint supersedes
+        # the gate by enqueueing a fresh message; the agent tool refuses
+        # instead (no service call, no cascade, nothing enqueued). The
+        # check is best-effort: introspection errors fail OPEN so a
+        # broken question-manager surface cannot wedge restart recovery.
+        qm = getattr(manager, "_question_manager", None)
+        if qm is not None:
+            try:
+                pending_pack = qm.get_question_pack(instance_id)
+            except Exception as qm_err:  # noqa: BLE001 — fail-open contract
+                logger.warning(
+                    "resume_instance: question-pack introspection failed "
+                    f"for {instance_id[:8]}...; proceeding without gate guard: {qm_err}"
+                )
+            else:
+                if pending_pack is not None and pending_pack.status == "pending":
+                    return {
+                        "error": (
+                            "instance has a pending question; answer it via "
+                            "the answer flow instead of resume_instance"
+                        ),
+                        "resumed": False,
+                        "instance_id": instance_id,
+                    }
         # Mirror the HTTP endpoint's write-paused migration gate
         # (routers/instances.py:695-697) — parity, not re-implementation.
         if getattr(manager, "is_write_paused", False):
@@ -4712,6 +4741,9 @@ Caveats:
       paused itself awaiting an answer (ask_questions gate), the answer
       endpoint (POST /api/instances/{id}/answer) is the SOLE entry that
       consumes the pending question; resuming here does not deliver one.
+      When a question pack is pending, resume_instance refuses
+      programmatically with an error before any service call — it never
+      routes the literal "resume" message as answer content.
     * To give a resumed agent NEW instructions, wait for the resume to
       land, then send_message / job_inject as usual — the resume
       continuation uses the standard "resume" message, not free text.

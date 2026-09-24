@@ -512,7 +512,8 @@ read the `error` field).
 **Do NOT use for:**
 - ❌ Answering a pending question — if the instance paused itself
   awaiting an answer, the answer endpoint is the ONLY entry that
-  delivers it; resuming does not substitute for the answer
+  delivers it; resume_instance refuses with an error if a question pack
+  is still pending
 - ❌ Cancelling work permanently → `job_cancel` / `terminate_instance`
 - ❌ Giving NEW instructions to a running agent → `job_inject`
 
