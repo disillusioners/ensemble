@@ -1007,12 +1007,31 @@ class ProcessMessageProcessor(BaseProcessor):
                     completed_task.work_id,
                     default="completed",
                 )
+                # DEFECT-1b (2026-09-24, fix/watch-notify-delivery-gaps):
+                # thread ``result_summary=`` directly with the in-memory
+                # ``ProcessingResult.result_content`` (the agent's last
+                # assistant message) instead of relying on the resolver's
+                # ``task.result`` read. The resolver read races the
+                # ``complete_task`` commit: live E2E (work_id
+                # 4a7236e2..., 2026-09-24) showed the notify enqueue 60ms
+                # BEFORE the Task row's commit became visible to the
+                # resolver, so ``_parse_task_result_summary`` saw an empty
+                # ``task.result`` and the watcher body carried NO
+                # ``Result:`` line despite ``Task.result`` being committed.
+                # Same threading discipline as the OBSERVER's post-commit
+                # outbox (``job_feedback_observer.py:2076``), but here we
+                # hold the content in scope from the pipeline return value
+                # (``gate_outcome.content``) so we don't need a second
+                # message-queue pre-fetch. The kwarg overrides the
+                # resolver fallback in ``work_notifier.effective_result``
+                # (``work_notifier.py:306``), closing the gap.
                 await notify_work_watchers(
                     work_id=completed_task.work_id,
                     status=per_kind_status,
                     instance_manager=instance_manager,
                     work_resolver=work_resolver,
                     watcher_repo=watcher_repo,
+                    result_summary=result.result_content,
                 )
 
             # Phase 4 fix: fire the skill metrics completion hook

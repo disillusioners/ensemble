@@ -27,9 +27,11 @@ Why a separate service
   ``daemon/services/`` (``JobQueueService``,
   ``JobQueueMgmtService``, ``JobRetryEngine``, …) so wiring it in
   ``daemon/api.py`` follows the same recipe.
-* Centralises the ``task.result`` JSON-parse rule (currently
-  duplicated in ``daemon/routers/messages.py:251-263``) so every
-  resolver consumer agrees on the ``result_summary`` shape.
+* Centralises the ``task.result`` JSON-parse rule so every
+  resolver consumer agrees on the ``result_summary`` shape. (It
+  DIVERGES from the legacy inline rule at
+  ``daemon/routers/messages.py:854-866`` since the DEFECT-1
+  clean-content fix — see :func:`_parse_task_result_summary`.)
 
 Read-side SQL posture
 ---------------------
@@ -747,14 +749,37 @@ def _normalize_sort_key(value: datetime | None) -> datetime:
 def _parse_task_result_summary(task: Task) -> str | None:
     """Convert ``Task.result`` (JSON string) into a ``result_summary`` string.
 
-    Mirrors the rule in ``daemon/routers/messages.py:251-263`` so the
-    virtual job surface and the legacy ``GET /messages/{id}/status``
-    route agree on the ``result_summary`` shape:
+    DIVERGES (intentionally) from the legacy rule in
+    ``daemon/routers/messages.py:854-866`` — the
+    ``GET /messages/{id}/status`` route still ``json.dumps`` the WHOLE
+    parsed payload, while this helper extracts the v0.13.9 envelope's
+    clean ``content`` text (DEFECT-1 fix, commit 1e12944a). The legacy
+    route is NOT refactored to match (known drift, backlog). This
+    helper's shape:
 
     * If ``Task.result`` is empty/None → ``None``.
     * If ``Task.result`` is a valid JSON string already → keep it.
-    * If ``Task.result`` parses to any other JSON value → ``json.dumps``
-      it (so the frontend always receives a string).
+    * If ``Task.result`` parses to a dict and carries a ``content``
+      key with a non-None value (the guard is ``is not None`` —
+      ``"content": null`` falls through to the whole-dict dump below;
+      the v0.13.9 ``complete_task`` producer stamp shape
+      ``{"success": True, "message_id": "x", "content": "<text>"}``
+      normally carries text) →
+      surface the ``content`` text verbatim. This is the agent's
+      last assistant message — the durable home per the v0.13.9 fix
+      (commit 540a5f16, ``fix/job-completed-result-arm``). Pre-fix
+      the helper dumped the whole JSON envelope, which slipped the
+      envelope into every ``[JOB_EVENT]`` watcher's ``Result:`` line
+      (live evidence: task-kind ``completed ✓`` bodies on
+      2026-09-24 E2E carried the envelope instead of the clean text —
+      DEFECT-1).
+    * If ``Task.result`` parses to a dict WITHOUT a ``content`` key
+      (or with ``"content": null``) →
+      ``json.dumps`` the whole dict (the prior fallback) so callers
+      still receive a string.
+    * If ``Task.result`` parses to any non-dict JSON value →
+      ``json.dumps`` it (so the frontend always receives a string)
+      for scalars, or return verbatim if it parses to a string.
     * If parsing fails → fall back to the raw ``Task.result`` string.
 
     Args:
@@ -770,6 +795,20 @@ def _parse_task_result_summary(task: Task) -> str | None:
         parsed = json.loads(raw)
     except (ValueError, TypeError):
         return raw
+    if isinstance(parsed, dict):
+        # DEFECT-1 fix (2026-09-24, fix/watch-notify-delivery-gaps):
+        # when ``task.result`` carries the v0.13.9 envelope shape, the
+        # ``content`` key holds the agent's last assistant message.
+        # The watcher body surfaces this directly so the ``Result:``
+        # line carries the assistant's text — not the whole envelope.
+        content_value = parsed.get("content")
+        if content_value is not None:
+            if isinstance(content_value, str):
+                return content_value
+            return json.dumps(content_value)
+        # No ``content`` key — fall back to the whole-dict dump so
+        # every caller still receives a string.
+        return json.dumps(parsed)
     return parsed if isinstance(parsed, str) else json.dumps(parsed)
 
 
@@ -1581,10 +1620,11 @@ class WorkResolverService:
 
         * ``result_summary`` ← ``Task.result`` (JSON string) when
           ``task`` is supplied; ``None`` otherwise. The JSON parse
-          rule lives in :func:`_parse_task_result_summary` (mirrors
-          the rule in ``daemon/routers/messages.py:251-263`` so the
-          virtual job surface and the legacy status route agree on
-          shape).
+          rule lives in :func:`_parse_task_result_summary` (it
+          DIVERGES from the legacy rule in
+          ``daemon/routers/messages.py:854-866`` — that route still
+          dumps the whole envelope; the divergence is intentional
+          post-DEFECT-1).
         * ``error`` ← ``Task.error`` for the dual-backed path (same
           thread-through via ``task``). Job-only rows surface
           ``None``.

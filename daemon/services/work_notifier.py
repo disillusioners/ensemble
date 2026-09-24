@@ -85,6 +85,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import traceback
 from typing import TYPE_CHECKING, Any
 
 from daemon.services.work_status import is_terminal as _is_terminal
@@ -93,6 +95,68 @@ if TYPE_CHECKING:
     from daemon.services.work_resolver import WorkResolverService
 
 logger = logging.getLogger(__name__)
+
+
+# ROUND-3 REVIEW (2026-09-24, 🟢 #2): the ``[watch-deliver]`` DEBUG
+# log line bounds the body slice at this many bytes (256 by default).
+# The line keeps the FULL body byte count as the explicit
+# ``body_bytes=`` field so the byte-discrimination contract
+# (prefix distinguishes ⟳-with-Result vs ✓-without) is preserved
+# even when the slice is clipped — the slice is purely for log
+# hygiene (no per-line size explosion on completed envelopes with
+# full assistant content). Tuned to fit the standard 8 KiB log
+# tail budget with comfortable headroom for ``ts=`` + ``work=`` +
+# ``status=`` + ``to=`` + ``body_bytes=`` fields.
+_MAX_LOG_BODY_BYTES = 256
+
+
+def _caller_chain(max_frames: int = 3) -> str:
+    """Best-effort caller attribution for the ``[watch-cas]`` debug log.
+
+    Walks the stack newest→oldest, skipping frames that belong to this
+    module and to asyncio/contextlib plumbing, and renders the first
+    ``max_frames`` application frames as ``file:func:lineno`` joined by
+    `` <- `` (immediate caller first). Callers MUST guard behind
+    ``logger.isEnabledFor(logging.DEBUG)`` — the stack walk is never
+    paid on the hot INFO path.
+
+    DEFECT-1 round 3 (2026-09-24, fix/watch-notify-delivery-gaps):
+    this attribution is the arbitration primitive. Three consecutive
+    commits fixed producer sites that unit tests proved correct while
+    the LIVE completed-leg stayed content-less — because a different
+    caller won the CAS claim race. The chain at the claim chokepoint
+    names the winner unambiguously (e.g.
+    ``job_queue_service.py:notify_watchers:378 <-
+    job_feedback_observer.py:_finalize_job:2076``).
+    """
+    chain: list[str] = []
+    try:
+        for fi in reversed(traceback.extract_stack()[:-1]):
+            filename = fi.filename
+            if filename.endswith("work_notifier.py"):
+                continue
+            if (
+                "/asyncio/" in filename
+                or filename.endswith(("contextlib.py", "threading.py"))
+            ):
+                continue
+            chain.append(
+                f"{filename.rsplit('/', 1)[-1]}:{fi.name}:{fi.lineno}"
+            )
+            if len(chain) >= max_frames:
+                break
+    except Exception:  # noqa: BLE001 — attribution must never break notify
+        return "<caller-chain-unavailable>"
+    return " <- ".join(chain) if chain else "<unknown>"
+
+
+def _shape(v: str | None) -> str:
+    """Render a kwarg's presence/shape for the structured debug log."""
+    if v is None:
+        return "None"
+    if not v:
+        return "empty"
+    return f"len={len(v)}"
 
 
 # Status display mapping — must stay byte-for-byte identical to the
@@ -366,7 +430,36 @@ async def notify_work_watchers(
             # liveness are terminal. The dual-terminal check uses
             # ``work_record.mission_liveness`` (canonical mission
             # vocabulary for mirror rows; ``None`` for task rows).
-            if mission_terminal_opt_in:
+            #
+            # DEFECT-5 fix (2026-09-24, fix/watch-notify-delivery-gaps):
+            # narrow the M2 hold gate — a watcher that ALSO subscribes
+            # to an explicit non-terminal kind (``in_progress``,
+            # ``midflight_report``, ``question_requested``,
+            # ``answer_received``, ``stuck_awaiting_answer``) MUST
+            # receive the non-terminal fire even when
+            # ``mission_terminal`` is in its events list. The
+            # pre-fix code held ``held_for_mission += 1; continue``
+            # for ANY non-terminal status whenever ``mission_terminal``
+            # was subscribed, which silently dropped every
+            # mid-flight ⟳ notification (live evidence: 3 emissions,
+            # 2 kinds, 0 deliveries — events 2412/2420 on dev daemon
+            # at 5f4e35b0). CRITICAL DESIGN TRAP: the non-terminal
+            # fire MUST NOT consume the multi-kind row — the row
+            # survives for the future terminal ``mission_terminal``
+            # fire. The non-terminal branch below reaches the
+            # read-only ``matching`` bucket (no CAS claim); the
+            # terminal mission_terminal fire claims the same row
+            # when the work reaches terminal liveness, exactly once.
+            # A1 closure (2026-09-24): explicit terminal-kind
+            # subscriptions (``settled`` / ``completed`` /
+            # ``failed`` / ``cancelled`` / ``dead_letter``) deliver
+            # AT RECEIPT-SETTLE even mid-mission — the CAS claim
+            # runs and consumes the row; only PURE ``mission_terminal``
+            # rows (no explicit terminal kind in ``watch_events``)
+            # hold for the mission-terminal flip. See
+            # ``tests/job_queue/test_work_notifier_defect5_pins.py``
+            # ``test_dual_terminal_kind_settles_mid_mission_delivers_once_with_claim``.
+            if mission_terminal_opt_in and not standard_match:
                 # Task row: ``mission_liveness`` is intentionally
                 # ``None`` by Fix C split-semantics design — the row
                 # IS its own mission. Use ``work_record.status`` as
@@ -434,6 +527,33 @@ async def notify_work_watchers(
                 work_id,
                 [w.instance_id for w in matching],
             )
+            # DEFECT-1 round-3 arbitration instrumentation (2026-09-24,
+            # fix/watch-notify-delivery-gaps): permanent structured DEBUG
+            # log at the CAS claim chokepoint. Emits for BOTH outcomes —
+            # the claim winner (claimed>=1) AND the loser (claimed=0) —
+            # with ns timestamp, stack-derived caller chain, and the
+            # kwarg shape each side held. This is the ground-truth
+            # record of WHICH caller site won the exactly-once race and
+            # what content it carried (``kw_result_summary=None`` on a
+            # winning line IS the content-less-delivery proof).
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[watch-cas] ts=%d work=%s status=%s caller=%s "
+                    "kw_result_summary=%s resolver_result_summary=%s "
+                    "effective_result=%s kw_error=%s effective_error=%s "
+                    "matching=%d claimed=%d",
+                    time.time_ns(),
+                    work_id[:8],
+                    status,
+                    _caller_chain(),
+                    _shape(result_summary),
+                    _shape(getattr(work_record, "result_summary", None)),
+                    _shape(effective_result),
+                    _shape(error),
+                    _shape(effective_error),
+                    len(matching),
+                    len(claimed),
+                )
             if not claimed:
                 # Lost every CAS — every matching row was already
                 # claimed by a concurrent terminal caller. Their
@@ -481,6 +601,41 @@ async def notify_work_watchers(
                     notification_parts.append(f"  Error: {effective_error}")
 
             notification = "\n".join(notification_parts)
+
+            # DEFECT-1 round-3 arbitration instrumentation: full body at
+            # DEBUG so the delivered envelope can be byte-discriminated
+            # straight from the log (⟳-with-Result vs ✓-without), paired
+            # with the ``[watch-cas]`` claim line above.
+            #
+            # ROUND-3 REVIEW (2026-09-24, 🟢 #2): Bounded log. The
+            # ``body=%r`` field used to dump the WHOLE notification,
+            # which can be many KB on a completed envelope with full
+            # assistant content — enough to swamp a log tail, bloat
+            # the test-pack archive snapshot, and (worst case) trip
+            # the structured-sink per-line cap. The byte-discrimination
+            # contract this log line serves only needs the body
+            # PREFIX (the ``[JOB_EVENT]`` header + ``Result:`` slot
+            # start). Cap the body slice at ``MAX_LOG_BODY_BYTES``
+            # (256) and KEEP the full byte count as an explicit
+            # ``body_bytes=`` field. An ellipsis marker
+            # (``<…truncated>``) suffixes the slice when the cap
+            # fires so it's unambiguous from the log that the body
+            # was clipped.
+            if logger.isEnabledFor(logging.DEBUG):
+                _body_bytes = len(notification)
+                _slice = notification[:_MAX_LOG_BODY_BYTES]
+                if _body_bytes > _MAX_LOG_BODY_BYTES:
+                    _slice = f"{_slice}<…truncated>"
+                logger.debug(
+                    "[watch-deliver] ts=%d work=%s status=%s to=%s "
+                    "body_bytes=%d body=%r",
+                    time.time_ns(),
+                    work_id[:8],
+                    status,
+                    watcher.instance_id[:8],
+                    _body_bytes,
+                    _slice,
+                )
 
             # ``enqueue_message`` is async — call it directly since we
             # are already on the event loop. The watcher's instance

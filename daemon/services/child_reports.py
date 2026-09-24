@@ -4335,9 +4335,57 @@ Provide a concise summary:"""
                         # §3 guard — never fire non-terminal.
                         continue
                     try:
-                        await _notify_service.notify_watchers(
-                            _work_id, _token
-                        )
+                        # DEFECT-1 round-3 fix (2026-09-24,
+                        # fix/watch-notify-delivery-gaps): thread the
+                        # in-scope ``last_content`` into the watcher
+                        # envelope. Instrumented arbitration on the dev
+                        # daemon (work c383bdbd..., [watch-cas] log)
+                        # proved THIS fan-out wins the CAS claim for
+                        # root message-task completions — pre-fix it
+                        # passed NO ``result_summary``, so
+                        # ``effective_result`` fell through to the
+                        # resolver's (pre-commit, None) Task.result
+                        # read and the delivered body was the
+                        # byte-exact 55-byte ``Result:``-less envelope
+                        # while the ⟳ mid-flight leg on the SAME job
+                        # carried full content. ``last_content`` is the
+                        # assistant reply pre-fetched BEFORE the DB
+                        # sync (``_process_child_completion_and_notify_parent``
+                        # :2083) — the exact value the v0.13.9
+                        # result-arm already threads into the lifecycle
+                        # event + CompletionRegistry above.
+                        #
+                        # ROUND-3 REVIEW NARROW (2026-09-24): the
+                        # threading is restricted to the ``completed``
+                        # token only — the MEASURED CAS winner on the
+                        # dev daemon was a completed ✓ event (work
+                        # c383bdbd). Every other token (settled,
+                        # cancelled, dead_letter, failed) reverts to
+                        # its pre-5292eb99 shape in this fan-out:
+                        # ``settled`` mirrors carry no Task.result and
+                        # must keep the by-design NO-Result-block
+                        # envelope (M3 mission-class guardrail — pinned
+                        # by ``test_settled_message_kind_no_result_block``
+                        # on the notifier path); ``failed`` already
+                        # has its own error-lane emission in
+                        # ``error_reporting.py`` and threads no
+                        # content here.
+                        #
+                        # F2 slot discipline (RC2, 2026-09-23) is
+                        # preserved: failed → ``error=``; completed →
+                        # ``result_summary=``; every other terminal
+                        # token → no content kwarg. Keyword-only —
+                        # never positional (the third positional param
+                        # is ``error``).
+                        if _token == "completed":
+                            await _notify_service.notify_watchers(
+                                _work_id, _token,
+                                result_summary=last_content,
+                            )
+                        else:
+                            await _notify_service.notify_watchers(
+                                _work_id, _token,
+                            )
                     except Exception as e:
                         logger.warning(
                             f"root_completed: notify_watchers failed for "
