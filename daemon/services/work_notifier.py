@@ -366,7 +366,27 @@ async def notify_work_watchers(
             # liveness are terminal. The dual-terminal check uses
             # ``work_record.mission_liveness`` (canonical mission
             # vocabulary for mirror rows; ``None`` for task rows).
-            if mission_terminal_opt_in:
+            #
+            # DEFECT-5 fix (2026-09-24, fix/watch-notify-delivery-gaps):
+            # narrow the M2 hold gate — a watcher that ALSO subscribes
+            # to an explicit non-terminal kind (``in_progress``,
+            # ``midflight_report``, ``question_requested``,
+            # ``answer_received``, ``stuck_awaiting_answer``) MUST
+            # receive the non-terminal fire even when
+            # ``mission_terminal`` is in its events list. The
+            # pre-fix code held ``held_for_mission += 1; continue``
+            # for ANY non-terminal status whenever ``mission_terminal``
+            # was subscribed, which silently dropped every
+            # mid-flight ⟳ notification (live evidence: 3 emissions,
+            # 2 kinds, 0 deliveries — events 2412/2420 on dev daemon
+            # at 5f4e35b0). CRITICAL DESIGN TRAP: the non-terminal
+            # fire MUST NOT consume the multi-kind row — the row
+            # survives for the future terminal ``mission_terminal``
+            # fire. The non-terminal branch below reaches the
+            # read-only ``matching`` bucket (no CAS claim); the
+            # terminal mission_terminal fire claims the same row
+            # when the work reaches terminal liveness, exactly once.
+            if mission_terminal_opt_in and not standard_match:
                 # Task row: ``mission_liveness`` is intentionally
                 # ``None`` by Fix C split-semantics design — the row
                 # IS its own mission. Use ``work_record.status`` as

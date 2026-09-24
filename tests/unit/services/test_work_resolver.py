@@ -457,21 +457,23 @@ class TestResolveWork:
         # post-fix (v0.13.9 commission) the agent's last assistant
         # message flows through the durable Task.result JSON column.
         #
-        # Contract note: ``Task.result`` is the JSON-serialized dict
-        # written by ``TaskRepository.complete_task`` (``result_json =
-        # json.dumps(result)`` at repository.py:2458). ``_parse_task_
-        # result_summary`` parses that JSON; when the parsed value is
-        # a dict (production shape), it ``json.dumps`` it back — so
-        # the surfaced string round-trips through the original dict.
-        # Production callers read ``result_summary`` as the JSON
-        # payload; the frontend's GET /api/jobs decodes it the same
-        # way the Task-only branch has since the helper was added.
-        parsed = json.loads(record.result_summary) if record.result_summary else None
-        assert isinstance(parsed, dict), (
-            f"expected dict-shaped result_summary, got {type(record.result_summary)}: "
-            f"{record.result_summary!r}"
+        # Contract (2026-09-24, fix/watch-notify-delivery-gaps): the
+        # helper extracts the ``content`` key verbatim when present
+        # (the v0.13.9 ``complete_task`` envelope shape). The
+        # ``[JOB_EVENT]`` watcher's ``Result:`` line then carries
+        # ``all done`` directly (clean text). The whole-envelope
+        # dump shape (prior helper behaviour) is preserved for
+        # envelopes WITHOUT a ``content`` key — see
+        # ``test_resolve_work_task_returns_task_record`` for that
+        # shape (which carries ``{"answer": "42", ...}``).
+        assert record.result_summary == "all done", (
+            f"v0.13.9 envelope shape (Task.result carries "
+            f"``{{content: ...}}``): the resolver must surface the "
+            f"clean text so the ``Result:`` line in the watcher body "
+            f"carries the agent's last assistant message verbatim "
+            f"(not the whole-envelope JSON dump). Got "
+            f"{record.result_summary!r}."
         )
-        assert parsed["content"] == "all done"
         assert record.error is None
         # Sanity-check the underlying row really is what we asked for.
         assert job_repo.get(jid) is not None

@@ -753,8 +753,23 @@ def _parse_task_result_summary(task: Task) -> str | None:
 
     * If ``Task.result`` is empty/None → ``None``.
     * If ``Task.result`` is a valid JSON string already → keep it.
-    * If ``Task.result`` parses to any other JSON value → ``json.dumps``
-      it (so the frontend always receives a string).
+    * If ``Task.result`` parses to a dict and carries a ``content``
+      key (the v0.13.9 ``complete_task`` producer stamp shape
+      ``{"success": True, "message_id": "x", "content": "<text>"}``) →
+      surface the ``content`` text verbatim. This is the agent's
+      last assistant message — the durable home per the v0.13.9 fix
+      (commit 540a5f16, ``fix/job-completed-result-arm``). Pre-fix
+      the helper dumped the whole JSON envelope, which slipped the
+      envelope into every ``[JOB_EVENT]`` watcher's ``Result:`` line
+      (live evidence: task-kind ``completed ✓`` bodies on
+      2026-09-24 E2E carried the envelope instead of the clean text —
+      DEFECT-1).
+    * If ``Task.result`` parses to a dict WITHOUT a ``content`` key →
+      ``json.dumps`` the whole dict (the prior fallback) so callers
+      still receive a string.
+    * If ``Task.result`` parses to any non-dict JSON value →
+      ``json.dumps`` it (so the frontend always receives a string)
+      for scalars, or return verbatim if it parses to a string.
     * If parsing fails → fall back to the raw ``Task.result`` string.
 
     Args:
@@ -770,6 +785,20 @@ def _parse_task_result_summary(task: Task) -> str | None:
         parsed = json.loads(raw)
     except (ValueError, TypeError):
         return raw
+    if isinstance(parsed, dict):
+        # DEFECT-1 fix (2026-09-24, fix/watch-notify-delivery-gaps):
+        # when ``task.result`` carries the v0.13.9 envelope shape, the
+        # ``content`` key holds the agent's last assistant message.
+        # The watcher body surfaces this directly so the ``Result:``
+        # line carries the assistant's text — not the whole envelope.
+        content_value = parsed.get("content")
+        if content_value is not None:
+            if isinstance(content_value, str):
+                return content_value
+            return json.dumps(content_value)
+        # No ``content`` key — fall back to the whole-dict dump so
+        # every caller still receives a string.
+        return json.dumps(parsed)
     return parsed if isinstance(parsed, str) else json.dumps(parsed)
 
 
