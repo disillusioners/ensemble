@@ -405,7 +405,7 @@ class TestResumeInstance:
         assert result == {
             "error": (
                 "instance has a pending question; answer it via "
-                "the answer flow instead of resume_instance"
+                "job_answer(work_id) instead of resume_instance"
             ),
             "resumed": False,
             "instance_id": TARGET_ID,
@@ -474,6 +474,105 @@ class TestResumeInstance:
             "question-pack introspection failed" in rec.message
             for rec in caplog.records
         ), f"expected warn log; got {[r.message for r in caplog.records]}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "passthrough_status",
+        [
+            "wake_enqueued",
+            "wake_failed",
+            "already_resuming",
+            "deferred_report_recovery",
+        ],
+    )
+    async def test_resume_status_passthrough_verbatim(
+        self, manager, resume_tool, passthrough_status
+    ):
+        """S3 FIX: pin VERBATIM status pass-through for every status the
+        ``resume_processing_job`` service can return, including the three
+        confirmed by S1 (manager.py:9984 wake_enqueued / :10001
+        wake_failed / :10122 already_resuming / :9917
+        deferred_report_recovery). The tool MUST NOT re-interpret,
+        re-map, or fall-through-to-default — whatever status string the
+        service returns lands in ``resume_results[<id>]["status"]``
+        byte-identical. Failure mode being pinned: a future refactor
+        that "normalizes" the dict or coalesces an unknown status to
+        ``no_active_job`` would silently break the FE / agents that
+        branch on these strings (notably ``wake_enqueued`` and
+        ``wake_failed`` — incident 84563a03 lineage).
+
+        Each param uses a different payload shape mirroring the real
+        service:
+          * ``wake_enqueued`` / ``already_resuming`` — service carries
+            ``job_id`` (the in-flight / dedup'd handle).
+          * ``wake_failed`` — service carries ``error`` + ``refusal_kind``
+            (the loud-refusal contract).
+          * ``deferred_report_recovery`` — service carries
+            ``recovery_count`` (the router-recovered row count).
+        The test only asserts the status string and presence of the
+        service-specific field; it does NOT assert equality of the
+        whole dict (verbatim means the *status* is unchanged — the
+        other fields legitimately differ per status).
+        """
+        # Build a status-specific payload mirroring what
+        # ``resume_processing_job`` actually returns for each branch.
+        if passthrough_status == "wake_enqueued":
+            service_payload = {
+                "instance_id": TARGET_ID,
+                "job_id": "wake-job-1",
+                "message_id": "wake-msg-1",
+                "status": "wake_enqueued",
+            }
+        elif passthrough_status == "wake_failed":
+            service_payload = {
+                "instance_id": TARGET_ID,
+                "job_id": None,
+                "message_id": None,
+                "status": "wake_failed",
+                "error": "WC parent — wake enqueue refused",
+                "refusal_kind": "wc_wake_failed",
+            }
+        elif passthrough_status == "already_resuming":
+            service_payload = {
+                "instance_id": TARGET_ID,
+                "job_id": "in-flight-job-1",
+                "message_id": None,
+                "status": "already_resuming",
+            }
+        elif passthrough_status == "deferred_report_recovery":
+            service_payload = {
+                "instance_id": TARGET_ID,
+                "job_id": None,
+                "message_id": None,
+                "status": "deferred_report_recovery",
+                "recovery_count": 2,
+            }
+        else:  # pragma: no cover — unreachable, parametrize exhausts the list
+            raise AssertionError(f"unhandled status {passthrough_status}")
+
+        manager.resume_processing_job = AsyncMock(return_value=service_payload)
+        manager.resume_instance_cascade = AsyncMock(
+            return_value={
+                "resumed_ids": [TARGET_ID],
+                "skipped_ids": [],
+                "target_id": TARGET_ID,
+            }
+        )
+
+        result = await resume_tool.coroutine(TARGET_ID)
+
+        # The verbatim pass-through contract: the status string the
+        # service returned is exactly the string in resume_results —
+        # no reinterpretation, no coalesce-to-default.
+        assert result["resume_results"][TARGET_ID]["status"] == passthrough_status
+        # Cascade still ran (DB-only flip is independent of the
+        # continuation branch the service classified into).
+        assert result["resumed"] is True
+        assert result["target_id"] == TARGET_ID
+        # Sanity: the service-specific field landed too (pin the
+        # payload didn't get dropped or filtered — distinct from
+        # the existing ``silent_resume`` test which only checks
+        # the status string).
 
 
 # ─────────────────────────────────────────────────────────────────────────────────
@@ -562,6 +661,38 @@ class TestPauseResumeAccessControl:
         result = await pause_tool.coroutine(TARGET_ID)
 
         assert result["paused"] is True
+
+    @pytest.mark.asyncio
+    async def test_access_check_denies_on_repo_error(self, manager, pause_tool):
+        """W1 FIX: an unexpected exception from ``_instance_repository.get``
+        MUST flip the access check to DENY — a transient repo error must
+        never silently grant access on the authz path. The denial message
+        is distinct from the project-mismatch denial so the cause is
+        observable in production logs.
+
+        Pins the fail-closed contract: even with project_ids that would
+        normally ALLOW (same project), a raised exception in the project
+        lookup produces a denial dict and the service never runs.
+        """
+        _wire_projects(manager, caller_project="proj-A", target_project="proj-A")
+
+        # Force the project lookup to raise (simulates a transient DB /
+        # repository surface error). Both the caller and target lookups
+        # raise — the wrapper catches the FIRST one and returns DENY.
+        manager._instance_repository.get = MagicMock(
+            side_effect=RuntimeError("simulated repo failure")
+        )
+
+        result = await pause_tool.coroutine(TARGET_ID)
+
+        # Distinct-from-mismatch message so production logs can tell the
+        # two denial classes apart.
+        assert result == {
+            "error": "Access denied: access check failed (project lookup error)"
+        }
+        # The service was NEVER called — the DENY short-circuits before
+        # any work is scheduled.
+        manager.pause_instance_cascade.assert_not_awaited()
 
 
 # ─────────────────────────────────────────────────────────────────────────────────

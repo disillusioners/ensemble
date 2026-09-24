@@ -469,10 +469,44 @@ def _check_instance_project_access(
         # an access-control regression (mirrors _check_job_access).
         return None
 
-    caller_project = _get_instance_project_id(manager, current_instance_id)
-    target_project = _get_instance_project_id(manager, target_instance_id)
+    # W1 FIX (review finding, fail-closed hardening): the prior code
+    # delegated the project lookup to ``_get_instance_project_id``
+    # which swallows ALL exceptions and returns ``None`` — the helper
+    # is intentionally permissive because other callers
+    # (instance.py:2201 / :2449 / :2629 / :2824) use it for
+    # non-authz project_id inheritance and want the swallow-and-default
+    # semantics. On the authz path, however, the only legitimate
+    # ``None`` return is "the row is genuinely absent or has no
+    # project_id" — those are the ALLOW inputs (line below). An
+    # exception is NOT legitimate: a transient repository failure
+    # must NOT silently flip to ALLOW. We therefore call the
+    # repository DIRECTLY (mirroring ``_check_job_access``'s shape at
+    # job_queue.py:951 — bare ``manager._instance_repository.get(...)``
+    # with no swallow) so any raised exception propagates and the
+    # try/except below can convert it into a DENY with a message
+    # distinct from the project-mismatch denial.
+    try:
+        caller_row = manager._instance_repository.get(current_instance_id)
+        target_row = manager._instance_repository.get(target_instance_id)
+    except Exception as lookup_exc:
+        logger.warning(
+            "instance access check failed: project lookup raised %s "
+            "(caller=%s target=%s); denying",
+            type(lookup_exc).__name__,
+            current_instance_id,
+            target_instance_id,
+        )
+        return {
+            "error": "Access denied: access check failed (project lookup error)"
+        }
+
+    caller_project = caller_row.project_id if caller_row else None
+    target_project = target_row.project_id if target_row else None
     if caller_project is None or target_project is None:
         # Unscoped caller or unscoped target → allow (job-tool parity).
+        # The None here is the LEGITIMATE "row absent / no project"
+        # signal, NOT the swallowed-exception signal — the try/except
+        # above has already separated the two.
         return None
 
     # Read at call time so test monkeypatching of the module attribute wins.
@@ -4649,7 +4683,7 @@ Caveats:
                     return {
                         "error": (
                             "instance has a pending question; answer it via "
-                            "the answer flow instead of resume_instance"
+                            "job_answer(work_id) instead of resume_instance"
                         ),
                         "resumed": False,
                         "instance_id": instance_id,
@@ -4680,6 +4714,16 @@ Caveats:
         except Exception as e:  # noqa: BLE001 — endpoint parity (:825-832)
             job_result = {"status": "error", "error": str(e)}
         if job_result is None:
+            # S4 FIX (review finding): mirror the HTTP resume handler's
+            # debug log (routers/instances.py:836-839) — same phrasing,
+            # same instance-id truncation, same "was IDLE/WAITING_CHILDREN"
+            # context. The two paths must produce identical log lines so
+            # production debugging is consistent regardless of which
+            # surface (tool vs. HTTP endpoint) the agent / user invoked.
+            logger.debug(
+                f"resume_instance: resume_processing_job returned None "
+                f"for {instance_id[:8]}... (was IDLE/WAITING_CHILDREN)"
+            )
             job_result = {"status": "no_active_job"}
 
         result = await manager.resume_instance_cascade(instance_id)
@@ -4730,8 +4774,14 @@ Returns:
     never re-interpreted: "resuming" (turn continuation job spun),
     "silent_resume" (silent checkpoint continuation — the non-WC parent /
     child cascade contract), "wake_enqueued" (a parked WAITING_CHILDREN
-    parent got a durable wake turn), "no_active_job" (nothing to continue),
-    "error" (the continuation failed — inspect the error field).
+    parent got a durable wake turn), "wake_failed" (the WC-wake enqueue
+    refused — inspect the error / refusal_kind fields for cause),
+    "already_resuming" (a resume was already in flight for this
+    instance — the dedup guard at manager.py:10122 short-circuits rather
+    than starting a second graph turn), "deferred_report_recovery"
+    (the router recovered one or more DEFERRED report rows for the
+    target; check the recovery_count field), "no_active_job" (nothing to
+    continue), "error" (the continuation failed — inspect the error field).
     {"error": ..., "resumed": False} when the instance is missing, writes
     are paused for a DB migration, or access is denied (project-scoped,
     same rule as job_messages).

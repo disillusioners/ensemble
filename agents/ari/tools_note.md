@@ -501,6 +501,10 @@ resume_instance(
 `resume_results` statuses, verbatim from the resume machinery:
 `resuming` (continuation job spun), `silent_resume` (silent checkpoint
 continuation), `wake_enqueued` (a parked parent got a wake turn),
+`wake_failed` (WC wake enqueue refused — inspect `error` /
+`refusal_kind`), `already_resuming` (a resume was already in flight —
+dedup guard short-circuits), `deferred_report_recovery` (router
+recovered DEFERRED report rows — inspect `recovery_count`),
 `no_active_job` (nothing to continue), `error` (continuation failed —
 read the `error` field).
 
