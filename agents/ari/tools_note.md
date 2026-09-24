@@ -431,3 +431,100 @@ protocol.
 - **Refusal ≠ failure of the tool.** `pipeline-busy`, `cooldown-active`,
   `rollback-cap-exceeded` are the anti-flapping interlocks doing their
   job; relay them, wait, or ask the user.
+
+---
+
+## Pausing / Resuming Instance Work
+
+Two tools let me checkpoint in-flight instance work around a daemon
+restart or upgrade. Pausing is SOFT and REVERSIBLE: the instance's turn is
+cancelled at the next graph checkpoint boundary — work state is
+checkpointed, NOT lost, and memory/history all survive. This is the
+proven pre-restart choreography: pause before the daemon stops, resume
+after it returns.
+
+### Which Tool to Use
+
+```mermaid
+flowchart LR
+    A[Restart/upgrade scheduled] --> B[pause_instance each busy lineage]
+    B --> C[Daemon restarts]
+    C --> D[resume_instance each paused lineage]
+    D --> E[Work continues from checkpoint]
+```
+
+### pause_instance
+
+```raw
+pause_instance(
+    instance_id="inst_abc123",       # Required — its whole lineage pauses
+    reason="pre-restart choreography" # Optional free-text, persisted for audit
+)
+```
+
+**Returns:**
+```jsonc
+{
+  "paused": true,
+  "paused_ids": ["inst_abc123", "inst_child1"],  // everything that flipped to PAUSED
+  "skipped_ids": ["inst_child2"]                 // already paused / terminal — idempotent
+}
+```
+
+- Cascades to the WHOLE lineage — pausing a child also pauses its waiting
+  ancestors, and every descendant goes down with it.
+- Re-pausing a paused instance is harmless — it lands in `skipped_ids`.
+
+### resume_instance
+
+```raw
+resume_instance(
+    instance_id="inst_abc123",   # Required — its whole paused lineage resumes
+    reason="daemon is back"      # Optional free-text, echoed in the result
+)
+```
+
+**Returns:**
+```jsonc
+{
+  "resumed": true,
+  "resumed_ids": ["inst_abc123", "inst_child1"],
+  "skipped_ids": [],
+  "target_id": "inst_abc123",
+  "resume_results": {
+    "inst_abc123":  {"status": "resuming", "job_id": "..."},  // turn continuation job spun
+    "inst_child1":  {"status": "silent_resume"}               // continued silently from checkpoint
+  }
+}
+```
+
+`resume_results` statuses, verbatim from the resume machinery:
+`resuming` (continuation job spun), `silent_resume` (silent checkpoint
+continuation), `wake_enqueued` (a parked parent got a wake turn),
+`wake_failed` (WC wake enqueue refused — inspect `error` /
+`refusal_kind`), `already_resuming` (a resume was already in flight —
+dedup guard short-circuits), `deferred_report_recovery` (router
+recovered DEFERRED report rows — inspect `recovery_count`),
+`no_active_job` (nothing to continue), `error` (continuation failed —
+read the `error` field).
+
+**Use for:**
+- Pre-restart choreography: pause busy lineages before `system_restart`
+  or `system_upgrade`, resume each one after the daemon returns
+- Parking work cleanly when the user needs the system quiet
+
+**Do NOT use for:**
+- ❌ Answering a pending question — if the instance paused itself
+  awaiting an answer, answer it via `job_answer(work_id)` (the
+  agent-facing surface; the POST /answer HTTP endpoint is its
+  user-facing twin — both share one implementation).
+  resume_instance refuses with an error if a question pack
+  is still pending
+- ❌ Cancelling work permanently → `job_cancel` / `terminate_instance`
+- ❌ Giving NEW instructions to a running agent → `job_inject`
+
+**Access control:** same project-scoped rule as the four job tools — a
+target in another project is refused unless I run unscoped (the
+front-door tier).
+
+---
