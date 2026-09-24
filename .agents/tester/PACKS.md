@@ -1,5 +1,21 @@
 # Test Packs
 
+## Active commission — AGENT-PAUSE-RESUME-TOOLS ACCEPTANCE GATE (2026-09-24)
+Branch `feature/agent-pause-resume-tools` @ `17cf80f1` (base `latest` @ `0fd06cf0`; 4 commits). Pre-merge acceptance gate. Feature = agent-facing `pause_instance`/`resume_instance` tools in `daemon/tools/instance.py` wrapping the same manager service layer as the HTTP pause/resume endpoints. **ALL invocations MUST scrub ambient `POSTGRES_*` + `DATABASE_URL` via `env -u`.** Acceptance gate = report-only; NO quick fixes on feature/test code.
+
+| Pack | Invocation (wrap in `timeout 300`; env-scrubbed) | Scope | Est. |
+|---|---|---|---|
+| `pause_resume_feature_unit_test` (ad-hoc) | `env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_URL -u DATABASE_URL .venv/bin/python -m pytest tests/unit/tools/test_pause_resume_instance_tools.py -q --tb=short` | 32-test feature suite (7 commissioned scenarios) | ~1 min |
+| `tools_dir_regression_test` (ad-hoc) | same fence + `.venv/bin/python -m pytest tests/unit/tools/ -q --tb=short --ignore=tests/unit/tools/test_archive_lifecycle.py` | containing dir: registry, tool_help/docs, instance-tools siblings (archive lifecycle quarantined ×5) | ~4 min |
+| `router_pause_resume_test` (ad-hoc; path pending inventory) | same fence + scoped pytest on router/API pause-resume test file(s) | HTTP pause/resume behavior untouched — must still pass | ~2 min |
+| `concurrency_atomic_unit_test` (registered) | `timeout 300 env -u <fence> bash test/packs/concurrency_atomic_unit_test.sh` | ensure.md Core #2/#3 (cascade races, atomic locks, sync-DB-off-loop) | ~3 min |
+| `lane_gate_boot_probe` (ad-hoc) | scrubbed `./dev.sh` boot, 30s must-not-crash, dev-DB engine-line verification, teardown | execution-lane intersection gate (resume spins message job) + Core #4 grep | ~2 min |
+| `reg_surface_check` (ad-hoc) | `/tmp` probe via real tool factory: schemas, categories, tool_help, meta allowlists | registration surface integration check | ~1 min |
+
+**OUTCOME (2026-09-24): ✅ MERGE-READY — 0 branch-caused failures across 10 workers / 6 pytest packs + 3 checks.** feature 32/32 (7.95s) · tools-dir A 1052P/4S + 5 quarantine-family F (pre-existing `TestAccessMemoryArchive`; `--ignore` silently ineffective vs glob-expanded explicit path — see LESSONS/2026-09-24-pytest-ignore-explicit-path-glob.md) · tools-dir B 1822P/1S (56.58s) · router 9/9 (2.46s) · jq-tools 81/81 (5.71s) · concurrency 98P/74S/0F baseline-identical (60.86s) · boot lane gate PASS (ensemble_dev:8079, no crash, clean teardown, 9797 untouched) · reg-surface 12/12 · mock-fidelity SOUND (0 drift, 0 call-count-only). Full report: `RESULTS/2026-09-24-agent-pause-resume-tools-acceptance.md`.
+
+---
+
 ## Active commission — FS-TOOL-GUARDRAILS FULL-REGRESSION GATE (2026-09-23)
 Branch `feature/fs-tool-guardrails` @ `948c0f06` (base `3c09c6ae`; 4 commits; prod footprint = `daemon/tools/filesystem.py` only). **✅ VERDICT: PASS — 0 branch-caused regressions; merge-ready from testing.** Method: 16 pack runs (all committed regression partitions + concurrency bonus + 1 ad-hoc family pack) + 6 base A/B legs (`/tmp/ens-fsg-base{,-2}`) + 3 solo tiebreaks; 29 workers, 0 re-dispatches; every invocation drift-pinned + env-scrubbed (`env -u` POSTGRES_*/DATABASE_URL) + dual-layer timeout.
 
