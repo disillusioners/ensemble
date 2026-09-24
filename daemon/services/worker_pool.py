@@ -1087,6 +1087,7 @@ class Worker(threading.Thread):
         task: "Task",
         status: str,
         error: str | None = None,
+        result_summary: str | None = None,
     ) -> None:
         """Bridge the worker thread's sync terminal write to the async notifier.
 
@@ -1099,6 +1100,22 @@ class Worker(threading.Thread):
         main event loop — the same pattern already used by
         ``_notify_parent_of_failure`` and
         ``_cancel_bus_watchers_for_task``.
+
+        ``result_summary`` (DEFECT-1b, 2026-09-24): when supplied, threads
+        the agent's last assistant message directly into the watcher
+        payload via the ``notify_work_watchers`` ``result_summary=`` kwarg,
+        bypassing the resolver's ``task.result`` read. The thread-pool
+        success path runs in ``worker_pool._handle_cancellation``'s grace
+        window (line 808-832) where ``complete_task`` was called with the
+        ``{"skipped": True}`` producer stamp (no ``content`` key on the
+        row) — the in-memory ``task.result`` JSON does NOT carry the
+        assistant text in that case. Callers that have the agent text in
+        hand (the OBSERVER pre-fetch via ``_get_last_assistant_message_raw``
+        is the canonical source) MUST pass it here. When omitted the
+        resolver fallback runs and may surface ``None`` on the same race
+        (live E2E 2026-09-24, work_id 4a7236e2...) — see the
+        ``task_processor.on_success`` callback for the same fix on the
+        main-success path.
 
         Silently no-ops when ``work_resolver`` / ``watcher_repo`` are
         not yet wired (late-wiring path that runs before api.py sets
@@ -1120,6 +1137,7 @@ class Worker(threading.Thread):
                     instance_manager=instance_manager,
                     work_resolver=self._work_resolver,
                     watcher_repo=self._watcher_repo,
+                    result_summary=result_summary,
                 )
             )
         except Exception as e:  # noqa: BLE001 — never raise from a fire-and-forget
