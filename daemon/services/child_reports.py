@@ -4353,20 +4353,38 @@ Provide a concise summary:"""
                         # sync (``_process_child_completion_and_notify_parent``
                         # :2083) — the exact value the v0.13.9
                         # result-arm already threads into the lifecycle
-                        # event + CompletionRegistry above. F2 slot
-                        # discipline (RC2, 2026-09-23): failed →
-                        # ``error=``; every other terminal token →
-                        # ``result_summary=``. Keyword-only — never
-                        # positional (the third positional param is
-                        # ``error``).
-                        if _token == "failed":
+                        # event + CompletionRegistry above.
+                        #
+                        # ROUND-3 REVIEW NARROW (2026-09-24): the
+                        # threading is restricted to the ``completed``
+                        # token only — the MEASURED CAS winner on the
+                        # dev daemon was a completed ✓ event (work
+                        # c383bdbd). Every other token (settled,
+                        # cancelled, dead_letter, failed) reverts to
+                        # its pre-5292eb99 shape in this fan-out:
+                        # ``settled`` mirrors carry no Task.result and
+                        # must keep the by-design NO-Result-block
+                        # envelope (M3 mission-class guardrail — pinned
+                        # by ``test_settled_message_kind_no_result_block``
+                        # on the notifier path); ``failed`` already
+                        # has its own error-lane emission in
+                        # ``error_reporting.py`` and threads no
+                        # content here.
+                        #
+                        # F2 slot discipline (RC2, 2026-09-23) is
+                        # preserved: failed → ``error=``; completed →
+                        # ``result_summary=``; every other terminal
+                        # token → no content kwarg. Keyword-only —
+                        # never positional (the third positional param
+                        # is ``error``).
+                        if _token == "completed":
                             await _notify_service.notify_watchers(
                                 _work_id, _token,
+                                result_summary=last_content,
                             )
                         else:
                             await _notify_service.notify_watchers(
                                 _work_id, _token,
-                                result_summary=last_content,
                             )
                     except Exception as e:
                         logger.warning(

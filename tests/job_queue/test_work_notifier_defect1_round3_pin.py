@@ -47,7 +47,26 @@ Pins (all must FAIL on revert of the child_reports.py fix):
   ``notify_watchers`` call carries the ``result_summary=`` keyword
   (fails on revert), and at most ONE call lacks both ``result_summary=``
   and ``error=`` (the intentional failed-arm call — a NEW unthreaded
-  success-status call site pushes the count to 2 and fails).
+  success-status call site pushes the count to 2 and fails). The
+  ROUND-3 REVIEW NARROW assertion extends this same test method:
+  each ``result_summary=`` call must be reachable ONLY under the
+  BODY of ``if _token == "completed":`` — AST parent-map walk via
+  ``_result_summary_call_under_completed_arm``. Fails the moment
+  anyone re-widens the threading to a non-completed token (the
+  post-5292eb99 gap that produced settled envelopes WITH a
+  ``Result:`` line).
+
+* ``test_settled_message_kind_dispatch_envelope_has_no_result_block`` —
+  ROUND-3 REVIEW M3 GUARD: a message-kind mirror WorkRecord
+  (``status="settled"``, ``job_type="message"``) routed through
+  the root-completion ``_dispatch_post_commit_side_effects``
+  fan-out delivers an envelope carrying the header + Agent line
+  and ``settled ✓`` glyph — and NOTHING ELSE. The resolver returns
+  no content for settled mirrors; the narrowed branch must not
+  pre-thread ``result_summary=last_content`` into a settled call
+  site (the pre-narrow else-branch did so for ``settled`` tokens
+  too, which violates the M3 mission-class by-design NO-Result
+  shape).
 """
 
 from __future__ import annotations
@@ -206,6 +225,38 @@ def _patch_resolver_race(resolver, *, wid: str):
         error=None,
         created_at=datetime.now(timezone.utc),
         job_type=None, mission_liveness=None,
+    )
+    original = resolver.resolve_work
+    resolver.resolve_work = MagicMock(return_value=record)
+    return original
+
+
+def _patch_resolver_settled_mirror(resolver, *, wid: str):
+    """Synthesize a message-kind mirror WorkRecord — ``kind="job"``,
+    ``job_type="message"`` — so ``per_kind_status_for(wid)`` returns
+    ``"settled"`` (M3 mission-class rename: terminal Reason='completed'
+    on a mirror JobItem flips the canonical status to ``settled``).
+
+    The settled mirror carries NO ``result_summary`` and NO ``error``
+    (mirror JobItem rows have no paired Task row to surface content
+    from), so the notifier's ``effective_result`` resolver-side read is
+    ``None`` and the body must render without a ``Result:`` block.
+
+    This is the SHAPE that the root-completion
+    ``_dispatch_post_commit_side_effects`` fan-out scans when a
+    message-kind JobItem mirror for the root is still in the
+    ``find_jobs_by_instance`` bucket at completion time. Pre-narrow,
+    the else-branch threaded ``result_summary=last_content`` here too
+    and the delivered envelope rendered WITH a ``Result:`` line,
+    breaking the M3 by-design NO-Result-block shape.
+    """
+    record = WorkRecord(
+        work_id=wid, kind="job", status="settled",
+        instance_id="inst-test", project_id="p1",
+        agent_id="worker", result_summary=None,
+        error=None,
+        created_at=datetime.now(timezone.utc),
+        job_type="message", mission_liveness=None,
     )
     original = resolver.resolve_work
     resolver.resolve_work = MagicMock(return_value=record)
@@ -377,6 +428,132 @@ class TestMeasuredWinnerDeliversResult:
         assert "LATE_IN_HAND_CONTENT" not in bodies[0]
 
 
+class TestSettledMessageKindDispatchEnvelope:
+    """ROUND-3 REVIEW M3 GUARD — settled envelope through
+    ``_dispatch_post_commit_side_effects`` must NOT carry a ``Result:``
+    line. The narrowing of the round-3 fix restricts
+    ``result_summary=last_content`` to the ``_token == "completed"``
+    arm only; a settled mirror (kind='job', job_type='message') flowing
+    through the same fan-out falls to the else-branch and gets NO
+    content kwarg — and the resolver returns no content for mirror
+    rows either — so the delivered body is the by-design
+    NO-Result-block shape (M3 mission-class contract).
+    """
+
+    @pytest.mark.asyncio
+    async def test_settled_message_kind_dispatch_envelope_has_no_result_block(
+        self, engine, task_repo, job_repo, instance_repo, watcher_repo,
+        enqueue_mock,
+    ):
+        """Real CAS path — real ``ChildReportsService`` → real
+        ``JobQueueService`` → real ``notify_work_watchers``. A
+        message-kind mirror WorkRecord (per_kind_status_for →
+        'settled') flowing through
+        ``_dispatch_post_commit_side_effects`` delivers ONE
+        envelope carrying the header + Agent + ``settled ✓`` line
+        and NO ``Result:`` block.
+
+        Pre-narrow (else-branch threading every non-failed token),
+        this exact scenario delivered a body carrying
+        ``Result:\\n<last_content>`` — which violates the M3
+        mission-class by-design NO-Result-block shape and creates
+        same-token envelope inconsistency between the notifier
+        direct call path and the child-reports fan-out (the notifier
+        path's guard, ``test_settled_message_kind_no_result_block``
+        in ``test_work_notifier_defect1_pins.py``, fires through
+        the same notifier but WITHOUT the result-threading else).
+        """
+        service = _build_service(
+            engine, job_repo, task_repo, instance_repo, enqueue_mock,
+        )
+        executor = _seed_executor_instance(
+            engine, f"exec-{uuid4().hex[:8]}"
+        )
+        work_id = str(uuid4())
+        # The settled mirror's work_id still surfaces via the
+        # Task-side work-scan (``get_by_instance``). Seed a Task
+        # row carrying it — its canonical status is irrelevant
+        # because the resolver is patched below to return the
+        # mirror-shape WorkRecord.
+        _seed_task(engine, work_id, executor)
+        # A watcher must exist for ``notify_work_watchers`` to
+        # actually deliver. The M3 settled-mirror contract: the
+        # watcher subscribes to the ``settled`` event explicitly
+        # (the per-kind dispatch surfaces ``settled`` as the
+        # canonical status on a mirror row). Default
+        # ``watch_events`` shape is the same literal
+        # ``["completed"]`` the winner pin seeds — that filter
+        # excludes ``settled`` terminal fires (status must be in
+        # ``watch_events`` for ``standard_match`` to fire), which
+        # is why a defaulted watch would yield zero deliveries on
+        # this dispatch.
+        watcher_repo.add_watch(
+            work_id, WATCHER_INSTANCE, ["settled"]
+        )
+
+        resolver = service._work_resolver
+        original = _patch_resolver_settled_mirror(resolver, wid=work_id)
+        try:
+            svc = _build_child_reports(engine, service, task_repo)
+            await svc._dispatch_post_commit_side_effects(
+                _root_completed_result(executor),
+                LAST_CONTENT,
+                str(uuid4()),  # completed_message_id (title gen stubbed)
+            )
+        finally:
+            resolver.resolve_work = original
+
+        bodies = _delivered_bodies(enqueue_mock)
+        assert len(bodies) == 1, (
+            f"the settled-mirror fan-out must deliver exactly one "
+            f"envelope; got {len(bodies)}: {bodies!r}"
+        )
+        body = bodies[0]
+        assert "[JOB_EVENT]" in body
+        assert "settled ✓" in body, (
+            "settled-mirror M3 envelope must carry the "
+            f"``settled ✓`` glyph; got {body!r}"
+        )
+        assert f"Agent: worker" in body
+        # ── THE NARROW HOLDS HERE ──
+        # The dispatch's else-branch (every non-completed token)
+        # now passes NO ``result_summary`` kwarg; the resolver
+        # returns ``result_summary=None`` for mirror rows; so
+        # the notifier's ``effective_result`` is ``None`` and the
+        # body has no ``Result:`` line.
+        assert "Result:" not in body, (
+            "ROUND-3 M3 GUARD: a settled mirror envelope through "
+            "_dispatch_post_commit_side_effects MUST NOT carry a "
+            "Result: line — the narrowed else-branch must not "
+            "pre-thread result_summary=last_content into a "
+            "settled-status call. Pre-narrow regression: the "
+            "else-branch fed last_content into the settled call "
+            f"too. Got body={body!r}"
+        )
+        # No error slot either (we passed status='settled', not
+        # 'failed', and no error kwarg upstream).
+        assert "Error:" not in body
+        # And ``LAST_CONTENT`` must not leak under any prefix —
+        # the in-scope assistant reply is supposed to ride the
+        # completed-arm delivery, not the settled envelope.
+        assert LAST_CONTENT not in body, (
+            "ROUND-3 GUARD: LAST_CONTENT must not appear in a "
+            "settled envelope — content is only valid for the "
+            "``completed`` arm. Got body={body!r}"
+        )
+        # The watcher row was CAS-consumed by the fan-out
+        # (the same exactly-once invariant the winner pin proves).
+        from sqlmodel import select
+        with Session(engine) as s:
+            remaining = s.exec(
+                select(JobWatcher).where(JobWatcher.job_id == work_id)
+            ).all()
+        assert remaining == [], (
+            "the settled-mirror fan-out must consume the watcher "
+            "row via the same CAS the winner takes"
+        )
+
+
 class TestDispatchCallSiteGuard:
     """AST guard over ``_dispatch_post_commit_side_effects``."""
 
@@ -406,6 +583,15 @@ class TestDispatchCallSiteGuard:
         * ≤1 call with NEITHER ``result_summary=`` NOR ``error=`` — a
           NEW unthreaded success-status call site pushes this to 2 and
           fails, closing the "new caller repeats the defect" gap.
+
+        ROUND-3 REVIEW NARROW assertion (2026-09-24): a
+        ``notify_watchers`` call carrying ``result_summary=`` must
+        live inside the BODY of an ``If _token == "completed":`` arm —
+        NOT in the orelse (which carries settled / cancelled /
+        dead_letter tokens) and NOT at the function's top level. Fails
+        the moment anyone re-widens the threading to a non-completed
+        token (the pre-narrow else-branch gap that produced settled
+        envelopes WITH a ``Result:`` line).
         """
         calls = self._notify_calls()
         assert calls, "no notify_watchers call sites found — layout drift"
@@ -435,3 +621,134 @@ class TestDispatchCallSiteGuard:
             f"allowed to omit both). Offending sites at lines: "
             f"{[c.lineno for c in naked]}"
         )
+
+        # ROUND-3 REVIEW NARROW (2026-09-24): walk the AST and confirm
+        # every ``notify_watchers(...)`` call carrying
+        # ``result_summary=`` is reachable ONLY under the
+        # ``if _token == "completed":`` body. Pre-narrow (commit
+        # 5292eb99) threaded ``result_summary=last_content`` in the
+        # else-arm, which carried settled / cancelled / dead_letter
+        # tokens too — settled envelopes rendered WITH a ``Result:``
+        # line, breaking the M3 mission-class by-design NO-Result-block
+        # shape. Re-widening triggers this assertion (offending call
+        # sites are reported with their arm status so the bug pattern
+        # is unambiguous from the failure message).
+        #
+        # Implementation note: the calls returned by ``_notify_calls``
+        # are derived from a FRESH ``ast.parse`` of the file. The
+        # parent map MUST be built from the SAME parse so the
+        # ``id()`` keys line up with the call nodes (each parse
+        # produces a fresh node object with a fresh id).
+        tree = ast.parse(CHILD_REPORTS_PATH.read_text(encoding="utf-8"))
+        # Find the dispatch function in the SAME tree so the calls
+        # returned by ``_notify_calls`` and the parent map share
+        # node identity.
+        dispatch_fn = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.AsyncFunctionDef)
+             and n.name == "_dispatch_post_commit_side_effects"),
+            None,
+        )
+        assert dispatch_fn is not None, (
+            "_dispatch_post_commit_side_effects not found — layout drift"
+        )
+        # Re-derive the calls list from the same dispatch_fn (no
+        # helper indirection — guarantees identity match).
+        live_calls = [
+            n for n in ast.walk(dispatch_fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "notify_watchers"
+        ]
+        live_with_result = [
+            c for c in live_calls
+            if any(kw.arg == "result_summary" for kw in c.keywords)
+        ]
+        parents_map = _build_parent_map(tree)
+        offenders: list[tuple[int, str]] = []
+        for call in live_with_result:
+            status = _result_summary_call_under_completed_arm(
+                call, parents_map,
+            )
+            if status != "completed-body":
+                offenders.append((call.lineno, status))
+        assert not offenders, (
+            "ROUND-3 REVIEW NARROW guard violation: every "
+            "notify_watchers(...result_summary=...) call inside "
+            "_dispatch_post_commit_side_effects must be reachable "
+            "ONLY under the `if _token == \"completed\":` body. "
+            "Offending call sites (lineno, status): "
+            f"{offenders}. A `settled` / `cancelled` / `dead_letter` "
+            "envelope reaching result_summary= would render WITH a "
+            "Result: line and break the M3 mission-class by-design "
+            "NO-Result-block shape."
+        )
+
+
+# ── AST helpers (parent map + arm walker) ────────────────────────────────
+
+
+def _build_parent_map(tree: ast.AST) -> dict[int, ast.AST]:
+    """Map ``id(child_node) → parent_node`` for the entire module."""
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            # ``ast.walk`` deduplicates children that appear in
+            # multiple lists (e.g. ``If.orelse`` may contain an
+            # ``ast.If`` that ``ast.iter_child_nodes`` traverses
+            # separately on the outer node). Use the FIRST parent
+            # encountered; ``ast.walk`` yields parents before
+            # children, so this is the syntactically correct parent.
+            parents.setdefault(id(child), parent)
+    return parents
+
+
+def _is_token_eq_completed(test: ast.AST) -> bool:
+    """Return True iff ``test`` is the expression ``_token == "completed"``.
+
+    Tolerates ast.Compare wrapping (the test may be the only operand
+    of an outer ``If.test``); rejects ``!=``, ``in``, ``is``, and
+    any non-string RHS — so a future reviewer who accidentally
+    widens to ``if _token in {"completed", "settled"}:`` flips this
+    guard cleanly (FAIL with a clear shape-error message).
+    """
+    if not isinstance(test, ast.Compare):
+        return False
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    if len(test.comparators) != 1:
+        return False
+    left = test.left
+    cmp = test.comparators[0]
+    if not isinstance(left, ast.Name) or left.id != "_token":
+        return False
+    if not isinstance(cmp, ast.Constant) or cmp.value != "completed":
+        return False
+    return True
+
+
+def _result_summary_call_under_completed_arm(
+    call: ast.Call, parents_map: dict[int, ast.AST],
+) -> str:
+    """Return one of:
+    * ``"completed-body"`` — the call sits in the BODY of an ancestor
+      ``If`` whose test is ``_token == "completed"``. PASS.
+    * ``"completed-orelse"`` — an ancestor ``If`` has the completed
+      test but the call is in ORELSE (FAIL). Pre-narrow regression
+      pattern.
+    * ``"no-completed-arm"`` — no ancestor ``If`` matches the
+      completed test (FAIL). Wider re-threading or top-level leak.
+    """
+    cur = call
+    parent = parents_map.get(id(cur))
+    while parent is not None:
+        if isinstance(parent, ast.If):
+            if _is_token_eq_completed(parent.test):
+                # Find which side of the If this subtree is on.
+                in_body = any(
+                    id(sibling) == id(cur) for sibling in parent.body
+                )
+                return "completed-body" if in_body else "completed-orelse"
+        cur = parent
+        parent = parents_map.get(id(cur))
+    return "no-completed-arm"

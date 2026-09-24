@@ -97,6 +97,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ROUND-3 REVIEW (2026-09-24, 🟢 #2): the ``[watch-deliver]`` DEBUG
+# log line bounds the body slice at this many bytes (256 by default).
+# The line keeps the FULL body byte count as the explicit
+# ``body_bytes=`` field so the byte-discrimination contract
+# (prefix distinguishes ⟳-with-Result vs ✓-without) is preserved
+# even when the slice is clipped — the slice is purely for log
+# hygiene (no per-line size explosion on completed envelopes with
+# full assistant content). Tuned to fit the standard 8 KiB log
+# tail budget with comfortable headroom for ``ts=`` + ``work=`` +
+# ``status=`` + ``to=`` + ``body_bytes=`` fields.
+_MAX_LOG_BODY_BYTES = 256
+
+
 def _caller_chain(max_frames: int = 3) -> str:
     """Best-effort caller attribution for the ``[watch-cas]`` debug log.
 
@@ -593,7 +606,26 @@ async def notify_work_watchers(
             # DEBUG so the delivered envelope can be byte-discriminated
             # straight from the log (⟳-with-Result vs ✓-without), paired
             # with the ``[watch-cas]`` claim line above.
+            #
+            # ROUND-3 REVIEW (2026-09-24, 🟢 #2): Bounded log. The
+            # ``body=%r`` field used to dump the WHOLE notification,
+            # which can be many KB on a completed envelope with full
+            # assistant content — enough to swamp a log tail, bloat
+            # the test-pack archive snapshot, and (worst case) trip
+            # the structured-sink per-line cap. The byte-discrimination
+            # contract this log line serves only needs the body
+            # PREFIX (the ``[JOB_EVENT]`` header + ``Result:`` slot
+            # start). Cap the body slice at ``MAX_LOG_BODY_BYTES``
+            # (256) and KEEP the full byte count as an explicit
+            # ``body_bytes=`` field. An ellipsis marker
+            # (``<…truncated>``) suffixes the slice when the cap
+            # fires so it's unambiguous from the log that the body
+            # was clipped.
             if logger.isEnabledFor(logging.DEBUG):
+                _body_bytes = len(notification)
+                _slice = notification[:_MAX_LOG_BODY_BYTES]
+                if _body_bytes > _MAX_LOG_BODY_BYTES:
+                    _slice = f"{_slice}<…truncated>"
                 logger.debug(
                     "[watch-deliver] ts=%d work=%s status=%s to=%s "
                     "body_bytes=%d body=%r",
@@ -601,8 +633,8 @@ async def notify_work_watchers(
                     work_id[:8],
                     status,
                     watcher.instance_id[:8],
-                    len(notification),
-                    notification,
+                    _body_bytes,
+                    _slice,
                 )
 
             # ``enqueue_message`` is async — call it directly since we
