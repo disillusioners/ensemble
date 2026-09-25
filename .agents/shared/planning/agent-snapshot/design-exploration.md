@@ -168,7 +168,7 @@ A new `SnapshotService` + `SnapshotExecutor` (C's clean service shape — siblin
 
 1. **Reuses `_call_summarization_llm`** (B's real reuse boundary) with two developer-verified changes: (a) it is a `ContextCompactor` **instance method** — construct a lightweight compactor carrying the target instance's LLM config + a synthetic `CompactionContext` (only `.config` is read on this path), or fold the call body into the PR1 shared module; (b) the persona parametrized as **one optional argument** at `compaction.py:3429-3434` (the SystemMessage is inlined at a single call site). A snapshot-side wrapper pins the call shape so later compaction signature drift breaks loudly.
 2. **Extracts the content-hardening corpus** (`_is_injected_message`, `_has_context_kind`, `_extract_text_from_content`, partition/hoist predicates) into a neutral shared module (C's gate — converts silent-wrong-digest risk into an import; `graph.py:1866-1867` is the existing precedent), swapping graph.py's lazy import to the new home. **Rev 5 uses these predicates for the R6a negative-space exclusion** (skip `context_kind=snapshot_digest` blocks from summarization input — already-persisted knowledge).
-3. **Owns its prompts** (new `snapshot_prompts.py`): durable-knowledge extraction — see **R11** for the 8-tuple steering block (decisions, gotchas, conventions, open threads, artifact refs, worked-vs-wasted with reasons, mid-run workflow refinements, judgment calls + reasoning, dead-ends-remembered-as-dead-ends) — NOT compaction's next-turn-continuity contract. **Quality steering (D6):** the prompt steers toward GOOD, well-chosen context — the ~25k-token ceiling is a ceiling, not a target; padding toward it is a prompt-level failure.
+3. **Owns its prompts** (new `snapshot_prompts.py`): durable-knowledge extraction — see **R11** for the **8 fields + dead-ends norm** steering block (decisions, gotchas, conventions, open threads, artifact refs, worked-vs-wasted with reasons, mid-run workflow refinements, judgment calls + reasoning) plus the dead-ends-remembered-as-dead-ends norm (a norm beside the tuple, not a 9th tuple field — see R11 §6.3) — NOT compaction's next-turn-continuity contract. **Quality steering (D6):** the prompt steers toward GOOD, well-chosen context — the ~25k-token ceiling is a ceiling, not a target; padding toward it is a prompt-level failure.
 4. **Model chain `SNAPSHOT_MODEL > COMPACTION_MODEL > session model`** (mirroring `_resolve_compaction_model`, `daemon/config.py:2835-2867`): an operator who already pinned the cheap compaction tier gets cheap snapshot calls by default; a bare `""` must NOT fall straight to the session model (that would make every snapshot a main-model call). Stamp the effective model into the snapshot row for cost forensics.
 5. **Never touches** the persist seam, trigger machinery, or `compact_state`.
 
@@ -240,7 +240,7 @@ flowchart TD
 - **`snapshots`** (header + digest + filterable search metadata + tags — Rev 5): `id`, `project_id` (FK), `created_by_agent_id`, `target_instance_id` (soft TEXT — no FK: the terminate/revive lifecycle makes hard FKs wrong, per the `superseded_by_id` precedent at `project/models.py:215-222`; was `root_instance_id` in Rev 4, renamed in Rev 5 to reflect per-instance capture), `title`, `task_summary` (BM25 corpus), **`domain_tags` JSONB** (R8 — typed `dim:value` strings, both auto-derived and judgment; queryable via `tag_mode: all|any` search filter), `status` (**`active` | `superseded` only — R12 ratifies create-mints-successor; an active→superseded atomic flip in the same transaction as the new row's insert**), `supersedes_snapshot_id` (soft self-ref; R12), `repo_path`, `vcs_type`, `git_sha`, `git_branch`, `git_dirty`, `runtime_version`, `effective_model` (cost forensics), **`digest` JSONB** (stored knowledge, unbounded by the consume-side ~25k-token ceiling, with a `refs`/`artifacts` section, see §10.1 D6 — **no `truncated` column in Rev 5**), `created_at`.
 - **`snapshot_embeddings`** (mirrors `skill_embeddings` exactly): `id`, `snapshot_id` (FK CASCADE), `trigger_query` (≤512), `embedding` (JSONB floats).
 
-**Status vs freshness (dead-state resolution):** the stored `status` enum is a **lifecycle** property with a real writer (`active` on create; `superseded` when a newer snapshot of the same target explicitly supersedes via R12). `fresh | stale | expired` are **computed at query time** from `age_days` / `runtime_version` thresholds (§5) — never stored, so there is no dead `expired` column state needing a flip mechanism.
+**Status vs freshness (dead-state resolution):** the stored `status` enum is a **lifecycle** property with a real writer (`active` on create; `superseded` when a newer snapshot of the same target explicitly supersedes via R12 — typical case; R12 explicitly permits cross-root supersession (no same-root/target enforcement)). `fresh | stale | expired` are **computed at query time** from `age_days` / `runtime_version` thresholds (§5) — never stored, so there is no dead `expired` column state needing a flip mechanism.
 
 **Why 2 tables (Rev 5):** per-instance capture has no ordered 1:N tree to persist — one header row + its 1:N vectors. The previous `snapshot_nodes` table is deleted (the per-tree-member shape no longer exists; the tree/lineage is encoded as tags on the header). Flattening one row into one header blob kills per-vector queries (anti-pattern flagged), so embeddings stay separate.
 
@@ -503,7 +503,7 @@ Returns (Rev 5):
 - **Home:** `daemon/tools/snapshot_tools.py` — `CATEGORY_NAME`/`CATEGORY_DOC` module attrs + `create_snapshot_tools(manager, current_instance_id, agent_id, version_tag)` factory + 3 × `@register_tool_category("snapshot")` + `@tool` closures.
 - **Grants (Rev 5 P2-v1):**
   - `snapshot_create` + `snapshot_search` → per-tool entries in `tools.allow` for **worker, coder, tester** only.
-  - `spawn_hot_instance` → ships in the **`instance` category** (auto-granted to every `instance`-category holder, zero per-agent meta.json edits). Verified holders (`grep '"instance"' agents/*/meta.json`): `_mother`, `approver[v2]`, `architect`, `blueprinter`, `coder`, `developer`, `developer[v2]`, `governor`, `leader`, `planner`, `planner[v2]`, `project-manager`, `reviewer[v2]`, `tester`, `tidier[v2]`, `wanderer`. **Excluded by design:** worker, explorer (leaf/latency), **ari — PERMANENT user decision** (*"ari manages jobs via job interface; this tool is for agents working directly like leader."*).
+  - `spawn_hot_instance` → ships in the **`instance` category** (auto-granted to every `instance`-category holder, zero per-agent meta.json edits). Verified holders (`grep '"instance"' agents/*/meta.json`): `_mother`, `approver[v2]`, `architect`, `blueprinter`, `coder`, `developer`, `developer[v2]`, `governor`, `leader`, `planner`, `planner[v2]`, `project-manager`, `reviewer[v2]`, `tester`, `tidier[v2]`, `wanderer`. **Excluded by design:** worker, explorer (leaf/latency), **ari — PERMANENT user decision** (*"ari manages jobs via job interface; this tool is for agents working directly like leader."*). **Scope clause (consumer side only):** this exclusion applies to the **consumption** side — `spawn_hot_instance` is auto-granted only to `instance`-category holders. Worker remains a v1 **creator** of snapshots (per P2-v1 grants above: worker holds `snapshot_create` + `snapshot_search` directly) and so is not excluded from snapshot use overall; only the warm-start consumer tool is gated. **Asymmetry clause:** ari's exclusion is a **PERMANENT user decision** (job-routing rationale); worker/explorer exclusions are **architectural v1 choices** driven by the leaf/latency rationale (workers run small fast tasks; explorers do RAG retrieval — neither benefits from warm-start).
 - **Registration — the exact 6-file chain (developer-traced, feasibility-notes §B(ii) — unchanged in Rev 5):**
   1. `daemon/tools/snapshot_tools.py` — NEW (above).
   2. `daemon/tools/_tool_registry.py` — `CATEGORY_MODULES` += `"snapshot": "daemon.tools.snapshot_tools"` (dict at `:513-570`); `DYNAMIC_TOOL_NAMES` += the **3 names** (`snapshot_create`, `snapshot_search`, `spawn_hot_instance`) at `:23-110`.
@@ -557,7 +557,7 @@ The Rev 4 D2 ratification (8-12 lines/agent) is **superseded** by Rev 5's P2-v1 
 **Auto-derived (zero prompt cost, computed at capture):**
 - `project:{project_id}`
 - `agent:{agent_id}` (the target's agent)
-- `role:{agent_id}` (alias for `agent:` — historical name; both emitted for backward-compat search)
+- `role:{agent_id}` (alias for `agent:` — historical name; both emitted for backward-compat search) — *alias retained for search flexibility; revisit/possibly drop at implementation* (drop-vs-deprecate deferred).
 - `lineage:{mission-root-iid}` (from the permanent `parent_id` chain via `get_tree_ids_permanent`)
 - `branch:{git_branch}` (column already stamped on the snapshot row; tag mirrors it)
 - `from-snapshot:{id}` (R6b — present iff `spawned_from_snapshot_id` is set)
@@ -630,7 +630,7 @@ class SnapshotCreateInput(BaseModel):
 **`create-mints-successor` semantics** (this NAMES the writer Rev 4 left unnamed):
 
 - A new `snapshots` row is INSERTED with `status='active'` AND `supersedes_snapshot_id=<prev>`.
-- Fresh embeddings are computed (`snapshot_embeddings` rows INSERTed; old rows CASCADE-DELETE on the old row's eventual cleanup or stay alongside, indexed by snapshot_id).
+- Fresh embeddings are computed (`snapshot_embeddings` rows INSERTed; old rows CASCADE-DELETE on the old row's eventual cleanup or stay alongside, indexed by snapshot_id). **Under Q8-A no-eviction (RATIFIED 2026-09-25):** the operative branch is **STAY ALONGSIDE** — successor embeddings persist next to the superseded header in v1; there is no cascade-delete on supersession. Embedding rows are cleaned only when the parent `snapshots` row is itself cleaned (which Q8-A defers indefinitely).
 - The previous row's `status` is UPDATEd to `'superseded'` **in the same transaction** as the new row's INSERT — atomic active→superseded flip (no torn state, no dead `expired` column).
 - Cross-root supersession is permitted as a **semantics extension only** — no same-root enforcement exists; validity = creator judgment + same `role:` tag + overlapping tags; **soft-warn never refuse**.
 - Supersession chains render in search (`"line: S1→S2→S3, tip active"`); tips preferred in ranking; automation stays deferred (phase-2).
@@ -817,15 +817,15 @@ North star: *"newly spawned agent ready to work — less thinking, less explorat
 | R5 | `_ensure_postgres_columns` mirror | **Unnecessary for new tables** — `create_all` covers existing PG on every boot; migration story simplified (§3.3). |
 | R6 | Tool registration pickup | **Fully traced — 6-file chain** (§6.1), including the loader warm-entry that prevents an empty-category cache pin. |
 | R7 | "No pause needed" concurrency claim | **Confirmed from code** (single sentinel channel write; reads never tear). |
-| R6a/b/c | Negative-space rules | **RATIFIED (Rev 5):** R6a hardening-filter exclusion; R6b atomic stamp; R6c delta-only norm. |
-| R7 (skip list) | Volume control | **RATIFIED (Rev 5):** 8-item skip list governs the 3 creators; primary volume control. |
-| R8 (tags) | Typed tag surface | **RATIFIED (Rev 5):** auto-derived + judgment; `tag_mode: all\|any` search filter. |
-| R9 (search-before-create) | Creator protocol | **RATIFIED (Rev 5):** investigate → tags → search → verdict (reuse/supersede/new/create-fresh). Worker light tier = skip-check only. |
-| R10 (ranking) | Tag-overlap signal | **RATIFIED (Rev 5):** three-stage + tag-overlap + freshness; recency tie-break and usage-ranking parked (R16 monitoring-only). |
-| R11 (digest guidance) | 8-tuple extraction | **RATIFIED (Rev 5):** decisions/gotchas/conventions/open-threads/artifact-refs + worked-vs-wasted/mid-run-workflow-refinements/judgment-calls + dead-ends-as-dead-ends. |
-| R12 (supersession) | create-mints-successor | **RATIFIED (Rev 5):** no `snapshot_update` tool; atomic active→superseded flip in the same transaction; cross-root = semantics extension only. |
-| R13 (rename) | `spawn_instance_from_snapshot` → `spawn_hot_instance` | **RATIFIED (Rev 5):** zero collision; aligns with internal "hot instance" jargon. |
-| R14 (auto-fallback) | Mandatory result contract | **RATIFIED (Rev 5):** fail-soft; warm/cold/hint; never an error on miss. |
+| R6a/b/c | Negative-space rules | **RATIFIED 2026-09-25 (Rev 5):** R6a hardening-filter exclusion; R6b atomic stamp; R6c delta-only norm. |
+| R7 (skip list) | Volume control | **RATIFIED 2026-09-25 (Rev 5):** 8-item skip list governs the 3 creators; primary volume control. |
+| R8 (tags) | Typed tag surface | **RATIFIED 2026-09-25 (Rev 5):** auto-derived + judgment; `tag_mode: all\|any` search filter. |
+| R9 (search-before-create) | Creator protocol | **RATIFIED 2026-09-25 (Rev 5):** investigate → tags → search → verdict (reuse/supersede/new/create-fresh). Worker light tier = skip-check only. |
+| R10 (ranking) | Tag-overlap signal | **RATIFIED 2026-09-25 (Rev 5):** three-stage + tag-overlap + freshness; recency tie-break and usage-ranking parked (R16 monitoring-only). |
+| R11 (digest guidance) | 8-tuple extraction | **RATIFIED 2026-09-25 (Rev 5):** decisions/gotchas/conventions/open-threads/artifact-refs + worked-vs-wasted/mid-run-workflow-refinements/judgment-calls + dead-ends-as-dead-ends. |
+| R12 (supersession) | create-mints-successor | **RATIFIED 2026-09-25 (Rev 5):** no `snapshot_update` tool; atomic active→superseded flip in the same transaction; cross-root = semantics extension only. |
+| R13 (rename) | `spawn_instance_from_snapshot` → `spawn_hot_instance` | **RATIFIED 2026-09-25 (Rev 5):** zero collision; aligns with internal "hot instance" jargon. |
+| R14 (auto-fallback) | Mandatory result contract | **RATIFIED 2026-09-25 (Rev 5):** fail-soft; warm/cold/hint; never an error on miss. |
 
 ---
 

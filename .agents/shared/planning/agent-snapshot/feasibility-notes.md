@@ -17,7 +17,7 @@
 
 **Date:** 2026-09-23 (Rev 4 verification); Rev 5 supersedures recorded 2026-09-25.
 **Branch:** `plan/agent-snapshot` @ 720a2b39 (verified at Rev 5 fold-in)
-**Inputs:** design-exploration.md (Rev 4, 640 ln) + design-exploration.md Rev 5 (943 ln, 2026-09-25) + machinery-inventory.md (51 ln), all read fully from disk.
+**Inputs:** design-exploration.md (Rev 4, 640 ln) + design-exploration.md Rev 5 (945 ln, 2026-09-25, post-Rev-5.1 textual touch-ups) + machinery-inventory.md (63 ln), all read fully from disk.
 **Method:** every load-bearing anchor below was re-verified by direct read on the working tree (grep/sed/read_file only — no builds, no tests). Where architect, wanderer, and my read disagree, my read wins and the delta is recorded in Section C. **Rev 5 does not re-verify the codebase anchors** (Rev 4's verification stands); the supersedures above are scope-shape changes, not anchor changes.
 
 ---
@@ -67,7 +67,7 @@ Shared stack verified: skill search is 3-stage pure-Python BM25 → cached-embed
 
 **A5 — Flat-digest consumption injection (M).**
 Seams verified: `set_metadata_many` at manager.py:3774 ("ONE SQL statement... prevents torn-state" — the atomic multi-key write the design calls :3779, ±5 drift); `assemble_context_messages` at context_messages.py:1589; `_make_context_message(kind, title, content, id_)` at :130-165 stamps `{"injected_message": True, "context_kind": kind}` and honors stable ids for `add_messages` in-place supersede; the enum is **plain string constants** (:83-107 — `CONTEXT_KIND_SYMPTOM_REPAIR` at :104 with a docstring that says verbatim that this kind places a doc "in the permanently non-selectable / hoisted bucket... survives every later compaction verbatim"); `_make_context_message` does NOT escape — caller must run `escape_for_context_block` (:147-152 docstring; fn at :342). Truncate-with-hint precedent: critical-notes reference truncation appends "… (truncated — project_cn_list for full text)" (:631-636) — the exact shape the design proposes for the ~12k digest cap. Survival of the stamp is verified exhaustively in D-checkpoint: the digest survives **every** compaction path.
-One nuance: the digest lands only if the metadata key is written BEFORE the instance's first `assemble_context_messages` pass (turn 1) — spawn-then-write-then-message ordering, which `spawn_instance_from_snapshot` controls end-to-end. Feasible.
+One nuance: the digest lands only if the metadata key is written BEFORE the instance's first `assemble_context_messages` pass (turn 1) — spawn-then-write-then-message ordering, which `spawn_instance_from_snapshot` [renamed spawn_hot_instance, R13] controls end-to-end. Feasible.
 
 **A6 — 3 tools + registration + prompt/meta lines (M).**
 The registration chain is fully traced (see B(ii) for the exact mechanism). Auth precedents verified: `_check_team_membership` at instance.py:663; completion-watcher zombie mechanism `_register_child_completion_watcher` at instance.py:686 (design's :686-734 exact — supports the tree-restore rejection); `SpawnInstanceInput` BaseModel convention at instance.py:1853; never-raise error strings at :2224-2226 (`return f"ERROR: {error_msg}"`). Prompt-edit surface (4-5 lines × ari/leader per docs/agent-prompt-writing-guide.md) is ordinary prompt work; leader fire-and-forget spawn block exists at agents/leader/workflow.md:660 (heading verbatim "Spawn Instance is Fire-and-Forget").
