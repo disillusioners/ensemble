@@ -24,13 +24,13 @@ behaviors that the branch's own tests do NOT cover:
 3. **``EmptyLLMResponseError`` bypasses the ``TimeoutError``-narrowed
    excepts into the ``except Exception`` truncation fallback.** The
    per-batch except handlers at
-   ``daemon/compaction.py:2830, :2908, :2928`` are deliberately
+   ``daemon/compaction.py:2708, 2786, 2806`` are deliberately
    narrowed to ``(TimeoutError, asyncio.TimeoutError)`` (architect §9.8
    O14) — a wider tuple would silently mask EmptyLLMResponseError as
    a timed-out batch (wrong failure_kind, lost lineage signal). The
    behavioral pin verifies an uncaught ``EmptyLLMResponseError``
    reaches ``_truncate_fallback`` via the OUTER ``except Exception``
-   (compaction.py:2644-2659); the AST pin asserts the except tuples
+   (compaction.py:2522-2537); the AST pin asserts the except tuples
    remain narrowed.
 
 Test-only authoring per leader constraint (no daemon edits).
@@ -227,7 +227,7 @@ class _CountingFailoverWrapper:
             self._retries_in_current_call,
         )
         # Exhaustion: re-raise. Outer handlers (compact_state's
-        # ``except Exception`` at :2644-2659) must catch this and
+        # ``except Exception`` at :2522-2537) must catch this and
         # route to ``_truncate_fallback``.
         assert last_exc is not None
         raise last_exc
@@ -264,10 +264,10 @@ class TestCompactionEmptySummaryTruncationFallback:
        cannot distinguish empty-summary from timeout-driven
        truncation; both paths are operationally identical).
     3. The ``failure_kind`` field is ``"error"`` (matches the outer
-       ``except Exception`` branch at :2644-2659, NOT
+       ``except Exception`` branch at :2522-2537, NOT
        ``"timeout"`` — the timeout classification lives in the
        narrower ``except (TimeoutError, asyncio.TimeoutError)`` at
-       :2616 which EmptyLLMResponseError does NOT enter).
+       :2494 which EmptyLLMResponseError does NOT enter).
     4. The doc / replacement_messages list is populated (NOT empty
        — the truncation fallback always emits the
        ``compaction-global-`` doc).
@@ -311,8 +311,8 @@ class TestCompactionEmptySummaryTruncationFallback:
         )
         assert result.failure_kind == "error", (
             f"EmptyLLMResponseError is NOT a timeout; failure_kind must "
-            f"be 'error' (the outer except Exception at :2644-2659), not "
-            f"'timeout' (the narrower except at :2616); got "
+            f"be 'error' (the outer except Exception at :2522-2537), not "
+            f"'timeout' (the narrower except at :2494); got "
             f"failure_kind={result.failure_kind}"
         )
         # Retry ladder FIRED — at least one internal retry per call
@@ -553,7 +553,7 @@ class TestCompactionSkipOnImmediateFallback:
         compactor = _build_compactor()
 
         # Wrapper raises asyncio.TimeoutError directly — the
-        # per-chunk narrowed handler (compaction.py:2830) catches
+        # per-chunk narrowed handler (compaction.py:2708) catches
         # it as a per-batch timeout, and the engine routes through
         # the truncation fallback.
         class _TimeoutWrapper:
@@ -587,7 +587,7 @@ class TestCompactionSkipOnImmediateFallback:
         )
         # failure_kind="timeout" — distinguishes this from the
         # EmptyLLMResponseError case (failure_kind="error"). The
-        # narrower except at :2616 catches TimeoutError specifically
+        # narrower except at :2494 catches TimeoutError specifically
         # so the classification is preserved.
         assert result.failure_kind == "timeout", (
             f"timeout-driven fallback must classify as 'timeout'; "
@@ -611,7 +611,7 @@ class TestCompactionEmptyLLMResponseErrorEscapesTimeoutExcepts:
     provider as a per-batch timeout — losing the failure_kind
     classification AND re-routing the engine through the narrower
     path. The behavioral pin verifies the OUTER ``except Exception``
-    (compaction.py:2644-2659) catches the unhandled
+    (compaction.py:2522-2537) catches the unhandled
     EmptyLLMResponseError; the AST pin asserts the per-chunk excepts
     remain narrowed.
     """
@@ -619,9 +619,9 @@ class TestCompactionEmptyLLMResponseErrorEscapesTimeoutExcepts:
     @pytest.mark.asyncio
     async def test_empty_llm_response_error_routes_to_truncate_fallback(self):
         """EmptyLLMResponseError must reach ``_truncate_fallback`` via
-        the outer ``except Exception`` at :2644-2659 — NOT via the
+        the outer ``except Exception`` at :2522-2537 — NOT via the
         per-batch ``except (TimeoutError, asyncio.TimeoutError)`` at
-        :2830, :2908, :2928 (which would mark the batch as timed
+        :2708, 2786, 2806 (which would mark the batch as timed
         out, misclassifying the failure_kind)."""
         install_empty_guard_config(enabled=True, compaction_skip=False)
 
@@ -708,7 +708,7 @@ class TestCompactionEmptyLLMResponseErrorEscapesTimeoutExcepts:
         )
 
         # Collect every ``except (...)`` handler inside the function.
-        # Spec pin targets lines :2830, :2908, :2928.
+        # Spec pin targets lines :2708, 2786, 2806.
         except_tuples: list[tuple[int, set[str]]] = []
         for node in ast.walk(target):
             if isinstance(node, ast.ExceptHandler):
@@ -729,7 +729,7 @@ class TestCompactionEmptyLLMResponseErrorEscapesTimeoutExcepts:
                 except_tuples.append((node.lineno, names))
 
         # Three per-chunk handlers are required (architect §9.8 O14):
-        # :2830 (single-batch try), :2908 (per-batch pool task), :2928
+        # :2708 (single-batch try), :2786 (per-batch pool task), :2806
         # (shared budget deadline). Pin each.
         assert except_tuples, (
             "_summarize_chunked must have except handlers"
@@ -764,7 +764,7 @@ class TestCompactionEmptyLLMResponseErrorEscapesTimeoutExcepts:
 
     def test_outer_except_exception_is_the_truncation_route(self):
         """AST pin — the OUTER ``except Exception`` at
-        ``daemon/compaction.py:2644-2659`` is the canonical route
+        ``daemon/compaction.py:2522-2537`` is the canonical route
         from ``_summarize_chunked`` exceptions to
         ``_truncate_fallback``. The comment must explicitly mention
         ``_truncate_fallback`` (anti-drift: a future refactor that
@@ -777,15 +777,15 @@ class TestCompactionEmptyLLMResponseErrorEscapesTimeoutExcepts:
             / "compaction.py"
         )
         source = source_path.read_text(encoding="utf-8")
-        # The handler at :2644-2659 calls ``self._truncate_fallback``
-        # at :2650. Grep-pin the call.
+        # The handler at :2522-2537 calls ``self._truncate_fallback``
+        # at :2528. Grep-pin the call.
         assert "_truncate_fallback" in source, (
             "_truncate_fallback must be referenced from "
             "daemon/compaction.py"
         )
         # The two truncation-fallback call sites the spec §10
-        # names (:2645 / :2650 — outer except Exception handler, and
-        # :2634 — TimeoutError narrower handler). Both must route
+        # names (:2495 / :2528 — outer except Exception handler, and
+        # :2475 — TimeoutError narrower handler). Both must route
         # through ``_truncate_fallback``.
         tree = ast.parse(source)
         # Find all calls to ``self._truncate_fallback`` and verify
@@ -801,9 +801,9 @@ class TestCompactionEmptyLLMResponseErrorEscapesTimeoutExcepts:
         # We expect AT LEAST one call inside the ``compact_state``
         # ``except Exception`` handler — the auto-path contract.
         assert any(
-            2640 <= line <= 2700 for line in truncate_call_lines
+            2495 <= line <= 2700 for line in truncate_call_lines
         ), (
             f"_truncate_fallback must be called inside the outer "
-            f"except Exception handler (~line 2644-2659); got call "
+            f"except Exception handler (~line 2522-2537); got call "
             f"sites at lines {truncate_call_lines}"
         )

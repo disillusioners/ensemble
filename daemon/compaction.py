@@ -45,6 +45,43 @@ from langchain_core.messages import (
 from .config import CompactionConfig, resolve_injected_notes_absorb
 from .loader import estimate_messages_tokens
 
+# agent-snapshot v1 — PR1 — content-hardening corpus
+# (originally defined HERE in this module, at :81/108/129/149/191/217).
+# The corpus is the canonical home for user-intent preservation + the
+# multimodal flattener; both the compaction engine AND the future
+# ``SnapshotService`` (Wave 1b, design-exploration §2.3 / feasibility-notes
+# §A) need it. See :mod:`daemon._content_hardening` for the full
+# rationale. Behavior-preserving extraction — internal callers in this
+# module now reference the public names directly (see ``_*`` aliases
+# below for the few sites that still use the long forms).
+#
+# Thin ``_*`` aliases below keep the existing private-name imports working
+# for the four test modules that reach in directly:
+#   * tests/test_injection_compaction.py
+#   * tests/integration/test_context_injection_integration.py
+#   * tests/unit/test_compaction.py
+#   * tests/unit/test_symptom_repair_engine_phase2.py
+# New callers (Wave 1b snapshot service) MUST import from
+# ``daemon._content_hardening`` directly — no re-export from this
+# module in the public API.
+#
+# Why ``daemon._content_hardening`` and not ``daemon.services.*``:
+# ``daemon/services/__init__.py`` eagerly re-exports ``instance_lifecycle``
+# which imports ``ContextCompactor`` from this module, so a
+# ``from .services.<x> import`` here would deadlock at module load (the
+# existing ``graph.py:1866-1867`` lazy import on
+# ``_extract_text_from_content`` was the original workaround). The
+# top-level ``daemon`` package is light (a docstring + ``__version__``),
+# so the self-import is cycle-free here.
+from ._content_hardening import (  # noqa: F401 — see ``_*`` aliases
+    extract_text_from_content as _extract_text_from_content,
+    has_context_kind as _has_context_kind,
+    injected_note_absorbed_ids as _injected_note_absorbed_ids,
+    is_hoisted_injected as _is_hoisted_injected,
+    is_injected_message as _is_injected_message,
+    partition_injected_for_compaction as _partition_injected_for_compaction,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,176 +115,17 @@ def _invoke_summarizer_llm(llm_wrapper: Any, messages: list) -> Any:
     return llm_wrapper.invoke(messages)
 
 
-def _extract_text_from_content(content: str | list) -> str:
-    """Extract text from message content, handling multimodal lists.
-
-    Args:
-        content: Message content, either a string or a multimodal list
-                 (e.g., [{'type': 'text', 'text': '...'}, {'type': 'image_url', ...}]).
-
-    Returns:
-        Extracted text string. For multimodal content, joins all text blocks.
-        Skips image_url blocks entirely.
-    """
-    if isinstance(content, str):
-        return content
-
-    if isinstance(content, list):
-        text_parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                block_type = block.get("type")
-                if block_type == "text":
-                    text_parts.append(block.get("text", ""))
-                # Skip image_url and other non-text blocks
-        return "".join(text_parts)
-
-    return str(content) if content is not None else ""
-
-
-def _is_injected_message(msg: BaseMessage) -> bool:
-    """Phase 1 / C3: detect a user-injected message by ``additional_kwargs``.
-
-    Mirrors the ``language_check_reminder`` skip pattern at graph.py:493.
-    An injected message was deliberately placed into the conversation by
-    the user via the injection slot (Phase 1 / C2) and MUST survive any
-    compaction pass — both proactive (this module) and reactive
-    (graph.py:641-684). Summarizing it would erase user intent.
-
-    Args:
-        msg: Candidate ``BaseMessage`` (typically ``HumanMessage``).
-
-    Returns:
-        ``True`` when the message is flagged as injected, ``False`` otherwise.
-    """
-    additional_kwargs = getattr(msg, "additional_kwargs", None)
-    if not additional_kwargs:
-        return False
-    return bool(additional_kwargs.get("injected_message"))
-
-
-def _has_context_kind(msg: BaseMessage) -> bool:
-    """True when the injected message is a REAL ``[SYSTEM CONTEXT]`` block.
-
-    Context messages are stamped by ``_make_context_message``
-    (``daemon/services/context_messages.py``) with BOTH
-    ``injected_message=True`` AND a ``context_kind`` enum value. They are
-    permanently non-selectable: preserved verbatim and hoisted above the
-    compaction doc at every pass (unchanged behavior).
-
-    Bare-flag injected messages (operator notes via the FIFO injection
-    drain — ``daemon/services/instance_messaging.py``) carry
-    ``injected_message=True`` with NO ``context_kind``; only those are
-    eligible for the answered-note lifecycle.
-    """
-    additional_kwargs = getattr(msg, "additional_kwargs", None)
-    if not additional_kwargs:
-        return False
-    return bool(additional_kwargs.get("context_kind"))
-
-
-def _injected_note_absorbed_ids(messages: list[BaseMessage]) -> frozenset[str]:
-    """Ids of BARE-flag injected notes that are ANSWERED (selectable).
-
-    The conservative "protect until answered" contract (injected-notes
-    hoisting fix): a bare injected note is ANSWERED when an ``AIMessage``
-    exists at a LATER index in the channel order. Unanswered notes —
-    the newest message, or notes followed only by ToolMessages — stay
-    permanently preserved. ``context_kind`` messages never qualify
-    (they are permanent regardless of position), and id-less bare
-    notes are conservatively treated as UNANSWERED (never absorbed).
-
-    Args:
-        messages: The FULL pre-compaction channel (conversation order).
-
-    Returns:
-        Frozenset of message ids that may be absorbed into the
-        compacted span. Empty when there are no answered bare notes —
-        or when the ``ENSEMBLE_INJECTED_NOTES_ABSORB`` kill-switch
-        resolves OFF, in which case the absorb contract is disabled
-        entirely and the three-bucket partition degenerates to the
-        legacy two-bucket behavior (ALL injected preserved + hoisted;
-        ``context_kind`` handling unchanged in both states). This is
-        the SINGLE check site for the flag — the gate, numerator,
-        envelope, and seam all consume this set downstream.
-    """
-    if not resolve_injected_notes_absorb():
-        # Kill-switch OFF → empty absorbed set: every bare-flag note
-        # fails the ``msg_id not in absorbed_note_ids`` hoist check and
-        # returns to preserve-forever hoisting (old behavior).
-        return frozenset()
-    absorbed: set[str] = set()
-    for idx, msg in enumerate(messages):
-        if not _is_injected_message(msg) or _has_context_kind(msg):
-            continue
-        msg_id = getattr(msg, "id", None)
-        if not msg_id:
-            continue  # id-less → conservative: preserved, never absorbed
-        if any(isinstance(m, AIMessage) for m in messages[idx + 1:]):
-            absorbed.add(msg_id)
-    return absorbed
-
-
-def _is_hoisted_injected(
-    msg: BaseMessage, absorbed_note_ids: frozenset[str]
-) -> bool:
-    """The hoist/preserve predicate for injected messages.
-
-    Hoisted (preserved verbatim above the compaction doc) when:
-
-    * the message carries ``context_kind`` (real system context —
-      permanent), OR
-    * it is a bare-flag note that is NOT answered (no later AIMessage
-      in the pre-compaction channel — or an unresolvable id, treated
-      conservatively as unanswered).
-
-    Answered bare notes are NOT hoisted: they join the selectable pool
-    and are absorbed into the compacted span like regular history.
-    """
-    if not _is_injected_message(msg):
-        return False
-    if _has_context_kind(msg):
-        return True
-    msg_id = getattr(msg, "id", None)
-    if not msg_id:
-        return True  # id-less bare note → conservative preserve
-    return msg_id not in absorbed_note_ids
-
-
-def _partition_injected_for_compaction(
-    messages: list[BaseMessage],
-) -> tuple[list[BaseMessage], list[BaseMessage], list[BaseMessage]]:
-    """Three-bucket partition of the pre-compaction channel.
-
-    Replaces the former unconditional two-way injected split: bare-flag
-    operator notes now join the selectable pool once ANSWERED (an
-    ``AIMessage`` exists at a later index — see
-    :func:`_injected_note_absorbed_ids`), instead of being hoisted
-    forever.
-
-    Returns:
-        Tuple ``(selectable, preserved_injected, absorbed_notes)`` where:
-
-        * ``selectable`` — regular history PLUS answered bare notes, in
-          original channel order (order matters: boundary grouping and
-          tail preservation are order-sensitive).
-        * ``preserved_injected`` — ``context_kind`` messages plus
-          UNANSWERED bare notes (hoisted verbatim above the doc).
-        * ``absorbed_notes`` — the answered bare-note subset of
-          ``selectable`` (same objects), for envelope accounting.
-    """
-    absorbed_note_ids = _injected_note_absorbed_ids(messages)
-    selectable: list[BaseMessage] = []
-    preserved_injected: list[BaseMessage] = []
-    absorbed_notes: list[BaseMessage] = []
-    for msg in messages:
-        if _is_hoisted_injected(msg, absorbed_note_ids):
-            preserved_injected.append(msg)
-        else:
-            selectable.append(msg)
-            if _is_injected_message(msg):
-                absorbed_notes.append(msg)
-    return selectable, preserved_injected, absorbed_notes
+# NOTE (agent-snapshot v1 — PR1): the content-hardening corpus
+# (``_extract_text_from_content``, ``_is_injected_message``,
+# ``_has_context_kind``, ``_injected_note_absorbed_ids``,
+# ``_is_hoisted_injected``, ``_partition_injected_for_compaction``) that
+# USED to be defined here (compaction.py:81-250 pre-PR1) now lives at
+# :mod:`daemon._content_hardening` and is re-exported above
+# via the thin ``_name`` aliases for back-compat with existing tests.
+# Internal references below still use the ``_name`` aliases; the names
+# resolve to the public functions in the new module. See the docstring
+# there for the rationale and the list of test modules that depend on
+# the ``_*`` imports.
 
 
 # Architecture §5 / §6 — the per-compaction output is a single
