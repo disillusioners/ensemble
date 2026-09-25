@@ -411,7 +411,13 @@ def parse_digest_markdown(text: str) -> dict[str, Any]:
 class SnapshotExecutor:
     """One capture: read → R6a → clamp → LLM → digest → terminal write."""
 
-    def __init__(self, manager: Any, snapshot_repository: SnapshotRepository) -> None:
+    def __init__(
+        self,
+        manager: Any,
+        snapshot_repository: SnapshotRepository,
+        *,
+        snapshot_embedding_service: Any | None = None,
+    ) -> None:
         """Initialize the executor.
 
         Args:
@@ -420,9 +426,17 @@ class SnapshotExecutor:
                 (via the manager's compactor), and the instance
                 repository reads. NEVER for messaging the target.
             snapshot_repository: Storage lane.
+            snapshot_embedding_service: Optional
+                :class:`~daemon.services.snapshot_embedding_service.SnapshotEmbeddingService`.
+                When provided, the terminal ACTIVE write kicks off
+                the embeddings-at-creation pipeline (R10 §3.4) as a
+                fire-and-forget asyncio task. ``None`` skips the
+                wiring (the row lands active without cached
+                embeddings; search degrades to BM25+tag-overlap).
         """
         self._manager = manager
         self._snapshots = snapshot_repository
+        self._snapshot_embedding_service = snapshot_embedding_service
 
     # ── lineage (tag computation ONLY — never a capture walk) ─────────
 
@@ -781,7 +795,17 @@ class SnapshotExecutor:
         started_monotonic: float,
         input_chars: int | None = None,
     ) -> Snapshot:
-        """Terminal write + the R16 structured capture log line."""
+        """Terminal write + the R16 structured capture log line.
+
+        For ``status='active'`` (the happy path), the
+        embeddings-at-creation wiring (R10 §3.4) kicks off as a
+        fire-and-forget asyncio task — generate 3-10 trigger
+        queries from ``task_summary + 1-2 digest excerpts``,
+        embed, persist. Failures are logged and DO NOT abort
+        the capture (the row is already active; the search will
+        degrade to BM25+tag-overlap until the next
+        re-embed pass).
+        """
         wall_clock = time.monotonic() - started_monotonic
         updated = await asyncio.to_thread(
             self._snapshots.update_capture_result,
@@ -790,6 +814,21 @@ class SnapshotExecutor:
             digest=digest,
             effective_model=effective_model,
         )
+        # R10 §3.4 — embeddings-at-creation wiring. Re-fetch the
+        # post-write row so the embedding pipeline sees the
+        # finalized task_summary + digest (the in-memory ``row``
+        # is the pre-write view).
+        if status == SNAPSHOT_STATUS_ACTIVE and self._snapshot_embedding_service is not None:
+            try:
+                # Snapshot the post-write view; the executor keeps
+                # an in-memory copy but the row is the source of
+                # truth for the embedding prompt.
+                asyncio.create_task(
+                    self._run_embedding_refresh(updated)
+                )
+            except RuntimeError:
+                # No running loop (test scope) — skip fire-and-forget.
+                pass
         # R16 groundwork — ONE structured line per capture (counters /
         # metrics surface is Wave 3; token usage is an honest
         # tiktoken approximation of prompt-in / digest-out).
@@ -810,6 +849,22 @@ class SnapshotExecutor:
             )
         )
         return updated
+
+    async def _run_embedding_refresh(self, row: Snapshot) -> None:
+        """Fire-and-forget embeddings-at-creation wiring (R10 §3.4).
+
+        Best-effort: an exception here MUST NOT propagate (the
+        row is already active and the capture is recorded).
+        """
+        try:
+            await self._snapshot_embedding_service.update_snapshot_embeddings(
+                row
+            )
+        except Exception as exc:  # pragma: no cover - defensive belt
+            logger.warning(
+                f"[Snapshot] embedding refresh failed for snapshot "
+                f"{row.id}: {type(exc).__name__}: {exc}"
+            )
 
     async def _fail_row(
         self,
@@ -893,6 +948,7 @@ class SnapshotService:
         snapshot_repository: SnapshotRepository,
         *,
         wall_clock_s: int = SNAPSHOT_WALL_CLOCK_S,
+        snapshot_embedding_service: Any | None = None,
     ) -> None:
         """Initialize the service.
 
@@ -900,10 +956,21 @@ class SnapshotService:
             manager: :class:`InstanceManager`.
             snapshot_repository: Storage lane.
             wall_clock_s: Per-snapshot wall clock (committed cap §8).
+            snapshot_embedding_service: Optional
+                :class:`~daemon.services.snapshot_embedding_service.SnapshotEmbeddingService`.
+                When provided, the terminal ACTIVE write triggers the
+                embeddings-at-creation pipeline (R10 §3.4) as a
+                fire-and-forget asyncio task. ``None`` skips the
+                wiring (search degrades to BM25+tag-overlap until
+                the next re-embed pass).
         """
         self._manager = manager
         self._snapshots = snapshot_repository
-        self._executor = SnapshotExecutor(manager, snapshot_repository)
+        self._executor = SnapshotExecutor(
+            manager,
+            snapshot_repository,
+            snapshot_embedding_service=snapshot_embedding_service,
+        )
         self._wall_clock_s = wall_clock_s
         self._tasks: set[asyncio.Task] = set()
 

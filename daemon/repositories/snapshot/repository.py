@@ -320,6 +320,54 @@ class SnapshotRepository:
             )
             return list(session.exec(stmt).all())
 
+    def add_embedding(
+        self,
+        snapshot_id: str,
+        trigger_query: str,
+        embedding: list[float],
+    ) -> SnapshotEmbedding:
+        """Insert a single :class:`SnapshotEmbedding` row (PR5).
+
+        Embeddings are computed AT CREATION ONLY (design R12 / Rev 5:
+        v1 snapshots are immutable; supersession mints a fresh row
+        with fresh embeddings — STAY-ALONGSIDE semantics, no
+        cascade-delete on supersession). The CASCADE FK on
+        :class:`SnapshotEmbedding.snapshot_id` only fires when the
+        parent ``snapshots`` row is hard-deleted (Q8-A no-eviction
+        keeps the row alive indefinitely).
+
+        Args:
+            snapshot_id: Owning snapshot id (must exist).
+            trigger_query: The example query that was embedded
+                (≤512 chars per the column contract).
+            embedding: Plain Python ``list[float]`` (the JSONB
+                column is dialect-typed; stored as a JSON array
+                on PG and as TEXT on SQLite).
+
+        Returns:
+            The persisted embedding row.
+
+        Raises:
+            ValueError: ``snapshot_id`` does not exist (fail loud —
+                embedding rows reference a real snapshot).
+        """
+        with Session(self.engine) as session:
+            row = session.get(Snapshot, snapshot_id)
+            if row is None:
+                raise ValueError(
+                    f"snapshot {snapshot_id!r} not found — embeddings "
+                    "must attach to an existing snapshot"
+                )
+            emb = SnapshotEmbedding(
+                snapshot_id=snapshot_id,
+                trigger_query=trigger_query,
+                embedding=list(embedding),
+            )
+            session.add(emb)
+            session.commit()
+            session.refresh(emb)
+            return emb
+
     def find_by_status(self, status: str) -> list[Snapshot]:
         """Fetch all rows in a given status (boot-sweep/ops reads)."""
         with Session(self.engine) as session:
