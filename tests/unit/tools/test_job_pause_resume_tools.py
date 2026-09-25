@@ -477,6 +477,49 @@ class TestJobResume:
         # Cascade still ran — the exception is per-target, not global.
         manager.resume_instance_cascade.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_resume_terminal_job_passes_through_fe_identically(
+        self, manager, job_service, resume_tool,
+    ):
+        """D3' (terminal-job asymmetry, review round 2): unlike
+        ``job_pause``, which REFUSES terminal jobs, ``job_resume``
+        PASSES THROUGH on terminal jobs — FE-identical to the HTTP
+        ``/instances/{id}/resume`` route. A terminal job_id still
+        carries its ``instance_id`` binding; the call delegates to
+        ``resume_instance_cascade`` + ``resume_processing_job`` and
+        returns the standard FE passthrough shape with NO refusal
+        error. This locks the FE mirror against future "helpful"
+        terminal guards — adding one would break symmetry with the
+        FE route and silently change observable agent behavior."""
+        for terminal_status in ("completed", "failed", "cancelled", "dead_letter"):
+            # Reset mocks between iterations so per-status call counts are clean.
+            manager.resume_instance_cascade.reset_mock()
+            manager.resume_processing_job.reset_mock()
+            job_service.get_work.reset_mock()
+            job_service.get_work.return_value = _make_work_record(status=terminal_status)
+            _wire_caller_project(manager, caller_project=TEST_SYSTEM_PROJECT_ID)
+
+            result = await resume_tool.coroutine(JOB_ID)
+
+            # FE passthrough shape — no refusal, no error key.
+            assert "error" not in result, (
+                f"status={terminal_status} must pass through FE-identically; "
+                f"got refusal: {result!r}"
+            )
+            assert result["resumed"] is True, (
+                f"status={terminal_status} got resumed={result['resumed']!r}"
+            )
+            # Standard FE response keys are all present.
+            assert "resumed_ids" in result
+            assert "skipped_ids" in result
+            assert "target_id" in result
+            assert "resume_results" in result
+            # The cascade flipped and the processing job ran — the
+            # terminal job_id resolved to its instance_id and the call
+            # delegated, exactly like the FE route does.
+            manager.resume_instance_cascade.assert_awaited_once()
+            manager.resume_processing_job.assert_awaited()
+
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Scenario (e) + (i): access control — project-scoped (same helper as

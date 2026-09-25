@@ -712,10 +712,10 @@ at ``daemon/manager.py:9599``). The agent-facing twin of
 FE-identical by construction — same facade call, same default kwargs, same
 return shape (``paused_ids`` + ``skipped_ids``).
 
-Resolves ``job_id`` → ``WorkRecord`` via ``job_service.get_work`` (the SAME
-resolver ``job_cancel`` uses at ``daemon/tools/job_queue.py:1479``), extracts
-``instance_id``, then delegates. Job state (admission_state/status) is NOT
-touched — only the instance lineage pauses.
+Resolves ``job_id`` → ``WorkRecord`` via ``job_service.get_work`` (the same
+resolver ``job_cancel`` uses), extracts ``instance_id``, then delegates.
+Job state (admission_state/status) is NOT touched — only the instance
+lineage pauses.
 
 Use when an agent holds a job_id (not an instance_id) and wants to apply the
 same lineage pause/resume semantics the FE pause endpoint exposes for an
@@ -749,14 +749,18 @@ Returns:
     (idempotent — re-pausing is a no-op).
 
 D2 (wedge guard): pausing does NOT keep an instance safe forever. The
-mid-flight QA channel's ``stuck_awaiting_answer`` wedge-guard emits an
-event after ~60 minutes of an instance being paused awaiting an answer
-(``daemon/repositories/task/models.py:52-63``), and the daemon does NOT
-auto-resume paused work. If you intend to leave an instance paused for
-longer than a few minutes, document the intent (e.g. via a watched job
-or a critical note) so a follow-up agent can resume it deliberately.
-The pause success response echoes this ``_wedge_note`` so it cannot be
-missed by an automated caller.
+mid-flight QA channel's ``stuck_awaiting_answer`` wedge-guard is a
+FINITE 3-emission chain (``daemon/constants.py:32-46``): an event fires
+at pause time (t=0), again at ~30 minutes (t=+1800s), and at ~60
+minutes (t=+3600s) the asker is ESCALATED — ``manager.terminate_instance``
+runs with ``terminal_reason="wedge_guard_terminated"`` and the chain
+mints NO successor (``daemon/services/task_processor.py:1267-1508``).
+The daemon does NOT auto-resume paused work; escalation TERMINATES the
+asker, it does not pause-and-wait. If you intend to leave an instance
+paused for longer than a few minutes, document the intent (e.g. via a
+watched job or a critical note) so a follow-up agent can resume it
+deliberately. The pause success response echoes this ``_wedge_note`` so
+the destructive consequence cannot be missed by an automated caller.
 """,
 
     "job_resume": """Resume the instance behind a PAUSED job and cascade to its lineage.
@@ -769,22 +773,38 @@ FE-identical by construction — same call shape (target continuation job with
 ``message="resume", silent=False`` → cascade flip → silent child resumes with
 ``silent=True``), same default kwargs, same return shape.
 
-Resolves ``job_id`` → ``WorkRecord`` via ``job_service.get_work`` (the SAME
-resolver ``job_cancel`` uses at ``daemon/tools/job_queue.py:1479``), extracts
-``instance_id``, then delegates. Job state (admission_state/status) is NOT
-touched — only the instance lineage resumes.
+Resolves ``job_id`` → ``WorkRecord`` via ``job_service.get_work`` (the same
+resolver ``job_cancel`` uses), extracts ``instance_id``, then delegates.
+Job state (admission_state/status) is NOT touched — only the instance
+lineage resumes.
 
 Use when an agent holds a job_id (not an instance_id) and wants to apply the
 same lineage resume semantics the FE resume endpoint exposes for an
 instance_id. For the instance_id-shaped variant, see ``resume_instance``.
 
+Terminal-job asymmetry (D3'): unlike ``job_pause``, which REFUSES terminal
+jobs (returns ``{"error": "...is in a terminal state...", "paused": False}``),
+this tool PASSES THROUGH on terminal jobs — FE-identical to the HTTP
+resume route. A terminal job_id resolves to its ``instance_id`` (terminal
+work still carries the instance binding) and the call delegates to
+``resume_instance_cascade`` + ``resume_processing_job``; the response is
+the standard FE passthrough shape (``resumed: True`` with whatever
+``resumed_ids`` / ``skipped_ids`` the cascade yields, ``resume_results``
+carrying ``no_active_job`` / ``silent_resume`` / ``error`` status from
+the underlying service). This is deliberate — the FE mirror must stay
+identical, and a "helpful" terminal guard on the agent surface would
+break that contract. Do NOT add a terminal refusal here.
+
 D3 (message injection): mirrors the FE plain resume path — injects the
 literal message ``"resume"`` onto the target via ``resume_processing_job``.
 The HTTP gate-supersession branch (when a pending question pack is on the
 target) is NOT mirrored; the agent surface refuses with a clear error
-instead — see the question-pack refusal below. To supersede a pending
-question gate via the agent surface, use ``job_answer`` (its underlying
-helper performs the FE gate-supersession flow before resuming).
+instead — see the question-pack refusal below. To clear a pending
+question gate via the agent surface, use ``job_answer``: its underlying
+helper ``answer_questions_via_instance`` runs the ANSWER flow
+(``daemon/routers/answer_helper.py`` — CAS flip pending→answered via
+``set_answers``, then ``resume_processing_job`` on the cleared pack)
+before resuming.
 
 Args:
     job_id: The work_id of an ACTIVE job whose instance is paused. Required.
@@ -802,7 +822,8 @@ Errors (returned as ``{"error": ..., "resumed": False}``):
       the standard resume path routes through ``answer_gate_existing_turn``
       which would treat the literal ``"resume"`` message as answer content.
       To clear the gate and resume, answer the question via ``job_answer``;
-      its underlying helper performs the FE gate-supersession flow.
+      its underlying helper runs the ANSWER flow (CAS flip
+      pending→answered, then ``resume_processing_job`` on the cleared pack).
     * ``Access denied: job does not belong to caller's project`` — the
       project-scoped ``_check_job_access`` check refused (system-default
       callers are the global-operator tier; project-scoped callers must share
@@ -3380,9 +3401,9 @@ def create_job_tools(
     # idempotency behavior comes for free by delegating to the manager
     # facade; this closure only adds:
     #
-    #   1. Work-resolution: ``job_service.get_work`` (the SAME resolver
-    #      ``job_cancel`` uses at job_queue.py:1479) maps the caller's
-    #      job_id → ``WorkRecord`` → ``instance_id``.
+    #   1. Work-resolution: ``job_service.get_work`` (the same resolver
+    #      ``job_cancel`` uses) maps the caller's job_id → ``WorkRecord``
+    #      → ``instance_id``.
     #   2. Pre-resolution gates (D1, terminal check, missing instance).
     #   3. Project-scoped access control via the SAME ``_check_job_access``
     #      helper the four visibility tools (``job_messages`` / ``job_tree``
@@ -3420,9 +3441,9 @@ def create_job_tools(
             return {"error": "Instance manager not available — job_pause requires manager access", "paused": False}
         if getattr(manager, "is_write_paused", False):
             return {"error": f"503 {WRITE_PAUSED_TOKEN}: writes are paused for database migration", "paused": False}
-        # 1. Resolve job_id → WorkRecord via the SAME resolver
-        #    job_cancel uses (job_queue.py:1479). The brief requires
-        #    resolver parity, not a new lookup path.
+        # 1. Resolve job_id → WorkRecord via the same resolver
+        #    job_cancel uses. The brief requires resolver parity, not a
+        #    new lookup path.
         try:
             record = await job_service.get_work(job_id)
         except Exception as e:  # noqa: BLE001
@@ -3471,8 +3492,8 @@ def create_job_tools(
         #    routers/instances.py:675; no new flags invented here.
         result = await manager.pause_instance_cascade(instance_id)
 
-        # D2 (wedge guard) — surface the ~60-min STUCK_AWAITING_ANSWER
-        # wedge in the success response so an automated caller cannot
+        # D2 (wedge guard) — surface the destructive-consequence wedge
+        # chain in the success response so an automated caller cannot
         # miss it. The docstring already carries the long form; the
         # response field is the no-scroll-required short reminder.
         return {
@@ -3481,9 +3502,11 @@ def create_job_tools(
             "skipped_ids": result["skipped_ids"],
             "instance_id": instance_id,
             "_wedge_note": (
-                "Pausing is not forever-safe. After ~60 minutes of being "
-                "paused awaiting an answer, the STUCK_AWAITING_ANSWER "
-                "wedge-guard emits a stuck_awaiting_answer event; the "
+                "Pausing is not forever-safe. While paused awaiting an "
+                "answer, the STUCK_AWAITING_ANSWER wedge-guard fires "
+                "stuck_awaiting_answer events at pause-time and again at "
+                "~30 minutes; at ~60 minutes it ESCALATES by terminating "
+                "the asker (terminal_reason=wedge_guard_terminated). The "
                 "daemon does NOT auto-resume paused work. Document the "
                 "intent and resume deliberately."
             ),
