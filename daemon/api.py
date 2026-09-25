@@ -631,6 +631,28 @@ async def lifespan(app: FastAPI):
     logger.info(f"Job recovery: {recovery_stats}")
 
     # ─────────────────────────────────────────────────────────────
+    # Agent Snapshot v1 (D3 boot sweep, PR4): mark orphaned
+    # 'running' snapshot rows 'interrupted' — one idempotent startup
+    # query scoped to the ONE snapshots table (same shape as job
+    # recovery, zero job/task coupling — the D1 hard requirement).
+    # Fail-soft: a sweep error must never block daemon boot.
+    # ─────────────────────────────────────────────────────────────
+    try:
+        from daemon.repositories.snapshot.repository import SnapshotRepository
+
+        snapshot_boot_sweep = SnapshotRepository(engine=manager.engine)
+        interrupted_count = await asyncio.to_thread(
+            snapshot_boot_sweep.mark_orphaned_running_interrupted
+        )
+        if interrupted_count:
+            logger.info(
+                f"Snapshot boot sweep: marked {interrupted_count} "
+                "orphaned 'running' snapshot row(s) 'interrupted'"
+            )
+    except Exception as snap_sweep_exc:
+        logger.warning(f"Snapshot boot sweep skipped: {snap_sweep_exc}")
+
+    # ─────────────────────────────────────────────────────────────
     # Phase 3 (defer-seam bugfix, F5/F10): start the periodic
     # dual-table drift reconciler. The reconciler runs on its own
     # asyncio task (NOT gated on MaintenanceService._is_idle) because

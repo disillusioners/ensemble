@@ -198,6 +198,49 @@ class SnapshotRepository:
             session.commit()
             return True
 
+    def update_capture_result(
+        self,
+        snapshot_id: str,
+        *,
+        status: str,
+        digest: dict[str, Any],
+        effective_model: str | None = None,
+    ) -> Snapshot:
+        """Terminal write for the D3 capture lane (PR4).
+
+        Merges ``digest`` over the row's existing digest (preserving
+        keys written at insert time — e.g. the R12 pointer and the
+        idempotency key), stamps the status and (optionally) the
+        effective model, and returns the updated row.
+
+        Raises:
+            ValueError: Unknown ``status`` (fail loud) — or unknown
+                ``snapshot_id`` (the lane's row must exist; a missing
+                row at terminal time is a programming error).
+        """
+        if status not in SNAPSHOT_STATUSES:
+            raise ValueError(
+                f"Unknown snapshot status {status!r}; "
+                f"expected one of {sorted(SNAPSHOT_STATUSES)}"
+            )
+        with Session(self.engine) as session:
+            row = session.get(Snapshot, snapshot_id)
+            if row is None:
+                raise ValueError(
+                    f"snapshot {snapshot_id!r} not found at terminal "
+                    "write — ledger row must exist"
+                )
+            merged = dict(row.digest or {})
+            merged.update(digest or {})
+            row.digest = merged
+            row.status = status
+            if effective_model is not None:
+                row.effective_model = effective_model
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return row
+
     # ── D3 boot sweep ─────────────────────────────────────────────────
 
     def mark_orphaned_running_interrupted(self) -> int:
