@@ -1,6 +1,18 @@
 *(wanderer machinery inventory — read-only investigation, 2026-09-23)*
 
-# Agent Snapshot Machinery Inventory — agents-ensemble @ plan/agent-snapshot (6ed47fca, v0.14.0)
+# Agent Snapshot Machinery Inventory — agents-ensemble @ plan/agent-snapshot (720a2b39, v0.14.0) — Rev 5 (2026-09-25) pointer
+
+**Status:** Verified Rev 4 codebase anchors (read-only). **SUPERSEDED POINTERS (Rev 5, 2026-09-25):** this file's verified codebase anchors **remain the implementation ground truth** — line refs and mechanism facts in §1-5 survive Rev 5 unchanged. The **scope-shape** is superseded by [`design-exploration.md`](design-exploration.md) Rev 5 (per-instance pivot P1, grants P2-v1, R6-R16 fold-ins). Specifically:
+
+- **Rev 5 does NOT delete the `get_tree_ids_permanent` utility** at `daemon/repositories/instance/repository.py:527` — it remains in the codebase. Rev 5 only deletes the **capture-time walk** that used it; the utility is now used only for the `lineage:{root-iid}` tag computation in R8.
+- **Rev 5 deletes the `snapshot_nodes` table** (was planned in Rev 4) — `daemon/repositories/snapshot/` (Rev 5 PR3) ships 2 tables: `snapshots` + `snapshot_embeddings`.
+- **Rev 5 renames** `spawn_instance_from_snapshot` → `spawn_hot_instance` (R13) and changes the grants: `snapshot_create` + `snapshot_search` per-tool entries in worker/coder/tester; `spawn_hot_instance` ships in the `instance` category (auto-grant, ari excluded).
+- **Rev 5 R8 typed tags** ride on `domain_tags` JSONB; the `task_summary` + 1-2 digest excerpts feed BM25 (was 2-3 node digests in Rev 4).
+- **Rev 5 R7 8-item skip list** governs creator agents (worker/coder/tester); the creation discipline is the v1 volume control (no eviction policy in v1 — Q8-A).
+- **Rev 5 R14 auto-fallback** mandatory result contract on `spawn_hot_instance`; fail-soft (never an error on miss).
+
+**What this file remains authoritative for:** every verified codebase anchor in §1-5 below (line refs, mechanism facts, file paths). These survive Rev 5 — the dev PR-time audit MUST re-pin them per verification rider (c) in design §12. **No re-verification was performed for Rev 5** (Rev 4's verification stands); Rev 5 is scope-shape only.
+
 Method: 5 delegated code-investigation workers over disjoint subsystems + spot-verification of highest-leverage claims (compaction prompts, config defaults, .agents/shared/ grep, thread_id invariant, synthetic-system injection, skill-keeper existence). All anchors verified against the working tree on branch plan/agent-snapshot.
 
 Cross-check corrections: agents/skill-keeper/ EXISTS (meta.json, soul.md) — a worker's "missing directory" anomaly was a truncated ls; discard it. Docstring drift: daemon/repositories/instance/repository.py:485-486 cites revive at instance_messaging.py:1510-1530; the traced status-flip site is :1897-1924.
