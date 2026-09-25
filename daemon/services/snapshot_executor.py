@@ -68,6 +68,9 @@ from daemon._content_hardening import (  # noqa: F401  (R6a — direct import, N
     is_injected_message,
     partition_injected_for_compaction,
 )
+from daemon.repositories.instance.repository import (  # NIT #5 (Wave 2a) — single source of truth
+    _MAX_TRAVERSAL_DEPTH,
+)
 from daemon.repositories.snapshot.models import (
     SNAPSHOT_STATUS_ACTIVE,
     SNAPSHOT_STATUS_FAILED,
@@ -126,9 +129,10 @@ TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset(
     {"completed", "error", "terminated", "failed"}
 )
 
-#: Lineage up-walk depth cap (mirrors the repository's
-#: ``_MAX_TRAVERSAL_DEPTH``).
-_LINEAGE_MAX_DEPTH = 256
+# Lineage up-walk depth cap — imported from the instance repository
+# (NIT #5 / Wave 2a pre-step): single source of truth, no local duplicate.
+# Used by :meth:`SnapshotExecutor._resolve_lineage_root` to bound the
+# ``parent_id`` chain walk.
 
 
 def _now_iso() -> str:
@@ -434,13 +438,13 @@ class SnapshotExecutor:
         if repo is None:
             return None
         current = target_instance_id
-        for _ in range(_LINEAGE_MAX_DEPTH):
+        for _ in range(_MAX_TRAVERSAL_DEPTH):
             row = repo.get(current)
             if row is None or not row.parent_id:
                 return current if row is not None else None
             current = row.parent_id
         logger.warning(
-            f"[Snapshot] lineage up-walk hit the {_LINEAGE_MAX_DEPTH} "
+            f"[Snapshot] lineage up-walk hit the {_MAX_TRAVERSAL_DEPTH} "
             f"depth cap for {target_instance_id[:8]}…"
         )
         return current

@@ -195,6 +195,16 @@ def _make_context_message(
 # bounds INJECTION, not knowledge — the full digest (with
 # refs/artifacts) persists in the DB.
 SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS = 25_000
+# Wrapper that :func:`_make_context_message` prepends to the digest body
+# to form the final ``HumanMessage.content``. The cap function subtracts
+# this overhead from the body budget so the FINAL assembled message
+# (wrapper + body) sits AT OR UNDER the ceiling — Wave 2a pre-step fix
+# (the bare-body cap could let the final message exceed the ceiling by
+# the wrapper's token cost; observed ~25008 against a 25k ceiling).
+_SNAPSHOT_DIGEST_WRAPPER = (
+    f"{CONTEXT_PREFIX}Agent Snapshot Digest{CONTEXT_SUFFIX}"
+)
+_SNAPSHOT_DIGEST_WRAPPER_TOKENS = estimate_tokens(_SNAPSHOT_DIGEST_WRAPPER)
 _SNAPSHOT_DIGEST_TRUNCATION_HINT = (
     "\n\n… (digest truncated at the "
     f"{SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS}-token injection "
@@ -263,23 +273,61 @@ def render_snapshot_digest_body(value: Any) -> str | None:
     return body or None
 
 
-def cap_snapshot_digest_for_injection(escaped_body: str) -> str:
+def cap_snapshot_digest_for_injection(
+    escaped_body: str,
+    *,
+    wrapper_overhead_tokens: int | None = None,
+) -> str:
     """Enforce the D6 ~25k-token ceiling on the ESCAPED digest body.
 
     STRICTLY counted (:func:`daemon.loader.estimate_tokens`,
     tiktoken cl100k). TAIL-truncates (the provenance block and the
     steering-ordered decisions live at the head; dropped content is
     the tail) and appends the ``snapshot_search``-for-full-body hint
-    — truncate, never skip. The FINAL content (hint included) is
-    asserted to sit under the ceiling: the injection hook fails loud
-    rather than ever landing an over-cap block.
+    — truncate, never skip.
+
+    **Wave 2a pre-step fix (wrapper budget):** the FINAL injected
+    message is ``wrapper_prefix + body``. The bare-body cap left the
+    final message up to ~``wrapper_tokens`` over the ceiling (the
+    observed case hit ~25008 against a 25k ceiling). The fix subtracts
+    the wrapper's token cost from the body budget so the FINAL
+    assembled message sits AT OR UNDER
+    :data:`SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS`.
+
+    The ``wrapper_overhead_tokens`` kwarg defaults to the
+    snapshot-digest wrapper constant (:data:`_SNAPSHOT_DIGEST_WRAPPER_TOKENS`)
+    and is exposed for unit-test scenarios that need a different
+    overhead (or to assert against ``0`` for the legacy bare-body
+    contract).
+
+    The FINAL content (wrapper + truncated head + hint) is asserted
+    to sit under the ceiling: the injection hook fails loud rather
+    than ever landing an over-cap block.
     """
+    if wrapper_overhead_tokens is None:
+        wrapper_overhead_tokens = _SNAPSHOT_DIGEST_WRAPPER_TOKENS
+
     if estimate_tokens(escaped_body) <= SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS:
         return escaped_body
 
     hint = _SNAPSHOT_DIGEST_TRUNCATION_HINT
     hint_tokens = estimate_tokens(hint)
-    budget = SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS - hint_tokens
+    # Body budget reserves BOTH the wrapper's tokens AND the hint's
+    # tokens so wrapper + (head + hint) stays at or under the ceiling.
+    body_budget = (
+        SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS
+        - wrapper_overhead_tokens
+        - hint_tokens
+    )
+    if body_budget < 0:
+        # Pathological: wrapper alone exceeds the ceiling. Fail loud
+        # rather than silently produce an over-cap block.
+        raise AssertionError(
+            "snapshot digest wrapper overhead "
+            f"({wrapper_overhead_tokens}t) + hint "
+            f"({hint_tokens}t) exceeds the "
+            f"{SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS}-token ceiling"
+        )
     # Binary search the largest head (in chars) whose token count
     # fits the post-hint budget — deterministic, strictly counted.
     lo, hi = 0, len(escaped_body)
@@ -287,15 +335,20 @@ def cap_snapshot_digest_for_injection(escaped_body: str) -> str:
     while lo <= hi:
         mid = (lo + hi) // 2
         candidate = escaped_body[:mid].rstrip()
-        if estimate_tokens(candidate) <= budget:
+        if estimate_tokens(candidate) <= body_budget:
             best = candidate
             lo = mid + 1
         else:
             hi = mid - 1
     capped = best + hint
-    assert estimate_tokens(capped) <= SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS, (
+    # FINAL-message ceiling check: wrapper + body ≤ ceiling.
+    # Replaces the prior bare-body assert (the Wave 2a fix).
+    final_tokens = wrapper_overhead_tokens + estimate_tokens(capped)
+    assert final_tokens <= SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS, (
         "snapshot digest injection exceeded the "
-        f"{SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS}-token ceiling"
+        f"{SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS}-token ceiling "
+        f"(wrapper={wrapper_overhead_tokens}t + body={estimate_tokens(capped)}t "
+        f"= {final_tokens}t)"
     )
     return capped
 

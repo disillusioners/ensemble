@@ -111,12 +111,15 @@ R11_DEAD_ENDS_NORM = (
 )
 
 
-def build_snapshot_summarizer_persona() -> str:
+def _compose_snapshot_summarizer_persona() -> str:
     """Compose the R11 SystemMessage persona for the digest LLM call.
 
-    Layout: the verbatim steering block first (it is the design's
-    north star and test-pinned), then the 8-field extraction contract,
-    then the dead-ends norm, then the output format.
+    Internal helper — there is no external caller; the only use is
+    the module-level cache (:data:`SNAPSHOT_SUMMARIZER_PERSONA`) at
+    import time (NIT #8 / Wave 2a pre-step). Layout: the verbatim
+    steering block first (it is the design's north star and
+    test-pinned), then the 8-field extraction contract, then the
+    dead-ends norm, then the output format.
     """
     field_lines = "\n".join(
         f"- **{name}** (`{key}`) — {instruction}"
@@ -140,8 +143,12 @@ def build_snapshot_summarizer_persona() -> str:
 
 
 # Module default so the persona is composed once at import (pure
-# string assembly — no I/O).
-SNAPSHOT_SUMMARIZER_PERSONA = build_snapshot_summarizer_persona()
+# string assembly — no I/O). Kept as a module-level symbol (renamed
+# from the prior ``build_snapshot_summarizer_persona`` factory to a
+# private helper — NIT #8 / Wave 2a pre-step: the factory had no
+# external caller, only the import-time cache, and the public name
+# invited unintended reuse).
+SNAPSHOT_SUMMARIZER_PERSONA = _compose_snapshot_summarizer_persona()
 
 __all__ = [
     "SNAPSHOT_PROMPT_VERSION",
@@ -149,6 +156,6 @@ __all__ = [
     "DIGEST_EXTRACTION_FIELDS",
     "DIGEST_KEYS",
     "R11_DEAD_ENDS_NORM",
-    "build_snapshot_summarizer_persona",
+    "_compose_snapshot_summarizer_persona",
     "SNAPSHOT_SUMMARIZER_PERSONA",
 ]

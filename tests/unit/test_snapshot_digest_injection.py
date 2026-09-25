@@ -34,6 +34,9 @@ from daemon.services import context_messages as cm
 from daemon.services.context_messages import (
     CONTEXT_KIND_SNAPSHOT_DIGEST,
     SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS,
+    _SNAPSHOT_DIGEST_TRUNCATION_HINT,
+    _SNAPSHOT_DIGEST_WRAPPER,
+    _SNAPSHOT_DIGEST_WRAPPER_TOKENS,
     _build_snapshot_digest_message,
     cap_snapshot_digest_for_injection,
     render_snapshot_digest_body,
@@ -140,6 +143,28 @@ class TestCapSnapshotDigestForInjection:
     def test_ceiling_constant_is_the_d6_value(self):
         assert SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS == 25_000
 
+    def test_wrapper_overhead_constant_in_sync_with_prefix(self):
+        """The wrapper the cap subtracts must match the wrapper
+        ``_make_context_message`` will actually prepend. Drift here
+        would re-open the Wave 2a bug (final message over the ceiling
+        by the wrapper's tokens).
+        """
+        assert (
+            _SNAPSHOT_DIGEST_WRAPPER
+            == "[SYSTEM CONTEXT: Agent Snapshot Digest]\n\n"
+        )
+        # And its token cost is strictly positive so the body budget
+        # is always strictly tighter than the bare ceiling.
+        assert _SNAPSHOT_DIGEST_WRAPPER_TOKENS > 0
+        # The wrapper itself must always fit well under the ceiling
+        # (truncation-hint sanity: even the hint + wrapper together
+        # must leave room for content).
+        assert (
+            estimate_tokens(_SNAPSHOT_DIGEST_WRAPPER)
+            + estimate_tokens(_SNAPSHOT_DIGEST_TRUNCATION_HINT)
+            < SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS
+        )
+
 
 # ============================================================================
 # Turn-1 emission (read/consume seam)
@@ -202,6 +227,78 @@ class TestBuildSnapshotDigestMessage:
         assert len(msg.content) < 0.9 * len(rendered)
         # Search hint appended for the dropped tail.
         assert "use snapshot_search for the full body" in msg.content
+
+    def test_message_level_ceiling_with_canonical_6k_fixture(self):
+        """Wave 2a pre-step: FINAL injected message (wrapper + body +
+        hint) must be AT OR UNDER the D6 ceiling — the bare-body cap
+        could let the final message exceed the ceiling by the
+        wrapper's token cost (observed ~25008 against 25k). The
+        6000-entry canonical digest fixture pushes the rendered body
+        far past the ceiling so the truncation path is exercised.
+        """
+        value = _digest_dict()
+        value["decisions"] = [
+            f"decision {i}: probed the subsystem and logged the finding"
+            for i in range(6_000)
+        ]
+        mgr = FakeManager(FakeInstanceRepo(_instance_with_digest(value)))
+        msg = asyncio.run(_build_snapshot_digest_message("inst-1", mgr))
+        assert msg is not None
+        # MESSAGE-LEVEL ceiling assert — the actual injected
+        # ``msg.content`` (the full wrapper + body + hint) sits AT OR
+        # UNDER the ceiling. This is the assertion that was missing
+        # pre-Wave 2a: the prior cap checked only the body.
+        assert estimate_tokens(msg.content) <= (
+            SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS
+        ), (
+            "snapshot digest final message exceeded the "
+            f"{SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS}-token ceiling "
+            f"(final={estimate_tokens(msg.content)}t)"
+        )
+        # Belt-and-braces: the content starts with the wrapper prefix
+        # we expect _make_context_message to mint, so the assertion
+        # above is exercising the real assembled message.
+        assert msg.content.startswith("[SYSTEM CONTEXT: Agent Snapshot Digest]")
+        # And the wrapper was reserved in the cap: the body alone
+        # leaves headroom for the wrapper's token cost.
+        body_only = msg.content[len(_SNAPSHOT_DIGEST_WRAPPER):]
+        assert (
+            estimate_tokens(body_only)
+            <= SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS
+            - _SNAPSHOT_DIGEST_WRAPPER_TOKENS
+        )
+
+    def test_message_level_ceiling_short_body_passthrough(self):
+        """The wrapper-budget reservation must NOT trip on the
+        short-body path — a body well under the ceiling should pass
+        through unchanged and the final message still fits."""
+        mgr = FakeManager(FakeInstanceRepo(_instance_with_digest(_digest_dict())))
+        msg = asyncio.run(_build_snapshot_digest_message("inst-1", mgr))
+        assert msg is not None
+        # Sanity: no truncation hint, no shrink.
+        assert "snapshot_search for the full body" not in msg.content
+        assert estimate_tokens(msg.content) <= (
+            SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS
+        )
+
+    def test_cap_function_explicit_wrapper_overhead_zero_legacy_contract(self):
+        """The cap function accepts ``wrapper_overhead_tokens`` for
+        back-compat tests. Passing ``0`` reproduces the LEGACY
+        bare-body contract (which is precisely the bug Wave 2a
+        fixed) — useful for pin tests that want to assert the
+        wrapper-budget subtraction is the active contract."""
+        body = ("decision line\n" * 20_000) + "TAIL-CONTENT-THAT-DROPS"
+        legacy_capped = cap_snapshot_digest_for_injection(
+            body, wrapper_overhead_tokens=0
+        )
+        # Legacy bare-body contract: capped body sits at-or-under the
+        # ceiling (this is what the old cap asserted).
+        assert estimate_tokens(legacy_capped) <= (
+            SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS
+        )
+        # And the truncated tail is gone + hint present (unchanged).
+        assert "TAIL-CONTENT-THAT-DROPS" not in legacy_capped
+        assert "snapshot_search for the full body" in legacy_capped
 
     def test_no_metadata_no_block(self):
         mgr = FakeManager(FakeInstanceRepo(_instance_with_digest(None)))
