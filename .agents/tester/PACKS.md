@@ -1,5 +1,20 @@
 # Test Packs
 
+## Completed commission — SEND-MESSAGE-CONTEXT-INJECT-FALLBACK VERIFICATION (2026-09-25)
+Branch `feature/send-message-context-inject-fallback` @ `6620cb7f` (base `75d7e2d1`; single amended commit). Independent verification gate for the agent-tool `send_message` busy-guard context-injection fallback (`daemon/tools/instance.py` only). All invocations drift-pinned, env-scrubbed (`env -u` POSTGRES_*/DATABASE_URL), `timeout 300` outer + pyproject per-test inner, `uv run python -m pytest`, no `-x`, no deselects. Report-only; zero quick fixes.
+
+| Pack | Scope | Result |
+|---|---|---|
+| `instance_tools_unit_test` (ad-hoc) | `tests/unit/tools/test_instance_tools.py` | ✅ PASS **207P/0F** (14.11s) |
+| `tools_dir_regression_test` (ad-hoc) | `tests/unit/tools/` full dir, no deselect | ✅ PASS(expected-pattern) **2904P/5F/0E/5S** (54.09s) — 5F = ledger `TestAccessMemoryArchive`, base-proven |
+| `archive_base_leg_test` (ad-hoc; throwaway detached worktree @75d7e2d1) | `tests/unit/tools/test_archive_lifecycle.py` | ✅ base-identical **26P/5F** (1.08s) — same node ids + 'Access denied' class → pre-existing, NOT branch-caused |
+| `b1_wc_durable_cross_test` (ad-hoc) | `tests/unit/services/test_b1_wc_durable_send.py` | ✅ PASS(env-defect-only) **11P/1F** (2s) — 1F = QUARANTINE 2026-09-12 hardcoded-worktree row, node+signature identical |
+| `status_guard_cross_test` (ad-hoc) | `tests/tools/test_send_message_status_guard.py` | ✅ PASS **6P/0F** (0.72s) — all legacy routing lanes intact |
+
+**OUTCOME (2026-09-25): ✅ SHIP — 0 branch-caused failures; mock fidelity FIDELITY-OK (byte-for-byte flattened-payload + exact provenance pins vs real signatures); all 5 edge cases covered; diff surgical (2 files; manager.py / routers/messages.py / tools/job_queue.py diffs EMPTY).** One acknowledged non-blocking deviation: busy-reject result-text appends `"Plain sends can inject mid-turn; load_skill requires the target to be free."` (214→290 chars, old text strict prefix; 8/9 deletions = docstring prose). Full report: `RESULTS/2026-09-25-send-message-context-inject-fallback-verification.md`.
+
+---
+
 ## Active commission — AGENT-PAUSE-RESUME-TOOLS ACCEPTANCE GATE (2026-09-24)
 Branch `feature/agent-pause-resume-tools` @ `17cf80f1` (base `latest` @ `0fd06cf0`; 4 commits). Pre-merge acceptance gate. Feature = agent-facing `pause_instance`/`resume_instance` tools in `daemon/tools/instance.py` wrapping the same manager service layer as the HTTP pause/resume endpoints. **ALL invocations MUST scrub ambient `POSTGRES_*` + `DATABASE_URL` via `env -u`.** Acceptance gate = report-only; NO quick fixes on feature/test code.
 

@@ -58,7 +58,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -5670,3 +5670,325 @@ class TestRunningLiveGraphInjectionPreserved:
         manager.has_live_graph_task.assert_called_once()
         assert manager.has_live_graph_task.call_count == 1
         manager.set_injection.assert_called_once()
+
+
+class TestBusyGuardInjectionFallback:
+    """Busy-guard → injection fallback for context-bearing sends
+    (feature/send-message-context-inject-fallback, 2026-09-25;
+    incident c3d1a722).
+
+    A send bearing non-empty ``context`` is force-routed to the durable
+    enqueue lane (the enqueue-only parameter override — ``set_injection``
+    has no metadata channel), and the enqueue lane's queue-busy guard
+    then REJECTS when the target is mid-turn — even though a PLAIN send
+    to the same target would have injected fine. Intended-guard ×
+    intended-guard = user-facing trap.
+
+    The fallback: when the busy guard is about to reject, re-check
+    injection eligibility (fresh ``running`` status + live graph task);
+    if eligible AND the send bore ``context`` (NOT ``load_skill``),
+    flatten the context block into the message body and deliver via
+    ``set_injection`` with the standard ``internal_agent:<caller>``
+    provenance. Every other shape keeps the busy-guard rejection.
+    """
+
+    async def test_context_send_to_busy_running_target_injects_flattened(self):
+        """THE incident: running + live graph + processing=1 + context
+        → injected (flattened), NOT the busy ERROR."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 0, "processing_count": 1}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id",
+                "please refactor the auth module",
+                context={"files": ["daemon/auth.py"], "notes": "keep API"},
+            )
+
+        manager.set_injection.assert_called_once()
+        manager.enqueue_message.assert_not_awaited()
+        # Success text notes the flattening; the busy ERROR is gone.
+        assert "flattened inline" in result
+        assert "already has a message in progress" not in result
+
+    async def test_flattened_content_is_context_block_then_message(self):
+        """Ordering/shape pin: the injected content is the formatted
+        ``[SYSTEM CONTEXT: Task Context]`` block PREPENDED to the
+        original message body (block first, blank-line separator, task
+        message last). The expected block is HARDCODED below (NOT
+        computed via ``_format_task_context``) so the pin fails if the
+        concatenation contract drifts."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 0, "processing_count": 1}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            await send_message.coroutine(
+                "target-id",
+                "please refactor the auth module",
+                context={"files": ["daemon/auth.py"], "notes": "keep API"},
+            )
+
+        injected = manager.set_injection.call_args.args[1]
+        assert injected.startswith("[SYSTEM CONTEXT: Task Context]")
+        assert injected.endswith("please refactor the auth module")
+        # Hardcoded expected concatenation (block + blank line + task
+        # message) — independent of the production formatter.
+        expected = (
+            "[SYSTEM CONTEXT: Task Context]\n"
+            "## Files\n"
+            "- daemon/auth.py\n"
+            "\n"
+            "## Notes\n"
+            "keep API\n"
+            "\n"
+            "please refactor the auth module"
+        )
+        assert injected == expected
+
+    async def test_fallback_stamps_internal_agent_provenance(self):
+        """The fallback uses the SAME provenance convention as the
+        injection branch: ``source="internal_agent:<caller_iid>"``."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 2, "processing_count": 1}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            await send_message.coroutine(
+                "target-id", "do the thing", context={"notes": "hi"}
+            )
+
+        manager.set_injection.assert_called_once()
+        assert manager.set_injection.call_args.args == (
+            "target-id",
+            ANY,
+        )
+        assert manager.set_injection.call_args.kwargs == {
+            "source": "internal_agent:parent-instance"
+        }
+
+    async def test_load_skill_send_keeps_busy_rejection(self):
+        """``load_skill`` STAYS enqueue-only — never flattened. A
+        ``load_skill`` send to a busy running target keeps the
+        busy-guard ERROR (the ``<meta>`` tag parser lives only in the
+        enqueue pipeline; flattening would inject raw tag garbage)."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 0, "processing_count": 1}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id", "do the thing", load_skill="unit-test"
+            )
+
+        manager.set_injection.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()
+        assert "already has a message in progress" in result
+
+    async def test_context_plus_load_skill_keeps_busy_rejection(self):
+        """Both parameters present → ``load_skill`` wins → rejection
+        (fail closed; no partial flattening)."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 0, "processing_count": 1}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id",
+                "do the thing",
+                load_skill="unit-test",
+                context={"notes": "hi"},
+            )
+
+        manager.set_injection.assert_not_called()
+        assert "already has a message in progress" in result
+
+    async def test_graphless_target_keeps_busy_rejection(self):
+        """A running target with NO live graph never gets the fallback —
+        the injection FIFO would strand the dispatch (DEFECT A)."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=False)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 0, "processing_count": 1}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id", "do the thing", context={"notes": "hi"}
+            )
+
+        manager.set_injection.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()
+        assert "already has a message in progress" in result
+
+    async def test_non_running_target_keeps_busy_rejection(self):
+        """WAITING_CHILDREN target with a busy queue keeps the rejection —
+        eligibility requires a fresh ``running`` status."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="waiting_children")
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 1, "processing_count": 0}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id", "do the thing", context={"notes": "hi"}
+            )
+
+        manager.set_injection.assert_not_called()
+        assert "already has a message in progress" in result
+
+    async def test_status_race_keyerror_fails_closed_to_rejection(self):
+        """The fresh-status re-check mirrors the split-cache race defense:
+        ``get_instance_info`` raising ``KeyError`` at fallback time fails
+        CLOSED to the busy-guard rejection (never a raw KeyError, never
+        an injection)."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 0, "processing_count": 1}
+            )
+            # First two reads (membership + routing) succeed; the
+            # fallback's fresh re-read hits the eviction race.
+            manager.get_instance_info = MagicMock(
+                side_effect=[
+                    {"status": "running", "agent_id": "developer"},
+                    {"status": "running", "agent_id": "developer"},
+                    KeyError("target-id"),
+                ]
+            )
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine(
+                "target-id", "do the thing", context={"notes": "hi"}
+            )
+
+        manager.set_injection.assert_not_called()
+        assert "already has a message in progress" in result
+
+    async def test_fallback_logs_structured_observability_line(self, caplog):
+        """The fallback is LOUD: structured ``event=agent_send_message``
+        log with ``routed_via=injection_busy_fallback`` (mirrors the
+        Task 3b provenance-logging contract)."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 0, "processing_count": 1}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            with caplog.at_level(
+                logging.INFO, logger="daemon.tools.instance"
+            ):
+                await send_message.coroutine(
+                    "target-id", "do the thing", context={"notes": "hi"}
+                )
+
+        fallback_records = [
+            r for r in caplog.records
+            if getattr(r, "event", None) == "agent_send_message"
+            and getattr(r, "routed_via", None) == "injection_busy_fallback"
+        ]
+        assert fallback_records, (
+            "expected a structured fallback log line with "
+            "routed_via=injection_busy_fallback"
+        )
+        assert fallback_records[0].target_iid == "target-id"
+        assert fallback_records[0].fresh_status == "running"
+        assert fallback_records[0].source == (
+            "internal_agent:parent-instance"
+        )
+
+    async def test_busy_reject_logs_structured_warn_line(self, caplog):
+        """The busy-guard REJECTION is no longer silent: structured
+        ``event=agent_send_message`` WARN with
+        ``routed_via=busy_reject`` carrying caller/target ids and the
+        queue counts that tripped the guard (closes the pre-existing
+        zero-trail gap). Mirrors the fallback log pin's style; uses the
+        load_skill-busy scenario (fallback ineligible → rejection)."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 2, "processing_count": 1}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            with caplog.at_level(
+                logging.WARNING, logger="daemon.tools.instance"
+            ):
+                await send_message.coroutine(
+                    "target-id", "do the thing", load_skill="unit-test"
+                )
+
+        reject_records = [
+            r for r in caplog.records
+            if getattr(r, "event", None) == "agent_send_message"
+            and getattr(r, "routed_via", None) == "busy_reject"
+        ]
+        assert reject_records, (
+            "expected a structured busy-reject WARN log line with "
+            "routed_via=busy_reject"
+        )
+        record = reject_records[0]
+        assert record.levelno == logging.WARNING
+        assert record.target_iid == "target-id"
+        assert record.caller_iid == "parent-instance"
+        assert record.pending_count == 2
+        assert record.processing_count == 1
+        # The WARN sees the message AFTER the load_skill <meta> sugar was
+        # appended (the tag is prepended to the body before dispatch) —
+        # pin the real payload length, not the caller's raw argument.
+        _expected_body = 'do the thing\n<meta>{"load_skill": "unit-test"}</meta>'
+        assert record.content_len == len(_expected_body)
+        assert "busy-guard rejection" in record.getMessage()
