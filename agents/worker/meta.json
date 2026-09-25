@@ -29,7 +29,9 @@
       "dynamic-skill",
       "system-log",
       "plane_sync",
-      "service"
+      "service",
+      "snapshot_create",
+      "snapshot_search"
     ]
   },
   "context_injection": {

@@ -10,6 +10,7 @@ import time
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from daemon.services.timestamps import now_utc_naive
 from pathlib import Path
@@ -123,6 +124,10 @@ from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import SkillJobDispatcher
 from .services.skill_trigger_engine import SkillTriggerEngine
 from .services.skill_trigger_seed import seed_default_triggers
+from .services.snapshot_executor import SnapshotService, compute_staleness_report
+from .services.snapshot_embedding_service import SnapshotEmbeddingService
+from .services.snapshot_search_service import SnapshotSearchService
+from .repositories.snapshot.repository import SnapshotRepository
 from .services.skill_seed_service import SkillSeedService
 from .services.skill_clone_service import SkillCloneService
 from .services.maintenance import MaintenanceService, CheckpointCleanupJob
@@ -1628,6 +1633,59 @@ class InstanceManager:
             # lookups (``getattr(manager, '_skill_job_dispatcher',
             # None)``) still see ``None`` rather than ``AttributeError``.
             self._skill_job_dispatcher = None
+
+        # ── Agent Snapshot v1 (Wave 2b — Wave 1b review NIT #6) ────────
+        # Snapshot repository + services constructed ALONGSIDE the other
+        # repositories (skill_repository pattern) so tool factories and
+        # the consumption seam never hand-assemble dependencies. The
+        # repository is unconditional (read paths + boot sweep are
+        # always available); the embedding service is best-effort — its
+        # failures degrade search to BM25+tag-overlap by design.
+        self._snapshot_repo = SnapshotRepository(engine=self._engine)
+        # LLM config: same dict shape the skill services use (the raw-SDK
+        # consumers read ``base_url`` / ``base_url_backup`` / ``api_key`` /
+        # ``request_gzip``). Built unconditionally here — the snapshot
+        # subsystem is decoupled from ``config.skill_evolution`` at the
+        # service layer, so it must not depend on that block having run.
+        snapshot_llm_config: dict[str, Any] = {
+            "base_url": self.config.llm.base_url,
+            "base_url_backup": self.config.llm.base_url_backup,
+            "api_key": self.config.llm.api_key,
+            "model": self.config.llm.model,
+            "model_vision": self.config.llm.model_vision,
+            "request_timeout": self.config.llm.request_timeout,
+            "request_gzip": self.config.llm.request_gzip,
+        }
+        # Embedding endpoint config (duck-typed): reuse the skill-evolution
+        # embedding fields when the operator configured them (same
+        # endpoint serves both caches); otherwise all-None so the service
+        # resolves model/base_url/api_key from its own fallbacks.
+        _snapshot_embed_src: Any = (
+            self.config.skill_evolution
+            if self.config.skill_evolution is not None
+            else SimpleNamespace(
+                embedding_model=None,
+                embedding_base_url=None,
+                embedding_api_key=None,
+                embedding_dimensions=None,
+            )
+        )
+        self._snapshot_embedding_service = SnapshotEmbeddingService(
+            config=_snapshot_embed_src,
+            snapshot_repo=self._snapshot_repo,
+            llm_config=snapshot_llm_config,
+        )
+        self._snapshot_service = SnapshotService(
+            self,
+            self._snapshot_repo,
+            snapshot_embedding_service=self._snapshot_embedding_service,
+        )
+        self._snapshot_search_service = SnapshotSearchService(
+            snapshot_repo=self._snapshot_repo,
+            embedding_service=self._snapshot_embedding_service,
+            llm_config=snapshot_llm_config,
+            staleness_fn=compute_staleness_report,
+        )
 
         # Initialize MCP warm-up pool (non-blocking background warmup)
         self._init_warmup_pool()

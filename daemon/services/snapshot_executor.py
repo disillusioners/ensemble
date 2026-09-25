@@ -807,13 +807,30 @@ class SnapshotExecutor:
         re-embed pass).
         """
         wall_clock = time.monotonic() - started_monotonic
-        updated = await asyncio.to_thread(
-            self._snapshots.update_capture_result,
-            row.id,
-            status=status,
-            digest=digest,
-            effective_model=effective_model,
-        )
+        # R12 create-mints-successor (Wave 2b): when this lane's row was
+        # minted FOR a supersession (the R12 pointer rides in the row's
+        # digest, stashed at capture_async time), the ACTIVE terminal
+        # write routes through ``create_successor`` — the successor is
+        # stamped active + ``supersedes_snapshot_id`` and the
+        # predecessor flips to ``superseded`` in ONE transaction (rider
+        # (g): no torn state; a concurrent reader sees either the old
+        # active row or the new one, never neither and never both).
+        # A missing predecessor id raises from the repository and lands
+        # in the capture lane's except → failed row (caller bug).
+        supersedes_id = (row.digest or {}).get("supersedes_snapshot_id")
+        if status == SNAPSHOT_STATUS_ACTIVE and supersedes_id:
+            row.digest = {**(row.digest or {}), **(digest or {})}
+            updated = await asyncio.to_thread(
+                self._snapshots.create_successor, row, supersedes_id
+            )
+        else:
+            updated = await asyncio.to_thread(
+                self._snapshots.update_capture_result,
+                row.id,
+                status=status,
+                digest=digest,
+                effective_model=effective_model,
+            )
         # R10 §3.4 — embeddings-at-creation wiring. Re-fetch the
         # post-write row so the embedding pipeline sees the
         # finalized task_summary + digest (the in-memory ``row``
