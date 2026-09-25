@@ -1,8 +1,9 @@
 """Job queue management tools for LangGraph agents.
 
 Size/seam note (M3 fix round, 2026-09-03, ``feature/mission-class``;
-size refresh 2026-09-22, ``feature/job-answer-tool`` M-tidier pass):
-this module is 3,321 lines (was 2,300+ when the note was authored)
+size refresh 2026-09-22, ``feature/job-answer-tool`` M-tidier pass;
+size refresh 2026-09-25, ``job-pause-resume-tools``):
+this module is 4,008 lines (was 3,321 at the 2026-09-22 refresh)
 and hosts BOTH the LangGraph ``@tool`` wrappers AND significant
 non-tool logic (the legacy ``list_jobs`` fallback, the watch-job
 immediate-notify branch, the mission-tool opt-in helper, the WC-wake
@@ -106,6 +107,12 @@ MAX_WATCHES_PER_INSTANCE = 50
 # it cannot drift between the docstring, the pre-check, and any test
 # that branches on it (tidier round 2026-09-22, #3 — Medium).
 WRITE_PAUSED_TOKEN = "WRITE_PAUSED"
+
+# Token for the pause wedge-guard surfaced in ``job_pause``'s success
+# response (``_wedge_note`` field). Hoisted from a string literal in the
+# closure so the spelling cannot drift between the docstring, the response
+# payload, and any test that branches on it (tidier round 2026-09-25, item 5).
+STUCK_AWAITING_ANSWER = "STUCK_AWAITING_ANSWER"
 
 
 def _watch_cap_error(current: int, attempted_clause: str | None = None) -> str:
@@ -613,6 +620,7 @@ Example:
     job_inject(job_id=\"job_abc123\", message=\"Also remember to add tests\")""",
 
     "job_answer": """Submit the orchestrator's answer to a pending question pack on a watched job.
+
 The agent-facing counterpart of ``POST /api/jobs/{work_id}/answer`` —
 delivers an answer to a pending ``ask_questions`` pack owned by the
 work_id's asker instance, then resumes the asker cascade. The underlying
@@ -723,7 +731,7 @@ instance_id. For the instance_id-shaped variant, see ``pause_instance``.
 
 Args:
     job_id: The work_id of an ACTIVE (non-terminal, instance-bearing) job
-        to pause. Required.
+        to pause. Its whole instance lineage pauses with it. Required.
 
 Errors (returned as ``{"error": ..., "paused": False}``):
 
@@ -807,7 +815,8 @@ helper ``answer_questions_via_instance`` runs the ANSWER flow
 before resuming.
 
 Args:
-    job_id: The work_id of an ACTIVE job whose instance is paused. Required.
+    job_id: The work_id of an ACTIVE job whose instance is paused. Its
+        whole instance lineage resumes with it. Required.
 
 Errors (returned as ``{"error": ..., "resumed": False}``):
 
@@ -3391,25 +3400,12 @@ def create_job_tools(
 
     job_answer._full_doc_ = _FULL_DOCS["job_answer"]
 
-    # ── job_pause / job_resume (job-pause-resume-tools, 2026-09-25) ──
+    # ── job_pause / job_resume (job-pause-resume-tools) ──
     #
-    # THIN WRAPPERS over the SAME service layer the HTTP endpoints use
-    # (``manager.pause_instance_cascade`` / ``manager.resume_instance_cascade``
-    # / ``manager.resume_processing_job``). The agent-facing twin of the
-    # pause/resume twin of ``pause_instance`` / ``resume_instance`` —
-    # shaped on JOB_ID instead of INSTANCE_ID. All cascade / lineage /
-    # idempotency behavior comes for free by delegating to the manager
-    # facade; this closure only adds:
-    #
-    #   1. Work-resolution: ``job_service.get_work`` (the same resolver
-    #      ``job_cancel`` uses) maps the caller's job_id → ``WorkRecord``
-    #      → ``instance_id``.
-    #   2. Pre-resolution gates (D1, terminal check, missing instance).
-    #   3. Project-scoped access control via the SAME ``_check_job_access``
-    #      helper the four visibility tools (``job_messages`` / ``job_tree``
-    #      / ``job_progress`` / ``job_inject``) use.
-    #   4. Defect-1 question-pack guard on resume (mirrors the
-    #      ``resume_instance`` tool at instance.py:4677-4695).
+    # Job-id-shaped twin of the agent-facing pause_instance/resume_instance
+    # closures (which themselves mirror the HTTP routes). Shaped on JOB_ID
+    # instead of INSTANCE_ID. See the closure docstrings for the full
+    # contract (gate order, wedge-guard, access-control pattern).
     #
     # Invariants (VERIFIED in the service — do NOT duplicate here):
     #   * Cascade pauses/resumes the WHOLE instance lineage (lifecycle
@@ -3422,11 +3418,9 @@ def create_job_tools(
     #     continue the turn → status "resuming".
     #   * Resume of a parked parent via the silent child lane returns
     #     status "silent_resume" (internal_child_noop).
-    #
-    # Job state (admission_state / status) is NOT touched by these
-    # tools — pause/resume operates on the instance lineage, NOT on
-    # the job row. The brief's D1 (QUEUED-no-instance) explicitly
-    # forbids mutating the job's state when an instance is absent.
+    #   * Job state (admission_state / status) is NOT touched by these
+    #     tools — pause/resume operates on the instance lineage, NOT on
+    #     the job row.
 
     @register_tool_category("job")
     @tool
@@ -3451,6 +3445,22 @@ def create_job_tools(
             return {"error": f"Failed to resolve {job_id}: {type(e).__name__}: {e}", "paused": False}
         if record is None:
             return {"error": f"Job not found: {job_id}", "paused": False}
+
+        # Kind refusal — pause operates on the JOB-shaped JobItem row.
+        # Task / turn / report rows have no instance_id to pause (Tasks
+        # use cooperative cancel_requested via job_cancel instead).
+        # Mirror the job_cancel / job_retry / job_delete / job_restore
+        # siblings at :1632, :1690, :1715, :1740, :1794 — fail-closed
+        # with a precise error naming the rejected kind (tidier round
+        # 2026-09-25, item 2).
+        if record.kind != "job":
+            return {
+                "error": (
+                    f"Job {job_id[:8]}... is task-type work ({record.kind}), "
+                    "which has no pause path — use job_cancel for tasks"
+                ),
+                "paused": False,
+            }
 
         # 2. D1 — QUEUED job (no instance yet). The job is in flight
         #    (pending/queued) but has no instance_id to pause. Refuse
@@ -3487,9 +3497,9 @@ def create_job_tools(
         if deny is not None:
             return {**deny, "paused": False}
 
-        # 5. Default kwargs ONLY (cascade_to_root=True, suspension_reason
-        #    default) — mirrors the HTTP pause endpoint at
-        #    routers/instances.py:675; no new flags invented here.
+        # 5. Relies on facade defaults (cascade_to_root=True,
+        #    suspension_reason=None) — mirrors the HTTP pause endpoint;
+        #    no new flags invented here.
         result = await manager.pause_instance_cascade(instance_id)
 
         # D2 (wedge guard) — surface the destructive-consequence wedge
@@ -3535,6 +3545,21 @@ def create_job_tools(
         if record is None:
             return {"error": f"Job not found: {job_id}", "resumed": False}
 
+        # Kind refusal — resume operates on the JOB-shaped JobItem row.
+        # Task / turn / report rows have no instance_id to resume.
+        # Mirror the job_cancel / job_retry / job_delete / job_restore
+        # siblings at :1632, :1690, :1715, :1740, :1794 — fail-closed
+        # with a precise error naming the rejected kind (tidier round
+        # 2026-09-25, item 2).
+        if record.kind != "job":
+            return {
+                "error": (
+                    f"Job {job_id[:8]}... is task-type work ({record.kind}), "
+                    "which has no resume path"
+                ),
+                "resumed": False,
+            }
+
         # 2. D1 — QUEUED job (no instance yet). Same refusal as job_pause
         #    (the QUEUED branch is symmetric — no instance to pause OR
         #    resume). Job state MUST remain UNTOUCHED.
@@ -3560,6 +3585,12 @@ def create_job_tools(
         #    gate-supersession flow before resuming). The check is
         #    best-effort: introspection errors fail OPEN so a broken
         #    question-manager surface cannot wedge restart recovery.
+        # NOTE (tidier polish 2026-09-25, item 1): the guard order
+        #    here is write-paused (:3521) → question-pack, matching the
+        #    FE ``/instances/{id}/resume`` handler at
+        #    routers/instances.py:693-694 + :710+. The sibling
+        #    ``resume_instance`` tool inverts this (question-pack first);
+        #    flagged for separate commission.
         qm = getattr(manager, "_question_manager", None)
         if qm is not None:
             try:

@@ -67,23 +67,26 @@ JOB_ID = "job-active-1"
 
 def _make_work_record(
     *,
-    work_id: str = JOB_ID,
-    kind: str = "job",
     status: str = "processing",
     instance_id: str | None = TARGET_INSTANCE_ID,
     project_id: str | None = "proj-A",
-    agent_id: str | None = "developer",
 ) -> MagicMock:
     """Build a ``WorkRecord``-shaped mock matching the fields the new tools
-    read: ``work_id``, ``kind``, ``status``, ``instance_id``, ``project_id``,
-    ``agent_id`` (latter for completeness, not strictly read by either tool)."""
-    record = MagicMock(name=f"WorkRecord[{work_id}]")
-    type(record).work_id = property(lambda self: work_id)
-    type(record).kind = property(lambda self: kind)
+    read: ``status``, ``instance_id``, ``project_id``. ``kind`` defaults to
+    ``"job"`` (instance attribute) so existing tests pass the kind-refusal
+    guard unchanged; kind-refusal tests override via ``record.kind = "task"``
+    (instance attribute wins over MagicMock's auto-vivified child).
+
+    Tidier round 2026-09-25, item 11: dropped the dead-pad kwargs
+    ``work_id`` / ``kind`` / ``agent_id`` — none of the tool assertions
+    actually read them off the record (the caller passes ``job_id``
+    directly; tools read ``kind`` only on the new refusal branch).
+    """
+    record = MagicMock(name=f"WorkRecord[{JOB_ID}]")
     type(record).status = property(lambda self: status)
     type(record).instance_id = property(lambda self: instance_id)
     type(record).project_id = property(lambda self: project_id)
-    type(record).agent_id = property(lambda self: agent_id)
+    record.kind = "job"
     return record
 
 
@@ -259,19 +262,20 @@ class TestJobPause:
         manager.pause_instance_cascade.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_pause_terminal_job_refused(self, manager, job_service, pause_tool):
+    @pytest.mark.parametrize("terminal_status", ["completed", "failed", "cancelled", "dead_letter"])
+    async def test_pause_terminal_job_refused(self, manager, job_service, pause_tool, terminal_status):
         """(c) Terminal job (status='completed'/'failed'/etc.) →
-        clean refusal; facade untouched."""
-        for terminal_status in ("completed", "failed", "cancelled", "dead_letter"):
-            job_service.get_work.return_value = _make_work_record(status=terminal_status)
-            _wire_caller_project(manager, caller_project=TEST_SYSTEM_PROJECT_ID)
+        clean refusal; facade untouched. Parameterized over the four
+        terminal statuses so each renders as its own test ID."""
+        job_service.get_work.return_value = _make_work_record(status=terminal_status)
+        _wire_caller_project(manager, caller_project=TEST_SYSTEM_PROJECT_ID)
 
-            result = await pause_tool.coroutine(JOB_ID)
+        result = await pause_tool.coroutine(JOB_ID)
 
-            assert result["paused"] is False, f"status={terminal_status}"
-            assert "terminal state" in result["error"], f"status={terminal_status}"
-            assert terminal_status in result["error"], f"status={terminal_status}"
-            manager.pause_instance_cascade.assert_not_awaited()
+        assert result["paused"] is False
+        assert "terminal state" in result["error"]
+        assert terminal_status in result["error"]
+        manager.pause_instance_cascade.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_pause_unknown_job_id(self, manager, job_service, pause_tool):
@@ -297,6 +301,27 @@ class TestJobPause:
         assert result["paused"] is False
         assert "503" in result["error"]
         assert "WRITE_PAUSED" in result["error"]
+        manager.pause_instance_cascade.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pause_refuses_non_job_kind(self, manager, job_service, pause_tool):
+        """Kind refusal (item 2, tidier round 2026-09-25): a Task-shaped
+        record (``kind != "job"``) has no instance_id to pause. Mirror
+        the job_cancel / job_retry / job_delete / job_restore siblings
+        at job_queue.py:1632, :1690, :1715, :1740, :1794 — fail-closed
+        with a precise error naming the rejected kind."""
+        record = _make_work_record(status="processing")
+        record.kind = "task"
+        job_service.get_work.return_value = record
+
+        result = await pause_tool.coroutine(JOB_ID)
+
+        assert result["paused"] is False
+        assert "task-type work" in result["error"]
+        assert "task" in result["error"]
+        # Error names the kind that was rejected (precise, not generic).
+        assert "(task)" in result["error"]
+        # Cascade facade untouched.
         manager.pause_instance_cascade.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -438,6 +463,65 @@ class TestJobResume:
         manager.resume_processing_job.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_resume_refuses_non_job_kind(self, manager, job_service, resume_tool):
+        """Kind refusal (item 2, tidier round 2026-09-25): a Task-shaped
+        record (``kind != "job"``) has no instance_id to resume. Mirror
+        the job_cancel / job_retry / job_delete / job_restore siblings
+        at job_queue.py:1632, :1690, :1715, :1740, :1794 — fail-closed
+        with a precise error naming the rejected kind."""
+        record = _make_work_record(status="processing")
+        record.kind = "task"
+        job_service.get_work.return_value = record
+
+        result = await resume_tool.coroutine(JOB_ID)
+
+        assert result["resumed"] is False
+        assert "task-type work" in result["error"]
+        assert "task" in result["error"]
+        # Error names the kind that was rejected (precise, not generic).
+        assert "(task)" in result["error"]
+        # Neither facade touched.
+        manager.resume_instance_cascade.assert_not_awaited()
+        manager.resume_processing_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resume_write_paused_gate_fires_before_question_pack_guard(
+        self, manager, job_service, resume_tool,
+    ):
+        """FE guard-order pin (item 1, tidier round 2026-09-25):
+        the ``is_write_paused`` migration gate (503) MUST fire BEFORE
+        the Defect-1 question-pack guard — matching the FE
+        ``/instances/{id}/resume`` handler at routers/instances.py:693
+        (write-paused → question-pack). The sibling
+        ``resume_instance`` tool inverts this (question-pack first);
+        ``job_resume`` follows the FE handler, NOT the sibling.
+
+        Pin: with both gates armed, the write-paused error wins and
+        the question-pack introspection is NEVER called.
+        """
+        manager.is_write_paused = True
+        job_service.get_work.return_value = _make_work_record(status="processing")
+        # Arm the question-pack guard too — it MUST NOT win.
+        pending_pack = MagicMock(name="PendingPack")
+        type(pending_pack).status = property(lambda self: "pending")
+        manager._question_manager.get_question_pack = MagicMock(return_value=pending_pack)
+        # Caller mismatched project — neither gate should reach access check.
+        _wire_caller_project(manager, caller_project="proj-B")
+
+        result = await resume_tool.coroutine(JOB_ID)
+
+        # Write-paused gate wins (not the pending-pack refusal).
+        assert result["resumed"] is False
+        assert "503" in result["error"]
+        assert "WRITE_PAUSED" in result["error"]
+        # The question-pack introspection must NOT have been called —
+        # write-paused fires first.
+        manager._question_manager.get_question_pack.assert_not_called()
+        # Neither facade touched.
+        manager.resume_instance_cascade.assert_not_awaited()
+        manager.resume_processing_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_resume_none_processing_job_status_normalized(
         self, manager, job_service, resume_tool,
     ):
@@ -478,8 +562,9 @@ class TestJobResume:
         manager.resume_instance_cascade.assert_awaited_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("terminal_status", ["completed", "failed", "cancelled", "dead_letter"])
     async def test_resume_terminal_job_passes_through_fe_identically(
-        self, manager, job_service, resume_tool,
+        self, manager, job_service, resume_tool, terminal_status,
     ):
         """D3' (terminal-job asymmetry, review round 2): unlike
         ``job_pause``, which REFUSES terminal jobs, ``job_resume``
@@ -491,34 +576,32 @@ class TestJobResume:
         error. This locks the FE mirror against future "helpful"
         terminal guards — adding one would break symmetry with the
         FE route and silently change observable agent behavior."""
-        for terminal_status in ("completed", "failed", "cancelled", "dead_letter"):
-            # Reset mocks between iterations so per-status call counts are clean.
-            manager.resume_instance_cascade.reset_mock()
-            manager.resume_processing_job.reset_mock()
-            job_service.get_work.reset_mock()
-            job_service.get_work.return_value = _make_work_record(status=terminal_status)
-            _wire_caller_project(manager, caller_project=TEST_SYSTEM_PROJECT_ID)
+        manager.resume_instance_cascade.reset_mock()
+        manager.resume_processing_job.reset_mock()
+        job_service.get_work.reset_mock()
+        job_service.get_work.return_value = _make_work_record(status=terminal_status)
+        _wire_caller_project(manager, caller_project=TEST_SYSTEM_PROJECT_ID)
 
-            result = await resume_tool.coroutine(JOB_ID)
+        result = await resume_tool.coroutine(JOB_ID)
 
-            # FE passthrough shape — no refusal, no error key.
-            assert "error" not in result, (
-                f"status={terminal_status} must pass through FE-identically; "
-                f"got refusal: {result!r}"
-            )
-            assert result["resumed"] is True, (
-                f"status={terminal_status} got resumed={result['resumed']!r}"
-            )
-            # Standard FE response keys are all present.
-            assert "resumed_ids" in result
-            assert "skipped_ids" in result
-            assert "target_id" in result
-            assert "resume_results" in result
-            # The cascade flipped and the processing job ran — the
-            # terminal job_id resolved to its instance_id and the call
-            # delegated, exactly like the FE route does.
-            manager.resume_instance_cascade.assert_awaited_once()
-            manager.resume_processing_job.assert_awaited()
+        # FE passthrough shape — no refusal, no error key.
+        assert "error" not in result, (
+            f"status={terminal_status} must pass through FE-identically; "
+            f"got refusal: {result!r}"
+        )
+        assert result["resumed"] is True, (
+            f"status={terminal_status} got resumed={result['resumed']!r}"
+        )
+        # Standard FE response keys are all present.
+        assert "resumed_ids" in result
+        assert "skipped_ids" in result
+        assert "target_id" in result
+        assert "resume_results" in result
+        # The cascade flipped and the processing job ran — the
+        # terminal job_id resolved to its instance_id and the call
+        # delegated, exactly like the FE route does.
+        manager.resume_instance_cascade.assert_awaited_once()
+        manager.resume_processing_job.assert_awaited()
 
 
 # ─────────────────────────────────────────────────────────────────────────────────
