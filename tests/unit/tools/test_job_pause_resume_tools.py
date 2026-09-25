@@ -602,7 +602,7 @@ class TestJobResumeAccessControl:
         manager.resume_processing_job.assert_awaited()
 
     @pytest.mark.asyncio
-    async def test_resume_access_check_runs_before_question_pack_guard(
+    async def test_resume_question_pack_guard_runs_before_access_check(
         self, manager, job_service, resume_tool,
     ):
         """The Defect-1 question-pack guard fires BEFORE the access check
