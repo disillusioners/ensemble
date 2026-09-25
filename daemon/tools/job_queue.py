@@ -1035,13 +1035,15 @@ def create_job_tools(
             # ever trusted verbatim on this path. Agent callers →
             # ``agent:<caller>`` (a hostile source="telegram:attacker"
             # must never thread through dispatch to the user-origin
-            # whitelist stamp — manager.stamp_user_origin_window /
-            # USER_ORIGIN_SOURCES — that would forge factor 2 of the live
-            # 3-factor gate with zero human involvement). Empty caller →
+            # classification stamp — manager.stamp_user_origin_window /
+            # upgrade_journal.classify_user_origin — that would forge
+            # factor 2 of the live 3-factor gate with zero human
+            # involvement). Empty caller →
             # ``internal_agent:unknown`` (F3, mirrors job_continue below):
-            # NEVER the default "api" — "api" is whitelisted, and the
-            # genuine web-UI path keeps its server-stamped value on the
-            # HTTP router (jobs_crud.py), not here.
+            # NEVER the default "api" — "api" arms the gate via the
+            # exact-match path, and the genuine web-UI path keeps its
+            # server-stamped value on the HTTP router (jobs_crud.py), not
+            # here.
             source = (
                 f"agent:{caller_agent_id}"
                 if caller_agent_id
@@ -1667,8 +1669,9 @@ def create_job_tools(
             result = await manager.enqueue_message_job(
                 instance_id=instance_id,
                 message=message,
-                # F3 (P2.2 fix pass): never mint a whitelisted source on the
-                # empty-caller fallback — "api" is in USER_ORIGIN_SOURCES.
+                # F3 (P2.2 fix pass): never mint a user-origin source on the
+                # empty-caller fallback — "api" arms the live gate via the
+                # exact-match path.
                 source=f"agent:{caller_agent_id}" if caller_agent_id else "internal_agent:unknown",
             )
 

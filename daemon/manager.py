@@ -989,14 +989,26 @@ class InstanceManager:
         # ``_process_message_with_tracking`` (the one funnel every dispatch
         # lane — API chat, external channels, internal reports, agent
         # sends — flows through with the triggering message's source and
-        # content in hand). Only sources passing the USER_ORIGIN_SOURCES
-        # whitelist stamp the window; every other source (all internal_*,
-        # scheduler, cascade_resume, agent:*) CLEARS it — the window is
-        # strictly per-turn, so an agent-dispatched turn never inherits a
-        # stale user authorization. Instance-scoped by key (children never
-        # inherit — their sources are internal_*, S-06). The live 3-factor
-        # gate in daemon/tools/upgrade_tools.py reads it.
+        # content in hand). Only sources passing
+        # upgrade_journal.classify_user_origin (the single source of truth:
+        # exact "api" + registry-backed chat source_type — verdict §4,
+        # gate-bug-final-verdict.md) stamp the window; every other source
+        # (all internal_*, scheduler, cascade_resume, agent:*) CLEARS it —
+        # the window is strictly per-turn, so an agent-dispatched turn never
+        # inherits a stale user authorization. Instance-scoped by key
+        # (children never inherit — their sources are internal_*, S-06). The
+        # live 3-factor gate in daemon/tools/upgrade_tools.py reads it.
         self._user_origin_windows: dict[str, dict] = {}
+
+        # Per-instance LAST-STAMP OBSERVATION (W1 hardening — verdict §4:
+        # the gate refusal must name the OBSERVED source value, which cost a
+        # diagnostic cycle when it didn't). Written by stamp_user_origin_window
+        # on EVERY turn — stamped or cleared — with the observed source and
+        # the classifier's fail-closed detail token. Deliberately separate
+        # from _user_origin_windows: a CLEARED window must still be able to
+        # say why. In-memory only, dies with the daemon (the gate refusal
+        # degrades to "no stamp recorded" after a restart — still fail-closed).
+        self._user_origin_last_stamp: dict[str, dict] = {}
 
         # Per-instance DEFERRED SYSTEM-EXECUTION marker (D-FA1.4). The actor
         # tools (system_restart / system_upgrade) set it while arming (the
@@ -3602,11 +3614,23 @@ class InstanceManager:
 
         Called from the top of :meth:`_process_message_with_tracking` — the
         single funnel where the triggering message's source is known. A
-        source passing ``USER_ORIGIN_SOURCES`` stamps
+        source passing :func:`upgrade_journal.classify_user_origin` (the
+        single source of truth: exact ``"api"`` + registry-backed chat
+        source_type — verdict §4) stamps
         ``{source, message_id, stamped_at, expires_at}``; any other source
         clears the window (per-turn semantics: an agent/internal-originated
         turn must never inherit an earlier turn's user authorization).
-        Cheap, in-memory, never raises.
+
+        EVERY call also records the observation in
+        ``_user_origin_last_stamp`` (source + classifier detail) so the
+        live gate's refusal can name the failing source value (W1
+        hardening — verdict §4: a refusal that lists the rule but not the
+        observed value cost a diagnostic cycle).
+
+        Classification reads REGISTRY METADATA ONLY (``source_type`` is
+        daemon-controlled, write-once, never message-supplied); every
+        failure mode — unregistered id, registry unavailable, exception —
+        fails CLOSED (window cleared). Cheap, in-memory, never raises.
         """
         try:
             from daemon.tools.upgrade_journal import NONCE_TTL_S
@@ -3615,8 +3639,20 @@ class InstanceManager:
         try:
             from daemon.tools import upgrade_journal as _uj
 
-            if _uj.is_user_origin_source(source):
-                now = _uj.now_iso()
+            registry = getattr(self, "source_registry", None)
+            registry_get = registry.get if registry is not None else None
+            is_user, detail = _uj.classify_user_origin(source, registry_get)
+            now = _uj.now_iso()
+            last = getattr(self, "_user_origin_last_stamp", None)
+            if isinstance(last, dict):
+                last[instance_id] = {
+                    "source": source,
+                    "message_id": message_id,
+                    "stamped": is_user,
+                    "detail": detail,
+                    "stamped_at": now,
+                }
+            if is_user:
                 self._user_origin_windows[instance_id] = {
                     "source": source,
                     "message_id": message_id,
@@ -7227,14 +7263,15 @@ class InstanceManager:
         # STRICTLY ADDITIVE. This is the one funnel every dispatch lane
         # (API chat, external channels, internal reports, agent sends)
         # flows through with the triggering message's SOURCE + CONTENT id
-        # in hand. Whitelisted source → stamp the per-turn window the live
-        # 3-factor gate reads; any other source → clear it (per-turn
+        # in hand. User-origin source (upgrade_journal.classify_user_origin
+        # — registry-backed, verdict §4) → stamp the per-turn window the
+        # live 3-factor gate reads; any other source → clear it (per-turn
         # semantics — an agent/internal-originated turn never inherits an
         # earlier turn's user authorization). Silent resume is the ONLY
         # skip (no message is injected; the window keeps the original
         # turn's). M2 (P2.2 fix pass 2026-08-23): a NON-silent dispatch
         # with source=None must ALSO stamp — stamp_user_origin_window
-        # treats None as non-whitelisted and CLEARS the window, so a
+        # treats None as non-user-origin and CLEARS the window, so a
         # source-less dispatch no longer leaves a prior turn's user-origin
         # window alive (fail-closed direction).
         if not silent:

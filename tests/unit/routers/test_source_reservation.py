@@ -200,12 +200,13 @@ class TestChatSourcePrefixesConstant:
 
     Mirrors ``TestReservedSourcePrefixesConstant`` above. The chat
     prefixes are the THREE interactive-chat members of the broader
-    FIVE-member user-origin set (``_USER_ORIGIN_PREFIXES``,
-    ``daemon/tools/upgrade_journal.py``): ``webhook:`` /
-    ``whatsapp:`` are deliberately EXCLUDED (CI/automation vs
-    interactive chat). Any future member change MUST edit this pin
-    AND the ``is_chat_source`` helper consumers in the same commit —
-    a silent membership change would re-route lane traffic."""
+    user-origin classification (``USER_ORIGIN_CHAT_SOURCE_TYPES``,
+    ``daemon/tools/upgrade_journal.py`` — registry-backed, carries
+    ``whatsapp`` too): ``webhook:`` / ``whatsapp:`` are deliberately
+    EXCLUDED here (CI/automation vs interactive chat). Any future
+    member change MUST edit this pin AND the ``is_chat_source`` helper
+    consumers in the same commit — a silent membership change would
+    re-route lane traffic."""
 
     def test_chat_source_prefixes_exist(self):
         """The tuple MUST live in ``daemon.constants`` with the exact

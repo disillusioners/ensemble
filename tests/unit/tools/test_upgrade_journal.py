@@ -36,8 +36,10 @@ Coverage groups (phase2-plan T4/T5 acceptance):
   allowlist (API-key-class + ENSEMBLE_UPGRADE_LIVE absent) and whose
   process group is independent of the parent, and the static
   no-BashProcessRegistry assertion.
-* ``USER_ORIGIN_SOURCES`` — whitelist frozen from the actual dispatch
-  formats; every ``internal_*`` / agent / scheduler source fails closed.
+* ``classify_user_origin`` — registry-backed user-origin classification
+  (verdict §4): exact "api" + registered chat source_type; every
+  ``internal_*`` / agent / scheduler source fails closed, prefix dialects
+  are dead, and the nonce content check is hyphen-tolerant on both sides.
 
 All fixtures live under ``tmp_path`` — never a real install dir, never
 live. lib.sh interop runs ``bash`` subprocesses with a scrubbed env.
@@ -51,6 +53,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -61,10 +64,11 @@ from daemon.tools.upgrade_journal import (
     JOURNAL_EMPTY,
     NONCE_RE,
     NONCE_TTL_S,
-    USER_ORIGIN_SOURCES,
+    USER_ORIGIN_CHAT_SOURCE_TYPES,
     JournalTorn,
     PendingAction,
     PendingOp,
+    classify_user_origin,
     is_user_origin_source,
     journal_init,
     journal_read,
@@ -77,6 +81,7 @@ from daemon.tools.upgrade_journal import (
     mint_nonce,
     nonce_grouped,
     nonce_in_content,
+    user_origin_sources_display,
 )
 
 # Repo root: tests/unit/tools/test_upgrade_journal.py -> parents[3].
@@ -591,6 +596,19 @@ class TestNonceHelpers:
         assert not nonce_in_content(nonce, "")
         assert not nonce_in_content(nonce, None)
 
+    def test_nonce_in_content_hyphen_regrouped_echo(self) -> None:
+        """Hardening (c) — cycle-1 secondary failure (verdict §1): the user
+        echoed 'CONFIRM-AI3N-A5TS' for minted 'CONFIRM-AI3NA5TS'. The check
+        is normalized on BOTH sides (nonce_normalize strips dashes/
+        whitespace), so a regrouped/dash-dropped echo passes and a wrong
+        nonce still fails. Regression pin: this must NEVER regress to an
+        exact-match comparison."""
+        minted = "CONFIRM-AI3NA5TS"
+        assert nonce_in_content(minted, "CONFIRM-AI3N-A5TS")  # regrouped
+        assert nonce_in_content(minted, "confirmai3na5ts")  # dashes dropped
+        assert nonce_in_content(minted, "ok: CONFIRM-AI3N-A5TS please")
+        assert not nonce_in_content(minted, "CONFIRM-AI3N-A5TX")  # wrong body
+
 
 class TestNonceStore:
     def _store(self, install: Path, run_id: str = "r-nonce-1") -> PendingAction:
@@ -983,23 +1001,205 @@ class TestExecutorSpawn:
         assert "NOT registered" in source
 
 
-# ── USER_ORIGIN_SOURCES (D-FA3.1 — assumption #1 closure) ────────────────────
+# ── User-origin classification (registry-backed — verdict §4) ────────────────
 
 
 class TestUserOriginSources:
+    """Registry-backed classification (verdict §4 — the static prefix
+    whitelist was a dialect mismatch and is DEAD). Every test here drives
+    classify_user_origin / is_user_origin_source / the REAL stamp site
+    against a FAKE registry table — never a live daemon, never a DB."""
+
+    @staticmethod
+    def _adapter(source_type: Any) -> Any:
+        """A fake adapter exposing ``source_type`` like the real ones
+        (daemon/sources/base.py:82-84 — config.source_type)."""
+
+        class _Adapter:
+            pass
+
+        return type("Adapter", (), {"source_type": source_type})()
+
+    @staticmethod
+    def _registry(table: dict) -> Any:
+        """Minimal fake of the sources-registry surface the classifier
+        uses (``registry.get``; registry.py:236 returns the adapter or
+        None)."""
+
+        class _Registry:
+            def __init__(self, t: dict) -> None:
+                self._t = t
+
+            def get(self, source_id: str) -> Any:
+                return self._t.get(source_id)
+
+        return _Registry(table)
+
+    # ── static exact-match path ──────────────────────────────────────────
+
     def test_exact_api_whitelisted(self) -> None:
         assert is_user_origin_source("api") is True
+        assert classify_user_origin("api", None) == (True, "exact:api")
 
-    def test_channel_prefixes_whitelisted(self) -> None:
-        for source in (
-            "telegram:user:1",
-            "telegram:123",
-            "webhook:hook-a:user:9",
-            "whatsapp:user:2",
-            "discord:user:3",
-            "slack:user:4",
-        ):
-            assert is_user_origin_source(source) is True, source
+    def test_api_with_uid_never_takes_the_exact_path(self) -> None:
+        """VERDICT-PINNED: full-STRING equality only. A hostile source
+        REGISTERED under id 'api' mints 'api:<uid>' — it must NOT arm via
+        the exact-match path (it goes through the registry like any other
+        source; with a non-chat type it does not arm at all)."""
+        registry = self._registry({"api": self._adapter("scheduler")})
+        ok, detail = classify_user_origin("api:spoofed-uid", registry.get)
+        assert ok is False
+        assert detail != "exact:api"
+        assert detail == "source-type-not-chat:'scheduler'"
+
+    def test_api_lookalikes_fail_closed(self) -> None:
+        """MINOR-5 (security review round 1): fail-closed look-alike pins.
+        Exact FULL-STRING equality only — a future whitespace- or
+        case-normalization refactor must not silently widen the F2
+        exact-match arm ("Api" case-fold, " api"/"api " strip,
+        "api\\u200b" zero-width-space normalize)."""
+        for lookalike in ("Api", " api", "api ", "api\u200b"):
+            assert is_user_origin_source(lookalike) is False, repr(lookalike)
+            # Also with a registry present: a look-alike is NOT "api" and
+            # its segment does not resolve in a sane registry table.
+            registry = self._registry({"my-discord-bot": self._adapter("discord")})
+            assert is_user_origin_source(lookalike, registry.get) is False, (
+                repr(lookalike)
+            )
+
+    def test_colon_only_and_empty_segment_fail_closed(self) -> None:
+        """MINOR-5: colon-only / empty-first-segment source strings never
+        arm — a future split() refactor must not start treating ':' / ':x'
+        / '::::' as armable id patterns."""
+        for source in (":", ":x", "::::"):
+            assert is_user_origin_source(source) is False, repr(source)
+
+    def test_f2_boundary_registered_chat_id_pattern_arms_by_design(self) -> None:
+        """MINOR-3 (security review round 1): boundary-pin the ACCEPTED F2
+        scope. vs the old static whitelist, the STRING SET that can arm via
+        the unauth-loopback body.source grows from {"api"} to {"api"} ∪
+        {registered-chat-id patterns} — the CAPABILITY delta is zero (an
+        attacker who can forge body.source could already send "api"; F2
+        forging is the separately-fenced pre-existing exposure). This test
+        DOCUMENTS that design; it does not widen it: only the write-once,
+        daemon-controlled source_type decides — never the id string."""
+        # A registered chat-typed adapter's id pattern arms — by design.
+        registry = self._registry({"chat-bot": self._adapter("discord")})
+        assert is_user_origin_source("chat-bot:attacker:room", registry.get) is True
+        # Same id pattern with a NON-chat type does NOT arm: the id string
+        # confers nothing; registry metadata (source_type) is the decider.
+        non_chat = self._registry({"chat-bot": self._adapter("scheduler")})
+        assert is_user_origin_source("chat-bot:attacker:room", non_chat.get) is False
+        # An UNREGISTERED id pattern does NOT arm (fail-closed).
+        assert is_user_origin_source("ghost-bot:attacker:room", registry.get) is False
+
+    # ── registry-backed chat classification ──────────────────────────────
+
+    def test_arbitrary_id_registered_chat_source_stamps(self) -> None:
+        """THE live-defect shape (verdict §1): 'my-discord-bot:<uid>:<cid>'
+        with a REGISTERED discord-typed adapter — must STAMP. No operator
+        rename needed; the id is irrelevant, the registry type decides."""
+        from daemon.models.source import SourceType
+
+        registry = self._registry(
+            {"my-discord-bot": self._adapter(SourceType.discord)}
+        )
+        source = "my-discord-bot:1536944374972416070:1536944376125587492"
+        assert classify_user_origin(source, registry.get) == (
+            True,
+            "registered-chat:discord",
+        )
+        assert is_user_origin_source(source, registry.get) is True
+
+    def test_all_chat_source_types_arm_via_registry(self) -> None:
+        for st in ("telegram", "slack", "discord", "whatsapp"):
+            registry = self._registry({"bot": self._adapter(st)})
+            assert is_user_origin_source(f"bot:user:1", registry.get) is True, st
+
+    def test_type_not_name_classification(self) -> None:
+        """Classification reads source_TYPE, not the id string: an id that
+        contains 'discord' but registers a non-chat type does NOT arm; a
+        chat-typed adapter with an arbitrary, non-hinting id DOES."""
+        registry = self._registry(
+            {
+                "my-discord-bot": self._adapter("scheduler"),  # name lies
+                "plain-scheduler": self._adapter("scheduler"),
+                "main-bot": self._adapter("discord"),  # type decides
+                "hooky": self._adapter("webhook"),  # webhook NEVER arms
+            }
+        )
+        # id hints discord, type is not chat → fail-closed.
+        ok, detail = classify_user_origin("my-discord-bot:1", registry.get)
+        assert (ok, detail) == (False, "source-type-not-chat:'scheduler'")
+        # chat type under a non-obvious id → arms.
+        assert classify_user_origin("main-bot:2", registry.get) == (
+            True,
+            "registered-chat:discord",
+        )
+        # webhook type is EXCLUDED (no WebhookAdapter exists — verdict §1).
+        ok, detail = classify_user_origin("hooky:3", registry.get)
+        assert (ok, detail) == (False, "source-type-not-chat:'webhook'")
+        # non-chat id, non-chat type.
+        assert is_user_origin_source("plain-scheduler:4", registry.get) is False
+
+    def test_unregistered_id_fails_closed(self) -> None:
+        registry = self._registry({"my-discord-bot": self._adapter("discord")})
+        ok, detail = classify_user_origin("totally-unknown:1:2", registry.get)
+        assert (ok, detail) == (False, "unregistered")
+        # Deregistered mid-session (adapter removed from the table): same.
+        registry._t.pop("my-discord-bot")
+        ok, detail = classify_user_origin("my-discord-bot:9", registry.get)
+        assert (ok, detail) == (False, "unregistered")
+
+    def test_registry_unavailable_and_raising_fail_closed(self) -> None:
+        # No registry at all (bootstrap window / bare manager): only 'api'.
+        assert classify_user_origin("discord:1", None) == (
+            False,
+            "registry-unavailable",
+        )
+
+        class _Boom:
+            def get(self, source_id: str) -> Any:
+                raise RuntimeError("registry wedged")
+
+        ok, detail = classify_user_origin("discord:1", _Boom().get)
+        assert (ok, detail) == (False, "registry-error:RuntimeError")
+
+    def test_detail_token_rendering_is_bounded(self) -> None:
+        """MINOR-1 (security review round 1): the ``source-type-not-chat``
+        detail token must be BOUNDED — never a raw ``{st_value!r}``, which
+        would leak enum class names ("SourceType.discord") and, for
+        default-repr pathological objects, memory addresses into gate
+        refusal reasons. Strings render value-capped; non-strings render
+        their TYPE NAME only."""
+        # (a) Non-string source_type: type name only — no class-name path,
+        #     no '<... object at 0x...>' address, no repr payload.
+        class _Pathological:
+            def __repr__(self) -> str:  # would leak an address if rendered
+                return "<_Pathological object at 0x7f00deadbeef>"
+
+            __str__ = __repr__
+
+        registry = self._registry({"bot": self._adapter(_Pathological())})
+        ok, detail = classify_user_origin("bot:1", registry.get)
+        assert ok is False
+        assert detail == "source-type-not-chat:_Pathological"
+        assert "0x" not in detail and "object at" not in detail
+
+        # (b) A pathologically LONG string value is capped in the token.
+        registry = self._registry({"bot": self._adapter("x" * 500)})
+        ok, detail = classify_user_origin("bot:2", registry.get)
+        assert ok is False
+        assert detail == f"source-type-not-chat:{'x' * 40!r}"
+        assert len(detail) <= len("source-type-not-chat:") + 42
+
+        # (c) Established short-string tokens stay stable (gate-refusal
+        #     compatibility): repr-style, uncapped-needed, distinguishable.
+        registry = self._registry({"bot": self._adapter("webhook")})
+        ok, detail = classify_user_origin("bot:3", registry.get)
+        assert (ok, detail) == (False, "source-type-not-chat:'webhook'")
+
+    # ── reserved internal lanes: absolute fail-closed ────────────────────
 
     def test_internal_and_spoofed_sources_fail_closed(self) -> None:
         for source in (
@@ -1017,15 +1217,38 @@ class TestUserOriginSources:
             None,                         # absent
         ):
             assert is_user_origin_source(source) is False, source
+            # With a registry present the reserved lanes STILL fail closed
+            # (belt-and-suspenders: even a mis-registered reserved id).
+            registry = self._registry({"agent": self._adapter("discord")})
+            assert is_user_origin_source(source, registry.get) is False, source
 
-    def test_frozen_whitelist_content(self) -> None:
-        assert USER_ORIGIN_SOURCES == frozenset(
-            {"api", "telegram:", "webhook:", "whatsapp:", "discord:", "slack:"}
+    def test_misregistered_reserved_id_cannot_arm(self) -> None:
+        """Even if an operator registers source_id='agent' with a chat
+        type, 'agent:<caller>' (the job-lane override) stays OUTSIDE
+        user-origin — is_reserved_source is checked BEFORE the registry."""
+        registry = self._registry({"agent": self._adapter("discord")})
+        ok, detail = classify_user_origin("agent:ari", registry.get)
+        assert (ok, detail) == (False, "reserved-internal")
+
+    # ── display constant accuracy ────────────────────────────────────────
+
+    def test_frozen_chat_type_set(self) -> None:
+        assert USER_ORIGIN_CHAT_SOURCE_TYPES == frozenset(
+            {"telegram", "slack", "discord", "whatsapp"}
         )
+
+    def test_display_names_the_real_rule(self) -> None:
+        display = user_origin_sources_display()
+        assert '"api"' in display
+        for st in sorted(USER_ORIGIN_CHAT_SOURCE_TYPES):
+            assert st in display, display
+        assert "webhook" in display  # the exclusion is stated, not hidden
+
+    # ── stamp-site integration (REAL manager method) ─────────────────────
 
     def test_stamp_site_never_stamps_for_spoofed_origin(self) -> None:
         """The REAL stamp site (manager.stamp_user_origin_window): a
-        non-whitelisted source must NOT stamp a window — and must CLEAR any
+        non-user-origin source must NOT stamp a window — and must CLEAR any
         earlier window (per-turn semantics: an agent-originated turn never
         inherits a prior turn's user authorization)."""
         from daemon.manager import InstanceManager
@@ -1055,6 +1278,61 @@ class TestUserOriginSources:
         # survives an agent-originated follow-up turn).
         InstanceManager.stamp_user_origin_window(harness, "inst-1", "agent:worker", "m-5")
         assert "inst-1" not in harness._user_origin_windows
+
+    def test_stamp_site_registry_backed_classification(self) -> None:
+        """The REAL stamp site with a REAL-shaped registry fixture: the
+        live-defect source string ('my-discord-bot:<uid>:<cid>', verdict
+        §1) now STAMPS; an unregistered id CLEARS; and every observation —
+        stamped or cleared — is recorded in ``_user_origin_last_stamp``
+        with the classifier's detail token (W1 hardening: the gate refusal
+        names the observed source)."""
+        from daemon.manager import InstanceManager
+        from daemon.models.source import SourceType
+
+        registry = self._registry(
+            {"my-discord-bot": self._adapter(SourceType.discord)}
+        )
+        harness = object.__new__(InstanceManager)  # skip heavy __init__
+        harness._user_origin_windows = {}
+        harness._user_origin_last_stamp = {}
+        harness.source_registry = registry
+
+        # (i) arbitrary-id registered chat source STAMPS (the live defect).
+        src = "my-discord-bot:1536944374972416070:1536944376125587492"
+        InstanceManager.stamp_user_origin_window(harness, "inst-9", src, "m-9")
+        assert harness._user_origin_windows["inst-9"]["source"] == src
+        last = harness._user_origin_last_stamp["inst-9"]
+        assert last["source"] == src
+        assert last["stamped"] is True
+        assert last["detail"] == "registered-chat:discord"
+
+        # (ii) unregistered id CLEARS the window (and records why).
+        InstanceManager.stamp_user_origin_window(harness, "inst-9", "ghost:1", "m-10")
+        assert "inst-9" not in harness._user_origin_windows
+        last = harness._user_origin_last_stamp["inst-9"]
+        assert last["source"] == "ghost:1"
+        assert last["stamped"] is False
+        assert last["detail"] == "unregistered"
+
+    def test_stamp_site_registry_fault_fails_closed(self) -> None:
+        """A raising registry must never break dispatch NOR leave a window
+        behind (fail-closed — verdict §4 point 4)."""
+        from daemon.manager import InstanceManager
+
+        class _BoomRegistry:
+            def get(self, source_id: str) -> Any:
+                raise RuntimeError("registry wedged")
+
+        harness = object.__new__(InstanceManager)
+        harness._user_origin_windows = {"inst-b": {"source": "api"}}
+        harness._user_origin_last_stamp = {}
+        harness.source_registry = _BoomRegistry()
+        InstanceManager.stamp_user_origin_window(harness, "inst-b", "discord:1", "m-b")
+        assert "inst-b" not in harness._user_origin_windows
+        assert harness._user_origin_last_stamp["inst-b"]["stamped"] is False
+        assert harness._user_origin_last_stamp["inst-b"]["detail"] == (
+            "registry-error:RuntimeError"
+        )
 
     async def test_m2_seam_nonsilent_none_source_clears_window(self) -> None:
         """M2 (P2.2 fix pass 2026-08-23; seam test added P2.3 B3.5

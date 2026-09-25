@@ -77,11 +77,11 @@ from .upgrade_journal import (
     JournalTorn,
     PendingAction,
     PendingOp,
-    USER_ORIGIN_SOURCES,
     iso_plus,
     mint_nonce,
     mint_run_id,
     nonce_grouped,
+    user_origin_sources_display,
     lock_acquire as journal_lock_acquire,
     lock_release as journal_lock_release,
     lock_run_id as journal_lock_run_id,
@@ -153,7 +153,7 @@ journal (atomic writes) and the daemonized pipeline scripts.
 #     fragment (confirmation protocol) in tools_note.md.               [DONE B]
 #  9. Actor tools system_restart / system_upgrade bodies + write-side
 #     journal helpers (daemon/tools/upgrade_journal.py) + daemonized
-#     executor + nonce / USER_ORIGIN_SOURCES gate + post-turn trigger. [DONE B]
+#     executor + nonce / user-origin classification gate + post-turn trigger. [DONE B]
 # 10. Docs: CATEGORY_DOC above; docs/ has no per-tool catalog to update
 #     (tool_help reads _full_doc_).                                     [DONE A]
 # ───────────────────────────────────────
@@ -1481,7 +1481,7 @@ def create_upgrade_tools(
     @tool
     async def release_info(
         target_env: Literal["dev", "demo", "live", "sandbox"] | None = None,
-        section: Literal["releases", "current", "journal", "changelog", "all"] = "all",
+        section: Literal["releases", "current", "journal", "changelog", "user-origin", "all"] = "all",
         version: str | None = None,
     ) -> str:
         """Read-only release/upgrade pipeline snapshot for THIS daemon's environment. Use tool_help("release_info") for details."""
@@ -1631,11 +1631,80 @@ def create_upgrade_tools(
                         block.append(f"  {r.name} — {r.manifest_error or 'no manifest'}")
                 return block
 
+            def _user_origin_block() -> list[str]:
+                # User-origin drift probe (verdict §4 hardening — the W1
+                # anomaly: no operator-facing surface warned that a source
+                # id like "my-discord-bot" couldn't arm the gate). Chosen
+                # over a startup probe because (a) it surfaces at the
+                # operator's decision point — the upgrade ceremony — where
+                # the information is actionable, and (b) adapters register
+                # asynchronously after boot (autostart delay), so a startup
+                # probe would race registration and mostly report empty.
+                # CONSUMES classify_user_origin — no second classification
+                # lives here.
+                block: list[str] = []
+                registry = getattr(manager, "source_registry", None)
+                listing = None
+                if registry is not None:
+                    try:
+                        candidate = registry.list_adapters()
+                        listing = candidate if isinstance(candidate, list) else None
+                    except Exception:
+                        listing = None
+                if not listing:
+                    block.append(
+                        "user-origin: sources registry unavailable/empty — "
+                        'only exact "api" can arm the live-upgrade gate '
+                        "(drift probe n/a)"
+                    )
+                    return block
+                registry_get = registry.get
+                arming: list[str] = []
+                drift: list[str] = []
+                chat_hints = ("telegram", "slack", "discord", "whatsapp")
+                for info in listing:
+                    if not isinstance(info, dict):
+                        continue
+                    sid = info.get("source_id")
+                    st_value = getattr(info.get("source_type"), "value", info.get("source_type"))
+                    arms, detail = uj.classify_user_origin(f"{sid}:probe", registry_get)
+                    label = f"{sid!r} (source_type={st_value!r})"
+                    if arms:
+                        arming.append(label)
+                    sid_l = str(sid).lower()
+                    hinted = any(h in sid_l for h in chat_hints)
+                    if hinted and not arms:
+                        drift.append(
+                            f"{label} — id looks like a chat platform but "
+                            f"classification={detail!r}: does NOT arm"
+                        )
+                    elif not hinted and arms:
+                        drift.append(
+                            f"{label} — ARMS the live-upgrade gate despite a "
+                            "non-obvious id (registry source_type decides, "
+                            "not the name)"
+                        )
+                block.append(
+                    f"user-origin: {len(arming)} registered source(s) can arm "
+                    "the live-upgrade gate: "
+                    + (", ".join(arming) if arming else "none")
+                )
+                if drift:
+                    for d in drift:
+                        block.append(f"user-origin DRIFT: {d}")
+                else:
+                    block.append(
+                        "user-origin drift: none (classification matches "
+                        "naive id expectation)"
+                    )
+                return block
+
             if section == "all":
                 lines.extend(await _current_block(include_journal=False))
                 lines.extend(_journal_block(with_raw=False))
                 lines.extend(_releases_block())
                 lines.extend(_changelog_block())
+                lines.extend(_user_origin_block())
                 lines.append(_upgrade_log_tail(install_dir))
             elif section == "current":
                 lines.extend(await _current_block())
@@ -1647,10 +1716,13 @@ def create_upgrade_tools(
                 lines.extend(_releases_block())
             elif section == "changelog":
                 lines.extend(_changelog_block())
+            elif section == "user-origin":
+                lines.append(_env_triple_line(self_env, install_dir, port))
+                lines.extend(_user_origin_block())
             else:
                 return (
                     f"Error: release_info — unknown section '{section}' "
-                    "(expected releases|current|journal|changelog|all)"
+                    "(expected releases|current|journal|changelog|user-origin|all)"
                 )
             return "\n".join(lines)
         except Exception as exc:  # never raise — structured error string
@@ -1677,7 +1749,7 @@ Args:
         signal), only an omitted target_env or "dev" is accepted.
     section: One of:
         * "all" (default) — current + journal + releases + changelog +
-          upgrade.log tail.
+          user-origin drift probe + upgrade.log tail.
         * "current" — current symlink, journal current/previous/in-flight,
           /livez + /readyz self-probes, version smoke vs the current
           manifest's binary_version, launcher state.
@@ -1691,6 +1763,10 @@ Args:
           releases.
         * "changelog" — per-release manifest identity summary (the P2.1
           manifest has no changelog text field; nothing is invented).
+        * "user-origin" — which registered sources can arm the live-upgrade
+          gate + drift between naive id expectation and the registry-backed
+          classification (verdict §4 hardening; consumes
+          classify_user_origin — no second classification here).
     version: Optional specific release name (e.g. "1.2.3") — filters the
         changelog section / adds a release-detail focus. Unknown version →
         "Error: release_info — unknown version ...".
@@ -2391,11 +2467,33 @@ never decides go/rollback).
                 if isinstance(windows, dict):
                     window = windows.get(current_instance_id)
                 if window is None:
-                    factor_failures.append(
-                        "user-confirmation-missing: this turn was not triggered "
-                        "by a whitelisted user-origin message "
-                        f"(USER_ORIGIN_SOURCES={sorted(USER_ORIGIN_SOURCES)})"
+                    # W1 hardening (verdict §4): name the OBSERVED source of
+                    # this turn — the stamp site records every observation
+                    # (stamped or cleared) with the classifier's fail-closed
+                    # detail token. A refusal that lists the rule but not the
+                    # failing value cost a diagnostic cycle on live.
+                    last_stamps = getattr(manager, "_user_origin_last_stamp", None)
+                    observed = (
+                        last_stamps.get(current_instance_id)
+                        if isinstance(last_stamps, dict)
+                        else None
                     )
+                    if isinstance(observed, dict) and observed.get("source") is not None:
+                        factor_failures.append(
+                            "user-confirmation-missing: this turn was not "
+                            "triggered by a user-origin message — observed "
+                            f"source {observed.get('source')!r} classified "
+                            f"{observed.get('detail', '?')!r} "
+                            f"(classification: {user_origin_sources_display()})"
+                        )
+                    else:
+                        factor_failures.append(
+                            "user-confirmation-missing: this turn was not "
+                            "triggered by a user-origin message (no stamp "
+                            "recorded this turn — daemon restart wipes the "
+                            "in-memory windows) "
+                            f"(classification: {user_origin_sources_display()})"
+                        )
                 else:
                     expires = parse_iso_utc(window.get("expires_at"))
                     # Fail-closed (review nit #5): an unparseable/absent
@@ -2405,7 +2503,8 @@ never decides go/rollback).
                     if expires is None or datetime.now(tz=timezone.utc) > expires:
                         factor_failures.append(
                             "user-confirmation-missing: the user-origin window "
-                            f"expired at {window.get('expires_at')} — ask again in "
+                            f"(source {window.get('source')!r}) expired at "
+                            f"{window.get('expires_at')} — ask again in "
                             "a fresh user turn"
                         )
                     else:
@@ -2674,14 +2773,17 @@ Args:
         user must have echoed back in their reply.
 
 LIVE 3-factor gate (§4.3, enforced server-side BEFORE any live action):
-(1) user_confirmed=true param; (2) this turn triggered by a
-whitelisted user-origin message (USER_ORIGIN_SOURCES: api + the
-telegram/webhook/whatsapp/discord/slack channel prefixes); (3) that
-HUMAN message's CONTENT contains the action-binding nonce
-(single-use, TTL 15min, persisted in the journal — survives daemon
-death). A fabricated param fails (2); a self-echoed nonce in an
-agent/internal-origin message fails (2)+(3). NOTE: this initiative
-never exercises the live happy path — live refusals only.
+(1) user_confirmed=true param; (2) this turn triggered by a user-origin
+message — registry-backed classification (verdict §4): the exact source
+"api" (HTTP chat path), or any REGISTERED source whose daemon-controlled
+source_type is one of telegram/slack/discord/whatsapp (see
+upgrade_journal.classify_user_origin — the single source of truth;
+webhook has no adapter and never arms); (3) that HUMAN message's CONTENT
+contains the action-binding nonce (single-use, TTL 15min, persisted in
+the journal — survives daemon death). A fabricated param fails (2); a
+self-echoed nonce in an agent/internal-origin message fails (2)+(3).
+NOTE: this initiative never exercises the live happy path — live
+refusals only.
 
 Refusal reasons (distinct tokens): invalid-target-env,
 env-marker-absent, env-self-match, target-not-staged,

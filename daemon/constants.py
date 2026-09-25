@@ -95,9 +95,11 @@ CHAT_WORKER_POOL_SIZE: int = 2  # Dedicated chat-lane worker threads (telegram/s
 # Interactive-chat prefixes ONLY. ``webhook:`` / ``whatsapp:`` are
 # explicitly EXCLUDED from this lane (deliberate scope decision:
 # webhook ≈ CI/automation, not interactive chat) — see
-# ``_USER_ORIGIN_PREFIXES`` in ``daemon/tools/upgrade_journal.py:1077-1079``
-# for the broader FIVE-member user-origin set; this tuple is the
-# THREE-member interactive-chat subset. The asymmetry is pinned by
+# ``USER_ORIGIN_CHAT_SOURCE_TYPES`` in ``daemon/tools/upgrade_journal.py``
+# for the broader FOUR-member (registry source_type) user-origin gate set;
+# this tuple is the THREE-member interactive-chat lane subset (prefix-matched
+# ids, a different mechanism from the registry classification). The
+# asymmetry is pinned by
 # ``tests/unit/routers/test_source_reservation.py::
 # TestChatSourcePrefixesConstant`` and the ``is_chat_source`` helper
 # pins (``webhook:gh-hook`` / ``whatsapp:1234`` → False).
@@ -788,8 +790,9 @@ def is_chat_source(source: str | None) -> bool:
     ``is_chat_source("webhook:gh-hook")`` and
     ``is_chat_source("whatsapp:1234")`` return False. See the
     :data:`CHAT_SOURCE_PREFIXES` provenance comment above and
-    ``_USER_ORIGIN_PREFIXES`` (``daemon/tools/upgrade_journal.py``)
-    for the broader user-origin set.
+    ``USER_ORIGIN_CHAT_SOURCE_TYPES`` (``daemon/tools/upgrade_journal.py``,
+    the registry-backed live-upgrade gate set) for the broader
+    user-origin classification.
     """
     if not isinstance(source, str) or not source:
         return False

@@ -1385,7 +1385,7 @@ class TestAutoResolution:
             }
         )
         assert _refusal_reason(out_armed) == "user-confirmation-missing", out_armed
-        assert "whitelisted user-origin" in out_armed
+        assert "user-origin message" in out_armed
         # Nothing armed; no markers; no spawn.
         assert manager.set_pending_system_execution.call_count == 0
 
@@ -2440,7 +2440,7 @@ class TestLiveThreeFactorGate:
              "user_confirmed": True, "nonce": grouped}
         )
         assert _refusal_reason(out) == "user-confirmation-missing"
-        assert "whitelisted user-origin" in out
+        assert "user-origin message" in out
 
     async def test_factor2_window_expired(self, live_harness) -> None:
         live = live_harness
@@ -2476,7 +2476,7 @@ class TestLiveThreeFactorGate:
              "user_confirmed": True}
         )
         assert _refusal_reason(out) == "user-confirmation-missing"
-        assert "whitelisted user-origin" in out  # factor 2 is the binding one
+        assert "user-origin message" in out  # factor 2 is the binding one
         # Nothing armed by the fabricated call.
         assert live["markers"] == []
 
@@ -2485,7 +2485,7 @@ class TestLiveThreeFactorGate:
         nonce string + NO genuine user-origin window → REFUSED. This is
         the user-direction hard invariant: the gate cannot be bypassed
         by supplying ANY nonce string. Without factor 2 (the server-
-        side window the dispatch seam stamps on whitelisted user-
+        side window the dispatch seam stamps on genuine user-
         origin turns), factor 1 (user_confirmed param) and factor 3
         (nonce content match) cannot unlock live.
 
@@ -2513,7 +2513,7 @@ class TestLiveThreeFactorGate:
         )
         # The gate cannot be bypassed — factor 2 binds (no window).
         assert _refusal_reason(out) == "user-confirmation-missing", out
-        assert "whitelisted user-origin" in out, out
+        assert "user-origin message" in out, out
         # And the fabricated nonce is not in the journal's pending_actions
         # (the gate never reached the nonce-content check).
         data = uj.journal_read(live["install"])
@@ -2834,7 +2834,7 @@ class TestForgedSourceDispatchSeam:
              "user_confirmed": True, "nonce": grouped}
         )
         assert _refusal_reason(out) == "user-confirmation-missing", out
-        assert "whitelisted user-origin" in out
+        assert "user-origin message" in out
         assert live["markers"] == []  # nothing armed
 
     async def test_empty_caller_hostile_source_never_verbatim(
@@ -2844,7 +2844,7 @@ class TestForgedSourceDispatchSeam:
         derivation is UNCONDITIONAL on the job_create path — the
         empty-caller fallback must not trust the LLM-authored ``source``
         param verbatim either, and must never mint a whitelisted source
-        ("api" is in USER_ORIGIN_SOURCES). Mirrors job_continue's F3
+        ("api" arms the gate via exact match). Mirrors job_continue's F3
         fallback: ``internal_agent:unknown`` — non-whitelisted, no window."""
         live = live_harness
         captured: dict[str, Any] = {}
@@ -2879,11 +2879,16 @@ class TestForgedSourceDispatchSeam:
             "empty-caller fallback must never mint/trust a whitelisted "
             f"source, got {captured.get('source')!r}"
         )
-        # The REAL stamp site agrees: the fallback source is not user-origin.
+        # The REAL stamp site agrees: the fallback source is not user-origin
+        # (explicit registry-less classification → fail-closed; the
+        # reserved-internal guard rejects it even WITH a registry).
         from daemon.manager import InstanceManager
-        from daemon.tools.upgrade_journal import is_user_origin_source
+        from daemon.tools.upgrade_journal import classify_user_origin
 
-        assert is_user_origin_source(captured["source"]) is False
+        assert classify_user_origin(captured["source"], None) == (
+            False,
+            "reserved-internal",
+        )
         mgr = object.__new__(InstanceManager)  # skip heavy __init__
         mgr._user_origin_windows = {}
         mgr.stamp_user_origin_window(INSTANCE_ID, "api", "m-user-turn")
@@ -2891,6 +2896,223 @@ class TestForgedSourceDispatchSeam:
         mgr.stamp_user_origin_window(INSTANCE_ID, captured["source"], "m-agent-turn")
         assert INSTANCE_ID not in mgr._user_origin_windows  # fallback → cleared
         assert live["markers"] == []  # nothing armed by this seam check
+
+
+class TestRegistryBackedUserOriginGate:
+    """Verdict §4 acceptance: the window factor is REGISTRY-BACKED. All
+    fixtures are fakes (tables of adapter stand-ins) — no live daemon,
+    no DB, no arming (the live happy path stays unexercised, per the
+    tool contract; the gate is proven at factor boundaries instead)."""
+
+    @staticmethod
+    def _fake_registry(table: dict) -> Any:
+        """Fake registry: maps source_id → source_type VALUE; ``get``
+        returns an adapter stand-in exposing ``.source_type`` (the real
+        registry returns adapters — base.py:82-84)."""
+
+        class _Adapter:
+            def __init__(self, st: Any) -> None:
+                self.source_type = st
+
+        class _Registry:
+            def __init__(self, t: dict) -> None:
+                self._t = {sid: _Adapter(st) for sid, st in t.items()}
+
+            def get(self, source_id: str) -> Any:
+                return self._t.get(source_id)
+
+        return _Registry(table)
+
+    def _stamped_manager(self, table: dict, source: str, msg_id: str):
+        """A REAL InstanceManager stamp site over a fake registry; returns
+        (manager, windows-dict, last-stamp-dict)."""
+        from daemon.manager import InstanceManager
+
+        mgr = object.__new__(InstanceManager)  # skip heavy __init__
+        windows: dict[str, dict] = {}
+        last: dict[str, dict] = {}
+        mgr._user_origin_windows = windows
+        mgr._user_origin_last_stamp = last
+        mgr.source_registry = self._fake_registry(table)
+        mgr.stamp_user_origin_window(INSTANCE_ID, source, msg_id)
+        return mgr, windows, last
+
+    async def test_registered_chat_source_window_reaches_factor3(
+        self, live_harness
+    ) -> None:
+        """Brief-add (i) at gate level: a window stamped by the REAL stamp
+        site from the live-defect source string ('my-discord-bot:<uid>:<cid>'
+        with a REGISTERED discord-typed adapter) passes factor 2 — the gate
+        proceeds past the window check and dies at factor 3 (row content),
+        WITHOUT arming anything."""
+        from daemon.models.source import SourceType
+
+        live = live_harness
+        table = {"my-discord-bot": SourceType.discord}
+        src = "my-discord-bot:1536944374972416070:1536944376125587492"
+        msg_id = "m-chat-turn"
+        _, windows, last = self._stamped_manager(table, src, msg_id)
+        assert windows.get(INSTANCE_ID), "chat-origin turn must stamp"
+        live["windows"].clear()
+        live["windows"].update(windows)
+        # Queue row for the triggering message, WITHOUT the nonce → the
+        # gate must reach factor 3 and refuse THERE (factor 2 passed).
+        row = MagicMock(name="MessageRow")
+        row.content = "ok fine"
+        repo = MagicMock(name="queue_repo")
+        repo.get = MagicMock(return_value=row)
+        live["manager"]._queue_repository = repo
+
+        run_id, nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped}
+        )
+        assert _refusal_reason(out) == "user-confirmation-missing", out
+        assert "carrying nonce" in out, out          # factor 3 fired
+        assert "user-origin message" not in out, out  # factor 2 PASSED
+        assert last[INSTANCE_ID]["detail"] == "registered-chat:discord"
+        assert live["markers"] == []  # nothing armed
+
+    async def test_factor2_refusal_names_observed_source(self, live_harness) -> None:
+        """Hardening (a) — W1 anomaly: the factor-2 refusal names the
+        OBSERVED source value + the classifier's fail-closed detail, not
+        just the rule."""
+        live = live_harness
+        live["manager"]._user_origin_last_stamp = {
+            INSTANCE_ID: {
+                "source": "internal_agent:developer",
+                "message_id": "m-x",
+                "stamped": False,
+                "detail": "reserved-internal",
+                "stamped_at": uj.now_iso(),
+            }
+        }
+        await TestLiveThreeFactorGate._mint_nonce(live)
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": "CONFIRM-FABRICATED1"}
+        )
+        assert _refusal_reason(out) == "user-confirmation-missing", out
+        assert "observed source 'internal_agent:developer'" in out, out
+        assert "'reserved-internal'" in out, out
+        assert "classification:" in out, out
+        assert live["markers"] == []
+
+    async def test_unregistered_source_window_cleared_at_gate_level(
+        self, live_harness
+    ) -> None:
+        """Brief-add (ii) at gate level: an unregistered id stamped over a
+        registry fixture CLEARS any prior window — the gate refuses with
+        the observed-source detail."""
+        from daemon.models.source import SourceType
+
+        live = live_harness
+        table = {"my-discord-bot": SourceType.discord}
+        self._stamped_manager(table, "ghost-source:1:2", "m-ghost")
+        windows = live["windows"]
+        windows.clear()  # the real stamp site cleared it; mirror the funnel
+        live["manager"]._user_origin_last_stamp = {
+            INSTANCE_ID: {
+                "source": "ghost-source:1:2",
+                "stamped": False,
+                "detail": "unregistered",
+            }
+        }
+        await TestLiveThreeFactorGate._mint_nonce(live)
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": "CONFIRM-FABRICATED2"}
+        )
+        assert _refusal_reason(out) == "user-confirmation-missing", out
+        assert "observed source 'ghost-source:1:2'" in out, out
+        assert "'unregistered'" in out, out
+        assert live["markers"] == []
+
+
+class TestReleaseInfoUserOriginProbe:
+    """Hardening (b) — the release_info user-origin drift probe (chosen
+    over a startup probe: it surfaces at the operator's upgrade decision
+    point, and boot-time adapter registration is async/delayed so a
+    startup probe would race registration)."""
+
+    @staticmethod
+    def _manager_with_registry(table: dict) -> MagicMock:
+        manager = _base_manager()
+
+        class _Adapter:
+            def __init__(self, st: Any) -> None:
+                self.source_type = st
+
+        class _Registry:
+            def __init__(self, t: dict) -> None:
+                self._t = t
+
+            def get(self, source_id: str) -> Any:
+                return self._t.get(source_id)
+
+            def list_adapters(self) -> list[dict]:
+                return [
+                    {"source_id": sid, "source_type": a.source_type}
+                    for sid, a in self._t.items()
+                ]
+
+        manager.source_registry = _Registry(table)
+        return manager
+
+    async def test_probe_lists_arming_sources_and_drift(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from daemon.models.source import SourceType
+
+        manager = self._manager_with_registry(
+            {
+                "my-discord-bot": type(
+                    "A", (), {"source_type": SourceType.discord}
+                )(),
+                "my-discord-looking": type(
+                    "A", (), {"source_type": SourceType.scheduler}
+                )(),
+            }
+        )
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "sandbox")
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: tmp_path)
+        tools = _build_tools(manager)
+        out = await tools["release_info"].ainvoke({"section": "user-origin"})
+        # The chat-typed arbitrary-id source arms (type decides, not name).
+        assert "can arm the live-upgrade gate" in out
+        assert "'my-discord-bot'" in out
+        # The id that LOOKS like discord but is scheduler-typed → DRIFT.
+        assert "user-origin DRIFT" in out
+        assert "'my-discord-looking'" in out
+        assert "does NOT arm" in out
+
+    async def test_probe_without_registry_degrades_cleanly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = _base_manager()  # source_registry is a MagicMock — listing
+        # comes back non-list → probe must degrade, not crash.
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "sandbox")
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: tmp_path)
+        tools = _build_tools(manager)
+        out = await tools["release_info"].ainvoke({"section": "user-origin"})
+        assert "registry unavailable/empty" in out
+        assert 'exact "api"' in out
+
+    async def test_all_section_includes_user_origin_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from daemon.models.source import SourceType
+
+        manager = self._manager_with_registry(
+            {"plain-bot": type("A", (), {"source_type": SourceType.slack})()}
+        )
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "sandbox")
+        monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: tmp_path)
+        tools = _build_tools(manager)
+        out = await tools["release_info"].ainvoke({})  # section=all (default)
+        assert "user-origin:" in out
+        assert "'plain-bot'" in out
 
 
 class TestDefaultVersionPick:
