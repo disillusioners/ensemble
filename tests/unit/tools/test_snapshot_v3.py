@@ -864,6 +864,86 @@ class TestR16MonitoringMetrics:
         assert result["error"] is None
         assert result["started"] == "cold"
 
+    # ── rider (j): the observability FLOOR — structured log lines ────
+
+    def test_warm_spawn_emits_snapshotspawnwarm_log_line(
+        self, tools, manager, engine, monkeypatch, caplog
+    ):
+        """Rider (j): a WARM spawn emits the structured
+        ``[SnapshotSpawnWarm]`` JSON line (R16 observability floor).
+        """
+        import json as _json
+        import logging
+
+        self._enable(monkeypatch)
+        self._wire_metrics(manager, engine)
+        repo: SnapshotRepository = manager._snapshot_repo
+        repo.create_with_embeddings(
+            Snapshot(
+                id="snap-warm-log",
+                project_id="p1",
+                created_by_agent_id="coder",
+                target_instance_id="inst-1",
+                title="warm",
+                task_summary="",
+                domain_tags=["kind:implementation"],
+                status=SNAPSHOT_STATUS_ACTIVE,
+                repo_path=None,
+                vcs_type=None,
+                git_sha=None,
+                git_branch=None,
+                git_dirty=False,
+                runtime_version="0.14.2",
+                effective_model="cheap-model",
+                digest={"task_summary_text": "warm"},
+            )
+        )
+        with caplog.at_level(logging.INFO, logger="daemon.tools.snapshot_tools"):
+            result = _run(
+                tools[2].ainvoke(
+                    {
+                        "agent_id": "worker",
+                        "task": "warm me",
+                        "snapshot_id": "snap-warm-log",
+                    }
+                )
+            )
+        assert result["started"] == "warm"
+        warm_lines = [
+            r for r in caplog.records
+            if r.getMessage().startswith("[SnapshotSpawnWarm] ")
+        ]
+        assert len(warm_lines) == 1, (
+            f"expected exactly one [SnapshotSpawnWarm] line, got "
+            f"{len(warm_lines)}"
+        )
+        payload = _json.loads(
+            warm_lines[0].getMessage()[len("[SnapshotSpawnWarm] "):]
+        )
+        assert payload["snapshot_id"] == "snap-warm-log"
+        assert payload["new_instance_id"] == "new-inst-1"
+        assert payload["counter"] == "spawn_warm"
+        assert payload["project_id"] == "p1"
+
+    def test_cold_spawn_emits_no_snapshotspawnwarm_line(
+        self, tools, manager, engine, monkeypatch, caplog
+    ):
+        """Rider (j) mirror: the cold path emits NO warm line (the
+        counter and the log line are both warm-only)."""
+        import logging
+
+        self._enable(monkeypatch)
+        self._wire_metrics(manager, engine)
+        with caplog.at_level(logging.INFO, logger="daemon.tools.snapshot_tools"):
+            result = _run(
+                tools[2].ainvoke({"agent_id": "worker", "task": "no snapshot"})
+            )
+        assert result["started"] == "cold"
+        assert not [
+            r for r in caplog.records
+            if r.getMessage().startswith("[SnapshotSpawnWarm] ")
+        ]
+
 
 # ============================================================================
 # D8 / Wave-2b handoff — explicit cross-project override

@@ -495,6 +495,53 @@ class TestEmbeddingWiringE2E:
         # as the _run_capture lane).
         assert executor._tasks == set()
 
+    def test_capture_emits_structured_snapshotcapture_log_line(
+        self, engine, repo, monkeypatch, caplog
+    ):
+        """Rider (j) — the R16 observability floor: EVERY capture
+        terminal write emits ONE ``[SnapshotCapture]`` structured
+        JSON line (status, ids, effective model, wall clock, honest
+        token approximations, creator + project)."""
+        import json as _json
+        import logging
+
+        _install_llm_patch(monkeypatch, _digest_llm_response())
+        irepo = FakeInstanceRepo({"inst-1": _instance("inst-1")})
+        messages = [
+            SimpleNamespace(**{"content": "explored the upgrade pipeline", "id": "m1"}),
+        ]
+        mgr = FakeManager(irepo, FakeGraph(messages=messages), compactor=_compactor())
+        executor = SnapshotExecutor(mgr, repo)
+        row = repo.create_with_embeddings(_running_row())
+
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.snapshot_executor"
+        ):
+            out = asyncio.run(executor.capture(row))
+
+        assert out.status == SNAPSHOT_STATUS_ACTIVE
+        capture_lines = [
+            r for r in caplog.records
+            if r.getMessage().startswith("[SnapshotCapture] ")
+        ]
+        assert len(capture_lines) == 1, (
+            f"expected exactly one [SnapshotCapture] line, got "
+            f"{len(capture_lines)}"
+        )
+        payload = _json.loads(
+            capture_lines[0].getMessage()[len("[SnapshotCapture] "):]
+        )
+        assert payload["status"] == "active"
+        assert payload["snapshot_id"] == out.id
+        assert payload["target_instance_id"] == "inst-1"
+        assert payload["effective_model"] == "session-model"
+        assert payload["created_by_agent_id"] == "coder"
+        assert payload["project_id"] == "p1"
+        assert isinstance(payload["wall_clock_s"], (int, float))
+        # Honest token approximations are present (ints).
+        assert isinstance(payload["approx_tokens_in"], int)
+        assert isinstance(payload["approx_tokens_out"], int)
+
 
 # ============================================================================
 # §5.2 staleness compute

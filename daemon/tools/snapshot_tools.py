@@ -73,7 +73,10 @@ A snapshot is a distilled digest of one instance's working experience
   snapshot (subject to the daemon settings toggle). Runs the
   search-before-create protocol internally: it searches first and may
   return an existing snapshot instead of creating a new one
-  (status "reused-existing-snapshot-id").
+  (status "reused-existing-snapshot-id"). Capture promptly after the
+  target completes — checkpoint cleanup deletes terminal context at
+  the 168h TTL, so a capture started after that window fails soft to
+  a "failed" snapshot row (the context is gone).
 - `snapshot_search` — read-only search over active snapshots in a
   project. Returns metadata + a digest preview; the full body is
   consumed at warm start.
