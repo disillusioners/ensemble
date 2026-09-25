@@ -37,8 +37,8 @@ class TestJobQueueToolRegistration:
 
         tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
 
-        # 16 original + job_continue + job_messages + job_tree + job_progress + job_inject + job_answer = 22
-        assert len(tools) == 22
+        # 16 original + job_continue + job_messages + job_tree + job_progress + job_inject + job_answer + job_pause + job_resume = 24
+        assert len(tools) == 24
 
     def test_each_tool_has_job_category(self):
         """Verify each tool has _tool_category == 'job' attribute."""
