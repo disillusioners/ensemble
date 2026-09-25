@@ -221,6 +221,47 @@ class TestR12AtomicSupersessionFlip:
         }
         assert repo.get(s3.id).supersedes_snapshot_id == s2.id
 
+    def test_stale_successor_preflipped_superseded_refuses_no_resurrection(
+        self, repo: SnapshotRepository
+    ):
+        """Wave 2b review FIX 2 — successor pre-state guard.
+
+        A stale capture finishing AFTER its own successor row was
+        already superseded by a later cycle must NOT resurrect it to
+        ``active`` (that would leave two active rows for one target).
+        Fail-soft refusal: the row keeps ``superseded``, the
+        predecessor chain stays intact.
+        """
+        s1 = repo.create_with_embeddings(_snapshot(title="s1"))
+        s2 = repo.create_successor(
+            _snapshot(title="s2", status=SNAPSHOT_STATUS_RUNNING),
+            supersedes_snapshot_id=s1.id,
+        )
+        s3 = repo.create_successor(
+            _snapshot(title="s3", status=SNAPSHOT_STATUS_RUNNING),
+            supersedes_snapshot_id=s2.id,
+        )
+        assert repo.get(s1.id).status == SNAPSHOT_STATUS_SUPERSEDED
+        assert repo.get(s2.id).status == SNAPSHOT_STATUS_SUPERSEDED
+        assert repo.get(s3.id).status == SNAPSHOT_STATUS_ACTIVE
+        # The stale capture for s2 finishes late and re-mints through
+        # create_successor. The stale row is a FRESH DB view (as the
+        # lane would hold after any re-fetch): a 'superseded' object
+        # that the mint would stamp back to 'active'.
+        stale_row = repo.get(s2.id)
+        assert stale_row is not None
+        repo.create_successor(stale_row, supersedes_snapshot_id=s1.id)
+        assert repo.get(s2.id).status == SNAPSHOT_STATUS_SUPERSEDED
+        assert repo.get(s3.id).status == SNAPSHOT_STATUS_ACTIVE
+        assert repo.get(s2.id).supersedes_snapshot_id == s1.id
+        # Exactly ONE active row for the target after the refusal.
+        active_ids = [
+            s.id
+            for s in (s1, s2, s3)
+            if repo.get(s.id).status == SNAPSHOT_STATUS_ACTIVE
+        ]
+        assert active_ids == [s3.id]
+
 
 # ============================================================================
 # update_capture_result terminal-state guard (Wave 1b FIX 1 — the

@@ -129,6 +129,13 @@ class SnapshotRepository:
         enforcement exists here (design R12 — validity is creator
         judgment + overlapping tags, soft-warn never refuse).
 
+        Wave 2b review FIX 2 — the SUCCESSOR row's pre-state is
+        checked inside the transaction: only a ``running`` row may
+        mint (a stale capture finishing after its own row was
+        superseded must not resurrect it — two-active-rows guard).
+        Refusal is fail-soft: rollback + WARN + row returned
+        unchanged.
+
         Args:
             snapshot: The successor row. ``status`` and
                 ``supersedes_snapshot_id`` are stamped by this method.
@@ -146,10 +153,32 @@ class SnapshotRepository:
                 :meth:`create_with_embeddings` guard — unreachable
                 here since this method stamps ``active``).
         """
-        snapshot.status = SNAPSHOT_STATUS_ACTIVE
-        snapshot.supersedes_snapshot_id = supersedes_snapshot_id
         rows = list(embeddings or [])
         with Session(self.engine) as session:
+            # Wave 2b review FIX 2 — successor pre-state guard (mirror
+            # of the Wave 1b ``update_capture_result`` guard, which
+            # covers only that write path). A stale capture finishing
+            # after its OWN row was already superseded by a later
+            # cycle must not resurrect it to ``active`` — that would
+            # leave two active rows for one target. Fail-soft: rollback
+            # + WARN + row returned unchanged (the async lane absorbs
+            # it; no raise). Column-only scalar select — deliberately
+            # does NOT load the entity into the identity map, so the
+            # detached ``session.add(snapshot)`` below keeps its exact
+            # update-on-flush semantics.
+            pre_state = session.scalar(
+                select(Snapshot.status).where(col(Snapshot.id) == snapshot.id)
+            )
+            if pre_state is not None and pre_state != SNAPSHOT_STATUS_RUNNING:
+                session.rollback()
+                logger.warning(
+                    f"[Snapshot] refusing successor mint for "
+                    f"{snapshot.id} in state {pre_state!r} — only "
+                    f"'running' may mint"
+                )
+                return snapshot
+            snapshot.status = SNAPSHOT_STATUS_ACTIVE
+            snapshot.supersedes_snapshot_id = supersedes_snapshot_id
             session.add(snapshot)
             for emb in rows:
                 emb.snapshot_id = snapshot.id

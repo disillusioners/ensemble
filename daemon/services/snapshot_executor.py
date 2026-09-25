@@ -818,6 +818,24 @@ class SnapshotExecutor:
         # A missing predecessor id raises from the repository and lands
         # in the capture lane's except → failed row (caller bug).
         supersedes_id = (row.digest or {}).get("supersedes_snapshot_id")
+        # Wave 2b review FIX 1 — digest contract pollution. The R12
+        # stash key is LANE-INTERNAL routing state; its contract home
+        # is the row's ``supersedes_snapshot_id`` COLUMN (stamped by
+        # ``create_successor`` on the mint branch). ``row.digest``
+        # feeds the warm spawn's ``instance_metadata["snapshot_digest"]``
+        # and from there the LLM injection — so the key is stripped
+        # from BOTH terminal branches before the DB write and never
+        # enters the persisted digest.
+        row.digest = {
+            k: v
+            for k, v in (row.digest or {}).items()
+            if k != "supersedes_snapshot_id"
+        }
+        digest = {
+            k: v
+            for k, v in (digest or {}).items()
+            if k != "supersedes_snapshot_id"
+        }
         if status == SNAPSHOT_STATUS_ACTIVE and supersedes_id:
             row.digest = {**(row.digest or {}), **(digest or {})}
             updated = await asyncio.to_thread(

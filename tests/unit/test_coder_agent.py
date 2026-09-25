@@ -220,9 +220,14 @@ class TestCoderPromptComposition:
         from daemon.loader import load_agent_prompts
         prompts = load_agent_prompts(CODER_AGENT_DIR)
         assert "soul" in prompts
-        # Coder has only soul.md, no rule.md or workflow.md
+        # Coder carries soul.md + workflow.md, no rule.md.
+        # Wave 2b review FIX 5: the old pin asserted "workflow" not in
+        # prompts ("only soul.md"), but agents/coder/workflow.md
+        # predates Wave 2b (prompt-norm placement, 27cb8cd0 lineage)
+        # and the pin was already RED at commission base db71500a —
+        # stale pin, now aligned with the legitimate state.
         assert "rule" not in prompts
-        assert "workflow" not in prompts
+        assert "workflow" in prompts
 
     def test_soul_content_included(self) -> None:
         from daemon.loader import load_agent_prompts

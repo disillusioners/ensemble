@@ -355,7 +355,10 @@ def _cold_result(
         "instance_id": instance_id,
         "started": "cold",
         "snapshot_id": snapshot_id,
-        "staleness": staleness,
+        # Wave 2b review FIX 3 — spec §4.3: staleness is ALWAYS a
+        # dict; the service-unavailable / no-consumed-snapshot paths
+        # pass None here, which must not leak into the result.
+        "staleness": staleness if isinstance(staleness, dict) else {},
         "hint": (
             f"No matching snapshot — spawned cold ({searched_part}"
             f"reason: {reason})"
@@ -834,17 +837,26 @@ def create_snapshot_tools(
             if staleness is None:
                 staleness = {}
             staleness["repo_state"] = git_state
+            # Wave 2b review FIX 4 — git-anchor warnings ride inside
+            # ``staleness.warnings`` (the R14 result contract is
+            # exactly 6 keys — no top-level ``warnings`` key).
+            git_warnings: list[str] = []
             if isinstance(git_state, dict) and git_state.get("error"):
-                warnings.append(
+                git_warnings.append(
                     f"git anchor unavailable: {git_state['error']}"
                 )
             elif isinstance(git_state, dict) and git_state.get(
                 "diverged_files"
             ):
-                warnings.append(
+                git_warnings.append(
                     f"repo diverged {git_state['diverged_files']} file(s) "
                     "since the snapshot commit"
                 )
+            if git_warnings:
+                warnings.extend(git_warnings)
+                warnings_list = list(staleness.get("warnings") or [])
+                warnings_list.extend(git_warnings)
+                staleness["warnings"] = warnings_list
 
         started = "warm" if consumed is not None else "cold"
         if started == "warm" and staleness is not None:
@@ -960,12 +972,17 @@ def create_snapshot_tools(
             "instance_id": new_instance_id,
             "started": started,
             "snapshot_id": consumed.id if (started == "warm" and consumed is not None) else None,
-            "staleness": staleness,
+            # Wave 2b review FIX 3 — spec §4.3: staleness is a dict on
+            # every result path (a warm start with the staleness
+            # service unavailable would otherwise emit None).
+            "staleness": staleness if isinstance(staleness, dict) else {},
             "hint": hint,
             "error": None,
         }
-        if started == "warm" and warnings:
-            result["warnings"] = warnings
+        # Wave 2b review FIX 4 — the conditional top-level
+        # ``result["warnings"]`` key (7th key) was REMOVED: the §4.3
+        # contract is exactly 6 keys; warnings surface via
+        # ``staleness.warnings`` and the ``hint`` text only.
         return result
 
     return [snapshot_create, snapshot_search, spawn_hot_instance]

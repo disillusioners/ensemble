@@ -519,6 +519,85 @@ class TestSpawnHotInstance:
         assert result["staleness"]["freshness"] == "stale"
         assert any("stale" in w for w in result["staleness"]["warnings"])
 
+    # ── Wave 2b review FIX 3 — §4.3: staleness is ALWAYS a dict ────
+
+    def test_staleness_is_dict_on_cold_no_hit(self, tools, monkeypatch):
+        self._auth_ok(monkeypatch)
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
+        assert result["started"] == "cold"
+        assert isinstance(result["staleness"], dict)
+
+    def test_staleness_is_dict_on_cold_expired(self, engine, caller_rows, monkeypatch):
+        manager = FakeManager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = manager._snapshot_repo
+        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
+        manager._snapshot_search_service = FakeSearchService(
+            [_candidate("snap-1", [], freshness="expired", age=30.0)]
+        )
+        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
+        self._auth_ok(monkeypatch)
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
+        assert result["started"] == "cold"
+        assert "expired" in result["hint"]
+        assert isinstance(result["staleness"], dict)
+
+    def test_staleness_is_dict_on_cold_verify_failed(self, tools, manager, monkeypatch):
+        self._auth_ok(monkeypatch)
+        result = _run(
+            tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "missing"})
+        )
+        assert result["started"] == "cold"
+        assert isinstance(result["staleness"], dict)
+
+    def test_staleness_is_dict_when_service_unavailable(self, engine, caller_rows, monkeypatch):
+        manager = FakeManager(caller_rows, SnapshotRepository(engine))
+        manager._snapshot_service = None  # staleness seam unavailable
+        repo: SnapshotRepository = manager._snapshot_repo
+        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
+        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
+        self._auth_ok(monkeypatch)
+        result = _run(
+            tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "snap-1"})
+        )
+        assert result["started"] == "warm"  # warm start, no staleness report
+        assert isinstance(result["staleness"], dict)
+        assert result["staleness"] == {}
+
+    # ── Wave 2b review FIX 4 — exactly 6 keys; warnings ride
+    #    ``staleness.warnings`` on the warm + verify=git path ────────
+
+    def test_git_verify_warnings_surface_in_staleness_no_top_level_key(
+        self, engine, caller_rows, monkeypatch
+    ):
+        manager = FakeManager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = manager._snapshot_repo
+        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
+        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        monkeypatch.setattr(
+            "daemon.tools.snapshot_tools._git_repo_state",
+            lambda repo_path, git_sha: {
+                "snapshot_head": git_sha,
+                "current_head": "def5678",
+                "diverged_files": 3,
+            },
+        )
+        result = _run(
+            tools[2].ainvoke(
+                {"agent_id": "worker", "task": "t", "snapshot_id": "snap-1", "verify": "git"}
+            )
+        )
+        assert result["started"] == "warm"
+        # §4.3 contract: EXACTLY 6 keys — no top-level ``warnings``.
+        assert set(result.keys()) == RESULT_KEYS
+        assert result["staleness"]["repo_state"]["diverged_files"] == 3
+        # The git-anchor warning surfaces via staleness.warnings.
+        assert any(
+            "repo diverged" in w for w in result["staleness"]["warnings"]
+        )
+
     def test_internal_search_crash_still_spawns_cold(self, engine, caller_rows, monkeypatch):
         """Rider (h): a search-system fault must NEVER raise — cold spawn."""
         manager = FakeManager(caller_rows, SnapshotRepository(engine))
@@ -610,9 +689,11 @@ class TestR12LaneMint:
         )
         # Successor ACTIVE with the R12 pointer + merged digest; the
         # predecessor flipped superseded in the SAME transaction.
+        # Wave 2b review FIX 1: the pointer rides the COLUMN only —
+        # the stash key is stripped from the persisted digest.
         assert updated.status == SNAPSHOT_STATUS_ACTIVE
         assert updated.supersedes_snapshot_id == "prev"
-        assert updated.digest["supersedes_snapshot_id"] == "prev"
+        assert "supersedes_snapshot_id" not in updated.digest
         assert updated.digest["decisions"] == ["d1"]
         assert repo.get("prev").status == SNAPSHOT_STATUS_SUPERSEDED
 
@@ -633,6 +714,55 @@ class TestR12LaneMint:
         )
         assert updated.status == SNAPSHOT_STATUS_ACTIVE
         assert repo.get("unrelated").status == SNAPSHOT_STATUS_ACTIVE
+
+    def test_completed_successor_digest_clean_and_warm_metadata_inherits(
+        self, engine: Engine, caller_rows: dict[str, Any], monkeypatch
+    ):
+        """Wave 2b review FIX 1 — end-to-end digest hygiene.
+
+        A capture minted WITH a supersedes pointer completes with the
+        pointer in the COLUMN only; the warm spawn's
+        ``instance_metadata["snapshot_digest"]`` write (the
+        ``consumed.digest`` flow that feeds the LLM injection) carries
+        no ``supersedes_snapshot_id`` key.
+        """
+        repo = SnapshotRepository(engine)
+        repo.create_with_embeddings(_snapshot(snapshot_id="prev", target="inst-1"))
+        successor = _snapshot(
+            snapshot_id="succ",
+            target="inst-1",
+            status=SNAPSHOT_STATUS_RUNNING,
+            digest={"supersedes_snapshot_id": "prev"},
+        )
+        repo.create_with_embeddings(successor)
+        executor = SnapshotExecutor(None, repo)
+        updated = asyncio.run(
+            executor._finish_row(
+                successor,
+                status=SNAPSHOT_STATUS_ACTIVE,
+                digest={"decisions": ["d1"]},
+                effective_model="m",
+                started_monotonic=0.0,
+            )
+        )
+        # Terminal row: column carries the pointer, digest does not.
+        assert updated.supersedes_snapshot_id == "prev"
+        assert "supersedes_snapshot_id" not in updated.digest
+        # Warm spawn from the completed row → clean metadata stamp.
+        manager = FakeManager(caller_rows, repo)
+        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        result = _run(
+            tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "succ"})
+        )
+        assert result["started"] == "warm"
+        instance_id, metadata_updates = manager.metadata_calls[0]
+        assert instance_id == "new-inst-1"
+        assert metadata_updates["spawned_from_snapshot_id"] == "succ"
+        assert "supersedes_snapshot_id" not in metadata_updates["snapshot_digest"]
+        assert metadata_updates["snapshot_digest"] == {"decisions": ["d1"]}
 
 
 # ============================================================================
