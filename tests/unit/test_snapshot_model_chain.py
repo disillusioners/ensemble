@@ -413,7 +413,3 @@ class TestResolveSnapshotModelChain:
         config = self._cfg(model="", summary_model="legacy-snap")
         out = resolve_snapshot_model(config, snapshot_env_value="")
         assert out == "legacy-snap"
-
-
-# Imports needed by the helper class above
-from daemon.config import CompactionConfig as CompactionConfigModel  # noqa: E402

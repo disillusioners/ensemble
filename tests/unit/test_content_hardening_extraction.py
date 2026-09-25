@@ -183,6 +183,4 @@ class TestKillSwitchContractPreserved:
         # Note: with the kill-switch OFF, the absorb contract degenerates
         # to "preserve everything injected" — note stays preserved.
         assert preserved and any(getattr(m, "id", None) == "n1" for m in preserved)
-        assert absorbed == [] or all(
-            getattr(m, "id", None) != "n1" for m in absorbed
-        )
+        assert absorbed == []

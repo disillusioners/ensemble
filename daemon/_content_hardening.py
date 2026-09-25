@@ -220,6 +220,7 @@ def injected_note_absorbed_ids(messages: list[BaseMessage]) -> frozenset[str]:
             continue  # id-less → conservative: preserved, never absorbed
         if any(isinstance(m, AIMessage) for m in messages[idx + 1:]):
             absorbed.add(msg_id)
+    # frozenset-wrap matches the declared ``-> frozenset[str]`` contract.
     return frozenset(absorbed)
 
 
@@ -273,9 +274,9 @@ def partition_injected_for_compaction(
           ``selectable`` (same objects), for envelope accounting.
     """
     absorbed_note_ids = injected_note_absorbed_ids(messages)
-    selectable: list = []
-    preserved_injected: list = []
-    absorbed_notes: list = []
+    selectable: list[BaseMessage] = []
+    preserved_injected: list[BaseMessage] = []
+    absorbed_notes: list[BaseMessage] = []
     for msg in messages:
         if is_hoisted_injected(msg, absorbed_note_ids):
             preserved_injected.append(msg)
