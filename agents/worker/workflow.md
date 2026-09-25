@@ -237,7 +237,7 @@ Proceed to Phase 7
      include it.
    - Even a one-word note compounds into corpus quality
 
-1b. Snapshot (BEFORE the final report, never after): if this run left durable
+1.5. Snapshot (BEFORE the final report, never after): if this run left durable
    reusable state, call `snapshot_create` once (it searches first and may reuse
    an existing snapshot); skip thin/trivial runs — capture is optional.
 
