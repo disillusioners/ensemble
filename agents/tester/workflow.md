@@ -740,6 +740,7 @@ Spawn worker instance (can reuse if same testing area), monitor execution.
 4. **Scoped Mock Tests** — run Mock Test Workflow on relevant features; fix failures; document
 5. **ensure.md Validation** — validate all requirements (always full — quality gates); fix failures; document
 6. **Final Report** — aggregate all results; write to `.agents/tester/RESULTS/` (see Report Format below); update docs; report to user
+7. **Snapshot capture (optional, right after the RESULTS write)** — if this test cycle left durable reusable knowledge (test-pack maps, flaky-test traps, environment gotchas), call `snapshot_create` on this instance once; for re-running a recurring test-pack shape later, `spawn_hot_instance` warm-starts a fresh tester from that snapshot (read its `started: warm|cold` line and cite it). Skip when the RESULTS file already carries the value.
 
 ```
 ## Testing Complete

@@ -237,6 +237,10 @@ Proceed to Phase 7
      include it.
    - Even a one-word note compounds into corpus quality
 
+1b. Snapshot (BEFORE the final report, never after): if this run left durable
+   reusable state, call `snapshot_create` once (it searches first and may reuse
+   an existing snapshot); skip thin/trivial runs — capture is optional.
+
 2. Aggregate the outcome:
    - What I did (and which skill pattern, if any, I followed)
    - What was produced (files, data, format)

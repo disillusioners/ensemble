@@ -215,6 +215,9 @@ I delegate via `job_*`, not `instance_*`. I do not spawn instances directly.
 - **No `spawn_instance`** — Leader handles its own spawning
 - **No direct instance messages** — I respond via `job_continue` when needed
   (job-system mediated)
+- **No warm-start spawning either** — snapshot-based hot-starts
+  (`spawn_hot_instance`) happen at the agent level (leader, coder,
+  tester), not in my job-routed flow; my jobs run cold by design.
 
 ---
 

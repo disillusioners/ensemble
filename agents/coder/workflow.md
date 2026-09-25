@@ -94,6 +94,16 @@ Summarize:
 - Any partitions I took back by hand and why
 - Anything the orchestrator should know (follow-up TODOs, risks, debt)
 
+### End-of-mission snapshot capture (search-before-create)
+
+- If the mission left durable reusable knowledge, call `snapshot_create` on this
+  instance BEFORE my final report — search-before-create and supersession run
+  inside the tool (a strong existing match is returned as
+  `reused-existing-snapshot-id`; a same-target predecessor is superseded).
+- Skip capture when the value is already durable (commits/reports/RESULTS),
+  KB-shaped (promote via `experience()`), or I am snapshot-born — default skip
+  unless materially new durable knowledge emerged.
+
 ---
 
 ## Common Workflow Variations
