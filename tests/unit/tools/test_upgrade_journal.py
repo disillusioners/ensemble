@@ -1052,6 +1052,47 @@ class TestUserOriginSources:
         assert detail != "exact:api"
         assert detail == "source-type-not-chat:'scheduler'"
 
+    def test_api_lookalikes_fail_closed(self) -> None:
+        """MINOR-5 (security review round 1): fail-closed look-alike pins.
+        Exact FULL-STRING equality only — a future whitespace- or
+        case-normalization refactor must not silently widen the F2
+        exact-match arm ("Api" case-fold, " api"/"api " strip,
+        "api\\u200b" zero-width-space normalize)."""
+        for lookalike in ("Api", " api", "api ", "api\u200b"):
+            assert is_user_origin_source(lookalike) is False, repr(lookalike)
+            # Also with a registry present: a look-alike is NOT "api" and
+            # its segment does not resolve in a sane registry table.
+            registry = self._registry({"my-discord-bot": self._adapter("discord")})
+            assert is_user_origin_source(lookalike, registry.get) is False, (
+                repr(lookalike)
+            )
+
+    def test_colon_only_and_empty_segment_fail_closed(self) -> None:
+        """MINOR-5: colon-only / empty-first-segment source strings never
+        arm — a future split() refactor must not start treating ':' / ':x'
+        / '::::' as armable id patterns."""
+        for source in (":", ":x", "::::"):
+            assert is_user_origin_source(source) is False, repr(source)
+
+    def test_f2_boundary_registered_chat_id_pattern_arms_by_design(self) -> None:
+        """MINOR-3 (security review round 1): boundary-pin the ACCEPTED F2
+        scope. vs the old static whitelist, the STRING SET that can arm via
+        the unauth-loopback body.source grows from {"api"} to {"api"} ∪
+        {registered-chat-id patterns} — the CAPABILITY delta is zero (an
+        attacker who can forge body.source could already send "api"; F2
+        forging is the separately-fenced pre-existing exposure). This test
+        DOCUMENTS that design; it does not widen it: only the write-once,
+        daemon-controlled source_type decides — never the id string."""
+        # A registered chat-typed adapter's id pattern arms — by design.
+        registry = self._registry({"chat-bot": self._adapter("discord")})
+        assert is_user_origin_source("chat-bot:attacker:room", registry.get) is True
+        # Same id pattern with a NON-chat type does NOT arm: the id string
+        # confers nothing; registry metadata (source_type) is the decider.
+        non_chat = self._registry({"chat-bot": self._adapter("scheduler")})
+        assert is_user_origin_source("chat-bot:attacker:room", non_chat.get) is False
+        # An UNREGISTERED id pattern does NOT arm (fail-closed).
+        assert is_user_origin_source("ghost-bot:attacker:room", registry.get) is False
+
     # ── registry-backed chat classification ──────────────────────────────
 
     def test_arbitrary_id_registered_chat_source_stamps(self) -> None:
@@ -1123,6 +1164,40 @@ class TestUserOriginSources:
 
         ok, detail = classify_user_origin("discord:1", _Boom().get)
         assert (ok, detail) == (False, "registry-error:RuntimeError")
+
+    def test_detail_token_rendering_is_bounded(self) -> None:
+        """MINOR-1 (security review round 1): the ``source-type-not-chat``
+        detail token must be BOUNDED — never a raw ``{st_value!r}``, which
+        would leak enum class names ("SourceType.discord") and, for
+        default-repr pathological objects, memory addresses into gate
+        refusal reasons. Strings render value-capped; non-strings render
+        their TYPE NAME only."""
+        # (a) Non-string source_type: type name only — no class-name path,
+        #     no '<... object at 0x...>' address, no repr payload.
+        class _Pathological:
+            def __repr__(self) -> str:  # would leak an address if rendered
+                return "<_Pathological object at 0x7f00deadbeef>"
+
+            __str__ = __repr__
+
+        registry = self._registry({"bot": self._adapter(_Pathological())})
+        ok, detail = classify_user_origin("bot:1", registry.get)
+        assert ok is False
+        assert detail == "source-type-not-chat:_Pathological"
+        assert "0x" not in detail and "object at" not in detail
+
+        # (b) A pathologically LONG string value is capped in the token.
+        registry = self._registry({"bot": self._adapter("x" * 500)})
+        ok, detail = classify_user_origin("bot:2", registry.get)
+        assert ok is False
+        assert detail == f"source-type-not-chat:{'x' * 40!r}"
+        assert len(detail) <= len("source-type-not-chat:") + 42
+
+        # (c) Established short-string tokens stay stable (gate-refusal
+        #     compatibility): repr-style, uncapped-needed, distinguishable.
+        registry = self._registry({"bot": self._adapter("webhook")})
+        ok, detail = classify_user_origin("bot:3", registry.get)
+        assert (ok, detail) == (False, "source-type-not-chat:'webhook'")
 
     # ── reserved internal lanes: absolute fail-closed ────────────────────
 

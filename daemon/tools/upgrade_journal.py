@@ -1056,9 +1056,21 @@ def spawn_executor(
 #                                    equality only: a source REGISTERED under
 #                                    id "api" mints "api:<uid>", which does
 #                                    NOT take this path (it must clear the
-#                                    registry like any other source) — the
-#                                    F2 boundary is neither widened nor
-#                                    narrowed.
+#                                    registry like any other source).
+#                                    F2 PRECISION (security review round 1):
+#                                    vs the old whitelist, the STRING SET
+#                                    that can arm via the unauth-loopback
+#                                    body.source grows from {"api"} to
+#                                    {"api"} ∪ {registered-chat-id
+#                                    patterns} — but the CAPABILITY delta
+#                                    is ZERO: an attacker able to forge
+#                                    body.source could already send the
+#                                    exact string "api", so chat-pattern
+#                                    strings grant no new power. F2 forging
+#                                    itself remains the separately-fenced
+#                                    pre-existing exposure (executor env
+#                                    allowlist + --f2-verified-closed
+#                                    promote gate), not addressed here.
 #   * registered chat source       — first segment of the source string
 #                                    (source.split(":", 1)[0]; source_id is
 #                                    colon-free per models/source.py:36)
@@ -1082,10 +1094,28 @@ def spawn_executor(
 #                                    (single-home check) BEFORE the registry
 #                                    lookup, so even a mis-registered id like
 #                                    "agent" can never arm.
+#                                    Cross-reference (restored — the old
+#                                    static-whitelist comment named this):
+#                                    the pre-existing else-branch HUMAN
+#                                    mis-typing defect at
+#                                    instance_messaging.py:1310-1319 is
+#                                    DEFERRED, not fixed here; this
+#                                    classification is its mitigation and
+#                                    gates AT THE TOOL — the mitigation
+#                                    still holds (reserved lanes clear the
+#                                    window regardless of registry type).
 #
 # webhook is EXCLUDED from the chat-type set: no WebhookAdapter exists
 # (_create_adapter_from_config has no webhook branch — verdict §1); add it
 # only when an adapter lands.
+#
+# whatsapp is the mirror-image case: it IS in the accept set
+# (USER_ORIGIN_CHAT_SOURCE_TYPES above) but NO whatsapp adapter exists in
+# _create_adapter_from_config (daemon/sources/registry.py:445-537 has no
+# whatsapp branch), so the registry lookup for any "whatsapp:*" id always
+# misses → classification fails CLOSED ("unregistered"). Dead-but-harmless:
+# membership is kept deliberately for FORWARD-COMPAT — a future whatsapp
+# adapter arms the gate the moment it registers, with no gate-side edit.
 #
 # SINGLE SOURCE OF TRUTH: classify_user_origin() is the ONLY classification.
 # The stamp site (manager.stamp_user_origin_window), the release_info
@@ -1155,7 +1185,20 @@ def classify_user_origin(
     st = getattr(adapter, "source_type", None)
     st_value = getattr(st, "value", st)  # SourceType enum → plain str
     if not isinstance(st_value, str) or st_value not in USER_ORIGIN_CHAT_SOURCE_TYPES:
-        return False, f"source-type-not-chat:{st_value!r}"
+        # Detail-token rendering is deliberately BOUNDED (security review
+        # round 1, MINOR-1). The common case is a non-chat STRING — render
+        # it repr-style, capped at 40 chars (keeps 'scheduler' / 'webhook'
+        # refusal tokens distinguishable). Any NON-string value renders as
+        # its TYPE NAME only: a bare {st_value!r} would leak enum class
+        # names ("SourceType.discord") and, for default-repr pathological
+        # objects, memory addresses into gate refusal reasons. The length
+        # cap also bounds adversarially long values. Classification is
+        # unaffected: this branch has already failed CLOSED.
+        if isinstance(st_value, str):
+            rendered = repr(st_value[:40])
+        else:
+            rendered = type(st_value).__name__[:40]
+        return False, f"source-type-not-chat:{rendered}"
     return True, f"registered-chat:{st_value}"
 
 
