@@ -1053,10 +1053,13 @@ def _route_send_message(
         Log-field pseudo-value (NOT a route value): the structured-log
         field ``routed_via`` may also carry ``"enqueue_graphless_guard"``
         at the call site when the graphless guard downgrades an eligible
-        RUNNING target to the durable enqueue lane. The final route value
-        in that case is ``"enqueue"``; ``"enqueue_graphless_guard"``
-        stamps the downgrade reason in the log payload only
-        (~:3052-3067).
+        RUNNING target to the durable enqueue lane, or
+        ``"injection_busy_fallback"`` when the queue-busy guard on the
+        enqueue lane re-routes a context-bearing send back to the
+        injection lane (2026-09-25, incident c3d1a722). The final route
+        value in either case is ``"enqueue"`` / ``"injection"``; the
+        pseudo-value stamps the downgrade/upgrade reason in the log
+        payload only.
     """
     # Lazy import — circular-import breaker (mirrors the pattern at the
     # governor-guard helper above; ``daemon.tools`` sits below
@@ -2945,6 +2948,15 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             tag parser and the ``metadata`` channel live in
             ``enqueue_message``'s pipeline) and would be lost or land
             as raw tag text on the injection branch.
+            BUSY-GUARD FALLBACK (2026-09-25, incident c3d1a722): a
+            context-bearing send that the enqueue lane's queue-busy
+            guard would reject (target mid-turn, processing > 0) is
+            re-checked against fresh state and — when the target is
+            still ``running`` with a live graph — delivered via
+            ``set_injection`` with the context block flattened inline
+            into the message body. ``load_skill`` sends are NEVER
+            flattened (the tag parser is enqueue-only); graphless or
+            non-running targets keep the busy-guard rejection.
             EXCEPTION (DEFECT A fix, 2026-09-14): a ``running`` target
             with NO live graph consumer (spawn-created child that was
             cascade-paused and cascade-resumed without ever being
@@ -3353,10 +3365,109 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # child reports.
         stats = await manager.get_queue_stats(instance_id)
         if stats["pending_count"] > 0 or stats["processing_count"] > 0:
+            # ── Busy-guard → injection fallback (context-bearing sends only;
+            # feature/send-message-context-inject-fallback, 2026-09-25;
+            # incident c3d1a722) ────────────────────────────────────────────
+            # Intended-guard × intended-guard trap: a send bearing
+            # non-empty ``context`` is force-routed to the durable
+            # enqueue lane by the enqueue-only parameter override above
+            # (``set_injection`` has no metadata channel), and the
+            # enqueue lane's queue-busy admission guard then REJECTS
+            # whenever the target is mid-turn (processing > 0) — even
+            # though a PLAIN send to the same target would have taken
+            # the injection branch and been absorbed by the live turn
+            # (D11 / R-O3 dropped the busy guard there deliberately:
+            # status is the source of truth).
+            # Fallback: when the busy guard is about to reject, re-check
+            # injection eligibility against FRESH state (the routing
+            # decision earlier in this function may be stale):
+            #   * target status is injection-eligible ("running") AND
+            #     ``manager.has_live_graph_task(...)`` is True — the
+            #     same live-graph-verified eligibility the injection
+            #     branch requires (DEFECT A guard; contract-guaranteed
+            #     non-raising), AND
+            #   * the send bore ``context`` (NOT ``load_skill`` — the
+            #     ``<meta>`` tag parser is enqueue-pipeline-only; a
+            #     flattened tag would land as raw garbage text in the
+            #     target's live turn and the skill would never load).
+            # On eligibility, flatten the formatted context block into
+            # the message body as a prefix (the injection FIFO carries
+            # no metadata channel — the block travels IN the content)
+            # and deliver via ``set_injection`` with the SAME
+            # ``internal_agent:<caller_instance_id>`` provenance marker
+            # the injection branch stamps (quick-win #1 convention).
+            # The next ``agent_node`` pass drains it, exactly like a
+            # plain mid-turn send.
+            # Every other shape (graphless target, non-running status,
+            # ``load_skill`` present, KeyError from the get-info
+            # split-cache race documented above) keeps the original
+            # busy-guard rejection — fail closed to pre-existing
+            # behavior.
+            _busy_fallback_eligible = False
+            _fresh_status = None
+            if task_context_text is not None and not load_skill_requested:
+                try:
+                    _fresh_status = manager.get_instance_info(
+                        instance_id
+                    ).get("status")
+                except KeyError:
+                    _fresh_status = None
+                _busy_fallback_eligible = (
+                    _fresh_status in INJECTION_ELIGIBLE_STATUSES
+                    and manager.has_live_graph_task(instance_id)
+                )
+            if _busy_fallback_eligible:
+                _flattened = (
+                    task_context_text.rstrip("\n") + "\n\n" + message
+                )
+                manager.set_injection(
+                    instance_id,
+                    _flattened,
+                    source=f"internal_agent:{current_instance_id}",
+                )
+                logger.warning(
+                    "agent_send_message busy-guard fallback routed via "
+                    "injection (context flattened inline)",
+                    extra={
+                        "event": "agent_send_message",
+                        "caller_iid": current_instance_id,
+                        "target_iid": instance_id,
+                        "routed_via": "injection_busy_fallback",
+                        "prior_status": prior_status,
+                        "fresh_status": _fresh_status,
+                        "content_len": len(_flattened),
+                        "source": f"internal_agent:{current_instance_id}",
+                    },
+                )
+                return (
+                    f"Message injected into running target — the context "
+                    f"block was flattened inline into the message body "
+                    f"(injected, not enqueued: the target is mid-turn, so "
+                    f"the durable queue rejected the enqueue; the next "
+                    f"agent_node cycle will deliver the combined message "
+                    f"to the live turn).\n\n"
+                    f"Note: if the target is paused or the daemon "
+                    f"restarts before delivery, an in-flight injected "
+                    f"message may be dropped (pause-loss parity with the "
+                    f"user messages API)."
+                )
+            logger.warning(
+                "agent_send_message busy-guard rejection (target busy)",
+                extra={
+                    "event": "agent_send_message",
+                    "routed_via": "busy_reject",
+                    "caller_iid": current_instance_id,
+                    "target_iid": instance_id,
+                    "pending_count": stats["pending_count"],
+                    "processing_count": stats["processing_count"],
+                    "content_len": len(message),
+                },
+            )
             return (
                 f"ERROR: Instance '{instance_id}' already has a message in progress. "
                 f"Pending: {stats['pending_count']}, Processing: {stats['processing_count']}. "
-                "Please wait for the current message to complete before sending another."
+                "Please wait for the current message to complete before sending another. "
+                "Plain sends can inject mid-turn; load_skill requires the target to be free."
             )
 
         # ── Revive-once guard (quick-win #7, enqueue-revive only) ──────────
@@ -3504,7 +3615,12 @@ status at the moment of invocation:
     ENQUEUE even for RUNNING — both parameters are enqueue-pipeline-only
     (the ``<meta>`` tag parser and the ``metadata`` channel live in
     ``enqueue_message``'s pipeline) and would be lost or land as raw
-    tag text on the injection branch.
+    tag text on the injection branch. BUSY-GUARD FALLBACK (2026-09-25):
+    when such a context-bearing enqueue is rejected by the queue-busy
+    guard (target mid-turn), the send falls back to injection with the
+    context flattened inline into the message body — provided the
+    target is still running with a live graph. ``load_skill`` sends are
+    never flattened.
 
   * ``WAITING_CHILDREN`` → ENQUEUE via
     ``manager.enqueue_message(...)`` — a durable ``MessageQueue``
@@ -3587,7 +3703,9 @@ Args:
         None for backward-compatible behavior (no context injected).
         Sends bearing a non-empty ``context`` always dispatch via the
         enqueue pipeline (the only path with a metadata channel for
-        the context block).
+        the context block) — see the busy-guard fallback above: on a
+        busy mid-turn injection-eligible target, the context is
+        flattened inline into the message body and injected.
 
 Returns:
     A human-readable status string. The shape varies by routing
@@ -3658,10 +3776,23 @@ Example outputs::
 
     # Busy gate (enqueue branch — D6 consequence; trips when a
     # WC target already has a queued wake during the enqueue→claim
-    # window):
+    # window). EXCEPTION — busy-guard fallback (2026-09-25): a send
+    # bearing non-empty ``context`` to a STILL-running, live-graph
+    # target is instead injected with the context block flattened
+    # inline into the message body; ``load_skill`` sends and
+    # graphless / non-running targets keep the rejection:
     "ERROR: Instance '<id>' already has a message in progress.
     Pending: N, Processing: M. Please wait for the current message
-    to complete before sending another."
+    to complete before sending another. Plain sends can inject
+    mid-turn; load_skill requires the target to be free."
+
+    # busy-guard fallback success (context-bearing send, target
+    # running with live graph, queue busy — injected, not enqueued):
+    "Message injected into running target — the context block was
+    flattened inline into the message body (injected, not enqueued:
+    the target is mid-turn, so the durable queue rejected the
+    enqueue; the next agent_node cycle will deliver the combined
+    message to the live turn). …"
 """
 
     # ──────────────────────────────────────────────────────────────────
