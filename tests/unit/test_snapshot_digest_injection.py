@@ -173,6 +173,36 @@ class TestBuildSnapshotDigestMessage:
         assert "\\u003c" in msg.content  # escaped, not raw
         assert "<tag>" not in msg.content
 
+    def test_oversized_canonical_digest_truncates_non_trivially_with_hint(self):
+        """D6 size pin (Wave 1b): a canonical digest whose body exceeds
+        the ceiling must lose REAL content — the injected body is
+        non-trivially smaller than the pre-cap original (< 90%) — and
+        the ``snapshot_search`` hint is appended for the dropped tail.
+        Pins the tail-truncate behavior beyond the under-ceiling
+        post-condition assert."""
+        value = _digest_dict()
+        # Inflate canonically: thousands of real decision entries push
+        # the rendered body far past the 25k-token ceiling.
+        value["decisions"] = [
+            f"decision {i}: probed the subsystem and logged the finding"
+            for i in range(6_000)
+        ]
+        rendered = render_snapshot_digest_body(value)
+        assert rendered is not None
+        # Pre-condition: actually over the ceiling after rendering.
+        assert (
+            estimate_tokens(rendered)
+            > SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS
+        )
+
+        mgr = FakeManager(FakeInstanceRepo(_instance_with_digest(value)))
+        msg = asyncio.run(_build_snapshot_digest_message("inst-1", mgr))
+        assert msg is not None
+        # Non-trivial shrink — the cap is a real clamp, not a stamp.
+        assert len(msg.content) < 0.9 * len(rendered)
+        # Search hint appended for the dropped tail.
+        assert "use snapshot_search for the full body" in msg.content
+
     def test_no_metadata_no_block(self):
         mgr = FakeManager(FakeInstanceRepo(_instance_with_digest(None)))
         assert asyncio.run(_build_snapshot_digest_message("inst-1", mgr)) is None

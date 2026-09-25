@@ -213,6 +213,18 @@ class SnapshotRepository:
         idempotency key), stamps the status and (optionally) the
         effective model, and returns the updated row.
 
+        Terminal-state guard (Wave 1b): ONLY a ``running`` row may
+        transition here — verified: every legitimate caller
+        (``_finish_row`` success/failed, ``_run_capture``
+        timeout/crash) writes a row the lane itself created as
+        ``running``; no other legitimate pre-state exists. A row
+        already terminal fails SOFT (no raise — the async capture
+        lane must not crash on a lost race): rollback + WARN + the
+        row is returned unchanged, the late digest dropped. The
+        critical case is ``superseded`` — a stale capture finishing
+        after the R12 atomic flip must not resurrect the row to
+        ``active`` (design §3.2/§10 R12: no torn supersession state).
+
         Raises:
             ValueError: Unknown ``status`` (fail loud) — or unknown
                 ``snapshot_id`` (the lane's row must exist; a missing
@@ -230,6 +242,27 @@ class SnapshotRepository:
                     f"snapshot {snapshot_id!r} not found at terminal "
                     "write — ledger row must exist"
                 )
+            # Wave 1b FIX 1 — late-terminal-write guard. A stale async
+            # capture finishing AFTER ``create_successor`` flipped the
+            # row must not resurrect it (R12: no torn supersession
+            # state). Only 'running' is a legal pre-state; any other
+            # state fails soft — rollback, WARN, row returned
+            # unchanged, digest dropped.
+            if row.status != SNAPSHOT_STATUS_RUNNING:
+                session.rollback()
+                if row.status == SNAPSHOT_STATUS_SUPERSEDED:
+                    logger.warning(
+                        f"[Snapshot] dropping late terminal-write for "
+                        f"superseded row {snapshot_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"[Snapshot] dropping late terminal-write for "
+                        f"{row.status!r} row {snapshot_id} — only "
+                        "'running' may transition via "
+                        "update_capture_result"
+                    )
+                return self.get(snapshot_id)
             merged = dict(row.digest or {})
             merged.update(digest or {})
             row.digest = merged

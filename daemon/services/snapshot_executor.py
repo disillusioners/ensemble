@@ -462,6 +462,9 @@ class SnapshotExecutor:
         started_monotonic = time.monotonic()
         target = row.target_instance_id
         prompt_version = SNAPSHOT_PROMPT_VERSION
+        # Pre-clamp transcript size for the R16 log line (None until
+        # the transcript exists — earlier failures log the fallback).
+        input_chars: int | None = None
         try:
             # ── 0. Target liveness read (LIVE banner + R6b stamp) ─────
             instance_repo = getattr(self._manager, "_instance_repository", None)
@@ -535,6 +538,10 @@ class SnapshotExecutor:
                 raise ValueError(
                     "post-R6a transcript is empty — nothing to distill"
                 )
+            # R16 honest input figure: capture the PRE-clamp size so
+            # the capture log line reflects actual input size, not the
+            # committed-cap ceiling.
+            input_chars = len(transcript)
 
             input_clamped = False
             if len(transcript) > TRUNCATION_GLOBAL_INPUT_CAP_CHARS:
@@ -577,6 +584,7 @@ class SnapshotExecutor:
                     started_monotonic=started_monotonic,
                     prompt_version=prompt_version,
                     effective_model=row.effective_model,
+                    input_chars=input_chars,
                 )
 
             # ── 5. Digest LLM call (R11 persona; SNAPSHOT_MODEL chain) ─
@@ -665,6 +673,7 @@ class SnapshotExecutor:
                 digest=digest,
                 effective_model=effective_model,
                 started_monotonic=started_monotonic,
+                input_chars=input_chars,
             )
 
         except KeyError as exc:
@@ -677,6 +686,7 @@ class SnapshotExecutor:
                 started_monotonic=started_monotonic,
                 prompt_version=prompt_version,
                 effective_model=row.effective_model,
+                input_chars=input_chars,
             )
         except asyncio.CancelledError:
             # Service shutdown mid-capture — re-raise after recording
@@ -702,6 +712,7 @@ class SnapshotExecutor:
                 started_monotonic=started_monotonic,
                 prompt_version=prompt_version,
                 effective_model=row.effective_model,
+                input_chars=input_chars,
             )
 
     # ── helpers ───────────────────────────────────────────────────────
@@ -764,6 +775,7 @@ class SnapshotExecutor:
         digest: dict[str, Any],
         effective_model: str | None,
         started_monotonic: float,
+        input_chars: int | None = None,
     ) -> Snapshot:
         """Terminal write + the R16 structured capture log line."""
         wall_clock = time.monotonic() - started_monotonic
@@ -786,7 +798,7 @@ class SnapshotExecutor:
                     "target_instance_id": row.target_instance_id,
                     "effective_model": effective_model,
                     "wall_clock_s": round(wall_clock, 3),
-                    "approx_tokens_in": _log_input_tokens(digest),
+                    "approx_tokens_in": _log_input_tokens(digest, input_chars),
                     "approx_tokens_out": _log_output_tokens(digest),
                     "created_by_agent_id": row.created_by_agent_id,
                     "project_id": row.project_id,
@@ -804,6 +816,7 @@ class SnapshotExecutor:
         started_monotonic: float,
         prompt_version: str,
         effective_model: str | None,
+        input_chars: int | None = None,
     ) -> Snapshot:
         """Record a ``failed`` terminal row (never raises)."""
         digest = {
@@ -823,18 +836,27 @@ class SnapshotExecutor:
             digest=digest,
             effective_model=effective_model,
             started_monotonic=started_monotonic,
+            input_chars=input_chars,
         )
 
 
-def _log_input_tokens(digest: dict[str, Any]) -> int:
+def _log_input_tokens(
+    digest: dict[str, Any],
+    input_chars: int | None = None,
+) -> int:
     """Approximate input tokens recorded for the capture log line.
 
     The executor clamps input at 40k chars ≈ 10k tokens (§8); the
-    honest figure needs the pre-clamp size which the digest does not
-    carry — the clamp stamp
-    (``provenance.input_clamped``) plus this ceiling-bound estimate
-    is the R16 groundwork fidelity for v1.
+    honest figure is the PRE-clamp transcript size, which ``capture``
+    records before clamping and threads through ``_finish_row`` /
+    ``_fail_row``. Only when the true length is unavailable (failure
+    before the transcript was built) does this fall back to the
+    ceiling-bound estimate; the clamp stamp
+    (``provenance.input_clamped``) disambiguates the clamped case
+    (R16 groundwork fidelity for v1).
     """
+    if input_chars is not None:
+        return input_chars // 4
     return TRUNCATION_GLOBAL_INPUT_CAP_CHARS // 4
 
 

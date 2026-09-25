@@ -223,6 +223,67 @@ class TestR12AtomicSupersessionFlip:
 
 
 # ============================================================================
+# update_capture_result terminal-state guard (Wave 1b FIX 1 — the
+# stale-capture resurrection race)
+# ============================================================================
+
+
+class TestUpdateCaptureResultTerminalGuard:
+    def test_late_write_after_supersession_dropped_no_resurrection(
+        self, repo: SnapshotRepository
+    ):
+        """A stale async capture finishing AFTER the R12 flip must NOT
+        resurrect the superseded row: ``update_capture_result`` fails
+        soft — status unchanged, late digest dropped, no raise."""
+        row = repo.create_with_embeddings(
+            _snapshot(title="late-race", status=SNAPSHOT_STATUS_RUNNING)
+        )
+        original_digest = dict(row.digest or {})
+        succ = repo.create_successor(
+            _snapshot(title="successor"), supersedes_snapshot_id=row.id
+        )
+        assert succ.status == SNAPSHOT_STATUS_ACTIVE
+        assert repo.get(row.id).status == SNAPSHOT_STATUS_SUPERSEDED
+
+        out = repo.update_capture_result(
+            row.id,
+            status=SNAPSHOT_STATUS_ACTIVE,
+            digest={"late": "resurrection-attempt"},
+        )
+        # Returned row is the unchanged superseded row.
+        assert out.status == SNAPSHOT_STATUS_SUPERSEDED
+        assert "late" not in (out.digest or {})
+        # Persisted state confirms: no resurrection, no digest write.
+        fresh = repo.get(row.id)
+        assert fresh is not None
+        assert fresh.status == SNAPSHOT_STATUS_SUPERSEDED
+        assert (fresh.digest or {}) == original_digest
+
+    def test_terminal_write_refused_for_other_terminal_pre_state(
+        self, repo: SnapshotRepository
+    ):
+        """Strict guard: ONLY 'running' may transition via
+        ``update_capture_result`` — a row already in any terminal
+        state (failed / interrupted / active) is never overwritten."""
+        for pre_status in ("failed", SNAPSHOT_STATUS_INTERRUPTED, SNAPSHOT_STATUS_ACTIVE):
+            row = repo.create_with_embeddings(
+                _snapshot(title=f"terminal-{pre_status}", status=pre_status)
+            )
+            original_digest = dict(row.digest or {})
+            out = repo.update_capture_result(
+                row.id,
+                status=SNAPSHOT_STATUS_ACTIVE,
+                digest={"late": True},
+            )
+            assert out.status == pre_status
+            fresh = repo.get(row.id)
+            assert fresh is not None
+            assert fresh.status == pre_status
+            assert "late" not in (fresh.digest or {})
+            assert (fresh.digest or {}) == original_digest
+
+
+# ============================================================================
 # D3 boot sweep
 # ============================================================================
 
