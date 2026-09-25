@@ -241,14 +241,20 @@ def _candidate(snapshot_id: str, tags: list[str], freshness: str = "fresh", age:
 
 class TestR15Gate:
     def test_default_is_off(self):
+        # No manager → constant fallback (fail-closed)
         assert is_snapshot_create_enabled() is False
+        # No manager kwarg → still False
+        assert is_snapshot_create_enabled(manager=None) is False
 
     def test_disabled_result_shape_exact(self, tools):
         result = _run(tools[0].ainvoke({"target_instance_id": "inst-1", "name": "n", "tags": VALID_TAGS}))
         assert result == {"disabled": True, "error": "snapshot_create disabled by settings toggle"}
 
     def test_on_proceeds_to_capture(self, tools, manager, monkeypatch):
-        monkeypatch.setattr("daemon.tools.snapshot_tools.is_snapshot_create_enabled", lambda: True)
+        monkeypatch.setattr(
+            "daemon.tools.snapshot_tools.is_snapshot_create_enabled",
+            lambda manager=None: True,
+        )
         result = _run(tools[0].ainvoke({"target_instance_id": "inst-1", "name": "n", "tags": VALID_TAGS}))
         assert result["error"] is None
         assert len(manager._snapshot_service.calls) == 1
@@ -272,7 +278,10 @@ class TestR15Gate:
 
 class TestR9Verdicts:
     def _enable(self, monkeypatch):
-        monkeypatch.setattr("daemon.tools.snapshot_tools.is_snapshot_create_enabled", lambda: True)
+        monkeypatch.setattr(
+            "daemon.tools.snapshot_tools.is_snapshot_create_enabled",
+            lambda manager=None: True,
+        )
 
     def test_reuse_strong_match_no_capture(self, tools, manager, monkeypatch):
         self._enable(monkeypatch)

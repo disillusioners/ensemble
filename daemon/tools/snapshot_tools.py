@@ -79,7 +79,11 @@ A snapshot is a distilled digest of one instance's working experience
   context). Falls back to a normal cold spawn when no snapshot is
   found, expired, or verification fails — the result's
   "started": "warm"|"cold" line says which happened; cite it in
-  your dispatch/report.
+  your dispatch/report. Pass `allow_cross_project=True` to consume
+  a cross-project snapshot explicitly (off by default — fail-closed
+  D8 isolation). Project-less callers (e.g. an instance whose
+  project is unknown) always get a cold spawn — the internal search
+  has no project to scope against (D8, permanent).
 
 Judgment tags are typed `dim:value` strings — `kind:` from the fixed
 enum (investigation, defect-verification, implementation, review,
@@ -88,21 +92,82 @@ refactor, release-gate, design-exploration, environment-setup) plus
 """
 
 # ── R15 settings toggle (write side ONLY — single seam) ────────────────
-#: R15 default OFF (opt-in rollout). Wave 3 replaces the helper's
-#: source with the real daemon setting + FE settings-menu item — the
-#: TOOL keeps exactly ONE call site (``is_snapshot_create_enabled``),
-#: so the swap never touches the tool body.
+#: R15 unset-fallback: when no manager is wired (e.g. boot probes,
+#: metadata-scan stubs) or when the metadata read fails, the helper
+#: MUST read as OFF (fail-closed opt-in rollout). This constant is
+#: the only place the default lives — Wave 3 wired the real setting
+#: via the FE settings-menu item (``daemon/routers/settings.py
+#: snapshot-create`` endpoints) into the helper body below.
 _SNAPSHOT_CREATE_ENABLED_DEFAULT = False
 
 
-def is_snapshot_create_enabled() -> bool:
+def is_snapshot_create_enabled(manager: Any | None = None) -> bool:
     """R15 gate source — ``True`` allows ``snapshot_create`` writes.
 
-    Wave 3 replaces this body with a read of the real daemon setting
-    (config + FE settings-menu item). The default-OFF contract and the
-    single-call-site rule are the stable parts.
+    Read-on-call so a runtime flip of the FE toggle takes effect on
+    the next ``snapshot_create`` invocation without a daemon restart
+    (mirrors how editor/peak-hours settings propagate — no listener
+    needed for an opt-in toggle that changes a handful of times a
+    year).
+
+    Resolution:
+
+    * ``manager is None`` → returns ``_SNAPSHOT_CREATE_ENABLED_DEFAULT``
+      (``False``). Used by metadata-scan stubs and boot-time probes
+      that wire no manager.
+    * ``manager`` is provided and its project repository can resolve
+      the SYSTEM_DEFAULT_PROJECT metadata record at
+      ``constants.SNAPSHOT_CREATE_METADATA_KEY`` → returns the stored
+      boolean (truthy values: ``"on"``, ``"true"``, ``"1"``, ``"yes"``
+      case-insensitive; everything else → ``False``).
+    * Read error / missing system project / missing metadata record →
+      ``_SNAPSHOT_CREATE_ENABLED_DEFAULT`` (fail-closed).
+
+    Rider (i) isolation: this helper is consulted by the SINGLE call
+    site in ``snapshot_create`` only. ``snapshot_search`` and
+    ``spawn_hot_instance`` are NEVER gated.
     """
-    return _SNAPSHOT_CREATE_ENABLED_DEFAULT
+    if manager is None:
+        return _SNAPSHOT_CREATE_ENABLED_DEFAULT
+    # Lazy import avoids a snapshot→services import-on-load cycle
+    # (the helper is imported during tool registration).
+    try:
+        from daemon.services.snapshot_settings_utils import (
+            get_snapshot_create_enabled,
+        )
+        # The manager exposes ``_project_repository`` (mirrors
+        # ``_snapshot_repo`` — see ``daemon/manager.py:1644`` and the
+        # SQLModelProjectRepository wiring).
+        repo = getattr(manager, "_project_repository", None)
+        if repo is None:
+            return _SNAPSHOT_CREATE_ENABLED_DEFAULT
+
+        import asyncio as _asyncio
+
+        try:
+            loop = _asyncio.get_running_loop()
+        except RuntimeError:
+            # Helper called from a sync context (boot probe /
+            # metadata scan) — fall back to the constant. The tool
+            # surface ALWAYS runs in a loop and exercises the async
+            # path; the sync path is purely defensive.
+            return _SNAPSHOT_CREATE_ENABLED_DEFAULT
+        # NOTE: this helper is synchronous (R15: a single sync bool
+        # read with fail-closed semantics — the async GET lives in
+        # the FE settings service and the operator sets the toggle
+        # there). Wrap the underlying read in a runner so the loop
+        # never deadlocks: the metadata repo opens its own session
+        # in a thread, so a sync caller can run it directly.
+        import contextvars as _cv
+
+        try:
+            return _asyncio.run_coroutine_threadsafe(
+                get_snapshot_create_enabled(repo), loop
+            ).result(timeout=2.0)
+        except Exception:
+            return _SNAPSHOT_CREATE_ENABLED_DEFAULT
+    except Exception:
+        return _SNAPSHOT_CREATE_ENABLED_DEFAULT
 
 
 # ── Input models (convention: SpawnInstanceInput, instance.py) ─────────
@@ -250,6 +315,24 @@ class SpawnHotInstanceInput(BaseModel):
             "the snapshot to carry a repo path + sha)."
         ),
     )] = "metadata"
+
+    allow_cross_project: Annotated[bool, Field(
+        default=False,
+        description=(
+            "D8/Wave 2b handoff — explicit cross-project override. "
+            "Default ``false`` (fail-closed): a snapshot from a "
+            "different project than the spawn's project triggers a "
+            "R14 verify-fail cold fallback with a warning, "
+            "preventing cross-project digest leakage through a "
+            "shared leader. Set to ``true`` to consume a "
+            "cross-project snapshot anyway — staleness is still "
+            "computed; the hint notes the cross-project origin "
+            "(``hint`` carries a 'cross-project' marker so the "
+            "caller records the consent). Only meaningful when "
+            "``snapshot_id`` is supplied; internal-search results "
+            "are always project-scoped (D8 permanent)."
+        ),
+    )] = False
 
 
 # ── module-level helpers (pure, testable) ──────────────────────────────
@@ -455,6 +538,45 @@ def create_snapshot_tools(
     def _search_service() -> SnapshotSearchService | None:
         return getattr(manager, "_snapshot_search_service", None)
 
+    def _metrics_service() -> Any | None:
+        """R16 — accessor for the monitoring counters service.
+
+        Returns ``None`` when the manager has no metrics wiring
+        (e.g. boot probes / metadata scan stubs) so the counters
+        no-op cleanly. Production managers always wire one — see
+        ``daemon/manager.py`` for the wiring line.
+        """
+        return getattr(manager, "_snapshot_metrics_service", None)
+
+    # R16 — fail-soft helpers for the snapshot_create and
+    # spawn_hot_instance counter increments. Wrapped in safe
+    # wrappers so a counter write failure NEVER bubbles up to the
+    # tool (R16 rider j: increments fail-soft — log, never raise,
+    # never fail the spawn/create).
+    def _safe_inc_capture(agent_id: str) -> None:
+        svc = _metrics_service()
+        if svc is None:
+            return
+        try:
+            svc.inc_capture(agent_id)
+        except Exception as exc:  # pragma: no cover — defensive belt
+            logger.warning(
+                f"[Snapshot] R16 capture counter increment failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    def _safe_inc_spawn(snapshot_id: str) -> None:
+        svc = _metrics_service()
+        if svc is None:
+            return
+        try:
+            svc.inc_spawn(snapshot_id)
+        except Exception as exc:  # pragma: no cover — defensive belt
+            logger.warning(
+                f"[Snapshot] R16 spawn counter increment failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
     @register_tool_category(CATEGORY_NAME)
     @tool(args_schema=SnapshotCreateInput)
     async def snapshot_create(
@@ -465,7 +587,7 @@ def create_snapshot_tools(
     ) -> dict:
         """Capture a target instance's experience as a snapshot. Use tool_help("snapshot_create") for details."""
         # ── R15 gate (write side ONLY) — single call site ─────────────
-        if not is_snapshot_create_enabled():
+        if not is_snapshot_create_enabled(manager=manager):
             return {
                 "disabled": True,
                 "error": "snapshot_create disabled by settings toggle",
@@ -566,6 +688,12 @@ def create_snapshot_tools(
                 if _r9_reuse_verdict(candidate, normalized_tags):
                     verdict = "reuse"
                     reuse_id = candidate.get("snapshot_id")
+                    # R16 — capture counter increments REGARDLESS of
+                    # R9 verdict (REUSE + NEW + SUPERSEDE + CREATE-FRESH
+                    # all count). REUSE = the creator exercised the
+                    # search-before-create protocol and chose to
+                    # reuse; that decision IS a capture event.
+                    _safe_inc_capture(caller_agent_id or "unknown")
                     return {
                         "snapshot_id": reuse_id,
                         "status": "reused-existing-snapshot-id",
@@ -623,6 +751,14 @@ def create_snapshot_tools(
 
         snapshot_id = capture.get("snapshot_id")
         capture_error = capture.get("error")
+        # R16 — capture counter on the SUCCESS path of the SUPERSEDE /
+        # NEW / CREATE-FRESH verdicts. REUSE already increments above
+        # (covers all 4 verdicts regardless of R9). The increment
+        # only fires on a real ledger-row insertion (snapshot_id
+        # non-null); a failed ``capture_async`` does NOT count
+        # (the capture never made it to storage).
+        if snapshot_id and not capture_error:
+            _safe_inc_capture(caller_agent_id or "unknown")
         return {
             "snapshot_id": snapshot_id,
             "status": capture.get("status") or "running",
@@ -689,6 +825,7 @@ def create_snapshot_tools(
         instance_name: Annotated[str | None, Field(description="Optional short name for the instance.")] = None,
         model: Annotated[str | None, Field(description="Optional LLM model override (spawn_instance fallback semantics).")] = None,
         verify: Annotated[Literal["metadata", "git"], Field(description="Staleness depth: 'metadata' (default) or 'git' repo-divergence anchor.")] = "metadata",
+        allow_cross_project: Annotated[bool, Field(description="D8/Wave 2b handoff: explicit cross-project override. False (default) → mismatch is a verify-fail cold fallback. True → consume the cross-project snapshot anyway (staleness still computed; hint notes the cross-project origin). Only meaningful when snapshot_id is supplied.")] = False,
     ) -> dict:
         """Spawn an instance warm-started from the best matching snapshot; cold fallback on any miss. Use tool_help("spawn_hot_instance") for details."""
         # ── Auth: team membership (same gate as spawn_instance) ───────
@@ -723,6 +860,11 @@ def create_snapshot_tools(
         cold_reason: str | None = None
         warnings: list[str] = []
         searched_desc: str | None = None
+        # D8 cross-project consume flag — flipped to True when the
+        # caller explicitly opted in via ``allow_cross_project=True``;
+        # threaded into the spawn-hot hint so the recorded consent
+        # is visible at-a-glance.
+        cross_project_consumed: bool = False
 
         project_id = _caller_project_id(manager, caller_instance_id)
 
@@ -752,17 +894,33 @@ def create_snapshot_tools(
                     and getattr(consumed, "project_id", None)
                     and consumed.project_id != project_id
                 ):
-                    # Cross-project isolation (§4.3) — no override
-                    # param exists on the tool, so a mismatch is a
-                    # verify failure (prevents digest leakage through
-                    # a shared leader).
-                    cold_reason = "verify-failed"
-                    warnings.append(
-                        f"snapshot {snapshot_id} belongs to project "
-                        f"{consumed.project_id}, not this instance's "
-                        f"project {project_id}"
-                    )
-                    consumed = None
+                    # Cross-project isolation (§4.3). Wave 2b
+                    # (D8 handoff) added an explicit opt-in param
+                    # — ``allow_cross_project=True`` lets the caller
+                    # consume a cross-project snapshot anyway
+                    # (staleness is still computed; the
+                    # ``hint`` notes the cross-project origin so
+                    # the caller records the consent). The default
+                    # ``False`` preserves the Wave 2b fail-closed
+                    # behavior — a mismatch is a verify-fail cold
+                    # fallback with a warning (prevents digest
+                    # leakage through a shared leader).
+                    if allow_cross_project:
+                        cross_project_consumed = True
+                        warnings.append(
+                            f"snapshot {snapshot_id} belongs to "
+                            f"project {consumed.project_id} — "
+                            f"cross-project consume opted in via "
+                            f"allow_cross_project=True"
+                        )
+                    else:
+                        cold_reason = "verify-failed"
+                        warnings.append(
+                            f"snapshot {snapshot_id} belongs to "
+                            f"project {consumed.project_id}, not "
+                            f"this instance's project {project_id}"
+                        )
+                        consumed = None
             searched_desc = f"snapshot {snapshot_id}"
         else:
             # R14 internal search — ACTIVE-only candidates (the search
@@ -939,6 +1097,48 @@ def create_snapshot_tools(
                 consumed = None
                 cold_reason = "verify-failed"
 
+            else:
+                # R16 — spawn-warm counter, MONITORING ONLY. Fires
+                # ONLY on the WARM path: cold / no-hit / expired /
+                # verify-failed spawns (R14 cold results, captured by
+                # the ``started == "cold"`` branch above and by the
+                # ``started == "cold"`` flip on stamp failure) do NOT
+                # count (rider j). Placement: AFTER the stamp
+                # succeeds, so a counter write failure can NEVER
+                # cause the warm spawn to downgrade to cold (the
+                # ordering is one-way: success-of-stamp first, then
+                # counter as observability).
+                if consumed is not None:
+                    _safe_inc_spawn(getattr(consumed, "id", "") or "")
+                    # R16 observability floor (Wave 3 rider j):
+                    # emit a structured line per WARM spawn with
+                    # the counter increment as the load-bearing
+                    # payload. Mirrors the executor's existing
+                    # capture log line shape
+                    # (``[SnapshotCapture]`` JSON payload) so
+                    # downstream tools can grep both uniformly.
+                    try:
+                        import json as _json
+
+                        logger.info(
+                            "[SnapshotSpawnWarm] "
+                            + _json.dumps(
+                                {
+                                    "snapshot_id": getattr(consumed, "id", None),
+                                    "new_instance_id": new_instance_id,
+                                    "counter": "spawn_warm",
+                                    "project_id": getattr(
+                                        consumed, "project_id", None
+                                    ),
+                                }
+                            )
+                        )
+                    except Exception:  # pragma: no cover — defensive belt
+                        logger.warning(
+                            "[Snapshot] R16 spawn warm log line "
+                            "encoding failed (non-fatal)"
+                        )
+
         if started == "warm":
             tags_text = ", ".join(list(getattr(consumed, "domain_tags", None) or [])[:8])
             age = (
@@ -950,6 +1150,17 @@ def create_snapshot_tools(
                 f"Warm-started from snapshot {consumed.id} "
                 f"(age {age}d; tags {tags_text})"
             )
+            # D8 cross-project marker — when the caller explicitly
+            # opted in via ``allow_cross_project=True``, surface
+            # the cross-project origin in the hint so the caller
+            # records the consent (digest provenance includes the
+            # consumed snapshot's project).
+            if cross_project_consumed:
+                hint += (
+                    f" — cross-project consume from "
+                    f"{getattr(consumed, 'project_id', None)} "
+                    f"(allow_cross_project=True)"
+                )
             # R14 drift-note mandate — a stale-not-expired warm start
             # carries the drift note in the hint AND in
             # staleness.warnings (appended above).

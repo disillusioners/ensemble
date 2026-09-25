@@ -532,9 +532,15 @@ class InstanceManager:
         # `snapshot_embeddings` tables are created on fresh AND
         # existing PG databases (design-exploration §3.3 — no
         # _ensure_postgres_columns mirror for brand-new tables).
+        #
+        # Wave 3 R16: ``SnapshotUsageCounter`` is in the same
+        # package; the include-block MUST add it so the
+        # ``snapshot_usage_counters`` table joins ``create_all`` on
+        # fresh DBs (PG) AND on the in-memory SQLite used by tests.
         from .repositories.snapshot.models import (  # noqa: F401
             Snapshot,
             SnapshotEmbedding,
+            SnapshotUsageCounter,
         )
 
         SQLModel.metadata.create_all(self._engine)
@@ -1685,6 +1691,17 @@ class InstanceManager:
             embedding_service=self._snapshot_embedding_service,
             llm_config=snapshot_llm_config,
             staleness_fn=compute_staleness_report,
+        )
+        # R16 — monitoring counters (Wave 3). Always wired (the
+        # service holds no expensive state and the row count is the
+        # source of truth). The tool surface consults it on every
+        # ``snapshot_create`` (capture path) and the WARM branch of
+        # ``spawn_hot_instance`` (spawn path); the surface endpoint
+        # ``GET /api/settings/snapshot-usage-metrics`` reads it for
+        # the FE.
+        from .services.snapshot_metrics_service import SnapshotMetricsService
+        self._snapshot_metrics_service = SnapshotMetricsService(
+            engine=self._engine,
         )
 
         # Initialize MCP warm-up pool (non-blocking background warmup)

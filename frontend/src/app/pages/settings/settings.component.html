@@ -178,4 +178,119 @@
       </button>
     </div>
   </section>
+
+  <section class="setting-section editor-section">
+    <h2>Agent Snapshots</h2>
+    <p class="setting-description">
+      The snapshot subsystem captures instance experience for warm starts
+      (R14 auto-fallback). The <strong>write side</strong>
+      (<code>snapshot_create</code>) is gated by this toggle; the read
+      (<code>snapshot_search</code>) and consumption
+      (<code>spawn_hot_instance</code>) tools are always-on (R15 rider
+      isolation). Default: <strong>off</strong> (opt-in rollout). When
+      off, <code>snapshot_create</code> calls return a clean disabled
+      result and <code>spawn_hot_instance</code> falls back to a cold
+      spawn whenever no snapshot was found.
+    </p>
+
+    <div class="editor-options" role="radiogroup" aria-label="Snapshot create preference">
+      <label
+        class="editor-option"
+        [class.selected]="snapshotCreateEnabled() === true"
+      >
+        <input
+          type="radio"
+          name="snapshot-create-preference"
+          value="on"
+          [checked]="snapshotCreateEnabled() === true"
+          (change)="onSnapshotCreateSelectionChange(true)"
+          [disabled]="savingSnapshotCreate()"
+        />
+        <span class="editor-option-label">Enabled</span>
+        <span class="editor-option-hint">
+          Allow <code>snapshot_create</code> calls to capture instance
+          experience.
+        </span>
+      </label>
+
+      <label
+        class="editor-option"
+        [class.selected]="snapshotCreateEnabled() === false"
+      >
+        <input
+          type="radio"
+          name="snapshot-create-preference"
+          value="off"
+          [checked]="snapshotCreateEnabled() === false"
+          (change)="onSnapshotCreateSelectionChange(false)"
+          [disabled]="savingSnapshotCreate()"
+        />
+        <span class="editor-option-label">Disabled (default)</span>
+        <span class="editor-option-hint">
+          <code>snapshot_create</code> returns disabled; spawn_hot_instance
+          goes cold whenever no captured snapshot is found.
+        </span>
+      </label>
+    </div>
+
+    <div class="editor-actions">
+      <button
+        mat-raised-button
+        color="primary"
+        (click)="saveSnapshotCreateEnabled()"
+        [disabled]="!snapshotCreateDirty() || savingSnapshotCreate()"
+      >
+        @if (savingSnapshotCreate()) {
+          <mat-progress-spinner
+            diameter="18"
+            mode="indeterminate"
+            class="apply-spinner"
+          ></mat-progress-spinner>
+          <span>Applying...</span>
+        } @else {
+          <span>Apply</span>
+        }
+      </button>
+      @if (snapshotCreateDirty() && !savingSnapshotCreate()) {
+        <span class="dirty-hint">Unsaved changes</span>
+      }
+    </div>
+  </section>
+
+  @if (snapshotMetrics()) {
+    <section class="setting-section">
+      <h2>Snapshot Usage Metrics</h2>
+      <p class="setting-description">
+        Per-agent capture counts (incremented on every
+        <code>snapshot_create</code>, regardless of REUSE / NEW /
+        SUPERSEDE / CREATE-FRESH verdict) and per-snapshot spawn-warm
+        counts (incremented only when <code>spawn_hot_instance</code>
+        consumes a snapshot). <strong>Monitoring only</strong> — these
+        counters never feed the search ranking.
+      </p>
+      @if (snapshotMetricsCaptureEntries().length === 0) {
+        <span class="setting-description">No usage recorded yet.</span>
+      } @else {
+        <ul class="metrics-list">
+          @for (entry of snapshotMetricsCaptureEntries(); track entry.agent) {
+            <li>
+              <span class="metrics-agent">{{ entry.agent }}</span>
+              <span class="metrics-count">{{ entry.created }} capture{{ entry.created === 1 ? '' : 's' }}</span>
+            </li>
+          }
+        </ul>
+        @if (snapshotMetricsSpawnEntries().length > 0) {
+          <h3 class="metrics-subheading">Warmed snapshots</h3>
+          <ul class="metrics-list">
+            @for (entry of snapshotMetricsSpawnEntries(); track entry.snapshot_id) {
+              <li>
+                <span class="metrics-agent">{{ entry.snapshot_id }}</span>
+                <span class="metrics-count">{{ entry.count }} warm spawn{{ entry.count === 1 ? '' : 's' }}</span>
+              </li>
+            }
+          </ul>
+        }
+      }
+    </section>
+  }
 </div>

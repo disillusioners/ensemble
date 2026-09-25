@@ -246,3 +246,48 @@ $accent-cyan: #10a7f7;
   align-items: center;
   gap: 0.75rem;
 }
+
+// R16 — usage metrics list (Wave 3). Reuses the editor-section
+// styles for the wrapping section; the inner list is its own scope.
+.metrics-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+
+  li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.875rem;
+    background: $bg-primary;
+    border: 1px solid $border-color;
+    border-radius: 6px;
+    font-size: 0.875rem;
+  }
+
+  .metrics-agent {
+    color: $accent-cyan;
+    font-weight: 500;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    word-break: break-all;
+  }
+
+  .metrics-count {
+    color: $text-secondary;
+    font-size: 0.8125rem;
+    margin-left: 0.75rem;
+    white-space: nowrap;
+  }
+}
+
+.metrics-subheading {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: $text-secondary;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}

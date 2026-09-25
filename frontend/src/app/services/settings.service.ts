@@ -13,6 +13,15 @@ export interface BlueprintPeakHours {
   tz_offset: number;
 }
 
+export interface SnapshotCreatePreference {
+  enabled: boolean;
+}
+
+export interface SnapshotUsageMetrics {
+  capture_counts: Record<string, { created: number }>;
+  spawn_counts_per_snapshot: Array<{ snapshot_id: string; count: number }>;
+}
+
 @Injectable({ providedIn: 'root' })
 export class SettingsService {
   private readonly http = inject(HttpClient);
@@ -79,5 +88,34 @@ export class SettingsService {
    */
   setBlueprintPeakHours(config: BlueprintPeakHours): Observable<BlueprintPeakHours> {
     return this.http.put<BlueprintPeakHours>('/api/settings/blueprint-peak-hours', config);
+  }
+
+  /**
+   * GET /api/settings/snapshot-create
+   * Returns the R15 settings toggle (snapshot_create enabled / disabled).
+   */
+  getSnapshotCreateEnabled(): Observable<SnapshotCreatePreference> {
+    return this.http.get<SnapshotCreatePreference>('/api/settings/snapshot-create');
+  }
+
+  /**
+   * PUT /api/settings/snapshot-create
+   * Persists the R15 settings toggle. Default OFF (opt-in rollout);
+   * snapshot_create tool calls refuse when disabled.
+   */
+  setSnapshotCreateEnabled(enabled: boolean): Observable<SnapshotCreatePreference> {
+    return this.http.put<SnapshotCreatePreference>(
+      '/api/settings/snapshot-create',
+      { enabled },
+    );
+  }
+
+  /**
+   * GET /api/settings/snapshot-usage-metrics
+   * Returns the aggregated R16 counters for ops visibility. MONITORING
+   * ONLY — never feeds the search pipeline (R10 forbids usage-ranking).
+   */
+  getSnapshotUsageMetrics(): Observable<SnapshotUsageMetrics> {
+    return this.http.get<SnapshotUsageMetrics>('/api/settings/snapshot-usage-metrics');
   }
 }

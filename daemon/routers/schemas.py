@@ -1621,3 +1621,84 @@ class DeferBlockResponse(BaseModel):
             "shape (display-side severity conjunction)"
         ),
     )
+
+
+# ==================== Agent Snapshot Settings Schemas ====================
+
+
+class SnapshotCreatePreferenceResponse(BaseModel):
+    """Response for ``GET /api/settings/snapshot-create``.
+
+    Surfaced to the FE settings menu — the toggle is R15 (gates the
+    ``snapshot_create`` WRITE side ONLY; ``snapshot_search`` and
+    ``spawn_hot_instance`` are NEVER gated). When ``enabled=False``
+    the operator has chosen opt-out (default, fail-closed); a
+    snapshot_create tool call returns the canonical
+    ``{"disabled": True, "error": "snapshot_create disabled by settings
+    toggle"}`` shape (Wave 2b contract — see
+    ``daemon/tools/snapshot_tools.py``).
+    """
+
+    enabled: bool = Field(
+        ...,
+        description=(
+            "R15 settings toggle: ``true`` allows snapshot_create writes, "
+            "``false`` disables them. Default false (unset → OFF, "
+            "fail-closed opt-in rollout)."
+        ),
+    )
+
+
+class SnapshotCreatePreferenceUpdate(BaseModel):
+    """Request body for ``PUT /api/settings/snapshot-create``."""
+
+    enabled: bool = Field(
+        ...,
+        description=(
+            "Set the R15 settings toggle. ``true`` enables "
+            "``snapshot_create`` writes; ``false`` disables them."
+        ),
+    )
+
+
+# ==================== Agent Snapshot Monitoring Metrics Schemas ====================
+
+
+class SnapshotUsageMetricsResponse(BaseModel):
+    """Response for ``GET /api/settings/snapshot-usage-metrics`` (R16).
+
+    Aggregated R16 counters — surfaced to the FE for ops visibility.
+    MONITORING ONLY — explicitly NOT a ranking signal (R10 forbids
+    usage-ranking in v1; the counters here never feed the search
+    pipeline; see ``daemon/services/snapshot_metrics_service.py``).
+
+    Shape:
+
+    * ``capture_counts`` — map of ``agent_id -> { created: int }``.
+      ``created`` increments on every ``snapshot_create`` invocation,
+      REGARDLESS of the R9 verdict (REUSE + NEW + SUPERSEDE +
+      CREATE-FRESH all count — cost forensics + adoption tracking).
+    * ``spawn_counts_per_snapshot`` — list of
+      ``{snapshot_id, count}`` for the snapshots that have warmed at
+      least one instance. Cold spawns (`None` snapshot consumption) DO
+      NOT count (R16 rider j). Only warmed snapshots surface; the FE
+      joins against its own snapshot display for names.
+    """
+
+    capture_counts: dict[str, dict[str, int]] = Field(
+        default_factory=dict,
+        description=(
+            "Map ``agent_id -> { created: int }``. Increments on every "
+            "``snapshot_create`` invocation regardless of R9 verdict."
+        ),
+    )
+
+    spawn_counts_per_snapshot: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Per-snapshot spawn usage — list of ``{snapshot_id, "
+            "count}`` for snapshots that warmed at least one instance. "
+            "Cold / ``None``-snapshot consumptions are NOT counted "
+            "(R16 rider j)."
+        ),
+    )
