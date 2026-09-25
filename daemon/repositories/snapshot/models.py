@@ -101,8 +101,24 @@ class Snapshot(SQLModel, table=True):
         task_summary: BM25 corpus text for hybrid search (PR5).
         domain_tags: R8 typed ``dim:value`` strings (auto-derived +
             judgment), stored as a JSONB string array. Queryable via
-            ``tag_mode: all|any`` (PG ``@>`` containment + GIN;
-            SQLite JSON-string scan at v1 volumes — rider (f)).
+            ``tag_mode: all|any`` (PG ``@>`` containment; SQLite
+            JSON-string scan at v1 volumes — rider (f)).
+
+            Rider (f) status (Wave 2a): GIN index on ``domain_tags``
+            is DEFERRED. No precedent in this repo for PG-side GIN
+            index creation alongside ``create_all`` (the existing
+            indexes in this module are btree composites); the
+            migrations runner is SQLite-only
+            (``daemon/migrations/runner.py:719-727``), so a
+            PG-only migration is not on the standard path. At v1
+            volumes the SQLite JSON scan is acceptable; on PG the
+            ``(project_id, status)`` btree composite + the
+            ``@>`` containment operator narrow candidates fast
+            enough for the pilot scale. Phase-2 backlog: revisit
+            with a dedicated PG-side GIN migration once volumes
+            warrant it (the SQL would be
+            ``CREATE INDEX ix_snapshots_domain_tags_gin ON snapshots
+            USING GIN (domain_tags jsonb_path_ops);`` or equivalent).
         status: Lifecycle state — see module docstring. Searchable
             states are ``active`` / ``superseded`` ONLY.
         supersedes_snapshot_id: R12 soft self-ref — set when this row
