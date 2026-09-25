@@ -19,7 +19,10 @@ A snapshot tool that consults this MUST treat ``False`` as the
 authoritative answer and refuse the call.
 
 Rider (i) isolation: only ``snapshot_create`` consults this helper
-(``is_snapshot_create_enabled`` in ``daemon/tools/snapshot_tools.py``).
+(the tool's call site awaits ``get_snapshot_create_enabled``
+directly; the ``is_snapshot_create_enabled`` sync stub in
+``daemon/tools/snapshot_tools.py`` is sync-context-only and always
+answers the fail-closed default).
 ``snapshot_search`` (read) and ``spawn_hot_instance`` (consumption) are
 NEVER gated — they ship always-on. Toggle OFF = instant cold fallback
 per R14 (the spawn succeeds but no snapshot is found because none is

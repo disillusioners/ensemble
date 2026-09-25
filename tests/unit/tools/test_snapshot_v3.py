@@ -42,6 +42,7 @@ tables (the Wave-2b engine only creates the snapshot domain).
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -252,6 +253,23 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _gate(monkeypatch, enabled: bool) -> None:
+    """Steer the R15 gate at its REAL seam.
+
+    Since the sync-bridge fix, ``snapshot_create`` awaits
+    ``daemon.tools.snapshot_tools.get_snapshot_create_enabled``
+    directly — patch THAT (async) name; the old sync
+    ``is_snapshot_create_enabled`` stub is no longer on the tool path.
+    """
+    async def _fake_enabled(repo=None):
+        return enabled
+
+    monkeypatch.setattr(
+        "daemon.tools.snapshot_tools.get_snapshot_create_enabled",
+        _fake_enabled,
+    )
+
+
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -451,10 +469,7 @@ class TestR15ToolIsolation:
         }
 
     def test_snapshot_create_on_proceeds(self, tools, manager, monkeypatch):
-        monkeypatch.setattr(
-            "daemon.tools.snapshot_tools.is_snapshot_create_enabled",
-            lambda manager=None: True,
-        )
+        _gate(monkeypatch, True)
         result = _run(
             tools[0].ainvoke(
                 {"target_instance_id": "inst-1", "name": "n", "tags": VALID_TAGS}
@@ -464,19 +479,14 @@ class TestR15ToolIsolation:
         assert len(manager._snapshot_service.calls) == 1
 
     def test_snapshot_search_not_gated(self, tools, monkeypatch):
-        # Toggle OFF (manager-aware). snapshot_search MUST still succeed.
-        monkeypatch.setattr(
-            "daemon.tools.snapshot_tools.is_snapshot_create_enabled",
-            lambda manager=None: False,
-        )
+        # Toggle OFF (gate steered at its real async seam).
+        # snapshot_search MUST still succeed.
+        _gate(monkeypatch, False)
         result = _run(tools[1].ainvoke({"query": "anything"}))
         assert result == {"results": [], "error": None}
 
     def test_spawn_hot_instance_not_gated(self, tools, monkeypatch):
-        monkeypatch.setattr(
-            "daemon.tools.snapshot_tools.is_snapshot_create_enabled",
-            lambda manager=None: False,
-        )
+        _gate(monkeypatch, False)
         result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
         # R14 fail-soft contract MUST return cold; error stays None.
         assert result["error"] is None
@@ -492,6 +502,82 @@ class TestR15ToolIsolation:
             tools[0].ainvoke(
                 {"target_instance_id": "inst-1", "name": "n", "tags": VALID_TAGS}
             )
+        )
+        assert result == {
+            "disabled": True,
+            "error": "snapshot_create disabled by settings toggle",
+        }
+
+
+# ============================================================================
+# R15 blocker regression — gate consults the REAL async util on the loop
+# ============================================================================
+
+
+class TestR15GateAsyncPath:
+    """Regression for the Wave-3 review BLOCKER (sync-bridge deadlock).
+
+    The old sync helper bridged the setting read with
+    ``run_coroutine_threadsafe(coro, loop).result(timeout=2.0)`` —
+    called from INSIDE the running loop's own thread it scheduled the
+    coroutine on the very loop it then blocked, a guaranteed
+    TimeoutError → ``except`` → fail-closed ``False``. Consequence:
+    the toggle could never read ON in production, and every
+    ``snapshot_create`` stalled the shared daemon loop ~2s.
+
+    The fix: the ``snapshot_create`` call site awaits the REAL
+    ``get_snapshot_create_enabled`` util directly. These tests drive
+    that real util against a real SQLite-backed project repository
+    (shared in-memory engine, real ``project_metadata_records``
+    rows) — NO mocks on the read path — and assert the tool proceeds
+    past the gate with the setting stored ON, without the 2s stall.
+    """
+
+    @pytest.mark.asyncio
+    async def test_real_setting_on_proceeds_without_stall(
+        self, engine, project_repo, system_default_project, manager
+    ):
+        # Wire the real (SQLite-backed) project repository the same
+        # way the production manager does (``_project_repository``),
+        # store the toggle ON, and invoke the tool as an async test —
+        # exactly the production call path.
+        manager._project_repository = project_repo
+        await set_snapshot_create_enabled(project_repo, True)
+
+        tools = create_snapshot_tools(manager, "caller-1", "coder", None)
+        start = time.monotonic()
+        result = await tools[0].ainvoke(
+            {"target_instance_id": "inst-1", "name": "n", "tags": VALID_TAGS}
+        )
+        elapsed = time.monotonic() - start
+
+        # Gate must read ON through the real util → the tool proceeds
+        # past the gate (no disabled shape) and the capture runs.
+        assert result.get("disabled") is not True, (
+            f"gate read the toggle as OFF despite stored ON — "
+            f"result={result!r}"
+        )
+        assert result["error"] is None
+        assert len(manager._snapshot_service.calls) == 1
+        # The loop must NOT be stalled by a 2s timeout bridge.
+        assert elapsed < 1.0, (
+            f"gate blocked the loop for {elapsed:.2f}s — the sync "
+            "run_coroutine_threadsafe bridge regressed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_real_setting_off_still_gates(
+        self, engine, project_repo, system_default_project, manager
+    ):
+        """The ON path's mirror: through the real util, stored OFF
+        (fail-closed) still returns the exact disabled shape.
+        """
+        manager._project_repository = project_repo
+        await set_snapshot_create_enabled(project_repo, False)
+
+        tools = create_snapshot_tools(manager, "caller-1", "coder", None)
+        result = await tools[0].ainvoke(
+            {"target_instance_id": "inst-1", "name": "n", "tags": VALID_TAGS}
         )
         assert result == {
             "disabled": True,
@@ -516,10 +602,7 @@ class TestR16MonitoringMetrics:
     """
 
     def _enable(self, monkeypatch):
-        monkeypatch.setattr(
-            "daemon.tools.snapshot_tools.is_snapshot_create_enabled",
-            lambda manager=None: True,
-        )
+        _gate(monkeypatch, True)
 
     def _wire_metrics(self, manager: FakeManager, engine: Engine):
         manager._snapshot_metrics_service = SnapshotMetricsService(engine=engine)
@@ -797,10 +880,7 @@ class TestCrossProjectOverride:
     """
 
     def _enable(self, monkeypatch):
-        monkeypatch.setattr(
-            "daemon.tools.snapshot_tools.is_snapshot_create_enabled",
-            lambda manager=None: True,
-        )
+        _gate(monkeypatch, True)
 
     def _seed_cross_project_snap(self, manager: FakeManager):
         repo: SnapshotRepository = manager._snapshot_repo

@@ -223,6 +223,23 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _gate(monkeypatch, enabled: bool) -> None:
+    """Steer the R15 gate at its REAL seam.
+
+    Since the sync-bridge fix, ``snapshot_create`` awaits
+    ``daemon.tools.snapshot_tools.get_snapshot_create_enabled``
+    directly — patch THAT (async) name; the old sync
+    ``is_snapshot_create_enabled`` stub is no longer on the tool path.
+    """
+    async def _fake_enabled(repo=None):
+        return enabled
+
+    monkeypatch.setattr(
+        "daemon.tools.snapshot_tools.get_snapshot_create_enabled",
+        _fake_enabled,
+    )
+
+
 def _candidate(snapshot_id: str, tags: list[str], freshness: str = "fresh", age: float = 1.0) -> dict[str, Any]:
     return {
         "snapshot_id": snapshot_id,
@@ -251,10 +268,7 @@ class TestR15Gate:
         assert result == {"disabled": True, "error": "snapshot_create disabled by settings toggle"}
 
     def test_on_proceeds_to_capture(self, tools, manager, monkeypatch):
-        monkeypatch.setattr(
-            "daemon.tools.snapshot_tools.is_snapshot_create_enabled",
-            lambda manager=None: True,
-        )
+        _gate(monkeypatch, True)
         result = _run(tools[0].ainvoke({"target_instance_id": "inst-1", "name": "n", "tags": VALID_TAGS}))
         assert result["error"] is None
         assert len(manager._snapshot_service.calls) == 1
@@ -278,10 +292,7 @@ class TestR15Gate:
 
 class TestR9Verdicts:
     def _enable(self, monkeypatch):
-        monkeypatch.setattr(
-            "daemon.tools.snapshot_tools.is_snapshot_create_enabled",
-            lambda manager=None: True,
-        )
+        _gate(monkeypatch, True)
 
     def test_reuse_strong_match_no_capture(self, tools, manager, monkeypatch):
         self._enable(monkeypatch)

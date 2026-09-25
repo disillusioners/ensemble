@@ -26,9 +26,11 @@ Category layout — one module, two grant categories:
   rationale); worker/explorer excluded architecturally (leaf/latency).
 
 R15 settings toggle (write side ONLY): ``snapshot_create`` consults
-:func:`is_snapshot_create_enabled` — default OFF (opt-in rollout).
-Wave 3 replaces the helper's source with the real daemon setting +
-FE toggle; until then the helper reads a module-level constant.
+the async :func:`daemon.services.snapshot_settings_utils.get_snapshot_create_enabled`
+directly on the loop (default OFF — opt-in rollout). The module-level
+``is_snapshot_create_enabled`` sync stub remains ONLY for genuine sync
+contexts (metadata-scan stubs / boot probes) and always answers the
+fail-closed default.
 ``snapshot_search`` (read-only) and ``spawn_hot_instance``
 (consumption) are NEVER gated.
 
@@ -55,6 +57,7 @@ from daemon.services.snapshot_executor import (
     normalize_judgment_tags,
 )
 from daemon.services.snapshot_search_service import SnapshotSearchService
+from daemon.services.snapshot_settings_utils import get_snapshot_create_enabled
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)
@@ -102,72 +105,31 @@ _SNAPSHOT_CREATE_ENABLED_DEFAULT = False
 
 
 def is_snapshot_create_enabled(manager: Any | None = None) -> bool:
-    """R15 gate source — ``True`` allows ``snapshot_create`` writes.
+    """R15 gate source — SYNC CONTEXTS ONLY; answers the fail-closed default.
 
-    Read-on-call so a runtime flip of the FE toggle takes effect on
-    the next ``snapshot_create`` invocation without a daemon restart
-    (mirrors how editor/peak-hours settings propagate — no listener
-    needed for an opt-in toggle that changes a handful of times a
-    year).
+    .. deprecated::
+        The async tool surface no longer routes through this helper.
+        The ``snapshot_create`` call site awaits
+        :func:`daemon.services.snapshot_settings_utils.get_snapshot_create_enabled`
+        directly (R15 review BLOCKER fix: the previous implementation
+        bridged the async read with
+        ``run_coroutine_threadsafe(...).result(timeout=2.0)`` — from
+        inside the running loop's own thread that schedules the
+        coroutine on the very loop it then blocks on, a guaranteed
+        TimeoutError that degraded every call to the default and
+        stalled the shared daemon loop ~2s).
 
-    Resolution:
+    This stub remains for GENUINE sync contexts only — metadata-scan
+    stubs and boot-time probes that wire no manager (or run with no
+    event loop) — where the fail-closed default (OFF, opt-in
+    rollout) is the correct answer. Resolution:
 
-    * ``manager is None`` → returns ``_SNAPSHOT_CREATE_ENABLED_DEFAULT``
-      (``False``). Used by metadata-scan stubs and boot-time probes
-      that wire no manager.
-    * ``manager`` is provided and its project repository can resolve
-      the SYSTEM_DEFAULT_PROJECT metadata record at
-      ``constants.SNAPSHOT_CREATE_METADATA_KEY`` → returns the stored
-      boolean (truthy values: ``"on"``, ``"true"``, ``"1"``, ``"yes"``
-      case-insensitive; everything else → ``False``).
-    * Read error / missing system project / missing metadata record →
-      ``_SNAPSHOT_CREATE_ENABLED_DEFAULT`` (fail-closed).
-
-    Rider (i) isolation: this helper is consulted by the SINGLE call
-    site in ``snapshot_create`` only. ``snapshot_search`` and
-    ``spawn_hot_instance`` are NEVER gated.
+    * Any call → ``_SNAPSHOT_CREATE_ENABLED_DEFAULT`` (``False``).
+      There is intentionally NO sync DB path: a sync caller that
+      needs the real setting must run the async util on a worker
+      thread / its own loop, not bridge it here.
     """
-    if manager is None:
-        return _SNAPSHOT_CREATE_ENABLED_DEFAULT
-    # Lazy import avoids a snapshot→services import-on-load cycle
-    # (the helper is imported during tool registration).
-    try:
-        from daemon.services.snapshot_settings_utils import (
-            get_snapshot_create_enabled,
-        )
-        # The manager exposes ``_project_repository`` (mirrors
-        # ``_snapshot_repo`` — see ``daemon/manager.py:1644`` and the
-        # SQLModelProjectRepository wiring).
-        repo = getattr(manager, "_project_repository", None)
-        if repo is None:
-            return _SNAPSHOT_CREATE_ENABLED_DEFAULT
-
-        import asyncio as _asyncio
-
-        try:
-            loop = _asyncio.get_running_loop()
-        except RuntimeError:
-            # Helper called from a sync context (boot probe /
-            # metadata scan) — fall back to the constant. The tool
-            # surface ALWAYS runs in a loop and exercises the async
-            # path; the sync path is purely defensive.
-            return _SNAPSHOT_CREATE_ENABLED_DEFAULT
-        # NOTE: this helper is synchronous (R15: a single sync bool
-        # read with fail-closed semantics — the async GET lives in
-        # the FE settings service and the operator sets the toggle
-        # there). Wrap the underlying read in a runner so the loop
-        # never deadlocks: the metadata repo opens its own session
-        # in a thread, so a sync caller can run it directly.
-        import contextvars as _cv
-
-        try:
-            return _asyncio.run_coroutine_threadsafe(
-                get_snapshot_create_enabled(repo), loop
-            ).result(timeout=2.0)
-        except Exception:
-            return _SNAPSHOT_CREATE_ENABLED_DEFAULT
-    except Exception:
-        return _SNAPSHOT_CREATE_ENABLED_DEFAULT
+    return _SNAPSHOT_CREATE_ENABLED_DEFAULT
 
 
 # ── Input models (convention: SpawnInstanceInput, instance.py) ─────────
@@ -587,7 +549,13 @@ def create_snapshot_tools(
     ) -> dict:
         """Capture a target instance's experience as a snapshot. Use tool_help("snapshot_create") for details."""
         # ── R15 gate (write side ONLY) — single call site ─────────────
-        if not is_snapshot_create_enabled(manager=manager):
+        # Awaits the REAL async util on the loop (R15 review BLOCKER
+        # fix: the former sync helper bridged the read with
+        # run_coroutine_threadsafe from the loop thread — guaranteed
+        # self-deadlock → TimeoutError → always-OFF + ~2s stall).
+        if not await get_snapshot_create_enabled(
+            getattr(manager, "_project_repository", None)
+        ):
             return {
                 "disabled": True,
                 "error": "snapshot_create disabled by settings toggle",
