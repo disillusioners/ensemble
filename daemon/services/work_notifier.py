@@ -89,6 +89,9 @@ import time
 import traceback
 from typing import TYPE_CHECKING, Any
 
+from daemon.services.mission_live_guard import (
+    evaluate_mission_live,
+)
 from daemon.services.work_status import is_terminal as _is_terminal
 
 if TYPE_CHECKING:
@@ -223,45 +226,78 @@ async def notify_work_watchers(
            before any watcher fetch. If the work is gone, return 0
            early — watchers stay in place for reconcile cleanup.
         2. **Read-only fetch + in-memory partition.** All watchers
-           are SELECTed (no DELETE). Each watcher is classified
-           into one of two buckets in memory:
+           are SELECTed (no DELETE). The partition runs in two
+           phases:
 
-           * **matching** — the watcher subscribes to ``status``
-             AND (for the ``mission_terminal`` opt-in branch) its
-             mission liveness is itself terminal. This bucket
-             WILL be notified.
-           * **held** — the watcher opts in to ``mission_terminal``
-             but its mission liveness is not yet terminal. The row
-             is preserved in the DB for the future terminal event;
-             it is NEVER claimed on this call.
+           a. **Mission-live verdict hoisted once** — when ANY
+              subscribing watcher opts in to ``mission_terminal``,
+              the canonical ``evaluate_mission_live`` guard
+              (``daemon/services/mission_live_guard.py``) is invoked
+              exactly ONCE per ``notify_work_watchers`` call. The
+              guard consults the dependency-bus pending count, the
+              permanent ``instances.parent_id`` tree, and the
+              ``completed_at`` zombie-backstop window — the same
+              legs the boot-sweep ``reconcile_terminal_watches``
+              and the observer's ``_fire_watcher_notify_for_terminal``
+              re-fire already use. This replaces the pre-C1 proxy
+              check (``work_record.mission_liveness`` /
+              ``work_record.status``) that missed live children
+              on the 2026-09-25 mission 36be8aef incident.
+
+           b. **Three-bucket classifier.** Each watcher lands in
+              exactly one of:
+
+              * **matching_claimable** — all subscribed events fire
+                NOW (transport-kind status matches AND, for rows
+                subscribing to ``mission_terminal``, mission
+                liveness is terminal). These rows are CAS-claimed
+                before notify (the N1 exactly-once invariant).
+              * **matching_readonly** — SOME but not all subscribed
+                events fire NOW (the multi-kind retire rule: a row
+                subscribing to BOTH a transport kind AND
+                ``mission_terminal`` fires the transport-kind
+                delivery mid-mission but the row survives for the
+                future mission-terminal fire — the LAST firing event
+                is the one that claims). The notify loop iterates
+                these rows WITHOUT claiming them so the row stays
+                in the DB.
+              * **held_for_mission** — the watcher subscribes only
+                to ``mission_terminal`` AND the mission is still
+                live. Skipped entirely on this call; survives for
+                the future mission-terminal re-fire.
 
         3. **CLAIM-FIRST for terminal statuses (N1 fix,
-           2026-09-03).** When ``status`` is terminal AND the
-           ``matching`` set is non-empty, the atomic
-           ``DELETE ... RETURNING`` on
+           2026-09-03, extended by C1).** When ``status`` is
+           terminal AND ``matching_claimable`` is non-empty, the
+           atomic ``DELETE ... RETURNING`` on
            ``watcher_repo.claim_watchers_for_job_for_instances``
            runs BEFORE any ``enqueue_message``. Only the rows the
-           CAS returned are notified. Concurrent callers each
-           partition independently; only the CAS winner(s) deliver,
-           so the bounded ≤2 duplicate-delivery window the
-           notify-then-claim ordering had is closed. The held
-           (mission-not-terminal) rows are not in the CAS WHERE
-           clause, so they survive untouched.
-        4. **Notify ONLY the CAS winners.** The notify loop
-           iterates the rows the claim returned. A row that was
-           partitioned into ``matching`` but lost the CAS to a
-           concurrent caller is NOT notified here — that caller's
-           notify loop owns it. This is the exactly-once
-           guarantee at the caller level (paired with the
-           repo-level CAS).
+           CAS returned are notified via the claimable path.
+           ``matching_readonly`` rows bypass the CAS — they are
+           delivered (so the multi-kind row gets its transport-kind
+           fire NOW) but the row itself stays in the DB for the
+           future mission-terminal claim. ``held_for_mission`` rows
+           are not in the CAS WHERE clause, so they survive
+           untouched.
+
+        4. **Notify ONLY the deliverable rows.** The notify loop
+           iterates ``claimed ∪ matching_readonly`` (terminal
+           status) or ``matching_claimable ∪ matching_readonly``
+           (non-terminal). A row that was partitioned into
+           ``matching_claimable`` but lost the CAS to a concurrent
+           caller is NOT notified via the claimable path here —
+           that caller's notify loop owns it. The
+           ``matching_readonly`` rows are NOT part of the CAS
+           contention (they bypass the claim) so they always
+           deliver on this call.
 
         For **non-terminal** statuses (``in_progress`` etc.),
-        ``claim`` is NEVER called: the notify loop iterates the
-        ``matching`` bucket in read-only mode, and the watcher
-        rows remain in the DB so the eventual terminal
-        notification can still reach them. The earlier
-        unconditional-claim implementation silently dropped these
-        rows before the terminal event fired.
+        ``claim`` is NEVER called: the notify loop iterates
+        ``matching_claimable ∪ matching_readonly`` in read-only
+        mode, and the watcher rows remain in the DB so the
+        eventual terminal notification can still reach them. The
+        earlier unconditional-claim implementation silently dropped
+        these rows before the terminal event fired.
 
     Exactly-once invariant (post-N1):
 
@@ -398,8 +434,98 @@ async def notify_work_watchers(
         #                        mission liveness NOT yet terminal.
         #                        Rows stay in DB for the future
         #                        terminal event. Never claimed here.
-        matching: list = []
+        matching_claimable: list = []
+        """Rows that have ALL subscribed events firing NOW — claim + deliver.
+
+        See the partition rule below for the precise definition.
+        """
+
+        matching_readonly: list = []
+        """Rows that have SOME (but not all) subscribed events firing NOW.
+
+        Deliver the body but DO NOT claim — the row stays in the DB for
+        the still-pending subscribed event(s). Currently populated when
+        a row subscribes to BOTH a transport-kind event (the current
+        ``status``) AND ``mission_terminal`` while the mission is still
+        live: the transport-kind fires NOW but ``mission_terminal`` is
+        pending, so the row survives for the future mission-terminal
+        delivery (which is the LAST firing event — see the
+        commission-mandated retire rule below).
+        """
+
         held_for_mission = 0
+
+        # C1 fix (2026-09-25, fix/mission-terminal-watch-report-publish):
+        # replace the PROXY mission liveness check (the
+        # ``work_record.mission_liveness`` / ``work_record.status``
+        # sniff) with the canonical ``evaluate_mission_live`` guard.
+        # The proxy missed live children in the permanent instance tree
+        # (the message-mirror flip per turn + per-receipt settlement
+        # pattern dropped the row 6m42s early on the 2026-09-25
+        # incident, mission 36be8aef). The guard consults the bus, the
+        # root instance, and every descendant via the permanent
+        # ``instances.parent_id`` reference — the same legs the boot
+        # sweep and the observer re-fire paths already use, so
+        # admission-vs-mission-liveness semantics stay aligned across
+        # all three notify lanes.
+        #
+        # Hoisted out of the per-watcher loop: every watcher on the
+        # same work_id shares the same mission liveness verdict, so
+        # the guard runs ONCE per notify call (not per-watcher). The
+        # expensive async ``evaluate_mission_live`` call is bypassed
+        # entirely when no subscribing watcher opts in to
+        # ``mission_terminal`` (the dominant case in production —
+        # default ``ALL_WATCHABLE_EVENTS`` rows do NOT include
+        # ``mission_terminal``; the M2 mission-class opt-in is
+        # explicit).
+        mission_live_verdict_live: bool | None = None
+        any_mission_terminal_opt_in = any(
+            "mission_terminal" in w.watch_events for w in watchers
+        )
+        if any_mission_terminal_opt_in:
+            instance_repository = getattr(
+                instance_manager, "_instance_repository", None
+            )
+            mission_instance_id = getattr(
+                work_record, "instance_id", None
+            )
+            try:
+                _guard_verdict = await evaluate_mission_live(
+                    instance_repository=instance_repository,
+                    instance_id=mission_instance_id,
+                    task_completed_at=getattr(
+                        work_record, "completed_at", None
+                    ),
+                    bus_pending_count=None,
+                )
+                mission_live_verdict_live = _guard_verdict.live
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "notify_work_watchers: mission-live guard "
+                        "verdict for work_id=%s status=%s: live=%s "
+                        "reason=%s",
+                        work_id[:8],
+                        status,
+                        _guard_verdict.live,
+                        _guard_verdict.reason,
+                    )
+            except Exception as guard_exc:  # noqa: BLE001
+                # Guard contract is fail-OPEN: any internal error →
+                # ``live=False`` (the caller proceeds). The guard helper
+                # itself never raises, but the defensive wrapper here
+                # guards against a guard-wrapper regression slipping
+                # through. Treat any raise as live=False → all rows
+                # claim + deliver (at-least-once terminal takes
+                # precedence over stranding).
+                logger.warning(
+                    "notify_work_watchers: mission-live guard "
+                    "raised %s for work_id=%s — fail-OPEN (claim all): %s",
+                    type(guard_exc).__name__,
+                    work_id[:8],
+                    guard_exc,
+                )
+                mission_live_verdict_live = False
+
         for watcher in watchers:
             # Filter by the watcher's subscribed events. The watcher's
             # ``watch_events`` is the JSONB list populated at
@@ -422,78 +548,99 @@ async def notify_work_watchers(
             if not standard_match and not mission_terminal_opt_in:
                 continue
 
-            # M2 (mission-class, 2026-09-02, ``feature/mission-class``)
-            # — ``mission_terminal`` opt-in gating (contract draft
-            # §3.5). When a watcher opts in via ``mission_terminal``
-            # (added to ``watch_events`` at ``add_watch`` time), the
-            # notification fires ONLY when both admission AND mission
-            # liveness are terminal. The dual-terminal check uses
-            # ``work_record.mission_liveness`` (canonical mission
-            # vocabulary for mirror rows; ``None`` for task rows).
+            # C1 partition rule (multi-kind retire, design choice
+            # 2026-09-25, ratified by user): a row R subscribed to
+            # events E is claimable ONLY when EVERY subscribed event
+            # has fired (or fires NOW). When SOME but not all
+            # subscribed events fire NOW the row is delivered but NOT
+            # claimed — it survives in the DB for the still-pending
+            # event(s). The four shapes this rule admits:
             #
-            # DEFECT-5 fix (2026-09-24, fix/watch-notify-delivery-gaps):
-            # narrow the M2 hold gate — a watcher that ALSO subscribes
-            # to an explicit non-terminal kind (``in_progress``,
-            # ``midflight_report``, ``question_requested``,
-            # ``answer_received``, ``stuck_awaiting_answer``) MUST
-            # receive the non-terminal fire even when
-            # ``mission_terminal`` is in its events list. The
-            # pre-fix code held ``held_for_mission += 1; continue``
-            # for ANY non-terminal status whenever ``mission_terminal``
-            # was subscribed, which silently dropped every
-            # mid-flight ⟳ notification (live evidence: 3 emissions,
-            # 2 kinds, 0 deliveries — events 2412/2420 on dev daemon
-            # at 5f4e35b0). CRITICAL DESIGN TRAP: the non-terminal
-            # fire MUST NOT consume the multi-kind row — the row
-            # survives for the future terminal ``mission_terminal``
-            # fire. The non-terminal branch below reaches the
-            # read-only ``matching`` bucket (no CAS claim); the
-            # terminal mission_terminal fire claims the same row
-            # when the work reaches terminal liveness, exactly once.
-            # A1 closure (2026-09-24): explicit terminal-kind
-            # subscriptions (``settled`` / ``completed`` /
-            # ``failed`` / ``cancelled`` / ``dead_letter``) deliver
-            # AT RECEIPT-SETTLE even mid-mission — the CAS claim
-            # runs and consumes the row; only PURE ``mission_terminal``
-            # rows (no explicit terminal kind in ``watch_events``)
-            # hold for the mission-terminal flip. See
-            # ``tests/job_queue/test_work_notifier_defect5_pins.py``
-            # ``test_dual_terminal_kind_settles_mid_mission_delivers_once_with_claim``.
-            if mission_terminal_opt_in and not standard_match:
-                # Task row: ``mission_liveness`` is intentionally
-                # ``None`` by Fix C split-semantics design — the row
-                # IS its own mission. Use ``work_record.status`` as
-                # the dual-terminal check for task rows.
-                job_type = getattr(work_record, "job_type", None)
-                if job_type == "message":
-                    mission_live = getattr(
-                        work_record, "mission_liveness", None
-                    )
-                else:
-                    mission_live = getattr(work_record, "status", None)
-                if not _is_terminal(mission_live):
-                    # Mission not yet terminal — keep the watch alive
-                    # for the future terminal event. Skip this
-                    # notification; the watcher row stays in place
-                    # (NOT in the step-3 claim WHERE clause).
-                    #
-                    # Engine phase (2026-09-20, design §3 of the
-                    # watch-notification-reliability recommendation):
-                    # the firing set was previously the literal
-                    # ``{completed, failed, cancelled}`` membership,
-                    # which EXCLUDED ``dead_letter`` — watchers of
-                    # dead-lettered missions were held forever (both
-                    # the event hook AND ``reconcile_terminal_watches``
-                    # route through this same gate). ``is_terminal``
-                    # covers the full canonical terminal set
-                    # (``completed`` / ``settled`` / ``failed`` /
-                    # ``cancelled`` / ``dead_letter``) while preserving
-                    # non-terminal holds (``pending`` / ``processing``
-                    # / ``paused`` fail closed as before).
-                    held_for_mission += 1
+            #   (1) Pure transport-kind row (no ``mission_terminal``
+            #       in events): the only subscribed event is the
+            #       transport status. Fires iff ``standard_match``.
+            #       Claim iff fires NOW. (Pre-existing A1 closure
+            #       behaviour; preserved verbatim.)
+            #
+            #   (2) Pure ``mission_terminal`` row (no transport
+            #       kind in events): the only subscribed event is
+            #       ``mission_terminal``. Fires iff mission liveness
+            #       is terminal. Claim iff fires NOW.
+            #
+            #   (3) Multi-kind row, mission LIVE: a subscribed
+            #       transport kind fires NOW but
+            #       ``mission_terminal`` is still pending. Deliver
+            #       the transport-kind body (no claim) — the row
+            #       survives for the future mission-terminal
+            #       delivery.
+            #
+            #   (4) Multi-kind row, mission TERMINAL: the
+            #       transport kind fires NOW AND
+            #       ``mission_terminal`` fires NOW. This is the
+            #       LAST firing event — claim + deliver. The
+            #       transport-kind body uses the current
+            #       ``status`` token (which may be a per-kind
+            #       mirror rename like ``"settled"`` for
+            #       ``job_type="message"`` rows); the user's
+            #       ``mission_terminal`` subscription is honored
+            #       by virtue of this delivery being the
+            #       mission-terminal moment.
+            #
+            # Coalescing caveat (3 → 4): a user subscribed to
+            # ``["completed", "mission_terminal"]`` for a task-kind
+            # work_id whose mission settles naturally gets TWO
+            # ``[JOB_EVENT]`` envelopes — the first at
+            # receipt-settle (mid-mission, "completed ✓") and the
+            # second at mission-terminal (the current status).
+            # This is the user-intended semantics: each subscribed
+            # event fires exactly once when its trigger arrives.
+            # The pre-C1 A1 closure coalesced to a single
+            # receipt-settle delivery that DROPPED the
+            # ``mission_terminal`` event entirely — the
+            # commission overrides that with the multi-event rule.
+            #
+            # Non-terminal kinds (DEFECT-5 preservation,
+            # 2026-09-24, ``fix/watch-notify-delivery-gaps``): a
+            # multi-kind row with a non-terminal kind subscription
+            # (``[in_progress, mission_terminal]``,
+            # ``[midflight_report, mission_terminal]``, etc.)
+            # delivers the non-terminal kind immediately even
+            # mid-mission — the mission-live guard is only
+            # consulted to gate ``mission_terminal`` itself.
+            # The non-terminal fire lands in the read-only bucket
+            # (no CAS claim); the eventual mission-terminal fire
+            # is the LAST firing event and claims.
+            if mission_terminal_opt_in:
+                if mission_live_verdict_live is True:
+                    # Mission still live — ``mission_terminal``
+                    # is pending. The current ``status`` either
+                    # fires (multi-kind, non-terminal-kind, or
+                    # transport-kind row) or does not (pure
+                    # mission_terminal-only row).
+                    if not standard_match:
+                        # Pure ``mission_terminal`` row with
+                        # mission still live — HOLD the row.
+                        held_for_mission += 1
+                        continue
+                    # Multi-kind row with at least one non-terminal
+                    # or terminal transport kind firing NOW:
+                    # deliver the body but DO NOT claim (the
+                    # ``mission_terminal`` subscription is still
+                    # pending and will fire later).
+                    matching_readonly.append(watcher)
                     continue
+                # Mission terminal (or guard failed-OPEN): the
+                # ``mission_terminal`` event fires NOW. The
+                # current ``status`` may ALSO fire (multi-kind)
+                # or may not (pure mission_terminal). Either way,
+                # this is the LAST firing event — claim + deliver.
+                # Fall through to ``matching_claimable``.
 
-            matching.append(watcher)
+            # Path 1 (pure transport-kind, status matches) AND
+            # Path 2 (pure ``mission_terminal``, mission terminal)
+            # AND Path 4 (multi-kind, mission terminal): all
+            # subscribed events have fired NOW — claim + deliver.
+            matching_claimable.append(watcher)
 
         # M2 — debug log when ``mission_terminal`` opt-in held
         # notifications back. The watcher rows remain in place for
@@ -508,59 +655,74 @@ async def notify_work_watchers(
                 status,
             )
 
-        # Step 3 (N1 — 2026-09-03): CLAIM-FIRST for terminal
-        # statuses. The atomic DELETE...RETURNING on the matching
-        # instance_id subset runs BEFORE any ``enqueue_message``.
-        # The repo-level CAS is the only primitive that closes the
-        # bounded ≤2 duplicate-delivery window the notify-then-claim
-        # ordering had. Two concurrent callers each partition
-        # independently above; only the CAS winner(s) receive the
-        # watcher rows back, and ONLY those rows are notified in
-        # step 4. The held-for-mission rows are excluded from the
-        # claim's WHERE clause, so they survive untouched for the
-        # future terminal event.
+        # Step 3 (N1 — 2026-09-03, extended by C1 2026-09-25):
+        # CLAIM-FIRST for terminal statuses, but ONLY for rows whose
+        # ALL subscribed events fire NOW (``matching_claimable``).
+        # Rows that have SOME but not all subscribed events firing
+        # NOW (``matching_readonly`` — multi-kind rows whose
+        # ``mission_terminal`` subscription is still pending while a
+        # transport kind fires NOW) are delivered WITHOUT claim so the
+        # row survives for the future mission-terminal fire.
+        # ``held_for_mission`` rows are pure ``mission_terminal``
+        # rows with mission still live — neither claimed nor
+        # delivered this call; they wait for the eventual
+        # mission-terminal re-fire (which reaches the matching_claimable
+        # bucket when the guard flips to ``live=False``).
         if _is_terminal(status):
-            if not matching:
-                return 0
-            claimed = await asyncio.to_thread(
-                watcher_repo.claim_watchers_for_job_for_instances,
-                work_id,
-                [w.instance_id for w in matching],
-            )
-            # DEFECT-1 round-3 arbitration instrumentation (2026-09-24,
-            # fix/watch-notify-delivery-gaps): permanent structured DEBUG
-            # log at the CAS claim chokepoint. Emits for BOTH outcomes —
-            # the claim winner (claimed>=1) AND the loser (claimed=0) —
-            # with ns timestamp, stack-derived caller chain, and the
-            # kwarg shape each side held. This is the ground-truth
-            # record of WHICH caller site won the exactly-once race and
-            # what content it carried (``kw_result_summary=None`` on a
-            # winning line IS the content-less-delivery proof).
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "[watch-cas] ts=%d work=%s status=%s caller=%s "
-                    "kw_result_summary=%s resolver_result_summary=%s "
-                    "effective_result=%s kw_error=%s effective_error=%s "
-                    "matching=%d claimed=%d",
-                    time.time_ns(),
-                    work_id[:8],
-                    status,
-                    _caller_chain(),
-                    _shape(result_summary),
-                    _shape(getattr(work_record, "result_summary", None)),
-                    _shape(effective_result),
-                    _shape(error),
-                    _shape(effective_error),
-                    len(matching),
-                    len(claimed),
+            if not matching_claimable:
+                # No row was fully-claimable; skip the CAS chokepoint
+                # entirely. ``matching_readonly`` rows will be
+                # delivered read-only below.
+                claimed = []
+            else:
+                claimed = await asyncio.to_thread(
+                    watcher_repo.claim_watchers_for_job_for_instances,
+                    work_id,
+                    [w.instance_id for w in matching_claimable],
                 )
-            if not claimed:
-                # Lost every CAS — every matching row was already
+                # DEFECT-1 round-3 arbitration instrumentation (2026-09-24,
+                # fix/watch-notify-delivery-gaps): permanent structured DEBUG
+                # log at the CAS claim chokepoint. Emits for BOTH outcomes —
+                # the claim winner (claimed>=1) AND the loser (claimed=0) —
+                # with ns timestamp, stack-derived caller chain, and the
+                # kwarg shape each side held. This is the ground-truth
+                # record of WHICH caller site won the exactly-once race and
+                # what content it carried (``kw_result_summary=None`` on a
+                # winning line IS the content-less-delivery proof).
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "[watch-cas] ts=%d work=%s status=%s caller=%s "
+                        "kw_result_summary=%s resolver_result_summary=%s "
+                        "effective_result=%s kw_error=%s effective_error=%s "
+                        "claimable=%d readonly=%d claimed=%d",
+                        time.time_ns(),
+                        work_id[:8],
+                        status,
+                        _caller_chain(),
+                        _shape(result_summary),
+                        _shape(getattr(work_record, "result_summary", None)),
+                        _shape(effective_result),
+                        _shape(error),
+                        _shape(effective_error),
+                        len(matching_claimable),
+                        len(matching_readonly),
+                        len(claimed),
+                    )
+            if matching_claimable and not claimed:
+                # Lost every CAS — every claimable row was already
                 # claimed by a concurrent terminal caller. Their
-                # notify loop owns delivery; ours would be a
-                # duplicate. Skip cleanly (return 0, no enqueue).
-                return 0
-            notify_list = claimed
+                # notify loop owns delivery of the claimable rows;
+                # ours would be a duplicate. ``matching_readonly``
+                # rows still deliver (they were not part of the CAS
+                # contention) so include them in the notify list.
+                notify_list = list(matching_readonly)
+            else:
+                # CAS winners + read-only rows. The CAS winner set is
+                # the DB-confirmed claim list (exactly-once by repo
+                # CAS); the read-only rows bypass the CAS entirely
+                # (multi-kind rows whose mission_terminal subscription
+                # is still pending).
+                notify_list = list(claimed) + list(matching_readonly)
         else:
             # Non-terminal (``in_progress`` etc.): NEVER claim — the
             # watcher must stay registered so the eventual terminal
@@ -568,8 +730,8 @@ async def notify_work_watchers(
             # implementation unconditionally claimed (deleted) all
             # watchers on every status, which broke progress tracking
             # by silently dropping the watch before the terminal
-            # event fired. Read-only notify on the matching bucket.
-            notify_list = matching
+            # event fired. Read-only notify on BOTH buckets.
+            notify_list = list(matching_claimable) + list(matching_readonly)
             logger.debug(
                 "notify_work_watchers: non-terminal status=%s for "
                 "work_id=%s — watcher rows preserved (read-only), "

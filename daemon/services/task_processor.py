@@ -259,12 +259,44 @@ class ProcessMessageProcessor(BaseProcessor):
             and self._work_resolver is not None
             and self._watcher_repo is not None
         ):
+            # C2 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+            # fetch the report content from the message row so the
+            # ``[JOB_EVENT]`` body carries a populated ``Result:`` line
+            # — without this the skip path notifies status-only (the
+            # dedup-skip path's notify ran with no content kwarg, the
+            # resolver returned ``None`` for the just-completed task's
+            # ``task.result`` because the write hadn't committed yet, and
+            # the body was the 57-byte header + Agent-only envelope the
+            # 2026-09-25 mission 36be8aef incident recorded). The kind
+            # is ``"completed"`` (NOT ``"settled"``) — PROCESS_REPORT
+            # tasks are task-kind WorkRecords, not message-mirror
+            # JobItems, so the M3 settled guardrail doesn't apply here.
+            skip_result_summary: str | None = None
+            if self._message_repo is not None and task.message_id:
+                try:
+                    skip_msg = await asyncio.to_thread(
+                        self._message_repo.get, task.message_id
+                    )
+                    if skip_msg is not None:
+                        skip_content = getattr(
+                            skip_msg, "content", None
+                        )
+                        if isinstance(skip_content, str) and skip_content:
+                            skip_result_summary = skip_content
+                except Exception as skip_fetch_exc:
+                    logger.warning(
+                        f"Task {task.id}: skip-path content fetch "
+                        f"failed for message {task.message_id[:8]}...: "
+                        f"{skip_fetch_exc!r} — notifying without content "
+                        f"(status-only envelope, same as pre-C2)."
+                    )
             await notify_work_watchers(
                 work_id=completed_task.work_id,
                 status="completed",
                 instance_manager=self._manager,
                 work_resolver=self._work_resolver,
                 watcher_repo=self._watcher_repo,
+                result_summary=skip_result_summary,
             )
         return {
             "success": True,
@@ -1122,10 +1154,30 @@ class ProcessMessageProcessor(BaseProcessor):
             # input, never the notify token. Guard: the write returns
             # None on race-loss / task-kind ⇒ no notify (phantom-event
             # guard).
+            #
+            # C3 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+            # thread ``result_summary=result.result_content`` so the
+            # settled envelope carries a populated ``Result:`` line.
+            # ``result.result_content`` is the in-memory
+            # ``ProcessingResult.result_content`` (the agent's last
+            # assistant message) — race-safe via the producer-side
+            # threading that DEFECT-1b established for the
+            # ``completed`` arm above (task_processor.py:1010-1020).
+            # Pre-C3 (M3 settled guardrail, 2026-09-24) the
+            # ``result_summary`` kwarg was intentionally omitted for
+            # settled envelopes — the M3 by-design NO-Result-block
+            # shape. C3 reverses that for settled-mirror envelopes
+            # specifically (user-ratified, 2026-09-25): the
+            # ``result.result_content`` is in scope from the
+            # pipeline return value and threading it closes the
+            # same ``task.result`` commit-visibility race the
+            # DEFECT-1b close documented at
+            # task_processor.py:1010-1020.
             if finalized_mirror is not None and job_queue_service is not None:
                 try:
                     await job_queue_service.notify_watchers(
-                        completed_task.work_id, "settled"
+                        completed_task.work_id, "settled",
+                        result_summary=result.result_content,
                     )
                 except Exception as e:
                     logger.warning(

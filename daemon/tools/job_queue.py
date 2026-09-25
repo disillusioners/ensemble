@@ -2208,9 +2208,24 @@ def create_job_tools(
         """
         if manager is None or not getattr(record, "instance_id", None):
             return record
+        # C2 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+        # include ``"settled"`` in the ``needs_result`` gate so
+        # message-mirror JobItem WorkRecords (per_kind_status_for
+        # surfaces ``"settled"`` instead of ``"completed"`` for the
+        # task → mirror split-semantics shape) also trigger the
+        # last-assistant-message enrichment. Without this the
+        # watch_job / watch_jobs path delivers a ``[JOB_EVENT]
+        # settled ✓`` body with no ``Result:`` block when the row's
+        # instance is still alive enough to have a captured assistant
+        # message — exactly the same class of stranding as the
+        # PROCESS_REPORT skip-path notify site
+        # (``task_processor._skip_task_as_completed``). The C3
+        # producer-side threading covers the notifier hot path;
+        # this enrichment is the second-chance catch for callers
+        # who reached the watch tools with an un-enriched record.
         needs_result = (
             getattr(record, "result_summary", None) is None
-            and getattr(record, "status", None) == "completed"
+            and getattr(record, "status", None) in {"completed", "settled"}
         )
         needs_error = (
             getattr(record, "error", None) is None
@@ -3978,7 +3993,11 @@ def create_mission_watch_tools(
                 f"Mission watch registered: armed {len(live_receipts)} "
                 f"live receipt(s) of mission {mission_id[:8]}... "
                 f"(events: {', '.join(effective_events)})"
-                f"{skipped_note}. Will notify at mission-terminal. "
+                f"{skipped_note}. Will notify at mission-terminal "
+                f"liveness — the row is HELD (NOT claimed at "
+                f"receipt-settle) until the canonical "
+                f"``evaluate_mission_live`` guard confirms the parent "
+                f"instance + every descendant is terminal. "
                 f"Re-call watch_mission after job_continue — new "
                 f"receipts are not auto-watched; the re-call is a "
                 f"delta-arm (already-settled receipts are skipped, "
@@ -3999,7 +4018,26 @@ def create_mission_watch_tools(
         "admission AND mission liveness are both terminal). Receipts "
         "that are ALREADY terminal at call time are skipped — they "
         "settled in a previous epoch and are never replayed.\n\n"
-        "Semantics:\n"
+        "Semantics (C1, 2026-09-25, ``fix/mission-terminal-watch-report-publish``):\n"
+        "    * A ``mission_terminal`` watcher row is HELD (DB-row "
+        "preserved) until the mission's liveness is genuinely terminal. "
+        "Receipt settlement alone does NOT claim the row — the row "
+        "fires when the canonical ``evaluate_mission_live`` guard "
+        "(``daemon/services/mission_live_guard.py``) confirms the "
+        "parent instance is terminal AND every descendant is terminal. "
+        "Pre-C1 the row was claimed/deleted at the FIRST receipt "
+        "settlement — that lost mission_terminal events when receipt "
+        "settlement preceded mission-terminal (the 2026-09-25 "
+        "incident pattern, mission 36be8aef). C1 replaces that proxy "
+        "check with the canonical guard.\n"
+        "    * Multi-kind retire rule (C1 commission-mandated, "
+        "supersedes A1 closure): rows subscribing to BOTH a transport "
+        "kind AND ``mission_terminal`` are HELD until the LAST firing "
+        "event (``mission_terminal``). The transport-kind fire is "
+        "delivered read-only (no CAS claim); the mission-terminal fire "
+        "is the LAST firing event and CAS-claims the row. Pre-C1 the "
+        "row was CAS-claimed at receipt-settle and the mission-terminal "
+        "fire was silently DROPPED; C1 reverses that.\n"
         "    * One mission-terminal produces N [JOB_EVENT]s for N "
         "watched receipts — the FIRST event after your watch is the "
         "signal; the rest are echoes. Act once.\n"
@@ -4015,7 +4053,8 @@ def create_mission_watch_tools(
         "mint delivers at the NEXT mission-terminal flip or boot "
         "sweep (delayed, never duplicated).\n"
         "    * A revived mission needs a FRESH watch_mission — the row "
-        "is claimed and deleted at the first terminal; the event "
+        "is HELD (NOT claimed/deleted) at receipt-settle and only "
+        "claims when mission-terminal liveness fires; the event "
         "carries no epoch (call get_mission for details).\n"
         "    * An already-terminal mission replays NOTHING: its "
         "settled receipts are skipped (no rows, no immediate "

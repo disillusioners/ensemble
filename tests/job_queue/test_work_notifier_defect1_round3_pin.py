@@ -141,12 +141,20 @@ def instance_repo(engine):
 
 
 @pytest.fixture
-def enqueue_mock():
-    """``instance_manager.enqueue_message`` double — inspect the body."""
+def enqueue_mock(instance_repo):
+    """``instance_manager.enqueue_message`` double — inspect the body.
+
+    C1 (2026-09-25): the ``_instance_repository`` attribute is wired
+    so the canonical ``evaluate_mission_live`` guard can walk the
+    ``instances.parent_id`` tree. Without it the guard fail-OPENS
+    (``live=False`` → claim + deliver) and the held-mission-terminal
+    semantics break.
+    """
     manager = MagicMock(name="instance_manager")
     manager.enqueue_message = AsyncMock(
         return_value=MagicMock(message_id="msg-defect1r3")
     )
+    manager._instance_repository = instance_repo
     return manager
 
 
@@ -429,19 +437,27 @@ class TestMeasuredWinnerDeliversResult:
 
 
 class TestSettledMessageKindDispatchEnvelope:
-    """ROUND-3 REVIEW M3 GUARD — settled envelope through
-    ``_dispatch_post_commit_side_effects`` must NOT carry a ``Result:``
-    line. The narrowing of the round-3 fix restricts
-    ``result_summary=last_content`` to the ``_token == "completed"``
-    arm only; a settled mirror (kind='job', job_type='message') flowing
-    through the same fan-out falls to the else-branch and gets NO
-    content kwarg — and the resolver returns no content for mirror
-    rows either — so the delivered body is the by-design
-    NO-Result-block shape (M3 mission-class contract).
+    """C3 (2026-09-25, ``fix/mission-terminal-watch-report-publish``) —
+    settled envelope through ``_dispatch_post_commit_side_effects``
+    MUST carry a populated ``Result:`` line. The pre-C3 M3 narrow
+    (81fc769d, 2026-09-24) restricted ``result_summary=last_content``
+    threading to the ``_token == "completed"`` arm only; a settled
+    mirror (kind='job', job_type='message') flowing through the same
+    fan-out fell to the else-branch and got NO content kwarg. C3
+    reverses that — settled envelopes SHOULD carry the Result line
+    (user-ratified, 2026-09-25).
+
+    Race-safety: ``last_content`` is the in-memory agent's last
+    assistant message, fetched BEFORE the fan-out runs. Threading it
+    as a ``result_summary`` kwarg bypasses the resolver's
+    ``task.result`` read that races the ``complete_task`` commit
+    visibility window (the live E2E race the DEFECT-1b close
+    documented at task_processor.py:1010-1020). Same race-safety
+    discipline DEFECT-1b established for the completed arm.
     """
 
     @pytest.mark.asyncio
-    async def test_settled_message_kind_dispatch_envelope_has_no_result_block(
+    async def test_settled_message_kind_dispatch_envelope_carries_result_block(
         self, engine, task_repo, job_repo, instance_repo, watcher_repo,
         enqueue_mock,
     ):
@@ -450,18 +466,19 @@ class TestSettledMessageKindDispatchEnvelope:
         message-kind mirror WorkRecord (per_kind_status_for →
         'settled') flowing through
         ``_dispatch_post_commit_side_effects`` delivers ONE
-        envelope carrying the header + Agent + ``settled ✓`` line
-        and NO ``Result:`` block.
+        envelope carrying the header + Agent + ``settled ✓`` glyph
+        AND a populated ``Result:\\n<last_content>`` line.
 
-        Pre-narrow (else-branch threading every non-failed token),
-        this exact scenario delivered a body carrying
-        ``Result:\\n<last_content>`` — which violates the M3
-        mission-class by-design NO-Result-block shape and creates
-        same-token envelope inconsistency between the notifier
-        direct call path and the child-reports fan-out (the notifier
-        path's guard, ``test_settled_message_kind_no_result_block``
-        in ``test_work_notifier_defect1_pins.py``, fires through
-        the same notifier but WITHOUT the result-threading else).
+        Pre-C3 (M3 narrow at 81fc769d, 2026-09-24) this scenario
+        delivered a body WITHOUT a ``Result:`` block — the
+        by-design M3 NO-Result-block shape. C3 reverses that
+        (user override, 2026-09-25): settled envelopes SHOULD
+        carry the Result line. The fan-out threading is broadened
+        at child_reports.py:4380+ so EVERY non-failed terminal
+        token (completed / settled / cancelled / dead_letter)
+        threads ``result_summary=last_content``; the ``failed``
+        token stays on the no-content branch because it has its
+        own error-lane emission in ``error_reporting.py``.
         """
         service = _build_service(
             engine, job_repo, task_repo, instance_repo, enqueue_mock,
@@ -477,16 +494,10 @@ class TestSettledMessageKindDispatchEnvelope:
         # mirror-shape WorkRecord.
         _seed_task(engine, work_id, executor)
         # A watcher must exist for ``notify_work_watchers`` to
-        # actually deliver. The M3 settled-mirror contract: the
-        # watcher subscribes to the ``settled`` event explicitly
-        # (the per-kind dispatch surfaces ``settled`` as the
-        # canonical status on a mirror row). Default
-        # ``watch_events`` shape is the same literal
-        # ``["completed"]`` the winner pin seeds — that filter
-        # excludes ``settled`` terminal fires (status must be in
-        # ``watch_events`` for ``standard_match`` to fire), which
-        # is why a defaulted watch would yield zero deliveries on
-        # this dispatch.
+        # actually deliver. C3: the watcher subscribes to the
+        # ``settled`` event explicitly (the per-kind dispatch
+        # surfaces ``settled`` as the canonical status on a
+        # mirror row).
         watcher_repo.add_watch(
             work_id, WATCHER_INSTANCE, ["settled"]
         )
@@ -511,36 +522,31 @@ class TestSettledMessageKindDispatchEnvelope:
         body = bodies[0]
         assert "[JOB_EVENT]" in body
         assert "settled ✓" in body, (
-            "settled-mirror M3 envelope must carry the "
+            "settled-mirror C3 envelope must carry the "
             f"``settled ✓`` glyph; got {body!r}"
         )
         assert f"Agent: worker" in body
-        # ── THE NARROW HOLDS HERE ──
-        # The dispatch's else-branch (every non-completed token)
-        # now passes NO ``result_summary`` kwarg; the resolver
-        # returns ``result_summary=None`` for mirror rows; so
-        # the notifier's ``effective_result`` is ``None`` and the
-        # body has no ``Result:`` line.
-        assert "Result:" not in body, (
-            "ROUND-3 M3 GUARD: a settled mirror envelope through "
-            "_dispatch_post_commit_side_effects MUST NOT carry a "
-            "Result: line — the narrowed else-branch must not "
-            "pre-thread result_summary=last_content into a "
-            "settled-status call. Pre-narrow regression: the "
-            "else-branch fed last_content into the settled call "
-            f"too. Got body={body!r}"
+        # ── C3 BROADEN HOLDS HERE ──
+        # The fan-out's non-failed branch (every terminal token
+        # EXCEPT failed, which has its own error lane) now threads
+        # ``result_summary=last_content``. A settled mirror
+        # flowing through the same fan-out lands on the
+        # non-failed branch and gets the content kwarg — the
+        # body carries the ``Result:\\n<last_content>`` line.
+        assert f"Result:\n{LAST_CONTENT}" in body, (
+            "C3 settled GUARD: a settled mirror envelope through "
+            "_dispatch_post_commit_side_effects MUST carry a "
+            "Result: line — the C3 broaden at child_reports.py:4380+ "
+            "threads ``result_summary=last_content`` for every "
+            "non-failed terminal token. Pre-C3 (M3 narrow at "
+            "81fc769d, 2026-09-24) settled envelopes were "
+            "NO-Result-block; C3 reverses that (user override, "
+            "2026-09-25). Race-safe via in-memory ``last_content`` "
+            f"(no DB read of ``task.result`` required). Got body={body!r}"
         )
         # No error slot either (we passed status='settled', not
         # 'failed', and no error kwarg upstream).
         assert "Error:" not in body
-        # And ``LAST_CONTENT`` must not leak under any prefix —
-        # the in-scope assistant reply is supposed to ride the
-        # completed-arm delivery, not the settled envelope.
-        assert LAST_CONTENT not in body, (
-            "ROUND-3 GUARD: LAST_CONTENT must not appear in a "
-            "settled envelope — content is only valid for the "
-            "``completed`` arm. Got body={body!r}"
-        )
         # The watcher row was CAS-consumed by the fan-out
         # (the same exactly-once invariant the winner pin proves).
         from sqlmodel import select
@@ -584,14 +590,21 @@ class TestDispatchCallSiteGuard:
           NEW unthreaded success-status call site pushes this to 2 and
           fails, closing the "new caller repeats the defect" gap.
 
-        ROUND-3 REVIEW NARROW assertion (2026-09-24): a
-        ``notify_watchers`` call carrying ``result_summary=`` must
-        live inside the BODY of an ``If _token == "completed":`` arm —
-        NOT in the orelse (which carries settled / cancelled /
-        dead_letter tokens) and NOT at the function's top level. Fails
-        the moment anyone re-widens the threading to a non-completed
-        token (the pre-narrow else-branch gap that produced settled
-        envelopes WITH a ``Result:`` line).
+        C3 REVIEW (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+        the pre-C3 ROUND-3 REVIEW NARROW asserted every
+        ``result_summary=`` call lived inside the BODY of an
+        ``if _token == "completed":`` arm — settling/cancelled/
+        dead_letter tokens were on the no-content branch. C3 BROADENS
+        the threading so EVERY non-failed terminal token (completed /
+        settled / cancelled / dead_letter) threads ``result_summary=``;
+        the failed token stays on the no-content branch because it has
+        its own error-lane emission in ``error_reporting.py``. The
+        AST guard therefore inverts: ``result_summary=`` calls MUST
+        live in the ELSE branch of ``if _token == "failed":`` (i.e.
+        NOT in the failed body, NOT at the function top level). Fails
+        the moment anyone re-narrows to the completed-only arm (the
+        pre-C3 narrow that produced settled envelopes WITHOUT a
+        ``Result:`` line).
         """
         calls = self._notify_calls()
         assert calls, "no notify_watchers call sites found — layout drift"
@@ -622,17 +635,20 @@ class TestDispatchCallSiteGuard:
             f"{[c.lineno for c in naked]}"
         )
 
-        # ROUND-3 REVIEW NARROW (2026-09-24): walk the AST and confirm
-        # every ``notify_watchers(...)`` call carrying
-        # ``result_summary=`` is reachable ONLY under the
-        # ``if _token == "completed":`` body. Pre-narrow (commit
-        # 5292eb99) threaded ``result_summary=last_content`` in the
-        # else-arm, which carried settled / cancelled / dead_letter
-        # tokens too — settled envelopes rendered WITH a ``Result:``
-        # line, breaking the M3 mission-class by-design NO-Result-block
-        # shape. Re-widening triggers this assertion (offending call
-        # sites are reported with their arm status so the bug pattern
-        # is unambiguous from the failure message).
+        # C3 REVIEW (2026-09-25): walk the AST and confirm every
+        # ``notify_watchers(...)`` call carrying ``result_summary=``
+        # is reachable ONLY under the ELSE branch of ``if _token ==
+        # "failed":`` (i.e. the completed / settled / cancelled /
+        # dead_letter tokens). Pre-C3 (ROUND-3 NARROW, 2026-09-24)
+        # this assertion required the call to live in the BODY of
+        # ``if _token == "completed":`` — settled / cancelled /
+        # dead_letter tokens were on the no-content branch. C3
+        # BROADENS the threading so every non-failed terminal token
+        # threads ``result_summary=last_content``. Re-narrowing to
+        # the completed-only arm (re-introducing the M3 settled
+        # guardrail) triggers this assertion (offending call sites
+        # are reported with their arm status so the bug pattern is
+        # unambiguous from the failure message).
         #
         # Implementation note: the calls returned by ``_notify_calls``
         # are derived from a FRESH ``ast.parse`` of the file. The
@@ -667,21 +683,23 @@ class TestDispatchCallSiteGuard:
         parents_map = _build_parent_map(tree)
         offenders: list[tuple[int, str]] = []
         for call in live_with_result:
-            status = _result_summary_call_under_completed_arm(
+            status = _result_summary_call_under_non_failed_arm(
                 call, parents_map,
             )
-            if status != "completed-body":
+            if status != "non-failed-body":
                 offenders.append((call.lineno, status))
         assert not offenders, (
-            "ROUND-3 REVIEW NARROW guard violation: every "
+            "C3 REVIEW BROADEN guard violation: every "
             "notify_watchers(...result_summary=...) call inside "
             "_dispatch_post_commit_side_effects must be reachable "
-            "ONLY under the `if _token == \"completed\":` body. "
-            "Offending call sites (lineno, status): "
-            f"{offenders}. A `settled` / `cancelled` / `dead_letter` "
-            "envelope reaching result_summary= would render WITH a "
-            "Result: line and break the M3 mission-class by-design "
-            "NO-Result-block shape."
+            "ONLY under the ELSE branch of `if _token == \"failed\":` "
+            "(i.e. the non-failed body — completed / settled / "
+            "cancelled / dead_letter). Offending call sites "
+            f"(lineno, status): {offenders}. A re-narrow to the "
+            "completed-only arm (re-introducing the pre-C3 M3 "
+            "settled guardrail) would render settled envelopes "
+            "WITHOUT a `Result:` line, breaking the user-ratified "
+            "C3 contract (2026-09-25)."
         )
 
 
@@ -703,14 +721,90 @@ def _build_parent_map(tree: ast.AST) -> dict[int, ast.AST]:
     return parents
 
 
+def _is_token_eq_failed(test: ast.AST) -> bool:
+    """Return True iff ``test`` is the expression ``_token == "failed"``.
+
+    C3 (2026-09-25): the dispatch's arm was inverted — the
+    pre-C3 narrow used ``if _token == "completed":`` to scope the
+    ``result_summary=`` threading; C3 broadens so EVERY non-failed
+    terminal token threads, which means the dispatch arm flips to
+    ``if _token == "failed":`` (the ONE excluded branch). This
+    predicate detects the inverted arm.
+
+    Tolerates ast.Compare wrapping; rejects ``!=``, ``in``, ``is``,
+    and any non-string RHS — so a future reviewer who accidentally
+    narrows back to ``if _token == "completed":`` flips the C3
+    broaden guard cleanly (FAIL with a clear shape-error message).
+    """
+    if not isinstance(test, ast.Compare):
+        return False
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    if len(test.comparators) != 1:
+        return False
+    left = test.left
+    cmp = test.comparators[0]
+    if not isinstance(left, ast.Name) or left.id != "_token":
+        return False
+    if not isinstance(cmp, ast.Constant) or cmp.value != "failed":
+        return False
+    return True
+
+
+def _result_summary_call_under_non_failed_arm(
+    call: ast.Call, parents_map: dict[int, ast.AST],
+) -> str:
+    """Return one of:
+    * ``"non-failed-body"`` — the call sits in the ORELSE of an
+      ancestor ``If`` whose test is ``_token == "failed"``. PASS
+      (C3 broaden: the non-failed branch is where
+      ``result_summary=last_content`` lives).
+    * ``"failed-body"`` — the call sits in the BODY of a
+      ``_token == "failed"`` arm. FAIL (failed-arm has no
+      ``result_summary=`` threading by design — it has its own
+      error-lane emission in ``error_reporting.py``).
+    * ``"no-failed-arm"`` — no ancestor ``If`` matches the
+      ``_token == "failed"`` test. FAIL (re-narrow to the
+      pre-C3 ``if _token == "completed":`` arm — the M3
+      settled guardrail that C3 reverses).
+
+    Note: this inverts the pre-C3 ``_result_summary_call_under_completed_arm``
+    guard. C3 broadens threading to every non-failed terminal
+    token (completed / settled / cancelled / dead_letter), so
+    the relevant arm boundary is now ``_token == "failed":``
+    (the EXCLUDED branch) and the ``result_summary=`` call MUST
+    live in its orelse.
+    """
+    cur = call
+    parent = parents_map.get(id(cur))
+    while parent is not None:
+        if isinstance(parent, ast.If):
+            if _is_token_eq_failed(parent.test):
+                # Find which side of the If this subtree is on.
+                in_body = any(
+                    id(sibling) == id(cur) for sibling in parent.body
+                )
+                return (
+                    "non-failed-body" if not in_body else "failed-body"
+                )
+        cur = parent
+        parent = parents_map.get(id(cur))
+
+    return "no-failed-arm"
+
+
 def _is_token_eq_completed(test: ast.AST) -> bool:
     """Return True iff ``test`` is the expression ``_token == "completed"``.
 
-    Tolerates ast.Compare wrapping (the test may be the only operand
-    of an outer ``If.test``); rejects ``!=``, ``in``, ``is``, and
-    any non-string RHS — so a future reviewer who accidentally
-    widens to ``if _token in {"completed", "settled"}:`` flips this
-    guard cleanly (FAIL with a clear shape-error message).
+    Deprecated (C3, 2026-09-25): the pre-C3 ROUND-3 REVIEW NARROW
+    used this predicate to verify the ``result_summary=`` call lived
+    inside the BODY of ``if _token == "completed":``. C3 broadens
+    the threading to every non-failed terminal token, so the
+    relevant arm boundary is now ``_token == "failed":`` (the
+    EXCLUDED branch). This predicate is retained for backwards-
+    compat with any test fixture that still references it but the
+    production AST guard uses ``_result_summary_call_under_non_failed_arm``
+    instead.
     """
     if not isinstance(test, ast.Compare):
         return False
@@ -730,14 +824,18 @@ def _is_token_eq_completed(test: ast.AST) -> bool:
 def _result_summary_call_under_completed_arm(
     call: ast.Call, parents_map: dict[int, ast.AST],
 ) -> str:
-    """Return one of:
-    * ``"completed-body"`` — the call sits in the BODY of an ancestor
-      ``If`` whose test is ``_token == "completed"``. PASS.
-    * ``"completed-orelse"`` — an ancestor ``If`` has the completed
-      test but the call is in ORELSE (FAIL). Pre-narrow regression
-      pattern.
-    * ``"no-completed-arm"`` — no ancestor ``If`` matches the
-      completed test (FAIL). Wider re-threading or top-level leak.
+    """Deprecated (C3, 2026-09-25): the pre-C3 ROUND-3 REVIEW NARROW
+    guard. The pre-C3 narrow required the ``result_summary=`` call
+    to live inside the BODY of ``if _token == "completed":``; C3
+    broadens the threading so EVERY non-failed terminal token threads
+    the kwarg. Use :func:`_result_summary_call_under_non_failed_arm`
+    for the C3 broaden guard. This function is retained so the AST
+    module still resolves any fixture that references it.
+
+    Return shape (unchanged from pre-C3):
+    * ``"completed-body"`` — call in the BODY of ``if _token == "completed":``. PASS (pre-C3).
+    * ``"completed-orelse"`` — call in the ORELSE. FAIL (pre-C3 regression).
+    * ``"no-completed-arm"`` — no ancestor ``If`` matches. FAIL.
     """
     cur = call
     parent = parents_map.get(id(cur))
