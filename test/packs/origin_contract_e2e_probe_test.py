@@ -21,8 +21,10 @@ Three sections:
     members. Any daemon-minted durable origin NOT in the reserved set
     is a BLOCKER. Any reserved member with no mint site is over-reservation.
 
-  PART 3 — USER_ORIGIN_SOURCES overlap check:
-    Verify the zero-overlap claim vs RESERVED_SOURCE_PREFIXES.
+  PART 3 — user-origin classification vs RESERVED_SOURCE_PREFIXES:
+    Verify the zero-overlap claim (registry chat source_types + exact
+    "api" vs the reserved internal half), per the registry-backed
+    classification (upgrade_journal.classify_user_origin).
 
 Exit codes:
   0   — PASS (every assertion holds; census has no BLOCKER gaps)
@@ -591,29 +593,45 @@ def run_part2() -> tuple[dict[str, list[tuple[str, int]]], list[str], list[str],
     return mint_sites, observed, missing_mint, over_reserved
 
 
-# ── PART 3 — USER_ORIGIN_SOURCES overlap ────────────────────────────────────
+# ── PART 3 — user-origin classification vs RESERVED_SOURCE_PREFIXES ─────────
 
 
 def run_part3() -> dict[str, Any]:
-    """Verify USER_ORIGIN_SOURCES vs RESERVED_SOURCE_PREFIXES zero overlap.
-
-    USER_ORIGIN_SOURCES (the whitelisted user-source set, distinct from the
-    reserved internal half) is defined at daemon/tools/upgrade_journal.py:1081.
+    """Verify the user-origin classification vs RESERVED_SOURCE_PREFIXES
+    zero overlap (registry-backed semantics — verdict §4). The static arms
+    (exact "api") and the registry chat source_types
+    (USER_ORIGIN_CHAT_SOURCE_TYPES) must be disjoint from the reserved
+    internal half, so a reserved internal lane can never arm the
+    live-upgrade gate.
     """
     from daemon.constants import RESERVED_SOURCE_PREFIXES
-    from daemon.tools.upgrade_journal import USER_ORIGIN_SOURCES
+    from daemon.tools.upgrade_journal import (
+        USER_ORIGIN_CHAT_SOURCE_TYPES,
+        classify_user_origin,
+        user_origin_sources_display,
+    )
 
     reserved = set(RESERVED_SOURCE_PREFIXES)
-    user = set(USER_ORIGIN_SOURCES)
+    chat_types = set(USER_ORIGIN_CHAT_SOURCE_TYPES)
 
-    intersection = reserved & user
+    intersection = reserved & chat_types
+    # Behavioral pin: "api" is NOT reserved (HTTP chat path) and still arms;
+    # every reserved internal lane fails closed even with a registry present.
+    api_reserved = "api" in reserved
+    reserved_fail_closed = all(
+        classify_user_origin(source, lambda _sid: None)[0] is False
+        for source in sorted(reserved)
+    )
 
     return {
         "reserved_count": len(reserved),
-        "user_count": len(user),
-        "user_members": sorted(user),
+        "chat_type_count": len(chat_types),
+        "chat_types": sorted(chat_types),
         "intersection": sorted(intersection),
         "zero_overlap": len(intersection) == 0,
+        "api_reserved": api_reserved,
+        "reserved_fail_closed": reserved_fail_closed,
+        "classification_rule": user_origin_sources_display(),
     }
 
 
@@ -714,16 +732,24 @@ def print_part2_table(
 
 
 def print_part3_table(result: dict[str, Any]) -> bool:
-    banner("PART 3 — USER_ORIGIN_SOURCES overlap check")
+    banner("PART 3 — user-origin classification overlap check")
     print(f"RESERVED_SOURCE_PREFIXES count: {result['reserved_count']}")
-    print(f"USER_ORIGIN_SOURCES count: {result['user_count']}")
-    print(f"USER_ORIGIN_SOURCES members: {result['user_members']}")
+    print(f"USER_ORIGIN_CHAT_SOURCE_TYPES count: {result['chat_type_count']}")
+    print(f"USER_ORIGIN_CHAT_SOURCE_TYPES members: {result['chat_types']}")
     print(f"Intersection: {result['intersection']}")
-    if result["zero_overlap"]:
-        print("VERDICT: zero overlap — claim holds ✅")
+    print(f"classify('api') arms: {not result['api_reserved']} (api must NOT be reserved)")
+    print(f"Reserved lanes fail closed (no registry): {result['reserved_fail_closed']}")
+    print(f"Classification rule: {result['classification_rule']}")
+    ok = (
+        result["zero_overlap"]
+        and not result["api_reserved"]
+        and result["reserved_fail_closed"]
+    )
+    if ok:
+        print("VERDICT: zero overlap + fail-closed reserved lanes — claim holds ✅")
         return True
     else:
-        print("VERDICT: OVERLAP DETECTED — claim violated ❌")
+        print("VERDICT: CLAIM VIOLATED ❌")
         return False
 
 
@@ -764,7 +790,7 @@ async def main() -> int:
             print(
                 "  Part 1: every case matches its expected gate behaviour.\n"
                 "  Part 2: every reserved member has ≥1 mint site (no BLOCKER gaps).\n"
-                "  Part 3: USER_ORIGIN_SOURCES ∩ RESERVED = ∅ (zero overlap)."
+                "  Part 3: user-origin classification ∩ RESERVED = ∅ (zero overlap)."
             )
             return 0
         else:

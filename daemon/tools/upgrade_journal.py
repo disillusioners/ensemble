@@ -91,6 +91,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from daemon.constants import is_reserved_source
+
 logger = logging.getLogger(__name__)
 
 # ── Constants (mirror scripts/upgrade/lib.sh — single source is lib.sh; a
@@ -1035,58 +1037,135 @@ def spawn_executor(
     return proc.pid
 
 
-# ── USER_ORIGIN_SOURCES (assumption #1 closure — D-FA3.1) ───────────────────
+# ── User-origin classification (assumption #1 closure — D-FA3.1; verdict §4) ──
+# HISTORY: this was a STATIC whitelist (exact "api" + the
+# telegram:/webhook:/whatsapp:/discord:/slack: id prefixes). The live-gate
+# investigation (dead-lettered job f9309685 →
+# .agents/shared/planning/deploy-ownership-fix/gate-bug-final-verdict.md,
+# 2026-09-24) proved it DEAD for chat: sources registry.py:948 mints
+# "<source_id>:<uid>[:<cid>]" where source_id is the OPERATOR-CHOSEN
+# registration id (e.g. "my-discord-bot" — live deployment), so no chat
+# source could ever match a platform prefix, every genuine chat nonce
+# ceremony was structurally refused at the window factor, and the ONLY
+# origin that could arm ("api") was precisely the F2-forgeable one.
 #
-# Enumeration of the ACTUAL user-origin source strings observed at the
-# dispatch funnel (manager._process_message_with_tracking receives
-# ``message_source``; formats verified in the dispatch paths):
+# Classification is now REGISTRY-BACKED (verdict §4):
 #
-#   * ``"api"``                    — routers/messages.py:391 stamps exactly
-#                                    "api" on the HTTP chat path (the web
-#                                    UI — a genuine human typing).
-#   * ``"<source_id>:<user_id>"``  — daemon/sources/registry.py:869 builds
-#                                    this for every external-channel message
-#                                    (``f"{source_id}:{external_user_id}"``;
-#                                    instance_messaging.py:1781 docstring
-#                                    example: "telegram:user:1"). source_id
-#                                    is DB-configured per adapter
-#                                    (daemon/models/source.py SourceCreate,
-#                                    pattern ^[a-zA-Z0-9_-]+$ — free-form);
-#                                    the deployed convention names sources
-#                                    after their type ("telegram:user").
-#                                    The whitelist therefore matches the six
-#                                    human-channel SourceType values as
-#                                    PREFIXES (daemon/models/source.py:17):
-#                                    telegram / webhook / whatsapp / discord
-#                                    / slack. A source whose source_id does
-#                                    NOT start with its type name fails
-#                                    CLOSED (no marker) — the safe direction;
-#                                    rename the source or use the web UI.
+#   * exact FULL-STRING "api"      — routers/messages.py stamps the literal
+#                                    "api" on the HTTP chat path. Full-string
+#                                    equality only: a source REGISTERED under
+#                                    id "api" mints "api:<uid>", which does
+#                                    NOT take this path (it must clear the
+#                                    registry like any other source) — the
+#                                    F2 boundary is neither widened nor
+#                                    narrowed.
+#   * registered chat source       — first segment of the source string
+#                                    (source.split(":", 1)[0]; source_id is
+#                                    colon-free per models/source.py:36)
+#                                    resolves in the sources registry AND its
+#                                    daemon-controlled source_type is a chat
+#                                    type. source_type is write-once at
+#                                    registration (SourceUpdate has no
+#                                    source_type field; never
+#                                    message-supplied) — the anti-forgery
+#                                    invariant. Classification therefore
+#                                    reads REGISTRY METADATA ONLY.
+#   * everything else FAILS CLOSED — unregistered ids, deregistered sources,
+#                                    registry unavailable/raising, and the
+#                                    reserved internal lanes
+#                                    (internal_agent:*, agent:*,
+#                                    cascade_resume, scheduler, …) all clear
+#                                    the window at the stamp site
+#                                    (manager.stamp_user_origin_window).
+#                                    Belt-and-suspenders: reserved ids are
+#                                    rejected via constants.is_reserved_source
+#                                    (single-home check) BEFORE the registry
+#                                    lookup, so even a mis-registered id like
+#                                    "agent" can never arm.
 #
-# Deliberately NOT whitelisted (machine/internal origins — the marker must
-# never fire for them):
-#   * ``"scheduler"``              — daemon/sources/adapters/scheduler.py:765
-#                                    (a scheduled job is not a human).
-#   * ``"cascade_resume"``, ``"internal_invoke_and_wait:*"``, ``"agent:*"``,
-#     ``"internal_report:*"``, ``"internal_error_report:*"``,
-#     ``"internal_agent:*"``, every other ``internal_*`` prefix — internal
-#     lanes (the pre-existing else-branch HUMAN-mis-typing defect at
-#     instance_messaging.py:1310-1319 is DEFERRED, not fixed here; this
-#     whitelist is its mitigation and gates AT THE TOOL).
+# webhook is EXCLUDED from the chat-type set: no WebhookAdapter exists
+# (_create_adapter_from_config has no webhook branch — verdict §1); add it
+# only when an adapter lands.
+#
+# SINGLE SOURCE OF TRUTH: classify_user_origin() is the ONLY classification.
+# The stamp site (manager.stamp_user_origin_window), the release_info
+# user-origin drift probe (upgrade_tools.py), and the gate refusal token all
+# consult it (or user_origin_sources_display()) — no divergent copies.
+#
+# NOT the same concept as constants.CHAT_SOURCE_PREFIXES ("telegram:",
+# "slack:", "discord:" — the jobs_crud/task-repo chat-source WORKER-LANE
+# routing set, no whatsapp): this gate set is matched against registry
+# source_type VALUES (not id prefixes) and carries whatsapp per the verdict.
+# Do NOT dedup the two — different members, different match semantics.
 _USER_ORIGIN_EXACT: frozenset[str] = frozenset({"api"})
-_USER_ORIGIN_PREFIXES: tuple[str, ...] = (
-    "telegram:", "webhook:", "whatsapp:", "discord:", "slack:",
+
+# The registry source_type values that count as a human chat channel for the
+# live-upgrade gate (SourceType members, compared via .value).
+USER_ORIGIN_CHAT_SOURCE_TYPES: frozenset[str] = frozenset(
+    {"telegram", "slack", "discord", "whatsapp"}
 )
 
-USER_ORIGIN_SOURCES: frozenset[str] = frozenset(
-    _USER_ORIGIN_EXACT | set(_USER_ORIGIN_PREFIXES)
-)
+
+def user_origin_sources_display() -> str:
+    """Accurate one-line description of what arms the live gate — used in
+    refusal reasons and docs. MUST track classify_user_origin; kept adjacent
+    so drift is visible in review (the old prefix frozenset lied about what
+    arms the gate — it described a dialect no chat source speaks)."""
+    types = ", ".join(sorted(USER_ORIGIN_CHAT_SOURCE_TYPES))
+    return (
+        'exact source "api" (HTTP chat path) + any REGISTERED source whose '
+        f"daemon-controlled source_type is one of: {types} "
+        "(registry-backed; webhook has no adapter and never arms)"
+    )
 
 
-def is_user_origin_source(source: str | None) -> bool:
-    """Whitelist test for a message source string (exact or channel prefix)."""
+def classify_user_origin(
+    source: str | None,
+    registry_get: Callable[[str], Any] | None,
+) -> tuple[bool, str]:
+    """THE single source of truth for user-origin classification (verdict §4).
+
+    ``registry_get`` is the sources registry lookup (``registry.get``);
+    pass ``None`` when no registry exists — then only exact "api" can arm.
+
+    Returns ``(is_user_origin, detail)``. ``detail`` is a short diagnostic
+    token (no secrets) safe to embed in gate refusal reasons. Never raises:
+    every failure mode fails CLOSED.
+    """
     if not isinstance(source, str) or not source:
-        return False
+        return False, "no-source"
     if source in _USER_ORIGIN_EXACT:
-        return True
-    return source.startswith(_USER_ORIGIN_PREFIXES)
+        return True, "exact:api"
+    # Reserved internal lanes NEVER arm — checked BEFORE the registry so a
+    # mis-registered reserved id ("agent", "scheduler", …) cannot arm via
+    # registry metadata either. is_reserved_source is the single-home check.
+    if is_reserved_source(source):
+        return False, "reserved-internal"
+    segment = source.split(":", 1)[0]
+    if not segment:
+        return False, "empty-segment"
+    if registry_get is None:
+        return False, "registry-unavailable"
+    try:
+        adapter = registry_get(segment)
+    except Exception as exc:  # noqa: BLE001 — fail-closed on any registry fault
+        return False, f"registry-error:{type(exc).__name__}"
+    if adapter is None:
+        return False, "unregistered"
+    st = getattr(adapter, "source_type", None)
+    st_value = getattr(st, "value", st)  # SourceType enum → plain str
+    if not isinstance(st_value, str) or st_value not in USER_ORIGIN_CHAT_SOURCE_TYPES:
+        return False, f"source-type-not-chat:{st_value!r}"
+    return True, f"registered-chat:{st_value}"
+
+
+def is_user_origin_source(
+    source: str | None,
+    registry_get: Callable[[str], Any] | None = None,
+) -> bool:
+    """Boolean convenience wrapper over :func:`classify_user_origin`.
+
+    The stamp site (manager) passes its registry's ``get``; registry-less
+    callers get exact-"api"-only semantics (fail-closed)."""
+    ok, _ = classify_user_origin(source, registry_get)
+    return ok
