@@ -39,6 +39,24 @@ divergent ON DELETE behavior (PG enforces, SQLite defaults OFF) would
 turn cascade questions into database-internal side effects.
 
 All timestamps are ISO-8601 strings for cross-driver consistency.
+
+**R16 monitoring counters** (Wave 3 — DB guardrail: NEW-TABLE-ONLY,
+no modifications to existing tables):
+
+* :class:`SnapshotUsageCounter` — one row per ``(scope, key)``
+  pair, holding an ``int`` count. Two scopes ship in v1:
+  - ``"capture:agent:<agent_id>"`` — increments on every
+    ``snapshot_create`` invocation REGARDLESS of R9 verdict
+    (REUSE + NEW + SUPERSEDE + CREATE-FRESH all increment).
+  - ``"spawn:snapshot:<snapshot_id>"`` — increments on the
+    ``spawn_hot_instance`` WARM path ONLY. Cold spawns
+    (``None`` snapshot consumption / no-hit / expired /
+    verify-failed) DO NOT increment (R16 rider j).
+
+  MONITORING ONLY — explicitly NOT a ranking signal (R10 forbids
+  usage-ranking in v1; the snapshot_search / snapshot_embedding
+  modules never read this table — pinned by the
+  ``MonitoringOnlyPinTest`` in tests/unit/tools/test_snapshot_v3_pin.py).
 """
 
 from __future__ import annotations
@@ -47,7 +65,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, Column, ForeignKey, Index, String, Text
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, String, Text
 
 from sqlmodel import Field, SQLModel
 
@@ -281,3 +299,69 @@ class SnapshotEmbedding(SQLModel, table=True):
             "embedding": list(self.embedding) if self.embedding else [],
             "created_at": self.created_at,
         }
+
+
+# R16 — monitoring counters (Wave 3; new-table-only per the DB guardrail).
+# Scope/key composition rules:
+#
+#   scope = "capture:agent:<agent_id>"   — increments on every
+#           ``snapshot_create`` invocation regardless of R9 verdict.
+#   scope = "spawn:snapshot:<snapshot_id>" — increments on the
+#           ``spawn_hot_instance`` WARM path ONLY. Cold / no-hit /
+#           expired / verify-failed paths DO NOT increment (R16 rider j).
+#
+# ``agent_id`` / ``snapshot_id`` are the natural keys the FE / FE
+# join surfaces will look up by. The two scopes are deliberately
+# linear prefixes so a single ``WHERE scope LIKE 'capture:agent:%'``
+# can scope a query without an enumeration pass.
+CAPTURE_COUNTER_PREFIX = "capture:agent:"
+SPAWN_COUNTER_PREFIX = "spawn:snapshot:"
+
+
+class SnapshotUsageCounter(SQLModel, table=True):
+    """R16 monitoring counter — increments, never decreases.
+
+    Single-row upsert on ``(scope, key)`` collisions (SQLite uses
+    ``ON CONFLICT`` upsert; PG uses the same clause via SQLAlchemy
+    dialect insert). The default counter value is 0 (a row created
+    on first observe, never read until it has at least one increment
+    downstream).
+
+    **Guarantees:**
+
+    * **Fail-soft increments** — the metrics service wraps every
+      write in try/except and logs on failure; spawn/create paths
+      MUST never raise on counter failure (R16 rider j — counters
+      must be cheap; no locks held across awaits; increments
+      fail-soft — log, never raise, never fail the spawn/create).
+    * **No downgrade** — counters only ever increment; a row's
+      ``value`` is monotonically non-decreasing.
+    * **Project scope is optional** — capture counts are per-agent
+      (not per-project) in v1; the surface reads them aggregated
+      across projects. Phase-2 may split per-project counts.
+    """
+
+    __tablename__ = "snapshot_usage_counters"
+    __table_args__ = (
+        # ``(scope, key)`` is the natural key — UNIQUE prevents the
+        # race where two concurrent increments would both insert a
+        # fresh row at zero and one would overwrite the other.
+        # Read surfaces rely on the row count being the sum of
+        # observable increments, never the count of UPSERT calls.
+        Index(
+            "ix_snapshot_usage_counters_scope_key",
+            "scope",
+            "key",
+            unique=True,
+        ),
+    )
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+        max_length=64,
+    )
+    scope: str = Field(sa_column=Column(String, nullable=False))
+    key: str = Field(sa_column=Column(String, nullable=False))
+    value: int = Field(sa_column=Column("value", Integer, nullable=False, default=0))
+    updated_at: str = Field(default_factory=_now_iso)
