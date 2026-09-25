@@ -771,6 +771,99 @@ class TestEmbeddingRerankDegrade:
 
 
 # ============================================================================
+# Cosine blend regression (Wave 2a review fold-in #6)
+# ============================================================================
+
+
+class TestCosineBlendIntoStage3:
+    """Blend regression: a cosine-ONLY candidate (near-zero BM25,
+    ~0.9 cosine) must bubble into the stage-3 top-20.
+
+    The stage-2 composite is ``bm25 + cosine`` (one additive scale).
+    This pins the blend being LIVE: the semantic signal can outrank
+    a keyword signal it cannot beat on BM25 alone. Numbers verified
+    against the real ``_bm25_score`` at authoring time:
+
+    * ``snap-cos``   — shares 1 query token → bm25 ≈ 0.21; cosine
+      0.9 (unit vec ``[0.9, √0.19, 0]`` vs query ``[1, 0, 0]``)
+      → composite ≈ 1.11.
+    * ``snap-bm25``  — shares 2 query tokens → bm25 ≈ 0.62;
+      cosine 0.0 (orthogonal vec) → composite ≈ 0.62.
+
+    Without the blend, ``snap-bm25`` (~3× the BM25) would win; with
+    it, ``snap-cos`` ranks first and leads the stage-3 candidate list.
+    """
+
+    def test_cosine_only_candidate_bubbles_into_stage3_top20(self):
+        cos_snap = FakeSnapshot(
+            snapshot_id="snap-cos",
+            task_summary="upgrade",  # 1 shared query token → tiny BM25
+            domain_tags=[],
+        )
+        bm25_snap = FakeSnapshot(
+            snapshot_id="snap-bm25",
+            task_summary="upgrade defect " + "filler " * 30,  # 2 shared tokens
+            domain_tags=[],
+        )
+        emb_rows = {
+            # cos(query [1,0,0], [0.9, sqrt(0.19), 0]) = 0.9 exactly
+            # (the vector is unit-length: 0.81 + 0.19 = 1.0).
+            "snap-cos": [MagicMock(embedding=[0.9, 0.19**0.5, 0.0])],
+            # Orthogonal to the query vec → cosine 0.0.
+            "snap-bm25": [MagicMock(embedding=[0.0, 1.0, 0.0])],
+        }
+        repo = FakeSnapshotRepo(active=[cos_snap, bm25_snap], embeddings=emb_rows)
+        emb_service = FakeEmbeddingService(query_vec=[1.0, 0.0, 0.0])
+
+        # Fake LLM stage: record the candidate list it is shown
+        # (the stage-3 top-20 input) and select nothing (empty
+        # selection → pipeline falls back to rerank order for the
+        # final result, which we also assert).
+        captured_prompts: list[str] = []
+
+        class RecordingChatCompletions:
+            def create(self, model, messages, temperature):
+                captured_prompts.append(messages[-1]["content"])
+                m = MagicMock()
+                m.choices = [
+                    MagicMock(
+                        message=MagicMock(content='{"selected": []}')
+                    )
+                ]
+                return m
+
+        fake_client = MagicMock()
+        fake_client.chat.completions = RecordingChatCompletions()
+        service = SnapshotSearchService(
+            snapshot_repo=repo,
+            embedding_service=emb_service,  # type: ignore[arg-type]
+            llm_config={"model": "test"},
+            staleness_fn=_staleness_stub,
+        )
+        result = asyncio.run(
+            service.search(
+                "upgrade pipeline defect",
+                project_id="p1",
+                llm_client=fake_client,
+            )
+        )
+        assert result["error"] is None
+        # The cosine-only candidate reached the LLM-selection stage
+        # (the top-20 input) AND leads it.
+        assert captured_prompts, "LLM stage was never invoked"
+        stage3_listing = captured_prompts[0]
+        pos_cos = stage3_listing.find("snap-cos")
+        pos_bm25 = stage3_listing.find("snap-bm25")
+        assert pos_cos != -1, "cosine-only candidate never reached stage 3"
+        assert pos_cos < pos_bm25, (
+            "cosine-only candidate did not outrank the BM25-strong "
+            "candidate in the stage-3 input — the cosine blend is "
+            "not live (composite regressed to BM25 order?)"
+        )
+
+
+
+# ============================================================================
 # Freshness post-filter placement (R10)
 # ============================================================================
 
@@ -961,6 +1054,24 @@ class TestDriftPin:
         src = inspect.getsource(snapshot_search_service)
         assert "_bm25_score" in src
         assert snapshot_search_service._bm25_score is sss._bm25_score
+
+    def test_snapshot_search_imports_extract_json_object_from_skill_search(self):
+        """Third drift-pin (Wave 2a review fold-in): the LLM-selection
+        stage's JSON extraction helper is IMPORTED — not copied — from
+        the skill side. A signature/behavior change in
+        ``skill_search_service._extract_json_object`` MUST break a
+        snapshot search test (the two subsystems' LLM-output parsing
+        cannot drift silently)."""
+        from daemon.services import snapshot_search_service
+
+        src = inspect.getsource(snapshot_search_service)
+        assert "_extract_json_object" in src
+        # Identity — the snapshot module binds the SAME function
+        # object the skill module defines (no shadow copy).
+        assert (
+            snapshot_search_service._extract_json_object
+            is sss._extract_json_object
+        )
 
     def test_snapshot_search_does_not_redefine_bm25_helpers(self):
         """Pin: snapshot_search_service must NOT redefine BM25 helpers

@@ -437,6 +437,11 @@ class SnapshotExecutor:
         self._manager = manager
         self._snapshots = snapshot_repository
         self._snapshot_embedding_service = snapshot_embedding_service
+        # Fire-and-forget embedding tasks (R10 §3.4) tracked here so a
+        # graceful shutdown can await them — mirrors the
+        # ``SnapshotService._tasks`` capture-lane set below (see
+        # ``SnapshotService.drain_capture_tasks``).
+        self._tasks: set[asyncio.Task] = set()
 
     # ── lineage (tag computation ONLY — never a capture walk) ─────────
 
@@ -857,10 +862,17 @@ class SnapshotExecutor:
             try:
                 # Snapshot the post-write view; the executor keeps
                 # an in-memory copy but the row is the source of
-                # truth for the embedding prompt.
-                asyncio.create_task(
+                # truth for the embedding prompt. The task is
+                # registered in ``self._tasks`` (mirroring the
+                # ``_run_capture`` registration in
+                # ``SnapshotService.capture_async``) so daemon
+                # shutdown awaits it gracefully instead of
+                # abandoning it mid-LLM-call.
+                emb_task = asyncio.create_task(
                     self._run_embedding_refresh(updated)
                 )
+                self._tasks.add(emb_task)
+                emb_task.add_done_callback(self._tasks.discard)
             except RuntimeError:
                 # No running loop (test scope) — skip fire-and-forget.
                 pass
@@ -887,6 +899,14 @@ class SnapshotExecutor:
 
     async def _run_embedding_refresh(self, row: Snapshot) -> None:
         """Fire-and-forget embeddings-at-creation wiring (R10 §3.4).
+
+        Rider (b) authority note: the caller-owns-target auth check
+        (``caller_owns_target`` in ``daemon/tools/snapshot_tools.py``)
+        lives in the TOOL wrapper that admitted this capture; by the
+        time this task runs, the row is already terminal-``active``
+        and the embed pipeline operates in EXECUTOR authority — a
+        pure read of the row it was handed. It never messages the
+        target instance (revive hazard, design §9).
 
         Best-effort: an exception here MUST NOT propagate (the
         row is already active and the capture is recorded).
@@ -1112,6 +1132,35 @@ class SnapshotService:
             )
 
     # ── boot sweep (D3) ───────────────────────────────────────────────
+
+    async def drain_capture_tasks(self, timeout: float = 10.0) -> int:
+        """Await pending capture + embedding fire-and-forget tasks (D3).
+
+        Wired into ``manager.shutdown`` (before the DB pools are
+        disposed) so a graceful stop lets in-flight captures and the
+        R10 embeddings-at-creation write LAND instead of dying with
+        the loop mid-LLM-call. Best-effort: tasks still pending after
+        ``timeout`` are left for loop teardown — the boot sweep
+        classifies their rows ``interrupted`` on next start.
+
+        Returns:
+            Number of tasks that were still pending at call time.
+        """
+        pending = {
+            t
+            for t in (self._tasks | self._executor._tasks)
+            if not t.done()
+        }
+        if not pending:
+            return 0
+        _, still_pending = await asyncio.wait(pending, timeout=timeout)
+        if still_pending:
+            logger.warning(
+                f"[Snapshot] shutdown drain: {len(still_pending)} task(s) "
+                f"still pending after {timeout}s — boot sweep will "
+                "classify their rows on next start"
+            )
+        return len(pending)
 
     async def sweep_orphaned_running(self) -> int:
         """Mark orphaned ``running`` rows ``interrupted`` (boot sweep).

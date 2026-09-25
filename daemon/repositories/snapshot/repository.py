@@ -294,6 +294,18 @@ class SnapshotRepository:
                 return self.get(snapshot_id)
             merged = dict(row.digest or {})
             merged.update(digest or {})
+            # FAILED-lane digest hygiene (Wave 2b follow-up): the R12
+            # stash key is LANE-INTERNAL routing state (stashed at
+            # ``capture_async`` time, consumed by ``_finish_row``'s
+            # mint branch). The executor strips it from the incoming
+            # digest on BOTH terminal branches; this pop closes the
+            # remaining seam — a pre-existing ``row.digest`` that
+            # still carries the stash (e.g. a FAILED row minted for
+            # a supersession that then failed) must not retain the
+            # key through the merge. Currently inert (failed rows
+            # never inject) — closed fully so the invariant does not
+            # depend on that accident.
+            merged.pop("supersedes_snapshot_id", None)
             row.digest = merged
             row.status = status
             if effective_model is not None:

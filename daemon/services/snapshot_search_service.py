@@ -362,6 +362,19 @@ class SnapshotSearchService:
                 # tuples from stage 1 — unpack each tuple so the
                 # fallback carries snapshot objects (the LLM stage
                 # dereferences ``.id`` / ``.title`` / etc.).
+                #
+                # SCORE-SCALE OPACITY NOTE (Wave 2a review fold-in):
+                # this fallback's scores live on the TAG-OVERLAP
+                # scale (bounded, ≈[0, 1]), NOT the happy path's
+                # composite scale (``bm25 + cosine``, unbounded —
+                # see ``_embedding_rerank``). The two branches are
+                # therefore never comparable to each other, and the
+                # switch is silent by design — only the ORDER within
+                # one path is meaningful, and no score value ever
+                # surfaces to a caller (the result envelope carries
+                # metadata + digest preview only). Do not "normalize"
+                # one path onto the other without re-reading this
+                # whole pipeline.
                 reranked = [
                     (snap, _tag_overlap_score(
                         tags or [],
@@ -537,12 +550,15 @@ class SnapshotSearchService:
                 )
                 for e in emb_rows
             )
-            # Composite: BM25 (rescaled to a similar magnitude as
-            # cosine in [0,1]) + cosine. The BM25 rescale keeps
-            # the existing ranking order when cosine disagrees
-            # only marginally — a strong cosine match (≈1.0) still
-            # wins on a strong BM25 (≥10) because cosine carries
-            # the rerank signal.
+            # Composite: raw BM25 + cosine in [0, 1] — NO rescale of
+            # the BM25 term despite its larger magnitude, so a
+            # keyword-strong candidate keeps an edge over a
+            # semantic-only one unless the cosine gap exceeds the
+            # BM25 gap (the blend regression test pins this). The
+            # two signals share one additive scale HERE; the
+            # embedding-FAILURE fallback below scores on a
+            # DIFFERENT (tag-overlap) scale — see the opacity note
+            # at that site.
             composite = bm25_score + best_cos
             scored.append((snap, composite))
 

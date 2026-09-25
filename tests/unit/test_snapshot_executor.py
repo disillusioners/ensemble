@@ -431,6 +431,72 @@ class TestSnapshotServiceLane:
 
 
 # ============================================================================
+# Embeddings-at-creation wiring — e2e (Wave 2a review fold-in #1)
+# ============================================================================
+
+
+class RecordingEmbeddingService:
+    """Mocked SnapshotEmbeddingService: records the rows it receives."""
+
+    def __init__(self) -> None:
+        self.rows: list[Any] = []
+
+    async def update_snapshot_embeddings(self, row: Any) -> None:
+        self.rows.append(row)
+
+
+class TestEmbeddingWiringE2E:
+    def test_active_finish_row_fires_embedding_task_once_with_post_write_row(
+        self, engine, repo, monkeypatch
+    ):
+        """E2E wiring: a full ``capture()`` that lands an ACTIVE write
+        kicks off the fire-and-forget embedding task exactly ONCE,
+        with the POST-WRITE row (the re-fetched terminal view, not
+        the pre-write in-memory row) — and the task is registered in
+        the executor's tracked set so shutdown can drain it."""
+        _install_llm_patch(monkeypatch, _digest_llm_response())
+        rows = {
+            "inst-1": _instance("inst-1", status="completed"),
+        }
+        irepo = FakeInstanceRepo(rows)
+        messages = [
+            SimpleNamespace(**{"content": "explored the upgrade pipeline", "id": "m1"}),
+            SimpleNamespace(**{"content": "found the defect", "id": "m2"}),
+        ]
+        mgr = FakeManager(irepo, FakeGraph(messages=messages), compactor=_compactor())
+        emb_service = RecordingEmbeddingService()
+        executor = SnapshotExecutor(mgr, repo, snapshot_embedding_service=emb_service)
+        row = repo.create_with_embeddings(_running_row())
+
+        async def _drive() -> Any:
+            out = await executor.capture(row)
+            # Registered exactly once, mirroring the ``_run_capture``
+            # lane's registration shape. No loop yield has happened
+            # since create_task, so the task is still tracked here.
+            (emb_task,) = list(executor._tasks)
+            # Let the fire-and-forget run to completion in-loop.
+            await emb_task
+            return out
+
+        out = asyncio.run(_drive())
+
+        assert out.status == SNAPSHOT_STATUS_ACTIVE
+        # Exactly ONE fire-and-forget fired, once.
+        assert len(emb_service.rows) == 1
+        # The service saw the POST-WRITE row: terminal status, the
+        # parsed digest, and the effective model stamped.
+        seen = emb_service.rows[0]
+        assert seen.id == out.id
+        assert seen.status == SNAPSHOT_STATUS_ACTIVE
+        assert seen.effective_model == "session-model"
+        assert seen.digest["decisions"] == ["chose the probe-first path"]
+        # The task completed cleanly and de-registered itself
+        # (add_done_callback(self._tasks.discard) — same lifecycle
+        # as the _run_capture lane).
+        assert executor._tasks == set()
+
+
+# ============================================================================
 # §5.2 staleness compute
 # ============================================================================
 

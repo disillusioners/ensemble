@@ -11536,6 +11536,10 @@ class InstanceManager:
             ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
             ("shutdown_event_bus", self._event_bus.shutdown()),
             ("shutdown_maintenance_service", self._maintenance_service.stop() if self._maintenance_service else asyncio.sleep(0)),
+            # Drain the D3 snapshot capture + R10 embedding
+            # fire-and-forget tasks BEFORE the DB pools go away —
+            # an in-flight terminal write must land on a live pool.
+            ("drain_snapshot_capture_tasks", self._drain_snapshot_capture_tasks()),
             ("dispose_db_pools", self._db_pool_manager.dispose_all() if hasattr(self, '_db_pool_manager') else asyncio.sleep(0)),
             ("close_checkpointer", self.close_checkpointer()),
             ("drain_mcp_pool", self._drain_warmup_pool()),
@@ -11561,6 +11565,29 @@ class InstanceManager:
     async def _cancel_all_active_requests(self) -> None:
         """Cancel all active requests in the registry with SHUTDOWN reason."""
         return await self._cancellation_service._cancel_all_active_requests()
+
+    async def _drain_snapshot_capture_tasks(self) -> None:
+        """Drain the D3 snapshot capture/embedding lane during shutdown.
+
+        Best-effort, mirroring every other shutdown step: failures are
+        logged, never raised. A missing service (early-boot failure)
+        is a no-op.
+        """
+        service = getattr(self, "_snapshot_service", None)
+        if service is None:
+            return
+        try:
+            pending = await service.drain_capture_tasks()
+            if pending:
+                logger.info(
+                    f"shutdown: drained snapshot capture lane "
+                    f"({pending} task(s) awaited)"
+                )
+        except Exception as e:
+            logger.error(
+                f"Error during shutdown step 'drain_snapshot_capture_tasks': {e}",
+                exc_info=True,
+            )
 
     async def _shutdown_opencode_registry(self) -> None:
         """Shutdown the opencode session registry during daemon shutdown.

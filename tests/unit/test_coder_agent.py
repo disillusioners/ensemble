@@ -2,7 +2,8 @@
 
 Tests Coder agent discovery, loading, tool filtering, and prompt composition.
 Coder is a direct-coding agent that works with files and bash WITHOUT delegating
-to OpenCode. It has only soul.md (no rule.md, no workflow.md, no tools_note.md).
+to OpenCode. It carries soul.md + workflow.md (no rule.md, no tools_note.md;
+workflow.md hosts the end-of-mission snapshot capture norm, 27cb8cd0 lineage).
 
 All tests run in the unit test environment with langgraph mocks from conftest.py.
 """
