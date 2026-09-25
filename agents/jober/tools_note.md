@@ -28,7 +28,11 @@ alias, case-insensitive: `system_fifo_queue`/`fifo`,
 always resolves to the SYSTEM queue of that name — a user-created queue
 with the same short name never shadows it. When `queue_id` is omitted, my
 work lands on `system_parallel_queue` by default (other agents default to
-FIFO). Unknown alias names return an error listing the valid queues.
+FIFO). Unknown-reference handling has two legs: a KNOWN alias that fails
+to resolve returns a strict error listing the valid queues; a value that
+is NOT a recognized alias (e.g. a typo'd name or a stale ID/UUID) passes
+through to the service's EXISTING soft-fail — the job is still created,
+a warning is logged, and `queue_id` ends up None.
 
 ---
 
@@ -358,7 +362,11 @@ job_retry(job_id="abc123")
 **Purpose:** List jobs in the Dead Letter Queue.
 
 ```raw
-dlq_list()
+dlq_list(
+    project_id="proj_123",        # Required
+    queue_id="parallel",          # Optional: queue ID or alias; unknown refs pass through to the DLQ filter unchanged
+    limit=50                      # Optional: 1-100, default 50
+)
 ```
 
 **Use for:** Finding failed jobs that need special handling.

@@ -169,6 +169,13 @@ Queue targeting:
     returned (provisioning bug) — the job is not silently created
     without its default queue.
 
+    Unknown reference handling has two legs: (a) a KNOWN alias name that
+    fails to resolve returns a strict error listing the valid queues;
+    (b) a value that is NOT a recognized alias (e.g. a typo'd name or a
+    stale ID/UUID) passes through to the service's EXISTING soft-fail —
+    the job is still created, a warning is logged, and ``queue_id``
+    resolves to None at enqueue time.
+
 Args:
     agent_id: Agent ID to run the job (e.g., "developer", "leader"). Required.
     message: The instruction/message for the agent. Required.
