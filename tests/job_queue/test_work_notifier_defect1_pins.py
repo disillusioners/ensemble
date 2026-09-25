@@ -187,12 +187,18 @@ def defect1_components(defect1_engine):
     instance_manager.enqueue_message = AsyncMock(
         return_value=MagicMock(message_id="msg-defect1")
     )
+    # C1 (2026-09-25): expose the instance repository on the manager so
+    # the ``evaluate_mission_live`` guard can walk the
+    # ``instances.parent_id`` tree (default MagicMock would force the
+    # guard to fail-OPEN, regressing every held-mission-terminal pin).
+    instance_manager._instance_repository = instance_repo
     return {
         "engine": defect1_engine,
         "watcher_repo": watcher_repo,
         "task_repo": task_repo,
         "resolver": resolver,
         "instance_manager": instance_manager,
+        "instance_repo": instance_repo,
     }
 
 
@@ -348,14 +354,26 @@ class TestNotifyWorkWatchersResultBlock:
         )
 
     @pytest.mark.asyncio
-    async def test_settled_message_kind_no_result_block(
+    async def test_settled_message_kind_carries_result_block(
         self, defect1_components,
     ):
-        """GUARD: M3 mission-class design — message-kind ``settled ✓``
-        receipts have a by-design NO-Result-block shape (the
-        ``settled`` glyph is sufficient; no extra body). The fix
-        must not regress this contract — the message body must
-        carry the header + Agent line and NOTHING ELSE."""
+        """C3 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+        settled-message-kind envelopes SHOULD carry a populated
+        ``Result:`` line. Pre-C3 (M3 settled guardrail,
+        2026-09-24, 81fc769d) settled envelopes were by-design
+        NO-Result-block — the user overrode that (2026-09-25),
+        reversing the M3 guardrail. The race-safety contract is
+        preserved: the caller (producer-side) threads
+        ``result_summary=`` directly from in-memory content, so
+        the body carries clean text without the resolver's
+        ``task.result`` read that races the ``complete_task``
+        commit-visibility window.
+
+        Same envelope contract as ``completed``: header + Agent
+        + ``Result:\\n<content>``. The settled glyph stays in
+        the header so the orchestrator's parser contract is
+        unchanged; only the body grows a ``Result:`` block.
+        """
         engine = defect1_components["engine"]
         watcher_repo = defect1_components["watcher_repo"]
         resolver = defect1_components["resolver"]
@@ -372,6 +390,17 @@ class TestNotifyWorkWatchersResultBlock:
             notified = await notify_work_watchers(
                 wid, "settled", instance_manager=instance_manager,
                 work_resolver=resolver, watcher_repo=watcher_repo,
+                # C3 (2026-09-25): producer-side threading of
+                # in-memory content. Mirrors the DEFECT-1b close
+                # for completed envelopes at
+                # task_processor.py:1010-1020 — the resolver's
+                # ``task.result`` read races the ``complete_task``
+                # commit visibility window, so the producer
+                # threads ``result_summary=`` directly from the
+                # in-memory ``ProcessingResult.result_content``
+                # (or in the child_reports fan-out path,
+                # ``last_content``).
+                result_summary="C3 SETTLED CONTENT FROM PRODUCER",
             )
         finally:
             resolver.resolve_work = original
@@ -381,11 +410,85 @@ class TestNotifyWorkWatchersResultBlock:
         msg = call.kwargs["message"]
         assert "[JOB_EVENT]" in msg
         assert "settled ✓" in msg
-        # GUARD: NO Result: block for settled.
+        # C3 (2026-09-25): settled envelopes SHOULD carry a
+        # ``Result:`` line. Pre-C3 the M3 guardrail asserted no
+        # ``Result:`` block; C3 reverses that (user override).
+        assert "Result:\nC3 SETTLED CONTENT FROM PRODUCER" in msg, (
+            "C3 settled GUARD: message-kind ``settled ✓`` receipts "
+            "MUST carry a populated ``Result:`` line — the user "
+            "overrode the pre-C3 M3 no-Result-block guardrail "
+            "(2026-09-25). The producer-side threading in this "
+            "test mirrors the real producer sites at "
+            "child_reports.py:4380+ and task_processor.py:1108+; "
+            "the notifier-side builder at work_notifier.py:759 "
+            "appends ``Result:\\n{content}`` whenever "
+            "``effective_result`` is truthy. Pre-C3 the M3 "
+            "guardrail omitted the kwarg at the producer sites; "
+            "C3 reverses that."
+        )
+        # And no Error: line either (no error keyword passed).
+        assert "Error:" not in msg
+
+    @pytest.mark.asyncio
+    async def test_settled_message_kind_no_kwarg_falls_back_to_no_result(
+        self, defect1_components,
+    ):
+        """C3 (2026-09-25) fallback pin: when the caller does NOT
+        thread ``result_summary=`` for a settled envelope (a
+        pre-C3 caller that hasn't been updated yet), the envelope
+        MUST degrade to no ``Result:`` block — same as the
+        pre-C3 M3 behavior. The notifier body builder only
+        appends ``Result:\\n{content}`` when ``effective_result``
+        is truthy; without the kwarg, ``effective_result`` falls
+        through to ``work_record.result_summary`` which is
+        ``None`` for the mirror shape (no ``task.result`` to
+        parse), so the body has no ``Result:`` block.
+
+        This is the C3 half-step — the producer-side threading
+        is the canonical race-safe path; the notifier-side
+        fallback is the pre-C3 degraded shape. Both are valid;
+        the producer-side threading is preferred (C3 mandate).
+        """
+        engine = defect1_components["engine"]
+        watcher_repo = defect1_components["watcher_repo"]
+        resolver = defect1_components["resolver"]
+        instance_manager = defect1_components["instance_manager"]
+
+        wid = f"wid-{uuid4().hex[:8]}"
+        _seed_instance(engine, instance_id="inst-test")
+        _seed_instance(engine, instance_id="watcher-1")
+        _add_watch(engine, work_id=wid, instance_id="watcher-1",
+                   watch_events=["settled"])
+
+        original = _patch_resolver_mirror(engine, resolver, wid=wid)
+        try:
+            notified = await notify_work_watchers(
+                wid, "settled", instance_manager=instance_manager,
+                work_resolver=resolver, watcher_repo=watcher_repo,
+                # NO result_summary kwarg — pre-C3 caller shape.
+            )
+        finally:
+            resolver.resolve_work = original
+
+        assert notified == 1
+        call = instance_manager.enqueue_message.await_args
+        msg = call.kwargs["message"]
+        assert "[JOB_EVENT]" in msg
+        assert "settled ✓" in msg
+        # Fallback shape: no ``Result:`` block when caller doesn't
+        # thread (the pre-C3 degraded shape; preserved as the
+        # backwards-compat path for callers that haven't migrated
+        # to the C3 producer-side threading yet).
         assert "Result:" not in msg, (
-            "M3 mission-class GUARD: message-kind ``settled ✓`` "
-            "receipts must NOT carry a ``Result:`` block — the "
-            "settled glyph is the body. Pre-fix regression test."
+            "C3 fallback pin: a settled envelope WITHOUT a "
+            "caller-supplied ``result_summary=`` falls through "
+            "to the resolver's ``work_record.result_summary`` "
+            "(``None`` for mirror rows, no ``task.result`` to "
+            "parse), so the body has NO ``Result:`` block — the "
+            "pre-C3 M3 degraded shape. This is the backwards-"
+            "compat fallback; the C3 mandate is producer-side "
+            "threading (see "
+            "``test_settled_message_kind_carries_result_block``)."
         )
         # And no Error: line either (no error keyword passed).
         assert "Error:" not in msg

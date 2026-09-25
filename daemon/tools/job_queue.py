@@ -64,7 +64,6 @@ from daemon import constants
 from daemon.constants import INJECTION_ELIGIBLE_STATUSES
 from daemon.models.common import ErrorCodes
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.services.queue_ref import (
@@ -73,7 +72,6 @@ from daemon.services.queue_ref import (
     is_known_alias_name,
     resolve_queue_ref,
 )
-from daemon.services.work_status import _derive_legacy_status
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
@@ -2208,9 +2206,24 @@ def create_job_tools(
         """
         if manager is None or not getattr(record, "instance_id", None):
             return record
+        # C2 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+        # include ``"settled"`` in the ``needs_result`` gate so
+        # message-mirror JobItem WorkRecords (per_kind_status_for
+        # surfaces ``"settled"`` instead of ``"completed"`` for the
+        # task → mirror split-semantics shape) also trigger the
+        # last-assistant-message enrichment. Without this the
+        # watch_job / watch_jobs path delivers a ``[JOB_EVENT]
+        # settled ✓`` body with no ``Result:`` block when the row's
+        # instance is still alive enough to have a captured assistant
+        # message — exactly the same class of stranding as the
+        # PROCESS_REPORT skip-path notify site
+        # (``task_processor._skip_task_as_completed``). The C3
+        # producer-side threading covers the notifier hot path;
+        # this enrichment is the second-chance catch for callers
+        # who reached the watch tools with an un-enriched record.
         needs_result = (
             getattr(record, "result_summary", None) is None
-            and getattr(record, "status", None) == "completed"
+            and getattr(record, "status", None) in {"completed", "settled"}
         )
         needs_error = (
             getattr(record, "error", None) is None
@@ -2234,11 +2247,39 @@ def create_job_tools(
             return record
         if needs_result and fetched:
             record.result_summary = fetched
-        elif needs_result and record.status == "completed":
+        elif needs_result and record.status in {"completed", "settled"}:
             # Match the observer's fallback so the ``Result:`` block
-            # always renders a non-empty body for completed jobs whose
+            # always renders a non-empty body for terminal jobs whose
             # instance produced no captureable assistant message.
-            record.result_summary = "Job completed (no agent response captured)"
+            #
+            # C2 lockstep (cycle 2 fixback, 2026-09-25): the
+            # ``needs_result`` gate at
+            # ``daemon/tools/job_queue.py:2226-2229`` widens to
+            # ``status in {"completed", "settled"}`` (settled mirror
+            # rows also enrich), but the fallback-message branch
+            # was previously scoped to ``status == "completed"``
+            # only — settled rows would silently fall through to
+            # ``result_summary=None`` and the ``[JOB_EVENT]``
+            # settled ✓ body would render WITHOUT a ``Result:``
+            # block when the manager's
+            # ``_get_last_assistant_message_raw`` returned ``None``
+            # (no captureable assistant message). Widen in lockstep
+            # so the fallback fires for both terminal-tokens that
+            # the gate admits. Per-token message text preserves the
+            # producer vocabulary (the user's orchestrator contract
+            # keys off ``completed ✓`` vs ``settled ✓``).
+            if record.status == "completed":
+                record.result_summary = (
+                    "Job completed (no agent response captured)"
+                )
+            else:
+                # ``record.status == "settled"`` (the only other
+                # token the C2 widened gate admits — the
+                # ``needs_result`` gate already excludes
+                # failed/cancelled/dead_letter).
+                record.result_summary = (
+                    "Job settled (no agent response captured)"
+                )
         # ``error`` is sourced separately by the instance-status path;
         # the manager's last-assistant-message raw hook does not carry
         # the failure message, so we leave ``error`` untouched here.
@@ -2261,7 +2302,7 @@ def create_job_tools(
             ),
         )] = None,
     ) -> str:
-        """Watch a job for lifecycle events. If the job is already in a terminal state, immediate notification is sent.
+        """Watch a job for lifecycle events. If the job is already in a terminal state, immediate notification is attempted (the reply reflects the held/delivered split — see F-2 fixback).
 
         Use tool_help("watch_job") for details."""
         try:
@@ -2352,13 +2393,56 @@ def create_job_tools(
                 # ``job_id``) and routes through WorkResolverService.
                 # ``error`` and ``result_summary`` are sourced from the
                 # record (now possibly enriched from the instance).
-                await job_service.notify_watchers(
+                #
+                # F-2 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+                # capture the return value so the reply text reflects
+                # the ACTUAL delivery state. Pre-F-2 the reply was
+                # hardcoded to "Immediate notification sent" regardless
+                # of whether the notify actually delivered — but
+                # ``notify_watchers`` can return ``0`` when the held
+                # ``mission_terminal`` row is consumed by a concurrent
+                # terminal caller (N1 CAS exactly-once invariant) or
+                # when the C1 mission-live guard holds a multi-kind row
+                # (commission-mandated HOLD semantics). A "sent"
+                # message that returns 0 is misleading — the caller
+                # cannot tell whether the watch is live (waiting for
+                # the future terminal flip) or genuinely delivered.
+                notified_count = await job_service.notify_watchers(
                     job_id,
                     record.status,
                     error=record.error,
                     result_summary=record.result_summary,
                 )
-                return f"Job {job_id[:8]}... is already {record.status}. Immediate notification sent."
+                if notified_count > 0:
+                    return (
+                        f"Job {job_id[:8]}... is already {record.status}. "
+                        f"Immediate notification sent ({notified_count} "
+                        f"watcher(s) notified)."
+                    )
+                # notified_count == 0: the row was CAS-claimed by a
+                # concurrent caller (N1 exactly-once invariant) OR a
+                # multi-kind ``mission_terminal`` row was held by the
+                # mission-live guard (no subscribed event can fire
+                # yet). The watch row IS registered (line 2338 ran
+                # BEFORE the notify call) — the future terminal flip
+                # OR boot sweep will fire the held notification. Tell
+                # the caller the held state honestly so they don't
+                # assume the notification already went out.
+                #
+                # C4 (cycle 2 fixback, 2026-09-25): the operator-
+                # facing vocabulary was simplified — "C1 HOLD
+                # semantics" leaks the internal commission ID;
+                # callers don't need to know which commission pass
+                # closed which class. Plain operator language: the
+                # row is held; it'll fire at the next mission-terminal
+                # flip OR boot sweep.
+                return (
+                    f"Job {job_id[:8]}... is already {record.status}. "
+                    f"Watch registered but immediate fire was held "
+                    f"(0 watchers notified now — the row stays "
+                    f"registered until the next mission-terminal flip "
+                    f"or boot sweep delivers it)."
+                )
 
             # Register watch
             watcher_repo.add_watch(job_id, current_instance_id, events)
@@ -2571,6 +2655,7 @@ def create_job_tools(
             watched = []
             already_terminal = []
             held_for_mission = []
+            held_for_delivery = []
 
             for jid in job_ids:
                 # Phase 7: resolver is the only lookup path. Unknown
@@ -2605,13 +2690,32 @@ def create_job_tools(
                         held_for_mission.append(jid)
                         continue
                     watcher_repo.add_watch(jid, current_instance_id, events)
-                    await job_service.notify_watchers(
+                    # F-2 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+                    # capture the return value so the bulk summary
+                    # reflects the actual delivery state. Pre-F-2 the
+                    # bulk path always classified notify results as
+                    # ``already_terminal`` even when the notify
+                    # returned 0 (held by the C1 mission-live guard
+                    # OR CAS-claimed by a concurrent terminal caller).
+                    # A "delivered" tag that returns 0 is misleading.
+                    notified_count = await job_service.notify_watchers(
                         jid,
                         record.status,
                         error=record.error,
                         result_summary=record.result_summary,
                     )
-                    already_terminal.append(jid)
+                    if notified_count > 0:
+                        already_terminal.append(jid)
+                    else:
+                        # 0-delivered: the watch row is registered
+                        # but the immediate fire was held — the
+                        # future mission-terminal flip or boot sweep
+                        # will deliver. Distinct from
+                        # ``held_for_mission`` (mission still live,
+                        # not even calling notify); this is "tried
+                        # notify, the row survived CAS" — a closer
+                        # to delivery state.
+                        held_for_delivery.append(jid)
                 else:
                     watcher_repo.add_watch(jid, current_instance_id, events)
                     watched.append(jid)
@@ -2626,6 +2730,22 @@ def create_job_tools(
                     f"{len(held_for_mission)} job(s) terminal on transport "
                     f"but held until mission liveness is also terminal "
                     f"(mission_terminal opt-in)."
+                )
+            # F-2 bulk-path honesty: surface the 0-delivered state
+            # distinctly from ``already_terminal`` so a caller reading
+            # the bulk reply can tell which watches already fired
+            # vs which were held for the next flip.
+            #
+            # C4 (cycle 2 fixback, 2026-09-25): plain operator
+            # vocabulary — "C1 HOLD semantics" leaks the internal
+            # commission ID; callers don't need to know which
+            # commission pass closed which class.
+            if held_for_delivery:
+                parts.append(
+                    f"{len(held_for_delivery)} job(s) already terminal "
+                    f"but immediate fire was held (0 watchers notified "
+                    f"now — the row stays registered until the next "
+                    f"mission-terminal flip or boot sweep delivers it)."
                 )
             return " ".join(parts) if parts else "No valid jobs found."
         except Exception as e:
@@ -3978,7 +4098,11 @@ def create_mission_watch_tools(
                 f"Mission watch registered: armed {len(live_receipts)} "
                 f"live receipt(s) of mission {mission_id[:8]}... "
                 f"(events: {', '.join(effective_events)})"
-                f"{skipped_note}. Will notify at mission-terminal. "
+                f"{skipped_note}. Will notify at mission-terminal "
+                f"liveness — the row is HELD (NOT claimed at "
+                f"receipt-settle) until the canonical "
+                f"``evaluate_mission_live`` guard confirms the parent "
+                f"instance + every descendant is terminal. "
                 f"Re-call watch_mission after job_continue — new "
                 f"receipts are not auto-watched; the re-call is a "
                 f"delta-arm (already-settled receipts are skipped, "
@@ -3999,7 +4123,26 @@ def create_mission_watch_tools(
         "admission AND mission liveness are both terminal). Receipts "
         "that are ALREADY terminal at call time are skipped — they "
         "settled in a previous epoch and are never replayed.\n\n"
-        "Semantics:\n"
+        "Semantics (C1, 2026-09-25, ``fix/mission-terminal-watch-report-publish``):\n"
+        "    * A ``mission_terminal`` watcher row is HELD (DB-row "
+        "preserved) until the mission's liveness is genuinely terminal. "
+        "Receipt settlement alone does NOT claim the row — the row "
+        "fires when the canonical ``evaluate_mission_live`` guard "
+        "(``daemon/services/mission_live_guard.py``) confirms the "
+        "parent instance is terminal AND every descendant is terminal. "
+        "Pre-C1 the row was claimed/deleted at the FIRST receipt "
+        "settlement — that lost mission_terminal events when receipt "
+        "settlement preceded mission-terminal (the 2026-09-25 "
+        "incident pattern, mission 36be8aef). C1 replaces that proxy "
+        "check with the canonical guard.\n"
+        "    * Multi-kind retire rule (C1 commission-mandated, "
+        "supersedes A1 closure): rows subscribing to BOTH a transport "
+        "kind AND ``mission_terminal`` are HELD until the LAST firing "
+        "event (``mission_terminal``). The transport-kind fire is "
+        "delivered read-only (no CAS claim); the mission-terminal fire "
+        "is the LAST firing event and CAS-claims the row. Pre-C1 the "
+        "row was CAS-claimed at receipt-settle and the mission-terminal "
+        "fire was silently DROPPED; C1 reverses that.\n"
         "    * One mission-terminal produces N [JOB_EVENT]s for N "
         "watched receipts — the FIRST event after your watch is the "
         "signal; the rest are echoes. Act once.\n"
@@ -4015,7 +4158,8 @@ def create_mission_watch_tools(
         "mint delivers at the NEXT mission-terminal flip or boot "
         "sweep (delayed, never duplicated).\n"
         "    * A revived mission needs a FRESH watch_mission — the row "
-        "is claimed and deleted at the first terminal; the event "
+        "is HELD (NOT claimed/deleted) at receipt-settle and only "
+        "claims when mission-terminal liveness fires; the event "
         "carries no epoch (call get_mission for details).\n"
         "    * An already-terminal mission replays NOTHING: its "
         "settled receipts are skipped (no rows, no immediate "
