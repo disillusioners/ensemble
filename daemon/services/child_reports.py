@@ -4355,24 +4355,38 @@ Provide a concise summary:"""
                         # result-arm already threads into the lifecycle
                         # event + CompletionRegistry above.
                         #
-                        # ROUND-3 REVIEW NARROW (2026-09-24, flipped
-                        # by C3 2026-09-25): the pre-C3 narrow
-                        # restricted threading to the ``completed``
-                        # token only — every other token (settled,
-                        # cancelled, dead_letter, failed) reverted to
-                        # its pre-5292eb99 shape in this fan-out.
-                        # C3 reverses that narrow for the ``settled``
-                        # mirror token: settled envelopes SHOULD carry
+                        # ROUND-3 REVIEW NARROW (2026-09-24, broadened
+                        # by C3 2026-09-25, NARROWED BY F-5 2026-09-25):
+                        # the pre-C3 narrow restricted threading to the
+                        # ``completed`` token only — every other token
+                        # (settled, cancelled, dead_letter, failed)
+                        # reverted to its pre-5292eb99 shape in this
+                        # fan-out.
+                        #
+                        # C3 reversed the narrow for the ``settled``
+                        # mirror token — settled envelopes SHOULD carry
                         # the ``Result:`` line (user-ratified,
                         # 2026-09-25), threaded via the same
                         # ``last_content`` in-memory payload that the
-                        # completed arm uses. ``failed`` still has its
-                        # own error-lane emission in
-                        # ``error_reporting.py`` (separate code path,
-                        # not this fan-out) — keeping the no-content
-                        # branch for failed preserves F2 slot
-                        # discipline (failed → ``error=``; every
-                        # other terminal token → ``result_summary=``).
+                        # completed arm uses.
+                        #
+                        # F-5 NARROWS THE C3 SCOPE BACK TO
+                        # ``{completed, settled}``: stale mid-flight
+                        # ``last_content`` captured while the mission
+                        # was alive would render under ``Result:`` for
+                        # ``cancelled`` and ``dead_letter`` envelopes
+                        # — content from a still-running mission paired
+                        # with a terminal-cancel / dead-letter token is
+                        # misleading. The ratified C3 scope is settled
+                        # bodies only (the M3-mirror rename); every
+                        # OTHER non-completed token (cancelled /
+                        # dead_letter) reverts to the pre-C3 NO-Result
+                        # shape. ``failed`` keeps the no-content branch
+                        # because it has its own error-lane emission
+                        # in ``error_reporting.py`` (separate code path,
+                        # not this fan-out) — F2 slot discipline
+                        # (failed → ``error=``; everything else
+                        # → ``result_summary=`` or no kwarg) preserved.
                         #
                         # C3 race-safety note: ``last_content`` is the
                         # in-memory agent's last assistant message,
@@ -4384,38 +4398,31 @@ Provide a concise summary:"""
                         # the ``complete_task`` commit-visibility
                         # window (the live E2E race the DEFECT-1b
                         # close documented at
-                        # task_processor.py:1010-1020). The pre-C3
-                        # M3 narrow had the side effect of routing
-                        # the same race onto every settled envelope
-                        # — settled mirrors resolved
-                        # ``work_record.result_summary`` through
-                        # ``_parse_task_result_summary(task)``, which
-                        # reads ``task.result`` directly. C3's
-                        # producer-side threading closes that race
-                        # the same way DEFECT-1b did for completed
-                        # tasks. The resolver fallback
-                        # (work_notifier.effective_result at
+                        # task_processor.py:1010-1020). The resolver
+                        # fallback (work_notifier.effective_result at
                         # work_notifier.py:306) is still active for
                         # callers that don't thread — same race risk
                         # as the pre-C3 code path; documented, not
                         # closed.
-                        if _token == "failed":
-                            await _notify_service.notify_watchers(
-                                _work_id, _token,
-                            )
-                        else:
-                            # ``completed`` / ``settled`` /
-                            # ``cancelled`` / ``dead_letter`` — every
-                            # non-failed terminal token threads
-                            # ``result_summary=last_content`` so the
-                            # ``[JOB_EVENT]`` body carries the
-                            # agent's last assistant message under
-                            # the ``Result:`` line. Race-safe via
-                            # the in-memory ``last_content`` (no DB
-                            # read of ``task.result`` required).
+                        if _token in {"completed", "settled"}:
                             await _notify_service.notify_watchers(
                                 _work_id, _token,
                                 result_summary=last_content,
+                            )
+                        else:
+                            # ``failed`` / ``cancelled`` /
+                            # ``dead_letter`` — keep the pre-C3
+                            # NO-Result shape. The ``failed`` token
+                            # has its own error-lane emission (F2
+                            # slot discipline, ``error=``); the
+                            # ``cancelled`` and ``dead_letter``
+                            # tokens have no canonical content
+                            # payload and would render stale
+                            # mid-flight ``last_content`` under
+                            # ``Result:`` if threaded (the F-5
+                            # stale-content stranding class).
+                            await _notify_service.notify_watchers(
+                                _work_id, _token,
                             )
                     except Exception as e:
                         logger.warning(

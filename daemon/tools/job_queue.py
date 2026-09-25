@@ -2367,13 +2367,48 @@ def create_job_tools(
                 # ``job_id``) and routes through WorkResolverService.
                 # ``error`` and ``result_summary`` are sourced from the
                 # record (now possibly enriched from the instance).
-                await job_service.notify_watchers(
+                #
+                # F-2 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+                # capture the return value so the reply text reflects
+                # the ACTUAL delivery state. Pre-F-2 the reply was
+                # hardcoded to "Immediate notification sent" regardless
+                # of whether the notify actually delivered — but
+                # ``notify_watchers`` can return ``0`` when the held
+                # ``mission_terminal`` row is consumed by a concurrent
+                # terminal caller (N1 CAS exactly-once invariant) or
+                # when the C1 mission-live guard holds a multi-kind row
+                # (commission-mandated HOLD semantics). A "sent"
+                # message that returns 0 is misleading — the caller
+                # cannot tell whether the watch is live (waiting for
+                # the future terminal flip) or genuinely delivered.
+                notified_count = await job_service.notify_watchers(
                     job_id,
                     record.status,
                     error=record.error,
                     result_summary=record.result_summary,
                 )
-                return f"Job {job_id[:8]}... is already {record.status}. Immediate notification sent."
+                if notified_count > 0:
+                    return (
+                        f"Job {job_id[:8]}... is already {record.status}. "
+                        f"Immediate notification sent ({notified_count} "
+                        f"watcher(s) notified)."
+                    )
+                # notified_count == 0: the row was CAS-claimed by a
+                # concurrent caller (N1 exactly-once invariant) OR a
+                # multi-kind ``mission_terminal`` row was held by the
+                # C1 mission-live guard (no subscribed event can fire
+                # yet). The watch row IS registered (line 2338 ran
+                # BEFORE the notify call) — the future terminal flip
+                # OR boot sweep will fire the held notification. Tell
+                # the caller the held state honestly so they don't
+                # assume the notification already went out.
+                return (
+                    f"Job {job_id[:8]}... is already {record.status}. "
+                    f"Watch registered but immediate fire was held "
+                    f"(0 watchers notified now — row survives for the "
+                    f"future mission-terminal flip or boot sweep, "
+                    f"per the C1 HOLD semantics)."
+                )
 
             # Register watch
             watcher_repo.add_watch(job_id, current_instance_id, events)
@@ -2586,6 +2621,7 @@ def create_job_tools(
             watched = []
             already_terminal = []
             held_for_mission = []
+            held_for_delivery = []
 
             for jid in job_ids:
                 # Phase 7: resolver is the only lookup path. Unknown
@@ -2620,13 +2656,32 @@ def create_job_tools(
                         held_for_mission.append(jid)
                         continue
                     watcher_repo.add_watch(jid, current_instance_id, events)
-                    await job_service.notify_watchers(
+                    # F-2 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+                    # capture the return value so the bulk summary
+                    # reflects the actual delivery state. Pre-F-2 the
+                    # bulk path always classified notify results as
+                    # ``already_terminal`` even when the notify
+                    # returned 0 (held by the C1 mission-live guard
+                    # OR CAS-claimed by a concurrent terminal caller).
+                    # A "delivered" tag that returns 0 is misleading.
+                    notified_count = await job_service.notify_watchers(
                         jid,
                         record.status,
                         error=record.error,
                         result_summary=record.result_summary,
                     )
-                    already_terminal.append(jid)
+                    if notified_count > 0:
+                        already_terminal.append(jid)
+                    else:
+                        # 0-delivered: the watch row is registered
+                        # but the immediate fire was held — the
+                        # future mission-terminal flip or boot sweep
+                        # will deliver. Distinct from
+                        # ``held_for_mission`` (mission still live,
+                        # not even calling notify); this is "tried
+                        # notify, the row survived CAS" — a closer
+                        # to delivery state.
+                        held_for_delivery.append(jid)
                 else:
                     watcher_repo.add_watch(jid, current_instance_id, events)
                     watched.append(jid)
@@ -2641,6 +2696,17 @@ def create_job_tools(
                     f"{len(held_for_mission)} job(s) terminal on transport "
                     f"but held until mission liveness is also terminal "
                     f"(mission_terminal opt-in)."
+                )
+            # F-2 bulk-path honesty: surface the 0-delivered state
+            # distinctly from ``already_terminal`` so a caller reading
+            # the bulk reply can tell which watches already fired
+            # vs which were held for the next flip.
+            if held_for_delivery:
+                parts.append(
+                    f"{len(held_for_delivery)} job(s) already terminal "
+                    f"but immediate fire was held (0 watchers notified "
+                    f"now — row survives for the next mission-terminal "
+                    f"flip or boot sweep, per the C1 HOLD semantics)."
                 )
             return " ".join(parts) if parts else "No valid jobs found."
         except Exception as e:

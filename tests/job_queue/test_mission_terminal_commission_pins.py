@@ -40,25 +40,28 @@ the new commission-specific pin coverage.
    status-only envelope the 2026-09-25 incident recorded is
    closed.
 
-5. ``test_settled_row_enrichment_includes_settled`` —
-   ``_enrich_terminal_record`` enriches ``settled`` rows the
-   same way it enriches ``completed`` rows.
+5. ``test_settled_row_enrichment_includes_settled`` (F-6
+   fixback) — ``_enrich_terminal_record`` enriches ``settled``
+   WorkRecords from the canonical ``_get_last_assistant_message_raw``
+   seam the same way it enriches ``completed`` records. Pinned
+   via the ``watch_job`` tool path at
+   ``daemon/tools/job_queue.py:2335-2339`` (the call-site seam
+   BEFORE the immediate ``notify_watchers``), so a settled
+   mirror that reaches the watch tool with a populated
+   assistant-message capture on the instance gets a
+   ``Result:\\n<content>`` block delivered.
 
 ### C3 — Settled-body Result line + race-safety
 
-6. ``test_settled_envelope_carries_result_under_commit_race`` —
-   the producer threads ``result_summary=`` directly from
-   in-memory content, so the settled envelope carries
-   ``Result:\\n<content>`` even when the resolver's
-   ``task.result`` read would race the ``complete_task``
-   commit visibility window. Constructs the race scenario
-   explicitly: task.result is empty / stale, the producer's
-   in-memory content is the canonical payload.
-
-7. ``test_settled_envelope_threads_via_producer_not_resolver`` —
+6. ``test_settled_envelope_threads_via_producer_not_resolver`` —
    the body uses the producer-side ``result_summary=`` kwarg
    (the ``[JOB_EVENT]`` body carries ``Result:\\n<threaded>``)
-   even when the resolver returns ``None``.
+   even when the resolver returns ``None``. Constructs the
+   commit-visibility race scenario explicitly: the resolver's
+   ``task.result`` read returns ``None`` (race window), the
+   producer's in-memory content is the canonical payload —
+   the same race-safety discipline DEFECT-1b established at
+   ``task_processor.py:1010-1020``.
 
 Recipe: real ``JobWatcherRepository`` + ``TaskRepository`` +
 real ``evaluate_mission_live`` via ``SQLModelInstanceRepository``
@@ -624,6 +627,152 @@ class TestC2SkipPathContentAndSettledEnrichment:
         # JSON envelope dump if work_record.result_summary was
         # set on the resolver record).
         assert json.dumps({"content": skip_content}) not in msg
+
+    @pytest.mark.asyncio
+    async def test_settled_row_enrichment_includes_settled(
+        self, commission_engine,
+    ):
+        """C2 enrichment seam pin (F-6 fixback, 2026-09-25) —
+        ``_enrich_terminal_record`` enriches a settled-mirror
+        WorkRecord (kind="job", job_type="message",
+        ``status="settled"``) from the canonical
+        ``_get_last_assistant_message_raw`` seam the same way
+        it enriches ``completed`` records.
+
+        Pre-C2 the ``needs_result`` gate at
+        ``daemon/tools/job_queue.py:2226-2229`` was
+        ``status == "completed"`` only — settled mirror rows
+        passed through ``watch_job`` / ``watch_jobs`` were
+        notified without a ``Result:`` block, mirroring the
+        PROCESS_REPORT skip-path stranding class. C2 widens
+        the gate to ``status in {"completed", "settled"}`` so
+        settled mirror rows also trigger the
+        last-assistant-message enrichment. This pin exercises
+        the call-site seam at
+        ``daemon/tools/job_queue.py:2335-2339`` (the
+        ``_enrich_terminal_record(record)`` invocation in
+        ``watch_job`` BEFORE the immediate ``notify_watchers``):
+        a settled WorkRecord with ``result_summary=None``
+        reaches the watch tool, the manager's
+        ``_get_last_assistant_message_raw(instance_id)`` returns
+        the captured assistant content, the enrichment
+        populates ``record.result_summary``, and the immediate
+        notify call carries the enriched kwarg.
+        """
+        from daemon.tools.job_queue import create_job_tools
+        from daemon.services.work_resolver import WorkRecord
+
+        # Seed the instance — the enrichment helper fetches the
+        # last-assistant-message via the manager mock below
+        # (mock-driven), but the WorkRecord still needs an
+        # ``instance_id`` so the seam can find the row.
+        iid = f"inst-enrich-{uuid4().hex[:8]}"
+        wid = f"wid-enrich-{uuid4().hex[:8]}"
+        _seed_instance(
+            commission_engine,
+            instance_id=iid,
+            # The instance must be live (non-terminal) — the
+            # enrichment helper fetches content from the live
+            # instance row, and the watch_job terminal-state
+            # gate evaluates ``record.status`` (not instance
+            # state).
+            status="running",
+        )
+        _seed_task(
+            commission_engine, work_id=wid, instance_id=iid,
+            status=TaskStatus.RUNNING.value,
+        )
+
+        # Manager mock: ``_get_last_assistant_message_raw``
+        # returns the captured assistant content (the
+        # canonical seam the enrichment uses). The pre-C2 gate
+        # would have skipped this fetch entirely for a settled
+        # record; the C2 widening lets the fetch run.
+        enriched_content = "F6_SETTLED_ENRICHMENT_FROM_INSTANCE"
+        manager = MagicMock()
+        manager._get_last_assistant_message_raw = AsyncMock(
+            return_value=enriched_content
+        )
+
+        # WorkResolver mock returning a settled mirror with
+        # ``result_summary=None`` (the race-prone / resolver-side
+        # fallback path; the enrichment seam is the
+        # second-chance catch).
+        resolver_mock = MagicMock()
+        settled_record = WorkRecord(
+            work_id=wid, kind="job", status="settled",
+            instance_id=iid, project_id="test-project",
+            agent_id="developer",
+            result_summary=None,
+            error=None,
+            created_at=datetime.now(timezone.utc),
+            job_type="message", mission_liveness="completed",
+        )
+        resolver_mock.resolve_work = MagicMock(
+            return_value=settled_record
+        )
+
+        # JobService mock — ``get_work`` routes through the
+        # resolver (the watch_job terminal-state branch); the
+        # captured ``notify_watchers`` call records the
+        # ``result_summary=`` kwarg the seam enriched.
+        job_service = MagicMock()
+        job_service.get_work = AsyncMock(return_value=settled_record)
+        job_service.notify_watchers = AsyncMock(return_value=1)
+
+        # Watcher repo mock (count + add — no-op for this pin).
+        watcher_repo = MagicMock()
+        watcher_repo.count_watches_for_instance = MagicMock(return_value=0)
+        watcher_repo.add_watch = MagicMock()
+
+        tools = create_job_tools(
+            job_service=job_service,
+            queue_mgmt_service=MagicMock(),
+            dead_letter_service=MagicMock(),
+            current_instance_id="inst-watcher",
+            agent_id="jober",
+            watcher_repo=watcher_repo,
+            manager=manager,
+        )
+        watch_job_tool = next(
+            t for t in tools if t.name == "watch_job"
+        )
+
+        # Exercise the seam at ``daemon/tools/job_queue.py:2335-2339``:
+        # watch_job sees a settled record, calls
+        # ``_enrich_terminal_record(record)``, then
+        # ``notify_watchers``. The enriched record carries the
+        # manager's last-assistant-message content as
+        # ``result_summary``.
+        result = await watch_job_tool.ainvoke(
+            {"job_id": wid}
+        )
+
+        # The manager's ``_get_last_assistant_message_raw`` was
+        # consulted — this is the seam the C2 widening opened.
+        manager._get_last_assistant_message_raw.assert_awaited_with(
+            iid
+        )
+
+        # ``notify_watchers`` received the ENRICHED record, NOT
+        # the original ``result_summary=None`` (the pre-C2
+        # regressed shape).
+        job_service.notify_watchers.assert_awaited_once()
+        call_kwargs = job_service.notify_watchers.await_args.kwargs
+        assert call_kwargs["result_summary"] == enriched_content, (
+            f"F-6 enrichment pin: ``_enrich_terminal_record`` MUST "
+            f"populate ``record.result_summary`` from "
+            f"``_get_last_assistant_message_raw`` for settled "
+            f"WorkRecords (C2 widening at ``needs_result`` gate, "
+            f"``daemon/tools/job_queue.py:2226-2229``). Got "
+            f"``result_summary={call_kwargs.get('result_summary')!r}``; "
+            f"expected ``{enriched_content!r}``."
+        )
+        # The status passed to notify_watchers is the settled
+        # mirror's per-kind token — confirms the seam at line
+        # 2335-2339 ran on a settled record (not silently skipped
+        # by the pre-C2 gate).
+        assert call_kwargs.get("error") is None
 
 
 # ── C3 — settled-body Result line + race-safety ──────────────────────────
