@@ -128,6 +128,18 @@ def _invoke_summarizer_llm(llm_wrapper: Any, messages: list) -> Any:
 # the ``_*`` imports.
 
 
+# Default summarizer persona — the system message the compaction
+# engine has been inlining at :3429 (and now the single site in
+# :meth:`ContextCompactor._call_summarization_llm`) since the
+# pre-snapshot-v1 era. Exposed as a module constant so the byte
+# identity is verifiable and the snapshot service can reference the
+# SAME literal by name (the parameter contract for
+# ``_call_summarization_llm`` accepts a custom persona string but
+# defaults to this constant — see ``_DEFAULT_SUMMARIZER_PERSONA``).
+DEFAULT_SUMMARIZER_PERSONA = (
+    "You are a helpful assistant that summarizes conversations "
+    "concisely while preserving all important details."
+)
 # Architecture §5 / §6 — the per-compaction output is a single
 # `compaction-global-{iid}-{seq}` SystemMessage; the truncation marker is
 # now the boundary line INSIDE the doc, not a separate message. The
@@ -1187,6 +1199,73 @@ def resolve_compaction_model(config: CompactionConfig) -> str:
     ``summarization_model`` check did.
     """
     return config.model or config.summarization_model
+
+
+def resolve_snapshot_model(
+    config: CompactionConfig,
+    *,
+    snapshot_env_value: str | None = None,
+) -> str:
+    """Effective snapshot-model override for the snapshot service.
+
+    Agent-snapshot v1 — PR2 (design-exploration §2.3 item 4,
+    feasibility-notes §A.3, model-resolution chain call-out).
+
+    Precedence (documented contract for the snapshot-model setting):
+
+      1. ``snapshot_env_value`` (``SNAPSHOT_MODEL``) — when SET and
+         NON-EMPTY (empty/whitespace treated as UNSET, mirroring the
+         compaction resolver's :func:`daemon.config._clean_env_value`
+         normalization). The snapshot service (Wave 1b) calls this
+         with the boot-time-resolved env value from
+         :func:`daemon.config.get_snapshot_model_env_resolved`, so a
+         snapshot-side operator who pinned the cheap-tier model
+         explicitly gets cheap snapshot calls. When ``snapshot_env_value``
+         is ``None``, the boot-time resolved cache is consulted on the
+         caller's behalf (the typical runtime path).
+      2. :func:`resolve_compaction_model` (``config``) — the
+         pre-existing compaction-model chain. The snapshot service
+         INHERITS whatever the operator pinned on the compaction tier
+         by default. Important invariant: when the operator pinned a
+         cheap compaction model (e.g. ``"agentic"``), snapshots inherit
+         that — a bare ``""`` for ``SNAPSHOT_MODEL`` does NOT silently
+         fall through to the session model (design-exploration §2.3
+         item 4 "a bare ``""`` must NOT fall straight to the session
+         model — that would make every snapshot a main-model call").
+      3. Unset — empty string (``""``). Treats "no override" as
+         "session model accessor + ``context_window_overrides``" (the
+         pre-existing behavior at the LLM-construction site, mirroring
+         :func:`resolve_compaction_model`).
+
+    Pure function — the snapshot service can call this per-snapshot
+    without shared mutable state. The empty-string result is falsy by
+    design, matching :func:`resolve_compaction_model`'s contract.
+
+    Args:
+        config: The :class:`CompactionConfig` carrying the resolved
+            ``model`` / ``summarization_model`` fields (env-and-yaml
+            resolved by ``load_config``).
+        snapshot_env_value: Optional explicit override (typical: boot-
+            time resolved value from
+            :func:`daemon.config.get_snapshot_model_env_resolved`).
+            ``None`` is permitted for legacy callers that don't care
+            about the env knob; the function then degenerates to the
+            compaction-model chain.
+
+    Returns:
+        The effective snapshot model override string. Empty string
+        indicates "no override" (the caller uses the session model).
+    """
+    if snapshot_env_value is None:
+        from .config import get_snapshot_model_env_resolved
+
+        snapshot_env_value = get_snapshot_model_env_resolved()
+    # Mirror the compaction resolver's normalization (None / blank →
+    # "") so the snapshot_env_value channel never carries ``None``.
+    if snapshot_env_value is None or not str(snapshot_env_value).strip():
+        compaction_resolved = resolve_compaction_model(config)
+        return compaction_resolved
+    return str(snapshot_env_value).strip()
 
 
 # =============================================================================
@@ -3203,13 +3282,26 @@ class ContextCompactor:
     async def _call_summarization_llm(
         self,
         prompt: str,
-        context: CompactionContext
+        context: CompactionContext,
+        *,
+        system_message: str | None = None,
     ) -> str:
         """Call LLM for summarization.
 
         Args:
             prompt: Summarization prompt.
             context: Compaction context with model info.
+            system_message: Optional persona for the summary LLM's
+                ``SystemMessage``. Defaults to
+                :data:`DEFAULT_SUMMARIZER_PERSONA` (the pre-snapshot-v1
+                hardcoded persona). The snapshot service (Wave 1b,
+                ``SnapshotExecutor``) passes its own steering block per
+                design-exploration.md §2.3 / feasibility-notes §A.3
+                "Summarizer invocation + cost control" so digest
+                quality matches the snapshot's purpose; compaction
+                itself leaves ``system_message=None`` and inherits
+                byte-identical behavior (the post-PR2 default is the
+                SAME literal as pre-PR2's inlined string).
 
         Returns:
             LLM response content as string.
@@ -3299,15 +3391,24 @@ class ContextCompactor:
         # callable) so the ContextVar is set on the thread that
         # actually runs ``invoke`` — propagation-proof regardless of
         # the caller's executor flavor.
+        # Snapshot v1 PR2: persona parametrization. The pre-PR2
+        # site had the persona hardcoded inline; the default is now
+        # :data:`DEFAULT_SUMMARIZER_PERSONA` (the SAME string, hoisted
+        # for reuse — see PR2 commit). Existing compaction callers that
+        # pass ``system_message=None`` (the default) get byte-identical
+        # behavior; the snapshot service (Wave 1b) passes its own
+        # steering block.
+        persona = (
+            system_message
+            if system_message is not None
+            else DEFAULT_SUMMARIZER_PERSONA
+        )
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 _invoke_summarizer_llm,
                 llm_wrapper,
                 [
-                    SystemMessage(
-                        content="You are a helpful assistant that summarizes conversations "
-                        "concisely while preserving all important details."
-                    ),
+                    SystemMessage(content=persona),
                     HumanMessage(content=prompt),
                 ],
             ),
@@ -3778,3 +3879,80 @@ class ContextCompactor:
             return (now - last_time).total_seconds() < 60
         except (ValueError, TypeError):
             return False
+
+
+# =============================================================================
+# agent-snapshot v1 — PR2 — snapshot-side LLM call wrapper
+# =============================================================================
+#
+# Why this wrapper exists (design-exploration.md §2.3 item 1):
+#   ``ContextCompactor._call_summarization_llm`` is a battle-tested
+#   instance method that the future ``SnapshotService`` (Wave 1b,
+#   design §4 / feasibility-notes §A.2 "SnapshotService creation
+#   pipeline") MUST reuse. The method carries a non-trivial signature
+#   (timeout facade + HA failover + persona payload); letting the
+#   snapshot service reach into it via instance dispatch couples the
+#   snapshot surface to the compactor's internal layout (which has
+#   already drifted across three architect cycles — see the
+#   ``_call_summarization_llm`` docstring history for context).
+#
+# The wrapper pins the call shape: every future PR that changes
+# ``_call_summarization_llm``'s signature MUST break this wrapper as
+# a CompileError signal — exactly the "later compaction signature
+# drift breaks loudly" property the spec calls out.
+#
+# This is a ``staticmethod``-style module function (NOT bound to a
+# particular compactor instance) so the snapshot service can build a
+# lightweight ``ContextCompactor`` carrying the target instance's LLM
+# config + a synthetic ``CompactionContext`` (the PR4 construction
+# helper) and call this wrapper without inheriting any of the
+# compactor's stateful bookkeeping.
+async def call_summarization_llm_for_snapshot(
+    compactor: "ContextCompactor",
+    prompt: str,
+    context: CompactionContext,
+    *,
+    system_message: str,
+) -> str:
+    """Snapshot-side pin for ``_call_summarization_llm``.
+
+    Thin wrapper that fixes the call shape so a future signature
+    drift on the underlying method surfaces as a compile-time error
+    at the snapshot-side call site. NOT a method on ``ContextCompactor``
+    because the snapshot service composes a lightweight compactor
+    (PR4 machinery) that doesn't carry the engine's stateful
+    bookkeeping — we want the snapshot surface to be a SEPARATE
+    incantation of the same call, not a base-class member.
+
+    The ``system_message`` kwarg is REQUIRED here (no default) — the
+    snapshot service always pins its own persona (R11 8-tuple steering
+    block, per feasibility-notes §A.5); a missing persona would mean
+    the snapshot silently inherited the compaction persona, which is
+    the wrong default. The default-byte-identity invariant is held by
+    :meth:`ContextCompactor._call_summarization_llm` itself, which
+    still defaults to :data:`DEFAULT_SUMMARIZER_PERSONA` when its
+    ``system_message`` kwarg is omitted.
+
+    Args:
+        compactor: A ``ContextCompactor`` (or lightweight
+            construction, PR4) carrying the target instance's
+            ``llm_config_with_headers`` + matching ``context`` —
+            the call delegates to ``compactor._call_summarization_llm``.
+        prompt: Summarization prompt (assembled by the snapshot
+            service from the captured history + R11 steering block).
+        context: ``CompactionContext``-shaped object. The wrapper
+            passes it through unchanged; only ``.config`` is read on
+            this path today (timeout math + model resolution).
+        system_message: REQUIRED persona — the snapshot service's
+            R11 steering block; passed through as
+            ``compactor._call_summarization_llm(..., system_message=...)``.
+
+    Returns:
+        LLM response content as a plain string (same shape as
+        :meth:`ContextCompactor._call_summarization_llm`).
+    """
+    return await compactor._call_summarization_llm(
+        prompt,
+        context,
+        system_message=system_message,
+    )

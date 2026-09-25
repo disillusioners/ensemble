@@ -2867,6 +2867,115 @@ def _resolve_compaction_model(yaml_value: Any, *, env_value: str | None) -> str:
     return yaml_value
 
 
+# agent-snapshot v1 — PR2 — ``SNAPSHOT_MODEL`` precedence chain.
+# Mirrors :func:`_resolve_compaction_model` for the env-only knob
+# that overrides the effective snapshot-summarization model. The
+# chain documented in design-exploration.md §2.3 item 4 /
+# feasibility-notes §A.3 is ``SNAPSHOT_MODEL > COMPACTION_MODEL >
+# session model``. The ``SNAPSHOT_MODEL`` env is env-only
+# (mirroring the operator-only "cheap tier" surface area — no
+# YAML ``snapshot.model`` knob by design) and overrides the
+# compaction model chain at the top of the resolution. When
+# ``SNAPSHOT_MODEL`` is unset/empty, the chain delegates to
+# :func:`_resolve_compaction_model` (which itself returns the
+# compaction YAML/env model, or ``""`` for "no override" = session
+# model).
+#
+# The bare-``""`` semantics — a missed env UNSET, NOT a fallback to
+# session model — is the load-bearing invariant called out in
+# design §2.3 item 4 ("a bare ``""`` must NOT fall straight to the
+# session model — that would make every snapshot a main-model call"):
+# the chain DELIBERATELY threads through the compaction resolver,
+# so unset-env snapshots inherit whatever the operator pinned on
+# the compaction tier (cheap by default) instead of leaping to the
+# session model.
+def _resolve_snapshot_model(env_value: str | None) -> str:
+    """Pure resolver for the ``SNAPSHOT_MODEL`` env-only override.
+
+    Precedence (documented contract for the snapshot-model setting —
+    agent-snapshot v1, design-exploration §2.3 / feasibility-notes
+    §A.3):
+
+      1. ``env_value`` (``SNAPSHOT_MODEL``) — when SET and NON-EMPTY
+         (empty/whitespace treated as UNSET, like every other env
+         override in this module — see :func:`_clean_env_value`),
+         wins outright. A snapshot-side operator who pinned the
+         cheap-tier model explicitly gets cheap snapshot calls.
+      2. Unset — empty string (``""``). The chain in
+         :func:`daemon.compaction.resolve_snapshot_model`
+         interprets ``""`` as "fall through to the compaction chain,
+         then session model". This is THE explicit ``""``-never-means-
+         session-model bullet from design §2.3 item 4 — the empty
+         string here is a signal to the chain resolver, NOT a
+         session-model request.
+
+    Pure function (no ``os.environ`` access). The boot path
+    (``:func:`_install_snapshot_model_for_boot`` and
+    :func:`load_config`) reads ``os.environ`` ONCE and threads the
+    string through to the resolver; the runtime caller of
+    :func:`daemon.compaction.resolve_snapshot_model` does the same
+    so the snapshot service in Wave 1b has access to the resolved
+    value at call time.
+
+    ``None`` and blank strings normalize to ``""`` so the ``str``
+    channel never receives ``None`` and "unset" always means the
+    empty string.
+    """
+    cleaned = _clean_env_value(env_value)
+    if cleaned is None:
+        return ""
+    return cleaned
+
+
+# Module-level resolved value for the snapshot-model chain. Boot
+# path installs it once via :func:`_install_snapshot_model_for_boot`;
+# runtime callers (the snapshot service in Wave 1b) read it via
+# :func:`get_snapshot_model_env_resolved` (no-arg, cached, mirrors
+# ``_VSCODE_WEBVIEW_CSP_FIX`` precedent). Tests use
+# :func:`_reset_snapshot_model_resolved_for_tests` to go back to cold
+# between cases.
+_SNAPSHOT_MODEL_RESOLVED: str | None = None
+
+
+def _install_snapshot_model_for_boot(env_value: str | None) -> None:
+    """Install the resolved ``SNAPSHOT_MODEL`` env value into the
+    module cache (boot path).
+
+    Called by :func:`load_config` after the env is read once. The
+    installed value is the post-resolution field value so the boot
+    log and the runtime gate can never disagree.
+
+    Mirrors the existing module-cached install pattern
+    (:func:`_install_vscode_webview_csp_fix`,
+    :func:`_install_proactive_enabled`).
+    """
+    global _SNAPSHOT_MODEL_RESOLVED
+    _SNAPSHOT_MODEL_RESOLVED = _resolve_snapshot_model(env_value)
+
+
+def get_snapshot_model_env_resolved() -> str:
+    """Read the resolved snapshot-model env value (no-arg, cached).
+
+    Returns the operator-resolved string the boot path installed.
+    Empty string (``""``) when the env was unset/blank — the
+    intended "chain continues to the compaction resolver"
+    sentinel, NOT a session-model request.
+    """
+    return _SNAPSHOT_MODEL_RESOLVED or ""
+
+
+def _reset_snapshot_model_resolved_for_tests() -> None:
+    """Reset the resolved snapshot-model cached value to ``None``.
+
+    Test-only helper — production callers never invoke this. Used
+    by the unit trio + the hot-reload test path to ensure
+    "unset at boot" tests see the cold state, NOT a previous
+    test's accidentally-leaked env value.
+    """
+    global _SNAPSHOT_MODEL_RESOLVED
+    _SNAPSHOT_MODEL_RESOLVED = None
+
+
 # Permissive parse for proactive_enabled env values. Mirrors the legacy
 # ``_parse_proactive_enabled`` field validator but raises a clear
 # ``ValueError`` on an unrecognized string so a typo is caught at boot
@@ -3890,6 +3999,26 @@ def load_config(config_path: str | None = None) -> Config:
         compaction_config.get("model", ""),
         env_value=os.environ.get("COMPACTION_MODEL"),
     )
+
+    # agent-snapshot v1 — PR2 — SNAPSHOT_MODEL precedence chain.
+    # Env-only override (design-exploration.md §2.3 item 4 / feasibility-notes
+    # §A.3): the snapshot service's summarizer calls consult this resolver
+    # BEFORE the compaction-model chain, so an operator who pinned the
+    # cheap compaction tier gets cheap snapshot calls by default. Bare
+    # ``""`` does NOT fall through to the session model — the snapshot
+    # chain resolver continues to the compaction chain on empty,
+    # preserving the documented chain ``SNAPSHOT_MODEL > COMPACTION_MODEL
+    # > session model`` even when both env and yaml overrides are unset
+    # (because ``_resolve_compaction_model`` returns ``""`` → snapshot
+    # chain continues to "session model" semantics).
+    #
+    # Install pattern mirrors :func:`_install_vscode_webview_csp_fix`:
+    # the boot path reads the env ONCE, hands the resolved string to
+    # the module cache, and runtime callers read the cached value. No
+    # per-snapshot re-reads of ``os.environ`` (cost model: cheap, but
+    # never gratuitous).
+    _install_snapshot_model_for_boot(os.environ.get("SNAPSHOT_MODEL"))
+
     # Cycle 2 (proactive-compaction-fix review W-1 + W-2) — explicit
     # resolution for ``proactive_enabled`` mirrors
     # ``_resolve_compaction_model`` above. pydantic-settings treats an
