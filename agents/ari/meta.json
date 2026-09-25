@@ -30,5 +30,6 @@
       "service"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
-  }
+  },
+  "default_queue": "system_parallel_queue"
 }

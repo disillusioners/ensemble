@@ -11,5 +11,6 @@
     "allow": ["job", "help", "self", "time", "project", "knowledge", "mcp", "context", "shared_meta_kv", "mission"],
     "deny": ["watch_job", "watch_jobs"]
   },
-  "team_members": ["explorer"]
+  "team_members": ["explorer"],
+  "default_queue": "system_parallel_queue"
 }

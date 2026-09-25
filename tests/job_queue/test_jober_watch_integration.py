@@ -706,6 +706,15 @@ class TestJoberWatchIntegration:
         """Task 4: job_create with watch=True should work (regression check)."""
         job_service = AsyncMock()
         job_service.use_virtual_job_resolver = False
+        # job_create resolves the caller's agent default queue via
+        # ``job_service._queue_repo`` (getattr, None default). On a bare
+        # ``AsyncMock()`` that getattr auto-creates an AsyncMock child whose
+        # ``get_by_name`` returns a coroutine (same trap as
+        # ``_work_resolver``) and breaks this test with agent_id="jober"
+        # (real registry meta declares default_queue). Pin None → the
+        # agent default degrades to the service default, which is what
+        # this watch-focused regression check exercises.
+        job_service._queue_repo = None
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         watcher_repo = MagicMock()

@@ -918,6 +918,13 @@ class TestQueueUpdateTool:
         job_service = AsyncMock()
         job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
+        # queue_update resolves queue aliases via
+        # ``queue_mgmt_service._queue_repo`` (getattr, None default). On a
+        # bare ``AsyncMock()`` that getattr auto-creates an AsyncMock child
+        # (same trap as ``_work_resolver`` above): ``repo.get(...)`` returns
+        # a coroutine and the alias path corrupts these tests. Pin None →
+        # pass-through (these tests exercise literal queue IDs).
+        queue_mgmt_service._queue_repo = None
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
 
