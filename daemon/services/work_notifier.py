@@ -95,6 +95,7 @@ from daemon.services.mission_live_guard import (
 from daemon.services.work_status import is_terminal as _is_terminal
 
 if TYPE_CHECKING:
+    from daemon.repositories.job_queue.watcher_models import JobWatcher
     from daemon.services.work_resolver import WorkResolverService
 
 logger = logging.getLogger(__name__)
@@ -312,8 +313,9 @@ async def notify_work_watchers(
     Args:
         work_id: The stable cross-system UUID4 (``Task.work_id`` or
             ``JobItem.job_id`` — they share the same column).
-        status: Canonical status (``"completed"``, ``"failed"``,
-            ``"cancelled"``, ``"dead_letter"``, or ``"in_progress"``).
+        status: Canonical status (``"completed"``, ``"settled"``,
+            ``"failed"``, ``"cancelled"``, ``"dead_letter"``, or
+            ``"in_progress"``).
         error: Optional error string — included verbatim as the
             ``Error:`` line for ``failed`` notifications.
         instance_manager: The ``InstanceManager`` whose
@@ -334,6 +336,27 @@ async def notify_work_watchers(
             notifications — rendered as the ``  Progress:\n{progress}``
             line that ``JobFeedbackObserver._emit_in_progress`` passes
             in. Ignored for non-``in_progress`` statuses.
+        result_summary: Optional result text — included verbatim as
+            the ``  Result:\n{result_summary}`` line for terminal
+            notifications (every non-``in_progress`` status).
+
+    Race-safe content (F-1, 2026-09-25): producer-side terminal-commit
+    callers (the natural-completion paths in ``job_feedback_observer``
+    and ``child_reports._dispatch_post_commit_side_effects``; the
+    inline mirror finalize at ``task_processor.py:1159``; the
+    PROCESS_REPORT dedup-skip site at
+    ``task_processor._skip_task_as_completed``) MUST thread
+    ``result_summary=<in-memory content>`` directly. The resolver
+    fallback ``work_record.result_summary`` reads ``Task.result``
+    which races the ``complete_task`` commit-visibility window
+    (the live E2E race the DEFECT-1b close documented — see
+    ``task_processor.py:1010-1020``); a caller that omits the kwarg
+    and lets the resolver fallback run risks a content-less
+    ``Result:`` block on the delivered envelope even when the
+    producer had the content in scope. The race-prone resolver
+    fallback remains active as the backwards-compat path for
+    callers that haven't migrated to producer-side threading;
+    new callers should thread explicitly.
 
     Returns:
         Number of watchers notified (zero is a valid no-op if no
@@ -417,30 +440,10 @@ async def notify_work_watchers(
 
         status_display = _format_status_display(status)
 
-        # Step 2 (N1 — 2026-09-03): in-memory PARTITION before any
-        # notify or claim. The pre-N1 flow did a notify-then-claim
-        # over the raw SELECT, which left a bounded ≤2
-        # duplicate-delivery window between two concurrent terminal
-        # callers (each SELECTed the same row and delivered before
-        # either ran the DELETE).
-        #
-        # Here we split into two pure buckets — no side effects —
-        # so the partition itself is race-free (every caller
-        # computes the same set from the same SELECT snapshot):
-        #   * matching         → will notify (atomic CAS in step 3
-        #                        picks which caller(s) actually
-        #                        deliver for each instance_id).
-        #   * held_for_mission → ``mission_terminal`` opt-in with
-        #                        mission liveness NOT yet terminal.
-        #                        Rows stay in DB for the future
-        #                        terminal event. Never claimed here.
-        matching_claimable: list = []
-        """Rows that have ALL subscribed events firing NOW — claim + deliver.
+        matching_claimable: list[JobWatcher] = []
+        """Rows that have ALL subscribed events firing NOW — claim + deliver."""
 
-        See the partition rule below for the precise definition.
-        """
-
-        matching_readonly: list = []
+        matching_readonly: list[JobWatcher] = []
         """Rows that have SOME (but not all) subscribed events firing NOW.
 
         Deliver the body but DO NOT claim — the row stays in the DB for
@@ -478,7 +481,7 @@ async def notify_work_watchers(
         # default ``ALL_WATCHABLE_EVENTS`` rows do NOT include
         # ``mission_terminal``; the M2 mission-class opt-in is
         # explicit).
-        mission_live_verdict_live: bool | None = None
+        mission_live: bool | None = None
         any_mission_terminal_opt_in = any(
             "mission_terminal" in w.watch_events for w in watchers
         )
@@ -498,7 +501,7 @@ async def notify_work_watchers(
                     ),
                     bus_pending_count=None,
                 )
-                mission_live_verdict_live = _guard_verdict.live
+                mission_live = _guard_verdict.live
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "notify_work_watchers: mission-live guard "
@@ -510,21 +513,38 @@ async def notify_work_watchers(
                         _guard_verdict.reason,
                     )
             except Exception as guard_exc:  # noqa: BLE001
-                # Guard contract is fail-OPEN: any internal error →
-                # ``live=False`` (the caller proceeds). The guard helper
-                # itself never raises, but the defensive wrapper here
-                # guards against a guard-wrapper regression slipping
-                # through. Treat any raise as live=False → all rows
-                # claim + deliver (at-least-once terminal takes
-                # precedence over stranding).
-                logger.warning(
+                # C3 fail-CLOSED (cycle 2 fixback, 2026-09-25): when
+                # the mission-live guard cannot evaluate (seam
+                # missing, guard-wrapper regression, etc.), HOLD
+                # the row — ``mission_live = True`` means the
+                # held_for_mission bucket below retains the watcher
+                # until the future terminal flip / boot sweep. The
+                # pre-C3 direction (live=False → claim + deliver) is
+                # the one that CANNOT be allowed here: at-least-once
+                # terminal delivery is preserved at the cost of
+                # stranding the watch if the seam is broken, because
+                # a stranded watch is recoverable on the next sweep
+                # but a premature claim re-introduces the C1
+                # false-positive class (the 2026-09-25 mission
+                # 36be8aef incident). Production wiring guarantees
+                # the seam (``InstanceManager._instance_repository``
+                # is set in ``daemon/manager.py`` and propagated
+                # through ``daemon/api.py``); a missing seam in
+                # this path is a wiring regression — log loudly so
+                # operators can spot the regression rather than
+                # silently masquerading as the pre-C1 proxy
+                # semantics.
+                logger.error(
                     "notify_work_watchers: mission-live guard "
-                    "raised %s for work_id=%s — fail-OPEN (claim all): %s",
+                    "raised %s for work_id=%s — fail-CLOSED (HOLD the "
+                    "row; refuse premature claim — pre-C3 fail-OPEN "
+                    "direction re-introduces the C1 false-positive "
+                    "class): %s",
                     type(guard_exc).__name__,
                     work_id[:8],
                     guard_exc,
                 )
-                mission_live_verdict_live = False
+                mission_live = True
 
         for watcher in watchers:
             # Filter by the watcher's subscribed events. The watcher's
@@ -611,7 +631,7 @@ async def notify_work_watchers(
             # (no CAS claim); the eventual mission-terminal fire
             # is the LAST firing event and claims.
             if mission_terminal_opt_in:
-                if mission_live_verdict_live is True:
+                if mission_live is True:
                     # Mission still live — ``mission_terminal``
                     # is pending. The current ``status`` either
                     # fires (multi-kind, non-terminal-kind, or
@@ -740,12 +760,12 @@ async def notify_work_watchers(
                 work_id[:8],
             )
 
-        # Step 4: notify ONLY the CAS winners (terminal) or the
-        # read-only matching bucket (non-terminal). Either way, the
-        # notify loop iterates ``notify_list`` — a set that, by
-        # construction, has no overlap with any concurrent caller's
-        # notify list on the same terminal ``work_id``. This is the
-        # caller-level exactly-once invariant.
+        # Step 4: notify ONLY the deliverable rows — either the
+        # CAS-winners ∪ matching_readonly (terminal) or
+        # matching_claimable ∪ matching_readonly (non-terminal).
+        # By construction ``notify_list`` has no overlap with any
+        # concurrent caller's notify list on the same terminal
+        # ``work_id`` — the caller-level exactly-once invariant.
         notified = 0
         for watcher in notify_list:
             notification_parts = [

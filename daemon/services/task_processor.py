@@ -228,12 +228,56 @@ class ProcessMessageProcessor(BaseProcessor):
                 self._work_resolver is not None
                 and self._watcher_repo is not None
             ):
+                # C2 completeness (cycle 2 fixback, 2026-09-25):
+                # the carve-out branch (cascade-pause handle
+                # preservation) ALSO notifies — same race-safe
+                # threading pattern as the dedup-skip site
+                # immediately below at `_skip_task_as_completed` :
+                # 293+. Fetch the message content via
+                # ``message_repo.get`` and thread
+                # ``result_summary=<content>`` directly so the
+                # ``[JOB_EVENT]`` body carries a populated
+                # ``Result:`` block. Pre-fix this carve-out notify
+                # ran without the kwarg (status-only envelope) —
+                # same stranding class the dedup-skip site closed
+                # in cycle 1 (the 2026-09-25 mission 36be8aef
+                # incident's 57-byte header + Agent-only envelope
+                # pattern). The kind is ``"completed"`` (NOT
+                # ``"settled"``) — PROCESS_REPORT tasks are
+                # task-kind WorkRecords, not message-mirror
+                # JobItems, so the M3 settled guardrail doesn't
+                # apply.
+                carve_result_summary: str | None = None
+                if self._message_repo is not None and task.message_id:
+                    try:
+                        carve_msg = await asyncio.to_thread(
+                            self._message_repo.get, task.message_id
+                        )
+                        if carve_msg is not None:
+                            carve_content = getattr(
+                                carve_msg, "content", None
+                            )
+                            if (
+                                isinstance(carve_content, str)
+                                and carve_content
+                            ):
+                                carve_result_summary = carve_content
+                    except Exception as carve_fetch_exc:
+                        logger.warning(
+                            f"Task {task.id}: carve-out content "
+                            f"fetch failed for message "
+                            f"{task.message_id[:8]}...: "
+                            f"{carve_fetch_exc!r} — notifying "
+                            f"without content (status-only envelope, "
+                            f"same as pre-C2)."
+                        )
                 await notify_work_watchers(
                     work_id=task.work_id,
                     status="completed",
                     instance_manager=self._manager,
                     work_resolver=self._work_resolver,
                     watcher_repo=self._watcher_repo,
+                    result_summary=carve_result_summary,
                 )
             return {
                 "success": True,

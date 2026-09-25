@@ -73,8 +73,6 @@ exercises.
 from __future__ import annotations
 
 import json
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -84,7 +82,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel
 
-from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import (
     SQLModelInstanceRepository,
 )

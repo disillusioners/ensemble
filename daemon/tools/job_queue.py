@@ -64,7 +64,6 @@ from daemon import constants
 from daemon.constants import INJECTION_ELIGIBLE_STATUSES
 from daemon.models.common import ErrorCodes
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.services.queue_ref import (
@@ -73,7 +72,6 @@ from daemon.services.queue_ref import (
     is_known_alias_name,
     resolve_queue_ref,
 )
-from daemon.services.work_status import _derive_legacy_status
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
@@ -2249,11 +2247,39 @@ def create_job_tools(
             return record
         if needs_result and fetched:
             record.result_summary = fetched
-        elif needs_result and record.status == "completed":
+        elif needs_result and record.status in {"completed", "settled"}:
             # Match the observer's fallback so the ``Result:`` block
-            # always renders a non-empty body for completed jobs whose
+            # always renders a non-empty body for terminal jobs whose
             # instance produced no captureable assistant message.
-            record.result_summary = "Job completed (no agent response captured)"
+            #
+            # C2 lockstep (cycle 2 fixback, 2026-09-25): the
+            # ``needs_result`` gate at
+            # ``daemon/tools/job_queue.py:2226-2229`` widens to
+            # ``status in {"completed", "settled"}`` (settled mirror
+            # rows also enrich), but the fallback-message branch
+            # was previously scoped to ``status == "completed"``
+            # only — settled rows would silently fall through to
+            # ``result_summary=None`` and the ``[JOB_EVENT]``
+            # settled ✓ body would render WITHOUT a ``Result:``
+            # block when the manager's
+            # ``_get_last_assistant_message_raw`` returned ``None``
+            # (no captureable assistant message). Widen in lockstep
+            # so the fallback fires for both terminal-tokens that
+            # the gate admits. Per-token message text preserves the
+            # producer vocabulary (the user's orchestrator contract
+            # keys off ``completed ✓`` vs ``settled ✓``).
+            if record.status == "completed":
+                record.result_summary = (
+                    "Job completed (no agent response captured)"
+                )
+            else:
+                # ``record.status == "settled"`` (the only other
+                # token the C2 widened gate admits — the
+                # ``needs_result`` gate already excludes
+                # failed/cancelled/dead_letter).
+                record.result_summary = (
+                    "Job settled (no agent response captured)"
+                )
         # ``error`` is sourced separately by the instance-status path;
         # the manager's last-assistant-message raw hook does not carry
         # the failure message, so we leave ``error`` untouched here.
@@ -2276,7 +2302,7 @@ def create_job_tools(
             ),
         )] = None,
     ) -> str:
-        """Watch a job for lifecycle events. If the job is already in a terminal state, immediate notification is sent.
+        """Watch a job for lifecycle events. If the job is already in a terminal state, immediate notification is attempted (the reply reflects the held/delivered split — see F-2 fixback).
 
         Use tool_help("watch_job") for details."""
         try:
@@ -2396,18 +2422,26 @@ def create_job_tools(
                 # notified_count == 0: the row was CAS-claimed by a
                 # concurrent caller (N1 exactly-once invariant) OR a
                 # multi-kind ``mission_terminal`` row was held by the
-                # C1 mission-live guard (no subscribed event can fire
+                # mission-live guard (no subscribed event can fire
                 # yet). The watch row IS registered (line 2338 ran
                 # BEFORE the notify call) — the future terminal flip
                 # OR boot sweep will fire the held notification. Tell
                 # the caller the held state honestly so they don't
                 # assume the notification already went out.
+                #
+                # C4 (cycle 2 fixback, 2026-09-25): the operator-
+                # facing vocabulary was simplified — "C1 HOLD
+                # semantics" leaks the internal commission ID;
+                # callers don't need to know which commission pass
+                # closed which class. Plain operator language: the
+                # row is held; it'll fire at the next mission-terminal
+                # flip OR boot sweep.
                 return (
                     f"Job {job_id[:8]}... is already {record.status}. "
                     f"Watch registered but immediate fire was held "
-                    f"(0 watchers notified now — row survives for the "
-                    f"future mission-terminal flip or boot sweep, "
-                    f"per the C1 HOLD semantics)."
+                    f"(0 watchers notified now — the row stays "
+                    f"registered until the next mission-terminal flip "
+                    f"or boot sweep delivers it)."
                 )
 
             # Register watch
@@ -2701,12 +2735,17 @@ def create_job_tools(
             # distinctly from ``already_terminal`` so a caller reading
             # the bulk reply can tell which watches already fired
             # vs which were held for the next flip.
+            #
+            # C4 (cycle 2 fixback, 2026-09-25): plain operator
+            # vocabulary — "C1 HOLD semantics" leaks the internal
+            # commission ID; callers don't need to know which
+            # commission pass closed which class.
             if held_for_delivery:
                 parts.append(
                     f"{len(held_for_delivery)} job(s) already terminal "
                     f"but immediate fire was held (0 watchers notified "
-                    f"now — row survives for the next mission-terminal "
-                    f"flip or boot sweep, per the C1 HOLD semantics)."
+                    f"now — the row stays registered until the next "
+                    f"mission-terminal flip or boot sweep delivers it)."
                 )
             return " ".join(parts) if parts else "No valid jobs found."
         except Exception as e:

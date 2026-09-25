@@ -74,7 +74,6 @@ from __future__ import annotations
 import ast
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -100,7 +99,6 @@ from daemon.services.child_reports import (
     _ChildCompletionDbResult,
 )
 from daemon.services.job_queue_service import JobQueueService
-from daemon.services.task_processor import ProcessMessageProcessor
 from daemon.services.work_notifier import notify_work_watchers
 from daemon.services.work_resolver import WorkRecord, WorkResolverService
 
@@ -826,129 +824,3 @@ def _result_summary_call_under_completed_settled_arm(
         parent = parents_map.get(id(cur))
 
     return "no-completed-settled-arm"
-
-
-def _is_token_eq_failed(test: ast.AST) -> bool:
-    """Return True iff ``test`` is the expression ``_token == "failed"``.
-
-    Deprecated (F-5, 2026-09-25): the C3 (2026-09-25) dispatch
-    arm was ``if _token == "failed":`` (every non-failed
-    terminal token threads). F-5 narrows the C3 scope back to
-    ``{completed, settled}`` — the dispatch arm flips again to
-    ``if _token in {"completed", "settled"}:``. This predicate
-    is retained for backwards-compat with any test fixture that
-    still references it but the production AST guard uses
-    :func:`_is_token_in_completed_settled` /
-    :func:`_result_summary_call_under_completed_settled_arm`
-    instead.
-
-    Tolerates ast.Compare wrapping; rejects ``!=``, ``in``,
-    ``is``, and any non-string RHS.
-    """
-    if not isinstance(test, ast.Compare):
-        return False
-    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
-        return False
-    if len(test.comparators) != 1:
-        return False
-    left = test.left
-    cmp = test.comparators[0]
-    if not isinstance(left, ast.Name) or left.id != "_token":
-        return False
-    if not isinstance(cmp, ast.Constant) or cmp.value != "failed":
-        return False
-    return True
-
-
-def _result_summary_call_under_non_failed_arm(
-    call: ast.Call, parents_map: dict[int, ast.AST],
-) -> str:
-    """Deprecated (F-5, 2026-09-25): the C3 (2026-09-25) AST
-    guard. The C3 broadened dispatch arm was
-    ``if _token == "failed":`` (every non-failed terminal token
-    threads ``result_summary=``). F-5 narrows the C3 scope back
-    to ``{completed, settled}``; use
-    :func:`_result_summary_call_under_completed_settled_arm`
-    for the F-5 narrowed guard.
-
-    Return shape (unchanged from C3):
-    * ``"non-failed-body"`` — call in the ORELSE of
-      ``if _token == "failed":``. PASS (C3 broaden).
-    * ``"failed-body"`` — call in the BODY. FAIL.
-    * ``"no-failed-arm"`` — no ancestor ``If`` matches. FAIL.
-    """
-    cur = call
-    parent = parents_map.get(id(cur))
-    while parent is not None:
-        if isinstance(parent, ast.If):
-            if _is_token_eq_failed(parent.test):
-                # Find which side of the If this subtree is on.
-                in_body = any(
-                    id(sibling) == id(cur) for sibling in parent.body
-                )
-                return (
-                    "non-failed-body" if not in_body else "failed-body"
-                )
-        cur = parent
-        parent = parents_map.get(id(cur))
-
-    return "no-failed-arm"
-
-
-def _is_token_eq_completed(test: ast.AST) -> bool:
-    """Return True iff ``test`` is the expression ``_token == "completed"``.
-
-    Deprecated (C3, 2026-09-25): the pre-C3 ROUND-3 REVIEW NARROW
-    used this predicate to verify the ``result_summary=`` call lived
-    inside the BODY of ``if _token == "completed":``. C3 broadens
-    the threading to every non-failed terminal token, so the
-    relevant arm boundary is now ``_token == "failed":`` (the
-    EXCLUDED branch). This predicate is retained for backwards-
-    compat with any test fixture that still references it but the
-    production AST guard uses ``_result_summary_call_under_non_failed_arm``
-    instead.
-    """
-    if not isinstance(test, ast.Compare):
-        return False
-    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
-        return False
-    if len(test.comparators) != 1:
-        return False
-    left = test.left
-    cmp = test.comparators[0]
-    if not isinstance(left, ast.Name) or left.id != "_token":
-        return False
-    if not isinstance(cmp, ast.Constant) or cmp.value != "completed":
-        return False
-    return True
-
-
-def _result_summary_call_under_completed_arm(
-    call: ast.Call, parents_map: dict[int, ast.AST],
-) -> str:
-    """Deprecated (C3, 2026-09-25): the pre-C3 ROUND-3 REVIEW NARROW
-    guard. The pre-C3 narrow required the ``result_summary=`` call
-    to live inside the BODY of ``if _token == "completed":``; C3
-    broadens the threading so EVERY non-failed terminal token threads
-    the kwarg. Use :func:`_result_summary_call_under_non_failed_arm`
-    for the C3 broaden guard. This function is retained so the AST
-    module still resolves any fixture that references it.
-
-    Return shape (unchanged from pre-C3):
-    * ``"completed-body"`` — call in the BODY of ``if _token == "completed":``. PASS (pre-C3).
-    * ``"completed-orelse"`` — call in the ORELSE. FAIL (pre-C3 regression).
-    * ``"no-completed-arm"`` — no ancestor ``If`` matches. FAIL.
-    """
-    cur = call
-    parent = parents_map.get(id(cur))
-    while parent is not None:
-        if isinstance(parent, ast.If):
-            if _is_token_eq_completed(parent.test):
-                # Find which side of the If this subtree is on.
-                in_body = any(
-                    id(sibling) == id(cur) for sibling in parent.body
-                )
-                return "completed-body" if in_body else "completed-orelse"
-        cur = parent
-        parent = parents_map.get(id(cur))
-    return "no-completed-arm"

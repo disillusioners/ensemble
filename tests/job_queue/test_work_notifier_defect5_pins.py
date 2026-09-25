@@ -69,7 +69,6 @@ asserted at the message envelope level.
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 

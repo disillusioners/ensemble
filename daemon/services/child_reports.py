@@ -18,7 +18,6 @@ from ..graph import ThinkingChatOpenAI, clean_llm_config
 from ..persistence import get_instance_messages
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
-from ..repositories.job_queue.models import JobItem
 from ..repositories.report_injection.repository import (
     ReportInjectionRepository,
 )
@@ -29,7 +28,6 @@ from ..repositories.report_injection.models import ReportInjection, ReportInject
 from ..registry import get_registry
 from .completion_content import (
     event_created_at_as_utc,
-    get_last_assistant_message,
     get_last_assistant_timestamp,
     parse_checkpoint_ts,
 )
@@ -4400,7 +4398,7 @@ Provide a concise summary:"""
                         # close documented at
                         # task_processor.py:1010-1020). The resolver
                         # fallback (work_notifier.effective_result at
-                        # work_notifier.py:306) is still active for
+                        # work_notifier.py:429) is still active for
                         # callers that don't thread — same race risk
                         # as the pre-C3 code path; documented, not
                         # closed.
