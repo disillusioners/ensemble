@@ -613,7 +613,6 @@ Example:
     job_inject(job_id=\"job_abc123\", message=\"Also remember to add tests\")""",
 
     "job_answer": """Submit the orchestrator's answer to a pending question pack on a watched job.
-
 The agent-facing counterpart of ``POST /api/jobs/{work_id}/answer`` —
 delivers an answer to a pending ``ask_questions`` pack owned by the
 work_id's asker instance, then resumes the asker cascade. The underlying
@@ -704,6 +703,125 @@ Example:
         answers={"q1": "yes", "q2": "no"},
         question_pack_id="pack-xyz",
     )""",
+
+    "job_pause": """Pause the instance behind an ACTIVE job and cascade to its lineage.
+
+Job-shaped resolver over the EXISTING cascade layer (``pause_instance_cascade``
+at ``daemon/manager.py:9599``). The agent-facing twin of
+``POST /api/instances/{instance_id}/pause`` (``daemon/routers/instances.py:653``):
+FE-identical by construction — same facade call, same default kwargs, same
+return shape (``paused_ids`` + ``skipped_ids``).
+
+Resolves ``job_id`` → ``WorkRecord`` via ``job_service.get_work`` (the SAME
+resolver ``job_cancel`` uses at ``daemon/tools/job_queue.py:1479``), extracts
+``instance_id``, then delegates. Job state (admission_state/status) is NOT
+touched — only the instance lineage pauses.
+
+Use when an agent holds a job_id (not an instance_id) and wants to apply the
+same lineage pause/resume semantics the FE pause endpoint exposes for an
+instance_id. For the instance_id-shaped variant, see ``pause_instance``.
+
+Args:
+    job_id: The work_id of an ACTIVE (non-terminal, instance-bearing) job
+        to pause. Required.
+
+Errors (returned as ``{"error": ..., "paused": False}``):
+
+    * ``Job not found: {job_id}`` — ``job_service.get_work`` returned None.
+    * ``Job {job_id[:8]}... is in a terminal state ({status}) — cannot be
+      paused`` — work is DONE/DEAD/cancelled/etc. Pause on terminal work is
+      a no-op and is refused.
+    * ``Job {job_id[:8]}... has not started an instance yet (status={status})
+      — use queue_pause(queue_id) to prevent it from starting instead`` —
+      the QUEUED branch (D1). The job is in flight (pending/queued) but has
+      no instance_id to pause. To prevent it from starting, pause the queue
+      instead. The job's admission_state/status is NOT modified.
+    * ``Access denied: job does not belong to caller's project`` — the
+      project-scoped ``_check_job_access`` check refused (system-default
+      callers are the global-operator tier; project-scoped callers must share
+      the job's project_id).
+
+Returns:
+    ``{"paused": True, "paused_ids": [...], "skipped_ids": [...],
+    "instance_id": ..., "_wedge_note": "..."}`` on success.
+    ``paused_ids`` is every instance ID that transitioned to PAUSED;
+    ``skipped_ids`` is every ID already paused / terminal / not found
+    (idempotent — re-pausing is a no-op).
+
+D2 (wedge guard): pausing does NOT keep an instance safe forever. The
+mid-flight QA channel's ``stuck_awaiting_answer`` wedge-guard emits an
+event after ~60 minutes of an instance being paused awaiting an answer
+(``daemon/repositories/task/models.py:52-63``), and the daemon does NOT
+auto-resume paused work. If you intend to leave an instance paused for
+longer than a few minutes, document the intent (e.g. via a watched job
+or a critical note) so a follow-up agent can resume it deliberately.
+The pause success response echoes this ``_wedge_note`` so it cannot be
+missed by an automated caller.
+""",
+
+    "job_resume": """Resume the instance behind a PAUSED job and cascade to its lineage.
+
+Job-shaped resolver over the EXISTING cascade layer (``resume_instance_cascade``
++ ``resume_processing_job`` at ``daemon/manager.py:9639`` / ``:9656``). The
+agent-facing twin of the plain (non-gate-supersession) branch of
+``POST /api/instances/{instance_id}/resume`` (``daemon/routers/instances.py:684``):
+FE-identical by construction — same call shape (target continuation job with
+``message="resume", silent=False`` → cascade flip → silent child resumes with
+``silent=True``), same default kwargs, same return shape.
+
+Resolves ``job_id`` → ``WorkRecord`` via ``job_service.get_work`` (the SAME
+resolver ``job_cancel`` uses at ``daemon/tools/job_queue.py:1479``), extracts
+``instance_id``, then delegates. Job state (admission_state/status) is NOT
+touched — only the instance lineage resumes.
+
+Use when an agent holds a job_id (not an instance_id) and wants to apply the
+same lineage resume semantics the FE resume endpoint exposes for an
+instance_id. For the instance_id-shaped variant, see ``resume_instance``.
+
+D3 (message injection): mirrors the FE plain resume path — injects the
+literal message ``"resume"`` onto the target via ``resume_processing_job``.
+The HTTP gate-supersession branch (when a pending question pack is on the
+target) is NOT mirrored; the agent surface refuses with a clear error
+instead — see the question-pack refusal below. To supersede a pending
+question gate via the agent surface, use ``job_answer`` (its underlying
+helper performs the FE gate-supersession flow before resuming).
+
+Args:
+    job_id: The work_id of an ACTIVE job whose instance is paused. Required.
+
+Errors (returned as ``{"error": ..., "resumed": False}``):
+
+    * ``Job not found: {job_id}`` — ``job_service.get_work`` returned None.
+    * ``Job {job_id[:8]}... has not started an instance yet (status={status})
+      — resume requires an instance_id`` — the QUEUED branch (D1). The job
+      has no instance_id to resume; admission_state/status is NOT modified.
+    * ``instance has a pending question; answer it via job_answer(work_id)
+      instead of job_resume`` — pending ``question_pack`` with
+      ``status == "pending"`` on the target instance. Mirrors the
+      ``resume_instance`` tool's Defect-1 guard (``daemon/tools/instance.py:4677-4695``):
+      the standard resume path routes through ``answer_gate_existing_turn``
+      which would treat the literal ``"resume"`` message as answer content.
+      To clear the gate and resume, answer the question via ``job_answer``;
+      its underlying helper performs the FE gate-supersession flow.
+    * ``Access denied: job does not belong to caller's project`` — the
+      project-scoped ``_check_job_access`` check refused (system-default
+      callers are the global-operator tier; project-scoped callers must share
+      the job's project_id).
+
+Returns:
+    ``{"resumed": True, "resumed_ids": [...], "skipped_ids": [...],
+    "target_id": ..., "resume_results": {instance_id: {"status": ...}}}``
+    on success. ``resume_results`` statuses come VERBATIM from the resume
+    service (``resume_processing_job``) and are never re-interpreted:
+    ``"resuming"`` (turn continuation job spun), ``"silent_resume"``
+    (silent checkpoint continuation), ``"wake_enqueued"`` / ``"wake_failed"``
+    (parked WAITING_CHILDREN parent — inspect refusal_kind for cause),
+    ``"already_resuming"`` (resume dedup guard short-circuited at
+    ``manager.py:10122``), ``"deferred_report_recovery"`` (router recovered
+    DEFERRED report rows; check ``recovery_count``), ``"no_active_job"``
+    (nothing to continue), ``"error"`` (continuation failed — inspect the
+    ``error`` field).
+""",
 }
 
 
@@ -3252,6 +3370,253 @@ def create_job_tools(
 
     job_answer._full_doc_ = _FULL_DOCS["job_answer"]
 
+    # ── job_pause / job_resume (job-pause-resume-tools, 2026-09-25) ──
+    #
+    # THIN WRAPPERS over the SAME service layer the HTTP endpoints use
+    # (``manager.pause_instance_cascade`` / ``manager.resume_instance_cascade``
+    # / ``manager.resume_processing_job``). The agent-facing twin of the
+    # pause/resume twin of ``pause_instance`` / ``resume_instance`` —
+    # shaped on JOB_ID instead of INSTANCE_ID. All cascade / lineage /
+    # idempotency behavior comes for free by delegating to the manager
+    # facade; this closure only adds:
+    #
+    #   1. Work-resolution: ``job_service.get_work`` (the SAME resolver
+    #      ``job_cancel`` uses at job_queue.py:1479) maps the caller's
+    #      job_id → ``WorkRecord`` → ``instance_id``.
+    #   2. Pre-resolution gates (D1, terminal check, missing instance).
+    #   3. Project-scoped access control via the SAME ``_check_job_access``
+    #      helper the four visibility tools (``job_messages`` / ``job_tree``
+    #      / ``job_progress`` / ``job_inject``) use.
+    #   4. Defect-1 question-pack guard on resume (mirrors the
+    #      ``resume_instance`` tool at instance.py:4677-4695).
+    #
+    # Invariants (VERIFIED in the service — do NOT duplicate here):
+    #   * Cascade pauses/resumes the WHOLE instance lineage (lifecycle
+    #     service at ``daemon/services/instance_lifecycle.py`` — pause /
+    #     resume both enumerate via repo.get_cascade_tree_ids so the
+    #     ENSEMBLE_CASCADE_LINEAGE kill-switch is honored).
+    #   * Already-paused / terminal / never-dispatched nodes are
+    #     skipped idempotently into skipped_ids (lifecycle service).
+    #   * Resume of a running-turn instance spins a message job to
+    #     continue the turn → status "resuming".
+    #   * Resume of a parked parent via the silent child lane returns
+    #     status "silent_resume" (internal_child_noop).
+    #
+    # Job state (admission_state / status) is NOT touched by these
+    # tools — pause/resume operates on the instance lineage, NOT on
+    # the job row. The brief's D1 (QUEUED-no-instance) explicitly
+    # forbids mutating the job's state when an instance is absent.
+
+    @register_tool_category("job")
+    @tool
+    async def job_pause(
+        job_id: Annotated[str, Field(description="The work_id of an ACTIVE (non-terminal, instance-bearing) job to pause. Its whole instance lineage pauses with it.")],
+    ) -> dict:
+        """Pause the instance behind an ACTIVE job and cascade to its lineage. Use tool_help("job_pause") for details."""
+        # Mirror the HTTP pause endpoint's write-paused migration gate
+        # (routers/instances.py:660). Parity, not re-implementation —
+        # the agent tool and the FE route refuse the same way.
+        if manager is None:
+            return {"error": "Instance manager not available — job_pause requires manager access", "paused": False}
+        if getattr(manager, "is_write_paused", False):
+            return {"error": f"503 {WRITE_PAUSED_TOKEN}: writes are paused for database migration", "paused": False}
+        # 1. Resolve job_id → WorkRecord via the SAME resolver
+        #    job_cancel uses (job_queue.py:1479). The brief requires
+        #    resolver parity, not a new lookup path.
+        try:
+            record = await job_service.get_work(job_id)
+        except Exception as e:  # noqa: BLE001
+            logger.error("job_pause: job_service.get_work(%s) raised: %s", job_id, e, exc_info=True)
+            return {"error": f"Failed to resolve {job_id}: {type(e).__name__}: {e}", "paused": False}
+        if record is None:
+            return {"error": f"Job not found: {job_id}", "paused": False}
+
+        # 2. D1 — QUEUED job (no instance yet). The job is in flight
+        #    (pending/queued) but has no instance_id to pause. Refuse
+        #    with a clear actionable error; suggest queue-level pause.
+        #    Job state MUST remain UNTOUCHED — we do NOT touch any
+        #    job-side field here (no cancel, no soft-delete, no
+        #    status mutation). Pure early-return.
+        instance_id = getattr(record, "instance_id", None)
+        if not instance_id:
+            return {
+                "error": (
+                    f"Job {job_id[:8]}... has not started an instance yet "
+                    f"(status={record.status}) — use queue_pause(queue_id) "
+                    "to prevent it from starting instead"
+                ),
+                "paused": False,
+            }
+
+        # 3. Terminal job → clear error, refuse as no-op (brief: "Terminal
+        #    job (DONE/DEAD etc.): clear error, refuse as no-op.").
+        from daemon.services.work_status import is_terminal as _is_terminal
+        if _is_terminal(record.status):
+            return {
+                "error": (
+                    f"Job {job_id[:8]}... is in a terminal state "
+                    f"({record.status}) — cannot be paused"
+                ),
+                "paused": False,
+            }
+
+        # 4. Access control — REUSE the SAME ``_check_job_access`` helper
+        #    the four visibility tools use. Same project-scoped rule.
+        deny = _check_job_access(manager, current_instance_id, record)
+        if deny is not None:
+            return {**deny, "paused": False}
+
+        # 5. Default kwargs ONLY (cascade_to_root=True, suspension_reason
+        #    default) — mirrors the HTTP pause endpoint at
+        #    routers/instances.py:675; no new flags invented here.
+        result = await manager.pause_instance_cascade(instance_id)
+
+        # D2 (wedge guard) — surface the ~60-min STUCK_AWAITING_ANSWER
+        # wedge in the success response so an automated caller cannot
+        # miss it. The docstring already carries the long form; the
+        # response field is the no-scroll-required short reminder.
+        return {
+            "paused": True,
+            "paused_ids": result["paused_ids"],
+            "skipped_ids": result["skipped_ids"],
+            "instance_id": instance_id,
+            "_wedge_note": (
+                "Pausing is not forever-safe. After ~60 minutes of being "
+                "paused awaiting an answer, the STUCK_AWAITING_ANSWER "
+                "wedge-guard emits a stuck_awaiting_answer event; the "
+                "daemon does NOT auto-resume paused work. Document the "
+                "intent and resume deliberately."
+            ),
+        }
+
+    job_pause._full_doc_ = _FULL_DOCS["job_pause"]
+
+    @register_tool_category("job")
+    @tool
+    async def job_resume(
+        job_id: Annotated[str, Field(description="The work_id of an ACTIVE job whose instance is paused. Its whole instance lineage resumes with it.")],
+    ) -> dict:
+        """Resume the instance behind a PAUSED job and cascade to its lineage. Use tool_help("job_resume") for details."""
+        if manager is None:
+            return {"error": "Instance manager not available — job_resume requires manager access", "resumed": False}
+        # Mirror the HTTP resume endpoint's write-paused migration gate
+        # (routers/instances.py:693). Parity, not re-implementation.
+        if getattr(manager, "is_write_paused", False):
+            return {"error": f"503 {WRITE_PAUSED_TOKEN}: writes are paused for database migration", "resumed": False}
+        # 1. Resolve job_id → WorkRecord (same resolver job_cancel uses).
+        try:
+            record = await job_service.get_work(job_id)
+        except Exception as e:  # noqa: BLE001
+            logger.error("job_resume: job_service.get_work(%s) raised: %s", job_id, e, exc_info=True)
+            return {"error": f"Failed to resolve {job_id}: {type(e).__name__}: {e}", "resumed": False}
+        if record is None:
+            return {"error": f"Job not found: {job_id}", "resumed": False}
+
+        # 2. D1 — QUEUED job (no instance yet). Same refusal as job_pause
+        #    (the QUEUED branch is symmetric — no instance to pause OR
+        #    resume). Job state MUST remain UNTOUCHED.
+        instance_id = getattr(record, "instance_id", None)
+        if not instance_id:
+            return {
+                "error": (
+                    f"Job {job_id[:8]}... has not started an instance yet "
+                    f"(status={record.status}) — resume requires an instance_id"
+                ),
+                "resumed": False,
+            }
+
+        # 3. Defect-1 guard (review finding #4 on the sibling
+        #    ``resume_instance`` tool at instance.py:4667-4695): refuse
+        #    early when the target has a pending question pack. The
+        #    standard resume path routes ``resume_processing_job`` →
+        #    ``answer_gate_existing_turn``, which would treat the literal
+        #    "resume" message as answer content. The HTTP route supersedes
+        #    the gate via enqueue + cascade (gate-supersession branch);
+        #    the agent surface refuses instead and points at
+        #    ``job_answer`` (whose underlying helper performs the SAME
+        #    gate-supersession flow before resuming). The check is
+        #    best-effort: introspection errors fail OPEN so a broken
+        #    question-manager surface cannot wedge restart recovery.
+        qm = getattr(manager, "_question_manager", None)
+        if qm is not None:
+            try:
+                pending_pack = qm.get_question_pack(instance_id)
+            except Exception as qm_err:  # noqa: BLE001 — fail-open contract
+                logger.warning(
+                    "job_resume: question-pack introspection failed for "
+                    f"{instance_id[:8]}...; proceeding without gate guard: {qm_err}"
+                )
+            else:
+                if pending_pack is not None and pending_pack.status == "pending":
+                    return {
+                        "error": (
+                            "instance has a pending question; answer it via "
+                            "job_answer(work_id) instead of job_resume"
+                        ),
+                        "resumed": False,
+                        "instance_id": instance_id,
+                    }
+
+        # 4. Access control — REUSE the SAME ``_check_job_access`` helper.
+        deny = _check_job_access(manager, current_instance_id, record)
+        if deny is not None:
+            return {**deny, "resumed": False}
+
+        # 5. Mirror the FE plain-path resume call shape exactly:
+        #    (routers/instances.py:823-866) target turn continuation
+        #    (silent=False, message="resume") → cascade flip →
+        #    silent child resumes (silent=True). D3 (message injection)
+        #    is "resume" verbatim — FE-identical by construction.
+        try:
+            job_result = await manager.resume_processing_job(
+                instance_id,
+                message="resume",
+                silent=False,
+            )
+        except Exception as e:  # noqa: BLE001 — endpoint parity
+            job_result = {"status": "error", "error": str(e)}
+        if job_result is None:
+            # Mirror the HTTP resume handler's debug log
+            # (routers/instances.py:836-839) — same phrasing, same
+            # instance-id truncation, same "was IDLE/WAITING_CHILDREN"
+            # context. Both surfaces (tool vs HTTP) must produce
+            # identical log lines for consistent production debugging.
+            logger.debug(
+                f"job_resume: resume_processing_job returned None for "
+                f"{instance_id[:8]}... (was IDLE/WAITING_CHILDREN)"
+            )
+            job_result = {"status": "no_active_job"}
+
+        result = await manager.resume_instance_cascade(instance_id)
+        target_id = result.get("target_id", instance_id)
+
+        # 6. Silent child resumes — non-target children wake from
+        #    checkpoint silently. Same loop as the HTTP endpoint
+        #    (routers/instances.py:851-866) and the ``resume_instance``
+        #    tool (instance.py:4737-4748).
+        resume_results = {instance_id: job_result}
+        for rid in result["resumed_ids"]:
+            if rid == target_id:
+                continue  # already handled above
+            child_result = await manager.resume_processing_job(
+                rid,
+                message="resume",
+                silent=True,
+            )
+            if child_result is None:
+                child_result = {"status": "no_active_job"}
+            resume_results[rid] = child_result
+
+        return {
+            "resumed": True,
+            "resumed_ids": result["resumed_ids"],
+            "skipped_ids": result["skipped_ids"],
+            "target_id": target_id,
+            "resume_results": resume_results,
+        }
+
+    job_resume._full_doc_ = _FULL_DOCS["job_resume"]
+
     return [
         job_create, job_get, job_list, job_cancel, job_retry,
         job_delete, job_restore, queue_list, queue_create,
@@ -3260,6 +3625,8 @@ def create_job_tools(
         job_messages, job_tree, job_progress, job_inject,
         watch_job, unwatch_job, list_watched_jobs, watch_jobs,
         job_answer,     # appended at END — never insert (positional-index trap)
+        job_pause,      # job-pause-resume-tools (2026-09-25) — appended at END
+        job_resume,     # job-pause-resume-tools (2026-09-25) — appended at END
     ]
 
 
