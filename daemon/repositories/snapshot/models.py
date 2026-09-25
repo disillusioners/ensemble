@@ -56,7 +56,8 @@ no modifications to existing tables):
   MONITORING ONLY — explicitly NOT a ranking signal (R10 forbids
   usage-ranking in v1; the snapshot_search / snapshot_embedding
   modules never read this table — pinned by the
-  ``MonitoringOnlyPinTest`` in tests/unit/tools/test_snapshot_v3_pin.py).
+  ``MonitoringOnlyPinTest`` in
+  tests/unit/tools/test_snapshot_v3.py::TestMonitoringOnlyPin).
 """
 
 from __future__ import annotations

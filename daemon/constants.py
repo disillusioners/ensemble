@@ -211,7 +211,6 @@ SNAPSHOT_CREATE_METADATA_KEY = "snapshot_create_enabled"
 # set is treated as OFF (defense-in-depth — corrupt or legacy values fail
 # closed).
 SNAPSHOT_CREATE_ENABLED_VALUES = frozenset({"on", "true", "1", "yes"})
-SNAPSHOT_CREATE_DISABLED_VALUES = frozenset({"off", "false", "0", "no", ""})
 
 # ---------------------------------------------------------------------------
 # Default Agent Versions

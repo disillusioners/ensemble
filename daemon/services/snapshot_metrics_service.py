@@ -18,16 +18,19 @@ Light usage counters, MONITORING ONLY. The R16 contract:
   logs on failure; spawn/create paths MUST NEVER raise on counter
   failure.
 * **No locks held across awaits** — each ``inc_*`` opens its own
-  short-lived SQLAlchemy Session, runs an ``upsert`` (or a guarded
-  ``UPDATE ... THEN INSERT`` pair), and commits. Two concurrent
-  increments are safe at the column level (PostgreSQL is atomic;
-  SQLite serializes the writer).
+  short-lived SQLAlchemy Session, runs ONE atomic dialect upsert
+  (``INSERT ... ON CONFLICT (scope, key) DO UPDATE SET value =
+  value + 1``), and commits. There is no read-modify-write window:
+  two concurrent first-increments both land (the loser takes the
+  conflict branch) instead of racing a SELECT→INSERT/UPDATE pair
+  into a UNIQUE IntegrityError.
 * **Cheap** — the read path is a single SELECT keyed by the
   (``scope``, ``key``) UNIQUE index. No joins, no aggregation in
   SQL.
 * **No ranking** — ranking modules (snapshot_search + snapshot_embedding)
   MUST NEVER import this module. Pinned by the
-  ``MonitoringOnlyPinTest`` in ``tests/unit/tools/test_snapshot_v3_pin.py``.
+  ``MonitoringOnlyPinTest`` in
+  ``tests/unit/tools/test_snapshot_v3.py::TestMonitoringOnlyPin``.
 
 DB guardrail: the storage lives in the brand-new
 ``snapshot_usage_counters`` table (``daemon/repositories/snapshot/models.py``).
@@ -40,9 +43,11 @@ is used. The R16 surface reads the aggregated counters from
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
@@ -134,6 +139,12 @@ class SnapshotMetricsService:
             Only counters that have at least one observable
             increment surface (zero rows are omitted — a fresh
             deployment yields an empty surface, not zeros).
+
+            Fail-soft (rider j parity with the increments): a read
+            failure logs a WARNING and returns the empty shape —
+            the surface endpoint degrades instead of raising, the
+            same contract as the not-wired-engine path in
+            ``daemon/routers/settings.py``.
         """
         def _read() -> dict[str, Any]:
             with Session(self._engine) as session:
@@ -154,9 +165,14 @@ class SnapshotMetricsService:
                 "spawn_counts_per_snapshot": spawns,
             }
 
-        import asyncio
-
-        return await asyncio.to_thread(_read)
+        try:
+            return await asyncio.to_thread(_read)
+        except Exception as exc:  # pragma: no cover — defensive belt
+            logger.warning(
+                f"[Snapshot] R16 surface read failed, returning empty "
+                f"shape: {type(exc).__name__}: {exc}"
+            )
+            return {"capture_counts": {}, "spawn_counts_per_snapshot": []}
 
     # ── internals ─────────────────────────────────────────────────────
 
@@ -170,37 +186,57 @@ class SnapshotMetricsService:
         cleaned = str(snapshot_id or "").strip()
         return f"{SPAWN_COUNTER_PREFIX}{cleaned}", cleaned
 
-    def _increment_upsert(self, scope: str, key: str) -> None:
-        """Upsert one counter row by (``scope``, ``key``) — fail-soft.
+    @staticmethod
+    def _get_dialect_insert(session: Session):
+        """Dialect-appropriate insert callable for the counter upsert.
 
-        The flow: read-modify-write under a single short Session.
-        If the row exists, ``value`` increments by 1 and
-        ``updated_at`` refreshes; if it doesn't, a fresh row lands
-        at ``value=1``. The Session commits at the end; the
-        ``engine`` dialect-aware insert handles dialect divergence.
+        Generic ``sqlalchemy.insert()`` lacks ``on_conflict_do_update()``
+        — that is a dialect-specific method. Returns the SQLite or
+        PostgreSQL dialect insert; both support
+        ``on_conflict_do_update``. Mirrors the
+        ``JobWatcherRepository._get_dialect_insert`` precedent
+        (``daemon/repositories/job_queue/watcher_repository.py``).
+        """
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            return pg_insert
+        return sqlite_insert
+
+    def _increment_upsert(self, scope: str, key: str) -> None:
+        """Atomically increment one counter row by (``scope``, ``key``).
+
+        ONE statement, no read-modify-write window:
+        ``INSERT ... ON CONFLICT (scope, key) DO UPDATE SET value =
+        snapshot_usage_counters.value + 1, updated_at = <now>`` (the
+        ON CONFLICT clause is valid on both SQLite ≥ 3.24 and
+        PostgreSQL). Two concurrent first-increments therefore both
+        land — the loser takes the conflict branch and increments —
+        where the former SELECT→INSERT/UPDATE pair could race into a
+        swallowed UNIQUE IntegrityError and silently undercount.
+        ``id`` is preserved on the conflict branch; ``updated_at``
+        refreshes on both branches.
 
         R16 rider j — failure is logged and swallowed. The agent
         tool calls MUST NOT raise.
         """
         try:
+            now = self._now_iso()
             with Session(self._engine) as session:
-                row = session.exec(
-                    select(SnapshotUsageCounter).where(
-                        SnapshotUsageCounter.scope == scope,
-                        SnapshotUsageCounter.key == key,
-                    )
-                ).one_or_none()
-                if row is None:
-                    row = SnapshotUsageCounter(
-                        scope=scope,
-                        key=key,
-                        value=1,
-                    )
-                    session.add(row)
-                else:
-                    row.value = int(row.value or 0) + 1
-                    row.updated_at = self._now_iso()
-                    session.add(row)
+                insert_fn = self._get_dialect_insert(session)
+                insert_stmt = insert_fn(SnapshotUsageCounter).values(
+                    scope=scope,
+                    key=key,
+                    value=1,
+                    updated_at=now,
+                )
+                stmt = insert_stmt.on_conflict_do_update(
+                    index_elements=["scope", "key"],
+                    set_={
+                        "value": SnapshotUsageCounter.__table__.c.value + 1,
+                        "updated_at": now,
+                    },
+                )
+                session.execute(stmt)
                 session.commit()
         except Exception as exc:  # pragma: no cover — defensive belt
             logger.warning(

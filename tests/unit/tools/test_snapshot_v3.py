@@ -42,6 +42,7 @@ tables (the Wave-2b engine only creates the snapshot domain).
 
 from __future__ import annotations
 
+import ast
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1012,26 +1013,77 @@ class TestMonitoringOnlyPin:
     the metrics service (R10 forbids usage-ranking in v1; the
     counters are observational only).
 
-    Pin-test: a static walk over the ranking module source files
-    asserts no ``import … snapshot_metrics_service …`` line.
+    Pin-test: an AST Import/ImportFrom walk over EVERY snapshot
+    module in ``daemon/services/`` (``snapshot*.py``) and
+    ``daemon/repositories/snapshot/`` (``*.py``) — excluding the
+    metrics service itself — asserts none imports
+    ``snapshot_metrics_service``. An AST walk catches plain imports,
+    lazy function-level imports, AND ``from pkg import mod``
+    re-exports; a raw substring walk only catches the literal module
+    text and can miss aliased/partial reference shapes.
     """
 
-    @pytest.mark.parametrize(
-        "module_name",
-        [
-            "daemon/services/snapshot_search_service.py",
-            "daemon/services/snapshot_embedding_service.py",
-            "daemon/repositories/snapshot/repository.py",
-        ],
-    )
-    def test_ranking_module_does_not_import_metrics(self, module_name):
+    METRICS_MODULE = "snapshot_metrics_service"
+
+    def _snapshot_module_files(self) -> list[Path]:
         repo_root = Path(__file__).resolve().parents[3]
-        target = repo_root / module_name
-        assert target.is_file(), f"target file {target} not found"
-        text = target.read_text(encoding="utf-8")
-        assert "snapshot_metrics_service" not in text, (
-            f"{module_name} MUST NOT import the R16 metrics service "
-            "(R10 forbids usage-ranking). Found a reference in the file."
+        candidates: list[Path] = []
+        candidates.extend(
+            sorted((repo_root / "daemon" / "services").glob("snapshot*.py"))
+        )
+        candidates.extend(
+            sorted((repo_root / "daemon" / "repositories" / "snapshot").glob("*.py"))
+        )
+        # The metrics service itself is the ONLY allowed importer of
+        # its own name — exclude it from the walk. Assert it exists so
+        # a rename cannot silently empty the exclusion.
+        metrics = (
+            repo_root / "daemon" / "services" / "snapshot_metrics_service.py"
+        )
+        assert metrics.is_file(), (
+            "snapshot_metrics_service.py not found — update the pin's "
+            "exclusion path if the module moved"
+        )
+        return [f for f in candidates if f.resolve() != metrics.resolve()]
+
+    @staticmethod
+    def _imports_module(tree: ast.AST, module_name: str) -> list[str]:
+        """Return the import statements in ``tree`` that reference
+        ``module_name`` (matched on dot-separated component so e.g.
+        ``snapshot_metrics_service_extra`` is NOT a false positive).
+        """
+        hits: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if module_name in alias.name.split("."):
+                        hits.append(f"import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                module_parts = (node.module or "").split(".")
+                if module_name in module_parts or any(
+                    module_name in alias.name.split(".") for alias in node.names
+                ):
+                    hits.append(
+                        f"from {node.module or ''} import "
+                        f"{', '.join(alias.name for alias in node.names)}"
+                    )
+        return hits
+
+    def test_no_snapshot_module_imports_metrics(self):
+        files = self._snapshot_module_files()
+        assert files, (
+            "AST pin resolved ZERO snapshot modules — the discovery "
+            "globs are broken and the pin would pass vacuously"
+        )
+        violations: list[str] = []
+        for path in files:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            hits = self._imports_module(tree, self.METRICS_MODULE)
+            if hits:
+                violations.append(f"{path}: {hits}")
+        assert not violations, (
+            "R10: ranking/daemon-side snapshot modules MUST NOT import "
+            f"the R16 metrics service — violations: {violations}"
         )
 
     def test_search_service_top_to_bottom(self):

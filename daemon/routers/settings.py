@@ -611,9 +611,9 @@ async def get_snapshot_usage_metrics():
     The endpoint is purely observational: no tool surface mutates on
     its output, and ranking modules (snapshot_search + snapshot_embedding_service)
     do NOT import the metrics module — pinned by the
-    ``MonitoringOnlyPinTest`` in tests/unit/tools/test_snapshot_v3_pin.py.
+    ``MonitoringOnlyPinTest`` in
+    tests/unit/tools/test_snapshot_v3.py::TestMonitoringOnlyPin.
     """
-    repo = get_project_repository()  # raises 503 if not initialized
     from daemon.services.snapshot_metrics_service import (
         SnapshotMetricsService,
     )
