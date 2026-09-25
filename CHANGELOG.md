@@ -5,6 +5,39 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] — 2026-09-25
+
+Feature-carrying release: four feature merges on top of v0.14.1 add agent-facing lifecycle/job tools and queue-awareness, plus one incident fix on the agent-tool message path. No schema changes, no breaking API changes, no config flips.
+
+### Added — Agent-facing pause/resume tools (`feature/agent-pause-resume-tools`, merge `39bd9b15`)
+
+- **`pause_instance` / `resume_instance` agent tools** — wrap the same manager service layer as the HTTP pause/resume endpoints; instance-cascade semantics preserved.
+- **Fail-closed access check** — denied shapes fail closed; `resume_instance` refuses while a pending question pack awaits answers (review finding #4).
+- **Acceptance gate** — tester merge-ready artifacts under `.agents/tester/RESULTS/`.
+
+### Added — Upgrade-gate dynamic user-origin classification (`feature/upgrade-gate-dynamic-user-origin`, merge `4db90d74`)
+
+- **Registry-backed user-origin classification** replaces the static list for upgrade-gate factor-2.
+- **Bounded detail-token rendering** + security-review hardening pins.
+
+### Added — Agent-aware default queue + job-tool queue aliases (`feature/parallel-default-queue-ari-jober`, merge `75d7e2d1`)
+
+- **`ari`/`jober` default to `system_parallel_queue`**; queue aliases accepted by job tools.
+- **Canonicalization fix** — agent `default_queue` aliases canonicalize to system queues.
+- **Docs** — `dlq_list` example fix + unknown-ref soft-fail clarification.
+
+### Added — Job-shaped pause/resume (`feature/job-pause-resume-tools`, merge `b3f44826`)
+
+- **`job_pause` / `job_resume` tools** — job-shaped wrappers delegating to the instance cascade; FE-identical responses.
+- **Grants** — ari/jober/leader; kind-refusal fail-closed for non-job refs; `create_job_tools` count pin 22→24.
+
+### Fixed — `send_message` busy-guard context-injection fallback (`feature/send-message-context-inject-fallback`, merge `6c3b5585`)
+
+Closes incident `c3d1a722`: a leader send bearing `context` to a running, live-graph, processing child was rejected (`Pending: 0, Processing: 1`) instead of injecting.
+
+- **Fallback path** — on the queue-busy rejection, when the target re-verifies injection-eligible (running + live graph task) and the send is non-`load_skill` with non-empty `context`, the `[SYSTEM CONTEXT: Task Context]` block is flattened into the injected message prefix and delivered via `set_injection`.
+- **Surgical diff** — `daemon/tools/instance.py` only (−9 docstring lines + one approved rejection-hint sentence); 207/0 gate re-proven post-rebase onto `cfaacab0`.
+
 ## [0.14.1] — 2026-09-24
 
 Patch release. Bug-fix-only content: two merges on top of v0.14.0 close the user-visible job-watch delivery loop. No schema changes, no breaking API changes, no config flips.
