@@ -345,6 +345,70 @@ class TestJobCreateAgentDefaultQueue:
         _, kwargs = job_service.enqueue.call_args
         assert kwargs["queue_id"] is None
 
+    async def test_default_short_alias_targets_system_not_user_queue(
+        self, tools_factory, monkeypatch
+    ):
+        """Invariant pin: meta ``default_queue=\"parallel\"`` must target the
+        SYSTEM parallel queue even when a user queue is literally named
+        \"parallel\". The short alias is reserved — it can NEVER shadow."""
+        patch_registry(monkeypatch, SimpleNamespace(default_queue="parallel"))
+        user_queue_named_parallel = MagicMock(
+            queue_id="uuid-user-parallel",
+            project_id=PROJECT_ID,
+            queue_name="parallel",
+        )
+        repo = make_repo()
+        # Mirror the existing test fixture: get_by_name on a bare "parallel"
+        # would return the user queue, but the canonical system name still
+        # resolves to the seeded system row.
+        repo.get_by_name.side_effect = lambda pid, name: {
+            "parallel": user_queue_named_parallel,
+            "system_parallel_queue": SYSTEM_QUEUES["system_parallel_queue"],
+        }.get(name.lower())
+        job_service = make_job_service(repo)
+        job_create = tools_factory(job_service, agent_id="ari")
+
+        result = await job_create.ainvoke({
+            "agent_id": "developer",
+            "message": "do the thing",
+            "project_id": PROJECT_ID,
+        })
+
+        assert result == {"job_id": "job-1"}
+        _, kwargs = job_service.enqueue.call_args
+        assert kwargs["queue_id"] == "sys-id-parallel"
+        # And the get_by_name call must have used the CANONICAL name, never
+        # the bare alias (the alias would have hit the user queue).
+        assert repo.get_by_name.call_args.args[1] == "system_parallel_queue"
+
+    async def test_default_user_queue_name_passes_through(
+        self, tools_factory, monkeypatch
+    ):
+        """Flexibility preserved: a non-alias name resolves to the matching
+        user queue (any project queue can be declared as default)."""
+        patch_registry(monkeypatch, SimpleNamespace(default_queue="team-queue"))
+        team_queue = MagicMock(
+            queue_id="uuid-team", project_id=PROJECT_ID, queue_name="team-queue"
+        )
+        repo = make_repo()
+        repo.get_by_name.side_effect = lambda pid, name: (
+            team_queue if name.lower() == "team-queue" else None
+        )
+        job_service = make_job_service(repo)
+        job_create = tools_factory(job_service, agent_id="ari")
+
+        result = await job_create.ainvoke({
+            "agent_id": "developer",
+            "message": "do the thing",
+            "project_id": PROJECT_ID,
+        })
+
+        assert result == {"job_id": "job-1"}
+        _, kwargs = job_service.enqueue.call_args
+        assert kwargs["queue_id"] == "uuid-team"
+        # And the lookup must have used the original (non-canonicalized) name.
+        assert repo.get_by_name.call_args.args[1] == "team-queue"
+
 
 # ---------------------------------------------------------------------------
 # Feature 2 — job_create alias acceptance

@@ -344,13 +344,18 @@ class AgentMetadata(BaseModel):
     default_queue: str | None = Field(
         default=None,
         description=(
-            "Default job queue NAME for this agent's ``job_create`` calls "
-            "when no ``queue_id`` is supplied (e.g. "
-            "'system_parallel_queue'). Must be a canonical system queue "
-            "name; the tool layer resolves it per-project at call time. "
-            "None (default) = no agent-level default — the service "
-            "default applies (system_fifo_queue for job_type=task). "
-            "Normalized at discovery: whitespace-stripped, empty → None."
+            "Default job queue for this agent's ``job_create`` calls when no "
+            "``queue_id`` is supplied. Accepts either a system-queue reference "
+            "(canonical name like ``system_parallel_queue`` OR short alias "
+            "like ``parallel`` — short aliases ALWAYS mean the system queue, "
+            "case-insensitive; a user queue literally named ``parallel`` can "
+            "never shadow the alias) or a plain project-queue name (e.g. a "
+            "team-specific user queue). The tool layer resolves it per-project "
+            "at call time; an alias key is canonicalized to the full system "
+            "name before lookup. None (default) = no agent-level default — "
+            "the service default applies (system_fifo_queue for "
+            "job_type=task). Normalized at discovery: whitespace-stripped, "
+            "empty → None."
         ),
     )
     mcp_full_access: list[str] = Field(

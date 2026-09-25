@@ -67,6 +67,7 @@ from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.services.queue_ref import (
+    QUEUE_ALIAS_TO_CANONICAL,
     describe_valid_queues,
     is_known_alias_name,
     resolve_queue_ref,
@@ -1156,10 +1157,19 @@ def create_job_tools(
                         agent_default_queue,
                     )
                 else:
+                    # Short aliases (e.g. "parallel") are reserved keys: they
+                    # ALWAYS map to the system queue — a user queue literally
+                    # named "parallel" can NEVER shadow the alias. Canonicalize
+                    # alias keys first; values not in the alias map pass
+                    # through as plain project-queue names (flexibility
+                    # preserved: a user queue declared as default stays valid).
+                    _lookup_name = QUEUE_ALIAS_TO_CANONICAL.get(
+                        agent_default_queue.lower(), agent_default_queue
+                    )
                     _default_queue = await asyncio.to_thread(
                         queue_repo.get_by_name,
                         normalized_project_id,
-                        agent_default_queue,
+                        _lookup_name,
                     )
                     if _default_queue is None:
                         return {
