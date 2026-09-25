@@ -66,6 +66,11 @@ from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.project_normalizer import normalize_project_id
+from daemon.services.queue_ref import (
+    describe_valid_queues,
+    is_known_alias_name,
+    resolve_queue_ref,
+)
 from daemon.services.work_status import _derive_legacy_status
 
 if TYPE_CHECKING:
@@ -150,12 +155,25 @@ _FULL_DOCS = {
 Jobs are processed by agents asynchronously. The job will be queued
 and picked up by the job processor when capacity is available.
 
+Queue targeting:
+    ``queue_id`` accepts a queue ID or a system-queue alias
+    (case-insensitive): system_fifo_queue|fifo,
+    system_parallel_queue|parallel, system_background_queue|background,
+    system_defer_queue|defer, system_kb_fifo_queue|kb_fifo. Aliases always
+    resolve to the SYSTEM queue of that name — even if a user-created
+    queue shares the short name. When ``queue_id`` is omitted: agents ari
+    and jober default to system_parallel_queue; every other agent keeps
+    the service default (system_fifo_queue for task jobs). If the
+    agent-default system queue is missing for the project, an error is
+    returned (provisioning bug) — the job is not silently created
+    without its default queue.
+
 Args:
     agent_id: Agent ID to run the job (e.g., "developer", "leader"). Required.
     message: The instruction/message for the agent. Required.
     project_id: Project ID for isolation and routing. Optional.
     priority: Job priority 1-10 (1=lowest, 10=highest). Default: 5.
-    queue_id: Specific queue to submit to. Optional.
+    queue_id: Queue ID or system-queue alias. Optional.
     idempotency_key: Deduplication key. Optional.
     metadata: Custom key-value metadata. Optional.
     source: Source identifier. Default: "api".
@@ -188,7 +206,7 @@ Returns:
 Args:
     statuses: Filter by status - "pending", "processing", "completed", "failed", "cancelled", "dead_letter". Natural aliases also accepted (e.g. "running" → processing, "done" → completed, "waiting" → pending). Case-insensitive. Optional.
     project_id: Filter by project ID. Optional.
-    queue_id: Filter by queue ID. Optional.
+    queue_id: Filter by queue ID or system-queue alias (system_fifo_queue|fifo, system_parallel_queue|parallel, system_background_queue|background, system_defer_queue|defer, system_kb_fifo_queue|kb_fifo; case-insensitive). Optional. Unknown alias names return an error listing valid queues.
     offset: Number of jobs to skip (default: 0).
     limit: Maximum number of jobs to return. Default: 50.
     include_deleted: Include soft-deleted jobs. Default: False.
@@ -290,7 +308,7 @@ Returns:
     "queue_update": """Update queue settings.
 
 Args:
-    queue_id: The queue ID to update. Required.
+    queue_id: The queue ID or system-queue alias (system_fifo_queue|fifo, system_parallel_queue|parallel, system_background_queue|background, system_defer_queue|defer, system_kb_fifo_queue|kb_fifo; case-insensitive) to update. Required.
     project_id: The project ID (for ownership validation). Required.
     queue_name: New queue name. Optional.
     concurrency_limit: New concurrency limit. Optional.
@@ -306,7 +324,7 @@ or were moved there for manual inspection.
 
 Args:
     project_id: Filter by project ID. Required.
-    queue_id: Filter by queue ID. Optional.
+    queue_id: Filter by queue ID or system-queue alias (system_fifo_queue|fifo, system_parallel_queue|parallel, system_background_queue|background, system_defer_queue|defer, system_kb_fifo_queue|kb_fifo; case-insensitive). Optional. Unknown alias names return an error listing valid queues.
     limit: Maximum items to return. Default: 50.
 
 Returns:
@@ -1002,13 +1020,43 @@ def create_job_tools(
     # (e.g. non-versioned callers), the enqueue falls back to base resolution.
     caller_agent_tag = agent_tag
 
+    # Agent-aware default queue: closure-time fetch of the caller's
+    # ``default_queue`` meta field, using the established versioned-meta
+    # pattern (prefer versioned meta for tagged callers, fall back to base
+    # resolved meta — see instance.py tool filtering). ari/jober are
+    # untagged dirs → base meta. When no explicit ``queue_id`` is supplied
+    # at call time, ``job_create`` targets this queue instead of degrading
+    # to the service default (system_fifo_queue for job_type=task). Any
+    # fetch failure or unresolvable value logs a warning and degrades to
+    # None (service default) — tool build is NEVER broken here.
+    agent_default_queue: str | None = None
+    if caller_agent_id:
+        try:
+            from ..registry import get_registry
+
+            registry = get_registry()
+            _meta = (
+                registry.get_version(caller_agent_id, caller_agent_tag)
+                or registry.get_resolved(caller_agent_id)
+            )
+            _raw = getattr(_meta, "default_queue", None)
+            if isinstance(_raw, str) and _raw.strip():
+                agent_default_queue = _raw.strip()
+        except Exception as e:
+            logger.warning(
+                "job tools: could not resolve default_queue for caller %r — "
+                "degrading to service default: %s",
+                caller_agent_id,
+                e,
+            )
+
     class JobCreateInput(BaseModel):
         """Input schema for job_create tool."""
         agent_id: Annotated[str, Field(description="Agent ID to run the job (e.g., 'developer', 'leader')")]
         message: Annotated[str, Field(description="The instruction/message for the agent")]
         project_id: Annotated[str | None, Field(default=None, description="Project ID for isolation and routing")]
         priority: Annotated[int, Field(default=5, ge=1, le=10, description="Job priority 1-10 (1=lowest, 10=highest)")]
-        queue_id: Annotated[str | None, Field(default=None, description="Specific queue to submit to")]
+        queue_id: Annotated[str | None, Field(default=None, description="Queue to submit to: a queue ID or a system-queue alias (system_fifo_queue|fifo, system_parallel_queue|parallel, system_background_queue|background, system_defer_queue|defer, system_kb_fifo_queue|kb_fifo; case-insensitive). Omit to use your agent default (ari/jober: system_parallel_queue) or the service default (FIFO).")]
         idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")]
         metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")]
         source: Annotated[str, Field(default="api", description="DEPRECATED and IGNORED (NIT-7, P2.3 review cycle 1): the server derives source UNCONDITIONALLY since B3.5 (agent:<caller> for agent callers, internal_agent:unknown otherwise) — any value passed here has no effect. Param retained purely for schema compat; removal deferred.")]
@@ -1021,13 +1069,19 @@ def create_job_tools(
         message: Annotated[str, Field(description="The instruction/message for the agent")],
         project_id: Annotated[str | None, Field(default=None, description="Project ID for isolation and routing")] = None,
         priority: Annotated[int, Field(default=5, ge=1, le=10, description="Job priority 1-10")] = 5,
-        queue_id: Annotated[str | None, Field(default=None, description="Specific queue to submit to")] = None,
+        queue_id: Annotated[str | None, Field(default=None, description="Queue to submit to: a queue ID or a system-queue alias (system_fifo_queue|fifo, system_parallel_queue|parallel, system_background_queue|background, system_defer_queue|defer, system_kb_fifo_queue|kb_fifo; case-insensitive). Omit to use your agent default (ari/jober: system_parallel_queue) or the service default (FIFO).")] = None,
         idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")] = None,
         metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")] = None,
         source: Annotated[str, Field(default="api", description="DEPRECATED and IGNORED: server derives source unconditionally (B3.5); retained for schema compat, removal deferred")] = "api",
         watch: Annotated[bool, Field(default=False, description="Watch the job for lifecycle events")] = False,
     ) -> dict:
-        """Submit a new job to the queue. Use tool_help("job_create") for details."""
+        """Submit a new job to the queue. Use tool_help("job_create") for details.
+
+        queue_id accepts a queue ID or a system-queue alias (e.g. "parallel"
+        = system_parallel_queue; case-insensitive). When omitted: ari/jober
+        target system_parallel_queue by default; other agents get the
+        service default (FIFO for task jobs).
+        """
         try:
             # MAJOR-1(a) (P2.2 fix pass 2026-08-23) + MINOR-B (P2.2
             # carry-over, closed P2.3 B3.5): the source derivation is
@@ -1048,6 +1102,78 @@ def create_job_tools(
                 else "internal_agent:unknown"
             )
             normalized_project_id = normalize_project_id(project_id)
+
+            # Queue reference resolution (tool-layer only — service
+            # enqueue semantics untouched). Two independent behaviors:
+            #
+            # 1. Alias acceptance (queue_ref): an explicit ``queue_id``
+            #    may be a system-queue alias (full name or short form,
+            #    case-insensitive) → resolved to the project's actual
+            #    queue row. Precedence: exact in-project ID first (works
+            #    for UUID and seeded sys-* IDs; a cross-project ID is NOT
+            #    a match → falls through to error), then alias map →
+            #    canonical name → get_by_name. A KNOWN name that fails
+            #    to resolve is a hard error (strict for names); an
+            #    unknown non-alias ref passes through untouched so the
+            #    service's soft-fail semantics stay regression-pinned.
+            # 2. Agent-aware default: when ``queue_id`` is None and the
+            #    caller's meta declares ``default_queue``, that system
+            #    queue is resolved per-project and targeted instead of
+            #    the service default. A missing queue there is a
+            #    provisioning bug → loud error, never silent degrade.
+            resolved_queue_id = queue_id
+            queue_repo = getattr(job_service, "_queue_repo", None)
+            if resolved_queue_id is not None:
+                if queue_repo is not None:
+                    _queue = await asyncio.to_thread(
+                        resolve_queue_ref,
+                        queue_repo,
+                        normalized_project_id,
+                        resolved_queue_id,
+                    )
+                    if _queue is not None:
+                        resolved_queue_id = _queue.queue_id
+                    elif is_known_alias_name(resolved_queue_id):
+                        return {
+                            "error": (
+                                f"Unknown queue reference '{queue_id}' for project "
+                                f"{normalized_project_id}. "
+                                + describe_valid_queues(
+                                    queue_repo, normalized_project_id
+                                )
+                            )
+                        }
+                    # else: not a known name → pass through verbatim;
+                    # enqueue's soft-fail handles it (pinned behavior).
+                # repo plumbing unavailable → pass through verbatim
+                # (degrade to pre-alias behavior).
+            elif agent_default_queue:
+                if queue_repo is None:
+                    logger.warning(
+                        "job_create: caller %r has default_queue %r but no "
+                        "queue repo is reachable — degrading to service default",
+                        caller_agent_id,
+                        agent_default_queue,
+                    )
+                else:
+                    _default_queue = await asyncio.to_thread(
+                        queue_repo.get_by_name,
+                        normalized_project_id,
+                        agent_default_queue,
+                    )
+                    if _default_queue is None:
+                        return {
+                            "error": (
+                                f"Default queue '{agent_default_queue}' (declared "
+                                f"for agent '{caller_agent_id}') not found in project "
+                                f"{normalized_project_id} — system queue provisioning "
+                                "bug. "
+                                + describe_valid_queues(
+                                    queue_repo, normalized_project_id
+                                )
+                            )
+                        }
+                    resolved_queue_id = _default_queue.queue_id
 
             # Pre-generate job_id so we can register the watcher BEFORE
             # dispatching. This closes the TOCTOU window where a fast job
@@ -1072,7 +1198,7 @@ def create_job_tools(
                 project_id=normalized_project_id,
                 priority=priority,
                 metadata=metadata,
-                queue_id=queue_id,
+                queue_id=resolved_queue_id,
                 idempotency_key=idempotency_key,
                 # F2: thread the caller's version tag so a versioned agent
                 # (e.g. ``reviewer[v2]``) creating a job targets the same
@@ -1167,6 +1293,35 @@ def create_job_tools(
         payload ties the two layers together in a single read.
         """
         try:
+            # Queue-alias resolution (queue_ref): an explicit ``queue_id``
+            # filter may be a system-queue alias (full name or short form,
+            # case-insensitive). Known-name-miss → hard error with the
+            # valid-queue listing; unknown non-alias refs pass through
+            # untouched (existing filter semantics, both branches, are
+            # unchanged). Alias lookups need a project scope, so they
+            # resolve against the normalized project.
+            resolved_queue_id = queue_id
+            if resolved_queue_id is not None:
+                _queue_repo = getattr(job_service, "_queue_repo", None)
+                if _queue_repo is not None:
+                    _queue = await asyncio.to_thread(
+                        resolve_queue_ref,
+                        _queue_repo,
+                        normalize_project_id(project_id),
+                        resolved_queue_id,
+                    )
+                    if _queue is not None:
+                        resolved_queue_id = _queue.queue_id
+                    elif is_known_alias_name(resolved_queue_id):
+                        return {
+                            "error": (
+                                f"Unknown queue reference '{queue_id}'. "
+                                + describe_valid_queues(
+                                    _queue_repo, normalize_project_id(project_id)
+                                )
+                            )
+                        }
+
             # Phase 7: resolver is always ON. Route through
             # ``work_resolver.list_work`` so the list is the UNION of
             # pending jobs AND running tasks.
@@ -1219,7 +1374,7 @@ def create_job_tools(
                 jobs = await job_service.list_jobs(
                     statuses=normalised_statuses,
                     project_id=project_id,
-                    queue_id=queue_id,
+                    queue_id=resolved_queue_id,
                     offset=offset,
                     limit=limit,
                     include_deleted=include_deleted,
@@ -1757,6 +1912,24 @@ def create_job_tools(
     ) -> str:
         """Update queue settings. Use tool_help("queue_update") for details."""
         try:
+            # Queue-alias resolution (queue_ref): ``queue_id`` may be a
+            # system-queue alias. Known-name-miss → hard error (matches
+            # this tool's ``ERROR: ...`` string shape); unknown non-alias
+            # refs pass through untouched (existing not-found handling).
+            resolved_queue_id = queue_id
+            _queue_repo = getattr(queue_mgmt_service, "_queue_repo", None)
+            if _queue_repo is not None:
+                _queue = await asyncio.to_thread(
+                    resolve_queue_ref, _queue_repo, project_id, resolved_queue_id
+                )
+                if _queue is not None:
+                    resolved_queue_id = _queue.queue_id
+                elif is_known_alias_name(resolved_queue_id):
+                    return (
+                        f"ERROR: Unknown queue reference '{queue_id}'. "
+                        + describe_valid_queues(_queue_repo, project_id)
+                    )
+
             # Build updates dict from non-None params
             updates: dict[str, Any] = {}
             if queue_name is not None:
@@ -1770,13 +1943,13 @@ def create_job_tools(
                 return "ERROR: No updates provided."
 
             # Get queue to verify it exists
-            queue = await queue_mgmt_service.get_queue(project_id=project_id, queue_id=queue_id)
+            queue = await queue_mgmt_service.get_queue(project_id=project_id, queue_id=resolved_queue_id)
             if queue is None:
                 return f"ERROR: Queue {queue_id} not found in project {project_id}."
 
             result = await queue_mgmt_service.update_queue(
                 project_id=project_id,
-                queue_id=queue_id,
+                queue_id=resolved_queue_id,
                 **updates,
             )
             if result is not None:
@@ -1797,9 +1970,27 @@ def create_job_tools(
     ) -> dict:
         """List dead letter queue items. Use tool_help("dlq_list") for details."""
         try:
+            # Queue-alias resolution (queue_ref): known-name-miss → hard
+            # error with the valid-queue listing; unknown non-alias refs
+            # pass through untouched (existing DLQ filter semantics).
+            resolved_queue_id = queue_id
+            if resolved_queue_id is not None:
+                _queue_repo = getattr(job_service, "_queue_repo", None)
+                if _queue_repo is not None:
+                    _queue = resolve_queue_ref(_queue_repo, project_id, resolved_queue_id)
+                    if _queue is not None:
+                        resolved_queue_id = _queue.queue_id
+                    elif is_known_alias_name(resolved_queue_id):
+                        return {
+                            "error": (
+                                f"Unknown queue reference '{queue_id}'. "
+                                + describe_valid_queues(_queue_repo, project_id)
+                            )
+                        }
+
             items, total_count = dead_letter_service.list_dlq(
                 project_id=project_id,
-                queue_id=queue_id,
+                queue_id=resolved_queue_id,
                 limit=limit,
             )
             result = {

@@ -36,6 +36,17 @@ covers every receipt that exists at call time (re-call it after `job_continue`).
 The FIRST `[JOB_EVENT]` after the watch is the signal; later events on the same
 mission's other receipts are echoes — act once.
 
+## Dispatching Work: job_create
+
+I create jobs with `job_create` (always with `watch=True` — atomic create +
+watch registration). Queue targeting: when I omit `queue_id`, my jobs land on
+`system_parallel_queue` by default — parallel dispatch without extra
+arguments; every other agent keeps the FIFO default. `queue_id` also accepts
+a queue ID verbatim or a system-queue alias (`fifo`, `parallel`,
+`background`, `defer`, `kb_fifo` — case-insensitive; an alias always resolves
+to the SYSTEM queue, never a user queue that happens to share the name).
+Use `queue_list(project_id=...)` to see the project's actual queues.
+
 ---
 
 ## Tool Boundaries: bash & filesystem

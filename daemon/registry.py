@@ -341,6 +341,18 @@ class AgentMetadata(BaseModel):
             "configured per event. Example: {\"on_complete\": [\"add_to_shared_context_md_files\"]}"
         ),
     )
+    default_queue: str | None = Field(
+        default=None,
+        description=(
+            "Default job queue NAME for this agent's ``job_create`` calls "
+            "when no ``queue_id`` is supplied (e.g. "
+            "'system_parallel_queue'). Must be a canonical system queue "
+            "name; the tool layer resolves it per-project at call time. "
+            "None (default) = no agent-level default — the service "
+            "default applies (system_fifo_queue for job_type=task). "
+            "Normalized at discovery: whitespace-stripped, empty → None."
+        ),
+    )
     mcp_full_access: list[str] = Field(
         default_factory=list,
         description=(
@@ -623,6 +635,17 @@ class AgentRegistry:
                     # validated in ``validate_tool_configs`` with a
                     # fail-closed WARN.
                     mcp_full_access=meta.get("mcp_full_access", []) or [],
+                    # ``default_queue``: normalize at discovery — strip
+                    # whitespace, empty → None. Unlike the
+                    # ``lifecycle_hooks`` precedent (field-without-
+                    # mapping that silently stays default), this field
+                    # MUST be mapped here or it would never leave its
+                    # default.
+                    default_queue=(
+                        (meta.get("default_queue").strip() or None)
+                        if isinstance(meta.get("default_queue"), str)
+                        else None
+                    ),
                 )
             except ValidationError as e:
                 # C6 / LLM-models pattern: don't crash discovery. Any

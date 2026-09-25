@@ -117,6 +117,11 @@ job_create(
 )
 ```
 
+My jobs are parallel by default: with no `queue_id`, my work lands on
+`system_parallel_queue` (other agents default to FIFO). To steer it,
+pass `queue_id` — a queue ID or a short system-queue alias
+(`parallel`, `fifo`, `background`, `defer`, `kb_fifo`; case-insensitive).
+
 ## Mode 3: Non-Project Skilled Tasks (→ Worker)
 
 For non-project tasks that need a skill and aren't short or trivial — chart

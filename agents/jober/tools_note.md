@@ -11,7 +11,7 @@
 ```raw
 job_create(
     agent_id="developer",           # Target agent
-    task="Fix the login bug",    # Task description
+    message="Fix the login bug",    # Task description
     watch=True,                 # CRITICAL: Watch immediately
     priority=5                  # Optional: 1-10, higher = more urgent
 )
@@ -21,6 +21,15 @@ job_create(
 
 **Important:** Record the returned `job_id` for tracking.
 
+**Queue targeting (`queue_id`):** accepts a queue ID or a system-queue
+alias, case-insensitive: `system_fifo_queue`/`fifo`,
+`system_parallel_queue`/`parallel`, `system_background_queue`/`background`,
+`system_defer_queue`/`defer`, `system_kb_fifo_queue`/`kb_fifo`. An alias
+always resolves to the SYSTEM queue of that name — a user-created queue
+with the same short name never shadows it. When `queue_id` is omitted, my
+work lands on `system_parallel_queue` by default (other agents default to
+FIFO). Unknown alias names return an error listing the valid queues.
+
 ---
 
 ### Creating Multiple Jobs (Parallel)
@@ -29,11 +38,11 @@ For independent jobs that can run simultaneously:
 
 ```raw
 # Create all jobs first
-job_create(agent_id="developer", task="Task A", watch=True)
+job_create(agent_id="developer", message="Task A", watch=True)
 → record job_id_1
-job_create(agent_id="reviewer", task="Task B", watch=True)
+job_create(agent_id="reviewer", message="Task B", watch=True)
 → record job_id_2
-job_create(agent_id="tester", task="Task C", watch=True)
+job_create(agent_id="tester", message="Task C", watch=True)
 → record job_id_3
 
 # Then watch each mission (the receipt you hold is a valid handle)
@@ -282,7 +291,7 @@ send_message(
 **Purpose:** List available job queues.
 
 ```raw
-queue_list()
+queue_list(project_id="proj_123")
 ```
 
 **Use for:** Understanding queue structure, organizing work.
@@ -295,21 +304,33 @@ queue_list()
 
 ```raw
 queue_create(
-    name="feature-build",
-    priority=5
+    project_id="proj_123",
+    queue_name="feature-build",
+    queue_type="parallel",        # or "fifo" (default)
+    concurrency_limit=5
 )
 ```
 
-**Use for:** Grouping related jobs, priority-based organization.
+**Use for:** Grouping related jobs, parallel execution. Concurrency (not
+priority) controls how many jobs run at once. System queue names
+(`system_fifo_queue`, `system_parallel_queue`, `system_background_queue`,
+`system_defer_queue`, `system_kb_fifo_queue`) are reserved and their short
+aliases (`fifo`, `parallel`, `background`, `defer`, `kb_fifo`) always point
+at the system queues, so pick a distinct name.
 
 ---
 
 ### queue_update
 
-**Purpose:** Update queue properties (priority, etc.).
+**Purpose:** Update queue properties (name, concurrency limit, paused state).
 
 ```raw
-queue_update(queue_id="q123", priority=10)
+queue_update(
+    queue_id="q123",
+    project_id="proj_123",
+    concurrency_limit=10,
+    is_paused=False
+)
 ```
 
 ---
