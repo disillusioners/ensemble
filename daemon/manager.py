@@ -522,6 +522,16 @@ class InstanceManager:
         # This ensures the schema_migrations table is created
         from .migrations.models import SchemaMigration
 
+        # Agent Snapshot v1 (PR3): register the snapshot models with
+        # SQLModel.metadata BEFORE create_all so the `snapshots` /
+        # `snapshot_embeddings` tables are created on fresh AND
+        # existing PG databases (design-exploration §3.3 — no
+        # _ensure_postgres_columns mirror for brand-new tables).
+        from .repositories.snapshot.models import (  # noqa: F401
+            Snapshot,
+            SnapshotEmbedding,
+        )
+
         SQLModel.metadata.create_all(self._engine)
 
         # Run file-based migrations using MigrationRunner
