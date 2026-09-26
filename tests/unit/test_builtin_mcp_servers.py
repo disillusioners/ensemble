@@ -223,8 +223,15 @@ def app(router_engine_and_repo, registry_with_test_def):
 
 
 @pytest.fixture
-def client(app):
-    """Create FastAPI TestClient."""
+def client(app, tmp_path, monkeypatch):
+    """Create FastAPI TestClient.
+
+    P3-WP5: configure-builtin now writes a §7.4 install-audit line to
+    ``<cwd>/.agents/shared/planning/designer-agent/install-audit.jsonl``
+    on every real mutation. Redirect cwd into tmp so test runs never
+    litter the repo tree with audit lines.
+    """
+    monkeypatch.chdir(tmp_path)
     return TestClient(app)
 
 
@@ -1009,14 +1016,20 @@ class TestBuiltinApiEndpoints:
         assert data["is_builtin"] is True
         assert data["config"]["args"] is not None
 
-    def test_configure_builtin_updates_existing(self, client, shared_repository):
+    def test_configure_builtin_updates_existing(self, client, shared_repository, test_definition):
         """Test POST /configure-builtin with existing built-in updates config."""
-        # First create the built-in server using shared repository
+        # First create the built-in server using shared repository.
+        # P3-WP5 (arch §7.4): configure-builtin now REFUSES a
+        # schema-version mismatch (row "0" vs definition "1.0" → 409),
+        # so the pre-created row must carry the definition's version —
+        # the pre-rails behavior (silent update across a version gap)
+        # is exactly what the rail exists to prevent.
         shared_repository.create_mcp_server(
             name="test-builtin",
             description="Test builtin",
             config={"args": [], "env": {}},
             is_builtin=True,
+            config_schema_version=test_definition.schema_version,
         )
 
         # Configure again

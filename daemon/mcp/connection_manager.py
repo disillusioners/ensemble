@@ -403,6 +403,28 @@ class McpConnectionManager:
 
         await asyncio.gather(*close_tasks, return_exceptions=True)
 
+    async def close_server(self, server_name: str) -> int:
+        """Close every tracked session for ``server_name`` across ALL instances.
+
+        STOP-then-DELETE primitive (P3-WP5, arch §7.4 uninstall rail):
+        the MCP-server delete route calls this BEFORE removing the
+        ``mcp_servers`` row so no live connection outlives its config.
+
+        Returns the number of sessions stopped (0 when the server had
+        no tracked connections — the common case).
+        """
+        targets: list[tuple[ManagedClientSession, Any]] = []
+        async with self._lock:
+            for instance_id in list(self._connections.keys()):
+                sessions = self._connections.get(instance_id, {})
+                if server_name in sessions:
+                    session = sessions.pop(server_name)
+                    stream_cm = (self._stream_contexts.get(instance_id, {}) or {}).pop(server_name, None)
+                    targets.append((session, stream_cm))
+        for session, stream_cm in targets:
+            await self._close_session_with_stream(server_name, session, stream_cm)
+        return len(targets)
+
     async def create_test_session(
         self,
         config: dict[str, Any],
