@@ -3759,6 +3759,32 @@ class InstanceManager:
         :meth:`drain_pending_system_execution` at exact turn-end."""
         self._pending_system_executions[instance_id] = dict(spec)
 
+    def _journal_executor_orphaned(
+        self, install_dir: Path, kind: str, run_id: str
+    ) -> None:
+        """Best-effort ``executor_orphaned`` journal append (R-M5-2 / v0.15.3
+        P1 Item 1 pre-spawn guard): the drain reached the spawn seam but no
+        durable pending_op exists — the child would carry no journal record
+        and be unverifiable, so it is NOT spawned. Emit-NOTHING observability
+        class (NOT in ``_TERMINAL_EVENTS``); never raises (a torn/absent
+        journal — the likely cause — cannot fail the drain path)."""
+        try:
+            from daemon.tools import upgrade_journal as _uj
+
+            _uj.journal_history_append(
+                install_dir,
+                "executor_orphaned",
+                f"drain refused spawn: no durable pending_op for kind={kind} "
+                f"run_id={run_id} install_dir={install_dir} "
+                "(reason=executor-orphaned)",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[system-execution] executor_orphaned journal write failed "
+                "(refusal stands, nothing spawned): %s",
+                exc,
+            )
+
     async def drain_pending_system_execution(self, instance_id: str) -> bool:
         """Pop the marker and fire the daemonized executor (post-graph path).
 
@@ -3773,12 +3799,18 @@ class InstanceManager:
         * promote  → release the arm-time lock (the handoff — promote.sh
           re-acquires it at its own preflight), then daemonized
           ``promote.sh``; the pending_op closes via lazy reconcile once the
-          promote's terminal event lands in the journal.
+          promote's terminal event lands in the journal. A 3-factor-verified
+          live arm additionally carries the F2 attestation
+          (``--f2-verified-closed`` argv flag + ``ENSEMBLE_UPGRADE_LIVE`` /
+          ``F2_VERIFIED_NOTE`` env extras — v0.15.3 P1 Item 1); unverified
+          arms spawn byte-identically to pre-v0.15.3.
 
         Never raises — a spawn failure is logged as a warning and the
         marker is still consumed (no halt journal event is written here;
         the journal pending_op remains the durable fallback for the
-        boot sweep).
+        boot sweep). If the durable pending_op is MISSING at the spawn
+        seam the spawn is refused and an ``executor_orphaned`` journal
+        event records it (R-M5-2 guard).
         """
         spec = self._pending_system_executions.pop(instance_id, None)
         if spec is None:
@@ -3798,6 +3830,12 @@ class InstanceManager:
             if spec.get("port"):
                 extra_env["PORT"] = str(spec["port"])
 
+            # v0.15.3 P1 Item 1: read the pending_op BEFORE the spawn — the
+            # loaded record feeds BOTH the verified-arm argv/env gate below
+            # AND the post-spawn owner stamp (one read, two consumers).
+            # read_pending_op never raises (torn/absent → None).
+            op = _uj.read_pending_op(install_dir)
+
             if kind == "restart":
                 argv = [
                     "bash", str(scripts_dir / "restart.sh"), env,
@@ -3813,11 +3851,33 @@ class InstanceManager:
                     "bash", str(scripts_dir / "promote.sh"), env,
                     "--version", str(spec.get("target", "")),
                 ]
+                # v0.15.3 P1 Item 1 (user ratification 2026-09-26): a
+                # 3-factor-verified live arm carries its F2 attestation to
+                # the gate. Explicit gate — the UNVERIFIED path below is
+                # byte-identical to pre-v0.15.3 (no flag, no env extras →
+                # the child hits require_live_guard and exits 78, now
+                # journaled by the reaper). EXECUTOR_ENV_ALLOWLIST is NOT
+                # widened: the extras ride the executor_env explicit-extra
+                # merge, which is per-call-site and never ambient.
+                if _uj.is_verified_arm(op):
+                    argv_ext, env_ext = _uj._verified_arm_extras(op)
+                    argv = argv + argv_ext
+                    extra_env.update(env_ext)
             else:
                 logger.warning(
                     "drain_pending_system_execution: unknown kind=%r for %s",
                     kind, instance_id[:8],
                 )
+                return False
+
+            if op is None:
+                # R-M5-2 pre-spawn guard (v0.15.3 P1 Item 1): the drain
+                # reached the spawn seam but the durable pending_op is gone
+                # (torn/lost journal write). A child with no journal record
+                # is unverifiable — refuse the spawn loudly instead; the
+                # marker stays consumed (one shot per armed op) and the
+                # operator investigates via upgrade.log + journal history.
+                self._journal_executor_orphaned(install_dir, kind, run_id)
                 return False
 
             child_pid = _uj.spawn_executor(argv, install_dir, extra_env)
@@ -3829,7 +3889,6 @@ class InstanceManager:
             # Record the executor identity in the journal pending_op
             # (advisory owner info; the op itself is already durable).
             try:
-                op = _uj.read_pending_op(install_dir)
                 if op is not None and op.run_id == run_id:
                     op.owner_pid = child_pid
                     op.owner_kind = "executor"

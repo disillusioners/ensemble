@@ -3395,6 +3395,105 @@ class TestManagerDrainPendingExecution:
         assert not uj.lock_dir(install).exists()
         assert iid not in drain_mgr._pending_system_executions
 
+    async def test_promote_argv_includes_f2_flag_when_verified(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """VERIFIED side (v0.15.3 P1 Item 1 — user ratification 2026-09-26):
+        a 3-factor-verified LIVE promote pending_op makes the drain append
+        ``--f2-verified-closed`` to the argv AND pass the
+        ``ENSEMBLE_UPGRADE_LIVE``/``F2_VERIFIED_NOTE`` env extras. Sibling to
+        the unverified exact-list pin above (which stays untouched)."""
+        run_id = "r-drain-live-1"
+        uj.lock_acquire(install, run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="promote", env="live", target="1.2.3",
+                armed_by_instance="inst-drain-live",
+                nonce="CONFIRM-ABCDEFGH",
+                nonce_consumed=True,
+                confirmed_by_human=True,
+                confirmed_source="my-discord-bot:123",
+            ),
+        )
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-live", "kind": "promote", "env": "live",
+             "run_id": run_id, "target": "1.2.3"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is True
+
+        [call] = spawn_calls
+        assert call["argv"] == [
+            "bash", str(scripts_dir / "promote.sh"), "live",
+            "--version", "1.2.3",
+            "--f2-verified-closed",
+        ]
+        assert call["extra_env"]["ENSEMBLE_UPGRADE_LIVE"] == "1"
+        assert call["extra_env"]["F2_VERIFIED_NOTE"] == f"my-discord-bot:123:{run_id}"
+
+    async def test_promote_verified_fields_nonlive_env_stays_unflagged(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """M-11 at the drain level: confirmed_source + nonce_consumed with
+        env=demo must NOT flag or pass live env — the 5th conjunct is the
+        safe-by-construction guard (the drain test for the env=demo truth
+        table row)."""
+        run_id = "r-drain-demo-vf"
+        uj.lock_acquire(install, run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="promote", env="demo", target="1.2.3",
+                armed_by_instance="inst-drain-demo-vf",
+                nonce="CONFIRM-ABCDEFGH",
+                nonce_consumed=True,
+                confirmed_by_human=True,
+                confirmed_source="my-discord-bot:123",
+            ),
+        )
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-demo-vf", "kind": "promote", "env": "demo",
+             "run_id": run_id, "target": "1.2.3"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is True
+
+        [call] = spawn_calls
+        assert call["argv"] == [
+            "bash", str(scripts_dir / "promote.sh"), "demo",
+            "--version", "1.2.3",
+        ]  # unverified: byte-identical to the pin above — no flag
+        assert "ENSEMBLE_UPGRADE_LIVE" not in call["extra_env"]
+        assert "F2_VERIFIED_NOTE" not in call["extra_env"]
+
+    async def test_spawn_seam_refuses_when_pending_op_missing(
+        self, drain_mgr, install, scripts_dir, spawn_calls, monkeypatch
+    ) -> None:
+        """R-M5-2 / Item-1 pre-spawn guard: when the durable pending_op is
+        gone at the spawn seam (torn/lost journal write), the drain refuses
+        to spawn and journals ``executor_orphaned`` (emit-NOTHING class,
+        NOT in _TERMINAL_EVENTS) with the spec kind + install dir."""
+        uj.lock_acquire(install, "r-drain-orphan")
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-orphan", "kind": "promote", "env": "demo",
+             "run_id": "r-drain-orphan", "target": "1.2.3"},
+        )
+        real_read = uj.read_pending_op
+        monkeypatch.setattr(uj, "read_pending_op", lambda _dir: None)
+        assert await drain_mgr.drain_pending_system_execution(iid) is False
+        monkeypatch.setattr(uj, "read_pending_op", real_read)
+        assert spawn_calls == []  # refused — nothing spawned
+        assert iid not in drain_mgr._pending_system_executions  # one shot
+        events = [e for e in uj.journal_read(install)["history"]]
+        orphan = [e for e in events if e["event"] == "executor_orphaned"]
+        assert len(orphan) == 1
+        assert "kind=promote" in orphan[0]["detail"]
+        assert str(install) in orphan[0]["detail"]
+        assert "(reason=executor-orphaned)" in orphan[0]["detail"]
+        assert orphan[0]["ts"]  # payload ts rides the history entry
+
     async def test_unknown_kind_refused_no_spawn(
         self, drain_mgr, install, scripts_dir, spawn_calls
     ) -> None:
@@ -3423,6 +3522,19 @@ class TestManagerDrainPendingExecution:
         monkeypatch.setenv("ENSEMBLE_UPGRADE_LIVE", "1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-do-not-leak")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-do-not-leak")
+        # Fixture completion (v0.15.3 P1 Item 1 — NOT a pin flip): the drain
+        # now refuses a spawn with no durable pending_op (R-M5-2 guard), so
+        # the fixture mirrors production arming, which ALWAYS writes the op
+        # (upgrade_tools.py write_pending_op) before setting the marker. The
+        # pins below (poison strip :3423-3434, allowed-set :3439-3444) are
+        # byte-identical to their pre-v0.15.3 form.
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id="r-drain-env-1", kind="restart", env="demo", reason="env",
+                armed_by_instance="inst-drain-4",
+            ),
+        )
         iid = self._arm(
             drain_mgr, install, scripts_dir,
             {"instance_id": "inst-drain-4", "kind": "restart", "env": "demo",

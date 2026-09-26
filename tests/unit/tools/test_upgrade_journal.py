@@ -1001,6 +1001,125 @@ class TestExecutorSpawn:
         assert "NOT registered" in source
 
 
+# ── Verified-arm predicate + passthrough extras (v0.15.3 P1 Item 1) ──────────
+
+
+class TestVerifiedArmPredicate:
+    """The 5-conjunct ``is_verified_arm`` predicate + the shared
+    ``_verified_arm_extras`` expansion (M-11: ``env == "live"`` is
+    safe-by-CONSTRUCTION — the passthrough never fires on demo/dev/sandbox
+    even with nonce + source present). Sibling tests: none of the existing
+    pins (allowlist purity / real-spawn poison / argv equality) is touched.
+
+    Every falsifying class gets its own row; the canonical row is the
+    LIVE-rung positive case (user ratification 2026-09-26)."""
+
+    @staticmethod
+    def _op(**overrides: Any) -> uj.PendingOp:
+        defaults: dict[str, Any] = dict(
+            run_id="r-verified-arm-1",
+            kind="promote",
+            env="live",
+            target="1.2.3",
+            nonce_consumed=True,
+            confirmed_by_human=True,
+            confirmed_source="my-discord-bot:123",
+        )
+        defaults.update(overrides)
+        return uj.PendingOp(**defaults)
+
+    @pytest.mark.parametrize(
+        ("overrides", "expected"),
+        [
+            # canonical TRUE row (all 5 conjuncts present, env=live)
+            ({}, True),
+            # falsifying rows — one conjunct absent / wrong per row
+            ({"env": "demo"}, False),          # M-11 5th conjunct
+            ({"env": "dev"}, False),           # M-11 5th conjunct
+            ({"env": "sandbox"}, False),       # M-11 5th conjunct
+            ({"confirmed_source": None}, False),   # no source
+            ({"confirmed_source": ""}, False),     # empty source
+            ({"confirmed_by_human": False}, False),  # not confirmed
+            ({"nonce_consumed": False}, False),    # no nonce
+            ({"kind": "restart"}, False),          # not promote
+        ],
+    )
+    def test_is_verified_arm_truth_table(
+        self, overrides: dict[str, Any], expected: bool
+    ) -> None:
+        assert uj.is_verified_arm(self._op(**overrides)) is expected
+
+    def test_is_verified_arm_none_op_false(self) -> None:
+        assert uj.is_verified_arm(None) is False
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"env": "demo"},
+            {"env": "dev"},
+            {"env": "sandbox"},
+            {"confirmed_source": None},
+            {"confirmed_by_human": False},
+            {"nonce_consumed": False},
+            {"kind": "restart"},
+        ],
+    )
+    def test_verified_arm_extras_helper_returns_empty_for_unverified(
+        self, overrides: dict[str, Any]
+    ) -> None:
+        argv_ext, env_ext = uj._verified_arm_extras(self._op(**overrides))
+        assert argv_ext == []
+        assert env_ext == {}
+
+    def test_verified_arm_extras_helper_returns_empty_for_none(self) -> None:
+        assert uj._verified_arm_extras(None) == ([], {})
+
+    def test_verified_arm_extras_helper_returns_expected_for_verified(self) -> None:
+        op = self._op()
+        argv_ext, env_ext = uj._verified_arm_extras(op)
+        assert argv_ext == ["--f2-verified-closed"]
+        assert env_ext == {
+            "ENSEMBLE_UPGRADE_LIVE": "1",
+            "F2_VERIFIED_NOTE": "my-discord-bot:123:r-verified-arm-1",
+        }
+
+    def test_verified_arm_extras_helper_name_frozen(self) -> None:
+        """Name-freeze pins (plan W2): the shared helpers keep their exact
+        names — a rename must be a paired truth-table update, never a
+        silent drift (R-P1-1)."""
+        import inspect
+
+        assert uj.is_verified_arm.__name__ == "is_verified_arm"
+        assert uj._verified_arm_extras.__name__ == "_verified_arm_extras"
+        source = inspect.getsource(uj)
+        assert "def is_verified_arm(op: PendingOp | None) -> bool:" in source
+        assert (
+            "def _verified_arm_extras(op: PendingOp | None) -> "
+            "tuple[list[str], dict[str, str]]:" in source
+        )
+
+    def test_spawn_executor_has_sole_production_caller_manager_drain(self) -> None:
+        """SOLE-CALLER PIN (plan W2): the ONLY production caller of
+        ``spawn_executor`` is the manager drain seam. A second call site
+        would bypass the drain's verified-arm gate + reaper enqueue — this
+        pin fails loudly if one appears. (Grep counts CALL sites — the
+        ``spawn_executor`` re-export in upgrade_tools is the test patch
+        seam, never called there.)"""
+        import re as _re
+
+        daemon_dir = REPO_ROOT / "daemon"
+        callers: dict[str, int] = {}
+        for py in sorted(daemon_dir.rglob("*.py")):
+            hits = _re.findall(
+                r"(?<!def )\bspawn_executor\(", py.read_text(encoding="utf-8")
+            )
+            if hits:
+                callers[str(py.relative_to(REPO_ROOT))] = len(hits)
+        assert callers == {"daemon/manager.py": 1}, (
+            f"unexpected spawn_executor call sites: {callers}"
+        )
+
+
 # ── User-origin classification (registry-backed — verdict §4) ────────────────
 
 

@@ -753,6 +753,61 @@ def clear_pending_op(install_dir: Path, *, clear_restart_marker: bool = True) ->
     journal_write(install_dir, data)
 
 
+# ── Verified-arm predicate + passthrough extras (v0.15.3 P1 Item 1) ─────────
+#
+# The 3-factor-verified live arm (user ratification 2026-09-26: the arm
+# ceremony IS the F2-equivalent attestation for the TOOL LANE; ADR-017's
+# tool-lane posture is superseded for VERIFIED ARMS ONLY) carries its
+# attestation to promote.sh as the ``--f2-verified-closed`` argv flag plus
+# the ``ENSEMBLE_UPGRADE_LIVE=1`` / ``F2_VERIFIED_NOTE`` env extras.
+#
+# EVERY verified-side expansion MUST route through the helpers below
+# (name-frozen, truth-table-pinned) — no call site rebuilds the predicate
+# inline. The F2 fence is intact for every UNVERIFIED path:
+# EXECUTOR_ENV_ALLOWLIST is NOT widened; the extras ride the pre-existing
+# ``executor_env`` explicit-extra merge (:1003-1004), which is per-call-site
+# and never ambient — an unverified arm's child env still strips
+# ENSEMBLE_UPGRADE_LIVE (poison tests pin that side).
+
+
+def is_verified_arm(op: PendingOp | None) -> bool:
+    """5-conjunct verified-arm predicate (M-11): the pending_op records a
+    live promote whose 3-factor ceremony completed (nonce burned + human
+    confirmed via a registered source).
+
+    ``op.env == "live"`` is the safe-by-construction conjunct — the
+    passthrough NEVER fires on demo/dev/sandbox even with nonce + source
+    present (the truth-table test pins each falsifying row)."""
+    return (
+        op is not None
+        and op.kind == "promote"
+        and op.nonce_consumed
+        and op.confirmed_by_human
+        and bool(op.confirmed_source)
+        and op.env == "live"  # M-11: safe-by-construction — env must be live
+    )
+
+
+def _verified_arm_extras(op: PendingOp | None) -> tuple[list[str], dict[str, str]]:
+    """Shared verified-arm expansion — ``(argv_extension, extra_env_extension)``.
+
+    Returns ``([], {})`` for any unverified op: call sites gate on
+    :func:`is_verified_arm` and skip extension entirely (the unverified
+    path stays byte-identical; the helper returning empty is the belt to
+    that suspenders). The note is ``<confirmed_source>:<run_id>`` — the
+    operator's audit trail (a registration id + the arm id; secret-free by
+    construction — research §6 "no secrets… safe to embed")."""
+    if op is None or not is_verified_arm(op):
+        return [], {}
+    return (
+        ["--f2-verified-closed"],
+        {
+            "ENSEMBLE_UPGRADE_LIVE": "1",
+            "F2_VERIFIED_NOTE": f"{op.confirmed_source}:{op.run_id}",
+        },
+    )
+
+
 # ── Nonce store (D-FA3.3 — pending_actions keyed by run_id) ─────────────────
 
 
