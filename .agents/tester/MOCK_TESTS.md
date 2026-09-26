@@ -515,3 +515,12 @@ Reproduces the ORIGINAL incident shape from mission f27e2d15 on a synthetic SQLi
 - **Result**: ✅ PASS — 5/5 scenario verdicts (a)–(e); runtime 4.5s; commit `347896a2` (script only, parent ac789d45)
 - **Quick Fixes**: none
 - **Report**: RESULTS/2026-09-23-job-watch-replay-verification-ac789d45.md
+
+
+## Mock Test: LCAFC PG lane (Job 6a) — 2026-09-26
+- **Script**: disposable PG14 @15432, initdb trust-auth (homebrew postgresql@14), `env -u POSTGRES_* -u DATABASE_URL` + 5 `PG_TEST_*` vars per conftest contract; `--override-ini="addopts=" -m postgres`. Scope: `tests/postgres/` attestation + mission/work-resolver glob. Teardown: port freed, PGDATA removed; 5432 NEVER touched. Pattern: `lcancheck_pg_lane_test.sh` (2026-09-23 gate, 21/21).
+
+## Mock Test: LCAFC boot smoke (Job 6b) — 2026-09-26
+- **Ports**: daemon 15800 · disposable PG 15810 · mock LLM 15820 (all >10000; NEVER 8079/8088/4199/5432).
+- **Config**: `DATA_DIR=/tmp/...`; all ENSEMBLE_* attestation vars UNSET (enforce-default proof).
+- **Checks**: /livez + /readyz 200 <5s; boot line `mode=enforce … attestation_enabled=true llm_judge_enabled=true`; scripted escalation renders `completed (gate escalated — unverified)` at an HTTP read point; SIGTERM graceful; ports freed; full teardown. Pattern: `lcancheck_boot_smoke_test.sh`.
