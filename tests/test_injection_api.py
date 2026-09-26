@@ -98,7 +98,7 @@ def _make_manager(
     # CONDITIONAL ``echo_id`` key (message-display-latency Phase 1):
     # byte-identical entry shape when absent, ``echo_id`` key present
     # when passed.
-    def _set_injection(iid, content, source=None, echo_id=None):
+    def _set_injection(iid, content, source=None, echo_id=None, image_refs=None):
         entry = {"content": content, "timestamp": "2026-07-13T00:00:00+00:00"}
         if echo_id is not None:
             entry["echo_id"] = echo_id
@@ -124,6 +124,19 @@ def _make_manager(
 
     # resume_processing_job (async) — used by the PAUSED path.
     manager.resume_processing_job = AsyncMock(return_value={"status": "resumed", "instance_id": instance_id})
+
+    # Slash-command dispatcher (Phase 1 / WS-1): the route calls
+    # ``await manager.command_dispatcher.dispatch(...)`` BEFORE any
+    # status-branch routing. Stub the dispatcher so the MagicMock
+    # default (a non-awaitable) does not blow up at line :325. Pattern
+    # mirrors ``tests/unit/test_paused_auto_resume_fallback.py:121-124``
+    # and ``tests/unit/routers/test_messages_router_ref_path.py:98-103``
+    # — ``kind="passthrough"`` + ``sanitized_text=None`` = no slash
+    # command + no ``//`` rewrite = byte-identical passthrough.
+    manager.command_dispatcher = MagicMock()
+    manager.command_dispatcher.dispatch = AsyncMock(
+        return_value=MagicMock(kind="passthrough", sanitized_text=None, ack=None)
+    )
 
     return manager
 
@@ -302,34 +315,13 @@ class TestInjectionPath:
         # The manager call still happened exactly once.
         state["manager"].set_injection.assert_called_once()
 
-    def test_waiting_children_post_time_user_message_shape(self, client_and_state):
-        """WAITING_CHILDREN gets the same POST-time user_message echo
-        (same shape, same entry POST timestamp)."""
-        client, state = client_and_state
-        state["manager"] = _make_manager(status="waiting_children", pending_count=1)
-        state["live_hub"] = _make_live_hub()
-
-        resp = client.post(
-            "/instances/inst-abc/messages",
-            json={"content": "please advise"},
-        )
-
-        assert resp.status_code == 202, resp.text
-        assert resp.json()["message_id"] == (
-            state["manager"].set_injection.call_args.kwargs["echo_id"]
-        )
-        calls = state["live_hub"].stream_message.await_args_list
-        assert [c.kwargs["event_type"] for c in calls] == [
-            "injection_pending",
-            "user_message",
-        ]
-        user_payload = calls[1].kwargs["message"]
-        assert user_payload["role"] == "user"
-        assert user_payload["content"] == "please advise"
-        assert user_payload["message_id"] == (
-            state["manager"].set_injection.call_args.kwargs["echo_id"]
-        )
-        assert user_payload["created_at"] == "2026-07-13T00:00:00+00:00"
+    # test_waiting_children_post_time_user_message_shape REMOVED:
+    # B1 contract (commit 88a27f71, 2026-09-11) shrank
+    # INJECTION_ELIGIBLE_STATUSES to {"running"}; WC now ALWAYS
+    # routes to durable enqueue (200, no SSE) — that contract is
+    # fully pinned by ``test_waiting_children_routes_to_enqueue``
+    # below (``set_injection.assert_not_called``,
+    # ``stream_message.assert_not_called``, status 200).
 
     def test_waiting_children_routes_to_enqueue(
         self, client_and_state,
