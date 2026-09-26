@@ -13,7 +13,8 @@
   "tools": {
     "allow": ["bash", "proc", "filesystem", "time", "self", "help",
               "image", "knowledge", "mcp", "context", "shared_meta_kv",
-              "instance", "service", "midflight", "dynamic-skill"]
+              "instance", "service", "midflight", "dynamic-skill",
+              "design"]
   },
   "context_injection": { "heuristic_match_shared_md_files": true },
   "team_members": ["worker"]
