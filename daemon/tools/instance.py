@@ -235,6 +235,7 @@ from .doc_write import create_doc_write_tools
 from .comment_edit import create_comment_edit_tools
 from .doc_commit import create_doc_commit_tools
 from .chart_tools import create_chart_tools
+from .compare_tools import create_compare_tools
 from .image_tools import create_image_tools
 from .todo_tools import create_todo_tools
 from .question_tools import create_question_tools
@@ -5150,6 +5151,15 @@ Returns:
     # to agents with innate_skills:["chart"] via INNATE_SKILL_TOOL_CATEGORIES.
     chart_tool_list = create_chart_tools(manager, current_instance_id)
     tools.extend(chart_tool_list)
+
+    # ── Compare tools (delegates to image-comparator agent for structured
+    #    findings, P2-WP2). Always-wired like the chart / image / todo
+    #    factories; per-agent access is gated by ``tools.allow`` via
+    #    ``TOOL_REQUIRED_AGENTS["design"]``. The factory never raises (it
+    #    only builds the closure); tool invocations surface the facade's
+    #    never-raise error envelope on failure.
+    compare_tool_list = create_compare_tools(manager, current_instance_id)
+    tools.extend(compare_tool_list)
 
     # ── Image tools (delegates to image-reader agent for vision analysis, always available) ──
     # Image tools (always available, like chart tools)
