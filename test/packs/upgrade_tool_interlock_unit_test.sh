@@ -27,6 +27,28 @@
 #     both directions, ADR-034 splice tolerance (tested, not violated)
 #   - executor spawn: env allowlist (API-key-class + ENSEMBLE_UPGRADE_LIVE
 #     absent), process-group independence, no-BashProcessRegistry static pin
+# v0.15.3 P1 (tool-lane live promote fix, 2026-09-26) — extends the SAME
+# two unit files; no pack-structure change:
+#   - verified-arm (P1 Item 1): is_verified_arm 5-conjunct truth table
+#     (incl. env=demo/dev/sandbox + op=None rows) + _verified_arm_extras
+#     (name-frozen) + the drain seam appending --f2-verified-closed and
+#     ENSEMBLE_UPGRADE_LIVE/F2_VERIFIED_NOTE ONLY for a verified live arm
+#     (unverified path byte-identical — the pre-existing argv/allowed-set
+#     pins above ARE the unverified side) + executor_orphaned pre-spawn
+#     refusal + the sole-production-caller pin
+#   - arm preflight before the nonce burn (P1 Item 3): each refusal token
+#     its own test — executor-scripts-unavailable (reused),
+#     preflight-argv-unconstructable, preflight-argv-malformed (nonce
+#     NEVER burned on refusal)
+#   - child-exit watcher (P1 Items 2+4): the drain spawn seam enqueues
+#     EVERY armed executor into the sweep service's reaper queue (patching
+#     daemon.tools.upgrade_journal.spawn_executor — NEVER subprocess.Popen,
+#     P2.2 gotcha); reaper journals executor_exit (real exit-78 child) /
+#     executor_still_running on timeout with benign-detach / continues
+#     after a journal-write OSError; boot sweep clears a stale pending_op;
+#     live-executor liveness guard skips clearing; pending_actions GC
+#   - terminal-outcome filter (P1 Item 5): nonce_consumed no longer
+#     masquerades as TERMINAL; label demoted to awaiting-executor (pending)
 # All fixtures /tmp-only; live/production NEVER touched.
 set -euo pipefail
 
