@@ -507,6 +507,13 @@ class TestStreamJobEventsResolverOn:
             # (draft §3.3).
             "outcome",
             "mission_ref",
+            # 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.2):
+            # the additive escalation flag rides the completed
+            # payload so the FE SSE consumer can key off it
+            # (alongside the surfaced ``status`` field which
+            # swaps to the distinct unverified string when
+            # escalated). Older clients ignore the extra key.
+            "completion_gate_escalated",
         }
         assert completed["job_id"] == jid
         assert completed["status"] == "completed"

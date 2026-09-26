@@ -216,6 +216,11 @@ async def test_flagship_deny_nudge_routes_back_and_attests(
         "attestation_nudge": True,
         "injected_message": True,
         "attestation_nudge_denied_count": 1,
+        # 7d4a3bd9 Fix 3 (2026-09-26): the deny nudge stamps
+        # ``attestation_nudge_kind`` ("standard" | "directive") so the
+        # post-turn forensics can tell the two shapes apart. First deny
+        # ⇒ standard (no prior deny snapshot).
+        "attestation_nudge_kind": "standard",
     }
     assert final_state["attestation_nudge_denied_count"] == 1
     assert any(isinstance(m, AIMessage) and m.tool_calls for m in messages)

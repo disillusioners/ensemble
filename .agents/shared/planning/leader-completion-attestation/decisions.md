@@ -2043,3 +2043,133 @@ The full attestation matrix was re-run with ``-p no:randomly`` deterministic ord
 **Step-order change in `decide()`:** the attested-split (HOLD branch) moves AFTER the R2 pending check. New order: `(1) user_answer_pending → (2) R2 pending (pending_children / queued_wakeups / live_descendants > 0 → ALLOWED_LEGITIMATE_PENDING_WAKEUP) → (3) attested-split (ALLOWED/HOLD) → (4) bound → (5) deny`. Step (1) and steps (4)/(5) are unchanged.
 
 **Rationale:** a premature attest during an active mission (children still running, wakeup en route) would otherwise fight the R2 legit-pending allow — the leader would be forced to deliver the report before children finish, but the children are still running. HOLD reserved for the quiet-tree end state (R2 inputs all zero). The premature-attest R2 allow path: NO reminder, deny counter UNTOUCHED; the attested counter-reset (trigger 1) is bound to the **report-completion reset** on the attested + standalone-text-report ALLOWED path only. Counter moves ONLY on (a) attested + standalone-text-report ALLOWED and (b) `terminal_after_bound`; every other path leaves the counter at its input value. The 2026-09-19 attest-first HOLD-state semantics are otherwise unchanged (clean-call vs bundled reminder text, per-mission reminder cap `ATTESTATION_REMINDER_CAP`, counter-independence on HOLD).
+## D-entry 2026-09-26 — incident 7d4a3bd9: false-completion fix cycle (final after amendments v1→v4)
+
+**Incident (leader 7d4a3bd9, 2026-09-25 17:40:30Z→19:13:27Z, mode=enforce deny_bound=3, Episode B):**
+the tester child self-completed 19:10:55Z while its own report said "Awaiting the root-level
+core tests report…" → `pending_children=0` → deny band (c_quiet+a_suspicion). The fused judge
+verdict `not_complete` was CORRECT (the reason named the mid-work state) and consumed deny
+slot 1; then TWO judge double-timeouts (50s each, model=quick, TimeoutError at the 25s
+default) consumed slots 2+3; the next evaluation fired `decision=terminal_after_bound` at
+19:13:26Z and wrote `status=COMPLETED` with `completion_gate_escalated=true` — INVISIBLE at
+the user surface. The terminal observer finalized `no_job` (the episode's real job 082899be
+had been finalized inline at its first turn-end per the Fix-B mirror semantics). The leader
+had answered all 3 deny-nudges with "Holding exactly there" prose — no tool calls, no attest.
+
+**DESIGN JOURNEY (recorded so the arc is reconstructable; user amendments v1→v4):**
+* v1 (dispatch) proposed: timeouts decoupled from the bound (substantive-vs-infra counting)
+  + a TOTAL deny-event cap (6) forcing the terminal. **REJECTED by user (v3): the CURRENT
+  counting is ruled CORRECT — every deny counts, timeouts included ("boundedness by
+  simplicity"); the total cap is dead.** The bound predicate `deny_bound_exceeded` is
+  byte-identical to pre-amendment; the revert-completeness proof is that every existing
+  bound invariant pin passes UNMODIFIED.
+* v2 proposed: a deterministic heuristic fallback (rule table over gate evidence) replacing
+  the judge when it never spoke. **DROPPED by user (v3) before any code landed: zero
+  heuristic code exists in the tree.** `attest_completion` IS the judge-dead fallback —
+  the tool's exact purpose (the deterministic trust path).
+* Timeout default: 25.0s → 300.0s (v1/v2) → **180.0s final (v4, "quicker")**. Env
+  `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S` stays tunable; min clamp 5.0s
+  unchanged. Worst case: retry-once ⇒ up to 2×180s = 360s on a single turn-end's judge
+  verdict — user-accepted for verdict reliability.
+
+**FINAL SEMANTICS — the exhaustion composition gate (the one behavioral change):**
+bound counting UNCHANGED; at `deny_bound_exceeded` the node branches on the epoch's
+deny-event composition, tracked by the SessionState channel
+`attestation_any_substantive_deny` (set when a deny's fused-judge verdict is
+`not_complete`; reset with the ledger on attested allow / terminal; reset semantics mirror
+the substantive counter):
+* **Bound exhausted WITH ≥1 substantive verdict** ⇒ the judge SPOKE and was overridden ⇒
+  `terminal_after_bound` stands exactly as today — fix 1's loud
+  `completed (gate escalated — unverified)` surface + real-job linkage.
+* **Bound exhausted with ZERO substantive verdicts** (all timeouts/errors/unparsable/
+  judge-disabled — the judge NEVER spoke) ⇒ **NOT COMPLETE, full stop**: NO terminal write
+  from timeouts alone — the deny+nudge cycle simply CONTINUES. Counting itself UNCHANGED
+  (every deny counts; the committed counter may rise past the bound, which is now correct).
+  The leader's exits are the existing ones: `attest_completion` (the deterministic trust
+  path — meta_bypass allow), finishing the remaining work, or asking the user. The
+  directive nudge (fix 3) pairs with this continuation — the leader keeps getting nudges
+  and the directive names the exits.
+
+**⚠ C1 SUPERSESSION NOTE (user ruling — do not "fix" without re-ruling):** the
+never-spoke-judge continuation is DELIBERATELY unbounded: an epoch whose judge never
+delivers a verdict denies forever (no terminal fallback). This SUPERSEDES C1's strict
+terminal-fallback boundedness FOR THE NEVER-SPOKE CASE ONLY. Rationale: rare with the 180s
+timeout; the exits exist (attest/finish/ask); the false-positive cost ("one small extra
+step") is accepted by the user. C1 boundedness remains FULLY INTACT for the judge-spoke
+path (≥1 `not_complete` verdict ⇒ the bound terminalizes as before).
+
+**⚠ INTERPRETATION RULING (flagged for user veto):** "substantive" := fused-judge verdict
+== `not_complete` (a definitive ruling). timeout / error / unparsable / judge-disabled /
+bundle-unavailable = the judge NEVER spoke (non-substantive). So the check-the-composition
+branch triggers on "zero `not_complete` verdicts among the epoch's deny events" — covering
+the all-timeout case AND the all-error case with the same never-spoke logic.
+
+**Fixes shipped this cycle (final scope):**
+
+* **Fix 1 — loud unverified surface (read-side only; NO new InstanceStatus).** Every read
+  point renders the DISTINCT string `completed (gate escalated — unverified)` (canonical
+  constant `daemon.constants.COMPLETION_GATE_ESCALATED_DISPLAY`) instead of plain
+  `completed` when the linked instance carries `completion_gate_escalated=True`: job
+  events (`work_notifier`), `job_get` (`jobs_crud._job_to_response`, via the additive
+  `WorkRecord.completion_gate_escalated` flag threaded from the joined Instance), and
+  `get_mission`/`list_missions` (`MissionRecord.completion_gate_escalated` +
+  `_render_liveness`; the canonical `liveness` field stays clean for filters/await). FE
+  job-card renders the label verbatim with a warning glyph + amber color (minimal; no
+  dist rebuild). **Job-linkage:** the observer's finalize context carries an
+  already-finalized witness (`_ProcessingJobContext.already_finalized_job_id`, resolved
+  from the freshest terminal JobItem) + the instance's escalation flag; the finalize log
+  ties the terminal to the REAL job instead of `no_job` (`already_finalized_by=` +
+  `gate_escalated=` witnesses; reporting-only — no state transition, no spurious watcher
+  notify).
+
+* **Fix 3 — directive nudge on no-progress repeat denies.** At each deny the node
+  snapshots transcript progress (tool-call count in the checkpointed history → channel
+  `attestation_deny_progress_tools`). On a deny that is the >= 2nd consecutive deny
+  (committed deny count >= 2 — every deny counts) AND has ZERO new tool calls since the
+  prior deny snapshot, the DIRECTIVE nudge replaces the standard in-graph deny nudge
+  (same stable id — supersedes in place; `attestation_nudge_kind` kwarg marks the shape).
+  The HOLD / Final-Report-Reminder / reminder-cap machinery (R4b/R4c) is untouched.
+  Canonical directive body embedded VERBATIM (single source
+  `daemon/graph.py:ATTESTATION_DIRECTIVE_NUDGE_TEXT`, pinned byte-exact by regression):
+  "[Attestation Gate — Directive] The gate has denied completion more than once and you
+  have taken no new action since the last denial. Choose exactly one now: (1) if the
+  mission is truly complete, call attest_completion and deliver your final report; (2) if
+  work remains, dispatch or finish it now (re-assign the pending work to a child or do it
+  yourself); (3) if you are blocked or uncertain, ask the user for a decision. Continuing
+  to hold without action will end this mission as COMPLETED-UNVERIFIED (gate escalated) once the judge delivers a verdict."
+
+* **Fix 5a — scanner pin (final_word_count).** Root cause pinned FROM CODE + LOG: Episode
+  A's `final_word_count=0 length_trigger=False messages_scanned=3` was NEITHER the window
+  hypothesis NOR marker scoping — the row printed DATACLASS DEFAULTS because the §(iii.b)
+  scan block is routing-gated and Episode A was a NON-DELEGATED allow
+  (`attestation_required=False`, `delegation_tool_call_total=0` — verified in the prod log
+  row). `messages_scanned=3` (the attestation scan) proves the 3-AIMessage tail was in
+  hand; the length scan walks the SAME list. Fix: the length scan runs on EVERY evaluated
+  path and the REAL values are stamped on the decision (the marker scan stays
+  routing-gated; marker fields keep their own semantics). Routing note: with 5a fixed,
+  Episode A's turn now shows real length values, but the R3/R4 no-delegation fold still
+  fires FIRST — the route is UNCHANGED (pinned by `test_ep_a_shape_route_unchanged`).
+
+* **Judge timeout default 180s** (v4; see the journey above) + docs tuning table +
+  worst-case note.
+
+**Fix 4 (child completion discipline) DEFERRED post-soak; fix 6 (attested→judge-priming)
+on the watchlist** (unchanged from the original commission).
+
+**Revert-completeness proof (bound counting UNCHANGED):** every EXISTING bound invariant
+pin passes UNMODIFIED — `tests/unit/test_attestation_gate.py` (decide() bound matrix,
+at-bound terminal pin), `tests/unit/test_attestation_resolver_activation.py` (would-be
+mapping), `tests/unit/test_attestation_epoch_replay.py`, `tests/unit/test_attestation_nudge_inject.py`
+all restored to pristine and green. The ONE pin updated BY RULING (semantics changed by
+user decision, flagged per commission):
+`tests/unit/test_attestation_judge_wiring.py::test_judge_not_called_on_terminal_after_bound_path`
+— formerly pinned "bound exhaustion with a never-spoke judge terminalizes (END, escalation
+write, no increment)"; now pins the v3 ruling: judge still never invoked (budget parity)
+BUT the terminal is withheld (deny+nudge continues, increment runs, counter rises past the
+bound, the `leader_completion_gate_bound_exhausted_never_spoke` audit row fires).
+
+**New regression file:** `tests/unit/test_lca_false_complete_fixes.py` (25 tests: mixed
+arc, never-spoke arc + attest exit + re-arm, directive matrix, scanner pins, surface
+renders, observer linkage). **Timeout config pins:**
+`tests/unit/test_attestation_judge_resolver.py` (default-180 class: default, unset env,
+env override, clamp, worst-case 2×180s) + the two literal-25 pins updated to 180.

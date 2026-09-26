@@ -56,6 +56,13 @@ export class JobDetailDrawerComponent {
         return 'accent';
       case 'completed':
         return 'primary';
+      case 'completed (gate escalated — unverified)':
+        // 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.3):
+        // amber warning — the completion is UNVERIFIED. The
+        // drawer chip diverges from the canonical ``completed``
+        // color (primary/blue) so the operator sees the unverified
+        // shape loud. Matches the badge / panel / card surfaces.
+        return 'warn';
       case 'failed':
         return 'warn';
       case 'cancelled':

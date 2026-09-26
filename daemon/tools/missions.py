@@ -91,6 +91,15 @@ from pydantic import BaseModel, Field
 
 from ._tool_registry import register_tool_category
 
+# 7d4a3bd9 false-completion fix (2026-09-26) — Fix 1 unverified surface.
+# Rendered as the get_mission / list_missions ``liveness`` VALUE when the
+# mission is gate-escalated + completed, with the machine-readable
+# ``completion_gate_escalated`` flag alongside. ``daemon.constants`` is
+# imported lazily inside the payload builders (module-top
+# ``daemon.config``-cycle discipline — same lazy-import pattern the
+# tool body uses for the resolver).
+
+
 if TYPE_CHECKING:
     from daemon.services.mission_resolver import (
         MissionRecord,
@@ -237,6 +246,29 @@ class ListMissionsInput(BaseModel):
 # ── Helpers (pure — no DB, no I/O) ───────────────────────────────────────
 
 
+def _render_liveness(record: "MissionRecord") -> str | None:
+    """Render the wire ``liveness`` value for mission payloads.
+
+    7d4a3bd9 false-completion fix (2026-09-26) — Fix 1 unverified
+    surface: when the mission is gate-escalated AND completed, the
+    DISTINCT string ``completed (gate escalated — unverified)``
+    replaces plain ``completed`` so the unverified shape is loud at
+    the get_mission / list_missions surface (Episode B rendered plain
+    ``completed`` and hid the escalation). ``record.liveness`` itself
+    stays canonical — filters, await logic, and the W4 dead-letter
+    precedence keep matching the canonical vocabulary. Any other
+    liveness value passes through unchanged.
+    """
+    from daemon.constants import COMPLETION_GATE_ESCALATED_DISPLAY
+
+    if (
+        record.completion_gate_escalated
+        and record.liveness == "completed"
+    ):
+        return COMPLETION_GATE_ESCALATED_DISPLAY
+    return record.liveness
+
+
 def _mission_snapshot_dict(record: "MissionRecord") -> dict[str, Any]:
     """Compose the ``get_mission`` snapshot payload (contract draft §2).
 
@@ -309,7 +341,9 @@ def _mission_snapshot_dict(record: "MissionRecord") -> dict[str, Any]:
         "mission_id": mission_id,
         "agent_id": record.agent_id,
         "parent_mission_id": record.parent_mission_id,
-        "liveness": record.liveness,
+        # 7d4a3bd9 Fix 1: distinct unverified string when escalated.
+        "liveness": _render_liveness(record),
+        "completion_gate_escalated": record.completion_gate_escalated,
         "terminal_reason": terminal_reason,
         "epoch": epoch,
         "epochs": epochs,
@@ -344,7 +378,9 @@ def _mission_summary_dict(record: "MissionRecord") -> dict[str, Any]:
         "mission_id": record.mission_id,
         "agent_id": record.agent_id,
         "parent_mission_id": record.parent_mission_id,
-        "liveness": record.liveness,
+        # 7d4a3bd9 Fix 1: distinct unverified string when escalated.
+        "liveness": _render_liveness(record),
+        "completion_gate_escalated": record.completion_gate_escalated,
         "terminal_reason": record.terminal_reason,
         "epoch": epoch,
         "epoch_count": epoch if epoch is not None else 0,

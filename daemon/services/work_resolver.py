@@ -313,6 +313,18 @@ class WorkRecord:
     # ``to_payload``.
     outcome: str | None = None
     mission_ref: dict[str, Any] | None = None
+    # 7d4a3bd9 false-completion fix (2026-09-26) — Fix 1 unverified
+    # surface. True when the linked Instance row carries
+    # ``completion_gate_escalated=True`` (the gate ended the mission
+    # via ``terminal_after_bound`` without an attested completion —
+    # the completion is UNVERIFIED). Read-side consumers render the
+    # DISTINCT status string ``completed (gate escalated —
+    # unverified)`` (``daemon.constants.COMPLETION_GATE_ESCALATED_DISPLAY``)
+    # instead of plain ``completed`` when this flag is set AND the
+    # status is terminal-completed. ``False`` when the row has no
+    # linked instance or the lookup degraded (same fail-soft contract
+    # as ``mission_liveness``).
+    completion_gate_escalated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this :class:`WorkRecord` to a JSON-friendly dict.
@@ -391,6 +403,8 @@ class WorkRecord:
             # mission's liveness in a single payload.
             "outcome": self.outcome,
             "mission_ref": self.mission_ref,
+            # 7d4a3bd9 Fix 1 — unverified-surface flag (additive).
+            "completion_gate_escalated": self.completion_gate_escalated,
         }
 
 
@@ -1569,6 +1583,15 @@ class WorkResolverService:
             # branch on ``kind == "report"`` instead.
             job_type=None,
             mission_liveness=None,
+            # 7d4a3bd9 Fix 1 — postmortem flag off the joined Instance
+            # (defensive getattr: old test doubles / partial rows lack
+            # the column). Degraded to ``False`` when the instance is
+            # missing — same fail-soft contract as the identity fields.
+            completion_gate_escalated=(
+                bool(getattr(instance, "completion_gate_escalated", False))
+                if instance is not None
+                else False
+            ),
         )
 
     def _job_to_record(
@@ -1947,6 +1970,16 @@ class WorkResolverService:
                 mission_liveness=mission_liveness,
                 mission_id=mission_id,
                 agent_id=job.agent_id,
+            ),
+            # 7d4a3bd9 Fix 1 — postmortem flag off the (batched or
+            # lazily-looked-up) Instance row; defensive getattr for
+            # partial rows / test doubles. Degrades to ``False`` when
+            # the instance is unknown — same fail-soft contract as
+            # ``mission_liveness`` above.
+            completion_gate_escalated=(
+                bool(getattr(instance, "completion_gate_escalated", False))
+                if instance is not None
+                else False
             ),
         )
 

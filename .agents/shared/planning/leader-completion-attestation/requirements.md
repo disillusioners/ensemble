@@ -1348,3 +1348,62 @@ Superseded ACs (2026-09-19):
   from the leader prompt (``agents/leader/rule.md``) and from the
   tool docstring (``daemon/tools/attestation.py``). The new contract
   is taught in BOTH places + enforced by the gate.
+
+
+# SUPERSESSION ENTRY (2026-09-26, FINAL after amendments v1→v4) — incident 7d4a3bd9
+
+* **BOUND COUNTING UNCHANGED (user ruling v3 — supersedes the v1 decoupling proposal).**
+  Every deny counts toward the deny bound, timeouts included ("boundedness by simplicity").
+  The predicate `deny_bound_exceeded(denied_count, bound)` and ALL its consumers are
+  byte-identical to pre-amendment; every existing bound invariant pin passes UNMODIFIED.
+  NO total deny-event cap exists. Any AC from the v1 proposal (substantive-only counting,
+  total-cap-6) is DEAD — never landed.
+
+* **NEW — EXHAUSTION COMPOSITION GATE.** At bound exhaustion the node branches on the
+  epoch's deny-event composition (channel `attestation_any_substantive_deny`; substantive
+  := fused-judge verdict `not_complete`; timeout/error/unparsable/disabled = never-spoke;
+  reset with the ledger on attested allow / terminal):
+  * ≥1 substantive ⇒ judge SPOKE and was overridden ⇒ `terminal_after_bound` stands as
+    today (the fix-1 loud `completed (gate escalated — unverified)` terminal);
+  * ZERO substantive ⇒ NOT COMPLETE, NO terminal write from timeouts alone — the deny+nudge
+    cycle CONTINUES (the committed counter may rise past the bound). Exits:
+    `attest_completion` / finish the work / ask the user.
+
+* **⚠ C1 SUPERSESSION (user ruling) — for the never-spoke case ONLY.** The all-timeout
+  continuation is deliberately unbounded (rare at the 180s timeout; exits exist;
+  false-positive cost accepted). C1's strict terminal-fallback boundedness REMAINS FULLY
+  INTACT for the judge-spoke path. Recorded in decisions.md D-entry 2026-09-26 so future
+  review does not flag it as a C1 violation.
+
+* **NEW — DIRECTIVE NUDGE on no-progress repeat denies** (≥ 2nd consecutive deny ∧ zero
+  new tool calls since the prior deny snapshot): the directive body replaces the standard
+  in-graph deny nudge (verbatim in decisions.md + docs/setup.md). HOLD/reminder machinery
+  unchanged.
+
+* **NEW — UNVERIFIED-COMPLETION SURFACE.** `completion_gate_escalated=True` ⇒ every read
+  surface renders `completed (gate escalated — unverified)` instead of plain `completed`;
+  the observer ties the escalated terminal to the episode's REAL job (already-finalized
+  witness) instead of `no_job`.
+
+* **NEW — JUDGE TIMEOUT DEFAULT 180s** (v4; journey 25→300→180): env tunable, min clamp
+  5.0s unchanged; worst case retry-once = 2×180s = 360s per turn-end evaluation
+  (user-accepted).
+
+* **RE-CONTRACTED — scanner fields on every evaluated path (fix 5a).** `final_word_count`
+  / `length_trigger` are REAL measurements of the final AIMessage on ALL evaluated paths.
+  Prior pins asserting dataclass defaults on DENIED/non-delegated rows encoded the
+  Episode-A defect shape and are superseded. The marker scan remains routing-gated.
+
+* **ONE PIN UPDATED BY RULING:** `tests/unit/test_attestation_judge_wiring.py::
+  test_judge_not_called_on_terminal_after_bound_path` — never-spoke exhaustion no longer
+  terminalizes; it continues deny+nudge with the counter rising past the bound, judge
+  still never invoked (see decisions.md for the full before/after).
+
+Files: `daemon/services/attestation_gate.py` (5a stamp + docstring ruling notes),
+`daemon/services/attestation_judge_timeout_resolver.py` (180s),
+`daemon/graph.py` (any-substantive channel + exhaustion gate + directive nudge + channel
+resets), `daemon/constants.py` (`COMPLETION_GATE_ESCALATED_DISPLAY`),
+`daemon/services/work_resolver.py` / `daemon/routers/jobs_crud.py` /
+`daemon/services/work_notifier.py` / `daemon/services/mission_resolver.py` /
+`daemon/tools/missions.py` / FE job-card + job model (unverified surface),
+`daemon/services/job_feedback_observer.py` (already-finalized witness + escalation flag).

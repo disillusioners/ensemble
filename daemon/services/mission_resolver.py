@@ -319,6 +319,17 @@ class MissionRecord:
     # no fabricated suffix).
     title: str | None = None
     initiative_preview: str | None = None
+    # 7d4a3bd9 false-completion fix (2026-09-26) — Fix 1 unverified
+    # surface. True when the instance row carries
+    # ``completion_gate_escalated=True`` (the attestation gate ended
+    # the mission via ``terminal_after_bound`` — completion
+    # UNVERIFIED). Read-side renderers surface the DISTINCT liveness
+    # string ``completed (gate escalated — unverified)``
+    # (``daemon.constants.COMPLETION_GATE_ESCALATED_DISPLAY``)
+    # instead of plain ``completed``; the canonical ``liveness``
+    # field above stays untouched so filters/await logic keep
+    # matching the canonical vocabulary.
+    completion_gate_escalated: bool = False
 
 
 @dataclass
@@ -881,6 +892,13 @@ class MissionResolver:
             ),
             initiative_preview=_initiative_preview(
                 instance.initiative_message
+            ),
+            # 7d4a3bd9 Fix 1 — postmortem flag off the already-loaded
+            # row (zero extra queries; the column rides the existing
+            # Instance SELECT). Defensive getattr: partial rows /
+            # older test doubles without the column read as False.
+            completion_gate_escalated=bool(
+                getattr(instance, "completion_gate_escalated", False)
             ),
         )
 

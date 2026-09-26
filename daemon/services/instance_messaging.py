@@ -432,6 +432,7 @@ def _build_graph_input(
     prepended_msgs: list[HumanMessage] | None = None,
     message_source: str | None = None,
     image_refs: list[str] | None = None,
+    fresh_episode_attestation_reset: bool = False,
 ) -> dict[str, list[HumanMessage]]:
     """Build the LangGraph ``graph_input`` dict, prepending the persistent context block.
 
@@ -553,23 +554,44 @@ def _build_graph_input(
     # through the checkpoint (A1/A3 end-to-end are the proof; the
     # legacy block list surface is preserved by the serializer union
     # in ``daemon/utils.py:113-137``+``:252+``).
+    #
+    # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak):
+    # ``fresh_episode_attestation_reset=True`` stamps a sentinel on
+    # the user message's ``additional_kwargs`` so the
+    # ``attestation_gate_node`` clears the SessionState channels
+    # (substantive + progress) BEFORE the next bound exhaustion can
+    # read a stale True. The DB columns (attestation_denied_count,
+    # completion_gate_escalated) are cleared in
+    # ``_prepare_enqueued_message`` (same identity) but the channels
+    # are checkpointed — without this sentinel a prior episode's
+    # stamped True would leak into the new episode and wrongly
+    # terminalize the FIRST bound exhaustion under v3.
     stamped_kwargs = _stamped_additional_kwargs(message_source)
     refs_fragment = _image_refs_kwarg(image_refs)
+    extra_kwargs: dict[str, Any] = {}
+    if fresh_episode_attestation_reset:
+        extra_kwargs["fresh_episode_attestation_reset"] = True
     if stamped_kwargs is not None:
         user_message = HumanMessage(
             content=content,
             id=message_id,
-            additional_kwargs={**stamped_kwargs, **refs_fragment},
+            additional_kwargs={
+                **stamped_kwargs,
+                **refs_fragment,
+                **extra_kwargs,
+            },
         )
-    elif refs_fragment:
+    elif refs_fragment or extra_kwargs:
         # Refs-only path — user/API delivery carrying the display
-        # channel. ``HumanMessage`` requires additional_kwargs to be a
-        # non-None dict, so we conditionally attach (byte-identical
-        # entry when image_refs is None — pre-feature shape).
+        # channel + / or the fresh-episode sentinel. ``HumanMessage``
+        # requires additional_kwargs to be a non-None dict, so we
+        # conditionally attach (byte-identical entry when
+        # image_refs is None AND no reset sentinel — pre-feature
+        # shape).
         user_message = HumanMessage(
             content=content,
             id=message_id,
-            additional_kwargs=refs_fragment,
+            additional_kwargs={**refs_fragment, **extra_kwargs},
         )
     else:
         # Byte-identical to the pre-feature shape: no additional_kwargs
@@ -722,6 +744,19 @@ class _PreparedEnqueueContext(NamedTuple):
     # for the default (non-defer) path — every existing caller that
     # does not pass ``is_deferred`` is unaffected.
     is_deferred: bool
+    # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak): True
+    # when this enqueue is a fresh-episode revival (priority==1 +
+    # HUMAN + prior terminal status). The caller threads this into
+    # ``_build_graph_input`` so the new user message carries the
+    # ``fresh_episode_attestation_reset`` sentinel and the
+    # ``attestation_gate_node`` clears the SessionState channels on
+    # the FIRST post-revival turn. Without this sentinel the channels
+    # would leak from the prior episode via checkpoint and the v3
+    # exhaustion composition gate would wrongly terminalize a
+    # never-spoke arc on the new episode's first bound exhaustion.
+    # NamedTuple requires defaults on trailing fields — kept here so
+    # the fresh-episode flag rides at the tail.
+    is_fresh_episode_user_message: bool = False
 
 
 class ActivityCallbackHandler(BaseCallbackHandler):
@@ -1682,6 +1717,15 @@ class InstanceMessagingService:
 
         status_changed_to_running = False
         is_idle_to_running = False
+        # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak):
+        # bound to False by default; set to True in the
+        # is_terminal_revival block when a fresh-episode revival is
+        # detected. Defined at the top of the function so the final
+        # ``_PreparedEnqueueContext`` construction reads it
+        # unconditionally (the variable was originally inside an
+        # ``if is_terminal_revival:`` branch and shadowed on the
+        # IDLE / WAITING_CHILDREN path).
+        is_fresh_episode_user_message = False
         instance_agent_id: str | None = None
         previous_status: str | None = None
         # A deferred-pause race guard may intentionally omit the Task while
@@ -1969,6 +2013,25 @@ class InstanceMessagingService:
                         if is_fresh_episode_user_message:
                             instance.attestation_denied_count = 0
                             instance.completion_gate_escalated = False
+                            # 7d4a3bd9 reviewer-flagged A1 (2026-09-26,
+                            # stale-flag leak): the SessionState
+                            # channels (substantive + progress) are
+                            # checkpointed per-instance and survive
+                            # the DB-column clears above. Without an
+                            # explicit reset on the fresh-episode
+                            # boundary, a prior episode that
+                            # stamped ``attestation_any_substantive_
+                            # deny=True`` would leak into the new
+                            # episode and wrongly terminalize the
+                            # FIRST bound exhaustion under v3 (the
+                            # exhaustion composition gate reads the
+                            # channel and would see substantive
+                            # carried over from the prior episode —
+                            # the never-spoke case would wrongly
+                            # terminalize). The channels are reset
+                            # HERE — same identity as the DB-column
+                            # reset — so the new episode starts with
+                            # both DB and SessionState clean.
                             logger.info(
                                 f"Attestation ledger reset on fresh-episode "
                                 f"revive: instance={instance_id[:8]}... "
@@ -2034,6 +2097,12 @@ class InstanceMessagingService:
             task_id=task_id,
             work_id=work_id,
             is_deferred=is_deferred,
+            # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag
+            # leak): thread the fresh-episode flag through the
+            # prepared context so the user-message sentinel can be
+            # stamped at ``_build_graph_input`` time (see the helper's
+            # ``fresh_episode_attestation_reset`` parameter).
+            is_fresh_episode_user_message=is_fresh_episode_user_message,
         )
 
     async def enqueue_message(
@@ -3967,6 +4036,15 @@ class InstanceMessagingService:
                         prepended_msgs=leftover_fifo_msgs or None,
                         message_source=message_source,
                         image_refs=image_refs,
+                        # 7d4a3bd9 reviewer-flagged A1 (2026-09-26,
+                        # stale-flag leak): the fresh-episode revival
+                        # flag is a property of the ENQUEUE (priority
+                        # + msg_type + previous_status), not the
+                        # graph-input shape — propagate it identically
+                        # on every retry-with-checkpoint call site so
+                        # the user message always carries the
+                        # sentinel when this is a fresh episode.
+                        fresh_episode_attestation_reset=ctx.is_fresh_episode_user_message,
                     )
                 else:
                     # Pure checkpoint resume (silent mode or no content)
@@ -3979,6 +4057,7 @@ class InstanceMessagingService:
                     prepended_msgs=leftover_fifo_msgs or None,
                     message_source=message_source,
                     image_refs=image_refs,
+                    fresh_episode_attestation_reset=ctx.is_fresh_episode_user_message,
                 )
         else:
             # First attempt - add message to conversation, with the
@@ -3993,6 +4072,12 @@ class InstanceMessagingService:
             # prepends pairing placeholders at position 0 to produce
             # the final end-to-end order
             # ``[placeholders?] + persistent + leftovers + user``.
+            #
+            # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag
+            # leak): the fresh-episode sentinel rides the user message
+            # so the gate node clears the SessionState channels on the
+            # FIRST post-revival turn (see the ``fresh_episode_
+            # attestation_reset`` parameter on ``_build_graph_input``).
             content = _build_message_content(message, images)
             graph_input = _build_graph_input(
                 content, message_id,
@@ -4000,6 +4085,7 @@ class InstanceMessagingService:
                 prepended_msgs=leftover_fifo_msgs or None,
                 message_source=message_source,
                 image_refs=image_refs,
+                fresh_episode_attestation_reset=ctx.is_fresh_episode_user_message,
             )
 
         # ── D2 seam drain — post-build phase ─────────────────────────────

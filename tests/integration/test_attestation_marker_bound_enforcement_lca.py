@@ -54,7 +54,10 @@ from daemon.services.attestation_judge_resolver import (
 from daemon.services.attestation_resolver import (
     reset_attestation_resolver_for_tests,
 )
-from daemon.graph import create_attestation_gate_node
+from daemon.graph import (
+    ATTESTATION_ANY_SUBSTANTIVE_KEY,
+    create_attestation_gate_node,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -155,12 +158,37 @@ def test_path_a_at_bound_escalates_without_nudge(monkeypatch, caplog):
     a nudge — the unbounded loop. Post-fix it MUST mirror ``decide()``
     step (6): terminal_after_bound, counter reset via
     ``set_escalated_and_reset``, operator event emitted, ZERO nudge.
+
+    7d4a3bd9 amendment v3 (2026-09-26, user ruling) — RE-CONTRACTED.
+    The original pin asserted "at bound → terminal, escalation write"
+    for any path-a/marker trip at bound. Under v3 the exhaustion
+    composition gate withholds the terminal when the epoch carries
+    ZERO substantive verdicts — and on this fixture the bound check
+    fires BEFORE the judge plan (budget parity — judge never invoked
+    on the exhaustion evaluation), so the epoch is never-spoke by
+    construction. To exercise the FIX-1 bound-enforcement path under
+    v3 the test seeds the epoch as judge-SPOKE
+    (``attestation_any_substantive_deny=True`` in the state), exactly
+    as a real epoch reaches bound after a ``not_complete`` deny. The
+    terminal stands; the escalation write runs; no nudge. The
+    never-spoke shape (the same test with the channel absent) is
+    pinned separately in
+    ``tests/unit/test_lca_false_complete_fixes.py::TestAllTimeoutArcNeverSpoke``
+    — terminal withheld, deny+nudge continues, counter rises past the
+    bound. Flagged as **UPDATED BY USER RULING** per the commission.
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _judge_incomplete)
 
     node, _manager, ledger = _make_node(
         instance_id="fix1-path-a-bound", denied_count=3
     )
+    state = _marker_state(
+        "Awaiting your reply. Ending turn, "
+        "will continue after your reply."
+    )
+    # v3 ruling: seed the judge-spoke epoch so the composition gate
+    # does not withhold the terminal.
+    state[ATTESTATION_ANY_SUBSTANTIVE_KEY] = True
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
     ), caplog.at_level(
@@ -169,10 +197,7 @@ def test_path_a_at_bound_escalates_without_nudge(monkeypatch, caplog):
     ):
         result = asyncio.run(
             node(
-                _marker_state(
-                    "Awaiting your reply. Ending turn, "
-                    "will continue after your reply."
-                ),
+                state,
                 config={"configurable": {"thread_id": "fix1-path-a-bound"}},
             )
         )
@@ -238,32 +263,48 @@ def test_path_a_exactly_three_nudges_then_terminal(monkeypatch, caplog):
     Four consecutive marker-triggered turn-ends with the counter
     climbing 0 → 1 → 2 → 3: the first three deny+nudge; the fourth
     (3 + 1 > 3) escalates. No fifth nudge exists anywhere.
+
+    7d4a3bd9 amendment v3 (2026-09-26, user ruling) — RE-CONTRACTED.
+    The original pin asserted that at-bound path-a escalates with a
+    zero-substantive-verdict epoch. Under v3 the composition gate
+    withholds the terminal in that case. To preserve the 6a0d60c9
+    acceptance (the FIX-1 bound-enforcement guarantee) the test seeds
+    each iteration's epoch as judge-SPOKE — the first three denies
+    stamp the substantive channel via the judge mock, and the
+    checkpointed state carries the channel forward (mirroring real
+    LangGraph state). The terminal stands on the 4th iteration; the
+    never-spoke shape is pinned separately in
+    ``tests/unit/test_lca_false_complete_fixes.py``. Flagged as
+    **UPDATED BY USER RULING** per the commission.
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _judge_incomplete)
 
     results = []
+    channel_state: dict = {}
     for denied_count in (0, 1, 2, 3):
         node, _manager, ledger = _make_node(
             instance_id="fix1-loop-shape", denied_count=denied_count
         )
+        state = _marker_state("Ending turn, awaiting go/no-go.")
+        state.update(channel_state)
         with caplog.at_level(logging.INFO, logger="daemon.graph"):
-            results.append(
-                (
-                    asyncio.run(
-                        node(
-                            _marker_state(
-                                "Ending turn, awaiting go/no-go."
-                            ),
-                            config={
-                                "configurable": {
-                                    "thread_id": "fix1-loop-shape"
-                                }
-                            },
-                        )
-                    ),
-                    ledger,
+            result = asyncio.run(
+                node(
+                    state,
+                    config={
+                        "configurable": {
+                            "thread_id": "fix1-loop-shape"
+                        }
+                    },
                 )
             )
+            # Carry the substantive channel forward across iterations
+            # (real LangGraph checkpoint semantics).
+            if ATTESTATION_ANY_SUBSTANTIVE_KEY in result:
+                channel_state[ATTESTATION_ANY_SUBSTANTIVE_KEY] = result[
+                    ATTESTATION_ANY_SUBSTANTIVE_KEY
+                ]
+            results.append((result, ledger))
 
     # Turns 1-3: deny + nudge (route back to agent).
     for i, (result, ledger) in enumerate(results[:3]):
@@ -296,16 +337,31 @@ def test_path_a_exactly_three_nudges_then_terminal(monkeypatch, caplog):
 
 
 def test_path_d_timeout_at_bound_escalates_without_nudge(monkeypatch, caplog):
-    """Path (d) via judge TIMEOUT at the bound → TERMINAL, not deny."""
+    """Path (d) via judge TIMEOUT at the bound → TERMINAL, no nudge.
+
+    7d4a3bd9 amendment v3 (2026-09-26, user ruling) — RE-CONTRACTED.
+    The original pin asserted "at bound → terminal" for a path-d
+    timeout. Under v3 the composition gate withholds the terminal when
+    the epoch carries ZERO substantive verdicts — and a TIMEOUT never
+    speaks, so this fixture is the never-spoke case by construction.
+    To exercise the FIX-1 bound-enforcement path under v3 the test
+    seeds the epoch as judge-SPOKE
+    (``attestation_any_substantive_deny=True`` in the state), so the
+    composition gate does not withhold. The terminal stands; the
+    escalation write runs; no nudge. The never-spoke timeout path is
+    pinned in ``tests/unit/test_lca_false_complete_fixes.py``. Flagged
+    as **UPDATED BY USER RULING** per the commission."""
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _judge_timeout)
 
     node, _manager, ledger = _make_node(
         instance_id="fix1-path-d-timeout", denied_count=3
     )
+    state = _marker_state("Ending turn, awaiting your reply.")
+    state[ATTESTATION_ANY_SUBSTANTIVE_KEY] = True
     with caplog.at_level(logging.INFO, logger="daemon.graph"):
         result = asyncio.run(
             node(
-                _marker_state("Ending turn, awaiting your reply."),
+                state,
                 config={
                     "configurable": {"thread_id": "fix1-path-d-timeout"}
                 },
@@ -329,6 +385,15 @@ def test_path_d_wrapper_fault_at_bound_escalates_without_nudge(
     The defense-in-depth ``except`` around the marker-path judge call
     routes conservatively per the SAME R2 inputs — and that
     conservative route now consults the shared bound predicate too.
+
+    7d4a3bd9 amendment v3 (2026-09-26, user ruling) — RE-CONTRACTED.
+    Same fix as ``test_path_d_timeout_at_bound_escalates_without_nudge``:
+    the original pin asserted "at bound → terminal" for a path-d
+    wrapper fault; under v3 the composition gate withholds the terminal
+    in the never-spoke case (wrapper fault never speaks). Test seeds
+    the epoch as judge-SPOKE so the FIX-1 bound-enforcement contract
+    holds. The never-spoke wrapper-fault path is pinned separately.
+    Flagged as **UPDATED BY USER RULING** per the commission.
     """
     async def _wrapper_fault(bundle_text, *, config, timeout_s=None):
         raise RuntimeError("wrapper fault at public entry-point")
@@ -340,10 +405,12 @@ def test_path_d_wrapper_fault_at_bound_escalates_without_nudge(
     node, _manager, ledger = _make_node(
         instance_id="fix1-path-d-fault", denied_count=3
     )
+    state = _marker_state("Ending turn, awaiting your reply.")
+    state[ATTESTATION_ANY_SUBSTANTIVE_KEY] = True
     with caplog.at_level(logging.INFO, logger="daemon.graph"):
         result = asyncio.run(
             node(
-                _marker_state("Ending turn, awaiting your reply."),
+                state,
                 config={
                     "configurable": {"thread_id": "fix1-path-d-fault"}
                 },

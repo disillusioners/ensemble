@@ -857,7 +857,21 @@ def test_judge_not_called_on_live_descendants_path(monkeypatch):
 
 
 def test_judge_not_called_on_terminal_after_bound_path(monkeypatch, caplog):
-    """``denied_count + 1 > bound`` → TERMINAL_AFTER_BOUND, judge never invoked."""
+    """7d4a3bd9 amendment v3 RE-CONTRACT (2026-09-26).
+
+    UPDATED BY USER RULING — this pin asserted that bound exhaustion
+    with a never-spoke judge (no substantive ``not_complete`` verdict
+    in the epoch, channel absent) terminalizes: END routing, escalation
+    write, no increment. Under the v3 ruling the composition gate
+    withholds the terminal when the judge NEVER SPOKE: NOT COMPLETE,
+    no terminal write, the deny+nudge cycle CONTINUES (every deny
+    still counts — the committed counter rises past the bound). The
+    judge-spoke exhaustion path (channel True ⇒ terminal stands) is
+    pinned in ``tests/unit/test_lca_false_complete_fixes.py``.
+
+    What is UNCHANGED and still pinned here: the judge LLM is never
+    invoked on the exhaustion evaluation itself (budget parity — the
+    pre-judge bound check fires before any judge plan)."""
     calls = []
 
     async def must_not_be_called(config, user_payload, *, timeout_s):
@@ -875,7 +889,7 @@ def test_judge_not_called_on_terminal_after_bound_path(monkeypatch, caplog):
     manager.send_message = MagicMock()
 
     ledger = MagicMock()
-    ledger.increment.return_value = 1
+    ledger.increment.return_value = 4
     ledger.reset.return_value = True
     # ``set_escalated_and_reset`` returns True on success — the gate
     # treats False/None as a degradation-to-allow signal and we want
@@ -884,7 +898,10 @@ def test_judge_not_called_on_terminal_after_bound_path(monkeypatch, caplog):
     ledger.get.return_value = 0
 
     config = build_gate_config("judge-tab-it", GateSettings("enforce", 3, 3))
-    # denied_count=3 + bound=3 ⇒ 3+1 > 3 ⇒ TERMINAL_AFTER_BOUND.
+    # denied_count=3 + bound=3 ⇒ 3+1 > 3 ⇒ bound exhausted — but the
+    # epoch carries ZERO substantive verdicts (channel absent) ⇒ the
+    # v3 ruling withholds the terminal: decision re-replaced as DENIED,
+    # deny+nudge continues, counter rises past the bound.
     node = create_attestation_gate_node(
         config,
         GateSettings("enforce", 3, 3),
@@ -901,24 +918,34 @@ def test_judge_not_called_on_terminal_after_bound_path(monkeypatch, caplog):
             )
         )
 
-    # Judge never invoked — TERMINAL_AFTER_BOUND is a distinct enum
-    # value, not DENIED, so the judge block never runs.
+    # Judge never invoked — UNCHANGED: the pre-judge bound check fires
+    # before any judge plan (budget parity survives the ruling).
     assert calls == []
-    # END routing — no nudge, no attestation_route=agent.
-    assert "messages" not in result
-    assert result["attestation_route"] is None
-    # Ledger write on the escalation path:
-    # ``safe_set_escalated_and_reset`` was called; ``safe_increment``
-    # was NOT (the bound-exceeded branch bypasses the increment).
-    ledger.set_escalated_and_reset.assert_called_once()
-    ledger.increment.assert_not_called()
+    # RE-CONTRACTED (v3 ruling): deny+nudge continues — agent routing,
+    # a nudge message rides the return, and the any-substantive channel
+    # stays False (nothing stamped — the judge never spoke).
+    assert result["attestation_route"] == "agent"
+    assert result["messages"][0].additional_kwargs["attestation_nudge"] is True
+    assert result["attestation_any_substantive_deny"] is False
+    # RE-CONTRACTED (v3 ruling): the DENIED branch persists the deny —
+    # ``safe_increment`` runs (the committed counter rises past the
+    # bound: 3 → 4) and ``set_escalated_and_reset`` is NOT called
+    # (no terminal write from a never-spoke-judge epoch).
+    ledger.increment.assert_called_once()
+    ledger.set_escalated_and_reset.assert_not_called()
+    # The withheld-terminal audit row is greppable.
+    assert any(
+        "leader_completion_gate_bound_exhausted_never_spoke" in rec.getMessage()
+        for rec in caplog.records
+    )
     ledger.reset.assert_not_called()
 
-    # Log fields: the terminal_after_bound observability event fired;
-    # the judge log line did NOT.
+    # Log fields (RE-CONTRACTED v3): the withheld-terminal audit row
+    # fired; the terminal_after_bound row did NOT (no escalation from a
+    # never-spoke-judge epoch); the judge log line did NOT.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "event=leader_completion_gate_terminal_after_bound" in log_text
-    assert "completion_gate_escalated=true" in log_text
+    assert "event=leader_completion_gate_bound_exhausted_never_spoke" in log_text
+    assert "event=leader_completion_gate_terminal_after_bound" not in log_text
     assert (
         "event=leader_completion_gate_fused_judge " not in log_text
         and "event=leader_completion_gate_fused_judge\n" not in log_text
@@ -1127,7 +1154,8 @@ def test_boot_log_disabled_when_env_zero(caplog, monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────────
 # Resolved timeout FLOWS to the judge call — Pattern C env-tunability
 # (operator tuning decision 2026-09-07 grounded in the tester live-LLM
-# probe; default 25.0s, min clamp 5.0s)
+# probe; default was 25.0s, 180.0s since the 2026-09-26 7d4a3bd9
+# amendment; min clamp 5.0s)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1147,7 +1175,7 @@ class _TimeoutCapturingConfig:
     Using the resolver directly (not the constant) is the point of the
     test — a refactor that hardcodes the constant back into the call
     site (re-introducing the bug class this resolver exists to fix)
-    would leave the wait_for cap at 25.0s regardless of the env value,
+    would leave the wait_for cap at 180.0s regardless of the env value,
     and the test would fail on the ``timeout_s`` assertion.
 
     Mirrors the ``_FakeCfg`` stub shape at
@@ -1228,7 +1256,8 @@ def test_resolved_timeout_flows_to_judge_call(monkeypatch):
     * the ``timeout_s`` it received (the ``asyncio.wait_for`` cap +
       ``wall_clock_cap_s`` for the HA facade — the operator-visible
       timeout); this MUST be the resolved value ``17.0``, not the
-      default ``25.0`` and not the prior hardcoded ``10.0``;
+      default ``180.0`` (2026-09-26 7d4a3bd9 amendment; was ``25.0``,
+      originally the hardcoded ``10.0``);
     * the derived ``judge_request_timeout`` (the W1 coupling — the
       per-attempt HTTP ``request_timeout`` passed to the LLM client).
       With ``config.llm.request_timeout`` set to a high value (e.g.
@@ -1281,10 +1310,10 @@ def test_resolved_timeout_flows_to_judge_call(monkeypatch):
 
 
 def test_resolved_timeout_default_when_env_unset(monkeypatch):
-    """With env unset, the default 25.0s flows to both seams.
+    """With env unset, the default 180.0s flows to both seams.
 
     Pins the "operator did not set the env" path — the runtime value
-    is :data:`DEFAULT_JUDGE_TIMEOUT_S` (25.0s, the operator tuning
+    is :data:`DEFAULT_JUDGE_TIMEOUT_S` (180.0s, the operator tuning
     decision default). A regression that dropped the resolver call
     would re-introduce the prior hardcoded 10.0s and fail this test.
     """
@@ -1316,8 +1345,8 @@ def test_resolved_timeout_default_when_env_unset(monkeypatch):
     ]
     asyncio.run(judge_mod.judge_fused_bundle_async("bundle text", config=cfg))
 
-    assert captured["timeout_s"] == 25.0
-    assert captured["request_timeout"] == 25.0
+    assert captured["timeout_s"] == 180.0
+    assert captured["request_timeout"] == 180.0
 
 
 def test_resolved_timeout_below_clamp_flows_clamp_to_seams(monkeypatch):

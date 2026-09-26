@@ -477,6 +477,16 @@ def deny_bound_exceeded(denied_count: int, bound: int) -> bool:
     ``event=leader_completion_gate_terminal_after_bound`` operator
     event + plain allow END) runs unchanged.
 
+    7d4a3bd9 amendment (2026-09-26, user ruling — predicate UNCHANGED):
+    the bound counts EVERY deny (timeouts included; "boundedness by
+    simplicity"). The ONLY 7d4a3bd9-derived behavioral gate lives in
+    the graph node's terminal branch: at exhaustion with ZERO
+    substantive (``not_complete``) verdicts among the epoch's deny
+    events — the judge never spoke — the terminal is WITHHELD and the
+    deny+nudge cycle continues (see ``ATTESTATION_ANY_SUBSTANTIVE_KEY``
+    in ``daemon/graph.py`` + decisions.md D-entry 2026-09-26). This
+    predicate itself is byte-identical to the pre-amendment helper.
+
     Args:
         denied_count: Current ``attestation_denied_count``.
         bound: Deny bound (D5, default 3).
@@ -563,6 +573,13 @@ def decide(
        ``denied_count + 1 > bound`` → :attr:`Decision.TERMINAL_AFTER_BOUND`
        with ``next_denied_count = 0`` (reset trigger 2; the same reset
        clears the escalated flag per ruling 2 — persistence is Phase 3).
+       7d4a3bd9 amendment (2026-09-26, user ruling): the bound counts
+       EVERY deny (timeouts included — "boundedness by simplicity").
+       The never-spoke-judge case is gated in the graph node's terminal
+       branch (the ``attestation_any_substantive_deny`` channel): zero
+       substantive (``not_complete``) verdicts among the epoch's deny
+       events ⇒ the terminal is withheld and the deny+nudge cycle
+       continues (``daemon/graph.py``).
     5. otherwise → :attr:`Decision.DENIED` with
        ``next_denied_count = denied_count + 1`` and
        ``should_inject_nudge = True``.
@@ -733,6 +750,14 @@ def decide(
     # the SHARED helper ``deny_bound_exceeded`` — the fused path's
     # allow→deny conversion in graph.py consults the SAME predicate so
     # the bound backstop can never be bypassed.
+    # 7d4a3bd9 amendment (2026-09-26, user ruling): the bound counts
+    # EVERY deny (timeouts included — "boundedness by simplicity").
+    # The never-spoke-judge case is gated in the graph node's terminal
+    # branch (the ``attestation_any_substantive_deny`` channel): zero
+    # substantive (``not_complete``) verdicts among the epoch's deny
+    # events means the terminal is withheld there and the deny+nudge
+    # cycle continues — the decision this function returns is still
+    # the canonical TERMINAL_AFTER_BOUND at the bound.
     if deny_bound_exceeded(denied_count, bound):
         return GateDecision(
             decision=Decision.TERMINAL_AFTER_BOUND,
@@ -1424,6 +1449,31 @@ def evaluate(
         # forensic-only (NOT in the canonical 17-field schema) but the
         # graph node reads them to drive the reminder injection
         # (post-evaluate path).
+        # 7d4a3bd9 FIX-5a (2026-09-26): the length scan now runs on
+        # EVERY evaluated path and its REAL values are stamped here —
+        # previously ``final_word_count`` / ``length_trigger`` were
+        # stamped ONLY inside the §(iii.b) routing-gated block, so
+        # every other path (DENIED / TERMINAL / non-delegated allows /
+        # answer-pending / attested) logged the DATACLASS DEFAULTS
+        # (``final_word_count=0 length_trigger=False``) and forensics
+        # misread them as scanner zeros. Episode A (leader 7d4a3bd9
+        # 17:39:15Z): a real 2313-char final AIMessage logged
+        # ``final_word_count=0 length_trigger=False`` because the row
+        # was a NON-DELEGATED allow (``attestation_required=False`` —
+        # the D10/R4 mirror skips the §(iii.b) block) printing
+        # defaults. NOT the window hypothesis (the attestation scan's
+        # ``messages_scanned=3`` proves the 3-AIMessage tail was in
+        # hand — the same list the length walk sees) and NOT marker
+        # scoping (the count has no marker anchor). The stamp is
+        # routing-safe: the predicate's Term-1 short-circuits before
+        # ``b_fires`` can consume the values on non-delegated paths,
+        # and on deny rows the band precedence (deny > marker > a)
+        # already resolves to BAND_DENY. The scan is a cheap pure
+        # word-count — the cost gate (which signals may ARM a judge)
+        # stays exactly where it was.
+        length_result = scan_for_short_final_ai(
+            messages, mode_resolver.window
+        )
         result = replace(
             result,
             scanner_window_truncated=scan.window_truncated,
@@ -1446,6 +1496,10 @@ def evaluate(
             final_ai_is_attest_call=final_ai_is_attest_call,
             is_bundled_call=is_bundled_call,
             attestation_index=attestation_index,
+            # FIX-5a: REAL length-signal values on every evaluated
+            # path (see the block comment above).
+            length_trigger=length_result.length_trigger,
+            final_word_count=length_result.final_word_count,
         )
 
         # (iii.b) Source-B activation-signal scans (2026-09-11,
@@ -1494,7 +1548,7 @@ def evaluate(
             # evaluation entirely.
             and result.attestation_required
         ):
-            # (iii.c.1) — Mid-work marker scan (2026-09-11, incident
+            # (iii.c.1) — Mid work marker scan (2026-09-11, incident
             # b08f40fe): cheap substring match over the tail
             # AIMessages.
             #
@@ -1504,10 +1558,16 @@ def evaluate(
             # brevity). The predicate composes the two halves via OR
             # inside ``b_fires`` — either signal arming (with
             # busy_descendants == 0) fires the marker band.
+            #
+            # 7d4a3bd9 FIX-5a (2026-09-26): the LENGTH scan itself was
+            # hoisted above (it now runs on every evaluated path so
+            # the log row never prints default zeros); this block
+            # reuses that precomputed result. The ROUTING semantics of
+            # this block are unchanged: what is gated here is which
+            # signals may ARM the marker/A band and the judge — the
+            # ``b_values`` consumption (§(vi)) reads the same stamped
+            # fields as before on every path this block used to cover.
             marker_result = scan_for_mid_work_markers(
-                messages, mode_resolver.window
-            )
-            length_result = scan_for_short_final_ai(
                 messages, mode_resolver.window
             )
             result = replace(

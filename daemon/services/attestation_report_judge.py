@@ -50,8 +50,9 @@ intent); leaving it unset uses the main ``OPENAI_MODEL``.
 Bounds
 ------
 
-* Timeout: :data:`JUDGE_TIMEOUT_S` seconds (default 25.0; env-tunable
-  via ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`` per Pattern C
+* Timeout: :data:`JUDGE_TIMEOUT_S` seconds (default 180.0 since the
+  2026-09-26 7d4a3bd9 amendment; env-tunable via
+  ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`` per Pattern C
   restart-read resolver at
   :mod:`daemon.services.attestation_judge_timeout_resolver`; minimum
   clamp 5.0s — values below clamp to 5.0 with a one-shot WARN; restart
@@ -60,7 +61,10 @@ Bounds
   defense (the same pattern as ``daemon/services/keyword_extraction.py:
   405-408``). The default was bumped from 10.0s → 25.0s on 2026-09-07
   (operator tuning decision grounded in the tester live-LLM probe — see
-  ``docs/setup.md`` rationale).
+  ``docs/setup.md`` rationale) → 180.0s on 2026-09-26 (incident
+  7d4a3bd9: two 25s judge double-timeouts consumed deny slots and
+  drove a COMPLETED-UNVERIFIED escalation; user accepts the 2×180s
+  worst case for verdict reliability).
 * Input cap: the fused bundle arrives pre-capped (≤14000 chars,
   per-section 3000/6000/3000/2000 (U), id-redacted) from
   :func:`daemon.services.attestation_resolver_activation.assemble_fused_bundle`
@@ -362,8 +366,9 @@ async def _invoke_judge_llm(
     # mirroring the compaction-site precedent at ``daemon/manager.py:398``.
     # The ``resolved_timeout`` is the Pattern C cached value from
     # :mod:`daemon.services.attestation_judge_timeout_resolver`
-    # (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``, default 25.0s,
-    # min clamp 5.0s). The HA facade's ``wall_clock_cap_s`` bounds only
+    # (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``, default
+    # 180.0s since the 2026-09-26 7d4a3bd9 amendment, min clamp
+    # 5.0s). The HA facade's ``wall_clock_cap_s`` bounds only
     # BETWEEN attempts (``daemon/services/llm_failover.py:174``); a hung
     # FIRST attempt can pin the ``asyncio.to_thread`` worker because
     # ``asyncio.wait_for`` cannot cancel a to_thread worker — without a
@@ -470,8 +475,9 @@ class _AttemptOutcome(NamedTuple):
 # (``model_keywords`` fallback), per-attempt ``request_timeout`` binding
 # ``min(resolved_timeout, config.llm.request_timeout or resolved_timeout)``,
 # the Pattern C timeout resolver
-# (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``, default 25.0s, min
-# clamp 5.0s), and the HA failover facade. The kill-switch
+# (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``, default 180.0s
+# since the 2026-09-26 7d4a3bd9 amendment, min clamp 5.0s), and the
+# HA failover facade. The kill-switch
 # (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED``) is resolved at the
 # CALL SITE (the graph-node fused block) — before this function is ever
 # called.
@@ -490,7 +496,9 @@ class _AttemptOutcome(NamedTuple):
 # → conservative fail-safe deny (DP-5 posture unchanged). The retry
 # fits the existing budget sentinel (``entries==1 && attempts<=2``)
 # exactly like the unparsable retry. Worst-case wall-clock = 2 ×
-# ``timeout_s`` (e.g., 50.0s with the default 25.0s cap).
+# (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``, default 25.0s on 2026-09-07, raised to 180.0s on 2026-09-26 by the 7d4a3bd9 amendment)
+# ``JUDGE_TIMEOUT_S``. Total worst-case wall-clock = 2 ×
+# ``timeout_s`` (e.g., 360.0s with the 180.0s default cap).
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: Strict system prompt for the fused judge (single source of truth —
@@ -716,7 +724,8 @@ async def judge_fused_bundle_async(
         timeout_s: Wall-clock cap PER ATTEMPT. ``None`` (default) →
             resolve via the Pattern C cached-global
             (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_
-            TIMEOUT_S``, default 25.0s, min clamp 5.0s). Each retry
+            TIMEOUT_S``, default 180.0s since the 2026-09-26
+            7d4a3bd9 amendment, min clamp 5.0s). Each retry
             attempt receives its OWN timeout window; worst-case
             wall-clock = 2 × ``timeout_s``.
 

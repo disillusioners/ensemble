@@ -3930,6 +3930,38 @@ class SessionState(MessagesState):
     # return value) so checkpoint assertions and crash-replay tests can read
     # the denial count without scraping the message history.
     attestation_nudge_denied_count: int | None = None
+    # 7d4a3bd9 false-completion fix cycle (2026-09-26) — SessionState
+    # channels for the bound-exhaustion composition gate + the Fix-3
+    # directive-nudge progress snapshot. Both reset with the ledger
+    # (attested allow / terminal; the fresh-episode revive clears the
+    # DB columns inline and a new mission starts with absent channels).
+    # ``attestation_any_substantive_deny`` — True once ANY deny event
+    # of the current epoch carried a SUBSTANTIVE fused-judge verdict
+    # (``not_complete``; timeout / error / unparsable / disabled =
+    # the judge never spoke). Its ONLY use: gating the node's
+    # terminal branch at bound exhaustion —
+    #   * exhaustion WITH a substantive verdict ⇒ the judge SPOKE and
+    #     was overridden ⇒ ``terminal_after_bound`` stands (the fix-1
+    #     loud ``completed (gate escalated — unverified)`` surface);
+    #   * exhaustion with ZERO substantive verdicts ⇒ the judge NEVER
+    #     spoke ⇒ user ruling: NOT COMPLETE, NO terminal write — the
+    #     deny+nudge cycle simply continues (counting unchanged —
+    #     every deny counts; the counter may rise past the bound).
+    #     The leader's exits are the existing ones: attest_completion
+    #     (the deterministic trust path), finishing the work, or
+    #     asking the user. Deliberately unbounded-by-user-ruling for
+    #     this never-spoke case (C1 supersession note in
+    #     decisions.md); C1 stays fully intact for the judge-spoke
+    #     path.
+    attestation_any_substantive_deny: bool = False
+    # Fix 3 progress snapshot — the count of tool calls in the
+    # checkpointed history at the LAST deny. On a repeat deny with
+    # ZERO new tool calls since this snapshot, the node injects the
+    # DIRECTIVE nudge instead of the standard one. ``None`` = no
+    # prior deny snapshot (first deny — always standard).
+    # Checkpoint-durable by construction (derived from
+    # ``state["messages"]``, re-read each deny).
+    attestation_deny_progress_tools: int | None = None
     # Transient error marker carried in the checkpoint so a fail-open
     # evaluation remains visible across a crash/resume boundary.
     gate_exception_seen: bool = False
@@ -4743,6 +4775,100 @@ ATTESTATION_REMINDER_CAP: int = 2
 #: path that resets ``attestation_denied_count``).
 ATTESTATION_REMINDER_COUNT_KEY: str = "attestation_reminder_count"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7d4a3bd9 false-completion fix cycle (2026-09-26): exhaustion gate + Fix 3
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Incident 7d4a3bd9 Episode B: judge verdict not_complete consumed deny
+# slot 1 (the judge was RIGHT), then TWO judge double-timeouts consumed
+# slots 2+3, and the next evaluation fired ``terminal_after_bound`` —
+# the mission ended COMPLETED-UNVERIFIED with the user surface blind.
+# The pieces of this cycle that live here (final semantics, amendments
+# v1→v4):
+#
+# * **Bound counting UNCHANGED (user ruling — "boundedness by
+#   simplicity").** Every deny counts toward the bound, timeouts
+#   included; the shared predicate ``deny_bound_exceeded`` is
+#   byte-identical to pre-amendment.
+#
+# * **Exhaustion composition gate (this file's terminal branch).** At
+#   bound exhaustion the node branches on the epoch's deny-event
+#   composition, tracked by the ``ATTESTATION_ANY_SUBSTANTIVE_KEY``
+#   channel (True once any deny's fused-judge verdict was
+#   ``not_complete``; timeout / error / unparsable / disabled = the
+#   judge never spoke; reset with the ledger on attested allow /
+#   terminal):
+#   * exhaustion WITH ≥1 substantive verdict ⇒ the judge SPOKE and
+#     was overridden ⇒ ``terminal_after_bound`` stands exactly as
+#     today — the fix-1 loud ``completed (gate escalated —
+#     unverified)`` terminal.
+#   * exhaustion with ZERO substantive verdicts ⇒ user ruling: NOT
+#     COMPLETE, NO terminal write from timeouts alone — the
+#     deny+nudge cycle simply CONTINUES (the counter may rise past
+#     the bound, which is now correct). The leader's exits are the
+#     existing ones: ``attest_completion`` (the deterministic trust
+#     path — meta_bypass allow — which IS the fallback now), finish
+#     the remaining work, or ask the user. Deliberately
+#     unbounded-by-user-ruling for this never-spoke case (C1
+#     supersession note in decisions.md); C1 stays fully intact for
+#     the judge-spoke path.
+#
+# * **Fix 3 — directive nudge on no-progress repeat denies.** At each
+#   deny the node snapshots transcript progress (tool-call count in
+#   the checkpointed history → ``ATTESTATION_DENY_PROGRESS_KEY``). On
+#   a deny that is the >= 2nd consecutive deny (committed deny count
+#   >= 2 — every deny counts) AND has ZERO new tool calls since the
+#   prior deny snapshot, the DIRECTIVE nudge replaces the standard
+#   one. The HOLD / Final-Report-Reminder / reminder-cap machinery is
+#   NOT touched — this is the DENY nudge only.
+#
+#: State channel key — any-substantive-verdict flag for the exhaustion
+#: composition gate (see above).
+ATTESTATION_ANY_SUBSTANTIVE_KEY: str = "attestation_any_substantive_deny"
+#: State channel key — tool-call snapshot taken at the last deny.
+ATTESTATION_DENY_PROGRESS_KEY: str = "attestation_deny_progress_tools"
+
+#: Directive deny nudge (Fix 3, 2026-09-26) — CANONICAL VERBATIM BODY.
+#: Embedded exactly as specified by the 7d4a3bd9 fix cycle; the text is
+#: quoted verbatim in the phase report and docs/setup.md. Like the
+#: standard nudge it leads with a single non-blank bracketed header
+#: line so the LLM recognizes it as system-origin at parse time.
+ATTESTATION_DIRECTIVE_NUDGE_TEXT = (
+    "[Attestation Gate — Directive] The gate has denied completion "
+    "more than once and you have taken no new action since the last "
+    "denial. Choose exactly one now: (1) if the mission is truly "
+    "complete, call attest_completion and deliver your final report; "
+    "(2) if work remains, dispatch or finish it now (re-assign the "
+    "pending work to a child or do it yourself); (3) if you are "
+    "blocked or uncertain, ask the user for a decision. Continuing "
+    "to hold without action will end this mission as "
+    "COMPLETED-UNVERIFIED (gate escalated) once the judge delivers a "
+    "verdict."
+)
+
+
+def _count_episode_tool_calls(messages: Any) -> int:
+    """Count tool calls in the checkpointed history (Fix 3 progress signal).
+
+    Durable by construction: the count derives from
+    ``state["messages"]`` — the same checkpointed list the gate already
+    reads — so a checkpoint replay reproduces the identical snapshot
+    (the epoch-determinism discipline). An AIMessage carrying multiple
+    tool calls contributes one per call. History SHRINKS (LoopRepairer
+    RemoveMessage, reactive compaction) are absorbed by the caller's
+    ``<=`` comparison: a shrink can only ever read as "no new action",
+    which errs toward the directive nudge — the conservative direction
+    (the leader that looks stuck gets the stronger instruction).
+    """
+    msgs = list(messages) if messages else []
+    total = 0
+    for message in msgs:
+        calls = getattr(message, "tool_calls", None)
+        if calls:
+            total += len(calls)
+    return total
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Attest-first HOLD-state factory (2026-09-19, c5d9a38a remediation)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5133,6 +5259,46 @@ def create_attestation_gate_node(
 
     getter = denied_count_getter
 
+    def _consume_fresh_episode_reset(
+        payload: dict[str, Any], messages_local: list[Any]
+    ) -> dict[str, Any]:
+        """7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak).
+
+        If the user-message sentinel ``fresh_episode_attestation_reset``
+        is present on any HumanMessage in the evaluated turn's
+        history, merge the SessionState channel clears into the
+        payload so the prior episode's stamped True does NOT leak
+        into the new episode via checkpoint. The sentinel is
+        consumed on the FIRST post-revival turn — subsequent turns
+        see the cleared channels and read defaults.
+
+        The reset is additive: the existing return payload
+        (decision / route / channel writes from the deny or allow
+        branch) is preserved; only the two channel keys are
+        overridden to their defaults. This guarantees the
+        exhaustion composition gate on the new episode's first
+        bound exhaustion sees ``any_substantive_deny=False`` (the
+        never-spoke arc behaviour holds, even if the prior
+        episode had stamped True on a substantive deny).
+        """
+        sentinel_seen = any(
+            isinstance(m, HumanMessage)
+            and bool(
+                getattr(m, "additional_kwargs", None)
+                and m.additional_kwargs.get(
+                    "fresh_episode_attestation_reset"
+                )
+            )
+            for m in (messages_local or [])
+        )
+        if not sentinel_seen:
+            return payload
+        return {
+            **payload,
+            ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
+            ATTESTATION_DENY_PROGRESS_KEY: None,
+        }
+
     async def attestation_gate_node(
         state: Any, config: Optional[RunnableConfig] = None
     ) -> dict:
@@ -5144,6 +5310,14 @@ def create_attestation_gate_node(
             # gate fault like any other (fail-open allow + marker), not
             # a mission error.
             messages = state["messages"]
+            # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag
+            # leak): the fresh-episode sentinel may be present on a
+            # user message — capture it here so the wrapper helper
+            # (``_consume_fresh_episode_reset``) can merge the channel
+            # reset into the return payload. The actual sentinel
+            # detection is deferred to the wrapper because EVERY
+            # return path must honor it — the helper runs once after
+            # the body completes and applies the merge uniformly.
             # Review fix 4a: mirror the WRITE path's id resolution. When
             # the build-time thread_id is absent the wiring passes
             # ``denied_count_getter=None``; the predecessor defaulted the
@@ -5161,6 +5335,20 @@ def create_attestation_gate_node(
                 )
             else:
                 denied_count = 0
+            # 7d4a3bd9 exhaustion gate — read the any-substantive
+            # channel (True once any deny event of this epoch carried
+            # a ``not_complete`` fused-judge verdict). Consumed ONLY by
+            # the terminal branch below (bound exhaustion composition
+            # gate). Bool-coerced defensively.
+            if isinstance(state, dict):
+                _raw_substantive = state.get(
+                    ATTESTATION_ANY_SUBSTANTIVE_KEY, False
+                )
+            else:
+                _raw_substantive = getattr(
+                    state, ATTESTATION_ANY_SUBSTANTIVE_KEY, False
+                )
+            any_substantive_deny = bool(_raw_substantive)
             decision = await asyncio.to_thread(
                 evaluate,
                 effective_instance_id,
@@ -5439,6 +5627,22 @@ def create_attestation_gate_node(
                             # decision STAYS DENIED; the existing Phase-3
                             # ledger + nudge machinery denies (path-(d)-exact,
                             # Q1 parity).
+                            #
+                            # 7d4a3bd9 exhaustion gate (2026-09-26): a
+                            # SUBSTANTIVE verdict (``not_complete``)
+                            # stamps the any-substantive channel — the
+                            # epoch has heard the judge speak. Timeout /
+                            # error / unparsable / kill-switch OFF /
+                            # wrapper fault = the judge never spoke (no
+                            # stamp). The channel gates ONLY the node's
+                            # terminal branch at bound exhaustion;
+                            # counting itself is UNCHANGED (every deny
+                            # counts).
+                            if (
+                                fused_result is not None
+                                and fused_result.verdict == "not_complete"
+                            ):
+                                any_substantive_deny = True
                             resolver_outcome = _RES_DENY_NUDGE
                     elif act.band in (_RES_BAND_MARKER, _RES_BAND_A):
                         if (
@@ -5484,6 +5688,15 @@ def create_attestation_gate_node(
                                 # by construction; mirrors the legacy
                                 # (a)/(d)-nothing-pending conversion,
                                 # bound-enforced via the shared predicate).
+                                # 7d4a3bd9 exhaustion gate: a substantive
+                                # verdict stamps the any-substantive
+                                # channel (same contract as the deny-band
+                                # stamp above).
+                                if (
+                                    fused_result is not None
+                                    and fused_result.verdict == "not_complete"
+                                ):
+                                    any_substantive_deny = True
                                 if deny_bound_exceeded(
                                     decision.denied_count,
                                     gate_config.get(
@@ -5589,6 +5802,52 @@ def create_attestation_gate_node(
                 # no early return so deny-band keeps deny+nudge.
 
 
+        # ─── 7d4a3bd9 exhaustion composition gate (2026-09-26) ──────
+        # Runs BEFORE the Phase-3 ledger writes so a WITHHELD terminal
+        # flows through the ordinary DENIED ledger + nudge machinery.
+        #
+        # User ruling (amendments v3): at bound exhaustion the decision
+        # branches on the epoch's deny-event composition —
+        #   * ≥1 substantive (``not_complete``) verdict ⇒ the judge
+        #     SPOKE and was overridden ⇒ ``terminal_after_bound`` stands
+        #     exactly as today (the fix-1 loud
+        #     ``completed (gate escalated — unverified)`` terminal).
+        #   * ZERO substantive verdicts (all timeouts / errors /
+        #     unparsable / judge-disabled — the judge NEVER spoke) ⇒
+        #     NOT COMPLETE, NO terminal write from timeouts alone: the
+        #     decision is re-replaced as DENIED and the deny+nudge
+        #     cycle CONTINUES. Counting is UNCHANGED — every deny
+        #     counts, and the committed counter may rise past the
+        #     bound (correct under this ruling). The leader's exits
+        #     are the existing ones: attest_completion (the
+        #     deterministic trust path — meta_bypass allow — the
+        #     fallback now), finishing the work, or asking the user.
+        #     Deliberately unbounded-by-user-ruling for this
+        #     never-spoke case (C1 supersession note, decisions.md);
+        #     C1 remains fully intact for the judge-spoke path.
+        if (
+            decision.decision is Decision.TERMINAL_AFTER_BOUND
+            and not any_substantive_deny
+        ):
+            decision = _replace(
+                decision,
+                decision=Decision.DENIED,
+                should_inject_nudge=True,
+                next_denied_count=decision.denied_count + 1,
+            )
+            logger.info(
+                "event=leader_completion_gate_bound_exhausted_never_spoke "
+                "instance_id=%s denied_count=%s next_denied_count=%s "
+                "any_substantive_deny=false "
+                "decision=terminal_withheld_deny_continues "
+                "detail=judge-never-spoke epoch: no not_complete verdict; "
+                "terminal withheld per user ruling (exits: attest / "
+                "finish work / ask user)",
+                effective_instance_id,
+                decision.denied_count,
+                decision.next_denied_count,
+            )
+
         # Phase 3 — ledger writes (C3 fail-open wrapper). NO writes on
         # the meta-conditions / dry / R2 un-attested allow paths. The
         # denial_epoch is DERIVED from the input state (review must-fix
@@ -5675,13 +5934,29 @@ def create_attestation_gate_node(
             # Terminal escalation is a distinct operator event from the
             # canonical decision line.  Keep it one-shot by placing the
             # event at this decision branch (not in the per-evaluation log).
+            # 7d4a3bd9: reaching here means the epoch carried ≥1
+            # substantive (``not_complete``) verdict — the judge SPOKE
+            # and was overridden — so the fix-1 loud
+            # ``completed (gate escalated — unverified)`` terminal
+            # stands. (The zero-substantive case was converted to DENIED
+            # by the exhaustion gate above and never reaches this row.)
             logger.info(
                 "event=leader_completion_gate_terminal_after_bound "
                 "instance_id=%s "
-                "attestation_denied_count=%s completion_gate_escalated=true",
+                "attestation_denied_count=%s completion_gate_escalated=true "
+                "any_substantive_deny=true",
                 effective_instance_id,
-                decision.next_denied_count,
+                decision.denied_count,
             )
+            # Terminal reset (trigger 2) — clear the fix-3 + exhaustion
+            # channels alongside the substantive counter reset (the
+            # ledger's ``set_escalated_and_reset`` cleared the instance
+            # column above). The next episode starts clean.
+            return {
+                "attestation_route": None,
+                ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
+                ATTESTATION_DENY_PROGRESS_KEY: None,
+            }
 
         if decision.decision is Decision.DENIED:
             # R1 — the deny path is the checkpoint-durable in-graph
@@ -5704,12 +5979,53 @@ def create_attestation_gate_node(
             # at module-load time, so the function-scoped import avoids
             # the cycle at import time.
             from .services.timestamps import now_utc_iso
+            # ─── 7d4a3bd9 Fix 3 — directive-vs-standard nudge selection ───
+            # Snapshot progress (tool-call count in the checkpointed
+            # history) and compare against the prior deny's snapshot.
+            # DIRECTIVE nudge iff this is the >= 2nd consecutive deny
+            # (the committed deny count — every deny counts — is >= 2)
+            # AND ZERO new tool calls since the prior deny snapshot.
+            # Otherwise the standard nudge. The comparison uses ``<=``
+            # so a history shrink (compaction / LoopRepairer) can only
+            # ever read as "no new action" — the conservative direction.
+            # The directive pairs with the all-timeout continuation: a
+            # never-spoke-judge epoch keeps denying and the directive
+            # names the exits (attest / finish the work / ask the user).
+            if isinstance(state, dict):
+                _raw_progress = state.get(ATTESTATION_DENY_PROGRESS_KEY)
+            else:
+                _raw_progress = getattr(
+                    state, ATTESTATION_DENY_PROGRESS_KEY, None
+                )
+            try:
+                _prior_progress = (
+                    int(_raw_progress) if _raw_progress is not None else None
+                )
+            except (TypeError, ValueError):
+                _prior_progress = None
+            _current_tool_calls = _count_episode_tool_calls(messages)
+            _is_repeat_deny = counted_denied_count >= 2
+            _zero_progress = (
+                _prior_progress is not None
+                and _current_tool_calls <= _prior_progress
+            )
+            _nudge_is_directive = _is_repeat_deny and _zero_progress
+            _nudge_body = (
+                ATTESTATION_DIRECTIVE_NUDGE_TEXT
+                if _nudge_is_directive
+                else ATTESTATION_NUDGE_TEXT
+            )
             logger.info(
                 "[AttestationGate] deny instance=%s denied_count=%s -> "
-                "next=%s nudge_inject_ts=%s; injecting in-graph nudge",
+                "next=%s nudge_kind=%s "
+                "progress_tools=%s prior_progress=%s "
+                "nudge_inject_ts=%s; injecting in-graph nudge",
                 effective_instance_id,
                 decision.denied_count,
                 decision.next_denied_count,
+                "directive" if _nudge_is_directive else "standard",
+                _current_tool_calls,
+                _prior_progress,
                 now_utc_iso(),
             )
             # FIX-3 (2026-09-16, incident 6a0d60c9): the nudge carries
@@ -5724,7 +6040,7 @@ def create_attestation_gate_node(
             # supersede decide-path nudges and vice versa (F1 Shape A
             # pattern). ``additional_kwargs`` are unchanged.
             nudge = HumanMessage(
-                content=ATTESTATION_NUDGE_TEXT,
+                content=_nudge_body,
                 id=(
                     _stable_id_for(
                         "attestation_nudge", instance_id=effective_instance_id
@@ -5734,6 +6050,14 @@ def create_attestation_gate_node(
                 ),
                 additional_kwargs={
                     "attestation_nudge": True,
+                    # 7d4a3bd9 Fix 3 (2026-09-26) — which nudge shape
+                    # fired ("standard" | "directive"). The stable id is
+                    # SHARED with the standard nudge so the directive
+                    # supersede's the prior standard block in place
+                    # (no accumulation).
+                    "attestation_nudge_kind": (
+                        "directive" if _nudge_is_directive else "standard"
+                    ),
                     # C1 (2026-09-12 review): stamp server-injected like
                     # every other injection site — the S1 turn-window
                     # scan must skip this nudge instead of reading it as
@@ -5751,6 +6075,13 @@ def create_attestation_gate_node(
                 "messages": [nudge],
                 "attestation_route": "agent",
                 "attestation_nudge_denied_count": counted_denied_count,
+                # 7d4a3bd9 — channel writes: the progress snapshot
+                # updates so the NEXT deny compares against THIS turn's
+                # tool-call count, and a substantive verdict on THIS
+                # deny stamps the any-substantive channel (the
+                # exhaustion composition gate's input).
+                ATTESTATION_ANY_SUBSTANTIVE_KEY: any_substantive_deny,
+                ATTESTATION_DENY_PROGRESS_KEY: _current_tool_calls,
             }
 
         # ─────────────────────────────────────────────────────────────
@@ -5871,26 +6202,77 @@ def create_attestation_gate_node(
         # ``decision.decision is Decision.HOLD`` — we MUST also reset
         # the per-mission reminder counter to 0 here so a future
         # sub-turn that delivers a real report gets a fresh start.
+        #
+        # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak):
+        # the SessionState channels (substantive + progress) ALSO reset
+        # here — the prior episode's stamped ``attestation_any_substantive_
+        # deny=True`` would otherwise leak across the cap fall-through
+        # into the next sub-turn's exhaustion composition gate and
+        # wrongly terminalize a never-spoke arc.
         if decision.decision is Decision.HOLD:
             return {
                 "attestation_route": None,
                 ATTESTATION_REMINDER_COUNT_KEY: 0,
+                ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
+                ATTESTATION_DENY_PROGRESS_KEY: None,
             }
         # Attested allow (Decision.ALLOWED with attestation_present=True)
         # — the leader delivered a proper standalone text report and
         # the gate cleared END. Reset the per-mission HOLD reminder
         # counter so the next HOLD sequence (if any) starts fresh.
+        # 7d4a3bd9 Fix 2: the total-event + progress channels reset
+        # here too (reset trigger 1 — same reset-semantics contract as
+        # the substantive counter: the next escalation cycle starts
+        # from zero on every channel).
         if decision.decision is Decision.ALLOWED and decision.attestation_present:
             return {
                 "attestation_route": None,
                 ATTESTATION_REMINDER_COUNT_KEY: 0,
+                ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
+                ATTESTATION_DENY_PROGRESS_KEY: None,
             }
-        return {"attestation_route": None}
+        # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak):
+        # every ALLOW / terminal branch that does NOT take the attested
+        # path above (ALLOWED_LEGITIMATE_PENDING_WAKEUP / DRY_LOG /
+        # ALLOWED with no attestation_present) MUST also clear the
+        # SessionState channels. The stale substantive flag would
+        # otherwise leak across episodes via checkpoint and wrongly
+        # terminalize a never-spoke arc at the next bound exhaustion.
+        # The reset is unconditional on every non-terminal-bearing
+        # allow branch — same reset-semantics contract as the
+        # attested-allow reset above.
+        return {
+            "attestation_route": None,
+            ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
+            ATTESTATION_DENY_PROGRESS_KEY: None,
+        }
 
     # O8 surface: the exact config the gate will run with, auditable in
     # tests (must carry NO checkpoint_ns key).
     attestation_gate_node.attestation_config = gate_config  # type: ignore[attr-defined]
-    return attestation_gate_node
+
+    # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak):
+    # wrap the gate node so every return path honours the
+    # fresh-episode sentinel — a prior episode's stamped
+    # ``attestation_any_substantive_deny=True`` MUST NOT leak into
+    # the new episode via checkpoint. The wrapper runs the body once,
+    # then merges the channel resets into the returned payload if the
+    # sentinel was seen on any HumanMessage in the evaluated turn.
+    # This single change covers every return path uniformly without
+    # per-site edits.
+    _raw_gate_node = attestation_gate_node
+
+    async def _attestation_gate_node_with_reset(
+        state: Any, config: Optional[RunnableConfig] = None
+    ) -> dict:
+        payload = await _raw_gate_node(state, config)
+        messages_local = state["messages"] if isinstance(state, dict) else state.messages
+        return _consume_fresh_episode_reset(payload, messages_local)
+
+    # Preserve the O8 surface attribute on the wrapped node (the
+    # auditable config — tests inspect ``attestation_gate_node.attestation_config``).
+    _attestation_gate_node_with_reset.attestation_config = gate_config  # type: ignore[attr-defined]
+    return _attestation_gate_node_with_reset
 
 
 # ============================================================================
