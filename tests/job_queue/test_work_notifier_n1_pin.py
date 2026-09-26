@@ -129,8 +129,22 @@ def _seed_instance(
     instance_id: str,
     agent_id: str = "developer",
     project_id: str = "test-project",
+    status: str = "running",
 ) -> str:
-    """Insert an ``Instance`` row so ``resolve_work`` can find it."""
+    """Insert an ``Instance`` row so ``resolve_work`` can find it.
+
+    C1 (2026-09-25): the ``status`` parameter lets individual tests
+    seed a terminal Instance (``"completed"`` / ``"terminated"`` /
+    ``"error"`` / ``"failed"``) so the canonical
+    ``evaluate_mission_live`` guard correctly returns ``live=False``
+    for dead-letter / terminal-mission scenarios. Pre-C1 the
+    proxy-based mission-liveness check used the WorkRecord's
+    ``mission_liveness`` / ``status`` field directly; the new
+    guard consults the permanent ``instances.parent_id`` tree
+    via the instance repository, so the Instance row itself must
+    be in the desired state for the test to exercise the
+    intended branch.
+    """
     now_iso = datetime.now(timezone.utc).isoformat()
     with Session(engine) as s:
         existing = s.get(Instance, instance_id)
@@ -141,7 +155,7 @@ def _seed_instance(
                 agent_dir=f"/tmp/agents/{agent_id}",
                 agent_name=agent_id,
                 project_id=project_id,
-                status="running",
+                status=status,
                 created_at=now_iso,
                 updated_at=now_iso,
                 paused_at=None,
@@ -241,6 +255,16 @@ def n1_components(n1_engine):
     Returns a ``NamedTuple``-like dict so each test can grab what it
     needs. The ``enqueue_message`` mock is on a plain ``MagicMock``
     instance_manager so we can count calls deterministically.
+
+    C1 (2026-09-25, ``fix/mission-terminal-watch-report-publish``): the
+    ``instance_manager`` exposes ``_instance_repository`` so the
+    canonical ``evaluate_mission_live`` guard
+    (``daemon/services/mission_live_guard.py``) — invoked from
+    ``work_notifier.notify_work_watchers`` when any subscribed
+    watcher opts in to ``mission_terminal`` — can walk the
+    ``instances.parent_id`` tree. Without this attribute the guard
+    fail-OPENS (live=False → claim + deliver), which silently
+    regresses every held-mission-terminal test.
     """
     watcher_repo = JobWatcherRepository(n1_engine)
     task_repo = TaskRepository(n1_engine)
@@ -253,6 +277,7 @@ def n1_components(n1_engine):
     instance_manager.enqueue_message = AsyncMock(
         return_value=MagicMock(message_id="msg-test")
     )
+    instance_manager._instance_repository = instance_repo
 
     return {
         "engine": n1_engine,
@@ -260,6 +285,7 @@ def n1_components(n1_engine):
         "task_repo": task_repo,
         "resolver": resolver,
         "instance_manager": instance_manager,
+        "instance_repo": instance_repo,
     }
 
 
@@ -837,14 +863,25 @@ class TestMissionTerminalDeadLetterFire:
     async def test_dead_letter_mission_terminal_fires(self, n1_components):
         """THE stranding-class pin: dead_letter-terminal mission +
         ``mission_terminal`` watcher → notify FIRES, row CAS-claimed,
-        ``[JOB_EVENT]`` enqueued."""
+        ``[JOB_EVENT]`` enqueued.
+
+        C1 (2026-09-25): the canonical ``evaluate_mission_live``
+        guard consults the permanent ``instances.parent_id`` tree —
+        seed ``inst-dl-1`` as ``"failed"`` (a canonical terminal
+        instance status) so the guard returns ``live=False`` and
+        the held watcher is delivered. Pre-C1 the proxy check used
+        ``work_record.status`` directly (``"dead_letter"``), which
+        is a work-status vocabulary (not an instance-status
+        vocabulary) and so the Instance row had to be moved to a
+        terminal status for the new guard to admit the fire.
+        """
         engine = n1_components["engine"]
         watcher_repo = n1_components["watcher_repo"]
         resolver = n1_components["resolver"]
         instance_manager = n1_components["instance_manager"]
 
         wid = "wid-dead-letter-1"
-        _seed_instance(engine, instance_id="inst-dl-1")
+        _seed_instance(engine, instance_id="inst-dl-1", status="failed")
         _seed_instance(engine, instance_id="watcher-dl")
 
         original = self._patch_record(

@@ -69,7 +69,6 @@ asserted at the message envelope level.
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -214,12 +213,20 @@ def defect5_components(defect5_engine):
     instance_manager.enqueue_message = AsyncMock(
         return_value=MagicMock(message_id="msg-defect5")
     )
+    # C1 (2026-09-25): expose the instance repository on the manager
+    # so the canonical ``evaluate_mission_live`` guard can walk the
+    # ``instances.parent_id`` tree. Without this attribute the guard
+    # walks a MagicMock (returning weird Mock objects that the guard
+    # can't iterate) and fail-OPENS to ``live=False`` → claim +
+    # deliver, regressing every held-mission-terminal pin.
+    instance_manager._instance_repository = instance_repo
     return {
         "engine": defect5_engine,
         "watcher_repo": watcher_repo,
         "task_repo": task_repo,
         "resolver": resolver,
         "instance_manager": instance_manager,
+        "instance_repo": instance_repo,
     }
 
 
@@ -395,6 +402,16 @@ class TestM2GateMultiKindRowSurvivesTerminal:
         exactly once. Pre-fix: non-terminal was silently held (0
         deliveries on in_progress); post-fix the design trap is
         satisfied.
+
+        C1 (2026-09-25): the canonical ``evaluate_mission_live``
+        guard consults the permanent ``instances.parent_id`` tree —
+        step 2 must therefore transition ``inst-prod-1`` to a
+        terminal status (``"completed"``) BEFORE the terminal fire
+        so the guard returns ``live=False`` and the held multi-kind
+        row is delivered. Pre-C1 the proxy check used
+        ``work_record.status`` directly, so the Instance state did
+        not matter; with the guard-based check, the Instance is
+        the source of truth.
         """
         engine = defect5_components["engine"]
         watcher_repo = defect5_components["watcher_repo"]
@@ -422,6 +439,16 @@ class TestM2GateMultiKindRowSurvivesTerminal:
         remaining = watcher_repo.get_watchers_for_job(wid)
         assert len(remaining) == 1
 
+        # Step 2 prep (C1): transition ``inst-prod-1`` to a terminal
+        # instance status so the mission-live guard returns
+        # ``live=False`` on the terminal fire. Without this the guard
+        # sees ``status="running"`` and holds the row.
+        with Session(engine) as s:
+            inst = s.get(Instance, "inst-prod-1")
+            assert inst is not None
+            inst.status = "completed"
+            s.commit()
+
         # Step 2: terminal fire on the same row.
         original2 = _patch_complete(resolver, wid=wid)
         try:
@@ -443,32 +470,31 @@ class TestM2GateMultiKindRowSurvivesTerminal:
         assert instance_manager.enqueue_message.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_dual_terminal_kind_settles_mid_mission_delivers_once_with_claim(
+    async def test_dual_terminal_kind_settles_mid_mission_held_until_terminal(
         self, defect5_components,
     ):
-        """A1 (reviewer-ratified A1+B2 closure, 2026-09-24): a
-        dual-subscription row carrying a TERMINAL-kind event
-        (``settled``) + ``mission_terminal``. The receipt settles
-        MID-MISSION (the work record's status is still
-        ``processing``), and the watcher MUST deliver EXACTLY ONCE
-        AT RECEIPT-SETTLE with the CAS claim. A subsequent
-        mission-terminal flip (the work reaches true terminal
-        liveness, ``completed``) produces NO second fire — the row
-        was consumed by the receipt-settle CAS.
+        """C1 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
+        the multi-kind retire rule (commission-mandated, supersedes the
+        pre-C1 A1 closure). A dual-subscription row carrying a
+        TERMINAL-kind event (``settled``) AND ``mission_terminal``:
+        the receipt settles MID-MISSION → row is HELD (delivered
+        read-only, NOT CAS-claimed). The row survives in the DB for
+        the future mission-terminal fire, which is the LAST firing
+        event and CAS-claims it.
 
-        Post-1e12944a gate: ``mission_terminal_opt_in and not
-        standard_match``. Here ``settled`` IS in ``watch_events``
-        (``standard_match=True``), so the M2 hold gate does NOT
-        hold — the row falls through to ``matching``, step 3's CAS
-        claims it (``_is_terminal("settled")`` is True — ``settled``
-        is canonical terminal per the comment at
-        ``work_notifier.py:417-419``), and step 4 delivers. The
-        pre-fix code held this row silently until the mission
-        flip; the post-fix code delivers at receipt-settle because
-        the explicit terminal-kind subscription matches, so the
-        hold gate does not trigger. Reviewer explicitly approved
-        this delivery semantic (same philosophy as DEFECT-5 — an
-        explicit subscription delivers).
+        Two-step shape mirrors the pre-C1 A1 test (which expected a
+        single CAS-at-receipt-settle deliver); C1 flips that to
+        deliver-then-claim-on-last-event so that the multi-kind row
+        honors both subscribed events (settled + mission_terminal)
+        rather than dropping the mission_terminal leg on receipt-
+        settle CAS consumption.
+
+        Step 2 prep: the canonical ``evaluate_mission_live`` guard
+        consults the permanent ``instances.parent_id`` tree — the
+        test must therefore transition ``inst-prod-1`` to a
+        terminal status BEFORE the terminal fire so the guard
+        returns ``live=False`` and the held multi-kind row is
+        delivered + claimed.
         """
         engine = defect5_components["engine"]
         watcher_repo = defect5_components["watcher_repo"]
@@ -485,10 +511,13 @@ class TestM2GateMultiKindRowSurvivesTerminal:
         # Step 1: receipt settles MID-MISSION — work record is still
         # ``processing`` (resolver patch below), so the mission is not
         # yet terminal. The watcher matches on ``settled`` (explicit
-        # terminal-kind subscription), the M2 hold gate does not
-        # trigger (``standard_match=True``), the CAS claim runs
-        # (``_is_terminal("settled")`` is True), and the watcher row
-        # is consumed.
+        # terminal-kind subscription), the M2 hold gate does NOT
+        # hold (C1 rule: multi-kind rows are HELD only when ALL
+        # subscribed events have not yet fired — here
+        # ``mission_terminal`` is still pending, so the row is
+        # delivered read-only via ``matching_readonly`` and survives
+        # in the DB). Pre-C1 (A1 closure) the row was CAS-consumed
+        # at receipt-settle; C1 reverses that.
         original = _patch_running(resolver, wid=wid)
         try:
             n_settled = await notify_work_watchers(
@@ -498,33 +527,38 @@ class TestM2GateMultiKindRowSurvivesTerminal:
         finally:
             resolver.resolve_work = original
 
-        # Delivers EXACTLY ONCE at receipt-settle with the CAS claim.
+        # C1: receipt-settle delivers ONCE but the row SURVIVES.
         assert n_settled == 1, (
-            "A1: dual-subscribed [settled, mission_terminal] watcher "
-            "must deliver ONCE at receipt-settle even mid-mission — "
-            "the M2 hold gate does NOT hold when the firing kind "
-            "matches an explicit terminal-kind subscription "
-            "(`mission_terminal_opt_in and not standard_match` is "
-            "False here because `settled` IS in watch_events). "
-            "Pre-fix the row was held until the mission-terminal "
-            "flip; the post-fix row delivers at receipt-settle and "
-            "the CAS consumes it. Got 0 deliveries."
+            "C1: dual-subscribed [settled, mission_terminal] watcher "
+            "MUST deliver at receipt-settle (read-only), but the row "
+            "MUST survive — the multi-kind retire rule holds the row "
+            "until ALL subscribed events have fired, and "
+            "``mission_terminal`` is still pending. Got 0 deliveries."
         )
         assert instance_manager.enqueue_message.await_count == 1
-        # CAS consumed the row — no watchers left for the mission flip.
+        # Row survives — the multi-kind retire rule holds the row.
         remaining = watcher_repo.get_watchers_for_job(wid)
-        assert len(remaining) == 0, (
-            "A1: receipt-settle CAS must consume the row — the "
-            "subsequent mission-terminal flip must find zero "
-            "watchers (no second fire)."
+        assert len(remaining) == 1, (
+            "C1: receipt-settle delivery must NOT CAS-consume the "
+            "row — the mission_terminal subscription is still "
+            "pending. Pre-C1 (A1 closure) the row was CAS-consumed "
+            "here. The C1 retire rule reverses that."
         )
 
+        # Step 2 prep (C1): transition ``inst-prod-1`` to a terminal
+        # instance status so the mission-live guard returns
+        # ``live=False`` on the mission-terminal fire. Without this
+        # the guard sees ``status="running"`` and holds the row.
+        with Session(engine) as s:
+            inst = s.get(Instance, "inst-prod-1")
+            assert inst is not None
+            inst.status = "completed"
+            s.commit()
+
         # Step 2: mission-terminal flip — work reaches true terminal
-        # liveness, the resolver returns ``completed``. A
-        # ``completed`` event would normally match the
-        # ``mission_terminal`` subscription on a row that survived;
-        # but the row was already consumed by the receipt-settle
-        # CAS, so there is nothing left to deliver to.
+        # liveness, the resolver returns ``completed``. The held
+        # multi-kind row is now claimable (all subscribed events
+        # have fired) — CAS-claim + deliver.
         original2 = _patch_complete(resolver, wid=wid)
         try:
             n_term = await notify_work_watchers(
@@ -534,18 +568,28 @@ class TestM2GateMultiKindRowSurvivesTerminal:
         finally:
             resolver.resolve_work = original2
 
-        # NO second fire — row was consumed by receipt-settle CAS.
-        assert n_term == 0, (
-            "A1: subsequent mission-terminal flip on a row already "
-            "consumed by receipt-settle CAS must produce ZERO "
-            "deliveries — get_watchers_for_job returns 0 rows so "
-            "the matching bucket is empty. Got non-zero deliveries."
+        # C1: terminal fire delivers ONCE (the LAST firing event).
+        assert n_term == 1, (
+            "C1: subsequent mission-terminal flip on a multi-kind "
+            "row that survived receipt-settle MUST produce exactly "
+            "ONE delivery — this is the LAST firing event, so the "
+            "CAS claim runs and the row is consumed. Got 0 "
+            "deliveries (guard held too long) or 2 deliveries "
+            "(something else fired)."
         )
-        # Total deliveries: 1 (settled), not 2.
-        assert instance_manager.enqueue_message.await_count == 1, (
-            "A1: enqueue_message must be called exactly once across "
-            "receipt-settle + mission-terminal flip — the row was "
-            "CAS-claimed at receipt-settle."
+        # CAS consumed the row — no watchers left.
+        remaining_after = watcher_repo.get_watchers_for_job(wid)
+        assert len(remaining_after) == 0, (
+            "C1: mission-terminal flip CAS-claims the row (LAST "
+            "firing event) — ``get_watchers_for_job`` must return "
+            "zero rows."
+        )
+        # Total deliveries: 1 (settled, read-only) + 1 (terminal, claim) = 2.
+        assert instance_manager.enqueue_message.await_count == 2, (
+            "C1: enqueue_message must be called exactly twice across "
+            "receipt-settle + mission-terminal flip — once for the "
+            "read-only settled delivery, once for the CAS-claimed "
+            "terminal delivery."
         )
 
     @pytest.mark.asyncio
@@ -559,6 +603,13 @@ class TestM2GateMultiKindRowSurvivesTerminal:
         row must SURVIVE for the terminal fire. Then the terminal
         fire delivers exactly once. This is the scenario S5-P1 in
         the tester evidence.
+
+        C1 (2026-09-25): the canonical ``evaluate_mission_live``
+        guard consults the permanent ``instances.parent_id`` tree —
+        step 2 must therefore transition ``inst-prod-1`` to a
+        terminal status (``"completed"``) BEFORE the terminal fire
+        so the guard returns ``live=False`` and the held multi-kind
+        row is delivered + claimed.
         """
         engine = defect5_components["engine"]
         watcher_repo = defect5_components["watcher_repo"]
@@ -592,6 +643,15 @@ class TestM2GateMultiKindRowSurvivesTerminal:
         # Row survives for the terminal fire.
         remaining = watcher_repo.get_watchers_for_job(wid)
         assert len(remaining) == 1
+
+        # C1 prep: transition ``inst-prod-1`` to a terminal
+        # instance status so the mission-live guard returns
+        # ``live=False`` on the mission-terminal fire.
+        with Session(engine) as s:
+            inst = s.get(Instance, "inst-prod-1")
+            assert inst is not None
+            inst.status = "completed"
+            s.commit()
 
         # Terminal fire — exactly once.
         original2 = _patch_complete(resolver, wid=wid)
