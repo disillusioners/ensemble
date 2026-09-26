@@ -379,31 +379,61 @@ class TestSqliteNoOp:
 
 class TestMaintenanceWiring:
     def test_execute_runs_operation_e_after_d(self, as_pg):
-        """execute() invokes the blob prune (Op E) after retention (Op D)."""
-        from daemon.services.maintenance import CheckpointCleanupJob
+        """execute() invokes the blob prune (Op E) after retention (Op D).
+
+        Section 1 / T1.4 — the auto cycle adds a read-only
+        ``find_all_thread_ns_pairs`` GROUP BY to ``_prune_per_thread_checkpoints``
+        for ``scanned_pairs``. The adapter-level order tracking
+        therefore sees two E-named adapter calls (``scanned_pairs``
+        scan inside D, then the E arm) bracketing one D-named
+        call. We pin the WRAPPER-level invariant — ``_prune_per_thread_checkpoints``
+        begins BEFORE ``_prune_unreferenced_blobs`` — which is the
+        semantic invariant the test was designed to enforce (INV-9:
+        the auto cycle's D→E order is UNCHANGED). The wrappers CALL
+        THROUGH to the real methods (adapter mocks supply the data) so
+        the real bodies stay exercised — this is deliberately stronger
+        than stubbing the wrappers outright.
+        """
+        from daemon.services.maintenance import (
+            CheckpointCleanupJob,
+            CheckpointRowPruneSummary,
+        )
         from daemon.config import PersistenceConfig
 
         adapter = MagicMock()
         adapter.list_thread_ids = AsyncMock(return_value=[])
+        adapter.find_excess_checkpoint_groups = AsyncMock(return_value=[])
+        adapter.find_all_thread_ns_pairs = AsyncMock(return_value=[])
         order: list[str] = []
 
-        async def excess(*a, **k):
-            order.append("D")
-            return []
-
-        async def pairs(*a, **k):
-            order.append("E")
-            return []
-
-        adapter.find_excess_checkpoint_groups = excess
-        adapter.find_all_thread_ns_pairs = pairs
+        # Construct with no gate / repo kwargs (legacy unwired path,
+        # INV-1 — the wired path is exercised by the new suite).
         job = CheckpointCleanupJob(
-            config=PersistenceConfig(), checkpointer=adapter, instance_repo=MagicMock()
+            config=PersistenceConfig(),
+            checkpointer=adapter,
+            instance_repo=MagicMock(),
         )
+        # Wrap the REAL methods with order-recording pass-throughs so
+        # the D-before-E wrapper invariant is pinned while the real
+        # bodies (incl. the T1.4 scanned_pairs scan inside D) still run.
         import asyncio
 
+        real_d = job._prune_per_thread_checkpoints
+        real_e = job._prune_unreferenced_blobs
+
+        async def wrap_d(*a, **k):
+            order.append("D")
+            return await real_d(*a, **k)
+
+        async def wrap_e(*a, **k):
+            order.append("E")
+            return await real_e(*a, **k)
+
+        job._prune_per_thread_checkpoints = wrap_d  # type: ignore[method-assign]
+        job._prune_unreferenced_blobs = wrap_e  # type: ignore[method-assign]
         asyncio.run(job.execute())
         assert order == ["D", "E"]
+        assert isinstance(job._prune_per_thread_checkpoints, object)  # sanity: rebinding held
 
     def test_blob_prune_failure_does_not_break_maintenance(self, as_pg, monkeypatch):
         """Even if prune_unreferenced_blobs were to raise (contract break),
@@ -414,11 +444,14 @@ class TestMaintenanceWiring:
         adapter = MagicMock()
         adapter.list_thread_ids = AsyncMock(return_value=[])
         adapter.find_excess_checkpoint_groups = AsyncMock(return_value=[])
+        adapter.find_all_thread_ns_pairs = AsyncMock(return_value=[])
         job = CheckpointCleanupJob(
             config=PersistenceConfig(), checkpointer=adapter, instance_repo=MagicMock()
         )
 
-        async def explode():
+        # T2 added the ``destructive`` keyword — the mock must
+        # accept it (any value; we explode regardless).
+        async def explode(*a, **k):
             raise RuntimeError("blob bucket on fire")
 
         # maintenance._prune_unreferenced_blobs imports the function from

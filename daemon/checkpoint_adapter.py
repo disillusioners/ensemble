@@ -114,6 +114,28 @@ class CheckpointerAdapter(ABC):
         """
 
     @abstractmethod
+    async def count_writes_excluding(
+        self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
+    ) -> int:
+        """DRY-RUN arm of the Op D writes accounting — SELECT COUNT only.
+
+        T2b / T1.5 — read-only mirror of :meth:`delete_writes_excluding`.
+        Returns the count of write rows that WOULD be deleted if the
+        destructive arm ran with the same ``keep_ids`` set, without
+        actually issuing the DELETE. The Postgres and SQLite
+        implementations mirror ``delete_writes_excluding`` exactly (same
+        table name + same NOT-IN-set semantics) so the dry-run report
+        can never disagree with the destructive arm's count for the
+        same keep-set (the parity pin in
+        ``tests/unit/services/test_checkpoint_prune_destructive_override.py``
+        proves this).
+
+        Used ONLY by the manual dry-run path
+        (``CheckpointCleanupJob._compute_row_prune_dry_run`` — T1.5);
+        the auto cycle never calls it (INV-1).
+        """
+
+    @abstractmethod
     async def adelete_thread(self, thread_id: str) -> None:
         """Delete all checkpoint data for a thread.
 
@@ -327,6 +349,32 @@ class SqliteCheckpointerAdapter(CheckpointerAdapter):
             await self._saver.conn.commit()
             return cursor.rowcount
 
+    async def count_writes_excluding(
+        self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
+    ) -> int:
+        """SQLite read-only mirror of :meth:`delete_writes_excluding`.
+
+        T2b — same ``writes`` table + same NOT-IN-set semantics as the
+        destructive arm so the dry-run count can never disagree with
+        the destructive delete-count for the same keep-set (the
+        parity pin). Empty ``keep_ids`` returns 0 (matches the
+        destructive arm's early-return).
+        """
+        if not keep_ids:
+            return 0
+        placeholders = ",".join("?" * len(keep_ids))
+        async with self._saver.lock:
+            cursor = await self._saver.conn.execute(
+                f"""
+                SELECT COUNT(*) FROM writes
+                WHERE thread_id = ? AND checkpoint_ns = ?
+                AND checkpoint_id NOT IN ({placeholders})
+                """,
+                (thread_id, checkpoint_ns, *keep_ids),
+            )
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+
     async def adelete_thread(self, thread_id: str) -> None:
         """Delete all checkpoint data for a thread."""
         await self._saver.adelete_thread(thread_id)
@@ -532,6 +580,32 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 if len(parts) >= 2:
                     return int(parts[1])
             return 0
+
+    async def count_writes_excluding(
+        self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
+    ) -> int:
+        """PG read-only mirror of :meth:`delete_writes_excluding`.
+
+        T2b — same ``checkpoint_writes`` table (NOT ``writes`` — that's
+        the SQLite table name) + same ``NOT (checkpoint_id = ANY(...))``
+        semantics as the destructive arm so the dry-run count can never
+        disagree with the destructive delete-count for the same
+        keep-set (the parity pin). Empty ``keep_ids`` returns 0.
+        """
+        if not keep_ids:
+            return 0
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT COUNT(*) AS cnt FROM checkpoint_writes
+                WHERE thread_id = $1 AND checkpoint_ns = $2
+                AND NOT (checkpoint_id = ANY($3::text[]))
+                """,
+                thread_id,
+                checkpoint_ns,
+                list(keep_ids),
+            )
+            return int(row["cnt"]) if row else 0
 
     async def adelete_thread(self, thread_id: str) -> None:
         """Delete all checkpoint data for a thread.
