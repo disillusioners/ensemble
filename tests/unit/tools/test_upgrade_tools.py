@@ -2641,6 +2641,108 @@ class TestLiveThreeFactorGate:
         assert no_spawn == []
 
 
+# ── v0.15.3 P1 Item 3 — arm preflight BEFORE the nonce burn ─────────────────
+
+
+class TestArmPreflightBeforeBurn:
+    """The preflight sits AFTER the lock acquire but BEFORE the nonce burn
+    (the plan's recommended slot): a refused preflight releases the lock,
+    journals its refusal (best-effort — the live read-only carve-out
+    applies), and returns cleanly with the nonce UNUSED. Three checks, three
+    tokens: ``executor-scripts-unavailable`` (reused), 
+    ``preflight-argv-unconstructable`` (new), ``preflight-argv-malformed``
+    (new). Sibling class — no existing live-gate test is modified."""
+
+    @staticmethod
+    async def _armed_call(live) -> str:
+        run_id, nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(
+            live, source="api", msg_id="m-preflight", content=grouped
+        )
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped}
+        )
+        return run_id, out
+
+    @staticmethod
+    def _assert_nonce_intact(live, run_id: str) -> None:
+        data = uj.journal_read(live["install"])
+        assert data["pending_actions"][run_id]["consumed_at"] is None, (
+            "refused preflight must NEVER burn the nonce"
+        )
+        assert data["pending_op"] is None
+        assert not (live["install"] / "releases" / "rollback.lock.d").exists()
+        assert live["markers"] == []
+
+    async def test_arm_preflight_refuses_unresolvable_scripts(
+        self, live_harness, monkeypatch
+    ) -> None:
+        """Check 1 — scripts unresolvable → REUSED token
+        ``executor-scripts-unavailable`` (redundant with the pre-lock arm-time
+        refusal by intent); nonce NOT burned."""
+        live = live_harness
+        monkeypatch.setattr(ut, "_resolve_scripts_dir", lambda _dir: None)
+        run_id, out = await self._armed_call(live)
+        assert _refusal_reason(out) == "executor-scripts-unavailable", out
+        self._assert_nonce_intact(live, run_id)
+
+    async def test_arm_preflight_refuses_unconstructable_argv(
+        self, live_harness
+    ) -> None:
+        """Check 2 — a confirmed_source that is not a string (corrupt window
+        marker) makes the verified-arm argv/env construction invalid → NEW
+        token ``preflight-argv-unconstructable``; nonce NOT burned."""
+        live = live_harness
+        run_id, nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(
+            live, source=12345, msg_id="m-bad-source", content=grouped
+        )
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped}
+        )
+        assert _refusal_reason(out) == "preflight-argv-unconstructable", out
+        assert "confirmed_source must be a string" in out
+        self._assert_nonce_intact(live, run_id)
+
+    async def test_arm_preflight_refuses_malformed_argv(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Check 3 — a promote.sh whose case statement lacks
+        ``--f2-verified-closed`` would kill the run at its unknown-flag trap
+        AFTER the nonce was spent → NEW token ``preflight-argv-malformed``
+        refuses pre-burn; promote.sh itself is READ ONLY (never edited)."""
+        live = live_harness
+        stale_scripts = tmp_path / "stale-scripts" / "upgrade"
+        stale_scripts.mkdir(parents=True)
+        (stale_scripts / "lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (stale_scripts / "promote.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "# fixture: a promote.sh WITHOUT the --f2-verified-closed case\n"
+            'case "$arg" in\n    demo|live|sandbox) TARGET_ARG="$arg" ;;\nesac\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(stale_scripts))
+        run_id, out = await self._armed_call(live)
+        assert _refusal_reason(out) == "preflight-argv-malformed", out
+        assert "--f2-verified-closed" in out
+        self._assert_nonce_intact(live, run_id)
+
+    async def test_arm_preflight_passes_nonce_burns_after_checks(
+        self, live_harness
+    ) -> None:
+        """Control: with healthy scripts + sane fields the preflight passes
+        and the burn happens AFTER it (the full-pass behavior is intact —
+        sibling control for the three refusal tests)."""
+        live = live_harness
+        run_id, out = await self._armed_call(live)
+        assert "UPGRADE ARMED" in out, out
+        data = uj.journal_read(live["install"])
+        assert data["pending_actions"][run_id]["consumed_at"] is not None
+        assert data["pending_op"]["nonce_consumed"] is True
+
+
 # ── P2.2 fix pass (2026-08-23) — gate hardening + the forged-source seam ────
 
 

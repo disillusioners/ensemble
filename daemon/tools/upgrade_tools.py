@@ -61,6 +61,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -2681,6 +2682,96 @@ never decides go/rollback).
                     "pipeline-busy",
                     f"per-env lock held (run_id={busy_run or '?'}) — retry via upgrade_status",
                 )
+            # ── v0.15.3 P1 Item 3: ARM PREFLIGHT (pre-nonce-burn) ──────────
+            # Runs AFTER the lock is ours (correct serialization — the plan's
+            # recommended between-lock-and-burn slot) but BEFORE the nonce
+            # burn below, so a refused preflight NEVER wastes the nonce. Each
+            # check carries its own D-FA2.2 reason token: lock released +
+            # refusal journaled (best-effort via _refusal → the live
+            # read-only carve-out applies) + clean return — the arm simply
+            # did not happen.
+            #
+            # Check 1 — scripts resolvable. Redundant with the pre-lock
+            # refusal above by intent (defense-in-depth): REUSES the existing
+            # ``executor-scripts-unavailable`` token.
+            if scripts_dir is None or not (scripts_dir / "promote.sh").is_file():
+                journal_lock_release(install_dir)
+                return _refusal(
+                    label,
+                    "executor-scripts-unavailable",
+                    "arm preflight: cannot resolve scripts/upgrade/promote.sh "
+                    "(set ENSEMBLE_UPGRADE_SCRIPTS_DIR or run from a source "
+                    "checkout)",
+                )
+            # Check 2 — argv/env construction works. The shared verified-arm
+            # helpers from Item 1 run against a synthetic op built exactly
+            # like the durable one below — the construction must not raise
+            # and the note fields must be sane strings.
+            try:
+                if not isinstance(run_id, str) or not run_id:
+                    raise TypeError(
+                        f"run_id must be a non-empty string, got {run_id!r}"
+                    )
+                if confirmed_source is not None and not isinstance(
+                    confirmed_source, str
+                ):
+                    raise TypeError(
+                        "confirmed_source must be a string, got "
+                        f"{type(confirmed_source).__name__}"
+                    )
+                probe_op = PendingOp(
+                    run_id=run_id,
+                    kind="promote",
+                    env=self_env,
+                    target=version,
+                    nonce_consumed=confirmed_action is not None,
+                    confirmed_by_human=confirmed_source is not None,
+                    confirmed_source=confirmed_source,
+                )
+                argv_ext_probe, env_ext_probe = (
+                    ([], {})
+                    if not uj.is_verified_arm(probe_op)
+                    else uj._verified_arm_extras(probe_op)
+                )
+                if env_ext_probe:
+                    note = env_ext_probe.get("F2_VERIFIED_NOTE", "")
+                    if not isinstance(note, str) or not note:
+                        raise TypeError(
+                            "F2_VERIFIED_NOTE must be a non-empty string, got "
+                            f"{type(note).__name__}"
+                        )
+            except Exception as exc:
+                journal_lock_release(install_dir)
+                return _refusal(
+                    label,
+                    "preflight-argv-unconstructable",
+                    f"arm preflight: verified-arm argv/env construction failed "
+                    f"({type(exc).__name__}: {exc}) — nonce NOT burned",
+                )
+            # Check 3 — argv syntactic validity: every flag the verified arm
+            # would append must exist in promote.sh's case statement (READ
+            # ONLY — promote.sh is never edited by this check). A flag the
+            # script does not know would die at its unknown-flag trap (exit
+            # 78) AFTER the nonce was spent.
+            if argv_ext_probe:
+                try:
+                    promote_sh = (scripts_dir / "promote.sh").read_text(
+                        encoding="utf-8"
+                    )
+                except OSError:
+                    promote_sh = ""
+                for flag in argv_ext_probe:
+                    if not re.search(
+                        rf"^[ \t]*{re.escape(flag)}\)", promote_sh, re.MULTILINE
+                    ):
+                        journal_lock_release(install_dir)
+                        return _refusal(
+                            label,
+                            "preflight-argv-malformed",
+                            f"arm preflight: promote.sh at {scripts_dir} has no "
+                            f"case for {flag} — the flag would hit the "
+                            "unknown-flag trap (exit 78); nonce NOT burned",
+                        )
             try:
                 if confirmed_action is not None:
                     uj.consume_pending_action(
