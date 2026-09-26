@@ -2734,6 +2734,8 @@ class InstanceMessagingService:
         silent: bool = False,
         task_context: str | None = None,
         image_refs: list[str] | None = None,
+        *,
+        is_fresh_episode_user_message: bool = False,
     ) -> "MessageResult":
         """Process message with activity tracking and cancellation support.
 
@@ -2755,6 +2757,15 @@ class InstanceMessagingService:
                 ``ProcessingContext.task_context`` → this kwarg. Injected as a
                 persistent HumanMessage BEFORE the task message on first attempt
                 (skipped on retry because the message is checkpointed on turn 1).
+            is_fresh_episode_user_message: P0 hotfix (review-2) — True when
+                this message is a user-driven fresh episode (priority==1 AND
+                msg_type==HUMAN per the ledger at
+                ``_prepare_enqueued_message``:2009-2013). Threaded via
+                ``ProcessingContext`` from ``task_processor._process`` (the
+                canonical carrier across the enqueue→process boundary);
+                ``False`` is the safe default for the cascade-resume
+                direct-dispatch site (which bypasses enqueue) and any other
+                non-enqueued dispatch.
 
         Returns:
             MessageResult with response data.
@@ -4005,38 +4016,6 @@ class InstanceMessagingService:
         # inside ``_maybe_compact_context`` (flag → status → shape →
         # engine) is the SOLE arbiter of skip/proceed on all lanes.
         await self._maybe_compact_context(instance_id, graph, config)
-
-        # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag
-        # leak) — P0 hotfix (regression d5c50994): the original
-        # ``ctx.is_fresh_episode_user_message`` referenced a
-        # ``_PreparedEnqueueContext`` NamedTuple that is LOCAL to
-        # ``enqueue_message`` and is NOT in scope inside
-        # ``_process_message_with_tracking``. Every message raised
-        # ``NameError: name 'ctx' is not defined``.
-        #
-        # The flag is re-derived from ``message_source`` using the
-        # SAME msg_type prefix logic the ledger path uses in
-        # ``_prepare_enqueued_message`` (lines 1698-1710):
-        # ``internal_report:*`` → COMPLETION_REPORT,
-        # ``internal_error_report:*`` → ERROR_REPORT,
-        # ``internal_agent:*`` → AGENT, everything else
-        # (user/api/telegram/None) → HUMAN.
-        #
-        # The ledger path's flag is
-        # ``(priority == 1 AND msg_type == HUMAN.value)``; priority
-        # is not threaded across the enqueue→process boundary (it
-        # is a parameter of ``enqueue_message`` only), so the
-        # default priority of 1 is assumed here — matching the
-        # user-facing entry path. Internal sources map to non-HUMAN
-        # msg_types and produce False (internal reports, error
-        # reports, and agent-to-agent dispatches are NOT new
-        # missions and must NOT reset the counter).
-        _src = message_source or ""
-        is_fresh_episode_user_message = not (
-            _src.startswith("internal_report:")
-            or _src.startswith("internal_error_report:")
-            or _src.startswith("internal_agent:")
-        )
 
         # Build input — on retry with checkpoint, resume from it; on
         # first attempt, build a fresh graph_input (persistent block +

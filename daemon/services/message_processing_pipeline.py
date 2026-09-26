@@ -163,6 +163,16 @@ class ProcessingContext:
     resume_mode: bool = False
     cancellation_token: Optional["CancellationToken"] = None
     task_context: str | None = None  # Pre-formatted [SYSTEM CONTEXT: Task Context] block from send_message(context=...)
+    # P0 hotfix (review-2): the ledger-derived fresh-episode flag,
+    # threaded from the worker-pool claim path
+    # (``task_processor._process``) at the SAME identity the ledger
+    # computes at ``_prepare_enqueued_message`` (lines 2009-2013):
+    # ``(priority == 1 AND type == HUMAN.value)``. Defaults to False
+    # so non-claim paths (tests, direct dispatch) are safe; the claim
+    # path always overrides with the value derived from the persisted
+    # MessageQueue row (priority + type columns are already on the row
+    # — no extra DB round-trip needed).
+    is_fresh_episode_user_message: bool = False
 
 
 @dataclass
@@ -407,6 +417,13 @@ class MessageProcessingPipeline:
         # a late-arriving cancellation (e.g. a new dispatcher that
         # re-uses the pipeline instance) sees the latest value.
         async def _do_process() -> "MessageResult":
+            # P0 hotfix (review-2): thread the ledger-derived
+            # fresh-episode flag from ProcessingContext (populated at
+            # the canonical claim path from the persisted MessageQueue
+            # row's ``priority`` + ``type`` columns) so
+            # ``_build_graph_input`` stamps the
+            # ``fresh_episode_attestation_reset`` sentinel with the
+            # SAME identity the ledger computes at enqueue time.
             return await self._manager._process_message_with_tracking(
                 instance_id=context.instance_id,
                 message=context.message,
@@ -429,6 +446,7 @@ class MessageProcessingPipeline:
                 image_refs=context.image_refs,
                 silent=context.silent,
                 task_context=context.task_context,
+                is_fresh_episode_user_message=context.is_fresh_episode_user_message,
             )
 
         # ---- Stage 1.5: claim the message (READY -> PROCESSING) ----

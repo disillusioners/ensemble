@@ -7316,6 +7316,8 @@ class InstanceManager:
         silent: bool = False,  # If True, skip message injection during checkpoint resume
         task_context: str | None = None,  # Pre-formatted task context from send_message(context=...)
         image_refs: list[str] | None = None,  # Phase 2: ref-based display channel
+        *,
+        is_fresh_episode_user_message: bool = False,  # P0 hotfix (review-2): threaded from ProcessingContext
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -7337,6 +7339,13 @@ class InstanceManager:
                 call via ``message_metadata``. Threaded through to the
                 messaging service which injects it as a HumanMessage BEFORE
                 the task message on first attempt.
+            is_fresh_episode_user_message: P0 hotfix (review-2) — True when
+                this message is a user-driven fresh episode (priority==1 AND
+                msg_type==HUMAN per the ledger). Threaded via
+                ProcessingContext from the worker-pool claim path. Default
+                False; the cascade-resume direct-dispatch site passes False
+                explicitly because a PAUSED→RUNNING resume is NOT a fresh
+                episode (the prior checkpoint's channels must persist).
 
         Returns:
             MessageResult with response data.
@@ -7374,6 +7383,10 @@ class InstanceManager:
             silent=silent,
             task_context=task_context,
             image_refs=image_refs,
+            # P0 hotfix (review-2): threaded from ProcessingContext at the
+            # canonical worker-pool claim path; explicit False at the
+            # cascade-resume direct-dispatch site (see below).
+            is_fresh_episode_user_message=is_fresh_episode_user_message,
         )
 
     def _get_instance_report_prefix(self, instance_id: str, agent_id: str) -> str:
@@ -10765,6 +10778,18 @@ class InstanceManager:
             #    WorkerPool / JobQueue dispatch) would race on the langgraph
             #    checkpoint and corrupt it.
             async def _do_process():
+                # P0 hotfix (review-2): cascade_resume bypasses enqueue
+                # (this call goes directly to
+                # ``_process_message_with_tracking``, not through
+                # ``enqueue_message`` → ``task_processor`` →
+                # ``ProcessingContext``), so the ledger's fresh-episode
+                # flag is NOT threaded via ProcessingContext here. A
+                # PAUSED→RUNNING cascade resume is NOT a terminal
+                # revival — the prior checkpoint's attestation deny
+                # channels MUST persist (the sentinel would otherwise
+                # wrongly clear ``attestation_any_substantive_deny`` /
+                # ``attestation_deny_progress`` on a mid-mission
+                # resume).
                 return await self._process_message_with_tracking(
                     instance_id=instance_id,
                     message=message,
@@ -10783,6 +10808,7 @@ class InstanceManager:
                     # row+kwargs stamp silently lost refs on PAUSED
                     # auto-resume — the failure mode the green suite masked.
                     image_refs=image_refs,
+                    is_fresh_episode_user_message=False,
                 )
 
             gate_outcome: Any = None
