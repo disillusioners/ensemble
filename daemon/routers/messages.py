@@ -611,7 +611,14 @@ async def send_message(
                 post_echo_msg = HumanMessage(
                     content=entry.get("content", ""),
                     id=entry.get("echo_id"),
-                    additional_kwargs=echo_kwargs,
+                    # ``echo_kwargs or {}``: HumanMessage rejects None
+                    # for additional_kwargs (pydantic v2 ValidationError);
+                    # ``serialize_message`` over default ``{}`` matches the
+                    # pre-14e4f486 wire shape byte-identically for the
+                    # no-refs case. Mirror sites
+                    # (``daemon/services/instance_messaging.py:557-578``,
+                    # ``daemon/graph.py:6987-6990``) are unaffected.
+                    additional_kwargs=echo_kwargs or {},
                 )
                 post_serialized = serialize_message(post_echo_msg)
                 post_serialized["instance_id"] = instance_id
