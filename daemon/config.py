@@ -1595,6 +1595,42 @@ class ServicesConfig(BaseSettings):
             "Override via SERVICES_JOB_LOCK_SWEEP_INTERVAL_SECONDS."
         ),
     )
+    # v0.15.3 P1 Item 4 — upgrade-journal sweep + executor reaper knobs.
+    # ALWAYS-ON infrastructure (no kill-switch — same HARD POLICY as the
+    # F3 sweep); the levers are the interval + the reaper wait.
+    upgrade_journal_sweep_interval_seconds: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "v0.15.3 P1 Item 4: how often the "
+            "``UpgradeJournalSweepService`` runs its reconcile + "
+            "pending-actions GC tick (seconds). Default 90s matches "
+            "the other periodic sweeps. The tick reuses the UNCHANGED "
+            "``reconcile_pending_op`` (tool entry is no longer the only "
+            "sweep — stale armed ops no longer starve re-arm) and "
+            "``gc_pending_actions(keep_run_id=None)``. A tick skips "
+            "clearing while the armed op's executor pid is alive-recent "
+            "(time-bound liveness, not bare pid-existence). Floor 1s; "
+            "out-of-range values FAIL FAST AT BOOT. Override via "
+            "SERVICES_UPGRADE_JOURNAL_SWEEP_INTERVAL_SECONDS."
+        ),
+    )
+    upgrade_journal_reaper_timeout_seconds: int = Field(
+        default=660,
+        ge=60,
+        description=(
+            "v0.15.3 P1 Item 4: how long the "
+            "``UpgradeJournalSweepService`` reaper waits for an armed "
+            "executor child to exit before BENIGN-DETACH (journal "
+            "``executor_still_running``, no kill, no raise — the child "
+            "leads its own process group and the OS reaps it). Default "
+            "660s: livez 60 + readyz 120 + soak 300 + overhead ≈ 490s "
+            "observed minimum for a live promote. Floor 60s rejects "
+            "nonsensical sub-minute values; out-of-range values FAIL "
+            "FAST AT BOOT. Override via "
+            "SERVICES_UPGRADE_JOURNAL_REAPER_TIMEOUT_SECONDS."
+        ),
+    )
     # Phase 3 of plane-integration-revival — retry machinery. Knobs for
     # ``PlaneSyncWatchdogService``. Mirrors the F3 / job-lock-sweep
     # convention (no kill-switch — ALWAYS-ON infrastructure; the only

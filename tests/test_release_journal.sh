@@ -1357,6 +1357,164 @@ assert_eq "13d cap'd journal → promote_entry_check exits 78" "78" "$RF3_RC"
 assert_contains "13d entry refusal journaled" '"event":"refusal"' "$(cat "$RF3/releases/state.json")"
 assert_contains "13d reason=cap token" 'reason=cap' "$(cat "$RF3/releases/state.json")"
 
+# ─── 14. stage.sh ROLLBACK_SAFE rider (P2 / v0.15.3 D-FA4.5 supersession) ───
+section "rollback_safe rider (v0.15.3 D-FA4.5 supersession)"
+
+# Section 12 above re-tags FAKE_REPO at SBX_V3, moving HEAD off the SBX_V1
+# commit. The rider's no-DROP tests (9a-9d, 9f) re-stage under VERSION=SBX_V1
+# — git describe --exact-match refuses if HEAD != SBX_V1. Reset HEAD to the
+# SBX_V1 commit so the existing FAKE_REPO is reusable for the no-DROP cases.
+# Section 13 doesn't read FAKE_REPO's git state (lib.sh-only); my section
+# is the last one to touch it before the summary.
+git -C "$FAKE_REPO" checkout -q "$SBX_V1" 2>/dev/null
+
+# DROP-bearing fixture (FAKE_REPO_DROP). Mirrors FAKE_REPO at :62-101 but its
+# migrations/versions/ carries a destructive DDL file so the rider's
+# unset+DROP refusal branch fires. Lives under $FIXTURE so it cleans up with
+# it (1367). The existing FAKE_REPO (benign, CREATE TABLE only at :90) is
+# reused for the no-DROP branches (9a-9d, 9f).
+FAKE_REPO_DROP="$FIXTURE/fake-repo-drop"
+rm -rf "$FAKE_REPO_DROP"
+for d in scripts/upgrade agents/leader frontend/dist/frontend/browser \
+         daemon/migrations/versions; do
+    mkdir -p "$FAKE_REPO_DROP/$d"
+done
+cp "$FAKE_REPO/scripts/upgrade/"*.sh "$FAKE_REPO_DROP/scripts/upgrade/"
+printf 'stub-agent-definition\n' > "$FAKE_REPO_DROP/agents/leader/soul.md"
+printf 'port: ${PORT:-8088}\n' > "$FAKE_REPO_DROP/config.yaml"
+printf 'stub-index\n' > "$FAKE_REPO_DROP/frontend/dist/frontend/browser/index.html"
+printf 'stub-app\n' > "$FAKE_REPO_DROP/frontend/dist/frontend/browser/main.js"
+printf '#!/bin/bash\n# stub launcher (unit fixture)\n' > "$FAKE_REPO_DROP/launcher.sh"
+chmod +x "$FAKE_REPO_DROP/launcher.sh"
+# the load-bearing line — destructive DDL makes the rider refuse on unset
+printf 'CREATE TABLE x (id int);\nDROP TABLE x;\n' \
+    > "$FAKE_REPO_DROP/daemon/migrations/versions/20260101_000001_destructive.sql"
+git -C "$FAKE_REPO_DROP" init -q
+git -C "$FAKE_REPO_DROP" add -A 2>/dev/null
+git -C "$FAKE_REPO_DROP" -c user.email=t@t -c user.name=t commit -qm fixture
+git -C "$FAKE_REPO_DROP" tag "$SBX_V1"
+# DROP_STAGE <install_dir> — like run_stage but targets the DROP-bearing fixture
+DROP_STAGE() {
+    HOME="$FAKE_HOME" VERSION="$SBX_V1" TARGET=sandbox \
+        INSTALL_DIR="$1" PORT="$SBX_PORT" \
+        bash "$FAKE_REPO_DROP/scripts/upgrade/stage.sh" sandbox --version "$SBX_V1" \
+        --skip-build "$FIXTURE/stub-prod"
+}
+
+# 9a. explicit ENSEMBLE_ROLLBACK_SAFE=1 honored (benign fixture)
+RIDER_DIR="$FIXTURE/rider9a"
+mkdir -p "$RIDER_DIR"
+out="$(env -u ENSEMBLE_ROLLBACK_SAFE HOME="$FAKE_HOME" TARGET=sandbox \
+    INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --version "$SBX_V1" \
+    --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+assert_eq "9a pre: stage rc unset baseline (benign fixture, no-DROP)" "0" "$rc"
+rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
+out="$(env ENSEMBLE_ROLLBACK_SAFE=1 HOME="$FAKE_HOME" TARGET=sandbox \
+    INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --version "$SBX_V1" \
+    --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+assert_eq "9a explicit=1 honored: rc" "0" "$rc"
+# manifest_field is lib.sh (not sourced in the test scope); use direct
+# JSON extraction via python3 (matches the line 191-193 pattern).
+# Returns lowercase 'true'/'false' to match the lib.sh manifest_field output.
+mf() {
+    python3 -c '
+import json, sys
+v = json.load(open(sys.argv[1])).get(sys.argv[2])
+if isinstance(v, bool):
+    print("true" if v else "false")
+else:
+    print(v)
+' "$1" "$2" 2>/dev/null
+}
+v=$(mf "$RIDER_DIR/releases/$SBX_V1/manifest.json" rollback_safe)
+assert_eq "9a explicit=1 honored: rollback_safe=true" "true" "$v"
+
+# 9b. explicit ENSEMBLE_ROLLBACK_SAFE=true honored (benign fixture)
+rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
+out="$(env ENSEMBLE_ROLLBACK_SAFE=true HOME="$FAKE_HOME" TARGET=sandbox \
+    INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --version "$SBX_V1" \
+    --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+assert_eq "9b explicit=true honored: rc" "0" "$rc"
+v=$(mf "$RIDER_DIR/releases/$SBX_V1/manifest.json" rollback_safe)
+assert_eq "9b explicit=true honored: rollback_safe=true" "true" "$v"
+
+# 9c. explicit ENSEMBLE_ROLLBACK_SAFE=0 honored (benign fixture — the
+#     migration delta is empty so this is technically a wrongful choice, but
+#     the rider honors explicit override verbatim)
+rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
+out="$(env ENSEMBLE_ROLLBACK_SAFE=0 HOME="$FAKE_HOME" TARGET=sandbox \
+    INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --version "$SBX_V1" \
+    --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+assert_eq "9c explicit=0 honored: rc" "0" "$rc"
+v=$(mf "$RIDER_DIR/releases/$SBX_V1/manifest.json" rollback_safe)
+assert_eq "9c explicit=0 honored: rollback_safe=false" "false" "$v"
+
+# 9d. explicit ENSEMBLE_ROLLBACK_SAFE=false honored (benign fixture)
+rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
+out="$(env ENSEMBLE_ROLLBACK_SAFE=false HOME="$FAKE_HOME" TARGET=sandbox \
+    INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --version "$SBX_V1" \
+    --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+assert_eq "9d explicit=false honored: rc" "0" "$rc"
+v=$(mf "$RIDER_DIR/releases/$SBX_V1/manifest.json" rollback_safe)
+assert_eq "9d explicit=false honored: rollback_safe=false" "false" "$v"
+
+# 9e. UNSET + DROP detected → REFUSE exit 78 with actionable WARNING
+rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
+out="$(unset ENSEMBLE_ROLLBACK_SAFE; HOME="$FAKE_HOME" TARGET=sandbox \
+    INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
+    DROP_STAGE "$RIDER_DIR" 2>&1)"; rc=$?
+assert_eq "9e unset+DROP refused: rc 78" "78" "$rc"
+assert_contains "9e unset+DROP refused: WARNING cites override" \
+    "ENSEMBLE_ROLLBACK_SAFE=1" "$out"
+assert_contains "9e unset+DROP refused: WARNING cites override" \
+    "ENSEMBLE_ROLLBACK_SAFE=0" "$out"
+assert_contains "9e unset+DROP refused: WARNING cites override legitimacy" \
+    "migration delta" "$out"
+assert_contains "9e unset+DROP refused: WARNING cites supersession history" \
+    "v0.14.2" "$out"
+assert_contains "9e unset+DROP refused: WARNING cites ADR" \
+    "ADR-035" "$out"
+# NO manifest written when refused
+if [ ! -f "$RIDER_DIR/releases/$SBX_V1/manifest.json" ]; then
+    _pass
+else
+    _fail "9e unset+DROP refused: no manifest written" \
+        "absent" "present"
+fi
+
+# 9f. UNSET + no DROP → quiet default true (benign fixture)
+rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
+out="$(env -u ENSEMBLE_ROLLBACK_SAFE HOME="$FAKE_HOME" TARGET=sandbox \
+    INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --version "$SBX_V1" \
+    --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+assert_eq "9f unset+no-DROP quiet default: rc 0" "0" "$rc"
+assert_contains "9f unset+no-DROP quiet default: stage log records source" \
+    "source=default=true" "$out"
+v=$(mf "$RIDER_DIR/releases/$SBX_V1/manifest.json" rollback_safe)
+assert_eq "9f unset+no-DROP quiet default: rollback_safe=true" "true" "$v"
+
+# 9g. REGRESSION PIN: silent-false path is DEAD (v0.14.2 + v0.15.1 accident
+#     class). Under pre-rider behavior: unset → rc=0 + manifest.rollback_safe=
+#     false (SILENT false). Under the rider: unset → rc=78 + no manifest.
+#     Catches a regression to the silent-false derivation.
+rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
+out="$(unset ENSEMBLE_ROLLBACK_SAFE; HOME="$FAKE_HOME" TARGET=sandbox \
+    INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
+    DROP_STAGE "$RIDER_DIR" 2>&1)"; rc=$?
+if [ "$rc" = "78" ] && [ ! -f "$RIDER_DIR/releases/$SBX_V1/manifest.json" ]; then
+    _pass
+else
+    _fail "9g silent-false path is DEAD (v0.14.2 + v0.15.1 accident class)" \
+        "rc=78, no manifest" \
+        "rc=$rc, manifest=$( [ -f "$RIDER_DIR/releases/$SBX_V1/manifest.json" ] && echo exists || echo absent )"
+fi
+
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

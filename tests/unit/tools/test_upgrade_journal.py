@@ -46,17 +46,21 @@ live. lib.sh interop runs ``bash`` subprocesses with a scrubbed env.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daemon.services import upgrade_journal_sweep as uj_sweep
 from daemon.tools import upgrade_journal as uj
 from daemon.tools.upgrade_journal import (
     EXECUTOR_ENV_ALLOWLIST,
@@ -999,6 +1003,549 @@ class TestExecutorSpawn:
         assert "subprocess" in code_names
         # The deliberate-absence documentation must stay (intent is load-bearing).
         assert "NOT registered" in source
+
+
+# ── Verified-arm predicate + passthrough extras (v0.15.3 P1 Item 1) ──────────
+
+
+class TestVerifiedArmPredicate:
+    """The 5-conjunct ``is_verified_arm`` predicate + the shared
+    ``_verified_arm_extras`` expansion (M-11: ``env == "live"`` is
+    safe-by-CONSTRUCTION — the passthrough never fires on demo/dev/sandbox
+    even with nonce + source present). Sibling tests: none of the existing
+    pins (allowlist purity / real-spawn poison / argv equality) is touched.
+
+    Every falsifying class gets its own row; the canonical row is the
+    LIVE-rung positive case (user ratification 2026-09-26)."""
+
+    @staticmethod
+    def _op(**overrides: Any) -> uj.PendingOp:
+        defaults: dict[str, Any] = dict(
+            run_id="r-verified-arm-1",
+            kind="promote",
+            env="live",
+            target="1.2.3",
+            nonce_consumed=True,
+            confirmed_by_human=True,
+            confirmed_source="my-discord-bot:123",
+        )
+        defaults.update(overrides)
+        return uj.PendingOp(**defaults)
+
+    @pytest.mark.parametrize(
+        ("overrides", "expected"),
+        [
+            # canonical TRUE row (all 5 conjuncts present, env=live)
+            ({}, True),
+            # falsifying rows — one conjunct absent / wrong per row
+            ({"env": "demo"}, False),          # M-11 5th conjunct
+            ({"env": "dev"}, False),           # M-11 5th conjunct
+            ({"env": "sandbox"}, False),       # M-11 5th conjunct
+            ({"confirmed_source": None}, False),   # no source
+            ({"confirmed_source": ""}, False),     # empty source
+            ({"confirmed_by_human": False}, False),  # not confirmed
+            ({"nonce_consumed": False}, False),    # no nonce
+            ({"kind": "restart"}, False),          # not promote
+        ],
+    )
+    def test_is_verified_arm_truth_table(
+        self, overrides: dict[str, Any], expected: bool
+    ) -> None:
+        assert uj.is_verified_arm(self._op(**overrides)) is expected
+
+    def test_is_verified_arm_none_op_false(self) -> None:
+        assert uj.is_verified_arm(None) is False
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"env": "demo"},
+            {"env": "dev"},
+            {"env": "sandbox"},
+            {"confirmed_source": None},
+            {"confirmed_by_human": False},
+            {"nonce_consumed": False},
+            {"kind": "restart"},
+        ],
+    )
+    def test_verified_arm_extras_helper_returns_empty_for_unverified(
+        self, overrides: dict[str, Any]
+    ) -> None:
+        argv_ext, env_ext = uj._verified_arm_extras(self._op(**overrides))
+        assert argv_ext == []
+        assert env_ext == {}
+
+    def test_verified_arm_extras_helper_returns_empty_for_none(self) -> None:
+        assert uj._verified_arm_extras(None) == ([], {})
+
+    def test_verified_arm_extras_helper_returns_expected_for_verified(self) -> None:
+        op = self._op()
+        argv_ext, env_ext = uj._verified_arm_extras(op)
+        assert argv_ext == ["--f2-verified-closed"]
+        assert env_ext == {
+            "ENSEMBLE_UPGRADE_LIVE": "1",
+            "F2_VERIFIED_NOTE": "my-discord-bot:123:r-verified-arm-1",
+        }
+
+    def test_verified_arm_extras_helper_name_frozen(self) -> None:
+        """Name-freeze pins (plan W2): the shared helpers keep their exact
+        names — a rename must be a paired truth-table update, never a
+        silent drift (R-P1-1)."""
+        import inspect
+
+        assert uj.is_verified_arm.__name__ == "is_verified_arm"
+        assert uj._verified_arm_extras.__name__ == "_verified_arm_extras"
+        source = inspect.getsource(uj)
+        assert "def is_verified_arm(op: PendingOp | None) -> bool:" in source
+        assert (
+            "def _verified_arm_extras(op: PendingOp | None) -> "
+            "tuple[list[str], dict[str, str]]:" in source
+        )
+
+    def test_spawn_executor_has_sole_production_caller_manager_drain(self) -> None:
+        """SOLE-CALLER PIN (plan W2): the ONLY production caller of
+        ``spawn_executor`` is the manager drain seam. A second call site
+        would bypass the drain's verified-arm gate + reaper enqueue — this
+        pin fails loudly if one appears. (Grep counts CALL sites — the
+        ``spawn_executor`` re-export in upgrade_tools is the test patch
+        seam, never called there.)"""
+        import re as _re
+
+        daemon_dir = REPO_ROOT / "daemon"
+        callers: dict[str, int] = {}
+        for py in sorted(daemon_dir.rglob("*.py")):
+            hits = _re.findall(
+                r"(?<!def )\bspawn_executor\(", py.read_text(encoding="utf-8")
+            )
+            if hits:
+                callers[str(py.relative_to(REPO_ROOT))] = len(hits)
+        assert callers == {"daemon/manager.py": 1}, (
+            f"unexpected spawn_executor call sites: {callers}"
+        )
+
+
+# ── v0.15.3 P1 Item 4 — public GC + UpgradeJournalSweepService ───────────────
+#
+# The sweep service lives in daemon/services/ but its tests ride HERE: the
+# upgrade_tool_interlock pack runs exactly this file + test_upgrade_tools.py,
+# so pack coverage is automatic (pack = pytest runner by design).
+
+
+class TestPendingActionsGcPublic:
+    """The public ``gc_pending_actions`` (scheduled-sweep face of the
+    opportunistic pruner). Semantics match ``_gc_pending_actions`` exactly:
+    consumed → dropped (audit lives in history), past-TTL unconsumed →
+    dropped, unparseable-TTL → KEPT (GC only deletes what it can prove
+    dead)."""
+
+    def _seed(self, install: Path) -> dict[str, dict]:
+        data = journal_read(install)
+        data["pending_actions"] = {
+            "r-gc-consumed": {
+                "run_id": "r-gc-consumed", "nonce": "CONFIRM-CCCCCCCC",
+                "kind": "upgrade", "env": "live", "target": "1.2.3",
+                "issued_at": uj.now_iso(),
+                "ttl_expires_at": uj.iso_plus(uj.now_iso(), 600),
+                "consumed_at": uj.now_iso(),
+            },
+            "r-gc-expired": {
+                "run_id": "r-gc-expired", "nonce": "CONFIRM-EEEEEEEE",
+                "kind": "upgrade", "env": "live", "target": "1.2.3",
+                "issued_at": uj.now_iso(),
+                "ttl_expires_at": "2020-01-01T00:00:00Z",
+                "consumed_at": None,
+            },
+            "r-gc-live": {
+                "run_id": "r-gc-live", "nonce": "CONFIRM-LLLLLLLL",
+                "kind": "upgrade", "env": "live", "target": "1.2.3",
+                "issued_at": uj.now_iso(),
+                "ttl_expires_at": uj.iso_plus(uj.now_iso(), 600),
+                "consumed_at": None,
+            },
+        }
+        journal_write(install, data)
+        return data["pending_actions"]
+
+    def test_pending_actions_gc_prunes_expired_unconsumed(self, install: Path) -> None:
+        self._seed(install)
+        pruned = uj.gc_pending_actions(install, keep_run_id=None)
+        # consumed → dropped (audit in history) + expired-unconsumed →
+        # dropped; the unexpired-unconsumed live row is mintable → kept.
+        assert pruned == 2
+        remaining = journal_read(install)["pending_actions"]
+        assert set(remaining) == {"r-gc-live"}
+
+    def test_pending_actions_gc_keep_run_id_exemption(self, install: Path) -> None:
+        """The operator/in-progress exemption: ``keep_run_id`` spares exactly
+        one entry (consume_pending_action's nonce-already-used semantics);
+        the background sweep passes ``None`` — exemption is caller-driven,
+        never arm-path-driven."""
+        self._seed(install)
+        pruned = uj.gc_pending_actions(install, keep_run_id="r-gc-expired")
+        assert pruned == 2 - 1  # expired row exempt; consumed still dropped
+        remaining = journal_read(install)["pending_actions"]
+        assert set(remaining) == {"r-gc-expired", "r-gc-live"}
+
+    def test_pending_actions_gc_no_write_when_nothing_pruned(self, install: Path) -> None:
+        """READ-FIRST discipline: a no-op tick leaves the journal
+        byte-identical (the sweep ticks every ~90s and must not churn)."""
+        data = journal_read(install)
+        data["pending_actions"] = {
+            "r-gc-live": {
+                "run_id": "r-gc-live", "nonce": "CONFIRM-LLLLLLLL",
+                "kind": "upgrade", "env": "live", "target": "1.2.3",
+                "issued_at": uj.now_iso(),
+                "ttl_expires_at": uj.iso_plus(uj.now_iso(), 600),
+                "consumed_at": None,
+            },
+        }
+        journal_write(install, data)
+        before = uj.journal_path(install).read_bytes()
+        assert uj.gc_pending_actions(install, keep_run_id=None) == 0
+        assert uj.journal_path(install).read_bytes() == before
+
+    def test_pending_actions_gc_empty_or_missing_noop(self, install: Path) -> None:
+        assert uj.gc_pending_actions(install) == 0
+        before = uj.journal_path(install).read_bytes()
+        assert uj.gc_pending_actions(install) == 0
+        assert uj.journal_path(install).read_bytes() == before
+
+    def test_pending_actions_gc_torn_journal_raises(self, install: Path) -> None:
+        uj.journal_path(install).write_text('{"torn":', encoding="utf-8")
+        with pytest.raises(JournalTorn):
+            uj.gc_pending_actions(install)
+
+
+class TestUpgradeJournalSweepService:
+    """Reconcile sweep + liveness guard + reaper worker (real children,
+    /tmp journals; the service is the ONLY reaper owner — the spawn seam
+    merely enqueues)."""
+
+    def _svc(self, install: Path, **kwargs) -> uj_sweep.UpgradeJournalSweepService:
+        return uj_sweep.UpgradeJournalSweepService(install, **kwargs)
+
+    async def _wait_for_event(self, install: Path, event: str, timeout_s: float = 5.0) -> dict:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            for entry in journal_read(install)["history"]:
+                if entry["event"] == event:
+                    return entry
+            await asyncio.sleep(0.05)
+        pytest.fail(f"journal event '{event}' not observed within {timeout_s}s")
+
+    def test_reaper_default_timeout_is_660s(self) -> None:
+        svc = uj_sweep.UpgradeJournalSweepService(None)
+        assert svc.reaper_timeout_seconds == 660
+        assert svc.interval_seconds == 90
+        # ServicesConfig knobs: ge floors fail fast at boot.
+        from pydantic import ValidationError
+
+        from daemon.config import ServicesConfig
+
+        assert ServicesConfig().upgrade_journal_reaper_timeout_seconds == 660
+        assert (
+            ServicesConfig().upgrade_journal_sweep_interval_seconds == 90
+        )
+        with pytest.raises(ValidationError):
+            ServicesConfig(upgrade_journal_reaper_timeout_seconds=59)
+        with pytest.raises(ValidationError):
+            ServicesConfig(upgrade_journal_sweep_interval_seconds=0)
+
+    async def test_boot_sweep_clears_stale_pending_op(self, install: Path) -> None:
+        """Armed promote op, no in_flight, past expires_at + grace → the
+        sweep tick clears it (via the UNCHANGED reconcile_pending_op)."""
+        uj.write_pending_op(
+            install,
+            PendingOp(
+                run_id="r-sweep-stale", kind="promote", env="demo",
+                target="1.2.3",
+                expires_at=uj.iso_plus(
+                    uj.now_iso(), -2 * uj.RECONCILE_GRACE_S
+                ),
+            ),
+        )
+        svc = self._svc(install)
+        result = await svc.sweep_once()
+        assert result["skipped"] == 0
+        assert result["reconcile"] and "r-sweep-stale" in str(result["reconcile"])
+        assert uj.read_pending_op(install) is None
+        events = [e["event"] for e in journal_read(install)["history"]]
+        assert "sweep" in events  # closure journaled by reconcile
+
+    async def test_periodic_sweep_skips_live_executor(self, install: Path, monkeypatch) -> None:
+        """Executor owner with an ALIVE pid + fresh evidence → the tick
+        skips clearing (os.kill(pid, 0) was issued) — the op tracks a real
+        run (R-P1-7)."""
+        uj.write_pending_op(
+            install,
+            PendingOp(
+                run_id="r-sweep-live", kind="promote", env="live",
+                target="1.2.3",
+                owner_pid=os.getpid(),  # THIS process — verifiably alive
+                owner_kind="executor",
+                owner_heartbeat_at=uj.now_iso(),
+                expires_at=uj.iso_plus(uj.now_iso(), 600),
+            ),
+        )
+        kill_calls: list[tuple[int, int]] = []
+        real_kill = os.kill
+
+        def _recording_kill(pid: int, sig: int) -> None:
+            kill_calls.append((pid, sig))
+            real_kill(pid, sig)
+
+        monkeypatch.setattr(os, "kill", _recording_kill)
+        svc = self._svc(install)
+        result = await svc.sweep_once()
+        monkeypatch.setattr(os, "kill", real_kill)
+        assert result["skipped"] == 1
+        assert result["reconcile"] is None
+        assert (os.getpid(), 0) in kill_calls
+        assert uj.read_pending_op(install) is not None  # NOT cleared
+
+    async def test_periodic_sweep_stale_evidence_does_not_block(
+        self, install: Path
+    ) -> None:
+        """TIME-BOUND predicate is load-bearing (NOT bare pid-existence):
+        an alive pid with STALE heartbeat evidence no longer blocks the
+        sweep — reconcile's own expiry path clears the op."""
+        uj.write_pending_op(
+            install,
+            PendingOp(
+                run_id="r-sweep-stale-pid", kind="promote", env="demo",
+                target="1.2.3",
+                owner_pid=os.getpid(),  # alive, but…
+                owner_kind="executor",
+                owner_heartbeat_at=uj.iso_plus(uj.now_iso(), -4 * 3600),  # stale
+                expires_at=uj.iso_plus(
+                    uj.now_iso(), -2 * uj.RECONCILE_GRACE_S
+                ),  # …and past expiry+grace
+            ),
+        )
+        svc = self._svc(install)
+        result = await svc.sweep_once()
+        assert result["skipped"] == 0
+        assert uj.read_pending_op(install) is None
+
+    def test_enqueue_reaper_truncates_argv_summary(self, install: Path) -> None:
+        svc = self._svc(install)
+        long = "x" * 500
+        svc.enqueue_reaper(4242, ["bash", long], install, "r-trunc")
+        job = svc._reaper_queue.get_nowait()
+        assert job.pid == 4242
+        assert job.argv_summary == ("bash", "x" * 80)
+        assert job.run_id == "r-trunc"
+
+    async def test_reaper_journals_exit_code_on_child_exit_78(
+        self, install: Path
+    ) -> None:
+        """REAL child exiting 78 (the unverified-arm class): the reaper
+        journals ``executor_exit`` with exit_code=78 + a bounded log tail.
+        The product spawn seam is what the MANAGER patches in its own tests
+        (never subprocess.Popen — P2.2 gotcha); here the child is the
+        test's own."""
+        proc = subprocess.Popen(["bash", "-c", "exit 78"])
+        svc = self._svc(install)
+        svc.enqueue_reaper(
+            proc.pid, ["bash", "-c", "exit 78"], install, "r-exit78"
+        )
+        svc.start()
+        try:
+            entry = await self._wait_for_event(install, "executor_exit")
+            assert f"pid={proc.pid}" in entry["detail"]
+            assert "exit_code=78" in entry["detail"]
+            assert "r-exit78" in entry["detail"]
+            tail = entry["detail"].split("upgrade.log tail:\n", 1)[-1]
+            assert len(tail) <= 4096
+        finally:
+            await svc.stop()
+
+    async def test_reaper_benign_detaches_and_journals_executor_still_running_on_timeout(
+        self, install: Path
+    ) -> None:
+        """C2 benign-detach: child outlives the (tiny) timeout →
+        ``executor_still_running`` journaled, child NOT killed, worker
+        keeps serving the queue."""
+        proc = subprocess.Popen(["sleep", "30"])
+        svc = self._svc(install, reaper_timeout_seconds=1)
+        svc.enqueue_reaper(proc.pid, ["sleep", "30"], install, "r-still")
+        svc.start()
+        try:
+            entry = await self._wait_for_event(
+                install, "executor_still_running", timeout_s=8.0
+            )
+            assert f"pid={proc.pid}" in entry["detail"]
+            assert "run_id=r-still" in entry["detail"]
+            assert "still running after 1s" in entry["detail"]
+            assert "no kill" in entry["detail"]
+            # Benign: the child is still alive right after the detach.
+            os.kill(proc.pid, 0)  # raises if dead → fail the test
+            # The worker loop still serves the queue (enqueue a follow-up
+            # that exits immediately and observe its executor_exit).
+            p2 = subprocess.Popen(["bash", "-c", "exit 0"])
+            svc.enqueue_reaper(p2.pid, ["bash", "-c", "exit 0"], install, "r-after")
+            await self._wait_for_event(install, "executor_exit", timeout_s=8.0)
+        finally:
+            await svc.stop()
+            try:
+                os.kill(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(proc.pid, os.WNOHANG)
+            except ChildProcessError:
+                pass  # the lingering shielded wait already reaped it
+
+    async def test_reaper_continues_after_journal_write_oserror(
+        self, install: Path, caplog
+    ) -> None:
+        """R-M5-1/R1: an OSError from the journal append → one WARNING
+        carrying run_id + pid, NO retry, NO raise — and the worker loop
+        continues to the next job."""
+        proc = subprocess.Popen(["bash", "-c", "exit 7"])
+        svc = self._svc(install)
+        svc.enqueue_reaper(proc.pid, ["bash", "-c", "exit 7"], install, "r-oserr")
+        real_append = uj.journal_history_append
+        calls = {"n": 0}
+
+        def _flaky_append(dir_, event, detail):
+            calls["n"] += 1
+            raise OSError(28, "No space left on device")
+
+        uj.journal_history_append = _flaky_append  # type: ignore[assignment]
+        svc.start()
+        try:
+            with caplog.at_level(logging.WARNING, logger="daemon.services.upgrade_journal_sweep"):
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline and calls["n"] == 0:
+                    await asyncio.sleep(0.05)
+                assert calls["n"] == 1, "journal append was not attempted"
+                warnings = [
+                    r for r in caplog.records if "executor_exit" in r.getMessage()
+                ]
+                assert warnings, "expected a WARNING for the failed write"
+                assert "r-oserr" in warnings[0].getMessage()
+                assert f"pid={proc.pid}" in warnings[0].getMessage()
+                assert "No space left on device" in warnings[0].getMessage()
+            # NO retry (the flaky append fired exactly once) + loop
+            # continues: restore the real append and confirm the NEXT job
+            # journals fine through it.
+            uj.journal_history_append = real_append  # type: ignore[assignment]
+            p2 = subprocess.Popen(["bash", "-c", "exit 0"])
+            svc.enqueue_reaper(p2.pid, ["bash", "-c", "exit 0"], install, "r-after-oserr")
+            entry = await self._wait_for_event(install, "executor_exit")
+            assert "r-after-oserr" in entry["detail"]
+            assert calls["n"] == 1  # no retry of the failed write
+        finally:
+            await svc.stop()
+
+    # ── M-1: dedicated waitpid executor (hygiene + isolation) ────────────
+
+    async def test_reaper_uses_dedicated_executor_isolated_from_default(
+        self, install: Path
+    ) -> None:
+        """M-1: ``start()`` materializes a service-owned DEDICATED
+        ``ThreadPoolExecutor`` for the blocking ``os.waitpid`` — bounded
+        ``max_workers`` (= ``min(16, cpu_count+4)``), named with prefix
+        ``UpgradeJournalReaperWaitpid``. The shared asyncio default
+        executor is NOT used; ``stop()`` shuts the dedicated one down and
+        nulls the reference."""
+        svc = self._svc(install)
+        # Lazy: not yet materialized.
+        assert svc._waitpid_executor is None
+        svc.start()
+        try:
+            ex = svc._waitpid_executor
+            assert ex is not None, "start() must materialize a waitpid executor"
+            # Match asyncio's default formula but capped at 16 — bounded leak.
+            assert ex._max_workers == min(16, (os.cpu_count() or 1) + 4)
+            # Distinct from the SHARED default executor.
+            loop = asyncio.get_running_loop()
+            assert ex is not loop._default_executor
+            # The thread-name prefix is the strongest signal — asyncio's
+            # default uses 'asyncio', ours uses 'UpgradeJournalReaperWaitpid'.
+            assert ex._thread_name_prefix == "UpgradeJournalReaperWaitpid"
+        finally:
+            await svc.stop()
+            # stop() nulls the reference so a start-after-stop cycle recreates.
+            assert svc._waitpid_executor is None
+
+    async def test_reaper_waitpid_runs_on_dedicated_executor_not_default(
+        self, install: Path, monkeypatch
+    ) -> None:
+        """M-1 end-to-end: instrument ``_waitpid_blocking`` to record the
+        executing thread's name. The recorded names carry the dedicated
+        prefix (``UpgradeJournalReaperWaitpid_*``) and NEVER the asyncio
+        default (``asyncio_*``). Pins that the executor-identity change
+        ACTUALLY flows through the worker, not just sits on the attribute."""
+        svc = self._svc(install)
+        recorded: list[str] = []
+        real = svc._waitpid_blocking
+
+        def _traced(pid: int) -> int:
+            recorded.append(threading.current_thread().name)
+            return real(pid)
+
+        # Staticmethod descriptor — ``self._waitpid_blocking`` returns the
+        # underlying function, matching the production call site.
+        monkeypatch.setattr(
+            type(svc), "_waitpid_blocking", staticmethod(_traced)
+        )
+        proc = subprocess.Popen(["bash", "-c", "exit 0"])
+        svc.enqueue_reaper(proc.pid, ["bash", "-c", "exit 0"], install, "r-exec0")
+        svc.start()
+        try:
+            await self._wait_for_event(install, "executor_exit")
+            assert recorded, "waitpid was never invoked"
+            assert all(
+                n.startswith("UpgradeJournalReaperWaitpid_") for n in recorded
+            ), (
+                "waitpid ran off the dedicated executor — M-1 isolation "
+                f"broken: thread names recorded: {recorded}"
+            )
+            assert not any(n.startswith("asyncio_") for n in recorded), (
+                "waitpid ran on the SHARED default executor — the bug "
+                f"M-1 was supposed to fix: thread names: {recorded}"
+            )
+        finally:
+            await svc.stop()
+
+    async def test_reaper_stop_is_bounded_on_hung_child(
+        self, install: Path
+    ) -> None:
+        """M-1: ``stop()`` returns within a bounded window even when a
+        child is still hung — the dedicated executor is shut down with
+        ``wait=False, cancel_futures=True``; the in-flight ``os.waitpid``
+        thread is abandoned (Python cannot interrupt it from outside;
+        the OS reaps the child via ``start_new_session=True`` either
+        way, C2 benign-detach contract). The SHARED default executor is
+        not drained here, so this test would HANG on the pre-M-1 code."""
+        proc = subprocess.Popen(["sleep", "30"])
+        # reaper_timeout_seconds deliberately larger than the stop budget
+        # so the worker's own wait_for CANNOT rescue us — only the
+        # executor.shutdown(wait=False) in stop() can.
+        svc = self._svc(install, reaper_timeout_seconds=600)
+        svc.enqueue_reaper(proc.pid, ["sleep", "30"], install, "r-hung")
+        svc.start()
+        # Give the worker a beat to enqueue the waitpid on the executor.
+        await asyncio.sleep(0.2)
+        t0 = time.monotonic()
+        await svc.stop()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 2.0, (
+            f"stop() blocked for {elapsed:.2f}s on a hung child — the "
+            "shutdown(wait=False) contract is broken"
+        )
+        assert svc._waitpid_executor is None
+        # Cleanup: the test process must not leak the hung child.
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(proc.pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
 
 
 # ── User-origin classification (registry-backed — verdict §4) ────────────────

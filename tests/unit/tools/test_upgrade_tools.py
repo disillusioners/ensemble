@@ -795,6 +795,84 @@ class TestUpgradeStatusRoundTrip:
         assert "journal tail (last 100)" in result
 
 
+# ── v0.15.3 P1 Item 5 — _terminal_outcome terminal-class filter ──────────────
+
+
+class TestTerminalOutcomeFilter:
+    """``nonce_consumed`` (and every other transition event) no longer
+    masquerades as TERMINAL: ``_terminal_outcome`` walks reversed history and
+    returns the FIRST entry whose event is in ``uj._TERMINAL_EVENTS``; no
+    terminal match → ``(None, None)``. Sibling tests — the existing
+    terminal-label tests above are untouched."""
+
+    def test_terminal_outcome_returns_latest_terminal(self, install: Path) -> None:
+        """Latest terminal wins — transition events after it are skipped."""
+        uj.journal_history_append(install, "commit", "older run committed")
+        uj.journal_history_append(install, "rollback", "a rollback happened")
+        uj.journal_history_append(install, "nonce_consumed", "a fresh arm burned its nonce")
+        journal = uj.journal_read(install)
+        event, entry = ut._terminal_outcome(journal)
+        assert event == "rollback"
+        assert entry is not None and entry["event"] == "rollback"
+
+    def test_terminal_outcome_filters_nonce_consumed(self, install: Path) -> None:
+        uj.journal_history_append(install, "commit", "promote committed")
+        uj.journal_history_append(
+            install, "nonce_consumed", "arm burned its nonce"
+        )
+        journal = uj.journal_read(install)
+        event, _entry = ut._terminal_outcome(journal)
+        assert event == "commit"  # latest TERMINAL — not nonce_consumed
+
+    def test_terminal_outcome_returns_none_when_armed(self, install: Path) -> None:
+        """Armed-not-finished: history carries ONLY nonce_consumed → the
+        outcome is (None, None), NOT a terminal event."""
+        uj.journal_history_append(
+            install, "nonce_consumed", "arm burned its nonce"
+        )
+        journal = uj.journal_read(install)
+        assert ut._terminal_outcome(journal) == (None, None)
+
+    def test_terminal_outcome_restart_event_still_terminal(self, install: Path) -> None:
+        """The restart lane's successful-completion event (restart.sh:240)
+        stays terminal for STATUS display — derived via
+        ``_TERMINAL_OUTCOME_EVENTS = uj._TERMINAL_EVENTS + ("restart",)``.
+        (It is deliberately NOT in the reconcile tuple — a restart event
+        must never close a promote pending_op.)"""
+        uj.journal_history_append(
+            install, "restart", "intentional restart complete"
+        )
+        event, _entry = ut._terminal_outcome(uj.journal_read(install))
+        assert event == "restart"
+
+    def test_terminal_outcome_preserves_early_returns(self, install: Path) -> None:
+        assert ut._terminal_outcome(None) == ("unknown", None)
+        assert ut._terminal_outcome({"history": "not-a-list"}) == ("idle", None)
+        assert ut._terminal_outcome({"history": []}) == ("idle", None)
+        uj.journal_init(install)  # empty journal → idle
+        assert ut._terminal_outcome(uj.journal_read(install)) == ("idle", None)
+
+    def test_outcome_label_nonce_consumed_awaiting(self) -> None:
+        """Label demoted (v0.15.3 P1 Item 5): 'awaiting executor (pending)'
+        replaces 'live-confirmation nonce consumed' (the old string exists
+        nowhere else — grep-verified)."""
+        assert ut._OUTCOME_LABELS["nonce_consumed"] == "awaiting executor (pending)"
+        assert "live-confirmation nonce consumed" not in ut._OUTCOME_LABELS.values()
+
+    async def test_status_pending_not_terminal_for_armed_journal(
+        self, harness
+    ) -> None:
+        """Consumer-level pin: an armed journal (nonce_consumed, no
+        pending_op, no in_flight) reports PENDING — never TERMINAL."""
+        tools, _, install = harness
+        uj.journal_history_append(
+            install, "nonce_consumed", "arm burned its nonce"
+        )
+        result = await tools["upgrade_status"].ainvoke({})
+        assert "PENDING" in result
+        assert "TERMINAL" not in result
+
+
 # ── Read-pair refusals + fail-open ───────────────────────────────────────────
 
 
@@ -2641,6 +2719,108 @@ class TestLiveThreeFactorGate:
         assert no_spawn == []
 
 
+# ── v0.15.3 P1 Item 3 — arm preflight BEFORE the nonce burn ─────────────────
+
+
+class TestArmPreflightBeforeBurn:
+    """The preflight sits AFTER the lock acquire but BEFORE the nonce burn
+    (the plan's recommended slot): a refused preflight releases the lock,
+    journals its refusal (best-effort — the live read-only carve-out
+    applies), and returns cleanly with the nonce UNUSED. Three checks, three
+    tokens: ``executor-scripts-unavailable`` (reused), 
+    ``preflight-argv-unconstructable`` (new), ``preflight-argv-malformed``
+    (new). Sibling class — no existing live-gate test is modified."""
+
+    @staticmethod
+    async def _armed_call(live) -> tuple[str, str]:
+        run_id, _nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(
+            live, source="api", msg_id="m-preflight", content=grouped
+        )
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped}
+        )
+        return run_id, out
+
+    @staticmethod
+    def _assert_nonce_intact(live, run_id: str) -> None:
+        data = uj.journal_read(live["install"])
+        assert data["pending_actions"][run_id]["consumed_at"] is None, (
+            "refused preflight must NEVER burn the nonce"
+        )
+        assert data["pending_op"] is None
+        assert not (live["install"] / "releases" / "rollback.lock.d").exists()
+        assert live["markers"] == []
+
+    async def test_arm_preflight_refuses_unresolvable_scripts(
+        self, live_harness, monkeypatch
+    ) -> None:
+        """Check 1 — scripts unresolvable → REUSED token
+        ``executor-scripts-unavailable`` (redundant with the pre-lock arm-time
+        refusal by intent); nonce NOT burned."""
+        live = live_harness
+        monkeypatch.setattr(ut, "_resolve_scripts_dir", lambda _dir: None)
+        run_id, out = await self._armed_call(live)
+        assert _refusal_reason(out) == "executor-scripts-unavailable", out
+        self._assert_nonce_intact(live, run_id)
+
+    async def test_arm_preflight_refuses_unconstructable_argv(
+        self, live_harness
+    ) -> None:
+        """Check 2 — a confirmed_source that is not a string (corrupt window
+        marker) makes the verified-arm argv/env construction invalid → NEW
+        token ``preflight-argv-unconstructable``; nonce NOT burned."""
+        live = live_harness
+        run_id, nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+        TestLiveThreeFactorGate._stamp_window(
+            live, source=12345, msg_id="m-bad-source", content=grouped
+        )
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped}
+        )
+        assert _refusal_reason(out) == "preflight-argv-unconstructable", out
+        assert "confirmed_source must be a string" in out
+        self._assert_nonce_intact(live, run_id)
+
+    async def test_arm_preflight_refuses_malformed_argv(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Check 3 — a promote.sh whose case statement lacks
+        ``--f2-verified-closed`` would kill the run at its unknown-flag trap
+        AFTER the nonce was spent → NEW token ``preflight-argv-malformed``
+        refuses pre-burn; promote.sh itself is READ ONLY (never edited)."""
+        live = live_harness
+        stale_scripts = tmp_path / "stale-scripts" / "upgrade"
+        stale_scripts.mkdir(parents=True)
+        (stale_scripts / "lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (stale_scripts / "promote.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "# fixture: a promote.sh WITHOUT the --f2-verified-closed case\n"
+            'case "$arg" in\n    demo|live|sandbox) TARGET_ARG="$arg" ;;\nesac\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(stale_scripts))
+        run_id, out = await self._armed_call(live)
+        assert _refusal_reason(out) == "preflight-argv-malformed", out
+        assert "--f2-verified-closed" in out
+        self._assert_nonce_intact(live, run_id)
+
+    async def test_arm_preflight_passes_nonce_burns_after_checks(
+        self, live_harness
+    ) -> None:
+        """Control: with healthy scripts + sane fields the preflight passes
+        and the burn happens AFTER it (the full-pass behavior is intact —
+        sibling control for the three refusal tests)."""
+        live = live_harness
+        run_id, out = await self._armed_call(live)
+        assert "UPGRADE ARMED" in out, out
+        data = uj.journal_read(live["install"])
+        assert data["pending_actions"][run_id]["consumed_at"] is not None
+        assert data["pending_op"]["nonce_consumed"] is True
+
+
 # ── P2.2 fix pass (2026-08-23) — gate hardening + the forged-source seam ────
 
 
@@ -3395,6 +3575,267 @@ class TestManagerDrainPendingExecution:
         assert not uj.lock_dir(install).exists()
         assert iid not in drain_mgr._pending_system_executions
 
+    async def test_promote_argv_includes_f2_flag_when_verified(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """VERIFIED side (v0.15.3 P1 Item 1 — user ratification 2026-09-26):
+        a 3-factor-verified LIVE promote pending_op makes the drain append
+        ``--f2-verified-closed`` to the argv AND pass the
+        ``ENSEMBLE_UPGRADE_LIVE``/``F2_VERIFIED_NOTE`` env extras. Sibling to
+        the unverified exact-list pin above (which stays untouched)."""
+        run_id = "r-drain-live-1"
+        uj.lock_acquire(install, run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="promote", env="live", target="1.2.3",
+                armed_by_instance="inst-drain-live",
+                nonce="CONFIRM-ABCDEFGH",
+                nonce_consumed=True,
+                confirmed_by_human=True,
+                confirmed_source="my-discord-bot:123",
+            ),
+        )
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-live", "kind": "promote", "env": "live",
+             "run_id": run_id, "target": "1.2.3"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is True
+
+        [call] = spawn_calls
+        assert call["argv"] == [
+            "bash", str(scripts_dir / "promote.sh"), "live",
+            "--version", "1.2.3",
+            "--f2-verified-closed",
+        ]
+        assert call["extra_env"]["ENSEMBLE_UPGRADE_LIVE"] == "1"
+        assert call["extra_env"]["F2_VERIFIED_NOTE"] == f"my-discord-bot:123:{run_id}"
+
+    async def test_promote_verified_fields_nonlive_env_stays_unflagged(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """M-11 at the drain level: confirmed_source + nonce_consumed with
+        env=demo must NOT flag or pass live env — the 5th conjunct is the
+        safe-by-construction guard (the drain test for the env=demo truth
+        table row)."""
+        run_id = "r-drain-demo-vf"
+        uj.lock_acquire(install, run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="promote", env="demo", target="1.2.3",
+                armed_by_instance="inst-drain-demo-vf",
+                nonce="CONFIRM-ABCDEFGH",
+                nonce_consumed=True,
+                confirmed_by_human=True,
+                confirmed_source="my-discord-bot:123",
+            ),
+        )
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-demo-vf", "kind": "promote", "env": "demo",
+             "run_id": run_id, "target": "1.2.3"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is True
+
+        [call] = spawn_calls
+        assert call["argv"] == [
+            "bash", str(scripts_dir / "promote.sh"), "demo",
+            "--version", "1.2.3",
+        ]  # unverified: byte-identical to the pin above — no flag
+        assert "ENSEMBLE_UPGRADE_LIVE" not in call["extra_env"]
+        assert "F2_VERIFIED_NOTE" not in call["extra_env"]
+
+    async def test_spawn_seam_refuses_when_pending_op_missing(
+        self, drain_mgr, install, scripts_dir, spawn_calls, monkeypatch
+    ) -> None:
+        """R-M5-2 / Item-1 pre-spawn guard: when the durable pending_op is
+        gone at the spawn seam (torn/lost journal write), the drain refuses
+        to spawn and journals ``executor_orphaned`` (emit-NOTHING class,
+        NOT in _TERMINAL_EVENTS) with the spec kind + install dir."""
+        uj.lock_acquire(install, "r-drain-orphan")
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-orphan", "kind": "promote", "env": "demo",
+             "run_id": "r-drain-orphan", "target": "1.2.3"},
+        )
+        real_read = uj.read_pending_op
+        monkeypatch.setattr(uj, "read_pending_op", lambda _dir: None)
+        assert await drain_mgr.drain_pending_system_execution(iid) is False
+        monkeypatch.setattr(uj, "read_pending_op", real_read)
+        assert spawn_calls == []  # refused — nothing spawned
+        assert iid not in drain_mgr._pending_system_executions  # one shot
+        events = [e for e in uj.journal_read(install)["history"]]
+        orphan = [e for e in events if e["event"] == "executor_orphaned"]
+        assert len(orphan) == 1
+        assert "kind=promote" in orphan[0]["detail"]
+        assert str(install) in orphan[0]["detail"]
+        assert "(reason=executor-orphaned)" in orphan[0]["detail"]
+        assert orphan[0]["ts"]  # payload ts rides the history entry
+
+    async def test_spawn_seam_refuses_run_id_mismatch_even_when_verified(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """M-2 attestation-seam run_id binding: a STALE marker (run_id X)
+        drained against a NEWER verified pending_op (run_id Y) must NOT
+        spawn — and must never ride the newer op's verified-arm attestation.
+        The mismatch folds into the R-M5-2 pre-spawn guard: the durable
+        journal vouches for run Y while the marker asks for run X →
+        unverifiable → ``executor_orphaned``, nothing spawned, the newer
+        verified op left byte-untouched."""
+        newer_run_id = "r-drain-live-2"
+        stale_run_id = "r-drain-live-1-stale"
+        uj.lock_acquire(install, newer_run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=newer_run_id, kind="promote", env="live", target="1.2.4",
+                armed_by_instance="inst-drain-live-2",
+                nonce="CONFIRM-ZZZZZZZZZZ",
+                nonce_consumed=True,
+                confirmed_by_human=True,
+                confirmed_source="my-discord-bot:456",
+            ),
+        )
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-live-1", "kind": "promote",
+             "env": "live", "run_id": stale_run_id, "target": "1.2.3"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is False
+        assert spawn_calls == []  # refused — nothing spawned, nothing attested
+        assert iid not in drain_mgr._pending_system_executions  # one shot
+        events = [e for e in uj.journal_read(install)["history"]]
+        orphan = [e for e in events if e["event"] == "executor_orphaned"]
+        assert len(orphan) == 1
+        assert "kind=promote" in orphan[0]["detail"]
+        assert stale_run_id in orphan[0]["detail"]
+        assert "(reason=executor-orphaned)" in orphan[0]["detail"]
+        # The NEWER verified op is untouched: still the durable record, no
+        # executor stamp, attestation state intact.
+        op = uj.read_pending_op(install)
+        assert op is not None and op.run_id == newer_run_id
+        assert op.owner_pid == 0
+        assert op.owner_kind == "tool-arm"
+        assert op.nonce_consumed is True
+        assert op.confirmed_by_human is True
+
+    async def test_spawn_seam_passes_when_marker_run_id_matches_verified_op(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """M-2 pass side (the pair to the mismatch refusal above): marker
+        run_id == pending_op run_id on a verified arm → the pre-spawn guard
+        PASSES, the spawn fires WITH the F2 attestation, and the post-spawn
+        owner stamp lands on the SAME matching op."""
+        run_id = "r-drain-live-match"
+        uj.lock_acquire(install, run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="promote", env="live", target="1.2.4",
+                armed_by_instance="inst-drain-live-match",
+                nonce="CONFIRM-MATCH1234",
+                nonce_consumed=True,
+                confirmed_by_human=True,
+                confirmed_source="my-discord-bot:789",
+            ),
+        )
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-live-match", "kind": "promote",
+             "env": "live", "run_id": run_id, "target": "1.2.4"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is True
+        [call] = spawn_calls
+        assert call["argv"] == [
+            "bash", str(scripts_dir / "promote.sh"), "live",
+            "--version", "1.2.4",
+            "--f2-verified-closed",
+        ]
+        assert call["extra_env"]["ENSEMBLE_UPGRADE_LIVE"] == "1"
+        assert call["extra_env"]["F2_VERIFIED_NOTE"] == f"my-discord-bot:789:{run_id}"
+        # Matching run: the owner stamp lands on the SAME op.
+        op = uj.read_pending_op(install)
+        assert op is not None and op.run_id == run_id
+        assert op.owner_pid == self.EXECUTOR_PID
+        assert op.owner_kind == "executor"
+
+    async def test_spawn_seam_enqueues_into_sweep_reaper_queue(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """Item 2: EVERY armed executor is enqueued into the sweep service's
+        reaper queue — UNCONDITIONALLY (no is_verified_arm gate; the
+        unverified exit-78 case is the observability point). The service is
+        REAL (constructed, not started — enqueue is queue-only); the spawn
+        seam stays patched (daemon.tools.upgrade_journal.spawn_executor,
+        NEVER subprocess.Popen — P2.2 gotcha)."""
+        from daemon.services.upgrade_journal_sweep import (
+            UpgradeJournalSweepService,
+        )
+
+        run_id = "r-drain-reap-1"
+        uj.lock_acquire(install, run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="restart", env="demo", reason="nightly",
+                armed_by_instance="inst-drain-reap",
+            ),
+        )
+        sweep = UpgradeJournalSweepService(install)
+        drain_mgr._upgrade_journal_sweep = sweep
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-reap", "kind": "restart", "env": "demo",
+             "run_id": run_id, "reason": "nightly"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is True
+        job = sweep._reaper_queue.get_nowait()
+        assert job.pid == self.EXECUTOR_PID
+        assert job.install_dir == install
+        assert job.run_id == run_id
+        # argv_summary is bounded at 80 chars/item (plan: ReaperJob contract)
+        assert all(len(item) <= 80 for item in job.argv_summary)
+        assert job.argv_summary[0] == "bash"
+        assert job.argv_summary[1] == str(scripts_dir / "restart.sh")[:80]
+        # No sweep wired (getattr None) → drain still succeeds.
+        drain_mgr._upgrade_journal_sweep = None
+        iid2 = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-reap-2", "kind": "restart", "env": "demo",
+             "run_id": run_id, "reason": "nightly"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid2) is True
+
+    async def test_spawn_seam_enqueue_failure_never_raises(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """The never-raises contract holds through a broken reaper: a
+        raising enqueue is logged, the drain still returns True, the spawn
+        already happened."""
+        class _Broken:
+            def enqueue_reaper(self, *a, **k):
+                raise RuntimeError("queue exploded")
+
+        run_id = "r-drain-reap-broken"
+        uj.lock_acquire(install, run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="restart", env="demo", reason="nightly",
+                armed_by_instance="inst-drain-broken",
+            ),
+        )
+        drain_mgr._upgrade_journal_sweep = _Broken()
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-broken", "kind": "restart", "env": "demo",
+             "run_id": run_id, "reason": "nightly"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is True
+        assert len(spawn_calls) == 1  # spawn happened; enqueue failure logged
+
     async def test_unknown_kind_refused_no_spawn(
         self, drain_mgr, install, scripts_dir, spawn_calls
     ) -> None:
@@ -3423,6 +3864,19 @@ class TestManagerDrainPendingExecution:
         monkeypatch.setenv("ENSEMBLE_UPGRADE_LIVE", "1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-do-not-leak")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-do-not-leak")
+        # Fixture completion (v0.15.3 P1 Item 1 — NOT a pin flip): the drain
+        # now refuses a spawn with no durable pending_op (R-M5-2 guard), so
+        # the fixture mirrors production arming, which ALWAYS writes the op
+        # (upgrade_tools.py write_pending_op) before setting the marker. The
+        # pins below (poison strip :3423-3434, allowed-set :3439-3444) are
+        # byte-identical to their pre-v0.15.3 form.
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id="r-drain-env-1", kind="restart", env="demo", reason="env",
+                armed_by_instance="inst-drain-4",
+            ),
+        )
         iid = self._arm(
             drain_mgr, install, scripts_dir,
             {"instance_id": "inst-drain-4", "kind": "restart", "env": "demo",

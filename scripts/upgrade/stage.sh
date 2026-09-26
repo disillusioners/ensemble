@@ -169,13 +169,35 @@ if grep -liE 'DROP[[:space:]]+TABLE|DROP[[:space:]]+COLUMN' \
 else
     CONTAINS_CONTRACT_PHASE=false
 fi
+# stage.sh:172-180 REPLACED — D-FA4.5 v0.15.3 supersession.
+# GNU-debt sites OUT OF SCOPE (fence): lib.sh:84-89 _iso_to_epoch (BSD-only),
+# lib.sh:706-712 cooldown arm (BSD date -v order), lib.sh:1238-1295 retention
+# eviction (BSD stat -f). Fix family = uname dispatch; backlog, NOT this mission.
+ROLLBACK_SAFE_SRC="unset"
 ROLLBACK_SAFE="${ENSEMBLE_ROLLBACK_SAFE:-}"
 case "$ROLLBACK_SAFE" in
-    1|true)  ROLLBACK_SAFE=true ;;
-    0|false) ROLLBACK_SAFE=false ;;
+    1|true)  ROLLBACK_SAFE=true ; ROLLBACK_SAFE_SRC="explicit=true" ;;
+    0|false) ROLLBACK_SAFE=false; ROLLBACK_SAFE_SRC="explicit=false" ;;
     "")
-        # derived default (D-FA4.5): destructive migrations ⇒ unsafe to roll back
-        if [ "$CONTAINS_CONTRACT_PHASE" = "true" ]; then ROLLBACK_SAFE=false; else ROLLBACK_SAFE=true; fi
+        # unset: the full-history destructive-DDL grep (stage.sh:163-171) is
+        # INFORMATIONAL — it is not delta-scoped and fires on DDL applied
+        # before the previous release tag too. When it matches AND the
+        # operator has not affirmed safety, refuse (D-FA4.5 supersession;
+        # the silent-false path bit v0.14.2 on 2026-09-25 and v0.15.1 on
+        # 2026-09-26). Override legitimacy: only set ENSEMBLE_ROLLBACK_SAFE=1
+        # when the migration delta between the previous release tag and
+        # $VERSION is EMPTY (no schema drift introduced by $VERSION itself).
+        if [ "$CONTAINS_CONTRACT_PHASE" = "true" ]; then
+            _warn "destructive DDL detected in daemon/migrations/versions (DROP TABLE|DROP COLUMN match) — refusing to derive rollback_safe silently (v0.15.3 D-FA4.5 supersession; the silent-false path bit v0.14.2 on 2026-09-25 and v0.15.1 on 2026-09-26). Re-run with an EXPLICIT choice:" \
+                  "  ENSEMBLE_ROLLBACK_SAFE=1   ... ONLY if the migration delta between the previous release tag and $VERSION is EMPTY (no schema drift introduced by $VERSION — the destructive DDL was already applied before $VERSION)" \
+                  "  ENSEMBLE_ROLLBACK_SAFE=0   ... otherwise (the delta is real and $VERSION genuinely cannot roll back)" \
+                  "See ADR-035 in .agents/shared/planning/self-restart-upgrade-phase2/decisions.md and runbook docs/runbooks/upgrade-drills.md §2."
+            exit 78
+        else
+            ROLLBACK_SAFE=true
+            ROLLBACK_SAFE_SRC="default=true"
+            _log "rollback_safe defaulted to true (no destructive DDL detected in migration history; no ENSEMBLE_ROLLBACK_SAFE override needed)"
+        fi
         ;;
 esac
 
@@ -378,5 +400,5 @@ if ! integrity_verify "$VERSION"; then
     exit 1
 fi
 
-_log "staged release $VERSION at $REL (rollback_safe=$ROLLBACK_SAFE known_schema_gen=$KNOWN_SCHEMA_GEN contains_contract_phase=$CONTAINS_CONTRACT_PHASE) — NO flip performed (promote.sh owns current)"
+_log "staged release $VERSION at $REL (rollback_safe=$ROLLBACK_SAFE source=$ROLLBACK_SAFE_SRC known_schema_gen=$KNOWN_SCHEMA_GEN contains_contract_phase=$CONTAINS_CONTRACT_PHASE) — NO flip performed (promote.sh owns current)"
 exit 0
