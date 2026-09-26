@@ -515,3 +515,51 @@ Reproduces the ORIGINAL incident shape from mission f27e2d15 on a synthetic SQLi
 - **Result**: ✅ PASS — 5/5 scenario verdicts (a)–(e); runtime 4.5s; commit `347896a2` (script only, parent ac789d45)
 - **Quick Fixes**: none
 - **Report**: RESULTS/2026-09-23-job-watch-replay-verification-ac789d45.md
+
+---
+
+## Mock Test: Embedding-Gzip Wire Exemption (strict-server red→green repro)
+
+### Metadata
+- **Created**: 2026-09-26
+- **Script**: `tests/mocks/embed_gzip_wire_mock.py` (server + driver); pack wrapper `test/packs/embed_gzip_wire_mock_test.sh`
+- **Language**: Python
+- **Status**: IMPLEMENTED (green side = permanent pack; red side = one-off scratch at base commit)
+
+### Configuration
+- **Timeout**: 120 s self (`signal.alarm`) + 240 s pack-internal `timeout` + `timeout 300` outer (dual-layer)
+- **Service Port**: n/a — no daemon started; in-process code path only
+- **Mock Ports**: **18771** (strict embeddings server; 10000-19999 mock range)
+- **Cleanup**: kill leftovers on 18771 at start (after verifying the port is not 8088 and belongs to this repro); EXIT-trap teardown; server thread daemonized
+
+### What It Tests
+- ORIGINAL-BUG closure (green, fix `ce644d4a`): with `request_gzip=True` and `EMBEDDING_BASE_URL` → local strict server, `SkillEmbeddingService.embed_text` must send PLAIN JSON (no `Content-Encoding: gzip` header, no gzip magic bytes) and receive 200.
+- Chat-path separation (green): a client built via `daemon.services.llm_gzip.resolve_gzip_client(True)` still sends `Content-Encoding: gzip` — gzip transport remains active for chat, untouched by the fix.
+- Symptom reproduction (red, base `139ba352`, scratch): the SAME driver against base code must show gzip body on the wire → strict server 400 → client-side failure surfaces. Proves the repro captures the real bug.
+
+### Mock Services Required
+- Local strict HTTP server on 18771 (any path accepted, path logged): if request carries `Content-Encoding: gzip` OR body fails `json.loads` → HTTP 400 with OpenAI-style body `{"error": {"message": "We could not parse the JSON body of your request. ...", "type": "invalid_request_error", "param": null, "code": null}}`; else 200 with embeddings-shaped JSON (`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[...]}],"model":"...","usage":{...}}`).
+
+### Test Scenarios
+1. GREEN embed: `embed_text("repro probe")` under `request_gzip=True` → 200, vector returned, no gzip on wire.
+2. GREEN chat-path: POST via gzip-enabled client → server observes `Content-Encoding: gzip`.
+3. RED (scratch, base only): `embed_text` → server observes gzip body → 400 → failure surfaces client-side.
+
+### Success Criteria
+- [ ] GREEN: 200 + no `Content-Encoding: gzip` on the embeddings request + valid JSON parse server-side
+- [ ] Chat-path: `Content-Encoding: gzip` observed
+- [ ] RED scratch: gzip observed + 400 returned + client failure surfaced (exit 0 only when the expected side's outcome holds)
+- [ ] Per-request transcript lines captured (path, Content-Encoding, body head hex, parse verdict, response status)
+- [ ] Port 18771 freed after run; no process leaks
+
+### Implementation Notes
+- Driver flags: `--expect {green,red}` (exit 0 iff expected outcome observed), `--repo-root PATH` (defaults to cwd — lets the SAME driver file run against a temp worktree at base while `uv run` resolves the venv at that root), `--port` (default 18771).
+- Driver sets its own env (`OPENAI_API_KEY=sk-repro-local`, `EMBEDDING_BASE_URL=http://127.0.0.1:<port>/v1`, `OPENAI_REQUEST_GZIP=true`) — overridable; exact env/config-key names verified against service source at both commits (constructor unchanged by `ce644d4a`).
+- If `resolve_gzip_client` returns a wrapper rather than a raw httpx client, the chat-path check adapts per `daemon/services/llm_gzip.py` source and discloses the adaptation.
+
+### Last Run
+- **Date**: 2026-09-26
+- **Worker Instance**: 44a65efa-5ac2-4dcf-80c1-4bac2eb86876 (W5)
+- **Result**: PASS — GREEN (permanent pack, :18771): embed `Content-Encoding=absent`, plain JSON, 200; chat-path `Content-Encoding=gzip` (magic `1f8b`) present. RED (scratch, temp worktree @ base 139ba352, :18772): embed gzip on wire → 400 "We could not parse the JSON body of your request" → client RuntimeError. Two-sides closure proof satisfied.
+- **Quick Fixes**: driver repaired @ `7375503e` (gzip_magic scope hoist + PROBE_TEXT ~2160 chars above gzip-shrink threshold — see LESSONS/2026-09-26-gzip-wire-repro-body-threshold.md)
+- **Report**: RESULTS/2026-09-26-embedding-gzip-exempt-verification.md
