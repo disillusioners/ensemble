@@ -129,9 +129,10 @@ Three reasons — all stated as hard constraints:
      registered).
 
 2. **`allowed_models` is also one-shot.** The allowlist is snapshotted
-   at boot (see `daemon/services/instance_lifecycle.py:1780-1835`
-   block — `getattr(self._config.llm, "allowed_models", None)` reads
-   the boot-time config). Mid-run changes are not observed by the
+   at boot (see `daemon/services/instance_lifecycle.py:1407-1452`
+   block — `def _resolve_model_override` reads
+   `getattr(self._config.llm, "allowed_models", None)` and enforces the
+   silent-fallback contract). Mid-run changes are not observed by the
    running daemon.
 
 3. **`model_vision` is also one-shot.** Vision routing is wired at
@@ -150,13 +151,13 @@ land all five things together?" — operators are responsible for
 sequencing. The code provides:
 
 - A WARNING log when `_resolve_model_override` rejects a model
-  (`daemon/services/instance_lifecycle.py:1436-1441`, WP3 — DEBUG
+  (`daemon/services/instance_lifecycle.py:1447-1451`, WP3 — DEBUG
   bumped to WARNING). If a designer spawn logs "model 'vision' is not
   in allowed_models; silently falling back to default model" → the
   restart did NOT include the config change.
 
 - A spawn log line carrying `model={resolved_model}, source={resolved_source}`
-  (`daemon/services/instance_lifecycle.py:2006`, WP3). If `source=llm_model`
+  (`daemon/services/instance_lifecycle.py:2231-2235`, WP3). If `source=llm_model`
   and `model=vision` → WP3 observability fires. If `source=default`
   instead → the allowlist was not picked up → restart did NOT include
   the config change.
@@ -213,5 +214,5 @@ diagnostic flow in §8.
 - **GT-2 / GT-3** (ground truth): `implementation-plan/phase1-foundations.md` §2 — `_resolve_model_override` never raises, emits DEBUG (now WARNING); `resolved_source` tracks 4 paths; `llm_model` branch logs nothing (WP3 closes this).
 - **D2** (architectural decision): `architecture-recommendation.md` §3.4 — the operative change is the `vision` allowlist entry.
 - **PD-1 / PD-3** (plan-time decisions): `implementation-plan/phase1-foundations.md` §8 — DEFER behavior change (no raise on non-allowlisted); ADD observability (WARNING + spawn log).
-- **WP2 / WP3**: see `daemon/services/instance_lifecycle.py:1780-1835` (the seam) + `:1436-1441` (log level) + `:2006` (spawn log line).
+- **WP2 / WP3**: see `daemon/services/instance_lifecycle.py:1407-1452` (the seam) + `:1447-1451` (log level) + `:2231-2235` (spawn log line).
 - **WP12 verification table**: `implementation-plan/phase1-foundations.md` §4 — AC-12a (registered), AC-12b (non-silent resolution), AC-12c (override chain).

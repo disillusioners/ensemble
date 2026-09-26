@@ -2424,20 +2424,26 @@ class InstanceManager:
         and the tools fail closed (``"Error: tmp-image store not
         initialized"``) the same way the HTTP router returns 503.
 
-        Lazily resolved: when the property is first read it falls
-        back to an inherited ``app.state.tmp_image_store`` reference
-        (defensive — covers tests that wire the store onto an app
-        after the manager is built but before tools are assembled).
+        Lazily resolved: ``_tmp_image_store`` is set at
+        ``InstanceManager.__init__`` time; this property is the
+        canonical accessor used by the ``image_save`` /
+        ``image_list`` / ``image_get`` tools. Tests that
+        construct ``InstanceManager`` directly may pass
+        ``None`` and the tools fail closed (``"Error: tmp-image store
+        not initialized"``) the same way the HTTP router returns 503.
         """
         store = self._tmp_image_store
         if store is not None:
             return store
-        # Defensive fallback for tests that wire an app-bound store
-        # after the manager is built. Production wiring is via the
-        # constructor kwarg (canonical, never re-derives).
-        app_state = getattr(self, "_app_state", None)
-        if app_state is not None:
-            return getattr(app_state, "tmp_image_store", None)
+        # Defensive fallback removed (P2 wave-1 cleanup rider):
+        # no code path assigns ``self._app_state`` on ``InstanceManager``
+        # — the prior ``getattr(self, "_app_state", None)`` lookup was
+        # provably dead (always returned ``None``). Production wiring is
+        # via the ``InstanceManager.__init__(tmp_image_store=...)``
+        # kwarg (canonical, never re-derives). If a future wiring
+        # requirement surfaces (e.g. app-bound store injection in
+        # tests), re-introduce the fallback with a real assignment
+        # site — the dead branch masked a missing wiring step.
         return None
 
     @property

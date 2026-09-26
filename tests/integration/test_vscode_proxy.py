@@ -2134,9 +2134,14 @@ class TestWebviewCspRewrite:
                         "cache-control": "public, max-age=31536000",
                     }
 
-                    async def aiter_raw(self, chunk_size=None):
-                        if False:
-                            yield
+                    # This test only checks headers captured at
+                    # ``build_request`` time — body is never iterated,
+                    # so ``aiter_raw`` is a no-op coroutine (not an
+                    # async generator). The previous ``if False: yield``
+                    # branch (dead code, retired by P2 wave-1 cleanup
+                    # rider) existed only to make the function signature
+                    # look like an async generator; the test does not
+                    # rely on that.
 
                     async def aclose(self):
                         pass

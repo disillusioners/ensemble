@@ -723,8 +723,8 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
         #
         # MIGRATION NOTE (Cluster A — designer-agent phase 1, WP2):
         # The legacy explorer-scoped ``caller_model_overrides`` lookup
-        # (formerly this block, ``daemon/tools/knowledge_tools.py:723-790``)
-        # has been generalized into the spawn seam at
+        # that USED to live in this function body was retired and
+        # generalized into the spawn seam at
         # ``daemon/services/instance_lifecycle.py:_resolve_caller_model_override``.
         # The seam runs at spawn time for EVERY spawn — not just the
         # explorer tool — and consults both the parent-declares-for-child

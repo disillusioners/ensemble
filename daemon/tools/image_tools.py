@@ -439,26 +439,28 @@ def create_image_tools(manager: "InstanceManager", current_instance_id: str) -> 
             pass
         return None
 
-    def _get_caller_agent_id() -> str:
+    def _get_caller_agent_id() -> str | None:
         """Resolve the calling agent's id from the active instance.
 
         Used by ``image_save`` to AUTO-STAMP ``provenance.source_agent``
-        when the caller does not supply one explicitly. Falls back to
-        the empty string (``""``) when the resolution path is broken
-        (test stubs, partial-init daemon, missing repo row) — the
-        resulting provenance tag reads as "no agent" rather than
-        crashing the save.
+        when the caller does not supply one explicitly. Returns
+        ``None`` when the resolution path is broken (test stubs,
+        partial-init daemon, missing repo row) so the downstream
+        provenance stamp treats the missing tag as "no agent" rather
+        than persisting an empty-string sentinel — the
+        ``source_agent`` field follows the ``str | None = None``
+        substrate convention (omitted == absent, never ``""``).
         """
         try:
             instance_meta = manager._instance_repository.get(current_instance_id)
             if instance_meta is None:
-                return ""
+                return None
             agent_id = getattr(instance_meta, "agent_id", None)
             if isinstance(agent_id, str):
                 return agent_id
-            return ""
+            return None
         except Exception:
-            return ""
+            return None
 
     def _get_project_workdir() -> str | None:
         """Auto-inject project workdir from instance context.
@@ -783,8 +785,13 @@ Example:
 
         # Auto-stamp source_agent from the calling instance when
         # the caller did not supply one. The resolved id is a
-        # string or ``""`` (resolution failure → no provenance tag
-        # rather than crashing the save).
+        # string OR ``None`` (resolution failure → no provenance tag
+        # rather than crashing the save). The ``str | None = None``
+        # convention is honored — empty-string sentinel was retired
+        # (P2 wave-1 cleanup rider); a missing tag now drops the
+        # ``provenance`` entry entirely (the
+        # ``if resolved_source_agent is not None`` guard below
+        # skips the stamp).
         resolved_source_agent = source_agent
         if resolved_source_agent is None:
             resolved_source_agent = _get_caller_agent_id()

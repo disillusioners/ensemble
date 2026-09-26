@@ -78,6 +78,11 @@ from daemon.services.instance_lifecycle import (
     InstanceLifecycleService,
     _SpawnResult,
 )
+from daemon.tools.instance import create_instance_tools
+from tests.helpers.send_message_fixtures import (
+    make_spawn_manager,
+    patch_heavy_helpers,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -858,3 +863,148 @@ class TestSpawnLogModelSource:
         log_line = _extract_spawn_log_line(logger_mock)
         assert "model=gpt-4" in log_line
         assert "source=default" in log_line
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. TestModelTierPrecedence — tool-layer ``model_tier`` > ``model=``
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _build_spawn_tool(manager: MagicMock) -> MagicMock:
+    """Drive ``create_instance_tools`` to find the ``spawn_instance`` StructuredTool.
+
+    Mirrors the integration-suite helper from
+    ``tests/integration/test_spawn_intelligence_tier.py`` — uses the
+    shared ``patch_heavy_helpers`` so only the instance-management
+    tools (spawn / send / terminate / list / get) are built, and the
+    langchain ``spawn_instance`` StructuredTool is selected by name.
+    """
+    patches = patch_heavy_helpers()
+    for p in patches:
+        p.start()
+    try:
+        tools = create_instance_tools(
+            manager, "parent-instance-id", agent_id="tester"
+        )
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+    for t in tools:
+        if getattr(t, "name", None) == "spawn_instance":
+            return t
+    raise RuntimeError(
+        "spawn_instance tool not found in create_instance_tools output; "
+        f"got {[getattr(t, 'name', None) for t in tools]}"
+    )
+
+
+def _fake_registry() -> MagicMock:
+    """A registry stub that resolves ``agent_id`` to itself and returns
+    a truthy metadata for version validation.
+
+    Mirrors ``tests/integration/test_spawn_intelligence_tier.py``
+    helper — only the surfaces the spawn tool reads
+    (``resolve_to_id``, ``get_version``) are stubbed.
+    """
+    fake = MagicMock()
+    fake.get_version.return_value = MagicMock()
+    fake.resolve_to_id.side_effect = lambda x: x
+    return fake
+
+
+class TestModelTierPrecedence:
+    """Tool-layer ``model_tier`` > ``model=`` pair precedence.
+
+    The four ``TestSpawnSeamPrecedence`` cases cover the
+    ``InstanceLifecycleService.spawn_instance`` seam precedence
+    chain (``model= > parent_map > llm_models > llm_model > default``)
+    via the ``llm_config`` passed to ``build_instance_graph``. The
+    ``model_tier`` opt-in (Feature #1) is implemented at the TOOL
+    LAYER in ``daemon/tools/instance.py:spawn_instance`` (lines
+    ~2157-2208) — the seam itself never sees ``model_tier`` because
+    D7 forbids threading it across the facade. This class covers
+    the load-bearing both-params path: when BOTH ``model_tier`` AND
+    ``model=`` are supplied, ``model_tier`` WINS — loud supersede
+    via a visible ``[NOTE]`` line in the return string (no
+    ``ValueError``, no silent ignore — D12 / A5 / R-A5 ratified).
+
+    The exact ``[NOTE]`` wording mirrors
+    ``daemon/tools/instance.py`` ~2199-2203:
+        ``[NOTE] model={!r} superseded by model_tier='{model_tier}'
+        (using {effective_model})``
+    and the W3 visibility line ~2204-2208:
+        ``model='{effective_model}' (model_tier='{model_tier}')``
+    is appended on EVERY tier-path success (not just both-params).
+
+    Follows the suite's existing in-process patterns — no daemon
+    boot, no network, direct ``spawn_instance.coroutine(...)``
+    invocation with the shared ``patch_heavy_helpers`` /
+    ``make_spawn_manager`` fixtures.
+    """
+
+    @pytest.mark.asyncio
+    async def test_model_tier_wins_over_model_with_visible_note(self):
+        """When BOTH ``model_tier='high'`` AND ``model='coding'`` are
+        supplied, ``model_tier`` wins:
+
+        1. ``manager.spawn_instance(...)`` receives the tier-resolved
+           model (``'agentic'``), NOT the legacy ``model='coding'``
+           value.
+        2. The return string carries a visible
+           ``[NOTE] model='coding' superseded by model_tier='high'``
+           line (D12 — loud supersede, not silent-ignore).
+        3. The return string ALSO carries the W3 visibility line
+           ``model='agentic' (model_tier='high')`` (every tier-path
+           success).
+        4. Spawn proceeds — no ``ValueError`` (D12 ratified:
+           both-params is loud-but-successful, not strict-reject).
+        """
+        manager = make_spawn_manager(allowed_models=["agentic", "coding"])
+        spawn_tool = _build_spawn_tool(manager)
+
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            with patch(
+                "daemon.registry.get_registry",
+                return_value=_fake_registry(),
+            ):
+                result = await spawn_tool.coroutine(
+                    agent_id="coder", model="coding", model_tier="high"
+                )
+
+        # (1) Tier-resolved model wins — manager receives "agentic",
+        # NOT the legacy "coding" value.
+        assert manager.spawn_instance.called, (
+            "manager.spawn_instance was not called by the spawn tool"
+        )
+        call_kwargs = manager.spawn_instance.call_args.kwargs
+        assert call_kwargs.get("model") == "agentic", (
+            f"tier-resolved model must win over legacy model=; "
+            f"manager.spawn_instance received model={call_kwargs.get('model')!r}"
+        )
+
+        # (2) Visible [NOTE] supersede line — exact wording mirrored
+        # from daemon/tools/instance.py:2199-2203.
+        expected_note = (
+            "[NOTE] model='coding' superseded by "
+            "model_tier='high' (using agentic)"
+        )
+        assert expected_note in result, (
+            f"both-params [NOTE] supersede line missing from return: "
+            f"{result!r}\n  expected: {expected_note!r}"
+        )
+
+        # (3) W3 visibility line — present on EVERY tier-path success.
+        expected_visibility = "model='agentic' (model_tier='high')"
+        assert expected_visibility in result, (
+            f"W3 visibility line missing from return: {result!r}\n"
+            f"  expected: {expected_visibility!r}"
+        )
+
+        # (4) Spawn proceeded — no ValueError (D12 ratified).
+        assert "Successfully spawned instance: new-spawn-instance-id" in result, (
+            f"spawn must proceed on tier-resolved model; got: {result!r}"
+        )
