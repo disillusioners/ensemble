@@ -14,12 +14,12 @@ Day-1 contract: NO PG / live DB. All fixtures are ``tmp_path`` + ``monkeypatch``
 env. No daemon boot.
 
 Note on the integration with the mint path: the mint-time gate hook in
-``daemon.services.kms_lite`` is staged by the phase lead AFTER the
-WP10 redaction sibling lands its ``kms_lite.py`` edits (per the WP13a
-dispatch conflict-escape). The unit tests below exercise
-``validate_key_source()`` directly — they prove the gate function is
-correct. The live-enforcement tests (gating ``kms_request``) will
-land when the hook lands.
+``daemon.services.kms_lite`` LANDED in P3-WP12a (fold of the WP13a
+dispatch). The unit tests above exercise ``validate_key_source()``
+directly; the ``TestMintGateThroughKmsRequest`` class below proves the
+gate fires through ``kms_request`` itself — a violating key file yields
+``KMSUnavailableError`` from the mint entry point, not merely a
+``ok=False`` from the standalone validator.
 """
 
 from __future__ import annotations
@@ -414,3 +414,63 @@ class TestResultInvariants:
         for v in result.violations:
             joined += " " + v.detail
         assert key_body not in joined
+
+
+# ---------------------------------------------------------------------------
+# P3-WP12a — the gate fires through kms_request (live enforcement)
+# ---------------------------------------------------------------------------
+
+
+class TestMintGateThroughKmsRequest:
+    """The WP13a hook is IN the mint path: ``kms_request`` refuses on a
+    hardening violation. Proves the gate fires at the mint entry point —
+    not merely that the standalone validator returns ``ok=False``."""
+
+    def test_0644_file_refuses_through_kms_request(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cryptography.fernet import Fernet
+
+        from daemon.services.kms_lite import (
+            KMSUnavailableError,
+            kms_request,
+            reset_store_for_tests,
+        )
+
+        key_file = tmp_path / "world-readable.key"
+        _write_key_file(key_file, mode=0o644, body=Fernet.generate_key().decode())
+        monkeypatch.setenv(SYSTEM_ENCRYPTION_KEY_FILE_ENV, str(key_file))
+        monkeypatch.delenv("SYSTEM_ENCRYPTION_KEY", raising=False)
+        reset_store_for_tests()
+        try:
+            with pytest.raises(KMSUnavailableError):
+                kms_request(service="opendesign", reason="wp13a gate proof")
+        finally:
+            reset_store_for_tests()
+
+    def test_fresh_0600_file_mints_through_kms_request(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The compliant path mints end-to-end: file source read by the
+        store, gate passes, handle issued. Also proves the gate does not
+        over-refuse (0o600 + fresh mtime is accepted). The key file is
+        written NOW (no mtime override) so the real-clock age check in
+        the mint path sees a fresh file."""
+        from cryptography.fernet import Fernet
+
+        from daemon.services.kms_lite import (
+            kms_request,
+            reset_store_for_tests,
+        )
+
+        key_file = tmp_path / "hardened.key"
+        _write_key_file(key_file, mode=0o600, body=Fernet.generate_key().decode())
+        monkeypatch.setenv(SYSTEM_ENCRYPTION_KEY_FILE_ENV, str(key_file))
+        monkeypatch.delenv("SYSTEM_ENCRYPTION_KEY", raising=False)
+        reset_store_for_tests()
+        try:
+            record = kms_request(service="opendesign", reason="wp13a happy path")
+            assert record["handle"].startswith("KMS_HANDLE_")
+            assert len(record["fingerprint"]) == 16
+        finally:
+            reset_store_for_tests()

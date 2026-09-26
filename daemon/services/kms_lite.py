@@ -35,7 +35,9 @@ Home verification (arch doc §7.5):
 Things this module deliberately does NOT do (deferred to §7.5a):
 
 * rotate / revoke
-* audit-log writer (sibling WP — audit-line emission lives elsewhere)
+* audit-log policy (the ``kms_issue`` emission is a single best-effort
+  line per mint via :mod:`daemon.services.install_audit`; the audit
+  lane's storage/policy is the writer module's concern)
 * policy store / TTL sweeps / budget caps
 * persistence across restart (day-1 in-memory; revisit if restart-loss
   becomes a day-1-correctness bug)
@@ -53,6 +55,12 @@ import uuid
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
+
+from daemon.services.install_audit import EVENT_KMS_ISSUE, append_install_audit
+from daemon.util.key_hardening import (
+    SYSTEM_ENCRYPTION_KEY_FILE_ENV,
+    validate_key_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +154,20 @@ class _KMSStore:
                 plaintext-only mode (WP9 invariant).
         """
         key: bytes | str | None = encryption_key
+        if key is None:
+            # P3-WP13a: the file source is the hardened custody path and
+            # is read BEFORE the inline env fallback. Trailing newline /
+            # CR (editor artifacts) are stripped; an empty file is a
+            # refusal, never a silent fall-through to the inline var.
+            key_file = os.environ.get(SYSTEM_ENCRYPTION_KEY_FILE_ENV, "").strip()
+            if key_file:
+                with open(key_file, "r", encoding="utf-8") as fh:
+                    key = fh.read().rstrip("\r\n")
+                if not key:
+                    raise KMSUnavailableError(
+                        "KMS-Lite unavailable: SYSTEM_ENCRYPTION_KEY_FILE "
+                        "is set but the file is empty"
+                    )
         if key is None:
             key = os.environ.get("SYSTEM_ENCRYPTION_KEY")
         if not key:
@@ -362,7 +384,9 @@ def kms_request(
 
     Raises:
         KMSUnavailableError: when ``SYSTEM_ENCRYPTION_KEY`` is absent /
-            invalid (WP9 fail-closed invariant). NEVER raises any other
+            invalid (WP9 fail-closed invariant) OR when the WP13a
+            hardening gate refuses the key source (file perms > 0o600,
+            stale key file, no key configured). NEVER raises any other
             exception — partial mint states are impossible because the
             store writes are atomic under the per-instance lock.
         ValueError: when ``service`` or ``reason`` is empty.
@@ -373,8 +397,44 @@ def kms_request(
         line — those are the responsibility of the caller). The only
         legitimate plaintext surface is :func:`kms_resolve_handle`.
     """
+    # P3-WP13a mint-time gate: refuse to issue when the key source
+    # violates the hardening contract (bad file perms, stale key file,
+    # no key at all). Fail-closed — this is the refusal path the WP13a
+    # acceptance tests pin (0o644 file ⇒ KMSUnavailableError from
+    # kms_request, not merely from the standalone validator).
+    gate = validate_key_source()
+    if not gate.ok:
+        msg = gate.message
+        if gate.source == "none":
+            # Preserve the WP9 message's operator-actionability: the
+            # bare gate summary ("no key source configured") loses the
+            # env-var pointer the historical unset path carried.
+            msg = (
+                f"{msg} (SYSTEM_ENCRYPTION_KEY is not set; set it "
+                "inline or via SYSTEM_ENCRYPTION_KEY_FILE)"
+            )
+        raise KMSUnavailableError(msg)
     store = _get_store()
-    return store.mint(service=service, reason=reason, actor=actor)
+    record = store.mint(service=service, reason=reason, actor=actor)
+    # P3-WP12 fold — §7.4 audit lane: every mint emits ONE ``kms_issue``
+    # line. ``secret_ref`` carries the HANDLE only (handles-not-secrets).
+    # Best-effort: an audit-lane failure NEVER fails a mint (log warning,
+    # proceed) — the store write above is the authoritative outcome.
+    audit = append_install_audit(
+        event=EVENT_KMS_ISSUE,
+        name=service,
+        actor=actor,
+        parent=None,
+        secret_ref=record["handle"],
+        idempotency_key="",
+        trace_id=uuid.uuid4().hex,
+    )
+    if not audit.written:
+        logger.warning(
+            "kms_issue audit line not written (mint succeeded): %s",
+            audit.error,
+        )
+    return record
 
 
 def kms_resolve_handle(handle: str) -> str | None:

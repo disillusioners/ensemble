@@ -56,9 +56,13 @@ Options::
                         the schema — the operator runs after ``dev.sh`` has brought
                         the tables up.
     --dry-run           Report what would migrate; change nothing; no audit lines.
-    --jsonl-path PATH   Override the audit jsonl output path. Default:
-                        ``<repo>/planning/designer-agent/install-audit.jsonl``.
-                        Parent dirs are created on first write.
+    --jsonl-path PATH   Override the audit jsonl output path. Must end
+                        with the canonical lane layout
+                        ``.agents/shared/planning/designer-agent/install-audit.jsonl``
+                        (treated as ``<workdir>/`` + that layout).
+                        Default: the same canonical lane under the repo
+                        root — the ONE file shared with the daemon's
+                        mcp_install / kms_issue writers.
     --fail-fast         Abort on the first row-level failure instead of
                         continuing. Default: continue + report.
     --actor ID          Override the audit-line actor. Default:
@@ -71,33 +75,21 @@ Exit codes:
 * ``2`` — error (row-level failures listed in the report; with
           ``--fail-fast`` the script aborts at the first such failure).
 
-Note on the audit helper:
+Note on the audit helper (UPDATED P3-WP12a — unified):
 
-Per dispatch spec — "If the audit-writer helper
-``daemon/services/install_audit.py`` appears from the installer sibling,
-you may IMPORT it; if absent when you finish, write the audit line with
-your own minimal jsonl append and note it for reconciliation."
-
-Status at the moment of writing: ``daemon/services/install_audit.py`` is
-PRESENT in the worktree (sibling committed it during my run; untracked at
-the time of my self-commit) but its path/field-set differ from this
-script's contract:
-
-* Helper preferred path: ``<cwd>/.agents/shared/planning/designer-agent/install-audit.jsonl``
-* This script's path     : ``<repo>/planning/designer-agent/install-audit.jsonl``
-  (per arch doc §7.4 — ``planning/{feature}/install-audit.jsonl``)
-* Helper field set       : ``{ts, event, name, actor, parent, secret_ref, idempotency_key, trace_id}``
-* This script's field set: ``{ts, event, name, actor, secret_ref, idempotency_key, trace_id}``
-  (per dispatch spec — no ``parent`` for migration events)
-
-I keep my own minimal JSONL append here because (a) the helper's path
-depends on ``os.getcwd()`` which is unstable for a script that runs
-against an arbitrary ``--db-url``, (b) the helper's extra ``parent``
-field would break the test's exact-field-set assertion, and (c) the
-sibling's module is untracked at the time of writing. Phase-lead can
-reconcile at fold time. When reconciling: the on-disk line shape MUST
-NOT change (per dispatch spec) — adopt the helper's path + field set
-consistently across both writers.
+Per the original dispatch spec this script carried its own minimal
+JSONL append because the helper's path depended on ``os.getcwd()`` and
+the field sets diverged. The P3-WP12a fold RECONCILED this as
+anticipated: ``daemon/services/install_audit.append_install_audit`` is
+now the single audit writer, and this script's ``_emit_audit_line`` is
+a thin wrapper over it (``parent=None``; ``workdir=`` decomposition of
+``--jsonl-path`` preserves the override semantics for paths under the
+canonical ``.agents/shared/planning/designer-agent/`` layout). The
+default audit path is the canonical lane — the SAME file the daemon's
+configure-builtin (``mcp_install``) and mint (``kms_issue``) writers
+use, so all event types land in one lane. The on-disk line carries the
+helper's §7.4 field set (``parent`` present as ``null``); ``secret_ref``
+remains the HANDLE only.
 
 Constraints (mission):
 
@@ -135,6 +127,10 @@ from sqlalchemy.engine import Engine
 # import is impossible because redact_secrets operates on a full config dict
 # and substitutes values, not on a per-key check; the matcher tuple is
 # module-local in that file. Mirror exactly and reference the source.
+from daemon.services.install_audit import (
+    INSTALL_AUDIT_RELATIVE_PATH,
+    append_install_audit,
+)
 from daemon.services.kms_lite import KMSUnavailableError, build_marker, kms_request
 from daemon.services.kms_resolver import is_marker
 
@@ -185,9 +181,14 @@ def _is_secret_env_key(env_key: str) -> bool:
 
 DEFAULT_ACTOR = "migration:kms_lite_raw_row_migrate"
 
-# Repo-relative default path for the per-feature install audit log.
-# planning/designer-agent/ follows the arch §7.4 convention ``planning/{feature}/``.
-_DEFAULT_AUDIT_REL_PATH = Path("planning") / "designer-agent" / "install-audit.jsonl"
+# P3-WP12a audit-lane unification: the default audit path is the
+# CANONICAL lane owned by daemon/services/install_audit.py —
+# ``<repo>/.agents/shared/planning/designer-agent/install-audit.jsonl`` —
+# the SAME file the daemon's configure-builtin + kms_issue writers use,
+# so §6 row 2 (mcp_install + kms_issue + migration lines in one lane)
+# holds by construction. The old script-private ``planning/designer-agent/``
+# location is retired.
+_DEFAULT_AUDIT_REL_PATH = INSTALL_AUDIT_RELATIVE_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +244,26 @@ class MigrationSummary:
 # ---------------------------------------------------------------------------
 
 
+def _audit_workdir(jsonl_path: Path) -> Path:
+    """Map a target jsonl path back to the audit writer's ``workdir``.
+
+    ``append_install_audit(workdir=W)`` writes to
+    ``W / INSTALL_AUDIT_RELATIVE_PATH``. ``--jsonl-path`` semantics are
+    preserved by exact suffix decomposition: any path ending with the
+    canonical relative layout maps to its prefix. A non-decomposable
+    path is a hard CLI error (fail loud) rather than silently writing
+    somewhere else.
+    """
+    rel_parts = INSTALL_AUDIT_RELATIVE_PATH.parts
+    parts = jsonl_path.parts
+    if len(parts) >= len(rel_parts) and parts[-len(rel_parts):] == rel_parts:
+        return Path(*parts[: len(parts) - len(rel_parts)])
+    raise ValueError(
+        f"--jsonl-path must end with '{INSTALL_AUDIT_RELATIVE_PATH}' "
+        f"(the canonical install-audit lane); got: {jsonl_path}"
+    )
+
+
 def _emit_audit_line(
     jsonl_path: Path,
     *,
@@ -253,43 +274,32 @@ def _emit_audit_line(
     trace_id: str,
     event: str = "migration_rewrite",
 ) -> None:
-    """Append one audit line in the arch §7.4 + dispatch shape.
+    """Append one audit line VIA the canonical install-audit writer.
 
-    Shape::
+    P3-WP12a unification: the script-private JSONL append is retired;
+    :func:`daemon.services.install_audit.append_install_audit` is the
+    single writer (same file, same field set, same never-raises core).
+    ``parent`` is ``None`` (migration events have no parent instance).
+    ``secret_ref`` stays the HANDLE only — never the marker, never the
+    plaintext (handles-not-secrets, unchanged from the dispatch spec).
 
-        {"ts": <iso-8601 UTC>,
-         "event": "migration_rewrite",
-         "name": <server name>,
-         "actor": <actor id>,
-         "secret_ref": <handle ONLY — never plaintext>,
-         "idempotency_key": <sha256 hex>,
-         "trace_id": <uuid4 hex>}
-
-    Note on ``secret_ref``: by dispatch spec this is the handle ONLY (not
-    the marker, not the plaintext). The marker and plaintext are NEVER
-    placed in the audit log.
-
-    Concurrency: append-mode open with a single ``write`` call. The
-    kernel's atomic small-write guarantee (PIPE_BUF / write(2) < page
-    boundary) is sufficient for line-atomicity on POSIX for line lengths
-    below PIPE_BUF (4 KiB on Linux); our lines are well under that. No
-    inter-process file lock is taken — concurrent migrations of the same
-    DB are not a supported day-1 operation (the idempotency check on
-    re-run absorbs the rare race).
+    The canonical field set is the helper's §7.4 set — ``parent`` is now
+    present (as ``null``) where the legacy local writer omitted it.
     """
-    line = {
-        "ts": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(),
-        "event": event,
-        "name": server_name,
-        "actor": actor,
-        "secret_ref": secret_ref,
-        "idempotency_key": idempotency_key,
-        "trace_id": trace_id,
-    }
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-    with jsonl_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(line, ensure_ascii=False, sort_keys=True))
-        fh.write("\n")
+    result = append_install_audit(
+        event=event,
+        name=server_name,
+        actor=actor,
+        parent=None,
+        secret_ref=secret_ref or None,
+        idempotency_key=idempotency_key,
+        trace_id=trace_id,
+        workdir=_audit_workdir(jsonl_path),
+    )
+    if not result.written:
+        # Preserve the legacy failure surface: an unwritable audit lane
+        # raised OSError out of _migrate_single_row.
+        raise OSError(f"install-audit append failed: {result.error}")
 
 
 def _compute_idempotency_key(

@@ -52,6 +52,15 @@ def _reset_store(monkeypatch: pytest.MonkeyPatch):
     reset_store_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    """P3-WP12a: every mint emits a ``kms_issue`` audit line via the
+    canonical lane (resolved from CWD). Chdir into the test tmp dir so
+    test runs never touch the repo's real audit lane."""
+    monkeypatch.chdir(tmp_path)
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Invariant 1 — spawn-time plaintext + DB-row marker in the same test
 # ---------------------------------------------------------------------------

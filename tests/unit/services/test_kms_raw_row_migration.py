@@ -62,6 +62,15 @@ def _isolate_kms_store():
     reset_store_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    """P3-WP12a: every mint now emits a ``kms_issue`` audit line via the
+    canonical lane (resolved from CWD). Chdir into the test tmp dir so
+    test runs never touch the repo's real audit lane."""
+    monkeypatch.chdir(tmp_path)
+    yield
+
+
 @pytest.fixture
 def fernet_key(monkeypatch: pytest.MonkeyPatch) -> str:
     """Provision a valid Fernet key in the env for the test duration."""
@@ -114,6 +123,14 @@ def _audit_lines(path: Path) -> list[dict[str, object]]:
             continue
         out.append(json.loads(line))
     return out
+
+
+def _migration_lines(path: Path) -> list[dict[str, object]]:
+    """P3-WP12a: the lane now carries ``kms_issue`` lines too (one per
+    mint). Migration-specific assertions filter to ``migration_rewrite``."""
+    return [
+        l for l in _audit_lines(path) if l.get("event") == "migration_rewrite"
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +192,7 @@ class TestFreshMigrate:
     def test_no_rows_is_noop(
         self, sqlite_engine: Engine, fernet_key: str, tmp_path: Path
     ) -> None:
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
         summary = migrate.run_migration(
             sqlite_engine, jsonl_path=jsonl, dry_run=False
         )
@@ -195,7 +212,7 @@ class TestFreshMigrate:
             name="opendesign",
             env={"LOG_LEVEL": "info", "MY_MCP_TRANSPORT": "stdio"},
         )
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
         summary = migrate.run_migration(
             sqlite_engine, jsonl_path=jsonl, dry_run=False
         )
@@ -219,7 +236,7 @@ class TestFreshMigrate:
             name="opendesign",
             env={"OPEN_DESIGN_API_KEY": "sk-test-plain"},
         )
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
         summary = migrate.run_migration(
             sqlite_engine, jsonl_path=jsonl, dry_run=False
         )
@@ -240,8 +257,9 @@ class TestFreshMigrate:
         assert b["actor"] == migrate.DEFAULT_ACTOR
         assert b["handle"].startswith("KMS_HANDLE_")
         assert len(b["fingerprint"]) == 16
-        # Audit line shape.
-        lines = _audit_lines(jsonl)
+        # Audit line shape (migration_rewrite line; the lane also
+        # carries one kms_issue line per mint since P3-WP12a).
+        lines = _migration_lines(jsonl)
         assert len(lines) == 1
         line = lines[0]
         assert set(line.keys()) >= {
@@ -271,7 +289,7 @@ class TestFreshMigrate:
                 "LOG_LEVEL": "info",  # not a secret
             },
         )
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
         summary = migrate.run_migration(
             sqlite_engine, jsonl_path=jsonl, dry_run=False
         )
@@ -289,8 +307,11 @@ class TestFreshMigrate:
         assert len(bindings) == 3
         env_keys = {b["env_key"] for b in bindings}
         assert env_keys == {"OPEN_DESIGN_API_KEY", "OPENDESIGN_TOKEN", "MY_PASSWORD"}
-        # One audit line per row rewritten.
-        assert len(_audit_lines(jsonl)) == 1
+        # One migration_rewrite line per row rewritten; one kms_issue
+        # line per mint (three secret slots ⇒ three mints).
+        assert len(_migration_lines(jsonl)) == 1
+        kms_lines = [l for l in _audit_lines(jsonl) if l["event"] == "kms_issue"]
+        assert len(kms_lines) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +328,7 @@ class TestIdempotentRerun:
             name="opendesign",
             env={"OPEN_DESIGN_API_KEY": "sk-test-plain"},
         )
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
 
         # First pass: live run, emits one audit line.
         s1 = migrate.run_migration(
@@ -320,7 +341,8 @@ class TestIdempotentRerun:
         before_store_size = kms_lite_mod._get_store().size()
         before_lines = _audit_lines(jsonl)
         assert before_store_size == 1
-        assert len(before_lines) == 1
+        # 1 migration_rewrite + 1 kms_issue (the mint) since P3-WP12a.
+        assert len(before_lines) == 2
 
         # Second pass: idempotent — zero new mints, zero new audit lines.
         s2 = migrate.run_migration(
@@ -371,7 +393,7 @@ class TestMixedRows:
             env={"LOG_LEVEL": "info"},
         )
 
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
         summary = migrate.run_migration(
             sqlite_engine, jsonl_path=jsonl, dry_run=False
         )
@@ -415,21 +437,25 @@ class TestAuditLineShape:
             name="opendesign",
             env={"OPEN_DESIGN_API_KEY": "plain-XYZ"},
         )
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
         migrate.run_migration(sqlite_engine, jsonl_path=jsonl, dry_run=False)
-        lines = _audit_lines(jsonl)
+        lines = _migration_lines(jsonl)
         assert len(lines) == 1
         line = lines[0]
-        # Field set exactly per dispatch spec.
+        # Field set exactly per the canonical §7.4 helper (P3-WP12a
+        # unified writer): ``parent`` is now present, null for
+        # migration events (no parent instance).
         assert set(line.keys()) == {
             "ts",
             "event",
             "name",
             "actor",
+            "parent",
             "secret_ref",
             "idempotency_key",
             "trace_id",
         }
+        assert line["parent"] is None
         assert line["event"] == "migration_rewrite"
         assert line["name"] == "opendesign"
         assert line["actor"] == migrate.DEFAULT_ACTOR
@@ -451,7 +477,7 @@ class TestAuditLineShape:
             name="opendesign",
             env={"OPEN_DESIGN_API_KEY": plaintext_marker},
         )
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
         migrate.run_migration(sqlite_engine, jsonl_path=jsonl, dry_run=False)
         line = _audit_lines(jsonl)[0]
         # The plaintext MUST NOT appear anywhere in the audit line.
@@ -477,7 +503,7 @@ class TestDryRun:
         row = _make_row(
             sqlite_engine, name="opendesign", env=original_env
         )
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
 
         before_size = kms_lite_mod._get_store().size()
         summary = migrate.run_migration(
@@ -537,7 +563,7 @@ class TestPerRowFailureIsolation:
 
         monkeypatch.setattr(migrate, "kms_request", selective_kms_request)
 
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
         summary = migrate.run_migration(
             sqlite_engine, jsonl_path=jsonl, dry_run=False, fail_fast=False
         )
@@ -550,8 +576,11 @@ class TestPerRowFailureIsolation:
         assert "simulated KMS mint failure" in (summary.failures[0].error or "")
         # Exit code 2 because there were failures.
         assert summary.exit_code == 2
-        # Two audit lines emitted (one per migrated row), NOT three.
-        assert len(_audit_lines(jsonl)) == 2
+        # Two migration_rewrite lines (one per migrated row), NOT
+        # three; the poisoned row minted nothing so it emits no
+        # kms_issue line either (2 mints ⇒ 2 kms_issue lines).
+        assert len(_migration_lines(jsonl)) == 2
+        assert len([l for l in _audit_lines(jsonl) if l["event"] == "kms_issue"]) == 2
         # The poisoned row is UNTOUCHED on disk — the per-row
         # transaction rolled back, leaving the original plaintext.
         poisoned_reread = _read_row(sqlite_engine, poisoned_row.id)
@@ -595,7 +624,7 @@ class TestPerRowFailureIsolation:
 
         monkeypatch.setattr(migrate, "kms_request", selective_kms_request)
 
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
         summary = migrate.run_migration(
             sqlite_engine,
             jsonl_path=jsonl,
@@ -635,7 +664,7 @@ class TestKMSUnavailable:
             name="opendesign",
             env={"OPEN_DESIGN_API_KEY": "plain-secret"},
         )
-        jsonl = tmp_path / "audit.jsonl"
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
         summary = migrate.run_migration(
             sqlite_engine, jsonl_path=jsonl, dry_run=False
         )

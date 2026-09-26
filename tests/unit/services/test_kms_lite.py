@@ -43,6 +43,15 @@ def _reset_kms_store():
     reset_store_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    """P3-WP12a: every mint emits a ``kms_issue`` audit line via the
+    canonical lane (resolved from CWD). Chdir into the test tmp dir so
+    test runs never touch the repo's real audit lane."""
+    monkeypatch.chdir(tmp_path)
+    yield
+
+
 @pytest.fixture
 def fernet_key(monkeypatch):
     """Provision a valid Fernet key in the env for the test duration."""
@@ -315,3 +324,64 @@ class TestCredentialManagerUnaffected:
         encrypted = cm.encrypt({"api_key": "sk-test-1234"})
         decrypted = cm.decrypt(encrypted)
         assert decrypted == {"api_key": "sk-test-1234"}
+
+class TestKmsIssueAuditLine:
+    """P3-WP12 fold (c): every mint appends ONE §7.4 ``kms_issue`` audit
+    line via the canonical lane. ``secret_ref`` carries the HANDLE only;
+    the plaintext never rides the audit lane. Best-effort: an audit
+    failure must never fail the mint."""
+
+    def test_mint_emits_one_kms_issue_line(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SYSTEM_ENCRYPTION_KEY", Fernet.generate_key().decode())
+        kms_lite.reset_store_for_tests()
+        try:
+            record = kms_lite.kms_request(
+                service="opendesign", reason="audit-line test"
+            )
+        finally:
+            pass
+        audit_path = (
+            tmp_path
+            / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        )
+        assert audit_path.exists()
+        lines = [
+            json.loads(l)
+            for l in audit_path.read_text(encoding="utf-8").splitlines()
+            if l.strip()
+        ]
+        kms_lines = [l for l in lines if l["event"] == "kms_issue"]
+        assert len(kms_lines) == 1
+        line = kms_lines[0]
+        assert set(line.keys()) == {
+            "ts", "event", "name", "actor", "parent",
+            "secret_ref", "idempotency_key", "trace_id",
+        }
+        assert line["name"] == "opendesign"
+        assert line["actor"] == "system"  # default actor (no caller passed)
+        assert line["parent"] is None
+        assert line["secret_ref"] == record["handle"]  # handle ONLY
+        assert line["idempotency_key"] == ""
+        assert line["secret_ref"].startswith("KMS_HANDLE_")
+        assert "__KMS_REF__" not in line["secret_ref"]
+
+    def test_audit_failure_never_fails_the_mint(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        monkeypatch.setenv("SYSTEM_ENCRYPTION_KEY", Fernet.generate_key().decode())
+        kms_lite.reset_store_for_tests()
+        # Make the audit lane unwritable: the preferred path's parent is
+        # a FILE, so mkdir/open inside the writer fails.
+        blocker = tmp_path / ".agents"
+        blocker.write_text("not a directory")
+        try:
+            record = kms_lite.kms_request(
+                service="opendesign", reason="audit-failure test"
+            )
+            # Mint succeeded despite the audit-lane failure.
+            assert record["handle"].startswith("KMS_HANDLE_")
+            assert kms_lite.kms_fingerprint(record["handle"]) is not None
+        finally:
+            kms_lite.reset_store_for_tests()
