@@ -2134,14 +2134,17 @@ class TestWebviewCspRewrite:
                         "cache-control": "public, max-age=31536000",
                     }
 
-                    # This test only checks headers captured at
-                    # ``build_request`` time — body is never iterated,
-                    # so ``aiter_raw`` is a no-op coroutine (not an
-                    # async generator). The previous ``if False: yield``
-                    # branch (dead code, retired by P2 wave-1 cleanup
-                    # rider) existed only to make the function signature
-                    # look like an async generator; the test does not
-                    # rely on that.
+                    # Empty async generator (canonical ``if False:
+                    # yield`` idiom) — LOAD-BEARING: the fake URL's
+                    # query string (``?id=x``) defeats
+                    # ``_path_contains_webview_fragment``'s exact
+                    # 4-segment tuple match, the rewrite returns None,
+                    # and the proxy's streaming fallback iterates
+                    # ``aiter_raw()``; this satisfies that protocol so
+                    # the header assertions still run.
+                    async def aiter_raw(self, chunk_size=None):
+                        if False:
+                            yield
 
                     async def aclose(self):
                         pass
