@@ -108,6 +108,30 @@ logger = logging.getLogger(__name__)
 # check and the set-add.
 _inflight_reuse: set[str] = set()
 
+# T6 — per-comparator ERROR/FAILED revive counter (chart precedent at
+# ``daemon/tools/chart_tools.py:37-49``: ``_reuse_revive_attempts``).
+# An ERROR/FAILED prior status consumes one revive; the NEXT
+# discovery hit on the same comparator respawns fresh (bounded
+# thrash). COMPLETED and the non-terminal statuses never touch this
+# counter (free revives).
+#
+# SEPARATE MECHANISM from the agent-tool ReviveGuard: programmatic
+# paths never call ``note_agent_tool_revive`` and never read/write
+# ``manager._agent_tool_revive_counts``. This dict is
+# compare-path-only, in-memory (lost on restart — accepted, same
+# precedent), and invisible to the agent-tool revive budget.
+#
+# Comparator-vs-charter TERMINATED policy (P2-WP2 review MINOR-1):
+# the charter reuses TERMINATED freely (per chart T8.13), but the
+# comparator does NOT — TERMINATED children are skipped at the
+# dispatch-site revive-rail (``compare_images`` below) and fall
+# through to a fresh spawn. Rationale: the comparator has no
+# durable cross-call state worth a TERMINATED→revive round-trip
+# (no shared spec context the charter accumulates), and a fresh
+# spawn is cheaper than the registry dance for a kill-then-retry
+# pattern.
+_reuse_revive_attempts: dict[str, int] = {}
+
 # Busy-reject message — hoisted so the two return sites stay in lock-step.
 # Tests pin this string verbatim; any copy-edit must update both the
 # docstring below and the busy-reject return site.
@@ -329,6 +353,241 @@ def _find_reusable_comparator(
             exc_info=True,
         )
         return None
+
+
+async def _reuse_comparator(
+    manager: "InstanceManager",
+    comparator_id: str,
+    message: str,
+    caller_id: str,
+    timeout: float = 600.0,
+) -> str:
+    """Register → enqueue → wait on the caller's EXISTING comparator instance.
+
+    Chart-tools-local mirror of the ``invoke_agent_and_wait`` wait-block
+    (``daemon/utils.py:672-740``) minus the spawn: the reuse path rides the
+    service-side revive-on-send — ``enqueue_message`` flips a terminal
+    comparator back to RUNNING and its checkpoint reloads
+    (``instance_messaging.py``) — so no new instance is created.
+
+    Mirrors ``_reuse_charter`` (``daemon/tools/chart_tools.py:148-372``)
+    exactly except for two deliberate adaptations:
+
+    * Comparator reuses TERMINATED *children are NOT eligible* (see the
+      module-level comment on ``_reuse_revive_attempts``); the
+      dispatch site filters TERMINATED out before reaching this helper,
+      so we only have to handle the in-scope statuses here.
+    * The image-comparator returns its findings as a JSON string
+      (no ``"Error: "`` wrapping for normal results, but the agent's
+      own error path returns ``"Error: ..."`` via ``invoke_agent_and_wait``
+      ``None``/string contracts). We collapse the agent's prose-error
+      string to the caller verbatim and let the caller-side
+      ``_classify_error`` route it to the right envelope kind.
+
+    Deviations from the fresh path, both deliberate:
+    * NO ``_invoke_semaphore`` acquire — nothing is spawned, so there
+      is no worker-pool contention with ``explore`` /
+      ``explain_image``.
+    * Timeout does NOT terminate the comparator: a refused-to-die
+      comparator would leave the caller unable to retry the
+      refinement later, and the busy guard rejects a still-running
+      comparator so buffered completion absorbs a late finish.
+
+    Args:
+        manager: The InstanceManager instance.
+        comparator_id: The discovered comparator instance to reuse.
+        message: The refinement request for the image-comparator agent.
+        caller_id: The calling instance id (drives the enqueue
+            source tag).
+        timeout: Maximum seconds to wait for the comparator's
+            completion.
+
+    Returns:
+        The agent's response string on success; ``"Error: ..."`` on
+        busy-reject, pause-reject, enqueue failure, timeout, or
+        agent error. The caller is responsible for envelope-shaping
+        the return (``_validate_findings`` for the success path,
+        ``_classify_error`` for the error path).
+    """
+    # Lazy import — same shape as ``daemon/utils.py:641`` and
+    # ``daemon/tools/chart_tools.py:184`` so the patched
+    # ``daemon.services.completion_registry.get_completion_registry``
+    # module attribute is re-read on every call.
+    from daemon.services.completion_registry import get_completion_registry
+
+    # 1. Status pre-check — authoritative re-read (discovery may be
+    #    stale). TERMINATED was filtered upstream by the dispatch
+    #    site's revive-rail, so it never reaches this helper.
+    #    COMPLETED proceeds free; RUNNING is already busy; PAUSED is
+    #    busy-rejected WITHOUT enqueue (a parked enqueue would sit
+    #    PENDING until an operator resumes the comparator while the
+    #    tool wait burns); ERROR/FAILED increment the local revive
+    #    counter (the consume side of the T6 policy — the miss side
+    #    is decided by the caller); any other status
+    #    (IDLE / WAITING / WAITING_CHILDREN / QUEUED) enqueues cleanly.
+    prior_status = None
+    try:
+        row = manager._instance_repository.get(comparator_id)
+        if row is not None:
+            prior_status = (row.status or "").lower()
+    except Exception:
+        prior_status = None
+
+    if prior_status == InstanceStatus.RUNNING.value:
+        logger.warning(
+            "compare_images: caller=%s comparator=%s mode=%s prior_status=%s",
+            caller_id[:8],
+            comparator_id[:8],
+            "busy-reject",
+            prior_status,
+        )
+        return _BUSY_MSG
+    if prior_status == InstanceStatus.PAUSED.value:
+        logger.warning(
+            "compare_images: caller=%s comparator=%s mode=%s prior_status=%s",
+            caller_id[:8],
+            comparator_id[:8],
+            "busy-reject",
+            prior_status,
+        )
+        return _PAUSED_MSG
+
+    # 2. Busy guard (T5 mirror) — check BEFORE add, no await between
+    #    the membership check and the set-add (chart_tools.py:227-249
+    #    F10/S4 busy-guard atomicity invariant): a single asyncio
+    #    event loop is assumed, and only sync code
+    #    (``logger.warning`` + ``get_completion_registry``) sits
+    #    between the check and the add inside the ``try`` below —
+    #    a yield in between would let a second caller observe the
+    #    same empty slot and slip a second waiter in.
+    if comparator_id in _inflight_reuse:
+        logger.warning(
+            "compare_images: caller=%s comparator=%s mode=%s prior_status=%s",
+            caller_id[:8],
+            comparator_id[:8],
+            "busy-reject",
+            prior_status or "none",
+        )
+        return _BUSY_MSG
+
+    registry = get_completion_registry()
+    try:
+        # S2 — set-add INSIDE the ``try`` so the ``finally`` cleanup
+        # always discards the in-flight entry, even if the add itself
+        # raises (defensive: a raise between add and try entry would
+        # otherwise leak the entry until the next caller observed it).
+        _inflight_reuse.add(comparator_id)
+
+        logger.info(
+            "compare_images: caller=%s comparator=%s mode=%s prior_status=%s",
+            caller_id[:8],
+            comparator_id[:8],
+            "reuse",
+            prior_status or "none",
+        )
+
+        # 3. Unregister-then-register — W1 stale-buffered completion
+        #    fix (chart_tools.py:267-281): a buffered completion from
+        #    a PREVIOUS turn sits in ``registry._buffered`` keyed by
+        #    comparator id. The next ``register()`` would consume that
+        #    stale entry and set the event immediately, so
+        #    ``wait_for`` below would return the OLD content instead
+        #    of the NEW turn's result. ``unregister`` clears
+        #    ``_buffered``, giving the new turn a clean slate. Safe
+        #    under the T5 busy-guard invariant — one waiter per
+        #    comparator id at a time, so no other consumer is racing
+        #    for the buffer slot.
+        registry.unregister(comparator_id)
+        registry.register(comparator_id)
+
+        # 4. Enqueue on the EXISTING instance. ONLY existing kwargs
+        #    — no facade change. The ``source`` carries the
+        #    ``internal_comparator_reuse:`` prefix so the messaging
+        #    layer can attribute the dispatch to the comparator-reuse
+        #    rail (mirrors chart_tools.py:289 ``internal_chart_reuse:``).
+        try:
+            await manager.enqueue_message(
+                instance_id=comparator_id,
+                message=message,
+                source=f"internal_comparator_reuse:{caller_id}",
+                metadata={"comparator_reuse": True},
+            )
+        except Exception as enqueue_err:
+            # S7 — mirror the fresh-path never-raise contract
+            # (``daemon/utils.py:706-735``): wrap the enqueue in a
+            # catch-all so the LLM never sees a raw ``enqueue_message``
+            # stack trace on the reuse path. Brief exception class +
+            # message, paired with the ``comparator_id`` so the caller
+            # can still identify the instance.
+            return (
+                f"Error: {type(enqueue_err).__name__}: {enqueue_err}"
+            )
+
+        # S1 — counter increment AFTER successful ``enqueue_message``
+        # (aligns with the vetted post-enqueue precedent at
+        # ``daemon/tools/instance.py:3009-3012`` and
+        # ``daemon/tools/chart_tools.py:304-322``). A transient
+        # ``enqueue_message`` exception above leaves the child eligible
+        # for a future revive attempt — the one-shot budget is only
+        # consumed when the dispatch actually happened.
+        if prior_status in (
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        ):
+            # ERROR/FAILED revive consumes the one-shot budget (T6).
+            # This counter is SEPARATE from the agent-tool ReviveGuard
+            # — see the module-level comment on ``_reuse_revive_attempts``.
+            # Growth is daemon-restart-bounded: this dict is in-memory,
+            # lost on restart, and accepted (mirrors the precedent at
+            # ``daemon/manager.py:773`` ``_agent_tool_revive_counts``).
+            _reuse_revive_attempts[comparator_id] = (
+                _reuse_revive_attempts.get(comparator_id, 0) + 1
+            )
+
+        # 5. Re-register if consumed — S3 comment fix
+        #    (chart_tools.py:324-334). The re-register guards the
+        #    post-enqueue consumption race: the enqueue above can
+        #    flip terminal→RUNNING and the comparator's existing
+        #    completion (e.g. from a side channel) may have drained
+        #    the event the step-3 register just set. Re-registering
+        #    restores the wait surface for the ``wait_for`` below so
+        #    a subsequent completion is captured.
+        if not registry.is_registered(comparator_id):
+            registry.register(comparator_id)
+
+        # 6. Wait for completion (success or error).
+        #
+        # W2 — accepted interleaving (chart_tools.py:337-351).
+        # ``CompletionRegistry`` keys one ``asyncio.Event`` per
+        # instance id; two completions landing on the same id share
+        # the event (one event set is binary). When an external
+        # message completes the same comparator while we are parked
+        # here, the resulting ``event.set()`` wakes THIS waiter with
+        # THAT other message's completion result — bounded by the T5
+        # busy guard to same-comparator turns (one reuse waiter per
+        # comparator at a time, so cross-waiter mixing is
+        # impossible).
+        result = await registry.wait_for(comparator_id, timeout=timeout)
+
+        if result is None:
+            # Timeout — do NOT terminate.
+            return (
+                f"Error: Comparator timed out after {timeout}s. "
+                f"Instance {comparator_id[:8]}... may still be running."
+            )
+
+        if result.is_error:
+            # Agent errored out — it's already in ERROR status.
+            return f"Error: Agent failed. {result.content}"
+
+        # Success — return the agent's findings verbatim. Schema
+        # validation happens at the caller (the existing
+        # ``_validate_findings`` invariant).
+        return result.content or ""
+    finally:
+        # 7. Always cleanup (mirrors chart_tools.py:368-371).
+        registry.unregister(comparator_id)
+        _inflight_reuse.discard(comparator_id)
 
 
 def _ensure_monitor_kv_recorded(
@@ -555,15 +814,25 @@ def _resolve_workdir_input(
         data_uri = _load_image_from_path(image_ref, workdir=workdir)
     except ValueError as exc:
         # ``_load_image_from_path`` raises ``ValueError`` for path
-        # confinement / magic-byte / size failures — surface as
-        # input-not-found with the verbatim reason.
+        # confinement / magic-byte / size / non-regular-file
+        # failures (P2-WP3 workdir validator semantics). These are
+        # REJECTED paths, not read failures — the validator refused
+        # the path before the open call. Distinct ``reason`` from
+        # OSError below so the caller can branch between
+        # "validator rejected the path" and "filesystem won't read".
         return {
             "error": "input-not-found",
             "image_id": image_ref,
-            "reason": "workdir_unreadable",
+            "reason": "workdir_invalid",
             "message": str(exc),
         }
     except OSError as exc:
+        # ``_load_image_from_path`` raises ``OSError`` for actual
+        # filesystem read failures (permissions, I/O, missing after
+        # the validator passed — defensive since the strict
+        # resolver can race a concurrent unlink). Distinct from
+        # ``workdir_invalid`` so the caller knows the validator
+        # passed and the read is the failure surface.
         return {
             "error": "input-not-found",
             "image_id": image_ref,
@@ -571,10 +840,14 @@ def _resolve_workdir_input(
             "message": f"{type(exc).__name__}: {exc}",
         }
     except Exception as exc:
+        # Anything else — defensive catch-all for unforeseen
+        # failures (encoding errors, OOM, etc.). Distinct reason
+        # so the caller / future operator can triage without
+        # parsing prose.
         return {
             "error": "input-not-found",
             "image_id": image_ref,
-            "reason": "workdir_unreadable",
+            "reason": "workdir_unknown",
             "message": f"{type(exc).__name__}: {exc}",
         }
     return {
@@ -979,14 +1252,25 @@ def create_compare_tools(
             compare_message += f"project: {pid}\n"
 
         # Comparator reuse (default): discover the caller's most
-        # recent comparator child and refine it in place. Mirrors
-        # charter's reuse logic — the comparator's pinned criteria
-        # set lives in its soul, so a refinement turn on the same
-        # child reuses the prior criteria context without a fresh
-        # cold-start. Pure query-discovery; ``fresh`` is implicit
-        # because we currently have no caller-side knob for it
-        # (PD-13 noted and accepted: the comparator's reuse is the
-        # default and only path).
+        # recent comparator child and refine it in place via the
+        # service-side revive-on-send (``enqueue_message`` flips
+        # terminal→RUNNING and the existing checkpoint reloads).
+        # ``fresh`` is implicit because we currently have no
+        # caller-side knob for it — the comparator's reuse is the
+        # default and only path. Mirrors charter's reuse rail at
+        # ``daemon/tools/chart_tools.py:449-486``, with two
+        # deliberate differences (see the ``_reuse_revive_attempts``
+        # module-level comment):
+        #
+        # 1. TERMINATED children are NOT eligible for reuse — they
+        #    fall through to a fresh spawn below. Charter reuses
+        #    TERMINATED freely (chart T8.13); the comparator does
+        #    NOT, because it has no durable cross-call state worth
+        #    a TERMINATED→revive round-trip.
+        # 2. ERROR/FAILED children get ONE revive attempt via
+        #    ``_reuse_comparator``; the next discovery hit on the
+        #    same comparator respawns fresh (T6 one-shot budget,
+        #    same precedent as charter).
         reusable = _find_reusable_comparator(manager, current_instance_id)
 
         # Input resolution (P2-WP3). Run BEFORE the dispatch so a
@@ -1009,85 +1293,67 @@ def create_compare_tools(
             resolved_b["data_uri"],
         ]
 
+        # Reuse-rail dispatch (P2-WP2 review MAJOR-1). The
+        # discovered comparator receives the dispatch on its
+        # EXISTING instance id via ``enqueue_message``; the facade
+        # does NOT spawn a fresh worker. Exactly ONE mode log line
+        # per call (the fresh-spawn log below is skipped when the
+        # reuse branch engages).
+        mode_logged = False
         if reusable is not None:
             comparator_id = reusable.instance_id
             prior_status = (reusable.status or "").lower()
 
-            # Busy-reject when the comparator is mid-turn. Mirrors
-            # charter's busy guard exactly — two waiters on one
-            # ``instance_id`` share a single ``asyncio.Event`` so
-            # the second would wake on the FIRST caller's completion.
-            if comparator_id in _inflight_reuse:
-                logger.warning(
-                    "compare_images: caller=%s comparator=%s mode=%s",
+            # TERMINATED children are NOT reused — fall through to
+            # fresh spawn (rationale: ``_reuse_revive_attempts``
+            # module-level comment). The comparator has no durable
+            # cross-call state worth a TERMINATED→revive round-trip.
+            if prior_status == InstanceStatus.TERMINATED.value:
+                logger.info(
+                    "compare_images: caller=%s comparator=%s mode=%s prior_status=%s",
                     current_instance_id[:8],
                     comparator_id[:8],
-                    "busy-reject",
+                    "reuse-respawn-terminated",
+                    prior_status,
                 )
-                return _envelope(
-                    _KIND_VISION_FAILURE,
-                    message=_BUSY_MSG,
+                mode_logged = True
+            elif (
+                prior_status
+                in (
+                    InstanceStatus.ERROR.value,
+                    InstanceStatus.FAILED.value,
                 )
-            if prior_status == InstanceStatus.RUNNING.value:
-                logger.warning(
-                    "compare_images: caller=%s comparator=%s mode=%s",
+                and _reuse_revive_attempts.get(comparator_id, 0) >= 1
+            ):
+                # One revive already consumed for this comparator
+                # (T6 miss side, adjudicated P5) — respawn fresh.
+                # The respawn line IS this call's single mode log,
+                # so the generic fresh-spawn log below is skipped.
+                logger.info(
+                    "compare_images: caller=%s comparator=%s mode=%s prior_status=%s",
                     current_instance_id[:8],
                     comparator_id[:8],
-                    "busy-reject-running",
+                    "reuse-respawn-after-failure",
+                    prior_status,
                 )
-                return _envelope(
-                    _KIND_VISION_FAILURE,
-                    message=_BUSY_MSG,
+                mode_logged = True
+            else:
+                # Reuse path: enqueue onto the existing comparator
+                # id and wait via the completion registry. Busy /
+                # paused / enqueue-failure / timeout / agent-error
+                # are all collapsed to a single string by
+                # ``_reuse_comparator``; envelope-shape it below.
+                raw = await _reuse_comparator(
+                    manager=manager,
+                    comparator_id=comparator_id,
+                    message=compare_message,
+                    caller_id=current_instance_id,
+                    timeout=600.0,
                 )
-            if prior_status == InstanceStatus.PAUSED.value:
-                logger.warning(
-                    "compare_images: caller=%s comparator=%s mode=%s",
-                    current_instance_id[:8],
-                    comparator_id[:8],
-                    "busy-reject-paused",
-                )
-                return _envelope(
-                    _KIND_VISION_FAILURE,
-                    message=_PAUSED_MSG,
-                )
-
-            # Status pre-read for the error-classification path on
-            # the reuse branch. The reuse flow itself does NOT
-            # terminate / spawn — the comparator child is durable
-            # and the next dispatch rides its existing checkpoint.
-            try:
-                _inflight_reuse.add(comparator_id)
-                try:
-                    raw, _reused = await invoke_agent_and_wait(
-                        manager=manager,
-                        agent_id="image-comparator",
-                        message=compare_message,
-                        project_id=pid,
-                        parent_id=current_instance_id,
-                        instance_name=(
-                            f"compare-{image_a[:6]}-vs-{image_b[:6]}"
-                        ),
-                        timeout=600.0,
-                        return_instance_id=True,
-                        images=images_param,
-                    )
-                except Exception as exc:
-                    # Never-raise contract (mirrors chart_tools.py:515-516).
-                    return _envelope(
-                        _KIND_VISION_FAILURE,
-                        message=(
-                            f"Comparator invocation failed: "
-                            f"{type(exc).__name__}: {exc}"
-                        ),
-                    )
-                if raw is None:
-                    return _envelope(
-                        _KIND_TIMEOUT,
-                        message=(
-                            "Comparator timed out after 600s; "
-                            "child may still be running."
-                        ),
-                    )
+                # Busy / paused / enqueue / timeout paths return an
+                # ``Error: ...`` string. Schema success returns the
+                # findings JSON. Both need envelope-shaping per the
+                # facade's failure-kind contract.
                 if isinstance(raw, str) and raw.startswith("Error:"):
                     return _envelope(
                         _classify_error(raw),
@@ -1108,11 +1374,18 @@ def create_compare_tools(
                         ),
                     )
                 return raw
-            finally:
-                _inflight_reuse.discard(comparator_id)
 
-        # Fresh-spawn path — no reusable comparator child on this
-        # caller. Same never-raise + structured-error contract.
+        # Fresh-spawn path — no reusable comparator child, OR
+        # reuse-rail chose respawn (TERMINATED / one-shot-budget
+        # exhausted). Same never-raise + structured-error contract.
+        if not mode_logged:
+            logger.info(
+                "compare_images: caller=%s comparator=%s mode=%s prior_status=%s",
+                current_instance_id[:8],
+                "spawn",
+                "fresh",
+                "none",
+            )
         try:
             raw, _child_id = await invoke_agent_and_wait(
                 manager=manager,

@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -87,6 +88,7 @@ def _make_manager(
     config_llm_side_effect: BaseException | None = None,
     no_config: bool = False,
     tmp_image_store: MagicMock | None = None,
+    enqueue_message: AsyncMock | None = None,
 ) -> MagicMock:
     """Build a mock manager wired for ``compare_images`` invocation.
 
@@ -98,8 +100,12 @@ def _make_manager(
         so the fresh-spawn path is exercised).
       * ``shared_meta_kv_repo`` → ``MagicMock`` with ``set_many``
         attr-recorded so monitoring KV writes can be asserted on.
-      * ``enqueue_message`` is not wired — the fresh path never touches
-        it (only the reuse path does, and those tests override).
+      * ``enqueue_message`` → ``AsyncMock`` (P2-WP2 reuse rail — the
+        reuse path calls ``manager.enqueue_message`` directly; a
+        bare ``MagicMock`` would not be awaitable). Tests that want
+        to observe the reuse dispatch pass ``enqueue_message=`` or
+        rely on the default; tests that exercise the fresh-spawn
+        path assert it was NOT called.
       * ``config.llm.allowed_models`` → ``["vision"]`` so the WP3
         fail-loud init gate passes (P2-WP3 AC-5). Tests that exercise
         the gate override this with ``allowed_models=[...]`` or
@@ -122,6 +128,18 @@ def _make_manager(
         )
     manager._instance_repository.get_tree_root_id = MagicMock(return_value=None)
     manager.shared_meta_kv_repo = shared_meta_kv_repo or MagicMock()
+    # P2-WP2 reuse rail — ``_reuse_comparator`` awaits
+    # ``manager.enqueue_message`` on the reuse path. A bare
+    # ``MagicMock`` attribute is sync and would explode with
+    # ``TypeError: object MagicMock can't be used in 'await'
+    # expression`` when awaited. Tests that want to observe the
+    # dispatch can pass ``enqueue_message=AsyncMock(...)`` and
+    # override the default.
+    manager.enqueue_message = (
+        enqueue_message
+        if enqueue_message is not None
+        else AsyncMock(return_value=MagicMock())
+    )
     # WP3 — wire a default tmp_image_store whose ``open_full`` returns
     # a successful TmpImageRecord for any 32-hex id (matches the
     # substrate shape the bridge expects). Tests that exercise the
@@ -577,14 +595,20 @@ class TestCompareImagesReuse:
 
     The comparator reuse logic mirrors the charter precedent — pure
     query-discovery over ``get_children``, filtered to
-    ``image-comparator`` children flagged ``invoked_as_tool``.
+    ``image-comparator`` children flagged ``invoked_as_tool``. The
+    reuse dispatch goes through ``manager.enqueue_message`` (the
+    service-side revive-on-send flips terminal→RUNNING and the
+    existing checkpoint reloads) — ``invoke_agent_and_wait`` is the
+    FRESH-spawn helper and MUST NOT be awaited on the reuse path.
     """
 
     @pytest.fixture(autouse=True)
     def _reset_module_state(self):
         compare_tools_module._inflight_reuse.clear()
+        compare_tools_module._reuse_revive_attempts.clear()
         yield
         compare_tools_module._inflight_reuse.clear()
+        compare_tools_module._reuse_revive_attempts.clear()
 
     async def test_first_call_spawns_fresh_when_no_prior_child(self):
         """Discovery empty → fresh spawn via ``invoke_agent_and_wait``."""
@@ -600,20 +624,25 @@ class TestCompareImagesReuse:
                 image_b=_SUBSTRATE_ID_B,
             )
 
+        # Fresh path: invoke_agent_and_wait invoked once with the
+        # comparator agent_id; enqueue_message NOT awaited (no
+        # discovered child to reuse).
         mock_invoke.assert_awaited_once()
         kwargs = mock_invoke.call_args.kwargs
         assert kwargs["agent_id"] == "image-comparator"
         assert kwargs["return_instance_id"] is True
         assert kwargs["timeout"] == 600.0
         assert kwargs["parent_id"] == "test-instance-id"
+        manager.enqueue_message.assert_not_awaited()
 
     async def test_second_call_reuses_completed_comparator(self):
-        """Terminal COMPLETED comparator → reuse via invoke_agent_and_wait.
+        """Terminal COMPLETED comparator → reuse via ``enqueue_message``.
 
-        Reuse path still routes through ``invoke_agent_and_wait`` (the
-        service-side revive-on-send flips terminal→RUNNING and the
-        existing checkpoint reloads — mirrors the charter reuse
-        pattern).
+        The discovered comparator id receives the dispatch (service-side
+        revive-on-send flips terminal→RUNNING and the existing
+        checkpoint reloads). ``invoke_agent_and_wait`` is NEVER
+        awaited on the reuse path — that's the load-bearing seam
+        the prior P2-WP2 review flagged as MAJOR-1 vacuous.
         """
         from daemon.tools.compare_tools import create_compare_tools
 
@@ -623,21 +652,74 @@ class TestCompareImagesReuse:
             last_activity_at=datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc),
         )
         manager = _make_manager(get_children_return=[completed])
-        mock_invoke = AsyncMock(return_value=(_valid_findings_json(), "comp-1"))
+        # ``_reuse_comparator`` re-reads the comparator row for its
+        # authoritative prior_status — wire ``get`` to return the
+        # same completed row.
+        manager._instance_repository.get = MagicMock(return_value=completed)
+        # Mock invoke is the tripwire — must NEVER be awaited on the
+        # reuse path (P2-WP2 review MAJOR-1 was that the prior test
+        # asserted only the agent_id, not that the discovered id was
+        # actually used).
+        mock_invoke = AsyncMock(
+            side_effect=AssertionError(
+                "invoke_agent_and_wait MUST NOT be called on the reuse path"
+            )
+        )
+        expected = _valid_findings_json()
+        mock_registry = _make_registry(
+            wait_result=SimpleNamespace(content=expected, is_error=False)
+        )
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
-            tools = create_compare_tools(manager, "test-instance-id")
-            result = await tools[0].coroutine(
-                image_a=_SUBSTRATE_ID_A,
-                image_b=_SUBSTRATE_ID_B,
-            )
+            with _patched_registry(mock_registry):
+                tools = create_compare_tools(manager, "test-instance-id")
+                result = await tools[0].coroutine(
+                    image_a=_SUBSTRATE_ID_A,
+                    image_b=_SUBSTRATE_ID_B,
+                )
 
-        assert result == _valid_findings_json()
-        mock_invoke.assert_awaited_once()
-        # Reuse path still goes through ``invoke_agent_and_wait`` with
-        # the comparator agent_id — the dispatch lands on the SAME
-        # instance via service-side revive.
-        assert mock_invoke.call_args.kwargs["agent_id"] == "image-comparator"
+        # The discovered comparator id is the target of the enqueue.
+        # This is the load-bearing pin: the prior P2-WP2 review
+        # flagged the old test as vacuous because it only asserted
+        # ``invoke_agent_and_wait`` was called (which always mints a
+        # fresh instance) — the test below proves the DISCOVERED id
+        # was actually used.
+        assert result == expected
+        manager.enqueue_message.assert_awaited_once()
+        enqueue_kwargs = manager.enqueue_message.call_args.kwargs
+        assert enqueue_kwargs["instance_id"] == "comp-1"
+        assert (
+            enqueue_kwargs["source"]
+            == "internal_comparator_reuse:test-instance-id"
+        )
+        assert enqueue_kwargs["metadata"] == {"comparator_reuse": True}
+        assert _SUBSTRATE_ID_A in enqueue_kwargs["message"]
+        # Tripwire — the spawn helper MUST NOT be used on reuse.
+        mock_invoke.assert_not_awaited()
+        # Registry lifecycle — register (drain + register; the
+        # post-enqueue re-register only fires when
+        # ``is_registered`` returns False at step 5; the mock
+        # fixture returns True so step 5 is a no-op). The key
+        # invariant is the discovered id was the registration
+        # target and the drain fired (step-3 W1 fix).
+        register_calls = [
+            call.args[0]
+            for call in mock_registry.register.call_args_list
+        ]
+        assert register_calls == ["comp-1"]
+        # Unregister fired at least twice: step-3 W1 stale-buffer
+        # drain + step-7 finally cleanup (mirrors chart T8.2 W1
+        # pin). The mock's unregister records every call; we only
+        # pin the target id (no exact count — the second pass
+        # depends on whether ``is_registered`` flipped).
+        unregister_calls = [
+            call.args[0]
+            for call in mock_registry.unregister.call_args_list
+        ]
+        assert all(c == "comp-1" for c in unregister_calls)
+        assert len(unregister_calls) >= 1
+        # finally-cleanup ran — no leaked inflight slot.
+        assert "comp-1" not in compare_tools_module._inflight_reuse
 
     async def test_only_image_comparator_children_qualify(self):
         """A child with a different ``agent_id`` is NOT reusable for compare.
@@ -669,6 +751,8 @@ class TestCompareImagesReuse:
         # Caller identity is the parent_id on the FRESH spawn (not
         # the reused charter id).
         assert mock_invoke.call_args.kwargs["parent_id"] == "test-instance-id"
+        # The filtered-out charter id was never enqueued onto.
+        manager.enqueue_message.assert_not_awaited()
 
     async def test_only_invoked_as_tool_children_qualify(self):
         """A comparator child WITHOUT the ``invoked_as_tool`` stamp is skipped.
@@ -697,6 +781,7 @@ class TestCompareImagesReuse:
 
         # Discovery empty after filter → fresh spawn.
         mock_invoke.assert_awaited_once()
+        manager.enqueue_message.assert_not_awaited()
 
     async def test_discovery_repository_error_degrades_to_fresh(self):
         """A repository error during discovery falls back to fresh spawn.
@@ -720,6 +805,7 @@ class TestCompareImagesReuse:
 
         assert result == _valid_findings_json()
         mock_invoke.assert_awaited_once()
+        manager.enqueue_message.assert_not_awaited()
 
     async def test_busy_in_flight_reuse_rejected(self):
         """A second concurrent call targeting the same comparator is
@@ -727,7 +813,12 @@ class TestCompareImagesReuse:
 
         Mirrors the chart precedent: two waiters on one
         ``instance_id`` would share an ``asyncio.Event`` and the
-        second would wake on the FIRST caller's completion.
+        second would wake on the FIRST caller's completion. The
+        busy-reject now fires inside ``_reuse_comparator`` (the
+        dispatch site no longer pre-checks busy — see
+        ``_reuse_comparator`` step 2), so the test pre-seeds
+        ``_inflight_reuse`` to simulate the comparator being
+        mid-turn and asserts no enqueue / no invoke.
         """
         from daemon.tools.compare_tools import create_compare_tools
 
@@ -736,6 +827,7 @@ class TestCompareImagesReuse:
             status="completed",
         )
         manager = _make_manager(get_children_return=[completed])
+        manager._instance_repository.get = MagicMock(return_value=completed)
         # Simulate the comparator being mid-turn by pre-seeding the
         # in-flight set.
         compare_tools_module._inflight_reuse.add("comp-1")
@@ -750,11 +842,308 @@ class TestCompareImagesReuse:
                 image_b=_SUBSTRATE_ID_B,
             )
 
-        # Busy-rejected — no second invoke dispatched.
+        # Busy-rejected — no second invoke dispatched, no enqueue,
+        # no fresh spawn.
         mock_invoke.assert_not_awaited()
+        manager.enqueue_message.assert_not_awaited()
         envelope = json.loads(result)
         assert envelope["kind"] == "vision-failure"
         assert "Comparator busy" in envelope["error"]
+        # The pre-seeded slot is still held — busy-reject does NOT
+        # consume the in-flight token (the holding caller still
+        # owns it).
+        assert "comp-1" in compare_tools_module._inflight_reuse
+
+    async def test_paused_comparator_returns_paused_envelope(self):
+        """PAUSED comparator → busy-rejected WITHOUT enqueue (W6 pin).
+
+        The reuse helper rejects PAUSED children at the
+        authoritative re-read (status pre-check, step 1 of
+        ``_reuse_comparator``) — enqueueing onto a paused
+        comparator would sit PENDING until an operator resumes
+        the child while the tool wait burns.
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        paused = _comparator_row(
+            instance_id="comp-1",
+            status="paused",
+        )
+        manager = _make_manager(get_children_return=[paused])
+        manager._instance_repository.get = MagicMock(return_value=paused)
+        mock_invoke = AsyncMock()
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_compare_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
+            )
+
+        mock_invoke.assert_not_awaited()
+        manager.enqueue_message.assert_not_awaited()
+        envelope = json.loads(result)
+        assert envelope["kind"] == "vision-failure"
+        assert "paused" in envelope["error"].lower()
+        assert "fresh=True" in envelope["error"]
+
+    async def test_error_comparator_revives_once_then_respawns(self):
+        """ERROR comparator: call 1 revives (counter 1), call 2 respawns.
+
+        The T6 one-shot budget: first ERROR hit consumes a revive
+        counter, the next ERROR hit on the same comparator id
+        respawns fresh. Mirrors chart test T8.4 exactly. The
+        counter is in-memory (daemon-restart-bounded) and only
+        ERROR/FAILED prior statuses consume it.
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        error_comparator = _comparator_row(
+            instance_id="comp-err",
+            status="error",
+            last_activity_at=datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc),
+        )
+        manager = _make_manager(get_children_return=[error_comparator])
+        manager._instance_repository.get = MagicMock(return_value=error_comparator)
+        mock_registry = _make_registry(
+            wait_result=SimpleNamespace(
+                content=_valid_findings_json(), is_error=False
+            )
+        )
+        mock_invoke = AsyncMock(
+            return_value=(_valid_findings_json(), "fresh-child-id")
+        )
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            with _patched_registry(mock_registry):
+                tools = create_compare_tools(manager, "test-instance-id")
+
+                # Call 1: ERROR + counter 0 → revive (consume).
+                result1 = await tools[0].coroutine(
+                    image_a=_SUBSTRATE_ID_A,
+                    image_b=_SUBSTRATE_ID_B,
+                )
+                assert result1 == _valid_findings_json()
+                assert (
+                    compare_tools_module._reuse_revive_attempts["comp-err"]
+                    == 1
+                )
+                manager.enqueue_message.assert_awaited_once()
+                assert (
+                    manager.enqueue_message.call_args.kwargs["instance_id"]
+                    == "comp-err"
+                )
+
+                # Call 2: counter ≥ 1 → treat as MISS → fresh spawn.
+                result2 = await tools[0].coroutine(
+                    image_a=_SUBSTRATE_ID_A,
+                    image_b=_SUBSTRATE_ID_B,
+                )
+                assert result2 == _valid_findings_json()
+                # Counter NOT incremented again by the respawn path.
+                assert (
+                    compare_tools_module._reuse_revive_attempts["comp-err"]
+                    == 1
+                )
+                # Still only ONE enqueue (call 1); call 2 spawned fresh.
+                assert manager.enqueue_message.await_count == 1
+                mock_invoke.assert_awaited_once()
+                # The fresh spawn carries the caller id as parent_id,
+                # NOT the discovered (and now-skipped) comp-err id.
+                assert (
+                    mock_invoke.call_args.kwargs["parent_id"]
+                    == "test-instance-id"
+                )
+
+    async def test_failed_comparator_revives_once_then_respawns(self):
+        """FAILED comparator mirrors the ERROR/FAILED symmetric budget.
+
+        T6 treats ERROR and FAILED symmetrically — both consume
+        the one-shot budget; COMPLETED/TERMINATED never touch the
+        counter (free revives).
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        failed = _comparator_row(
+            instance_id="comp-fail",
+            status="failed",
+            last_activity_at=datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc),
+        )
+        manager = _make_manager(get_children_return=[failed])
+        manager._instance_repository.get = MagicMock(return_value=failed)
+        mock_registry = _make_registry(
+            wait_result=SimpleNamespace(
+                content=_valid_findings_json(), is_error=False
+            )
+        )
+        mock_invoke = AsyncMock(
+            return_value=(_valid_findings_json(), "fresh-child-id")
+        )
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            with _patched_registry(mock_registry):
+                tools = create_compare_tools(manager, "test-instance-id")
+
+                # Call 1: FAILED + counter 0 → revive.
+                result1 = await tools[0].coroutine(
+                    image_a=_SUBSTRATE_ID_A,
+                    image_b=_SUBSTRATE_ID_B,
+                )
+                assert result1 == _valid_findings_json()
+                assert (
+                    compare_tools_module._reuse_revive_attempts["comp-fail"]
+                    == 1
+                )
+                manager.enqueue_message.assert_awaited_once()
+
+                # Call 2: FAILED + counter 1 → respawn fresh.
+                result2 = await tools[0].coroutine(
+                    image_a=_SUBSTRATE_ID_A,
+                    image_b=_SUBSTRATE_ID_B,
+                )
+                assert result2 == _valid_findings_json()
+                assert manager.enqueue_message.await_count == 1
+                mock_invoke.assert_awaited_once()
+
+    async def test_terminated_comparator_respawns_fresh(self):
+        """TERMINATED comparator → fresh spawn, no reuse, no revive bump.
+
+        Comparator-vs-charter divergence (MINOR-1): charter reuses
+        TERMINATED freely (chart T8.13); the comparator does NOT
+        — TERMINATED children fall through to a fresh spawn because
+        the comparator has no durable cross-call state worth a
+        TERMINATED→revive round-trip.
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        terminated = _comparator_row(
+            instance_id="comp-term",
+            status="terminated",
+        )
+        manager = _make_manager(get_children_return=[terminated])
+        manager._instance_repository.get = MagicMock(return_value=terminated)
+        mock_invoke = AsyncMock(
+            return_value=(_valid_findings_json(), "fresh-child-id")
+        )
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_compare_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
+            )
+
+        # Fresh spawn invoked once; enqueue NEVER called (TERMINATED
+        # child is filtered at the dispatch site, not at the reuse
+        # helper).
+        mock_invoke.assert_awaited_once()
+        manager.enqueue_message.assert_not_awaited()
+        assert result == _valid_findings_json()
+        # TERMINATED never touches the revive counter (the counter
+        # only ERROR/FAILED consume — the dispatch site skips
+        # TERMINATED before reaching the helper).
+        assert (
+            compare_tools_module._reuse_revive_attempts.get("comp-term") is None
+        )
+
+    async def test_completed_comparator_revives_free(self):
+        """COMPLETED comparator: free revive, counter never created.
+
+        T6 mirror — COMPLETED never touches the local revive
+        counter (free revives). Mirrors chart T8.11 (the
+        comparator path's free-revive invariant).
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        completed = _comparator_row(
+            instance_id="comp-1",
+            status="completed",
+        )
+        manager = _make_manager(get_children_return=[completed])
+        manager._instance_repository.get = MagicMock(return_value=completed)
+        mock_registry = _make_registry(
+            wait_result=SimpleNamespace(
+                content=_valid_findings_json(), is_error=False
+            )
+        )
+
+        with _patched_registry(mock_registry):
+            tools = create_compare_tools(manager, "test-instance-id")
+            for i in range(3):
+                result = await tools[0].coroutine(
+                    image_a=_SUBSTRATE_ID_A,
+                    image_b=_SUBSTRATE_ID_B,
+                )
+                assert result == _valid_findings_json()
+
+        # Three reuse dispatches, three enqueues, NO fresh spawn.
+        assert manager.enqueue_message.await_count == 3
+        # Counter never created for COMPLETED children.
+        assert compare_tools_module._reuse_revive_attempts.get("comp-1") is None
+
+    async def test_reuse_timeout_returns_timeout_envelope(self):
+        """Registry wait_for → None → timeout envelope; no fresh spawn.
+
+        Mirrors chart T8.7 — timeout on the reuse path returns an
+        error string, NEVER spawns fresh (M8 mirror — the
+        comparator is durable across calls so we do not terminate
+        it on timeout).
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        completed = _comparator_row(
+            instance_id="comp-1",
+            status="completed",
+        )
+        manager = _make_manager(get_children_return=[completed])
+        manager._instance_repository.get = MagicMock(return_value=completed)
+        mock_invoke = AsyncMock(
+            side_effect=AssertionError("must not be called on reuse")
+        )
+        mock_registry = _make_registry(wait_result=None)  # timeout
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            with _patched_registry(mock_registry):
+                tools = create_compare_tools(manager, "test-instance-id")
+                result = await tools[0].coroutine(
+                    image_a=_SUBSTRATE_ID_A,
+                    image_b=_SUBSTRATE_ID_B,
+                )
+
+        envelope = json.loads(result)
+        assert envelope["kind"] == "timeout"
+        # No fresh spawn on timeout (M8 mirror).
+        mock_invoke.assert_not_awaited()
+        # Inflight slot cleaned up.
+        assert "comp-1" not in compare_tools_module._inflight_reuse
+
+
+def _make_registry(wait_result=None) -> MagicMock:
+    """Mock CompletionRegistry with a configured ``wait_for`` result.
+
+    Patched at the ``daemon.services.completion_registry`` MODULE
+    attribute — ``_reuse_comparator`` imports
+    ``get_completion_registry`` lazily inside the function body, so
+    the patched name must be visible at the module attribute (the
+    local import re-binds on every call), mirroring
+    ``tests/test_chart_tools.py::_make_registry``.
+    """
+    registry = MagicMock(name="CompletionRegistry")
+    registry.wait_for = AsyncMock(return_value=wait_result)
+    registry.register = MagicMock()
+    registry.unregister = MagicMock()
+    registry.is_registered = MagicMock(return_value=True)
+    return registry
+
+
+@contextmanager
+def _patched_registry(mock_registry):
+    """Patch ``get_completion_registry`` at the module attribute."""
+    with patch(
+        "daemon.services.completion_registry.get_completion_registry",
+        return_value=mock_registry,
+    ):
+        yield mock_registry
 
 
 # ── Monitoring triggers (AC-5) ──────────────────────────────────────────────
@@ -1056,6 +1445,130 @@ class TestInputResolutionSubstrate:
         envelope = json.loads(result)
         assert envelope["kind"] == "input-not-found"
         # The agent was never invoked.
+        mock_invoke.assert_not_awaited()
+
+
+# ── P2-WP2 review MINOR-5 — Distinct workdir failure reasons ─────────────────
+
+
+class TestInputResolutionWorkdirReasons:
+    """P2-WP2 review MINOR-5 — distinct ``reason`` per workdir failure class.
+
+    The facade distinguishes three workdir-input failure modes
+    (each surfaces a distinct ``reason`` string so the caller / a
+    future operator can branch / triage without parsing prose):
+
+      * ``workdir_invalid`` — ``_load_image_from_path`` raised
+        ``ValueError`` (confinement / magic-byte / size /
+        non-regular-file rejection; the validator refused the
+        path before the open call).
+      * ``workdir_unreadable`` — ``_load_image_from_path`` raised
+        ``OSError`` (filesystem read failure: permissions, I/O,
+        post-validator unlink race).
+      * ``workdir_unknown`` — any other ``Exception`` (defensive
+        catch-all for unforeseen failures: encoding errors, OOM).
+
+    Each test patches ``_load_image_from_path`` to raise the
+    canonical exception class and asserts the envelope's
+    ``reason`` field is the matching string.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_module_state(self):
+        compare_tools_module._inflight_reuse.clear()
+        yield
+        compare_tools_module._inflight_reuse.clear()
+
+    async def test_workdir_value_error_returns_workdir_invalid(self):
+        """``ValueError`` from ``_load_image_from_path`` → ``workdir_invalid``.
+
+        Confinement / magic-byte / size rejection falls here.
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager()
+        mock_invoke = AsyncMock()
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            # ``_load_image_from_path`` is imported lazily inside
+            # ``_resolve_workdir_input`` from
+            # ``daemon.tools.image_tools`` — patch the import source
+            # so the facade's lazy import binds to the mock.
+            with patch(
+                "daemon.tools.image_tools._load_image_from_path",
+                side_effect=ValueError(
+                    "Path 'img.png' is outside the project workdir boundary."
+                ),
+            ):
+                tools = create_compare_tools(manager, "test-instance-id")
+                result = await tools[0].coroutine(
+                    image_a="img.png",  # not a 32-hex → workdir branch
+                    image_b=_SUBSTRATE_ID_B,
+                )
+
+        envelope = json.loads(result)
+        assert envelope["kind"] == "input-not-found"
+        assert envelope["reason"] == "workdir_invalid"
+        assert "outside the project workdir" in envelope["error"]
+        # No spawn — the agent is never invoked on a bad image.
+        mock_invoke.assert_not_awaited()
+
+    async def test_workdir_oserror_returns_workdir_unreadable(self):
+        """``OSError`` from ``_load_image_from_path`` → ``workdir_unreadable``.
+
+        Filesystem read failure falls here (validator passed; the
+        read itself failed — typically permissions or I/O).
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager()
+        mock_invoke = AsyncMock()
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            with patch(
+                "daemon.tools.image_tools._load_image_from_path",
+                side_effect=PermissionError("Permission denied: 'img.png'"),
+            ):
+                tools = create_compare_tools(manager, "test-instance-id")
+                result = await tools[0].coroutine(
+                    image_a="img.png",
+                    image_b=_SUBSTRATE_ID_B,
+                )
+
+        envelope = json.loads(result)
+        assert envelope["kind"] == "input-not-found"
+        assert envelope["reason"] == "workdir_unreadable"
+        assert "Permission denied" in envelope["error"]
+        mock_invoke.assert_not_awaited()
+
+    async def test_workdir_unexpected_error_returns_workdir_unknown(self):
+        """Any other ``Exception`` → ``workdir_unknown``.
+
+        Defensive catch-all so a future unforeseen failure mode
+        (encoding error, OOM, etc.) surfaces with a distinct
+        reason the operator can triage without parsing the prose
+        message.
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager()
+        mock_invoke = AsyncMock()
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            with patch(
+                "daemon.tools.image_tools._load_image_from_path",
+                side_effect=RuntimeError("unexpected codec failure"),
+            ):
+                tools = create_compare_tools(manager, "test-instance-id")
+                result = await tools[0].coroutine(
+                    image_a="img.png",
+                    image_b=_SUBSTRATE_ID_B,
+                )
+
+        envelope = json.loads(result)
+        assert envelope["kind"] == "input-not-found"
+        assert envelope["reason"] == "workdir_unknown"
+        assert "RuntimeError" in envelope["error"]
         mock_invoke.assert_not_awaited()
 
 
