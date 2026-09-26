@@ -1368,6 +1368,279 @@ def list_known_skill_names_from_skill_set_files(
     return names
 
 
+# ─────────────────────────────────────────────────────────────────────
+# WP4 strictness flip — production loader (P3-WP5 fold)
+# ─────────────────────────────────────────────────────────────────────
+
+#: Agents root scanned for ``skill-set.yaml`` manifests by the
+#: production loader (project-relative; resolved against cwd).
+DEFAULT_AGENTS_DIR = Path("agents")
+
+
+def _default_builtin_mcp_resolver(class_or_name: str) -> Any:
+    """Resolve a ``builtin_mcp_class`` entry against the live registry.
+
+    ``capabilities.yaml`` stores the CLASS name (``OpenDesignMCP``)
+    while :meth:`BuiltinServerRegistry.get_by_name` keys on the SERVER
+    name (``opendesign``). Production resolution therefore tries the
+    server-name lookup first, then a class-name scan — either match
+    counts as resolved; anything else returns ``None`` (which the
+    loader turns into a strict error).
+
+    Lazy import: keeps capability_resolver importable without the MCP
+    subsystem (tests inject their own resolvers).
+    """
+    from daemon.mcp.builtin_servers import get_registry  # lazy: avoid cycle
+
+    registry = get_registry()
+    by_name = registry.get_by_name(class_or_name)
+    if by_name is not None:
+        return by_name
+    for candidate in registry.get_all():
+        if type(candidate).__name__ == class_or_name:
+            return candidate
+    return None
+
+
+def load_production_capabilities_registry(
+    registry_path: Path | str | None = None,
+    agents_dir: Path | str | None = None,
+) -> list["CapabilityRegistryEntry"]:
+    """Load the capabilities registry the way PRODUCTION does — strict.
+
+    This is the single production entry point for registry loads
+    (P3-WP5 strictness flip: the ``install-opendesign`` skill now
+    exists in ``agents/worker/skill-set.yaml``, so a dangling
+    ``installer_skill`` reference is a real misconfiguration and MUST
+    fail loud instead of silently loading as ``_pending``):
+
+    - ``installer_skill_names`` discovered from every agent's
+      ``skill-set.yaml`` via
+      :func:`list_known_skill_names_from_skill_set_files`.
+    - ``builtin_mcp_class`` resolved against the live builtin_servers
+      registry (class-name OR server-name match).
+    - ``lazy_installer_validation=False`` — STRICT. A dangling
+      installer skill raises :class:`CapabilityRegistryError`.
+
+    Tests keep their fixture-based non-strict surface by calling
+    :func:`load_capabilities_registry` directly with explicit
+    arguments; only production wiring goes through here.
+
+    Raises:
+        FileNotFoundError: registry yaml missing.
+        CapabilityRegistryError: any strict-validation failure
+            (dangling installer skill, unresolvable builtin class,
+            schema violation).
+    """
+    names = list_known_skill_names_from_skill_set_files(
+        Path(agents_dir) if agents_dir else DEFAULT_AGENTS_DIR
+    )
+    return load_capabilities_registry(
+        registry_path=registry_path,
+        installer_skill_names=names,
+        builtin_mcp_resolver=_default_builtin_mcp_resolver,
+        lazy_installer_validation=False,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# WP11 — [resume] convention (documented convention + parse helper)
+# ─────────────────────────────────────────────────────────────────────
+
+#: Body marker that tags a resume block inside a ``job_continue``
+#: message (WP11 ratification — mirrors the ``Result: `` prefix
+#: convention of the child-report lane). Canonical shape::
+#:
+#:     [resume] {"capability_id": "opendesign",
+#:               "status": "installed_but_unconfigured",
+#:               "tools_now_available": ["kms_request", "kms_attach"],
+#:               "resume_from": "step_after_kms_bind"}
+RESUME_TAG = "[resume]"
+
+#: The four REQUIRED fields of a resume block (arch §7.3).
+_RESUME_REQUIRED_FIELDS = (
+    "capability_id",
+    "status",
+    "tools_now_available",
+    "resume_from",
+)
+
+
+class ResumeParseError(ValueError):
+    """Raised when a message's ``[resume]`` block is missing, not
+    valid JSON, or violates the four-field shape. Consumers translate
+    this into a ``capability_missing`` escalation envelope (see
+    :func:`escalation_for_malformed_resume`) — never a crash."""
+
+
+@dataclass
+class ResumeMessage:
+    """Parsed ``[resume]`` block (WP11 shape, arch §7.3).
+
+    ``resume_from`` is the step label the consumer MUST continue from —
+    honoring it is contractual (re-running completed steps, e.g.
+    minting a second KMS handle, is a violation). ``raw`` preserves the
+    full JSON object for lossless diagnostics.
+    """
+
+    capability_id: str
+    status: str
+    tools_now_available: list[str]
+    resume_from: str
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """The canonical four-field payload (round-trips through
+        :func:`format_resume_message` / :func:`parse_resume_message`)."""
+        return {
+            "capability_id": self.capability_id,
+            "status": self.status,
+            "tools_now_available": list(self.tools_now_available),
+            "resume_from": self.resume_from,
+        }
+
+
+def format_resume_message(resume: ResumeMessage) -> str:
+    """Render a resume block as ``[resume] <json>\\n`` (canonical wire form)."""
+    return f"{RESUME_TAG} {json.dumps(resume.to_dict())}\n"
+
+
+def parse_resume_message(message: str) -> ResumeMessage:
+    """Parse the ``[resume]``-tagged block out of a ``job_continue`` message.
+
+    Accepted shapes (mirroring :func:`parse_envelope_from_message`'s
+    tolerance):
+
+    1. ``"[resume] {...}"`` — JSON on the same line (canonical).
+    2. ``"[resume]\\n{...}"`` — JSON starting on a following line.
+    3. Prose around the block — the FIRST ``[resume]`` tag in the
+       message wins; everything after its opening ``{`` is handed to
+       ``json.JSONDecoder.raw_decode`` (so multi-line pretty-printed
+       JSON parses and trailing prose is ignored).
+
+    Raises:
+        ResumeParseError: no tag in message, no JSON object after the
+            tag, invalid JSON, or a schema violation (missing fields /
+            wrong types).
+    """
+    if not isinstance(message, str) or not message.strip():
+        raise ResumeParseError("message is empty or whitespace")
+    idx = message.find(RESUME_TAG)
+    if idx == -1:
+        raise ResumeParseError(
+            f"no {RESUME_TAG} block found in message"
+        )
+    after_tag = message[idx + len(RESUME_TAG):]
+    brace = after_tag.find("{")
+    if brace == -1:
+        raise ResumeParseError(
+            f"{RESUME_TAG} block carries no JSON object"
+        )
+    try:
+        data, _end = json.JSONDecoder().raw_decode(after_tag[brace:])
+    except json.JSONDecodeError as e:
+        raise ResumeParseError(
+            f"{RESUME_TAG} block is not valid JSON: {e}"
+        ) from e
+    if not isinstance(data, dict):
+        raise ResumeParseError(
+            f"{RESUME_TAG} block must be a JSON object, got "
+            f"{type(data).__name__}"
+        )
+    missing = [f for f in _RESUME_REQUIRED_FIELDS if f not in data]
+    if missing:
+        raise ResumeParseError(
+            f"{RESUME_TAG} block missing required fields: {missing}"
+        )
+    for str_field in ("capability_id", "status", "resume_from"):
+        value = data[str_field]
+        if not isinstance(value, str) or not value.strip():
+            raise ResumeParseError(
+                f"{RESUME_TAG} field {str_field!r} must be a non-empty string"
+            )
+    tools = data["tools_now_available"]
+    if not isinstance(tools, list) or not all(
+        isinstance(t, str) for t in tools
+    ):
+        raise ResumeParseError(
+            f"{RESUME_TAG} field 'tools_now_available' must be a list "
+            f"of strings"
+        )
+    return ResumeMessage(
+        capability_id=data["capability_id"],
+        status=data["status"],
+        tools_now_available=list(tools),
+        resume_from=data["resume_from"],
+        raw=data,
+    )
+
+
+#: Mapping from carried resume statuses to the tri-state a FRESH
+#: ``capability_check`` should agree with (WP11 consumer step 2).
+_RESUME_STATUS_TO_STATE: dict[str, str] = {
+    "missing": "missing",
+    "capability_missing": "missing",
+    "unconfigured": "unconfigured",
+    "installed_but_unconfigured": "unconfigured",
+}
+
+
+def resume_capability_check(
+    resume: ResumeMessage,
+    **check_kwargs: Any,
+) -> "CapabilityCheckResult":
+    """Re-run the pre-flight for a resumed capability (WP11 step 2).
+
+    The carried ``status`` is NEVER trusted — the fresh tri-state check
+    is the single source of truth. All ``check_kwargs`` forward to
+    :func:`capability_check` (``mcp_lookup`` / ``tools_allow`` /
+    ``env_lookup``).
+    """
+    return capability_check(resume.capability_id, **check_kwargs)
+
+
+def resume_status_agrees(
+    resume: ResumeMessage,
+    check_result: "CapabilityCheckResult",
+) -> bool:
+    """Whether a fresh check agrees with the resume's carried status.
+
+    ``True`` when the fresh state is ``present`` (resolved during the
+    resume window — consumer proceeds) or equals the mapped tri-state
+    of the carried status. An UNRECOGNIZED carried status agrees
+    vacuously (informational field; the fresh check governs).
+    """
+    expected = _RESUME_STATUS_TO_STATE.get(resume.status)
+    if expected is None:
+        return True
+    return check_result.state in (expected, "present")
+
+
+def escalation_for_malformed_resume(
+    *,
+    capability: str,
+    installer_skill: str,
+    reason: str,
+    blocker_scope: "BlockerScope" = "this_task",
+) -> "EscalationEnvelope":
+    """Build the WP11-mandated envelope for an unparseable resume block.
+
+    Acceptance: "malformed resume message → escalation
+    ``kind=capability_missing``". ``detection_evidence`` carries the
+    parse failure reason; ``resume_hint`` points back at the pre-flight
+    (the consumer must re-establish ground truth before proceeding).
+    """
+    return EscalationEnvelope.now_envelope(
+        kind="capability_missing",
+        capability=capability,
+        installer_skill=installer_skill,
+        detection_evidence=f"malformed [resume] block: {reason}",
+        blocker_scope=blocker_scope,
+        resume_hint="step_after_preflight",
+        policy_denied_reason=None,
+    )
+
+
 # Re-export for convenience — sibling modules import these from
 # capability_resolver.py to keep the bootstrap wiring in a single place.
 __all__ = [
@@ -1397,7 +1670,18 @@ __all__ = [
     # WP4
     "CapabilityRegistryEntry",
     "load_capabilities_registry",
+    "load_production_capabilities_registry",
     "list_known_skill_names_from_skill_set_files",
     "CapabilityRegistryError",
     "DEFAULT_CAPABILITIES_REGISTRY_PATH",
+    "DEFAULT_AGENTS_DIR",
+    # WP11 — [resume] convention
+    "RESUME_TAG",
+    "ResumeMessage",
+    "ResumeParseError",
+    "format_resume_message",
+    "parse_resume_message",
+    "resume_capability_check",
+    "resume_status_agrees",
+    "escalation_for_malformed_resume",
 ]
