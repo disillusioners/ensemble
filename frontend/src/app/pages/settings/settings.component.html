@@ -190,7 +190,10 @@
       isolation). Default: <strong>off</strong> (opt-in rollout). When
       off, <code>snapshot_create</code> calls return a clean disabled
       result and <code>spawn_hot_instance</code> falls back to a cold
-      spawn whenever no snapshot was found.
+      spawn whenever no snapshot was found. Snapshots capture only what
+      still exists at creation time — instance context expires after
+      about 168 hours (the checkpoint TTL), so long-off periods mean
+      older completed work is no longer snapshotable.
     </p>
 
     <div class="editor-options" role="radiogroup" aria-label="Snapshot create preference">
