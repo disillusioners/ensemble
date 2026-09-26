@@ -45,7 +45,8 @@ def make_fake_sync(
     """Build a fake `_finalize_job_db_sync` replacement for unit tests.
 
     Mirrors the production sync helper's signature:
-      (job_id, instance_id, terminal_status, result_summary, error_message)
+      (job_id, instance_id, terminal_status, result_summary, error_message,
+       already_finalized_job_id)
       → _FinalizeJobResult
     """
     def fake_sync(
@@ -54,6 +55,7 @@ def make_fake_sync(
         terminal_status,
         result_summary,
         error_message,
+        already_finalized_job_id=None,
     ):
         if raise_exc is not None:
             raise raise_exc
@@ -213,6 +215,7 @@ class TestObserverCompletesJob:
             InstanceStatus.COMPLETED.value,
             "Agent response content",
             None,
+            None,
         )
 
     @pytest.mark.asyncio
@@ -295,6 +298,7 @@ class TestObserverFailsJob:
             InstanceStatus.ERROR.value,
             None,
             "Something went wrong",
+            None,
         )
 
 
@@ -1127,12 +1131,14 @@ class TestObserverStartStop:
             InstanceStatus.COMPLETED.value,
             "Test response",
             None,
+            None,
         )
         assert completed_args_by_job["job-2"] == (
             "job-2",
             "instance-2",
             InstanceStatus.COMPLETED.value,
             "Test response",
+            None,
             None,
         )
 
