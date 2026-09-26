@@ -2173,3 +2173,172 @@ arc, never-spoke arc + attest exit + re-arm, directive matrix, scanner pins, sur
 renders, observer linkage). **Timeout config pins:**
 `tests/unit/test_attestation_judge_resolver.py` (default-180 class: default, unset env,
 env override, clamp, worst-case 2×180s) + the two literal-25 pins updated to 180.
+## D-entry 2026-09-26 — P0 hotfix: incident 7d4a3bd9 cycle-2 NameError `ctx.is_fresh_episode_user_message` (third seam-mocking blind-spot confirmation)
+
+The d5c50994 cycle-1 commit (incident 7d4a3bd9 fix cycle) added three
+`fresh_episode_attestation_reset=ctx.is_fresh_episode_user_message`
+references inside `_process_message_with_tracking` at
+`daemon/services/instance_messaging.py:4047/4060/4088`. The `ctx` was a
+`_PreparedEnqueueContext` NamedTuple local to `enqueue_message` — NOT in
+scope inside `_process_message_with_tracking`. Every message raised
+`NameError: name 'ctx' is not defined`, broke all message processing
+on the freshly-shipped v0.15.0 (commit 416ae70d).
+
+**Root cause.** The cycle-1 author referenced `ctx.is_fresh_episode_user_message`
+inside the wrong function — `enqueue_message` builds the `_PreparedEnqueueContext`
+locally and consumes it inline (line 2168 `ctx = await asyncio.to_thread(self._prepare_enqueued_message, ...)`);
+the `_process_message_with_tracking` seam, called later by the worker pool, never
+sees `ctx`. The fix is to compute the flag at the consumer seam using the
+SAME msg_type derivation logic the ledger path uses in
+`_prepare_enqueued_message` (lines 1698-1710): source prefix → msg_type,
+then `(priority == 1 AND msg_type == HUMAN)`. At the consumer seam only
+`message_source` is in scope; priority defaults to 1 (the user-facing entry
+path), so HUMAN-typed sources match the ledger's fresh-episode condition.
+
+**Seam-mocking lesson — third empirical confirmation.** The bug slipped past
+the `tests/unit/test_lca_false_complete_fixes.py::TestFreshEpisodeChannelReset`
+family (35 tests, all green at base) because those tests assert the
+`fresh_episode_attestation_reset` parameter on `_build_graph_input`
+DIRECTLY — they never exercise the MESSAGING seam where the kwarg is
+*constructed*. `AsyncMock` + `inspect.getsource` substring assertions stay
+green at the InstanceManager / InstanceMessagingService facade seam; this
+is the second-order class those mocks miss (the BUILD of the parameter,
+not its CONSUMPTION).
+
+Blueprint §Core Architecture Facade-Forwarding Discipline warns the same
+class slips past unit tests at this seam. This is the THIRD empirical
+confirmation: the first two were the enqueue_message→process seam
+(c5ae6d95 and 80bb61dd lessons); the third is the same seam again.
+
+**Fix applied (commit, branch `feature/lca-p0-ctx-hotfix`, off latest
+416ae70d):**
+
+* Replaced 3 broken `ctx.is_fresh_episode_user_message` references at
+  lines 4047 / 4060 / 4088 with a local `is_fresh_episode_user_message`
+  computed at the function-body level using the SAME msg_type prefix
+  logic the ledger path uses.
+* No new param added to `_process_message_with_tracking`'s signature
+  (the ledger path itself does not thread the flag across the
+  enqueue→process boundary either).
+* No new context object invented.
+
+**Real-path regression test (no mocks at the seam):**
+`tests/integration/test_fresh_episode_attestation_reset_p0.py`. Four
+tests drive the REAL `_process_message_with_tracking` through its real
+path (real DB, real MessageQueue row, real GraphTap capture) and assert:
+
+1. **No NameError on any path.** Pre-fix: raises
+   `NameError: name 'ctx' is not defined` at line 4088. Post-fix: graph
+   runs, captures graph_input.
+2. **User-API message stamps `fresh_episode_attestation_reset=True`** on
+   the user message's `additional_kwargs` (matches ledger path
+   semantics for HUMAN-typed source).
+3. **internal_agent: source does NOT stamp the sentinel** (AGENT
+   msg_type is not a fresh episode).
+4. **internal_report: source does NOT stamp the sentinel**
+   (COMPLETION_REPORT is not a fresh episode).
+
+**Live boot+POST verification (pre-fix and post-fix):** Disposable
+PostgreSQL on `ens_p0_ctx_repro` (port 5432), mock OpenAI-compatible
+LLM endpoint (port 19999), daemon booted on port 18080. POST
+`/api/instances/{id}/messages` returned HTTP 200, message completed
+cleanly, no NameError in logs. Pre-fix would raise NameError on
+the same call.
+
+**Adjudication rule going forward.** Any review of commits that touch
+the InstanceManager / InstanceMessagingService facade seam MUST grep
+for any `_PreparedEnqueueContext`-shaped local references that leak
+across the enqueue→process boundary. A unit test that exercises
+`_build_graph_input` directly is NOT a regression proof for the
+messaging seam — the seam itself must be exercised.
+---
+
+## D-entry 2026-09-26 (cycle-3, review-2) — incident 7d4a3bd9 fix cycle: ledger-parity for fresh-episode flag (system/scheduler/cascade_resume shapes)
+
+Cycle-2 commit `118bd45c` (reviewer-2 FAIL: incomplete enumeration instead of out-of-scope name) replaced the `ctx` NameError with an ad-hoc 3-prefix check on `message_source` at the consumer seam. The reviewer flagged:
+
+1. **PREFIX PARITY** — the 3-prefix check missed the 4th internal prefix
+   `system:` (encoded in `_INTERNAL_STAMPED_SOURCE_PREFIXES` at
+   `instance_messaging.py:374-379`). Concrete false-True sources:
+   `system:long-tool-nudge`, `system:report-integrity-guard`,
+   `system:watchdog`, `system:resume_wake` (priority=0 each).
+2. **PRIORITY ASSUMPTION FALSE** — priority is NOT in scope at the
+   consumer seam; priority!=1 HUMAN messages exist (scheduler at
+   `priority=5` per `constants.py:192`). Cycle-2 stamped True.
+3. **DIRECT-DISPATCH PATH** — `manager._resume_processing_background`
+   (`manager.py:10767-10786`) calls `_process_message_with_tracking`
+   DIRECTLY with `message_source="cascade_resume"`, bypassing enqueue.
+   A PAUSED→RUNNING cascade resume is NOT a terminal revival.
+
+**Cycle-3 mechanism chosen: ProcessingContext carrier** (Primary directive
+> "thread the REAL ledger-derived flag instead of re-deriving").
+
+* `ProcessingContext` (`message_processing_pipeline.py:119`) gains a new
+  field `is_fresh_episode_user_message: bool = False`.
+* `InstanceMessagingService._process_message_with_tracking`
+  (`instance_messaging.py:2724`) and `InstanceManager._process_message_with_tracking`
+  (`manager.py:7306`) gain a keyword-only kwarg
+  `is_fresh_episode_user_message: bool = False`.
+* Pipeline's `_do_process` closure (`message_processing_pipeline.py:409`)
+  threads the kwarg from context.
+* **Canonical construction site** (`task_processor.py:535`) computes the
+  flag from the persisted MessageQueue row's `priority` + `type`
+  columns using the EXACT ledger logic
+  (`_prepare_enqueued_message:2009-2013`): `(priority == 1 AND type == HUMAN.value)`.
+  Re-deriving from the row (which already carries the columns — no
+  extra DB round-trip needed) gives the flag identical to what the
+  ledger computed at enqueue time, and captures priority!=1 (cycle-2
+  blind-spot).
+* `cascade_resume` direct-dispatch site (`manager.py:10767-10786`)
+  passes `is_fresh_episode_user_message=False` explicitly (the
+  direct-dispatch bypasses enqueue and ProcessingContext; a
+  PAUSED→RUNNING resume is NOT a fresh episode).
+
+**Per-shape verdict table (reviewer-2 acceptance criteria #1):**
+
+| Source / shape                | msg_type            | priority | ledger | cycle-3 | file:line evidence |
+|-------------------------------|---------------------|----------|--------|---------|-------------------|
+| `api`                         | `human`             | 1        | True   | True    | task_processor.py:535 (priority=1 + HUMAN) |
+| `telegram:user:1`             | `human`             | 1        | True   | True    | task_processor.py:535 |
+| `scheduler`                   | `human`             | 5        | False  | False   | constants.py:192 SCHEDULER_DEFAULT_PRIORITY=5; task_processor.py:535 priority!=1 → False |
+| `internal_agent:leader`       | `agent`             | 1        | False  | False   | task_processor.py:535 type != HUMAN → False |
+| `internal_report:child-1`     | `completion_report` | 1        | False  | False   | task_processor.py:535 type != HUMAN → False |
+| `system:watchdog`             | `system`            | 0        | False  | False   | waiting_children_watchdog.py:172/1169/1217/1267/178/1564 (priority=0); task_processor.py:535 type != HUMAN → False |
+| `system:long-tool-nudge`      | `system`            | 0        | False  | False   | long_tool_nudge.py:1204 (priority=0); task_processor.py:535 type != HUMAN → False |
+| `system:report-integrity-guard` | `system`          | 0        | False  | False   | report_integrity_guard.py:836 (priority=0); task_processor.py:535 type != HUMAN → False |
+| `system:resume_wake`          | `system`            | 0        | False  | False   | manager.py:10093 (priority=0); task_processor.py:535 type != HUMAN → False |
+| `cascade_resume`              | `human` (default)   | 1 (default) | False (direct-dispatch override) | False | manager.py:10767-10786 (explicit `is_fresh_episode_user_message=False`); comment explains: PAUSED→RUNNING is NOT a terminal revival |
+| `None` (untyped)              | n/a (no row)        | n/a      | n/a    | False   | ProcessingContext default; ledger's typed signature `source: str = "api"` means None is not a real shape (reviewer-2 finding #6) — documented divergence |
+
+The cycle-3 carrier flag is **identical** to the ledger's flag for all
+enqueued shapes (it re-derives from the same priority+type columns the
+ledger used at enqueue time, with the SAME `(priority == 1 AND type == HUMAN.value)`
+formula). The cascade_resume direct-dispatch is the ONE divergence,
+documented with explicit False at the call site.
+
+**Real-path test matrix expanded** (`tests/integration/test_fresh_episode_attestation_reset_p0.py`,
+13 tests, all green post-cycle-3): the original 4 cycle-1/cycle-2 tests
+plus the reviewer-2 expanded matrix (api, telegram, scheduler, internal_agent,
+internal_report, system_watchdog, system_long_tool_nudge,
+system_report_integrity, system_resume_wake, cascade_resume, none_source)
+plus a persisted-row test that exercises the EXACT task_processor
+computation on a row with `priority=5, type=HUMAN` (asserts the flag
+is False — cycle-2's blind-spot).
+
+**Seam-mocking lesson reinforced (4th empirical confirmation).** This
+is the SECOND time the InstanceManager / InstanceMessagingService
+facade seam has been bitten by incomplete enumeration. The cycle-2
+attempt to derive the flag locally was driven by the (correct)
+realization that `ctx` was out of scope; the (wrong) implementation
+re-derived locally with insufficient state. The carrier-threading
+pattern (cycle-3) is the durable fix: identify the field on a
+seam-crossing class (`ProcessingContext.is_fresh_episode_user_message`),
+populate it at the canonical construction site
+(`task_processor.py:535`), and read it verbatim at the consumer. The
+single-source-of-truth becomes the persisted MessageQueue row's
+priority+type columns, which the ledger ALSO uses at enqueue time.
+
+Blueprint §Core Architecture Facade-Forwarding Discipline warns the
+same class slips past unit tests at this seam. This is now the FOURTH
+empirical confirmation: c5ae6d95, 80bb61dd, cycle-2 118bd45c (this
+fix-cycle), cycle-3 (this commit).

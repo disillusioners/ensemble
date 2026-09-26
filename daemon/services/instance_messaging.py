@@ -2734,6 +2734,8 @@ class InstanceMessagingService:
         silent: bool = False,
         task_context: str | None = None,
         image_refs: list[str] | None = None,
+        *,
+        is_fresh_episode_user_message: bool = False,
     ) -> "MessageResult":
         """Process message with activity tracking and cancellation support.
 
@@ -2755,6 +2757,15 @@ class InstanceMessagingService:
                 ``ProcessingContext.task_context`` → this kwarg. Injected as a
                 persistent HumanMessage BEFORE the task message on first attempt
                 (skipped on retry because the message is checkpointed on turn 1).
+            is_fresh_episode_user_message: P0 hotfix (review-2) — True when
+                this message is a user-driven fresh episode (priority==1 AND
+                msg_type==HUMAN per the ledger at
+                ``_prepare_enqueued_message``:2009-2013). Threaded via
+                ``ProcessingContext`` from ``task_processor._process`` (the
+                canonical carrier across the enqueue→process boundary);
+                ``False`` is the safe default for the cascade-resume
+                direct-dispatch site (which bypasses enqueue) and any other
+                non-enqueued dispatch.
 
         Returns:
             MessageResult with response data.
@@ -4044,7 +4055,7 @@ class InstanceMessagingService:
                         # on every retry-with-checkpoint call site so
                         # the user message always carries the
                         # sentinel when this is a fresh episode.
-                        fresh_episode_attestation_reset=ctx.is_fresh_episode_user_message,
+                        fresh_episode_attestation_reset=is_fresh_episode_user_message,
                     )
                 else:
                     # Pure checkpoint resume (silent mode or no content)
@@ -4057,7 +4068,7 @@ class InstanceMessagingService:
                     prepended_msgs=leftover_fifo_msgs or None,
                     message_source=message_source,
                     image_refs=image_refs,
-                    fresh_episode_attestation_reset=ctx.is_fresh_episode_user_message,
+                    fresh_episode_attestation_reset=is_fresh_episode_user_message,
                 )
         else:
             # First attempt - add message to conversation, with the
@@ -4085,7 +4096,7 @@ class InstanceMessagingService:
                 prepended_msgs=leftover_fifo_msgs or None,
                 message_source=message_source,
                 image_refs=image_refs,
-                fresh_episode_attestation_reset=ctx.is_fresh_episode_user_message,
+                fresh_episode_attestation_reset=is_fresh_episode_user_message,
             )
 
         # ── D2 seam drain — post-build phase ─────────────────────────────

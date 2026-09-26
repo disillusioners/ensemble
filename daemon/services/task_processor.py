@@ -532,6 +532,26 @@ class ProcessMessageProcessor(BaseProcessor):
         )
 
         # ---- Build pipeline input ----
+        # P0 hotfix (review-2): compute the ledger-derived
+        # fresh-episode flag from the PERSISTED MessageQueue row's
+        # ``priority`` + ``type`` columns using the EXACT same logic
+        # the ledger uses at ``_prepare_enqueued_message``:2009-2013:
+        # ``(priority == 1 AND type == MessageType.HUMAN.value)``.
+        # Re-deriving from the row (which already carries the columns
+        # — no extra DB round-trip needed) gives the flag identical to
+        # what the ledger computed at enqueue time, and captures cases
+        # where priority != 1 (e.g. scheduler with priority=5 stamps
+        # False — the previous ad-hoc re-derivation missed this because
+        # priority was not in scope at the consumer seam).
+        is_fresh_episode_user_message = False
+        if message is not None:
+            from daemon.repositories.message_queue.models import (
+                MessageType,
+            )
+            is_fresh_episode_user_message = (
+                message.priority == 1
+                and message.type == MessageType.HUMAN.value
+            )
         context = ProcessingContext(
             instance_id=task.instance_id,
             message_id=task.message_id,
@@ -549,6 +569,10 @@ class ProcessMessageProcessor(BaseProcessor):
             resume_mode=is_retry,
             cancellation_token=cancellation_token,
             task_context=task_context_text,
+            # P0 hotfix (review-2): ledger-derived fresh-episode flag,
+            # re-derived from the persisted MessageQueue row using the
+            # SAME identity as ``_prepare_enqueued_message``:2009-2013.
+            is_fresh_episode_user_message=is_fresh_episode_user_message,
         )
         callbacks = self._build_callbacks(task)
 
