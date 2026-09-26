@@ -1,0 +1,8 @@
+# P3 boot.log excerpts (scrub + DB target + KMS source + engine line + seeding)
+SCRUB-OK: zero POSTGRES_*/PG* vars in environment at 2026-09-26T21:59:37Z
+DB-TARGET: POSTGRES_DB=ensemble_designer_p3 @ 127.0.0.1:5432 (user set: yes/no only)
+KMS-SOURCE: file=600 mode, inline SYSTEM_ENCRYPTION_KEY: unset-OK
+21:59:43 - daemon.repositories.factory - INFO - Creating PostgreSQL engine: 127.0.0.1:5432/ensemble_designer_p3
+21:59:49 - daemon.manager - INFO - Skill bank seeding (Phase 3): {'new': 63, 'updated': 0, 'unchanged': 0, 'errors': 0}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8081 (Press CTRL+C to quit)

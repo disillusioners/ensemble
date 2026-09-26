@@ -1,0 +1,9 @@
+SCRUB-OK: zero POSTGRES_*/PG* vars in environment at 2026-09-26T22:01:47Z
+{
+  "root_handlers_total": 3,
+  "root_handlers_with_filter": 2,
+  "fresh_handler_auto_covered": true,
+  "functional_scrub_ok": true,
+  "records_emitted": 1,
+  "pass": true
+}
