@@ -34,7 +34,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional, Sequence
 
-from sqlalchemy import func, update
+from sqlalchemy import cast, func, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
@@ -531,27 +532,27 @@ class SnapshotRepository:
 
         if self.engine.dialect.name == "postgresql" and candidates:
             # PG path: one containment query over the candidate ids.
+            # R8 / Blocker 1 fix: ``JSONBType`` is a ``TypeDecorator(impl=JSON)``
+            # so ``col(...).contains([...])`` routes to the JSON/LIKE comparator
+            # and emits ``LIKE '%' || :tags::JSONB || '%'`` — PG raises
+            # ``InvalidTextRepresentation`` on every non-empty tag search.
+            # Casting the column to ``JSONB`` at the call site switches the
+            # comparator to the JSONB containment path (``@>``). The cast
+            # lives ONLY in this dialect branch; the SQLite Python-scan
+            # branch below is byte-untouched (gate-verified). Choice (b)
+            # over comparator override on ``JSONBType``: ``JSONBType`` is
+            # shared infra (skill tables use it too) — comparator override
+            # would change behavior for every site that does ``contains``
+            # against a JSON column, exceeding this commission's scope.
+            # The statement is built via ``_build_filter_by_tags_pg_stmt``
+            # so the unit-level drift-pin
+            # (``TestTagFilterPGDriftPin`` in
+            # ``tests/unit/test_snapshot_repository.py``) can compile it
+            # against the postgresql dialect without a live connection —
+            # guards against regression to the LIKE form.
             ids = [c.id for c in candidates]
+            stmt = self._build_filter_by_tags_pg_stmt(ids, wanted, tag_mode)
             with Session(self.engine) as session:
-                stmt = (
-                    select(Snapshot)  # type: ignore[arg-type]
-                    .where(col(Snapshot.id).in_(ids))
-                )
-                if tag_mode == "all":
-                    # @> with the full wanted list = every tag present.
-                    stmt = stmt.where(col(Snapshot.domain_tags).contains(wanted))
-                else:
-                    # OR-semantics: contain ANY single tag.
-                    from sqlalchemy import or_
-
-                    stmt = stmt.where(
-                        or_(
-                            *(
-                                col(Snapshot.domain_tags).contains([tag])
-                                for tag in wanted
-                            )
-                        )
-                    )
                 matched_ids = {
                     row.id for row in session.exec(stmt).all()
                 }
@@ -565,3 +566,43 @@ class SnapshotRepository:
             return any(t in have for t in wanted)
 
         return [c for c in candidates if _matches(c)]
+
+    @staticmethod
+    def _build_filter_by_tags_pg_stmt(
+        ids: Sequence[str],
+        wanted: Sequence[str],
+        tag_mode: str,
+    ) -> Any:
+        """Build the PostgreSQL ``filter_by_tags`` containment query.
+
+        R8 / Blocker 1 guardrail — extracted so the unit-level drift-pin
+        (``TestTagFilterPGDriftPin`` in ``tests/unit/test_snapshot_repository.py``)
+        can compile it against the postgresql dialect WITHOUT a live
+        connection. Catches regression to the broken LIKE form: if this
+        builder ever drops the ``cast(..., JSONB)``, the rendered SQL
+        contains ``LIKE`` instead of ``@>`` and the drift-pin fires.
+
+        Args:
+            ids: Candidate snapshot ids (caller-side filter).
+            wanted: Typed ``dim:value`` tags (already empty-stripped).
+            tag_mode: ``'all'`` (default) or ``'any'``.
+
+        Returns:
+            A SQLAlchemy ``Select`` statement, not yet executed.
+        """
+        from sqlalchemy import or_
+
+        domain_tags_jsonb = cast(col(Snapshot.domain_tags), JSONB)
+        stmt = (
+            select(Snapshot)  # type: ignore[arg-type]
+            .where(col(Snapshot.id).in_(list(ids)))
+        )
+        if tag_mode == "all":
+            # @> with the full wanted list = every tag present.
+            return stmt.where(domain_tags_jsonb.contains(list(wanted)))
+        # OR-semantics: contain ANY single tag.
+        return stmt.where(
+            or_(
+                *(domain_tags_jsonb.contains([tag]) for tag in wanted)
+            )
+        )

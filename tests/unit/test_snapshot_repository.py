@@ -27,7 +27,7 @@ via ``asyncio.to_thread``. Engine fixture mirrors
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 import pytest
 from sqlalchemy import create_engine
@@ -442,6 +442,81 @@ class TestTagFilter:
     def test_no_match_returns_empty(self, repo: SnapshotRepository):
         rows = self._rows(repo)
         assert repo.filter_by_tags(rows, ["topic:nonexistent"], tag_mode="any") == []
+
+
+# ============================================================================
+# R8 PG arm drift-pin (Blocker 1 regression guard)
+# ============================================================================
+#
+# Compile-only checks against the postgresql dialect. No live PG connection;
+# the rendered SQL is what the production PG arm will execute. Guards against
+# regression to the broken LIKE form (JSONBType TypeDecorator routes
+# ``col().contains()`` to JSON/LIKE — see Block-1 root cause in
+# daemon/repositories/snapshot/repository.py). If the production cast to
+# JSONB is ever dropped, the rendered SQL contains ``LIKE`` and these
+# tests fail loudly.
+#
+# Companion pack (live PG): test/packs/ab/snapshot_pg_smoke_integration_test.sh.
+# Pattern: tests/unit/services/test_waiting_children_watchdog.py:1424-1435
+# (compile against postgresql.dialect(), assert shape).
+
+
+class TestTagFilterPGDriftPin:
+    """PG arm SHAPE — JSONB ``@>`` containment (no live PG required).
+
+    The drift-pin compiles ``SnapshotRepository._build_filter_by_tags_pg_stmt``
+    against the postgresql dialect and asserts the rendered SQL:
+
+    * contains the ``@>`` containment operator (the JSONB fix),
+    * does NOT contain ``LIKE`` (the broken-TypeDecorator regression),
+    * does NOT contain the JSONB cast wrapper ``::jsonb`` bound to a
+      string concatenation (which is what the broken form actually
+      emits — ``LIKE '%' || :tags::jsonb || '%'``).
+
+    Both ``all`` and ``any`` modes are covered; the ``any``-mode renders
+    one ``@>`` per tag in the wanted list.
+    """
+
+    def _render(self, tag_mode: str, wanted: Sequence[str] = ("a", "b")) -> str:
+        from sqlalchemy.dialects import postgresql
+
+        stmt = SnapshotRepository._build_filter_by_tags_pg_stmt(
+            ids=["snap-001", "snap-002"],
+            wanted=list(wanted),
+            tag_mode=tag_mode,
+        )
+        return str(stmt.compile(dialect=postgresql.dialect()))
+
+    def test_all_mode_emits_jsonb_containment_not_like(self):
+        rendered = self._render(tag_mode="all")
+        # JSONB containment — the fix.
+        assert "@>" in rendered, (
+            "PG arm must emit JSONB @> containment; got:\n" + rendered
+        )
+        # Regression guards: the broken TypeDecorator form would emit these.
+        assert "LIKE" not in rendered.upper(), (
+            "PG arm regressed to JSON/LIKE comparator; rendered:\n" + rendered
+        )
+        assert "||" not in rendered, (
+            "PG arm regressed to string-concat bound; rendered:\n" + rendered
+        )
+
+    def test_any_mode_emits_jsonb_containment_per_tag(self):
+        rendered = self._render(tag_mode="any", wanted=("a", "c"))
+        # Two wanted tags → two containment clauses.
+        assert rendered.count("@>") == 2, (
+            "any-mode must emit one @> per wanted tag; got:\n" + rendered
+        )
+        assert "LIKE" not in rendered.upper()
+        assert "||" not in rendered
+
+    def test_in_clause_present(self):
+        """The candidate-id filter still lands in the PG arm."""
+        rendered = self._render(tag_mode="all")
+        # psycopg paramstyle renders IN as ``IN (...)`` with positional
+        # ``%(param_1)s`` binds; the Snapshot.id column reference survives.
+        assert "IN" in rendered.upper()
+        assert "snapshots" in rendered.lower()
 
 
 # ============================================================================
