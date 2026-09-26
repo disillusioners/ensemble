@@ -1,6 +1,12 @@
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideNoopAnimations } from '@angular/platform-browser/animations';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { signal } from '@angular/core';
 import { of, throwError } from 'rxjs';
 import type { VSCodeStatusState } from '../../models';
+import { SettingsComponent } from './settings.component';
+import { SettingsService } from '../../services/settings.service';
+import { WorkspaceService } from '../../services/workspace.service';
 
 // Storage key matching the component
 const STORAGE_KEY = 'settings-language-preference';
@@ -1330,5 +1336,187 @@ describe('SettingsComponent', () => {
       jest.advanceTimersByTime(STATUS_POLL_INTERVAL_MS * 5);
       expect(service.getVscodeStatus.mock.calls.length).toBe(callsBefore);
     });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Agent Snapshots settings toggle (R15, agent-snapshot-v1 Gate 5)
+//
+// REAL-component TestBed block (pattern: searchable-select spec) —
+// the toggle is template-rendered (radiogroup + Apply gate), which a
+// plain mirror class cannot verify. Covers:
+//   (a) section + radio group render with stable handles
+//   (b) user radio change updates the form model + dirty gate
+//   (c) Apply persists via SettingsService.setSnapshotCreateEnabled
+//       with the ``enabled`` payload field
+//   (d) initial checked state reflects the loaded daemon preference
+//       (incl. fail-closed OFF when the GET fails)
+// ═══════════════════════════════════════════════════════════════════
+
+class TestBedMockSettingsService {
+  getLanguagePreference = jest.fn().mockReturnValue(of({ language: 'Auto' }));
+  setLanguagePreference = jest.fn();
+  getEditorPreference = jest.fn().mockReturnValue(of({ editor: 'builtin' }));
+  setEditorPreference = jest.fn();
+  getVscodeStatus = jest.fn().mockReturnValue(of({ status: 'starting' }));
+  startVscodeServer = jest.fn();
+  stopVscodeServer = jest.fn();
+  getBlueprintPeakHours = jest
+    .fn()
+    .mockReturnValue(of({ start: 12, end: 20, tz_offset: 7 }));
+  setBlueprintPeakHours = jest.fn();
+  getSnapshotCreateEnabled = jest.fn().mockReturnValue(of({ enabled: false }));
+  setSnapshotCreateEnabled = jest.fn().mockReturnValue(of({ enabled: false }));
+  getSnapshotUsageMetrics = jest
+    .fn()
+    .mockReturnValue(of({ capture_counts: {}, spawn_counts_per_snapshot: [] }));
+}
+
+class TestBedMockWorkspaceService {
+  setEditorMode = jest.fn();
+}
+
+describe('Agent Snapshots settings toggle (R15)', () => {
+  const RADIO_SELECTOR = 'input[name="snapshot-create-preference"]';
+  let service: TestBedMockSettingsService;
+  let fixture: ComponentFixture<SettingsComponent>;
+  let component: SettingsComponent;
+
+  const snapshotSection = (): HTMLElement => {
+    const sections = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll('section'),
+    );
+    return sections.find((s) =>
+      s.querySelector('h2')?.textContent?.includes('Agent Snapshots'),
+    ) as HTMLElement;
+  };
+  const applyButton = (): HTMLButtonElement | undefined =>
+    Array.from(snapshotSection().querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Apply'),
+    );
+
+  beforeEach(async () => {
+    service = new TestBedMockSettingsService();
+    await TestBed.configureTestingModule({
+      imports: [SettingsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: SettingsService, useValue: service },
+        { provide: WorkspaceService, useClass: TestBedMockWorkspaceService },
+        { provide: MatSnackBar, useValue: { open: jest.fn() } },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(SettingsComponent);
+    component = fixture.componentInstance;
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  // ── (a) renders ──────────────────────────────────────────────────
+  it('renders the Agent Snapshots section with a two-option radio group', () => {
+    fixture.detectChanges();
+    const compiled = fixture.nativeElement as HTMLElement;
+    const group = compiled.querySelector(
+      '[role="radiogroup"][aria-label="Snapshot create preference"]',
+    );
+    expect(group).not.toBeNull();
+    const h2 = Array.from(compiled.querySelectorAll('h2')).find((el) =>
+      el.textContent?.includes('Agent Snapshots'),
+    );
+    expect(h2).not.toBeUndefined();
+    const radios = compiled.querySelectorAll(RADIO_SELECTOR);
+    expect(radios.length).toBe(2);
+    const labels = Array.from(
+      compiled.querySelectorAll('.editor-option-label'),
+    ).map((el) => el.textContent?.trim());
+    expect(labels).toContain('Enabled');
+    expect(labels).toContain('Disabled (default)');
+  });
+
+  // ── (d) initial value reflects loaded daemon state ───────────────
+  it('initial checked state reflects loaded preference (enabled: true → On radio checked)', () => {
+    service.getSnapshotCreateEnabled.mockReturnValue(of({ enabled: true }));
+    fixture.detectChanges();
+    expect(component.snapshotCreateEnabled()).toBe(true);
+    expect(component.savedSnapshotCreateEnabled()).toBe(true);
+    const radios = (fixture.nativeElement as HTMLElement).querySelectorAll(
+      RADIO_SELECTOR,
+    ) as NodeListOf<HTMLInputElement>;
+    expect(radios[0].checked).toBe(true);
+    expect(radios[1].checked).toBe(false);
+  });
+
+  it('defaults to OFF (fail-closed) when the load request fails', () => {
+    service.getSnapshotCreateEnabled.mockReturnValue(
+      throwError(() => new Error('boom')),
+    );
+    fixture.detectChanges();
+    expect(component.snapshotCreateEnabled()).toBe(false);
+    expect(component.savedSnapshotCreateEnabled()).toBe(false);
+    const radios = (fixture.nativeElement as HTMLElement).querySelectorAll(
+      RADIO_SELECTOR,
+    ) as NodeListOf<HTMLInputElement>;
+    expect(radios[1].checked).toBe(true); // "Disabled (default)" checked
+  });
+
+  // ── (b) user toggle updates the form model ───────────────────────
+  it('radio change updates snapshotCreateEnabled and flips the dirty gate', () => {
+    fixture.detectChanges();
+    expect(component.snapshotCreateDirty()).toBe(false);
+    const radios = (fixture.nativeElement as HTMLElement).querySelectorAll(
+      RADIO_SELECTOR,
+    ) as NodeListOf<HTMLInputElement>;
+    radios[0].click(); // "Enabled"
+    fixture.detectChanges();
+    expect(component.snapshotCreateEnabled()).toBe(true);
+    expect(component.snapshotCreateDirty()).toBe(true);
+    expect(fixture.nativeElement.querySelector('.dirty-hint')).not.toBeNull();
+  });
+
+  it('Apply button is disabled until the selection is dirty, enabled after', () => {
+    fixture.detectChanges();
+    expect(applyButton()?.disabled).toBe(true);
+    const radios = (fixture.nativeElement as HTMLElement).querySelectorAll(
+      RADIO_SELECTOR,
+    ) as NodeListOf<HTMLInputElement>;
+    radios[0].click();
+    fixture.detectChanges();
+    expect(applyButton()?.disabled).toBe(false);
+  });
+
+  // ── (c) SAVE calls the service with the correct payload field ────
+  it('Apply click persists via setSnapshotCreateEnabled with the enabled payload field', () => {
+    service.setSnapshotCreateEnabled.mockReturnValue(of({ enabled: true }));
+    fixture.detectChanges();
+    component.onSnapshotCreateSelectionChange(true);
+    fixture.detectChanges();
+    applyButton()?.click();
+    fixture.detectChanges();
+    expect(service.setSnapshotCreateEnabled).toHaveBeenCalledTimes(1);
+    expect(service.setSnapshotCreateEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it('save success syncs the saved signal from the server-confirmed response (dirty clears)', () => {
+    service.setSnapshotCreateEnabled.mockReturnValue(of({ enabled: true }));
+    fixture.detectChanges();
+    component.onSnapshotCreateSelectionChange(true);
+    component.saveSnapshotCreateEnabled();
+    expect(component.savedSnapshotCreateEnabled()).toBe(true);
+    expect(component.snapshotCreateDirty()).toBe(false);
+    expect(component.savingSnapshotCreate()).toBe(false);
+  });
+
+  it('save failure keeps the saved value and stops the in-flight flag', () => {
+    service.setSnapshotCreateEnabled.mockReturnValue(
+      throwError(() => new Error('boom')),
+    );
+    fixture.detectChanges();
+    component.onSnapshotCreateSelectionChange(true);
+    component.saveSnapshotCreateEnabled();
+    expect(component.savedSnapshotCreateEnabled()).toBe(false); // unchanged
+    expect(component.savingSnapshotCreate()).toBe(false);
   });
 });
