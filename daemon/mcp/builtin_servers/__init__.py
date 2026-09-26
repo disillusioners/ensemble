@@ -75,7 +75,9 @@ def get_registry() -> BuiltinServerRegistry:
 from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
 from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
+from daemon.mcp.builtin_servers.opendesign import OpenDesignMCP
 
 _registry.register(WebFetchServerDefinition())
 _registry.register(Context7ServerDefinition())
 _registry.register(PlaneServerDefinition())
+_registry.register(OpenDesignMCP())
