@@ -203,10 +203,15 @@ class UpgradeJournalSweepService:
             try:
                 await task
             except (asyncio.CancelledError, Exception):
-                # CancelledError is the normal shutdown path (FM-11 — the
-                # reaper re-raises it and lands HERE, not in a bare except);
-                # Exception is defensive against an unexpected shutdown
-                # error. Either way the service is stopped — no re-raise.
+                # Sweep-side cancel — not the worker-side contract. The
+                # reaper task is SHUT-DOWN here; CancelledError is the
+                # normal shutdown path (FM-11 — the reaper re-raises it
+                # and lands HERE, not in a bare except). Exception is
+                # defensive against an unexpected shutdown error. Worker
+                # paths are a separate concern (see the explicit
+                # _TERMINAL_EVENTS / never-swallow contract on the
+                # reaper queue side). Either way the service is stopped
+                # — no re-raise.
                 pass
         # M-1: shut down the dedicated waitpid executor. ``wait=False`` so
         # ``stop()`` is bounded — any in-flight ``os.waitpid`` threads are
@@ -400,9 +405,10 @@ class UpgradeJournalSweepService:
     # ── journal writers (R-M5-1: OSError → WARNING, NO retry, continue) ──
 
     def _log_tail(self, install_dir: Path) -> str:
-        """Last ≤4KB / ≤40 lines of ``data/upgrade.log``. seek(-4KB) +
-        truncate-at-newline — never an O(n) whole-file read; the file is
-        parent-created before Popen so absence just means an empty tail."""
+        """Last ≤4KB byte-tail, then last ≤40 lines of decoded text of
+        ``data/upgrade.log``. seek(-4KB) + truncate-at-newline — never
+        an O(n) whole-file read; the file is parent-created before Popen
+        so absence just means an empty tail."""
         try:
             log = uj.executor_log_path(install_dir)
             with log.open("rb") as fh:

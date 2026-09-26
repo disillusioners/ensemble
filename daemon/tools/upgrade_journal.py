@@ -765,7 +765,7 @@ def clear_pending_op(install_dir: Path, *, clear_restart_marker: bool = True) ->
 # (name-frozen, truth-table-pinned) — no call site rebuilds the predicate
 # inline. The F2 fence is intact for every UNVERIFIED path:
 # EXECUTOR_ENV_ALLOWLIST is NOT widened; the extras ride the pre-existing
-# ``executor_env`` explicit-extra merge (:1003-1004), which is per-call-site
+# ``executor_env`` explicit-extra merge (:1083-1084), which is per-call-site
 # and never ambient — an unverified arm's child env still strips
 # ENSEMBLE_UPGRADE_LIVE (poison tests pin that side).
 

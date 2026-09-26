@@ -1033,12 +1033,14 @@ def _terminal_outcome(journal: dict[str, Any] | None) -> tuple[str | None, dict[
     """Derive the terminal outcome from the last TERMINAL-CLASS journal
     history event.
 
-    v0.15.3 P1 Item 5: walk ``reversed(history)`` and return the FIRST
-    entry whose event is in ``_TERMINAL_OUTCOME_EVENTS`` (``uj._TERMINAL_EVENTS``
-    + the restart-lane completion event — see above). Transition events
-    (``nonce_consumed`` etc.) no longer masquerade as TERMINAL: history
-    that carries NO terminal event returns ``(None, None)`` — the arm is
-    armed, not finished.
+    v0.15.3 P1 Item 5: filter history with ``_TERMINAL_OUTCOME_EVENTS``
+    (``uj._TERMINAL_EVENTS`` + the restart-lane completion event — see
+    above) and return the FIRST entry that passes; the pre-existing
+    ``reversed(history)`` walk is the search direction, not the delta.
+    Transition events (``nonce_consumed`` etc.) no longer masquerade as
+    TERMINAL — history that carries NO terminal event returns
+    ``(None, None)`` (the arm is armed, not finished; the consumer now
+    prints PENDING instead of a bogus TERMINAL block).
 
     Early returns preserved: ``"unknown"`` for a non-dict journal,
     ``"idle"`` for empty/missing history.
@@ -2779,7 +2781,18 @@ never decides go/rollback).
                             "F2_VERIFIED_NOTE must be a non-empty string, got "
                             f"{type(note).__name__}"
                         )
-            except Exception as exc:
+            except (TypeError, AttributeError, KeyError, ValueError) as exc:
+                # Schema regression (AttributeError / KeyError) must NOT be
+                # masqueraded as the expected preflight-argv-unconstructable
+                # token — log the traceback AND return the refusal so the
+                # tool remains never-raises.
+                logger.warning(
+                    "arm preflight: verified-arm argv/env construction "
+                    "failed (%s: %s)",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 journal_lock_release(install_dir)
                 return _refusal(
                     label,

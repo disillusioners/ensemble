@@ -1949,9 +1949,9 @@ async def lifespan(app: FastAPI):
     if upgrade_journal_sweep is not None:
         try:
             await upgrade_journal_sweep.stop()
-        except Exception as e:
-            logger.warning(
-                f"UpgradeJournalSweepService shutdown error: {e}"
+        except Exception:
+            logger.exception(
+                "UpgradeJournalSweepService shutdown error"
             )
         app.state.upgrade_journal_sweep = None
 

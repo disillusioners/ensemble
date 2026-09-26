@@ -2732,8 +2732,8 @@ class TestArmPreflightBeforeBurn:
     (new). Sibling class — no existing live-gate test is modified."""
 
     @staticmethod
-    async def _armed_call(live) -> str:
-        run_id, nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
+    async def _armed_call(live) -> tuple[str, str]:
+        run_id, _nonce, grouped = await TestLiveThreeFactorGate._mint_nonce(live)
         TestLiveThreeFactorGate._stamp_window(
             live, source="api", msg_id="m-preflight", content=grouped
         )

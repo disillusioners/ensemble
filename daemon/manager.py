@@ -3759,7 +3759,7 @@ class InstanceManager:
         :meth:`drain_pending_system_execution` at exact turn-end."""
         self._pending_system_executions[instance_id] = dict(spec)
 
-    def set_upgrade_journal_sweep(self, sweep: object) -> None:
+    def set_upgrade_journal_sweep(self, sweep: Any) -> None:
         """Wire the ``UpgradeJournalSweepService`` (v0.15.3 P1 Item 4) so the
         drain seam can enqueue armed executors for exit observation. The
         drain reads the attribute defensively (``getattr`` + try/except) —
@@ -3775,8 +3775,10 @@ class InstanceManager:
         matching durable pending_op exists (absent, or a different run_id —
         M-2 binding) — the child would carry no journal record of its own
         and be unverifiable, so it is NOT spawned. Emit-NOTHING observability
-        class (NOT in ``_TERMINAL_EVENTS``); never raises (a torn/absent
-        journal — the likely cause — cannot fail the drain path)."""
+        class (NOT in ``_TERMINAL_EVENTS``); only the EXPECTED torn-journal /
+        I/O failure modes are swallowed here so the drain path can stay
+        never-raises — genuine faults propagate to the outer drain's
+        context-rich handler."""
         try:
             from daemon.tools import upgrade_journal as _uj
 
@@ -3788,7 +3790,7 @@ class InstanceManager:
                 f"run_id={run_id} install_dir={install_dir} "
                 "(reason=executor-orphaned)",
             )
-        except Exception as exc:
+        except (OSError, _uj.JournalTorn) as exc:
             logger.warning(
                 "[system-execution] executor_orphaned journal write failed "
                 "(refusal stands, nothing spawned): %s",
@@ -3820,9 +3822,9 @@ class InstanceManager:
         the journal pending_op remains the durable fallback for the
         boot sweep). If the durable pending_op is MISSING at the spawn
         seam — or present with a DIFFERENT run_id than the marker (M-2
-        binding: a newer arm superseded the stale marker) — the spawn is
-        refused and an ``executor_orphaned`` journal
-        event records it (R-M5-2 guard).
+        binding: a newer arm superseded the stale marker) — the spawn
+        is refused and an ``executor_orphaned`` journal event records
+        it (R-M5-2 guard).
         """
         spec = self._pending_system_executions.pop(instance_id, None)
         if spec is None:

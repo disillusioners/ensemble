@@ -1221,7 +1221,7 @@ class TestUpgradeJournalSweepService:
     /tmp journals; the service is the ONLY reaper owner — the spawn seam
     merely enqueues)."""
 
-    def _svc(self, install: Path, **kwargs) -> "uj_sweep.UpgradeJournalSweepService":
+    def _svc(self, install: Path, **kwargs) -> uj_sweep.UpgradeJournalSweepService:
         return uj_sweep.UpgradeJournalSweepService(install, **kwargs)
 
     async def _wait_for_event(self, install: Path, event: str, timeout_s: float = 5.0) -> dict:
