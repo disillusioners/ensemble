@@ -110,3 +110,33 @@ All 7 reds classified pre-existing:
 - 🟢 Optional 9h empty-delta+DROP rider case (documentation loop-closer).
 - 🟢 P2.1 GNU date debt (3 lib.sh sites) — standing backlog; v0.15.3 does not regress it.
 - 🟢 Dev LLM bring-up gotcha (no primary upstream; HA latch on dead backup) — recorded to KB by the e2e worker; skill `dev-bringup-tool-lane-e2e` created.
+
+---
+
+## Integration Gate (bounded delta check) — merged tip `77b45a34132f` on local `latest`
+
+**Date:** 2026-09-26 ~20:30–20:45Z · **Context:** origin/latest advanced 9 commits past validated base `139ba352` (checkpoint-retention keep-3 — the ONLY source overlap with our mission, `daemon/config.py`; embedding-gzip exemption; make-install fix; agent docs; tester wire-repro driver). Giter FF'd latest → `666c089d`, merged feature --no-ff → **`77b45a34132f31c43d7d60d1a141b6afe0377b02`**. Every worker pre-flight-pinned HEAD+branch. All runs env-fenced, timeout-300-wrapped. Workers: de20a357 (IG-1), cf5ab24d (IG-2), e436186a (IG-3), 70f660b9 (IG-4), ebebf41f (IG-5), 41d6f219 (IG-6), 3b7f07fb (IG-7).
+
+### VERDICT: ✅ **PASS — COMBINED STATE CLEARED** (zero new reds; zero count drift on mission surfaces; boot smoke green)
+
+| # | Check | Result | Delta vs acceptance baseline |
+|---|---|---|---|
+| IG-1 | Mission battery (3 files) | ✅ **295/295** @ 20.45s | none (exact) |
+| IG-1s | Sanity: `daemon/__init__.py:3 __version__ = "0.15.2"` (pre-bump); `git tag -l v0.15.3` → empty | ✅ PASS | — (tip lineage: 77b45a34 merge ← 371af8fd evidence commit ← a95b7028) |
+| IG-2 | Interlock pack | ✅ **PASS 274/274** @ 13.40s | none (exact) |
+| IG-3 | `tests/test_release_journal.sh` | ✅ **246P/42F** @ 106s | none (exact; B2b PASSED this run — no flake trigger; section 14 = 0 ✗ 9[a-g]; all 42 = GNU-debt family, 11× `date: invalid option -- 'j'` markers) |
+| IG-4 | `tests/unit/tools/` dir | ✅ **3098P/7F/5S** @ 221.53s | none (byte-identical red set = archive ×5 + watch ×2, both quarantined) |
+| IG-5 | Retention spot: `-k checkpoint_max_per_thread` census + probes + Config() co-existence | ✅ **9/9 selected** (~18s) + **6/6 probes** @ 0.30s + co-existence proof | cohort 10→9 = surface drift (all retention semantics still covered; collected 23,443→23,497 = tip surface growth); probes file NOW COMMITTED at tip. **Semantic auto-merge proof:** one `Config()` constructs `persistence.checkpoint_max_per_thread=3` AND `services.upgrade_journal_sweep_interval_seconds=90` / `upgrade_journal_reaper_timeout_seconds=660` — no collision (config.py:611 vs :1601/:1618) |
+| IG-6 | Embedding-gzip spot | ✅ trio **48/48** @ 9.18s; skill-services **164P/4F** (4 = quarantine rows); wire-mock fallback PASS @ 3.29s | trio exact; skill-services 146→168 total (+22) attributed to pre-merge origin commit `09d50c78` growing test_skill_evolution_service.py (zero commits touched the pack's 4 files in 139ba352..HEAD); AB-resolution red slot swapped to quarantined sibling `force_resolve` (family-internal variance of documented flaky family, rows 2026-08-30 + 2026-09-16 addendum — adjudicated NOT new). **Deviation (disclosed):** `embed_gzip_unit_test.sh` + `embed_gzip_wire_mock_test.sh` refused at tip on STALE DRIFT PINS (branch literal `fix/embedding-gzip-exemption`; ancestor checks pass) — zero tests skipped; workers ran scope-identical fallbacks (exact file sets + exact inner invocations). Port 18771 hygiene clean. |
+| IG-7 | Boot smoke of COMBINED daemon (scrubbed, ENSEMBLE_SELF_ENV=dev, dev.sh :8079) | ✅ ALL GREEN | healthy @ +24s (20:42:17Z), alive @ +96s; `/readyz` = ready (database/queue_freshness/services all true); `UpgradeJournalSweepService started: interval=90s, reaper_timeout=660s` ×2 + `reconcile_boot_sweep alive=0 reaped=0 errors=0`; **0 tracebacks**; in-band scrub proof `POSTGRES_SURVIVORS=0` + checkpointer `localhost:5432/ensemble_dev`; SIGTERM teardown 1s (graceful, no SIGKILL, no orphans); **live 9797 pid 1781911 + demo 7979 pid 1781910 UNCHANGED/untouched**; 8088 never contacted |
+
+### Cross-mission interaction conclusion
+The single source overlap (`daemon/config.py`) is **semantically sound**: retention field and sweep ServicesConfig block co-exist in one constructed Config with defaults intact, retention suite 9/9 + probes 6/6 at tip, gzip surface green, and the COMBINED daemon boots/tears down cleanly with the sweep service registered. No mission surface regressed at the merged tip (battery/pack/journal/tools-dir all byte-stable vs acceptance).
+
+### Integration-gate follow-ups (non-blocking)
+- 🟠 **Stale drift pins** on `test/packs/embed_gzip_unit_test.sh` + `test/packs/embed_gzip_wire_mock_test.sh` (branch-literal pins refuse at any post-merge tip) — pack refresh needs authorization; until then use the scope-identical fallback protocol (worker created skill `drift-pin-pack-fallback` bf877bae).
+- 🟢 Retention census cohort 10→9 selected (one keyword match lost at tip — surface drift; semantics covered).
+- 🟢 AB-resolution sibling swap re-confirms the family's fixture-isolation follow-up remains unowned (standing QUARANTINE row).
+- 🟢 `uv` not on tool-shell PATH (needs explicit prefix) — ops note for future pack runs.
+
+*This section appended 2026-09-26 per integration-gate commission; file intentionally left uncommitted (giter Phase-2 flow owns it). Logs: /tmp/ig{1..7}-*.log.*
