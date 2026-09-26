@@ -571,8 +571,11 @@ async def set_snapshot_create_preference(request: SnapshotCreatePreferenceUpdate
 
     Mirrors ``set_editor_preference``: writer responsibility is the
     metadata record only. The ``snapshot_create`` tool reads it on
-    every invocation via ``is_snapshot_create_enabled``; the tool
-    call site is unchanged (single seam).
+    every invocation via the async
+    ``get_snapshot_create_enabled`` util (awaited at the single
+    tool call site — the R15 gate in
+    ``daemon/tools/snapshot_tools.py``); the deprecated
+    ``is_snapshot_create_enabled`` sync stub is NOT on the tool path.
     """
     repo = get_project_repository()  # raises 503 if not initialized
     from daemon.services.snapshot_settings_utils import set_snapshot_create_enabled

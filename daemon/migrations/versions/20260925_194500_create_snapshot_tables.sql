@@ -1,4 +1,11 @@
 -- Migration: create agent-snapshot tables (2 tables)
+--
+-- Created: 2026-09-25
+-- Author: worker (agent-snapshot-v1 PR3 storage layer)
+-- Description:
+--   Creates the ``snapshots`` + ``snapshot_embeddings`` tables for the
+--   Agent Snapshot v1 storage layer (design-exploration §3.2, Rev 5
+--   per-instance pivot). Dual-driver behavior: see notes below.
 -- DUAL-DRIVER NOTES:
 --   For PostgreSQL: SQLModel.metadata.create_all() in manager.py creates
 --     these tables on every boot (brand-new tables need NO

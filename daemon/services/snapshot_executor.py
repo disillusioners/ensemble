@@ -64,7 +64,6 @@ from typing import Any, Optional
 from daemon._content_hardening import (  # noqa: F401  (R6a — direct import, NOT compaction aliases)
     extract_text_from_content,
     has_context_kind,
-    is_hoisted_injected,
     is_injected_message,
     partition_injected_for_compaction,
 )
@@ -76,7 +75,6 @@ from daemon.repositories.snapshot.models import (
     SNAPSHOT_STATUS_FAILED,
     SNAPSHOT_STATUS_RUNNING,
     Snapshot,
-    SnapshotEmbedding,
 )
 from daemon.repositories.snapshot.repository import SnapshotRepository
 from daemon.services.snapshot_prompts import (
@@ -162,10 +160,11 @@ def derive_auto_tags(
 ) -> list[str]:
     """Derive the R8 auto-tag set (zero prompt cost, computed at capture).
 
-    Emits (in order): ``project:``, ``agent:``, ``role:`` (alias —
-    BOTH emitted; drop-vs-deprecate deferred), ``lineage:`` (from the
-    permanent ``parent_id`` chain root), ``branch:`` (iff stamped),
-    ``from-snapshot:`` (iff the target carries
+    Emits (in order): ``project:``, ``agent:``, ``role:`` (``role:``
+    is a historical alias for ``agent:`` — BOTH emitted for
+    backward-compat search; drop-vs-deprecate deferred), ``lineage:``
+    (from the permanent ``parent_id`` chain root), ``branch:`` (iff
+    stamped), ``from-snapshot:`` (iff the target carries
     ``spawned_from_snapshot_id`` — R6b read-side), ``runtime:``.
     """
     tags = [
@@ -1184,6 +1183,10 @@ class SnapshotService:
         Performs the post-capture-advance single DB read (target's
         CURRENT status) and delegates to
         :func:`compute_staleness_report`.
+
+        The report propagates to the ``spawn_hot_instance`` result
+        wrapper (``daemon/tools/snapshot_tools.py``) as the
+        ``staleness`` field of the R14 contract.
         """
         snapshot = await asyncio.to_thread(self._snapshots.get, snapshot_id)
         if snapshot is None:

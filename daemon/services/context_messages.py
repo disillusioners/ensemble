@@ -342,14 +342,17 @@ def cap_snapshot_digest_for_injection(
             hi = mid - 1
     capped = best + hint
     # FINAL-message ceiling check: wrapper + body ≤ ceiling.
-    # Replaces the prior bare-body assert (the Wave 2a fix).
+    # Replaces the prior bare-body assert (the Wave 2a fix); the
+    # assert was converted to a raise so the guard survives
+    # `python -O` (tidier pass).
     final_tokens = wrapper_overhead_tokens + estimate_tokens(capped)
-    assert final_tokens <= SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS, (
-        "snapshot digest injection exceeded the "
-        f"{SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS}-token ceiling "
-        f"(wrapper={wrapper_overhead_tokens}t + body={estimate_tokens(capped)}t "
-        f"= {final_tokens}t)"
-    )
+    if final_tokens > SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS:
+        raise RuntimeError(
+            "snapshot digest injection exceeded the "
+            f"{SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS}-token ceiling "
+            f"(wrapper={wrapper_overhead_tokens}t + body={estimate_tokens(capped)}t "
+            f"= {final_tokens}t)"
+        )
     return capped
 
 

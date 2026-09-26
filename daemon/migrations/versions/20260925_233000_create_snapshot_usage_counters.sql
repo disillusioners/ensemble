@@ -1,4 +1,11 @@
 -- Migration: create snapshot_usage_counters (1 table)
+--
+-- Created: 2026-09-25
+-- Author: worker (agent-snapshot-v1 Wave 3 R16 review follow-up)
+-- Description:
+--   Creates the ``snapshot_usage_counters`` table (R16 usage
+--   monitoring — MONITORING ONLY, R10 forbids usage-ranking in v1).
+--   Dual-driver behavior: see notes below.
 -- DUAL-DRIVER NOTES:
 --   For PostgreSQL: SQLModel.metadata.create_all() in manager.py creates
 --     this table on every boot (brand-new table needs NO

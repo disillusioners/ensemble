@@ -935,6 +935,7 @@ def create_snapshot_tools(
                         task,
                         project_id=project_id or "",
                         tags=search_tags,
+                        # FIXME(ledger): tag_mode=any unwired — see follow-up ledger
                         tag_mode="all" if search_tags else "all",
                         limit=1,
                     )

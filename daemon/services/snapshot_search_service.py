@@ -123,6 +123,11 @@ _LLM_SELECT_TOP_N = 20
 #: large) and the cosine rerank needs candidates to work with.
 _BM25_TOP_K = 30
 
+#: Outer SQL fetch cap for the Stage-0 active-candidate scan —
+#: deliberately wider than the rerank caps; bounds the candidate
+#: read without starving the BM25 prefilter.
+_SQL_ACTIVE_FETCH_CAP = 200
+
 #: Tag-overlap ranking weight (R10). Per-overlap-tag bonus added
 #: to the cosine rerank score. Tunable; the spec lands on a small
 #: constant weight that nudges tag-overlapping candidates up
@@ -322,7 +327,7 @@ class SnapshotSearchService:
             candidates = await asyncio.to_thread(
                 self._repo.list_active_by_project,
                 project_id,
-                200,  # outer SQL cap; the LLM cap is the tighter bound
+                _SQL_ACTIVE_FETCH_CAP,  # outer SQL cap; the LLM cap is the tighter bound
             )
             if not candidates:
                 return {"results": [], "error": None}
@@ -813,5 +818,6 @@ __all__ = [
     "_tag_overlap_score",
     "_BM25_TOP_K",
     "_LLM_SELECT_TOP_N",
+    "_SQL_ACTIVE_FETCH_CAP",
     "_TAG_OVERLAP_WEIGHT",
 ]

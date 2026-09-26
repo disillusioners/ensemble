@@ -56,7 +56,6 @@ from daemon.repositories.snapshot.models import (
 from daemon.repositories.snapshot.repository import SnapshotRepository
 from daemon.services.snapshot_executor import SnapshotExecutor
 from daemon.tools.snapshot_tools import (
-    CATEGORY_NAME,
     create_snapshot_tools,
     is_snapshot_create_enabled,
 )
@@ -127,10 +126,22 @@ class FakeInstanceRepo:
 
 
 class FakeCaptureService:
-    """Records ``capture_async`` kwargs; serves a canned staleness map."""
+    """Records ``capture_async`` kwargs; serves a canned staleness map.
 
-    def __init__(self, staleness: dict[str, Any] | None = None):
+    ``capture_status`` defaults to RUNNING — the real
+    ``SnapshotExecutor.capture_async`` contract (inserts the running
+    ledger row, captures in background; ACTIVE only lands on
+    completion). Parameterized so terminal-state scenarios can opt in
+    explicitly instead of hard-picking one canned status.
+    """
+
+    def __init__(
+        self,
+        staleness: dict[str, Any] | None = None,
+        capture_status: str = SNAPSHOT_STATUS_RUNNING,
+    ):
         self.calls: list[dict[str, Any]] = []
+        self.capture_status = capture_status
         self.staleness = staleness or {
             "snapshot_age_days": 1.0,
             "freshness": "fresh",
@@ -140,7 +151,7 @@ class FakeCaptureService:
 
     async def capture_async(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
-        return {"snapshot_id": "snap-new", "status": SNAPSHOT_STATUS_RUNNING, "error": None}
+        return {"snapshot_id": "snap-new", "status": self.capture_status, "error": None}
 
     async def staleness_report(self, snapshot_id: str) -> dict[str, Any] | None:
         return dict(self.staleness)

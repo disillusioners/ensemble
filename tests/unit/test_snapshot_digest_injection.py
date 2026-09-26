@@ -228,7 +228,7 @@ class TestBuildSnapshotDigestMessage:
         # Search hint appended for the dropped tail.
         assert "use snapshot_search for the full body" in msg.content
 
-    def test_message_level_ceiling_with_canonical_6k_fixture(self):
+    def test_message_level_ceiling_with_canonical_6k_fixture(self, monkeypatch):
         """Wave 2a pre-step: FINAL injected message (wrapper + body +
         hint) must be AT OR UNDER the D6 ceiling — the bare-body cap
         could let the final message exceed the ceiling by the
@@ -267,6 +267,34 @@ class TestBuildSnapshotDigestMessage:
             <= SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS
             - _SNAPSHOT_DIGEST_WRAPPER_TOKENS
         )
+        # Fail-loud pin (tidier assert→raise pass): the ceiling guard
+        # is a RuntimeError raise (not an assert) so it survives
+        # `python -O`. The guard is mathematically unreachable via
+        # honest measurement (the binary search reserves the
+        # wrapper+hint budget), so force ONLY the final capped
+        # composite over-cap with a selective estimate_tokens liar —
+        # honest for the raw body (entry gate) and the binary-search
+        # probes (neither carries the hint), inflated for any string
+        # carrying the hint (i.e. the capped composite measured at
+        # the final check).
+        real_estimate = cm.estimate_tokens
+        hint = _SNAPSHOT_DIGEST_TRUNCATION_HINT
+
+        def _inflated_on_final_composite(text: str) -> int:
+            n = real_estimate(text)
+            if hint in text and len(text) > len(hint):
+                return n + SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS
+            return n
+
+        monkeypatch.setattr(cm, "estimate_tokens", _inflated_on_final_composite)
+        with pytest.raises(
+            RuntimeError, match="snapshot digest injection exceeded the"
+        ):
+            asyncio.run(
+                cap_snapshot_digest_for_injection(
+                    render_snapshot_digest_body(value)
+                )
+            )
 
     def test_message_level_ceiling_short_body_passthrough(self):
         """The wrapper-budget reservation must NOT trip on the
