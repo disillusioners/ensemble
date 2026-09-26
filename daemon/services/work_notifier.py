@@ -438,7 +438,23 @@ async def notify_work_watchers(
         # JobItem's ``error_message`` flows through.
         effective_error = error if error is not None else work_record.error
 
+        # 7d4a3bd9 false-completion fix (2026-09-26) — Fix 1 unverified
+        # surface. When the resolved work's linked instance ended via
+        # the gate escalation, the terminal ``completed`` event renders
+        # the DISTINCT unverified string instead of plain
+        # ``completed ✓`` (additive words inside the header — the
+        # parser contract keys off the ``[JOB_EVENT] Job {id}...``
+        # prefix and stays byte-compatible, same evolution rule the
+        # midflight-status additions used). Non-escalated rows and
+        # every other status are UNCHANGED.
         status_display = _format_status_display(status)
+        if (
+            getattr(work_record, "completion_gate_escalated", False)
+            and status == "completed"
+        ):
+            from daemon.constants import COMPLETION_GATE_ESCALATED_DISPLAY
+
+            status_display = COMPLETION_GATE_ESCALATED_DISPLAY
 
         matching_claimable: list[JobWatcher] = []
         """Rows that have ALL subscribed events firing NOW — claim + deliver."""

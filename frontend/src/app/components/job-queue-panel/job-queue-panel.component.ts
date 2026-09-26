@@ -614,6 +614,14 @@ export class JobQueuePanelComponent {
     switch (status) {
       case 'completed':
         return 'check_circle';
+      case 'completed (gate escalated — unverified)':
+        // 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.3):
+        // warning glyph — the completion is UNVERIFIED (the
+        // attestation gate ended the mission via
+        // ``terminal_after_bound``). Distinct from ``completed``'s
+        // check_circle so the panel + card agree on the unverified
+        // shape. Mirrors ``job-card.component.ts::statusIcon``.
+        return 'warning';
       case 'settled':
         // Receipt-style glyph — a settled mirror row IS a delivery receipt,
         // not a completed mission. `receipt_long` (Material Icons codepoint

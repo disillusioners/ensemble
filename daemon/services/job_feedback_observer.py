@@ -249,6 +249,17 @@ class _ProcessingJobContext(NamedTuple):
 
     instance_id: str
     job_id: str | None
+    # 7d4a3bd9 false-completion fix (2026-09-26) — REPORTING-ONLY
+    # witness. Set when the instance HAS a JobItem but it is already
+    # terminal (finalized inline by the mirror writer, another actor,
+    # or a prior finalize). The finalize log renders this id instead
+    # of the anonymous ``no_job`` placeholder (plus an
+    # ``already_finalized_by=True`` witness) so an escalated/late
+    # terminal still ties to the REAL job. Deliberately NOT consumed
+    # by Step 1/3 or the notify chain — those keep the
+    # ``job_id=None`` semantics (no double-finalize, no spurious
+    # watcher notifications).
+    already_finalized_job_id: str | None = None
 
 
 class _FinalizeJobResult(NamedTuple):
@@ -281,6 +292,15 @@ class _FinalizeJobResult(NamedTuple):
       flag so the other ``skip`` paths (unknown terminal_status,
       gate check aborted) don't create spurious empty watcher
       entries — C2-N1 fix.
+    * ``already_finalized_job_id`` — 7d4a3bd9 fix (2026-09-26):
+      REPORTING-ONLY. Set when the instance's freshest JobItem was
+      already terminal at finalize time — the log ties the terminal
+      to the REAL job instead of ``no_job``.
+    * ``completion_gate_escalated`` — 7d4a3bd9 fix (2026-09-26):
+      the instance row's ``completion_gate_escalated`` column at
+      finalize time. Rendered as a ``gate_escalated=True`` witness
+      on the finalize log so the unverified-completion shape is
+      visible in the operator surface.
     """
 
     skip: bool = False
@@ -303,6 +323,14 @@ class _FinalizeJobResult(NamedTuple):
     # same-tx evaluation found violations. Dead weight with the
     # kill-switch OFF (ship default) — zero notice work.
     b_violation_report: Any = None
+    # 7d4a3bd9 fix (2026-09-26) — REPORTING-ONLY already-finalized
+    # witness (see the docstring). ``None`` on every path that
+    # finalizes a live JobItem.
+    already_finalized_job_id: str | None = None
+    # 7d4a3bd9 fix (2026-09-26) — the instance row's
+    # ``completion_gate_escalated`` flag at finalize time (Step 2
+    # read). Rendered on the finalize log as ``gate_escalated=``.
+    completion_gate_escalated: bool = False
 
 
 class JobFeedbackObserver:
@@ -914,6 +942,30 @@ class JobFeedbackObserver:
         # ``job_id=None`` tells ``_finalize_job_db_sync`` to skip Step 1
         # (no JobItem to UPDATE), run Step 2 unconditionally, and no-op
         # Step 3.
+        #
+        # 7d4a3bd9 false-completion fix (2026-09-26) — already-finalized
+        # witness. When the freshest JobItem for the instance exists but
+        # is ALREADY terminal (``done`` / ``dead``), the terminal chain
+        # still reports the REAL job id instead of the anonymous
+        # ``no_job`` placeholder. Incident shape: episode B's job
+        # 082899be was finalized INLINE at its first turn-end (the Fix-B
+        # mirror semantics — receipt rows settle per turn), so the
+        # later gate-escalated terminal resolved ``no_job`` and the
+        # unverified completion could not be tied to the real job in
+        # the operator log. The witness is REPORTING-ONLY: no Step-1
+        # transition, no lock release, no watcher notify fire for the
+        # already-terminal row (all of those stay keyed to
+        # ``job_id=None`` semantics).
+        if (
+            job is not None
+            and job.admission_state
+            in (AdmissionState.DONE.value, AdmissionState.DEAD.value)
+        ):
+            return _ProcessingJobContext(
+                instance_id=instance_id,
+                job_id=None,
+                already_finalized_job_id=job.job_id,
+            )
         return _ProcessingJobContext(instance_id=instance_id, job_id=None)
 
     async def _get_task_row_by_work_id(self, work_id: str) -> Any | None:
@@ -1672,6 +1724,7 @@ class JobFeedbackObserver:
                         terminal_status,
                         result_summary,
                         error_message,
+                        getattr(ctx, "already_finalized_job_id", None),
                     )
             else:
                 # Legacy path / bus not wired — no lock needed; the FOR UPDATE
@@ -1683,6 +1736,7 @@ class JobFeedbackObserver:
                     terminal_status,
                     result_summary,
                     error_message,
+                    getattr(ctx, "already_finalized_job_id", None),
                 )
 
             # ─── Post-commit re-arm (orphan-race fix, 2026-06-20) ───
@@ -3411,6 +3465,7 @@ class JobFeedbackObserver:
         terminal_status: str,
         result_summary: str | None,
         error_message: str | None,
+        already_finalized_job_id: str | None = None,
     ) -> _FinalizeJobResult:
         """Sync DB half of ``_finalize_job`` (H15 fix).
 
@@ -4194,6 +4249,14 @@ class JobFeedbackObserver:
             # commits with steps 1 and 3. Captures parent_id / agent_id before
             # the session closes (instance is detached after commit).
             instance = session.get(Instance, instance_id)
+            # 7d4a3bd9 Fix 1 (2026-09-26): capture the postmortem
+            # escalation flag off the row we already hold (zero extra
+            # reads) so the finalize log can render the
+            # ``gate_escalated=True`` witness — the unverified
+            # completion becomes visible in the operator surface.
+            _instance_gate_escalated = bool(
+                getattr(instance, "completion_gate_escalated", False)
+            ) if instance is not None else False
             # B.S.1-iii: (b) same-tx evaluation hand-off (None unless the
             # COMPLETED stamp below proceeds with violations).
             _b_violation_report = None
@@ -4336,6 +4399,24 @@ class JobFeedbackObserver:
             f"for instance {instance_id[:8]}... (released {released} lock(s), "
             f"instance_was_terminal={instance_was_terminal})"
         )
+        # 7d4a3bd9 Fix 1 (2026-09-26) — the tie-to-real-job row. Emitted
+        # whenever the finalize resolved NO live JobItem but the
+        # instance HAS an already-terminal freshest job (witness), and/
+        # or the instance row carries the gate-escalation flag. This is
+        # the row that lets an escalated terminal (e.g. the 7d4a3bd9
+        # COMPLETED-UNVERIFIED shape) be tied to the episode's REAL job
+        # (082899be there) instead of the anonymous ``no_job``.
+        if already_finalized_job_id or _instance_gate_escalated:
+            logger.info(
+                "Observer: job linkage %s instance=%s... "
+                "already_finalized_by=%s... gate_escalated=%s "
+                "(already-terminal row — no state transition, "
+                "reporting-only witness)",
+                job_id[:8] if job_id else "no_job",
+                instance_id[:8],
+                already_finalized_job_id[:8] if already_finalized_job_id else "<none>",
+                _instance_gate_escalated,
+            )
 
         return _FinalizeJobResult(
             skip=False,
@@ -4354,6 +4435,8 @@ class JobFeedbackObserver:
             b_violation_report=(
                 _b_violation_report if not instance_was_terminal else None
             ),
+            already_finalized_job_id=already_finalized_job_id,
+            completion_gate_escalated=_instance_gate_escalated,
         )
 
     async def _trigger_next_job_by_id(

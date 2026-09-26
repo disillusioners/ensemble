@@ -55,6 +55,7 @@ from langchain_core.tools import tool
 from sqlmodel import Session
 
 from daemon.graph import (
+    ATTESTATION_DIRECTIVE_NUDGE_TEXT,
     ATTESTATION_NUDGE_TEXT,
 )
 from daemon.repositories.instance.models import Instance, InstanceStatus
@@ -1549,8 +1550,26 @@ async def test_scenario_b_live_judge(
         f"LIVE scenario B: at least one nudge MUST be injected on "
         f"primary deny; got {len(_nudges(messages))}"
     )
-    assert _nudges(messages)[0].content == ATTESTATION_NUDGE_TEXT, (
-        "LIVE scenario B: nudge must match ATTESTATION_NUDGE_TEXT verbatim"
+    # 7d4a3bd9 Fix 3 (2026-09-26): the surviving nudge here is the
+    # DIRECTIVE shape — the scripted leader emits no new tool calls
+    # between the first and second denies, the directive supersedes
+    # the standard nudge in place (same stable id, no accumulation),
+    # and the surviving nudge's content is the directive body. The
+    # test's original assertion (standard text verbatim) was pinned
+    # before Fix 3 existed.
+    surviving_nudge = _nudges(messages)[0]
+    assert surviving_nudge.content in (
+        ATTESTATION_NUDGE_TEXT,
+        ATTESTATION_DIRECTIVE_NUDGE_TEXT,
+    ), (
+        "LIVE scenario B: surviving nudge must be standard OR "
+        "directive (Fix 3 supersede-in-place); the scripted path "
+        "naturally hits the directive on the 2nd deny"
+    )
+    assert surviving_nudge.additional_kwargs.get(
+        "attestation_nudge_kind"
+    ) in ("standard", "directive"), (
+        "7d4a3bd9 Fix 3 — the nudge stamps attestation_nudge_kind"
     )
 
     # PRIMARY counter evidence — the 0→1 first-deny log line.

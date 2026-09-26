@@ -44,6 +44,16 @@ from daemon.services.mission_resolver import (
     MISSION_LIVENESS_FILTER_VALUES,
     MissionRecord,
 )
+# 7d4a3bd9 Fix 1 — the HTTP ROUTER now renders the DISTINCT unverified
+# string via the SAME ``_render_liveness`` helper the agent tool surface
+# uses (canonical source ``daemon/tools/missions.py``); both call sites
+# share the helper, so the two surfaces cannot drift. The router does
+# NOT import the helper from a service module — it imports directly
+# from the agent-tool module (which already lazy-imports
+# ``daemon.constants``); this avoids a circular import and keeps the
+# canonical renderer single-sourced. The HTTP router is a downstream
+# caller of the tool's renderer, no contract duplication.
+from daemon.tools.missions import _render_liveness
 
 if TYPE_CHECKING:
     from daemon.services.mission_resolver import MissionResolver
@@ -147,17 +157,33 @@ def _mission_record_to_response(record: MissionRecord) -> MissionResponse:
     Explicit field-by-field construction (the ``InstanceInfo``
     precedent) rather than ``model_validate(from_attributes=True)`` —
     the mapping stays greppable if either side ever grows a field.
+
+    7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.1): the HTTP
+    router now renders the DISTINCT unverified string via the shared
+    ``_render_liveness`` helper (canonical source
+    ``daemon.tools.missions``) — same renderer the agent tool surface
+    uses — and threads the machine-readable
+    ``completion_gate_escalated`` flag so the FE can render verbatim
+    (the helper swaps the string when the flag is set AND liveness is
+    ``completed``; the canonical ``liveness`` field on the resolver
+    row stays untouched so filters / await / W4 dead-letter precedence
+    keep matching the canonical vocabulary).
     """
     return MissionResponse(
         mission_id=record.mission_id,
         agent_id=record.agent_id,
         parent_mission_id=record.parent_mission_id,
-        liveness=record.liveness,
+        # 7d4a3bd9 Fix 1 — distinct unverified string when escalated.
+        liveness=_render_liveness(record),
         terminal_reason=record.terminal_reason,
         epoch=record.epoch,
         linked_jobs=list(record.linked_jobs),
         started_at=record.started_at,
         last_activity_at=record.last_activity_at,
+        # 7d4a3bd9 Fix 1 — machine-readable escalation flag (additive;
+        # FE narrowings depend on it being present alongside the
+        # surfaced string).
+        completion_gate_escalated=record.completion_gate_escalated,
         # Mission tree panel fields — honest nulls (no fallback
         # labels fabricated server-side; the FE owns fallback
         # rendering).

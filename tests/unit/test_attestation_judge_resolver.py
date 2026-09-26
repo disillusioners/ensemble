@@ -13,7 +13,8 @@ feature. Covers:
   ON rather than tripping a silent disable).
 * :mod:`daemon.services.attestation_judge_timeout_resolver` — wall-clock
   cap resolver (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``,
-  default 25.0s, min clamp 5.0s; Pattern C sibling resolver, fail-OPEN
+  default 180.0s since the 2026-09-26 7d4a3bd9 amendment; min clamp 5.0s;
+  Pattern C sibling resolver, fail-OPEN
   on invalid, clamp on below-minimum). Operator tuning decision
   2026-09-07 grounded in the tester live-LLM probe; rationale in
   ``docs/setup.md`` + ``.agents/shared/planning/leader-completion-attestation/decisions.md``.
@@ -204,7 +205,8 @@ def test_reset_helper_clears_cache(monkeypatch):
 # Wall-clock cap resolver — ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S
 # ═════════════════════════════════════════════════════════════════════════════
 #
-# Operator tuning decision 2026-09-07 (default 25.0s, min clamp 5.0s;
+# Operator tuning decision 2026-09-07 (default was 25.0s then; 180.0s
+# since the 2026-09-26 7d4a3bd9 amendment; min clamp 5.0s;
 # Pattern C sibling resolver — sibling to the boolean kill-switch above).
 # Rationale grounded in the tester live-LLM probe: real quick-model
 # latencies on 2026-09-07 showed successes 2.6s–13.6s with 4/8 calls
@@ -226,7 +228,7 @@ _VALID_TIMEOUT_INPUTS = [
 
 
 # Invalid parse inputs (non-numeric OR <= 0). All resolve to the
-# default ``DEFAULT_JUDGE_TIMEOUT_S`` (25.0s) WITH a one-shot WARN.
+# default ``DEFAULT_JUDGE_TIMEOUT_S`` (180.0s) WITH a one-shot WARN.
 _INVALID_TIMEOUT_INPUTS = [
     "abc",
     "1.5x",     # mixed numeric + alpha
@@ -292,7 +294,7 @@ def test_parse_judge_timeout_s_invalid_falls_open_to_default(raw):
     numeric env: a typo'd ``"abc"`` or a ``"=0"`` would be the
     dangerous direction (always-timeout = silent gate-flip to
     conservative deny+nudge); fail-OPEN keeps the judge alive at
-    the documented default 25.0s. Blank / unset is also default
+    the documented default 180.0s. Blank / unset is also default
     (the resolver handles both shapes identically — unset env and
     blank value).
     """
@@ -300,12 +302,13 @@ def test_parse_judge_timeout_s_invalid_falls_open_to_default(raw):
 
 
 def test_parse_judge_timeout_s_unset_returns_default():
-    """Unset env (key absent from source) → :data:`DEFAULT_JUDGE_TIMEOUT_S` (25.0s).
+    """Unset env (key absent from source) → :data:`DEFAULT_JUDGE_TIMEOUT_S` (180.0s).
 
     Source dict lacks the env key entirely — the resolver must not
     ``KeyError`` and must return the documented default.
+    7d4a3bd9 amendment (2026-09-26): the default is 180.0s (was 25.0s).
     """
-    assert _parse_judge_timeout_s({}) == DEFAULT_JUDGE_TIMEOUT_S == 25.0
+    assert _parse_judge_timeout_s({}) == DEFAULT_JUDGE_TIMEOUT_S == 180.0
 
 
 def test_parse_judge_timeout_s_none_value_returns_default():
@@ -414,11 +417,11 @@ def test_get_judge_timeout_s_caches_first_resolution(monkeypatch):
     return the cached float even if the env has been mutated in
     the interim. Flip requires restart.
     """
-    # First read with env unset → default 25.0.
-    assert get_judge_timeout_s() == 25.0
+    # First read with env unset → default 180.0.
+    assert get_judge_timeout_s() == 180.0
     # Mid-flight flip to ``15`` does NOT re-resolve.
     monkeypatch.setenv(ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S_ENV, "15")
-    assert get_judge_timeout_s() == 25.0
+    assert get_judge_timeout_s() == 180.0
     # Reset + re-resolve → now reflects the mutated env.
     reset_judge_timeout_resolver_for_tests()
     assert get_judge_timeout_s() == 15.0
@@ -481,7 +484,7 @@ def test_sibling_resolver_caches_are_independent(monkeypatch):
     """
     # First call: both resolvers cache their defaults.
     assert is_llm_judge_enabled() is True
-    assert get_judge_timeout_s() == 25.0
+    assert get_judge_timeout_s() == 180.0
     # Reset ONLY the timeout cache.
     monkeypatch.setenv(ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S_ENV, "15")
     reset_judge_timeout_resolver_for_tests()
@@ -494,3 +497,52 @@ def test_sibling_resolver_caches_are_independent(monkeypatch):
     reset_llm_judge_resolver_for_tests()
     assert is_llm_judge_enabled() is False  # re-resolves to OFF
     assert get_judge_timeout_s() == 15.0  # still 15, no re-resolve
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7d4a3bd9 amendment (2026-09-26): default 25.0s → 180.0s
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestJudgeTimeoutDefault180Amendment:
+    """Incident 7d4a3bd9 amendment pins: default 180.0s, env override,
+    clamp unchanged.
+
+    Episode B's two judge double-timeouts at the 25s default consumed
+    deny slots 2+3 and the bound escalation ended the mission
+    COMPLETED-UNVERIFIED. The user accepts the worst-case trade —
+    retry-once means up to 2 × 180s = 360s on a single turn-end's
+    judge verdict — for verdict reliability."""
+
+    def test_default_is_180s(self):
+        assert DEFAULT_JUDGE_TIMEOUT_S == 180.0
+
+    def test_unset_env_resolves_180(self, monkeypatch):
+        monkeypatch.delenv(
+            ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S_ENV,
+            raising=False,
+        )
+        reset_judge_timeout_resolver_for_tests()
+        assert get_judge_timeout_s() == 180.0
+
+    def test_env_override_wins_over_default(self, monkeypatch):
+        monkeypatch.setenv(
+            ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S_ENV, "45"
+        )
+        reset_judge_timeout_resolver_for_tests()
+        assert get_judge_timeout_s() == 45.0
+
+    def test_min_clamp_unchanged(self):
+        assert MIN_JUDGE_TIMEOUT_S == 5.0
+
+    def test_below_clamp_still_clamps_to_5(self, monkeypatch):
+        monkeypatch.setenv(
+            ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S_ENV, "2"
+        )
+        reset_judge_timeout_resolver_for_tests()
+        assert get_judge_timeout_s() == 5.0
+
+    def test_worst_case_is_two_attempts_at_180(self):
+        """Doc contract: retry-once ⇒ up to 2 × 180s = 360s per
+        turn-end evaluation (user-accepted)."""
+        assert 2 * DEFAULT_JUDGE_TIMEOUT_S == 360.0

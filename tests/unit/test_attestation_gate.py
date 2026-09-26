@@ -712,22 +712,23 @@ class TestGateExceptionMarkerDry:
 # =============================================================================
 
 
-class TestDeniedRowsHaveDefaultMarkerFields:
-    """Pin that the marker/length fields on DENIED rows are dataclass
-    defaults, not measurements.
+class TestDeniedRowsHaveRealSignalFields:
+    """Pin the marker/length fields on DENIED rows.
 
-    The marker/length scanner is the TRIGGER half of a two-stage
-    disambiguator that fires only on ALLOW paths (incident b08f40fe
-    family). On DENIED rows the scanner never runs — the deny path
-    consumes ``decision.should_inject_nudge`` + the ledger writes
-    and exits; the marker/length fields are not relevant. The
-    canonical log row still stamps them (33 placeholders include
-    them all), but their values are the dataclass defaults.
-
-    This pin closes a future-readability hazard: a reader who
-    interprets ``marker_hit=True`` on a DENIED row as "the
-    marker scanner actually fired and saw a marker on the final
-    message" would be wrong — the scanner literally never ran.
+    7d4a3bd9 FIX-5a re-contract (2026-09-26, supersedes the former
+    "defaults on denied rows" pin): the LENGTH scan now runs on EVERY
+    evaluated path, so ``length_trigger`` / ``final_word_count`` on a
+    DENIED row are REAL measurements of the final AIMessage — the
+    former dataclass-default pins encoded the exact defect that made
+    Episode A of leader 7d4a3bd9 log ``final_word_count=0
+    length_trigger=False`` against a real 2313-char final AIMessage
+    (a non-delegated allow printed defaults, forensics misread them
+    as scanner zeros). The MARKER scan stays routing-gated: on DENIED
+    rows ``marker_hit`` is still the dataclass default (the deny path
+    consumes ``should_inject_nudge`` + the ledger writes; the deny
+    band resolves on the C term alone and leader-prose markers are
+    moot there — the marker field on a DENIED row remains
+    "scanner did not run", not a measurement).
     """
 
     def test_denied_rows_have_marker_hit_default_false(self):
@@ -736,43 +737,52 @@ class TestDeniedRowsHaveDefaultMarkerFields:
         result = evaluate(
             "inst-denied-marker", 0, plain_messages(), settings, manager,
         )
-        # DENIED is the canonical deny path — scanner does NOT run.
+        # DENIED is the canonical deny path — the MARKER scan still
+        # does not run (routing-gated; the deny band needs no prose
+        # signal).
         assert result.decision is Decision.DENIED
         assert result.marker_hit is False, (
             "marker_hit on a DENIED row MUST be the dataclass default "
-            "(False) — the scanner does not run on the deny path. "
+            "(False) — the marker scan does not run on the deny path. "
             "Reading marker_hit=True on a DENIED row as 'the marker "
             "saw a marker on the final message' would be wrong."
         )
 
-    def test_denied_rows_have_length_trigger_default_false(self):
+    def test_denied_rows_carry_real_length_trigger(self):
+        # 7d4a3bd9 FIX-5a re-contract: REAL measurement, not the
+        # default. ``plain_messages()`` ends with the 3-word final
+        # AIMessage "Everything is complete." → brevity-class
+        # (3 < SHORT_REPORT_WORD_THRESHOLD=150) → length_trigger True.
         manager = make_manager(pending_children=0, wakeups=0)
         settings = GateSettings(mode="enforce", window=3, deny_bound=3)
         result = evaluate(
             "inst-denied-length", 0, plain_messages(), settings, manager,
         )
         assert result.decision is Decision.DENIED
-        assert result.length_trigger is False, (
-            "length_trigger on a DENIED row MUST be the dataclass "
-            "default (False) — the length scanner does not run on "
-            "the deny path. A length_trigger=True value on DENIED "
-            "is a measurement of the scanner-never-ran state, not "
-            "a measurement of the final message."
+        assert result.length_trigger is True, (
+            "length_trigger on a DENIED row is now a REAL measurement "
+            "of the final AIMessage (7d4a3bd9 FIX-5a) — the 3-word "
+            "final in plain_messages() is brevity-class, so True is "
+            "the honest value. False here would mean the length scan "
+            "stopped running on deny paths (the Episode-A defect "
+            "shape)."
         )
 
-    def test_denied_rows_have_final_word_count_default_zero(self):
+    def test_denied_rows_carry_real_final_word_count(self):
+        # 7d4a3bd9 FIX-5a re-contract: final_word_count reflects the
+        # actual final AIMessage text ("Everything is complete." → 3
+        # words) on the DENIED path too.
         manager = make_manager(pending_children=0, wakeups=0)
         settings = GateSettings(mode="enforce", window=3, deny_bound=3)
         result = evaluate(
             "inst-denied-wordcount", 0, plain_messages(), settings, manager,
         )
         assert result.decision is Decision.DENIED
-        assert result.final_word_count == 0, (
-            "final_word_count on a DENIED row MUST be the dataclass "
-            "default (0) — the word-count scanner does not run on "
-            "the deny path. A non-zero value on DENIED is a sentinel "
-            "that the scanner-never-ran state was mis-stamped; either "
-            "the gate logic regressed or the field was set elsewhere."
+        assert result.final_word_count == 3, (
+            "final_word_count on a DENIED row is now the REAL word "
+            "count of the final AIMessage (7d4a3bd9 FIX-5a). A 0 here "
+            "would mean the default-zeros defect (Episode-A shape) "
+            "regressed back."
         )
 
     def test_denied_rows_have_no_marker_path_field(self):

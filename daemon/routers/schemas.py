@@ -1395,7 +1395,35 @@ class MissionResponse(BaseModel):
         description=(
             "Canonical mission liveness: pending/processing/paused/"
             "completed/failed/cancelled (§8.2 value space); null when "
-            "degraded"
+            "degraded. 7d4a3bd9 Fix 1: when ``completion_gate_escalated`` "
+            "is True AND liveness is ``completed``, this field carries "
+            "the DISTINCT string ``completed (gate escalated — "
+            "unverified)`` (canonical constant "
+            "``daemon.constants.COMPLETION_GATE_ESCALATED_DISPLAY``) "
+            "instead of plain ``completed`` so the unverified shape "
+            "is loud at the HTTP router surface. The mission row's "
+            "canonical liveness stays untouched in the resolver so "
+            "filters / await / W4 dead-letter precedence match the "
+            "canonical vocabulary."
+        ),
+    )
+    # 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.1): the HTTP
+    # router surface now carries the machine-readable escalation flag
+    # alongside the surfaced string. True when the linked instance row
+    # carries ``completion_gate_escalated=True`` (the attestation gate
+    # ended the mission via ``terminal_after_bound`` — completion
+    # UNVERIFIED). Default ``False`` for non-escalated missions; the
+    # field is additive vs the pre-amendment response schema.
+    completion_gate_escalated: bool = Field(
+        default=False,
+        description=(
+            "7d4a3bd9 Fix 1 — True when the mission ended via the "
+            "attestation gate's ``terminal_after_bound`` escalation "
+            "(completion UNVERIFIED). Pairs with the surfaced "
+            "``liveness`` string ``completed (gate escalated — "
+            "unverified)`` so the FE can render verbatim and the "
+            "filters / await logic keep matching the canonical "
+            "liveness vocabulary."
         ),
     )
     terminal_reason: str | None = Field(

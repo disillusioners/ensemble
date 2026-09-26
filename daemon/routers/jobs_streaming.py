@@ -62,6 +62,22 @@ class _ResolvedWork:
     job_type: str | None
     mission_liveness: str | None
 
+    # 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.2): the SSE
+    # payload now carries the postmortem escalation flag off the
+    # joined Instance row (read-side surface; same
+    # ``WorkRecord.completion_gate_escalated`` flag the
+    # jobs_crud / work_notifier surfaces already read). The completed
+    # payload swaps the surfaced ``status`` field to the DISTINCT
+    # unverified string ``completed (gate escalated — unverified)``
+    # (canonical constant
+    # ``daemon.constants.COMPLETION_GATE_ESCALATED_DISPLAY``) when the
+    # flag is True and the status is ``completed``, so the SSE
+    # completed event agrees with the HTTP router rendering and the
+    # unverified shape is loud at the FE SSE consumer. Defensive
+    # ``getattr`` on partial rows / test doubles — same fail-soft
+    # contract as the other WorkRecord readers.
+    completion_gate_escalated: bool | None = None
+
     # M1 (mission-class, 2026-09-02) — three additive mission
     # projection fields mirroring ``WorkRecord``. Always-on since WS3
     # (the M1 mission-projection kill-switch was
@@ -135,6 +151,13 @@ class _ResolvedWork:
             # new writers, no new queries.
             outcome=getattr(record, "outcome", None),
             mission_ref=getattr(record, "mission_ref", None),
+            # 7d4a3bd9 Fix 1 — postmortem escalation flag off the
+            # joined Instance (same additive field as the WorkRecord
+            # and the other read surfaces — defensive getattr for
+            # partial rows / test doubles).
+            completion_gate_escalated=bool(
+                getattr(record, "completion_gate_escalated", False)
+            ),
         )
 
     def to_payload(self, *, work_id: str) -> dict[str, Any]:
@@ -174,13 +197,44 @@ class _ResolvedWork:
         # for shape uniformity with the JobResponse surface.
         payload["outcome"] = self.outcome
         payload["mission_ref"] = self.mission_ref
+        # 7d4a3bd9 Fix 1 — the escalation flag rides the SSE payload
+        # uniformly (additive vs the pre-amendment shape; the FE
+        # narrowings depend on it). Status swap to the distinct
+        # unverified string happens in ``to_completed_payload`` only
+        # — the connected / status_update payloads ride the canonical
+        # ``status`` field unchanged because the escalation lives in
+        # the row's pre-terminal history (the FE sees the canonical
+        # status mid-flight and the swap on the terminal completed
+        # event).
+        payload["completion_gate_escalated"] = (
+            self.completion_gate_escalated
+        )
         return payload
 
     def to_completed_payload(self, *, work_id: str) -> dict[str, Any]:
         """Emit the completed payload keys (includes terminal-state fields)."""
+        # 7d4a3bd9 Fix 1 — the completed event swaps the surfaced
+        # ``status`` field to the DISTINCT unverified string when the
+        # row carries ``completion_gate_escalated=True`` and the
+        # canonical status is ``completed``. The swap uses the same
+        # canonical constant the HTTP router (jobs_crud /
+        # work_notifier / missions) renders — single source
+        # ``daemon.constants.COMPLETION_GATE_ESCALATED_DISPLAY``.
+        # ``status`` is otherwise passed through verbatim so the
+        # completed payload stays backward-compatible (the FE narrowings
+        # add the new union member on the consumer side).
+        surfaced_status = self.status
+        if (
+            self.completion_gate_escalated
+            and surfaced_status == "completed"
+        ):
+            from daemon.constants import COMPLETION_GATE_ESCALATED_DISPLAY
+
+            surfaced_status = COMPLETION_GATE_ESCALATED_DISPLAY
+
         payload: dict[str, Any] = {
             "job_id": work_id,
-            "status": self.status,
+            "status": surfaced_status,
             "result_summary": self.result_summary,
             "error_message": self.error_message,
             "queue_id": self.queue_id,
@@ -208,6 +262,12 @@ class _ResolvedWork:
         # outcome answer.
         payload["outcome"] = self.outcome
         payload["mission_ref"] = self.mission_ref
+        # 7d4a3bd9 Fix 1 — same additive flag as the
+        # connected/status_update payload; the FE consumes it
+        # alongside the surfaced string.
+        payload["completion_gate_escalated"] = (
+            self.completion_gate_escalated
+        )
         return payload
 
 

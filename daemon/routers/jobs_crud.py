@@ -21,6 +21,7 @@ from daemon.repositories.job_queue.models import (
 from daemon.constants import DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT
 from daemon.constants import (
     CHAT_SOURCE_PREFIXES,
+    COMPLETION_GATE_ESCALATED_DISPLAY,
     RESERVED_SOURCE_PREFIXES,
     is_chat_source,
     is_reserved_source,
@@ -185,6 +186,25 @@ def _job_to_response(
         # D3: JobItem TEXT verbatim (byte-stable via to_utc_iso's
         # str pass-through).
         created_at = to_utc_iso(job.created_at)
+
+    # 7d4a3bd9 false-completion fix (2026-09-26) — Fix 1 unverified
+    # surface. When the linked instance ended via the attestation
+    # gate's ``terminal_after_bound`` escalation, the completion is
+    # UNVERIFIED: render the DISTINCT string instead of plain
+    # ``completed`` so the user surface is loud (Episode B rendered
+    # plain ``completed`` and the unverified shape was invisible).
+    # Applies on both the resolver-backed path (``work_record`` is
+    # the instance-authoritative view; escalation rides the joined
+    # Instance) and NEVER on the legacy fallback (no instance view —
+    # honest default: plain status). Mirror-receipt ``settled``
+    # rows are deliberately NOT rewritten — the flag describes the
+    # MISSION completion, and the receipt vocabulary is disjoint.
+    if (
+        work_record is not None
+        and getattr(work_record, "completion_gate_escalated", False)
+        and status == "completed"
+    ):
+        status = COMPLETION_GATE_ESCALATED_DISPLAY
 
     return JobResponse(
         job_id=job.job_id,

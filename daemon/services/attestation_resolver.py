@@ -484,9 +484,12 @@ def emit_attestation_boot_log() -> None:
     :func:`daemon.services.attestation_report_judge.resolve_judge_model`),
     and the resolved wall-clock cap (Pattern C sibling resolver at
     :mod:`daemon.services.attestation_judge_timeout_resolver`,
-    default :data:`DEFAULT_JUDGE_TIMEOUT_S` 25.0s, min clamp 5.0s —
-    operator tuning decision 2026-09-07 grounded in the tester live-LLM
-    probe; see ``docs/setup.md``). When the judge is disabled
+    default :data:`DEFAULT_JUDGE_TIMEOUT_S` 180.0s (was 25.0s; raised
+    2026-09-26 by the incident 7d4a3bd9 amendment — two 25s judge
+    double-timeouts consumed deny slots and drove a COMPLETED-UNVERIFIED
+    escalation; the user accepts the 2×180s worst case for verdict
+    reliability), min clamp 5.0s — operator tuning decision 2026-09-07
+    grounded in the tester live-LLM probe; see ``docs/setup.md``). When the judge is disabled
     (``llm_judge_enabled=false``) the model field surfaces
     ``<disabled>`` so operators see at a glance that no judge call will
     fire (the timeout is still logged — the operator can audit the
@@ -538,8 +541,9 @@ def emit_attestation_boot_log() -> None:
         "true" if judge_enabled else "false",
         judge_model if judge_enabled else "<disabled>",
         # Format the float as "%.1f" so the boot line shows e.g.
-        # ``llm_judge_timeout_s=25.0`` (clean, no scientific
-        # notation, consistent across integer / float env values).
+        # ``llm_judge_timeout_s=180.0`` (was 25.0 before the 7d4a3bd9
+        # amendment; clean, no scientific notation, consistent across
+        # integer / float env values).
         ("%.1f" % judge_timeout_s),
         floor_status,
         ENSEMBLE_ATTESTATION_MODE_ENV,

@@ -103,12 +103,26 @@ export class JobCardComponent {
       case 'failed': return 'error';
       case 'cancelled': return 'cancel';
       case 'dead_letter': return 'report_problem';
+      // 7d4a3bd9 Fix 1 — unverified completions get the warning glyph
+      // (the string is not the canonical 'completed' literal, so the
+      // switch's default 'help' would otherwise render).
+      case 'completed (gate escalated — unverified)': return 'warning';
       default: return 'help';
     }
   });
 
   statusLabel = computed(() => {
     const status = this.job().status;
+    // 7d4a3bd9 false-completion fix (2026-09-26) — Fix 1 unverified
+    // surface: the backend renders the DISTINCT string
+    // ``completed (gate escalated — unverified)`` on
+    // gate-escalated completions (suffix-matched here against the
+    // daemon's COMPLETION_GATE_ESCALATED_DISPLAY literal shape).
+    // Render it verbatim with a warning glyph — the completion is
+    // UNVERIFIED (the attestation gate ended the mission).
+    if (status === 'completed (gate escalated — unverified)') {
+      return status;
+    }
     // Handle snake_case (e.g., 'dead_letter' -> 'Dead Letter').
     const title = status
       .replace(/_/g, ' ')

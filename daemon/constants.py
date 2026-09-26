@@ -77,6 +77,19 @@ ACTIVITY_UPDATE_INTERVAL: float = 5.0  # Activity callback update interval (seco
 # ENSEMBLE_* flags; activation = rebuild+restart, same as WORKER_POOL_SIZE).
 CHAT_WORKER_POOL_SIZE: int = 2  # Dedicated chat-lane worker threads (telegram/slack/discord)
 
+# ── LCA unverified-completion surface (7d4a3bd9 fix, Fix 1) ─────────────────
+#
+# DISTINCT user-facing status string rendered INSTEAD of plain
+# ``completed`` on every read surface (job events, job_get, get_mission,
+# FE label) when the linked instance carries
+# ``completion_gate_escalated=True`` — i.e. the attestation gate ended
+# the mission via ``terminal_after_bound`` WITHOUT an attested
+# completion. Incident 7d4a3bd9 Episode B: the escalated completion was
+# INVISIBLE at the user surface (plain ``completed``); this string makes
+# the unverified shape loud. Single source of truth — the FE derives its
+# badge from the same literal shape via suffix match.
+COMPLETION_GATE_ESCALATED_DISPLAY: str = "completed (gate escalated — unverified)"
+
 # Interactive-chat source prefixes (chat-source-worker-lane, D1/D10.1).
 #
 # Provenance (Pin 1 of the D10.1 5-pin pattern): the LEGITIMATE mint

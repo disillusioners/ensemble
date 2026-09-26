@@ -38,7 +38,7 @@ export type JobJobType = 'task' | 'message';
  * no linked instance are indistinguishable by design; all ``null``s
  * render nothing extra and fall back to receipt-only semantics).
  */
-export type MissionLiveness = 'pending' | 'processing' | 'paused' | 'completed' | 'failed' | 'cancelled';
+export type MissionLiveness = 'pending' | 'processing' | 'paused' | 'completed' | 'completed (gate escalated — unverified)' | 'failed' | 'cancelled';
 
 /**
  * WorkKind subset that may appear on a Job record.
@@ -102,6 +102,18 @@ export interface Job {
   // optional for backward compatibility.
   mission_id?: string | null;
   mission_ref?: { mission_id: string; agent_id: string; liveness: string } | null;
+  // 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.3):
+  // machine-readable escalation flag paired with the surfaced
+  // ``status`` string ``completed (gate escalated — unverified)``.
+  // True when the linked instance row carries
+  // ``completion_gate_escalated=True`` (the attestation gate ended
+  // the mission via ``terminal_after_bound`` — completion
+  // UNVERIFIED). The job-card uses both: the surfaced string for
+  // the human-visible badge, the flag for narrowings that should
+  // key off the escalation state (e.g. analytics, operator-visible
+  // warnings). Optional for backward compatibility — older payloads
+  // omit it.
+  completion_gate_escalated?: boolean | null;
 }
 
 export interface JobCreate {
@@ -137,6 +149,11 @@ export interface JobEventPayload {
   // discriminator + liveness pair. Optional — legacy payloads omit them.
   job_type?: JobJobType | null;
   mission_liveness?: MissionLiveness | null;
+  // 7d4a3bd9 Fix 1 — machine-readable escalation flag (additive;
+  // SSE payloads carry it alongside the surfaced string). Paired
+  // with the surfaced ``status`` so the FE can render the
+  // COMPLETED-UNVERIFIED shape verbatim (amber / warning glyph).
+  completion_gate_escalated?: boolean | null;
 }
 
 export interface JobEvent {
@@ -151,8 +168,20 @@ export interface JobEvent {
 // value (mirror-receipt terminal). Task rows still carry ``completed``.
 // Both are terminal; the per-kind split is the whole point of the
 // rename.
+//
+// 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.3): the
+// ``completed (gate escalated — unverified)`` literal IS terminal —
+// the attestation gate ended the mission via ``terminal_after_bound``,
+// the mission is COMPLETED-UNVERIFIED (not ongoing, not pending).
+// Treating the literal as non-terminal would let escalated rows
+// render as ACTIVE in the FE work-view (a dangerous miss — the user
+// surface would claim the mission is still running). The literal is
+// a member of the JobStatus union above AND of MissionLiveness above
+// so the FE narrowings (statusLabel switch, statusIcon switch,
+// isTerminalStatus, getStatusColor, getMissionLivenessColor) become
+// reachable.
 export function isTerminalStatus(status: JobStatus): boolean {
-  return status === 'completed' || status === 'settled' || status === 'failed' || status === 'cancelled' || status === 'dead_letter';
+  return status === 'completed' || status === 'completed (gate escalated — unverified)' || status === 'settled' || status === 'failed' || status === 'cancelled' || status === 'dead_letter';
 }
 
 /**
@@ -224,6 +253,13 @@ export function getMissionLivenessColor(value: MissionLiveness): string {
       return '#F59E0B'; // amber-500
     case 'completed':
       return '#22C55E'; // green-500
+    case 'completed (gate escalated — unverified)':
+      // 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.3):
+      // amber-500 — same as the JobStatus color so the work-view
+      // and the badge agree on the unverified shape. NOT green
+      // (the canonical completed color) so the escalated row
+      // visually diverges from a verified done.
+      return '#F59E0B';
     case 'failed':
       return '#EF4444'; // red-500
     case 'cancelled':
@@ -355,6 +391,11 @@ export function getStatusColor(status: JobStatus): string {
       return '#F59E0B'; // amber-500
     case 'dead_letter':
       return '#7C3AED'; // purple-600
+    // 7d4a3bd9 false-completion fix (2026-09-26) — Fix 1 unverified
+    // surface: gate-escalated completions render amber (warning) —
+    // NOT the completed green, which would read as a verified done.
+    case 'completed (gate escalated — unverified)':
+      return '#F59E0B'; // amber-500
     default:
       return '#9CA3AF'; // gray-400
   }
@@ -453,4 +494,17 @@ export interface MissionSummary {
   last_activity_at: string | null;
   title: string | null;
   initiative_preview: string | null;
+  // 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.3):
+  // machine-readable escalation flag paired with the surfaced
+  // ``liveness`` string ``completed (gate escalated — unverified)``.
+  // True when the linked instance row carries
+  // ``completion_gate_escalated=True`` (the attestation gate ended
+  // the mission via ``terminal_after_bound`` — completion
+  // UNVERIFIED). The badge / panel uses both: the surfaced string
+  // for the human-visible badge, the flag for narrowings that
+  // should key off the escalation state (e.g. operator-visible
+  // warnings, analytics). Optional for backward compatibility —
+  // older payloads omit it, in which case the FE treats the
+  // mission as not-escalated.
+  completion_gate_escalated?: boolean | null;
 }

@@ -7,8 +7,9 @@ resolution — sibling to :mod:`daemon.services.attestation_judge_resolver`
 (the boolean kill-switch) and :mod:`daemon.services.attestation_resolver`
 (the main tri-state mode resolver).
 
-* ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`` (default 25.0s;
-  restart-read; minimum clamp 5.0s);
+* ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`` (default 180.0s
+  since the 2026-09-26 7d4a3bd9 amendment; restart-read; minimum clamp
+  5.0s);
 * the cached-global Pattern C resolver;
 * the test-only cache-reset helper.
 
@@ -24,7 +25,7 @@ restart-required to flip**.
 
 An invalid env value (non-numeric, negative, zero) emits a ONE-SHOT
 WARN carrying the offending raw value + the resolved default, and falls
-back to the default ``25.0s``. A value below the documented minimum
+back to the default ``180.0s``. A value below the documented minimum
 clamp ``5.0s`` emits a DIFFERENT one-shot WARN (clamp WARN) and clamps
 the resolved value to ``5.0s``. The two WARN paths use independent
 one-shot flags so an operator who passes both an invalid AND a
@@ -50,6 +51,17 @@ b42f7237..2a43904c on branch ``feature/leader-completion-attestation``):
   path (the judge is only invoked on the WOULD-BE-DENY branch) vs
   fewer false nudges of genuine reports. The 25s default keeps the
   wait bounded while letting the quick-model tail latency ride.
+* **7d4a3bd9 amendment (2026-09-26): default bumped 25.0s → 180.0s.**
+  Episode B of leader 7d4a3bd9: TWO judge double-timeouts at the 25s
+  default consumed deny slots 2+3 and the bound escalation ended the
+  mission COMPLETED-UNVERIFIED — the timeouts were the decisive
+  failure. The user accepts the worst-case trade: retry-once means up
+  to 2×180s (6 minutes) on a single turn-end's judge verdict, bought
+  for verdict reliability (a delivered verdict — either of
+  complete/not_complete — is what keeps the bound machinery honest;
+  a never-spoke judge now falls to the user-ruled not-complete
+  continuation, see decisions.md D-entry 2026-09-26). Env stays
+  tunable; min clamp unchanged (5.0s).
 
 Public API
 ----------
@@ -78,13 +90,14 @@ ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S_ENV = (
 # Defaults + bounds (single source of truth — referenced by tests + setup.md)
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: Default ship posture for the judge wall-clock cap. Bumped from 10.0s →
-#: 25.0s on 2026-09-07 (operator decision grounded in the tester live-LLM
-#: probe; see module docstring rationale). Operators tighten via the env
-#: var (e.g. ``=15`` for a faster tail-bound); restart is required (Pattern
-#: C — no live flip). The default mirrors the quick-model tail latency
-#: observed in the probe (successes 2.6–13.6s with 4/8 calls >15s).
-DEFAULT_JUDGE_TIMEOUT_S: float = 25.0
+#: Default ship posture for the judge wall-clock cap. History: 10.0s at
+#: ship → 25.0s on 2026-09-07 (live-LLM probe) → **180.0s on 2026-09-26**
+#: (incident 7d4a3bd9 amendment: two 25s double-timeouts consumed deny
+#: slots and drove a COMPLETED-UNVERIFIED escalation; the user accepts
+#: the 2×180s worst case per judge invocation — retry-once — for verdict
+#: reliability). Operators tighten via the env var; restart is required
+#: (Pattern C — no live flip).
+DEFAULT_JUDGE_TIMEOUT_S: float = 180.0
 
 #: Minimum clamp for the resolved timeout. Values below this clamp to
 #: the floor with a one-shot WARN. The floor still lets a real timeout
@@ -118,7 +131,7 @@ def _parse_judge_timeout_s(source: dict[str, str]) -> float:
     Failure / clamp policy (fail-OPEN; mirrors the boolean kill-switch
     resolver's "silent default-ON" posture scaled to a numeric env):
 
-    * Blank / unset → :data:`DEFAULT_JUDGE_TIMEOUT_S` (25.0s).
+    * Blank / unset → :data:`DEFAULT_JUDGE_TIMEOUT_S` (180.0s).
     * Non-numeric (including floats that cannot be parsed, e.g. "abc",
       "1.5x") → :data:`DEFAULT_JUDGE_TIMEOUT_S` + one-shot invalid-WARN.
     * ``<= 0`` → :data:`DEFAULT_JUDGE_TIMEOUT_S` + one-shot invalid-WARN
@@ -184,7 +197,7 @@ def get_judge_timeout_s() -> float:
     calls return the cached float — restart required to flip). Pattern
     C resolver; mirrors the WC-wake / governor-recursion /
     attestation-mode / judge-enabled resolvers' identity-preservation
-    contract. Returns :data:`DEFAULT_JUDGE_TIMEOUT_S` (25.0s) on unset
+    contract. Returns :data:`DEFAULT_JUDGE_TIMEOUT_S` (180.0s) on unset
     env, :data:`MIN_JUDGE_TIMEOUT_S` (5.0s) on below-clamp values.
     """
     global _CACHED_JUDGE_TIMEOUT_S

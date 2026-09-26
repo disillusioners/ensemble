@@ -62,6 +62,8 @@ from daemon.services.attestation_resolver import (
     reset_attestation_resolver_for_tests,
 )
 from daemon.graph import (
+    ATTESTATION_ANY_SUBSTANTIVE_KEY,
+    ATTESTATION_DENY_PROGRESS_KEY,
     create_attestation_gate_node,
 )
 
@@ -450,17 +452,25 @@ class TestR7PinBoundEscalationFromFusedPath:
         """denied_count == bound (3) + un-attested∧quiet → decide()
         step (6) TERMINAL — the SAME machinery the old deny path used;
         no judge (budget parity: at-bound TERMINAL never got a judge
-        pre-flip either); escalation ledger write + operator event."""
+        pre-flip either); escalation ledger write + operator event.
+
+        7d4a3bd9 amendment v3 (2026-09-26): the exhaustion composition
+        gate withholds the terminal when the epoch's deny events carry
+        ZERO substantive verdicts. This pin models the judge-SPOKE
+        epoch (denied_count=3 fed via the getter + the
+        ``attestation_any_substantive_deny`` channel seeded True — the
+        checkpointed shape a real epoch reaches after a
+        ``not_complete`` deny), so the terminal stands unchanged."""
         spy = _JudgeSpy([_complete_json()])
         monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
 
         node, manager, ledger = _make_node(
             instance_id="r7p3-bound", denied_count=3
         )
+        state = _delegated_mission("All done.")
+        state[ATTESTATION_ANY_SUBSTANTIVE_KEY] = True
         with _capture(caplog).at_level(logging.INFO):
-            result = _run(
-                node, _delegated_mission("All done."), "r7p3-bound"
-            )
+            result = _run(node, state, "r7p3-bound")
 
         assert "messages" not in result, "terminal — no nudge"
         assert result["attestation_route"] is None
@@ -506,16 +516,26 @@ class TestR7PinBoundEscalationFromFusedPath:
         spy = _JudgeSpy([_not_complete_json()])
         monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
 
+        # 7d4a3bd9 amendment v3: the loop carries the checkpointed
+        # channels forward (mirroring real LangGraph state) — each
+        # ``not_complete`` deny stamps ``attestation_any_substantive_deny``
+        # True, so the epoch at bound exhaustion is a judge-SPOKE epoch
+        # and the terminal stands (the FIX-1 contract under test).
+        channel_state: dict = {}
         nudges = 0
         for denied_count in (0, 1, 2, 3):
             node, _m, ledger = _make_node(
                 instance_id="r7p3-loop", denied_count=denied_count
             )
-            result = _run(
-                node,
-                _delegated_mission("Ending turn, awaiting go/no-go."),
-                "r7p3-loop",
-            )
+            state = _delegated_mission("Ending turn, awaiting go/no-go.")
+            state.update(channel_state)
+            result = _run(node, state, "r7p3-loop")
+            for key in (
+                ATTESTATION_ANY_SUBSTANTIVE_KEY,
+                ATTESTATION_DENY_PROGRESS_KEY,
+            ):
+                if key in result:
+                    channel_state[key] = result[key]
             if "messages" in result:
                 nudges += 1
                 assert result["attestation_route"] == "agent"
@@ -1034,13 +1054,38 @@ class TestIncident6a0d60c9AwaitingAnswer:
     ):
         """The answer-gate bypass is the ONLY thing preventing the deny
         on this shape; with the answer closed (False) and the counter
-        at the bound, the SAME mission terminates (bound enforced)."""
+        at the bound, the SAME mission is bound-enforced.
+
+        7d4a3bd9 amendment v3 (2026-09-26, user ruling) — RE-CONTRACTED.
+        The pre-amendment pin asserted "at bound → terminal_after_bound,
+        no nudge, escalation write". Under v3 the composition gate
+        withholds the terminal when the epoch's deny events carry ZERO
+        substantive verdicts. With ``denied_count=3`` here the pre-judge
+        bound check fires BEFORE the judge plan (budget parity — the
+        judge is never invoked on the exhaustion evaluation, the
+        ``_invoke_judge_llm`` spy stays untouched). So the epoch has
+        ZERO substantive verdicts and the terminal is WITHHELD: deny
+        +nudge continues, the committed counter rises past the bound
+        (3 → 4), no escalation write, the
+        ``event=leader_completion_gate_bound_exhausted_never_spoke``
+        audit row fires. The bound IS still enforced — counting is
+        UNCHANGED, every deny counts — only the terminal write is
+        withheld for the never-spoke case. The judge-spoke exhaustion
+        path (channel True ⇒ terminal stands) is pinned in
+        ``TestR7PinBoundEscalationFromFusedPath`` and in
+        ``tests/unit/test_lca_false_complete_fixes.py``. Flagged as
+        **UPDATED BY USER RULING** per the commission."""
         spy = _JudgeSpy([_not_complete_json()])
         monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
 
         node, _m, ledger = _make_node(
             instance_id="6a0d60c9-bound", denied_count=3
         )
+        # Pin the ledger's increment return so the post-DENIED write
+        # reflects a "counter rises past the bound" (3 → 4) state — the
+        # v3 ruling leaves counting UNCHANGED, just withholds the
+        # terminal.
+        ledger.increment.return_value = 4
         with _capture(caplog).at_level(logging.INFO):
             result = _run(
                 node,
@@ -1048,9 +1093,29 @@ class TestIncident6a0d60c9AwaitingAnswer:
                 "6a0d60c9-bound",
             )
 
-        assert "messages" not in result, "at bound → terminal, no nudge"
-        ledger.set_escalated_and_reset.assert_called_once()
-        assert _rows(caplog, "event=leader_completion_gate_terminal_after_bound")
+        # v3 ruling — never-spoke exhaustion withholds the terminal,
+        # deny+nudge continues, the judge is still never invoked.
+        assert result["messages"], "deny+nudge continues past the bound"
+        assert (
+            result["attestation_route"] == "agent"
+        ), "the bound-enforced deny+nudge routes to agent"
+        # Judge never invoked — budget parity survives the ruling.
+        assert spy.attempts == [], (
+            "the pre-judge bound check still fires first; the "
+            "_invoke_judge_llm spy stays untouched"
+        )
+        # Deny ledger write — the counter rises past the bound (counting
+        # UNCHANGED). No escalation write — the never-spoke case never
+        # terminalizes.
+        ledger.increment.assert_called_once()
+        ledger.set_escalated_and_reset.assert_not_called()
+        # The withheld-terminal audit row is greppable.
+        assert _rows(
+            caplog, "event=leader_completion_gate_bound_exhausted_never_spoke"
+        ), "the v3 ruling's never-spoke audit row must fire"
+        assert not _rows(
+            caplog, "event=leader_completion_gate_terminal_after_bound"
+        ), "no terminal write from a never-spoke-judge epoch"
 
 
 class TestIncidentOriginalChildLie:
