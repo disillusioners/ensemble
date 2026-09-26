@@ -1,5 +1,18 @@
 # Test Packs
 
+## Completed commission — CHECKPOINT-RETENTION UNCOMMITTED-DIFF VERIFICATION (2026-09-26)
+Branch `feature/checkpoint-retention-keep-3` @ HEAD `0f9bda12` + UNCOMMITTED diff (5 files, +135/−14: config field `checkpoint_max_per_thread` default 3 `ge=1` env `CHECKPOINT_MAX_PER_THREAD`; constants.py constant 50 removed; maintenance Op D reads config). Validate-only, zero commits. **VERDICT: PASS** — full report: `RESULTS/2026-09-26-checkpoint-retention-verification.md`.
+
+| Pack | Invocation (wrap in `timeout 300`; env-scrub `unset POSTGRES_*`; `uv run python -m pytest` only) | Scope | Result |
+|---|---|---|---|
+| `maintenance_unit_test` | `timeout 300 uv run python -m pytest tests/test_maintenance.py --tb=short -q` | 78 tests incl. 6 new config tests | ✅ PASS — 78/78 in 0.54s |
+| `cleanup_wiring_pin_test` | `... pytest tests/integration/test_checkpoint_cleanup_job_wiring_pin.py --tb=short -q` | AST singleton pin (regression net; not in diff) | ✅ PASS — 3/3 in 3.59s |
+| `retention_kfilter_test` | `... pytest tests/ -k checkpoint_max_per_thread --ignore=tests/packs --ignore=tests/e2e --tb=short -q` (census-first) | 10 selected / 23,443 collected | ✅ PASS — 10/10 in 6.96s, selection census-proved |
+| `retention_probes_test` (NEW probe file) | `... pytest tests/unit/test_checkpoint_retention_config_probes.py --tb=short -q` | 6 gap-probes: P5 four-adapter flow, P6 N=1, P7 inner no-op, P8 multi-thread, P9 per-ns, P10 prefix-alias | ✅ PASS — 6/6 in 0.18s (file left UNTRACKED per commission) |
+| `retention_sweep_test` (sharded after 124) | A: entries 1–172 + `tests/test_config.py` (6,426); B: entries 173–344 (7,031); full 13,451 hit 300s cap @ 52% | config/constants surface + broad tests/unit | ⚠️ FAIL-by-count, adjudicated NON-REGRESSION — 68F/23E all pre-existing-class (MCP baseline 21+2; quarantined drift families); canary `import daemon.manager` exit 0 |
+| `checkpoint_real_saver_pg_test` | `PG_TEST_HOST=127.0.0.1 PG_TEST_PORT=15432 PG_TEST_USER=ensemble PG_TEST_PASSWORD=x PG_TEST_DB=ensemble_test timeout 300 uv run python -m pytest tests/integration/checkpoint_prune_real_saver.py --override-ini='addopts=' --override-ini='timeout=120' --tb=short -q` on disposable PG14 (`initdb -A trust -U ensemble`, mktemp PGDATA) | 9 real-saver tests | ⚠️ 2F/7P → base A/B proof at `0f9bda12` (temp worktree, PG :15433) = identical 2F/7P → PRE-EXISTING, both QUARANTINED (caplog sibling-logger mismatch, test-side); effective 7/7 relevant PASS |
+
+
 ## Active commission — EMBEDDING-GZIP-EXEMPTION CLOSE-OUT (2026-09-26)
 Branch `fix/embedding-gzip-exemption` @ `ce644d4a` (1-commit-clean on base v0.15.2 @ `139ba352`; diff = `daemon/services/skill_embedding_service.py` + new `tests/unit/test_embedding_gzip_exempt.py` + re-contracted `tests/unit/test_llm_request_gzip_edge_cases.py`). Debug-workflow close-out: the ORIGINAL symptom (31× HTTP 400 "We could not parse the JSON body of your request" on direct OpenAI /embeddings under `OPENAI_REQUEST_GZIP=true`) must be proven dead via wire-level red→green — suites green alone do not close it.
 

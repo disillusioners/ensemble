@@ -265,7 +265,6 @@ class TestRealSaverWritePruneResume:
     ):
         """THE core §9 test: real writes → real retention prune (Op D) →
         blob prune (dry-run then destructive) → aget + resume intact."""
-        from daemon.constants import CHECKPOINT_MAX_PER_THREAD
         from daemon.services.checkpoint_prune import prune_unreferenced_blobs
 
         graph = build_graph(saver)

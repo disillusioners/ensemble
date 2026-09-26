@@ -5,6 +5,14 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — 2026-09-26
+
+### Changed
+
+- **Default `persistence.checkpoint_max_per_thread` lowered 50 → 3** (`feature/checkpoint-retention-keep-3`, merge pending). The per-thread retention cap on the Op D checkpoint-prune pass (`daemon/services/maintenance.py::_prune_per_thread_checkpoints`) is now operator-tunable via the `CHECKPOINT_MAX_PER_THREAD` env var (floor 1, enforced by `PersistenceConfig.checkpoint_max_per_thread` `ge=1` — pydantic raises `ValidationError` at config load on 0 / negative rather than silently mass-pruning the latest checkpoint). Long-running instances no longer accumulate a multi-week checkpoint tail they never resume against; the constant `daemon.constants.CHECKPOINT_MAX_PER_THREAD = 50` is removed (the source of truth moved to config). Default `persistence.checkpoint_cleanup_interval` (24h, unchanged) bounds how often the prune pass runs; the new default retention cap bounds per-pass disk growth. Override per-installation via `CHECKPOINT_MAX_PER_THREAD=N` (YAML key `persistence.checkpoint_max_per_thread` mirrors the env).
+
+---
+
 ## [0.14.2] — 2026-09-25
 
 Feature-carrying release: four feature merges on top of v0.14.1 add agent-facing lifecycle/job tools and queue-awareness, plus one incident fix on the agent-tool message path. No schema changes, no breaking API changes, no config flips.
