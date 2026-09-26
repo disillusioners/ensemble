@@ -31,6 +31,17 @@ Branch `feature/agent-pause-resume-tools` @ `17cf80f1` (base `latest` @ `0fd06cf
 
 ---
 
+## Active commission — AGENT-SNAPSHOT-V1 A/B ACCEPTANCE GATE (2026-09-25)
+Branch `feature/agent-snapshot-v1` @ `2a691591` (base `db71500a`; 21 commits; 58 files +13448/−248). A/B acceptance against prepared base leg at `/tmp/ens-snap-base` (`db71500a`). Gates 1+2 (build/feature/regression) reported green by giter; GATE 3 = live PG dialect smoke for `filter_by_tags` JSONB `@>` arm — rider (f) residual, unit-unreachable on SQLite.
+
+| Pack | Invocation | Scope | Est. |
+|---|---|---|---|
+| `snapshot_pg_smoke_integration_test` (registered: `test/packs/ab/snapshot_pg_smoke_integration_test.sh` + `_snapshot_pg_smoke_exercise.py`) | `timeout 300 bash test/packs/ab/snapshot_pg_smoke_integration_test.sh` (self-provisions throwaway PG :15432 trust-auth; teardown EXIT trap) | Live PG @> containment arm vs SQLite JSON-text scan; 10 cases (all/any × multiple tag sets + empty-tags passthrough) + edge cases (invalid `tag_mode`, empty candidates). Compare PG id-list to SQLite id-list; capture per-case runtime SQL. Migration runner = documented PG no-op (runner.py:719-727); schema materialized via `SQLModel.metadata.create_all` to mirror production manager init. | ~1 min |
+
+**GATE 3 RESULT (2026-09-26): 🔴 BLOCKER — PG arm does NOT emit JSONB `@>`; emits `LIKE '%' \|\| :tags::JSONB \|\| '%'` → `psycopg.errors.InvalidTextRepresentation` (Token "%" invalid).** Root cause: `col(Snapshot.domain_tags).contains(wanted)` (repository.py:542,550) routes through `JSON.Comparator.contains` (LIKE substring) instead of `JSONB.Comparator.contains` (`@>`). `JSONBType` is a `TypeDecorator` wrapping `JSON`; without an explicit `coerce_compared_value` override (or `cast(col, JSONB).contains(...)`), the JSONB comparator never fires. Per gate policy: production code NOT modified; this pack is the durable regression marker. Fix direction (next commission): cast the column to `JSONB` at compare time, OR have `JSONBType` provide a JSONB-aware comparator. Pack script + per-case matrix preserved at `test/packs/ab/`.
+
+---
+
 ## Active commission — FS-TOOL-GUARDRAILS FULL-REGRESSION GATE (2026-09-23)
 Branch `feature/fs-tool-guardrails` @ `948c0f06` (base `3c09c6ae`; 4 commits; prod footprint = `daemon/tools/filesystem.py` only). **✅ VERDICT: PASS — 0 branch-caused regressions; merge-ready from testing.** Method: 16 pack runs (all committed regression partitions + concurrency bonus + 1 ad-hoc family pack) + 6 base A/B legs (`/tmp/ens-fsg-base{,-2}`) + 3 solo tiebreaks; 29 workers, 0 re-dispatches; every invocation drift-pinned + env-scrubbed (`env -u` POSTGRES_*/DATABASE_URL) + dual-layer timeout.
 
