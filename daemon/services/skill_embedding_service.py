@@ -180,15 +180,18 @@ def _do_embed_call(
     ``llm_config["base_url_backup"]`` plumbed through from
     ``daemon/manager.py``.
 
-    The ``http_client`` kwarg is the seam for outbound request-body
-    gzip compression (``OPENAI_REQUEST_GZIP=true``). When None
-    (default), the openai client constructs its own built-in
-    default httpx client (the openai SDK's ``DefaultHttpxClient``)
-    — no gzip wrapping, no ``Content-Encoding`` header, no
-    transport mutation. Embedding request bodies are tiny (one
-    short string) so the savings are small — but the gzip transport
-    is a no-op on bodies that don't shrink under compression, so
-    it's free to apply uniformly.
+    The ``http_client`` kwarg is retained for signature symmetry with
+    :func:`_do_chat_call`, but the embedding path must always leave it
+    ``None``. When None (default), the openai client constructs its
+    own built-in default httpx client (the openai SDK's
+    ``DefaultHttpxClient``) — no gzip wrapping, no ``Content-Encoding``
+    header, no transport mutation. This is NOT a size optimization:
+    the direct OpenAI ``/embeddings`` endpoint REJECTS gzip-compressed
+    request bodies with HTTP 400 ("We could not parse the JSON body of
+    your request"). Attaching the gzip transport here (the
+    pre-2026-09-26 behavior under ``OPENAI_REQUEST_GZIP=true``) broke
+    every embedding call routed to ``api.openai.com``. The gzip
+    transport remains correct ONLY for chat endpoints that tolerate it.
     """
     url = current_failover_url() or embed_base_url
     client_kwargs: dict[str, Any] = {
@@ -418,27 +421,28 @@ class SkillEmbeddingService:
         if not text or not text.strip():
             raise ValueError("Cannot embed empty text")
 
-        # Opt-in outbound request-body gzip compression — see
-        # ``daemon.services.llm_gzip.resolve_gzip_client`` for the
-        # full rationale. Embedding request bodies are small (one
-        # short string); the gzip transport is a no-op on bodies
-        # that don't shrink under compression. The variable is
-        # declared here (BEFORE ``_call_embed`` below) so the closure
-        # captures it eagerly instead of relying on Python's late
-        # binding — same shape as the chat path.
-        from .llm_gzip import resolve_gzip_client
-
-        gzip_embed_client = resolve_gzip_client(
-            bool(self.llm_config.get("request_gzip"))
-        )
-
+        # GZIP EXEMPTION (bugfix 2026-09-26): the embedding path NEVER
+        # attaches the outbound request-body gzip transport, regardless
+        # of ``llm_config["request_gzip"]``. Unlike chat calls (which
+        # target the llm proxy and tolerate gzip), embedding calls hit
+        # ``EMBEDDING_BASE_URL`` — the DIRECT OpenAI
+        # ``https://api.openai.com/v1`` endpoint — whose ``/embeddings``
+        # route REJECTS gzip-compressed request bodies with HTTP 400
+        # ("We could not parse the JSON body of your request"). Passing
+        # ``http_client=None`` lets the openai SDK build its built-in
+        # default httpx client (see :func:`_do_embed_call`) — no gzip
+        # wrapping, no ``Content-Encoding: gzip`` header. This single
+        # construction site covers every SkillEmbeddingService consumer
+        # (skill-search re-rank, trigger minting, critical-notes
+        # embedding, blueprint embedding). Chat-path gzip behavior is
+        # unchanged (see ``generate_trigger_queries``).
         def _call_embed() -> Any:
             return _do_embed_call(
                 embed_model=model,
                 embed_base_url=base_url,
                 embed_api_key=api_key,
                 text=text,
-                http_client=gzip_embed_client,
+                http_client=None,
             )
 
         try:
@@ -473,9 +477,10 @@ class SkillEmbeddingService:
                 "base_url_backup": embed_backup,
                 "api_key": api_key,
             }
-            # ``gzip_embed_client`` is resolved eagerly above (before
-            # the ``_call_embed`` closure definition) so the closure
-            # captures it directly — no late-binding surprise.
+            # ``_call_embed`` closes over the locals above; the
+            # embedding path never resolves a gzip client (see the
+            # GZIP EXEMPTION comment), so there is no late-binding
+            # transport variable to capture.
             embed_callable = lambda: _call_embed()
             response = await asyncio.to_thread(
                 invoke_raw_with_failover,

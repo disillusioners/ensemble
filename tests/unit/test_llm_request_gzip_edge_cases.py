@@ -1004,20 +1004,23 @@ def _make_resolve_gzip_recorder() -> tuple[Any, list[bool]]:
 
 
 class TestEdgeCaseResolveGzipClientPlumbing:
-    """Each of the 4 production call sites invokes ``resolve_gzip_client``
+    """Each REMAINING production call site invokes ``resolve_gzip_client``
     with the correct ``enabled`` argument derived from ``llm_config``.
 
     ADDENDUM #3 (mock-fidelity audit gap): monkeypatch
     ``daemon.services.llm_gzip.resolve_gzip_client`` with a recording
-    mock and drive each of the 4 call sites to verify the boolean
+    mock and drive each call site to verify the boolean
     argument correctly reflects the service's ``llm_config['request_gzip']``:
 
       * ``daemon/services/skill_search_service.py:797-801``
         inside ``SkillSearchService._llm_select`` (line 706)
-      * ``daemon/services/skill_embedding_service.py:347-356``
-        inside ``SkillEmbeddingService.generate_trigger_queries`` (line 282)
-      * ``daemon/services/skill_embedding_service.py:429-433``
-        inside ``SkillEmbeddingService.embed_text`` (line 384)
+      * ``daemon/services/skill_embedding_service.py`` inside
+        ``SkillEmbeddingService.generate_trigger_queries`` (line 282)
+      * ``SkillEmbeddingService.embed_text`` — EXEMPTED 2026-09-26
+        (bugfix ``fix/embedding-gzip-exemption``): the call site was
+        REMOVED; the direct OpenAI ``/embeddings`` endpoint rejects
+        gzip request bodies with HTTP 400. Pinned no-call by
+        ``test_skill_embedding_service_embed_text`` below.
       * ``daemon/services/skill_evolution_service.py:1550-1558``
         inside ``SkillEvolutionService._call_llm`` (line 1507)
 
@@ -1222,8 +1225,18 @@ class TestEdgeCaseResolveGzipClientPlumbing:
         )
 
     def test_skill_embedding_service_embed_text(self):
-        """``SkillEmbeddingService.embed_text`` invokes ``resolve_gzip_client``
-        with the boolean derived from ``llm_config['request_gzip']``."""
+        """``SkillEmbeddingService.embed_text`` NEVER invokes
+        ``resolve_gzip_client`` — the embedding path is EXEMPT from
+        request-body gzip regardless of ``llm_config['request_gzip']``.
+
+        SUPERSEDED-CONTRACT RE-CONTRACTION (2026-09-26 bugfix,
+        ``fix/embedding-gzip-exemption``): this test previously pinned
+        ``resolve_gzip_client(request_gzip)`` plumbing on the embed
+        path. The bugfix removed that call site — the direct OpenAI
+        ``/embeddings`` endpoint rejects gzipped bodies with HTTP 400 —
+        so the pin now asserts the call is GONE under both flag values.
+        Wire-level + construction-site coverage lives in
+        ``tests/unit/test_embedding_gzip_exempt.py``."""
         from daemon.services.skill_embedding_service import SkillEmbeddingService
 
         config = MagicMock()
@@ -1261,14 +1274,11 @@ class TestEdgeCaseResolveGzipClientPlumbing:
             except (ValueError, Exception):
                 pass
 
-        assert len(calls_true) >= 1, (
-            "resolve_gzip_client must be called by "
-            "SkillEmbeddingService.embed_text"
-        )
-        assert all(c is True for c in calls_true), (
-            f"with llm_config['request_gzip']=True, embed_text must "
-            f"invoke resolve_gzip_client(True); observed "
-            f"calls={calls_true}"
+        assert calls_true == [], (
+            "embed_text must NOT invoke resolve_gzip_client — the "
+            "embedding path is exempt from request-body gzip (the "
+            "direct OpenAI /embeddings endpoint rejects gzipped "
+            f"bodies with HTTP 400); observed calls={calls_true}"
         )
 
         # ── False case ──
@@ -1300,11 +1310,9 @@ class TestEdgeCaseResolveGzipClientPlumbing:
             except (ValueError, Exception):
                 pass
 
-        assert len(calls_false) >= 1
-        assert all(c is False for c in calls_false), (
-            f"with llm_config['request_gzip']=False, embed_text must "
-            f"invoke resolve_gzip_client(False); observed "
-            f"calls={calls_false}"
+        assert calls_false == [], (
+            f"embed_text must not invoke resolve_gzip_client under "
+            f"any flag value; observed calls={calls_false}"
         )
 
     def test_skill_evolution_service_call_llm(self):
