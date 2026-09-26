@@ -250,7 +250,7 @@ from .project_history import create_project_history_tools
 from .context_tools import create_context_tools
 from .shared_meta_kv_tools import create_shared_meta_kv_tools
 from .db_tools import create_db_tools
-from .infra import create_infra_tools
+from .infra import create_infra_tools, create_kms_tools
 from .system import create_system_tools
 from .system_log_tools import create_system_log_tools
 from .upgrade_tools import create_upgrade_tools
@@ -5258,6 +5258,16 @@ Returns:
         repository=manager.infra_repository,
     )
     tools.extend(infra_tool_list)
+
+    # ── KMS-Lite tools (P3-WP7, designer-agent mission) ──
+    # Mint / attach / lookup. Registered under the ``infra`` category
+    # via ``create_kms_tools`` so agents opt-in by adding ``infra`` to
+    # ``tools.allow`` (the same path as ``infra_asset_*``). Day-1
+    # contract: handles-only, fail-closed (P3-WP9), no rotate/revoke.
+    # Note: ``infra`` is NOT in ``agents/worker/meta.json::tools.allow``
+    # today — see P3-WP7 finding. Sibling WPs own agent allowlist edits.
+    kms_tool_list = create_kms_tools(manager, current_instance_id)
+    tools.extend(kms_tool_list)
 
     # ── Context tools (list/read shared context directory) ──
     # Always available — internal agents need this to inspect accumulated context
