@@ -35,6 +35,13 @@ export const JOB_STATUS_VALUES = [
   'processing',
   'paused',
   'completed',
+  // 7d4a3bd9 Fix 1 (2026-09-26) — add the gate-escalated literal to
+  // the canonical value list so the exhaustiveness guard at L47 keeps
+  // compiling AND ``asJobStatus`` accepts the literal when it appears
+  // in raw filter-state payloads (URL filters / legacy mirrors). Exact
+  // verbatim match with ``daemon.constants.COMPLETION_GATE_ESCALATED_DISPLAY``
+  // on the BE (do not paraphrase — suffix-matched by ``isTerminalStatus``).
+  'completed (gate escalated — unverified)',
   'settled',
   'failed',
   'cancelled',

@@ -749,6 +749,17 @@ class TestUnverifiedSurfaceRenders:
             job, work_record=_escalated_work_record()
         )
         assert response.status == COMPLETION_GATE_ESCALATED_DISPLAY
+        # 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.3): the
+        # jobs-API router surface threads the machine-readable
+        # escalation flag alongside the surfaced ``status`` string so
+        # the FE narrowings can key off the boolean (paired with the
+        # surfaced status — suffix-matching the status string is
+        # fragile). Mirror the MissionResponse assertion at L1049-1052.
+        assert response.completion_gate_escalated is True, (
+            "A4.3 — the machine-readable flag rides the JobResponse "
+            "so the FE badge / narrowings can key off it without "
+            "suffix-matching the surfaced status string"
+        )
 
     def test_job_get_non_escalated_stays_plain(self):
         from daemon.routers.jobs_crud import _job_to_response
@@ -758,6 +769,14 @@ class TestUnverifiedSurfaceRenders:
         plain.completion_gate_escalated = False
         response = _job_to_response(job, work_record=plain)
         assert response.status == "completed"
+        # 7d4a3bd9 Fix 1 (2026-09-26) — non-escalated completions stay
+        # canonical: surfaced status is plain ``completed`` AND the
+        # machine-readable flag is False (no escalation signal).
+        # Mirror the MissionResponse assertion at L1071.
+        assert response.completion_gate_escalated is False, (
+            "A4.3 — non-escalated completed stays False on the flag; "
+            "the surfaced string AND the boolean stay canonical together"
+        )
 
     def test_settled_mirror_receipt_never_rewritten(self):
         from daemon.routers.jobs_crud import _job_to_response

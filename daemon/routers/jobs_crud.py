@@ -206,6 +206,20 @@ def _job_to_response(
     ):
         status = COMPLETION_GATE_ESCALATED_DISPLAY
 
+    # 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.3): thread the
+    # machine-readable escalation flag onto the jobs-API response so
+    # the FE can key off the boolean (suffix-matching the surfaced
+    # ``status`` string is fragile). Mirrors the fail-soft contract
+    # from ``daemon.services.mission_resolver.py`` (:900-902): the
+    # column rides the joined Instance via the resolver-backed
+    # ``WorkRecord``; partial rows / older test doubles without the
+    # column degrade to ``False`` instead of erroring. Legacy fallback
+    # (``work_record is None``) is also ``False`` — no instance view
+    # means no escalation signal.
+    completion_gate_escalated = bool(
+        getattr(work_record, "completion_gate_escalated", False)
+    ) if work_record is not None else False
+
     return JobResponse(
         job_id=job.job_id,
         status=status,
@@ -333,6 +347,13 @@ def _job_to_response(
         # already carries the canonical mission vocabulary.
         outcome=None,
         mission_ref=_derive_m2_mission_ref(work_record, job),
+        # 7d4a3bd9 Fix 1 (2026-09-26) — machine-readable escalation
+        # flag. Computed above via the fail-soft getattr pattern
+        # (mirrors mission_resolver.py:900-902). Surfaces on every
+        # jobs-API response alongside the surfaced ``status`` string
+        # so the FE narrowings / analytics can key off the boolean
+        # without suffix-matching the status.
+        completion_gate_escalated=completion_gate_escalated,
     )
 
 

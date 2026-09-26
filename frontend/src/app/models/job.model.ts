@@ -8,7 +8,16 @@
 // outcome, not a transport signal. ``settled`` is DISJOINT from the
 // mission-side ``MissionLiveness`` vocabulary (which still carries
 // ``completed`` for a terminal instance).
-export type JobStatus = 'pending' | 'processing' | 'paused' | 'completed' | 'settled' | 'failed' | 'cancelled' | 'dead_letter';
+// 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.3): ``completed
+// (gate escalated — unverified)`` is the surfaced JobStatus when the
+// attestation gate ended the mission via ``terminal_after_bound`` (the
+// completion is UNVERIFIED). Mirrors the canonical constant
+// ``daemon.constants.COMPLETION_GATE_ESCALATED_DISPLAY`` on the BE —
+// exact verbatim, do not paraphrase (suffix-matched by both
+// ``isTerminalStatus`` below and the FE status-icon/colour switches).
+// Same shape as the sibling ``MissionLiveness`` literal at L41 so the
+// label/color/terminal machinery stays uniform across the two surfaces.
+export type JobStatus = 'pending' | 'processing' | 'paused' | 'completed' | 'completed (gate escalated — unverified)' | 'settled' | 'failed' | 'cancelled' | 'dead_letter';
 
 export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
 

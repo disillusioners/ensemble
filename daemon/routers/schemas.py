@@ -131,6 +131,33 @@ class JobResponse(BaseModel):
             "instance lookup degraded (degradation-safe contract)."
         ),
     )
+    # 7d4a3bd9 Fix 1 (2026-09-26, reviewer-flagged A4.3): the
+    # jobs-API router surface (``daemon.routers.jobs_crud._job_to_response``)
+    # threads the machine-readable escalation flag alongside the
+    # surfaced ``status`` string ``completed (gate escalated —
+    # unverified)``. True when the linked instance row carries
+    # ``completion_gate_escalated=True`` (the attestation gate ended
+    # the mission via ``terminal_after_bound`` — completion
+    # UNVERIFIED). Default ``False`` for non-escalated jobs; the
+    # field is additive vs the pre-amendment response schema. Mirrors
+    # the ``MissionResponse.completion_gate_escalated`` flag (L1417)
+    # so the FE narrowings can key off one boolean across both
+    # surfaces (the surfaced string for the badge, the flag for
+    # analytics / filters that should NOT match the canonical
+    # completed vocabulary).
+    completion_gate_escalated: bool = Field(
+        default=False,
+        description=(
+            "7d4a3bd9 Fix 1 — True when the job's status was rewritten "
+            "from ``completed`` to the distinct ``completed (gate "
+            "escalated — unverified)`` string (the attestation gate "
+            "ended the mission via ``terminal_after_bound`` — "
+            "completion UNVERIFIED). Pairs with the surfaced "
+            "``status`` string so the FE narrowings / analytics can "
+            "key off the boolean without suffix-matching the "
+            "surfaced status."
+        ),
+    )
     # M1 (mission-class, 2026-09-02) — additive mission projection
     # fields. Always-on since WS3 (the
     # M1 mission-projection kill-switch was removed);
@@ -304,6 +331,13 @@ class JobResponse(BaseModel):
             "terminal_reason": self.terminal_reason,
             "job_type": self.job_type,
             "mission_liveness": self.mission_liveness,
+            # 7d4a3bd9 Fix 1 (2026-09-26) — machine-readable escalation
+            # flag surfaces verbatim from the model state so the
+            # FE narrowings can key off the boolean (paired with the
+            # surfaced ``status`` string ``completed (gate escalated
+            # — unverified)`` — see JobResponse.completion_gate_escalated
+            # field docstring).
+            "completion_gate_escalated": self.completion_gate_escalated,
             **mission_projection_to_dict(
                 mission_id=self.mission_id,
                 mission_epoch=self.mission_epoch,
