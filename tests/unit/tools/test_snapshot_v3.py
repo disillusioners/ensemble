@@ -1083,6 +1083,173 @@ class TestCrossProjectOverride:
         assert "cross-project" not in result["hint"]
 
 
+class TestProjectlessExplicitId:
+    """D8 review fix — project-less caller + EXPLICIT snapshot id.
+
+    Pre-fix gap: the mismatch arm required a TRUTHY caller
+    ``project_id``, so a project-less caller consuming a
+    foreign-project snapshot by explicit id skipped the arm entirely
+    → silent cross-project warm. The mirror arm treats
+    caller-project-None/empty + snapshot-has-project as cross-project
+    (verify-fail cold unless ``allow_cross_project=True``), while a
+    snapshot WITHOUT a project must not trigger a false cold.
+
+    Note on case (c): ``snapshots.project_id`` is ``nullable=False``
+    (models.py) — a true NULL-project ROW cannot exist, so the
+    no-false-cold pin loads a REAL row and flips the in-memory
+    ``project_id`` attribute to None, stubbing ``repo.get``. That
+    pins the arm's ``getattr(consumed, "project_id", None)``
+    tolerance without fabricating an impossible DB state.
+    """
+
+    def _seed(self, manager: FakeManager, project_id: str | None) -> None:
+        repo: SnapshotRepository = manager._snapshot_repo
+        repo.create_with_embeddings(
+            Snapshot(
+                id="snap-pl",
+                project_id=project_id or "p2",
+                created_by_agent_id="coder",
+                target_instance_id="inst-xp",
+                title="projectless-caller target",
+                task_summary="",
+                domain_tags=["kind:implementation"],
+                status=SNAPSHOT_STATUS_ACTIVE,
+                repo_path=None,
+                vcs_type=None,
+                git_sha=None,
+                git_branch=None,
+                git_dirty=False,
+                runtime_version="0.14.2",
+                effective_model="cheap-model",
+                digest={"task_summary_text": "pl"},
+            )
+        )
+
+    def _stub_projectless_get(self, manager: FakeManager, monkeypatch) -> None:
+        """Serve the seeded row with ``project_id=None`` in memory."""
+        repo: SnapshotRepository = manager._snapshot_repo
+        row = repo.get("snap-pl")
+        assert row is not None
+        row.project_id = None
+        monkeypatch.setattr(repo, "get", lambda snapshot_id: row)
+
+    @pytest.fixture
+    def projectless_caller_rows(self) -> dict[str, Any]:
+        """Caller row with NO project (the D8 gap precondition)."""
+        return {
+            "caller-1": _row("caller-1", agent_id="coder", project_id=None),
+            "inst-1": _row(
+                "inst-1", agent_id="worker", parent_id="caller-1"
+            ),
+        }
+
+    @pytest.fixture
+    def projectless_manager(
+        self, engine: Engine, projectless_caller_rows: dict[str, Any]
+    ) -> FakeManager:
+        return FakeManager(
+            projectless_caller_rows, SnapshotRepository(engine)
+        )
+
+    @pytest.fixture
+    def projectless_tools(
+        self, projectless_manager: FakeManager
+    ):
+        return create_snapshot_tools(
+            projectless_manager, "caller-1", "coder", None
+        )
+
+    def test_projectless_caller_foreign_snapshot_is_cold(
+        self, projectless_tools, projectless_manager, monkeypatch
+    ):
+        """(a) project-less caller + foreign-project snapshot via
+        EXPLICIT id → verify-fail cold fallback, NOT silent warm."""
+        _gate(monkeypatch, True)
+        self._seed(projectless_manager, "p2")
+        result = _run(
+            projectless_tools[2].ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "warm me",
+                    "snapshot_id": "snap-pl",
+                }
+            )
+        )
+        assert result["started"] == "cold"
+        assert "verify-failed" in result["hint"]
+        # Warning names the snapshot's project AND the missing scope.
+        assert "p2" in result["hint"]
+        assert "no project to scope against" in result["hint"]
+        # No snapshot consumed → no digest stamp surface.
+        assert result["snapshot_id"] is None
+
+    def test_projectless_caller_cross_project_optin_warm(
+        self, projectless_tools, projectless_manager, monkeypatch
+    ):
+        """(b) same + ``allow_cross_project=True`` → warm + the
+        cross-project marker in the hint (consent recorded)."""
+        _gate(monkeypatch, True)
+        self._seed(projectless_manager, "p2")
+        result = _run(
+            projectless_tools[2].ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "warm me",
+                    "snapshot_id": "snap-pl",
+                    "allow_cross_project": True,
+                }
+            )
+        )
+        assert result["started"] == "warm"
+        assert "cross-project consume from p2" in result["hint"]
+        assert "(allow_cross_project=True)" in result["hint"]
+
+    def test_projectless_snapshot_no_false_cold(
+        self, projectless_tools, projectless_manager, monkeypatch
+    ):
+        """(c) project-less caller + snapshot WITHOUT a project →
+        proceeds normally (no false cold, no cross-project marker)."""
+        _gate(monkeypatch, True)
+        self._seed(projectless_manager, None)
+        self._stub_projectless_get(projectless_manager, monkeypatch)
+        result = _run(
+            projectless_tools[2].ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "warm me",
+                    "snapshot_id": "snap-pl",
+                }
+            )
+        )
+        assert result["started"] == "warm"
+        assert "cross-project" not in result["hint"]
+
+    def test_projectless_spawn_normalizes_to_system_default(
+        self, projectless_tools, projectless_manager, monkeypatch
+    ):
+        """Normalize-parity (instance.py:2211-2215): a project-less
+        caller's spawn resolves project_id via ``normalize_project_id``
+        → the system default project, not ``None`` (the old
+        ``if project_id else None`` conditional skipped resolution)."""
+        _gate(monkeypatch, True)
+        self._seed(projectless_manager, None)
+        self._stub_projectless_get(projectless_manager, monkeypatch)
+        result = _run(
+            projectless_tools[2].ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "warm me",
+                    "snapshot_id": "snap-pl",
+                }
+            )
+        )
+        assert result["started"] == "warm"
+        assert (
+            projectless_manager.spawn_calls[0]["project_id"]
+            == SYSTEM_DEFAULT_PROJECT_ID
+        )
+
+
 # ============================================================================
 # Monitoring-only pin — ranking modules MUST NOT import metrics service
 # ============================================================================

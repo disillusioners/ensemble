@@ -860,6 +860,32 @@ def create_snapshot_tools(
                         "'active' snapshots spawn"
                     )
                     consumed = None
+                elif getattr(consumed, "project_id", None) and not project_id:
+                    # D8 project-less arm — the caller has NO project
+                    # to scope against while the snapshot HAS one.
+                    # Mirror of the mismatch arm below (same §4.3
+                    # isolation rule, not new machinery): without it a
+                    # project-less caller silently warm-starts from
+                    # another project's snapshot. Same consent valve:
+                    # only an explicit ``allow_cross_project=True``
+                    # consumes.
+                    if allow_cross_project:
+                        cross_project_consumed = True
+                        warnings.append(
+                            f"snapshot {snapshot_id} belongs to "
+                            f"project {consumed.project_id} — "
+                            f"cross-project consume opted in via "
+                            f"allow_cross_project=True"
+                        )
+                    else:
+                        cold_reason = "verify-failed"
+                        warnings.append(
+                            f"snapshot {snapshot_id} belongs to "
+                            f"project {consumed.project_id} — "
+                            f"caller instance has no project to "
+                            f"scope against (D8 isolation)"
+                        )
+                        consumed = None
                 elif (
                     project_id
                     and getattr(consumed, "project_id", None)
@@ -1014,17 +1040,17 @@ def create_snapshot_tools(
                 agent_id,
                 registry,
             )
-            # Parity with the spawn_instance tool: normalize None/empty
-            # to the system default project. Tolerate the pre-startup
-            # guard (SYSTEM_DEFAULT_PROJECT_ID unset) — a truthy caller
-            # project id is already normalized, so the raw value is the
-            # correct fallback, never a spawn blocker.
-            try:
-                resolved_project_id = (
-                    normalize_project_id(project_id) if project_id else None
-                )
-            except RuntimeError:
-                resolved_project_id = project_id
+            # Parity with the spawn_instance tool (instance.py:2211):
+            # normalize UNCONDITIONALLY — a None/empty caller project
+            # (and "null"/"none" strings) resolves to the system
+            # default project, exactly as the spawn path does after
+            # parent auto-inherit (the caller project was already
+            # inherited at the top of this tool). No pre-guard shim:
+            # a RuntimeError from the pre-startup guard
+            # (SYSTEM_DEFAULT_PROJECT_ID unset) surfaces through the
+            # spawn except below as a cold error — the same loud lane
+            # instance.py's generic ``except Exception`` handler uses.
+            resolved_project_id = normalize_project_id(project_id)
             new_instance_id, validated_model_override = manager.spawn_instance(
                 agent_id=agent_id,
                 instance_id=None,
