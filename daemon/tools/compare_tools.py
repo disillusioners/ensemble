@@ -56,10 +56,32 @@ charter / explorer / image-reader call — no day-1 fan-out compare
 loops. If a refinement turn needs a second compare, the
 reuse-by-discovery path rides the caller's existing comparator
 child instead of spawning a fresh one.
+
+P2-WP3 path→data-URI bridge
+---------------------------
+The facade accepts BOTH substrate ids (32-hex, returned by
+``image_save``) AND project-workdir paths. The bridge
+(``daemon/services/tmp_image_bridge.py`` — Option B per
+bridge-design.md §3) handles substrate ids; workdir paths are
+resolved daemon-side inline via ``_load_image_from_path``
+(``daemon/tools/image_tools.py:318-371``). Both paths produce
+``data:`` URIs ready for the ``images=[]`` dispatch parameter.
+
+Fail-loud model gate (P2-WP3 AC-5)
+----------------------------------
+At factory init, the facade reads ``manager.config.llm.allowed_models``.
+If the ``"vision"`` model is absent AND the list is non-empty (an
+empty list = "all models allowed" — the documented default), the
+factory raises ``VisionModelNotAllowedError`` immediately. Silent
+default resolution is FORBIDDEN per arch §8 🔴 (the model would
+quietly resolve to the daemon default and the comparator would lose
+its vision capability without any error).
 """
 
+import base64
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
@@ -104,14 +126,50 @@ _PAUSED_MSG = (
 _KIND_TIMEOUT = "timeout"
 _KIND_MISSING_AGENT = "missing-agent"
 _KIND_VISION_FAILURE = "vision-failure"
-# WP3 additions (declared here so WP3 can import them; populated by
-# the WP3 commit which re-exports them at module top-level).
+# WP3 addition — facade input resolution failure (substrate id 404,
+# workdir path missing / outside confinement, magic-byte reject).
 _KIND_INPUT_NOT_FOUND = "input-not-found"
+# WP3 addition — agent return did not parse as the findings schema.
+# Surfaces as a structured envelope so the caller can branch without
+# re-parsing prose.
+_KIND_SCHEMA_INVALID = "schema-invalid"
 
 # Shared meta KV key for the monitoring triggers payload (P2-WP2 AC-5).
 # Reads / writes go through ``manager.shared_meta_kv_repo`` — the same
 # repo ``daemon/tools/shared_meta_kv_tools.py`` exposes to agents.
 _MONITOR_KV_KEY = "design.comparator.monitor"
+
+# Substrate id pattern (P1-WP10 anchor — must byte-match
+# ``daemon/tools/image_tools.py:640`` and the HTTP router regex).
+# 32 lowercase hex characters. The facade accepts EITHER this shape
+# OR a project-workdir path.
+_SUBSTRATE_ID_REGEX = re.compile(r"^[a-f0-9]{32}$")
+
+# Findings schema enum sets (P2-WP3 AC-1 / AC-7). Pinned here as
+# module constants so the validator and the test pins share one source.
+_FINDINGS_VERDICTS: frozenset[str] = frozenset(
+    {"pass", "fail", "conditional_pass"}
+)
+_FINDINGS_RESULTS: frozenset[str] = frozenset({"pass", "fail"})
+_FINDINGS_SEVERITIES: frozenset[str] = frozenset(
+    {"critical", "major", "minor", "nit"}
+)
+
+# Vision model alias the comparator agent advertises in its meta.json
+# (P1-WP1). Fail-loud init verifies this name is in
+# ``config.llm.allowed_models`` (case-insensitive) — if it isn't AND
+# the list is non-empty, the factory raises.
+_COMPARATOR_MODEL_ALIAS = "vision"
+
+
+class VisionModelNotAllowedError(RuntimeError):
+    """Fail-loud: the ``vision`` model is missing from
+    ``config.llm.allowed_models`` (P2-WP3 AC-5, arch §8 🔴).
+
+    Mirrors the chart precedent for category-specific model checks;
+    the silent default-resolution fallback is FORBIDDEN.
+    """
+
 
 CATEGORY_NAME = "Design"
 CATEGORY_DOC = """\
@@ -370,6 +428,404 @@ def _ensure_monitor_kv_recorded(
         )
 
 
+# ── Input resolution (P2-WP3 bridge integration) ────────────────────────────
+
+
+def _looks_like_substrate_id(value: str) -> bool:
+    """True iff ``value`` is a 32-hex substrate id (bridge input shape)."""
+    if not isinstance(value, str):
+        return False
+    return bool(_SUBSTRATE_ID_REGEX.match(value))
+
+
+def _resolve_substrate_input(
+    image_ref: str,
+    *,
+    manager: "InstanceManager",
+) -> dict[str, Any]:
+    """Resolve a substrate id → ``data:`` URI dict via the bridge.
+
+    On any failure the dict carries ``{"error": "input-not-found", ...}``
+    so the facade can surface it as the ``_KIND_INPUT_NOT_FOUND``
+    envelope.
+
+    Args:
+        image_ref: The 32-hex substrate id.
+        manager: The InstanceManager instance — ``tmp_image_store`` is
+            read from the manager (mirrors ``image_tools.py:652``).
+
+    Returns:
+        A dict with EITHER ``{"data_uri": str, "provenance": dict | None,
+        "retention_class": str, ...}`` on success,
+        OR ``{"error": "input-not-found", "image_id": str, "reason": str,
+        "message": str}`` on any failure.
+    """
+    # Lazy import — keeps the import surface small when the facade
+    # is wired but the call never fires (same pattern as the
+    # ``image_tools`` substrate tools).
+    from daemon.services.tmp_image_bridge import resolve_data_uris
+
+    # Store wiring — mirrors ``daemon/tools/image_tools.py:651-654``.
+    try:
+        store = manager.tmp_image_store
+    except Exception as exc:
+        return {
+            "error": "input-not-found",
+            "image_id": image_ref,
+            "reason": "store_not_initialized",
+            "message": f"tmp-image store unavailable: {exc}",
+        }
+    if store is None:
+        return {
+            "error": "input-not-found",
+            "image_id": image_ref,
+            "reason": "store_not_initialized",
+            "message": "tmp-image store not initialized",
+        }
+
+    try:
+        results = resolve_data_uris([image_ref], store=store)
+    except Exception as exc:
+        return {
+            "error": "input-not-found",
+            "image_id": image_ref,
+            "reason": "bridge_failed",
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+    if not results:
+        return {
+            "error": "input-not-found",
+            "image_id": image_ref,
+            "reason": "bridge_no_result",
+            "message": "bridge returned no result",
+        }
+    row = results[0]
+    if isinstance(row, dict) and row.get("error"):
+        # Bridge surfaced a per-position error envelope — re-emit as
+        # the facade's input-not-found kind with the bridge's
+        # reason/message preserved.
+        return {
+            "error": "input-not-found",
+            "image_id": row.get("image_id", image_ref),
+            "reason": row.get("reason", row.get("error", "unknown")),
+            "message": row.get("message", "bridge reported failure"),
+        }
+    return row
+
+
+def _resolve_workdir_input(
+    image_ref: str,
+    *,
+    manager: "InstanceManager",
+    project_id: str | None,
+) -> dict[str, Any]:
+    """Resolve a workdir path → ``data:`` URI dict via the daemon-side read.
+
+    Reuses ``_load_image_from_path`` from ``daemon/tools/image_tools.py``
+    which already enforces the project workdir confinement. The
+    facade holds the daemon-side read (P2-WP3 — workdir-confined
+    ``explain_image`` is NOT used inside the facade per plan §5 P2-WP3
+    risks).
+
+    Args:
+        image_ref: A filesystem path (absolute or project-relative).
+        manager: The InstanceManager instance — used to look up the
+            project's workdir via ``_project_repository``.
+        project_id: The caller's project id (resolved upstream).
+
+    Returns:
+        A dict with EITHER ``{"data_uri": str}`` on success,
+        OR ``{"error": "input-not-found", "image_id": str, "reason": str,
+        "message": str}`` on any failure.
+    """
+    from daemon.tools.image_tools import _load_image_from_path
+
+    # Resolve workdir from the project (mirrors the existing
+    # image-tools workdir-confined read path).
+    workdir: str | None = None
+    if project_id is not None:
+        try:
+            project = manager._project_repository.get(project_id)
+            if project is not None:
+                workdir = getattr(project, "main_directory", None)
+        except Exception:
+            workdir = None
+
+    try:
+        data_uri = _load_image_from_path(image_ref, workdir=workdir)
+    except ValueError as exc:
+        # ``_load_image_from_path`` raises ``ValueError`` for path
+        # confinement / magic-byte / size failures — surface as
+        # input-not-found with the verbatim reason.
+        return {
+            "error": "input-not-found",
+            "image_id": image_ref,
+            "reason": "workdir_unreadable",
+            "message": str(exc),
+        }
+    except OSError as exc:
+        return {
+            "error": "input-not-found",
+            "image_id": image_ref,
+            "reason": "workdir_unreadable",
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+    except Exception as exc:
+        return {
+            "error": "input-not-found",
+            "image_id": image_ref,
+            "reason": "workdir_unreadable",
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "data_uri": data_uri,
+        "image_id": image_ref,
+        "source": "workdir",
+    }
+
+
+def _resolve_input(
+    image_ref: str,
+    *,
+    manager: "InstanceManager",
+    project_id: str | None,
+) -> dict[str, Any]:
+    """Resolve one facade input → ``data:`` URI or input-not-found envelope.
+
+    Dispatch:
+      * 32-hex substrate id → bridge (substrate store read).
+      * Anything else → workdir path → daemon-side read with workdir
+        confinement.
+
+    The facade NEVER raises — every failure path returns the
+    ``_KIND_INPUT_NOT_FOUND`` envelope shape the caller can branch on.
+
+    Args:
+        image_ref: The raw caller-supplied string.
+        manager: The InstanceManager instance.
+        project_id: The caller's project id (for workdir resolution).
+
+    Returns:
+        A dict with EITHER ``{"data_uri": str, ...}`` on success,
+        OR ``{"error": "input-not-found", ...}`` on any failure.
+    """
+    if not isinstance(image_ref, str) or not image_ref:
+        return {
+            "error": "input-not-found",
+            "image_id": str(image_ref),
+            "reason": "invalid_input",
+            "message": "image address must be a non-empty string",
+        }
+    if _looks_like_substrate_id(image_ref):
+        return _resolve_substrate_input(image_ref, manager=manager)
+    return _resolve_workdir_input(
+        image_ref, manager=manager, project_id=project_id
+    )
+
+
+def _resolve_inputs_pair(
+    image_a: str,
+    image_b: str,
+    *,
+    manager: "InstanceManager",
+    project_id: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    """Resolve both inputs in one pass; return ``(uri_a, uri_b, error_json)``.
+
+    On any input failure the ``error_json`` field carries the structured
+    envelope string and the URI fields are ``None``. When BOTH inputs
+    fail the FIRST error is reported (per bridge-design §5 example A1
+    — the comparator surfaces the worst failure first).
+
+    Args:
+        image_a, image_b: The two caller-supplied image addresses.
+        manager: The InstanceManager instance.
+        project_id: The caller's project id (for workdir resolution).
+
+    Returns:
+        ``(uri_a, uri_b, error_json)`` — exactly one of
+        ``uri_a``/``uri_b`` + ``error_json`` is set on success.
+    """
+    resolved_a = _resolve_input(
+        image_a, manager=manager, project_id=project_id
+    )
+    if isinstance(resolved_a, dict) and resolved_a.get("error"):
+        return (
+            None,
+            None,
+            _envelope(
+                _KIND_INPUT_NOT_FOUND,
+                message=resolved_a.get(
+                    "message", "input-not-found on image_a"
+                ),
+                image_id=resolved_a.get("image_id", image_a),
+                reason=resolved_a.get("reason", "unknown"),
+                input_slot="image_a",
+            ),
+        )
+    resolved_b = _resolve_input(
+        image_b, manager=manager, project_id=project_id
+    )
+    if isinstance(resolved_b, dict) and resolved_b.get("error"):
+        return (
+            None,
+            None,
+            _envelope(
+                _KIND_INPUT_NOT_FOUND,
+                message=resolved_b.get(
+                    "message", "input-not-found on image_b"
+                ),
+                image_id=resolved_b.get("image_id", image_b),
+                reason=resolved_b.get("reason", "unknown"),
+                input_slot="image_b",
+            ),
+        )
+    return resolved_a, resolved_b, None
+
+
+# ── Findings schema validator (P2-WP3 AC-1 / AC-7) ─────────────────────────
+
+
+def _validate_findings(raw: str) -> dict[str, Any] | None:
+    """Validate the comparator agent's return value against the
+    findings schema.
+
+    Returns the parsed findings dict on success, or ``None`` on any
+    schema violation. The caller is responsible for wrapping
+    ``None`` in the ``_KIND_SCHEMA_INVALID`` envelope.
+
+    Schema (P2-WP3 AC-1 + AC-7):
+
+        {
+          "verdict": "pass" | "fail" | "conditional_pass",
+          "per_criterion": [
+            {
+              "criterion": str,
+              "result": "pass" | "fail",
+              "severity": "critical" | "major" | "minor" | "nit",
+              "evidence": list[str]
+            },
+            ...
+          ],
+          "summary": str,
+          "pinned_spec_sha": str | null
+        }
+
+    Validation is permissive on ``pinned_spec_sha`` shape (any string
+    or null) — the SHA validation happens upstream when the caller
+    compares it against the approved spec. The schema's
+    ``pinned_spec_sha`` field is the D6 hard-rule wire.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        findings = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(findings, dict):
+        return None
+
+    # Required top-level fields
+    verdict = findings.get("verdict")
+    if verdict not in _FINDINGS_VERDICTS:
+        return None
+    if "per_criterion" not in findings:
+        return None
+    per_criterion = findings.get("per_criterion")
+    if not isinstance(per_criterion, list) or len(per_criterion) < 1:
+        return None
+    for row in per_criterion:
+        if not isinstance(row, dict):
+            return None
+        if not isinstance(row.get("criterion"), str):
+            return None
+        if row.get("result") not in _FINDINGS_RESULTS:
+            return None
+        if row.get("severity") not in _FINDINGS_SEVERITIES:
+            return None
+        evidence = row.get("evidence")
+        if not isinstance(evidence, list):
+            return None
+        # Evidence list items are strings (the comparator's anti-drift
+        # rule pins the shape).
+        if not all(isinstance(item, str) for item in evidence):
+            return None
+    summary = findings.get("summary")
+    if not isinstance(summary, str):
+        return None
+    pinned = findings.get("pinned_spec_sha", None)
+    if pinned is not None and not isinstance(pinned, str):
+        return None
+    return findings
+
+
+# ── Vision model fail-loud gate (P2-WP3 AC-5) ──────────────────────────────
+
+
+def _verify_vision_allowed(manager: "InstanceManager") -> None:
+    """Fail-loud at facade init when ``vision`` is not in allowed_models.
+
+    Mirrors arch §8 🔴 — silent default resolution is FORBIDDEN.
+    Raises :class:`VisionModelNotAllowedError` (a ``RuntimeError``
+    subclass) when the comparator's ``vision`` alias is missing from
+    ``config.llm.allowed_models`` AND the list is non-empty (the
+    documented default for ``allowed_models`` is ``[]`` = "all
+    models allowed").
+
+    The check reads through ``manager.config.llm.allowed_models`` —
+    the canonical config access path (G7). The check fails CLOSED on
+    any error (defensive — a partial-init manager must not silently
+    pass the gate).
+
+    Args:
+        manager: The InstanceManager instance.
+
+    Raises:
+        VisionModelNotAllowedError: ``vision`` is not in
+            ``config.llm.allowed_models`` AND the list is non-empty.
+    """
+    try:
+        config = getattr(manager, "config", None)
+        if config is None:
+            # No config wired — the gate is not enforceable.
+            # The factory passes through; the actual spawn will
+            # surface the failure downstream.
+            return
+        allowed_models = getattr(config.llm, "allowed_models", None)
+    except Exception as exc:
+        # Fail-closed: if we cannot verify the gate, refuse to
+        # init the facade (a partial-init manager must not silently
+        # pass).
+        raise VisionModelNotAllowedError(
+            "compare_images: cannot verify vision model in "
+            f"allowed_models — config access failed ({exc}). "
+            "Refusing to init the facade (silent default resolution "
+            "is FORBIDDEN per arch §8)."
+        ) from exc
+
+    if not isinstance(allowed_models, list):
+        # Garbage type — fail-closed.
+        raise VisionModelNotAllowedError(
+            "compare_images: config.llm.allowed_models is not a list "
+            f"(got {type(allowed_models).__name__}). Refusing to init "
+            "the facade."
+        )
+    if not allowed_models:
+        # Empty list = "all models allowed" — the documented default.
+        return
+    # Case-insensitive exact match (mirrors the spawn-time check at
+    # ``daemon/manager.py:7073``).
+    lower_allowed = {m.lower() for m in allowed_models if isinstance(m, str)}
+    if _COMPARATOR_MODEL_ALIAS.lower() not in lower_allowed:
+        raise VisionModelNotAllowedError(
+            f"compare_images: '{_COMPARATOR_MODEL_ALIAS}' model is "
+            f"missing from config.llm.allowed_models ({allowed_models}). "
+            "Silent default resolution is FORBIDDEN per arch §8 🔴. "
+            f"Add '{_COMPARATOR_MODEL_ALIAS}' to OPENAI_SELECTABLE_MODELS "
+            "and restart the daemon."
+        )
+
+
 # ── Factory ──────────────────────────────────────────────────────────────────
 
 
@@ -390,6 +846,12 @@ def create_compare_tools(
     Returns:
         List of tool functions: ``[compare_images]``.
     """
+    # Fail-loud init gate (P2-WP3 AC-5). Mirrors arch §8 🔴 — silent
+    # default resolution is FORBIDDEN. A missing ``vision`` alias in
+    # ``allowed_models`` must surface at factory init, not at first
+    # spawn when the comparator child silently falls back to the
+    # daemon default model.
+    _verify_vision_allowed(manager)
 
     def _get_project_id() -> str | None:
         """Auto-inject project_id from instance context."""
@@ -526,6 +988,27 @@ def create_compare_tools(
         # (PD-13 noted and accepted: the comparator's reuse is the
         # default and only path).
         reusable = _find_reusable_comparator(manager, current_instance_id)
+
+        # Input resolution (P2-WP3). Run BEFORE the dispatch so a
+        # missing image never wastes a spawn / enqueue. The bridge
+        # handles substrate ids; workdir paths are read daemon-side
+        # inline. On any failure the facade surfaces
+        # ``kind: input-not-found`` immediately — never spawns the
+        # comparator with a bad image.
+        resolved_a, resolved_b, input_err = _resolve_inputs_pair(
+            image_a,
+            image_b,
+            manager=manager,
+            project_id=pid,
+        )
+        if input_err is not None:
+            return input_err
+        assert resolved_a is not None and resolved_b is not None
+        images_param: list[str] = [
+            resolved_a["data_uri"],
+            resolved_b["data_uri"],
+        ]
+
         if reusable is not None:
             comparator_id = reusable.instance_id
             prior_status = (reusable.status or "").lower()
@@ -586,6 +1069,7 @@ def create_compare_tools(
                         ),
                         timeout=600.0,
                         return_instance_id=True,
+                        images=images_param,
                     )
                 except Exception as exc:
                     # Never-raise contract (mirrors chart_tools.py:515-516).
@@ -609,6 +1093,20 @@ def create_compare_tools(
                         _classify_error(raw),
                         message=raw,
                     )
+                # Schema validation (P2-WP3 AC-1) — agent returned
+                # something that doesn't fit the findings schema.
+                # The comparator child is the source of truth for
+                # findings shape; the facade surfaces a structured
+                # envelope so the caller can branch.
+                if _validate_findings(raw) is None:
+                    return _envelope(
+                        _KIND_SCHEMA_INVALID,
+                        message=(
+                            "Comparator return did not match the "
+                            "findings schema (verdict / per_criterion / "
+                            "severity / evidence / summary)."
+                        ),
+                    )
                 return raw
             finally:
                 _inflight_reuse.discard(comparator_id)
@@ -627,6 +1125,7 @@ def create_compare_tools(
                 ),
                 timeout=600.0,
                 return_instance_id=True,
+                images=images_param,
             )
         except Exception as exc:
             return _envelope(
@@ -646,6 +1145,17 @@ def create_compare_tools(
             return _envelope(
                 _classify_error(raw),
                 message=raw,
+            )
+        # Schema validation (P2-WP3 AC-1) — fresh-path mirror of
+        # the reuse-path check above.
+        if _validate_findings(raw) is None:
+            return _envelope(
+                _KIND_SCHEMA_INVALID,
+                message=(
+                    "Comparator return did not match the findings "
+                    "schema (verdict / per_criterion / severity / "
+                    "evidence / summary)."
+                ),
             )
         return raw
 

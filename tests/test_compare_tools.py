@@ -11,17 +11,28 @@ Coverage lanes:
   3. **Authorization** — the ``"design"`` row in
      ``TOOL_REQUIRED_AGENTS`` byte-matches the
      ``@register_tool_category`` string (AC-1 grep-provable).
-  4. **Never-raise contract** — distinct error envelope kinds for
-     ``timeout`` / ``missing-agent`` / ``vision-failure`` (AC-3);
+  4. **Vision fail-loud init** — facade refuses to init when
+     ``"vision"`` is absent from ``config.llm.allowed_models`` AND the
+     list is non-empty (P2-WP3 AC-5, mirrors arch §8 🔴).
+  5. **Never-raise contract** — distinct error envelope kinds for
+     ``timeout`` / ``missing-agent`` / ``vision-failure`` /
+     ``input-not-found`` / ``schema-invalid`` (AC-3);
      no exception escapes the facade.
-  5. **Reuse-by-discovery** — second call finds the caller's most
+  6. **Reuse-by-discovery** — second call finds the caller's most
      recent invoked-as-tool-stamped ``image-comparator`` child
      (AC-4, mirrors ``tests/test_chart_tools.py::TestGenerateChartReuse``).
-  6. **Discovery error degrades** — repository error during discovery
+  7. **Discovery error degrades** — repository error during discovery
      falls back to fresh spawn, never raises.
-  7. **Monitoring triggers** — the T1–T3 trigger payload reaches
+  8. **Monitoring triggers** — the T1–T3 trigger payload reaches
      ``shared_meta_kv_repo`` with the ``design.comparator.monitor``
      key (AC-5). Docstring is canonical — KV write is best-effort.
+  9. **Single-call shape** — ``invoke_agent_and_wait`` receives
+     ``images=[uri_a, uri_b]`` in ONE dispatch (AC-3).
+ 10. **Findings schema validation** — agent return matches the
+     findings schema; a malformed return surfaces the
+     ``schema-invalid`` envelope (AC-1).
+ 11. **Output type check** — facade never returns image bytes /
+     data-URI fields in its structured return (AC-7).
 """
 
 from __future__ import annotations
@@ -38,12 +49,44 @@ import pytest
 import daemon.tools.compare_tools as compare_tools_module
 
 
+# Two 32-hex substrate ids for tests that exercise the input
+# resolution path; the input-not-found path uses a third non-hex id
+# so the resolver routes it through the workdir branch (which then
+# 404s because the test has no workdir wired — the same expected
+# input-not-found surface).
+_SUBSTRATE_ID_A = "0123456789abcdef0123456789abcdef"
+_SUBSTRATE_ID_B = "fedcba9876543210fedcba9876543210"
+
+
+def _valid_findings_json() -> str:
+    """A minimal findings JSON object that passes the WP3 schema validator."""
+    return json.dumps(
+        {
+            "verdict": "pass",
+            "per_criterion": [
+                {
+                    "criterion": "structural_layout",
+                    "result": "pass",
+                    "severity": "nit",
+                    "evidence": ["stub"],
+                }
+            ],
+            "summary": "stub",
+            "pinned_spec_sha": None,
+        }
+    )
+
+
 def _make_manager(
     *,
     get_children_return: list | None = None,
     get_children_side_effect: BaseException | None = None,
     shared_meta_kv_repo: MagicMock | None = None,
     instance_get_return=None,
+    allowed_models: list[str] | None = None,
+    config_llm_side_effect: BaseException | None = None,
+    no_config: bool = False,
+    tmp_image_store: MagicMock | None = None,
 ) -> MagicMock:
     """Build a mock manager wired for ``compare_images`` invocation.
 
@@ -57,6 +100,14 @@ def _make_manager(
         attr-recorded so monitoring KV writes can be asserted on.
       * ``enqueue_message`` is not wired — the fresh path never touches
         it (only the reuse path does, and those tests override).
+      * ``config.llm.allowed_models`` → ``["vision"]`` so the WP3
+        fail-loud init gate passes (P2-WP3 AC-5). Tests that exercise
+        the gate override this with ``allowed_models=[...]`` or
+        ``no_config=True``.
+      * ``tmp_image_store`` → a ``MagicMock`` whose
+        ``open_full`` returns a default TmpImageRecord and whose
+        ``dir`` is path-like; tests that exercise the bridge
+        override it.
     """
     manager = MagicMock()
     manager._instance_repository = MagicMock()
@@ -71,6 +122,61 @@ def _make_manager(
         )
     manager._instance_repository.get_tree_root_id = MagicMock(return_value=None)
     manager.shared_meta_kv_repo = shared_meta_kv_repo or MagicMock()
+    # WP3 — wire a default tmp_image_store whose ``open_full`` returns
+    # a successful TmpImageRecord for any 32-hex id (matches the
+    # substrate shape the bridge expects). Tests that exercise the
+    # bridge surface override ``tmp_image_store``.
+    if tmp_image_store is None:
+        from tests.test_tmp_image_bridge import _FakeStore, _tmp_image_record
+
+        # Default store: 404 on every id (the resolver then surfaces
+        # input-not-found). Tests that want success override the
+        # store and provide records.
+        default_records = {
+            _SUBSTRATE_ID_A: _tmp_image_record(image_id=_SUBSTRATE_ID_A),
+            _SUBSTRATE_ID_B: _tmp_image_record(image_id=_SUBSTRATE_ID_B),
+        }
+        manager.tmp_image_store = _FakeStore(
+            records=default_records,
+            blobs={
+                _SUBSTRATE_ID_A: b"\x89PNG\r\n\x1a\n" + b"\x00" * 100,
+                _SUBSTRATE_ID_B: b"\x89PNG\r\n\x1a\n" + b"\x00" * 100,
+            },
+        )
+    else:
+        manager.tmp_image_store = tmp_image_store
+    # Wire the WP3 vision-model gate (P2-WP3 AC-5). Default is a
+    # list containing ``"vision"`` — mirrors the production
+    # ``OPENAI_SELECTABLE_MODELS=agentic,coding,coding2,vision`` set
+    # so the gate passes on the canonical test fixture. Tests
+    # exercising the gate override ``allowed_models`` /
+    # ``no_config``.
+    if no_config:
+        # Strip ``config`` to test the no-config pass-through branch.
+        # ``MagicMock.__getattr__`` auto-creates attrs on AttributeError
+        # so a simple ``del manager.config`` is not enough — the next
+        # access re-creates a MagicMock. Use a simple namespace
+        # object instead that does NOT support ``config`` at all.
+        manager = SimpleNamespace(
+            _instance_repository=manager._instance_repository,
+            shared_meta_kv_repo=manager.shared_meta_kv_repo,
+            tmp_image_store=manager.tmp_image_store,
+            enqueue_message=manager.enqueue_message,
+        )
+    else:
+        cfg = MagicMock()
+        cfg.llm = MagicMock()
+        if config_llm_side_effect is not None:
+            # Caller wants the gate to error — wire ``llm`` to raise
+            # when ``allowed_models`` is accessed.
+            type(cfg.llm).allowed_models = property(
+                lambda self: (_ for _ in ()).throw(config_llm_side_effect)
+            )
+        else:
+            cfg.llm.allowed_models = (
+                allowed_models if allowed_models is not None else ["vision"]
+            )
+        manager.config = cfg
     return manager
 
 
@@ -228,8 +334,8 @@ class TestCompareImagesNeverRaise:
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         assert isinstance(result, str)
@@ -252,8 +358,8 @@ class TestCompareImagesNeverRaise:
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         assert isinstance(result, str)
@@ -276,8 +382,8 @@ class TestCompareImagesNeverRaise:
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         assert isinstance(result, str)
@@ -303,8 +409,8 @@ class TestCompareImagesNeverRaise:
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         envelope = json.loads(result)
@@ -320,8 +426,8 @@ class TestCompareImagesNeverRaise:
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         envelope = json.loads(result)
@@ -344,13 +450,37 @@ class TestCompareImagesNeverRaise:
         ):
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         envelope = json.loads(result)
         assert envelope["kind"] == "vision-failure"
         assert "transport exploded" in envelope["error"]
+
+    async def test_schema_invalid_envelope_when_agent_return_malformed(self):
+        """Agent return that doesn't match the findings schema →
+        ``kind: schema-invalid`` envelope (P2-WP3 AC-1).
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager()
+        mock_invoke = AsyncMock(
+            return_value=(
+                "this is not a findings JSON object",
+                "comp-1",
+            )
+        )
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_compare_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
+            )
+
+        envelope = json.loads(result)
+        assert envelope["kind"] == "schema-invalid"
 
 
 # ── Happy path: findings schema passthrough ─────────────────────────────────
@@ -385,8 +515,8 @@ class TestCompareImagesHappyPath:
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         # Findings returned verbatim — facade does NOT wrap successes
@@ -403,13 +533,13 @@ class TestCompareImagesHappyPath:
         from daemon.tools.compare_tools import create_compare_tools
 
         manager = _make_manager()
-        mock_invoke = AsyncMock(return_value=("{}", "comp-1"))
+        mock_invoke = AsyncMock(return_value=(_valid_findings_json(), "comp-1"))
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
                 pinned_spec_sha="abc123",
             )
 
@@ -422,13 +552,13 @@ class TestCompareImagesHappyPath:
         from daemon.tools.compare_tools import create_compare_tools
 
         manager = _make_manager()
-        mock_invoke = AsyncMock(return_value=("{}", "comp-1"))
+        mock_invoke = AsyncMock(return_value=(_valid_findings_json(), "comp-1"))
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
                 criteria=["layout_matches", "color_conforms"],
             )
 
@@ -461,13 +591,13 @@ class TestCompareImagesReuse:
         from daemon.tools.compare_tools import create_compare_tools
 
         manager = _make_manager(get_children_return=[])
-        mock_invoke = AsyncMock(return_value=("{}", "child-id"))
+        mock_invoke = AsyncMock(return_value=(_valid_findings_json(), "child-id"))
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         mock_invoke.assert_awaited_once()
@@ -493,16 +623,16 @@ class TestCompareImagesReuse:
             last_activity_at=datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc),
         )
         manager = _make_manager(get_children_return=[completed])
-        mock_invoke = AsyncMock(return_value=("{}", "comp-1"))
+        mock_invoke = AsyncMock(return_value=(_valid_findings_json(), "comp-1"))
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
-        assert result == "{}"
+        assert result == _valid_findings_json()
         mock_invoke.assert_awaited_once()
         # Reuse path still goes through ``invoke_agent_and_wait`` with
         # the comparator agent_id — the dispatch lands on the SAME
@@ -525,13 +655,13 @@ class TestCompareImagesReuse:
             status="completed",
         )
         manager = _make_manager(get_children_return=[charter_child])
-        mock_invoke = AsyncMock(return_value=("{}", "child-id"))
+        mock_invoke = AsyncMock(return_value=(_valid_findings_json(), "child-id"))
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         # Discovery filtered out the charter child → fresh spawn.
@@ -556,13 +686,13 @@ class TestCompareImagesReuse:
             invoked_as_tool=False,
         )
         manager = _make_manager(get_children_return=[not_invoked])
-        mock_invoke = AsyncMock(return_value=("{}", "child-id"))
+        mock_invoke = AsyncMock(return_value=(_valid_findings_json(), "child-id"))
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         # Discovery empty after filter → fresh spawn.
@@ -579,16 +709,16 @@ class TestCompareImagesReuse:
         manager = _make_manager(
             get_children_side_effect=RuntimeError("database unavailable"),
         )
-        mock_invoke = AsyncMock(return_value=("{}", "child-id"))
+        mock_invoke = AsyncMock(return_value=(_valid_findings_json(), "child-id"))
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
-        assert result == "{}"
+        assert result == _valid_findings_json()
         mock_invoke.assert_awaited_once()
 
     async def test_busy_in_flight_reuse_rejected(self):
@@ -616,8 +746,8 @@ class TestCompareImagesReuse:
         ) as mock_invoke:
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
         # Busy-rejected — no second invoke dispatched.
@@ -645,7 +775,7 @@ class TestCompareImagesMonitoring:
 
         kv_repo = MagicMock()
         manager = _make_manager(shared_meta_kv_repo=kv_repo)
-        mock_invoke = AsyncMock(return_value=("{}", "child-id"))
+        mock_invoke = AsyncMock(return_value=(_valid_findings_json(), "child-id"))
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
@@ -687,18 +817,19 @@ class TestCompareImagesMonitoring:
         kv_repo = MagicMock()
         kv_repo.set_many.side_effect = RuntimeError("kv offline")
         manager = _make_manager(shared_meta_kv_repo=kv_repo)
-        mock_invoke = AsyncMock(return_value=('{"ok": true}', "child-id"))
+        findings = _valid_findings_json()
+        mock_invoke = AsyncMock(return_value=(findings, "child-id"))
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             # Tool invocation completes — KV failure is logged at
             # debug, never raised.
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
-        assert result == '{"ok": true}'
+        assert result == findings
 
     async def test_monitor_write_falls_back_to_module_sentinel_on_repo_miss(self):
         """If the manager exposes no ``shared_meta_kv_repo``, the write
@@ -712,16 +843,17 @@ class TestCompareImagesMonitoring:
         type(manager).shared_meta_kv_repo = property(
             lambda self: (_ for _ in ()).throw(RuntimeError("no kv"))
         )
-        mock_invoke = AsyncMock(return_value=('{"ok": true}', "child-id"))
+        findings = _valid_findings_json()
+        mock_invoke = AsyncMock(return_value=(findings, "child-id"))
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             tools = create_compare_tools(manager, "test-instance-id")
             result = await tools[0].coroutine(
-                image_a="img_a",
-                image_b="img_b",
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
             )
 
-        assert result == '{"ok": true}'
+        assert result == findings
 
 
 # ── Error envelope shape (helper) ───────────────────────────────────────────
@@ -769,3 +901,493 @@ class TestClassifyError:
         # ``sort_keys=True`` ⇒ the JSON string is byte-stable, which
         # makes it test-pin friendly.
         assert json.dumps(parsed, sort_keys=True) == env
+
+
+# ── P2-WP3 — Vision fail-loud init gate ─────────────────────────────────────
+
+
+class TestVisionFailLoudInit:
+    """P2-WP3 AC-5 / arch §8 🔴 — silent default resolution is FORBIDDEN.
+
+    The comparator's ``vision`` model alias must be in
+    ``config.llm.allowed_models``; if not AND the list is non-empty,
+    the factory raises ``VisionModelNotAllowedError`` at init time
+    (never at first spawn).
+    """
+
+    def test_init_passes_when_vision_is_in_allowed_models(self):
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager(allowed_models=["vision", "agentic"])
+        # Should not raise.
+        tools = create_compare_tools(manager, "test-instance-id")
+        assert tools[0].name == "compare_images"
+
+    def test_init_passes_when_allowed_models_is_empty(self):
+        """Empty ``allowed_models`` = "all models allowed" (canonical default)."""
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager(allowed_models=[])
+        tools = create_compare_tools(manager, "test-instance-id")
+        assert tools[0].name == "compare_images"
+
+    def test_init_fails_loud_when_vision_missing_from_allowed_models(self):
+        from daemon.tools.compare_tools import (
+            VisionModelNotAllowedError,
+            create_compare_tools,
+        )
+
+        manager = _make_manager(allowed_models=["agentic", "coding"])
+        with pytest.raises(VisionModelNotAllowedError) as exc_info:
+            create_compare_tools(manager, "test-instance-id")
+
+        # The error message surfaces the missing alias + how to fix it.
+        assert "vision" in str(exc_info.value)
+        assert "OPENAI_SELECTABLE_MODELS" in str(exc_info.value)
+
+    def test_init_is_case_insensitive(self):
+        """The match is case-insensitive (mirrors spawn-time check)."""
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager(allowed_models=["VISION"])
+        tools = create_compare_tools(manager, "test-instance-id")
+        assert tools[0].name == "compare_images"
+
+    def test_init_fails_loud_when_config_access_errors(self):
+        """A config-access failure closes the gate (no silent pass)."""
+        from daemon.tools.compare_tools import (
+            VisionModelNotAllowedError,
+            create_compare_tools,
+        )
+
+        manager = _make_manager(config_llm_side_effect=RuntimeError("db gone"))
+        with pytest.raises(VisionModelNotAllowedError):
+            create_compare_tools(manager, "test-instance-id")
+
+    def test_init_passes_when_no_config_wired(self):
+        """Partial-init manager (no ``config``) — gate is not enforceable.
+
+        The actual spawn will surface the failure downstream; the
+        facade does not block on init.
+        """
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager(no_config=True)
+        tools = create_compare_tools(manager, "test-instance-id")
+        assert tools[0].name == "compare_images"
+
+    def test_no_config_init_actually_strips_config(self):
+        """Sanity: the no_config fixture removes ``config`` so the
+        gate falls through to the no-config pass-through branch."""
+        from daemon.tools.compare_tools import _verify_vision_allowed
+
+        manager = _make_manager(no_config=True)
+        # ``config`` getter raises AttributeError — the gate must
+        # not raise; it returns ``None`` (no enforcement).
+        result = _verify_vision_allowed(manager)
+        assert result is None
+
+
+# ── P2-WP3 — Input resolution (substrate id → bridge) ─────────────────────
+
+
+class TestInputResolutionSubstrate:
+    """P2-WP3 AC-2 — facade resolves substrate ids via the bridge."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_module_state(self):
+        compare_tools_module._inflight_reuse.clear()
+        yield
+        compare_tools_module._inflight_reuse.clear()
+
+    async def test_substrate_ids_route_through_bridge(self):
+        """Two valid 32-hex ids → bridge resolves both → single dispatch."""
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager()
+        findings = _valid_findings_json()
+        mock_invoke = AsyncMock(return_value=(findings, "child-id"))
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_compare_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
+            )
+
+        assert result == findings
+        # ``invoke_agent_and_wait`` received ``images=[uri_a, uri_b]`` —
+        # AC-3 single-call shape.
+        kwargs = mock_invoke.call_args.kwargs
+        assert "images" in kwargs
+        assert isinstance(kwargs["images"], list)
+        assert len(kwargs["images"]) == 2
+        # Both entries are ``data:`` URIs.
+        assert all(uri.startswith("data:") for uri in kwargs["images"])
+
+    async def test_missing_substrate_id_surfaces_input_not_found(self):
+        """A 32-hex id not in the store → ``kind: input-not-found`` envelope.
+
+        The agent is NEVER spawned with a missing image — the facade
+        rejects the input BEFORE the dispatch.
+        """
+        from daemon.services.tmp_image_store import TmpImageNotFound
+        from daemon.tools.compare_tools import create_compare_tools
+        from tests.test_tmp_image_bridge import _FakeStore
+
+        # A store that 404s on every id — input resolution surfaces
+        # the failure before the dispatch.
+        store = _FakeStore(
+            records={},
+            blobs={},
+            open_full_error=TmpImageNotFound("tmp image not found"),
+        )
+        manager = _make_manager(tmp_image_store=store)
+        mock_invoke = AsyncMock()
+        with patch(
+            "daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke
+        ):
+            tools = create_compare_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
+            )
+
+        envelope = json.loads(result)
+        assert envelope["kind"] == "input-not-found"
+        # The agent was never invoked.
+        mock_invoke.assert_not_awaited()
+
+
+# ── P2-WP3 — Single-call shape ──────────────────────────────────────────────
+
+
+class TestSingleCallShape:
+    """AC-3 — comparator runs ONE vision call per compare.
+
+    Mechanism: ``invoke_agent_and_wait`` receives ``images=[uri_a,
+    uri_b]`` in one dispatch; ``instance_messaging.py:113-128``
+    builds the multimodal content with two ``image_url`` blocks in
+    ONE message (the mechanism the existing
+    ``test_multiple_images_in_one_message`` test pins at
+    ``tests/unit/test_vision_routing.py:275``).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_module_state(self):
+        compare_tools_module._inflight_reuse.clear()
+        yield
+        compare_tools_module._inflight_reuse.clear()
+
+    async def test_invoke_called_once_with_both_images(self):
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager()
+        findings = _valid_findings_json()
+        mock_invoke = AsyncMock(return_value=(findings, "child-id"))
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_compare_tools(manager, "test-instance-id")
+            await tools[0].coroutine(
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
+            )
+
+        # Exactly one dispatch — no per-image fan-out.
+        mock_invoke.assert_awaited_once()
+        images = mock_invoke.call_args.kwargs["images"]
+        assert len(images) == 2
+
+
+# ── P2-WP3 — Findings schema validation ────────────────────────────────────
+
+
+class TestFindingsSchemaValidation:
+    """AC-1 — facade validates the agent's return against the findings schema.
+
+    On schema violation the facade returns ``kind: schema-invalid``.
+    The validator's enums / shapes are pinned here so a future
+    schema evolution surfaces as a test failure.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_module_state(self):
+        compare_tools_module._inflight_reuse.clear()
+        yield
+        compare_tools_module._inflight_reuse.clear()
+
+    @pytest.mark.parametrize(
+        "raw,should_pass",
+        [
+            # Valid: pass verdict + one per_criterion row.
+            (
+                json.dumps(
+                    {
+                        "verdict": "pass",
+                        "per_criterion": [
+                            {
+                                "criterion": "structural_layout",
+                                "result": "pass",
+                                "severity": "major",
+                                "evidence": ["header"],
+                            }
+                        ],
+                        "summary": "ok",
+                        "pinned_spec_sha": None,
+                    }
+                ),
+                True,
+            ),
+            # Valid: fail verdict with critical severity.
+            (
+                json.dumps(
+                    {
+                        "verdict": "fail",
+                        "per_criterion": [
+                            {
+                                "criterion": "states_a11y",
+                                "result": "fail",
+                                "severity": "critical",
+                                "evidence": [
+                                    "no focus ring visible on tab key"
+                                ],
+                            }
+                        ],
+                        "summary": "missing focus ring",
+                        "pinned_spec_sha": "abc123",
+                    }
+                ),
+                True,
+            ),
+            # Invalid: bad verdict.
+            ('{"verdict": "ok", "per_criterion": [], "summary": "x"}', False),
+            # Invalid: empty per_criterion.
+            (
+                json.dumps(
+                    {
+                        "verdict": "pass",
+                        "per_criterion": [],
+                        "summary": "x",
+                        "pinned_spec_sha": None,
+                    }
+                ),
+                False,
+            ),
+            # Invalid: bad severity.
+            (
+                json.dumps(
+                    {
+                        "verdict": "pass",
+                        "per_criterion": [
+                            {
+                                "criterion": "x",
+                                "result": "pass",
+                                "severity": "high",
+                                "evidence": [],
+                            }
+                        ],
+                        "summary": "x",
+                        "pinned_spec_sha": None,
+                    }
+                ),
+                False,
+            ),
+            # Invalid: missing summary.
+            (
+                json.dumps(
+                    {
+                        "verdict": "pass",
+                        "per_criterion": [
+                            {
+                                "criterion": "x",
+                                "result": "pass",
+                                "severity": "nit",
+                                "evidence": [],
+                            }
+                        ],
+                        "pinned_spec_sha": None,
+                    }
+                ),
+                False,
+            ),
+            # Invalid: evidence is not a list of strings.
+            (
+                json.dumps(
+                    {
+                        "verdict": "pass",
+                        "per_criterion": [
+                            {
+                                "criterion": "x",
+                                "result": "pass",
+                                "severity": "nit",
+                                "evidence": [42, 43],
+                            }
+                        ],
+                        "summary": "x",
+                        "pinned_spec_sha": None,
+                    }
+                ),
+                False,
+            ),
+        ],
+    )
+    def test_validator_accepts_or_rejects(self, raw, should_pass):
+        result = compare_tools_module._validate_findings(raw)
+        if should_pass:
+            assert result is not None
+            assert result["verdict"] in {
+                "pass",
+                "fail",
+                "conditional_pass",
+            }
+        else:
+            assert result is None
+
+    async def test_schema_invalid_envelope_returned_to_caller(self):
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager()
+        # Missing summary → schema-invalid.
+        bad_findings = json.dumps(
+            {
+                "verdict": "pass",
+                "per_criterion": [
+                    {
+                        "criterion": "x",
+                        "result": "pass",
+                        "severity": "nit",
+                        "evidence": [],
+                    }
+                ],
+                "pinned_spec_sha": None,
+            }
+        )
+        mock_invoke = AsyncMock(return_value=(bad_findings, "comp-1"))
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_compare_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
+            )
+
+        envelope = json.loads(result)
+        assert envelope["kind"] == "schema-invalid"
+
+    def test_pinned_spec_sha_null_is_valid(self):
+        """``pinned_spec_sha: null`` is the advisory-mode default."""
+        findings = compare_tools_module._validate_findings(
+            json.dumps(
+                {
+                    "verdict": "pass",
+                    "per_criterion": [
+                        {
+                            "criterion": "x",
+                            "result": "pass",
+                            "severity": "nit",
+                            "evidence": [],
+                        }
+                    ],
+                    "summary": "x",
+                    "pinned_spec_sha": None,
+                }
+            )
+        )
+        assert findings is not None
+        assert findings["pinned_spec_sha"] is None
+
+    def test_pinned_spec_sha_string_is_valid(self):
+        """``pinned_spec_sha: <sha>`` is the spec-conformance shape (D6)."""
+        findings = compare_tools_module._validate_findings(
+            json.dumps(
+                {
+                    "verdict": "pass",
+                    "per_criterion": [
+                        {
+                            "criterion": "x",
+                            "result": "pass",
+                            "severity": "nit",
+                            "evidence": [],
+                        }
+                    ],
+                    "summary": "x",
+                    "pinned_spec_sha": "deadbeef",
+                }
+            )
+        )
+        assert findings is not None
+        assert findings["pinned_spec_sha"] == "deadbeef"
+
+
+# ── P2-WP3 — Output type check (AC-7) ──────────────────────────────────────
+
+
+class TestOutputType:
+    """AC-7 — the facade's return is NEVER an image.
+
+    Schema-validated success returns a JSON string carrying only
+    strings / enums / arrays. The envelope shape carries the same
+    restriction. No image bytes / data-URI fields survive the
+    facade's output.
+    """
+
+    def test_findings_schema_has_no_image_field(self):
+        """The findings schema itself carries zero image fields."""
+        # Walk the JSON-schema shape — verdict / per_criterion /
+        # summary / pinned_spec_sha. No field name carries an image.
+        findings_obj = json.loads(_valid_findings_json())
+        top_level_keys = set(findings_obj.keys())
+        assert "verdict" in top_level_keys
+        assert "per_criterion" in top_level_keys
+        assert "summary" in top_level_keys
+        assert "pinned_spec_sha" in top_level_keys
+        # No image keys.
+        for forbidden in ("image", "image_bytes", "data_uri", "image_url"):
+            assert forbidden not in top_level_keys
+        # per_criterion row keys also carry no image fields.
+        row_keys = set(findings_obj["per_criterion"][0].keys())
+        for forbidden in ("image", "image_bytes", "data_uri", "image_url"):
+            assert forbidden not in row_keys
+
+    async def test_facade_returns_string_only(self):
+        """The facade's return is always a JSON-encoded string."""
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager()
+        findings = _valid_findings_json()
+        mock_invoke = AsyncMock(return_value=(findings, "child-id"))
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_compare_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
+            )
+
+        assert isinstance(result, str)
+        # Always parseable as JSON — the contract is a JSON-encoded
+        # string of either the findings schema or an envelope.
+        parsed = json.loads(result)
+        assert "verdict" in parsed  # success shape
+
+    async def test_envelope_returns_string_with_no_image_field(self):
+        """Even the structured-error envelope carries no image data."""
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager()
+        mock_invoke = AsyncMock(
+            return_value=("Error: vision exploded", "comp-1")
+        )
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_compare_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
+            )
+
+        assert isinstance(result, str)
+        parsed = json.loads(result)
+        # Envelope keys never include image payloads.
+        for forbidden in ("image", "image_bytes", "data_uri", "image_url"):
+            assert forbidden not in str(parsed).lower()
