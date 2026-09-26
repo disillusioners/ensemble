@@ -1,5 +1,16 @@
 # Test Packs
 
+## Active commission — LCA-FALSE-COMPLETE PG-LANE MERGE GATE (2026-09-26, Job 6a)
+Branch `feature/lca-false-complete-fixes` @ `d5c50994c61ba6c0a762c9dd128d9aa5603eca2a` (single commit on top of LCA note-removal gate). Incident 7d4a3bd9 — `correct-judge-override` class: unverified surface + all-timeout no-terminal rule + directive nudge + scanner pin. Delta touches `daemon/graph.py` (gate region), `daemon/services/{attestation_gate,attestation_resolver,attestation_judge_timeout_resolver,mission_resolver,work_resolver,work_notifier,job_feedback_observer,instance_messaging}.py`, `daemon/routers/{jobs_crud,missions,jobs_streaming,schemas}.py`, `daemon/tools/missions.py` — PG-visible mission/job/service surfaces. **Pack is the PG-lane merge gate; reports-only, NO fixes.**
+
+Glob: `ls tests/postgres/ | grep -iE 'attest|lca|mission|work_res|work_notifier'` — matches exactly ONE file (`test_attestation_live_descendants_pg_lca.py`, 21 tests, 21/21 at prior `lcancheck` gate). Other 37 tests/postgres/ files = out of scope (different subsystems); see exclusion list in pack output.
+
+| Pack | Invocation (wrap in `timeout 300`) | Scope | Est. |
+|---|---|---|---|
+| `lcafc_pg_lane_test` (registered: `test/packs/lcafc_pg_lane_test.sh`) | `timeout 300 bash test/packs/lcafc_pg_lane_test.sh` (self-provisions throwaway PG14 :15432 trust-auth; teardown EXIT trap; drift-pin branch+HEAD; per-pack `--override-ini="addopts=" -m postgres`; `--tb=short -q`, no `-x`) | `tests/postgres/test_attestation_live_descendants_pg_lca.py` (21 tests) | ~1–2 min |
+
+---
+
 ## Completed commission — SEND-MESSAGE-CONTEXT-INJECT-FALLBACK VERIFICATION (2026-09-25)
 Branch `feature/send-message-context-inject-fallback` @ `6620cb7f` (base `75d7e2d1`; single amended commit). Independent verification gate for the agent-tool `send_message` busy-guard context-injection fallback (`daemon/tools/instance.py` only). All invocations drift-pinned, env-scrubbed (`env -u` POSTGRES_*/DATABASE_URL), `timeout 300` outer + pyproject per-test inner, `uv run python -m pytest`, no `-x`, no deselects. Report-only; zero quick fixes.
 
