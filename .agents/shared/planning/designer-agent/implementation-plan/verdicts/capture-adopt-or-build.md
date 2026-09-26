@@ -60,6 +60,23 @@ WP6 inherits the procedure documented in §6 (this file) plus the agent-browser 
 
 ---
 
+## §10a — Integration landed (P2-WP6 execution)
+
+**ADOPTED — integration landed** · 2026-09-26T19:04:49Z · worktree `feature/designer-agent-design` @ `7a24a37d` · phase-lead instance `d9a6114d-aeac-49e0-bb77-560975fefc63` · P2-WP6 worker verdict
+
+- **Procedure doc landed:** `agents/designer/tools_note.md` § "Capture Procedure (agent-browser → substrate)" (lines 37–122). Grep-provable: `grep -n "Capture Procedure (agent-browser" agents/designer/tools_note.md` returns line 37. Two paths documented: agent-turn (PRIMARY, `image_save(content_b64=..., content_type=..., feature=..., page=..., version=..., source_agent=..., retention_class=...)` at `daemon/tools/image_tools.py:671-839`) and non-LLM ops (mechanical equivalent: `POST /api/tmp_images` + sidecar write to `<data_dir>/tmp_images/<id>.json`).
+- **Two substrate image ids (AC-1 mechanical e2e, proxy :4124 DOWN):**
+  - `61badab6017744cd9de7a05ab1823619` — page=`settings`, 55558 bytes, sha256=`b26edf21…`, GET 200, ETag matches sha256[:16]
+  - `ec84609148dd4ca09b0169a954835e4f` — page=`home`, 44523 bytes, sha256=`edd2da5f…`, GET 200, ETag matches sha256[:16]
+  - Both sidecars at `data/tmp_images/<id>.json` (worktree-local) carry `provenance = {feature: "designer-agent", page: <route>, version: "p2-wp6", source_agent: "dev-worker-p2-wp6"}` and `retention_class: "normal"`. All four provenance keys populated; `all_keys_populated=true` per `/tmp/wp6/ingest-{settings,home}.json`.
+- **Capture-route decision:** throwaway daemon on `127.0.0.1:8079` did **not** serve a real routed frontend (UI not built; `/` returns `{"error":"UI not built. Run 'npm run build' in frontend directory."}`); per WP5 precedent the frontend build was served locally via `python3 -m http.server 8126` from `/tmp/wp6/pages/{settings,home}.html`. Captures routed through agent-browser v0.38.1 + `--args "--no-sandbox"` to `/tmp/wp6/captures/{settings,home}-viewport.png` then POSTed to the daemon's `/api/tmp_images`.
+- **C4 vision spot-check:** proxy `127.0.0.1:4124` still DOWN at 2026-09-26T19:04:57Z (HTTP 000). Mechanical verification (PNG signature, magic bytes, byte sizes, md5-divergence between the two captures, ETag=sha256[:16] match) stands as the gate evidence per §C4-deferral; vision layer pinned to the proxy-up window. PD-31 records the agent-turn re-execution commitment.
+- **Boot evidence:** `/livez` + `/readyz` both 200; tmp_images store ready (`dir=data/tmp_images count=1 max_bytes=1073741824`); PG engine `localhost:5432/ensemble_designer_p1` (LOCAL dev, NOT ensemble_prod); graceful shutdown confirmed (`19:05:07 daemon.manager Graceful shutdown complete`). Boot log: `/tmp/wp6/boot.log`. Both ports (8079, 8126) released post-shutdown.
+- **Zero daemon code delta:** `git diff --stat` against worktree HEAD shows no `daemon/` changes attributable to this WP. (P1-minors rider has pre-existing uncommitted `daemon/` edits in flight under the rider's own WP — see tree-state-at-boot note in P2-WP6 worker report.)
+- **Cross-reference:** procedure doc ↔ verdict artifact — `agents/designer/tools_note.md:37` ↔ this section (`§10a`). The cross-reference is grep-provable in either direction.
+
+---
+
 ## D6 note
 
 - **Architecture base SHA:** `e67e5cd85f052896cb80bf22ba03d575f339e025` (the arch doc was ratified against this SHA; verdict decided against the same).
