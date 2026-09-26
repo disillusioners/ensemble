@@ -176,3 +176,27 @@ needs `opendesign-verify` loaded; installer needs `install-opendesign`.
 | `test-connection-out.json` | success, 10 tools |
 | `od-tool-list.json` | the 10 od_* tool names (direct MCP handshake) |
 | `audit-lane-lines.txt` | live `mcp_install` line + `kms_issue` line shape (row 2) |
+
+## 7. Post-verdict addendum (phase lead, 2026-09-26)
+
+### (a) Live negative resolver proof — fail-closed spawn seam, demonstrated against the live p3 daemon
+
+Verbatim excerpt from `/tmp/p3boot/live-neg-proof.txt` (captured during this window, against `127.0.0.1:8081` / DB `ensemble_designer_p3`):
+
+```
+  File "/home/nea/ensemble-src-wt-designer-agent-design/daemon/services/kms_resolver.py", line 82, in _resolve_value
+    raise KMSMarkerResolutionError(
+        f"KMS marker references unknown handle: {handle}"
+    )
+daemon.services.kms_resolver.KMSMarkerResolutionError: KMS marker references unknown handle: KMS_HANDLE_nonexistent000
+```
+
+**Meaning:** the live MCP test-connection spawn seam (`POST /api/mcp-servers/test-connection`) provably routes env values through `daemon/services/kms_resolver.py:82 (_resolve_value)`, and a `__KMS_REF__` marker that points at an unknown handle is rejected with `KMSMarkerResolutionError` — i.e. the spawn path is fail-closed against accidental plaintext substitution (proving WP12 §6 row 4 + row 5 acceptance semantics on the LIVE daemon, not only the deterministic test seam).
+
+### (b) Live-cycle agent-turn pinning (PD-47)
+
+The exit-proof (a) agent-turn slice (designer live cycle: install-opendesign → kms_request → `__KMS_REF__` substitution → live MCP tool-listing → cleanup) is **PINNED to the LLM-gateway-up window**. At live-cycle time, `:4124` is the local text-only mock (vision ⇒ 500; connection-refused on real Claude-route traffic); 7979 demo is reserved-unreachable; nothing else on the host listens LLM-shaped. Rerun procedure = `verdicts/p3-wp12-e2e-rollout.md` §5 runbook, executing against the still-booted p3 daemon (see (c)), with the original designer spawned in-process under a TEXT-model override (`model=` param — HTTP InstanceCreate has none). Full rationale + revisit-trigger recorded in PD-47.
+
+### (c) p3 daemon held UP — awaiting pinned rerun window + cleanup per §5.7
+
+The p3 daemon stays RUNNING at `127.0.0.1:8081` (DB `ensemble_designer_p3`) for the phase-lead live cycle. To reuse: spawn against the existing instance per §5 steps 1–4. To tear down: follow `verdicts/p3-wp12-e2e-rollout.md` §5.7 kill/cleanup commands verbatim (`kill -TERM $(pgrep -f "uvicorn daemon.api:app.*8081")`; ops lane `/tmp/p3boot/` is disposable; DB drop is operator-call, NEVER touches p1/prod). The DB `ensemble_designer_p3` and ops-lane `/tmp/p3boot/` remain user keep-alive per `wt.census.designer-agent-design.mission_retained_artifacts` until the final implementation report sign-off.
