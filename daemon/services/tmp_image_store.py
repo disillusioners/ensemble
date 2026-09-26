@@ -39,12 +39,14 @@ so we never cross the configured cap (architect amendment #3).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from daemon.services.timestamps import now_utc_iso
 
@@ -76,16 +78,48 @@ class TmpImageStoreFull(TmpImageStoreError):
 # the GET endpoint will serve back.
 _METADATA_SUFFIX = ".json"
 
+# Phase 1 designer-agent extensions — WP7 (provenance) + WP9
+# (retention class). Default values are intentionally the byte-identical
+# state of the prior sidecar schema: with both extensions at their
+# defaults, the persisted JSON is identical to a Phase 1 write.
+_PROVENANCE_KEY = "provenance"
+_RETENTION_CLASS_KEY = "retention_class"
+_RETENTION_CLASS_NORMAL = "normal"
+_RETENTION_CLASS_PROTECTED = "protected"
+_VALID_RETENTION_CLASSES: frozenset[str] = frozenset(
+    {_RETENTION_CLASS_NORMAL, _RETENTION_CLASS_PROTECTED}
+)
+
 
 @dataclass(frozen=True)
 class TmpImageRecord:
-    """In-memory projection of the per-image sidecar record."""
+    """In-memory projection of the per-image sidecar record.
+
+    Phase 1 designer-agent extensions (WP7 + WP9):
+
+    * ``provenance`` — optional ``{feature, page, version, source_agent}``
+      mapping (any keys may be None; the mapping shape is whatever the
+      caller passed). ``None`` on read when the sidecar is missing the
+      key (the canonical clipboard path never sets it).
+    * ``retention_class`` — ``"normal"`` (default, swept at 30 days)
+      or ``"protected"`` (WP9: design baselines, exempt from the
+      sweep). The cap still counts protected bytes — exhaustion
+      raises ``TmpImageStoreFull``, no silent protected-eviction.
+
+    Older sidecars written before these extensions (no
+    ``provenance`` / no ``retention_class`` key) parse cleanly:
+    ``provenance`` becomes ``None`` and ``retention_class`` becomes
+    ``"normal"``. No migration, no rewrite — old bytes read
+    unchanged.
+    """
 
     image_id: str
     content_type: str
     size_bytes: int
     uploaded_at: str  # ISO-8601 string with offset
     sha256_hex: str  # full sha256 hex digest of the bytes
+    provenance: dict[str, Any] | None = field(default=None)
+    retention_class: str = _RETENTION_CLASS_NORMAL
 
 
 class TmpImageStore:
@@ -246,6 +280,9 @@ class TmpImageStore:
         image_id: str,
         content_bytes: bytes,
         content_type: str,
+        *,
+        provenance: dict[str, Any] | None = None,
+        retention_class: str = _RETENTION_CLASS_NORMAL,
     ) -> TmpImageRecord:
         """Persist a new entry.
 
@@ -253,7 +290,9 @@ class TmpImageStore:
            raise ``TmpImageStoreFull`` (router → HTTP 507). The
            projected size includes both the new blob AND the new
            sidecar — the cap is on TOTAL DISK USAGE under the store
-           directory, not just blob bytes.
+           directory, not just blob bytes. Protected entries are
+           counted the same way: the cap is a hard disk-usage budget,
+           not an entry-count budget.
         2. Open the blob with ``O_CREAT|O_EXCL|O_WRONLY`` — a collision
            on the uuid4 hex raises ``FileExistsError`` (router → HTTP 409).
            The blob creation is POSIX-atomic and the payload is drained
@@ -267,8 +306,24 @@ class TmpImageStore:
            router covers ids written earlier in the same batch; an
            in-progress failure is left to the sweep (architect §7).
 
+        Phase 1 designer-agent extensions (WP7 / WP9) are ADDITIVE:
+
+        * ``provenance`` — optional mapping (typically
+          ``{feature, page, version, source_agent}``) written into the
+          sidecar verbatim when provided. ``None`` (default) omits the
+          key — clipboard-path callers get byte-identical sidecars and
+          no migration is needed for existing entries.
+        * ``retention_class`` — ``"normal"`` (default) or
+          ``"protected"`` (WP9: design baselines, exempt from the
+          30-day sweep). The cap check sees both classes identically.
+
         Returns the ``TmpImageRecord`` that was persisted.
         """
+        if retention_class not in _VALID_RETENTION_CLASSES:
+            raise ValueError(
+                f"retention_class must be one of "
+                f"{sorted(_VALID_RETENTION_CLASSES)!r}; got {retention_class!r}"
+            )
         if not self._dir.exists():
             self.init()
 
@@ -280,17 +335,20 @@ class TmpImageStore:
         uploaded_at = now_utc_iso()
         # Project the sidecar's byte count so the cap check sees the
         # total disk footprint. The JSON shape is stable so the size
-        # is predictable. ~120 bytes for typical inputs; the sidecar
-        # is well below 1 KiB even for pathological filenames.
+        # is predictable. The optional extension keys
+        # (``provenance`` / ``retention_class``) are included in the
+        # projection when non-default so the cap check remains
+        # accurate even on the extended-shape sidecars.
+        sidecar_projection = self._build_sidecar_payload(
+            content_type=content_type,
+            size_bytes=new_size,
+            uploaded_at=uploaded_at,
+            sha256_hex=sha256_hex,
+            provenance=provenance,
+            retention_class=retention_class,
+        )
         projected_sidecar_size = len(
-            json.dumps(
-                {
-                    "content_type": content_type,
-                    "size_bytes": new_size,
-                    "uploaded_at": uploaded_at,
-                    "sha256_hex": sha256_hex,
-                }
-            ).encode("utf-8")
+            json.dumps(sidecar_projection).encode("utf-8")
         )
         current = self.current_total_bytes()
         if current + new_size + projected_sidecar_size > self._max_bytes:
@@ -331,6 +389,8 @@ class TmpImageStore:
             size_bytes=new_size,
             uploaded_at=uploaded_at,
             sha256_hex=sha256_hex,
+            provenance=copy.deepcopy(provenance) if provenance else None,
+            retention_class=retention_class,
         )
         # Sidecar write — atomic via tmp-file + ``os.replace`` so a
         # partial write is never observable. The tmp file is
@@ -339,14 +399,7 @@ class TmpImageStore:
         # best-effort unlinked; the blob stays on disk but the entry
         # is un-readable (no MIME record → GET 404) until the next
         # sweep reaps it.
-        sidecar_payload = json.dumps(
-            {
-                "content_type": record.content_type,
-                "size_bytes": record.size_bytes,
-                "uploaded_at": record.uploaded_at,
-                "sha256_hex": record.sha256_hex,
-            }
-        )
+        sidecar_payload = json.dumps(sidecar_projection)
         tmp_meta_path = meta_path.with_suffix(meta_path.suffix + ".tmp")
         try:
             tmp_meta_path.write_text(sidecar_payload, encoding="utf-8")
@@ -419,6 +472,289 @@ class TmpImageStore:
             except FileNotFoundError:
                 pass
         return removed
+
+    # ------------------------------------------------------------------
+    # Designer-agent substrate — WP7 (provenance) + WP9 (retention)
+    # ------------------------------------------------------------------
+
+    def open_full(self, image_id: str) -> TmpImageRecord:
+        """Read a full ``TmpImageRecord`` (provenance + retention_class).
+
+        Same 404-gating as ``open()`` — a missing blob or unreadable
+        sidecar raises ``TmpImageNotFound`` (the existing GET path).
+        Old sidecars written before the extensions parse cleanly:
+        ``provenance`` becomes ``None`` and ``retention_class`` becomes
+        ``"normal"``.
+        """
+        blob_path = self._blob_path(image_id)
+        meta_path = self._metadata_path(image_id)
+        if not blob_path.exists() or not meta_path.exists():
+            raise TmpImageNotFound(f"tmp image not found: {image_id}")
+        meta = self._read_sidecar_json(meta_path, image_id)
+        return self._record_from_sidecar(image_id, meta)
+
+    def list_records(
+        self,
+        *,
+        feature: str | None = None,
+        page: str | None = None,
+        version: str | None = None,
+        source_agent: str | None = None,
+        retention_class: str | None = None,
+    ) -> list[TmpImageRecord]:
+        """List ``TmpImageRecord`` rows matching the filter (AND-combined).
+
+        Tolerates torn / missing sidecars via the same precedent as the
+        sweep's orphan view (:215-221) — entries whose sidecar is
+        missing, unreadable, or invalid JSON are EXCLUDED from the
+        returned list (they look un-readable to a caller, by the same
+        404-when-sidecar-missing contract the GET endpoint enforces).
+
+        Filter combinations:
+
+        * Each ``None`` key = no constraint on that field.
+        * ``feature`` / ``page`` / ``version`` / ``source_agent`` are
+          matched against the matching ``provenance`` key
+          (``provenance["feature"] == feature``, etc.). A record
+          whose ``provenance`` is ``None`` cannot match a non-``None``
+          filter — the constraint is "I want rows tagged X", and
+          rows with no tags at all are not tagged X.
+        * ``retention_class`` is matched against the top-level
+          ``retention_class`` field. ``None`` here means "any class"
+          (the common listing case).
+
+        Returns records sorted by ``uploaded_at`` ascending — the same
+        chronological order the sweep views by, so callers get a
+        stable iteration.
+        """
+        if not self._dir.exists():
+            return []
+        records: list[TmpImageRecord] = []
+        for sidecar_name in self._iter_sidecar_names():
+            image_id = sidecar_name[: -len(_METADATA_SUFFIX)]
+            meta = self._read_sidecar_json_or_none(
+                self._metadata_path(image_id), image_id
+            )
+            if meta is None:
+                # Torn / missing / unreadable sidecar — excluded from
+                # listing (404-gated). Sweep will reap it on the next
+                # tick (a clean miss, never a partial record).
+                continue
+            record = self._record_from_sidecar(image_id, meta)
+            if not self._record_matches(
+                record,
+                feature=feature,
+                page=page,
+                version=version,
+                source_agent=source_agent,
+                retention_class=retention_class,
+            ):
+                continue
+            records.append(record)
+        records.sort(key=lambda r: r.uploaded_at)
+        return records
+
+    def get_retention_class(self, image_id: str) -> str | None:
+        """Return the stored ``retention_class`` for one id, or ``None``.
+
+        ``None`` when:
+
+        * the blob or sidecar is missing (the same 404-gated shape as
+          ``open()`` — a torn entry reads as no-class);
+        * the sidecar JSON is unreadable / invalid (defensive).
+
+        Stored values are always normalized to ``"normal"`` or
+        ``"protected"`` — anything else on disk is treated as
+        ``"normal"`` to fail-open to the safe (sweep-eligible) class.
+        """
+        meta_path = self._metadata_path(image_id)
+        meta = self._read_sidecar_json_or_none(meta_path, image_id)
+        if meta is None:
+            return None
+        value = meta.get(_RETENTION_CLASS_KEY)
+        if value == _RETENTION_CLASS_PROTECTED:
+            return _RETENTION_CLASS_PROTECTED
+        return _RETENTION_CLASS_NORMAL
+
+    # ------------------------------------------------------------------
+    # Internals — JSON shape + helpers shared by save/read paths
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_sidecar_payload(
+        *,
+        content_type: str,
+        size_bytes: int,
+        uploaded_at: str,
+        sha256_hex: str,
+        provenance: dict[str, Any] | None,
+        retention_class: str,
+    ) -> dict[str, Any]:
+        """Compose the sidecar JSON dict for ``save``.
+
+        Additive extensions (``provenance`` / ``retention_class``) are
+        OMITTED from the payload when they are at their clipboard-path
+        defaults — keeps the clipboard write byte-identical to the
+        pre-WP7 sidecar shape so existing tests + readers parse
+        unchanged.
+        """
+        payload: dict[str, Any] = {
+            "content_type": content_type,
+            "size_bytes": size_bytes,
+            "uploaded_at": uploaded_at,
+            "sha256_hex": sha256_hex,
+        }
+        if provenance is not None:
+            payload[_PROVENANCE_KEY] = copy.deepcopy(provenance)
+        if retention_class != _RETENTION_CLASS_NORMAL:
+            payload[_RETENTION_CLASS_KEY] = retention_class
+        return payload
+
+    @staticmethod
+    def _record_from_sidecar(
+        image_id: str, meta: dict[str, Any]
+    ) -> TmpImageRecord:
+        """Project a sidecar dict into a ``TmpImageRecord``.
+
+        Backward-compat defaults are applied for missing keys so old
+        sidecars parse cleanly (the canonical clipboard-path write
+        never sets the extension keys).
+        """
+        provenance_raw = meta.get(_PROVENANCE_KEY)
+        if provenance_raw is None:
+            provenance = None
+        elif isinstance(provenance_raw, dict):
+            provenance = copy.deepcopy(provenance_raw)
+        else:
+            # Malformed sidecar — coerce to None rather than echoing
+            # the bad value back. A wrong-typed provenance is an old
+            # bug we'll never re-introduce; defensively ignore.
+            provenance = None
+        retention_raw = meta.get(_RETENTION_CLASS_KEY)
+        if retention_raw == _RETENTION_CLASS_PROTECTED:
+            retention_class = _RETENTION_CLASS_PROTECTED
+        else:
+            # Default + defensive: any value other than the literal
+            # "protected" string reads as "normal". This keeps a
+            # tampered or unknown value from accidentally exempting
+            # something from the sweep.
+            retention_class = _RETENTION_CLASS_NORMAL
+        return TmpImageRecord(
+            image_id=image_id,
+            content_type=str(meta.get("content_type", "")),
+            size_bytes=int(meta.get("size_bytes", 0)),
+            uploaded_at=str(meta.get("uploaded_at", "")),
+            sha256_hex=str(meta.get("sha256_hex", "")),
+            provenance=provenance,
+            retention_class=retention_class,
+        )
+
+    @staticmethod
+    def _record_matches(
+        record: TmpImageRecord,
+        *,
+        feature: str | None,
+        page: str | None,
+        version: str | None,
+        source_agent: str | None,
+        retention_class: str | None,
+    ) -> bool:
+        if retention_class is not None and record.retention_class != retention_class:
+            return False
+        # Provenance-keyed filters. A record without provenance cannot
+        # satisfy a non-None constraint for any provenance key.
+        if record.provenance is None:
+            return (
+                feature is None
+                and page is None
+                and version is None
+                and source_agent is None
+            )
+        if feature is not None and record.provenance.get("feature") != feature:
+            return False
+        if page is not None and record.provenance.get("page") != page:
+            return False
+        if version is not None and record.provenance.get("version") != version:
+            return False
+        if (
+            source_agent is not None
+            and record.provenance.get("source_agent") != source_agent
+        ):
+            return False
+        return True
+
+    def _iter_sidecar_names(self) -> list[str]:
+        """List sidecar filenames in the store dir (stable order).
+
+        Excludes the ``.gitignore`` repo-hygiene artifact (same
+        precedent as ``list_ids_with_mtime``).
+        """
+        if not self._dir.exists():
+            return []
+        out: list[str] = []
+        with os.scandir(self._dir) as it:
+            for entry in it:
+                if (
+                    not entry.is_file()
+                    or not entry.name.endswith(_METADATA_SUFFIX)
+                    or entry.name == ".gitignore"
+                ):
+                    continue
+                out.append(entry.name)
+        out.sort()
+        return out
+
+    @staticmethod
+    def _read_sidecar_json(meta_path: Path, image_id: str) -> dict[str, Any]:
+        """Read + parse the sidecar JSON or raise ``TmpImageNotFound``.
+
+        Mirrors ``open()``'s contract: missing files, missing parent
+        blob, or unreadable JSON all surface as the same 404-style
+        miss. Used for the ``open_full`` call site that requires
+        strict 404 semantics.
+        """
+        try:
+            raw = meta_path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise TmpImageNotFound(
+                f"tmp image sidecar missing: {image_id}"
+            ) from exc
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, OSError) as exc:
+            raise TmpImageNotFound(
+                f"tmp image sidecar unreadable: {image_id} ({exc})"
+            ) from exc
+        if not isinstance(data, dict):
+            raise TmpImageNotFound(
+                f"tmp image sidecar has unexpected shape: {image_id}"
+            )
+        return data
+
+    @staticmethod
+    def _read_sidecar_json_or_none(
+        meta_path: Path, image_id: str
+    ) -> dict[str, Any] | None:
+        """Read + parse the sidecar JSON; ``None`` on any miss.
+
+        Used by ``list_records`` — torn / unreadable sidecars yield
+        a clean None so the listing skips them (the orphan-view
+        precedent). Mirrors the existing GET 404-on-missing-sidecar
+        posture without raising.
+        """
+        if not meta_path.exists():
+            return None
+        try:
+            raw = meta_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
 
     # ------------------------------------------------------------------
     # Path helpers — extensionless blobs per architect risk #7 ruling

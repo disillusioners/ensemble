@@ -158,6 +158,11 @@ if TYPE_CHECKING:
     # orchestrator's own TYPE_CHECKING references InstanceManager,
     # which is exactly the cycle this seam avoids).
     from .services.pool_orchestrator import PoolOrchestrator
+    # Designer-agent tmp_images substrate (Phase 1 WP7/8/9): the
+    # shared store surfaced from ``app.state.tmp_image_store`` so the
+    # image tools can write / list / read without re-deriving the
+    # data_dir. Runtime import is inlined in ``__init__``.
+    from .services.tmp_image_store import TmpImageStore
 
 
 
@@ -423,6 +428,7 @@ class InstanceManager:
         config: Config,
         ensemble_config: EnsembleConfig | None = None,
         credential_manager: "CredentialManager | None" = None,
+        tmp_image_store: "TmpImageStore | None" = None,
     ):
         """Initialize the instance manager.
 
@@ -438,6 +444,15 @@ class InstanceManager:
                 production (N5: shared singleton, not per-instance); falls back
                 to constructing a fresh one for tests that build ``InstanceManager``
                 directly.
+            tmp_image_store: Optional shared :class:`TmpImageStore` used by the
+                image tools (``image_save`` / ``image_list`` / ``image_get``).
+                Injected from ``app.state.tmp_image_store`` in production so
+                the lifespan ``tmp_image_store_max_bytes`` budget is shared
+                with the HTTP router and the agent-facing tools; falls back
+                to ``None`` for tests that build ``InstanceManager`` without
+                going through the lifespan — tools referencing it fall back
+                to a clean ``"Error: ..."`` string and never crash the agent
+                turn.
         """
         self.config = config
         self._ensemble_config = ensemble_config
@@ -608,6 +623,12 @@ class InstanceManager:
         # Both the repository and the pool manager need access to the engine,
         # which is why this block sits here, after engine/migrations/columns.
         # Imports are inline to avoid circular dependencies at module load time.
+        from .services.tmp_image_store import TmpImageStore
+        # Accept the shared store when wired by the lifespan; tests and
+        # direct ``InstanceManager(...)`` callers may leave ``None`` and
+        # the public property returns ``None`` (tool-layer fails closed).
+        self._tmp_image_store: "TmpImageStore | None" = tmp_image_store
+
         from .sources.credentials import CredentialManager
         if credential_manager is None:
             credential_manager = CredentialManager()
@@ -2388,6 +2409,36 @@ class InstanceManager:
         ``infra_repository`` wiring immediately above).
         """
         return self._shared_meta_kv_repo
+
+    @property
+    def tmp_image_store(self) -> "TmpImageStore | None":
+        """Public read-only access to the shared :class:`TmpImageStore`.
+
+        Designer-agent substrate (Phase 1 WP7/8/9) — the agent-facing
+        ``image_save`` / ``image_list`` / ``image_get`` tools reach the
+        store through this seam (mirrors the
+        ``app.state.tmp_image_store`` the routers also use). The
+        lifespan constructs the store once at boot and injects it via
+        ``InstanceManager.__init__(tmp_image_store=...)``; tests that
+        construct an ``InstanceManager`` directly may pass ``None``
+        and the tools fail closed (``"Error: tmp-image store not
+        initialized"``) the same way the HTTP router returns 503.
+
+        Lazily resolved: when the property is first read it falls
+        back to an inherited ``app.state.tmp_image_store`` reference
+        (defensive — covers tests that wire the store onto an app
+        after the manager is built but before tools are assembled).
+        """
+        store = self._tmp_image_store
+        if store is not None:
+            return store
+        # Defensive fallback for tests that wire an app-bound store
+        # after the manager is built. Production wiring is via the
+        # constructor kwarg (canonical, never re-derives).
+        app_state = getattr(self, "_app_state", None)
+        if app_state is not None:
+            return getattr(app_state, "tmp_image_store", None)
+        return None
 
     @property
     def credential_manager(self):

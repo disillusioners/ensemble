@@ -670,6 +670,14 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "external_opencode_wait_any",
     "external_opencode_wait_for_result",
     "generate_chart",
+    # image_save / image_list / image_get — designer-agent substrate
+    # (Phase 1 WP7/8/9) — factory-created per-instance alongside
+    # explain_image; never registered at module import. The
+    # explicit names allow agents' ``tools.allow`` to validate the
+    # image category at startup.
+    "image_save",
+    "image_list",
+    "image_get",
     "get_instance_info",
     "get_mission",
     "glob_files",

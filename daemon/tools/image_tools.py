@@ -5,14 +5,20 @@ Mirrors the closure-injection pattern of ``daemon.tools.chart_tools`` and
 is invoked from ``create_instance_tools`` to assemble the per-instance tool list.
 The generated ``explain_image`` tool delegates to the ``image-reader`` agent via
 ``invoke_agent_and_wait`` and returns the vision model's analysis of the image.
+The ``image_save`` / ``image_list`` / ``image_get`` tools are the designer-agent
+substrate (Phase 1 WP7/8/9) — they wrap ``daemon.services.tmp_image_store``
+through ``manager.tmp_image_store`` so agents can save / list / read tagged
+images with provenance and an optional ``protected`` retention class.
 """
 
 import base64
+import binascii
 import ipaddress
 import logging
 import re
 import socket
 import stat
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -403,15 +409,22 @@ def _detect_format_from_magic_bytes(data: bytes) -> str | None:
 
 
 def create_image_tools(manager: "InstanceManager", current_instance_id: str) -> list:
-    """Create image analysis tools with injected manager reference.
+    """Create image analysis + substrate tools with injected manager reference.
 
     Args:
         manager: The InstanceManager instance to use for operations.
         current_instance_id: The ID of the current instance (used as parent
-            for the spawned image-reader instance).
+            for the spawned image-reader instance + the calling-agent id
+            source for ``image_save`` auto-stamping).
 
     Returns:
-        List of tool functions: [explain_image]
+        List of tool functions: ``[explain_image, image_save, image_list,
+        image_get]``. The three new tools are the agent-facing substrate
+        (Phase 1 designer-agent WP7/8/9); ``explain_image`` is the
+        pre-existing analysis delegation. The new tools share the
+        ``"image"`` category with ``explain_image`` and all are
+        available to any agent with the image category in
+        ``tools.allow``.
     """
 
     def _get_project_id() -> str | None:
@@ -425,6 +438,27 @@ def create_image_tools(manager: "InstanceManager", current_instance_id: str) -> 
         except Exception:
             pass
         return None
+
+    def _get_caller_agent_id() -> str:
+        """Resolve the calling agent's id from the active instance.
+
+        Used by ``image_save`` to AUTO-STAMP ``provenance.source_agent``
+        when the caller does not supply one explicitly. Falls back to
+        the empty string (``""``) when the resolution path is broken
+        (test stubs, partial-init daemon, missing repo row) — the
+        resulting provenance tag reads as "no agent" rather than
+        crashing the save.
+        """
+        try:
+            instance_meta = manager._instance_repository.get(current_instance_id)
+            if instance_meta is None:
+                return ""
+            agent_id = getattr(instance_meta, "agent_id", None)
+            if isinstance(agent_id, str):
+                return agent_id
+            return ""
+        except Exception:
+            return ""
 
     def _get_project_workdir() -> str | None:
         """Auto-inject project workdir from instance context.
@@ -578,4 +612,395 @@ Example:
     >>> explain_image("/tmp/screenshot.png", "What error is shown?")
 """
 
-    return [explain_image]
+    # ==================================================================
+    # Designer-agent substrate (Phase 1 WP7/8/9): image_save /
+    # image_list / image_get — agent-facing surface over the
+    # daemon-side tmp_images store.
+    #
+    # Unlike ``explain_image`` (which the agent-instruction must keep
+    # workdir-confined), these tools run DAEMON-SIDE with full
+    # ``data_dir`` access via ``manager.tmp_image_store``. The
+    # distinction is deliberate — see
+    # ``agents/designer/tools_note.md`` (WP4): ``explain_image`` reads
+    # bytes the agent already has a reference to; ``image_*`` writes
+    # to + reads from the canonical image substrate that ships with
+    # the daemon (the same store the HTTP router uses). Confining
+    # ``image_save`` to the project workdir would mean the wire-up
+    # for path→data-URI pixels-at-dispatch had to be re-invented
+    # inside the agent, defeating the WP10 bridge.
+    #
+    # All three tools fail closed: a missing / unavailable store
+    # surfaces a short ``"Error: ..."`` string so the agent can
+    # reason about the failure without exception handling. They
+    # never raise.
+    # ==================================================================
+
+    _ID_REGEX = re.compile(r"^[a-f0-9]{32}$")
+
+    def _get_store():
+        """Resolve the daemon-side ``TmpImageStore`` via the manager.
+
+        Returns ``None`` when the lifespan did not wire the store
+        (test stubs, partial-init daemon, store boot failure). Each
+        tool checks the result and surfaces an explicit
+        ``"Error: tmp-image store not initialized"`` — mirrors the
+        503 contract the HTTP router uses for the same condition.
+        """
+        try:
+            return manager.tmp_image_store
+        except Exception:
+            return None
+
+    def _validate_id(image_id: str) -> str | None:
+        """Return the canonical 32-hex id or ``None`` on any non-conforming shape.
+
+        Same enforcement as the HTTP router
+        (``daemon/routers/tmp_images.py:183-204``) — no ``/`` /
+        ``..``, no control chars, only lowercase hex. Used by
+        ``image_get`` (which accepts user-supplied ids) so a bad
+        shape never reaches the store's path-traversal regex.
+        """
+        if not isinstance(image_id, str):
+            return None
+        return image_id if _ID_REGEX.match(image_id) else None
+
+    @register_tool_category("image")
+    @tool
+    def image_save(
+        content_b64: str,
+        content_type: str,
+        feature: str | None = None,
+        page: str | None = None,
+        version: str | None = None,
+        source_agent: str | None = None,
+        retention_class: str = "normal",
+    ) -> str:
+        """Save an image to the daemon-side tmp_images substrate.
+
+        Persists ``content_b64`` (raw base64 — no ``data:`` URI prefix,
+        no whitespace) under ``<data_dir>/tmp_images/<uuid4 hex>`` and
+        writes the sidecar with the supplied provenance + retention
+        class. Returns the new image id + a structured record the
+        caller can dispatch into ``image_get`` / ``image_list``.
+
+        FAILURE CONTRACT: any save-time error (decode failure, store
+        not initialized, cap exhausted, O_EXCL collision — vanishingly
+        rare, invalid retention class) is surfaced as a
+        short ``"Error: ..."`` string. The tool never raises so the
+        agent can ``if result.startswith("Error:")`` cleanly.
+
+        Args:
+            content_b64: Raw base64 payload of the image bytes. NO
+                ``data:image/png;base64,`` prefix; pass only the
+                base64 string. Decoded once server-side via
+                ``base64.b64decode``; whitespace (``\\n`` / ``\\r`` /
+                spaces) is tolerated between bytes.
+            content_type: MIME of the image (e.g. ``"image/png"``).
+                Stored in the sidecar verbatim — the GET endpoint
+                serves it as ``Content-Type``.
+            feature: Optional provenance tag (e.g. ``"checkout"``,
+                ``"settings"``). Stored in the sidecar under
+                ``provenance.feature`` so ``image_list(feature=...)``
+                can find rows by this key.
+            page: Optional provenance tag (e.g. ``"home"``,
+                ``"results"``). Same provenance contract as
+                ``feature``.
+            version: Optional provenance tag (version string / spec
+                SHA / etc.). Same provenance contract as ``feature``.
+            source_agent: Optional provenance tag identifying the
+                authoring agent. When ``None`` (the default), the
+                tool AUTO-STAMPS it with the calling agent's id
+                resolved from the active instance — agents do NOT
+                need to remember their own id. Pass an explicit
+                string to override (e.g. to tag a baseline captured
+                on behalf of another agent).
+            retention_class: ``"normal"`` (default, eligible for
+                the periodic sweep) or ``"protected"`` (WP9, exempt
+                from the sweep). ``"protected"`` is for design
+                baselines that must survive past the 30-day window
+                while a project is active. Release path: a follow-up
+                ``image_save`` call (or any new save carrying the
+                same id — but IDs are uuid4, so the practical
+                release path is a project-close sweep note:
+                explicit re-save on the same bytes is not possible
+                since ids are collision-resistant random). The cap
+                still counts protected bytes — exhaustion raises
+                ``TmpImageStoreFull`` and the tool returns
+                ``"Error: tmp-image store is full"`` instead of
+                silently evicting.
+
+        Returns:
+            A JSON-encoded dict on success::
+
+                {
+                  "image_id": "<32 hex>",
+                  "content_type": "image/png",
+                  "size_bytes": 12345,
+                  "uploaded_at": "<ISO-8601>",
+                  "sha256_hex": "<full hex>",
+                  "provenance": {
+                    "feature": "...",
+                    "page": "...",
+                    "version": "...",
+                    "source_agent": "..."
+                  },
+                  "retention_class": "normal" | "protected"
+                }
+
+            Or a short ``"Error: ..."`` string on failure.
+        """
+        import json as _json
+        from daemon.services.tmp_image_store import (
+            TmpImageStoreFull as _TmpImageStoreFull,
+        )
+
+        store = _get_store()
+        if store is None:
+            return "Error: tmp-image store not initialized"
+
+        # Validate retention_class early (no store round-trip on
+        # bad input).
+        if retention_class not in ("normal", "protected"):
+            return (
+                f"Error: retention_class must be 'normal' or 'protected', "
+                f"got {retention_class!r}"
+            )
+
+        # Decode — tolerate whitespace in the base64 stream the way
+        # browsers / image encoders emit.
+        try:
+            decoded = base64.b64decode(content_b64, validate=False)
+        except (binascii.Error, ValueError) as exc:
+            return f"Error: content_b64 is not valid base64: {exc}"
+        if not decoded:
+            return "Error: content_b64 decoded to 0 bytes"
+        # content_type must be a non-empty string; we do NOT enforce
+        # a known-MIME allowlist (the store + HTTP GET serve it
+        # verbatim), but empty / wrong-type inputs should fail
+        # loudly with a clean message rather than persisting garbage.
+        if not isinstance(content_type, str) or not content_type.strip():
+            return "Error: content_type must be a non-empty string"
+
+        # Auto-stamp source_agent from the calling instance when
+        # the caller did not supply one. The resolved id is a
+        # string or ``""`` (resolution failure → no provenance tag
+        # rather than crashing the save).
+        resolved_source_agent = source_agent
+        if resolved_source_agent is None:
+            resolved_source_agent = _get_caller_agent_id()
+        provenance: dict[str, str] | None = None
+        if any(v is not None for v in (feature, page, version, resolved_source_agent)):
+            provenance = {}
+            if feature is not None:
+                provenance["feature"] = str(feature)
+            if page is not None:
+                provenance["page"] = str(page)
+            if version is not None:
+                provenance["version"] = str(version)
+            if resolved_source_agent is not None:
+                provenance["source_agent"] = str(resolved_source_agent)
+
+        try:
+            image_id = uuid.uuid4().hex
+            record = store.save(
+                image_id,
+                decoded,
+                content_type,
+                provenance=provenance,
+                retention_class=retention_class,
+            )
+        except _TmpImageStoreFull as exc:
+            return f"Error: tmp-image store is full: {exc}"
+        except FileExistsError as exc:
+            # O_EXCL collision — vanishingly rare with uuid4 hex;
+            # surfaced so the caller can retry or surface upstream.
+            return f"Error: tmp-image id collision: {exc}"
+        except OSError as exc:
+            return f"Error: tmp-image save failed: {exc}"
+
+        return _json.dumps(
+            {
+                "image_id": record.image_id,
+                "content_type": record.content_type,
+                "size_bytes": record.size_bytes,
+                "uploaded_at": record.uploaded_at,
+                "sha256_hex": record.sha256_hex,
+                "provenance": record.provenance,
+                "retention_class": record.retention_class,
+            },
+            sort_keys=True,
+        )
+
+    @register_tool_category("image")
+    @tool
+    def image_list(
+        feature: str | None = None,
+        page: str | None = None,
+        version: str | None = None,
+        source_agent: str | None = None,
+        retention_class: str | None = None,
+    ) -> str:
+        """List substrate entries matching the supplied provenance filter.
+
+        Filter semantics (mirrors the store's ``list_records``):
+
+        * Each ``None`` key = no constraint on that field.
+        * ``feature`` / ``page`` / ``version`` / ``source_agent``
+          match against the matching ``provenance`` key.
+          Entries WITHOUT provenance cannot satisfy a non-``None``
+          constraint — they are not tagged X.
+        * ``retention_class`` matches the top-level field
+          (``"normal"`` or ``"protected"``). ``None`` = any class.
+
+        TORN-SIDECAR EXCLUSION (matches the sweep's orphan view):
+        an entry whose sidecar is missing / unreadable / invalid
+        is OMITTED from the result — same 404-style miss the GET
+        endpoint enforces, never a partial record.
+
+        Args:
+            feature: Optional provenance filter.
+            page: Optional provenance filter.
+            version: Optional provenance filter.
+            source_agent: Optional provenance filter.
+            retention_class: Optional class filter (``"normal"`` or
+                ``"protected"``). ``None`` = no class constraint.
+
+        Returns:
+            JSON-encoded list of dicts on success, each shaped::
+
+                {
+                  "image_id": "<32 hex>",
+                  "content_type": "image/png",
+                  "size_bytes": 12345,
+                  "uploaded_at": "<ISO-8601>",
+                  "sha256_hex": "<full hex>",
+                  "provenance": {<as stored> | null},
+                  "retention_class": "normal" | "protected"
+                }
+
+            Empty list when no entries match. On store-not-wired,
+            returns ``"Error: tmp-image store not initialized"``.
+        """
+        import json as _json
+
+        store = _get_store()
+        if store is None:
+            return "Error: tmp-image store not initialized"
+        if retention_class is not None and retention_class not in (
+            "normal",
+            "protected",
+        ):
+            return (
+                f"Error: retention_class must be 'normal', 'protected', "
+                f"or None; got {retention_class!r}"
+            )
+
+        try:
+            records = store.list_records(
+                feature=feature,
+                page=page,
+                version=version,
+                source_agent=source_agent,
+                retention_class=retention_class,
+            )
+        except OSError as exc:
+            return f"Error: tmp-image list failed: {exc}"
+
+        # Serialize to plain dicts (json.dumps can't serialize the
+        # frozen dataclass directly; projections match the
+        # ``image_save`` return shape).
+        out = [
+            {
+                "image_id": r.image_id,
+                "content_type": r.content_type,
+                "size_bytes": r.size_bytes,
+                "uploaded_at": r.uploaded_at,
+                "sha256_hex": r.sha256_hex,
+                "provenance": r.provenance,
+                "retention_class": r.retention_class,
+            }
+            for r in records
+        ]
+        return _json.dumps(out, sort_keys=True)
+
+    @register_tool_category("image")
+    @tool
+    def image_get(image_id: str) -> str:
+        """Fetch one substrate entry — bytes + MIME + provenance.
+
+        The MIME comes from the SIDECAR RECORD — blobs are
+        extensionless (architect risk #7 ruling; the filename
+        suffix would leak the underlying MIME to an attacker).
+        Never extension-guessed.
+
+        Returns base64-encoded bytes (no ``data:`` URI prefix) so
+        the caller can compose a vision dispatch or pipe the
+        bytes into another tool without a second decode hop.
+
+        Args:
+            image_id: 32-hex char id returned by a prior
+                ``image_save`` (or from a ``image_list`` query).
+                Same regex enforcement as the HTTP router: any
+                non-conforming shape is rejected without touching
+                the filesystem.
+
+        Returns:
+            JSON-encoded dict on success::
+
+                {
+                  "image_id": "<32 hex>",
+                  "content_type": "image/png",
+                  "content_b64": "<raw base64 of the bytes>",
+                  "size_bytes": 12345,
+                  "uploaded_at": "<ISO-8601>",
+                  "sha256_hex": "<full hex>",
+                  "provenance": {<as stored> | null},
+                  "retention_class": "normal" | "protected"
+                }
+
+            ``"Error: tmp-image not found: ..."`` for a missing /
+            torn entry (404-style — the cap-shape sidecar path
+            reads as missing, never a stack trace).
+        """
+        import json as _json
+        from daemon.services.tmp_image_store import (
+            TmpImageNotFound as _TmpImageNotFound,
+        )
+
+        store = _get_store()
+        if store is None:
+            return "Error: tmp-image store not initialized"
+        canonical_id = _validate_id(image_id)
+        if canonical_id is None:
+            return (
+                f"Error: image_id must match ^[a-f0-9]{{32}}$; got {image_id!r}"
+            )
+
+        try:
+            record = store.open_full(canonical_id)
+        except _TmpImageNotFound as exc:
+            return f"Error: tmp-image not found: {exc}"
+
+        try:
+            blob = (store.dir / canonical_id).read_bytes()
+        except OSError as exc:
+            # Path-traversal defenses aside, the blob can still
+            # vanish in a FE DELETE ∥ sweep race; surface a clean
+            # miss.
+            return f"Error: tmp-image blob unreadable: {canonical_id} ({exc})"
+
+        return _json.dumps(
+            {
+                "image_id": record.image_id,
+                "content_type": record.content_type,
+                "content_b64": base64.b64encode(blob).decode("ascii"),
+                "size_bytes": record.size_bytes,
+                "uploaded_at": record.uploaded_at,
+                "sha256_hex": record.sha256_hex,
+                "provenance": record.provenance,
+                "retention_class": record.retention_class,
+            },
+            sort_keys=True,
+        )
+
+    return [explain_image, image_save, image_list, image_get]
