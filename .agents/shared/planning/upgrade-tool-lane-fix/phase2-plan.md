@@ -267,6 +267,21 @@ These obligations are **NOT implemented in v0.15.3 code**. They are runbook/evid
 
 **And even with F2 closed:** the live rung remains **USER-EXECUTED** — automation stops at demo permanently (ADR-017 env-target model; `promotion-ladder.md` S4-S6 are USER rows; §8 above is a design, never an agent procedure).
 
+## Review Residuals (2026-09-26)
+
+Review-pass findings recorded as INTENTIONAL or DEFERRED so a future reviewer does not "fix" them. Pinned to the v0.15.3 review pass (`r-20260926-…`). One canonical home — do not duplicate into `plan.md`.
+
+### Intentional (do not fix)
+
+- **N-1** — preflight reuses the existing refusal token `executor-scripts-unavailable` instead of minting the plan-named `preflight-scripts-unresolvable`. Intentional redundancy with the existing token; self-consistent with `_refusal()` taxonomy in `daemon/tools/upgrade_tools.py`; pinned at `daemon/tools/upgrade_tools.py:2755`. New token would have widened the regex-equality test pack without changing the failure mode.
+- **N-3** — `restart` added to `_TERMINAL_OUTCOME_EVENTS` beyond the plan's event vocabulary. Justified extension: the live-path reaper emits a terminal `executor_exit` row on child SIGKILL/SIGTERM, and `restart` must be terminal-class so the reconcile sweep treats it as DONE (not as a stuck arm). Pinned by `tests/unit/tools/test_upgrade_journal.py`; correctly excluded from the `reconcile_pending_op` tuple (it lives in `_TERMINAL_OUTCOME_EVENTS`, not `_TERMINAL_EVENTS`).
+
+### Deferred (later, not now)
+
+- **N-4** — GC/reconcile journal mutation relies on single-event-loop serialization (`asyncio` event loop in `daemon/tools/upgrade_journal.py`). Add an explicit `asyncio.Lock` or an assumption comment at the mutation sites later; out of scope for the v0.15.3 sweep, safe under today's single-loop daemon.
+- **N-5** — journal detail strings vs structured payload. Some `_journal_*` calls carry free-form `detail="..."` (string); future work could promote those to a typed dataclass (`reason_code`, `context: dict`). Backlog item, not this mission.
+- **N-6** — `scripts/upgrade/stage.sh:192` `$VERSION` printf-style hardening. Today the value flows into a literal `%s` slot; the printf format-vulnerability class (version containing `%`) is unexercised because version values come from the bump script's regex-validated input. Backlog: tighten the format string or pre-validate.
+
 ## Test Plan
 
 ### Pack additions to `test/packs/release_journal_unit_test.sh` (53-line wrapper)
