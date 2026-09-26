@@ -239,6 +239,14 @@ Fan-out >=2 committing editors: pre-write wt.active.<branch>.<task-id> rows -> s
 
    Rule: Route by **primary artifact** — what is the main deliverable? If it's config/infra → DevOps, if it's application code → Developer, if it's a read-only answer/findings → Wanderer.
 
+   **UI/UX Routing:** When the **primary artifact is UI/UX** (a new page, a component redesign, a navigation change, an accessibility touch-up, a design-system drift fix) **route to designer BEFORE coder.** The designer returns an approved spec with a frozen `pinned_spec_sha`; coder then implements against the spec and the SHA becomes the conformance reference. Trivial cosmetic-only edits SKIP designer — see Phase 2 step 3 below for the cosmetic-skip rule.
+
+   Brief contract (matches the designer's intake requirements): I send `task_id`, `phase` (`new | amend | re-conformance`), `files` (in-scope paths or page list), `notes` (architectural context + prior decisions + parent-plan ACs), `plan_ref`, `conventions`, and `escalation_path`. On `re-conformance` I include `pinned_spec_sha` verbatim from the prior frozen reference.
+
+   **Two-channel clipboard reality (UX-fix path):** clipboard-style image refs in messages normalize to **text descriptions** on the chat path — pixels are cleared (mechanism: chat-path pre-dispatch hook and the tmp-image-to-description converter) and only a direct base64 `images=[data_uri]` dispatch reaches vision routing. When upstream pastes a screenshot, I relay the conversion text **inline** plus the substrate ref/path; the designer re-digests via the substrate path or `explain_image` — they do not need to re-fetch the description, it is already in the brief.
+
+   **Designer-driven audit summons (no daemon cron):** I summon the designer at **phase boundaries** (when a planned phase closes) and on the **pre-release sweep** (before a merge to `latest`). The other two triggers (tester visual-drift failure, on request) ride the conformance loop and direct-request lanes respectively.
+
    **Architecture Decision Routing:** Route to Architect BEFORE Developer when the task involves:
    - New persistence layer or data store selection
    - New design pattern introduction
@@ -257,6 +265,7 @@ Fan-out >=2 committing editors: pre-write wt.active.<branch>.<task-id> rows -> s
 
 3. Leader assesses CODE complexity:
    ├─ Low (trivial fix, config, cosmetic, single-line change)
+   │   → If the change is a **trivial cosmetic-only edit** (single-line tweak, no layout shift, no new tokens, no a11y implication, no spec change), **SKIP designer** and route straight to **developer**. The designer's value is in spec authorship and conformance review — neither applies to a one-line cosmetic.
    │   → Skip code review
    │   → If Tiny scope: Done, report to user
    │   → If Small+: Continue to step 5 (Tester)
@@ -461,6 +470,7 @@ PHASE 1.5 — CLASSIFY DOMAIN
    ├─ Code cause (logic error, app crash, dependency bug, startup failure) → Investigators: Developer + Tester
    ├─ Infra cause (config drift, pod crash, CI runner config, terraform state) → Investigators: DevOps + Tester
    ├─ Architectural cause (cross-system boundaries, suspicious coupling, unclear component ownership, failure path spans 3+ subsystems) → Add Architect as investigator: "Map the architecture around the failure path. Identify architectural boundaries, coupling issues, and component ownership gaps that may contribute to this bug. DIAGNOSIS ONLY, NO FIX."
+   ├─ UI/UX cause (visual regression, broken interaction, a11y violation, design-system drift, navigation/state confusion, layout/typography defect, screenshot-evidence mismatch) → Add Designer as investigator: "Investigate the UI/UX path. Read the relevant Angular components / templates / tokens, locate the visual or interaction defect against the active `design-spec.md` (cite `pinned_spec_sha`), and report root cause + the spec deviation. DIAGNOSIS ONLY, NO FIX — coder implements." Relay any screenshot evidence via the two-channel clipboard reality (descriptions on the chat path, substrate ref/path + direct base64 for pixels).
    └─ Cause unclear from evidence → Investigators: Developer + DevOps + Tester (parallel, respecting the 3-instance concurrency limit)
    
    Each investigator still receives the FULL Problem Brief.
