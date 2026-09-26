@@ -549,6 +549,15 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "context": "daemon.tools.context_tools",
     "shared_meta_kv": "daemon.tools.shared_meta_kv_tools",
     "db": "daemon.tools.db_tools",
+    # Design tools (designer-agent P2-WP8, 2026-09-26) — image-comparator
+    # specialist behind the ``compare_images`` facade. Category key MUST
+    # byte-match ``@register_tool_category("design")`` in
+    # ``daemon/tools/compare_tools.py`` and the ``TOOL_REQUIRED_AGENTS``
+    # row in ``daemon/tools/_auth.py``. Row is load-bearing for boot-time
+    # allow-list validation (registry.py known_categories) — without it
+    # designer's ``tools.allow: ["design"]`` entry emits the
+    # "neither a known category nor a known tool" WARNING (WP8 G2-A3).
+    "design": "daemon.tools.compare_tools",
     "infra": "daemon.tools.infra",
     "system": "daemon.tools.system",
     "skill-evolution": "daemon.tools.skill_evolution_tools",

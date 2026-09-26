@@ -240,4 +240,25 @@ Port 8080 released cleanly post-shutdown. No orphans.
 
 ---
 
+## §G2-followup — CATEGORY_MODULES fix + re-verify boot (2026-09-26 ~20:31Z)
+
+A3 closed in a follow-up commission. **Fix**: `daemon/tools/_tool_registry.py` CATEGORY_MODULES gained `"design": "daemon.tools.compare_tools"` (row after `"db"`, house-style comment; 1 functional line + 8 comment lines). Root cause: `_auth.py:50` TOOL_REQUIRED_AGENTS row and the `@register_tool_category("design")` decorator (compare_tools.py:1141) both existed, but the boot-time validator (registry.py:1080 `known_categories = set(CATEGORY_MODULES.keys())`) consults ONLY CATEGORY_MODULES.
+
+**Unit checks (in-process, scrubbed worktree venv):**
+- Registry assertion: `CATEGORY_MODULES["design"] == "daemon.tools.compare_tools"`; `discover_all_tool_names()` now contains `compare_images` (AST scan covers CATEGORY_MODULES sources only — the row is what admits compare_tools.py to the scan); `get_category_doc("design")` → `("Design", …)`; boot-validator replication against the real designer meta → ZERO would-warn allow entries.
+- `tests/test_compare_tools.py` — **66 passed** (no import-order regression).
+- `tests/unit/tools/test_tool_config_validation_boot.py` — **2 passed** (zero-warnings guard + still-warns no-false-negative guard).
+
+**Re-verify boot** (port 8080 per WP8-A1; 8079 free but held for the other mission's dev.sh risk; 5-var scrub wrapper `/tmp/p12/scrub-wp8.sh`; dev DB `ensemble_designer_p1`): boot 20:31:18Z → `/livez` 200 (~18s) → `/readyz` 200.
+- (a) WARNING GONE: `grep "designer.*neither a known category" boot-fix-verify.log` → **0 matches** (pre-fix boot.log 20:16 had the WARNING at line 64).
+- (b) designer registered: `/api/instances` lists designer agents.
+- (c) TOOL SURFACE (load-bearing): resolve_tool_filter (instance.py:5490 site) with designer's real allow (`[…, 'midflight', 'design']`) → `compare_images` **in** resolved surface (size 16); negative control (same list minus `'design'`) → `compare_images` **absent** — the category entry itself resolves the tool, not merely silences the warning.
+- (d) NO NEW warnings: post-fix warning set = pre-existing `maintenancer: deny entry 'git_commit'` (pre-existing, separate finding — deny-list references a tool/category that is not in the known universe; needs its own commission) + plane MCP schema-discovery noise (proxy :4124 down, pre-existing). Zero additions vs baseline.
+
+**Shutdown proof**: SIGTERM → process exited, port 8080 released, log tail: `Graceful shutdown complete` / `Application shutdown complete` (20:32:52).
+
+**Commit**: `fix(designer): register design category in CATEGORY_MODULES — close WP8 G2 boot warning (P2-WP8 follow-up)`.
+
+---
+
 *End of p2-wp8-e2e-rollout.md.*
