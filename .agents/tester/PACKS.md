@@ -1262,3 +1262,42 @@ ntf_real_judge_s1 | lcancheck_matrix_8_intf_real_judge_s1_test.sh | 2 real-judge
 | lcancheck_boot_smoke (ad-hoc) | lcancheck_boot_smoke_test.sh | daemon boot @15800 + disposable PG@15810 + mock LLM@15820; enforce default; clean SIGTERM | 2026-09-23 | ✅ PASS 28/0 assertions (13s) (`e9d167ff`); attestation boot line mode=enforce @ DEFAULT_MODE (attestation_resolver.py:111) |
 
 Exclusions (documented, never silent): `tests/postgres/test_attestation_live_descendants_pg_lca.py` → own PG-lane pack (above); `tests/integration/test_lca_stale_a_judge_live.py` + `test_lcan_sameturn_window.py` → DESEL by default addopts, not delta-touched, not in prior lcan_matrix packs (out of gate scope). Estimates calibration note: splitter header estimates were 2.5–40× under actual for integration packs (m4 ~5×, m5 ~2.5–6×); re-baseline before reuse.
+
+## A/B acceptance (agent-snapshot-v1, 2026-09-26)
+
+Full-suite A/B acceptance gate for `feature/agent-snapshot-v1` (base `db71500a` vs HEAD `02b68247`, 58 files). Infrastructure-only setup: 24 slice scripts in `test/packs/ab/` covering the ENTIRE default-discovery suite — 22,639 tests / 970 files, glob-partition verified zero-gap, zero-dup (per-file node counts from `--collect-only` at HEAD). Every script: `SNAP_WT` overridable worktree root, venv check, daemon-import guard (must resolve inside `SNAP_WT`), env scrub (POSTGRES_*/ENSEMBLE_*/DATABASE_* — live-DB fence), `timeout 240` + junitxml to `$SNAPAB_OUT/<slice>.xml`, `RESULT: PASS/TIMEOUT/FAIL` contract, `-n auto` xdist (repo convention per `regression_unit_services_test.sh`; 8-core calibration 3.9–9.5 tests/s). Selection = commit-stable letter-range globs (`test_[a-h]*.py` style) so base and branch run byte-identical invocation shape (LESSONS 2026-09-23 fairness rule). Run each as `bash test/packs/ab/<slice>.sh` at BOTH commits; adjudicate per-node reds by node-ID + signature diff.
+
+Exclusions (documented, never silent): `tests/e2e` (requires real daemon on localhost:8079 — docstring-verified; e2e lane is judged, not suite-run; `test_context_injection_hybrid.py` errors at collection without daemon); `tests/postgres` (322 tests, all deselected by repo addopts `-m 'not integration and not postgres'` — PG hard fence); `tests/manual`, `tests/mocks`, `tests/probe`, `tests/regression`, `tests/support`, `tests/fixtures`, `tests/helpers`, `tests/packs` (0 pytest-collectable tests — support/manual runners). Deselected-by-addopts inside included dirs (integration 328, job_queue 3, opencode 4, root 12) are repo-config semantics, identical both commits.
+
+Quarantine handling: ONLY the 5 × TestAccessMemoryArchive nodes are `--deselect`ed (repo mechanism from `tools_suite_unit_test.sh`; QUARANTINE.md rows 2026-08-20) — in `unit_tools_a_o_unit_test.sh` (the slice containing `test_archive_lifecycle.py`), identically at both commits. ALL other known-red families (fenced set incl. TestSite1InlineMirrorFinalize ×3 in `job_queue_a_l`, enqueue_shared drift in `root_r_z`, proxy_phase1, watchover, sqlite-20260714 cascade…) RUN unmodified — identical reds at both commits ARE the fence evidence.
+
+Smoke-proven at HEAD: `unit_routers_unit_test.sh` → 471P/3F in 20.6s, junit `tests="474"`, RESULT+exit-code contract verified (3F = `test_stop_instance_subtree` `originator_instance_id` kwarg TypeError — kwarg present 4× at BOTH commits, zero diff overlap either file → expect base-identical; A/B adjudicates).
+
+| Slice script (`test/packs/ab/`) | Scope | Tests | Est |
+|---|---|---|---|
+| `top_misc_unit_test.sh` | tests/api + lint + manager + static + property + performance + migration + repositories | 548 | ~2 min |
+| `top_services_unit_test.sh` | tests/services | 622 | ~2.5 min |
+| `top_message_queue_redesign_unit_test.sh` | tests/message_queue_redesign | 470 | ~2 min |
+| `top_opencode_unit_test.sh` | tests/opencode | 505 | ~2.5 min |
+| `top_integration_integration_test.sh` | tests/integration (collected set under default addopts) | 789 | ~3.5 min |
+| `top_tools_unit_test.sh` | tests/tools | 274 | ~1.5 min |
+| `root_a_h_unit_test.sh` | tests/ root `test_[a-h]*.py` | 970 | ~2 min |
+| `root_i_q_unit_test.sh` | tests/ root `test_[i-q]*.py` | 1604 | ~3.5 min |
+| `root_r_z_unit_test.sh` | tests/ root `test_[r-z]*.py` (incl. `test_enqueue_shared.py`) | 1585 | ~3.5 min |
+| `unit_root_a_b_unit_test.sh` | tests/unit root `test_[a-b]*.py` | 1036 | ~2.5 min |
+| `unit_root_c_e_unit_test.sh` | tests/unit root `test_[c-e]*.py` | 974 | ~2.5 min |
+| `unit_root_f_l_unit_test.sh` | tests/unit root `test_[f-l]*.py` | 1326 | ~3 min |
+| `unit_root_m_o_unit_test.sh` | tests/unit root `test_[m-o]*.py` | 1099 | ~2.5 min |
+| `unit_root_p_r_unit_test.sh` | tests/unit root `test_[p-r]*.py` | 1275 | ~3 min |
+| `unit_root_s_unit_test.sh` | tests/unit root `test_s*.py` | 877 | ~2 min |
+| `unit_root_t_z_unit_test.sh` | tests/unit root `test_[t-z]*.py` | 831 | ~2 min |
+| `unit_tools_a_o_unit_test.sh` | tests/unit/tools `test_[a-o]*.py` + 5 archive deselects | 1107 | ~2 min |
+| `unit_tools_p_z_unit_test.sh` | tests/unit/tools `test_[p-z]*.py` | 1948 | ~3.5 min |
+| `unit_routers_unit_test.sh` | tests/unit/routers | 474 | ~1 min (smoke: 20.6s) |
+| `unit_services_a_l_unit_test.sh` | tests/unit/services `test_[a-l]*.py` | 1208 | ~3 min |
+| `unit_services_m_z_unit_test.sh` | tests/unit/services `test_[m-z]*.py` | 705 | ~2 min |
+| `unit_small_subdirs_unit_test.sh` | tests/unit/{checkpoint_adapter,config,graph,job_queue,job_state,models,persistence,rag,repositories,sources} | 481 | ~2 min |
+| `job_queue_a_l_unit_test.sh` | tests/job_queue `test_[a-l]*.py` (incl. TestSite1InlineMirrorFinalize ×3 fenced red) | 1083 | ~2.5 min |
+| `job_queue_m_z_unit_test.sh` | tests/job_queue `test_[m-z]*.py` | 848 | ~2 min |
+
+Sizing note: 6–12-slice target infeasible for this suite — 22,639 tests at observed repo xdist rates (3.9–9.5 tests/s, per fs-tool-guardrails gate pack tallies) needs ≥19 slices under the 240s cap; split-don't-extend per LESSONS 2026-09-23 §outer-cap.
