@@ -1,5 +1,20 @@
 # Test Packs
 
+## Completed commission — V0.15.3 UPGRADE TOOL-LANE FIX ACCEPTANCE (2026-09-26)
+
+Branch `feature/upgrade-tool-lane-fix` @ `a95b7028` (base `139ba352` = v0.15.2). INDEPENDENT final gate before release-cut. **✅ VERDICT: PASS — zero mission-caused failures; all 5 defect arms DEAD; tool-lane e2e on dev all-phases PASS; mock audit all-real-semantics.** All runs env-fenced (`env -u POSTGRES_* PG* ENSEMBLE_UPGRADE_LIVE ENSEMBLE_ROLLBACK_SAFE`), `timeout 300` wrappers, pre-flight HEAD/branch pin by every worker.
+
+| Pack / scope | Invocation | Result |
+|---|---|---|
+| `upgrade_tool_interlock_unit_test` (registered: `test/packs/upgrade_tool_interlock_unit_test.sh`) | `timeout 300 bash test/packs/upgrade_tool_interlock_unit_test.sh` | ✅ PASS **274/274** in 13.29s — fresh reproduction of prior claim; extensions (verified-arm, arm-preflight tokens, child-exit watcher) green |
+| pytest battery (scoped, not a pack script) | `timeout 300 .venv/bin/pytest tests/unit/tools/test_upgrade_{journal,tools,registration}.py -q` | ✅ PASS **295/295** in 21.75s — exact match to prior claim |
+| `release_journal_unit_test` inner suite | `timeout 300 bash tests/test_release_journal.sh` ×2 @ HEAD + ×1 @ base worktree `139ba352` | ✅ ATTRIBUTION-CONFIRMED — HEAD **246P/42F** (definitive; 1st run 245P/43F incl. B2b flake), base 226P/42F, failure sets SYMMETRIC; **section 14 (9a-9g) 20/20 GREEN** (new-at-HEAD); all 42 = GNU date debt (lib.sh :84-89 ×41, :1238-1295 ×1); lib.sh sha256 identical HEAD↔base |
+| Breadth `tests/unit/tools/` | `timeout 300 .venv/bin/pytest tests/unit/tools/ -q` | ✅ PASS **3098P/7F/5S** in 221.97s — all 7F pre-existing (TestAccessMemoryArchive ×5 quarantined + mission-terminal watch ×2 base-evidenced @139ba352 byte-identical, quarantined) |
+| Breadth `tests/test_api.py` (path-corrected from commission's `tests/unit/test_api.py` — nonexistent) | `timeout 300 .venv/bin/pytest tests/test_api.py -q` | ✅ PASS **45P/2F** in 4.60s — both reds pre-existing-at-base (messages.py:325 Mock-await family 32→34, quarantined) |
+| E2E dev tool-lane (ad-hoc, not a pack script) | standalone #!/bin/bash scrub wrapper (POSTGRES_SURVIVORS=0 echo-verified) + `ENSEMBLE_SELF_ENV=dev ./dev.sh` :8079 | ✅ ALL PHASES PASS — boot healthy 10s / sweep started (interval=90s, reaper=660s; `reconcile_boot_sweep alive=0 reaped=0 errors=0`; api.py:1399 wiring) / mirrors correct-for-dev (read surface IS the tool lane; env-self-match fence holds) / real `system_upgrade {target_env:dev, dry_run:true}` → exact `no-staged-install` refusal, daemon healthy, NOT a live arm / live journal sha256 IDENTICAL before+after / SIGTERM teardown ~4s, 9797+7979 untouched |
+
+Full evidence: `RESULTS/2026-09-26-v0153-tool-lane-fix-acceptance.md`. Quarantine deltas: messages-Mock-await family +2, mission-terminal watch family ×2 new, GNU family re-verified (+B2b flake member).
+
 ## Completed commission — SETTINGS-SCROLL FIX ACCEPTANCE (2026-09-26)
 
 Branch `fix/settings-scroll` @ `dd14d975` (FE-only: 2 SCSS lines in settings.component.scss). Acceptance gate for the fix + downstream v0.15.2. Ad-hoc one-shot evidence packs, registered here for PACKS.md integrity; scripts + logs live in `.agents/tester/RESULTS/assets/2026-09-26-settings-scroll/` (NOT test/packs/ — commission constrained artifacts to .agents/tester/RESULTS/*).
