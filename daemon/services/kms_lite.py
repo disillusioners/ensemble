@@ -161,8 +161,20 @@ class _KMSStore:
             # refusal, never a silent fall-through to the inline var.
             key_file = os.environ.get(SYSTEM_ENCRYPTION_KEY_FILE_ENV, "").strip()
             if key_file:
-                with open(key_file, "r", encoding="utf-8") as fh:
-                    key = fh.read().rstrip("\r\n")
+                # P3 review F5: wrap the file read in try/except OSError
+                # so a 0o000 perms file or a missing file surfaces as
+                # the typed ``KMSUnavailableError`` (the documented
+                # ``kms_request`` / ``kms_resolve_handle`` exception),
+                # not a raw ``PermissionError`` / ``OSError`` leaking
+                # from the resolve path.
+                try:
+                    with open(key_file, "r", encoding="utf-8") as fh:
+                        key = fh.read().rstrip("\r\n")
+                except OSError as exc:
+                    raise KMSUnavailableError(
+                        f"KMS-Lite unavailable: cannot read "
+                        f"SYSTEM_ENCRYPTION_KEY_FILE: {exc}"
+                    ) from exc
                 if not key:
                     raise KMSUnavailableError(
                         "KMS-Lite unavailable: SYSTEM_ENCRYPTION_KEY_FILE "
@@ -383,12 +395,19 @@ def kms_request(
         ``{"handle": "KMS_HANDLE_<uuid>", "fingerprint": "<sha256[:16] hex>"}``
 
     Raises:
-        KMSUnavailableError: when ``SYSTEM_ENCRYPTION_KEY`` is absent /
-            invalid (WP9 fail-closed invariant) OR when the WP13a
-            hardening gate refuses the key source (file perms > 0o600,
-            stale key file, no key configured). NEVER raises any other
-            exception — partial mint states are impossible because the
-            store writes are atomic under the per-instance lock.
+        KMSUnavailableError:
+            * when ``SYSTEM_ENCRYPTION_KEY`` is absent or invalid
+              (WP9 fail-closed invariant),
+            * OR when the WP13a hardening gate refuses the key source
+              (file perms > 0o600, stale key file, no key configured),
+            * OR when the file source's ``open()`` raises ``OSError``
+              (e.g. 0o000 perms, missing file) — the resolve path
+              surfaces this as the typed ``KMSUnavailableError`` rather
+              than leaking the raw ``OSError`` (P3 review F5).
+
+            Partial mint states are impossible because the store writes
+            are atomic under the per-instance lock — on refusal, no
+            handle is minted and no audit line is emitted.
         ValueError: when ``service`` or ``reason`` is empty.
 
     Invariant:

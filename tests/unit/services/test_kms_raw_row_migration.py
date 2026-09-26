@@ -139,41 +139,70 @@ def _migration_lines(path: Path) -> list[dict[str, object]]:
 
 
 class TestSecretKeyMatcher:
-    """The migration must match the SAME secret-key list as redact_secrets."""
+    """The migration's destructive-rewrite matcher is a STRICT SUBSET of
+    the presentation redact tuple (P3 review F2)."""
 
-    def test_secret_key_matcher_matches_redact_secrets(self) -> None:
+    def test_migration_matcher_is_strict_subset_of_redact_secrets(self) -> None:
         from daemon.routers.mcp_servers import redact_secrets
 
-        # A mixed set — every key redact_secrets redacts, our matcher
-        # also considers secret; and every key redact_secrets passes
-        # through, our matcher also passes through.
+        # A mixed set spanning the universe of (parity, divergence) cases.
+        # Parity holds on the {KEY,TOKEN,SECRET,PASSWORD} substrings;
+        # divergence appears on {BASE, HEADERS} substrings (the migration
+        # excludes them; redact includes them as defense-in-depth).
         test_keys = [
-            "LOG_LEVEL",
-            "MY_MCP_TRANSPORT",
-            "DEBUG",
+            # parity (migration says secret, redact says secret)
             "OPEN_DESIGN_API_KEY",
             "MY_TOKEN",
             "PASSWORD",
-            "AUTH_HEADER",
-            "API_BASE",
-            "EXTRA_HEADERS",
             "CLIENT_SECRET",
-            "MYAPP_BASE_URL",
             "X_AUTH_TOKEN",
+            # parity (neither says secret)
+            "LOG_LEVEL",
+            "MY_MCP_TRANSPORT",
+            "DEBUG",
+            "AUTH_HEADER",   # NOTE: contains "HEADER" but not "HEADERS"
             "OS_ENV_VAR",
             "TRANSPORT",
             "PATH",
             "HOME",
+            # DIVERGENCE: redact says secret (BASE / HEADERS substring),
+            # migration says NOT secret (destructive rewrite excluded).
+            "API_BASE",
+            "EXTRA_HEADERS",
+            "MYAPP_BASE_URL",
         ]
         for k in test_keys:
             c = {"env": {k: "value"}}
             redacted = redact_secrets(c)
             upstream_says_secret = redacted["env"][k] == "[REDACTED]"
             local_says_secret = migrate._is_secret_env_key(k)
-            assert local_says_secret == upstream_says_secret, (
-                f"matcher divergence on key={k!r}: "
-                f"redact_secrets={upstream_says_secret}, "
-                f"_is_secret_env_key={local_says_secret}"
+            # Migration ⇒ redact (strict subset invariant).
+            assert local_says_secret <= upstream_says_secret, (
+                f"subset violation on key={k!r}: migration says secret "
+                f"but redact does not ({local_says_secret=} vs "
+                f"{upstream_says_secret=}) — this would mean we are "
+                f"rewriting something the presentation layer doesn't even "
+                f"consider sensitive."
+            )
+
+    def test_migration_excludes_base_and_headers_while_redact_includes(self) -> None:
+        """Pin the intentional divergence: the {BASE, HEADERS} substrings
+        are presentation-redacted but MUST NOT trigger a destructive
+        rewrite (rewriting them would corrupt config)."""
+        divergent_keys = ["API_BASE", "EXTRA_HEADERS", "MYAPP_BASE_URL"]
+        for k in divergent_keys:
+            assert migrate._is_secret_env_key(k) is False, (
+                f"migration matcher leaked into BASE/HEADERS territory "
+                f"for {k!r} — would corrupt config on rewrite"
+            )
+            # And redact_secrets MUST consider them sensitive
+            # (else the subset invariant is vacuous).
+            from daemon.routers.mcp_servers import redact_secrets
+            redacted = redact_secrets({"env": {k: "value"}})
+            assert redacted["env"][k] == "[REDACTED]", (
+                f"redact_secrets no longer marks {k!r} as sensitive — "
+                f"either redact_secrets changed or the subset test is "
+                f"vacuous"
             )
 
     def test_marker_value_is_recognized(self) -> None:
@@ -679,6 +708,253 @@ class TestKMSUnavailable:
 
 
 # ---------------------------------------------------------------------------
+# F2 — destructive-rewrite subset: *_API_BASE / *_EXTRA_HEADERS are skipped
+# ---------------------------------------------------------------------------
+
+
+class TestStrictMatcherSubsetApplied:
+    """End-to-end coverage: ``*_API_BASE`` and ``*_EXTRA_HEADERS`` env
+    entries are NOT migrated (counted as skipped-clean) because the
+    destructive-rewrite matcher is now a strict subset (P3 review F2).
+    ``OPEN_DESIGN_API_KEY`` / ``X_AUTH_TOKEN`` still migrate."""
+
+    def test_api_base_env_is_skipped_not_migrated(
+        self, sqlite_engine: Engine, fernet_key: str, tmp_path: Path
+    ) -> None:
+        original_url = "https://api.example.com/v1"
+        row = _make_row(
+            sqlite_engine,
+            name="opendesign",
+            env={"OPENAI_API_BASE": original_url},
+        )
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        summary = migrate.run_migration(
+            sqlite_engine, jsonl_path=jsonl, dry_run=False
+        )
+        # Migration refused to rewrite the URL.
+        assert summary.migrated == 0
+        assert summary.skipped_clean == 1
+        assert summary.skipped_marker == 0
+        assert summary.audit_lines_emitted == 0
+        # Original value preserved byte-for-byte.
+        reread = _read_row(sqlite_engine, row.id)
+        assert reread is not None
+        assert reread.config["env"]["OPENAI_API_BASE"] == original_url
+        # No KMS handle was minted — store size still 0.
+        assert kms_lite_mod._get_store().size() == 0
+        # No audit lines written.
+        assert _audit_lines(jsonl) == []
+
+    def test_extra_headers_env_is_skipped_not_migrated(
+        self, sqlite_engine: Engine, fernet_key: str, tmp_path: Path
+    ) -> None:
+        original_headers = '{"X-Custom": "value"}'
+        row = _make_row(
+            sqlite_engine,
+            name="opendesign",
+            env={"MCP_EXTRA_HEADERS": original_headers},
+        )
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        summary = migrate.run_migration(
+            sqlite_engine, jsonl_path=jsonl, dry_run=False
+        )
+        assert summary.migrated == 0
+        assert summary.skipped_clean == 1
+        reread = _read_row(sqlite_engine, row.id)
+        assert reread is not None
+        assert reread.config["env"]["MCP_EXTRA_HEADERS"] == original_headers
+
+    def test_open_design_api_key_still_migrates(
+        self, sqlite_engine: Engine, fernet_key: str, tmp_path: Path
+    ) -> None:
+        # Sanity: the {KEY, TOKEN, SECRET, PASSWORD} subset still matches.
+        row = _make_row(
+            sqlite_engine,
+            name="opendesign",
+            env={"OPEN_DESIGN_API_KEY": "sk-test-plain"},
+        )
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        summary = migrate.run_migration(
+            sqlite_engine, jsonl_path=jsonl, dry_run=False
+        )
+        assert summary.migrated == 1
+        reread = _read_row(sqlite_engine, row.id)
+        assert reread is not None
+        assert is_marker(reread.config["env"]["OPEN_DESIGN_API_KEY"])
+
+    def test_x_auth_token_still_migrates(
+        self, sqlite_engine: Engine, fernet_key: str, tmp_path: Path
+    ) -> None:
+        row = _make_row(
+            sqlite_engine,
+            name="opendesign",
+            env={"X_AUTH_TOKEN": "token-plain-xyz"},
+        )
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        summary = migrate.run_migration(
+            sqlite_engine, jsonl_path=jsonl, dry_run=False
+        )
+        assert summary.migrated == 1
+        reread = _read_row(sqlite_engine, row.id)
+        assert reread is not None
+        assert is_marker(reread.config["env"]["X_AUTH_TOKEN"])
+
+    def test_mixed_base_and_key_row_only_rewrites_key(
+        self, sqlite_engine: Engine, fernet_key: str, tmp_path: Path
+    ) -> None:
+        """A row carrying both ``*_API_BASE`` and a true secret must
+        rewrite ONLY the secret — the URL stays put."""
+        row = _make_row(
+            sqlite_engine,
+            name="opendesign",
+            env={
+                "OPENAI_API_BASE": "https://api.example.com/v1",
+                "OPEN_DESIGN_API_KEY": "sk-plain-mixed",
+            },
+        )
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        summary = migrate.run_migration(
+            sqlite_engine, jsonl_path=jsonl, dry_run=False
+        )
+        assert summary.migrated == 1
+        # ONE migration_rewrite line (per row), ONE kms_issue line (per
+        # minted secret slot — the URL was not minted).
+        assert len(_migration_lines(jsonl)) == 1
+        assert len([l for l in _audit_lines(jsonl) if l["event"] == "kms_issue"]) == 1
+        # Only the API_KEY became a marker.
+        reread = _read_row(sqlite_engine, row.id)
+        assert reread is not None
+        env = reread.config["env"]
+        assert env["OPENAI_API_BASE"] == "https://api.example.com/v1"
+        assert is_marker(env["OPEN_DESIGN_API_KEY"])
+
+
+# ---------------------------------------------------------------------------
+# F1 — operational hard-gate (CLI-only; SQLite / dry-run exempt)
+# ---------------------------------------------------------------------------
+
+
+class TestOperationalHardGate:
+    """``main()`` MUST refuse to run a LIVE migration against a non-SQLite
+    ``--db-url`` unless the operator passes the explicit acknowledgement
+    flag (P3 review F1). SQLite paths and ``--dry-run`` are exempt."""
+
+    def test_cli_refuses_postgres_without_flag(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        # No --i-know-this-replaces-credentials, no --dry-run, non-SQLite
+        # --db-url ⇒ refusal exit.
+        with pytest.raises(SystemExit) as excinfo:
+            migrate.main(
+                [
+                    "--db-url",
+                    "postgresql://user:pass@localhost:5432/live_db",
+                    "--jsonl-path",
+                    str(jsonl),
+                ]
+            )
+        # Distinct exit code so operators can tell the refusal apart
+        # from the row-failure exit (2) and the clean-no-op exit (0/1).
+        assert excinfo.value.code == migrate._REPLACE_REFUSAL_EXIT_CODE
+        captured = capsys.readouterr()
+        assert "REFUSING to run against non-SQLite" in captured.err
+        assert "--i-know-this-replaces-credentials" in captured.err
+        assert "postgresql://user:pass@localhost:5432/live_db" in captured.err
+
+    def test_cli_proceeds_postgres_with_flag(
+        self,
+        sqlite_engine: Engine,
+        fernet_key: str,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # With the acknowledgement flag, the gate must NOT refuse. We
+        # cannot reach the real PG (worktree contract forbids it), so
+        # we monkey-patch ``_build_engine`` to return the in-memory
+        # SQLite engine and prove the gate does not stop the call.
+        from unittest.mock import patch
+
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        with patch.object(migrate, "_build_engine", return_value=sqlite_engine):
+            rc = migrate.main(
+                [
+                    "--db-url",
+                    "postgresql://user:pass@localhost:5432/live_db",
+                    "--jsonl-path",
+                    str(jsonl),
+                    "--i-know-this-replaces-credentials",
+                ]
+            )
+        # Empty DB ⇒ clean no-op exit code 0; the gate did NOT refuse.
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "REFUSING" not in captured.err
+
+    def test_cli_proceeds_sqlite_ungated(
+        self, sqlite_engine: Engine, fernet_key: str, tmp_path: Path
+    ) -> None:
+        from unittest.mock import patch
+
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        # SQLite URL + no flag ⇒ gate exempt, no refusal.
+        with patch.object(migrate, "_build_engine", return_value=sqlite_engine):
+            rc = migrate.main(
+                [
+                    "--db-url",
+                    "sqlite:///./data/ensemble.db",
+                    "--jsonl-path",
+                    str(jsonl),
+                ]
+            )
+        assert rc == 0  # no rows ⇒ clean exit
+
+    def test_cli_proceeds_dry_run_ungated_even_for_postgres(
+        self, sqlite_engine: Engine, fernet_key: str, tmp_path: Path
+    ) -> None:
+        from unittest.mock import patch
+
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        # Postgres URL + --dry-run ⇒ gate exempt (read-only).
+        with patch.object(migrate, "_build_engine", return_value=sqlite_engine):
+            rc = migrate.main(
+                [
+                    "--db-url",
+                    "postgresql://user:pass@localhost:5432/live_db",
+                    "--jsonl-path",
+                    str(jsonl),
+                    "--dry-run",
+                ]
+            )
+        assert rc == 0
+
+    def test_run_migration_function_is_not_gated(
+        self, sqlite_engine: Engine, fernet_key: str, tmp_path: Path
+    ) -> None:
+        """``run_migration()`` is the programmatic entry point used by
+        tests and dev scripts. The hard-gate is CLI-only — programmatic
+        callers are assumed to know what they are doing."""
+        jsonl = tmp_path / ".agents/shared/planning/designer-agent/install-audit.jsonl"
+        # The function accepts an Engine directly; no --db-url is parsed,
+        # so the gate cannot fire. This must always succeed regardless
+        # of engine type.
+        summary = migrate.run_migration(
+            sqlite_engine, jsonl_path=jsonl, dry_run=False
+        )
+        assert summary.pre_count == 0
+        assert summary.migrated == 0
+
+    def test_help_lists_acknowledgement_flag(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            migrate.main(["--help"])
+        assert excinfo.value.code == 0
+        captured = capsys.readouterr().out
+        assert "--i-know-this-replaces-credentials" in captured
+
+
+# ---------------------------------------------------------------------------
 # CLI surface
 # ---------------------------------------------------------------------------
 
@@ -695,3 +971,4 @@ class TestCLISurface:
         assert "--fail-fast" in captured
         assert "--actor" in captured
         assert "--db-url" in captured
+        assert "--i-know-this-replaces-credentials" in captured

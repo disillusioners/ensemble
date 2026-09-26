@@ -545,6 +545,129 @@ class TestCreatePooledConnection:
         assert mock_logger.error.call_count == 1, f"Expected 1 error, got {mock_logger.error.call_count}"
 
 
+# ---------------------------------------------------------------------------
+# P3 review F3 — ``_create_pooled_connection`` routes env through resolve_env
+# ---------------------------------------------------------------------------
+
+
+class TestKMSEnvResolution:
+    """``_create_pooled_connection`` MUST call ``resolve_env`` on the
+    stored env so pooled connections receive plaintext rather than
+    ``__KMS_REF__<handle>__`` markers (P3 review F3).
+
+    The seam is one line, but it closes a leak path: without it, a
+    pooled subprocess would see a literal marker in its env — which
+    the upstream service would not recognize as auth."""
+
+    @pytest.mark.asyncio
+    async def test_create_pooled_connection_routes_env_through_resolve_env(
+        self, pool
+    ) -> None:
+        """``_create_pooled_connection`` MUST call ``resolve_env`` on
+        the stored env (P3 review F3). The marker→plaintext swap is
+        verified separately in the next test against the env forwarded
+        to ``StdioServerParameters``."""
+        from daemon.services import kms_resolver
+        from daemon.services.kms_lite import kms_request, build_marker
+
+        # Mint a real handle so resolve_env has a real plaintext to
+        # return when called via the seam.
+        record = kms_request("opendesign", "test-resolve-env")
+        marker = build_marker(record["handle"])
+
+        config = McpStdioConfig(
+            transport="stdio",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            env={"OPENDESIGN_TOKEN": marker},
+        )
+        pool.register_server("opendesign", config)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=None)
+        mock_session.send_ping = AsyncMock()
+
+        with patch(
+            "daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=mock_cm
+        ), patch(
+            "daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session
+        ), patch(
+            "daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock
+        ) as mock_tools, patch(
+            "daemon.mcp.warmup_pool.adapt_mcp_tools"
+        ) as mock_adapt, patch(
+            "daemon.mcp.warmup_pool.resolve_env",
+            side_effect=kms_resolver.resolve_env,
+        ) as mock_resolve_env:
+            mock_tools.return_value = [MagicMock()]
+            mock_adapt.return_value = [MagicMock()]
+
+            await pool._create_pooled_connection("opendesign")
+
+        # resolve_env was called exactly once with the stored marker dict.
+        mock_resolve_env.assert_called_once_with({"OPENDESIGN_TOKEN": marker})
+
+    @pytest.mark.asyncio
+    async def test_create_pooled_connection_passes_env_to_stdio_server_params(
+        self, pool
+    ) -> None:
+        """The env passed to ``StdioServerParameters`` is the RESOLVED
+        env, not the stored env (P3 review F3)."""
+        from daemon.services import kms_resolver
+        from daemon.services.kms_lite import kms_request, build_marker
+
+        record = kms_request("opendesign", "test-resolve-env-2")
+        marker = build_marker(record["handle"])
+
+        config = McpStdioConfig(
+            transport="stdio",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            env={"OPENDESIGN_TOKEN": marker},
+        )
+        pool.register_server("opendesign", config)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=None)
+        mock_session.send_ping = AsyncMock()
+
+        with patch(
+            "daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=mock_cm
+        ), patch(
+            "daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session
+        ), patch(
+            "daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock
+        ) as mock_tools, patch(
+            "daemon.mcp.warmup_pool.adapt_mcp_tools"
+        ) as mock_adapt, patch(
+            "daemon.mcp.warmup_pool.StdioServerParameters",
+            wraps=__import__("mcp").StdioServerParameters,
+        ) as mock_params:
+            mock_tools.return_value = [MagicMock()]
+            mock_adapt.return_value = [MagicMock()]
+
+            await pool._create_pooled_connection("opendesign")
+
+        # StdioServerParameters was called once with env=RESOLVED (the
+        # marker dict replaced by the plaintext dict via resolve_env).
+        mock_params.assert_called_once()
+        forwarded_env = mock_params.call_args.kwargs.get("env")
+        assert forwarded_env is not None
+        # Plaintext, not the marker, was forwarded.
+        assert forwarded_env["OPENDESIGN_TOKEN"] != marker
+        assert kms_resolver.is_marker(forwarded_env["OPENDESIGN_TOKEN"]) is False
+
+
 class TestWarmup:
     """Tests for warmup method."""
 

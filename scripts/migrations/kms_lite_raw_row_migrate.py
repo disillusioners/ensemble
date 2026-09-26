@@ -15,12 +15,14 @@ Algorithm (per ``mcp_servers`` row, inside one DB transaction — PR6):
 
 1. Walk ``config.env`` items.
 2. For each ``(env_key, value)`` pair: if ``env_key`` matches the
-   canonical secret-key list (the SAME matcher as
-   ``daemon/routers/mcp_servers.py:98``; mirrored exactly here because
-   ``daemon/routers/`` is owned by a sibling coder) AND the value is
-   NOT already a KMS marker (``daemon/services/kms_resolver.is_marker``),
-   mint a handle via ``daemon/services/kms_lite.kms_request`` and
-   rewrite the value to ``__KMS_REF__<handle>__``.
+   DESTRUCTIVE-REWRITE subset (see :data:`_SECRET_KEY_MARKERS` below —
+   the strict subset ``{"KEY", "TOKEN", "SECRET", "PASSWORD"}`` of
+   ``daemon/routers/mcp_servers.py::redact_secrets``' wider marker
+   tuple; ``BASE`` and ``HEADERS`` are excluded because they are not
+   secrets) AND the value is NOT already a KMS marker
+   (``daemon/services/kms_resolver.is_marker``), mint a handle via
+   ``daemon/services/kms_lite.kms_request`` and rewrite the value to
+   ``__KMS_REF__<handle>__``.
 3. Append the binding to ``instance_metadata.bound_handles`` with
    shape ``{handle, env_key, fingerprint, actor}`` — the same shape
    ``kms_attach`` writes (mirror exactly; this script does not import
@@ -91,6 +93,25 @@ use, so all event types land in one lane. The on-disk line carries the
 helper's §7.4 field set (``parent`` present as ``null``); ``secret_ref``
 remains the HANDLE only.
 
+⚠️  REPLACEMENT SEMANTICS — OPERATIONAL HARD-GATE (P3 review F1):
+
+This migration's day-1 mint primitive does NOT have an ``kms_import``
+path (§7.5a defers it). For every plaintext it migrates, the script
+MINTS A NEW RANDOM SECRET — the original credential the external
+service has never seen. After migration, markers resolve to NEW random
+secrets at spawn time, breaking the running config's auth until the
+operator re-pairs the external service with the new secret
+(service-by-service). This is acceptable for the SQLite dev path (the
+operator is the same human running the migration and re-pairing) but
+DANGEROUS for a live PG DB where the operator may run this against a
+production row set unaware of the replacement semantics.
+
+For that reason ``main()`` REFUSES to run against a non-SQLite
+``--db-url`` unless ``--i-know-this-replaces-credentials`` is passed.
+The gate is CLI-only (programmatic ``run_migration()`` callers are
+dev-only and assume they know what they are doing). ``--dry-run`` is
+exempt because it does not write.
+
 Constraints (mission):
 
 * Worktree-only — never reach into live or demo daemons.
@@ -121,12 +142,16 @@ sys.path.insert(0, str(_REPO_ROOT))
 from sqlalchemy.engine import Engine
 
 # Sibling-owned modules — IMPORT only (no re-implementation of the matching
-# logic). The key matcher below MIRRORS the marker tuple used by
-# daemon/routers/mcp_servers.py:98 exactly (case-insensitive substring match
-# against ("KEY","TOKEN","SECRET","PASSWORD","BASE","HEADERS")). Reuse via
-# import is impossible because redact_secrets operates on a full config dict
-# and substitutes values, not on a per-key check; the matcher tuple is
-# module-local in that file. Mirror exactly and reference the source.
+# logic). The destructive-rewrite key matcher below is a STRICT SUBSET of
+# the marker tuple used by ``daemon/routers/mcp_servers.py::redact_secrets``
+# (case-insensitive substring match against
+# ``("KEY","TOKEN","SECRET","PASSWORD","BASE","HEADERS")`` at
+# daemon/routers/mcp_servers.py:226). Reuse via import is impossible
+# because ``redact_secrets`` operates on a full config dict and
+# substitutes values, not on a per-key check; the matcher tuple is
+# module-local in that file. See the rationale on
+# :data:`_SECRET_KEY_MARKERS` below for why ``BASE``/``HEADERS`` are
+# excluded from the rewrite subset but kept in the presentation layer.
 from daemon.services.install_audit import (
     INSTALL_AUDIT_RELATIVE_PATH,
     append_install_audit,
@@ -138,36 +163,58 @@ logger = logging.getLogger("kms_lite_migration")
 
 
 # ---------------------------------------------------------------------------
-# Key matcher — mirrors redact_secrets() at daemon/routers/mcp_servers.py:98
+# Key matcher — DESTRUCTIVE rewrite subset (P3 review F2)
 # ---------------------------------------------------------------------------
 
-# Canonical secret-key markers. MUST stay byte-equal to the tuple in
-# daemon/routers/mcp_servers.py::redact_secrets(). If the canonical list
-# ever changes there, change it here in the SAME commit.
+# Destructive-rewrite subset of secret-key markers. MUST stay a STRICT
+# SUBSET of the canonical tuple in ``daemon/routers/mcp_servers.py::redact_secrets``
+# at line 226 (which is ``("KEY", "TOKEN", "SECRET", "PASSWORD", "BASE",
+# "HEADERS")``).
+#
+# ``BASE`` and ``HEADERS`` are PRESENTATION-safe to redact (they guard the
+# response payload so a leaked URL or header dict cannot surface a token),
+# but they are NOT secrets — ``*_API_BASE`` is an endpoint URL and
+# ``*_EXTRA_HEADERS`` is a config dict the operator set. Rewriting them
+# via the day-1 mint primitive would CORRUPT CONFIG: the migration
+# mints a NEW random secret (no ``kms_import`` primitive exists day-1;
+# §7.5a defers an import path), so a ``*_API_BASE`` value like
+# ``https://api.example.com/v1`` would be replaced by a NEW random
+# secret, breaking the running config forever.
+#
+# If the canonical list ever changes upstream, update ``_SECRET_KEY_MARKERS``
+# in the same commit AND re-verify this subset contract still holds.
 _SECRET_KEY_MARKERS: tuple[str, ...] = (
     "KEY",
     "TOKEN",
     "SECRET",
     "PASSWORD",
-    "BASE",
-    "HEADERS",
 )
 
 
 def _is_secret_env_key(env_key: str) -> bool:
-    """Return True iff ``env_key`` matches the canonical secret-key list.
+    """Return True iff ``env_key`` matches the DESTRUCTIVE-REWRITE secret subset.
 
-    Mirrors the matcher inside ``daemon.routers.mcp_servers.redact_secrets``
-    at line 98 EXACTLY: case-insensitive substring match against
-    ``("KEY","TOKEN","SECRET","PASSWORD","BASE","HEADERS")``. See
-    that function for the rationale on ``BASE`` (``*_API_BASE`` endpoint
-    URLs) and ``HEADERS`` (``*_EXTRA_HEADERS`` HTTP headers dict).
+    The migration's matcher is a STRICT SUBSET of the canonical redact
+    tuple at ``daemon.routers.mcp_servers.redact_secrets`` line 226.
+    Rationale (P3 review F2): ``redact_secrets`` is a *presentation*
+    guard (replace value with ``"[REDACTED]"`` in the response payload),
+    while this function gates a *destructive rewrite* (mint a NEW random
+    secret to replace the plaintext — no import primitive day-1, §7.5a
+    defers). ``BASE`` (``*_API_BASE`` endpoint URL) and ``HEADERS``
+    (``*_EXTRA_HEADERS`` config dict) are correctly included in
+    presentation redaction (defense in depth) but MUST NOT be migrated:
+    rewriting them would corrupt running config.
 
-    We mirror here because ``redact_secrets`` operates on a full config
-    dict and rewrites values, not on a per-key check; the matcher tuple
-    is module-local there and we cannot import it without touching a
-    sibling-owned file. If the canonical list is ever revised upstream,
-    update ``_SECRET_KEY_MARKERS`` in the same commit.
+    Match rule (case-insensitive substring):
+
+    * Returns True iff ``env_key`` contains any of
+      ``("KEY", "TOKEN", "SECRET", "PASSWORD")``.
+    * Returns False otherwise (including ``*_API_BASE`` / ``*_EXTRA_HEADERS``).
+
+    See ``daemon.routers.mcp_servers.redact_secrets`` for the upstream
+    rationale on the wider marker set. If that tuple is ever revised,
+    update ``_SECRET_KEY_MARKERS`` in the same commit AND re-verify the
+    subset contract still holds.
     """
     if not isinstance(env_key, str) or not env_key:
         return False
@@ -691,6 +738,83 @@ def _print_summary(summary: MigrationSummary) -> None:
     print("=" * 70)
 
 
+# ---------------------------------------------------------------------------
+# Operational hard-gate (P3 review F1)
+# ---------------------------------------------------------------------------
+
+# Exit code emitted by ``main()`` when the live-DB gate refuses to run.
+# Distinct from the row-failure exit (2) and the clean-no-op / no-rows exit
+# (0/1) so CI scripts and operators can tell the refusal apart from a
+# normal run. ``3`` is otherwise unused by the script's exit surface.
+_REPLACE_REFUSAL_EXIT_CODE = 3
+
+
+def _is_sqlite_url(db_url: str) -> bool:
+    """Return True iff ``db_url`` is a SQLAlchemy SQLite URL."""
+    # SQLAlchemy prefixes; covers ``sqlite:///``, ``sqlite:///:memory:``,
+    # and the relative ``sqlite:///./data/ensemble.db`` form.
+    return db_url.split(":", 1)[0].lower() == "sqlite"
+
+
+def _check_live_db_gate(
+    db_url: str, *, dry_run: bool, i_know_replaces: bool
+) -> None:
+    """Refuse to run a LIVE (non-dry-run) migration against a non-SQLite DB
+    unless the operator has explicitly acknowledged the replacement
+    semantics (P3 review F1).
+
+    Rationale: the day-1 mint primitive has no ``kms_import`` path
+    (§7.5a defers it), so every migrated plaintext is REPLACED by a NEW
+    random secret the external service has never seen. On a live DB this
+    silently breaks auth for every migrated MCP server until the
+    operator re-pairs the external service with the new credential —
+    precisely the kind of accidental destruction a hard-gate exists to
+    prevent.
+
+    Exemptions:
+
+    * ``--dry-run`` — read-only; safe to run on any URL.
+    * ``sqlite:`` URLs — the day-1 dev path where the operator running
+      the migration is the same human who will re-pair any external
+      service. Still informational (the WARNING message prints) so a
+      future operator running against an unexpected ``sqlite`` URL sees
+      the replacement semantics.
+
+    Raises:
+        SystemExit: with ``_REPLACE_REFUSAL_EXIT_CODE`` when the gate
+            refuses. The printed message includes the precise flag the
+            operator needs to pass to override (``--i-know-this-replaces-credentials``).
+    """
+    if dry_run:
+        return
+    if i_know_replaces:
+        return
+    if _is_sqlite_url(db_url):
+        return
+    msg = (
+        "REFUSING to run against non-SQLite --db-url without explicit "
+        "acknowledgement of replacement semantics.\n"
+        "\n"
+        "This migration mints a NEW random secret for every plaintext it "
+        "rewrites (no kms_import primitive exists day-1; §7.5a defers an "
+        "import path). The original credential the external service has "
+        "never seen is REPLACED — markers resolve to NEW random secrets "
+        "at spawn time, breaking the running config's auth until the "
+        "operator re-pairs each external service with its new credential.\n"
+        "\n"
+        f"  --db-url : {db_url!r}\n"
+        "  --dry-run: False\n"
+        "\n"
+        "To proceed against a non-SQLite DB, re-run with:\n"
+        "  --i-know-this-replaces-credentials\n"
+        "\n"
+        "Or run with --dry-run first to inspect what would be migrated "
+        "(read-only; no writes, no audit lines)."
+    )
+    print(msg, file=sys.stderr)
+    raise SystemExit(_REPLACE_REFUSAL_EXIT_CODE)
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="kms_lite_raw_row_migrate",
@@ -727,6 +851,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_ACTOR,
         help=f"Audit-line actor id (default: {DEFAULT_ACTOR!r}).",
     )
+    p.add_argument(
+        "--i-know-this-replaces-credentials",
+        dest="i_know_replaces",
+        action="store_true",
+        help=(
+            "Acknowledgement flag for non-SQLite --db-url: confirms the "
+            "operator understands the migration REPLACES plaintexts with "
+            "NEW random secrets (no kms_import primitive day-1; §7.5a "
+            "defers an import path). Required to run LIVE against any "
+            "non-SQLite DB. SQLite and --dry-run are exempt."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -737,6 +873,14 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     args = _parse_args(argv)
+    # Operational hard-gate (P3 review F1). CLI-only — programmatic
+    # ``run_migration()`` callers are dev/test only and assume they know
+    # what they are doing.
+    _check_live_db_gate(
+        args.db_url,
+        dry_run=args.dry_run,
+        i_know_replaces=args.i_know_replaces,
+    )
     jsonl_path = _resolve_jsonl_path(_REPO_ROOT, args.jsonl_path)
     engine = _build_engine(args.db_url)
     summary = run_migration(

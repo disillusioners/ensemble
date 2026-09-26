@@ -385,3 +385,102 @@ class TestKmsIssueAuditLine:
             assert kms_lite.kms_fingerprint(record["handle"]) is not None
         finally:
             kms_lite.reset_store_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# P3 review F5 — typed KMSUnavailableError on file-read failure
+# ---------------------------------------------------------------------------
+
+
+class TestKeyFileReadFailure:
+    """``_build_fernet`` MUST surface a file-read failure as the typed
+    ``KMSUnavailableError`` rather than leaking the raw ``OSError`` /
+    ``PermissionError`` from the resolve path (P3 review F5).
+
+    Both ``kms_request`` (which gates on
+    :func:`daemon.util.key_hardening.validate_key_source` first) and
+    ``kms_resolve_handle`` (which goes straight to ``_get_store()``)
+    MUST raise ``KMSUnavailableError`` when the key file is unreadable.
+    """
+
+    @pytest.fixture
+    def unreadable_key_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Path:
+        """Write a valid Fernet key to a file and chmod 0o000.
+
+        Skips (yields ``None``) when running as root — chmod 0o000 is
+        a no-op for uid 0.
+        """
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            yield None  # type: ignore[misc]
+            return
+        key_path = tmp_path / "system_encryption.key"
+        key_path.write_text(Fernet.generate_key().decode(), encoding="utf-8")
+        key_path.chmod(0o000)
+        # The file env var points at this file; the inline env var is
+        # unset so ``_build_fernet`` follows the file-source path.
+        monkeypatch.setenv(
+            "SYSTEM_ENCRYPTION_KEY_FILE", str(key_path)
+        )
+        monkeypatch.delenv("SYSTEM_ENCRYPTION_KEY", raising=False)
+        yield key_path
+        # Restore perms so tmp_path cleanup can delete the file.
+        try:
+            key_path.chmod(0o600)
+        except OSError:
+            pass
+
+    def test_unreadable_file_raises_kms_unavailable_from_kms_request(
+        self, unreadable_key_file
+    ) -> None:
+        if unreadable_key_file is None:
+            pytest.skip("running as root — chmod 0o000 is a no-op")
+        kms_lite.reset_store_for_tests()
+        with pytest.raises(KMSUnavailableError) as excinfo:
+            kms_request("opendesign", "install")
+        # WP13a validator catches the 0o000 perms first (its own
+        # "not readable" code path); either that or the F5 wrap must
+        # have produced the typed exception. We assert the TYPE; the
+        # intermediate code path can be either (or both).
+        assert isinstance(excinfo.value, KMSUnavailableError)
+        # The error message MUST give the operator enough signal to
+        # act — accept any of: the F5 wrap message ("cannot read
+        # SYSTEM_ENCRYPTION_KEY_FILE"), the validator's refusal
+        # summary ("key hardening refusal"), or the validator's
+        # ``[KEY_FILE_NOT_READABLE]`` code token (which only the
+        # validator emits; the F5 wrap produces a different message).
+        msg = str(excinfo.value)
+        assert (
+            "cannot read SYSTEM_ENCRYPTION_KEY_FILE" in msg
+            or "key hardening refusal" in msg
+            or "KEY_FILE_NOT_READABLE" in msg
+        ), f"unhelpful error message: {msg!r}"
+
+    def test_unreadable_file_raises_kms_unavailable_from_kms_resolve_handle(
+        self, unreadable_key_file
+    ) -> None:
+        if unreadable_key_file is None:
+            pytest.skip("running as root — chmod 0o000 is a no-op")
+        kms_lite.reset_store_for_tests()
+        with pytest.raises(KMSUnavailableError) as excinfo:
+            kms_resolve_handle("KMS_HANDLE_doesnotexist")
+        assert isinstance(excinfo.value, KMSUnavailableError)
+        # kms_resolve_handle bypasses the validator; this path MUST
+        # hit the F5 wrap and surface the "cannot read" message.
+        assert "cannot read SYSTEM_ENCRYPTION_KEY_FILE" in str(excinfo.value)
+
+    def test_missing_file_raises_kms_unavailable_from_kms_resolve_handle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-existent file path also surfaces as the typed exception
+        (OSError family includes FileNotFoundError)."""
+        monkeypatch.setenv(
+            "SYSTEM_ENCRYPTION_KEY_FILE", str(tmp_path / "nope.key")
+        )
+        monkeypatch.delenv("SYSTEM_ENCRYPTION_KEY", raising=False)
+        kms_lite.reset_store_for_tests()
+        with pytest.raises(KMSUnavailableError) as excinfo:
+            kms_resolve_handle("KMS_HANDLE_doesnotexist")
+        assert "cannot read SYSTEM_ENCRYPTION_KEY_FILE" in str(excinfo.value)
+
