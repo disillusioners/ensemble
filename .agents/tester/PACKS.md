@@ -1,5 +1,17 @@
 # Test Packs
 
+## Completed commission — SETTINGS-SCROLL FIX ACCEPTANCE (2026-09-26)
+
+Branch `fix/settings-scroll` @ `dd14d975` (FE-only: 2 SCSS lines in settings.component.scss). Acceptance gate for the fix + downstream v0.15.2. Ad-hoc one-shot evidence packs, registered here for PACKS.md integrity; scripts + logs live in `.agents/tester/RESULTS/assets/2026-09-26-settings-scroll/` (NOT test/packs/ — commission constrained artifacts to .agents/tester/RESULTS/*).
+
+| Pack | Invocation | Scope | Result |
+|---|---|---|---|
+| `fe_jest_full_test` | `timeout 300 bash .agents/tester/RESULTS/assets/2026-09-26-settings-scroll/fe_jest_full_test.sh` (CI=true npm test -- --watch=false; inner 270s watchdog) | Full FE Jest suite (98 suites / 3392 tests) | ✅ PASS — 3388P/4F/0S, exact baseline match; 4F = pre-existing (see QUARANTINE 2026-09-26 row), 0 settings-related |
+| `fe_jest_baseline_test` | `timeout 300 bash .agents/.../fe_jest_baseline_test.sh` (git worktree @ `dd14d975^`=`e67e5cd8`, 2 suites only, EXIT-trap cleanup) | Formal close of pre-existing claim | ✅ PASS — same 4 failures at parent; claim CLOSED |
+| `fe_prod_build_test` | `timeout 300 bash .agents/.../fe_prod_build_test.sh` (npm run build; inner 270s) | FE production build | ✅ PASS — exit 0, ~30s; fix's SCSS verified in compiled lazy chunk-6CRMNNZQ.js |
+| `fe_settings_scroll_e2e_test` | `timeout 280 node .agents/.../fe_settings_scroll_e2e_test.mjs` (chromium; inner 240s watchdog) | THE visual gate: settings scroll @1440×900+1280×720, 5-section matrix, R15 toggle reach/operate/PERSISTED, regression pages, z-ladder subset | ✅ PASS — scroll = .settings-container element; R15 reachable+operable+persistent (PUT/GET 200); 6 screenshots |
+| bring-up (not a pack) | standalone #!/bin/bash scrub wrapper → ./dev.sh + ng serve :4199 | dev daemon v0.15.1 :8079 + FE dev :4199, POSTGRES_SURVIVORS=0, teardown clean | ✅ PASS — live/demo untouched throughout |
+
 ## Active commission — LCA-FALSE-COMPLETE PG-LANE MERGE GATE (2026-09-26, Job 6a)
 Branch `feature/lca-false-complete-fixes` @ `d5c50994c61ba6c0a762c9dd128d9aa5603eca2a` (single commit on top of LCA note-removal gate). Incident 7d4a3bd9 — `correct-judge-override` class: unverified surface + all-timeout no-terminal rule + directive nudge + scanner pin. Delta touches `daemon/graph.py` (gate region), `daemon/services/{attestation_gate,attestation_resolver,attestation_judge_timeout_resolver,mission_resolver,work_resolver,work_notifier,job_feedback_observer,instance_messaging}.py`, `daemon/routers/{jobs_crud,missions,jobs_streaming,schemas}.py`, `daemon/tools/missions.py` — PG-visible mission/job/service surfaces. **Pack is the PG-lane merge gate; reports-only, NO fixes.**
 
