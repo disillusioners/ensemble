@@ -10,3 +10,13 @@ skills:
         - bash
         - instance
       env: []
+  - name: opendesign-verify
+    version: "1.0.0"
+    auto_load: false
+    category: execution
+    description: "Consume the opendesign capability (P3-WP12 e2e trigger) — mandatory-first capability_check, capability_missing escalation envelope on miss, [resume]-convention re-entry, reports the live mcp_opendesign od_* tool surface"
+    requires:
+      mcp:
+        - opendesign
+      tools:
+        - bash

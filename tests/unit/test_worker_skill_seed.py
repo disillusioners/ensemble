@@ -53,13 +53,16 @@ class TestWorkerSkillSetParses:
     def test_skill_set_exists_and_parses(self):
         assert SKILL_SET.exists()
         entries = parse_skill_set_file(SKILL_SET)
-        assert len(entries) == 1
+        # P3-WP12: two worker skills — the installer (WP5) and the
+        # consumer (WP12). Installer stays FIRST (index 0) by convention.
+        assert len(entries) == 2
         entry = entries[0]
         assert entry.name == "install-opendesign"
         assert entry.version == "1.0.0"
         assert entry.auto_load is False
         assert entry.category == "execution"
         assert entry.description.strip()
+        assert entries[1].name == "opendesign-verify"
 
     def test_requires_tools_and_env_only(self):
         entry = parse_skill_set_file(SKILL_SET)[0]
@@ -97,10 +100,13 @@ class TestWorkerSkillSetParses:
         service = SkillSeedService(repo, AGENTS_DIR)
         result = service.seed_agent("worker", WORKER_DIR, SKILL_SET)
         assert result["errors"] == 0
-        assert result["new"] == 1
+        assert result["new"] == 2  # install-opendesign + opendesign-verify
         seeded = repo.get_by_name_and_agent("install-opendesign", "worker")
         assert seeded is not None
         assert "capability_check" in seeded.content[:200]
+        verify_seeded = repo.get_by_name_and_agent("opendesign-verify", "worker")
+        assert verify_seeded is not None
+        assert "capability_check" in verify_seeded.content[:200]
 
 
 class TestMandatoryFirstInstruction:
@@ -257,3 +263,65 @@ class TestResumeConventionDocumentationPin:
         resume = parse_resume_message(example)
         assert resume.capability_id == "opendesign"
         assert resume.resume_from == "step_after_kms_bind"
+
+
+class TestOpendesignVerifySkill:
+    """P3-WP12 Step 2 — the consumer skill (the live cycle's trigger)."""
+
+    @pytest.fixture
+    def verify_entry(self):
+        entries = parse_skill_set_file(SKILL_SET)
+        return next(e for e in entries if e.name == "opendesign-verify")
+
+    @pytest.fixture
+    def verify_body(self):
+        return (WORKER_DIR / "skills-template" / "opendesign-verify.md").read_text()
+
+    def test_requires_declares_the_mcp_capability(self, verify_entry):
+        """Unlike the installer (PR4: no mcp key — installing IS the
+        fix), the consumer REQUIRES the capability it consumes."""
+        req = verify_entry.requirement
+        assert req is not None
+        assert req.mcp == ["opendesign"]
+        assert req.tools == ["bash"]
+        assert not req.is_empty()
+
+    def test_body_opens_with_capability_check(self, verify_body):
+        from daemon.services.capability_resolver import (
+            _first_substantive_line,
+            _strip_frontmatter,
+        )
+
+        first = _first_substantive_line(_strip_frontmatter(verify_body))
+        assert first is not None
+        assert first.strip().startswith('capability_check("opendesign")')
+
+    def test_enforcer_passes(self, verify_entry, verify_body):
+        enforce_mandatory_first_instruction(
+            skill_name=verify_entry.name,
+            skill_body=verify_body,
+            requirement=verify_entry.requirement,
+            skill_set_path=str(SKILL_SET),
+        )
+
+    def test_body_emits_canonical_envelope_on_miss(self, verify_body):
+        """The miss path pins the exact envelope fields the e2e test and
+        the live cycle rely on."""
+        assert "Result:" in verify_body
+        assert '"capability_missing"' in verify_body
+        assert '"installer_skill": "install-opendesign"' in verify_body
+        assert "resume_hint" in verify_body
+
+    def test_body_documents_resume_reentry(self, verify_body):
+        assert RESUME_TAG in verify_body
+        for field in ("capability_id", "status", "tools_now_available", "resume_from"):
+            assert field in verify_body
+        # Re-check rule: never trust the carried status.
+        assert "parse_resume_message" in verify_body
+
+    def test_resume_example_parses(self, verify_body):
+        start = verify_body.index(f"{RESUME_TAG} {{")
+        example = verify_body[start : verify_body.index("}", start) + 1]
+        resume = parse_resume_message(example)
+        assert resume.capability_id == "opendesign"
+        assert resume.resume_from == "step_after_install"

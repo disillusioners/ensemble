@@ -77,6 +77,15 @@ def fixed_now() -> float:
     return 1_700_000_000.0
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    """P3-WP12a: the mint-path tests emit kms_issue audit lines via the
+    canonical lane (resolved from CWD). Chdir into the test tmp dir so
+    runs never touch the repo's real audit lane."""
+    monkeypatch.chdir(tmp_path)
+    yield
+
+
 # ---------------------------------------------------------------------------
 # (a) 0o644 file → refusal
 # ---------------------------------------------------------------------------

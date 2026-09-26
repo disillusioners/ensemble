@@ -852,8 +852,13 @@ class TestRegistryValid:
         assert e.schema_version == "0.16.1"
         assert e.requires_secret is True
         assert e.kms_service_id == "opendesign"
-        # Lazy validation: skill not yet landed → pending=True.
-        assert e.pending is True
+        # The install-opendesign skill LANDED (P3-WP5) — the lazy
+        # default scan of the real agents/ tree now resolves the
+        # installer, so the entry loads non-pending even in lazy mode.
+        # (Pre-WP5 this asserted pending=True; the assertion tracks the
+        # landed reality, same as the strict-load test in
+        # test_worker_skill_seed.py.)
+        assert e.pending is False
 
     def test_load_real_registry_default_cwd_resolution(self, real_registry_path):
         # Resolve via the project root (this test runs from the
