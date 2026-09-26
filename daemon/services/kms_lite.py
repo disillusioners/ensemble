@@ -124,6 +124,16 @@ class _KMSStore:
         # handle -> {"service", "reason", "actor", "fingerprint", "encrypted"}
         self._handles: dict[str, dict[str, Any]] = {}
         self._fernet = self._build_fernet(encryption_key)
+        # P3-WP10 redaction-use registry. Holds a thread-safe set of the
+        # plaintexts currently held by this store, so the logging
+        # redaction filter (daemon.util.log_redaction_filter) can scrub
+        # any plaintext that accidentally reaches a log record.
+        #
+        # Internal/redaction-use ONLY. NEVER exposed to tool callers or
+        # to agent-facing surfaces. Snapshot semantics on read — callers
+        # never see live mutations.
+        self._plaintext_registry: set[str] = set()
+        self._registry_lock = threading.Lock()
 
     @staticmethod
     def _build_fernet(encryption_key: bytes | str | None) -> Fernet:
@@ -173,6 +183,10 @@ class _KMSStore:
 
         handle = f"{KMS_HANDLE_PREFIX}{uuid.uuid4().hex}"
         plaintext = secrets.token_urlsafe(32)
+        # P3-WP10: register the plaintext with the redaction filter
+        # registry before any other state is touched, so a concurrent
+        # log record emitted during this turn cannot leak the plaintext.
+        self._register_plaintext(plaintext)
         fingerprint = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()[:16]
         payload = {
             "service": service,
@@ -241,6 +255,30 @@ class _KMSStore:
         with self._lock:
             return len(self._handles)
 
+    # P3-WP10 — internal redaction-use registry -----------------------
+    # Thread-safe accessors used ONLY by
+    # ``daemon.util.log_redaction_filter``. Not exported to agent tools.
+
+    def _register_plaintext(self, plaintext: str) -> None:
+        """Register ``plaintext`` with the redaction filter registry.
+
+        Internal/redaction-use ONLY. Called from :meth:`mint` immediately
+        after the plaintext is generated. Safe to call multiple times —
+        the registry is a set.
+        """
+        with self._registry_lock:
+            self._plaintext_registry.add(plaintext)
+
+    def _iter_registered_plaintexts(self) -> list[str]:
+        """Return a snapshot list of all registered plaintexts.
+
+        Internal/redaction-use ONLY. The list is a per-call copy so the
+        redaction filter sees a stable view even if a concurrent mint
+        mutates the registry mid-scrub.
+        """
+        with self._registry_lock:
+            return list(self._plaintext_registry)
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton (lazy, process-wide)
@@ -276,6 +314,27 @@ def reset_store_for_tests() -> None:
     global _store
     with _store_lock:
         _store = None
+
+
+def reset_plaintext_registry_for_tests() -> None:
+    """Drop the process-wide redaction-use plaintext registry.
+
+    Test-only. Production code MUST NOT call this. The store reset
+    above already drops the registry (the registry lives on the store
+    instance), but tests that want to scrub the registry WITHOUT
+    dropping the store can use this helper — for example, to confirm
+    the filter is a no-op pass-through when no plaintexts are
+    registered.
+
+    Safe to call before the store is initialised.
+    """
+    global _store
+    with _store_lock:
+        store = _store
+    if store is None:
+        return
+    with store._registry_lock:
+        store._plaintext_registry.clear()
 
 
 # ---------------------------------------------------------------------------
