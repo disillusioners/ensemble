@@ -876,6 +876,31 @@ def _gc_pending_actions(
     return data
 
 
+def gc_pending_actions(install_dir: Path, keep_run_id: str | None = None) -> int:
+    """Public GC entry (v0.15.3 P1 Item 4) — the scheduled-sweep face of
+    :func:`_gc_pending_actions`.
+
+    Read-modify-write: prunes consumed / past-TTL entries exactly like the
+    write-triggered pruner, and returns the pruned count (0 → nothing
+    pruned and NO journal write — the sweep ticks every ~90s and must not
+    churn the journal: READ-FIRST discipline, same as reconcile).
+    ``keep_run_id`` is the operator/in-progress exemption (the background
+    sweep passes ``None`` — TTL + consumed-state logic IS the safety).
+    Raises ``JournalTorn`` on a torn journal (callers in the sweep wrap
+    everything; the never-raises contract lives there, not here)."""
+    data = journal_read(install_dir)
+    actions = data.get("pending_actions")
+    if not isinstance(actions, dict) or not actions:
+        return 0
+    before = len(actions)
+    _gc_pending_actions(data, keep_run_id=keep_run_id)
+    kept = data.get("pending_actions")
+    pruned = before - (len(kept) if isinstance(kept, dict) else 0)
+    if pruned > 0:
+        journal_write(install_dir, data)
+    return pruned
+
+
 def store_pending_action(install_dir: Path, action: PendingAction) -> None:
     data = ensure_extensions(install_dir)
     actions = data.get("pending_actions")

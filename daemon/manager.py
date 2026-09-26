@@ -3759,6 +3759,14 @@ class InstanceManager:
         :meth:`drain_pending_system_execution` at exact turn-end."""
         self._pending_system_executions[instance_id] = dict(spec)
 
+    def set_upgrade_journal_sweep(self, sweep: object) -> None:
+        """Wire the ``UpgradeJournalSweepService`` (v0.15.3 P1 Item 4) so the
+        drain seam can enqueue armed executors for exit observation. The
+        drain reads the attribute defensively (``getattr`` + try/except) —
+        an unwired service (unit seams, partial boot) degrades to "no reaper
+        enqueue", never to a drain failure."""
+        self._upgrade_journal_sweep = sweep
+
     def _journal_executor_orphaned(
         self, install_dir: Path, kind: str, run_id: str
     ) -> None:

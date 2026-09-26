@@ -1342,6 +1342,74 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # v0.15.3 P1 Item 4 — UpgradeJournalSweepService: periodic
+    # reconcile_pending_op (the pending_op previously reconciled ONLY
+    # at tool entry — a stale armed op starved re-arm ~20min) +
+    # pending_actions GC + the executor reaper (queue + worker; the
+    # manager drain seam enqueues every armed executor through
+    # manager.set_upgrade_journal_sweep below). ALWAYS-ON (no kill
+    # switch — HARD POLICY, same as JobLockSweepService); knobs are
+    # the interval + reaper timeout (ServicesConfig, pydantic
+    # fail-fast at boot). Wired AFTER the app.state wiring above and
+    # BEFORE first request; shutdown mirrors the JobLockSweepService
+    # block in the shutdown sequence.
+    #
+    # One-time boot reconcile runs here (best-effort — a torn journal
+    # logs and boot continues; the launcher's boot sweep remains the
+    # deeper backstop). FRESH-BOOT EDGE: on a FIRST boot there is no
+    # journal and no arms, so the boot pass is a harmless no-op — no
+    # false-positive clears are possible (reconcile is READ-FIRST and
+    # returns None on an absent journal).
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.upgrade_journal_sweep import (
+        DEFAULT_UPGRADE_JOURNAL_SWEEP_INTERVAL_SECONDS,
+        DEFAULT_REAPER_TIMEOUT_SECONDS,
+        UpgradeJournalSweepService,
+    )
+    from daemon.tools import upgrade_journal as _boot_uj
+    from daemon.tools.upgrade_tools import (
+        _resolve_install_dir,
+        _self_env_marker,
+    )
+
+    upgrade_install_dir = _resolve_install_dir(_self_env_marker())
+    upgrade_journal_sweep = UpgradeJournalSweepService(
+        upgrade_install_dir,
+        reconcile_interval_seconds=(
+            config.services.upgrade_journal_sweep_interval_seconds
+        ),
+        reaper_timeout_seconds=(
+            config.services.upgrade_journal_reaper_timeout_seconds
+        ),
+    )
+    try:
+        if upgrade_install_dir is not None:
+            boot_note = _boot_uj.reconcile_pending_op(upgrade_install_dir)
+            if boot_note:
+                logger.info(
+                    "UpgradeJournalSweepService boot reconcile: %s",
+                    boot_note,
+                )
+    except Exception as boot_exc:  # best-effort — never aborts boot
+        logger.warning(
+            "UpgradeJournalSweepService boot reconcile failed (the "
+            "periodic tick will retry): %s",
+            boot_exc,
+        )
+    upgrade_journal_sweep.start()
+    app.state.upgrade_journal_sweep = upgrade_journal_sweep
+    manager.set_upgrade_journal_sweep(upgrade_journal_sweep)
+    logger.info(
+        f"UpgradeJournalSweepService started: interval="
+        f"{config.services.upgrade_journal_sweep_interval_seconds}s "
+        f"(default {DEFAULT_UPGRADE_JOURNAL_SWEEP_INTERVAL_SECONDS}s), "
+        f"reaper_timeout="
+        f"{config.services.upgrade_journal_reaper_timeout_seconds}s "
+        f"(default {DEFAULT_REAPER_TIMEOUT_SECONDS}s), install_dir="
+        f"{upgrade_install_dir or '<none — dev/unresolved>'}"
+    )
+
+    # ─────────────────────────────────────────────────────────────
     # service-tool Phase 1 (1.C.14) — ServiceReconciliationService.
     # D6 boot sweep + periodic PID-liveness / start-time-match
     # reconcile for the ``service_tracking`` table (mark dead or
@@ -1870,6 +1938,22 @@ async def lifespan(app: FastAPI):
                 f"JobLockSweepService shutdown error: {e}"
             )
         app.state.job_lock_sweep = None
+
+    # --- UpgradeJournalSweepService shutdown (v0.15.3 P1 Item 4) ---
+    # Stop the reconcile/GC ticker AND the executor reaper worker
+    # before the manager shuts down. Cancelling the reaper is safe by
+    # design (C2 benign-detach: the executor child leads its own
+    # process group via start_new_session=True and the OS reaps it;
+    # the pending_op/journal remain the durable record).
+    upgrade_journal_sweep = getattr(app.state, "upgrade_journal_sweep", None)
+    if upgrade_journal_sweep is not None:
+        try:
+            await upgrade_journal_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"UpgradeJournalSweepService shutdown error: {e}"
+            )
+        app.state.upgrade_journal_sweep = None
 
     # --- ServiceReconciliationService shutdown (service-tool 1.C.15) ---
     # getattr-guarded stop — survives partial startup failures where
