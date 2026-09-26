@@ -46,6 +46,7 @@ Lifecycle mirrors :class:`~daemon.services.job_lock_sweep.JobLockSweepService`:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 from dataclasses import dataclass
@@ -125,6 +126,19 @@ class UpgradeJournalSweepService:
         self._reaper_queue: asyncio.Queue[ReaperJob] = asyncio.Queue()
         self._sweep_task: asyncio.Task[None] | None = None
         self._reaper_task: asyncio.Task[None] | None = None
+        # M-1: dedicated executor for the blocking waitpid. ``asyncio.
+        # to_thread`` would use the SHARED default executor and strand one
+        # thread per hung child daemon-wide; with the dedicated executor
+        # the leak is bounded to ``max_workers`` (asyncio's default formula
+        # is ``min(32, os.cpu_count()+4)`` — we keep the same shape but
+        # cap at 16 so a long-promote storm cannot grow the leak surface
+        # indefinitely). The cap is generous vs the plan's "arms are rare
+        # and operator-gated" reality — concurrent reaping rarely exceeds
+        # a handful — but allows the benign-detach-then-next-job pattern
+        # (a single timed-out waitpid must not block the next queued
+        # observation). Lazy: created on first ``start()`` so tests that
+        # construct but do not start the service do not pay.
+        self._waitpid_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._stopping: bool = False
 
     # ── introspection ────────────────────────────────────────────────────
@@ -152,6 +166,15 @@ class UpgradeJournalSweepService:
             )
             return
         self._stopping = False
+        # M-1: lazily create the dedicated waitpid executor on first start
+        # (re-created on every start so a start-after-stop cycle is clean).
+        # Match asyncio's default formula (``min(32, cpu+4)``) but cap at
+        # 16 to bound the leak surface for hung-children storms.
+        if self._waitpid_executor is None:
+            self._waitpid_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(16, (os.cpu_count() or 1) + 4),
+                thread_name_prefix="UpgradeJournalReaperWaitpid",
+            )
         self._sweep_task = asyncio.create_task(
             self._run(), name="UpgradeJournalSweepService"
         )
@@ -185,6 +208,16 @@ class UpgradeJournalSweepService:
                 # Exception is defensive against an unexpected shutdown
                 # error. Either way the service is stopped — no re-raise.
                 pass
+        # M-1: shut down the dedicated waitpid executor. ``wait=False`` so
+        # ``stop()`` is bounded — any in-flight ``os.waitpid`` threads are
+        # abandoned (Python cannot interrupt them from outside); the OS
+        # reaps the child either way (C2: child leads its own process
+        # group). ``cancel_futures=True`` drops any queued-but-not-started
+        # work — bounded leak surface is ``max_workers`` per service
+        # lifetime, the SHARED default executor stays untouched.
+        if self._waitpid_executor is not None:
+            self._waitpid_executor.shutdown(wait=False, cancel_futures=True)
+            self._waitpid_executor = None
         logger.info("UpgradeJournalSweepService stopped")
 
     # ── reaper queue (spawn-seam entry point — P1 Item 2 calls this) ─────
@@ -315,9 +348,24 @@ class UpgradeJournalSweepService:
                 # The blocking waitpid runs in a thread; the shield keeps a
                 # stray outer cancellation from half-tearing the wait
                 # (manager.py's bounded-wait pattern — FM-11 compliant).
+                #
+                # M-1: run on the service-owned DEDICATED executor (not
+                # ``asyncio.to_thread`` — that uses the SHARED default and
+                # strands one thread per hung child daemon-wide). ``None``
+                # for the default executor is precisely the bug being
+                # replaced. ``start()`` guarantees the executor exists by
+                # the time this coroutine runs.
+                assert self._waitpid_executor is not None, (
+                    "_reaper_worker started without a waitpid executor — "
+                    "start() must precede worker scheduling"
+                )
                 status = await asyncio.wait_for(
                     asyncio.shield(
-                        asyncio.to_thread(self._waitpid_blocking, job.pid)
+                        asyncio.get_running_loop().run_in_executor(
+                            self._waitpid_executor,
+                            self._waitpid_blocking,
+                            job.pid,
+                        )
                     ),
                     timeout=self._reaper_timeout_s,
                 )
@@ -343,8 +391,9 @@ class UpgradeJournalSweepService:
 
     @staticmethod
     def _waitpid_blocking(pid: int) -> int:
-        """Blocking ``os.waitpid`` — runs in a thread via ``to_thread``.
-        Returns the raw wait status (decoded by the worker)."""
+        """Blocking ``os.waitpid`` — runs in a thread on the service-owned
+        DEDICATED executor (M-1, not ``asyncio.to_thread``). Returns the
+        raw wait status (decoded by the worker)."""
         _, status = os.waitpid(pid, 0)
         return status
 

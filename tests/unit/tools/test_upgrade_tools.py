@@ -3674,6 +3674,93 @@ class TestManagerDrainPendingExecution:
         assert "(reason=executor-orphaned)" in orphan[0]["detail"]
         assert orphan[0]["ts"]  # payload ts rides the history entry
 
+    async def test_spawn_seam_refuses_run_id_mismatch_even_when_verified(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """M-2 attestation-seam run_id binding: a STALE marker (run_id X)
+        drained against a NEWER verified pending_op (run_id Y) must NOT
+        spawn — and must never ride the newer op's verified-arm attestation.
+        The mismatch folds into the R-M5-2 pre-spawn guard: the durable
+        journal vouches for run Y while the marker asks for run X →
+        unverifiable → ``executor_orphaned``, nothing spawned, the newer
+        verified op left byte-untouched."""
+        newer_run_id = "r-drain-live-2"
+        stale_run_id = "r-drain-live-1-stale"
+        uj.lock_acquire(install, newer_run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=newer_run_id, kind="promote", env="live", target="1.2.4",
+                armed_by_instance="inst-drain-live-2",
+                nonce="CONFIRM-ZZZZZZZZZZ",
+                nonce_consumed=True,
+                confirmed_by_human=True,
+                confirmed_source="my-discord-bot:456",
+            ),
+        )
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-live-1", "kind": "promote",
+             "env": "live", "run_id": stale_run_id, "target": "1.2.3"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is False
+        assert spawn_calls == []  # refused — nothing spawned, nothing attested
+        assert iid not in drain_mgr._pending_system_executions  # one shot
+        events = [e for e in uj.journal_read(install)["history"]]
+        orphan = [e for e in events if e["event"] == "executor_orphaned"]
+        assert len(orphan) == 1
+        assert "kind=promote" in orphan[0]["detail"]
+        assert stale_run_id in orphan[0]["detail"]
+        assert "(reason=executor-orphaned)" in orphan[0]["detail"]
+        # The NEWER verified op is untouched: still the durable record, no
+        # executor stamp, attestation state intact.
+        op = uj.read_pending_op(install)
+        assert op is not None and op.run_id == newer_run_id
+        assert op.owner_pid == 0
+        assert op.owner_kind == "tool-arm"
+        assert op.nonce_consumed is True
+        assert op.confirmed_by_human is True
+
+    async def test_spawn_seam_passes_when_marker_run_id_matches_verified_op(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """M-2 pass side (the pair to the mismatch refusal above): marker
+        run_id == pending_op run_id on a verified arm → the pre-spawn guard
+        PASSES, the spawn fires WITH the F2 attestation, and the post-spawn
+        owner stamp lands on the SAME matching op."""
+        run_id = "r-drain-live-match"
+        uj.lock_acquire(install, run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="promote", env="live", target="1.2.4",
+                armed_by_instance="inst-drain-live-match",
+                nonce="CONFIRM-MATCH1234",
+                nonce_consumed=True,
+                confirmed_by_human=True,
+                confirmed_source="my-discord-bot:789",
+            ),
+        )
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-live-match", "kind": "promote",
+             "env": "live", "run_id": run_id, "target": "1.2.4"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is True
+        [call] = spawn_calls
+        assert call["argv"] == [
+            "bash", str(scripts_dir / "promote.sh"), "live",
+            "--version", "1.2.4",
+            "--f2-verified-closed",
+        ]
+        assert call["extra_env"]["ENSEMBLE_UPGRADE_LIVE"] == "1"
+        assert call["extra_env"]["F2_VERIFIED_NOTE"] == f"my-discord-bot:789:{run_id}"
+        # Matching run: the owner stamp lands on the SAME op.
+        op = uj.read_pending_op(install)
+        assert op is not None and op.run_id == run_id
+        assert op.owner_pid == self.EXECUTOR_PID
+        assert op.owner_kind == "executor"
+
     async def test_spawn_seam_enqueues_into_sweep_reaper_queue(
         self, drain_mgr, install, scripts_dir, spawn_calls
     ) -> None:

@@ -53,6 +53,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -1437,6 +1438,114 @@ class TestUpgradeJournalSweepService:
             assert calls["n"] == 1  # no retry of the failed write
         finally:
             await svc.stop()
+
+    # ── M-1: dedicated waitpid executor (hygiene + isolation) ────────────
+
+    async def test_reaper_uses_dedicated_executor_isolated_from_default(
+        self, install: Path
+    ) -> None:
+        """M-1: ``start()`` materializes a service-owned DEDICATED
+        ``ThreadPoolExecutor`` for the blocking ``os.waitpid`` — bounded
+        ``max_workers`` (= ``min(16, cpu_count+4)``), named with prefix
+        ``UpgradeJournalReaperWaitpid``. The shared asyncio default
+        executor is NOT used; ``stop()`` shuts the dedicated one down and
+        nulls the reference."""
+        svc = self._svc(install)
+        # Lazy: not yet materialized.
+        assert svc._waitpid_executor is None
+        svc.start()
+        try:
+            ex = svc._waitpid_executor
+            assert ex is not None, "start() must materialize a waitpid executor"
+            # Match asyncio's default formula but capped at 16 — bounded leak.
+            assert ex._max_workers == min(16, (os.cpu_count() or 1) + 4)
+            # Distinct from the SHARED default executor.
+            loop = asyncio.get_running_loop()
+            assert ex is not loop._default_executor
+            # The thread-name prefix is the strongest signal — asyncio's
+            # default uses 'asyncio', ours uses 'UpgradeJournalReaperWaitpid'.
+            assert ex._thread_name_prefix == "UpgradeJournalReaperWaitpid"
+        finally:
+            await svc.stop()
+            # stop() nulls the reference so a start-after-stop cycle recreates.
+            assert svc._waitpid_executor is None
+
+    async def test_reaper_waitpid_runs_on_dedicated_executor_not_default(
+        self, install: Path, monkeypatch
+    ) -> None:
+        """M-1 end-to-end: instrument ``_waitpid_blocking`` to record the
+        executing thread's name. The recorded names carry the dedicated
+        prefix (``UpgradeJournalReaperWaitpid_*``) and NEVER the asyncio
+        default (``asyncio_*``). Pins that the executor-identity change
+        ACTUALLY flows through the worker, not just sits on the attribute."""
+        svc = self._svc(install)
+        recorded: list[str] = []
+        real = svc._waitpid_blocking
+
+        def _traced(pid: int) -> int:
+            recorded.append(threading.current_thread().name)
+            return real(pid)
+
+        # Staticmethod descriptor — ``self._waitpid_blocking`` returns the
+        # underlying function, matching the production call site.
+        monkeypatch.setattr(
+            type(svc), "_waitpid_blocking", staticmethod(_traced)
+        )
+        proc = subprocess.Popen(["bash", "-c", "exit 0"])
+        svc.enqueue_reaper(proc.pid, ["bash", "-c", "exit 0"], install, "r-exec0")
+        svc.start()
+        try:
+            await self._wait_for_event(install, "executor_exit")
+            assert recorded, "waitpid was never invoked"
+            assert all(
+                n.startswith("UpgradeJournalReaperWaitpid_") for n in recorded
+            ), (
+                "waitpid ran off the dedicated executor — M-1 isolation "
+                f"broken: thread names recorded: {recorded}"
+            )
+            assert not any(n.startswith("asyncio_") for n in recorded), (
+                "waitpid ran on the SHARED default executor — the bug "
+                f"M-1 was supposed to fix: thread names: {recorded}"
+            )
+        finally:
+            await svc.stop()
+
+    async def test_reaper_stop_is_bounded_on_hung_child(
+        self, install: Path
+    ) -> None:
+        """M-1: ``stop()`` returns within a bounded window even when a
+        child is still hung — the dedicated executor is shut down with
+        ``wait=False, cancel_futures=True``; the in-flight ``os.waitpid``
+        thread is abandoned (Python cannot interrupt it from outside;
+        the OS reaps the child via ``start_new_session=True`` either
+        way, C2 benign-detach contract). The SHARED default executor is
+        not drained here, so this test would HANG on the pre-M-1 code."""
+        proc = subprocess.Popen(["sleep", "30"])
+        # reaper_timeout_seconds deliberately larger than the stop budget
+        # so the worker's own wait_for CANNOT rescue us — only the
+        # executor.shutdown(wait=False) in stop() can.
+        svc = self._svc(install, reaper_timeout_seconds=600)
+        svc.enqueue_reaper(proc.pid, ["sleep", "30"], install, "r-hung")
+        svc.start()
+        # Give the worker a beat to enqueue the waitpid on the executor.
+        await asyncio.sleep(0.2)
+        t0 = time.monotonic()
+        await svc.stop()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 2.0, (
+            f"stop() blocked for {elapsed:.2f}s on a hung child — the "
+            "shutdown(wait=False) contract is broken"
+        )
+        assert svc._waitpid_executor is None
+        # Cleanup: the test process must not leak the hung child.
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(proc.pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
 
 
 # ── User-origin classification (registry-backed — verdict §4) ────────────────

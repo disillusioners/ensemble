@@ -3772,7 +3772,8 @@ class InstanceManager:
     ) -> None:
         """Best-effort ``executor_orphaned`` journal append (R-M5-2 / v0.15.3
         P1 Item 1 pre-spawn guard): the drain reached the spawn seam but no
-        durable pending_op exists — the child would carry no journal record
+        matching durable pending_op exists (absent, or a different run_id —
+        M-2 binding) — the child would carry no journal record of its own
         and be unverifiable, so it is NOT spawned. Emit-NOTHING observability
         class (NOT in ``_TERMINAL_EVENTS``); never raises (a torn/absent
         journal — the likely cause — cannot fail the drain path)."""
@@ -3782,7 +3783,8 @@ class InstanceManager:
             _uj.journal_history_append(
                 install_dir,
                 "executor_orphaned",
-                f"drain refused spawn: no durable pending_op for kind={kind} "
+                f"drain refused spawn: no matching durable pending_op for "
+                f"kind={kind} "
                 f"run_id={run_id} install_dir={install_dir} "
                 "(reason=executor-orphaned)",
             )
@@ -3817,7 +3819,9 @@ class InstanceManager:
         marker is still consumed (no halt journal event is written here;
         the journal pending_op remains the durable fallback for the
         boot sweep). If the durable pending_op is MISSING at the spawn
-        seam the spawn is refused and an ``executor_orphaned`` journal
+        seam — or present with a DIFFERENT run_id than the marker (M-2
+        binding: a newer arm superseded the stale marker) — the spawn is
+        refused and an ``executor_orphaned`` journal
         event records it (R-M5-2 guard).
         """
         spec = self._pending_system_executions.pop(instance_id, None)
@@ -3878,13 +3882,19 @@ class InstanceManager:
                 )
                 return False
 
-            if op is None:
-                # R-M5-2 pre-spawn guard (v0.15.3 P1 Item 1): the drain
-                # reached the spawn seam but the durable pending_op is gone
-                # (torn/lost journal write). A child with no journal record
-                # is unverifiable — refuse the spawn loudly instead; the
+            if op is None or op.run_id != run_id:
+                # R-M5-2 pre-spawn guard (v0.15.3 P1 Item 1) + M-2 run_id
+                # binding: the drain reached the spawn seam but the durable
+                # pending_op either is gone (torn/lost journal write) or no
+                # longer describes THIS marker's run (a newer arm superseded
+                # the stale marker). A child the durable journal does not
+                # vouch for — no record, or a different run_id — is
+                # unverifiable and must never spawn, and never ride a newer
+                # op's verified-arm attestation. Refuse loudly instead; the
                 # marker stays consumed (one shot per armed op) and the
                 # operator investigates via upgrade.log + journal history.
+                # Mirrors the post-spawn owner stamp below, which likewise
+                # only touches an op whose run_id matches.
                 self._journal_executor_orphaned(install_dir, kind, run_id)
                 return False
 
