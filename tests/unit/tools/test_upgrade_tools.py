@@ -3674,6 +3674,81 @@ class TestManagerDrainPendingExecution:
         assert "(reason=executor-orphaned)" in orphan[0]["detail"]
         assert orphan[0]["ts"]  # payload ts rides the history entry
 
+    async def test_spawn_seam_enqueues_into_sweep_reaper_queue(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """Item 2: EVERY armed executor is enqueued into the sweep service's
+        reaper queue — UNCONDITIONALLY (no is_verified_arm gate; the
+        unverified exit-78 case is the observability point). The service is
+        REAL (constructed, not started — enqueue is queue-only); the spawn
+        seam stays patched (daemon.tools.upgrade_journal.spawn_executor,
+        NEVER subprocess.Popen — P2.2 gotcha)."""
+        from daemon.services.upgrade_journal_sweep import (
+            UpgradeJournalSweepService,
+        )
+
+        run_id = "r-drain-reap-1"
+        uj.lock_acquire(install, run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="restart", env="demo", reason="nightly",
+                armed_by_instance="inst-drain-reap",
+            ),
+        )
+        sweep = UpgradeJournalSweepService(install)
+        drain_mgr._upgrade_journal_sweep = sweep
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-reap", "kind": "restart", "env": "demo",
+             "run_id": run_id, "reason": "nightly"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is True
+        job = sweep._reaper_queue.get_nowait()
+        assert job.pid == self.EXECUTOR_PID
+        assert job.install_dir == install
+        assert job.run_id == run_id
+        # argv_summary is bounded at 80 chars/item (plan: ReaperJob contract)
+        assert all(len(item) <= 80 for item in job.argv_summary)
+        assert job.argv_summary[0] == "bash"
+        assert job.argv_summary[1] == str(scripts_dir / "restart.sh")[:80]
+        # No sweep wired (getattr None) → drain still succeeds.
+        drain_mgr._upgrade_journal_sweep = None
+        iid2 = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-reap-2", "kind": "restart", "env": "demo",
+             "run_id": run_id, "reason": "nightly"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid2) is True
+
+    async def test_spawn_seam_enqueue_failure_never_raises(
+        self, drain_mgr, install, scripts_dir, spawn_calls
+    ) -> None:
+        """The never-raises contract holds through a broken reaper: a
+        raising enqueue is logged, the drain still returns True, the spawn
+        already happened."""
+        class _Broken:
+            def enqueue_reaper(self, *a, **k):
+                raise RuntimeError("queue exploded")
+
+        run_id = "r-drain-reap-broken"
+        uj.lock_acquire(install, run_id)
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="restart", env="demo", reason="nightly",
+                armed_by_instance="inst-drain-broken",
+            ),
+        )
+        drain_mgr._upgrade_journal_sweep = _Broken()
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-broken", "kind": "restart", "env": "demo",
+             "run_id": run_id, "reason": "nightly"},
+        )
+        assert await drain_mgr.drain_pending_system_execution(iid) is True
+        assert len(spawn_calls) == 1  # spawn happened; enqueue failure logged
+
     async def test_unknown_kind_refused_no_spawn(
         self, drain_mgr, install, scripts_dir, spawn_calls
     ) -> None:

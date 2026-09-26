@@ -3894,6 +3894,29 @@ class InstanceManager:
                 "(daemonized, start_new_session)",
                 kind, run_id, child_pid,
             )
+            # v0.15.3 P1 Item 2: UNCONDITIONAL reaper enqueue — every armed
+            # executor is observed to its exit by the sweep-service worker
+            # (an UNVERIFIED arm's exit-78 is exactly the observability this
+            # exists for; no is_verified_arm gate here). Best-effort: the
+            # never-raises contract below holds — an enqueue failure (no
+            # sweep wired, queue error) logs a warning and the arm's journal
+            # pending_op remains the durable fallback.
+            sweep = getattr(self, "_upgrade_journal_sweep", None)
+            if sweep is not None:
+                try:
+                    sweep.enqueue_reaper(
+                        child_pid,
+                        [str(a) for a in argv],
+                        install_dir,
+                        run_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[system-execution] reaper enqueue failed for "
+                        "pid=%s run_id=%s: %s — exit will not be observed "
+                        "(journal pending_op remains)",
+                        child_pid, run_id, exc,
+                    )
             # Record the executor identity in the journal pending_op
             # (advisory owner info; the op itself is already durable).
             try:
