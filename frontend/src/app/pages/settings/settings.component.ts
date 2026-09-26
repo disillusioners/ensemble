@@ -9,6 +9,7 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { SettingsService } from '../../services/settings.service';
 import { WorkspaceService } from '../../services/workspace.service';
 import type { EditorType, VSCodeStatus } from '../../models';
+import type { SnapshotUsageMetrics } from '../../services/settings.service';
 import {
   SearchableSelectComponent,
   SearchableSelectOption,
@@ -85,6 +86,47 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly peakHoursLoading = signal<boolean>(false);
   readonly peakHoursSaving = signal<boolean>(false);
 
+  // R15 snapshot-create toggle (Wave 3) — mirrors the editor
+  // radio-button shape (dirty + saved + applying signals) so the
+  // Apply button starts disabled and flips only after the server
+  // confirms.
+  readonly snapshotCreateEnabled = signal<boolean>(false);
+  readonly savedSnapshotCreateEnabled = signal<boolean>(false);
+  readonly savingSnapshotCreate = signal<boolean>(false);
+  readonly snapshotCreateDirty = computed(
+    () =>
+      this.snapshotCreateEnabled() !== this.savedSnapshotCreateEnabled(),
+  );
+
+  // R16 monitoring metrics surface (Wave 3). Loaded on init; the
+  // surface is read-only — no PUT endpoint — so a single signal is
+  // enough. MONITORING ONLY.
+  readonly snapshotMetrics = signal<SnapshotUsageMetrics | null>(null);
+  readonly snapshotMetricsCaptureEntries = computed(() => {
+    const metrics = this.snapshotMetrics();
+    if (!metrics) {
+      return [] as Array<{ agent: string; created: number }>;
+    }
+    return Object.entries(metrics.capture_counts ?? {})
+      .map(([agent, count]) => ({
+        agent,
+        created: Number((count as { created?: number })?.created ?? 0),
+      }))
+      .sort((a, b) => b.created - a.created || a.agent.localeCompare(b.agent));
+  });
+  readonly snapshotMetricsSpawnEntries = computed(() => {
+    const metrics = this.snapshotMetrics();
+    if (!metrics) {
+      return [] as Array<{ snapshot_id: string; count: number }>;
+    }
+    return (metrics.spawn_counts_per_snapshot ?? [])
+      .slice()
+      .sort(
+        (a, b) =>
+          b.count - a.count || a.snapshot_id.localeCompare(b.snapshot_id),
+      );
+  });
+
   private statusPollTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
@@ -105,6 +147,8 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.loadFromApi();
     this.loadEditorPreference();
     this.loadPeakHours();
+    this.loadSnapshotCreateEnabled();
+    this.loadSnapshotMetrics();
   }
 
   ngOnDestroy(): void {
@@ -535,5 +579,102 @@ export class SettingsComponent implements OnInit, OnDestroy {
           });
         },
       });
+  }
+
+  // ──────── R15 snapshot-create toggle (Wave 3) ────────
+
+  /**
+   * Read the current ``snapshot_create_enabled`` preference and
+   * seed both the working and saved signals. Mirrors the editor
+   * preference shape — same "Apply" gate disables when the values
+   * match.
+   */
+  private loadSnapshotCreateEnabled(): void {
+    this.settingsService.getSnapshotCreateEnabled().subscribe({
+      next: (resp) => {
+        const enabled = !!resp?.enabled;
+        this.snapshotCreateEnabled.set(enabled);
+        this.savedSnapshotCreateEnabled.set(enabled);
+      },
+      error: () => {
+        // Fail-closed default: missing endpoint / unavailable
+        // backend → keep the signals at OFF.
+        this.snapshotCreateEnabled.set(false);
+        this.savedSnapshotCreateEnabled.set(false);
+        this.snackBar.open(
+          'Failed to load snapshot-create preference — showing defaults',
+          'Dismiss',
+          { duration: 5000, panelClass: 'error-snackbar' },
+        );
+      },
+    });
+  }
+
+  /**
+   * Update the in-memory selection when the radio changes. Saving
+   * requires clicking Apply so unsaved radio toggles don't fire
+   * network requests on every click (parity with the editor
+   * preference flow).
+   */
+  onSnapshotCreateSelectionChange(enabled: boolean): void {
+    this.snapshotCreateEnabled.set(enabled);
+  }
+
+  /**
+   * Persist the working selection to the backend. On success we
+   * sync ``savedSnapshotCreateEnabled`` (flipping
+   * ``snapshotCreateDirty`` back to false). On failure we keep the
+   * saved value unchanged so the radio reflects the last known
+   * good state.
+   */
+  saveSnapshotCreateEnabled(): void {
+    const target = this.snapshotCreateEnabled();
+    this.savingSnapshotCreate.set(true);
+    this.settingsService.setSnapshotCreateEnabled(target).subscribe({
+      next: (resp) => {
+        const confirmed = !!resp?.enabled;
+        this.savedSnapshotCreateEnabled.set(confirmed);
+        this.savingSnapshotCreate.set(false);
+        this.snackBar.open(
+          confirmed
+            ? 'Snapshot-create enabled — capturing is now allowed for creators'
+            : 'Snapshot-create disabled — captures will be refused until re-enabled',
+          'Close',
+          { duration: 3000, panelClass: 'success-snackbar' },
+        );
+      },
+      error: () => {
+        this.savingSnapshotCreate.set(false);
+        this.snackBar.open(
+          'Failed to save snapshot-create preference',
+          'Dismiss',
+          { duration: 5000, panelClass: 'error-snackbar' },
+        );
+      },
+    });
+  }
+
+  // ──────── R16 snapshot-usage metrics surface (Wave 3) ────────
+
+  /**
+   * Read the aggregated R16 counters for the read-only block.
+   * MONITORING ONLY — never feeds the search pipeline. A failure
+   * surfaces a toast and keeps the surface null (the template
+   * hides the block).
+   */
+  private loadSnapshotMetrics(): void {
+    this.settingsService.getSnapshotUsageMetrics().subscribe({
+      next: (resp) => {
+        this.snapshotMetrics.set(resp ?? null);
+      },
+      error: () => {
+        this.snapshotMetrics.set(null);
+        this.snackBar.open(
+          'Failed to load snapshot usage metrics',
+          'Dismiss',
+          { duration: 5000, panelClass: 'error-snackbar' },
+        );
+      },
+    });
   }
 }

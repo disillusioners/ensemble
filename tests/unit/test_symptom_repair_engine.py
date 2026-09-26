@@ -267,7 +267,19 @@ class TestSurgeryShape:
             ),
         )
         import daemon.compaction as compaction_module
+        # PR1: the absorb-contract gate moved to ``daemon._content_hardening``
+        # (the canonical home of the partition/hoist predicates). Patch the
+        # resolver on BOTH the old compaction_module (kept around as a
+        # back-compat alias for tests / future imports) AND the new home so
+        # the kill-switch OFF path is exercised regardless of which module
+        # holds the consulted binding. Idempotent — both names point at the
+        # same underlying ``daemon.config.resolve_injected_notes_absorb`` in
+        # production; this is the correct test seam post-extraction.
+        import daemon._content_hardening as content_hardening_module
 
+        monkeypatch.setattr(
+            content_hardening_module, "resolve_injected_notes_absorb", lambda: False
+        )
         monkeypatch.setattr(
             compaction_module, "resolve_injected_notes_absorb", lambda: False
         )

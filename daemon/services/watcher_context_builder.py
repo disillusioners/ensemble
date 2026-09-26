@@ -251,7 +251,8 @@ class WatcherContextBuilder:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         # Lazy import — same cycle-avoidance as in WatchoverEvaluator.
-        from daemon.compaction import _extract_text_from_content
+        # PR1: resolved via daemon._content_hardening (the canonical home).
+        from .._content_hardening import extract_text_from_content
 
         user_payload = json.dumps(
             {
@@ -273,7 +274,7 @@ class WatcherContextBuilder:
             ),
             timeout=self._timeout_seconds,
         )
-        return _extract_text_from_content(response.content)
+        return extract_text_from_content(response.content)
 
     def _serialize_messages(self, messages: list[Any]) -> str:
         """Serialize the trailing window into a compact text block.

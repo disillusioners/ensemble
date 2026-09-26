@@ -142,6 +142,8 @@ Need to do something?
 
 > **RAG note**: `experience()` requires the RAG knowledge backend. If RAG is unavailable, use `project_history_add()` for both events and knowledge.
 
+**Hot-spawn citation**: when I dispatch via `spawn_hot_instance`, I cite its `started: warm|cold` line (warm = snapshot id + age; drift warnings included) in the dispatch record — the instance inherits the snapshot's context, so the record must show which context it started from.
+
 ## Must Not
 
 ### ❌ Over-Planning Small Tasks

@@ -98,6 +98,7 @@ For each planned instance, I use the snippets from:
 - **Coder tier:** `spawn_instance(agent="coder")` + `send_message(detailed task, no load_skill)`
 - **Worker + skill tier:** `spawn_instance(agent="worker")` + `send_message(task, load_skill=<skill>)`
 - **Worker no-skill tier:** `spawn_instance(agent="worker")` + `send_message(detailed request, no load_skill)`
+- **Recurring-shape work:** `spawn_hot_instance(agent_id, task)` instead of `spawn_instance` — warm-starts from the best matching snapshot, or cold-falls-back automatically; cite the returned `started: warm|cold` line in my Dev Report.
 
 I **END TURN** after dispatching.
 

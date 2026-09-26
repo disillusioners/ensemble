@@ -53,6 +53,7 @@ from langchain_core.messages import HumanMessage
 from daemon import constants as _constants
 from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.config import _resolve_kv_ambient_system_default_enabled
+from daemon.loader import estimate_tokens
 from .skill_metrics_service import REPLACED_SKILLS_METADATA_KEY
 
 # Phase-2 selector lazy import keeps the module-level surface
@@ -117,6 +118,17 @@ CONTEXT_KIND_SYMPTOM_REPAIR = "symptom_repair"
 # callers; tests for the branch are deleted in
 # ``tests/unit/test_child_terminal_contradiction.py``).
 CONTEXT_KIND_CHILD_REPORT_CHECK = "child_report_check"
+# Agent Snapshot v1 (PR4 — design-exploration §4.3 / R2): the
+# warm-start digest block. Stamping the digest with this kind places
+# it in the permanently non-selectable / hoisted bucket of the
+# compaction three-bucket partition (the hoist is truthy-keyed on any
+# ``context_kind`` string — zero compaction changes), so the digest
+# survives every later compaction verbatim. Stable message id
+# ``snapshot_digest:{instance_id}`` — ``add_messages`` supersedes in
+# place (one-digest-per-instance). Written to
+# ``instance_metadata["snapshot_digest"]`` by the spawn tool's atomic
+# ``set_metadata_many`` (Wave 2b); THIS module only reads/consumes.
+CONTEXT_KIND_SNAPSHOT_DIGEST = "snapshot_digest"
 _AMBIENT_KV_FRESH: bool | None = None
 _AMBIENT_KV_FRESH_BOOT_LOG_EMITTED = False
 
@@ -162,6 +174,222 @@ def _make_context_message(
         content=f"{CONTEXT_PREFIX}{title}{CONTEXT_SUFFIX}{content}",
         id=id_ if id_ is not None else str(uuid.uuid4()),
         additional_kwargs={"injected_message": True, "context_kind": kind},
+    )
+
+
+# ── Agent Snapshot digest (warm-start) — PR4 read/consume seam ────────────
+# The metadata WRITE at spawn is Wave 2b's tool path (atomic
+# ``set_metadata_many`` of ``instance_metadata["snapshot_digest"]`` +
+# ``spawned_from_snapshot_id``, R6b). THIS seam only reads/consumes:
+# on TURN 1, ``assemble_context_messages`` renders the stored digest
+# into a ``[SYSTEM CONTEXT: Agent Snapshot Digest]`` block.
+#
+# Escape-then-cap ordering (developer-verified discipline, design
+# §4.3): ``_make_context_message`` does NOT escape — run
+# :func:`escape_for_context_block` FIRST (escaping can expand content
+# up to ~6×), THEN enforce the D6-ratified hard ceiling of ~25k
+# tokens, strictly counted (tiktoken cl100k via
+# :func:`daemon.loader.estimate_tokens`), TAIL-truncating with a
+# ``snapshot_search``-for-full-body hint. Truncate, never skip — a
+# digest that silently doesn't land defeats warm-start. The cap
+# bounds INJECTION, not knowledge — the full digest (with
+# refs/artifacts) persists in the DB.
+SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS = 25_000
+# Wrapper that :func:`_make_context_message` prepends to the digest body
+# to form the final ``HumanMessage.content``. The cap function subtracts
+# this overhead from the body budget so the FINAL assembled message
+# (wrapper + body) sits AT OR UNDER the ceiling — Wave 2a pre-step fix
+# (the bare-body cap could let the final message exceed the ceiling by
+# the wrapper's token cost; observed ~25008 against a 25k ceiling).
+_SNAPSHOT_DIGEST_WRAPPER = (
+    f"{CONTEXT_PREFIX}Agent Snapshot Digest{CONTEXT_SUFFIX}"
+)
+_SNAPSHOT_DIGEST_WRAPPER_TOKENS = estimate_tokens(_SNAPSHOT_DIGEST_WRAPPER)
+_SNAPSHOT_DIGEST_TRUNCATION_HINT = (
+    "\n\n… (digest truncated at the "
+    f"{SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS}-token injection "
+    "ceiling — use snapshot_search for the full body)"
+)
+
+
+def render_snapshot_digest_body(value: Any) -> str | None:
+    """Render the stored ``snapshot_digest`` metadata value to block text.
+
+    Accepts the two shapes the write side may produce:
+
+    * ``dict`` — the digest JSONB (R11 8-tuple + provenance): the
+      MANDATORY provenance block renders ATOP the digest (§9
+      mitigation d), then the task summary, then the 8 sections.
+    * ``str`` — a pre-rendered body (back-compat shape), passed
+      through as-is.
+
+    Returns ``None`` for empty/blank values (no block emitted).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        body = value.strip()
+        return body or None
+    if not isinstance(value, dict):
+        return None
+
+    lines: list[str] = []
+    provenance = value.get("provenance") or {}
+    if isinstance(provenance, dict) and provenance:
+        lines.append("**Provenance** (a lead, not ground truth — hold "
+                     "warm-started conclusions to the same evidence rule "
+                     "as cold ones)")
+        for key in (
+            "source_instance_id",
+            "effective_model",
+            "prompt_version",
+            "captured_at",
+        ):
+            if provenance.get(key):
+                lines.append(f"- {key}: {provenance[key]}")
+        for banner in provenance.get("banner") or []:
+            lines.append(f"- ⚠ {banner}")
+    if value.get("task_summary_text"):
+        lines.append("")
+        lines.append(str(value["task_summary_text"]))
+    for key, header in (
+        ("decisions", "Decisions"),
+        ("gotchas", "Gotchas"),
+        ("conventions", "Conventions"),
+        ("open_threads", "Open threads"),
+        ("artifact_refs", "Artifact refs"),
+        ("worked_vs_wasted", "Worked vs wasted"),
+        ("workflow_refinements", "Workflow refinements"),
+        ("judgment_calls", "Judgment calls"),
+    ):
+        entries = value.get(key) or []
+        if not entries:
+            continue
+        lines.append("")
+        lines.append(f"## {header}")
+        for entry in entries:
+            lines.append(f"- {entry}")
+    body = "\n".join(lines).strip()
+    return body or None
+
+
+def cap_snapshot_digest_for_injection(
+    escaped_body: str,
+    *,
+    wrapper_overhead_tokens: int | None = None,
+) -> str:
+    """Enforce the D6 ~25k-token ceiling on the ESCAPED digest body.
+
+    STRICTLY counted (:func:`daemon.loader.estimate_tokens`,
+    tiktoken cl100k). TAIL-truncates (the provenance block and the
+    steering-ordered decisions live at the head; dropped content is
+    the tail) and appends the ``snapshot_search``-for-full-body hint
+    — truncate, never skip.
+
+    **Wave 2a pre-step fix (wrapper budget):** the FINAL injected
+    message is ``wrapper_prefix + body``. The bare-body cap left the
+    final message up to ~``wrapper_tokens`` over the ceiling (the
+    observed case hit ~25008 against a 25k ceiling). The fix subtracts
+    the wrapper's token cost from the body budget so the FINAL
+    assembled message sits AT OR UNDER
+    :data:`SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS`.
+
+    The ``wrapper_overhead_tokens`` kwarg defaults to the
+    snapshot-digest wrapper constant (:data:`_SNAPSHOT_DIGEST_WRAPPER_TOKENS`)
+    and is exposed for unit-test scenarios that need a different
+    overhead (or to assert against ``0`` for the legacy bare-body
+    contract).
+
+    The FINAL content (wrapper + truncated head + hint) is asserted
+    to sit under the ceiling: the injection hook fails loud rather
+    than ever landing an over-cap block.
+    """
+    if wrapper_overhead_tokens is None:
+        wrapper_overhead_tokens = _SNAPSHOT_DIGEST_WRAPPER_TOKENS
+
+    if estimate_tokens(escaped_body) <= SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS:
+        return escaped_body
+
+    hint = _SNAPSHOT_DIGEST_TRUNCATION_HINT
+    hint_tokens = estimate_tokens(hint)
+    # Body budget reserves BOTH the wrapper's tokens AND the hint's
+    # tokens so wrapper + (head + hint) stays at or under the ceiling.
+    body_budget = (
+        SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS
+        - wrapper_overhead_tokens
+        - hint_tokens
+    )
+    if body_budget < 0:
+        # Pathological: wrapper alone exceeds the ceiling. Fail loud
+        # rather than silently produce an over-cap block.
+        raise AssertionError(
+            "snapshot digest wrapper overhead "
+            f"({wrapper_overhead_tokens}t) + hint "
+            f"({hint_tokens}t) exceeds the "
+            f"{SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS}-token ceiling"
+        )
+    # Binary search the largest head (in chars) whose token count
+    # fits the post-hint budget — deterministic, strictly counted.
+    lo, hi = 0, len(escaped_body)
+    best = escaped_body
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = escaped_body[:mid].rstrip()
+        if estimate_tokens(candidate) <= body_budget:
+            best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    capped = best + hint
+    # FINAL-message ceiling check: wrapper + body ≤ ceiling.
+    # Replaces the prior bare-body assert (the Wave 2a fix); the
+    # assert was converted to a raise so the guard survives
+    # `python -O` (tidier pass).
+    final_tokens = wrapper_overhead_tokens + estimate_tokens(capped)
+    if final_tokens > SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS:
+        raise RuntimeError(
+            "snapshot digest injection exceeded the "
+            f"{SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS}-token ceiling "
+            f"(wrapper={wrapper_overhead_tokens}t + body={estimate_tokens(capped)}t "
+            f"= {final_tokens}t)"
+        )
+    return capped
+
+
+async def _build_snapshot_digest_message(
+    instance_id: str,
+    manager: Any,
+) -> HumanMessage | None:
+    """Build the turn-1 warm-start digest block, or ``None``.
+
+    Reads ``instance_metadata["snapshot_digest"]`` (single DB read;
+    a failed read must NOT abort context assembly — swallow and
+    skip). Escape FIRST, then cap (see the module-seam comment
+    above), then emit via :func:`_make_context_message` with the
+    stable id ``snapshot_digest:{instance_id}``.
+    """
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        return None
+    try:
+        row = await asyncio.to_thread(repo.get, instance_id)
+        value = (row.instance_metadata or {}).get("snapshot_digest") if row else None
+    except Exception as exc:
+        logger.warning(
+            f"[ContextMessages] snapshot_digest read failed for "
+            f"{instance_id[:8]}...: {exc}"
+        )
+        return None
+    body = render_snapshot_digest_body(value)
+    if body is None:
+        return None
+    escaped = escape_for_context_block(body)
+    capped = cap_snapshot_digest_for_injection(escaped)
+    return _make_context_message(
+        CONTEXT_KIND_SNAPSHOT_DIGEST,
+        "Agent Snapshot Digest",
+        capped,
+        id_=f"snapshot_digest:{instance_id}",
     )
 
 
@@ -2015,6 +2243,24 @@ async def assemble_context_messages(
                     )
                 )
 
+        # ── 3.7. Snapshot digest (warm-start) — PERSISTENT (once-per-instance) ──
+        # Agent Snapshot v1 (PR4 read seam): on TURN 1, if the spawn
+        # tool stamped ``instance_metadata["snapshot_digest"]``
+        # (Wave 2b write path — atomic ``set_metadata_many``), render
+        # it into a ``[SYSTEM CONTEXT: Agent Snapshot Digest]``
+        # block. Escape FIRST, then the D6 ~25k-token hard ceiling
+        # (strictly counted, tail-truncate with a snapshot_search
+        # hint — truncate, never skip). Stable id
+        # ``snapshot_digest:{instance_id}`` so a re-spawn supersedes
+        # in place. The hoisted bucket (``context_kind``-keyed) makes
+        # the block survive every later compaction verbatim — zero
+        # compaction changes.
+        snap_digest_msg = await _build_snapshot_digest_message(
+            instance_id=instance_id, manager=manager
+        )
+        if snap_digest_msg is not None:
+            persistent_msgs.append(snap_digest_msg)
+
     # ── 4. Skills message — PERSISTENT (2026-07-29 refactor) ─────────────
     # Ephemeral skill injection is currently disabled. Skills are
     # persistent (checkpointed) for debugging and improvement. The
@@ -2076,6 +2322,8 @@ __all__ = [
     "CONTEXT_KIND_BLUEPRINT",
     "CONTEXT_KIND_PROJECT_SCOPE_GUIDE",
     "CONTEXT_KIND_SHARED_META_KV",
+    "CONTEXT_KIND_SNAPSHOT_DIGEST",
+    "SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS",
     # Pure builder functions
     "build_project_context_message",
     "build_project_scope_guide_message",
@@ -2084,6 +2332,9 @@ __all__ = [
     "build_auto_load_skills_message",
     "auto_load_skills_message_id",
     "build_skills_message",
+    # Snapshot digest seam (PR4 — read/consume side)
+    "render_snapshot_digest_body",
+    "cap_snapshot_digest_for_injection",
     # Shared helpers
     "escape_for_context_block",
     # Async orchestrator

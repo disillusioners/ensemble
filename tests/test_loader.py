@@ -830,6 +830,28 @@ class TestLoadToolsDocForAgent:
             "short_doc": "Create a new project",
             "full_doc": "Create a new project.\n\nArgs:\n    name: Project name.",
         }
+        # Wave-2b warm-scan guard raised the populated predicate from
+        # ``if _tool_metadata`` to ``>= 20 entries``
+        # (loader._WARM_SCAN_POPULATED_MIN_ENTRIES) — the old ``if`` guard
+        # short-circuited forever because module-level @register_tool
+        # sites pre-populate one entry at import time, which made the
+        # warm scan never run. The new threshold needs ≥20 entries
+        # before the warm scan is skipped; this fixture pre-populates
+        # exactly 4 meaningful entries (preserving each test's intent
+        # — the four are referenced by name in some assertions), so we
+        # add 16 generic placeholders to reach the threshold. Without
+        # this, the warm scan runs, ``create_inner_soul_tool(None, "", "")``
+        # resolves ``agent_path`` via the mock registry → ``agent_meta.path``
+        # is a MagicMock → ``_load_growth_rules(MagicMock)`` TypeErrors
+        # at inner_soul.py:1389 (``re.search`` on a MagicMock). Adding
+        # the 16 entries short-circuits the warm scan before the
+        # inner_soul factory is invoked.
+        for _idx in range(16):
+            _tool_metadata[f"_fixture_pad_{_idx}"] = {
+                "category": "fixture",
+                "short_doc": f"fixture placeholder {_idx}",
+                "full_doc": f"Fixture placeholder entry {_idx} for warm-scan threshold.",
+            }
         
         # Mock the registry
         self.mock_agent_meta = MagicMock()

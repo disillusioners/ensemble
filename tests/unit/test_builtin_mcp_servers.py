@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, AsyncMock
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, create_engine, Session as SQLModelSession
+from sqlalchemy.pool import StaticPool
 
 from daemon.models import (
     McpServerCreate,
@@ -90,7 +91,20 @@ def repository(engine):
     return SQLModelMcpServerRepository(engine)
 
 
-# Shared engine for router tests (to avoid SQLite threading issues)
+# Shared engine for router tests (to avoid SQLite threading issues and
+# cross-run DB-file staleness). Wave-2b snapshot feature brought the
+# ``snapshots`` table into SQLModel.metadata; the previous file-based
+# engine (``sqlite:///test_builtin_mcp_servers.db``) persisted across
+# pytest sessions, so the second run inherited the stale table and
+# ``SQLModel.metadata.create_all`` raised ``table snapshots already
+# exists`` on the first ``router_engine_and_repo`` test that needed
+# a fresh create_all pass. The repo convention for in-memory engines
+# that share state across threads is ``StaticPool`` + ``:memory:`` +
+# ``check_same_thread=False`` (see e2e/test_full_chain_turn_reconciler.py
+# :138-141, tests/test_snapshot_repository.py :57-61). Switching to
+# that pattern here keeps the ``shared_repository`` semantics intact
+# (the single StaticPool connection is reused across all sessions in
+# the test process) and starts each pytest process with a clean DB.
 _router_engine = None
 _router_repository = None
 
@@ -100,9 +114,10 @@ def get_router_engine():
     global _router_engine, _router_repository
     if _router_engine is None:
         _router_engine = create_engine(
-            "sqlite:///test_builtin_mcp_servers.db",
+            "sqlite:///:memory:",
             echo=False,
             connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
         )
         SQLModel.metadata.create_all(_router_engine)
         _router_repository = SQLModelMcpServerRepository(_router_engine)

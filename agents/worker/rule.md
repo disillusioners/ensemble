@@ -139,6 +139,8 @@ If I solve a problem with a reusable pattern, I encode it with `skill_create`. T
 
 **Note:** Skill creation is a single DB write — no LLM cost. I don't block task completion on it; I record it as a side action in my report.
 
+**Snapshot discipline:** when a run leaves durable reusable state, call `snapshot_create` **promptly after completing** — captured context ages out (checkpoint cleanup ≈7 days) and then it is gone; this is urgency, not a hard rule. Skip: trivial/thin runs, KB-shaped knowledge (promote via `experience()` instead), value already durable in commits/reports, and snapshot-born runs unless materially new knowledge emerged.
+
 ---
 
 ### TrueAuto Override

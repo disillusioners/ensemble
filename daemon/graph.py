@@ -1375,13 +1375,22 @@ class LoopDetector:
 #     returns the ORIGINAL message list so the graph can fall through to
 #     ``recursion_limit`` rather than wedging the agent.
 
-# ``_extract_text_from_content`` is imported lazily inside
-# ``LoopRepairer._build_excerpt`` to avoid a circular import: ``compaction.py``
-# already imports ``clean_llm_config`` from this module at module-load time,
-# so a top-level ``from .compaction import _extract_text_from_content`` here
-# would deadlock at import time. The lazy import mirrors the
-# ``from .compaction import CompactionContext`` pattern already used in
+# ``extract_text_from_content`` (the multimodal flattener) is imported lazily
+# inside the helpers that use it (``LoopRepairer._build_excerpt``,
+# ``WatchoverSlidingWindowStateMachine._format_messages_for_summary``, etc.)
+# to avoid a circular import: ``compaction.py`` already imports
+# ``clean_llm_config`` from this module at module-load time, so a top-level
+# import here would deadlock. The lazy pattern mirrors the existing
+# ``from .compaction import CompactionContext`` shape used in
 # :func:`create_agent_node` for the same reason.
+#
+# Pre-PR1 this lazy import reached ``from .compaction import
+# _extract_text_from_content`` — the helper was inlined in ``compaction.py``
+# for historical reasons. The agent-snapshot v1 build (PR1) extracted the
+# content-hardening corpus (this predicate + the partition/hoist family)
+# into the canonical home :mod:`daemon._content_hardening`; the lazy
+# import below now resolves there. The lazy harness is RETAINED (not
+# promoted to top-level) so the test-collection path stays stable.
 
 
 @dataclass
@@ -1784,7 +1793,8 @@ class LoopRepairer:
         """
         # Lazy import to avoid circular dependency with daemon.compaction
         # (see module-level comment above the ``RepairContext`` dataclass).
-        from .compaction import _extract_text_from_content
+        # PR1: resolved via daemon._content_hardening (the canonical home).
+        from ._content_hardening import extract_text_from_content
 
         excerpt = LoopRepairer._build_excerpt(messages, max_messages=10)
         prompt = REPAIR_SUMMARIZATION_PROMPT.format(
@@ -1826,7 +1836,7 @@ class LoopRepairer:
                 ),
                 timeout=timeout_seconds,
             )
-            return _extract_text_from_content(response.content)
+            return extract_text_from_content(response.content)
 
         except asyncio.TimeoutError:
             logger.warning(
@@ -1864,7 +1874,8 @@ class LoopRepairer:
         """
         # Lazy import to avoid circular dependency with daemon.compaction
         # (see module-level comment above the ``RepairContext`` dataclass).
-        from .compaction import _extract_text_from_content
+        # PR1: resolved via daemon._content_hardening (the canonical home).
+        from ._content_hardening import extract_text_from_content
 
         if not messages:
             return ""
@@ -1872,7 +1883,7 @@ class LoopRepairer:
         lines: list[str] = []
         for msg in tail:
             content = getattr(msg, "content", "") or ""
-            text = _extract_text_from_content(content)
+            text = extract_text_from_content(content)
             msg_type = type(msg).__name__
             if text:
                 lines.append(f"[{msg_type}] {text}")
@@ -1995,7 +2006,7 @@ def _is_real_human_message(msg: BaseMessage) -> bool:
     """True for a REAL (non-injected) ``HumanMessage`` (B-3, OQ5).
 
     Injected detection mirrors the compaction partition predicates
-    (``daemon/compaction.py::_is_injected_message`` /
+    (:func:`daemon._content_hardening.is_injected_message` /
     ``daemon/services/context_messages.py::_make_context_message``):
     operator injections, skill/context blocks and child-report drains all
     carry ``additional_kwargs.injected_message=True`` — none of them is a
@@ -2004,9 +2015,9 @@ def _is_real_human_message(msg: BaseMessage) -> bool:
     """
     if not isinstance(msg, HumanMessage):
         return False
-    from .compaction import _is_injected_message  # lazy: cycle guard
+    from ._content_hardening import is_injected_message  # lazy: cycle guard
 
-    return not _is_injected_message(msg)
+    return not is_injected_message(msg)
 
 
 def _repair_boundary_reset_state(
@@ -9486,7 +9497,8 @@ class WatchoverEvaluator:
 
         # Lazy import — keeps the graph.py top-level import surface stable
         # for the test collection path (mirrors LoopRepairer._summarize_loop).
-        from .compaction import _extract_text_from_content
+        # PR1: resolved via daemon._content_hardening (the canonical home).
+        from ._content_hardening import extract_text_from_content
 
         system_prompt = _load_watcher_soul_prompt()
 
@@ -9635,7 +9647,7 @@ class WatchoverEvaluator:
                     ),
                     timeout=self._timeout_seconds,
                 )
-                raw = _extract_text_from_content(response.content)
+                raw = extract_text_from_content(response.content)
                 parsed = self._parse_verdict(raw)
                 if parsed is None:
                     # Judgment error — fail-CLOSED for this call.
@@ -9729,7 +9741,8 @@ class WatchoverEvaluator:
             any error so the sliding window never produces an empty
             snapshot mid-conversation.
         """
-        from .compaction import _extract_text_from_content
+        # PR1: resolved via daemon._content_hardening (the canonical home).
+        from ._content_hardening import extract_text_from_content
 
         delta_text = self._format_messages_for_summary(self._delta_messages)
 
@@ -9758,7 +9771,7 @@ class WatchoverEvaluator:
                 asyncio.to_thread(llm.invoke, summary_messages),
                 timeout=self._timeout_seconds,
             )
-            return _extract_text_from_content(response.content)
+            return extract_text_from_content(response.content)
         except Exception as exc:
             # If snapshot regeneration fails, keep the old snapshot
             # (better to have stale context than no context).
@@ -9789,7 +9802,8 @@ class WatchoverEvaluator:
         """
         if not messages:
             return "(no messages)"
-        from .compaction import _extract_text_from_content
+        # PR1: resolved via daemon._content_hardening (the canonical home).
+        from ._content_hardening import extract_text_from_content
 
         # Map raw LangGraph message types to concise human-readable
         # labels so the summarizer never sees ``"HumanMessage"`` /
@@ -9808,7 +9822,7 @@ class WatchoverEvaluator:
             role = role_map.get(raw_role, raw_role)
             content = getattr(msg, "content", "")
             try:
-                text = _extract_text_from_content(content)
+                text = extract_text_from_content(content)
             except Exception:
                 text = str(content)
             lines.append(f"[{role}]: {text}")

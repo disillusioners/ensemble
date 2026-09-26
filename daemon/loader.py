@@ -24,18 +24,40 @@ KNOWLEDGE_FILE = _base_dir / "agents" / "_prompt_system" / "knowledge.md"
 KNOWLEDGE_NO_FORCE_EXPLORE_FILE = _base_dir / "agents" / "_prompt_system" / "knowledge_no_force_explore.md"
 
 
+# Threshold above which ``_tool_metadata`` is considered fully populated
+# by the comprehensive warm scan. This is a COUNT, not a truthy check,
+# because the dict is NOT empty at import time: module-level
+# ``@register_tool`` sites (e.g. ``language_skip_check``, imported
+# transitively via ``daemon.tools.instance``) pre-populate one entry,
+# which made the old ``if _tool_metadata: return`` guard short-circuit
+# forever — the warm scan never ran, and cold-boot tool docs for
+# factory categories (snapshot, db, ens-db, service, system-log, ...)
+# rendered EMPTY and pinned into the no-TTL PromptCache (Wave 2b
+# discovery; the maintenancer W1-fix list was silently dead under this
+# ``guard``. The warm scan registers ~60 entries; the stale-entry case
+# (import-time @register_tool sites) contributes 1. A threshold of 20
+# separates the two states with wide margin; a false "not yet run" only
+# costs one redundant (idempotent) scan.
+_WARM_SCAN_POPULATED_MIN_ENTRIES = 20
+
+
 def _ensure_tool_metadata_populated() -> None:
     """Ensure _tool_metadata is populated by importing and scanning all tool modules.
-    
+
     This enables category expansion in resolve_tool_filter() and ensures
     CATEGORY_DOC is available for load_tools_doc_for_agent().
-    
-    Safe to call multiple times - subsequent calls are no-ops if already populated.
+
+    Safe to call multiple times - subsequent calls are no-ops once the
+    metadata universe is fully populated (see
+    _WARM_SCAN_POPULATED_MIN_ENTRIES: the mere PRESENCE of entries is
+    not proof the scan ran — module-level @register_tool sites
+    pre-populate entries at import time; a full clear via
+    ``clear_registry()`` correctly re-triggers the scan).
     """
     from .tools._tool_registry import _tool_metadata, scan_tools_for_full_docs
-    
-    if _tool_metadata:
-        return  # Already populated
+
+    if len(_tool_metadata) >= _WARM_SCAN_POPULATED_MIN_ENTRIES:
+        return  # Comprehensive warm scan already ran (or equivalent).
     
     # Import all tool modules to trigger @register_tool_category decorators
     # and collect @tool decorated functions
@@ -61,6 +83,14 @@ def _ensure_tool_metadata_populated() -> None:
     from .tools.upgrade_tools import create_upgrade_tools
     from .tools.db_tools import create_db_tools
     from .tools.service_tools import create_service_tools
+    # Agent Snapshot (Wave 2b): the snapshot tools are factory-created
+    # (@register_tool_category decorators never run at import time).
+    # Skipping this warm-list entry would pin an EMPTY "snapshot"
+    # category into the no-TTL prompt cache on cold boot — the
+    # load_tools_doc_for_agent("worker") path would render no Snapshot
+    # section until some instance build happened to repopulate the
+    # cache. Same maintenancer W1-fix pattern as the modules above.
+    from .tools.snapshot_tools import create_snapshot_tools
 
     # Create dummy instances to get the tools (these create closures with None manager)
     # We just need the tool objects themselves for metadata scanning
@@ -89,6 +119,12 @@ def _ensure_tool_metadata_populated() -> None:
     # @register_tool_category("service") decorators must run HERE so
     # the cold-boot metadata scan registers the category.
     service_tools = create_service_tools(None, "metadata-scan")
+    # Snapshot tools (Wave 2b): construction only builds closures
+    # (manager / services dereferenced at CALL time) — the
+    # @register_tool_category("snapshot") / ("instance") decorators
+    # must run HERE so the cold-boot metadata scan registers the
+    # category before the no-TTL prompt cache pins tool docs.
+    snapshot_tools = create_snapshot_tools(None, "", "")
     # create_db_tools reads manager.credential_manager at construction
     # (N1 — shared Fernet handle), so it needs a minimal attribute stub;
     # None is sufficient — the credential manager is only invoked inside
@@ -115,7 +151,7 @@ def _ensure_tool_metadata_populated() -> None:
     # the list object itself would stringify it during the scan).
     for factory_tools in (
         system_log_tools, ens_db_tools, knowledge_tools,
-        upgrade_tools, db_tools, service_tools,
+        upgrade_tools, db_tools, service_tools, snapshot_tools,
     ):
         if factory_tools:
             all_tools.extend(factory_tools)
@@ -154,9 +190,12 @@ def load_tools_doc_for_agent(
 
     # Ensure _tool_metadata is populated by scanning tool modules
     # This is needed because load_tools_doc_for_agent may be called before
-    # create_instance_tools (which also scans tools)
-    if not _tool_metadata:
-        _ensure_tool_metadata_populated()
+    # create_instance_tools (which also scans tools). Called
+    # UNCONDITIONALLY — the function self-guards via the populated-count
+    # predicate (the old ``if not _tool_metadata`` predicate never fired
+    # because a module-level @register_tool site pre-populates one entry
+    # at import time).
+    _ensure_tool_metadata_populated()
 
     # Get agent's tool filter from registry.
     # Prefer versioned meta when a version_tag is provided; fall back to

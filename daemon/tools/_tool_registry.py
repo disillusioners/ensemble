@@ -91,6 +91,15 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "ens_db_inspect",
     "ens_db_repair_execute",
     "ens_db_pool_status",
+    # Agent Snapshot tools (agent-snapshot v1 Wave 2b, PR6) — created by
+    # create_snapshot_tools() factory (daemon/tools/snapshot_tools.py).
+    # snapshot_create + snapshot_search ship in the "snapshot" category
+    # (per-tool grants for the creator agents); spawn_hot_instance ships
+    # in the "instance" category (auto-granted to every instance-category
+    # holder — zero per-agent meta.json edits; ari permanently excluded).
+    "snapshot_create",
+    "snapshot_search",
+    "spawn_hot_instance",
     # service tools (service-tool Phase 1, 2026-09-15) — created by
     # create_service_tools() factory (daemon/tools/service_tools.py).
     # Default-enabled per override 2026-09-16 (see
@@ -567,6 +576,14 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # factory-created (create_service_tools) and listed in
     # DYNAMIC_TOOL_NAMES below.
     "service": "daemon.tools.service_tools",
+    # Agent Snapshot tools (agent-snapshot v1 Wave 2b, PR6) — one
+    # module hosting two grant categories: snapshot_create +
+    # snapshot_search carry the "snapshot" category (per-tool
+    # creator grants); spawn_hot_instance carries the "instance"
+    # category (consumer auto-grant). The AST source discovery scans
+    # the MODULE, so all three factory tools are picked up here
+    # regardless of their per-tool category attribute.
+    "snapshot": "daemon.tools.snapshot_tools",
 }
 
 
@@ -678,8 +695,8 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "job_messages",
     "job_pause",
     "job_progress",
-    "job_resume",
     "job_restore",
+    "job_resume",
     "job_retry",
     "job_tree",
     "language_skip_check",
@@ -769,7 +786,10 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "skill_resolve_ab",
     "skill_search",
     "skill_view",
+    "snapshot_create",
+    "snapshot_search",
     "spawn_councilor",
+    "spawn_hot_instance",
     "spawn_instance",
     "subtree_messages",
     "subtree_status",

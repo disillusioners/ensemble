@@ -198,6 +198,21 @@ EDITOR_DEFAULT = "builtin"                     # default when no preference set
 EDITOR_OPTIONS = ["builtin", "vscode"]         # valid editor values
 
 # ---------------------------------------------------------------------------
+# Agent Snapshot — R15 settings toggle (write side ONLY)
+# ---------------------------------------------------------------------------
+# Stored under the SYSTEM_DEFAULT_PROJECT metadata record (mirrors the
+# EDITOR_METADATA_KEY shape). The ``is_snapshot_create_enabled`` seam in
+# ``daemon/tools/snapshot_tools.py`` reads it; absent/missing → OFF
+# (fail-closed opt-in rollout). The toggle gates ONLY ``snapshot_create``;
+# ``snapshot_search`` (read) and ``spawn_hot_instance`` (consumption) are
+# always-on (R15 rider (i) isolation).
+SNAPSHOT_CREATE_METADATA_KEY = "snapshot_create_enabled"
+# Tracked string values stored in the metadata record. Anything not in this
+# set is treated as OFF (defense-in-depth — corrupt or legacy values fail
+# closed).
+SNAPSHOT_CREATE_ENABLED_VALUES = frozenset({"on", "true", "1", "yes"})
+
+# ---------------------------------------------------------------------------
 # Default Agent Versions
 # ---------------------------------------------------------------------------
 DEFAULT_AGENT_VERSIONS_METADATA_KEY = "default_agent_versions"  # metadata key in project_metadata_records

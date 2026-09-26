@@ -117,10 +117,11 @@ def _last_real_human_id(messages: list[BaseMessage]) -> str:
     detection mirrors ``graph.py::_is_real_human_message`` via the SAME
     compaction predicate (lazy import — cycle guard).
     """
-    from ..compaction import _is_injected_message  # lazy: cycle guard
+    # PR1: resolved via daemon._content_hardening (the canonical home).
+    from .._content_hardening import is_injected_message  # lazy: cycle guard
 
     for msg in reversed(messages):
-        if isinstance(msg, HumanMessage) and not _is_injected_message(msg):
+        if isinstance(msg, HumanMessage) and not is_injected_message(msg):
             return str(getattr(msg, "id", "") or "")
     return ""
 
@@ -726,7 +727,7 @@ class SymptomRepairEngine:
         through to the shipped backstops, making a fallback summary
         strictly worse than no surgery).
         """
-        from ..compaction import _extract_text_from_content  # lazy
+        from .._content_hardening import extract_text_from_content  # lazy; PR1
         from ..graph import (  # lazy: graph ↔ services cycle guard
             REPAIR_SUMMARIZATION_PROMPT,
             ThinkingChatOpenAI,
@@ -774,7 +775,7 @@ class SymptomRepairEngine:
             abort.reason = "summarizer-failed"
             raise abort from exc
 
-        text = _extract_text_from_content(getattr(response, "content", "") or "")
+        text = extract_text_from_content(getattr(response, "content", "") or "")
         cleaned, _thinking = parse_think_tags(text or "")
         if not cleaned.strip():
             abort = SymptomRepairAborted(
@@ -1041,17 +1042,17 @@ class SymptomRepairEngine:
             same channel WITHOUT the sentinel (the caller prepends the
             system prompt for the LLM call).
         """
-        from ..compaction import (  # lazy
-            _injected_note_absorbed_ids,
-            _is_hoisted_injected,
-            make_remove_all_sentinel,
+        from .._content_hardening import (  # lazy; PR1 (canonical home)
+            injected_note_absorbed_ids,
+            is_hoisted_injected,
         )
+        from ..compaction import make_remove_all_sentinel
 
-        answered_note_ids = _injected_note_absorbed_ids(context.messages)
+        answered_note_ids = injected_note_absorbed_ids(context.messages)
         hoisted: list[BaseMessage] = []
         retained: list[BaseMessage] = []
         for msg in context.messages:
-            if _is_hoisted_injected(msg, answered_note_ids):
+            if is_hoisted_injected(msg, answered_note_ids):
                 hoisted.append(msg)
             elif getattr(msg, "id", None) in removal_ids:
                 continue  # loop evidence — removed by the sentinel

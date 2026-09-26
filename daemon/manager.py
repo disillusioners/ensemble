@@ -10,6 +10,7 @@ import time
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from daemon.services.timestamps import now_utc_naive
 from pathlib import Path
@@ -123,6 +124,10 @@ from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import SkillJobDispatcher
 from .services.skill_trigger_engine import SkillTriggerEngine
 from .services.skill_trigger_seed import seed_default_triggers
+from .services.snapshot_executor import SnapshotService, compute_staleness_report
+from .services.snapshot_embedding_service import SnapshotEmbeddingService
+from .services.snapshot_search_service import SnapshotSearchService
+from .repositories.snapshot.repository import SnapshotRepository
 from .services.skill_seed_service import SkillSeedService
 from .services.skill_clone_service import SkillCloneService
 from .services.maintenance import MaintenanceService, CheckpointCleanupJob
@@ -521,6 +526,22 @@ class InstanceManager:
         # Import SchemaMigration to register it with SQLModel.metadata
         # This ensures the schema_migrations table is created
         from .migrations.models import SchemaMigration
+
+        # Agent Snapshot v1 (PR3): register the snapshot models with
+        # SQLModel.metadata BEFORE create_all so the `snapshots` /
+        # `snapshot_embeddings` tables are created on fresh AND
+        # existing PG databases (design-exploration §3.3 — no
+        # _ensure_postgres_columns mirror for brand-new tables).
+        #
+        # Wave 3 R16: ``SnapshotUsageCounter`` is in the same
+        # package; the include-block MUST add it so the
+        # ``snapshot_usage_counters`` table joins ``create_all`` on
+        # fresh DBs (PG) AND on the in-memory SQLite used by tests.
+        from .repositories.snapshot.models import (  # noqa: F401
+            Snapshot,
+            SnapshotEmbedding,
+            SnapshotUsageCounter,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
@@ -1618,6 +1639,70 @@ class InstanceManager:
             # lookups (``getattr(manager, '_skill_job_dispatcher',
             # None)``) still see ``None`` rather than ``AttributeError``.
             self._skill_job_dispatcher = None
+
+        # ── Agent Snapshot v1 (Wave 2b — Wave 1b review NIT #6) ────────
+        # Snapshot repository + services constructed ALONGSIDE the other
+        # repositories (skill_repository pattern) so tool factories and
+        # the consumption seam never hand-assemble dependencies. The
+        # repository is unconditional (read paths + boot sweep are
+        # always available); the embedding service is best-effort — its
+        # failures degrade search to BM25+tag-overlap by design.
+        self._snapshot_repo = SnapshotRepository(engine=self._engine)
+        # LLM config: same dict shape the skill services use (the raw-SDK
+        # consumers read ``base_url`` / ``base_url_backup`` / ``api_key`` /
+        # ``request_gzip``). Built unconditionally here — the snapshot
+        # subsystem is decoupled from ``config.skill_evolution`` at the
+        # service layer, so it must not depend on that block having run.
+        snapshot_llm_config: dict[str, Any] = {
+            "base_url": self.config.llm.base_url,
+            "base_url_backup": self.config.llm.base_url_backup,
+            "api_key": self.config.llm.api_key,
+            "model": self.config.llm.model,
+            "model_vision": self.config.llm.model_vision,
+            "request_timeout": self.config.llm.request_timeout,
+            "request_gzip": self.config.llm.request_gzip,
+        }
+        # Embedding endpoint config (duck-typed): reuse the skill-evolution
+        # embedding fields when the operator configured them (same
+        # endpoint serves both caches); otherwise all-None so the service
+        # resolves model/base_url/api_key from its own fallbacks.
+        _snapshot_embed_src: Any = (
+            self.config.skill_evolution
+            if self.config.skill_evolution is not None
+            else SimpleNamespace(
+                embedding_model=None,
+                embedding_base_url=None,
+                embedding_api_key=None,
+                embedding_dimensions=None,
+            )
+        )
+        self._snapshot_embedding_service = SnapshotEmbeddingService(
+            config=_snapshot_embed_src,
+            snapshot_repo=self._snapshot_repo,
+            llm_config=snapshot_llm_config,
+        )
+        self._snapshot_service = SnapshotService(
+            self,
+            self._snapshot_repo,
+            snapshot_embedding_service=self._snapshot_embedding_service,
+        )
+        self._snapshot_search_service = SnapshotSearchService(
+            snapshot_repo=self._snapshot_repo,
+            embedding_service=self._snapshot_embedding_service,
+            llm_config=snapshot_llm_config,
+            staleness_fn=compute_staleness_report,
+        )
+        # R16 — monitoring counters (Wave 3). Always wired (the
+        # service holds no expensive state and the row count is the
+        # source of truth). The tool surface consults it on every
+        # ``snapshot_create`` (capture path) and the WARM branch of
+        # ``spawn_hot_instance`` (spawn path); the surface endpoint
+        # ``GET /api/settings/snapshot-usage-metrics`` reads it for
+        # the FE.
+        from .services.snapshot_metrics_service import SnapshotMetricsService
+        self._snapshot_metrics_service = SnapshotMetricsService(
+            engine=self._engine,
+        )
 
         # Initialize MCP warm-up pool (non-blocking background warmup)
         self._init_warmup_pool()
@@ -11451,6 +11536,10 @@ class InstanceManager:
             ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
             ("shutdown_event_bus", self._event_bus.shutdown()),
             ("shutdown_maintenance_service", self._maintenance_service.stop() if self._maintenance_service else asyncio.sleep(0)),
+            # Drain the D3 snapshot capture + R10 embedding
+            # fire-and-forget tasks BEFORE the DB pools go away —
+            # an in-flight terminal write must land on a live pool.
+            ("drain_snapshot_capture_tasks", self._drain_snapshot_capture_tasks()),
             ("dispose_db_pools", self._db_pool_manager.dispose_all() if hasattr(self, '_db_pool_manager') else asyncio.sleep(0)),
             ("close_checkpointer", self.close_checkpointer()),
             ("drain_mcp_pool", self._drain_warmup_pool()),
@@ -11476,6 +11565,29 @@ class InstanceManager:
     async def _cancel_all_active_requests(self) -> None:
         """Cancel all active requests in the registry with SHUTDOWN reason."""
         return await self._cancellation_service._cancel_all_active_requests()
+
+    async def _drain_snapshot_capture_tasks(self) -> None:
+        """Drain the D3 snapshot capture/embedding lane during shutdown.
+
+        Best-effort, mirroring every other shutdown step: failures are
+        logged, never raised. A missing service (early-boot failure)
+        is a no-op.
+        """
+        service = getattr(self, "_snapshot_service", None)
+        if service is None:
+            return
+        try:
+            pending = await service.drain_capture_tasks()
+            if pending:
+                logger.info(
+                    f"shutdown: drained snapshot capture lane "
+                    f"({pending} task(s) awaited)"
+                )
+        except Exception as e:
+            logger.error(
+                f"Error during shutdown step 'drain_snapshot_capture_tasks': {e}",
+                exc_info=True,
+            )
 
     async def _shutdown_opencode_registry(self) -> None:
         """Shutdown the opencode session registry during daemon shutdown.

@@ -124,6 +124,9 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Recommend agent-browser for web frontend projects** — instruct "use agent-browser skill to auto-fix the website bug"
 - **Browser automation ONLY for web frontend testing** — not backend API or non-UI testing
 
+### Snapshot Discipline (creator)
+- **Search-before-create runs inside `snapshot_create`** — a strong existing match comes back as `reused-existing-snapshot-id`; a same-target predecessor is superseded automatically (no `snapshot_update` exists). Capture promptly after the RESULTS write — snapshots age out (~7d); skip when the value is already durable in RESULTS/PACKS/LESSONS.
+
 ### Port Safety
 - **NEVER kill a process on port 8088** — that is the ensemble self-system; killing it ends the tester. Before killing by name or PID, inspect the process's bound port first to avoid mistaking the system process
 - **Port ranges**: 1-9999 production/dev; 10000-19999 mock tests ONLY; 20000+ reserved

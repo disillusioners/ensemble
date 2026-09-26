@@ -33,6 +33,9 @@ from .schemas import (
     BlueprintPeakHoursResponse,
     BlueprintPeakHoursUpdate,
     PlaneConfigResponse,
+    SnapshotCreatePreferenceResponse,
+    SnapshotCreatePreferenceUpdate,
+    SnapshotUsageMetricsResponse,
 )
 
 # Peak-hours gate metadata keys — these are the same keys read by
@@ -536,3 +539,97 @@ async def get_plane_config():
     if not url or not re.match(r'^https?://', url, re.IGNORECASE):
         return PlaneConfigResponse(enabled=False, url="")
     return PlaneConfigResponse(enabled=True, url=url)
+
+
+# ==================== Agent Snapshot — R15 Toggle (write side ONLY) ====================
+# Gates ONLY ``snapshot_create`` (rider (i) isolation —
+# ``snapshot_search`` and ``spawn_hot_instance`` are NEVER gated).
+# Default OFF — unset / missing / unknown values all read as False
+# (fail-closed opt-in rollout). Storage shape mirrors
+# ``editor_preference`` (R2: ``set_metadata`` opens its own Session).
+# Imported lazily at call sites to avoid a snapshot→settings import
+# inversion (the utils live in ``daemon/services/``).
+
+
+@router.get("/snapshot-create", response_model=SnapshotCreatePreferenceResponse)
+async def get_snapshot_create_preference():
+    """Read the R15 settings toggle for ``snapshot_create``.
+
+    Unset / missing / unknown values all return ``enabled=False``
+    (fail-closed opt-in rollout — design §6.3 R15).
+    """
+    repo = get_project_repository()  # raises 503 if not initialized
+    from daemon.services.snapshot_settings_utils import get_snapshot_create_enabled
+
+    enabled = await get_snapshot_create_enabled(repo)
+    return SnapshotCreatePreferenceResponse(enabled=enabled)
+
+
+@router.put("/snapshot-create", response_model=SnapshotCreatePreferenceResponse)
+async def set_snapshot_create_preference(request: SnapshotCreatePreferenceUpdate):
+    """Persist the R15 settings toggle for ``snapshot_create``.
+
+    Mirrors ``set_editor_preference``: writer responsibility is the
+    metadata record only. The ``snapshot_create`` tool reads it on
+    every invocation via the async
+    ``get_snapshot_create_enabled`` util (awaited at the single
+    tool call site — the R15 gate in
+    ``daemon/tools/snapshot_tools.py``); the deprecated
+    ``is_snapshot_create_enabled`` sync stub is NOT on the tool path.
+    """
+    repo = get_project_repository()  # raises 503 if not initialized
+    from daemon.services.snapshot_settings_utils import set_snapshot_create_enabled
+
+    try:
+        enabled = await set_snapshot_create_enabled(repo, request.enabled)
+    except RuntimeError as exc:
+        # system default project row is missing (W12 parity)
+        raise HTTPException(status_code=503, detail=str(exc))
+    return SnapshotCreatePreferenceResponse(enabled=enabled)
+
+
+# ==================== Agent Snapshot — R16 Monitoring Metrics ====================
+# MONITORING ONLY — explicitly NOT a ranking signal (design §6.3 R16;
+# R10 forbids usage-ranking in v1). The endpoint surfaces the counters
+# the R16 storage collects: per-agent capture counts + per-snapshot
+# spawn-warm counts. Cold spawns (``None`` snapshot consumption) are
+# NOT counted — see ``daemon/services/snapshot_metrics_service.py``.
+
+
+@router.get("/snapshot-usage-metrics", response_model=SnapshotUsageMetricsResponse)
+async def get_snapshot_usage_metrics():
+    """Surface the R16 counters (monitoring only).
+
+    The metrics service aggregates counter rows from
+    ``daemon/repositories/snapshot/models.py:SnapshotUsageCounter``.
+    Storage shape:
+
+    * capture counts — incremented on every ``snapshot_create``
+      invocation regardless of R9 verdict (REUSE + NEW + SUPERSEDE +
+      CREATE-FRESH all count);
+    * per-snapshot spawn counts — incremented on the ``spawn_hot_instance``
+      WARM path only (cold / no-hit / expired / verify-failed paths
+      DO NOT count — R16 rider j).
+
+    The endpoint is purely observational: no tool surface mutates on
+    its output, and ranking modules (snapshot_search + snapshot_embedding_service)
+    do NOT import the metrics module — pinned by the
+    ``MonitoringOnlyPinTest`` in
+    tests/unit/tools/test_snapshot_v3.py::TestMonitoringOnlyPin.
+    """
+    from daemon.services.snapshot_metrics_service import (
+        SnapshotMetricsService,
+    )
+
+    metrics_engine = getattr(_project_repo, "engine", None)
+    if metrics_engine is None:
+        return SnapshotUsageMetricsResponse(
+            capture_counts={},
+            spawn_counts_per_snapshot=[],
+        )
+    service = SnapshotMetricsService(engine=metrics_engine)
+    metrics = await service.surface()
+    return SnapshotUsageMetricsResponse(
+        capture_counts=metrics.get("capture_counts") or {},
+        spawn_counts_per_snapshot=metrics.get("spawn_counts_per_snapshot") or [],
+    )

@@ -1436,7 +1436,8 @@ Provide a concise summary:"""
         # S5: lazy import — mirrors the convention at graph.py:1011-1017.
         # Keeps the module-level import surface small and avoids the cycle
         # risk if compaction ever imports child_reports.
-        from ..compaction import _extract_text_from_content
+        # PR1: resolved via daemon._content_hardening (the canonical home).
+        from .._content_hardening import extract_text_from_content
 
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -1517,7 +1518,7 @@ Provide a concise summary:"""
                 ),
                 timeout=timeout,
             )
-            return _extract_text_from_content(response.content)
+            return extract_text_from_content(response.content)
 
         except asyncio.TimeoutError:
             logger.warning(

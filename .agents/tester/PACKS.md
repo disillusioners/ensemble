@@ -31,6 +31,17 @@ Branch `feature/agent-pause-resume-tools` @ `17cf80f1` (base `latest` @ `0fd06cf
 
 ---
 
+## Active commission — AGENT-SNAPSHOT-V1 A/B ACCEPTANCE GATE (2026-09-25)
+Branch `feature/agent-snapshot-v1` @ `2a691591` (base `db71500a`; 21 commits; 58 files +13448/−248). A/B acceptance against prepared base leg at `/tmp/ens-snap-base` (`db71500a`). Gates 1+2 (build/feature/regression) reported green by giter; GATE 3 = live PG dialect smoke for `filter_by_tags` JSONB `@>` arm — rider (f) residual, unit-unreachable on SQLite.
+
+| Pack | Invocation | Scope | Est. |
+|---|---|---|---|
+| `snapshot_pg_smoke_integration_test` (registered: `test/packs/ab/snapshot_pg_smoke_integration_test.sh` + `_snapshot_pg_smoke_exercise.py`) | `timeout 300 bash test/packs/ab/snapshot_pg_smoke_integration_test.sh` (self-provisions throwaway PG :15432 trust-auth; teardown EXIT trap) | Live PG @> containment arm vs SQLite JSON-text scan; 10 cases (all/any × multiple tag sets + empty-tags passthrough) + edge cases (invalid `tag_mode`, empty candidates). Compare PG id-list to SQLite id-list; capture per-case runtime SQL. Migration runner = documented PG no-op (runner.py:719-727); schema materialized via `SQLModel.metadata.create_all` to mirror production manager init. | ~1 min |
+
+**GATE 3 RESULT (2026-09-26): 🔴 BLOCKER — PG arm does NOT emit JSONB `@>`; emits `LIKE '%' \|\| :tags::JSONB \|\| '%'` → `psycopg.errors.InvalidTextRepresentation` (Token "%" invalid).** Root cause: `col(Snapshot.domain_tags).contains(wanted)` (repository.py:542,550) routes through `JSON.Comparator.contains` (LIKE substring) instead of `JSONB.Comparator.contains` (`@>`). `JSONBType` is a `TypeDecorator` wrapping `JSON`; without an explicit `coerce_compared_value` override (or `cast(col, JSONB).contains(...)`), the JSONB comparator never fires. Per gate policy: production code NOT modified; this pack is the durable regression marker. Fix direction (next commission): cast the column to `JSONB` at compare time, OR have `JSONBType` provide a JSONB-aware comparator. Pack script + per-case matrix preserved at `test/packs/ab/`.
+
+---
+
 ## Active commission — FS-TOOL-GUARDRAILS FULL-REGRESSION GATE (2026-09-23)
 Branch `feature/fs-tool-guardrails` @ `948c0f06` (base `3c09c6ae`; 4 commits; prod footprint = `daemon/tools/filesystem.py` only). **✅ VERDICT: PASS — 0 branch-caused regressions; merge-ready from testing.** Method: 16 pack runs (all committed regression partitions + concurrency bonus + 1 ad-hoc family pack) + 6 base A/B legs (`/tmp/ens-fsg-base{,-2}`) + 3 solo tiebreaks; 29 workers, 0 re-dispatches; every invocation drift-pinned + env-scrubbed (`env -u` POSTGRES_*/DATABASE_URL) + dual-layer timeout.
 
@@ -638,6 +649,7 @@ Job-queue mission-tree feature gate on `feature/job-queue-mission-tree` @ `708ee
 | tools_suite_unit_test | test/packs/tools_suite_unit_test.sh | Entire tests/unit/tools/ directory (674 tests collected): regression sweep anchoring the frozen tool-name discovery fix against sibling tool tests (version-tag resolution, spawn defaults, system/context/rag/critical-notes tools, inner-soul suites, memory edge cases) | 2 min | 2026-08-20 | ✅ PASS (671 passed / 5 deselected / 0 failed, 13.07s, @ 9a8da571 with quarantine fix 68823b49 — 5 PRE-EXISTING test_archive_lifecycle.py access_memory 'Access denied' failures triple-attributed pre-branch (symbol-grep ∅, file unmodified, ancestor re-run identical) → quarantined, see QUARANTINE.md 2026-08-20; TESTER VERIFICATION 2026-08-23 @ ca5a404e (P2.2 pre-merge): PASS 836 passed / 5 deselected / 0 failed in 17.35s — deselect set == EXACTLY the 5 quarantined, no new failures/deselects; grew from 671 by the P2.2 suites, /tmp/p22-verify-toolssweep.log) — **GATE 2026-08-28 @ 51f5dc54 (injection-marker-serialization): PASS 993c/988P/0F/5-des in 24.9s (+2 = new D12 tests, all pass; deselect set == quarantine ×5 exact)** — **GATE 2026-08-28 @ 1d14f451 (subtree-status): PASS 1023P/0F/5-des in 27.3s (+35 subtree_status tests)** — **GATE 2026-08-29 @ b1159eca (stability-quick-wins-2): PASS 1024P/0F/5-des in 28s (+1 facade delegate test; all 34 TestSubtreeStatus* green incl. queued/running reshape; tools/instance.py in blast radius)** |
 | registry_validation_unit_test | test/packs/registry_validation_unit_test.sh | tests/test_registry.py (102 tests) + tests/test_tools.py (38 tests): AgentRegistry discovery/validation + tool modules the validator consumes — pins that daemon/registry.py validation logic was untouched | 2 min | 2026-08-27 | ✅ PASS (140/140 in 6.59s — FIRST-EVER committed run, baseline established @ e15be0e2 agent-instance-tools Phase-2 gate; leader subtree_messages opt-in accepted, zero unknown-tool warnings; prior PACKS count "23" for test_tools.py was stale — actual 38) — **GATE 2026-08-28 @ 51f5dc54 (injection-marker-serialization): PASS 140/140 in 6.49s baseline-exact** — **GATE 2026-08-28 @ 1d14f451 (subtree-status): PASS 140/140, ZERO subtree_status unknown-tool warnings (meta opt-in ×3 + KNOWN_TOOL_NAMES validated)** |
 | tool_config_validation_boot_unit_test | test/packs/tool_config_validation_boot_unit_test.sh | Boot-path tool-config validation (NEW, authored with the pack): source-mode `get_registry()` boot wrapper + `validate_tool_configs()` against REAL agents/project-manager/meta.json — (1) zero "is neither a known category nor a known tool" warnings for project-manager (prod-incident regression pin, logger daemon.registry at WARNING), (2) deliberately-unknown `totally_bogus_tool_xyz` in tmp_path-staged config STILL warns (no-false-negative guard). No daemon boot, no ports, no DB | 2 min | 2026-08-20 | ✅ PASS (2/2 in 2s + grep evidence: 0 symptom-warning records for project-manager, exactly 1 bogus-tool WARNING record at daemon/registry.py:1160, fix/tool-registry-validation-warnings @ 9a8da571) |
+| snapshot_behavior_spot_unit_test | `test/packs/snapshot_behavior_spot_unit_test.sh` → `tests/test_snapshot_behavior_spot.py` | Agent-snapshot-v1 Gate-4 spot-check (BEYOND the dev's 457-test bounded pack): R14 explicit-warm 6-key contract; R14 explicit-cold (verify-failed, expired) with reason lexeme in hint; R14 internal-search no-hit cold + warm-top; R12 superseded never spawns (explicit, internal-search); R15 settings toggle (default OFF, clean disabled result, ON proceeds, no-OFF-breaks-spawn invariant for spawn_hot_instance); D8 project scoping (foreign snapshot id → cold, no cross-project warm hit, the Wave-2b W1 fix path); parametrized sweep of the 6-key contract | 30s internal / 5 min outer | 2026-09-26 | ✅ PASS (14/14 in ~1.6s @ feature/agent-snapshot-v1 @ 02b68247 — Gate-4 spot-check, 5 classes + 1 parametrized sweep; 0 fixes, 0 production defects; mirrors dev suite's FakeManager fixture style) |
 
 ## Integration Test Packs
 
@@ -1262,3 +1274,44 @@ ntf_real_judge_s1 | lcancheck_matrix_8_intf_real_judge_s1_test.sh | 2 real-judge
 | lcancheck_boot_smoke (ad-hoc) | lcancheck_boot_smoke_test.sh | daemon boot @15800 + disposable PG@15810 + mock LLM@15820; enforce default; clean SIGTERM | 2026-09-23 | ✅ PASS 28/0 assertions (13s) (`e9d167ff`); attestation boot line mode=enforce @ DEFAULT_MODE (attestation_resolver.py:111) |
 
 Exclusions (documented, never silent): `tests/postgres/test_attestation_live_descendants_pg_lca.py` → own PG-lane pack (above); `tests/integration/test_lca_stale_a_judge_live.py` + `test_lcan_sameturn_window.py` → DESEL by default addopts, not delta-touched, not in prior lcan_matrix packs (out of gate scope). Estimates calibration note: splitter header estimates were 2.5–40× under actual for integration packs (m4 ~5×, m5 ~2.5–6×); re-baseline before reuse.
+
+## A/B acceptance (agent-snapshot-v1, 2026-09-26)
+
+Full-suite A/B acceptance gate for `feature/agent-snapshot-v1` (base `db71500a` vs HEAD `02b68247`, 58 files). Infrastructure-only setup: 24 slice scripts in `test/packs/ab/` covering the ENTIRE default-discovery suite — 22,639 tests / 970 files, glob-partition verified zero-gap, zero-dup (per-file node counts from `--collect-only` at HEAD). Every script: `SNAP_WT` overridable worktree root, venv check, daemon-import guard (must resolve inside `SNAP_WT`), env scrub (POSTGRES_*/ENSEMBLE_*/DATABASE_* — live-DB fence), `timeout 240` + junitxml to `$SNAPAB_OUT/<slice>.xml`, `RESULT: PASS/TIMEOUT/FAIL` contract, `-n auto` xdist (repo convention per `regression_unit_services_test.sh`; 8-core calibration 3.9–9.5 tests/s). Selection = commit-stable letter-range globs (`test_[a-h]*.py` style) so base and branch run byte-identical invocation shape (LESSONS 2026-09-23 fairness rule). Run each as `bash test/packs/ab/<slice>.sh` at BOTH commits; adjudicate per-node reds by node-ID + signature diff.
+
+Exclusions (documented, never silent): `tests/e2e` (requires real daemon on localhost:8079 — docstring-verified; e2e lane is judged, not suite-run; `test_context_injection_hybrid.py` errors at collection without daemon); `tests/postgres` (322 tests, all deselected by repo addopts `-m 'not integration and not postgres'` — PG hard fence); `tests/manual`, `tests/mocks`, `tests/probe`, `tests/regression`, `tests/support`, `tests/fixtures`, `tests/helpers`, `tests/packs` (0 pytest-collectable tests — support/manual runners). Deselected-by-addopts inside included dirs (integration 328, job_queue 3, opencode 4, root 12) are repo-config semantics, identical both commits.
+
+Quarantine handling: ONLY the 5 × TestAccessMemoryArchive nodes are `--deselect`ed (repo mechanism from `tools_suite_unit_test.sh`; QUARANTINE.md rows 2026-08-20) — in `unit_tools_a_o_unit_test.sh` (the slice containing `test_archive_lifecycle.py`), identically at both commits. ALL other known-red families (fenced set incl. TestSite1InlineMirrorFinalize ×3 in `job_queue_a_l`, enqueue_shared drift in `root_r_z`, proxy_phase1, watchover, sqlite-20260714 cascade…) RUN unmodified — identical reds at both commits ARE the fence evidence.
+
+Smoke-proven at HEAD: `unit_routers_unit_test.sh` → 471P/3F in 20.6s, junit `tests="474"`, RESULT+exit-code contract verified (3F = `test_stop_instance_subtree` `originator_instance_id` kwarg TypeError — kwarg present 4× at BOTH commits, zero diff overlap either file → expect base-identical; A/B adjudicates).
+
+| Slice script (`test/packs/ab/`) | Scope | Tests | Est |
+|---|---|---|---|
+| `top_misc_unit_test.sh` | tests/api + lint + manager + static + property + performance + migration + repositories | 548 | ~2 min |
+| `top_services_unit_test.sh` | tests/services | 622 | ~2.5 min |
+| `top_message_queue_redesign_unit_test.sh` | tests/message_queue_redesign | 470 | ~2 min |
+| `top_opencode_unit_test.sh` | tests/opencode | 505 | ~2.5 min |
+| `top_integration_integration_test.sh` | tests/integration (collected set under default addopts) | 789 | ~3.5 min |
+| `top_tools_unit_test.sh` | tests/tools | 274 | ~1.5 min |
+| `root_a_h_unit_test.sh` | tests/ root `test_[a-h]*.py` | 970 | ~2 min |
+| `root_i_q_unit_test.sh` | tests/ root `test_[i-q]*.py` | 1604 | ~3.5 min |
+| `root_r_z_unit_test.sh` | tests/ root `test_[r-z]*.py` (incl. `test_enqueue_shared.py`) | 1585 | ~3.5 min |
+| `unit_root_a_b_unit_test.sh` | tests/unit root `test_[a-b]*.py` | 1036 | ~2.5 min |
+| `unit_root_c_e_unit_test.sh` | tests/unit root `test_[c-e]*.py` | 974 | ~2.5 min |
+| `unit_root_f_l_unit_test.sh` | tests/unit root `test_[f-l]*.py` | 1326 | ~3 min |
+| `unit_root_m_o_unit_test.sh` | tests/unit root `test_[m-o]*.py` | 1099 | ~2.5 min |
+| `unit_root_p_r_unit_test.sh` | tests/unit root `test_[p-r]*.py` | 1275 | ~3 min |
+| `unit_root_s_unit_test.sh` | tests/unit root `test_s*.py` | 877 | ~2 min |
+| `unit_root_t_z_unit_test.sh` | tests/unit root `test_[t-z]*.py` | 831 | ~2 min |
+| `unit_tools_a_o_unit_test.sh` | tests/unit/tools `test_[a-o]*.py` + 5 archive deselects | 1107 | ~2 min |
+| `unit_tools_p_z_unit_test.sh` | tests/unit/tools `test_[p-z]*.py` | 1948 | ~3.5 min |
+| `unit_routers_unit_test.sh` | tests/unit/routers | 474 | ~1 min (smoke: 20.6s) |
+| `unit_services_a_l_unit_test.sh` | tests/unit/services `test_[a-l]*.py` | 1208 | ~3 min |
+| `unit_services_m_z_unit_test.sh` | tests/unit/services `test_[m-z]*.py` | 705 | ~2 min |
+| `unit_small_subdirs_unit_test.sh` | tests/unit/{checkpoint_adapter,config,graph,job_queue,job_state,models,persistence,rag,repositories,sources} | 481 | ~2 min |
+| `job_queue_a_l_unit_test.sh` | tests/job_queue `test_[a-l]*.py` (incl. TestSite1InlineMirrorFinalize ×3 fenced red) | 1083 | ~2.5 min |
+| `job_queue_m_z_unit_test.sh` | tests/job_queue `test_[m-z]*.py` | 848 | ~2 min |
+
+Sizing note: 6–12-slice target infeasible for this suite — 22,639 tests at observed repo xdist rates (3.9–9.5 tests/s, per fs-tool-guardrails gate pack tallies) needs ≥19 slices under the 240s cap; split-don't-extend per LESSONS 2026-09-23 §outer-cap.
+
+**OUTCOME (2026-09-26): ❌ VERDICT: BLOCKERS (3) — 0 unexplained regressions.** 24 slices × both legs executed (HEAD `79de1b5e` = 02b68247+test-only; BASE `db71500a`; per-worktree venvs, containment-proven; junit per-node mechanical diff). HEAD 22,112P/199F/38E/300S vs BASE 21,825P/197F/46E/300S: **222 shared failures (all pre-existing/fenced — fences verified: TestSite1×3 + enqueue_shared node fail-identical at base)**, 21 base-only (HEAD passes), **281 new feature tests ALL PASS**, 15 HEAD-only → 4 solo-flake dismissals + 1 attestation-family + 3 context-flakes + **8 deterministic (Blocker 2: loader warm-scan ≥20-entries contract drift)** + **2 snapshots-table fixture errors (Blocker 3)**. **Blocker 1 (🔴): PG `filter_by_tags` `@>` arm emits LIKE → crashes on every non-empty tag query** (Gate 3 first live-PG exercise; pack `snapshot_pg_smoke_integration_test.sh`). All 24 slices ran ≪ caps (18–160s). Correction to slice table: `test_enqueue_shared.py` glob-matches `test_[a-h]*` → ran in `root_a_h` (fenced node verified there). Full matrix: `/tmp/snapab/ab_matrix.md`; report: `RESULTS/2026-09-26-agent-snapshot-v1-ab-gate.md`.

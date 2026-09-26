@@ -241,6 +241,7 @@ from .question_tools import create_question_tools
 from .midflight_report import create_midflight_tools
 from .skill_tools import create_skill_tools
 from .skill_evolution_tools import create_skill_evolution_tools
+from .snapshot_tools import create_snapshot_tools
 from .external_opencode import create_opencode_tools
 from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
@@ -5209,6 +5210,19 @@ Returns:
     # stub messages when the service is absent.
     skill_evo_tools = create_skill_evolution_tools(manager, current_instance_id)
     tools.extend(skill_evo_tools)
+
+    # ── Agent Snapshot tools (agent-snapshot v1 Wave 2b, PR6) ──
+    # snapshot_create + snapshot_search (category "snapshot") are
+    # granted per-tool via tools.allow; spawn_hot_instance rides the
+    # "instance" category so every instance-category holder gets it.
+    # All three fail-soft when the snapshot services are not wired on
+    # the manager (test doubles / partial init), so this call is safe
+    # everywhere create_instance_tools runs. version_tag is forwarded
+    # for the team-membership check (C1 parity with spawn_instance).
+    snapshot_tool_list = create_snapshot_tools(
+        manager, current_instance_id, agent_id, version_tag
+    )
+    tools.extend(snapshot_tool_list)
 
     # ── Database tools (external DB connection management, always available) ──
     # C3: Pass shared repository and pool_manager from the manager — these are
