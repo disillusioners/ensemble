@@ -2173,3 +2173,81 @@ arc, never-spoke arc + attest exit + re-arm, directive matrix, scanner pins, sur
 renders, observer linkage). **Timeout config pins:**
 `tests/unit/test_attestation_judge_resolver.py` (default-180 class: default, unset env,
 env override, clamp, worst-case 2×180s) + the two literal-25 pins updated to 180.
+## D-entry 2026-09-26 — P0 hotfix: incident 7d4a3bd9 cycle-2 NameError `ctx.is_fresh_episode_user_message` (third seam-mocking blind-spot confirmation)
+
+The d5c50994 cycle-1 commit (incident 7d4a3bd9 fix cycle) added three
+`fresh_episode_attestation_reset=ctx.is_fresh_episode_user_message`
+references inside `_process_message_with_tracking` at
+`daemon/services/instance_messaging.py:4047/4060/4088`. The `ctx` was a
+`_PreparedEnqueueContext` NamedTuple local to `enqueue_message` — NOT in
+scope inside `_process_message_with_tracking`. Every message raised
+`NameError: name 'ctx' is not defined`, broke all message processing
+on the freshly-shipped v0.15.0 (commit 416ae70d).
+
+**Root cause.** The cycle-1 author referenced `ctx.is_fresh_episode_user_message`
+inside the wrong function — `enqueue_message` builds the `_PreparedEnqueueContext`
+locally and consumes it inline (line 2168 `ctx = await asyncio.to_thread(self._prepare_enqueued_message, ...)`);
+the `_process_message_with_tracking` seam, called later by the worker pool, never
+sees `ctx`. The fix is to compute the flag at the consumer seam using the
+SAME msg_type derivation logic the ledger path uses in
+`_prepare_enqueued_message` (lines 1698-1710): source prefix → msg_type,
+then `(priority == 1 AND msg_type == HUMAN)`. At the consumer seam only
+`message_source` is in scope; priority defaults to 1 (the user-facing entry
+path), so HUMAN-typed sources match the ledger's fresh-episode condition.
+
+**Seam-mocking lesson — third empirical confirmation.** The bug slipped past
+the `tests/unit/test_lca_false_complete_fixes.py::TestFreshEpisodeChannelReset`
+family (35 tests, all green at base) because those tests assert the
+`fresh_episode_attestation_reset` parameter on `_build_graph_input`
+DIRECTLY — they never exercise the MESSAGING seam where the kwarg is
+*constructed*. `AsyncMock` + `inspect.getsource` substring assertions stay
+green at the InstanceManager / InstanceMessagingService facade seam; this
+is the second-order class those mocks miss (the BUILD of the parameter,
+not its CONSUMPTION).
+
+Blueprint §Core Architecture Facade-Forwarding Discipline warns the same
+class slips past unit tests at this seam. This is the THIRD empirical
+confirmation: the first two were the enqueue_message→process seam
+(c5ae6d95 and 80bb61dd lessons); the third is the same seam again.
+
+**Fix applied (commit, branch `feature/lca-p0-ctx-hotfix`, off latest
+416ae70d):**
+
+* Replaced 3 broken `ctx.is_fresh_episode_user_message` references at
+  lines 4047 / 4060 / 4088 with a local `is_fresh_episode_user_message`
+  computed at the function-body level using the SAME msg_type prefix
+  logic the ledger path uses.
+* No new param added to `_process_message_with_tracking`'s signature
+  (the ledger path itself does not thread the flag across the
+  enqueue→process boundary either).
+* No new context object invented.
+
+**Real-path regression test (no mocks at the seam):**
+`tests/integration/test_fresh_episode_attestation_reset_p0.py`. Four
+tests drive the REAL `_process_message_with_tracking` through its real
+path (real DB, real MessageQueue row, real GraphTap capture) and assert:
+
+1. **No NameError on any path.** Pre-fix: raises
+   `NameError: name 'ctx' is not defined` at line 4088. Post-fix: graph
+   runs, captures graph_input.
+2. **User-API message stamps `fresh_episode_attestation_reset=True`** on
+   the user message's `additional_kwargs` (matches ledger path
+   semantics for HUMAN-typed source).
+3. **internal_agent: source does NOT stamp the sentinel** (AGENT
+   msg_type is not a fresh episode).
+4. **internal_report: source does NOT stamp the sentinel**
+   (COMPLETION_REPORT is not a fresh episode).
+
+**Live boot+POST verification (pre-fix and post-fix):** Disposable
+PostgreSQL on `ens_p0_ctx_repro` (port 5432), mock OpenAI-compatible
+LLM endpoint (port 19999), daemon booted on port 18080. POST
+`/api/instances/{id}/messages` returned HTTP 200, message completed
+cleanly, no NameError in logs. Pre-fix would raise NameError on
+the same call.
+
+**Adjudication rule going forward.** Any review of commits that touch
+the InstanceManager / InstanceMessagingService facade seam MUST grep
+for any `_PreparedEnqueueContext`-shaped local references that leak
+across the enqueue→process boundary. A unit test that exercises
+`_build_graph_input` directly is NOT a regression proof for the
+messaging seam — the seam itself must be exercised.
