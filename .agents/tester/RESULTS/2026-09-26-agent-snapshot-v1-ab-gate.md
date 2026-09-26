@@ -113,8 +113,26 @@ Jest 30 infra (npm ci 53s; node v22). Existing spec 82/82 → **90/90 after +8 f
 - 79de1b5e — PG dialect smoke pack + PACKS.md
 - (this commit) — RESULTS, QUARANTINE.md (+2 rows), LESSONS (scrub incident), PACKS.md outcome line
 
+## 8. RE-GATE ADDENDUM (2026-09-26, bounded — full A/B NOT repeated)
+
+**Range:** f575532e → 552c6e61 (exactly 3 blocker-fix commits: 73d1a4e4 B1 production+drift-pins, e632230a B2 test premise, 552c6e61 B3 fixture isolation). Fence honored throughout (standalone `#!/bin/bash` scrub wrappers per LESSONS/2026-09-26; throwaway PG :15432 only; 5432/9797/7979/8088 untouched; no pushes).
+
+| # | Item | Result |
+|---|---|---|
+| 1 | **B1 (authoritative)** | **RESOLVED — independently re-confirmed.** My committed PG smoke pack @ 552c6e61: **RESULT: PASS, matrix agreement 10/10** (was 2/10 at f575532e) — PG↔SQLite identical id-lists, both tag_modes, all tag sets; edges (invalid mode ValueError both dialects, empty-candidates) OK. Drift-pins `TestTagFilterPGDriftPin` (tests/unit/test_snapshot_repository.py:464): **exactly 3 nodes, 3/3 PASS**, non-vacuous — rendered PG SQL shows `CAST(snapshots.domain_tags AS JSONB) @> :param::JSONB` (single for `all`, per-tag OR for `any`); `LIKE` absent, `||` absent. Teardown verified (15432 free). |
+| 1b | **Scope check** | **B1-ONLY, no scope creep**: `f575532e..552c6e61` = 4 files (repository.py +81, test_loader.py +22, test_builtin_mcp_servers.py +19, test_snapshot_repository.py +77 — all test-side except repository.py). `02b68247..552c6e61 -- daemon/ agents/ frontend/` = repository.py + settings.component.spec.ts (test file) only; `agents/` empty. `.agents/tidier/notes.md` remains unstaged/uncommitted as found. |
+| 2 | **B2** | **RESOLVED — deterministic.** `TestLoadToolsDocForAgent` **8/8 PASS solo ×2** (0.46s/0.50s). Fix shape verified: +16 placeholder entries bring `_tool_metadata` 4→20, matching `len(...) >= _WARM_SCAN_POPULATED_MIN_ENTRIES = 20` (loader.py:41/:59). Single-file commit. |
+| 3 | **B3** | **RESOLVED — fence confirmed.** Module re-run: 66P/**17E**, **zero** `table snapshots already exists` (grep=0), zero OperationalError. All 17 errors bucket exactly into the documented pre-existing `service_tool` mock-gap class (TestBootstrap 5 + DisableEnable 6 + SkipsUnavailable 2 + OrphanedCleanup 4); identical signature @ manager.py:707; no new anomaly class. |
+| 4 | **Canonical bounded pack** | **PASS 533/533** in 18.04s (junit `tests="533" failures="0" errors="0"`). Composition: 13-file snapshot domain 343 (incl. content_hardening 9, coder 39, symptom_repair 25, empty_guard 9, drift-pins 3) + compaction trio 190 (compaction.py 129 + model_config 31 + multimodal 30). Spot pack 14/14 green (separate, gate-authored). |
+| 5 | **Pack-count reconciliation** | 457 baseline (dev-run) ≈ 293 snapshot-domain + 164 trio (compaction 124 + empty_guard 9 + model_config 31), 0 pins, 0 spot. Dev's re-gate **340 was NON-canonical** (swapped test_compaction.py OUT — arithmetic ≈333+7 minor drift). Canonical NOW **533 = 457 + 76 drift**: +~50 snapshot-domain adds (Waves 2b/3/4), +26 trio (compaction.py 124→129 + multimodal 30 new), +3 B1 pins, +14 spot (counted separately). Caveats: per-file counts at historical measurement commits not exactly recoverable; 13-file list reconstruction best-effort (10 pure-snapshot + 3 PR-touched) — PASS result invariant under any sensible selection. |
+
+### Re-gate verdict: **SHIP**
+All 3 blockers resolved and independently verified at 552c6e61; production scope = repository.py (B1) only beyond the commissioned tip; full-suite A/B verdict (0 unexplained regressions) stands; canonical domain green 533/533.
+
+*Re-gate evidence: /tmp/snapregate/ (canonical pack junit + wrappers), /tmp/snapshot_rerun/ (drift-pin rendered-SQL probes), /tmp/regate_wrapper.sh (B2/B3 scrub wrapper); all sessions env-scrub-verified zero-survivor.*
+
 ### Documentation updated
-- [x] RESULTS/2026-09-26-agent-snapshot-v1-ab-gate.md (this file)
+- [x] RESULTS/2026-09-26-agent-snapshot-v1-ab-gate.md (this file, incl. §8 re-gate addendum)
 - [x] QUARANTINE.md — grace_period_zero new row + 2026-09-26 consolidated adjudication row
 - [x] LESSONS/2026-09-26-boot-probe-scrub-sh-incident.md
 - [x] PACKS.md — A/B section + outcome
