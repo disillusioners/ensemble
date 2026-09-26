@@ -1019,12 +1019,29 @@ def _check_target_env(
     return None
 
 
-def _terminal_outcome(journal: dict[str, Any] | None) -> tuple[str, dict[str, Any] | None]:
-    """Derive the terminal outcome from the last journal history event.
+# v0.15.3 P1 Item 5: the status-view terminal vocabulary — derived FROM
+# ``uj._TERMINAL_EVENTS`` (the single source, never forked) plus ONE
+# status-only extension: ``restart`` is the restart lane's successful-
+# completion event (restart.sh appends it after the /livez gate is green).
+# It is deliberately ABSENT from the reconcile tuple (a restart event must
+# never close a promote pending_op — reconcile uses the strict tuple) but
+# it IS terminal for status display (pinned by the drain round-trip test).
+_TERMINAL_OUTCOME_EVENTS = uj._TERMINAL_EVENTS + ("restart",)
 
-    The P2.1 journal is NOT run-id keyed — its event vocabulary is
-    commit | rollback | quarantine | sweep | sweep_rollback | halt (lib.sh
-    journal schema comment). Outcome mapping is from that vocabulary only.
+
+def _terminal_outcome(journal: dict[str, Any] | None) -> tuple[str | None, dict[str, Any] | None]:
+    """Derive the terminal outcome from the last TERMINAL-CLASS journal
+    history event.
+
+    v0.15.3 P1 Item 5: walk ``reversed(history)`` and return the FIRST
+    entry whose event is in ``_TERMINAL_OUTCOME_EVENTS`` (``uj._TERMINAL_EVENTS``
+    + the restart-lane completion event — see above). Transition events
+    (``nonce_consumed`` etc.) no longer masquerade as TERMINAL: history
+    that carries NO terminal event returns ``(None, None)`` — the arm is
+    armed, not finished.
+
+    Early returns preserved: ``"unknown"`` for a non-dict journal,
+    ``"idle"`` for empty/missing history.
     """
     if not isinstance(journal, dict):
         return "unknown", None
@@ -1032,9 +1049,12 @@ def _terminal_outcome(journal: dict[str, Any] | None) -> tuple[str, dict[str, An
     if not isinstance(history, list) or not history:
         return "idle", None
     for entry in reversed(history):
-        if isinstance(entry, dict) and entry.get("event"):
+        if (
+            isinstance(entry, dict)
+            and str(entry.get("event", "")) in _TERMINAL_OUTCOME_EVENTS
+        ):
             return str(entry["event"]), entry
-    return "idle", None
+    return None, None
 
 
 _OUTCOME_LABELS: dict[str, str] = {
@@ -1045,7 +1065,11 @@ _OUTCOME_LABELS: dict[str, str] = {
     "halt": "halted-for-human",
     "quarantine": "quarantine recorded",
     "restart": "restarted (intentional)",
-    "nonce_consumed": "live-confirmation nonce consumed",
+    # v0.15.3 P1 Item 5: nonce_consumed is a TRANSITION event (arm completed,
+    # executor not yet observed) — it no longer flows out of
+    # _terminal_outcome as a terminal outcome; the label keeps the honest
+    # "awaiting executor (pending)" wording.
+    "nonce_consumed": "awaiting executor (pending)",
 }
 
 
@@ -1891,7 +1915,22 @@ Returns:
                 )
             else:
                 event_key, last_entry = _terminal_outcome(journal)
-                if journal_status == "ok" and event_key != "idle":
+                if journal_status == "ok" and event_key is None:
+                    # v0.15.3 P1 Item 5: history exists but carries NO
+                    # terminal-class event (e.g. nonce_consumed only — the
+                    # arm completed, the executor has not reported). NOT
+                    # terminal — say so instead of masquerading.
+                    lines.append(
+                        "PENDING — no terminal journal event yet "
+                        "(awaiting executor; nonce_consumed and other "
+                        "transition events are not terminal)"
+                    )
+                    if isinstance(journal, dict):
+                        lines.append(
+                            f"current={journal.get('current')} previous={journal.get('previous')} "
+                            f"{_rollback_window_summary(journal)}"
+                        )
+                elif journal_status == "ok" and event_key != "idle":
                     lines.append("TERMINAL")
                     if last_entry is not None:
                         lines.append(

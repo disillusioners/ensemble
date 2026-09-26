@@ -795,6 +795,84 @@ class TestUpgradeStatusRoundTrip:
         assert "journal tail (last 100)" in result
 
 
+# ── v0.15.3 P1 Item 5 — _terminal_outcome terminal-class filter ──────────────
+
+
+class TestTerminalOutcomeFilter:
+    """``nonce_consumed`` (and every other transition event) no longer
+    masquerades as TERMINAL: ``_terminal_outcome`` walks reversed history and
+    returns the FIRST entry whose event is in ``uj._TERMINAL_EVENTS``; no
+    terminal match → ``(None, None)``. Sibling tests — the existing
+    terminal-label tests above are untouched."""
+
+    def test_terminal_outcome_returns_latest_terminal(self, install: Path) -> None:
+        """Latest terminal wins — transition events after it are skipped."""
+        uj.journal_history_append(install, "commit", "older run committed")
+        uj.journal_history_append(install, "rollback", "a rollback happened")
+        uj.journal_history_append(install, "nonce_consumed", "a fresh arm burned its nonce")
+        journal = uj.journal_read(install)
+        event, entry = ut._terminal_outcome(journal)
+        assert event == "rollback"
+        assert entry is not None and entry["event"] == "rollback"
+
+    def test_terminal_outcome_filters_nonce_consumed(self, install: Path) -> None:
+        uj.journal_history_append(install, "commit", "promote committed")
+        uj.journal_history_append(
+            install, "nonce_consumed", "arm burned its nonce"
+        )
+        journal = uj.journal_read(install)
+        event, _entry = ut._terminal_outcome(journal)
+        assert event == "commit"  # latest TERMINAL — not nonce_consumed
+
+    def test_terminal_outcome_returns_none_when_armed(self, install: Path) -> None:
+        """Armed-not-finished: history carries ONLY nonce_consumed → the
+        outcome is (None, None), NOT a terminal event."""
+        uj.journal_history_append(
+            install, "nonce_consumed", "arm burned its nonce"
+        )
+        journal = uj.journal_read(install)
+        assert ut._terminal_outcome(journal) == (None, None)
+
+    def test_terminal_outcome_restart_event_still_terminal(self, install: Path) -> None:
+        """The restart lane's successful-completion event (restart.sh:240)
+        stays terminal for STATUS display — derived via
+        ``_TERMINAL_OUTCOME_EVENTS = uj._TERMINAL_EVENTS + ("restart",)``.
+        (It is deliberately NOT in the reconcile tuple — a restart event
+        must never close a promote pending_op.)"""
+        uj.journal_history_append(
+            install, "restart", "intentional restart complete"
+        )
+        event, _entry = ut._terminal_outcome(uj.journal_read(install))
+        assert event == "restart"
+
+    def test_terminal_outcome_preserves_early_returns(self, install: Path) -> None:
+        assert ut._terminal_outcome(None) == ("unknown", None)
+        assert ut._terminal_outcome({"history": "not-a-list"}) == ("idle", None)
+        assert ut._terminal_outcome({"history": []}) == ("idle", None)
+        uj.journal_init(install)  # empty journal → idle
+        assert ut._terminal_outcome(uj.journal_read(install)) == ("idle", None)
+
+    def test_outcome_label_nonce_consumed_awaiting(self) -> None:
+        """Label demoted (v0.15.3 P1 Item 5): 'awaiting executor (pending)'
+        replaces 'live-confirmation nonce consumed' (the old string exists
+        nowhere else — grep-verified)."""
+        assert ut._OUTCOME_LABELS["nonce_consumed"] == "awaiting executor (pending)"
+        assert "live-confirmation nonce consumed" not in ut._OUTCOME_LABELS.values()
+
+    async def test_status_pending_not_terminal_for_armed_journal(
+        self, harness
+    ) -> None:
+        """Consumer-level pin: an armed journal (nonce_consumed, no
+        pending_op, no in_flight) reports PENDING — never TERMINAL."""
+        tools, _, install = harness
+        uj.journal_history_append(
+            install, "nonce_consumed", "arm burned its nonce"
+        )
+        result = await tools["upgrade_status"].ainvoke({})
+        assert "PENDING" in result
+        assert "TERMINAL" not in result
+
+
 # ── Read-pair refusals + fail-open ───────────────────────────────────────────
 
 
