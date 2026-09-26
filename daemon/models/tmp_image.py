@@ -113,6 +113,32 @@ class TmpImageUpload(BaseModel):
     content_type: str = Field(..., description="Declared MIME; must be in the 4-type allowlist")
     data_base64: str = Field(..., description="Base64-encoded bytes (raw, NOT a data URI)")
 
+    # Optional provenance (P3 rider, P2-deferred): lets operators uploading
+    # via the raw HTTP API attach the same provenance the designer tool
+    # path stamps (daemon/tools/image_tools.py). All four default to None =
+    # request handled exactly as before (the store omits the ``provenance``
+    # sidecar key entirely when None). ``extra="forbid"`` is KEPT — unknown
+    # keys still 422.
+    feature: str | None = Field(
+        default=None,
+        description="Optional provenance: design feature this image belongs to",
+    )
+    page: str | None = Field(
+        default=None,
+        description="Optional provenance: design page/section identifier",
+    )
+    version: str | None = Field(
+        default=None,
+        description="Optional provenance: design version label",
+    )
+    source_agent: str | None = Field(
+        default=None,
+        description=(
+            "Optional provenance: uploading agent id (NO auto-stamp on the "
+            "HTTP path — auto-stamp remains tool-path-only behavior)"
+        ),
+    )
+
     _MAX_IMAGE_BYTES: ClassVar[int] = 10 * 1024 * 1024  # 10MB per architect amendment
     _MAX_IMAGES_PER_REQUEST: ClassVar[int] = 3
 
