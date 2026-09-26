@@ -25,7 +25,6 @@ from daemon.services.maintenance import (
 )
 from daemon.config import PersistenceConfig
 from daemon.constants import (
-    CHECKPOINT_MAX_PER_THREAD,
     CHECKPOINT_TTL_HOURS,
     MAX_INSTANCE_HISTORY,
 )
@@ -983,7 +982,7 @@ class TestCheckpointCleanupJobPerThreadPruning:
 
     @pytest.mark.asyncio
     async def test_prune_per_thread_checkpoints(self):
-        """Threads with > 50 checkpoints get pruned."""
+        """Threads exceeding the configured cap (default 3) get pruned."""
         config = PersistenceConfig()
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
@@ -1011,10 +1010,10 @@ class TestCheckpointCleanupJobPerThreadPruning:
         assert result is None
         # Verify each adapter method was called once
         checkpointer.find_excess_checkpoint_groups.assert_awaited_once_with(
-            CHECKPOINT_MAX_PER_THREAD
+            3
         )
         checkpointer.get_checkpoint_ids.assert_awaited_once_with(
-            "thread-excess", "", CHECKPOINT_MAX_PER_THREAD
+            "thread-excess", "", 3
         )
         checkpointer.delete_checkpoints_excluding.assert_awaited_once()
         checkpointer.delete_writes_excluding.assert_awaited_once()
@@ -1133,7 +1132,7 @@ class TestCheckpointCleanupJobExecute:
         # Verify the adapter's query methods were called (Ops A and D)
         checkpointer.list_thread_ids.assert_awaited_once()
         checkpointer.find_excess_checkpoint_groups.assert_awaited_once_with(
-            CHECKPOINT_MAX_PER_THREAD
+            3
         )
 
 
@@ -1232,9 +1231,90 @@ class TestConfigDefaults:
         # Should fall back to constant
         assert config.max_instance_history == 0  # Will use default in job logic
 
-    def test_checkpoint_max_per_thread_constant(self):
-        """Test CHECKPOINT_MAX_PER_THREAD constant is correct."""
-        assert CHECKPOINT_MAX_PER_THREAD == 50
+    def test_checkpoint_max_per_thread_default(self):
+        """Default ``checkpoint_max_per_thread`` is 3 (not the legacy 50).
+
+        The historical ``daemon.constants.CHECKPOINT_MAX_PER_THREAD`` was
+        50 (preserved the entire parent chain); the new default of 3
+        matches the canonical LangGraph keep-N and bounds disk usage on
+        long-running instances that never resume against old checkpoints.
+        """
+        config = PersistenceConfig()
+
+        assert config.checkpoint_max_per_thread == 3
+
+    def test_checkpoint_max_per_thread_explicit_value(self):
+        """Explicit ``checkpoint_max_per_thread=N`` overrides the default."""
+        config = PersistenceConfig(checkpoint_max_per_thread=7)
+
+        assert config.checkpoint_max_per_thread == 7
+
+    def test_checkpoint_max_per_thread_env_override(self, monkeypatch):
+        """``CHECKPOINT_MAX_PER_THREAD`` env var overrides the default.
+
+        Env binding uses ``validation_alias=AliasChoices(...)`` so the
+        env name is the legacy constant name (no ``PERSISTENCE_`` prefix)
+        — matches the discoverability of the old hardcoded constant.
+        """
+        monkeypatch.setenv("CHECKPOINT_MAX_PER_THREAD", "12")
+
+        config = PersistenceConfig()
+
+        assert config.checkpoint_max_per_thread == 12
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_max_per_thread_env_override_threads_to_cleanup(
+        self, monkeypatch
+    ):
+        """Env-overridden ``checkpoint_max_per_thread`` actually flows
+        into ``CheckpointCleanupJob._prune_per_thread_checkpoints`` and
+        reaches the adapter (``find_excess_checkpoint_groups``).
+
+        Without the wiring, the cleanup job would still pass 3 (the
+        default) to the adapter even when the env says otherwise — proving
+        the singleton construction in ``manager.py:initialize`` threads
+        the configured value all the way to the runtime read.
+        """
+        monkeypatch.setenv("CHECKPOINT_MAX_PER_THREAD", "17")
+
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        # Empty excess → early-return path, but the adapter is still
+        # called once with the configured N before the early return.
+        checkpointer.find_excess_checkpoint_groups = AsyncMock(return_value=[])
+
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo)
+
+        await job._prune_per_thread_checkpoints()
+
+        checkpointer.find_excess_checkpoint_groups.assert_awaited_once_with(
+            17
+        )
+
+    @pytest.mark.parametrize("bad_value", [0, -1, -50])
+    def test_checkpoint_max_per_thread_ge_1_guard_rejects_invalid(
+        self, bad_value
+    ):
+        """``ge=1`` fails loud at config load when value is 0 or negative.
+
+        0 / negative would prune ALL checkpoints including the latest,
+        breaking resume across every instance — the silent-prune-everything
+        class. Pydantic raises ``ValidationError`` (a ``ValueError``
+        subclass) so the daemon refuses to boot rather than wipe the
+        checkpoint store on the first maintenance tick.
+        """
+        with pytest.raises(ValueError):
+            PersistenceConfig(checkpoint_max_per_thread=bad_value)
+
+    @pytest.mark.parametrize("bad_value", ["abc", "1.5"])
+    def test_checkpoint_max_per_thread_non_int_fails_loud(self, bad_value):
+        """Non-int env values (e.g. ``CHECKPOINT_MAX_PER_THREAD=abc``)
+        also fail loud at config load — pydantic int coercion rejects
+        strings that aren't valid integers.
+        """
+        with pytest.raises(ValueError):
+            PersistenceConfig(checkpoint_max_per_thread=bad_value)
 
 
 class TestUtcNow:

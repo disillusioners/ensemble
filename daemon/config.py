@@ -594,6 +594,35 @@ class PersistenceConfig(BaseSettings):
     maintenance_check_interval_minutes: int = Field(default=MAINTENANCE_CHECK_INTERVAL_MINUTES)
     max_instance_history: int = Field(default=MAX_INSTANCE_HISTORY)
 
+    # ── Per-thread retention cap (Op D prune, daemon/services/maintenance.py) ─
+    # Max checkpoints to keep per (thread_id, checkpoint_ns). The cleanup job
+    # in ``_prune_per_thread_checkpoints`` reads this value via
+    # ``self._config.checkpoint_max_per_thread`` and prunes the oldest
+    # checkpoints while preserving the latest N. Default 3 (was the hardcoded
+    # ``daemon.constants.CHECKPOINT_MAX_PER_THREAD`` value of 50; lowered to 3
+    # so long-running instances don't accumulate a multi-week checkpoint tail
+    # they never resume against). Floor 1 enforced by ``ge=1`` — 0 / negative
+    # would prune EVERY checkpoint (including the latest) and break resume;
+    # pydantic raises ``ValidationError`` at config load when violated. Override via env: ``CHECKPOINT_MAX_PER_THREAD``.
+    # ``validation_alias`` is explicit (no ``PERSISTENCE_`` prefix) so the
+    # env name matches the historical Python constant and is discoverable
+    # by operators who know the constant name. YAML key remains
+    # ``persistence.checkpoint_max_per_thread``.
+    checkpoint_max_per_thread: int = Field(
+        default=3,
+        ge=1,
+        validation_alias=AliasChoices(
+            "checkpoint_max_per_thread",
+            "CHECKPOINT_MAX_PER_THREAD",
+        ),
+        description=(
+            "Max checkpoints to keep per thread (parent chain preserved). "
+            "Default 3. Floor 1 (0/negative fails loud at config load — "
+            "would prune ALL checkpoints including the latest, breaking "
+            "resume). Override via env: CHECKPOINT_MAX_PER_THREAD."
+        ),
+    )
+
 
 class QueueConfig(BaseSettings):
     """Message queue configuration settings."""
