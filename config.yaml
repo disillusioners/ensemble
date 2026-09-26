@@ -79,7 +79,12 @@ llm:
   # as unset (default applies) — to lift restrictions entirely, hardcode
   # `allowed_models: []` here.
   # Exact model names only — this is NOT a prefix or substring match.
-  allowed_models: ${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2}
+  # Default includes ``vision`` so the designer agent's
+  # ``llm_model: "vision"`` resolves daemon-wide (WP1 — designer-agent
+  # phase 1). Override via the ``OPENAI_SELECTABLE_MODELS`` env var
+  # to lift or tighten this list; the env value is a comma-separated
+  # exact-match list.
+  allowed_models: ${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}
 
   # Outbound LLM request-body gzip compression. When True, every
   # outbound LLM HTTP request body is gzip-compressed and a
