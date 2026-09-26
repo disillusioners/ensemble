@@ -19,6 +19,7 @@ from daemon.mcp.config import (
 from daemon.mcp.managed_session import ManagedClientSession
 from daemon.mcp.stdio_wrapper import TaskScopedContextManager, TaskScopedStdioClient
 from daemon.repositories.mcp_server.models import McpServer
+from daemon.services.kms_resolver import resolve_env, resolve_headers
 
 logger = logging.getLogger(__name__)
 
@@ -203,10 +204,14 @@ class McpConnectionManager:
         Returns:
             Initialized MCP ClientSession
         """
+        # KMS marker → plaintext substitution (P3-WP6). Stored env keeps
+        # ``__KMS_REF__<handle>__`` markers; only the subprocess env ever
+        # sees plaintext. resolve_env returns a NEW dict.
+        resolved_env = resolve_env(config.env)
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
-            env=config.env,
+            env=resolved_env,
         )
         streams_cm = TaskScopedStdioClient(server_params)
         try:
@@ -256,8 +261,14 @@ class McpConnectionManager:
         # different task``. ``TaskScopedContextManager`` owns the inner
         # CM in a dedicated background task, mirroring the STDIO fix
         # in commit ``c025480`` and its SSE/streamable-HTTP extension.
+        # KMS marker → plaintext substitution (P3-WP6). The stored
+        # ``McpSseConfig.headers`` keeps ``__KMS_REF__<handle>__``
+        # markers; resolve_headers returns a NEW dict where markers are
+        # substituted to plaintext in-RAM. Only the live HTTP/SSE
+        # transport ever sees plaintext.
+        resolved_headers = resolve_headers(config.headers)
         streams_cm = TaskScopedContextManager(
-            factory=lambda: sse_client(config.url, headers=config.headers or {}),
+            factory=lambda: sse_client(config.url, headers=resolved_headers or {}),
             name="mcp-sse-client",
         )
         try:
@@ -299,8 +310,12 @@ class McpConnectionManager:
         # and commit ``c025480`` for the original STDIO fix). The
         # wrapper owns the inner CM in a dedicated background task so
         # ``__aenter__`` and ``__aexit__`` always run in the same task.
+        # KMS marker → plaintext substitution (P3-WP6): stored
+        # ``McpStreamableHttpConfig.headers`` keeps ``__KMS_REF__<handle>__``
+        # markers; resolve_headers returns a NEW dict substituted in-RAM.
+        resolved_headers = resolve_headers(config.headers)
         streams_cm = TaskScopedContextManager(
-            factory=lambda: streamablehttp_client(config.url, headers=config.headers or {}),
+            factory=lambda: streamablehttp_client(config.url, headers=resolved_headers or {}),
             name="mcp-streamable-http-client",
         )
         try:
@@ -432,10 +447,14 @@ class McpConnectionManager:
         timeout: float,
     ) -> tuple[ManagedClientSession, Any]:
         """Create a test session for STDIO transport."""
+        # KMS marker → plaintext substitution (P3-WP6). Stored env keeps
+        # ``__KMS_REF__<handle>__`` markers; only the subprocess env ever
+        # sees plaintext. resolve_env returns a NEW dict.
+        resolved_env = resolve_env(config.env)
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
-            env=config.env,
+            env=resolved_env,
         )
         streams_cm = TaskScopedStdioClient(server_params)
         return await self._create_test_session_from_streams(streams_cm, timeout, is_streamable_http=False)
@@ -446,8 +465,11 @@ class McpConnectionManager:
         timeout: float,
     ) -> tuple[ManagedClientSession, Any]:
         """Create a test session for SSE transport."""
+        # KMS marker → plaintext substitution (P3-WP6) — test sessions
+        # carry the same markers as real sessions.
+        resolved_headers = resolve_headers(config.headers)
         streams_cm = TaskScopedContextManager(
-            factory=lambda: sse_client(config.url, headers=config.headers or {}),
+            factory=lambda: sse_client(config.url, headers=resolved_headers or {}),
             name="mcp-sse-client",
         )
         return await self._create_test_session_from_streams(streams_cm, timeout, is_streamable_http=False)
@@ -458,8 +480,11 @@ class McpConnectionManager:
         timeout: float,
     ) -> tuple[ManagedClientSession, Any]:
         """Create a test session for Streamable HTTP transport."""
+        # KMS marker → plaintext substitution (P3-WP6) — test sessions
+        # carry the same markers as real sessions.
+        resolved_headers = resolve_headers(config.headers)
         streams_cm = TaskScopedContextManager(
-            factory=lambda: streamablehttp_client(config.url, headers=config.headers or {}),
+            factory=lambda: streamablehttp_client(config.url, headers=resolved_headers or {}),
             name="mcp-streamable-http-client",
         )
         return await self._create_test_session_from_streams(streams_cm, timeout, is_streamable_http=True)

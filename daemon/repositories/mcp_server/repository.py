@@ -131,6 +131,7 @@ class SQLModelMcpServerRepository:
         name: str | None = None,
         description: str | None = None,
         config: dict[str, Any] | None = None,
+        instance_metadata: dict[str, Any] | None = None,
         is_active: bool | None = None,
         config_schema: list[dict[str, Any]] | None = None,
         config_schema_version: str | None = None,
@@ -180,6 +181,12 @@ class SQLModelMcpServerRepository:
                 mcp_server.description = description
             if config is not None:
                 mcp_server.config = config
+            if instance_metadata is not None:
+                # KMS-Lite (P3-WP6) — JSONB column for handle→env-key
+                # bindings. Plaintext NEVER rides this column. Callers
+                # MUST pass a freshly-fetched dict (read-row-fresh
+                # invariant — never cache+rewrite, see test_kms_resolver_marker_roundtrip.py).
+                mcp_server.instance_metadata = instance_metadata
             if is_active is not None:
                 mcp_server.is_active = is_active
             if config_schema is not None:

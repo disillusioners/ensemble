@@ -5451,6 +5451,21 @@ class InstanceManager:
                 "ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS "
                 "image_refs JSONB"
             ),
+            # mcp_servers.instance_metadata (P3-WP6, 2026-09-26 —
+            # designer-agent KMS-Lite bootstrap): JSONB column for the
+            # handle→server binding substrate. ``bound_handles`` entries
+            # carry handle + env_key + fingerprint only — plaintext
+            # NEVER rides this column. Fresh PostgreSQL databases get
+            # the column from SQLModel.metadata.create_all() via the
+            # McpServer SQLModel declaration at
+            # ``daemon/repositories/mcp_server/models.py``; existing
+            # databases need the ADD COLUMN here. SQLite companion
+            # migration lives at
+            # ``daemon/migrations/versions/20260926_120000_add_mcp_server_instance_metadata.sql``.
+            (
+                "ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS "
+                "instance_metadata JSONB"
+            ),
             # instances.attestation_denied_count (Phase 3, 2026-09-05):
             # row-scoped per-instance counter for the leader completion
             # attestation gate (D5). NOT NULL DEFAULT 0 — existing rows
