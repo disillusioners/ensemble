@@ -1572,26 +1572,40 @@ class JobFeedbackObserver:
         # (which DOES still guard — see that comment for the
         # asymmetry rationale).
         #
-        # U1-F1 FIX (cycle 3, 2026-09-27, fix/u1-watch-reconcile):
-        # the lifecycle event's ``instance_id`` is the MISSION
-        # ROOT (the instance that just reached terminal), but the
-        # held row's ``instance_id`` is the WATCHER (the child of
-        # the mission root who called ``watch_job``). The
-        # watcher-scoped helper
-        # (:meth:`JobQueueService.reconcile_held_watches_for_instance`)
-        # filters rows by ``watch.instance_id == instance_id`` —
-        # which matches ZERO rows when the terminated instance is
-        # the mission root. The mission-root-scoped helper
-        # (:meth:`JobQueueService.reconcile_held_watches_for_mission_root`)
-        # uses the SAME axis ``evaluate_mission_live`` resolves
-        # (the parent_id tree walk from the watcher up to the
-        # mission root), so it touches the correct set of held
-        # rows and routes them through the canonical CAS-claim
-        # notify path. Exactly-once + fail-soft preserved; hook
-        # (b) and the sweep keep their byte-unchanged call shapes.
+        # U1-F1 FIX (cycle 4, 2026-09-27, fix/u1-watch-reconcile):
+        # hook (a) fires on the TERMINATED / FAILED lifecycle event
+        # of the MISSION ROOT (the instance that just reached
+        # terminal). The cycle-3 fix introduced a
+        # mission-root-scoped helper that walked DOWN from the
+        # mission root and filtered ``watch.instance_id ∈
+        # tree(root)`` — but the held row's ``instance_id`` is the
+        # WATCHER, and the DOMINANT production topology (the
+        # c7f59aaf incident shape) has the watcher as EXTERNAL
+        # (parent_id=NULL) or ANCESTOR of the mission root —
+        # neither is in the subtree, so the cycle-3 helper was a
+        # silent no-op on the production seam (tester live
+        # evidence: 234s sweep delivery, no hook-(a) log line).
+        #
+        # The CORRECT axis is the WORK side — the canonical
+        # ``evaluate_mission_live`` resolves via the parent_id
+        # tree walk from the work's instance, and the global
+        # sweep path (``instance_id=None``) is live-proven to
+        # deliver (234s observed in tester cycle-4 re-verify).
+        # Hook (a) reuses the same global-scan call shape so the
+        # candidate set is keyed on the work axis (via the C1
+        # partition's per-work ``evaluate_mission_live``
+        # evaluation) — NOT on the watcher's tree position. The
+        # ``instance_id=None`` arg is the SAME call the sweep
+        # makes; hook (a)'s contribution is the latency reduction
+        # (fires immediately on TERMINATED instead of waiting up
+        # to ``interval_seconds`` for the next sweep tick). The
+        # CAS-claim ensures exactly-once even though both paths
+        # touch the same row in close succession. Sweep call
+        # shape preserved byte-unchanged; hook (b) preserved
+        # byte-unchanged.
         try:
-            await self._job_queue_service.reconcile_held_watches_for_mission_root(
-                instance_id=instance_id,
+            await self._job_queue_service.reconcile_held_watches_for_instance(
+                instance_id=None,
             )
         except Exception as hook_err:
             logger.warning(
