@@ -210,6 +210,30 @@ The daemon is configured via `config.yaml`. Key sections:
 | `services` | External service configurations |
 | `job_system` | Job queue operational settings |
 
+### Selectable models (`OPENAI_SELECTABLE_MODELS`)
+
+`OPENAI_SELECTABLE_MODELS` controls which models may be used as instance model
+overrides at spawn time (spawn `model=` override, weighted `llm_models` pool,
+`spawn_councilor` validation, session-restore re-validation; purpose-bound models
+such as `model_title` / `model_vision` are unaffected). It accepts a comma-separated
+list or a JSON array, e.g. `gpt-4,gpt-4o,gpt-4o-mini,gpt-4-turbo,gpt-3.5-turbo,o1-mini,o1-preview,vision`.
+
+- **Default (when unset):** `agentic,coding,coding2,vision` — matching the shipped
+  `config.yaml` interpolation. When the default applies, the daemon logs a one-shot
+  WARNING at startup; set the variable explicitly (even to the default value) to
+  silence it.
+- **Strict-when-set:** an explicit list is respected exactly. A model outside the
+  list falls back with a WARNING on spawn `model=` override, raises on
+  `model_tier=`, and blocks instance creation for agents whose `llm_model` is not
+  listed — include `vision` in any explicit list.
+- **Empty/whitespace value = unset** (default applies). Unrestricted mode is
+  config.yaml-only: hardcode `allowed_models: []` — there is no env path.
+- **Legacy alias** `OPENAI_ALLOWED_MODELS` is still honored when the new name is
+  unset (one-shot deprecation warning).
+
+See [docs/setup.md](docs/setup.md#selectable-models-openai_selectable_models) for
+the full reference, including the v0.16.0 upgrade note on the `vision` requirement.
+
 For full configuration details, see [docs/setup.md](docs/setup.md).
 
 ---
