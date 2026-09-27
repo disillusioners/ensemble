@@ -316,6 +316,7 @@ class TestableCheckpointCleanupService {
       'backend_unsupported',
       'origin_not_trusted',
       'maintenance_disabled',
+      'internal_error',
     ];
     return (known as readonly string[]).includes(code);
   }
@@ -591,16 +592,27 @@ describe('CheckpointCleanupService', () => {
       expect(body.message).toBe('Network down');
     });
 
-    it('coerces A-8 `internal_error` to the nearest stable code', () => {
+    it('surfaces A-8 `internal_error` verbatim (code + message preserved)', () => {
       const err = {
         status: 500,
         error: { error: 'internal_error', message: 'unexpected boom' },
       };
       const body = service.toErrorBody(err);
-      // The literal `internal_error` is NOT in the frozen union (added
-      // post-freeze). Coerce to `not_initialized` (the fallback).
-      expect(body.error).toBe('not_initialized');
+      // `internal_error` IS in the union (A-8 amendment) — it passes
+      // the type guard and is stored verbatim, with no
+      // `not_initialized` coercion.
+      expect(body.error).toBe('internal_error');
       expect(body.message).toBe('unexpected boom');
+    });
+
+    it('falls back to {error: "not_initialized", message: ...} on a genuinely unknown code', () => {
+      const err = {
+        status: 502,
+        error: { error: 'proxy_gibberish', message: 'Bad gateway' },
+      };
+      const body = service.toErrorBody(err);
+      expect(body.error).toBe('not_initialized');
+      expect(body.message).toBe('Bad gateway');
     });
   });
 

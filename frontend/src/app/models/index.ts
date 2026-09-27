@@ -893,7 +893,8 @@ export interface CheckpointCleanupRun {
 }
 
 /**
- * AM-13, AM-1 — 10 stable error codes (was 8 in v1 draft).
+ * AM-13, AM-1 — 10 stable error codes (was 8 in v1 draft), plus the
+ * A-8 catch-all literal `internal_error` (11 union members).
  * `origin_not_trusted` (403) + `maintenance_disabled` (503) added.
  */
 export type MaintenanceErrorCode =
@@ -906,13 +907,15 @@ export type MaintenanceErrorCode =
   | 'byte_count_mismatch'
   | 'backend_unsupported'
   | 'origin_not_trusted'
-  | 'maintenance_disabled';
+  | 'maintenance_disabled'
+  | 'internal_error';
 
 /**
  * AM-17, AM-14 — `details.run_id` is the canonical key FE adopts on
  * 409 (`run_in_flight`). Mirror `plane.py:71-170`. The catch-all
  * 500 body carries `error: "internal_error"` (A-8 amendment) — that
- * literal lives in the union above.
+ * literal IS a union member above and the FE surfaces it verbatim
+ * (no `not_initialized` coercion).
  *
  * Open-family `details` (A-11) — FE tolerates extra keys everywhere.
  */

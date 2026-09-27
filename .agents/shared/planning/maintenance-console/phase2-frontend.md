@@ -1112,6 +1112,10 @@ The frozen API contract in `plan-overview.md` §API Contract is the binding spec
 
 **What changed**: T1.1 `CheckpointCleanupLastRun` strips `triggered_by` from the union. T5.1 status card renders only the `kind` badge. No further FE work needed.
 
+### CF-6. BE catch-all 500 `internal_error` code — **A-8 SUPERSEDES THE PRE-A-8 COUNT**
+
+**Disposition (A-8)**: **A-8 supersedes the pre-A-8 count.** `MaintenanceErrorCode` union 10→11 including `internal_error`; the FE surfaces the literal verbatim (`toErrorBody` coercion to `not_initialized` removed; unknown-code/absent-body fallback retained). The 15 source-grep pin total is a separate count and is unchanged. Flagged for architect ratification at merge.
+
 ---
 
 ## Sign-off Checklist

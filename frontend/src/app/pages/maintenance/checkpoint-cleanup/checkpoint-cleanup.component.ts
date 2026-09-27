@@ -310,6 +310,19 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     return { label: reason, tone: 'error' };
   }
 
+  /**
+   * A-8 — error code → human label for the inline banner. Only codes
+   * with a curated label are mapped; everything else renders verbatim
+   * (the raw code string), preserving the pre-existing behavior for
+   * the 10 stable codes.
+   */
+  errorLabel(code: string): string {
+    if (code === 'internal_error') {
+      return 'Internal server error';
+    }
+    return code;
+  }
+
   /** AM-6 — interrupted-state render guard. */
   canRerunInterrupted(run: CheckpointCleanupRun): boolean {
     return run.status === 'interrupted';

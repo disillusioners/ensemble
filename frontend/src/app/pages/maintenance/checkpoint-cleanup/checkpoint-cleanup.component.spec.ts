@@ -14,7 +14,7 @@
 //     — AM-17 negative pin
 //   - Confirm dialog echo: message contains formatted bytes + checkpoint-row count
 //   - Stale dry-run short-circuit: snack-bar opens, no dialog
-//   - 10-code error rendering (count pin + global banner for
+//   - 11-code error rendering (count pin + global banner for
 //     `maintenance_disabled` + guidance note for `origin_not_trusted`)
 //   - Poll start/stop on terminal `succeeded` / `interrupted` (AM-6)
 //   - 409-adoption behavior (AM-14, AM-17): on `run_in_flight`, adopt
@@ -660,7 +660,7 @@ describe('CheckpointCleanupComponent', () => {
     });
   });
 
-  describe('10-code error rendering — count pin', () => {
+  describe('11-code error rendering — count pin', () => {
     const codes: MaintenanceErrorBody['error'][] = [
       'not_initialized',
       'not_found',
@@ -672,8 +672,9 @@ describe('CheckpointCleanupComponent', () => {
       'backend_unsupported',
       'origin_not_trusted',
       'maintenance_disabled',
+      'internal_error',
     ];
-    it('handles all 10 stable codes — render path exists for each', () => {
+    it('handles all 11 codes (10 stable + A-8 internal_error) — render path exists for each', () => {
       for (const code of codes) {
         const body: MaintenanceErrorBody = { error: code, message: 'msg' };
         service.lastError.set(body);
@@ -687,7 +688,7 @@ describe('CheckpointCleanupComponent', () => {
         }
       }
       // Coverage assertion: every code is exercised (no fall-through silent).
-      expect(codes).toHaveLength(10);
+      expect(codes).toHaveLength(11);
     });
   });
 

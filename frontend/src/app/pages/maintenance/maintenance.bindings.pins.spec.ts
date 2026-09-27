@@ -144,9 +144,9 @@ describe('Maintenance console — source-grep pins (15 pins)', () => {
     });
   });
 
-  // ── Pin 6: error-code-union-exhaustive (10 codes) ──────────────────────
-  describe('6. error-code-union-exhaustive (10 codes, AM-13/AM-1)', () => {
-    it('MaintenanceErrorCode union enumerates all 10 stable codes', () => {
+  // ── Pin 6: error-code-union-exhaustive (11 codes incl. A-8) ────────────
+  describe('6. error-code-union-exhaustive (11 codes incl. A-8 internal_error, AM-13/AM-1)', () => {
+    it('MaintenanceErrorCode union enumerates all 11 codes (10 stable + A-8 internal_error)', () => {
       const unionMatch = modelsSrc.match(
         /export type MaintenanceErrorCode\s*=([\s\S]*?);/,
       );
@@ -163,13 +163,14 @@ describe('Maintenance console — source-grep pins (15 pins)', () => {
         'backend_unsupported',
         'origin_not_trusted',
         'maintenance_disabled',
+        'internal_error',
       ];
       for (const code of expectedCodes) {
         expect(unionBody).toContain(`'${code}'`);
       }
-      // The union has exactly 10 codes.
+      // The union has exactly 11 codes (10 stable + A-8 internal_error).
       const codeMatches = unionBody.match(/'\w+'/g) ?? [];
-      expect(codeMatches).toHaveLength(10);
+      expect(codeMatches).toHaveLength(11);
     });
   });
 

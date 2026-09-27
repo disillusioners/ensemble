@@ -19,7 +19,7 @@
   <section class="ck-card ck-error-banner" data-testid="ck-error-banner">
     <mat-icon>error_outline</mat-icon>
     <div>
-      <strong>{{ lastError()?.error }}</strong>
+      <strong>{{ errorLabel(lastError()?.error ?? '') }}</strong>
       @if (lastError()?.message) {
         <p>{{ lastError()?.message }}</p>
       }

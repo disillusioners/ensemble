@@ -263,12 +263,12 @@ export class CheckpointCleanupService {
    * doesn't return a structured body.
    *
    * A-8 — the BE's catch-all 500 body carries
-   * `error: "internal_error"` (one new error-code literal added to
-   * the union post-freeze). That literal is NOT in the frozen
-   * `MaintenanceErrorCode` union, so it can't pass the type guard
-   * below; we coerce it to the nearest stable code
-   * (`'not_initialized'`) and keep the message verbatim so the FE
-   * still surfaces it. A-11 — the FE tolerates extra `details` keys.
+   * `error: "internal_error"`. That literal IS in the
+   * `MaintenanceErrorCode` union (A-8 amendment), so it passes the
+   * type guard below and is stored verbatim — message and `details`
+   * preserved, no `not_initialized` coercion. The fallback branch is
+   * reserved for genuinely unknown literals and absent bodies.
+   * A-11 — the FE tolerates extra `details` keys.
    */
   toErrorBody(err: HttpErrorResponse | unknown): MaintenanceErrorBody {
     const e = err as HttpErrorResponse;
@@ -282,8 +282,9 @@ export class CheckpointCleanupService {
       typeof errorBody === 'object' &&
       typeof errorBody.error === 'string' &&
       // Narrow to the union: only known codes are accepted as
-      // `MaintenanceErrorBody.error`. `internal_error` (A-8) and any
-      // unknown literal falls through to the fallback branch below.
+      // `MaintenanceErrorBody.error`. `internal_error` (A-8) is a
+      // union member; only genuinely unknown literals fall through
+      // to the fallback branch below.
       this.isKnownErrorCode(errorBody.error)
     ) {
       return {
@@ -292,8 +293,8 @@ export class CheckpointCleanupService {
         ...(errorBody.details ? { details: errorBody.details } : {}),
       };
     }
-    // Fallback for: missing/malformed body, `internal_error`
-    // (post-freeze A-8 literal), or unknown code literal. Preserve
+    // Fallback for: missing/malformed body or unknown code literal.
+    // Preserve
     // the upstream message verbatim so the FE banner can still
     // surface the BE's intent.
     return {
@@ -317,6 +318,7 @@ export class CheckpointCleanupService {
       'backend_unsupported',
       'origin_not_trusted',
       'maintenance_disabled',
+      'internal_error',
     ];
     return (known as readonly string[]).includes(code);
   }
