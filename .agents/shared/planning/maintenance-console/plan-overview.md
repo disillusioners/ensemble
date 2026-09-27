@@ -37,6 +37,8 @@ Single-sentence completion test: *An operator can open the Maintenance section i
 ## API Contract v3 — frozen 2026-09-27 (post-architect amendments AM-1…AM-18; leader rulings applied)
 > **Changelog v2→v3 (reviewer fix pass 2026-09-27):** C-1/C-2 literals + shape unified (404 code = `not_found` everywhere; 409 body nested under `details` everywhere); W-1 mechanism restated + completion-gate prohibition added (INV-13); counts reconciled [R-1/R-2].
 > **v3.1 (2026-09-27, doc-repair only — no wire-surface change):** `internal_error` (500, router catch-all per A-8) added to the frozen error-code table + FE union/pin counts 10→11 + BE case 67; documents code already shipped and reviewed (CF-6 ratification). [CF-6 doc-repair, v3.1]
+> **v3.2 (2026-09-28, dry-run projection — A+C adopted, B deferred):** §3 gains projection fields bytes_reclaimable_now/after_row_prune/total (DELTA semantics per amendment R-1; projection-class, NEVER gate-bound, default 0, additive); manual_execute run summary gains additive projection echo block; gate binding UNCHANGED (echo binds would_free_bytes only, AM-3/INV-13 reaffirmed); B deferred to v3.3 candidate w/ preconditions P1+P2; BE 67→72, FE pins 15→18. Spec: dry-run-projection-amendment.md. [v3.2, A+C ratified]
+> **Architect conformance-stamp 2026-09-28: v3.2 implementation @ 0847075c verified against the ratified amendment — delta projection pinned by the discriminating real-PG 4-class test (TestDryRunProjectionBlobClasses; distinct sizes 111_111/222_222/333_333 + keep-side markers — superset-counting shifts the total); alias/gate binding unchanged (echo reads would_free_bytes only; execute echo = 2-field _at_dry_run snapshot per R-5); skipped pairs contribute 0 with the FE understatement flag (template + source-grep pin); B-deferral respected (no D-then-E composition, no post-run gate, INV-13 note intact). APPROVED FOR MERGE.**
 > **Architect delta-stamp 2026-09-27: v2→v3 delta verified (C-1/C-2/W-1+INV-13 applied; no regression to AM-1…AM-18 rulings); two stale W-1-contradicting residues swept at stamp time (risk-row tail + AM-16c bullet — completed the v3 restatement, no semantic change); contract v3 APPROVED for implementation.**
 > **[C1 hardening amendment, 2026-09-27 fix pass]** Rule 2's same-origin derivation additionally requires the request `Host` to pass a Host allowlist (loopback family + hosts parsed from `MAINTENANCE_TRUSTED_ORIGINS` + new env `MAINTENANCE_ALLOWED_HOSTS` CSV, default empty); a Host miss means rule 2 cannot match (fail-closed `origin_not_trusted` via rule 5). The frozen R-7 derivation sentence above is unchanged; rule set/order, the `/availability` exemption, and all literals stand.
 > **[A-8 amendment, 2026-09-27 fix pass]** The maintenance router's catch-all for unexpected exceptions now returns a contract-shaped 500 `{error:"internal_error", message, details:{}}` (leader-authorized fix item 8; one new error-code literal `internal_error` added to the frozen string set). All other frozen literals, paths, payloads, enums, and gate-order are unchanged. **(v3.1 doc catch-up [CF-6 doc-repair, v3.1]: the frozen error-code table below now carries the 11th row `internal_error` | 500 — this documents an already-shipped and reviewed code literal; doc catch-up, NOT a wire change.)**
@@ -200,6 +202,9 @@ When `last_run.summary` came from a **destructive** run (not a dry-run), `blobs`
   },
   "would_delete_count": 4,
   "would_free_bytes": 268435456,
+  "bytes_reclaimable_now": 268435456,
+  "bytes_reclaimable_after_row_prune": 0,
+  "bytes_reclaimable_total": 268435456,
   "scanned": {
     "thread_ns_pairs": 12
   },
@@ -213,6 +218,13 @@ When `last_run.summary` came from a **destructive** run (not a dry-run), `blobs`
 }
 ```
 *(field `skipped_truncated` added to this example per [R-9, v3 fix pass] — it is in the schema and was missing from the example)*
+
+**Projection fields (v3.2 — additive; normative semantics per `dry-run-projection-amendment.md` §3/R-1/R-4 [v3.2, A+C ratified]):**
+
+- `bytes_reclaimable_now` — INTEGER ≥ 0. Current-state orphan blob bytes: what **this run** (E→D) will free. **Equals `would_free_bytes`** (retained as an explicit alias for shape stability; the echo gate continues to bind `would_free_bytes`, AM-3 unchanged).
+- `bytes_reclaimable_after_row_prune` — INTEGER ≥ 0. **DELTA semantics (R-1, authoritative):** blob bytes currently *referenced* whose only referencers are the excess rows Op D of this pass deletes — i.e. `post_D_orphan_set − now_set` (NOT the post-D superset; `now + superset` would double-count). What a **follow-up run** frees after this one (quiescent DB). Skipped pairs contribute 0 (R-4).
+- `bytes_reclaimable_total` — INTEGER ≥ 0. Exactly `now + after_row_prune`. Derived, informational sum-on-the-wire; materializing it requires **two passes** on a never-pruned DB (pass 1 E→D frees `now`; pass 2's E frees `after`).
+- All three are **projection-class, informational, NEVER gate-bound** — same AM-3 treatment as `skipped[]`. Missing fields default to 0 (additive; v3.1 clients unaffected). Computation: one anti-join per excess pair against the simulated survivor set **minus** that pair's current-orphan contribution (R-1).
 
 `fresh_until` is `now() + MAINTENANCE_DRY_RUN_FRESH_SECONDS` (default 300s / 5 min) — execute must reference a fresh enough dry-run to proceed. Echoed by the client as `expected_bytes` to the execute endpoint.
 
@@ -294,6 +306,17 @@ When the execute endpoint returns **409** `run_in_flight` (the single-flight gat
 ```
 
 `running` → `{status, completed_at:null, summary:null}`; terminal → full body; unknown → 404.
+
+**`manual_execute` run summary — additive `projection` echo block (v3.2 [v3.2, A+C ratified]):**
+
+```json
+"summary": { "…existing…": "…", "projection": {
+  "bytes_reclaimable_now_at_dry_run": 0,
+  "bytes_reclaimable_after_row_prune_at_dry_run": 11811060000
+} }
+```
+
+Echo of the source dry-run's two projection numbers (self-contained on the run row via `dry_run_summary_json`; powers the post-run FE "run cleanup again" banner across page refreshes). `manual_dry_run` rows already carry the fields in their summary payload; **auto rows: absent** (R-5 — no auto-cycle involvement; `/status` §2 frozen shape untouched, absent fields render "n/a"). Informational only — never gate-bound (INV-13 reaffirmed).
 
 **Errors**:
 - 404 `{"error": "not_found", "run_id": "..."}` — 404 error code literal is **`not_found`** everywhere in this surface [C-1, v3 fix pass]
@@ -443,6 +466,13 @@ Reuse `frontend/src/app/components/confirm-dialog/confirm-dialog.component.ts`. 
 - **Execute progress:** poll `GET /runs/{run_id}` every **2000 ms** (`POLL_INTERVAL_MS = 2000` — source-grep pin in spec) while `status === 'running'`; on terminal, render the same result panel.
 - **409-adoption behavior** (AM-14, AM-17): on `409 run_in_flight` from execute, adopt `details.run_id` and **resume polling** `GET /runs/{details.run_id}` immediately (no operator-visible error toast). Covers double-click and network-retry classes.
 - No shared table component exists yet — keep it inline. (Future: extract to `frontend/src/app/shared/components/result-table/` if a second section needs it.)
+
+### v3.2 display additions — dry-run projection ([v3.2, A+C ratified]; normative copy per amendment §FE display contract)
+
+- **Dry-run card, three-number render**: "This run: ~{now} · After this run (run cleanup again): ~{after} · Combined: ~{total}". Skip zero components with "—". Sub-copy on never-pruned profiles: *"On a DB that has never run retention, run 1 deletes rows only; run 2 frees the blob bytes."*
+- **Skipped flag** (R-4): when `skipped.length > 0`, render "N pairs skipped — cleanup effectiveness may be understated" near the projection. The projection excludes skipped pairs (including them would make `total` over-promise); with them excluded the displayed numbers may understate eventual effectiveness — the flag covers that honesty gap (R-4).
+- **Confirm dialog** (per-run consent instrument, journey context) — **supersedes the §Confirm flow message template above at implementation time** [v3.2, A+C ratified]: *"This run will permanently delete ~{fmt(now)} of unreferenced blobs and {rows} excess checkpoint rows. After this run, ~{fmt(after)} more becomes reclaimable by running cleanup again. This may take several minutes on large databases. This cannot be undone."*
+- **Post-run convergence banner** (execute succeeded AND `projection.bytes_reclaimable_after_row_prune_at_dry_run > 0`): "Run cleanup again to reclaim ~{fmt(…)} more" — the CTA starts a **NEW dry-run** (never a silent execute); disabled while a run is in flight; hides once a fresh dry-run reports `now == 0`.
 
 ---
 
@@ -674,7 +704,7 @@ Per INV-5; the architect-recommendation's 5-item checklist:
 
 ### BE (Phase 1)
 
-**Total: 67 enumerated BE cases** [R-1 v3 recount + case 67 added [CF-6 doc-repair, v3.1]; every count site agrees on 67: §4.1 = 10 (incl. 9a), §4.2 = 29 (incl. 11a, 17a), §4.3 = 27 (numbering 37–67, with 53 retired/replaced by 64; case 67 = A-8 catch-all shape pin), §4.4 wiring pin = 1]:
+**Total: 72 enumerated BE cases** [v3.2, A+C ratified — was 67 at v3/v3.1 (R-1 v3 recount + case 67 [CF-6 doc-repair, v3.1]); +5 = cases 68–72, negative pin folded as companion 25b — see phase1 §v3.2 Work Block]: §4.1 = 10 (incl. 9a), §4.2 = 29 + companion 25b (same case number), §4.3 = 32 (numbering 37–72, with 53 retired/replaced by 64; 67 = A-8 catch-all shape pin; 68–72 = projection), §4.4 wiring pin = 1:
 
 - **Unit** (`tests/unit/test_maintenance_checkpoint_cleanup_service.py`):
   - `MaintenanceApiService.availability()` shape (state enum + derived `eligible`)
@@ -716,7 +746,7 @@ Per INV-5; the architect-recommendation's 5-item checklist:
   - Polling lifecycle (start on execute, stop on terminal status)
   - **(AM-16)** Skipped pairs render — badge line + reason badge map (known codes) + generic `ERROR:*` fallback
   - **(AM-16)** 409-adoption — on 409 from execute, adopt `details.run_id`, resume polling, no error toast
-- **Source-grep pins** (mirrors Job Queue Testing conventions §ORDER-PIN EXCEPTION + §COUNT-CLAIM DECOMPOSITION) — **15 pins total in phase2 T6.3 [R-2 + sections-registry addition, v3 fix pass]**:
+- **Source-grep pins** (mirrors Job Queue Testing conventions §ORDER-PIN EXCEPTION + §COUNT-CLAIM DECOMPOSITION) — **18 pins total in phase2 T6.3** *(15 at v3/v3.1 [R-2 + sections-registry addition, v3 fix pass]; +3 at v3.2 [v3.2, A+C ratified]: `projection-fields-render`, `confirm-message-journey-copy`, `run-again-banner-when-projection-nonzero`)*:
   - `confirm-dialog` is wired in template (grep pin)
   - Error code union is exhaustive (count pin)
   - Five service methods present (count pin)
