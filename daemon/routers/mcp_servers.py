@@ -567,16 +567,51 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
                 ).model_dump()
             )
 
-        # Idempotent replay: same key → same row, NO duplicate write.
-        if (existing.instance_metadata or {}).get(
+        # Idempotent replay: same key → same row.
+        # P3-WP2 wiring fix (proof-b, fix 2/3): when the row is
+        # currently ``is_active=False`` (e.g. an earlier configure
+        # left the server inactive, or a kms_attach failure left it
+        # in a non-live state), the replay path must set
+        # ``is_active=True`` so the install actually completes the
+        # install (a no-op replay would silently leave the row dead).
+        # Live evidence: after deactivation the replay currently
+        # returns the inactive row unchanged, blocking downstream
+        # consumers (including the capability gate) from seeing the
+        # server as live.
+        existing_key = (existing.instance_metadata or {}).get(
             "install_idempotency_key"
-        ) == idempotency_key:
-            logger.info(
-                "configure-builtin: idempotent replay for '%s' "
-                "(key=%s…) — returning existing row unchanged",
-                definition.name,
-                idempotency_key[:12],
-            )
+        )
+        if existing_key == idempotency_key:
+            if not existing.is_active:
+                # Replay that REACTIVATES an inactive row. We pass
+                # ``is_active=True`` through ``update_mcp_server``
+                # so the column write is auditable (separate
+                # timestamp); the metadata stays put (no config
+                # change, no install-audit line — same install was
+                # already audited on the original write). The schema
+                # version mismatch 409 path above is unchanged —
+                # that branch fires on a different ``key`` or a
+                # different ``schema_version``, never on this one.
+                reactivated = await asyncio.to_thread(
+                    manager._mcp_server_repository.update_mcp_server,
+                    existing.id,
+                    is_active=True,
+                )
+                if reactivated is not None:
+                    existing = reactivated
+                logger.info(
+                    "configure-builtin: idempotent replay for '%s' "
+                    "(key=%s…) reactivated inactive row to is_active=true",
+                    definition.name,
+                    idempotency_key[:12],
+                )
+            else:
+                logger.info(
+                    "configure-builtin: idempotent replay for '%s' "
+                    "(key=%s…) — returning existing row unchanged",
+                    definition.name,
+                    idempotency_key[:12],
+                )
             return _mcp_server_to_info(existing)
 
         # Update path: capture prev_config_snapshot with a 7-day TTL

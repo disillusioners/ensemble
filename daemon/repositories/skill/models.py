@@ -778,6 +778,27 @@ class SkillBankItem(SQLModel, table=True):
             "task). Source of truth from skill-set.yaml (legacy .md) definition."
         ),
     )
+    # Phase 3 P3-WP2 (WP2 wiring fix — proof (b)): persisted
+    # ``CapabilityRequirement`` JSON, parsed from the skill-set.yaml
+    # ``requires:`` block. ``NULL`` when the entry omits ``requires:``
+    # (back-compat — every existing repo skill is in this bucket; zero
+    # behavior change at injection time). The injection service looks
+    # this up via ``source_skill_bank_id`` so the live path can run a
+    # capability pre-flight BEFORE composing the injected content —
+    # without this field, the gate would have to be reconstructed from
+    # scratch at every inject call (parse the bank template body, etc.)
+    # which is both slower and a different surface from the seed-time
+    # parse that already happened. JSON form (not a structured column)
+    # because the dataclass has only primitive types + lists.
+    requirement_json: Optional[str] = Field(
+        default=None,
+        max_length=4096,
+        description=(
+            "Serialized CapabilityRequirement (JSON) parsed from the "
+            "skill-set.yaml `requires:` block. NULL when no `requires:` "
+            "was declared."
+        ),
+    )
     created_at: str = Field(default_factory=_now_iso)
     updated_at: str = Field(default_factory=_now_iso)
 
@@ -792,6 +813,7 @@ class SkillBankItem(SQLModel, table=True):
             "template_version": self.template_version,
             "agent_id": self.agent_id,
             "auto_load": self.auto_load,
+            "requirement_json": self.requirement_json,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

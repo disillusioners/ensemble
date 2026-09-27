@@ -1,6 +1,7 @@
 """Instance manager orchestrating all agent instances."""
 
 import sys
+import os
 import uuid
 import logging
 import asyncio
@@ -1645,6 +1646,20 @@ class InstanceManager:
                 self._skill_injection_service.set_clone_service(
                     self._skill_clone_service
                 )
+                # P3-WP2 wiring fix — capability gate (proof-b).
+                # Wire the four lookup callables the injection
+                # service needs to run the pre-flight BEFORE
+                # composing injected content. The lookup closures
+                # read the bank row by ``source_skill_bank_id`` and
+                # parse ``requirement_json``; the mcp_lookup wraps
+                # ``McpServerRepository.get_mcp_server_by_name``
+                # into the ``McpLookupResult`` projection the
+                # resolver expects; tools_allow reads the agent's
+                # effective meta; env_lookup snapshots ``os.environ``
+                # at wire time. Day-1 contract: gate is a no-op
+                # when ANY lookup is missing (test fixtures,
+                # pre-Phase-3 deployments).
+                self._wire_skill_injection_capability_gate()
         else:
             self._skill_usage_repo = None
             self._skill_trigger_repo = None
@@ -3507,6 +3522,221 @@ class InstanceManager:
             marker has not been cleared.
         """
         return instance_id in self._explicit_skill_loaded
+
+    # ------------------------------------------------------------------
+    # P3-WP2 wiring fix — capability gate wiring (proof-b)
+    # ------------------------------------------------------------------
+    # The :class:`SkillInjectionService` runs a capability pre-flight
+    # BEFORE composing injected content. The four lookup callables
+    # are constructed here (closure-captured dependencies) so the
+    # service stays hermetic and testable. Production wires:
+    #
+    # * ``requirement_lookup`` — closure over ``_skill_bank_repo`` that
+    #   reads ``Skill.source_skill_bank_id`` and parses the bank
+    #   row's ``requirement_json`` field.
+    # * ``mcp_lookup`` — closure over ``_mcp_server_repository`` that
+    #   projects the SQLModel row into the ``McpLookupResult``
+    #   shape the resolver expects.
+    # * ``tools_allow`` — returns the current agent's effective
+    #   ``tools.allow`` list (empty default when agent meta isn't
+    #   loaded — the gate still works for MCP / env axes).
+    # * ``env_lookup`` — snapshots ``os.environ`` at wire time
+    #   (the resolver expects a dict).
+    #
+    # The wire method is invoked once at manager init, AFTER both
+    # ``_skill_injection_service`` and ``_skill_bank_repo`` /
+    # ``_mcp_server_repository`` are constructed. The lookup
+    # callables are read at inject-time (lazy), so the order
+    # between wire and the first inject call doesn't matter.
+    # ------------------------------------------------------------------
+
+    def _wire_skill_injection_capability_gate(self) -> None:
+        """Build and install the four capability-gate lookup callables.
+
+        Called once at manager init AFTER the surrounding repos are
+        built. The injection service is updated via
+        :meth:`SkillInjectionService.set_capability_gate`; each
+        argument is optional — ``None`` means "leave as-is" so test
+        fixtures can opt in selectively.
+
+        Failure policy: any missing repo leaves the corresponding
+        callable ``None`` (gate is a no-op for that axis). This is
+        the back-compat default and matches the
+        ``SkillInjectionService.set_capability_gate`` contract.
+        """
+        injection = getattr(self, "_skill_injection_service", None)
+        if injection is None:
+            return
+
+        # ── requirement_lookup ────────────────────────────────────
+        # Closure over ``_skill_bank_repo`` so we can swap the
+        # engine in tests (the repo holds the engine by reference;
+        # swapping the engine swaps the repo's reads).
+        skill_bank_repo = getattr(self, "_skill_bank_repo", None)
+        capability_resolver = None
+        try:
+            from daemon.services.capability_resolver import (
+                CapabilityRequirement,
+                capability_check,
+            )
+            from daemon.services.skill_injection_service import (
+                SkillInjectionService as _SIS,  # noqa: F401
+            )
+            capability_resolver = (CapabilityRequirement, capability_check)
+        except Exception:
+            capability_resolver = None
+
+        def _requirement_lookup(skill: Any) -> Any:
+            """Resolve a Skill to its parsed CapabilityRequirement.
+
+            Reads ``skill.source_skill_bank_id`` and parses the bank
+            row's ``requirement_json`` (P3-WP2 wiring fix). Returns
+            ``None`` when the bank lookup fails, the row has no
+            ``requirement_json``, the JSON is malformed, or the
+            bank repo isn't wired (test fixtures).
+            """
+            if skill_bank_repo is None:
+                return None
+            if capability_resolver is None:
+                return None
+            CapabilityRequirement_cls, _ = capability_resolver
+            source_id = getattr(skill, "source_skill_bank_id", None)
+            if not source_id:
+                return None
+            try:
+                row = skill_bank_repo.get(source_id)
+            except Exception as e:
+                logger.warning(
+                    f"[P3-WP2-wire] requirement_lookup bank get failed "
+                    f"for source_id={source_id!r}: {e}"
+                )
+                return None
+            if row is None:
+                return None
+            raw = getattr(row, "requirement_json", None)
+            if not raw:
+                return None
+            try:
+                return CapabilityRequirement_cls.from_dict(
+                    json.loads(raw)
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[P3-WP2-wire] requirement_json parse failed for "
+                    f"row={source_id!r}: {e}"
+                )
+                return None
+
+        # ── mcp_lookup ────────────────────────────────────────────
+        # Closure over the MCP server repository. ``_mcp_server_repository``
+        # may be missing in test fixtures; the gate falls through to
+        # ``missing`` for that axis (resolver returns ``missing`` when
+        # mcp_lookup is None — see capability_resolver.check_mcp_capability).
+        mcp_repo = getattr(self, "_mcp_server_repository", None)
+
+        def _mcp_lookup(capability_id: str) -> Any:
+            """Resolve a capability_id to a McpLookupResult projection.
+
+            Returns ``None`` when the repo is absent, the row doesn't
+            exist, or the lookup raises (logged, swallowed). The
+            resolver's McpLookupResult is the duck-typed projection;
+            we project the SQLModel row into that shape so the
+            resolver stays DB-agnostic.
+            """
+            if mcp_repo is None:
+                return None
+            try:
+                row = mcp_repo.get_mcp_server_by_name(capability_id)
+            except Exception as e:
+                logger.warning(
+                    f"[P3-WP2-wire] mcp_lookup failed for "
+                    f"{capability_id!r}: {e}"
+                )
+                return None
+            if row is None:
+                return None
+            # Project to McpLookupResult shape.
+            from daemon.services.capability_resolver import McpLookupResult
+            config = getattr(row, "config", None) or {}
+            env_section = (
+                config.get("env", {}) if isinstance(config, dict) else {}
+            )
+            instance_meta = (
+                getattr(row, "instance_metadata", None) or {}
+            )
+            bound_handles = (
+                instance_meta.get("bound_handles", [])
+                if isinstance(instance_meta, dict)
+                else []
+            )
+            return McpLookupResult(
+                name=getattr(row, "name", capability_id),
+                is_active=bool(getattr(row, "is_active", False)),
+                config_env=dict(env_section) if isinstance(
+                    env_section, dict
+                ) else {},
+                requires_secret=bool(env_section) and not all(
+                    isinstance(v, str) and not v.startswith("__KMS_REF__")
+                    for v in env_section.values()
+                ) if env_section else False,
+                bound_handle=(
+                    bound_handles[0].get("handle")
+                    if bound_handles
+                    and isinstance(bound_handles[0], dict)
+                    else None
+                ),
+            )
+
+        # ── tools_allow / env_lookup ──────────────────────────────
+        # Both are simple snapshots. ``tools_allow`` defaults to an
+        # empty list when agent meta isn't loaded (the resolver treats
+        # that as ``missing`` for every tool); ``env_lookup`` snapshots
+        # ``os.environ`` at lookup time (the resolver never mutates it).
+        def _tools_allow() -> list[str]:
+            """Return the agent's effective ``tools.allow`` list.
+
+            Reads the meta from the resolver's expected interface
+            (duck-typed). Returns an empty list when meta isn't
+            loaded — that's a valid "no tools allowed" state, and
+            the resolver's ``check_tool_capability`` returns
+            ``missing`` for every requested tool.
+            """
+            try:
+                # Read the current agent's meta lazily — the
+                # injector already holds an ``instance_id`` /
+                # ``message_id`` at call time, but those aren't
+                # threaded into the capability gate; we read the
+                # global agent_meta fallback (the manager's
+                # ``get_agent_meta`` accessor) so the gate works
+                # for the common case where one agent is the
+                # current scope. Per-instance meta can be wired in
+                # later (P3 backlog) — the surface is callable
+                # and replaceable.
+                meta = self.get_agent_meta() if hasattr(
+                    self, "get_agent_meta"
+                ) else None
+                if meta is None:
+                    return []
+                allow = getattr(meta, "tools_allow", None)
+                if allow is None:
+                    return []
+                return list(allow)
+            except Exception as e:
+                logger.warning(
+                    f"[P3-WP2-wire] tools_allow failed: {e}"
+                )
+                return []
+
+        def _env_lookup() -> dict[str, str]:
+            """Snapshot ``os.environ`` as a dict."""
+            return dict(os.environ)
+
+        injection.set_capability_gate(
+            requirement_lookup=_requirement_lookup,
+            mcp_lookup=_mcp_lookup,
+            tools_allow=_tools_allow,
+            env_lookup=_env_lookup,
+        )
 
     # ------------------------------------------------------------------
     # Question pause-requested flag (Phase 1 / question tool)
@@ -6168,6 +6398,19 @@ class InstanceManager:
             "ALTER TABLE skill_bank ADD COLUMN IF NOT EXISTS template_version TEXT NOT NULL DEFAULT '1.0.0'",
             "ALTER TABLE skill_bank ADD COLUMN IF NOT EXISTS agent_id TEXT",
             "ALTER TABLE skill_bank ADD COLUMN IF NOT EXISTS auto_load BOOLEAN NOT NULL DEFAULT false",
+            # ── Skill Bank requirement_json (2026-09-27) ─────────────
+            # P3-WP2 wiring fix (proof-b): persists the parsed
+            # ``CapabilityRequirement`` from the skill-set.yaml
+            # ``requires:`` block onto the bank template. Read by the
+            # injection-time capability gate via
+            # ``Skill.source_skill_bank_id`` so the live path can run a
+            # capability pre-flight BEFORE composing the injected
+            # content — without this column, the gate would have to
+            # re-parse the template body on every inject call. NULL is
+            # the day-1 back-compat default (every existing repo skill
+            # has no ``requires:`` block). SQLite counterpart lives in
+            # ``daemon/migrations/versions/20260927_120000_add_skill_bank_requirement_json.sql``.
+            "ALTER TABLE skill_bank ADD COLUMN IF NOT EXISTS requirement_json TEXT",
             "CREATE INDEX IF NOT EXISTS ix_skill_bank_agent_id ON skill_bank(agent_id)",
             # ── Skills auto_load + source_skill_bank_id (2026-07-14) ─────
             # Phase 2 of tester-skill-evolution. The skills (evolution)

@@ -93,7 +93,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,22 @@ logger = logging.getLogger(__name__)
 # selection". ``inactive`` / ``archived`` variants are filtered out
 # so the picker only sees live candidates.
 _ACTIVE_AB_STATUSES: frozenset[str] = frozenset({"active", "ab_testing"})
+
+
+# Type alias for the injectable capability-resolution callables.
+# The production caller (manager.py) wires these to thin closures
+# over ``McpServerRepository``, the agent's effective ``tools.allow``
+# set, and a ``dict(environ)`` snapshot — see the call site for
+# details. Tests inject in-memory fakes so the surface stays
+# hermetic.
+RequirementLookupFn = Callable[[Any], "object | None"]
+# ^ ``object`` is ``CapabilityRequirement | None`` from
+# ``daemon.services.capability_resolver``. Typed loosely here to
+# avoid an import cycle (capability_resolver does NOT depend on this
+# module; this module depends on it lazily).
+McpLookupFn = Callable[[str], "object | None"]
+ToolsAllowFn = Callable[[], list[str]]
+EnvLookupFn = Callable[[], dict[str, str]]
 
 
 # ============================================================
@@ -161,6 +177,10 @@ class SkillInjectionService:
         config: Any,  # SkillEvolutionConfig
         ab_test_repo: Any,
         skill_repo: Any,
+        requirement_lookup: RequirementLookupFn | None = None,
+        mcp_lookup: McpLookupFn | None = None,
+        tools_allow: ToolsAllowFn | None = None,
+        env_lookup: EnvLookupFn | None = None,
     ) -> None:
         """Store the search service, config, and A/B repositories.
 
@@ -169,6 +189,23 @@ class SkillInjectionService:
             config: See :attr:`_config`.
             ab_test_repo: See :attr:`_ab_test_repo`.
             skill_repo: See :attr:`_skill_repo`.
+            requirement_lookup: P3-WP2 wiring fix — callable that
+                resolves a :class:`Skill` to its parsed
+                :class:`CapabilityRequirement` (or ``None`` when the
+                skill carries no ``requires:`` block). Production
+                wires this to a closure over ``SkillBankRepository``
+                that reads ``Skill.source_skill_bank_id`` and parses
+                the bank row's ``requirement_json``. When ``None`` the
+                gate is a no-op (zero behavior change — every existing
+                skill has empty requirement; the resolve path is
+                skipped entirely).
+            mcp_lookup: Injectable MCP-server lookup forwarded to
+                ``capability_check``. ``None`` falls through to
+                ``missing`` (no MCP ever installed).
+            tools_allow: Injectable accessor for the agent's effective
+                ``tools.allow`` list.
+            env_lookup: Injectable accessor for the merged environment
+                mapping.
         """
         self._search_service = search_service
         self._config = config
@@ -186,6 +223,18 @@ class SkillInjectionService:
         # queries this to attribute a feedback signal back to
         # the skills that were offered for the task.
         self._injected_skills: dict[str, dict[str, list[str]]] = {}
+        # P3-WP2 wiring fix — capability gate (proof-b). All four
+        # are optional; when ANY is missing the gate is a no-op
+        # (the requirement lookup runs but produces no envelope
+        # because we can't check the requirement). The full set is
+        # wired by ``EnsembleManager`` so day-1 production runs the
+        # gate; tests / fixtures can opt in selectively.
+        self._requirement_lookup: RequirementLookupFn | None = (
+            requirement_lookup
+        )
+        self._mcp_lookup: McpLookupFn | None = mcp_lookup
+        self._tools_allow: ToolsAllowFn | None = tools_allow
+        self._env_lookup: EnvLookupFn | None = env_lookup
 
     # --------------------------------------------------------
     # Construction-time setters (avoid init-order chicken-and-egg)
@@ -207,6 +256,47 @@ class SkillInjectionService:
                 manager.
         """
         self._clone_service = clone_service
+
+    def set_capability_gate(
+        self,
+        *,
+        requirement_lookup: RequirementLookupFn | None = None,
+        mcp_lookup: McpLookupFn | None = None,
+        tools_allow: ToolsAllowFn | None = None,
+        env_lookup: EnvLookupFn | None = None,
+    ) -> None:
+        """Wire the P3-WP2 capability gate after construction.
+
+        Mirrors the :meth:`set_clone_service` pattern — the lookup
+        callables aren't available until the manager has fully built
+        the surrounding services (MCP server repository, agent meta,
+        env). Each argument is optional; passing ``None`` leaves the
+        existing wiring untouched. Passing a callable REPLACES the
+        existing wiring for that slot (idempotent re-wiring for
+        test fixtures).
+
+        Args:
+            requirement_lookup: Callable that resolves a ``Skill`` →
+                ``CapabilityRequirement | None``. Production wires a
+                closure over ``SkillBankRepository`` that reads
+                ``source_skill_bank_id`` and parses
+                ``requirement_json``.
+            mcp_lookup: Callable that resolves a capability_id → MCP
+                row projection (``McpLookupResult | None``). Forwarded
+                to ``capability_check``.
+            tools_allow: Callable returning the agent's effective
+                ``tools.allow`` list. Forwarded to ``capability_check``.
+            env_lookup: Callable returning the merged env mapping.
+                Forwarded to ``capability_check``.
+        """
+        if requirement_lookup is not None:
+            self._requirement_lookup = requirement_lookup
+        if mcp_lookup is not None:
+            self._mcp_lookup = mcp_lookup
+        if tools_allow is not None:
+            self._tools_allow = tools_allow
+        if env_lookup is not None:
+            self._env_lookup = env_lookup
 
     # --------------------------------------------------------
     # Public API
@@ -276,7 +366,26 @@ class SkillInjectionService:
             selected = await self._select_ab_variant(
                 skill, instance_id, message_id
             )
-            routed_injected.append({"skill": selected, "score": score})
+            # Stage 2.5 — capability pre-flight (P3-WP2 wiring fix,
+            # proof-b). For each routed skill carrying a non-empty
+            # requirement, run ``capability_check`` BEFORE composing
+            # the injected content. Missing/unconfigured → prepend a
+            # capability pre-flight block (per skill convention: the
+            # first thing the agent sees is a clearly-marked
+            # escalation envelope + the action required of it). The
+            # skill body still renders after the block so a present
+            # capability does not lose context. Failure of the check
+            # itself (resolver error) → inject the skill WITHOUT the
+            # block and log a warning; never block injection on a
+            # resolver fault.
+            preflight_block = await self._capability_preflight_block(
+                selected
+            )
+            routed_injected.append({
+                "skill": selected,
+                "score": score,
+                "preflight_block": preflight_block,
+            })
 
         # Stage 3 — format. Empty routed_injected + non-empty
         # low_match still renders — the "other available skills"
@@ -399,13 +508,27 @@ class SkillInjectionService:
             skill, instance_id, message_id
         )
 
+        # Stage 2.5 — capability pre-flight (P3-WP2 wiring fix,
+        # proof-b). Same semantics as ``inject_skills``: a skill
+        # carrying a non-empty requirement runs ``capability_check``
+        # BEFORE the formatter; missing/unconfigured → prepend the
+        # pre-flight block; resolver failure → log + inject without
+        # the block (never block injection on a resolver fault).
+        preflight_block = await self._capability_preflight_block(selected)
+
         # Stage 3 — format. Explicit injection forces a 1.0
         # score since relevance is presumed (caller asked by
         # name); ``low_match`` is empty because we did not run
         # the search pipeline.
         injection_text = self._format_injection(
             {
-                "injected": [{"skill": selected, "score": 1.0}],
+                "injected": [
+                    {
+                        "skill": selected,
+                        "score": 1.0,
+                        "preflight_block": preflight_block,
+                    }
+                ],
                 "low_match": [],
             }
         )
@@ -570,6 +693,228 @@ class SkillInjectionService:
     # Formatting
     # --------------------------------------------------------
 
+    # ──────────────────────────────────────────────────────────────
+    # P3-WP2 wiring fix — capability pre-flight (proof-b)
+    # ──────────────────────────────────────────────────────────────
+    # Per skill convention: a skill body declaring ``requires:``
+    # MUST begin with ``capability_check(...)``; the result of the
+    # check is what tells the agent how to proceed (present → run
+    # the body; missing/unconfigured → escalate to install).
+    #
+    # The injector runs the check BEFORE composing the injected
+    # content and, when the result is not ``present``, prepends a
+    # clearly-marked block carrying the escalation envelope. The
+    # block is the load-bearing mechanism that lets a live agent
+    # avoid the failure mode observed on proof (b) run 2 (worker
+    # instance 498ca5b2 on :8081): the agent guessed at a missing
+    # tool inventory, invented a non-schema envelope kind, and
+    # skipped the install step entirely.
+    #
+    # Failure policy: resolver errors are caught, logged, and the
+    # skill is injected WITHOUT the block (never block injection on
+    # a resolver fault — the skill is still usable, just without the
+    # gate).
+    # ──────────────────────────────────────────────────────────────
+
+    async def _capability_preflight_block(
+        self,
+        skill: Any,
+    ) -> str:
+        """Run ``capability_check`` for a skill's declared requirements.
+
+        Returns a clearly-marked markdown block to prepend before
+        the skill body when at least one capability is not
+        ``present``. Returns ``""`` when the gate is a no-op (no
+        requirement, capability is present, lookup not wired, or
+        resolver error).
+
+        The block is rendered from the existing
+        :class:`EscalationEnvelope` + :func:`format_envelope_message`
+        helpers — the wire format (``Result: <json>`` with the seven
+        §7.2 fields) is the contract the consumer side already
+        parses.
+
+        Args:
+            skill: The skill being injected (post A/B routing).
+
+        Returns:
+            Markdown text to prepend before ``skill.content`` in
+            the injection block. Empty string when no block is
+            needed (gate is a no-op OR the check returns
+            ``present``).
+        """
+        # Fast path — no wiring → gate is a no-op. This is the
+        # back-compat default for tests / fixtures / pre-Phase-3
+        # deployments that don't supply the lookups. Zero behavior
+        # change: the skill injects as today.
+        if (
+            self._requirement_lookup is None
+            or self._mcp_lookup is None
+            or self._tools_allow is None
+            or self._env_lookup is None
+        ):
+            return ""
+
+        # Resolve the requirement for this skill. The production
+        # closure reads ``Skill.source_skill_bank_id`` and parses
+        # the bank row's ``requirement_json``. None / empty →
+        # back-compat (every existing repo skill lands here; the
+        # gate is a no-op).
+        try:
+            requirement = self._requirement_lookup(skill)
+        except Exception as e:
+            logger.warning(
+                f"[SkillInjection] requirement_lookup raised for skill "
+                f"{getattr(skill, 'name', '?')!r}: {e}; injecting "
+                f"without pre-flight block."
+            )
+            return ""
+
+        if requirement is None:
+            return ""
+        # Defensive: the lookup may return anything callable-shaped
+        # in tests; we only care about the recognized interface.
+        is_empty = getattr(requirement, "is_empty", None)
+        if callable(is_empty) and is_empty():
+            return ""
+
+        # Lazy import to keep the module surface lightweight and
+        # to avoid a circular dep at module load time.
+        from .capability_resolver import (
+            CapabilityCheckResult,
+            EscalationEnvelope,
+            capability_check,
+            format_envelope_message,
+        )
+
+        skill_name = getattr(skill, "name", "?") or "?"
+        # Run capability_check across every declared capability on
+        # every axis (mcp, tools, env). First non-present result
+        # wins (most informative evidence) and becomes the
+        # envelope. The check is a DB read — no LLM, no
+        # subprocess, fast (p95 < 50ms per WP2 contract).
+        checks: list[CapabilityCheckResult] = []
+        mcp_ids = list(getattr(requirement, "mcp", []) or [])
+        tool_ids = list(getattr(requirement, "tools", []) or [])
+        env_ids = list(getattr(requirement, "env", []) or [])
+        for mcp_id in mcp_ids:
+            try:
+                result = capability_check(
+                    mcp_id,
+                    mcp_lookup=self._mcp_lookup,
+                    tools_allow=self._tools_allow,
+                    env_lookup=self._env_lookup,
+                    capability_kind="mcp",
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[SkillInjection] capability_check raised for "
+                    f"mcp={mcp_id!r} (skill={skill_name!r}): {e}; "
+                    f"injecting without pre-flight block."
+                )
+                return ""
+            checks.append(result)
+        for tool_id in tool_ids:
+            try:
+                result = capability_check(
+                    tool_id,
+                    mcp_lookup=self._mcp_lookup,
+                    tools_allow=self._tools_allow,
+                    env_lookup=self._env_lookup,
+                    capability_kind="tools",
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[SkillInjection] capability_check raised for "
+                    f"tools={tool_id!r} (skill={skill_name!r}): {e}; "
+                    f"injecting without pre-flight block."
+                )
+                return ""
+            checks.append(result)
+        for env_id in env_ids:
+            try:
+                result = capability_check(
+                    env_id,
+                    mcp_lookup=self._mcp_lookup,
+                    tools_allow=self._tools_allow,
+                    env_lookup=self._env_lookup,
+                    capability_kind="env",
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[SkillInjection] capability_check raised for "
+                    f"env={env_id!r} (skill={skill_name!r}): {e}; "
+                    f"injecting without pre-flight block."
+                )
+                return ""
+            checks.append(result)
+
+        # First non-present check wins. ``present`` everywhere →
+        # no block (the gate confirms the capability is live; the
+        # skill body renders as today).
+        non_present = next(
+            (c for c in checks if c.state != "present"), None
+        )
+        if non_present is None:
+            return ""
+
+        # Build the envelope. ``installer_skill`` is advisory —
+        # the resolver doesn't know the install path; we use the
+        # capability_id itself as the default installer lookup
+        # hint. The escalation protocol's consumer (designer
+        # agent) owns the registry of installer_skill mappings.
+        try:
+            envelope = EscalationEnvelope.from_check(
+                non_present,
+                installer_skill=non_present.capability_id,
+                blocker_scope="this_task",
+                resume_hint="step_after_install",
+            )
+        except Exception as e:
+            logger.warning(
+                f"[SkillInjection] envelope construction failed for "
+                f"{non_present.capability_id!r} (skill={skill_name!r}): "
+                f"{e}; injecting without pre-flight block."
+            )
+            return ""
+        envelope_text = format_envelope_message(envelope).rstrip("\n")
+        state_label = non_present.state  # "missing" or "unconfigured"
+        # Compose the clearly-marked block. The header is fixed so
+        # downstream consumers (the agent, the report verifier)
+        # can identify it without parsing the body. ``REQUIRED
+        # ACTION`` is the single-line directive the agent must
+        # honor (per the proof-b convention: emit exactly one
+        # ``Result: <json>`` envelope then STOP — do not attempt
+        # the skill body).
+        missing_subkeys = list(
+            getattr(non_present, "missing_subkeys", []) or []
+        )
+        subkey_line = (
+            f"missing_subkeys: {missing_subkeys}\n"
+            if missing_subkeys
+            else ""
+        )
+        block = (
+            f"[Capability Pre-flight: {non_present.capability_id} "
+            f"= {state_label}]\n"
+            f"detection_evidence: {non_present.detection_evidence}\n"
+            f"{subkey_line}"
+            f"REQUIRED ACTION (skill convention): your FIRST report "
+            f"must be the escalation envelope — emit exactly "
+            f"`Result: <single-line JSON>` with the "
+            f"EscalationEnvelope schema (kind="
+            f"{('capability_missing' if state_label == 'missing' else 'installed_but_unconfigured')};"
+            f" capability={non_present.capability_id}; "
+            f"installer_skill={envelope.installer_skill}; "
+            f"detection_evidence={envelope.detection_evidence}; "
+            f"blocker_scope=this_task; "
+            f"resume_hint=step_after_install; "
+            f"policy_denied_reason=null; ts={envelope.ts}) — then "
+            f"STOP; do not attempt the skill body.\n"
+            f"{envelope_text}\n"
+        )
+        return block
+
     def _format_injection(
         self,
         results: dict[str, list[dict[str, Any]]],
@@ -619,11 +964,21 @@ class SkillInjectionService:
           so missing-id fixtures (test mocks) don't crash the
           formatter — the ``(id: …)`` segment is omitted when
           the id is falsy.
+        * When an injected item carries a non-empty
+          ``preflight_block`` (P3-WP2 wiring fix), the block is
+          rendered BEFORE the skill body so the agent sees the
+          capability gate as the first thing in that skill's
+          section. The block is clearly-marked (``[Capability
+          Pre-flight: …]``) and ends with a ``REQUIRED ACTION``
+          line so the agent can identify it without parsing.
 
         Args:
             results: Dict with ``injected`` and ``low_match``
                 lists. See :meth:`SkillSearchService.search` for
-                per-item shape.
+                per-item shape. Injected items MAY carry a
+                ``preflight_block`` key (string) added by
+                :meth:`_capability_preflight_block` — when truthy,
+                the formatter prepends it to the skill body.
 
         Returns:
             The formatted injection text.
@@ -650,6 +1005,7 @@ class SkillInjectionService:
                 score_val = 0.0
             content = getattr(skill, "content", "") or ""
             skill_id = getattr(skill, "id", None)
+            preflight_block = item.get("preflight_block") or ""
             # Inline the skill ID next to the name + score so the
             # consuming agent has every signal it needs to call
             # ``skill_feedback`` / ``skill_fix`` / ``skill_view``
@@ -667,6 +1023,16 @@ class SkillInjectionService:
                     f"📋 **Skill: {name}** (match score: {score_val:.2f})"
                 )
             lines.append("─" * 30)
+            # P3-WP2 wiring fix — capability pre-flight block. When
+            # a skill's requirement returned ``missing`` /
+            # ``unconfigured``, the block is prepended to the body
+            # so the agent sees the escalation envelope BEFORE the
+            # skill instructions (the skill's first-line directive
+            # is the capability_check call, which would otherwise
+            # be the first thing the agent reads; the block makes
+            # the gate state explicit and unambiguous).
+            if preflight_block:
+                lines.append(preflight_block)
             lines.append(content)
             lines.append("")
 

@@ -404,7 +404,19 @@ class SkillSeedService:
             )
 
             if existing is None:
-                # New template — insert
+                # New template — insert.
+                # P3-WP2 wiring fix: persist the parsed
+                # CapabilityRequirement as JSON so the injection-time
+                # capability gate can look it up via
+                # ``Skill.source_skill_bank_id`` without re-parsing the
+                # template body. Empty requirement → NULL (no row-level
+                # state for advisory skills).
+                req_json = (
+                    entry.requirement.to_json()
+                    if entry.requirement is not None
+                    and not entry.requirement.is_empty()
+                    else None
+                )
                 self._bank_repo.create(
                     name=entry.name,
                     content=template_content,
@@ -414,6 +426,7 @@ class SkillSeedService:
                     template_version=entry.version,
                     agent_id=agent_id,
                     auto_load=entry.auto_load,
+                    requirement_json=req_json,
                 )
                 summary["new"] += 1
                 logger.debug(
@@ -425,6 +438,16 @@ class SkillSeedService:
                 # is strictly higher than the bank's stored version.
                 # Same version = skip (idempotent). Lower version = skip
                 # (bank has a newer version, probably manually updated).
+                # P3-WP2 wiring fix: refresh requirement_json alongside
+                # the template refresh so an entry that adds or
+                # changes ``requires:`` propagates to the bank without
+                # waiting for a separate migration.
+                update_req_json = (
+                    entry.requirement.to_json()
+                    if entry.requirement is not None
+                    and not entry.requirement.is_empty()
+                    else None
+                )
                 self._bank_repo.update(
                     existing.id,
                     content=template_content,
@@ -432,6 +455,7 @@ class SkillSeedService:
                     category=bank_category,
                     template_version=entry.version,
                     auto_load=entry.auto_load,
+                    requirement_json=update_req_json,
                 )
                 summary["updated"] += 1
                 logger.info(
