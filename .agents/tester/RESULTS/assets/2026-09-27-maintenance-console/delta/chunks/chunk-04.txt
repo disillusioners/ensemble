@@ -1,0 +1,11 @@
+tests/unit/test_pause_never_dispatched_ghosts.py
+tests/unit/test_paused_instance_ttl.py
+tests/unit/test_phase4_manager_decomposition.py
+tests/unit/test_project_manager_agent.py
+tests/unit/test_terminal_reason_mirror_set_regression.py
+tests/unit/test_validate_agent_id_compat.py
+tests/unit/test_vision.py
+tests/unit/test_wanderer_agent.py
+tests/unit/test_webfetch_builtin.py
+tests/unit/tools/test_archive_lifecycle.py
+tests/unit/tools/test_watch_job_mission_terminal.py

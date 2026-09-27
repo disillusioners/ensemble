@@ -3,7 +3,7 @@
 Date: 2026-09-27
 Author: planner[v2] via overview worker (post-architect amendments AM-1…AM-18 applied)
 Branch: `feature/maintenance-console` @ `666c089d`
-Status: **API Contract v3 frozen** — Phase 1 may begin; phase-file workers build strictly against contract v3 in this document *(v3 = reviewer fix pass 2026-09-27: C-1/C-2/W-1 + R-items applied; architect quick delta stamp pending — see Re-freeze Checklist row 6)*
+Status: **API Contract v3 frozen** — Phase 1 may begin; phase-file workers build strictly against contract v3 in this document *(v3 = reviewer fix pass 2026-09-27: C-1/C-2/W-1 + R-items applied; architect delta stamp landed; **v3.1 = doc-repair only 2026-09-27 [CF-6 doc-repair, v3.1]** — `internal_error` table/union/count catch-up, no wire-surface change)*
 Architect source: `architecture-recommendation.md` (275 lines, 2026-09-27, controller + 4 workers)
 Companion: `research-findings.md` (same directory) — full evidence citations
 Decision log: `decision-log.md` (same directory) — leader rulings + AM-2 rationale
@@ -36,9 +36,10 @@ Single-sentence completion test: *An operator can open the Maintenance section i
 
 ## API Contract v3 — frozen 2026-09-27 (post-architect amendments AM-1…AM-18; leader rulings applied)
 > **Changelog v2→v3 (reviewer fix pass 2026-09-27):** C-1/C-2 literals + shape unified (404 code = `not_found` everywhere; 409 body nested under `details` everywhere); W-1 mechanism restated + completion-gate prohibition added (INV-13); counts reconciled [R-1/R-2].
+> **v3.1 (2026-09-27, doc-repair only — no wire-surface change):** `internal_error` (500, router catch-all per A-8) added to the frozen error-code table + FE union/pin counts 10→11 + BE case 67; documents code already shipped and reviewed (CF-6 ratification). [CF-6 doc-repair, v3.1]
 > **Architect delta-stamp 2026-09-27: v2→v3 delta verified (C-1/C-2/W-1+INV-13 applied; no regression to AM-1…AM-18 rulings); two stale W-1-contradicting residues swept at stamp time (risk-row tail + AM-16c bullet — completed the v3 restatement, no semantic change); contract v3 APPROVED for implementation.**
 > **[C1 hardening amendment, 2026-09-27 fix pass]** Rule 2's same-origin derivation additionally requires the request `Host` to pass a Host allowlist (loopback family + hosts parsed from `MAINTENANCE_TRUSTED_ORIGINS` + new env `MAINTENANCE_ALLOWED_HOSTS` CSV, default empty); a Host miss means rule 2 cannot match (fail-closed `origin_not_trusted` via rule 5). The frozen R-7 derivation sentence above is unchanged; rule set/order, the `/availability` exemption, and all literals stand.
-> **[A-8 amendment, 2026-09-27 fix pass]** The maintenance router's catch-all for unexpected exceptions now returns a contract-shaped 500 `{error:"internal_error", message, details:{}}` (leader-authorized fix item 8; one new error-code literal `internal_error` added to the frozen string set). All other frozen literals, paths, payloads, enums, and gate-order are unchanged.
+> **[A-8 amendment, 2026-09-27 fix pass]** The maintenance router's catch-all for unexpected exceptions now returns a contract-shaped 500 `{error:"internal_error", message, details:{}}` (leader-authorized fix item 8; one new error-code literal `internal_error` added to the frozen string set). All other frozen literals, paths, payloads, enums, and gate-order are unchanged. **(v3.1 doc catch-up [CF-6 doc-repair, v3.1]: the frozen error-code table below now carries the 11th row `internal_error` | 500 — this documents an already-shipped and reviewed code literal; doc catch-up, NOT a wire change.)**
 > **Architect re-stamp 2026-09-27: AM-1…AM-18 verified applied; PR-9/PR-10 RATIFIED; contract v2 APPROVED for implementation (Phase 2 merge gate cleared). Decision-log AM-2 rationale direction corrected same date — plan-overview §Manual-execute ordering rationale is authoritative.** *(Historical v2 stamp — superseded as the operative marker by the v3 freeze above; see Re-freeze Checklist row 5.)*
 > **Re-freeze rule (INV-5):** this is the contract that Phase 1 implements and Phase 2 builds against. Any drift must update this section and re-freeze.
 
@@ -301,7 +302,7 @@ When the execute endpoint returns **409** `run_in_flight` (the single-flight gat
 
 ### Common Error Detail Body Shape
 
-All 4xx/5xx responses use the structured dict pattern from `daemon/routers/plane.py:71-170`:
+All 4xx/5xx responses use the structured dict pattern from `daemon/routers/plane.py:71-170` (including the 500 catch-all: unexpected exceptions return `{error:"internal_error", message, details:{}}` — table row added [CF-6 doc-repair, v3.1]):
 
 ```json
 {
@@ -325,6 +326,7 @@ Stable machine codes for Section 1:
 | `byte_count_mismatch` | 400 | echoed `expected_bytes` doesn't match stored dry-run |
 | `origin_not_trusted` | 403 | Origin guard (AM-1) refused |
 | `maintenance_disabled` | 503 | `MAINTENANCE_ENDPOINTS_ENABLED=0` |
+| `internal_error` | 500 | unexpected exception (router catch-all per A-8) *(row added [CF-6 doc-repair, v3.1] — documents the already-shipped literal; 11 codes total)* |
 
 ---
 
@@ -650,7 +652,7 @@ Per INV-5; the architect-recommendation's 5-item checklist:
 | 3 | `phase1-backend.md` schema re-sync + 4 new BE cases: (a) dry-run renders seeded ZERO_REFS pair in `skipped[]`; (b) execute succeeds when a new skip pair appeared in-window (bytes unaffected); (c) excess-rows execute does NOT mismatch (AM-2 proof); (d) `last_run` excludes `manual_dry_run` (AM-9) | **satisfied (verified at fan-in 2026-09-27)** | phase1-backend.md amended 569→724 lines, 195 inline AM tags; cases (a)–(d) = cases 43/56/57/58; AM-15 schema re-synced verbatim; verification: dispatcher spot-checks (AM-tag density + key-token greps) |
 | 4 | `phase2-frontend.md` schema re-sync + FE additions: skipped list render + reason badge map + generic `ERROR:*` fallback, 409-adoption behavior, `+00:00` parsing note | **satisfied (verified at fan-in 2026-09-27)** | phase2-frontend.md amended 816→1124 lines, 166 inline AM tags; skipped render + badge map + ERROR:* fallback, 409-adoption wired (service+component+spec+pin), +00:00 note documented; verification: dispatcher spot-checks (AM-tag density + key-token greps) |
 | 5 | Architect re-stamps the freeze (date + approver) before Phase 2 merges | **partially satisfied — architect re-stamped v2; v3 delta stamp pending** | The architect re-stamped **v2** on 2026-09-27 (see the historical re-stamp line under the freeze marker). **Contract v3 (this re-freeze) is the reviewer-fix freeze (C-1/C-2/W-1 + R-items applied); it awaits the architect's quick delta pass** — the delta is exactly the v3 changelog line: literals/shape unification, W-1 mechanism restatement + INV-13, count reconciliation. Phase-file workers conform to v3 in the interim. |
-| 6 | **v3 fix pass (this row — added by the reviewer-fix re-freeze 2026-09-27)** | **stamped** | Architect delta-stamp landed 2026-09-27 (see the freeze-marker stamp above the v3 changelog) — this row's `applied` status is now `stamped`. Reviewer findings applied across plan-overview / phase1-backend / phase2-frontend / decision-log: [C-1] 404 error-code literal unified to `not_found` at every site (stale literal grep-verified 0 remaining); [C-2] 409 bodies nested under `details` everywhere (case 63 + `adoptRunIdFromError` pins untouched); [W-1] AM-2 mechanism restated at 3 sites + INV-13 completion-gate prohibition added (plan-overview §Mandatory Invariants + phase1 §0); [R-1] BE count reconciled = 66; [R-2] FE pins = 15 (incl. new sections-registry pin), Playwright = 14; [R-3] line-cites fixed; [R-5]–[R-10] doc-level; [R-11]–[R-17] PR/task annotations; [R-18]–[R-23] close-out rows; leader rulings (a)/(b) in decision-log. Tag `[C-n]/[W-n]/[R-n]` inline at every application point. |
+| 6 | **v3 fix pass (this row — added by the reviewer-fix re-freeze 2026-09-27)** | **stamped** | Architect delta-stamp landed 2026-09-27 (see the freeze-marker stamp above the v3 changelog) — this row's `applied` status is now `stamped`. Reviewer findings applied across plan-overview / phase1-backend / phase2-frontend / decision-log: [C-1] 404 error-code literal unified to `not_found` at every site (stale literal grep-verified 0 remaining); [C-2] 409 bodies nested under `details` everywhere (case 63 + `adoptRunIdFromError` pins untouched); [W-1] AM-2 mechanism restated at 3 sites + INV-13 completion-gate prohibition added (plan-overview §Mandatory Invariants + phase1 §0); [R-1] BE count reconciled = 66 *(66 at v3; 67 after [CF-6 doc-repair, v3.1])*; [R-2] FE pins = 15 (incl. new sections-registry pin), Playwright = 14; [R-3] line-cites fixed; [R-5]–[R-10] doc-level; [R-11]–[R-17] PR/task annotations; [R-18]–[R-23] close-out rows; leader rulings (a)/(b) in decision-log. Tag `[C-n]/[W-n]/[R-n]` inline at every application point. |
 
 ---
 
@@ -672,7 +674,7 @@ Per INV-5; the architect-recommendation's 5-item checklist:
 
 ### BE (Phase 1)
 
-**Total: 66 enumerated BE cases** [R-1, v3 fix pass — recount; every count site agrees on 66: §4.1 = 10 (incl. 9a), §4.2 = 29 (incl. 11a, 17a), §4.3 = 26 (numbering 37–64 with 53 retired/replaced by 64), §4.4 wiring pin = 1]:
+**Total: 67 enumerated BE cases** [R-1 v3 recount + case 67 added [CF-6 doc-repair, v3.1]; every count site agrees on 67: §4.1 = 10 (incl. 9a), §4.2 = 29 (incl. 11a, 17a), §4.3 = 27 (numbering 37–67, with 53 retired/replaced by 64; case 67 = A-8 catch-all shape pin), §4.4 wiring pin = 1]:
 
 - **Unit** (`tests/unit/test_maintenance_checkpoint_cleanup_service.py`):
   - `MaintenanceApiService.availability()` shape (state enum + derived `eligible`)

@@ -1,0 +1,67 @@
+=================================================================
+BASE A/B DELTA VERDICT — maintenance-console verification
+=================================================================
+Base: 666c089d  (Merge feature/checkpoint-retention-keep-3 into latest)
+HEAD: 691fb557  (feature/maintenance-console, 10 commits ahead of base)
+Date: 2026-09-27
+
+-----------------------------------------------------------------
+Summary counts
+-----------------------------------------------------------------
+  HEAD unique failing nodes:            204  (181 FAILED + 23 ERROR)
+  BASE unique failing nodes:            204  (181 FAILED + 23 ERROR)
+  PRE-EXISTING (fail at both HEAD+BASE): 201
+  HEAD-only (NEW-FAILURE at HEAD):        3
+  BASE-only (healed at HEAD):             3
+  FILE-NEW:                               0
+  NEW-TEST-FAILURE (parametrize drift):   0
+
+-----------------------------------------------------------------
+Headline: NEW-FAILURE VERDICT (3 nodes) — these pass at base 666c089d
+but FAIL at HEAD 691fb557. ALL 3 are in files unchanged between
+base and HEAD — the failures are due to source-code changes
+elsewhere in the maintenance-console branch (not the test files).
+-----------------------------------------------------------------
+  tests/integration/test_lcancheck_family_separation.py::TestS3WholeTreeCensus::test_s3_whole_tree_census
+  tests/services/test_skill_evolution_service.py::TestCheckABTestResolution::test_ab_resolution_force_resolve
+  tests/unit/test_mcp_tool_timeout.py::TestToolNodeIntegration::test_tool_node_handles_timeout
+
+
+-----------------------------------------------------------------
+Healed at HEAD (3 nodes) — these FAIL at base 666c089d but PASS
+at HEAD 691fb557. All 3 are in files unchanged between base and
+HEAD — healings are due to source-code fixes in the
+maintenance-console branch.
+-----------------------------------------------------------------
+  tests/services/test_skill_evolution_service.py::TestCheckABTestResolution::test_ab_resolution_threshold_met
+  tests/test_innate_skills_refactoring.py::TestEdgeCases::test_invalid_json_in_meta_json_falls_back_to_legacy
+  tests/test_innate_skills_refactoring.py::TestInnateSkillsIntegration::test_complete_pipeline_with_real_agents
+
+-----------------------------------------------------------------
+Detailed classification
+-----------------------------------------------------------------
+
+NEW-FAILURE (3 nodes — all in files identical between base and HEAD):
+  tests/integration/test_lcancheck_family_separation.py::TestS3WholeTreeCensus::test_s3_whole_tree_census
+    file: tests/integration/test_lcancheck_family_separation.py
+    def at base: def-exists-at-base
+    file diff base..HEAD:  (empty = identical)
+
+  tests/services/test_skill_evolution_service.py::TestCheckABTestResolution::test_ab_resolution_force_resolve
+    file: tests/services/test_skill_evolution_service.py
+    def at base: def-exists-at-base
+    file diff base..HEAD:  (empty = identical)
+
+  tests/unit/test_mcp_tool_timeout.py::TestToolNodeIntegration::test_tool_node_handles_timeout
+    file: tests/unit/test_mcp_tool_timeout.py
+    def at base: def-exists-at-base
+    file diff base..HEAD:  (empty = identical)
+
+
+=================================================================
+VERDICT: maintenance-console branch adds exactly 3 NEW-FAILURE
+nodes and heals exactly 3 base-failing nodes (one file each in
+skill_evolution_service.py, plus 2 nodes in test_innate_skills_
+refactoring.py). 201 PRE-EXISTING failures are unchanged. Zero
+FILE-NEW and zero NEW-TEST-FAILURE.
+=================================================================

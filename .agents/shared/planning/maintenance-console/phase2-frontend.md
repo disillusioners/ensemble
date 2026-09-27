@@ -79,10 +79,39 @@ Append at the end of the existing Migration section (after line 681) — keeps t
 | `CheckpointCleanupExecuteRequest` | `{ dry_run_run_id: string; expected_bytes: number; confirm: true }` | **AM-17 DROPPED** — NO `idempotency_key` field (removed). Replaces earlier `idempotency_key?: string`. 409-adoption contract replaces it. |
 | `CheckpointCleanupExecute` | `{ run_id: string; status: 'running'; started_at: string; advisory: 'system_busy' \| null; expected_duration_ms_hint: number }` | **AM-12 (A-11 RATIFIED)** — 202 body gains `advisory` + `expected_duration_ms_hint` (= the referenced dry-run's `duration_ms`; **unit: ms** [R-5, v3 fix pass] — canonical unit definition lives once in plan-overview §4). |
 | `CheckpointCleanupRun` | `{ run_id: string; kind: CheckpointCleanupRunKind; status: CheckpointCleanupRunStatus; started_at: string; completed_at: string \| null; summary: CheckpointCleanupSummary \| null; error: { code: string; message: string } \| null }` | Frozen §5. `interrupted` carries `error.code = "run_interrupted"`. |
-| `MaintenanceErrorCode` | union: `'not_initialized' \| 'not_found' \| 'run_in_flight' \| 'confirm_required' \| 'dry_run_required' \| 'dry_run_stale' \| 'byte_count_mismatch' \| 'backend_unsupported' \| 'origin_not_trusted' \| 'maintenance_disabled'` | **AM-13, AM-1** — 10 codes (was 8). `origin_not_trusted` (403) + `maintenance_disabled` (503) added. |
+| `MaintenanceErrorCode` | union: `'not_initialized' \| 'not_found' \| 'run_in_flight' \| 'confirm_required' \| 'dry_run_required' \| 'dry_run_stale' \| 'byte_count_mismatch' \| 'backend_unsupported' \| 'origin_not_trusted' \| 'maintenance_disabled' \| 'internal_error'` | **AM-13, AM-1, A-8** — **11 codes (was 10 at v3; was 8 in the v1 draft)**. `origin_not_trusted` (403) + `maintenance_disabled` (503) added at AM-13/AM-1; `internal_error` (500, router catch-all per A-8) added to the docs at v3.1 [CF-6 doc-repair, v3.1] — the literal is already shipped on the wire. Derived from the `MAINTENANCE_ERROR_CODES` as-const tuple (see below). |
 | `MaintenanceErrorBody` | `{ error: MaintenanceErrorCode; message?: string; details?: { run_id?: string; started_at?: string; expected?: number; stored?: number; age_seconds?: number; max_age_seconds?: number; [k: string]: unknown } }` | **AM-17 + AM-14** — `details.run_id` is the canonical key FE adopts on 409 (`run_in_flight`). Mirror `plane.py:71-170`. |
 
-**Acceptance**: `tsc --noEmit -p tsconfig.app.json` passes with all new types exported. No `@Injectable` or service-level logic in this sub-task.
+**Error-code literal set — single source of truth [CF-6 doc-repair, v3.1; codifies SHIPPED behavior]:** the FE ships (in `frontend/src/app/models/index.ts`) an as-const tuple from which the union and the exhaustiveness pin derive. This is documentation catch-up of an already-shipped, already-reviewed artifact (the FE reviewer + tester verified it; the architect's contrary D4 note was a stale-worktree read) — prescribe it so the spec matches what ships:
+
+```ts
+/** [CF-6 doc-repair, v3.1] The 11 maintenance error-code literals (A-8 set).
+ *  Single source of truth: the union AND the T6.3 `error-code-union-exhaustive`
+ *  count pin derive from this tuple — adding a 12th code is a one-line append
+ *  here plus a pin-count bump, nothing else. */
+export const MAINTENANCE_ERROR_CODES = [
+  'not_initialized',
+  'not_found',
+  'run_in_flight',
+  'confirm_required',
+  'dry_run_required',
+  'dry_run_stale',
+  'byte_count_mismatch',
+  'backend_unsupported',
+  'origin_not_trusted',
+  'maintenance_disabled',
+  'internal_error',            // 500 — router catch-all per A-8 [CF-6 doc-repair, v3.1]
+] as const;
+
+export type MaintenanceErrorCode = (typeof MAINTENANCE_ERROR_CODES)[number];
+
+/** Narrow an unknown wire value to a known code (used by `toErrorBody`). */
+export function isKnownErrorCode(v: unknown): v is MaintenanceErrorCode {
+  return typeof v === 'string' && (MAINTENANCE_ERROR_CODES as readonly string[]).includes(v);
+}
+```
+
+**Acceptance**: `tsc --noEmit -p tsconfig.app.json` passes with all new types exported. No `@Injectable` or service-level logic in this sub-task. **[CF-6 doc-repair, v3.1]** `MAINTENANCE_ERROR_CODES` has exactly **11** entries; `MaintenanceErrorCode` is derived from it (no hand-written duplicate union); `isKnownErrorCode('internal_error')` is `true`.
 
 **Commit slice**: `feat(checkpoint-cleanup): add typed models for maintenance API contract v3`.
 
@@ -147,7 +176,7 @@ export class CheckpointCleanupService {
 Notes:
 - Use the **exact** path constants from the FROZEN contract — `/api/maintenance/checkpoint-cleanup/*` (relative; `proxy.conf.json` forwards).
 - All `Observable`s use `pipe(tap(...), catchError(err => { this.lastError.set(this.toErrorBody(err)); return throwError(() => err); }))` so the component can surface a structured error from the signal AND the subscriber sees the throw.
-- Error mapping helper `toErrorBody(err: HttpErrorResponse): MaintenanceErrorBody` accepts both `err.error` (FE-side parsed body) and falls back to `{ error: 'unknown', message: err.message }` when the body is absent (e.g., network error or proxy 502). This keeps `MaintenanceErrorCode` exhaustive at the union level but does not crash on malformed bodies.
+- Error mapping helper `toErrorBody(err: HttpErrorResponse): MaintenanceErrorBody` accepts both `err.error` (FE-side parsed body) and falls back to `{ error: 'unknown', message: err.message }` when the body is absent (e.g., network error or proxy 502). This keeps `MaintenanceErrorCode` exhaustive at the union level but does not crash on malformed bodies. **[CF-6 doc-repair, v3.1]** `toErrorBody` validates via `isKnownErrorCode(v)` (derived from `MAINTENANCE_ERROR_CODES`): the 11 known codes — now incl. `internal_error` — surface **verbatim** (the pre-A-8 coercion of unknown codes to `not_initialized` is REMOVED); unknown codes and absent bodies fall back to `{ error: 'unknown', message: err.message }`.
 - `pollRun` MUST:
   - Stop on terminal status (`'succeeded' | 'failed' | 'interrupted'` — **AM-6** adds `interrupted`).
   - Be Observable-shaped (not just a Promise) so the component can `takeUntilDestroyed` and avoid memory leaks when the user navigates away mid-poll.
@@ -479,7 +508,7 @@ Key wiring details (these are the non-obvious bits a future maintainer needs to 
 
 - **Poll lifecycle**: `pollSub` is unsubscribed in `ngOnDestroy` AND inside the next `onExecute` call (prevent two polls stacking if the operator double-clicks — the lock + 409-adoption path is the BE side, but FE must not pile on). Use `takeUntilDestroyed(this.destroyRef)` on the initial `fetchStatus` subscription so deep-link → leave-page tears down cleanly. **AM-6 terminal statuses**: `pollRun` now terminates on `succeeded | failed | interrupted` — the component renders the appropriate result-panel variant for each.
 
-- **Error → UI mapping** (10 codes — was 8 in the v1 draft):
+- **Error → UI mapping** (**11 codes** — was 10 at v3, 8 in the v1 draft) [CF-6 doc-repair, v3.1]:
   - `run_in_flight` (409): **AM-14 — adopt `details.run_id`, resume polling, NO error toast.** The double-click + network-retry classes dissolve into "ride along" UX. Only fall through to the snack-bar if `details.run_id` is absent (malformed body — defensive).
   - `dry_run_stale` / `dry_run_required` (400): snack-bar "Re-run the dry-run check before executing." Reset `lastDryRun` to null in the local UI signal so the user must re-run.
   - `byte_count_mismatch` (400): snack-bar "The dry-run result changed since you ran it — re-run and try again." Same UI reset.
@@ -487,6 +516,7 @@ Key wiring details (these are the non-obvious bits a future maintainer needs to 
   - `not_found` (404) on poll: snack-bar "The run record was not found — re-run from the status page." Stop polling.
   - `origin_not_trusted` (403, **AM-1 NEW**): render the structured error message inline with a one-line explanation: "This origin is not trusted for maintenance actions. If you're seeing this unexpectedly, file a ticket." The kill-switch and FE localStorage paths do NOT silence this — operators must see it.
   - `maintenance_disabled` (503, **AM-13 NEW**): render a global banner across the page top: "Maintenance endpoints are disabled (MAINTENANCE_ENDPOINTS_ENABLED=0). Restart the daemon with the flag enabled to use this section." Dismissible. Auto-dismisses on the next `/availability` probe returning `state: "ready"`.
+  - `internal_error` (500, **[CF-6 doc-repair, v3.1]** — router catch-all per A-8): **generic affordance, no special banner** — snack-bar "Unexpected error — retry, or contact the operator if it persists" with the raw code rendered in the inline banner (`{{ err.error }}`); offers a retry (re-run the failed action). Never silently swallowed.
 
 - **Display helpers** (pure functions, exposed as `protected` methods for template):
   - `formatBytes(n: number): string` — human-readable (KB/MB/GB, binary). Source-grep pin: `1024` divisor (not 1000).
@@ -713,7 +743,7 @@ Scaffold after `frontend/src/app/components/migration/migration.component.scss`.
 - Dry-run button → click → spinner → result renders with formatted bytes/duration.
 - Stale dry-run (>5 min): execute button disabled AND tooltip "Re-run dry-run first". Honest copy: "May take several minutes on large databases" surfaced in the dry-run muted text.
 - Execute button → confirm dialog with destructive styling → confirm → 202 received → `expected_duration_ms_hint` displayed → poll starts → result renders.
-- All 10 `MaintenanceErrorCode` values from the v2 error table map to a visible UI affordance (snack-bar OR inline banner); `run_in_flight` is silently absorbed by 409-adoption (no error toast); `maintenance_disabled` gets a global banner above all cards.
+- All **11** `MaintenanceErrorCode` values from the v3 error table map to a visible UI affordance (snack-bar OR inline banner) [CF-6 doc-repair, v3.1]; `run_in_flight` is silently absorbed by 409-adoption (no error toast); `maintenance_disabled` gets a global banner above all cards; `internal_error` gets the generic retry affordance.
 - Skipped pairs render with summary line + per-entry reason badge (known codes + `ERROR:*` fallback) + truncated notice when applicable.
 - Interrupted-state result renders the "daemon restarted mid-run — re-run to converge" affordance card with a re-run button. No cancel button anywhere.
 - `tsc --noEmit -p tsconfig.app.json` passes.
@@ -725,7 +755,7 @@ Scaffold after `frontend/src/app/components/migration/migration.component.scss`.
 
 ### T6. Jest Logic-Mirror Tests — pure spec files, no TestBed
 
-**Owner**: any FE worker. **Depends on**: T1 + T5. **AM-16 amendments**: 409-adoption spec, skipped-render spec, state-enum gating pins, no-idempotency pin, 10-code error rendering, pollRun terminates on `interrupted`.
+**Owner**: any FE worker. **Depends on**: T1 + T5. **AM-16 amendments**: 409-adoption spec, skipped-render spec, state-enum gating pins, no-idempotency pin, 11-code error rendering *(10→11 [CF-6 doc-repair, v3.1])* , pollRun terminates on `interrupted`.
 
 **Goal**: behavioral + source-grep pins that catch drift before it lands. House style: plain TS + hand-rolled mocks, mirrors `frontend/src/app/services/instance.service.spec.ts:14-35` and `frontend/src/app/pages/jobs/jobs-page.bindings.pins.spec.ts`.
 
@@ -747,7 +777,7 @@ Coverage:
 
 #### T6.2. Section component spec — `frontend/src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.spec.ts`
 
-Mirror `frontend/src/app/pages/jobs/jobs.component.spec.ts:122-168` (`mockDialog` + `MockDialogRef` pattern). Use a `MockCheckpointCleanupService` exposing the same signal surface as the real service. **AM-16 amendments**: 409-adoption test, skipped[] render test, state-enum gating test, no-idempotency-key test, interrupted-state render test, 10-code error rendering test.
+Mirror `frontend/src/app/pages/jobs/jobs.component.spec.ts:122-168` (`mockDialog` + `MockDialogRef` pattern). Use a `MockCheckpointCleanupService` exposing the same signal surface as the real service. **AM-16 amendments**: 409-adoption test, skipped[] render test, state-enum gating test, no-idempotency-key test, interrupted-state render test, 11-code error rendering test *(10→11 [CF-6 doc-repair, v3.1])*.
 
 Coverage:
 1. **Status render**: with `service.status` set to a fixture, the dl/dt/dd pairs render with the right values. **AM-11** — covers BOTH flavors: a `destructive: false` last_run shows "Would free" + `would_free_bytes`; a `destructive: true` last_run shows "Bytes freed" + `bytes_freed`.
@@ -757,7 +787,7 @@ Coverage:
 5. **AM-17 — Confirm confirm** (no idempotency_key): `nextResult = true` → `service.execute` called with EXACTLY `{dry_run_run_id, expected_bytes, confirm: true}` (assert EXACTLY these three fields, no `idempotency_key`, no `idempotencyKey`, no `uuid`; pin `confirm: true` literal; assert `Object.keys(executeArgs).sort() === ['confirm', 'dry_run_run_id', 'expected_bytes']`).
 6. **Confirm dialog echo message**: the dialog's `data.message` string contains BOTH the formatted byte count AND the checkpoint-row count from `lastDryRun.would_delete` (regression guard against "we forgot to echo and the operator clicks blind"). **AM-16** — message contains honest-duration copy ("several minutes" or "may take" — pin a substring the implementer chooses at coding time).
 7. **Stale dry-run short-circuit**: with `fresh_until` in the past, clicking execute opens NO dialog and surfaces the snack-bar (mock snackbar records the open).
-8. **AM-16 — Error rendering per stable code** (10 codes now, was 8): for each `MaintenanceErrorCode` (`not_initialized`, `run_in_flight`, `dry_run_stale`, `byte_count_mismatch`, `not_found`, `origin_not_trusted`, `maintenance_disabled`, …), set `service.lastError` to a fixture and assert the inline banner renders with the right `error` text + dismiss button clears the signal. **Special case for `maintenance_disabled`**: assert the global banner (`.ck-banner-disabled`) renders ABOVE the cards. **Special case for `origin_not_trusted`**: assert the one-line guidance note renders.
+8. **AM-16 — Error rendering per stable code** (**11 codes now** — was 10 at v3, 8 in the v1 draft [CF-6 doc-repair, v3.1]): for each `MaintenanceErrorCode` (`not_initialized`, `run_in_flight`, `dry_run_stale`, `byte_count_mismatch`, `not_found`, `origin_not_trusted`, `maintenance_disabled`, `internal_error`, …), set `service.lastError` to a fixture and assert the inline banner renders with the right `error` text + dismiss button clears the signal. `internal_error` renders generically (code + message + retry affordance — no special banner). **Special case for `maintenance_disabled`**: assert the global banner (`.ck-banner-disabled`) renders ABOVE the cards. **Special case for `origin_not_trusted`**: assert the one-line guidance note renders.
 9. **Poll start/stop**: after execute 202, `service.pollRun` is called with the `run_id` AND a `takeUntilDestroyed` subscription exists; simulate a `succeeded` response and assert `executing()` flips back to false.
 10. **AM-6 — Interrupted poll termination**: pollRun emits a `status: 'interrupted'` fixture; assert `executing()` flips to false AND the result panel renders the `.ck-interrupted-card` with the re-run button.
 11. **AM-14 — 409-adoption behavior**: simulate `service.execute` throwing with `lastError.error === 'run_in_flight'` AND `details.run_id = 'ckpt-...'`. Assert: `service.adoptRunIdFromError` was called AND `service.pollRun('ckpt-...')` was called AND `executing()` is true AND the snack-bar was NOT opened.
@@ -770,7 +800,7 @@ Coverage:
 
 #### T6.3. Source-grep pins — co-located with each component spec
 
-Pattern from `frontend/src/app/pages/jobs/jobs-page.bindings.pins.spec.ts:380-409` — read the production source via `fs.readFileSync` and `expect(componentSrc).toMatch(/.../)`. **AM-16 amendments**: replace `idempotency-key-present` with `no-idempotency-key` (AM-17 DROPPED), update `error-code-union-exhaustive` count from 8 to 10, add new pins for state-enum gating, 409-adoption, skipped-render, interrupted-state render. **[R-2, v3 fix pass] Pin table total = 15 source-grep pins** (the 14 AM-16-era pins + the `sections-registry-load-bearing` pin [R-addition]). This 15 is THE count every count site agrees on.
+Pattern from `frontend/src/app/pages/jobs/jobs-page.bindings.pins.spec.ts:380-409` — read the production source via `fs.readFileSync` and `expect(componentSrc).toMatch(/.../)`. **AM-16 amendments**: replace `idempotency-key-present` with `no-idempotency-key` (AM-17 DROPPED), update `error-code-union-exhaustive` count from 8 to 10 (at v3; **11 since v3.1** [CF-6 doc-repair, v3.1]), add new pins for state-enum gating, 409-adoption, skipped-render, interrupted-state render. **[R-2, v3 fix pass] Pin table total = 15 source-grep pins** (the 14 AM-16-era pins + the `sections-registry-load-bearing` pin [R-addition]). This 15 is THE count every count site agrees on.
 
 | Pin | What it pins | Failure mode it catches |
 |---|---|---|
@@ -778,7 +808,7 @@ Pattern from `frontend/src/app/pages/jobs/jobs-page.bindings.pins.spec.ts:380-40
 | `poll-stop-on-terminal` | `service.pollRun(` exists, AND the returned observable is subscribed via `takeUntilDestroyed`. **[R-13, v3 fix pass — wording aligned to T5.1/T6.2 behavior]** the pin ALSO asserts the terminal predicate (the poll source completes on `status ∈ {succeeded, failed, interrupted}` — T6.1 cases 6 + T6.2 case 10) so the pin's name matches what it proves; `takeUntilDestroyed` alone tests teardown, not stopping. | A developer drops `takeUntilDestroyed` (leak) OR breaks the terminal-stop predicate (poll runs forever) |
 | `no-idempotency-key` (**AM-17 — REPLACES** `idempotency-key-present`) | (a) Production source does NOT contain `crypto.randomUUID` in the execute flow AND (b) the literal `idempotency_key` does NOT appear in the execute payload object AND (c) `CheckpointCleanupExecuteRequest` model does NOT have an `idempotency_key` field | A developer adds the dropped field back (it would deadlock the contract) |
 | `byte-echo-in-confirm-message` | Production source's confirm-dialog `data.message` string template contains BOTH `formatBytes(` AND `would_delete.checkpoint_rows` (or `would_delete.writes`) | Operator confirms blind — the "echo" guard regresses |
-| `error-code-union-exhaustive` | **AM-13/AM-1 — count pin is 10, was 8.** A `switch` (or `if/else` chain) on `lastError().error` enumerates all 10 codes (`not_initialized`, `not_found`, `run_in_flight`, `confirm_required`, `dry_run_required`, `dry_run_stale`, `byte_count_mismatch`, `backend_unsupported`, `origin_not_trusted`, `maintenance_disabled`). Acceptable: a fallthrough "default" branch that surfaces the code as text. | A new code is added server-side and FE silently ignores it |
+| `error-code-union-exhaustive` | **AM-13/AM-1/A-8 — count pin is 11** (was 10 at v3, 8 in the v1 draft) [CF-6 doc-repair, v3.1]. The pin asserts the handling set against `MAINTENANCE_ERROR_CODES` (the as-const tuple — T1.1): all 11 codes (`not_initialized`, `not_found`, `run_in_flight`, `confirm_required`, `dry_run_required`, `dry_run_stale`, `byte_count_mismatch`, `backend_unsupported`, `origin_not_trusted`, `maintenance_disabled`, `internal_error`). Acceptable: a fallthrough "default" branch that surfaces the code as text. | A new code is added server-side and FE silently ignores it |
 | `poll-interval-default-2000` | `POLL_INTERVAL_MS = 2000` exists as a `readonly` static constant on `CheckpointCleanupService` AND the `pollRun(` call site uses that constant (or the default arg in the service signature is `CheckpointCleanupService.POLL_INTERVAL_MS`). **AM-14 — pin is on the constant name, not the literal**, so re-skinning the value at a single site can't slip through. **[R-17, v3 fix pass]** the pin ALSO greps every `pollRun(` CALL SITE (component, specs) for the constant — a hardcoded `2000` at a call site fails the pin. | The poll tightens (BE load) or loosens (UX lag) silently; a call-site hardcoded literal drifts from the constant |
 | `format-bytes-uses-binary` | `formatBytes(` source contains `1024` (binary units) — guards against accidentally switching to decimal SI units which would mislead operators | "Your 1GB run freed 0.93 GiB" — off by ~7% forever |
 | `state-enum-gating` (**AM-14 NEW**) | Gear-menu probe source contains `state === 'ready'` (exact equality, not `data.eligible`) AND `app.routes.ts` guard source contains `state === 'ready'` | A developer branches on `eligible` instead of the enum; or the route guard forgets the state check and stale FE dist + missing BE router 404s into SPA fallback |
@@ -1023,7 +1053,7 @@ Each item below is RESOLVED per `plan-overview.md` §Open Questions + the Contra
 
 | Open Q | Affected sub-tasks | Final disposition (post-AM) | What FE does |
 |---|---|---|---|
-| **§6.1** Error body shape | T5.1 error mapping, T6.2 error-rendering test | **RESOLVED — A-8 RATIFIED.** Structured dict (`plane.py:71-170` shape), binding for all 5 endpoints. Confirmed in error-code table. | T5.1 maps every error code to a visible UI affordance; T6.2 spec asserts the 10-code rendering. |
+| **§6.1** Error body shape | T5.1 error mapping, T6.2 error-rendering test | **RESOLVED — A-8 RATIFIED.** Structured dict (`plane.py:71-170` shape), binding for all 5 endpoints. Confirmed in error-code table. | T5.1 maps every error code to a visible UI affordance; T6.2 spec asserts the 11-code rendering *(10→11 [CF-6 doc-repair, v3.1])*. |
 | **§6.2** Auth / kill-switch | T2.1 menu probe | **RESOLVED — AM-1 + AM-13.** Origin guard on destructive namespace + `MAINTENANCE_ENDPOINTS_ENABLED` kill-switch (default ON, AM-13). `/availability` returns 200 `state:"kill_switched"` on kill-switch OFF — clean hide, never an error. **No FE-side `localStorage` flag.** | T2.1 branches on `state === 'ready'`; T3 canMatch guard mirrors the gate. |
 | **§6.3** Menu visibility when auto-cycle disabled | T2.1 menu probe | **RESOLVED — AM-14 (state-enum).** Availability gains `state` enum (`ready \| backend_unsupported \| subsystem_disabled \| kill_switched`); `eligible` is derived (`state === 'ready'`). Gear menu hides on every non-`ready` state. `MAINTENANCE_SERVICE_DISABLED` idea DROPPED (YAGNI). | T2.1 + T3 both gate on `state === 'ready'`. Source-grep pin `state-enum-gating` enforces. |
 | **§6.4** Dry-run freshness window | T5.1 stale-dry-run short-circuit | **RESOLVED — 5 min + env, keep.** `MAINTENANCE_DRY_RUN_FRESH_SECONDS=300` default. **AM-16 honest copy caveat:** the window may legitimately expire on slow disks where dry-run itself takes minutes — the operator's prompt to re-run, NOT a defect signal. | T5.1 renders `fresh_until` in the dry-run result panel; honest muted copy "May take several minutes on large databases". |
@@ -1055,18 +1085,18 @@ Each item below is RESOLVED per `plan-overview.md` §Open Questions + the Contra
 
 The Phase 2 work is **complete** when ALL of the following hold:
 
-- [ ] T1.1 model types compile and are exported from `frontend/src/app/models/index.ts`. **AM-17:** the `CheckpointCleanupExecuteRequest` type has NO `idempotency_key` field. **AM-14:** `MaintenanceAvailability` carries the `state` enum. **AM-12:** `CheckpointCleanupExecute` carries `advisory` + `expected_duration_ms_hint`. **AM-11:** `CheckpointCleanupBlobsSummary` carries dual-flavor keys. **AM-10:** `CheckpointCleanupDryRun` carries `skipped[]` + `skipped_truncated`. **AM-6:** `CheckpointCleanupRunStatus` includes `'interrupted'`. **AM-13/AM-1:** `MaintenanceErrorCode` has 10 values.
+- [ ] T1.1 model types compile and are exported from `frontend/src/app/models/index.ts`. **AM-17:** the `CheckpointCleanupExecuteRequest` type has NO `idempotency_key` field. **AM-14:** `MaintenanceAvailability` carries the `state` enum. **AM-12:** `CheckpointCleanupExecute` carries `advisory` + `expected_duration_ms_hint`. **AM-11:** `CheckpointCleanupBlobsSummary` carries dual-flavor keys. **AM-10:** `CheckpointCleanupDryRun` carries `skipped[]` + `skipped_truncated`. **AM-6:** `CheckpointCleanupRunStatus` includes `'interrupted'`. **AM-13/AM-1/A-8:** `MaintenanceErrorCode` has **11** values *(10→11 [CF-6 doc-repair, v3.1])* , derived from the `MAINTENANCE_ERROR_CODES` as-const tuple.
 - [ ] T1.2 service class compiles and exposes 5 typed HTTP methods + 1 poll helper + 1 `adoptRunIdFromError` helper (AM-14, AM-17) + 1 error-mapping helper. `POLL_INTERVAL_MS = 2000` is a `readonly static` constant on the service.
 - [ ] T2.1 `checkMaintenanceAvailability()` is wired in `ngOnInit` and the menu appends "Maintenance" only on `state === 'ready'` (AM-14 state-enum gating — NOT the legacy `eligible === true` boolean).
 - [ ] T3 lazy route `maintenance/checkpoint-cleanup` is registered before the wildcard with `canMatch: [maintenanceAvailabilityGuard]` (AM-14 route hardening).
 - [ ] T4 page shell renders the section registry with a single `Checkpoint Cleanup` section.
 - [ ] T5 component renders 4 cards + result panel + error banner + global maintenance_disabled banner; dry-run → confirm → poll → result works end-to-end. **AM-14:** 409-adoption adopts `details.run_id` and resumes polling (no error toast). **AM-10:** skipped[] renders with summary line + reason badge map + `ERROR:*` fallback + `skipped_truncated` notice. **AM-11:** status + result panels branch on `destructive:bool`. **AM-12:** executing card shows `Expected duration: ~X` from the 202 body's `expected_duration_ms_hint`. **AM-6:** interrupted-state result renders the "re-run to converge" affordance card. **AM-16:** honest-duration copy ("May take several minutes on large databases") in dry-run muted text + dialog message.
-- [ ] T6.1 service spec, T6.2 component spec, T6.3 source-grep pins all pass under `npx jest src/app/pages/maintenance/`. **AM-16:** spec includes 409-adoption, skipped-render, state-enum gating, 10-code error rendering, interrupted-state render. **AM-17:** `no-idempotency-key` source-grep pin replaces `idempotency-key-present`. **[R-2 + R-addition, v3 fix pass]:** pin table total = **15** (incl. `sections-registry-load-bearing`).
+- [ ] T6.1 service spec, T6.2 component spec, T6.3 source-grep pins all pass under `npx jest src/app/pages/maintenance/`. **AM-16:** spec includes 409-adoption, skipped-render, state-enum gating, 11-code error rendering *(10→11 [CF-6 doc-repair, v3.1])* , interrupted-state render. **AM-17:** `no-idempotency-key` source-grep pin replaces `idempotency-key-present`. **[R-2 + R-addition, v3 fix pass]:** pin table total = **15** (incl. `sections-registry-load-bearing`).
 - [ ] T7 Playwright spec refuses to run against `ensemble_prod` and passes all non-destructive tests on a disposable-PG dev daemon. **AM-16:** spec includes cross-origin 403 case (403 BODY asserted via `context.request.post` [R-12]), kill-switch hide case (`state: 'kill_switched'` → menu hidden), interrupted-state render case, 409-adoption case (no error toast). **[R-2/R-11, v3 fix pass]:** spec total = **14 cases**, run on a dedicated port with `reuseExistingServer: false` + daemon canary.
 - [ ] `npx tsc --noEmit -p tsconfig.app.json` passes.
 - [ ] `npm run build` (production) passes with NO budget warnings (initial ≤ 1MB warning, anyComponentStyle ≤ 8kB warning).
 - [ ] `npm test` passes for the entire FE suite (no regression to existing specs).
-- [ ] **All 10 `MaintenanceErrorCode` values are handled in the component (count pin verified)** — `run_in_flight` is silently absorbed by 409-adoption (the count pin still asserts the switch arm exists, even if it doesn't show a banner). `origin_not_trusted` and `maintenance_disabled` were added (AM-1, AM-13).
+- [ ] **All 11 `MaintenanceErrorCode` values are handled in the component (count pin verified)** *(10→11 [CF-6 doc-repair, v3.1])* — `run_in_flight` is silently absorbed by 409-adoption (the count pin still asserts the switch arm exists, even if it doesn't show a banner). `origin_not_trusted` and `maintenance_disabled` were added (AM-1, AM-13).
 
 ---
 
@@ -1114,7 +1144,9 @@ The frozen API contract in `plan-overview.md` §API Contract is the binding spec
 
 ### CF-6. BE catch-all 500 `internal_error` code — **A-8 SUPERSEDES THE PRE-A-8 COUNT**
 
-**Disposition (A-8)**: **A-8 supersedes the pre-A-8 count.** `MaintenanceErrorCode` union 10→11 including `internal_error`; the FE surfaces the literal verbatim (`toErrorBody` coercion to `not_initialized` removed; unknown-code/absent-body fallback retained). The 15 source-grep pin total is a separate count and is unchanged. Flagged for architect ratification at merge.
+**Disposition (A-8)**: **A-8 supersedes the pre-A-8 count.** `MaintenanceErrorCode` union 10→11 including `internal_error`; the FE surfaces the literal verbatim (`toErrorBody` coercion to `not_initialized` removed; unknown-code/absent-body fallback retained). The 15 source-grep pin total is a separate count and is unchanged. Flagged for architect ratification at merge. *(v3.1 [CF-6 doc-repair]: the doc lag this disposition flagged is closed — frozen table row 11 in plan-overview, union/pin/mapping sweep to 11 in this file, BE case 67 in phase1; ready for the one-line ratification.)*
+
+> **Architect ratified 2026-09-27: CF-6 union=11 (A-8) — v3.1 doc-repair verified (4/4 steps; zero 10-code/66 residues; counts 67 BE / 11 FE / 15 pins / 14 Playwright agree at every site); FE tuple mirror verified SHIPPED-EXACT against the BE wire table — `MAINTENANCE_ERROR_CODES` = 11 entries in `frontend/src/app/models/index.ts` (union derived via `(typeof …)[number]`, no hand-written duplicate), `isKnownErrorCode` single-sourced and consumed at `checkpoint-cleanup.service.ts:322`, router catch-all live at `daemon/routers/maintenance.py:382`. D4 re-based: the artifact landed on-branch after the original worktree read — no drift remains.**
 
 ---
 
@@ -1125,9 +1157,9 @@ The frozen API contract in `plan-overview.md` §API Contract is the binding spec
 - [ ] Phase 2 lead confirms: this phase-2 detail plan conforms to the re-frozen contract v3 — schema re-sync complete (T1.1), state-enum gating (T2 + T3), 409-adoption (T1.2 + T5.1), dual-flavor branching (T5.1 + T5.2), skipped[] render with reason badge map (T5.1 + T5.2), interrupted-state affordance (T5.1 + T5.2), expected_duration_ms_hint display (T5.1 + T5.2), `no-idempotency_key` negative-pin (T6.3), honest duration copy (T5.1 muted + dialog message). No new design introduced.
 - [ ] **CF-1 through CF-5 dispositions applied** (AM-17 DROPPED, AM-12 RATIFIED, A-9 CONFIRMED, A-10 CONFIRMED, AM-9 CLOSED). The Contract Feedback section now records the architect's resolutions; no open CFs remain.
 - [ ] **§6.1 through §6.8 dispositions applied** (A-8 structured dict, AM-1/AM-13 origin+kill-switch, AM-14 state-enum, 5 min window + env, AM-9 last_run scope, single global lane, AM-15 one audit channel, AM-17 dropped idempotency). The Open Questions table now records the architect's resolutions; no open OQs remain.
-- [ ] Test lead confirms: disposable-PG harness ready, Jest specs cover the 10-code error union + 409-adoption + skipped-render + state-enum gating + interrupted-state render. Playwright spec drafted with AM-16 cross-origin 403 + kill-switch hide + 409-adoption + interrupted-state cases.
+- [ ] Test lead confirms: disposable-PG harness ready, Jest specs cover the 11-code error union *(10→11 [CF-6 doc-repair, v3.1])* + 409-adoption + skipped-render + state-enum gating + interrupted-state render. Playwright spec drafted with AM-16 cross-origin 403 + kill-switch hide + 409-adoption + interrupted-state cases.
 - [ ] Ops lead confirms: activation runbook drafted (Phase 3), kill-switch default `MAINTENANCE_ENDPOINTS_ENABLED=1` documented (AM-13 hide-not-error semantics), FE dist rebuild trap warning included in §Activation Steps.
-- [ ] T1 lead confirms all model + service types compile and the service spec pins the 5 endpoints + poll helper + `adoptRunIdFromError` + 10-code error mapping.
+- [ ] T1 lead confirms all model + service types compile and the service spec pins the 5 endpoints + poll helper + `adoptRunIdFromError` + 11-code error mapping *(10→11 [CF-6 doc-repair, v3.1])*.
 - [ ] T2/T3 lead confirms gear-menu probe branches on `state === 'ready'` (AM-14) AND the route is gated by `canMatch: [maintenanceAvailabilityGuard]` (AM-14 route hardening).
 - [ ] T4 lead confirms page shell + section registry + 2-3 acceptance tests for the registry pattern.
 - [ ] T5 lead confirms component compiles, renders, and passes `npm run build` with no budget warnings. **Skipped-render block** (AM-10), **dual-flavor branching** (AM-11), **interrupted-state card** (AM-6), **expected-duration-hint copy** (AM-12), and **409-adoption logic** (AM-14) all visible in the rendered template.

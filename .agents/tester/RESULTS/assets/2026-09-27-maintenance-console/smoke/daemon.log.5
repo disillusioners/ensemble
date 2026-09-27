@@ -1,0 +1,83 @@
+10:08:28 - daemon.api - INFO - Starting Ensemble v0.15.2
+10:08:28 - daemon.api - INFO - Starting Ensemble v0.15.2
+INFO:     Started server process [66695]
+INFO:     Waiting for application startup.
+10:08:28 - daemon.ensemble_config - INFO - Loaded ensemble config: database=postgres
+10:08:28 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+10:08:28 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+10:08:28 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+10:08:28 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+10:08:28 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+10:08:28 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+10:08:28 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+10:08:28 - daemon - INFO - [TmpImages] ready: dir=/tmp/mc_smoke.dZorNB/data/tmp_images count=0 max_bytes=1073741824
+10:08:28 - daemon - INFO - [Config] reasoning_echo_disabled_models=[] (models matching these patterns will NOT echo reasoning_content; all others echo)
+10:08:28 - daemon - INFO - [Config] default_streaming=True (clean_llm_config injects streaming=True when callers don't pass an explicit flag; OPENAI_STREAMING env var controls it)
+10:08:28 - daemon - INFO - [Config] default_request_gzip=True (clean_llm_config attaches gzip httpx clients when True; OPENAI_REQUEST_GZIP env var controls it)
+10:08:28 - daemon - INFO - [Config] default_request_timeout=610s (clean_llm_config injects it when a site omits request_timeout — tightening ∞→610s; OPENAI_REQUEST_TIMEOUT controls it)
+10:08:28 - daemon - INFO - [Config] empty_degenerate_reinvoke_cap=3 (router stops re-invoking on reasoning-only/<think>-only empties at the cap)
+10:08:28 - daemon.rag.config - INFO - Running RAG auto-test...
+10:08:29 - daemon.rag.config - INFO - RAG auto-test passed: LightRAG is reachable
+10:08:29 - daemon.manager - INFO - Context compaction enabled: threshold=0.8, recent_window=10, min_window=3
+10:08:29 - daemon.repositories.factory - INFO - Creating PostgreSQL engine: localhost:5432/ensemble_mc_smoke_1008119470
+10:08:29 - daemon.migrations.runner - INFO - Skipping migrations for non-SQLite database (schema evolution handled by EnsembleManager._ensure_postgres_columns)
+10:08:29 - daemon.manager - INFO - Cleared 0 backlog message(s) (discard_on_startup=backlog-clear; in-flight/paused preserved)
+10:08:29 - daemon.manager - INFO - Cleared 0 backlog task(s) (discard_on_startup=backlog-clear; running/paused preserved)
+10:08:29 - daemon.repositories.instance.repository - INFO - Cascade lineage mode resolved: permanent (env ENSEMBLE_CASCADE_LINEAGE=<unset>); permanent enumeration uses instances.parent_id, hierarchy fallback uses instance_hierarchy. Restart required to flip.
+10:08:29 - daemon.repositories.instance.repository - INFO - Governor recursion guard resolved: enabled (env LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=<unset>); refuses governor spawn when parent chain already contains ≥ K governors (K from LIMITS_MAX_GOVERNOR_ANCESTORS, default 1). Restart required to flip.
+10:08:29 - daemon.services.context_messages - INFO - Ambient KV freshness ENABLED (per-turn fresh)
+10:08:29 - daemon.services.report_integrity_guard - INFO - Report-integrity (b) terminal-waiting guard resolved: DISABLED (default — log-only mode: the [ReportIntegrityGuard] soak log still fires at completion stamps; no notice is ever injected) (env WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=<unset>). Restart required to flip. See docs/setup.md (WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED).
+10:08:29 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+10:08:29 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+10:08:29 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+10:08:29 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+10:08:29 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+10:08:29 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+10:08:29 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+10:08:29 - daemon.services.attestation_resolver - INFO - Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=quick llm_judge_timeout_s=180.0 N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<unset>). Restart required to flip. See docs/setup.md (ENSEMBLE_LEADER_ATTESTATION_MODE).
+10:08:29 - daemon.sources.dispatcher - INFO - ResponseDispatcher initialized with subscriber_id=response_dispatcher
+10:08:29 - daemon.manager - INFO - G7: created partial unique index ux_blueprint_one_core (one core per project, active rows)
+10:08:29 - daemon.manager - INFO - OpenCode session registry initialized at /tmp/mc_smoke.dZorNB/opencode_sessions.db
+10:08:29 - daemon.manager - INFO - [/compact] registered /compact command (availability predicate unpopulated — O-B6)
+10:08:29 - daemon.manager - INFO - Bootstrapping 3 built-in MCP servers...
+10:08:29 - daemon.manager - INFO - Built-in MCP server 'webfetch' disabled (MCP_DISABLE_BUILT_IN_WEBFETCH), skipping creation
+10:08:29 - daemon.manager - INFO - Built-in MCP server bootstrap complete
+10:08:29 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=datacenter (description=updated, schema_doc=updated)
+10:08:29 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=server (description=updated, schema_doc=updated)
+10:08:29 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=rack (description=updated, schema_doc=updated)
+10:08:29 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_cluster (description=updated, schema_doc=updated)
+10:08:29 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_node (description=updated, schema_doc=updated)
+10:08:29 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=network (description=updated, schema_doc=updated)
+10:08:29 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=load_balancer (description=updated, schema_doc=updated)
+10:08:29 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=database (description=updated, schema_doc=updated)
+10:08:29 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=storage (description=updated, schema_doc=updated)
+10:08:29 - daemon.repositories.infra.repository - INFO - Bootstrapped infra asset types: 9 total, 0 new, 9 updated
+10:08:29 - daemon.manager - INFO - MCP server 'webfetch' disabled (env var), skipping warmup pool registration
+10:08:29 - daemon.manager - INFO - MCP warm-up pool initialized: 1 server(s) registered, warmup running in background
+10:08:29 - daemon.persistence - INFO - Creating PostgreSQL checkpointer for localhost:5432/ensemble
+10:08:29 - daemon.persistence - INFO - PostgreSQL checkpointer adapter ready (saver=AsyncPostgresSaver, pool=asyncpg.Pool)
+10:08:29 - daemon.manager - INFO - Skill trigger seed (Phase 4): 0 new default triggers inserted
+10:08:29 - daemon.services.maintenance - INFO - Maintenance service started
+10:08:30 - daemon.registry - WARNING - Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+10:08:30 - daemon.services.skill_seed_service - INFO - Skill seeding complete: 0 new, 0 updated, 61 unchanged, 0 errors
+10:08:30 - daemon.manager - INFO - SessionManager initialized with PostgreSQL checkpointer (localhost:5432/ensemble)
+10:08:30 - daemon.config - INFO - [CriticalNotes:state] tiered=true projects_with_pins=0/1 total_pinned=0 (gating active when projects_with_pins>=1 per §4.2 #8; projects without pins fall back to render-all)
+10:08:30 - daemon.services.main_loop_bridge - INFO - MainLoopBridge: event loop set to <uvloop.Loop running=True closed=False debug=False>
+10:08:30 - daemon.services.stale_task_recovery - INFO - Running startup crash recovery (no grace period)...
+10:08:30 - daemon.services.stale_task_recovery - INFO - Startup recovery complete: 0 tasks recovered
+10:08:30 - daemon.services.stale_task_recovery - INFO - StaleTaskRecovery started: threshold=10min, interval=60s, grace=30s, max_retries=3
+10:08:30 - daemon.services.report_delivery_recovery - INFO - ReportDeliveryRecoveryService started: interval=300s, age_bound=10min, batch_cap=100, retry=1min, lanes=[deferred=True, no_row_backstop=True, pending_age=True, recovery_retry=True, orphan=True]
+10:08:30 - daemon.services.worker_pool - INFO - Starting WorkerPool with 5 workers...
+10:08:30 - daemon.services.worker_pool - INFO - Worker worker-0 started
+10:08:30 - daemon.services.worker_pool - INFO - Worker worker-1 started
+10:08:30 - daemon.services.worker_pool - INFO - Worker worker-2 started
+10:08:30 - daemon.services.worker_pool - INFO - Worker worker-3 started
+10:08:30 - daemon.services.worker_pool - INFO - Worker worker-4 started
+10:08:30 - daemon.services.worker_pool - INFO - WorkerPool started: 5 workers
+10:08:30 - daemon.services.worker_pool - INFO - Starting WorkerPool with 2 workers...
+10:08:30 - daemon.services.worker_pool - INFO - Worker chat-worker-0 started
+10:08:30 - daemon.services.worker_pool - INFO - Worker chat-worker-1 started
+10:08:30 - daemon.services.worker_pool - INFO - WorkerPool started: 2 workers
+10:08:30 - daemon.services.pool_orchestrator - INFO - ChatSourceWorkerPool started: workers=2, prefixes=telegram:,slack:,discord:
+10:08:30 - daemon - INFO - Maintenance endpoints DISABLED: MAINTENANCE_ENDPOINTS_ENABLED=0 (endpoints 2–5 will 503; /availability renders state='kill_switched')
+10:08:30 - daemon.services.maintenance_boot_sweep - INFO - maintenance boot sweep: 0 interrupted run(s) in section=checkpoint-cleanup
