@@ -29,6 +29,7 @@ from .llm_error_classifier import (
 from .constants import (
     CHECKPOINT_TTL_HOURS,
     CHECKPOINT_CLEANUP_INTERVAL_HOURS,
+    CHECKPOINT_MAX_PER_THREAD_FLOOR,
     ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED,
     ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX,
     MAX_INSTANCE_HISTORY,
@@ -610,7 +611,7 @@ class PersistenceConfig(BaseSettings):
     # ``persistence.checkpoint_max_per_thread``.
     checkpoint_max_per_thread: int = Field(
         default=3,
-        ge=1,
+        ge=CHECKPOINT_MAX_PER_THREAD_FLOOR,
         validation_alias=AliasChoices(
             "checkpoint_max_per_thread",
             "CHECKPOINT_MAX_PER_THREAD",

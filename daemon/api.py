@@ -128,6 +128,7 @@ from daemon.routers import (
     skill_bank_router,        # /api/skill-bank (Skill Bank CRUD)
     blueprints_router,        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     recovery_router,          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
+    maintenance_router,        # /api/maintenance (Section 1: checkpoint cleanup — Phase 1)
     missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
 )
@@ -421,6 +422,61 @@ async def lifespan(app: FastAPI):
     # The router resolves the worker from app.state.migration_worker.
     from daemon.services.migration_worker import MigrationWorker
     app.state.migration_worker = MigrationWorker(manager)
+
+    # Section 1 / T5 + T8 — wire the MaintenanceApiService AFTER
+    # ``manager.initialize()`` (the lock + repo + job handle are built
+    # inside ``manager.initialize()``; the service is constructed here
+    # because it needs ``manager._maintenance_service`` for the idle
+    # advisory probe, which exists after ``manager.initialize()``
+    # returns). Stash on ``app.state`` for the router dependency
+    # ``get_maintenance_api_service``.
+    from daemon.services.maintenance_api_service import MaintenanceApiService
+
+    maintenance_api_service = MaintenanceApiService(
+        config=manager.config.persistence,
+        checkpointer=manager._checkpointer,
+        cleanup_job=manager._checkpoint_cleanup_job,
+        runs_repo=manager._maintenance_runs_repo,
+        run_lock=manager._maintenance_run_lock,
+        maintenance_service=manager._maintenance_service,
+    )
+    manager._maintenance_api_service = maintenance_api_service
+    app.state.maintenance_api_service = maintenance_api_service
+
+    # Section 1 / T7 — kill-switch boot log (ONE INFO line when OFF,
+    # the PlaneSyncWatchdog no-key precedent — AM-13). INV-1 note: the
+    # switch gates the API surface ONLY; the auto-cycle env dual-arm
+    # is untouched (auto stays destructive-if-armed while the manual
+    # API refuses — correct by design; runbook documents it).
+    from daemon.constants import MAINTENANCE_ENDPOINTS_ENABLED
+
+    if not MAINTENANCE_ENDPOINTS_ENABLED:
+        daemon_logger.info(
+            "Maintenance endpoints DISABLED: MAINTENANCE_ENDPOINTS_ENABLED=0 "
+            "(endpoints 2–5 will 503; /availability renders "
+            "state='kill_switched')"
+        )
+
+    # Section 1 / T8 — boot sweep (unconditional rowcount-guarded CAS
+    # ``running → interrupted`` at lifespan start; AM-7). No age gate —
+    # a boot-time ``running`` row is an orphan by definition under the
+    # single-daemon assumption. The sweep emits its own ONE summary
+    # log line; this block only guards against transient DB hiccups
+    # (best-effort, never raises into the boot path).
+    from daemon.services.maintenance_boot_sweep import (
+        sweep_interrupted_running_runs,
+    )
+
+    if manager._maintenance_runs_repo is not None:
+        try:
+            await sweep_interrupted_running_runs(
+                manager._maintenance_runs_repo, section="checkpoint-cleanup"
+            )
+        except Exception as sweep_err:  # noqa: BLE001
+            daemon_logger.warning(
+                f"[Startup] maintenance boot sweep failed (non-fatal): "
+                f"{type(sweep_err).__name__}: {sweep_err}"
+            )
     
     # Initialize JobQueueService with shared engine from manager
     # Set create_tables=True to ensure job_queue_items table is created
@@ -2708,6 +2764,13 @@ def create_app() -> FastAPI:
     api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)
     api_router.include_router(recovery_router)          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
+    # Section 1: Maintenance Console checkpoint-cleanup surface.
+    # Registered alongside the other modular routers BEFORE the SPA
+    # catch-all (``/api_tmp_images`` block at :2724 follows the same
+    # pattern). The Origin guard (AM-1) is the FIRST check on
+    # endpoints 2–5; ``/availability`` is exempt — see
+    # ``daemon/routers/maintenance.py``.
+    api_router.include_router(maintenance_router)        # /api/maintenance (Section 1)
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned

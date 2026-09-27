@@ -134,6 +134,43 @@ MAX_INSTANCE_HISTORY: int = 500  # Max terminal instances to keep checkpoint dat
 MAINTENANCE_CHECK_INTERVAL_MINUTES: int = 15  # Maintenance service check interval
 IDEMPOTENCY_KEY_TTL_HOURS: int = 24  # Idempotency key deduplication TTL
 
+# ── Section 1 Maintenance Console (Section 1) ──────────────────────────────────
+# Single source of truth for the maintenance-runs audit table (AM-15)
+# + the operator-facing config + service gates (AM-1, AM-13).
+# MAINTENANCE_ENDPOINTS_ENABLED and MAINTENANCE_DRY_RUN_FRESH_SECONDS
+# are BOOT-READ: evaluated once at import (daemon boot) — flipping
+# either requires a restart (the PlaneSyncWatchdog no-key precedent;
+# plan T7 / AM-13 boot-read semantics).
+def _boot_read_bool_env(name: str, default: str) -> bool:
+    import os
+
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _boot_read_int_env(name: str, default: int) -> int:
+    import os
+
+    raw = os.environ.get(name, "")
+    try:
+        return int(raw) if raw.strip() else default
+    except ValueError:
+        return default
+
+
+MAINTENANCE_ENDPOINTS_ENABLED: bool = _boot_read_bool_env(
+    "MAINTENANCE_ENDPOINTS_ENABLED", "1"
+)  # [AM-13] default ON; endpoints 2–5 → 503 maintenance_disabled, /availability → 200 kill_switched
+MAINTENANCE_DRY_RUN_FRESH_SECONDS: int = _boot_read_int_env(
+    "MAINTENANCE_DRY_RUN_FRESH_SECONDS", 300
+)  # [§6.4 CONFIRMED] 5-min dry-run freshness window (env-tunable)
+MAINTENANCE_TRUSTED_ORIGINS: str = ""  # [AM-1] CSV; default empty; localhost-family auto-trust (the guard reads the env directly)
+
+# Floor for ``PersistenceConfig.checkpoint_max_per_thread`` (T7). The
+# ``ge=1`` pydantic constraint is bound to this constant so the
+# ``/status`` ``config.checkpoint_max_per_thread_floor`` field cannot
+# drift from the pydantic constraint (single source for the floor).
+CHECKPOINT_MAX_PER_THREAD_FLOOR: int = 1
+
 # ── Checkpoint Blob Prune (Phase 1 C3 — reference-aware checkpoint_blobs prune) ───
 # Conservative ladder: the maintenance blob prune starts DRY-RUN ONLY (reports
 # what would be deleted, deletes nothing). Destructive execution requires BOTH

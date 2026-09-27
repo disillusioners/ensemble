@@ -11521,6 +11521,21 @@ class InstanceManager:
             # exit regardless.
             logger.warning(f"Error closing checkpointer adapter: {e}")
     
+    async def _shutdown_maintenance_api_service(self) -> None:
+        """Section 1 / T5.5 — best-effort stop of the MaintenanceApiService.
+
+        Cancels + awaits the live executing task (its CancelledError
+        handler writes the ``run_interrupted_by_shutdown`` terminal
+        row); never raises.
+        """
+        svc = getattr(self, "_maintenance_api_service", None)
+        if svc is None:
+            return
+        try:
+            await svc.shutdown()
+        except Exception as e:  # noqa: BLE001 — best-effort by contract
+            logger.warning(f"maintenance api service shutdown error: {e}")
+
     async def shutdown(self, grace_period: float = 10.0) -> None:
         """Gracefully shutdown all manager components in order.
         
@@ -11609,6 +11624,14 @@ class InstanceManager:
             ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
             ("shutdown_event_bus", self._event_bus.shutdown()),
             ("shutdown_maintenance_service", self._maintenance_service.stop() if self._maintenance_service else asyncio.sleep(0)),
+            # Section 1 / T5.5 — cancel + await the live maintenance
+            # execute task; its CancelledError handler marks the run
+            # row ``failed`` with ``error_json.code=
+            # 'run_interrupted_by_shutdown'`` (AM-6/AM-7 ruling: a
+            # graceful shutdown is not a crash — ``interrupted`` is
+            # reserved for restart-orphaned rows). Runs BEFORE the DB
+            # pools go away so the terminal write lands on a live pool.
+            ("shutdown_maintenance_api_service", self._shutdown_maintenance_api_service()),
             # Drain the D3 snapshot capture + R10 embedding
             # fire-and-forget tasks BEFORE the DB pools go away —
             # an in-flight terminal write must land on a live pool.
