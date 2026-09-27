@@ -2764,6 +2764,24 @@ class InstanceManager:
                 last_run=last_run_dt,
             )
 
+        # Section 1 / T8 + W1 + W2 (v3 fix pass) — boot sweep of
+        # orphaned ``running`` rows (AM-7): unconditional
+        # rowcount-guarded CAS ``running → interrupted``, WITH bounded
+        # retry (W1 — a failed sweep leaves a stale running row that
+        # 409-wedges all cleanup). Runs HERE — immediately BEFORE
+        # ``_maintenance_service.start()`` — so the auto cycle's first
+        # tick can never race the sweep (W2: the ordering is
+        # structural, NOT left to the loop's 60s initial sleep; pinned
+        # by tests/integration/test_checkpoint_cleanup_job_wiring_pin.py).
+        # Best-effort, never raises into the boot path; the runs repo
+        # exists by this point (built above with the shared engine).
+        if self._maintenance_runs_repo is not None:
+            from daemon.services.maintenance_boot_sweep import (
+                run_boot_sweep_with_retry,
+            )
+
+            await run_boot_sweep_with_retry(self._maintenance_runs_repo)
+
         await self._maintenance_service.start()
 
         # ── Skill Bank seeding (Phase 3: versioned templates) ──────────

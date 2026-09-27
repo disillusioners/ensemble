@@ -209,7 +209,13 @@ class MaintenanceService:
 
     async def _loop(self) -> None:
         """Main background loop that checks and runs pending jobs."""
-        # Initial delay to let the system stabilize on startup
+        # Initial delay to let the system stabilize on startup. NOTE
+        # (W2, v3 fix pass): this sleep is boot stabilization ONLY —
+        # it is NOT the sweep-vs-first-tick ordering guarantee. That
+        # ordering is structural: the maintenance boot sweep runs in
+        # ``manager.initialize()`` immediately before ``start()`` (see
+        # ``maintenance_boot_sweep.run_boot_sweep_with_retry``; pinned
+        # in test_checkpoint_cleanup_job_wiring_pin.py).
         await asyncio.sleep(60)
 
         while self._running:

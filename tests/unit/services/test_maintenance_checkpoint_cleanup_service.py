@@ -360,6 +360,11 @@ class TestExecuteGates:
         # NOT the caller's would-be run.
         assert ei.value.details["run_id"] == holder.run_id
         assert ei.value.details["started_at"] == holder.started_at
+        # [W1, v3 fix pass] DB-fallback conflicts (no in-process
+        # holder — the stale-row wedge class) additionally carry the
+        # additive heal_hint pointing at the runbook.
+        assert "heal_hint" in ei.value.details
+        assert "maintenance-console.md" in ei.value.details["heal_hint"]
         # NO row for the refused caller — exactly the holder + the
         # seeded dry-run exist.
         assert len(runs_repo.list_all()) == 2
@@ -754,6 +759,77 @@ class TestBootSweep:
             r for r in caplog.records if "maintenance boot sweep" in r.message
         ]
         assert len(summary_lines) == 1
+
+    async def test_boot_sweep_retry_succeeds_after_transient_failures(
+        self, runs_repo, caplog
+    ):
+        """W1 — a transient DB hiccup at boot is retried; the sweep
+        still heals the stale row and logs exactly ONE summary line
+        (on the successful attempt only)."""
+        from daemon.services.maintenance_boot_sweep import (
+            run_boot_sweep_with_retry,
+        )
+
+        stale = MaintenanceRun(
+            run_id="ckpt-20260927_040000000000-stale0000",
+            kind="manual_execute", started_at=now_utc_iso(),
+            status="running", triggered_by="user",
+        )
+        assert runs_repo.insert(stale) is True
+
+        real_cas = runs_repo.cas_running_to_interrupted
+        calls = {"n": 0}
+
+        def flaky_cas(section):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise RuntimeError("transient boot hiccup")
+            return real_cas(section)
+
+        runs_repo.cas_running_to_interrupted = flaky_cas  # type: ignore[method-assign]
+        with caplog.at_level(logging.INFO):
+            swept = await run_boot_sweep_with_retry(
+                runs_repo, backoff_seconds=0.0
+            )
+        assert swept == 1
+        assert calls["n"] == 3
+        assert runs_repo.get(stale.run_id).status == "interrupted"
+        # ONE INFO SUMMARY line total (the two WARNING retry lines are
+        # per-attempt forensics, not summaries).
+        summary_lines = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO
+            and "maintenance boot sweep:" in r.message
+        ]
+        assert len(summary_lines) == 1
+
+    async def test_boot_sweep_retry_exhausted_never_raises(
+        self, runs_repo, caplog
+    ):
+        """W1 — every attempt failing: the wrapper returns None (never
+        raises into the boot path) and logs ONE ERROR line naming the
+        manual heal statement (the runbook pointer)."""
+        import logging as _logging
+
+        from daemon.services.maintenance_boot_sweep import (
+            run_boot_sweep_with_retry,
+        )
+
+        def dead_cas(section):
+            raise RuntimeError("db down")
+
+        runs_repo.cas_running_to_interrupted = dead_cas  # type: ignore[method-assign]
+        with caplog.at_level(_logging.ERROR):
+            result = await run_boot_sweep_with_retry(
+                runs_repo, attempts=2, backoff_seconds=0.0
+            )
+        assert result is None
+        error_lines = [
+            r for r in caplog.records
+            if "boot sweep FAILED after 2 attempts" in r.getMessage()
+        ]
+        assert len(error_lines) == 1
+        assert "UPDATE maintenance_runs" in error_lines[0].getMessage()
 
 
 class TestOriginGuardMatrix:

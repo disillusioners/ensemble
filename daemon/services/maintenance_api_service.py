@@ -703,11 +703,25 @@ class MaintenanceApiService:
                 running = await asyncio.to_thread(
                     self._runs_repo.get_running, "checkpoint-cleanup"
                 )
-            except Exception:  # noqa: BLE001 — forensics only
+            except Exception as exc:  # noqa: BLE001 — forensics only
+                logger.debug(
+                    "conflict forensics: get_running read failed: %s: %s",
+                    type(exc).__name__, exc, exc_info=True,
+                )
                 running = None
             if running is not None:
                 details["run_id"] = running.run_id
                 details["started_at"] = running.started_at
+                # [W1, v3 fix pass] This branch means NO in-process
+                # holder — cross-daemon contention OR a stale
+                # ``running`` row wedging the gate (the failed-boot-
+                # sweep class). Additive details key (FE tolerates
+                # extra keys, A-11); the frozen C-2 keys above are
+                # untouched.
+                details["heal_hint"] = (
+                    "no in-process holder — if this run never "
+                    "completes, see docs/runbooks/maintenance-console.md"
+                )
         return MaintenanceError(
             code="run_in_flight",
             http_status=409,

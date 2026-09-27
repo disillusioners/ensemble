@@ -92,20 +92,88 @@ class TestCheckpointCleanupJobWiring:
         )
 
     def test_manager_holds_handles_for_service_wiring(self):
-        """Companion — the manager stores the shared handles the api.py
-        lifespan reads (``_checkpoint_cleanup_job``, ``_maintenance_run_lock``,
-        ``_maintenance_runs_repo``) — losing any of them breaks the T5
-        wiring with an AttributeError at boot."""
-        src = MANAGER.read_text(encoding="utf-8")
+        """Companion — the manager STORES the shared handles the api.py
+        lifespan reads (``self._checkpoint_cleanup_job``,
+        ``self._maintenance_run_lock``, ``self._maintenance_runs_repo``)
+        via real attribute assignments — losing any of them breaks the
+        T5 wiring with an AttributeError at boot.
+
+        AST-based (W6/W17/W5 v3 fix pass — replaces the former
+        substring grep): a comment, docstring, or read-only mention can
+        never satisfy this pin; only an ``Assign``/``AnnAssign`` whose
+        target is ``self.<attr>`` counts."""
+        tree = ast.parse(MANAGER.read_text(encoding="utf-8"))
+        assigned: set[str] = set()
+        for node in ast.walk(tree):
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                targets = [node.target]
+            for t in targets:
+                if (
+                    isinstance(t, ast.Attribute)
+                    and isinstance(t.value, ast.Name)
+                    and t.value.id == "self"
+                ):
+                    assigned.add(t.attr)
         for attr in (
-            "self._checkpoint_cleanup_job",
-            "self._maintenance_run_lock",
-            "self._maintenance_runs_repo",
+            "_checkpoint_cleanup_job",
+            "_maintenance_run_lock",
+            "_maintenance_runs_repo",
         ):
-            assert attr in src, (
-                f"manager.py no longer stores {attr} — the api.py lifespan "
-                "MaintenanceApiService wiring depends on it"
+            assert attr in assigned, (
+                f"manager.py no longer assigns self.{attr} — the api.py "
+                "lifespan MaintenanceApiService wiring depends on it"
             )
+
+    def test_boot_sweep_precedes_maintenance_service_start(self):
+        """W2 (v3 fix pass) — inside ``InstanceManager.initialize``, the
+        maintenance boot sweep call (``run_boot_sweep_with_retry``)
+        must appear BEFORE ``self._maintenance_service.start()``. The
+        ordering must be STRUCTURAL, not left to the service loop's
+        60s initial sleep: a first auto tick racing the sweep could
+        flip a LIVE auto run to ``interrupted``. AST positional pin —
+        call-site order within the ``initialize`` function body."""
+        tree = ast.parse(MANAGER.read_text(encoding="utf-8"))
+        init_fn = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "initialize"
+            ):
+                init_fn = node
+        assert init_fn is not None, "InstanceManager.initialize not found"
+
+        sweep_lines: list[int] = []
+        start_lines: list[int] = []
+        for sub in ast.walk(init_fn):
+            if not isinstance(sub, ast.Call):
+                continue
+            f = sub.func
+            if isinstance(f, ast.Attribute) and f.attr == "start":
+                recv = f.value
+                if (
+                    isinstance(recv, ast.Attribute)
+                    and recv.attr == "_maintenance_service"
+                ):
+                    start_lines.append(sub.lineno)
+            elif isinstance(f, ast.Name) and f.id == "run_boot_sweep_with_retry":
+                sweep_lines.append(sub.lineno)
+        assert sweep_lines, (
+            "initialize() no longer calls run_boot_sweep_with_retry — "
+            "the W2 structural ordering guarantee is gone (the sweep "
+            "must run immediately before the maintenance service starts)"
+        )
+        assert start_lines, (
+            "initialize() no longer starts _maintenance_service — "
+            "the W2 pin needs the start() call site"
+        )
+        assert min(sweep_lines) < min(start_lines), (
+            "W2 violated: the maintenance boot sweep must run BEFORE "
+            "self._maintenance_service.start() (structural ordering, "
+            "not the loop's 60s initial sleep)"
+        )
 
 
 class TestManualOnlyEntryPoint:

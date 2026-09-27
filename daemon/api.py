@@ -457,27 +457,12 @@ async def lifespan(app: FastAPI):
             "state='kill_switched')"
         )
 
-    # Section 1 / T8 — boot sweep (unconditional rowcount-guarded CAS
-    # ``running → interrupted`` at lifespan start; AM-7). No age gate —
-    # a boot-time ``running`` row is an orphan by definition under the
-    # single-daemon assumption. The sweep emits its own ONE summary
-    # log line; this block only guards against transient DB hiccups
-    # (best-effort, never raises into the boot path).
-    from daemon.services.maintenance_boot_sweep import (
-        sweep_interrupted_running_runs,
-    )
+    # Section 1 / T8 — the maintenance boot sweep (AM-7) runs inside
+    # ``manager.initialize()`` immediately BEFORE the maintenance
+    # service starts (W1 retry + W2 structural ordering — see
+    # ``daemon/services/maintenance_boot_sweep.py``); nothing left to
+    # do here.
 
-    if manager._maintenance_runs_repo is not None:
-        try:
-            await sweep_interrupted_running_runs(
-                manager._maintenance_runs_repo, section="checkpoint-cleanup"
-            )
-        except Exception as sweep_err:  # noqa: BLE001
-            daemon_logger.warning(
-                f"[Startup] maintenance boot sweep failed (non-fatal): "
-                f"{type(sweep_err).__name__}: {sweep_err}"
-            )
-    
     # Initialize JobQueueService with shared engine from manager
     # Set create_tables=True to ensure job_queue_items table is created
     job_repository = create_job_repository(engine=manager.engine, create_tables=True)

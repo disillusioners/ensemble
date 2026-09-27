@@ -15,6 +15,16 @@ Boot-sweep-only — there is NO live stale-running watchdog in v1
 is rejected by design: prune is retention-idempotent (re-run
 converges; per-pair independence means a partial pass finishes next
 run).
+
+W1 (v3 fix pass 2026-09-27): the boot call site wraps the sweep in
+``run_boot_sweep_with_retry`` — a failed sweep leaves a stale
+``running`` row that 409-wedges cleanup, so transient boot-time DB
+hiccups get bounded retries; the exhaustion path logs the manual
+heal line (see ``docs/runbooks/maintenance-console.md``). The sweep
+call site is in ``manager.initialize()`` immediately BEFORE
+``_maintenance_service.start()`` so the auto cycle's first tick can
+never race the sweep (W2 — structural ordering, not the loop's
+60s initial sleep).
 """
 
 from __future__ import annotations
@@ -50,4 +60,54 @@ async def sweep_interrupted_running_runs(
     return interrupted
 
 
-__all__ = ["sweep_interrupted_running_runs"]
+async def run_boot_sweep_with_retry(
+    runs_repo: MaintenanceRunsRepository,
+    section: str = "checkpoint-cleanup",
+    *,
+    attempts: int = 3,
+    backoff_seconds: float = 1.0,
+) -> int | None:
+    """Boot-site wrapper [W1, v3 fix pass]: bounded retry around the sweep.
+
+    Why: a single failed boot sweep leaves a stale ``running`` row
+    that 409-wedges ALL cleanup (dry-run + execute) until the next
+    successful boot. A transient DB hiccup at boot therefore becomes
+    a feature-wide outage. The wrapper retries the sweep
+    ``attempts`` times with linear backoff (``backoff_seconds`` ×
+    attempt) and never raises into the boot path; on exhaustion it
+    logs ONE ERROR line naming the runbook heal.
+
+    Returns the swept rowcount, or ``None`` when every attempt
+    failed (the ERROR line is the operator trace). The one-summary-
+    log-line invariant holds: ``sweep_interrupted_running_runs``
+    logs its INFO summary exactly once on the successful attempt.
+    """
+    import asyncio
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await sweep_interrupted_running_runs(runs_repo, section)
+        except Exception as exc:  # noqa: BLE001 — boot must stay non-fatal
+            if attempt < attempts:
+                logger.warning(
+                    "maintenance boot sweep failed (attempt %d/%d): "
+                    "%s: %s — retrying in %.1fs",
+                    attempt, attempts, type(exc).__name__, exc,
+                    backoff_seconds * attempt,
+                )
+                await asyncio.sleep(backoff_seconds * attempt)
+            else:
+                logger.error(
+                    "maintenance boot sweep FAILED after %d attempts "
+                    "(%s: %s) — stale running rows may 409-wedge cleanup "
+                    "until the next successful boot. Manual heal: "
+                    "UPDATE maintenance_runs SET status='interrupted' "
+                    "WHERE status='running'  (see "
+                    "docs/runbooks/maintenance-console.md)",
+                    attempts, type(exc).__name__, exc,
+                    exc_info=True,
+                )
+    return None
+
+
+__all__ = ["sweep_interrupted_running_runs", "run_boot_sweep_with_retry"]
