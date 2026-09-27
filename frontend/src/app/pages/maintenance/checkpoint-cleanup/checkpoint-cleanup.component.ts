@@ -201,9 +201,12 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
       error: (err: MaintenanceErrorBody) => {
         // AM-14, AM-17 — 409-adoption. If `run_in_flight` carries a
         // `details.run_id`, adopt it and resume polling — NO error
-        // toast. The 409 response IS the de-facto idempotency handle.
+        // toast AND no inline error banner. The 409 response IS the
+        // de-facto idempotency handle; we clear `lastError` so the
+        // banner doesn't render during the "ride along" polling.
         const adoptedRunId = this.service.adoptRunIdFromError(err);
         if (adoptedRunId) {
+          this.service.clearLastError();
           this.activeRunId.set(adoptedRunId);
           // No snack-bar for this case — ride along UX.
           this.startPolling(adoptedRunId);
