@@ -26,6 +26,11 @@ htmlcov/
 
 # Data directory
 data/
+# Disposable-PG e2e cluster (Maintenance Console) — leaked dir is
+# cleaned by `frontend/scripts/boot-e2e-maintenance-daemon.sh stop`
+# (cleanup() now wired into TERM/INT trap AND action_stop). Stays
+# out of git by convention even when cleanup fails.
+data_e2e_maintenance/
 
 # Frontend
 node_modules/

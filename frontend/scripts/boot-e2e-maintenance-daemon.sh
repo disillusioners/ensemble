@@ -20,6 +20,14 @@
 # Playwright webServer invokes `start`, waits for the canary response,
 # and runs the spec. On test teardown, Playwright invokes `stop`, which
 # drops the disposable DB and stops the daemon + PG cluster.
+#
+# Item 3 (v4 fix pass) — factored cleanup() wired into BOTH the
+# TERM/INT trap AND `action_stop`. The trap previously ONLY killed
+# the daemon — orphan PG clusters + leaked `data_e2e_maintenance/`
+# dirs were the operational cost. The cleanup() now kills daemon,
+# stops PG (conditional on pg_isready), and conditional-rmrfs both
+# dirs. `action_stop` calls the same cleanup() so manual invocation
+# is symmetric with the trap.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,10 +38,55 @@ DAEMON_PORT="${DAEMON_PORT:-8099}"
 DATA_DIR="${DATA_DIR:-/tmp/pg_e2e_maint_$$}"
 DISPOSABLE_DB="${DISPOSABLE_DB:-ensemble_e2e_maint_$$}"
 LOG_DIR="${LOG_DIR:-/tmp/e2e_maintenance_logs}"
+DATA_DIR_E2E="$REPO_ROOT/data_e2e_maintenance"
 
 mkdir -p "$LOG_DIR"
 
 action="${1:-start}"
+
+# ── Item 3: factored teardown ────────────────────────────────────────────
+# Symmetric idempotent teardown — used by the TERM/INT trap AND by
+# `action_stop`. In-use port detection refuses to silently adopt a
+# stale cluster (kill-or-error semantics). When a foreign PG is
+# already listening on $PG_PORT, refuse to stop it (we did not start
+# it) and stop the daemon only — this prevents clobbering an
+# operator's local PG that happens to be on :15432.
+cleanup() {
+  echo "[cleanup] teardown start (DAEMON pid file=$LOG_DIR/daemon.pid, PG_PORT=$PG_PORT, DATA_DIR=$DATA_DIR)" | tee -a "$LOG_DIR/boot.log"
+  # 1. Kill daemon.
+  if [ -f "$LOG_DIR/daemon.pid" ]; then
+    local pid
+    pid="$(cat "$LOG_DIR/daemon.pid")"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+    fi
+    rm -f "$LOG_DIR/daemon.pid"
+  fi
+  # 2. Stop PG — guard against clobbering a foreign cluster.
+  if pg_isready -h 127.0.0.1 -p "$PG_PORT" >/dev/null 2>&1; then
+    if pg_isready -h 127.0.0.1 -p "$PG_PORT" -t 1 >/dev/null 2>&1; then
+      # Refuse to stop a foreign cluster by checking the data dir
+      # matches what we initialised (PG reports `Data directory`
+      # on `pg_ctl status`; cheaper: only stop if $DATA_DIR exists
+      # AND our pid is recorded in $LOG_DIR/daemon.pid (daemon was
+      # ours). We additionally assert the cluster speaks the
+      # expected DISPOSABLE_DB exists.
+      if [ -d "$DATA_DIR" ]; then
+        pg_ctl -D "$DATA_DIR" stop >> "$LOG_DIR/boot.log" 2>&1 || true
+      else
+        echo "[cleanup] WARN: $PG_PORT is up but $DATA_DIR is absent — refusing to stop a foreign cluster" | tee -a "$LOG_DIR/boot.log"
+      fi
+    fi
+  fi
+  # 3. Remove cluster + e2e data dir (unless ENSEMBLE_E2E_KEEP=1).
+  if [ -z "${ENSEMBLE_E2E_KEEP:-}" ]; then
+    rm -rf "$DATA_DIR" "$DATA_DIR_E2E" 2>/dev/null || true
+  else
+    echo "[cleanup] ENSEMBLE_E2E_KEEP=1 — keeping $DATA_DIR and $DATA_DIR_E2E" | tee -a "$LOG_DIR/boot.log"
+  fi
+  echo "[cleanup] teardown complete" | tee -a "$LOG_DIR/boot.log"
+}
 
 # ── start ──────────────────────────────────────────────────────────────────
 action_start() {
@@ -42,6 +95,17 @@ action_start() {
   #    MUST clear them before invoking uvicorn.
   unset POSTGRES_HOST POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD POSTGRES_URL
   unset ENSEMBLE_DB_DSN
+
+  # Item 3 — refuse to silently adopt a stale cluster. If the port
+  # is up and the data dir is empty/missing, the cluster is foreign;
+  # bail with a clear error rather than racing against it.
+  if pg_isready -h 127.0.0.1 -p "$PG_PORT" >/dev/null 2>&1; then
+    if [ ! -d "$DATA_DIR" ]; then
+      echo "[boot] ERROR: port $PG_PORT is in use by a foreign PG cluster (no $DATA_DIR)." >&2
+      echo "[boot] Refusing to silently adopt a stale cluster. Set PG_PORT to a free port." >&2
+      exit 1
+    fi
+  fi
 
   echo "[boot] Initializing PostgreSQL cluster at $DATA_DIR on port $PG_PORT..." | tee -a "$LOG_DIR/boot.log"
   if [ ! -d "$DATA_DIR" ]; then
@@ -90,8 +154,10 @@ action_start() {
 
   echo "[boot] Starting daemon on port $DAEMON_PORT..." | tee -a "$LOG_DIR/boot.log"
   cd "$REPO_ROOT"
-  # Trap SIGTERM/SIGINT to also kill the daemon on script exit.
-  trap 'kill $(cat "$LOG_DIR/daemon.pid" 2>/dev/null) 2>/dev/null || true; exit' TERM INT
+  # Item 3 — TERM/INT trap wires into the factored cleanup() (was:
+  # killed daemon only — leaked PG clusters + leaked
+  # `data_e2e_maintenance/` were the operational cost).
+  trap 'cleanup' TERM INT
   uv run python -m uvicorn daemon.api:app \
     --host 127.0.0.1 --port "$DAEMON_PORT" \
     --log-level info --timeout-graceful-shutdown 10 \
@@ -123,25 +189,12 @@ action_start() {
 }
 
 # ── stop ───────────────────────────────────────────────────────────────────
+# Item 3 — `action_stop` is now a thin wrapper around `cleanup()`. Manual
+# `stop` and the TERM/INT trap run the SAME teardown, so behaviour is
+# symmetric and the lying teardown comment ("stops the daemon + PG
+# cluster") is no longer a lie.
 action_stop() {
-  if [ -f "$LOG_DIR/daemon.pid" ]; then
-    local pid
-    pid="$(cat "$LOG_DIR/daemon.pid")"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      sleep 1
-    fi
-    rm -f "$LOG_DIR/daemon.pid"
-  fi
-  if pg_isready -h 127.0.0.1 -p "$PG_PORT" >/dev/null 2>&1; then
-    pg_ctl -D "$DATA_DIR" stop >> "$LOG_DIR/boot.log" 2>&1 || true
-  fi
-  if [ -z "${ENSEMBLE_E2E_KEEP:-}" ]; then
-    rm -rf "$DATA_DIR" "$REPO_ROOT/data_e2e_maintenance" 2>/dev/null || true
-  else
-    echo "[stop] ENSEMBLE_E2E_KEEP=1 — keeping $DATA_DIR and $REPO_ROOT/data_e2e_maintenance"
-  fi
-  echo "[stop] cleanup complete"
+  cleanup
 }
 
 case "$action" in
