@@ -794,13 +794,28 @@ class JobQueueService:
                     work_resolver.resolve_work, work_id
                 )
                 if record is None:
-                    # Work is gone. Determine retire vs skip via the
-                    # mission-live guard — the work may be transiently
-                    # missing (DB race, in-progress deletion) and a
-                    # retire here would lose a row that's about to
-                    # become resolvable again. Only retire when the
-                    # mission liveness is terminal or unresolvable
-                    # (fail-closed GC: "permanently un-firable").
+                    # Work is gone → retire. The mission-live
+                    # guard call below is wired with
+                    # ``instance_id=None`` (this loop has no
+                    # work_id → instance_id mapping — the row's
+                    # ``instance_id`` column points at the WATCHER's
+                    # parent, not the mission's root), so the
+                    # guard fail-opens per zombie-GC contract:
+                    # ``evaluate_mission_live`` raises
+                    # ``RuntimeError`` (unwired legs) which the
+                    # wrapper catches and returns
+                    # ``live=False, error=True`` → we retire.
+                    #
+                    # The "transiently missing → keep the row"
+                    # rationale the pre-fix comment carried is
+                    # FALSE in production: the guard always says
+                    # ``live=False`` here, so the keep-branch is
+                    # test-mocking-only (a wired
+                    # ``instance_repository`` + ``instance_id``
+                    # that says "mission still live" would skip,
+                    # but this call site does NOT supply either).
+                    # Threading ``instance_id`` is explicitly
+                    # out of scope this commission.
                     retire = True
                     try:
                         verdict = await evaluate_mission_live(

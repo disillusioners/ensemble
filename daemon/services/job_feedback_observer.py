@@ -1109,14 +1109,14 @@ class JobFeedbackObserver:
             InstanceStatus.TERMINATED.value,
             InstanceStatus.FAILED.value,
         ):
-            _u_slice_fail_notify_status = (
+            _u_slice_terminal_notify_status = (
                 "cancelled"
                 if status == InstanceStatus.TERMINATED.value
                 else "failed"
             )
             await self._fire_watcher_notify_for_terminal(
                 instance_id,
-                notify_status=_u_slice_fail_notify_status,
+                notify_status=_u_slice_terminal_notify_status,
                 result_summary=None,
                 error_message=error,
             )
@@ -1124,7 +1124,7 @@ class JobFeedbackObserver:
                 f"Skipping {status} event for instance "
                 f"{instance_id[:8]}... (held-watcher re-fire via "
                 f"_fire_watcher_notify_for_terminal; "
-                f"notify_status={_u_slice_fail_notify_status})"
+                f"notify_status={_u_slice_terminal_notify_status})"
             )
             return
 

@@ -549,6 +549,75 @@ class TestP1StarvationIncidentVerbatim:
             "after exactly-once delivery."
         )
 
+    @pytest.mark.asyncio
+    async def test_p1_sweep_loop_ticks_via_run_async(
+        self, u1_components,
+    ):
+        """P1 loop-tick pin — the periodic ``_run`` loop drives
+        ticks via the asyncio task, NOT via a direct
+        ``sweep_once()`` call.
+
+        The existing ``test_p1_sweep_cadence_actually_exercised``
+        exercises ``sweep_once`` directly (single-tick fast-clock
+        determinism). This SIBLING exercises the structural
+        backstop the U1 commission mandated — the asyncio task
+        spawned by ``start()`` MUST actually fire periodic ticks
+        via ``_run`` so the 310ms race + the long-tail case (no
+        event hook fires) are caught in production.
+
+        Strategy: spin up the service with ``interval_seconds=1``,
+        give the loop ~2.5s (enough for the immediate first tick
+        + at least one sleep-then-tick round), ``stop()``, then
+        assert ``counters()["ticks"] >= 1``. The ``>= 1`` floor
+        is deliberately conservative — CI clock drift could
+        shave the second tick off a 2.5s sleep; the load-bearing
+        invariant is "the loop ticks via the asyncio task at
+        all", not the exact tick count.
+        """
+        from daemon.services.watch_reconcile_sweep import (
+            WatchReconcileSweepService,
+        )
+
+        jqs = u1_components["jqs"]
+
+        sweep = WatchReconcileSweepService(
+            job_queue_service=jqs,
+            interval_seconds=1,
+        )
+        assert sweep.counters()["ticks"] == 0
+
+        # Spin up the asyncio task — this is the production
+        # lifecycle (manager.py lifespan owns start/stop).
+        sweep.start()
+        assert sweep._task is not None
+        assert not sweep._task.done()
+
+        try:
+            # Give the loop enough wall-clock to fire the
+            # immediate-first tick + at least one
+            # sleep(1s)→tick round.
+            await asyncio.sleep(2.5)
+        finally:
+            # Clean shutdown — exercises the cancel+await path
+            # the manager lifespan uses.
+            await sweep.stop()
+
+        ticks_via_loop = sweep.counters()["ticks"]
+        assert ticks_via_loop >= 1, (
+            f"P1 loop-tick pin: the asyncio _run loop MUST fire "
+            f"at least one periodic tick (the structural backstop "
+            f"for the 310ms race + long-tail case); got "
+            f"ticks={ticks_via_loop}. A 0 here means start() "
+            f"spawned a task that never entered its first "
+            f"sweep_once() — the U1 structural backstop would be "
+            f"silently dead in production."
+        )
+        # _task must be cleared post-stop (mirrors the
+        # ``JobLockSweepService`` lifecycle contract).
+        assert sweep._task is None
+        # No errors logged — the periodic path is healthy.
+        assert sweep.counters()["errors_total"] == 0
+
 
 # ── P2 — TOOL-ENTRY contract ──────────────────────────────────────────────
 
