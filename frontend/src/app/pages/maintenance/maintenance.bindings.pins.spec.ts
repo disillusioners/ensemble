@@ -291,10 +291,31 @@ describe('Maintenance console — source-grep pins (15 pins)', () => {
 
   // ── Pin 13: dual-flavor-branch (AM-11) ─────────────────────────────────
   describe('13. dual-flavor-branch', () => {
-    it('template branches on `blobs.destructive` and reads both flavor keys', () => {
-      expect(sectionComponentTemplate).toMatch(/blobs\.destructive/);
-      expect(sectionComponentTemplate).toMatch(/would_free_bytes/);
-      expect(sectionComponentTemplate).toMatch(/bytes_freed/);
+    // Item 11 amendment — the dual-flavor branching was lifted out
+    // of the template into `blobBytesFor()` / `blobCountFor()`
+    // helpers on the component class. The pin now asserts (a) the
+    // template consumes the helpers, (b) the component source
+    // branches on `blobs.destructive` AND reads both flavor keys
+    // (`would_free_bytes` + `bytes_freed`) — i.e. the contract lives
+    // in the helpers, not the template.
+    it('dual-flavor branch lives in blobBytesFor / blobCountFor helpers (template consumes them)', () => {
+      // Template consumes the helpers — both labels + values via the
+      // helpers, not via inline `destructive ? ... : ...` ternaries.
+      expect(sectionComponentTemplate).toMatch(/blobBytesFor\(/);
+      expect(sectionComponentTemplate).toMatch(/blobCountFor\(/);
+      // Component source owns the branching + both flavor keys.
+      expect(sectionComponentSrc).toMatch(/blobs\.destructive/);
+      expect(sectionComponentSrc).toMatch(/would_free_bytes/);
+      expect(sectionComponentSrc).toMatch(/bytes_freed/);
+      // Negative arm: the template MUST NOT contain inline dual-flavor
+      // ternaries (`destructive ? ... : ...`) — that contract moved
+      // to the helpers.
+      expect(sectionComponentTemplate).not.toMatch(
+        /\.destructive\s*\?\s*\(?[^:]*bytes_freed/,
+      );
+      expect(sectionComponentTemplate).not.toMatch(
+        /\.destructive\s*\?\s*[^:]*:\s*[^.]*would_free_bytes/,
+      );
     });
   });
 

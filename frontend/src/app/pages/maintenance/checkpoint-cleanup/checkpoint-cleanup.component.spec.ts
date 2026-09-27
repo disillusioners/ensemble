@@ -41,6 +41,11 @@ import type {
 } from '../../../models';
 import { CheckpointCleanupService } from './checkpoint-cleanup.service';
 import { ConfirmDialogComponent } from '../../../components/confirm-dialog/confirm-dialog.component';
+import {
+  DRY_RUN,
+  STALE_DRY_RUN,
+  STATUS,
+} from './__fixtures__/fixtures';
 
 // ── Mocks ────────────────────────────────────────────────────────────────
 
@@ -487,43 +492,12 @@ class TestableCheckpointCleanupComponent {
   }
 }
 
-// ── Fixtures ─────────────────────────────────────────────────────────────
-
-const NOW_PLUS_5_MIN = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-const NOW_MINUS_1_MIN = new Date(Date.now() - 60_000).toISOString();
-
-const DRY_RUN: CheckpointCleanupDryRun = {
-  run_id: 'ckpt-20260927_032000123456-2a18f3c9',
-  would_delete: { checkpoint_rows: 2, writes: 0, blobs: 4, bytes: 268435456 },
-  would_delete_count: 4,
-  would_free_bytes: 268435456,
-  scanned: { thread_ns_pairs: 12 },
-  skipped: [
-    { thread_id: 'thr-1', checkpoint_ns: '', reason: 'ZERO_REFS_FAIL_SAFE' },
-    { thread_id: 'thr-2', checkpoint_ns: 'snap:x', reason: 'MAX_REFS_EXCEEDED' },
-    { thread_id: 'thr-3', checkpoint_ns: '', reason: 'ERROR:MyException' },
-  ],
-  skipped_truncated: false,
-  duration_ms: 412,
-  fresh_until: NOW_PLUS_5_MIN,
-};
-
-const STALE_DRY_RUN: CheckpointCleanupDryRun = {
-  ...DRY_RUN,
-  fresh_until: NOW_MINUS_1_MIN,
-};
-
-const STATUS: CheckpointCleanupStatus = {
-  config: {
-    checkpoint_max_per_thread: 3,
-    checkpoint_max_per_thread_floor: 1,
-    cleanup_interval_hours: 24,
-    blob_prune_dry_run_env_default: '1',
-    blob_prune_destructive_armed: false,
-  },
-  last_run: null,
-  in_flight: null,
-};
+// ── Fixtures (Item 10) ──────────────────────────────────────────────────
+// Canonical fixtures (DRY_RUN, STALE_DRY_RUN, STATUS, EXECUTE_RESP,
+// BYTES_256_MB, AVAILABILITY_READY, BLOBS_DRY, BLOBS_DESTRUCTIVE,
+// makeRun) live in ./__fixtures__/fixtures.ts. The component spec
+// imports the same set as the service spec — drift between the two
+// is no longer possible.
 
 // ── Tests ────────────────────────────────────────────────────────────────
 

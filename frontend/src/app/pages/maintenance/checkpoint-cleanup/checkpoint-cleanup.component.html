@@ -66,11 +66,9 @@
       <dt>Kind</dt><dd>{{ last.kind }}</dd>
       <dt>Completed at</dt><dd>{{ formatTimestamp(last.completed_at) }}</dd>
       <dt>Status</dt><dd>{{ last.status }}</dd>
-      <!-- AM-11 — dual-flavor branch on destructive. -->
-      <dt>{{ last.summary.blobs.destructive ? 'Bytes freed' : 'Would free' }}</dt>
-      <dd>
-        {{ formatBytes(last.summary.blobs.destructive ? (last.summary.blobs.bytes_freed ?? 0) : last.summary.blobs.would_free_bytes) }}
-      </dd>
+      <!-- AM-11 / Item 11 — dual-flavor label + value via blobBytesFor(). -->
+      <dt>{{ blobBytesFor(last.summary.blobs).label }}</dt>
+      <dd>{{ formatBytes(blobBytesFor(last.summary.blobs).value) }}</dd>
       <dt>Duration</dt><dd>{{ formatDuration(last.summary.duration_ms) }}</dd>
     </dl>
     <!-- AM-10 — skipped render on last_run summary. -->
@@ -208,14 +206,16 @@
       <dt>Started at</dt><dd>{{ formatTimestamp(res.started_at) }}</dd>
       <dt>Completed at</dt><dd>{{ formatTimestamp(res.completed_at) }}</dd>
       @if (res.summary; as s) {
-        <!-- AM-11 — dual-flavor branch on destructive. -->
-        @if (s.blobs.destructive) {
-          <dt>Bytes freed</dt><dd>{{ formatBytes(s.blobs.bytes_freed ?? 0) }}</dd>
-          <dt>Blobs deleted</dt><dd>{{ s.blobs.deleted ?? 0 }}</dd>
-        } @else {
-          <dt>Would free</dt><dd>{{ formatBytes(s.blobs.would_free_bytes) }}</dd>
-          <dt>Would delete (blobs)</dt><dd>{{ s.blobs.would_delete_count }}</dd>
-        }
+        <!-- AM-11 / Item 11 — dual-flavor label + value via the
+             blobBytesFor() / blobCountFor() helpers. The previous
+             inline `@if/@else` block was duplicated between the
+             status-card "Last run" panel (line ~70) and this
+             result panel; the helpers now own the dual-flavor
+             branching in one place. -->
+        <dt>{{ blobBytesFor(s.blobs).label }}</dt>
+        <dd>{{ formatBytes(blobBytesFor(s.blobs).value) }}</dd>
+        <dt>{{ blobCountFor(s.blobs).label }}</dt>
+        <dd>{{ blobCountFor(s.blobs).value }}</dd>
         <dt>Checkpoint rows deleted</dt><dd>{{ s.checkpoint_rows.deleted }}</dd>
         <dt>Duration</dt><dd>{{ formatDuration(s.duration_ms) }}</dd>
 

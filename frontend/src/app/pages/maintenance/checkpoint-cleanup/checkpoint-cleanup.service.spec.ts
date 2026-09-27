@@ -19,14 +19,22 @@ import { catchError, switchMap, take, takeWhile, tap, throwError as throwErr, ti
 import {
   isKnownErrorCode,
   type CheckpointCleanupBlobsSummary,
-  CheckpointCleanupDryRun,
-  CheckpointCleanupExecute,
-  CheckpointCleanupExecuteRequest,
-  CheckpointCleanupRun,
-  CheckpointCleanupStatus,
-  MaintenanceAvailability,
-  MaintenanceErrorBody,
+  type CheckpointCleanupDryRun,
+  type CheckpointCleanupExecute,
+  type CheckpointCleanupExecuteRequest,
+  type CheckpointCleanupRun,
+  type CheckpointCleanupStatus,
+  type MaintenanceAvailability,
+  type MaintenanceErrorBody,
 } from '../../../models';
+import {
+  AVAILABILITY_READY,
+  BLOBS_DRY,
+  DRY_RUN,
+  EXECUTE_RESP,
+  STATUS,
+  makeRun,
+} from './__fixtures__/fixtures';
 
 // Note: `MaintenanceDisplayCode` lives in models/index.ts but is a
 // FE-only display sentinel — the service mirror does NOT consume it.
@@ -99,78 +107,9 @@ class MockHttpClient {
   }
 }
 
-// ── Fixtures ─────────────────────────────────────────────────────────────
-
-const AVAILABILITY: MaintenanceAvailability = {
-  eligible: true,
-  state: 'ready',
-  backend: 'postgres',
-  reason: null,
-};
-
-const STATUS: CheckpointCleanupStatus = {
-  config: {
-    checkpoint_max_per_thread: 3,
-    checkpoint_max_per_thread_floor: 1,
-    cleanup_interval_hours: 24,
-    blob_prune_dry_run_env_default: '1',
-    blob_prune_destructive_armed: false,
-  },
-  last_run: null,
-  in_flight: null,
-};
-
-const FRESH_FUTURE_ISO = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-
-const DRY_RUN: CheckpointCleanupDryRun = {
-  run_id: 'ckpt-20260927_032000123456-2a18f3c9',
-  would_delete: { checkpoint_rows: 0, writes: 0, blobs: 4, bytes: 268435456 },
-  would_delete_count: 4,
-  would_free_bytes: 268435456,
-  scanned: { thread_ns_pairs: 12 },
-  skipped: [
-    { thread_id: 'thr-1', checkpoint_ns: '', reason: 'ZERO_REFS_FAIL_SAFE' },
-  ],
-  skipped_truncated: false,
-  duration_ms: 412,
-  fresh_until: FRESH_FUTURE_ISO,
-};
-
-const EXECUTE_RESP: CheckpointCleanupExecute = {
-  run_id: 'ckpt-20260927_032130456789-7e11f3a2',
-  status: 'running',
-  started_at: '2026-09-27T03:21:30.456789+00:00',
-  advisory: null,
-  expected_duration_ms_hint: 412,
-};
-
-const BLOBS_DRY: CheckpointCleanupBlobsSummary = {
-  scanned_pairs: 12,
-  would_delete_count: 4,
-  would_free_bytes: 268435456,
-  would_delete: 4,
-  bytes: 268435456,
-  destructive: false,
-  skipped: [],
-  skipped_truncated: false,
-};
-
-function makeRun(status: CheckpointCleanupRun['status']): CheckpointCleanupRun {
-  return {
-    run_id: EXECUTE_RESP.run_id,
-    kind: 'manual_execute',
-    status,
-    started_at: EXECUTE_RESP.started_at,
-    completed_at: status === 'running' ? null : new Date().toISOString(),
-    summary: status === 'running' ? null : {
-      checkpoint_rows: { scanned_pairs: 12, deleted: 4, excess_pairs: 4 },
-      writes: { deleted: 0 },
-      blobs: BLOBS_DRY,
-      duration_ms: 1823,
-    },
-    error: status === 'interrupted' ? { code: 'run_interrupted', message: 'daemon restart' } : null,
-  };
-}
+// ── Fixtures (Item 10) ──────────────────────────────────────────────────
+// Canonical fixtures live in ./__fixtures__/fixtures.ts. Both the
+// component + service spec import from there to keep them in sync.
 
 // ── Testable mirror ──────────────────────────────────────────────────────
 
@@ -350,7 +289,7 @@ describe('CheckpointCleanupService', () => {
 
   describe('fetchAvailability()', () => {
     it('hits GET /availability and updates the availability signal', async () => {
-      http.setGet('/api/maintenance/checkpoint-cleanup/availability', AVAILABILITY);
+      http.setGet('/api/maintenance/checkpoint-cleanup/availability', AVAILABILITY_READY);
       await firstValueFrom(service.fetchAvailability());
       expect(http.calls).toHaveLength(1);
       expect(http.calls[0]).toEqual({
@@ -358,7 +297,7 @@ describe('CheckpointCleanupService', () => {
         url: '/api/maintenance/checkpoint-cleanup/availability',
         body: undefined,
       });
-      expect(service.availability()).toEqual(AVAILABILITY);
+      expect(service.availability()).toEqual(AVAILABILITY_READY);
     });
 
     it('availability signal carries state for isReady derived computed', () => {
@@ -366,9 +305,9 @@ describe('CheckpointCleanupService', () => {
       // mirror keeps the signal shape; the spec verifies the signal
       // state directly (the `isReady` derivation is exercised by
       // `app.ts` at runtime).
-      service.availability.set(AVAILABILITY);
+      service.availability.set(AVAILABILITY_READY);
       expect(service.availability()?.state).toBe('ready');
-      service.availability.set({ ...AVAILABILITY, state: 'backend_unsupported' });
+      service.availability.set({ ...AVAILABILITY_READY, state: 'backend_unsupported' });
       expect(service.availability()?.state).toBe('backend_unsupported');
     });
   });
@@ -405,7 +344,10 @@ describe('CheckpointCleanupService', () => {
     it('preserves skipped[] entries on the lastDryRun signal (AM-10)', async () => {
       http.setPost('/api/maintenance/checkpoint-cleanup/dry-run', DRY_RUN);
       await firstValueFrom(service.dryRun());
-      expect(service.lastDryRun()?.skipped).toHaveLength(1);
+      // Item 10 — the shared fixture carries 3 skipped entries
+      // (ZERO_REFS_FAIL_SAFE + MAX_REFS_EXCEEDED + ERROR:*); the
+      // service preserves them all verbatim.
+      expect(service.lastDryRun()?.skipped).toHaveLength(3);
       expect(service.lastDryRun()?.skipped[0].reason).toBe('ZERO_REFS_FAIL_SAFE');
     });
   });
