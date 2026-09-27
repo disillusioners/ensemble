@@ -571,3 +571,34 @@ Reproduces the ORIGINAL incident shape from mission f27e2d15 on a synthetic SQLi
 - **Result**: PASS — GREEN (permanent pack, :18771): embed `Content-Encoding=absent`, plain JSON, 200; chat-path `Content-Encoding=gzip` (magic `1f8b`) present. RED (scratch, temp worktree @ base 139ba352, :18772): embed gzip on wire → 400 "We could not parse the JSON body of your request" → client RuntimeError. Two-sides closure proof satisfied.
 - **Quick Fixes**: driver repaired @ `7375503e` (gzip_magic scope hoist + PROBE_TEXT ~2160 chars above gzip-shrink threshold — see LESSONS/2026-09-26-gzip-wire-repro-body-threshold.md)
 - **Report**: RESULTS/2026-09-26-embedding-gzip-exempt-verification.md
+
+
+---
+
+## Mock Test: sel-default boot smokes (a)/(b)/(c) — ad-hoc, 2026-09-27
+
+### Metadata
+- **Created**: 2026-09-27 (commission sel-default-20260927)
+- **Scripts**: `/tmp/seldef_boot_a.sh`, `/tmp/seldef_boot_b.sh`, `/tmp/seldef_boot_c.sh` (ad-hoc, NOT registered in PACKS.md — single-commission packs; dual-layer timeout: outer `timeout 300` + internal `timeout 240`)
+- **Language**: bash
+- **Status**: ACTIVE (one-shot; evidence in RESULTS/2026-09-27-sel-default-verification.md)
+
+### Configuration
+- **Timeout**: 300s outer / 240s internal
+- **Ports**: daemon 10081 (a) / 10082 (b) / 10083 (c); dead-LLM endpoint 10089 (`OPENAI_BASE_URL=http://127.0.0.1:10089` — guarantees zero real LLM calls)
+- **Scratch DBs (local dev PG 127.0.0.1:5432)**: `ensemble_seldef_a` / `_b` / `_c` — created per run, DROPPED after (proven)
+- **Cleanup**: SIGTERM graceful shutdown; port-free + DB-dropped assertions; live/demo ports (9797/7979/8079/8088) never touched
+
+### What It Tests
+- (a) `OPENAI_SELECTABLE_MODELS` + legacy `OPENAI_ALLOWED_MODELS` both UNSET → shipped default `agentic,coding,coding2,vision` applies + exactly ONE `warn_default_allowed_models_applied`-family warning (`[Config] allowed_models default applied: [...]`)
+- (b) var SET without vision → zero default warnings; any spawn → loud pre-LLM `VisionModelNotAllowedError` (HTTP 500, arch §8 message)
+- (c) var SET with vision → zero warnings; vision passes allowed-models gate, reaches `[LLM] Invoking LLM (model=vision)`, fails only at dead local endpoint (ordering proof)
+
+### Environment Notes
+- Env scrub MANDATORY before boot: ambient env carries live `POSTGRES_*` (10.44.0.2/ensemble_prod) AND an ambient `OPENAI_SELECTABLE_MODELS` value — outer-shell scrub + zero-survivor proof, else results are invalid.
+- Per-worker dedicated PG role recommended (see RESULTS operational note #3 — `ensemble` role password churn during parallel runs).
+- Worktree venv checks are cwd-sensitive: `cd <wt>` before `import daemon` isolation checks.
+
+### Last Run
+- **Date**: 2026-09-27 | **Workers**: 9cfa5016 (a) / 9a6c3136 (b) / 635d3df3 (c) | **Result**: PASS ×3 (15s / 15s / 31s)
+- **Report**: RESULTS/2026-09-27-sel-default-verification.md
