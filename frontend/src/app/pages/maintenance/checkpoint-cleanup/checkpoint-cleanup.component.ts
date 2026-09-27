@@ -24,8 +24,6 @@ import type {
   CheckpointCleanupExecute,
   CheckpointCleanupExecuteRequest,
   CheckpointCleanupRun,
-  CheckpointCleanupSkippedEntry,
-  CheckpointCleanupStatus,
   MaintenanceDisplayCode,
   MaintenanceErrorBody,
 } from '../../../models';
@@ -79,7 +77,11 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   readonly lastError = this.service.lastError;
   readonly canDryRun = this.service.canDryRun;
   readonly isRunInFlight = this.service.isRunInFlight;
-  readonly isReady = this.service.isReady;
+  // Item 12 — the `isReady` re-exposed alias was dead surface
+  // (template never reads it; the gear-menu probe in app.ts
+  // branches directly on the `state` enum of the Availability
+  // body). The service's `isReady` computed is also removed (see
+  // service.ts); component-side alias goes with it.
 
   // ── Local UI state ────────────────────────────────────────────────────
   readonly dryRunning = signal(false);
@@ -483,15 +485,5 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   /** AM-13 — kill-switch OFF: render the global banner. */
   isMaintenanceDisabled(): boolean {
     return this.lastError()?.error === 'maintenance_disabled';
-  }
-
-  /** Track-by helpers for templates with `@for` loops. */
-  trackByThreadId(_index: number, entry: CheckpointCleanupSkippedEntry): string {
-    return entry.thread_id;
-  }
-
-  /** Convenience: typed access for the template's @if guards. */
-  statusSnapshot(): CheckpointCleanupStatus | null {
-    return this.status();
   }
 }

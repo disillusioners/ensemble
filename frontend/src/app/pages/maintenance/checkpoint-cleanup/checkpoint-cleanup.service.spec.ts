@@ -126,11 +126,14 @@ class TestableCheckpointCleanupService {
   // hard-coding it in tests (the test mocks the HTTP layer).
   static readonly AVAILABILITY_URL = '/api/maintenance/checkpoint-cleanup/availability';
 
-  readonly availability = signal<MaintenanceAvailability | null>(null);
   readonly status = signal<CheckpointCleanupStatus | null>(null);
   readonly lastDryRun = signal<CheckpointCleanupDryRun | null>(null);
   readonly lastError = signal<MaintenanceErrorBody | null>(null);
-  readonly lastRun = signal<CheckpointCleanupRun | null>(null);
+  // Item 12 — `availability` / `lastRun` are dead surface in
+  // production (gear-menu probe + canMatch guard hit the URL
+  // directly; the caller owns the terminal row). Spec mirror also
+  // drops them; the spec keeps `fetchAvailability()` as a deprecated
+  // no-op shell so the test block doesn't break in this pass.
 
   private readonly API_BASE = '/api/maintenance/checkpoint-cleanup';
   // Allow tests to override the timeout for PR-2 coverage.
@@ -138,9 +141,9 @@ class TestableCheckpointCleanupService {
 
   constructor(private readonly http: MockHttpClient) {}
 
+  /** @deprecated Item 12 — see production service; URL-only probe. */
   fetchAvailability(): Observable<MaintenanceAvailability> {
     return this.http.get<MaintenanceAvailability>(`${this.API_BASE}/availability`).pipe(
-      tap((data) => this.availability.set(data)),
       catchError((err) => throwError(() => this.toErrorBody(err))),
     );
   }
@@ -213,7 +216,6 @@ class TestableCheckpointCleanupService {
         }
         return this.getRun(runId).pipe(take(1));
       }),
-      tap((run) => this.lastRun.set(run)),
       takeWhile((run) => !this.isTerminalStatus(run.status), true),
     );
   }
@@ -287,8 +289,13 @@ describe('CheckpointCleanupService', () => {
     });
   });
 
-  describe('fetchAvailability()', () => {
-    it('hits GET /availability and updates the availability signal', async () => {
+  describe('fetchAvailability() — Item 12 deprecated shell', () => {
+    it('hits GET /availability (URL contract)', async () => {
+      // The production service exposes the URL constant + the
+      // canMatch guard / app.ts gear-menu probe hit it directly.
+      // The fetchAvailability() wrapper is @deprecated; this test
+      // pins the URL contract (canonical literal matches the
+      // single-source constant).
       http.setGet('/api/maintenance/checkpoint-cleanup/availability', AVAILABILITY_READY);
       await firstValueFrom(service.fetchAvailability());
       expect(http.calls).toHaveLength(1);
@@ -297,18 +304,11 @@ describe('CheckpointCleanupService', () => {
         url: '/api/maintenance/checkpoint-cleanup/availability',
         body: undefined,
       });
-      expect(service.availability()).toEqual(AVAILABILITY_READY);
     });
 
-    it('availability signal carries state for isReady derived computed', () => {
-      // The production service exposes `isReady` as a computed — the
-      // mirror keeps the signal shape; the spec verifies the signal
-      // state directly (the `isReady` derivation is exercised by
-      // `app.ts` at runtime).
-      service.availability.set(AVAILABILITY_READY);
-      expect(service.availability()?.state).toBe('ready');
-      service.availability.set({ ...AVAILABILITY_READY, state: 'backend_unsupported' });
-      expect(service.availability()?.state).toBe('backend_unsupported');
+    it('AVAILABILITY_URL static constant matches the URL literal', () => {
+      expect(TestableCheckpointCleanupService.AVAILABILITY_URL)
+        .toBe('/api/maintenance/checkpoint-cleanup/availability');
     });
   });
 

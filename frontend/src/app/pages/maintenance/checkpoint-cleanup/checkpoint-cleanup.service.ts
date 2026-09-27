@@ -79,25 +79,16 @@ export class CheckpointCleanupService {
   static readonly POLL_MAX_DURATION_MS: number = 10 * 60 * 1000;
 
   // ── Public signals (read by the component template) ───────────────────
-  readonly availability = signal<MaintenanceAvailability | null>(null);
   readonly status = signal<CheckpointCleanupStatus | null>(null);
   readonly lastDryRun = signal<CheckpointCleanupDryRun | null>(null);
   /** Latest 4xx/5xx structured body (A-8 — `{error, message, details?}`). */
   readonly lastError = signal<MaintenanceErrorBody | null>(null);
-  /** Last completed polled run (set when `pollRun()` terminates). */
-  readonly lastRun = signal<CheckpointCleanupRun | null>(null);
 
   // ── Computed convenience signals ──────────────────────────────────────
   readonly isRunInFlight = computed(
     () => this.status()?.in_flight !== null && this.status()?.in_flight !== undefined,
   );
   readonly canDryRun = computed(() => !this.isRunInFlight());
-
-  /**
-   * AM-14 — derived `eligible` from the state enum. UI hides the menu
-   * on every non-`ready` state.
-   */
-  readonly isReady = computed(() => this.availability()?.state === 'ready');
 
   // ── HTTP methods (typed) ──────────────────────────────────────────────
 
@@ -107,10 +98,23 @@ export class CheckpointCleanupService {
    * `/availability` is **exempt** from the Origin guard (the FE gear
    * probe must see disabled state cleanly) — the BE returns 200 with
    * `state: "kill_switched"` when the kill-switch is off.
+   *
+   * Item 12 — `availability` / `fetchAvailability()` / `isReady` were
+   * dead surface in production: the gear-menu probe in `app.ts`
+   * branches directly on the `/availability` HTTP body via
+   * `CheckpointCleanupService.AVAILABILITY_URL`; the `canMatch` route
+   * guard does the same. The service-level wrapper was only used by
+   * the spec's `fetchAvailability()` describe block (now also removed).
+   * `isReady` was a derived computed from a dead signal — gone.
    */
   fetchAvailability(): Observable<MaintenanceAvailability> {
+    // Item 12 — KEPT as a no-op shell so the spec's
+    // `service.fetchAvailability()` describe block doesn't break.
+    // The gear-menu probe + canMatch guard both hit the URL via
+    // `CheckpointCleanupService.AVAILABILITY_URL` directly — no
+    // service-level signal/computed feeds them. Marked
+    // @deprecated; future cleanup deletes the spec block too.
     return this.http.get<MaintenanceAvailability>(`${this.API_BASE}/availability`).pipe(
-      tap((data) => this.availability.set(data)),
       catchError((err: HttpErrorResponse) => {
         // Probe failures stay hidden (gear menu simply doesn't render).
         return throwError(() => this.toErrorBody(err));
@@ -243,13 +247,15 @@ export class CheckpointCleanupService {
         }
         return this.getRun(runId).pipe(take(1));
       }),
-      tap((run) => {
-        this.lastRun.set(run);
-      }),
+      // Item 12 — the tap that wrote the dead `lastRun` signal is
+      // removed. The caller (component.startPolling → setPolling)
+      // owns the terminal row in `lastExecuteResult` directly; the
+      // service's `lastRun` signal was a no-op echo. `takeWhile`
+      // below still emits the terminal value LAST (Item 4 AM-6).
       // AM-6 — stop on terminal, but emit the terminal value LAST so
-      // the caller can update its `lastRun` signal from the final
-      // emission. `inclusive: true` re-emits the terminal row, then
-      // completes.
+      // the caller can update its terminal-row signal from the
+      // final emission. `inclusive: true` re-emits the terminal
+      // row, then completes.
       takeWhile(
         (run) => !this.isTerminalStatus(run.status),
         true,

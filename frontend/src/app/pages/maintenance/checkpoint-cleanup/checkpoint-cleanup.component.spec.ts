@@ -35,7 +35,6 @@ import type {
   CheckpointCleanupExecuteRequest,
   CheckpointCleanupRun,
   CheckpointCleanupStatus,
-  MaintenanceAvailability,
   MaintenanceDisplayCode,
   MaintenanceErrorBody,
 } from '../../../models';
@@ -97,15 +96,16 @@ class MockCheckpointCleanupService {
   static readonly POLL_INTERVAL_MS = 2000 as const;
   static readonly POLL_MAX_DURATION_MS: number = 10 * 60 * 1000;
 
-  readonly availability = signal<MaintenanceAvailability | null>(null);
   readonly status = signal<CheckpointCleanupStatus | null>(null);
   readonly lastDryRun = signal<CheckpointCleanupDryRun | null>(null);
   readonly lastError = signal<MaintenanceErrorBody | null>(null);
-  readonly lastRun = signal<CheckpointCleanupRun | null>(null);
+  // Item 12 — `availability` / `lastRun` / `isReady` are dead
+  // surface in production; the spec mirror drops them too.
+  // `canDryRun` / `isRunInFlight` are still live (consumed by the
+  // component's button-disabled guards).
 
   readonly canDryRun = signal(true);
   readonly isRunInFlight = signal(false);
-  readonly isReady = signal(true);
 
   fetchStatusCalls = 0;
   dryRunCalls = 0;
@@ -182,10 +182,10 @@ class MockCheckpointCleanupService {
   }
 }
 
-// Item 15 — `MaintenanceAvailability` + `CheckpointCleanupExecuteRequest`
-// already exist in `../../../models`. The local type shadows were
-// duplicate definitions; import the canonical types instead so the
-// spec cannot drift from production shapes.
+// Item 15 — `CheckpointCleanupExecuteRequest` already exists in
+// `../../../models`. The local type shadow was a duplicate
+// definition; import the canonical type instead so the spec cannot
+// drift from production shapes.
 
 // ── Testable mirror component ────────────────────────────────────────────
 
@@ -225,7 +225,8 @@ class TestableCheckpointCleanupComponent {
     this.lastError = this.service.lastError;
     this.canDryRun = this.service.canDryRun;
     this.isRunInFlight = this.service.isRunInFlight;
-    this.isReady = this.service.isReady;
+    // Item 12 — `isReady` re-exposed alias removed (template never
+    // reads it; production service also dropped the computed).
   }
 
   refreshStatus(): void {
@@ -370,10 +371,9 @@ class TestableCheckpointCleanupComponent {
     this.service.clearLastError();
   }
 
-  trackByThreadId(_index: number, entry: { thread_id: string }): string {
-    return entry.thread_id;
-  }
-
+  // Item 12 — `trackByThreadId` / `statusSnapshot` were dead
+  // surface (template uses `track entry.thread_id` directly; the
+  // status accessor is just `this.status()`). Mirrored deletion.
   blobCountFor(s: {
     destructive: boolean;
     deleted?: number;

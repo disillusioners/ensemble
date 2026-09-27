@@ -38,10 +38,11 @@ const sectionComponentTemplate = readFileSync(
   join(componentDir, 'checkpoint-cleanup/checkpoint-cleanup.component.html'),
   'utf-8',
 );
-const sectionComponentScss = readFileSync(
-  join(componentDir, 'checkpoint-cleanup/checkpoint-cleanup.component.scss'),
-  'utf-8',
-);
+// Item 19 — `sectionComponentScss` was a dead read (loaded but never
+// asserted against). Deleted. The SCSS file carries no critical
+// contract surface worth a source-grep pin (no token selectors
+// that downstream code depends on); if a future pin is needed,
+// add it here with a deliberate contract statement.
 const serviceSrc = readFileSync(
   join(componentDir, 'checkpoint-cleanup/checkpoint-cleanup.service.ts'),
   'utf-8',
