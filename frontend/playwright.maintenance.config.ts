@@ -44,6 +44,12 @@ const PROXY_E2E = join(HERE, 'proxy.conf.e2e.json');
 
 export default defineConfig({
   testDir: './e2e',
+  // Item 3 v4 fix pass — deterministic teardown backstop. The
+  // boot script's TERM/EXIT trap is the primary path; this is the
+  // race-loser when Playwright's force-kill (SIGKILL to the
+  // process group) pre-empts the trap before pg_ctl stop finishes.
+  // Idempotent w.r.t. the boot script's own cleanup.
+  globalTeardown: './e2e/global-teardown-maintenance.ts',
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

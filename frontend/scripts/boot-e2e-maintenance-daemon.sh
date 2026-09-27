@@ -158,6 +158,14 @@ action_start() {
   # killed daemon only — leaked PG clusters + leaked
   # `data_e2e_maintenance/` were the operational cost).
   trap 'cleanup' TERM INT
+  # Item 3 v4 fix pass — EXIT trap backstop. Playwright's webServer
+  # teardown can race SIGKILL against SIGTERM (esp. when
+  # `pg_ctl stop` takes >5s on a saturated cluster). The EXIT trap
+  # fires on ANY script exit — the boot script's own success path
+  # calls cleanup() explicitly after `wait`, AND the globalTeardown
+  # in playwright.maintenance.config.ts is a deterministic backstop
+  # for the SIGKILL race. Three layers; all idempotent.
+  trap 'cleanup' EXIT
   uv run python -m uvicorn daemon.api:app \
     --host 127.0.0.1 --port "$DAEMON_PORT" \
     --log-level info --timeout-graceful-shutdown 10 \
@@ -175,9 +183,17 @@ action_start() {
       if [ "$state" = "ready" ]; then
         echo "[boot] OK — daemon is READY on :$DAEMON_PORT (DB $DISPOSABLE_DB) — blocking on daemon pid=$DAEMON_PID" | tee -a "$LOG_DIR/boot.log"
         # BLOCK on the daemon process so Playwright's webServer stays
-        # up for the duration of the e2e run. The daemon is killed
-        # via SIGTERM in `action_stop` or on shell exit.
+        # up for the duration of the e2e run. Playwright's webServer
+        # teardown kills the daemon (the child), `wait` returns, and
+        # the script reaches the normal-exit path below. The TERM/INT
+        # trap also fires `cleanup()` if Playwright SIGTERMs the shell
+        # instead of the daemon (covers both webServer styles).
         wait "$DAEMON_PID"
+        # Normal-exit path — Playwright killed the daemon (or it died
+        # on its own). Run cleanup() here so PG + dirs don't leak. The
+        # TERM/INT trap may have already fired; cleanup() is
+        # idempotent (each step guards against missing state).
+        cleanup
         exit 0
       fi
     fi
@@ -185,6 +201,7 @@ action_start() {
   done
   echo "[boot] ERROR: daemon did not reach state=ready within 60s" >&2
   tail -20 "$LOG_DIR/daemon.log" >&2 || true
+  cleanup
   exit 1
 }
 
