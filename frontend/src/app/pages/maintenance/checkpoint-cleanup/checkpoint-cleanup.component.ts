@@ -49,6 +49,22 @@ import type {
  * confirm: true}` — NO `idempotency_key`, NO `crypto.randomUUID`.
  * AM-16 — honest duration copy ("May take several minutes on large
  * databases") + `fresh_until` rendered in the dry-run result panel.
+ *
+ * v3.2 — three additive projection fields on the dry-run response
+ * (`bytes_reclaimable_now`, `bytes_reclaimable_after_row_prune`,
+ * `bytes_reclaimable_total`) PLUS a two-field `projection` block on
+ * the manual_execute run summary (`bytes_reclaimable_now_at_dry_run`,
+ * `bytes_reclaimable_after_row_prune_at_dry_run`). Echo gate AM-3
+ * UNCHANGED — these fields are informational and projection-class;
+ * the existing `would_free_bytes` echo pin is untouched. Rendered as:
+ *
+ *   - Dry-run card three-number render + skip-flag honesty banner
+ *     (R-1, R-4)
+ *   - Confirm dialog journey copy (now + "after" + "running cleanup
+ *     again" anchor)
+ *   - Post-run convergence banner ("Run cleanup again to reclaim ~X
+ *     more" — a NEW dry-run, never a silent execute); hides when a
+ *     fresh dry-run reports `now == 0` (convergence reached)
  */
 @Component({
   selector: 'app-checkpoint-cleanup',
@@ -439,13 +455,139 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
 
   // ── Private helpers ───────────────────────────────────────────────────
 
+  /**
+   * v3.2 — three additive projection fields on the dry-run response.
+   *
+   * Per the amendment's FE display contract: "This run / After this
+   * run (run cleanup again) / Combined". Zero components render as
+   * "—" (amendment copy). Each helper falls back to `would_free_bytes`
+   * for the `now` value (alias-of shape-stability) and treats missing
+   * `after`/`total` fields as 0 — v3.1 legacy dry-run payloads render
+   * with `after: '—'` and a `total === now`.
+   *
+   * R-1 ruling — `total === now + after` is COHERENT only with
+   * delta-semantics `after` (subset of post-D orphans minus the
+   * already-orphan portion). Helpers below are pure; the template
+   * renders them inline.
+   */
+
+  /** "—" for zero, else human-formatted bytes. This-run number. */
+  dryRunProjectionNow(dryRun: CheckpointCleanupDryRun): string {
+    const v = dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes ?? 0;
+    return this.formatOrDash(v);
+  }
+
+  /** "—" for zero, else human-formatted bytes. Follow-up run number. */
+  dryRunProjectionAfter(dryRun: CheckpointCleanupDryRun): string {
+    const v = dryRun.bytes_reclaimable_after_row_prune ?? 0;
+    return this.formatOrDash(v);
+  }
+
+  /**
+   * "—" for zero, else human-formatted bytes. Sum. Reads the
+   * wire-level `bytes_reclaimable_total` when present (exact
+   * server sum), otherwise derives `now + after` — same value
+   * modulo drift. Pin: schema docstring states total is derived.
+   */
+  dryRunProjectionTotal(dryRun: CheckpointCleanupDryRun): string {
+    const now = dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes ?? 0;
+    const after = dryRun.bytes_reclaimable_after_row_prune ?? 0;
+    const v = dryRun.bytes_reclaimable_total ?? now + after;
+    return this.formatOrDash(v);
+  }
+
+  /**
+   * `pure` helper — render zero as the literal "—" sentinel rather
+   * than "0 B" (amendment: "Zero components render as '—' (skipped).").
+   * Negative or non-finite inputs also yield "—" to guard against
+   * malformed wire payloads during a delivery-window defect.
+   */
+  private formatOrDash(v: number): string {
+    return typeof v === 'number' && v > 0 && Number.isFinite(v) ? this.formatBytes(v) : '—';
+  }
+
+  /**
+   * R-4 honesty flag — render the "skipped pairs may understate
+   * effectiveness" notice when `skipped[]` is non-empty. Mirrors
+   * the existing AM-10 skipped summary on the same data, but
+   * lives near the projection so the operator sees it BEFORE
+   * clicking execute (this is the consent-time signal).
+   */
+  dryRunSkippedHonestyActive(dryRun: CheckpointCleanupDryRun): boolean {
+    return dryRun.skipped.length > 0;
+  }
+
+  /**
+   * Sub-copy on never-pruned profiles — `now == 0 && after > 0`
+   * means pass 1 frees no blob bytes (Op D will orphan them) and a
+   * follow-up run is required for the visible reclaim. The note
+   * names the journey explicitly so the operator understands why
+   * the "This run" number is "—" even though retention work is
+   * obvious.
+   */
+  isNeverPrunedProfile(dryRun: CheckpointCleanupDryRun): boolean {
+    const now = dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes ?? 0;
+    const after = dryRun.bytes_reclaimable_after_row_prune ?? 0;
+    return now === 0 && after > 0;
+  }
+
+  // ── Post-run banner helpers (v3.2) ────────────────────────────────────
+
+  /**
+   * Post-run banner visibility (R-5). Renders when:
+   *   1. The last execute run succeeded
+   *   2. Its summary carries a projection with `after > 0`
+   *   3. The user has NOT yet run a fresh dry-run that converged
+   *      (`bytes_reclaimable_now == 0` — they've reached pass 2's
+   *      claim; nothing more to reclaim)
+   *
+   * The banner is intentionally tied to the run-row's projection
+   * echo — no client-only state. Page refreshes (or DAEMON
+   * restarts during a poll) still recover the banner from the
+   * run summary. Auto rows have no projection block (R-5) so the
+   * banner never fires on them.
+   */
+  showRunAgainBanner(): boolean {
+    const run = this.lastExecuteResult();
+    if (!run || run.status !== 'succeeded' || !run.summary) {
+      return false;
+    }
+    const after =
+      run.summary.projection?.bytes_reclaimable_after_row_prune_at_dry_run ?? 0;
+    if (after <= 0) {
+      return false;
+    }
+    // Hides once a fresh dry-run converges (`now == 0`). When
+    // `lastDryRun` is null we haven't asked yet — keep the banner
+    // visible so the CTA stays actionable.
+    const dry = this.lastDryRun();
+    if (dry && (dry.bytes_reclaimable_now ?? 0) === 0) {
+      return false;
+    }
+    return true;
+  }
+
+  /** Banner CTA copy source — the projection's after-reclaim bytes. */
+  runAgainReclaimBytes(): number {
+    const run = this.lastExecuteResult();
+    return run?.summary?.projection?.bytes_reclaimable_after_row_prune_at_dry_run ?? 0;
+  }
+
   private buildConfirmMessage(dryRun: CheckpointCleanupDryRun): string {
-    const bytes = this.formatBytes(dryRun.would_free_bytes);
+    // v3.2 — journey copy (amendment VERBATIM). The amendment splits
+    // per-run honesty (what THIS run does) from journey honesty
+    // (what a follow-up run will reclaim) — the confirm dialog is
+    // the consent instrument, so the journey note belongs here too.
+    const now = this.formatBytes(dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes);
+    const after = this.formatBytes(
+      dryRun.bytes_reclaimable_after_row_prune ?? 0,
+    );
     const rows = dryRun.would_delete.checkpoint_rows;
     return (
-      `This will permanently delete ~${bytes} of unreferenced blobs and ` +
-      `${rows} excess checkpoint rows. This may take several minutes on ` +
-      `large databases. This cannot be undone.`
+      `This run will permanently delete ~${now} of unreferenced blobs ` +
+      `and ${rows} excess checkpoint rows. After this run, ~${after} ` +
+      `more becomes reclaimable by running cleanup again. This may ` +
+      `take several minutes on large databases. This cannot be undone.`
     );
   }
 

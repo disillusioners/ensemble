@@ -129,6 +129,45 @@
       <dt>Fresh until</dt><dd data-testid="ck-dry-fresh-until">{{ formatTimestamp(dry.fresh_until) }}</dd>
     </dl>
 
+    <!-- v3.2 — projection-class informational three-number render (R-1).
+         Reads three dry-run fields (`bytes_reclaimable_now`,
+         `bytes_reclaimable_after_row_prune`, `bytes_reclaimable_total`)
+         via the `dryRunProjectionNow/After/Total()` helpers. Zero
+         components render as "—" (amendment contract). Echo gate AM-3
+         is UNCHANGED — these numbers are projection-class and never
+         gate-bound (the execute-time echo still binds to
+         `would_free_bytes`). -->
+    <div class="ck-projection" data-testid="ck-projection">
+      <p class="ck-projection-line">
+        This run:
+        <strong data-testid="ck-projection-now">{{ dryRunProjectionNow(dry) }}</strong>
+        · After this run (run cleanup again):
+        <strong data-testid="ck-projection-after">{{ dryRunProjectionAfter(dry) }}</strong>
+        · Combined:
+        <strong data-testid="ck-projection-total">{{ dryRunProjectionTotal(dry) }}</strong>
+      </p>
+
+      <!-- R-4 — skip-flag honesty banner. The same `skipped[]` already
+           renders an itemized block below; this near-projection note
+           surfaces the under-reclaim risk at consent time (before the
+           operator clicks execute). -->
+      @if (dryRunSkippedHonestyActive(dry)) {
+        <p class="ck-projection-skipped" data-testid="ck-projection-skipped">
+          <mat-icon>verified_user</mat-icon>
+          {{ dry.skipped.length }} pairs skipped — cleanup effectiveness may be understated
+        </p>
+      }
+
+      <!-- Never-pruned sub-copy — names the journey when this run
+           frees 0 blob bytes (Op D will orphan them for pass 2). -->
+      @if (isNeverPrunedProfile(dry)) {
+        <p class="ck-never-pruned-subcopy" data-testid="ck-never-pruned-subcopy">
+          On a DB that has never run retention, run 1 deletes rows only;
+          run 2 frees the blob bytes.
+        </p>
+      }
+    </div>
+
     <!-- AM-10 — skipped render: summary + reason badge map + truncated. -->
     @if (dry.skipped.length > 0) {
       <div class="ck-skipped" data-testid="ck-dry-skipped">
@@ -251,6 +290,47 @@
         </div>
         <button mat-raised-button color="primary" (click)="onExecute()" data-testid="ck-rerun-btn">
           Re-run
+        </button>
+      </div>
+    }
+
+    <!-- v3.2 — post-run convergence banner. Visible when the last execute
+         succeeded AND its summary's projection-after is > 0. The CTA
+         starts a NEW dry-run (NEVER a silent execute — onDryRun is the
+         entry point and the standard dry-run → confirm → execute
+         flow still gates the actual destructive action). The button is
+         disabled while ANY run is in flight (dry-run / execute /
+         daemon-reported `isRunInFlight`). Persistence across page
+         refreshes comes from the run-summary's projection block — NO
+         client-only state. Banner hides once a fresh dry-run reports
+         `bytes_reclaimable_now == 0` (convergence reached, signalled by
+         `showRunAgainBanner()`). -->
+    @if (showRunAgainBanner()) {
+      <div class="ck-run-again-banner" data-testid="ck-run-again-banner">
+        <mat-icon>autorenew</mat-icon>
+        <div>
+          <strong>
+            Run cleanup again to reclaim
+            ~{{ formatBytes(runAgainReclaimBytes()) }} more
+          </strong>
+          <p>
+            A follow-up run will free the blobs orphaned by the row
+            deletions that just completed.
+          </p>
+        </div>
+        <button
+          mat-raised-button
+          color="primary"
+          data-testid="ck-run-again-btn"
+          [disabled]="dryRunning() || executing() || isRunInFlight()"
+          (click)="onDryRun()"
+        >
+          @if (dryRunning()) {
+            <mat-spinner diameter="20"></mat-spinner>
+            Running...
+          } @else {
+            Run again
+          }
         </button>
       </div>
     }

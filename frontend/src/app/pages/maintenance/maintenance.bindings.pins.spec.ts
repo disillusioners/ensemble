@@ -3,8 +3,9 @@
 // Pattern from `frontend/src/app/pages/jobs/jobs-page.bindings.pins.spec.ts`
 // — `fs.readFileSync` + `expect(componentSrc).toMatch(/.../)`. The
 // spec reads the REAL production source verbatim and asserts each
-// pin's contract surface survives in code. **15 pins total** per the
-// plan T6.3 [R-2 + sections-registry addition, v3 fix pass]:
+// pin's contract surface survives in code. **18 pins total** per the
+// plan T6.3 [R-2 + sections-registry addition, v3 fix pass +
+// v3.2 amendment]:
 //
 //   1.  `sections-registry-load-bearing` (R-addition)
 //   2.  `confirm-dialog-wired` (T6.3)
@@ -21,6 +22,9 @@
 //   13. `dual-flavor-branch` (AM-11)
 //   14. `expected-duration-hint` (AM-12)
 //   15. `fresh_until-shown` (AM-16)
+//   16. `projection-fields-render` (v3.2 amendment, R-1/R-4)
+//   17. `confirm-message-journey-copy` (v3.2 amendment)
+//   18. `run-again-banner-when-projection-nonzero` (v3.2 amendment, R-5)
 
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -51,7 +55,7 @@ const modelsSrc = readFileSync(join(__dirname, '../../models/index.ts'), 'utf-8'
 const appRoutesSrc = readFileSync(join(__dirname, '../../app.routes.ts'), 'utf-8');
 const appSrc = readFileSync(join(__dirname, '../../app.ts'), 'utf-8');
 
-describe('Maintenance console — source-grep pins (15 pins)', () => {
+describe('Maintenance console — source-grep pins (18 pins)', () => {
   // ── Pin 1: sections-registry-load-bearing (R-addition, v3 fix pass) ─────
   describe('1. sections-registry-load-bearing', () => {
     it('MaintenanceComponent declares readonly sections array', () => {
@@ -341,6 +345,162 @@ describe('Maintenance console — source-grep pins (15 pins)', () => {
     });
   });
 
+  // ── Pin 16: projection-fields-render (v3.2 amendment, R-1 + R-4) ─────
+  describe('16. projection-fields-render (v3.2 — R-1/R-4)', () => {
+    // Pin 16 — three-number render (now / after / total) + skip-flag
+    // honesty banner. The component reads three dry-run fields via
+    // its helpers, and the template renders them via those helpers.
+    // Zero components render as "—" (amendment copy) — the helper
+    // implementation lives in the component source; the template
+    // wires the helpers and the skipped-flag block.
+
+    it('component source reads `bytes_reclaimable_now` (via the `dryRunProjectionNow` helper)', () => {
+      expect(sectionComponentSrc).toMatch(/dryRunProjectionNow/);
+      // The literal field name MUST appear in the source — a
+      // refactor that renames the wire field without updating the
+      // model is caught here.
+      expect(sectionComponentSrc).toMatch(/bytes_reclaimable_now/);
+    });
+
+    it('component source reads `bytes_reclaimable_after_row_prune` (via the `dryRunProjectionAfter` helper)', () => {
+      expect(sectionComponentSrc).toMatch(/dryRunProjectionAfter/);
+      expect(sectionComponentSrc).toMatch(/bytes_reclaimable_after_row_prune/);
+    });
+
+    it('component source reads `bytes_reclaimable_total` (via the `dryRunProjectionTotal` helper)', () => {
+      expect(sectionComponentSrc).toMatch(/dryRunProjectionTotal/);
+      expect(sectionComponentSrc).toMatch(/bytes_reclaimable_total/);
+    });
+
+    it('template calls the three projection helpers in the three-number render block', () => {
+      // All three helper invocations MUST be present in the
+      // template — the three-number render is a single amendment
+      // shape; deleting one drops the consent-time number.
+      expect(sectionComponentTemplate).toMatch(/dryRunProjectionNow\(\s*dry\s*\)/);
+      expect(sectionComponentTemplate).toMatch(/dryRunProjectionAfter\(\s*dry\s*\)/);
+      expect(sectionComponentTemplate).toMatch(/dryRunProjectionTotal\(\s*dry\s*\)/);
+    });
+
+    it('template renders the R-4 skip-flag honesty banner when `dry.skipped.length > 0`', () => {
+      // The skipped list is already wired (Pin 11); the new
+      // honest-copy sits near the projection. Both branches use
+      // `dry.skipped.length > 0`.
+      expect(sectionComponentTemplate).toMatch(
+        /dryRunSkippedHonestyActive\([\s\S]*?dry\s*\)/,
+      );
+      expect(sectionComponentTemplate).toMatch(/dry\.skipped\.length\s*>\s*0/);
+      // The honesty-copy wording (R-4) MUST appear verbatim — any
+      // drift fails the pin.
+      expect(sectionComponentTemplate).toMatch(/cleanup effectiveness may be understated/);
+    });
+
+    it('never-pruned sub-copy renders when isNeverPrunedProfile(dry) is true', () => {
+      // Amendment copy: "On a DB that has never run retention, run
+      // 1 deletes rows only; run 2 frees the blob bytes."
+      expect(sectionComponentSrc).toMatch(/isNeverPrunedProfile/);
+      expect(sectionComponentTemplate).toMatch(/isNeverPrunedProfile\(\s*dry\s*\)/);
+      expect(sectionComponentTemplate).toMatch(/never run retention, run 1 deletes rows only/);
+    });
+  });
+
+  // ── Pin 17: confirm-message-journey-copy (v3.2 amendment) ────────────
+  describe('17. confirm-message-journey-copy (v3.2)', () => {
+    // Pin 17 EXTENDS Pin 5 (byte-echo-in-confirm-message, AM-16).
+    // Both still must pass; this pin adds the journey copy.
+
+    it('message reads bytes_reclaimable_now (this-run) AND bytes_reclaimable_after_row_prune (follow-up) via formatBytes', () => {
+      // Anchor on the unique journey-anchor literal `running cleanup again`
+      // (only present in the v3.2 consent-instrument copy). Capturing
+      // forward to the template-literal terminator + statement-close
+      // gives us `buildConfirmMessage`'s body verbatim. The Pin 5
+      // static grep on `formatBytes(` still covers the overall
+      // helper-usage contract; this pin narrows to the AMENDMENT
+      // contract specifically.
+      const buildMsg = sectionComponentSrc.match(
+        /private\s+buildConfirmMessage[\s\S]*?running cleanup again[\s\S]*?\)\s*;/,
+      );
+      expect(buildMsg).not.toBeNull();
+      // Two `formatBytes(` calls (now + after) — at least 2.
+      const formatBytesCount = (buildMsg![0].match(/formatBytes\(/g) ?? []).length;
+      expect(formatBytesCount).toBeGreaterThanOrEqual(2);
+      // The two field references used in the consent-instrument copy.
+      expect(buildMsg![0]).toMatch(/bytes_reclaimable_now/);
+      expect(buildMsg![0]).toMatch(/bytes_reclaimable_after_row_prune/);
+      // rows echoed (Pin 5 carries).
+      expect(buildMsg![0]).toMatch(/would_delete\.checkpoint_rows/);
+    });
+
+    it('message contains the "running cleanup again" anchor literal', () => {
+      // The amendment copy is the canonical consent-instrument
+      // journey phrase — `running cleanup again` is the anchor.
+      expect(sectionComponentSrc).toMatch(/running cleanup again/);
+    });
+
+    it('AM-16 honest-duration copy still present in the confirm message', () => {
+      // Pin 5 (T6.3) keeps its contract — the journey copy extends
+      // the existing message, doesn't replace it.
+      expect(sectionComponentSrc).toMatch(/several minutes/i);
+      expect(sectionComponentSrc).toMatch(/cannot be undone/i);
+    });
+  });
+
+  // ── Pin 18: run-again-banner-when-projection-nonzero (v3.2, R-5) ─────
+  describe('18. run-again-banner-when-projection-nonzero (v3.2 — R-5)', () => {
+    // Pin 18 — the post-run convergence banner. Visible when (a)
+    // last execute succeeded, (b) projection.after > 0; hides when
+    // a fresh dry-run reports `bytes_reclaimable_now == 0`. The
+    // CTA button starts a NEW dry-run (onDryRun binding) — NEVER
+    // a silent execute. The button is disabled while a run is in
+    // flight.
+
+    it('component source defines `showRunAgainBanner()` reading `bytes_reclaimable_after_row_prune_at_dry_run`', () => {
+      expect(sectionComponentSrc).toMatch(/showRunAgainBanner\s*\(/);
+      expect(sectionComponentSrc).toMatch(
+        /bytes_reclaimable_after_row_prune_at_dry_run/,
+      );
+    });
+
+    it('banner visibility converges (`bytes_reclaimable_now == 0` hides it)', () => {
+      // Anchored on the `showRunAgainBanner` definition so the
+      // convergence check is read inside the visibility decision,
+      // not somewhere else.
+      const bannerShow = sectionComponentSrc.match(
+        /showRunAgainBanner\s*\([\s\S]*?(?=\n\s*private\s|\n\s*}\s*\/\*|\n\s*\/\*\*\s*\n)/,
+      );
+      expect(bannerShow).not.toBeNull();
+      expect(bannerShow![0]).toMatch(/bytes_reclaimable_now/);
+    });
+
+    it('template renders `data-testid="ck-run-again-banner"` (banner DOM marker)', () => {
+      expect(sectionComponentTemplate).toMatch(/data-testid="ck-run-again-banner"/);
+    });
+
+    it('banner CTA wired to `(click)="onDryRun()"` (NEVER onExecute) — no silent execute', () => {
+      // Negative arm: the run-again button MUST bind to onDryRun,
+      // not onExecute. A silent-execute regression (a re-binding
+      // to `onExecute()`) is caught here.
+      // We anchor on the run-again button testid and look for the
+      // first `(click)` binding within its opening tag block.
+      const runAgainButton = sectionComponentTemplate.match(
+        /data-testid="ck-run-again-btn"[\s\S]*?>/,
+      );
+      expect(runAgainButton).not.toBeNull();
+      expect(runAgainButton![0]).toMatch(/\(click\)\s*=\s*["']onDryRun\(\)["']/);
+      expect(runAgainButton![0]).not.toMatch(/\(click\)\s*=\s*["']onExecute\(\)["']/);
+    });
+
+    it('banner CTA disabled while ANY run is in flight (dry-run / execute / daemon isRunInFlight)', () => {
+      const runAgainButton = sectionComponentTemplate.match(
+        /data-testid="ck-run-again-btn"[\s\S]*?>/,
+      );
+      expect(runAgainButton).not.toBeNull();
+      // All three in-flight signals MUST gate the button.
+      expect(runAgainButton![0]).toMatch(/dryRunning\(\)/);
+      expect(runAgainButton![0]).toMatch(/executing\(\)/);
+      expect(runAgainButton![0]).toMatch(/isRunInFlight\(\)/);
+    });
+  });
+
   // ── Pin count assertion ────────────────────────────────────────────────
   describe('pin count', () => {
     // Item 2 — derive the pin-count from this file's OWN describe
@@ -363,9 +523,9 @@ describe('Maintenance console — source-grep pins (15 pins)', () => {
       // count itself stays in sync because every describe('N. …')
       // increment adds one match.
       expect(pinDescribes.length).toBeGreaterThan(0);
-      // Anchor: the file ships with 15 pin describes (1–15); if you
-      // add a new describe('16. …'), update this anchor.
-      expect(pinDescribes.length).toBe(15);
+      // Anchor: the file ships with 18 pin describes (1–18); if you
+      // add a new describe('19. …'), update this anchor.
+      expect(pinDescribes.length).toBe(18);
     });
   });
 });

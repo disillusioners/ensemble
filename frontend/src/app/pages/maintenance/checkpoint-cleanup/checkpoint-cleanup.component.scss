@@ -299,6 +299,98 @@ $accent-blue: #3b82f6;
   border: 2px solid $accent-rose !important;
 }
 
+// v3.2 — three-number projection render (R-1). Two-column label +
+// value pairs for raw `would_*` reads live in the `<dl>` above; the
+// projection block is a single highlighted sentence with sub-copy
+// below (skipped-honesty + never-pruned journey note).
+.ck-projection {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  background: rgba($accent-blue, 0.08);
+  border: 1px solid rgba($accent-blue, 0.4);
+  border-radius: 6px;
+  padding: 0.875rem 1rem;
+}
+
+.ck-projection-line {
+  margin: 0;
+  color: $text-secondary;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+
+  strong {
+    color: $text-primary;
+    font-weight: 600;
+    font-family: 'Menlo', 'Monaco', monospace;
+    margin: 0 0.125rem;
+  }
+}
+
+.ck-projection-skipped {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  color: $accent-cyan;
+  font-size: 0.8125rem;
+
+  mat-icon {
+    font-size: 1rem;
+    width: 1rem;
+    height: 1rem;
+  }
+}
+
+.ck-never-pruned-subcopy {
+  margin: 0;
+  color: $text-muted;
+  font-size: 0.8125rem;
+  font-style: italic;
+  line-height: 1.4;
+}
+
+// v3.2 — post-run convergence banner (R-5). Mirrors the
+// interrupted-card pattern visually but uses accent-blue (operator
+// action, NOT a warning) and surfaces the reclaim number in monospace.
+.ck-run-again-banner {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: rgba($accent-blue, 0.08);
+  border: 1px solid rgba($accent-blue, 0.4);
+  border-radius: 6px;
+  padding: 1rem;
+
+  mat-icon {
+    color: $accent-blue;
+    font-size: 1.5rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    flex-shrink: 0;
+  }
+
+  div {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+
+    strong {
+      color: $accent-blue;
+      font-size: 0.9375rem;
+      font-family: 'Menlo', 'Monaco', monospace;
+    }
+
+    p {
+      margin: 0;
+      color: $text-secondary;
+      font-size: 0.8125rem;
+      line-height: 1.4;
+    }
+  }
+}
+
 // Execute button: progress bar spacing
 mat-progress-bar {
   margin-top: 0.5rem;

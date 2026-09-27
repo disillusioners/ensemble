@@ -797,6 +797,33 @@ export interface CheckpointCleanupSummary {
   writes: { deleted: number };
   blobs: CheckpointCleanupBlobsSummary;
   duration_ms: number;
+  /**
+   * v3.2 — manual_execute echo of the source dry-run's projection.
+   * Powers the post-run "Run cleanup again to reclaim ~X more"
+   * banner across page refreshes — the run row is self-contained
+   * (R-5).
+   *
+   * `manual_dry_run` rows carry equivalent values in their summary
+   * payload already (the dry-run IS its own projection source);
+   * this block is the snapshot of the dry-run that the execute
+   * was issued against. Auto rows: absent (R-5 — INV-1/INV-2
+   * keep auto-cycle free of projection scans).
+   *
+   *   `bytes_reclaimable_now_at_dry_run` — INTEGER ≥ 0. What the
+   *     dry-run reported for THIS run.
+   *   `bytes_reclaimable_after_row_prune_at_dry_run` — INTEGER ≥ 0.
+   *     What the dry-run projected a FOLLOW-UP run would free
+   *     after this one. Used by the run-again banner — when this
+   *     is `> 0`, the banner is visible; once a fresh dry-run
+   *     reports `bytes_reclaimable_now == 0`, the banner hides.
+   *
+   * Both fields optional so legacy v3.1 payloads remain valid;
+   * missing ⇒ 0 (FE renders as "—" / banner hidden).
+   */
+  projection?: {
+    bytes_reclaimable_now_at_dry_run?: number;
+    bytes_reclaimable_after_row_prune_at_dry_run?: number;
+  };
 }
 
 /**
@@ -841,12 +868,38 @@ export interface CheckpointCleanupScanned {
  * AM-10, AM-11 — canonical names `would_delete_count` /
  * `would_free_bytes`; `skipped[]` capped at 1000 with
  * `skipped_truncated:true` flag.
+ *
+ * v3.2 — three additive projection fields (ratified contract
+ * amendment). The echo gate remains bound to `would_free_bytes`
+ * (AM-3 unchanged); these three fields are projection-class and
+ * informational — `would_free_bytes` === `bytes_reclaimable_now`.
+ *
+ *   `bytes_reclaimable_now` — INTEGER ≥ 0. **This run** frees this
+ *     (alias of `would_free_bytes`; explicit shape-stability alias).
+ *   `bytes_reclaimable_after_row_prune` — INTEGER ≥ 0. **Follow-up
+ *     run** frees this (delta: blobs currently referenced whose
+ *     only referencers are excess rows Op D deletes). Skipped pairs
+ *     contribute 0.
+ *   `bytes_reclaimable_total` — INTEGER ≥ 0. Derived sum
+ *     (`now + after`); informational for glanceability. Schema
+ *     docstring MUST state it requires two passes to materialize
+ *     on a never-pruned DB.
+ *
+ * Missing fields default to 0 (v3.1 clients unaffected; additive).
+ * Never gate-bound (AM-3 unchanged); treated as informational, same
+ * as `skipped[]`.
  */
 export interface CheckpointCleanupDryRun {
   run_id: string;
   would_delete: CheckpointCleanupWouldDelete;
   would_delete_count: number;
   would_free_bytes: number;
+  /** v3.2 — alias of `would_free_bytes`; what THIS run frees. */
+  bytes_reclaimable_now?: number;
+  /** v3.2 — what a FOLLOW-UP run frees after this one (delta). */
+  bytes_reclaimable_after_row_prune?: number;
+  /** v3.2 — `now + after` (informational sum-on-the-wire). */
+  bytes_reclaimable_total?: number;
   scanned: CheckpointCleanupScanned;
   skipped: CheckpointCleanupSkippedEntry[];
   skipped_truncated?: boolean;

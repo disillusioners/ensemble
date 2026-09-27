@@ -44,6 +44,15 @@ import {
   DRY_RUN,
   STALE_DRY_RUN,
   STATUS,
+  DRY_RUN_NEVER_PRUNED,
+  DRY_RUN_PRUNED,
+  DRY_RUN_MIXED,
+  DRY_RUN_WITH_SKIPPED,
+  RUN_SUCCEEDED_NEVER_PRUNED,
+  RUN_SUCCEEDED_PRUNED,
+  RUN_AUTO_NO_PROJECTION,
+  RUN_FAILED_NEVER_PRUNED,
+  RUN_INTERRUPTED_NEVER_PRUNED,
 } from './__fixtures__/fixtures';
 
 // ── Mocks ────────────────────────────────────────────────────────────────
@@ -403,6 +412,66 @@ class TestableCheckpointCleanupComponent {
     return run.status === 'interrupted';
   }
 
+  // ── v3.2 — dry-run projection helpers ─────────────────────────────────
+
+  /** R-1 — "—" for zero, else human-formatted bytes. This-run number. */
+  dryRunProjectionNow(dryRun: CheckpointCleanupDryRun): string {
+    const v = dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes ?? 0;
+    return this.formatOrDash(v);
+  }
+
+  /** R-1 — "—" for zero, else human-formatted bytes. Follow-up run. */
+  dryRunProjectionAfter(dryRun: CheckpointCleanupDryRun): string {
+    const v = dryRun.bytes_reclaimable_after_row_prune ?? 0;
+    return this.formatOrDash(v);
+  }
+
+  /** R-1 — "—" for zero, else human-formatted bytes. Sum. */
+  dryRunProjectionTotal(dryRun: CheckpointCleanupDryRun): string {
+    const now = dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes ?? 0;
+    const after = dryRun.bytes_reclaimable_after_row_prune ?? 0;
+    const v = dryRun.bytes_reclaimable_total ?? now + after;
+    return this.formatOrDash(v);
+  }
+
+  /** Pure — "—" for zero/negative/non-finite; otherwise formatBytes. */
+  private formatOrDash(v: number): string {
+    return typeof v === 'number' && v > 0 && Number.isFinite(v) ? this.formatBytes(v) : '—';
+  }
+
+  /** R-4 — skip-flag honesty banner trigger. */
+  dryRunSkippedHonestyActive(dryRun: CheckpointCleanupDryRun): boolean {
+    return dryRun.skipped.length > 0;
+  }
+
+  /** Never-pruned profile — `now == 0 && after > 0`. */
+  isNeverPrunedProfile(dryRun: CheckpointCleanupDryRun): boolean {
+    const now = dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes ?? 0;
+    const after = dryRun.bytes_reclaimable_after_row_prune ?? 0;
+    return now === 0 && after > 0;
+  }
+
+  // ── v3.2 — post-run banner helpers (R-5) ──────────────────────────────
+
+  /** Banner visibility — last execute succeeded, projection.after > 0,
+   *  NOT yet converged via fresh dry-run (now == 0). */
+  showRunAgainBanner(): boolean {
+    const run = this.lastExecuteResult();
+    if (!run || run.status !== 'succeeded' || !run.summary) return false;
+    const after =
+      run.summary.projection?.bytes_reclaimable_after_row_prune_at_dry_run ?? 0;
+    if (after <= 0) return false;
+    const dry = this.lastDryRun();
+    if (dry && (dry.bytes_reclaimable_now ?? 0) === 0) return false;
+    return true;
+  }
+
+  /** Banner CTA copy source — projection-after bytes. */
+  runAgainReclaimBytes(): number {
+    const run = this.lastExecuteResult();
+    return run?.summary?.projection?.bytes_reclaimable_after_row_prune_at_dry_run ?? 0;
+  }
+
   /**
    * Item 4 / Item 20 — error code → human label for the inline banner.
    * Curated mapping via `ERROR_LABEL_MAP` (table lookup); everything
@@ -467,12 +536,18 @@ class TestableCheckpointCleanupComponent {
   }
 
   private buildConfirmMessage(dryRun: CheckpointCleanupDryRun): string {
-    const bytes = this.formatBytes(dryRun.would_free_bytes);
+    // v3.2 — journey copy (amendment VERBATIM). Per-run honesty
+    // (what THIS run does) + journey honesty (what a follow-up run
+    // reclaims). Two `formatBytes()` calls (now, after) +
+    // `would_delete.checkpoint_rows` + literal "running cleanup again".
+    const now = this.formatBytes(dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes);
+    const after = this.formatBytes(dryRun.bytes_reclaimable_after_row_prune ?? 0);
     const rows = dryRun.would_delete.checkpoint_rows;
     return (
-      `This will permanently delete ~${bytes} of unreferenced blobs and ` +
-      `${rows} excess checkpoint rows. This may take several minutes on ` +
-      `large databases. This cannot be undone.`
+      `This run will permanently delete ~${now} of unreferenced blobs ` +
+      `and ${rows} excess checkpoint rows. After this run, ~${after} ` +
+      `more becomes reclaimable by running cleanup again. This may ` +
+      `take several minutes on large databases. This cannot be undone.`
     );
   }
 
@@ -860,6 +935,211 @@ describe('CheckpointCleanupComponent', () => {
       component.ngOnDestroy();
       // pollSub is internal; verify via the mock's teardown count.
       expect(service.pollRunCalls).toHaveLength(1);
+    });
+  });
+
+  // ── v3.2 — Pin 16: projection-fields-render ─────────────────────────
+
+  describe('projection-fields-render (Pin 16 — v3.2, R-1/R-4)', () => {
+    it('never-pruned scenario: now == "—", after ≈ 11 GB, total ≈ 11 GB', () => {
+      expect(component.dryRunProjectionNow(DRY_RUN_NEVER_PRUNED)).toBe('—');
+      const after = component.dryRunProjectionAfter(DRY_RUN_NEVER_PRUNED);
+      // formatBytes is binary (1024); 11,811,060,000 B → "11.0 GB"
+      expect(after).toMatch(/^11(\.\d+)? GB/);
+      const total = component.dryRunProjectionTotal(DRY_RUN_NEVER_PRUNED);
+      expect(total).toMatch(/^11(\.\d+)? GB/);
+    });
+
+    it('fully-pruned scenario: now = 256 MB, after = "—", total = 256 MB', () => {
+      expect(component.dryRunProjectionNow(DRY_RUN_PRUNED)).toBe('256 MB');
+      expect(component.dryRunProjectionAfter(DRY_RUN_PRUNED)).toBe('—');
+      expect(component.dryRunProjectionTotal(DRY_RUN_PRUNED)).toBe('256 MB');
+    });
+
+    it('mixed projection: no "—" substitutions, every number formatted', () => {
+      expect(component.dryRunProjectionNow(DRY_RUN_MIXED)).toBe('100 MB');
+      expect(component.dryRunProjectionAfter(DRY_RUN_MIXED)).toBe('5.0 GB');
+      expect(component.dryRunProjectionTotal(DRY_RUN_MIXED)).toBe('5.1 GB');
+    });
+
+    it('sentinel "—" fires for zero, negative, non-finite inputs', () => {
+      const zeroed: CheckpointCleanupDryRun = {
+        ...DRY_RUN_PRUNED,
+        bytes_reclaimable_now: 0,
+      };
+      expect(component.dryRunProjectionNow(zeroed)).toBe('—');
+      const negative: CheckpointCleanupDryRun = {
+        ...DRY_RUN,
+        bytes_reclaimable_now: -1,
+      };
+      expect(component.dryRunProjectionNow(negative)).toBe('—');
+      const naned: CheckpointCleanupDryRun = {
+        ...DRY_RUN,
+        bytes_reclaimable_now: NaN,
+      };
+      expect(component.dryRunProjectionNow(naned)).toBe('—');
+    });
+
+    it('falls back to would_free_bytes when bytes_reclaimable_now is missing (v3.1 payload defensive)', () => {
+      // Legacy v3.1 dry-run lacks the projection fields. The "now"
+      // helper MUST render via `would_free_bytes` (shape-stability
+      // alias — they MUST render the same number per AM-3).
+      const legacy: CheckpointCleanupDryRun = { ...DRY_RUN };
+      expect(component.dryRunProjectionNow(legacy)).toBe('256 MB');
+      // total reads would_free_bytes (sum of legacy-fallback now + 0 after)
+      expect(component.dryRunProjectionTotal(legacy)).toBe('256 MB');
+      // after is zero, "—"
+      expect(component.dryRunProjectionAfter(legacy)).toBe('—');
+    });
+
+    it('total derives now+after when bytes_reclaimable_total absent (wire summary drift tolerance)', () => {
+      const drifted: CheckpointCleanupDryRun = {
+        ...DRY_RUN_NEVER_PRUNED,
+        bytes_reclaimable_total: undefined,
+      };
+      const total = component.dryRunProjectionTotal(drifted);
+      // equals after (since now = 0)
+      expect(total).toBe(component.dryRunProjectionAfter(drifted));
+    });
+
+    it('skip-flag honesty active iff skipped[] non-empty (R-4)', () => {
+      expect(component.dryRunSkippedHonestyActive(DRY_RUN_NEVER_PRUNED)).toBe(false);
+      expect(component.dryRunSkippedHonestyActive(DRY_RUN_WITH_SKIPPED)).toBe(true);
+      // DRY_RUN has skipped: [3 entries] — existing fixture carries it
+      expect(component.dryRunSkippedHonestyActive(DRY_RUN)).toBe(true);
+    });
+
+    it('isNeverPrunedProfile: now == 0 && after > 0 — only the never-pruned case', () => {
+      expect(component.isNeverPrunedProfile(DRY_RUN_NEVER_PRUNED)).toBe(true);
+      expect(component.isNeverPrunedProfile(DRY_RUN_PRUNED)).toBe(false);
+      expect(component.isNeverPrunedProfile(DRY_RUN_MIXED)).toBe(false);
+      // both zero → not a never-pruned profile
+      const bothZero: CheckpointCleanupDryRun = {
+        ...DRY_RUN_NEVER_PRUNED,
+        bytes_reclaimable_after_row_prune: 0,
+      };
+      expect(component.isNeverPrunedProfile(bothZero)).toBe(false);
+    });
+  });
+
+  // ── v3.2 — Pin 17: confirm-message-journey-copy ──────────────────────
+
+  describe('confirm-message-journey-copy (Pin 17 — v3.2)', () => {
+    /** Builds the message without opening the dialog, then asserts
+     *  on it directly. The component's `buildConfirmMessage` is
+     *  private; we exercise via the public dialog `data.message`. */
+    function captureConfirmMessage(dryRun: CheckpointCleanupDryRun): string {
+      service.lastDryRun.set(dryRun);
+      mockDialog.nextResult = false; // cancel — no execute path
+      mockDialog.openCalls = [];
+      component.onExecute();
+      const captured = mockDialog.openCalls[0]?.data as
+        | { message: string }
+        | undefined;
+      if (!captured) {
+        throw new Error('confirm dialog was not opened');
+      }
+      return captured.message;
+    }
+
+    it('journey copy extends Pin 5 — now + rows + fmt(after) + "running cleanup again"', () => {
+      const msg = captureConfirmMessage(DRY_RUN_NEVER_PRUNED);
+      // fmt(now) — 0 → "0 B" in formatBytes (NOT "—"; the dialog
+      //  promises what THIS run deletes, even when 0, so the user
+      //  is not misled into thinking it's "skip"; spec uses
+      //  formatBytes unconditionally for the consent instrument).
+      expect(msg).toMatch(/0 B|—/);
+      // rows — 104,501 excess checkpoint rows
+      expect(msg).toContain('104501');
+      // fmt(after) — 11,811,060,000 bytes → "11.0 GB" (binary)
+      expect(msg).toMatch(/11(\.\d+)? GB/);
+      // Journey anchor literal
+      expect(msg).toMatch(/running cleanup again/i);
+    });
+
+    it('AM-16 honest-duration copy preserved', () => {
+      const msg = captureConfirmMessage(DRY_RUN);
+      expect(msg).toMatch(/several minutes/i);
+      expect(msg).toMatch(/cannot be undone/i);
+      expect(msg).toContain('256 MB');
+      expect(msg).toContain('2'); // 2 excess checkpoint rows (DRY_RUN fixture)
+    });
+
+    it('destructive phrasing present (extends AM-17)', () => {
+      const msg = captureConfirmMessage(DRY_RUN);
+      // v3.2 wording — "This run will permanently delete"
+      expect(msg).toContain('This run will permanently delete');
+      expect(msg).toContain('cannot be undone');
+    });
+
+    it('path present on mixed projection (no zero fallback)', () => {
+      const msg = captureConfirmMessage(DRY_RUN_MIXED);
+      expect(msg).toContain('100 MB'); // fmt(now)
+      expect(msg).toMatch(/5\.0 GB/); // fmt(after)
+      expect(msg).toContain('5000'); // 5000 excess rows
+    });
+  });
+
+  // ── v3.2 — Pin 18: run-again-banner-when-projection-nonzero ───────────
+
+  describe('run-again-banner-when-projection-nonzero (Pin 18 — v3.2, R-5)', () => {
+    it('banner VISIBLE when last execute succeeded AND projection.after > 0', () => {
+      component.lastExecuteResult.set(RUN_SUCCEEDED_NEVER_PRUNED);
+      expect(component.showRunAgainBanner()).toBe(true);
+      expect(component.runAgainReclaimBytes()).toBe(11811060000);
+    });
+
+    it('banner HIDDEN when last execute status is failed or interrupted', () => {
+      component.lastExecuteResult.set(RUN_FAILED_NEVER_PRUNED);
+      expect(component.showRunAgainBanner()).toBe(false);
+      component.lastExecuteResult.set(RUN_INTERRUPTED_NEVER_PRUNED);
+      expect(component.showRunAgainBanner()).toBe(false);
+    });
+
+    it('banner HIDDEN when projection.after is 0 (no follow-up reclaimable)', () => {
+      component.lastExecuteResult.set(RUN_SUCCEEDED_PRUNED);
+      expect(component.showRunAgainBanner()).toBe(false);
+      expect(component.runAgainReclaimBytes()).toBe(0);
+    });
+
+    it('banner HIDDEN when summary has no projection block (auto rows, R-5)', () => {
+      component.lastExecuteResult.set(RUN_AUTO_NO_PROJECTION);
+      expect(component.showRunAgainBanner()).toBe(false);
+      // auto rows still expose 0 for the reclaim bytes
+      expect(component.runAgainReclaimBytes()).toBe(0);
+    });
+
+    it('banner HIDDEN when there is no last execute result', () => {
+      component.lastExecuteResult.set(null);
+      expect(component.showRunAgainBanner()).toBe(false);
+    });
+
+    it('banner HIDDEN once a fresh dry-run converges (bytes_reclaimable_now == 0)', () => {
+      component.lastExecuteResult.set(RUN_SUCCEEDED_NEVER_PRUNED);
+      // After > 0 case: dry-run shows now > 0 (mixed / pruned) — banner visible
+      service.lastDryRun.set(DRY_RUN_PRUNED);
+      expect(component.showRunAgainBanner()).toBe(true);
+      // After a fresh dry-run converges (now == 0) — banner hides
+      const converged: CheckpointCleanupDryRun = {
+        ...DRY_RUN_PRUNED,
+        bytes_reclaimable_now: 0,
+      };
+      service.lastDryRun.set(converged);
+      expect(component.showRunAgainBanner()).toBe(false);
+    });
+
+    it('banner CTA starts a NEW dry-run (NEVER a silent execute) — covers the (click)=onDryRun binding', () => {
+      // The Pin 18 source-grep asserts `(click)="onDryRun()"` on
+      // the button (template). The behavioural counterpart here
+      // proves the production entry point never calls execute()
+      // when the user clicks "Run again".
+      component.lastExecuteResult.set(RUN_SUCCEEDED_NEVER_PRUNED);
+      service.lastDryRun.set(DRY_RUN_NEVER_PRUNED);
+      service.dryRunCalls = 0;
+      service.executeCalls = [];
+      component.onDryRun();
+      expect(service.dryRunCalls).toBe(1);
+      expect(service.executeCalls).toHaveLength(0);
     });
   });
 });
