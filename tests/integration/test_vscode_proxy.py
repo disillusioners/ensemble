@@ -485,7 +485,7 @@ class TestHTTPProxyGate:
         def fake_async_client(*args, **kwargs):
             return fake_client
 
-        monkeypatch.setattr(httpx.AsyncClient, "__new__", fake_async_client)
+        monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
 
         with TestClient(app) as client:
             resp = client.get("/index.html")
@@ -527,7 +527,7 @@ class TestHTTPProxyGate:
         def fake_async_client(*args, **kwargs):
             return fake_client
 
-        monkeypatch.setattr(httpx.AsyncClient, "__new__", fake_async_client)
+        monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
 
         with TestClient(app) as client:
             resp = client.get("/healthz")
@@ -567,7 +567,7 @@ class TestHTTPProxyGate:
         def fake_async_client(*args, **kwargs):
             return fake_client
 
-        monkeypatch.setattr(httpx.AsyncClient, "__new__", fake_async_client)
+        monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
 
         with TestClient(app) as client:
             # HTTPStatusError is NOT caught by the proxy (it only catches

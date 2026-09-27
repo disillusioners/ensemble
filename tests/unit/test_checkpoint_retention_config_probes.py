@@ -46,11 +46,15 @@ def _build_checkpointer(excess_pairs, ids_to_keep=None, deleted_cp_rows=0, delet
     """Build an AsyncMock checkpointer shaped like the existing tests.
 
     Mirrors the mock shape in ``tests/test_maintenance.py``:
+      - ``find_all_thread_ns_pairs`` → ALL (thread_id, ns, cnt) groups
+        (T1.4 scanned_pairs enumeration — read-only GROUP BY before the
+        excess filter; Section 1 of the Maintenance Console)
       - ``find_excess_checkpoint_groups`` → list of (thread_id, ns, cnt) tuples
       - ``get_checkpoint_ids`` → list of keep IDs (or [] for P7)
       - ``delete_checkpoints_excluding`` / ``delete_writes_excluding`` → rowcount
     """
     checkpointer = AsyncMock()
+    checkpointer.find_all_thread_ns_pairs = AsyncMock(return_value=excess_pairs)
     checkpointer.find_excess_checkpoint_groups = AsyncMock(return_value=excess_pairs)
     if ids_to_keep is None:
         # Default to "give back one id per call" so tests don't accidentally
@@ -188,7 +192,16 @@ async def test_inner_defensive_noop_when_get_checkpoint_ids_returns_empty():
     # Must not raise
     result = await job._prune_per_thread_checkpoints()
 
-    assert result is None  # _prune_per_thread_checkpoints returns None always
+    # T1.4 (maintenance-console §1): the method now returns a
+    # CheckpointRowPruneSummary (was ``-> None``). The defensive no-op
+    # path returns a summary with scanned_pairs populated and every
+    # delete counter at 0.
+    from daemon.services.maintenance import CheckpointRowPruneSummary
+
+    assert isinstance(result, CheckpointRowPruneSummary)
+    assert result.deleted_checkpoints == 0
+    assert result.deleted_writes == 0
+    assert result.scanned_pairs == 1  # the staged pair was scanned
     checkpointer.find_excess_checkpoint_groups.assert_awaited_once_with(3)
     checkpointer.get_checkpoint_ids.assert_awaited_once_with("thread-empty-keep", "", 3)
     # The DELETE calls MUST NOT have fired with a non-empty keep set —

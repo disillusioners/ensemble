@@ -988,6 +988,11 @@ class TestCheckpointCleanupJobPerThreadPruning:
         instance_repo = MagicMock()
 
         # Mock the adapter methods invoked during Operation D
+        # Step 0 (T1.4 — maintenance-console §1): find_all_thread_ns_pairs
+        # enumerates ALL groups for scanned_pairs (read-only GROUP BY).
+        checkpointer.find_all_thread_ns_pairs = AsyncMock(
+            return_value=[("thread-excess", "", 100)]
+        )
         # Step 1: find_excess_checkpoint_groups returns one thread/namespace pair
         checkpointer.find_excess_checkpoint_groups = AsyncMock(
             return_value=[("thread-excess", "", 100)]
@@ -1003,11 +1008,17 @@ class TestCheckpointCleanupJobPerThreadPruning:
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
-        # Method runs and returns None (no explicit return)
+        # T1.4: the method returns a CheckpointRowPruneSummary (was
+        # ``-> None``; the plan upgraded the return contract).
+        from daemon.services.maintenance import CheckpointRowPruneSummary
+
         result = await job._prune_per_thread_checkpoints()
 
-        # Method returns None (no explicit return in production code)
-        assert result is None
+        assert isinstance(result, CheckpointRowPruneSummary)
+        assert result.deleted_checkpoints == 50
+        assert result.deleted_writes == 100
+        assert result.scanned_pairs == 1
+        assert result.excess_pairs == 1
         # Verify each adapter method was called once
         checkpointer.find_excess_checkpoint_groups.assert_awaited_once_with(
             3
@@ -1025,6 +1036,8 @@ class TestCheckpointCleanupJobPerThreadPruning:
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
 
+        # find_all_thread_ns_pairs returns the same group (T1.4 scanned).
+        checkpointer.find_all_thread_ns_pairs = AsyncMock(return_value=[])
         # find_excess_checkpoint_groups returns empty — no threads to prune
         checkpointer.find_excess_checkpoint_groups = AsyncMock(return_value=[])
 
@@ -1032,8 +1045,14 @@ class TestCheckpointCleanupJobPerThreadPruning:
 
         result = await job._prune_per_thread_checkpoints()
 
-        # No deletions when no excess threads - method returns None
-        assert result is None
+        # T1.4: returns a summary — early-exit shape (scanned populated,
+        # zeros elsewhere; no deletes fired).
+        from daemon.services.maintenance import CheckpointRowPruneSummary
+
+        assert isinstance(result, CheckpointRowPruneSummary)
+        assert result.scanned_pairs == 0
+        assert result.deleted_checkpoints == 0
+        assert result.deleted_writes == 0
         # Pruning methods should not have been called
         checkpointer.get_checkpoint_ids.assert_not_called()
         checkpointer.delete_checkpoints_excluding.assert_not_called()
