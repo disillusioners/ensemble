@@ -17,7 +17,7 @@ warnings.filterwarnings(
 import uvicorn
 from pathlib import Path
 
-from .config import load_config, warn_deprecated_allowed_models_env, warn_deprecated_reasoning_echo_env
+from .config import load_config, warn_default_allowed_models_applied, warn_deprecated_allowed_models_env, warn_deprecated_reasoning_echo_env
 
 # ── Process exit-code contract (Auto-Restart ADR-010/011) ─────────────────
 # The launcher (Phase 1) maps exit codes to restart policy:
@@ -291,6 +291,13 @@ def main(run_preflight: bool = True):
     # Warn-once if the legacy OPENAI_ALLOWED_MODELS env var is the
     # effective source (no-op when load_config already emitted it).
     warn_deprecated_allowed_models_env()
+
+    # Warn-once when the documented default applies — neither env var
+    # set (sel-default-20260927). The module-level guard makes this a
+    # no-op when load_config already emitted it; firing here means a
+    # process that only goes through the startup path (no prior
+    # load_config, rare) still gets the WARNING exactly once.
+    warn_default_allowed_models_applied()
 
     # Log version for debugging
     from . import __version__

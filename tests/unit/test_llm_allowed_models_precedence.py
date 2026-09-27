@@ -8,13 +8,24 @@ and ``daemon/config.py``):
   2. ``OPENAI_ALLOWED_MODELS`` (legacy) — when set AND the new name is
      unset, used as the effective source AND the warn-once
      ``warn_deprecated_allowed_models_env`` is invoked.
-  3. Neither env var set → documented default ``["agentic", "coding"]``.
+  3. Neither env var set → documented default
+     ``("agentic", "coding", "coding2", "vision")`` AND the
+     warn-once ``warn_default_allowed_models_applied`` is invoked.
 
 Internal API (the pydantic field ``config.llm.allowed_models``) is
 unchanged — only the env-var-level aliasing changed. These tests verify
 the resolution chain in ``_resolve_allowed_models`` (pure function,
 deterministic) and the warning-fires-exactly-once guard on
-``warn_deprecated_allowed_models_env``.
+``warn_deprecated_allowed_models_env`` /
+``warn_default_allowed_models_applied``.
+
+The fail-safe default (``agentic, coding, coding2, vision``) was set
+under the ``sel-default-20260927`` commission to align the constant in
+``daemon/config.py`` with the YAML interpolation literal in
+``config.yaml`` (which had already inlined ``vision`` per the
+designer-agent P1-WP1 mission, but the constant drifted). The
+``TestDefaultConsistencyPin`` class is the regression guard for future
+drift.
 
 Precedent: ``tests/unit/test_llm_reasoning_echo_config.py`` covers the
 sibling deprecation pattern (``OPENAI_REASONING_ECHO_MODELS`` →
@@ -121,8 +132,12 @@ class TestResolveAllowedModelsPure:
     def test_neither_set_yields_documented_default(self) -> None:
         """When neither env var is exported and an empty yaml value
         arrives (custom yaml or programmatic callers), the resolver
-        substitutes the documented default ``agentic,coding`` so a
-        no-env-var deployment matches the pre-rename behavior.
+        substitutes the documented default
+        ``agentic,coding,coding2,vision`` so a no-env-var deployment
+        matches the shipped YAML default (``sel-default-20260927``).
+        The drift-detector pin test
+        (``TestDefaultConsistencyPin``) guarantees the constant stays
+        aligned with the YAML interpolation literal.
         """
         from daemon.config import _resolve_allowed_models
 
@@ -132,7 +147,7 @@ class TestResolveAllowedModelsPure:
             old_var=None,
             on_legacy=lambda: None,
         )
-        assert result == "agentic,coding"
+        assert result == "agentic,coding,coding2,vision"
 
     def test_yaml_passthrough_when_neither_set(self) -> None:
         """If the YAML layer somehow handed us a non-empty value
@@ -321,19 +336,46 @@ class TestLoadConfigAllowedModelsIntegration:
     def test_neither_set_yields_documented_default(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """(c) Neither env var set → documented default ``[agentic, coding]``."""
+        """(c) Neither env var set → documented default
+        ``[agentic, coding, coding2, vision]`` (sel-default-20260927).
+        The shipped ``config.yaml`` inlines the same list at the
+        interpolation site; the default-applied WARNING fires exactly
+        once via the ``load_config`` wiring (caplog proof).
+        """
         monkeypatch.delenv("OPENAI_SELECTABLE_MODELS", raising=False)
         monkeypatch.delenv("OPENAI_ALLOWED_MODELS", raising=False)
 
         from daemon.config import load_config
         with caplog.at_level(logging.WARNING, logger="daemon.config"):
             cfg = load_config()
-        assert cfg.llm.allowed_models == ["agentic", "coding"]
+        assert cfg.llm.allowed_models == [
+            "agentic",
+            "coding",
+            "coding2",
+            "vision",
+        ]
         records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        # The legacy deprecation warning says "OPENAI_ALLOWED_MODELS is
+        # set but renamed to OPENAI_SELECTABLE_MODELS ..." — the new
+        # default-applied WARNING also mentions OPENAI_ALLOWED_MODELS
+        # in its explanation but is distinguished by "default applied".
+        # We assert NEITHER fires here: no legacy set → no deprecation
+        # warning, AND the default-applied WARNING is exercised by the
+        # dedicated TestDefaultAppliedWarningLoadConfig tests below.
         legacy_records = [
-            r for r in records if "OPENAI_ALLOWED_MODELS" in r.getMessage()
+            r
+            for r in records
+            if "OPENAI_ALLOWED_MODELS" in r.getMessage()
+            and "default applied" not in r.getMessage()
         ]
         assert legacy_records == []
+        default_records = [
+            r
+            for r in records
+            if "allowed_models default applied" in r.getMessage()
+        ]
+        assert len(default_records) == 1
+        assert "vision" in default_records[0].getMessage()
 
     def test_both_set_new_wins_no_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -351,8 +393,18 @@ class TestLoadConfigAllowedModelsIntegration:
             cfg = load_config()
         assert cfg.llm.allowed_models == ["gpt-5"]
         records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        # The legacy deprecation warning says "OPENAI_ALLOWED_MODELS is
+        # set but renamed to OPENAI_SELECTABLE_MODELS ..." — the new
+        # default-applied WARNING also mentions OPENAI_ALLOWED_MODELS
+        # in its explanation but is distinguished by "default applied".
+        # We assert NEITHER fires here: no legacy set → no deprecation
+        # warning, AND the default-applied WARNING is exercised by the
+        # dedicated TestDefaultAppliedWarningLoadConfig tests below.
         legacy_records = [
-            r for r in records if "OPENAI_ALLOWED_MODELS" in r.getMessage()
+            r
+            for r in records
+            if "OPENAI_ALLOWED_MODELS" in r.getMessage()
+            and "default applied" not in r.getMessage()
         ]
         assert legacy_records == []
 
@@ -378,7 +430,8 @@ class TestEmptyStringResolverSemantics:
 
     def test_new_var_empty_string_treated_as_unset(self) -> None:
         """F2 core: ``OPENAI_SELECTABLE_MODELS=""`` must fall through
-        to the documented default — NOT unrestricted (empty list).
+        to the documented default (``agentic,coding,coding2,vision``,
+        sel-default-20260927) — NOT unrestricted (empty list).
         Operator-facing: a bare ``KEY=`` line in ``.env`` must never
         silently produce unrestricted mode.
         """
@@ -390,7 +443,7 @@ class TestEmptyStringResolverSemantics:
             old_var=None,
             on_legacy=lambda: None,
         )
-        assert result == "agentic,coding"
+        assert result == "agentic,coding,coding2,vision"
 
     def test_old_var_empty_string_treated_as_unset(self) -> None:
         """F3 core: ``OPENAI_ALLOWED_MODELS=""`` must NOT trigger the
@@ -410,7 +463,7 @@ class TestEmptyStringResolverSemantics:
             old_var="",
             on_legacy=on_legacy,
         )
-        assert result == "agentic,coding"
+        assert result == "agentic,coding,coding2,vision"
         assert calls == []
 
     def test_new_var_empty_old_var_set_old_honored_with_callback(
@@ -456,7 +509,7 @@ class TestEmptyStringResolverSemantics:
             old_var="",
             on_legacy=on_legacy,
         )
-        assert result == "agentic,coding"
+        assert result == "agentic,coding,coding2,vision"
         assert calls == []
 
     def test_whitespace_only_treated_as_unset(self) -> None:
@@ -473,7 +526,7 @@ class TestEmptyStringResolverSemantics:
             old_var="\t  ",
             on_legacy=lambda: None,
         )
-        assert result == "agentic,coding"
+        assert result == "agentic,coding,coding2,vision"
 
 
 class TestEmptyStringWarnSemantics:
@@ -597,7 +650,8 @@ class TestEmptyStringEndToEnd:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """E2e (F2): ``OPENAI_SELECTABLE_MODELS=""`` falls through to
-        the documented default — NOT unrestricted. The CSV/JSON
+        the documented default (``agentic,coding,coding2,vision``,
+        sel-default-20260927) — NOT unrestricted. The CSV/JSON
         validator downstream would otherwise turn ``""`` into ``[]``
         = unrestricted.
         """
@@ -606,7 +660,12 @@ class TestEmptyStringEndToEnd:
 
         from daemon.config import load_config
         cfg = load_config()
-        assert cfg.llm.allowed_models == ["agentic", "coding"]
+        assert cfg.llm.allowed_models == [
+            "agentic",
+            "coding",
+            "coding2",
+            "vision",
+        ]
 
     def test_old_var_empty_string_yields_default_no_warning_e2e(
         self,
@@ -623,7 +682,12 @@ class TestEmptyStringEndToEnd:
         from daemon.config import load_config
         with caplog.at_level(logging.WARNING, logger="daemon.config"):
             cfg = load_config()
-        assert cfg.llm.allowed_models == ["agentic", "coding"]
+        assert cfg.llm.allowed_models == [
+            "agentic",
+            "coding",
+            "coding2",
+            "vision",
+        ]
         legacy_records = [
             r
             for r in caplog.records
@@ -660,3 +724,378 @@ class TestEmptyStringEndToEnd:
             and "OPENAI_ALLOWED_MODELS" in r.getMessage()
         ]
         assert len(legacy_records) == 1
+
+
+# ---------------------------------------------------------------------------
+# sel-default-20260927 — Default-applied WARNING (the new emit-once surface
+# that names the shipped default list when neither env var is set).
+#
+# Rationale: the v0.16.0 deploy blocked instance creation when a deployed
+# env file had ``OPENAI_SELECTABLE_MODELS`` set WITHOUT ``vision``. The
+# strict-when-set contract is ratified correct (exit-proof, do not weaken),
+# but deployments with the var UNSET must ALSO include vision — that is the
+# YAML interpolation default, and it is now the Python constant too. The
+# default-applied WARNING tells operators (at startup, once per process)
+# that the default fired and names the list, so a misconfigured deployment
+# surfaces the issue before the first spawn fails downstream.
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultAppliedWarning:
+    """``warn_default_allowed_models_applied`` — emit-once per process
+    when neither ``OPENAI_SELECTABLE_MODELS`` nor the legacy
+    ``OPENAI_ALLOWED_MODELS`` is exported. Mirrors the
+    ``warn_deprecated_allowed_models_env`` module-guard pattern.
+    """
+
+    def setup_method(self) -> None:
+        import daemon.config as cfg
+        cfg._allowed_models_deprecation_warned = False
+        cfg._default_allowed_models_warned = False
+
+    def teardown_method(self) -> None:
+        import daemon.config as cfg
+        cfg._allowed_models_deprecation_warned = False
+        cfg._default_allowed_models_warned = False
+
+    def test_first_call_emits_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """(a) Both env vars unset → the default-applied WARNING fires
+        exactly once, names the default list, and notes ``vision``.
+        """
+        from daemon.config import warn_default_allowed_models_applied
+
+        monkeypatch.delenv("OPENAI_SELECTABLE_MODELS", raising=False)
+        monkeypatch.delenv("OPENAI_ALLOWED_MODELS", raising=False)
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            warn_default_allowed_models_applied()
+        records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        default_records = [
+            r
+            for r in records
+            if "allowed_models default applied" in r.getMessage()
+        ]
+        assert len(default_records) == 1
+        msg = default_records[0].getMessage()
+        # Names the default list.
+        assert "agentic" in msg
+        assert "coding" in msg
+        assert "coding2" in msg
+        # Notes vision inclusion (operator-facing: vision-guard compat).
+        assert "vision" in msg
+        # Points to the override escape hatch.
+        assert "OPENAI_SELECTABLE_MODELS" in msg
+
+    def test_second_call_silent(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The module-level guard makes the second-and-subsequent
+        calls silent — at most one record per process, regardless of
+        how many entry points invoke the function.
+        """
+        from daemon.config import warn_default_allowed_models_applied
+
+        monkeypatch.delenv("OPENAI_SELECTABLE_MODELS", raising=False)
+        monkeypatch.delenv("OPENAI_ALLOWED_MODELS", raising=False)
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            warn_default_allowed_models_applied()  # first: fires
+            warn_default_allowed_models_applied()  # second: silent
+            warn_default_allowed_models_applied()  # third: still silent
+        records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        default_records = [
+            r
+            for r in records
+            if "allowed_models default applied" in r.getMessage()
+        ]
+        assert len(default_records) == 1
+
+    def test_no_warning_when_new_set(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """(b) ``OPENAI_SELECTABLE_MODELS`` set (even WITHOUT vision) →
+        no default-applied WARNING. Strict-when-set is the ratified
+        contract; the WARNING is a deployment-config hint, not a
+        per-spawn behavior. Operators who set the var explicitly
+        opt out of the hint.
+        """
+        from daemon.config import warn_default_allowed_models_applied
+
+        # Explicit list WITHOUT vision — this would fail the vision-guard
+        # downstream, but the WARNING here is for the unresolved default
+        # case only. The set-var path bypasses it.
+        monkeypatch.setenv("OPENAI_SELECTABLE_MODELS", "agentic,coding")
+        monkeypatch.delenv("OPENAI_ALLOWED_MODELS", raising=False)
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            warn_default_allowed_models_applied()
+        records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        default_records = [
+            r
+            for r in records
+            if "allowed_models default applied" in r.getMessage()
+        ]
+        assert default_records == []
+
+    def test_no_warning_when_only_legacy_set(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """When ONLY the legacy alias is set, the legacy value is the
+        effective source — the default does NOT apply, so no
+        default-applied WARNING. The legacy deprecation WARNING still
+        fires on its own emit-once path.
+        """
+        from daemon.config import warn_default_allowed_models_applied
+
+        monkeypatch.delenv("OPENAI_SELECTABLE_MODELS", raising=False)
+        monkeypatch.setenv("OPENAI_ALLOWED_MODELS", "agentic,coding,coding2")
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            warn_default_allowed_models_applied()
+        records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        default_records = [
+            r
+            for r in records
+            if "allowed_models default applied" in r.getMessage()
+        ]
+        assert default_records == []
+
+    def test_no_warning_when_both_env_empty(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Bare ``KEY=`` lines (empty / whitespace-only) for BOTH vars
+        are treated as UNSET — the default applies AND the WARNING
+        fires (this is the v0.16.0 incident shape: operator typo'd
+        the env var, the default saved them, but they should know).
+        """
+        from daemon.config import warn_default_allowed_models_applied
+
+        monkeypatch.setenv("OPENAI_SELECTABLE_MODELS", "")
+        monkeypatch.setenv("OPENAI_ALLOWED_MODELS", "")
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            warn_default_allowed_models_applied()
+        records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        default_records = [
+            r
+            for r in records
+            if "allowed_models default applied" in r.getMessage()
+        ]
+        assert len(default_records) == 1
+
+    def test_guard_marks_true_after_firing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After the warning fires, the module-level guard is True so
+        subsequent calls in the same process are silent — preventing
+        the duplicate-record scenario where ``load_config`` AND the
+        ``__main__/api`` startup wiring both invoke the function.
+        """
+        import daemon.config as cfg
+        from daemon.config import warn_default_allowed_models_applied
+
+        monkeypatch.delenv("OPENAI_SELECTABLE_MODELS", raising=False)
+        monkeypatch.delenv("OPENAI_ALLOWED_MODELS", raising=False)
+        assert cfg._default_allowed_models_warned is False
+        warn_default_allowed_models_applied()
+        assert cfg._default_allowed_models_warned is True
+
+
+class TestDefaultAppliedWarningLoadConfig:
+    """(a) End-to-end via ``load_config`` — the deployment-facing path.
+    Verifies that the default-applied WARNING is fired from the
+    ``load_config`` call site (NOT only via the explicit startup
+    wiring) so the operator sees it even on processes that go
+    straight through ``load_config`` without entering
+    ``__main__`` / ``api``.
+    """
+
+    def setup_method(self) -> None:
+        import daemon.config as cfg
+        cfg._allowed_models_deprecation_warned = False
+        cfg._default_allowed_models_warned = False
+
+    def teardown_method(self) -> None:
+        import daemon.config as cfg
+        cfg._allowed_models_deprecation_warned = False
+        cfg._default_allowed_models_warned = False
+
+    def test_load_config_emits_warning_when_both_unset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """(a) end-to-end: ``load_config`` with both env vars unset →
+        allowed_models == shipped default AND exactly one
+        default-applied WARNING in the caplog.
+        """
+        monkeypatch.delenv("OPENAI_SELECTABLE_MODELS", raising=False)
+        monkeypatch.delenv("OPENAI_ALLOWED_MODELS", raising=False)
+
+        from daemon.config import load_config
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            cfg = load_config()
+
+        # The shipped default (YAML interpolation literal) — vision
+        # is present so designer-agent vision-guard resolves.
+        assert cfg.llm.allowed_models == [
+            "agentic",
+            "coding",
+            "coding2",
+            "vision",
+        ]
+        default_records = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "allowed_models default applied" in r.getMessage()
+        ]
+        assert len(default_records) == 1
+        # No spurious legacy deprecation warning.
+        legacy_records = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "OPENAI_ALLOWED_MODELS" in r.getMessage()
+            and "default applied" not in r.getMessage()
+        ]
+        assert legacy_records == []
+
+    def test_load_config_emits_warning_exactly_once_across_calls(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """(a) module-guard: ``load_config()`` called twice on the
+        same process still emits exactly ONE default-applied
+        WARNING. Pin test for the cross-call guard.
+        """
+        monkeypatch.delenv("OPENAI_SELECTABLE_MODELS", raising=False)
+        monkeypatch.delenv("OPENAI_ALLOWED_MODELS", raising=False)
+
+        from daemon.config import load_config
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            load_config()
+            load_config()  # second call: guard short-circuits
+
+        default_records = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "allowed_models default applied" in r.getMessage()
+        ]
+        assert len(default_records) == 1
+
+    def test_load_config_no_warning_when_explicit_with_vision(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """(c) Explicit ``OPENAI_SELECTABLE_MODELS`` including
+        ``vision`` → strict-when-set, default does NOT apply, NO
+        default-applied WARNING. ``vision`` resolves cleanly through
+        the spawn-time validation chain.
+        """
+        monkeypatch.setenv(
+            "OPENAI_SELECTABLE_MODELS", "agentic,coding,coding2,vision"
+        )
+        monkeypatch.delenv("OPENAI_ALLOWED_MODELS", raising=False)
+
+        from daemon.config import load_config
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            cfg = load_config()
+
+        assert cfg.llm.allowed_models == [
+            "agentic",
+            "coding",
+            "coding2",
+            "vision",
+        ]
+        # The default-applied WARNING must NOT fire when the env var
+        # is set (regardless of whether vision is in the list).
+        default_records = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "allowed_models default applied" in r.getMessage()
+        ]
+        assert default_records == []
+
+    def test_load_config_no_warning_when_explicit_without_vision(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """(b) Explicit ``OPENAI_SELECTABLE_MODELS`` WITHOUT vision →
+        strict-when-set preserved (the v0.16.0 incident-shape path).
+        No default-applied WARNING; the strict behavior raises
+        downstream at the vision-guard. The exit-proof contract is
+        ratified — do not weaken it.
+        """
+        monkeypatch.setenv("OPENAI_SELECTABLE_MODELS", "agentic,coding")
+        monkeypatch.delenv("OPENAI_ALLOWED_MODELS", raising=False)
+
+        from daemon.config import load_config
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            cfg = load_config()
+
+        assert cfg.llm.allowed_models == ["agentic", "coding"]
+        # No default-applied WARNING (the explicit set opts out).
+        default_records = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "allowed_models default applied" in r.getMessage()
+        ]
+        assert default_records == []
+
+
+class TestDefaultConsistencyPin:
+    """(d) Drift-detector pin: ``_ALLOWED_MODELS_DEFAULT`` in
+    ``daemon/config.py`` MUST match the ``config.yaml`` interpolation
+    literal byte-for-byte. This test fails loudly if either side is
+    edited without the other — the v0.16.0 drift (YAML had vision,
+    constant did not) is the regression we are guarding against.
+
+    Parsing strategy: read ``config.yaml`` raw text, regex-match the
+    ``allowed_models:`` line, extract the
+    ``${OPENAI_SELECTABLE_MODELS:-<value>}`` fallback. The fallback
+    is the canonical YAML-layer default. We assert the comma-joined
+    ``_ALLOWED_MODELS_DEFAULT`` tuple matches the fallback.
+    """
+
+    def test_yaml_literal_matches_constant(self) -> None:
+        import re
+        from pathlib import Path
+
+        from daemon.config import _ALLOWED_MODELS_DEFAULT
+
+        config_yaml = (
+            Path(__file__).resolve().parents[2] / "config.yaml"
+        )
+        assert config_yaml.is_file(), (
+            f"config.yaml not found at {config_yaml} — drift test "
+            "needs the repo-root YAML to extract the literal default"
+        )
+        text = config_yaml.read_text(encoding="utf-8")
+        # Match the allowed_models interpolation line. The value is
+        # anchored to ``${OPENAI_SELECTABLE_MODELS:-<FALLBACK>}``.
+        match = re.search(
+            r"^\s*allowed_models:\s*\$\{OPENAI_SELECTABLE_MODELS:-([^}]+)\}\s*$",
+            text,
+            re.MULTILINE,
+        )
+        assert match is not None, (
+            "Could not find the allowed_models interpolation line in "
+            "config.yaml — drift test needs the standard "
+            "${OPENAI_SELECTABLE_MODELS:-...} form to extract the literal"
+        )
+        yaml_default_csv = match.group(1).strip()
+        yaml_default_tuple = tuple(
+            m.strip() for m in yaml_default_csv.split(",") if m.strip()
+        )
+        assert _ALLOWED_MODELS_DEFAULT == yaml_default_tuple, (
+            f"DRIFT: _ALLOWED_MODELS_DEFAULT {_ALLOWED_MODELS_DEFAULT} "
+            f"!= config.yaml interpolation default {yaml_default_tuple}. "
+            "Both homes of the shipped default must stay aligned — "
+            "update both daemon/config.py:_ALLOWED_MODELS_DEFAULT AND "
+            "config.yaml:87 in the same change. See the "
+            "sel-default-20260927 commission."
+        )

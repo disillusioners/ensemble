@@ -437,6 +437,18 @@ class LLMConfig(BaseSettings):
     #   OPENAI_SELECTABLE_MODELS="gpt-4,gpt-4o"
     # The NoDecode annotation prevents pydantic-settings from auto-JSON-decoding
     # the value, so our field_validator can handle comma-separated input.
+    #
+    # Shipped default (sel-default-20260927): ``("agentic", "coding",
+    # "coding2", "vision")`` — see ``_ALLOWED_MODELS_DEFAULT`` and the
+    # YAML interpolation literal at ``config.yaml:87``. ``vision`` is in
+    # the default so the designer-agent vision-guard resolves
+    # daemon-wide without forcing every deployment to add it to
+    # ``OPENAI_SELECTABLE_MODELS`` explicitly. When neither env var is
+    # set, ``load_config`` emits a one-shot WARNING naming the default
+    # (see ``warn_default_allowed_models_applied``). The
+    # drift-detector pin test
+    # (``TestDefaultConsistencyPin.test_yaml_literal_matches_constant``)
+    # keeps the two homes of the default aligned.
     allowed_models: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description=(
@@ -449,7 +461,10 @@ class LLMConfig(BaseSettings):
             "a fixed value, model_vision, compaction, skill_evolution) are "
             "unaffected. Resolved from OPENAI_SELECTABLE_MODELS with "
             "OPENAI_ALLOWED_MODELS as a legacy alias (warn-once when the "
-            "legacy name is the effective source). Default: []."
+            "legacy name is the effective source). Default: ``(\"agentic\", "
+            "\"coding\", \"coding2\", \"vision\")`` — single source of "
+            "truth is ``_ALLOWED_MODELS_DEFAULT``; YAML inlines the same "
+            "list at the interpolation site; tests pin the equality."
         ),
     )
 
@@ -2785,9 +2800,99 @@ def warn_deprecated_allowed_models_env() -> None:
 
 
 # Documented default for ``allowed_models`` when neither env var is set.
-# Mirrors the legacy ``config.yaml`` default so behavior is identical to
-# the pre-rename deployment when operators have not yet migrated.
-_ALLOWED_MODELS_DEFAULT: tuple[str, ...] = ("agentic", "coding")
+# SINGLE SOURCE OF TRUTH (sel-default-20260927): this tuple MUST match the
+# ``config.yaml`` interpolation literal
+# ``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}`` EXACTLY.
+# The drift-detector pin test in
+# ``tests/unit/test_llm_allowed_models_precedence.py``
+# (``TestDefaultConsistencyPin.test_yaml_literal_matches_constant``)
+# parses ``config.yaml`` raw text at test time and asserts the equality —
+# if either side drifts, that test fails loudly so the operator-facing
+# default and the documented default stay aligned.
+#
+# ``vision`` is in the default so the designer agent's
+# ``llm_model: "vision"`` resolves daemon-wide (P1-WP1 designer-agent
+# mission, base 1a40bc56) without requiring every deployment to add
+# ``vision`` to ``OPENAI_SELECTABLE_MODELS`` explicitly. Operators who
+# want to tighten the list export ``OPENAI_SELECTABLE_MODELS`` (or
+# hardcode ``allowed_models: []`` in ``config.yaml`` to lift
+# restrictions entirely).
+#
+# When neither env var is set, the resolver / load_config / startup
+# wiring also emit a one-shot WARNING via
+# :func:`warn_default_allowed_models_applied` — operators see exactly
+# once per process that the default fired and what it includes.
+_ALLOWED_MODELS_DEFAULT: tuple[str, ...] = (
+    "agentic",
+    "coding",
+    "coding2",
+    "vision",
+)
+
+
+# Warn-once guard for the default-applied WARNING — when neither
+# ``OPENAI_SELECTABLE_MODELS`` nor legacy ``OPENAI_ALLOWED_MODELS`` is
+# exported (or both are bare ``KEY=`` / whitespace-only), the resolver
+# substitutes ``_ALLOWED_MODELS_DEFAULT`` and we log a single WARNING
+# per process naming the default list and the env-var escape hatch.
+# Mirrors the module-guard pattern of
+# :data:`_allowed_models_deprecation_warned` so the function is safe
+# to invoke from multiple entry points (load_config, __main__,
+# api.py) without duplicating records.
+_default_allowed_models_warned = False
+
+
+def warn_default_allowed_models_applied() -> None:
+    """Log a single per-process WARNING when the documented default applies.
+
+    Emits exactly when BOTH conditions hold:
+
+      * ``OPENAI_SELECTABLE_MODELS`` is unset (or present-but-empty
+        after ``_clean_env_value`` normalization — bare ``KEY=`` /
+        whitespace-only are treated as UNSET, matching the resolver
+        and ``warn_deprecated_allowed_models_env`` semantics), AND
+      * ``OPENAI_ALLOWED_MODELS`` (legacy alias) is likewise unset /
+        empty.
+
+    Decided by inspecting ``os.environ`` directly — NOT by inspecting
+    the ``yaml_value`` the resolver receives, because the YAML
+    interpolation ``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}``
+    inlines the default and is therefore indistinguishable from an
+    operator hard-coded value at the resolver layer.
+
+    The message names the actual default list (so operators see what
+    the daemon will accept at spawn time), notes that ``vision`` is
+    included (designer-agent vision-guard compatibility), and points
+    to ``OPENAI_SELECTABLE_MODELS`` as the override.
+
+    Called from ``load_config`` (immediately after the resolver
+    decides the default branch) AND the explicit startup wiring
+    sites (``daemon/__main__.py``, ``daemon/api.py``) so a fresh
+    process that only goes through the startup path still gets the
+    warning. The module-level ``_default_allowed_models_warned``
+    guard makes the second-and-subsequent calls silent — at most
+    one record per process, regardless of how many call sites invoke
+    it.
+    """
+    global _default_allowed_models_warned
+    if _default_allowed_models_warned:
+        return
+    _default_allowed_models_warned = True
+    if _clean_env_value(os.environ.get("OPENAI_SELECTABLE_MODELS")) is not None:
+        return
+    if _clean_env_value(os.environ.get("OPENAI_ALLOWED_MODELS")) is not None:
+        return
+    logger.warning(
+        "[Config] allowed_models default applied: %s — the shipped "
+        "default is used because neither OPENAI_SELECTABLE_MODELS nor "
+        "the legacy OPENAI_ALLOWED_MODELS env var is set. ``vision`` "
+        "is included so the designer-agent vision-guard resolves "
+        "daemon-wide. Set OPENAI_SELECTABLE_MODELS to override this "
+        "list (comma-separated or JSON array). To silence this "
+        "WARNING, set the env var explicitly — even to your current "
+        "default value — and restart.",
+        list(_ALLOWED_MODELS_DEFAULT),
+    )
 
 
 # ─── Spawn Intelligence (Feature #1) ──────────────────────────────────────────
@@ -2856,15 +2961,16 @@ def _resolve_allowed_models(
          exactly once per process.
       3. ``yaml_value`` — the YAML-interpolated value. The shipped
          ``config.yaml`` now inlines the default in its interpolation
-         (``${OPENAI_SELECTABLE_MODELS:-agentic,coding}``), so the YAML
-         layer hands us either the new-var value or that default — not
-         an empty string. The empty-string branch is retained as
-         defense-in-depth for custom/programmatic yaml and direct
-         resolver calls: we substitute the documented default
-         ``["agentic", "coding"]`` so a no-env-var deployment matches
-         the pre-rename behavior. Non-empty values (e.g. an operator
-         hard-coded the value in YAML bypassing the env vars) are
-         passed through untouched.
+         (``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}``),
+         so the YAML layer hands us either the new-var value or that
+         default — not an empty string. The empty-string branch is
+         retained as defense-in-depth for custom/programmatic yaml and
+         direct resolver calls: we substitute the documented default
+         ``("agentic", "coding", "coding2", "vision")`` (single source of
+         truth: ``_ALLOWED_MODELS_DEFAULT``) so a no-env-var deployment
+         matches the shipped YAML default. Non-empty values (e.g. an
+         operator hard-coded the value in YAML bypassing the env vars)
+         are passed through untouched.
 
     Pure function (no ``os.environ`` access, no module-level mutation):
     tests pass the resolved env values directly, which keeps the
@@ -3948,14 +4054,16 @@ def load_config(config_path: str | None = None) -> Config:
 
     # Resolve the OPENAI_SELECTABLE_MODELS / OPENAI_ALLOWED_MODELS
     # precedence chain for ``llm.allowed_models``. The shipped
-    # config.yaml now inlines the default in its interpolation
-    # (``${OPENAI_SELECTABLE_MODELS:-agentic,coding}``), so the YAML
-    # layer hands us either the new-var value or that default — not
-    # an empty string. We still need explicit precedence here (and an
-    # os.environ check for the legacy name) so:
+    # config.yaml inlines the default in its interpolation
+    # (``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}``),
+    # so the YAML layer hands us either the new-var value or that
+    # default — not an empty string. We still need explicit precedence
+    # here (and an os.environ check for the legacy name) so:
     #   * both vars set → new wins, no warning
     #   * only legacy set → legacy wins + one-shot warning
-    #   * neither set → documented default ("agentic,coding")
+    #   * neither set → documented default
+    #     ("agentic","coding","coding2","vision") + one-shot
+    #     default-applied WARNING naming the list
     # The "neither set" branch is defense-in-depth: it only fires when
     # a custom/programmatic yaml (or direct resolver call) presents
     # an empty yaml_value.
@@ -3964,18 +4072,41 @@ def load_config(config_path: str | None = None) -> Config:
     # ALSO from the startup entry points (daemon/__main__.py,
     # daemon/api.py) so a fresh process that only goes through the
     # startup path (rare — load_config normally precedes those sites)
-    # still gets the warning. The module-level guard makes the second
-    # call silent.
+    # still gets the warning. The module-level guards
+    # (``_allowed_models_deprecation_warned`` /
+    # ``_default_allowed_models_warned``) make the second-and-subsequent
+    # calls silent.
+    # The default-applied WARNING is fired here (NOT in
+    # ``_resolve_allowed_models``) because the resolver is a pure
+    # function that does no ``os.environ`` access — its job is the
+    # pure precedence chain. The default-applied decision is made by
+    # inspecting ``os.environ`` directly here, mirroring the
+    # ``warn_default_allowed_models_applied`` env-check. This way
+    # the YAML-interpolated default (indistinguishable from an
+    # operator-hardcoded value at the resolver layer) does NOT
+    # trigger a spurious WARNING — only the true "no env var" case
+    # does.
     # See ``_resolve_allowed_models`` for the full contract.
     llm_config: Dict[str, Any] = {}
     if "llm" in processed_config:
         llm_config = processed_config["llm"].copy()
-    llm_config["allowed_models"] = _resolve_allowed_models(
+    resolved_allowed = _resolve_allowed_models(
         llm_config.get("allowed_models", ""),
         new_var=os.environ.get("OPENAI_SELECTABLE_MODELS"),
         old_var=os.environ.get("OPENAI_ALLOWED_MODELS"),
         on_legacy=warn_deprecated_allowed_models_env,
     )
+    llm_config["allowed_models"] = resolved_allowed
+    # Default-applied WARNING (sel-default-20260927): fires exactly once
+    # per process when neither env var is set. The resolver decided the
+    # value (it may be the YAML-inlined default OR the constant fallback
+    # for a custom yaml), but the WARNING gate is the env-check here so
+    # we never false-positive on an operator-hardcoded YAML value.
+    if (
+        _clean_env_value(os.environ.get("OPENAI_SELECTABLE_MODELS")) is None
+        and _clean_env_value(os.environ.get("OPENAI_ALLOWED_MODELS")) is None
+    ):
+        warn_default_allowed_models_applied()
     # Feature #1 (spawn-time intelligence override) — single ``os.environ``
     # read at boot (A6 hard rule: per-spawn reads FORBIDDEN to avoid
     # split-brain with the ``allowed_models`` boot snapshot above). The
