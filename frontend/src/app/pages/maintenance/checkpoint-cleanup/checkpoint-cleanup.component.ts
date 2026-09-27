@@ -185,7 +185,7 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     this.expectedDurationHintMs.set(null);
 
     // AM-17 — payload is EXACTLY `{dry_run_run_id, expected_bytes,
-    // confirm: true}` — NO `idempotency_key`, NO `crypto.randomUUID()`.
+    // confirm: true}` — NO idempotency key, NO client-side UUID generation.
     const payload: CheckpointCleanupExecuteRequest = {
       dry_run_run_id: dryRun.run_id,
       expected_bytes: dryRun.would_free_bytes,
