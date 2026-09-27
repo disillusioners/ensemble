@@ -462,10 +462,18 @@ class TestObserverObserverBehavior:
         mock_job_repo.atomic_transition.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_observer_completion_then_termination_skips_termination(self):
-        """After instance completes, termination event should be skipped.
+    async def test_observer_terminated_arm_routes_through_helper(self):
+        """TERMINATED events route through ``_fire_watcher_notify_for_terminal``.
 
-        This tests the filter that skips 'terminated' status events.
+        U1-SLICE FIX (2026-09-27, fix/u1-watch-reconcile): the
+        pre-fix gate "skip TERMINATED silently" was the U1 defect
+        vector (held ``mission_terminal`` watcher rows starved
+        because no in-session path consulted them on TERMINATED).
+        The new contract widens the gate to
+        ``{TERMINATED, FAILED}`` and invokes the helper so held
+        watchers re-fire. ``atomic_transition`` stays out — final
+        JobItem transition is owned by ``terminate_instance()``
+        out-of-band.
         """
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock()
@@ -493,8 +501,11 @@ class TestObserverObserverBehavior:
 
         await observer._process_event(event)
 
-        # Should not try to look up job for terminated events
-        mock_job_queue_service.get_job_by_instance.assert_not_called()
+        # New contract: the helper is invoked once to collect
+        # candidate work_ids for the held-watcher notify pass.
+        mock_job_queue_service.get_job_by_instance.assert_called_once()
+        # atomic_transition stays out — terminal finalization is
+        # owned by terminate_instance() out-of-band.
         mock_job_repo.atomic_transition.assert_not_called()
 
 

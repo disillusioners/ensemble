@@ -1086,16 +1086,45 @@ class JobFeedbackObserver:
         # post-commit outbox below is a no-op for an
         # already-terminal instance, so we fire ONLY the watcher
         # notify here and then early-return like before.
-        if status == InstanceStatus.TERMINATED.value:
+        #
+        # U1-SLICE FIX (2026-09-27, fix/u1-watch-reconcile) —
+        # widen the gate from TERMINATED-only to
+        # {TERMINATED, FAILED}. The pre-fix gate matched the
+        # docstring at ``_fire_watcher_notify_for_terminal``
+        # ("TERMINATED / FAILED instance transitions need a
+        # single watcher notification per candidate work_id") on
+        # only ONE of the two transitions it names — the FAILED
+        # lane fell through to the post-commit outbox below
+        # (which is itself a no-op for an already-terminal
+        # instance). The held ``mission_terminal`` watcher rows
+        # for a FAILED instance therefore starved identically
+        # to the c7f59aaf incident vector, but on the error lane.
+        # The fix routes FAILED through the same
+        # ``_fire_watcher_notify_for_terminal`` helper (which
+        # accepts a ``notify_status`` kwarg — ``"failed"`` for the
+        # error lane). The COMPLETED lane is unchanged — it
+        # already routes through ``_finalize_job`` post-commit
+        # outbox (U1-slice hook (b)).
+        if status in (
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.FAILED.value,
+        ):
+            _u_slice_terminal_notify_status = (
+                "cancelled"
+                if status == InstanceStatus.TERMINATED.value
+                else "failed"
+            )
             await self._fire_watcher_notify_for_terminal(
                 instance_id,
-                notify_status="cancelled",
+                notify_status=_u_slice_terminal_notify_status,
                 result_summary=None,
-                error_message=None,
+                error_message=error,
             )
             logger.debug(
-                f"Skipping terminated event for instance {instance_id[:8]}... "
-                "(handled by terminate_instance)"
+                f"Handling {status} event for instance "
+                f"{instance_id[:8]}... via held-watcher re-fire "
+                f"through ``_fire_watcher_notify_for_terminal``; "
+                f"notify_status={_u_slice_terminal_notify_status}"
             )
             return
 
@@ -1519,6 +1548,73 @@ class JobFeedbackObserver:
             logger.warning(
                 f"Observer: held-watcher re-fire aborted for "
                 f"instance {instance_id[:8]}... (non-fatal): {e}"
+            )
+
+        # ── U1-SLICE event hook (2026-09-27, fix/u1-watch-reconcile) ──
+        # The re-fire above is best-effort and only targets the
+        # candidate work_ids for THIS instance. But a held
+        # ``mission_terminal`` watcher row may exist for an
+        # instance whose work is settled-but-still-held while the
+        # MISSION is now terminal (the TERMINATED/FAILED path fires
+        # this helper). The helper consults the canonical
+        # ``evaluate_mission_live`` guard for any held rows that
+        # survived the natural notify path and fires them via the
+        # existing ``notify_watchers`` CAS-claim. Fail-soft — the
+        # ``reconcile_terminal_watches`` boot sweep + the new
+        # ``WatchReconcileSweepService`` are the backstops.
+        #
+        # Note: no ``self._job_queue_service is None`` guard here —
+        # the enclosing ``_fire_watcher_notify_for_terminal`` early-
+        # returns at the top when ``_job_queue_service`` is ``None``
+        # (line 1468), so by this point the reference is provably
+        # non-None. Dropping the dead guard keeps the hook arm
+        # symmetric with the post-commit outbox seam at ~:2390
+        # (which DOES still guard — see that comment for the
+        # asymmetry rationale).
+        #
+        # U1-F1 FIX (cycle 4, 2026-09-27, fix/u1-watch-reconcile):
+        # hook (a) fires on the TERMINATED / FAILED lifecycle event
+        # of the MISSION ROOT (the instance that just reached
+        # terminal). The cycle-3 fix introduced a
+        # mission-root-scoped helper that walked DOWN from the
+        # mission root and filtered ``watch.instance_id ∈
+        # tree(root)`` — but the held row's ``instance_id`` is the
+        # WATCHER, and the DOMINANT production topology (the
+        # c7f59aaf incident shape) has the watcher as EXTERNAL
+        # (parent_id=NULL) or ANCESTOR of the mission root —
+        # neither is in the subtree, so the cycle-3 helper was a
+        # silent no-op on the production seam (tester live
+        # evidence: 234s sweep delivery, no hook-(a) log line).
+        #
+        # The CORRECT axis is the WORK side — the canonical
+        # ``evaluate_mission_live`` resolves via the parent_id
+        # tree walk from the work's instance, and the global
+        # sweep path (``instance_id=None``) is live-proven to
+        # deliver (234s observed in tester cycle-4 re-verify).
+        # Hook (a) reuses the same global-scan call shape so the
+        # candidate set is keyed on the work axis (via the C1
+        # partition's per-work ``evaluate_mission_live``
+        # evaluation) — NOT on the watcher's tree position. The
+        # ``instance_id=None`` arg is the SAME call the sweep
+        # makes; hook (a)'s contribution is the latency reduction
+        # (fires immediately on TERMINATED instead of waiting up
+        # to ``interval_seconds`` for the next sweep tick). The
+        # CAS-claim ensures exactly-once even though both paths
+        # touch the same row in close succession. Sweep call
+        # shape preserved byte-unchanged; hook (b) preserved
+        # byte-unchanged.
+        try:
+            await self._job_queue_service.reconcile_held_watches_for_instance(
+                instance_id=None,
+            )
+        except Exception as hook_err:
+            logger.warning(
+                # WARNING parity with the outer catch at :1547 — the
+                # sweep retries within the interval so a single
+                # transient hook glitch is not silent.
+                f"Observer: u1-slice hook (a) failed for instance "
+                f"{instance_id[:8]}... (non-fatal, swept by "
+                f"WatchReconcileSweepService next tick): {hook_err}"
             )
 
     async def _finalize_job(
@@ -2315,6 +2411,40 @@ class JobFeedbackObserver:
                         ctx.job_id[:8] if ctx.job_id else "unknown",
                         e,
                     )
+
+            # ── U1-SLICE event hook (2026-09-27, fix/u1-watch-reconcile) ──
+            # End-of-outbox seam for the COMPLETED/ERROR branch
+            # (companion to hook (a) which sits at the end of
+            # ``_fire_watcher_notify_for_terminal`` for the
+            # TERMINATED/FAILED no-JobItem path). After the DB
+            # commit AND the notify_watchers loop + SSE + lifecycle
+            # event fan-out have all fired, ask the helper to
+            # re-evaluate any held ``mission_terminal`` watcher
+            # rows for this instance. The helper consults the
+            # canonical ``evaluate_mission_live`` guard and either
+            # CAS-claims + delivers them (if the mission is now
+            # terminal) or leaves them alone (if the mission is
+            # still live — the periodic sweep is the backstop).
+            #
+            # Fail-soft: any hook error is logged at DEBUG and
+            # swallowed — the post-commit outbox has already
+            # succeeded and must not be undone by a helper glitch.
+            try:
+                if self._job_queue_service is not None:
+                    await self._job_queue_service.reconcile_held_watches_for_instance(
+                        instance_id=instance_id,
+                    )
+            except Exception as hook_err:
+                # WARNING parity with the outer catch at :1547 — the
+                # sweep retries within the interval so a single
+                # transient hook glitch is not silent. Same rationale
+                # as hook (a) at :1570.
+                logger.warning(
+                    f"Observer: u1-slice hook (b) failed for "
+                    f"instance {instance_id[:8]}... (non-fatal, "
+                    f"swept by WatchReconcileSweepService next "
+                    f"tick): {hook_err}"
+                )
 
             logger.info(
                 f"Observer: finalized job {ctx.job_id[:8] if ctx.job_id else 'no_job'}... "

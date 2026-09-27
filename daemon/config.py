@@ -1703,6 +1703,49 @@ class ServicesConfig(BaseSettings):
             "quarantine. Override via SERVICES_PLANE_SYNC_WATCHDOG_MAX_ATTEMPTS."
         ),
     )
+    # U1-SLICE FIX (2026-09-27, fix/u1-watch-reconcile) — periodic
+    # backstop for held ``mission_terminal`` watcher rows. The
+    # event hooks in ``JobFeedbackObserver`` (the
+    # ``_fire_watcher_notify_for_terminal`` end-of-method seam
+    # and the ``_finalize_job`` post-commit-outbox seam) are the
+    # in-session fast-path; the periodic
+    # ``WatchReconcileSweepService`` is the structural backstop
+    # for the 310ms parent-lifecycle-completed vs last-child-
+    # settle race the live evidence documented (row 538e2f59
+    # held in-session despite the mission being terminal — only
+    # the next boot's ``reconcile_terminal_watches`` sweep would
+    # have re-fired it; before this fix, that gap could be
+    # unbounded). ALWAYS-ON infrastructure (no kill-switch —
+    # the same HARD POLICY as the F3 / JobLockSweepService and
+    # v0.15.3 / UpgradeJournalSweepService sweeps); the only
+    # tuning knob is the interval. Default 300s = the upper
+    # bound the U1 commission mandated (delivery latency =
+    # ``min(in-session event, 300s sweep)``); floor 1s prevents
+    # spin. Out-of-range values FAIL FAST AT BOOT via pydantic
+    # ``Field(ge=1)`` (matches the JobLockSweepService
+    # convention — out-of-range values fail fast at boot). The
+    # knob is exported on ``ServicesConfig`` and read in
+    # ``daemon/api.py`` at lifespan boot. Override via
+    # SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS.
+    watch_reconcile_sweep_interval_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "U1-SLICE FIX (2026-09-27): how often the "
+            "``WatchReconcileSweepService`` runs its "
+            "held-mission_terminal + zombie-GC tick (seconds). "
+            "Default 300s — the upper bound the U1 commission "
+            "mandated (delivery latency = ``min(in-session "
+            "event, 300s sweep)``). ALWAYS-ON infrastructure "
+            "(no kill-switch env var — per the project owner's "
+            "HARD POLICY on Batch A codified in "
+            "``job_lock_sweep.py``); the interval knob tunes "
+            "responsiveness vs DB load. Floor 1s prevents "
+            "spin; out-of-range values FAIL FAST AT BOOT. "
+            "Override via "
+            "SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS."
+        ),
+    )
     # clipboard-image-chat Phase 1 / Task 2b (architect amendment #3):
     # hard cap on the tmp-image store's total disk usage. The store
     # performs a walkdir sum BEFORE each write and raises

@@ -302,22 +302,48 @@ class TestObserverFailsJob:
         )
 
 
-class TestObserverSkipsTerminated:
-    """Tests for skipping terminated events."""
+class TestObserverTerminalArmFiresWatchers:
+    """Tests for the TERMINATED / FAILED arm firing held watchers.
+
+    U1-SLICE FIX (2026-09-27, fix/u1-watch-reconcile): the gate
+    widened from TERMINATED-only to {TERMINATED, FAILED} so a
+    FAILED instance also routes through
+    :meth:`_fire_watcher_notify_for_terminal` and re-fires any
+    held ``mission_terminal`` watcher rows. The pre-fix contract
+    "TERMINATED is silently dropped" is GONE — the helper is now
+    the structural in-session backstop for both terminal statuses
+    (the observer still early-returns BEFORE ``_finalize_job`` so
+    the job-completion / lock-release chain is NOT duplicated).
+
+    ``atomic_transition`` is still NOT called from this arm
+    (terminal finalization is owned by ``terminate_instance()``
+    out-of-band); only ``_get_processing_job_for_instance`` (which
+    delegates to ``get_job_by_instance``) is invoked once to
+    collect candidate work_ids for the helper's notify pass.
+    """
 
     @pytest.mark.asyncio
-    async def test_observer_skips_terminated_status(self):
-        """Terminated events are skipped (terminate_instance handles them)."""
+    async def test_observer_terminated_status_routes_through_helper(self):
+        """TERMINATED events route through ``_fire_watcher_notify_for_terminal``.
+
+        U1-SLICE FIX (2026-09-27): the pre-fix gate skipped
+        TERMINATED silently; the new contract widens the gate to
+        ``{TERMINATED, FAILED}`` and fires the helper so any held
+        ``mission_terminal`` watchers for this instance re-fire.
+        ``atomic_transition`` is still owned by
+        ``terminate_instance()`` — the observer's terminal arm
+        only invokes the held-watcher notify helper.
+        """
         mock_job_queue_service = AsyncMock()
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
-        
+
         observer, _, mock_job_repo, _, _, _ = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
         )
-        
+
         event = {
             "event_type": "instance_lifecycle",
             "data": {
@@ -326,10 +352,14 @@ class TestObserverSkipsTerminated:
                 "error": None,
             }
         }
-        
+
         await observer._process_event(event)
-        
-        mock_job_queue_service.get_job_by_instance.assert_not_called()
+
+        # New contract: the helper is invoked once to collect
+        # candidate work_ids for the held-watcher notify pass.
+        mock_job_queue_service.get_job_by_instance.assert_called_once()
+        # atomic_transition stays out — terminal finalization is
+        # owned by terminate_instance() out-of-band.
         mock_job_repo.atomic_transition.assert_not_called()
 
 
