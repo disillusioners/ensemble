@@ -650,6 +650,27 @@ class TestRouterGates:
             assert r3.status_code == 400, r3.text
             assert r3.json()["detail"]["error"] == "confirm_required"
 
+    async def test_unexpected_service_raise_yields_contract_500(
+        self, runs_repo, as_pg
+    ):
+        """[tidier fix pass] router catch-all — an unexpected
+        non-MaintenanceError raise must surface as a CONTRACT-SHAPED
+        500 (``{error: internal_error, message, details}`` per A-8),
+        never FastAPI's plain-text default."""
+        from unittest.mock import MagicMock
+
+        svc = MagicMock(spec=MaintenanceApiService)
+        svc.status = AsyncMock(side_effect=RuntimeError("boom"))
+        app = _http_app(svc)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get("/maintenance/checkpoint-cleanup/status")
+        assert r.status_code == 500, r.text
+        detail = r.json()["detail"]
+        assert detail["error"] == "internal_error"
+        assert detail["message"]
+        assert detail["details"] == {}
+
     async def test_kill_switch_disables_api_surface(
         self, runs_repo, as_pg, monkeypatch
     ):
