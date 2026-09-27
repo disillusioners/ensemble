@@ -7,12 +7,15 @@
  * where the bootstrap script needs >5s to run pg_ctl stop +
  * rm -rf). This teardown is a deterministic backstop:
  *
- *   1. Read the most-recent /tmp/pg_e2e_maint_* dir from boot.log
+ *   1. Kill the e2e daemon (pid file provenance:
+ *      `frontend/scripts/boot-e2e-maintenance-daemon.sh` writes
+ *      `$LOG_DIR/daemon.pid` from the daemon's `$!`).
+ *   2. Read the most-recent /tmp/pg_e2e_maint_* dir from boot.log
  *      (the boot script's `DATA_DIR` was random + canonical; we
  *      scan postmaster.opts to identify it).
- *   2. If PG is still listening on 15432 with that data dir, call
+ *   3. If PG is still listening on 15432 with that data dir, call
  *      `pg_ctl stop` directly.
- *   3. Remove the pg cluster dir + `data_e2e_maintenance/` if they
+ *   4. Remove the pg cluster dir + `data_e2e_maintenance/` if they
  *      still exist.
  *
  * Idempotent — safe to run alongside the boot script's own cleanup.
@@ -40,7 +43,24 @@ function safeExec(cmd: string): string {
 }
 
 export default async function globalTeardown(): Promise<void> {
-  // 1. Discover the most-recent PG cluster dir.
+  // 1. Kill the e2e daemon. Idempotent: missing pid file / dead PID
+  //    / non-numeric pid = silent no-op. Foreign-safe: only kills the
+  //    PID the boot script wrote — never touches anything by port.
+  //    SIGTERM only (the boot script invokes uvicorn with
+  //    `--timeout-graceful-shutdown 10`; the daemon's lifespan
+  //    handler drains on SIGTERM). No SIGKILL escalation — boot
+  //    script's TERM/INT/EXIT trap is the SIGKILL-of-last-resort.
+  const daemonPidFile = join(LOG_DIR, 'daemon.pid');
+  if (existsSync(daemonPidFile)) {
+    const pid = parseInt(readFileSync(daemonPidFile, 'utf8').trim(), 10);
+    if (Number.isFinite(pid) && pid > 0) {
+      try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    try { rmSync(daemonPidFile, { force: true }); } catch { /* best-effort */ }
+  }
+
+  // 2. Discover the most-recent PG cluster dir.
   let pgDataDir: string | null = null;
   if (existsSync(LOG_DIR)) {
     const candidates = readdirSync('/tmp')
@@ -58,13 +78,13 @@ export default async function globalTeardown(): Promise<void> {
     }
   }
 
-  // 2. If PG is listening on 15432 with that data dir, stop it.
+  // 3. If PG is listening on 15432 with that data dir, stop it.
   const portCheck = safeExec(`pg_isready -h 127.0.0.1 -p ${PG_PORT}`);
   if (portCheck.includes('accepting') && pgDataDir) {
     safeExec(`pg_ctl -D ${pgDataDir} stop`);
   }
 
-  // 3. Remove leftover cluster dir + repo data_e2e_maintenance/.
+  // 4. Remove leftover cluster dir + repo data_e2e_maintenance/.
   if (pgDataDir && existsSync(pgDataDir)) {
     try {
       rmSync(pgDataDir, { recursive: true, force: true });

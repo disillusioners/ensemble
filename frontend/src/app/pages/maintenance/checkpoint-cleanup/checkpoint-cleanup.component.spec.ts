@@ -714,33 +714,60 @@ describe('CheckpointCleanupComponent', () => {
       // `lastError()` is null post-adoption (silent-adoption UX
       // unguarded otherwise — the inline banner would otherwise
       // re-render against the run_in_flight body), (c) no error toast.
+      //
+      // N1 (merge-gate hardening) — the mock override MUST emulate
+      // the service-layer `catchError` (`execute()` at
+      // `checkpoint-cleanup.service.ts:172-176` calls
+      // `this.lastError.set(body)` before re-throwing). Without this
+      // emulation, `clearLastError()` could be deleted from the
+      // mirror and `lastError()` would still be null (no one ever
+      // set it) — making the assertion a dead guard. With
+      // emulation, the assertion becomes a LIVE guard: deleting the
+      // mirror's `clearLastError()` leaves `lastError` holding the
+      // body and the test goes red.
       service.lastDryRun.set(DRY_RUN);
       mockDialog.nextResult = true;
-      // Override the mock's execute to throw a 409 body.
-      service.execute = () => throwError(() => ({
+      const adoptedBody: MaintenanceErrorBody = {
         error: 'run_in_flight',
         details: { run_id: 'ckpt-already-running', started_at: '2026-09-27T03:21:30.456789+00:00' },
-      }) as never);
+      };
+      // Override the mock's execute to mirror service `catchError`
+      // (set `lastError` THEN throw) so the adoption-pin assertion
+      // is live.
+      service.execute = () => {
+        service.lastError.set(adoptedBody);
+        return throwError(() => adoptedBody);
+      };
       component.onExecute();
       expect(service.pollRunCalls).toHaveLength(1);
       expect(service.pollRunCalls[0].runId).toBe('ckpt-already-running');
       expect(MockSnackBarRef.openCalls).toHaveLength(0); // no error toast
       // Item 1 pin: silent-adoption UX — lastError MUST be null after
       // adoption so the inline banner does not render during the
-      // "ride along" polling.
+      // "ride along" polling. Live guard (see N1 note above).
       expect(component.lastError()).toBeNull();
     });
 
     it('on 409 run_in_flight WITHOUT details.run_id: error banner surfaces (fallthrough)', () => {
       service.lastDryRun.set(DRY_RUN);
       mockDialog.nextResult = true;
-      service.execute = () => throwError(() => ({
+      // N1 — same emulation as the adoption test above: the
+      // service-layer `catchError` sets `lastError` before throwing.
+      // The fallthrough component path (no `details.run_id` → no
+      // adoption) leaves `lastError` populated so the inline
+      // banner renders; mirroring the production wire shape.
+      const fallthroughBody: MaintenanceErrorBody = {
         error: 'run_in_flight',
         // no details.run_id
-      }) as never);
+      };
+      service.execute = () => {
+        service.lastError.set(fallthroughBody);
+        return throwError(() => fallthroughBody);
+      };
       component.onExecute();
       expect(service.pollRunCalls).toHaveLength(0); // no adoption
       expect(component.executing()).toBe(false); // not stuck
+      expect(component.lastError()?.error).toBe('run_in_flight'); // banner surfaces
     });
   });
 
