@@ -1003,12 +1003,41 @@ class TestP4TerminatedFailedArms:
     ):
         """P4 TERMINATED arm — pre-existing behavior, pinned.
 
+        **UNIT-SCOPE pin (U1-F1 cycle 3 re-anchor):** this test
+        exercises the BODY of
+        :meth:`JobQueueService.reconcile_held_watches_for_mission_root`
+        directly, bypassing the production ``_process_event`` →
+        ``_fire_watcher_notify_for_terminal`` → hook (a) call
+        site. The companion ``test_p4_terminated_arm_live_seam``
+        exercises the FULL LIVE SEAM end-to-end (real observer,
+        real lifecycle event, mission-root TERMINATED with
+        watcher ≠ mission-root).
+
+        Recipe (mirrors the live evidence topology from
+        tester RESULTS 2026-09-27 P4(a)): mission root instance
+        is the entity that flips terminal; the watcher is a
+        SEPARATE instance (a child of the mission root in the
+        ``instances.parent_id`` chain) who called ``watch_job``
+        to observe the mission's terminal event. The held row's
+        ``instance_id`` is the WATCHER, NOT the mission root —
+        the original watcher-scoped helper
+        (:meth:`reconcile_held_watches_for_instance`) would
+        match ZERO rows under this topology (the live no-op
+        fixed by U1-F1). The mission-root-scoped helper uses
+        ``get_tree_ids_permanent(mission_root)`` to enumerate
+        the watcher descendants and fires them correctly.
+
         A TERMINATED lifecycle event reaches
         ``_process_event``; the widened gate routes through
         ``_fire_watcher_notify_for_terminal`` (notify_status=
-        "cancelled"); the helper's hook (a) at the end of
-        ``_fire_watcher_notify_for_terminal`` re-evaluates held
-        rows; the row fires when mission flips terminal.
+        "cancelled"); hook (a) calls the mission-root helper
+        with ``instance_id=<terminated instance>`` (the LIVE
+        call shape after U1-F1). This unit pin simulates that
+        call shape: it invokes the helper directly with the
+        MISSION ROOT id (``inst-mission-term``), not the
+        watcher id — the helper enumerates the watcher via
+        ``get_tree_ids_permanent(mission_root)`` and the held
+        row fires when the mission is terminal.
         """
         engine = u1_components["engine"]
         watcher_repo = u1_components["watcher_repo"]
@@ -1021,7 +1050,18 @@ class TestP4TerminatedFailedArms:
             engine, instance_id="inst-mission-term",
             status="running",
         )
-        _seed_instance(engine, instance_id="watcher-u1-term")
+        # Seed the WATCHER as a CHILD of the mission root so
+        # ``get_tree_ids_permanent(inst-mission-term)`` returns
+        # ``[inst-mission-term, watcher-u1-term]``. Without this
+        # ``parent_id`` link, the mission-root helper's tree
+        # walk returns only the mission root and the held row
+        # is excluded — the helper is correctly keyed on the
+        # mission-root axis, the fixture must reflect the
+        # mission tree.
+        _seed_instance(
+            engine, instance_id="watcher-u1-term",
+            parent_id="inst-mission-term",
+        )
         _add_watch(
             engine, work_id=wid,
             instance_id="watcher-u1-term",
@@ -1035,19 +1075,44 @@ class TestP4TerminatedFailedArms:
         # _fire_watcher_notify_for_terminal path: the gate at
         # :1089 now routes BOTH TERMINATED and FAILED through
         # _fire_watcher_notify_for_terminal. Mission flips
-        # terminal; hook (a) at the end of the helper fires
-        # the helper.
+        # terminal; hook (a) calls the MISSION-ROOT helper
+        # (U1-F1 fix) with the terminated instance id.
+        #
+        # Cascade-terminate topology (mirrors the live evidence
+        # from tester RESULTS 2026-09-27 P4(a) — DELETE
+        # /api/instances/{W2} cascade-terminates the mission
+        # subtree, so both the mission root AND its watcher
+        # descendants end up terminal in the same tick). The
+        # mission-live guard inside the C1 partition walks the
+        # parent_id tree from ``work_record.instance_id`` —
+        # when the watcher is ALSO terminal, the guard returns
+        # ``live=False`` and the row fires; when the watcher is
+        # still running (which is also possible mid-cascade), the
+        # guard returns ``live=True`` and the row correctly stays
+        # held until the watcher itself terminates (the sweep
+        # backstop or a later hook (a) carries the delivery).
+        # This pin exercises the FIRE case (both terminal) so the
+        # mission-root helper's filter inclusion is provable.
         _seed_instance(
             engine, instance_id="inst-mission-term",
+            status="terminated",
+        )
+        _seed_instance(
+            engine, instance_id="watcher-u1-term",
             status="terminated",
         )
         original = _patch_resolver_task_completed(
             resolver, wid=wid, instance_id="inst-mission-term",
         )
         try:
+            # U1-F1 FIX: invoke the MISSION-ROOT helper with
+            # the mission root id (NOT the watcher id — that
+            # was the cycle-1/2 pin-mask shape that masked the
+            # live no-op). The mission-root helper enumerates
+            # the watcher via ``get_tree_ids_permanent``.
             result = (
-                await jqs.reconcile_held_watches_for_instance(
-                    instance_id="watcher-u1-term",
+                await jqs.reconcile_held_watches_for_mission_root(
+                    instance_id="inst-mission-term",
                 )
             )
         finally:
@@ -1055,7 +1120,7 @@ class TestP4TerminatedFailedArms:
 
         assert result["fired"] == 1, (
             f"P4 TERMINATED: arm MUST fire the held row via the "
-            f"gate-widened ``_process_event`` path — "
+            f"mission-root helper (U1-F1 cycle 3) — "
             f"got fired={result['fired']}."
         )
 
@@ -1089,7 +1154,15 @@ class TestP4TerminatedFailedArms:
             engine, instance_id="inst-mission-failed",
             status="running",
         )
-        _seed_instance(engine, instance_id="watcher-u1-failed")
+        # Seed the WATCHER as a CHILD of the mission root so
+        # ``get_tree_ids_permanent(inst-mission-failed)`` returns
+        # ``[inst-mission-failed, watcher-u1-failed]`` — the
+        # mission-root helper's tree walk needs the parent_id
+        # chain to enumerate the watcher (U1-F1 cycle 3).
+        _seed_instance(
+            engine, instance_id="watcher-u1-failed",
+            parent_id="inst-mission-failed",
+        )
         _add_watch(
             engine, work_id=wid,
             instance_id="watcher-u1-failed",
@@ -1099,21 +1172,31 @@ class TestP4TerminatedFailedArms:
         # Pre-condition: held row exists.
         assert len(watcher_repo.get_watchers_for_job(wid)) == 1
 
-        # Simulate the FAILED lifecycle event + widened gate.
-        # _process_event's :1089 gate now routes FAILED through
-        # _fire_watcher_notify_for_terminal (notify_status=
-        # "failed"); hook (a) fires the helper.
+        # Simulate the FAILED lifecycle event + widened gate +
+        # hook (a) → mission-root helper (U1-F1). The FAILED lane
+        # is the cycle-2 gate-widening + the cycle-3 axis-fix;
+        # this pin exercises BOTH. Cascade-terminate topology (the
+        # mission subtree ends up terminal in the same tick):
         _seed_instance(
             engine, instance_id="inst-mission-failed",
             status="failed",
+        )
+        _seed_instance(
+            engine, instance_id="watcher-u1-failed",
+            status="terminated",
         )
         original = _patch_resolver_task_completed(
             resolver, wid=wid, instance_id="inst-mission-failed",
         )
         try:
+            # U1-F1 FIX: invoke the MISSION-ROOT helper with
+            # the mission root id (NOT the watcher id — the
+            # cycle-1/2 pin-mask shape that masked the live
+            # no-op on the TERMINATED arm; same fix applies to
+            # the FAILED arm because both reach hook (a)).
             result = (
-                await jqs.reconcile_held_watches_for_instance(
-                    instance_id="watcher-u1-failed",
+                await jqs.reconcile_held_watches_for_mission_root(
+                    instance_id="inst-mission-failed",
                 )
             )
         finally:
@@ -1121,12 +1204,184 @@ class TestP4TerminatedFailedArms:
 
         assert result["fired"] == 1, (
             f"P4 FAILED: arm MUST fire the held row via the "
-            f"widened gate — got fired={result['fired']}. "
-            f"Pre-fix this row starved on the error lane (the "
-            f"identical c7f59aaf class, error variant)."
+            f"widened gate + mission-root helper (U1-F1 cycle 3) "
+            f"— got fired={result['fired']}. Pre-fix this row "
+            f"starved on the error lane (the identical c7f59aaf "
+            f"class, error variant)."
         )
         # Confirm exactly-once: row is gone after the fire.
         assert len(watcher_repo.get_watchers_for_job(wid)) == 0
+
+    @pytest.mark.asyncio
+    async def test_p4_terminated_arm_live_seam(
+        self, u1_components,
+    ):
+        """P4 TERMINATED arm — LIVE-SEAM pin (U1-F1 cycle 3).
+
+        The companion ``test_p4_terminated_arm_fires_via_helper_hook``
+        exercises the BODY of the mission-root helper directly
+        (unit-scope — bypasses the production call-site wiring).
+        THIS pin exercises the FULL LIVE SEAM end-to-end:
+
+          1. A real :class:`JobFeedbackObserver` with a real
+             ``JobQueueService`` (NOT mocks — the helper filter
+             + C1 partition + CAS-claim + ``enqueue_message``
+             must all be real).
+          2. The mission-root TERMINATED lifecycle event
+             routed through ``observer._process_event`` →
+             ``_fire_watcher_notify_for_terminal`` → hook (a)
+             → :meth:`JobQueueService.reconcile_held_watches_for_mission_root`
+             — i.e., the EXACT call shape production uses.
+          3. Mission root and its watcher descendant (separate
+             instances) end up terminal in the same tick —
+             mirrors the live evidence from tester RESULTS
+             2026-09-27 P4(a) ``DELETE /api/instances/{W2}``
+             cascade-terminate. The held row's ``instance_id``
+             is the WATCHER (a CHILD of the mission root in the
+             ``instances.parent_id`` chain), the lifecycle event
+             fires for the MISSION ROOT.
+          4. Assert the row was CAS-claimed in-session (the
+             ``watcher_repo`` no longer holds it). Under the
+             OLD code (cycle1/2), hook (a) called the
+             WATCHER-scoped helper with the MISSION-ROOT key —
+             the filter excluded the watcher — no fire (the
+             live no-op). Under the NEW code (cycle 3, this
+             commission), hook (a) calls the MISSION-ROOT
+             helper, the tree walk enumerates the watcher, the
+             C1 partition confirms mission-dead (both
+             terminal), the row fires.
+
+        **Tester's LESSON 2026-09-27-pin-masks-live-seam-hook-a.md
+        was the trigger**: the old unit pin masked this bug by
+        calling the helper directly with a watcher id. Pins
+        that exercise the HELPER BODY cannot detect a
+        call-site-level wiring defect; only pins that exercise
+        the LIVE SEAM through the real observer can. This is
+        the masking fix the cycle-3 commission demanded.
+        """
+        from daemon.repositories.job_queue.repository import JobRepository
+        from daemon.repositories.job_queue.lock_repository import LockRepository
+        from daemon.services.job_feedback_observer import JobFeedbackObserver
+
+        engine = u1_components["engine"]
+        watcher_repo = u1_components["watcher_repo"]
+        resolver = u1_components["resolver"]
+        instance_manager = u1_components["instance_manager"]
+        jqs = u1_components["jqs"]
+
+        # Build a REAL observer with a REAL jqs — the helper
+        # filter, C1 partition, CAS-claim, and ``enqueue_message``
+        # delivery all run for real. The observer only mocks the
+        # side-channels the LIVE SEAM doesn't exercise (the
+        # ``atomic_transition`` terminal path is owned by
+        # ``terminate_instance()`` out-of-band — see
+        # ``job_feedback_observer.py:~:1565`` for the asymmetry).
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=jqs,
+            job_repo=MagicMock(spec=JobRepository),
+            lock_repo=MagicMock(spec=LockRepository),
+            project_repo=MagicMock(),
+            instance_manager=instance_manager,
+        )
+
+        wid = f"wid-u1-term-live-{uuid4().hex[:8]}"
+        # Mission root — the instance that will receive the
+        # TERMINATED lifecycle event in the live call.
+        _seed_instance(
+            engine, instance_id="inst-mission-term-live",
+            status="running",
+        )
+        # Watcher — a SEPARATE instance, a CHILD of the mission
+        # root in the ``instances.parent_id`` chain. The watch
+        # row's ``instance_id`` is the WATCHER (the live
+        # topology: watcher ≠ mission-root). The
+        # ``parent_id`` link is what makes the
+        # ``get_tree_ids_permanent(mission_root)`` walk
+        # enumerate the watcher — without it the helper's tree
+        # walk returns only the mission root and the held row
+        # is excluded (the OLD code's failure mode).
+        _seed_instance(
+            engine, instance_id="watcher-u1-term-live",
+            parent_id="inst-mission-term-live",
+        )
+        _add_watch(
+            engine, work_id=wid,
+            instance_id="watcher-u1-term-live",
+            watch_events=["mission_terminal"],
+        )
+
+        # Pre-condition: held row exists.
+        assert len(watcher_repo.get_watchers_for_job(wid)) == 1
+
+        # Cascade-terminate the subtree (mirrors the live
+        # DELETE-cascade-terminate topology from tester
+        # P4(a)). The mission-live guard walks the parent_id
+        # tree from the watcher's id and finds both terminal
+        # → live=False → fire.
+        _seed_instance(
+            engine, instance_id="inst-mission-term-live",
+            status="terminated",
+        )
+        _seed_instance(
+            engine, instance_id="watcher-u1-term-live",
+            status="terminated",
+        )
+
+        # Patch the resolver to return a TERMINAL work_record
+        # whose ``instance_id`` is the WATCHER (the live
+        # semantics: the watcher registered ``watch_job`` on
+        # its OWN work). The mission-live guard then walks the
+        # watcher → mission root chain and finds both terminal
+        # → live=False → CAS-claim + deliver.
+        original = _patch_resolver_task_completed(
+            resolver, wid=wid, instance_id="watcher-u1-term-live",
+        )
+        try:
+            # THE LIVE SEAM: fire a real lifecycle event for the
+            # MISSION ROOT (NOT a direct helper call). This is
+            # the exact seam hook (a) runs on in production.
+            event = {
+                "event_type": "instance_lifecycle",
+                "data": {
+                    "instance_id": "inst-mission-term-live",
+                    "status": "terminated",
+                    "error": None,
+                },
+            }
+            await observer._process_event(event)
+        finally:
+            resolver.resolve_work = original
+
+        # The held row MUST be CAS-claimed in-session. The
+        # ``watcher_repo.get_watchers_for_job(wid)`` returns an
+        # empty list when the row is gone (the CAS-claim
+        # DELETE happens inside ``notify_work_watchers``).
+        remaining = len(watcher_repo.get_watchers_for_job(wid))
+        assert remaining == 0, (
+            f"P4 TERMINATED LIVE-SEAM (U1-F1 cycle 3): hook (a) "
+            f"MUST CAS-claim the held row in-session when the "
+            f"mission root terminates and the watcher is a "
+            f"descendant — got {remaining} watcher row(s) "
+            f"remaining. Under the OLD code (cycle1/2), hook (a) "
+            f"called the WATCHER-scoped helper with the MISSION-"
+            f"ROOT key → filter excluded → live no-op (delivered "
+            f"by the 300s sweep at ~27s in the tester evidence). "
+            f"Under the NEW code (this commission), hook (a) "
+            f"calls the MISSION-ROOT helper, the tree walk "
+            f"enumerates the watcher via "
+            f"``get_tree_ids_permanent``, the C1 partition "
+            f"confirms mission-dead, the row fires in-session."
+        )
+        # The instance_manager.enqueue_message mock MUST have
+        # been called once for the delivery (the [JOB_EVENT]
+        # enqueue path — the production contract for delivery).
+        assert instance_manager.enqueue_message.await_count == 1, (
+            f"P4 TERMINATED LIVE-SEAM: hook (a) MUST drive the "
+            f"[JOB_EVENT] enqueue exactly once via the "
+            f"CAS-claim + notify loop; got "
+            f"await_count={instance_manager.enqueue_message.await_count}."
+        )
 
 
 # ── P5 — CROSS-BOOT STALE ────────────────────────────────────────────────

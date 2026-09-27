@@ -1571,8 +1571,26 @@ class JobFeedbackObserver:
         # symmetric with the post-commit outbox seam at ~:2390
         # (which DOES still guard — see that comment for the
         # asymmetry rationale).
+        #
+        # U1-F1 FIX (cycle 3, 2026-09-27, fix/u1-watch-reconcile):
+        # the lifecycle event's ``instance_id`` is the MISSION
+        # ROOT (the instance that just reached terminal), but the
+        # held row's ``instance_id`` is the WATCHER (the child of
+        # the mission root who called ``watch_job``). The
+        # watcher-scoped helper
+        # (:meth:`JobQueueService.reconcile_held_watches_for_instance`)
+        # filters rows by ``watch.instance_id == instance_id`` —
+        # which matches ZERO rows when the terminated instance is
+        # the mission root. The mission-root-scoped helper
+        # (:meth:`JobQueueService.reconcile_held_watches_for_mission_root`)
+        # uses the SAME axis ``evaluate_mission_live`` resolves
+        # (the parent_id tree walk from the watcher up to the
+        # mission root), so it touches the correct set of held
+        # rows and routes them through the canonical CAS-claim
+        # notify path. Exactly-once + fail-soft preserved; hook
+        # (b) and the sweep keep their byte-unchanged call shapes.
         try:
-            await self._job_queue_service.reconcile_held_watches_for_instance(
+            await self._job_queue_service.reconcile_held_watches_for_mission_root(
                 instance_id=instance_id,
             )
         except Exception as hook_err:

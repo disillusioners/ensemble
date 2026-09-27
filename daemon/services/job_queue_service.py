@@ -776,6 +776,192 @@ class JobQueueService:
             if watch.job_id:
                 candidate_work_ids.add(watch.job_id)
 
+        scope_label = (
+            (instance_id[:8] + "...") if instance_id else "<global>"
+        )
+        return await self._reconcile_work_ids(
+            candidate_work_ids,
+            work_resolver=work_resolver,
+            scope_label=scope_label,
+        )
+
+    async def reconcile_held_watches_for_mission_root(
+        self,
+        *,
+        instance_id: str,
+    ) -> dict[str, int]:
+        """Fire held ``mission_terminal`` watchers whose WATCHER
+        instance descends from ``instance_id`` (the MISSION ROOT).
+
+        U1-SLICE FIX CYCLE 3 (2026-09-27, fix/u1-watch-reconcile,
+        U1-F1 from tester gate): this is the call-site-corrected
+        companion to :meth:`reconcile_held_watches_for_instance`.
+        Hook (a) in :class:`JobFeedbackObserver` fires on the
+        TERMINATED / FAILED lifecycle event of the MISSION ROOT
+        instance (the instance that just reached terminal). The
+        held ``job_watchers`` row's ``instance_id`` is the
+        WATCHER — a CHILD of the mission root who called
+        ``watch_job`` to observe that mission's terminal event.
+
+        The watcher-scoped helper
+        (:meth:`reconcile_held_watches_for_instance`) filters
+        rows by ``watch.instance_id == instance_id`` — which
+        matches ZERO rows when the terminated instance is the
+        mission root (the held row's instance_id is the WATCHER,
+        not the mission root). Live evidence: hook (a) was a
+        NO-OP on the production seam; only the 300s sweep
+        delivered.
+
+        This companion method reconciles by the
+        MISSION-ROOT axis — the SAME axis
+        :func:`daemon.services.mission_live_guard.evaluate_mission_live`
+        resolves (parent_id tree walk from the watcher up to
+        the mission root). Implementation: compute the mission
+        tree via ``get_tree_ids_permanent(instance_id)``
+        (returns ``[instance_id, *descendants]`` — the root +
+        all watcher descendants); filter ``job_watchers`` rows
+        whose ``instance_id`` is in the tree; route through the
+        canonical ``notify_watchers`` CAS path.
+
+        The helper preserves the EXACT contract of
+        :meth:`reconcile_held_watches_for_instance`: fail-soft
+        per-work_id (one row's failure doesn't abort the tick);
+        WARNING log on zombie-GC guard raise; WARNING log on
+        per-work_id notify failure; INFO log on fired/retired
+        counts.
+
+        Args:
+            instance_id: The mission root — the instance whose
+                terminal lifecycle event triggered hook (a).
+                ``get_tree_ids_permanent(instance_id)`` enumerates
+                the watcher descendants in scope.
+
+        Returns:
+            Same dict shape as
+            :meth:`reconcile_held_watches_for_instance`:
+
+            * ``fired`` — watchers CAS-claimed + delivered
+            * ``retired`` — zombie rows removed
+            * ``scanned`` — unique work_ids visited
+
+            Returns the zero-counts dict when the mission root
+            is not in the ``instances`` table (transient race or
+            post-terminate row-vacuum); a global scan here would
+            be a slow over-fetch and risks firing rows that do
+            NOT belong to the terminated mission.
+        """
+        if self._watcher_repo is None or self._instance_manager is None:
+            return {"fired": 0, "retired": 0, "scanned": 0}
+
+        instance_repository = getattr(
+            self._instance_manager, "_instance_repository", None
+        )
+        if instance_repository is None:
+            # Wiring gap (mirrors the guard fail-open contract —
+            # the mission-liveness guard returns
+            # ``live=False, error=True`` on wiring gaps; we
+            # treat the same shape here and let the sweep
+            # backstop handle it). Silent no-op rather than crash.
+            return {"fired": 0, "retired": 0, "scanned": 0}
+
+        # Compute the mission tree — the mission root plus every
+        # watcher descendant (via the permanent ``instances.parent_id``
+        # walk; ``get_tree_ids_permanent`` is the canonical
+        # COMPLETE-LINEAGE enumerator — survives churn, revive,
+        # and the instance_hierarchy working-set deletions).
+        try:
+            tree_ids = await asyncio.to_thread(
+                instance_repository.get_tree_ids_permanent,
+                instance_id,
+            )
+        except Exception as fetch_err:
+            logger.warning(
+                "reconcile_held_watches_for_mission_root: "
+                "get_tree_ids_permanent failed for "
+                "instance_id=%s: %s — hook (a) tick no-ops "
+                "(sweep backstop will retry)",
+                (instance_id[:8] + "...") if instance_id else "<global>",
+                fetch_err,
+            )
+            return {"fired": 0, "retired": 0, "scanned": 0}
+
+        if not tree_ids:
+            # Mission root not in the permanent record — either
+            # a transient race or post-terminate row-vacuum.
+            # Silent no-op (the sweep's global scan would catch
+            # any orphan rows, and we have no signal the row is
+            # permanently un-firable).
+            return {"fired": 0, "retired": 0, "scanned": 0}
+
+        tree_set = set(tree_ids)
+
+        work_resolver = getattr(self, "_work_resolver", None)
+        try:
+            all_watches = self._watcher_repo.get_all_active_watches()
+        except Exception as fetch_err:
+            logger.warning(
+                "reconcile_held_watches_for_mission_root: "
+                "get_all_active_watches failed for "
+                "mission_root=%s: %s — hook (a) tick no-ops "
+                "(sweep backstop will retry)",
+                (instance_id[:8] + "..."),
+                fetch_err,
+            )
+            return {"fired": 0, "retired": 0, "scanned": 0}
+
+        # Filter the active watches to those whose WATCHER
+        # instance is in the mission tree (the WATCHER is a
+        # descendant of the mission root). The dedupe-by-work_id
+        # and per-work_id notify path are identical to
+        # ``reconcile_held_watches_for_instance`` — extracted to
+        # ``_reconcile_work_ids`` to keep the two public
+        # methods focused on the AXIS (watcher vs mission root).
+        candidate_work_ids: set[str] = set()
+        for watch in all_watches:
+            if watch.instance_id not in tree_set:
+                continue
+            if watch.job_id:
+                candidate_work_ids.add(watch.job_id)
+
+        scope_label = f"mission_root={(instance_id[:8] + '...')}"
+        return await self._reconcile_work_ids(
+            candidate_work_ids,
+            work_resolver=work_resolver,
+            scope_label=scope_label,
+        )
+
+    async def _reconcile_work_ids(
+        self,
+        candidate_work_ids: set[str],
+        *,
+        work_resolver,
+        scope_label: str,
+    ) -> dict[str, int]:
+        """Per-work_id notify loop shared by the reconcile helpers.
+
+        Extracted (cycle 3, U1-F1) so :meth:`reconcile_held_watches_for_instance`
+        and :meth:`reconcile_held_watches_for_mission_root` stay
+        focused on the AXIS (watcher-scoped filter vs mission-root
+        tree walk) without duplicating ~150 lines of per-work_id
+        logic. Behavior is preserved verbatim from the pre-extraction
+        inline loop.
+
+        Args:
+            candidate_work_ids: Pre-filtered set of unique
+                work_ids with at least one in-scope watcher.
+            work_resolver: The ``_work_resolver`` instance (or
+                ``None`` for legacy / partial-init callers).
+            scope_label: Label for log messages — the WATCHER
+                id (or ``<global>``) for the per-instance helper;
+                ``mission_root=<id>...`` for the mission-root
+                helper.
+
+        Returns:
+            ``{"fired": int, "retired": int, "scanned": int}``.
+        """
+        fired = 0
+        retired = 0
+        scanned = 0
         for work_id in candidate_work_ids:
             scanned += 1
             try:
@@ -842,13 +1028,12 @@ class JobQueueService:
                         # closed retire" from a cleanly verified
                         # terminal verdict (no log line emitted).
                         logger.warning(
-                            "reconcile_held_watches_for_instance: "
+                            "reconcile_held_watches: "
                             "zombie-GC guard raised %s (%s) for "
                             "work_id=%s — fail-closed retire "
                             "(un-firable row): %s",
                             type(guard_err).__name__,
-                            (instance_id[:8] + "...")
-                            if instance_id else "<global>",
+                            scope_label,
                             work_id[:8],
                             guard_err,
                         )
@@ -862,21 +1047,21 @@ class JobQueueService:
                             if removed:
                                 retired += removed
                                 logger.warning(
-                                    "reconcile_held_watches_for_instance: "
+                                    "reconcile_held_watches: "
                                     "zombie watcher row retired "
-                                    "(job_id=%s, instance_filter=%s, "
+                                    "(job_id=%s, scope=%s, "
                                     "reason=work_unresolvable+"
                                     "mission_terminal_or_unresolvable, "
                                     "removed=%d)",
                                     work_id[:8],
-                                    (instance_id[:8] + "...")
-                                    if instance_id else "<global>",
+                                    scope_label,
                                     removed,
                                 )
                         except Exception as retire_err:
                             logger.warning(
-                                "reconcile_held_watches_for_instance: "
-                                "zombie retire failed for job_id=%s: %s",
+                                "reconcile_held_watches: "
+                                "zombie retire failed for "
+                                "job_id=%s: %s",
                                 work_id[:8], retire_err,
                             )
                     continue
@@ -900,9 +1085,6 @@ class JobQueueService:
                 # tick will revisit it on the next iteration.
                 if not _work_status_is_terminal(work_status):
                     continue
-                # Pass ``instance_id`` filter only when set — the
-                # per-instance hook variant is scoped; the global
-                # sweep variant fires for everything in scope.
                 notified = await self.notify_watchers(
                     work_id,
                     work_status,
@@ -924,20 +1106,19 @@ class JobQueueService:
                 # Fail-soft per work_id: log + continue. The next
                 # sweep tick retries.
                 logger.warning(
-                    "reconcile_held_watches_for_instance: "
+                    "reconcile_held_watches: "
                     "per-work_id notify failed (work_id=%s, "
-                    "instance_filter=%s): %s",
+                    "scope=%s): %s",
                     work_id[:8],
-                    (instance_id[:8] + "...") if instance_id else "<global>",
+                    scope_label,
                     per_work_err,
                 )
 
         if fired or retired:
             logger.info(
-                "reconcile_held_watches_for_instance: scanned=%d "
-                "fired=%d retired=%d (instance_filter=%s)",
-                scanned, fired, retired,
-                (instance_id[:8] + "...") if instance_id else "<global>",
+                "reconcile_held_watches: scanned=%d "
+                "fired=%d retired=%d (scope=%s)",
+                scanned, fired, retired, scope_label,
             )
 
         return {"fired": fired, "retired": retired, "scanned": scanned}
