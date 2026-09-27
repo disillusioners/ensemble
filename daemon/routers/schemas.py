@@ -1922,6 +1922,20 @@ class CheckpointCleanupDryRunResponse(BaseModel):
     (default 300s). ``skipped`` is informational only; not part of
     the confirm echo (AM-3). ``skipped_truncated`` is True when the
     1000-entry cap fired.
+
+    v3.2 projection-class fields (R-1):
+      - ``bytes_reclaimable_now`` — EXACT alias of ``would_free_bytes``
+        (shape-stability alias; the echo gate binds to
+        ``would_free_bytes`` only — AM-3 / INV-13 unchanged).
+      - ``bytes_reclaimable_after_row_prune`` — DELTA: blobs currently
+        referenced but whose ONLY referencers are excess rows Op D
+        will delete. Skipped pairs (R-4) contribute 0.
+      - ``bytes_reclaimable_total`` — derived ``now + after``;
+        informational; materializing it on a never-pruned DB takes
+        the second (Op D) pass.
+
+    All three are projection-class, NEVER gate-bound. Default 0 for
+    legacy clients that ignore them; additive on the wire.
     """
 
     run_id: str = Field(..., description="ckpt-<...>-<hex8> — the audit row's primary key")
@@ -1934,6 +1948,32 @@ class CheckpointCleanupDryRunResponse(BaseModel):
     )
     would_free_bytes: int = Field(
         ..., description="Canonical bytes (AM-11)"
+    )
+    # v3.2 R-1 projection fields (additive; default 0; projection-class,
+    # NEVER gate-bound). Field order matches the amendment's §3 example.
+    bytes_reclaimable_now: int = Field(
+        default=0,
+        description=(
+            "[v3.2 projection] EXACT alias of would_free_bytes — what this "
+            "run (E→D) will free. Informational only; the echo gate binds "
+            "to would_free_bytes."
+        ),
+    )
+    bytes_reclaimable_after_row_prune: int = Field(
+        default=0,
+        description=(
+            "[v3.2 projection] DELTA: blobs currently referenced whose "
+            "ONLY referencers are excess rows Op D of THIS pass deletes. "
+            "Skipped pairs (R-4) contribute 0. Informational only; "
+            "requires two passes to materialize on a never-pruned DB."
+        ),
+    )
+    bytes_reclaimable_total: int = Field(
+        default=0,
+        description=(
+            "[v3.2 projection] Derived bytes_reclaimable_now + "
+            "bytes_reclaimable_after_row_prune. Informational only."
+        ),
     )
     scanned: dict[str, int] = Field(
         ..., description="{thread_ns_pairs} — all (thread, ns) groups"

@@ -20,6 +20,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -72,6 +73,7 @@ def _result(
     would_bytes: int = 268435456,
     duration_ms: int = 412,
     skipped: list | None = None,
+    bytes_after_row_prune: int = 0,
 ) -> Any:
     blobs = BlobPruneSummary(
         dry_run=not destructive,
@@ -82,7 +84,10 @@ def _result(
         total_bytes_freed=would_bytes if destructive else 0,
         skipped=skipped or [],
     )
-    rows = CheckpointRowPruneSummary(scanned_pairs=12)
+    rows = CheckpointRowPruneSummary(
+        scanned_pairs=12,
+        would_free_bytes_after_row_prune=bytes_after_row_prune,
+    )
     from daemon.services.maintenance import CheckpointRunResult
 
     return CheckpointRunResult(
@@ -527,17 +532,141 @@ class TestExecuteHappyPath:
         assert resp2["expected_duration_ms_hint"] == 412
 
 
+class TestProjectionEchoBothOrNeither:
+    """v3.2 fix-pass O2 — the manual_execute ``projection`` echo is
+    BOTH-OR-NEITHER + legacy-row safe.
+
+    ``_execute_run`` sources the echo from the EXECUTE row's
+    ``dry_run_summary_json`` snapshot. A snapshot whose dict predates
+    the v3.2 projection fields (legacy), carries only ONE of the two
+    values, or is not even a dict must surface NO ``projection`` block
+    — never a partial echo, never a KeyError/TypeError from any legacy
+    row shape. Only a BOTH-present snapshot emits the block.
+    """
+
+    @staticmethod
+    def _with_summary(runs_repo, row, mutation: dict) -> str:
+        """Re-save the seeded dry-run row with extra summary keys
+        (mutating a dict the gate does not read — ``would_delete``
+        stays intact so the execute gate still passes). Returns the
+        row's run_id — the commit expires the passed instance, so
+        callers must use the returned id (never touch ``row`` after)."""
+        from sqlalchemy.orm import Session
+
+        summary = dict(row.summary_json)
+        summary.update(mutation)
+        run_id = row.run_id
+        row.summary_json = summary
+        with Session(runs_repo.engine) as s:
+            s.add(row)
+            s.commit()
+        return run_id
+
+    async def _execute_and_fetch(self, runs_repo, run_id: str):
+        svc = _service(runs_repo, job_result=_result(destructive=True))
+        resp = await svc.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=run_id,
+                expected_bytes=268435456,
+            ),
+            REQUESTER,
+        )
+        await asyncio.gather(*list(svc._executing_tasks))
+        return runs_repo.get(resp["run_id"])
+
+    async def test_legacy_row_absent_projection_fields_no_block(
+        self, runs_repo, as_pg
+    ):
+        """Pre-v3.2 legacy snapshot (no ``*_reclaimable_*`` keys) →
+        summary keeps the FROZEN 4-key shape; NO projection block."""
+        fresh = _seed_dry_run_row(runs_repo)
+        row = await self._execute_and_fetch(runs_repo, fresh.run_id)
+        assert row.status == "succeeded"
+        assert "projection" not in row.summary_json
+        assert set(row.summary_json.keys()) == {
+            "checkpoint_rows", "writes", "blobs", "duration_ms",
+        }
+
+    async def test_now_only_snapshot_emits_no_block(self, runs_repo, as_pg):
+        """One-sided snapshot (``bytes_reclaimable_now`` only) → NO
+        projection block (BOTH-OR-NEITHER — no partial echo)."""
+        fresh = _seed_dry_run_row(runs_repo)
+        run_id = self._with_summary(runs_repo, fresh, {"bytes_reclaimable_now": 111})
+        row = await self._execute_and_fetch(runs_repo, run_id)
+        assert row.status == "succeeded"
+        assert "projection" not in row.summary_json
+
+    async def test_after_only_snapshot_emits_no_block(self, runs_repo, as_pg):
+        """One-sided snapshot (``..._after_row_prune`` only) → NO
+        projection block."""
+        fresh = _seed_dry_run_row(runs_repo)
+        run_id = self._with_summary(
+            runs_repo, fresh, {"bytes_reclaimable_after_row_prune": 222}
+        )
+        row = await self._execute_and_fetch(runs_repo, run_id)
+        assert row.status == "succeeded"
+        assert "projection" not in row.summary_json
+
+    async def test_both_present_emits_both_at_dry_run(self, runs_repo, as_pg):
+        """BOTH values present → the echo block carries both
+        ``*_at_dry_run`` keys with the snapshotted values (R-5)."""
+        fresh = _seed_dry_run_row(runs_repo)
+        run_id = self._with_summary(
+            runs_repo,
+            fresh,
+            {
+                "bytes_reclaimable_now": 111,
+                "bytes_reclaimable_after_row_prune": 222,
+            },
+        )
+        row = await self._execute_and_fetch(runs_repo, run_id)
+        assert row.summary_json["projection"] == {
+            "bytes_reclaimable_now_at_dry_run": 111,
+            "bytes_reclaimable_after_row_prune_at_dry_run": 222,
+        }
+
+    async def test_non_dict_snapshot_never_raises(self, runs_repo, as_pg):
+        """Corrupt snapshot shapes (JSON string / list) → _execute_run
+        completes, row succeeds, NO projection block, NO KeyError /
+        AttributeError / TypeError. Driven directly (the execute gate
+        cannot produce this shape — belt-and-braces for direct repo
+        writes)."""
+        for weird in ("not-a-dict", [1, 2, 3]):
+            run_id = f"ckpt-20260927_032000123456-{uuid4().hex[:8]}"
+            row = MaintenanceRun(
+                run_id=run_id,
+                section="checkpoint-cleanup",
+                kind="manual_execute",
+                started_at=now_utc_iso(),
+                status="running",
+                triggered_by="user",
+                dry_run_summary_json=weird,
+            )
+            assert runs_repo.insert(row) is True
+            svc = _service(runs_repo, job_result=_result(destructive=True))
+            await svc._execute_run(run_id)
+            done = runs_repo.get(run_id)
+            assert done.status == "succeeded"
+            assert "projection" not in done.summary_json
+
+
 class TestDryRun:
     async def test_dry_run_happy_shape(self, runs_repo, as_pg):
         """Case 32a — happy shape pins: would_delete /
         would_delete_count / would_free_bytes / scanned / skipped /
-        duration_ms / fresh_until [AM-10/AM-11]."""
+        duration_ms / fresh_until [AM-10/AM-11]; v3.2 additive
+        projection fields bytes_reclaimable_now /
+        bytes_reclaimable_after_row_prune / bytes_reclaimable_total
+        [R-1] (projection-class, informational, never gate-bound)."""
         svc = _service(runs_repo, job_result=_result(duration_ms=100))
         got = await svc.dry_run(REQUESTER)
         assert set(got.keys()) == {
             "run_id", "would_delete", "would_delete_count",
             "would_free_bytes", "scanned", "skipped", "skipped_truncated",
             "duration_ms", "fresh_until",
+            "bytes_reclaimable_now", "bytes_reclaimable_after_row_prune",
+            "bytes_reclaimable_total",
         }
         assert got["would_delete"] == {
             "checkpoint_rows": 0, "writes": 0, "blobs": 4,
@@ -545,6 +674,13 @@ class TestDryRun:
         }
         assert got["would_delete_count"] == 4
         assert got["would_free_bytes"] == 268435456
+        # v3.2 projection fields — default 0 when the dry-run result
+        # is a stub (the test's _result() returns no
+        # would_free_bytes_after_row_prune; the
+        # CheckpointRowPruneSummary dataclass defaults to 0).
+        assert got["bytes_reclaimable_now"] == 268435456
+        assert got["bytes_reclaimable_after_row_prune"] == 0
+        assert got["bytes_reclaimable_total"] == 268435456
         assert got["scanned"] == {"thread_ns_pairs": 12}
         assert got["skipped"] == []
         # fresh_until ≈ started_at + 300s (±2s tolerance, TEXT ISO).
@@ -1290,3 +1426,320 @@ class TestHostAllowlistGuard:
         finally:
             guard.reset_trusted_origins_cache()
             guard.reset_allowed_hosts_cache()
+# ── v3.2 dry-run projection — wire-shape pins (R-1) ─────────────────────────────
+#
+# Five new tests land here per the amendment's Test-deltas table; the
+# convergence test (#5) lives in the integration suite (real E→D
+# composition on disposable PG). The negative pin (#6) lives in this
+# file too — it pins the gate, which is a service-level concern.
+
+
+class TestDryRunProjection:
+    """v3.2 R-1 — the dry-run §3 response carries three additive
+    projection-class fields (NEVER gate-bound).
+
+    Tests 1, 2, 4 of the amendment's Test-deltas table. Test 3 (R-1
+    pin — actual delta-not-superset computation) lives in
+    :class:`TestRowPruneProjectionDeltaNotSuperset` (it tests the
+    computation site directly with a per-pair mock adapter).
+    """
+
+    async def test_dry_run_projection_fields_on_never_pruned_db(
+        self, runs_repo, as_pg
+    ):
+        """Test 1 — incident scenario: never-pruned DB has all blobs
+        referenced only by excess rows → ``now == 0``, ``after > 0``,
+        ``rows > 0``, ``total == now + after``.
+
+        Stubs ``_result`` to mirror the incident numbers (rows:104,501,
+        writes:273,293, blobs:0/bytes:0 in would_delete — i.e. zero
+        current orphans; the projection must be > 0). The wire composer
+        must surface all three additive fields with the correct
+        algebra.
+        """
+        # Per the incident ground truth: never-pruned prod DB →
+        # would_delete.bytes = 0 (current orphans = 0); the after-row-
+        # prune projection reports the ~11 GB blobs that are
+        # referenced only by excess rows D will delete.
+        result = _result(
+            would_blobs=0,
+            would_bytes=0,
+            bytes_after_row_prune=11_811_060_000,
+        )
+        svc = _service(runs_repo, job_result=result)
+        got = await svc.dry_run(REQUESTER)
+        # Additive fields present with correct values.
+        assert got["bytes_reclaimable_now"] == 0
+        assert got["bytes_reclaimable_after_row_prune"] == 11_811_060_000
+        assert got["bytes_reclaimable_total"] == 11_811_060_000
+        # would_free_bytes is the canonical echo-gate number (= now
+        # by v3.2 alias semantics — pin it so a future refactor that
+        # recomputes the value can't drift the gate).
+        assert got["would_free_bytes"] == 0
+        assert got["bytes_reclaimable_now"] == got["would_free_bytes"]
+
+    async def test_dry_run_projection_zero_on_already_pruned_db(
+        self, runs_repo, as_pg
+    ):
+        """Test 2 — post-pass: both ``now`` and ``after`` are 0 (subset
+        identity ``after == 0 when excess_pairs == 0``).
+
+        A DB whose retention has already converged has no excess pairs,
+        so the projection's per-pair loop never fires. The wire composer
+        must still emit the additive fields (default 0 for legacy
+        clients that ignore them).
+        """
+        result = _result(
+            would_blobs=0,
+            would_bytes=0,
+            bytes_after_row_prune=0,
+        )
+        svc = _service(runs_repo, job_result=result)
+        got = await svc.dry_run(REQUESTER)
+        assert got["bytes_reclaimable_now"] == 0
+        assert got["bytes_reclaimable_after_row_prune"] == 0
+        assert got["bytes_reclaimable_total"] == 0
+        # Pin the subset identity (algebra of the projection): if
+        # excess_pairs == 0 (a post-pass DB), ``after`` MUST be 0.
+        # The amendment formalizes this; the wire composer reads
+        # ``result.rows.would_free_bytes_after_row_prune`` directly,
+        # so the pin is at the per-pair accumulator.
+
+    async def test_dry_run_projection_skips_skipped_pairs(
+        self, runs_repo, as_pg
+    ):
+        """Test 4 — R-4 pin: skipped pairs (ZERO_REFS / MAX_REFS-cap)
+        contribute 0 to ``after`` / ``total`` AND surface in
+        ``skipped[]`` (the FE flag covers the honesty gap).
+
+        Fixture: a single excess pair lands in the blob prune's
+        skipped list (e.g. MAX_REFS_EXCEEDED — the 1,928-checkpoint top
+        thread from the incident). The Op D dry-run must subtract
+        this pair from the projection (its excess rows still delete
+        but its blobs' reclaimability is unknown).
+        """
+        skipped = [("t-top", "ns-A", "MAX_REFS_EXCEEDED")]
+        result = _result(
+            would_blobs=0,
+            would_bytes=0,
+            bytes_after_row_prune=0,  # excluded due to skipped pair
+            skipped=skipped,
+        )
+        svc = _service(runs_repo, job_result=result)
+        got = await svc.dry_run(REQUESTER)
+        assert got["bytes_reclaimable_now"] == 0
+        assert got["bytes_reclaimable_after_row_prune"] == 0
+        assert got["bytes_reclaimable_total"] == 0
+        # The skipped pair surfaces in ``skipped[]`` (R-4 honesty gap).
+        assert len(got["skipped"]) == 1
+        assert got["skipped"][0]["thread_id"] == "t-top"
+        assert got["skipped"][0]["reason"] == "MAX_REFS_EXCEEDED"
+
+
+class TestRowPruneProjectionDeltaNotSuperset:
+    """Test 3 — R-1 pin — the per-pair computation excludes current
+    orphans from ``after``.
+
+    Set algebra (amendment R-1):
+      now_set       = blobs not referenced by ANY row
+      after_D_set   = blobs not referenced by ANY keep row
+      after_set     = after_D_set − now_set
+                    = blobs referenced by ≥1 excess row
+                      AND by 0 keep rows
+                    = "referenced by excess only"
+
+    The superset reading would compute:
+      after_wrong    = after_D_set (the post-D orphan SUPERSET)
+      total_wrong    = now_set + after_wrong (DOUBLE-counts now)
+
+    Pin: a fixture with 1 current-orphan blob (X) AND 1 excess-
+    referenced blob (Y) in the same pair → the correct ``after`` is Y
+    (NOT X+Y); ``total`` is X+Y (NOT 2X+Y). Test asserts:
+      bytes_reclaimable_after_row_prune == bytes(Y)
+      bytes_reclaimable_total            == bytes(X) + bytes(Y)
+      bytes_reclaimable_total            < bytes(X) + bytes(X) + bytes(Y)
+    """
+
+    async def test_dry_run_projection_delta_not_superset(self):
+        """One pair: 1 current-orphan blob + 1 excess-referenced blob.
+        The pair-level projection must report the excess-referenced
+        bytes only (NOT include current orphans).
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from daemon.checkpoint_adapter import CheckpointerAdapter
+        from daemon.config import PersistenceConfig
+        from daemon.services.maintenance import (
+            CheckpointCleanupJob,
+            CheckpointRowPruneSummary,
+        )
+        from daemon.services.checkpoint_prune import BlobPruneSummary
+
+        # Pair fixture: (thread_id="t1", checkpoint_ns="ns1", cnt=5)
+        # → keep_ids = {c1, c2, c3} (the 3 newest); excess = {c4, c5}.
+        # Blob X (current orphan): 1_000_000 bytes, no refs.
+        # Blob Y (excess-only ref): 2_500_000 bytes, ref'd only by c4.
+        X_BYTES = 1_000_000
+        Y_BYTES = 2_500_000
+
+        adapter = MagicMock(spec=CheckpointerAdapter)
+        adapter.find_all_thread_ns_pairs = AsyncMock(
+            return_value=[("t1", "ns1", 5)]
+        )
+        adapter.find_excess_checkpoint_groups = AsyncMock(
+            return_value=[("t1", "ns1", 5)]
+        )
+        adapter.get_checkpoint_ids = AsyncMock(
+            return_value=["c1", "c2", "c3"]
+        )
+        adapter.count_writes_excluding = AsyncMock(return_value=2)
+        # The R-1 set algebra: count_blobs_anti_join reports NOW (X);
+        # count_blobs_referenced_only_by_excess reports AFTER (Y only).
+        adapter.count_blobs_anti_join = AsyncMock(
+            return_value=(1, X_BYTES)
+        )
+        adapter.count_blobs_referenced_only_by_excess = AsyncMock(
+            return_value=(1, Y_BYTES)
+        )
+
+        job = CheckpointCleanupJob(
+            config=PersistenceConfig(),
+            checkpointer=adapter,
+            instance_repo=MagicMock(),
+        )
+        summary = await job._compute_row_prune_dry_run()
+
+        # Per-pair projection: AFTER must be Y (NOT X+Y). R-1
+        # set-difference: after = (after_D) − (now) = Y. The superset
+        # reading would emit X+Y — caught by the assertion below.
+        assert isinstance(summary, CheckpointRowPruneSummary)
+        assert summary.would_free_bytes_after_row_prune == Y_BYTES, (
+            f"after must exclude current orphans; got "
+            f"{summary.would_free_bytes_after_row_prune}, expected {Y_BYTES}"
+        )
+        # Also pin that the per-pair adapter method was called with
+        # the right keep-set (c1, c2, c3).
+        call_args = (
+            adapter.count_blobs_referenced_only_by_excess.await_args
+        )
+        assert call_args is not None
+        assert call_args.args[0] == "t1"
+        assert call_args.args[1] == "ns1"
+        assert call_args.args[2] == {"c1", "c2", "c3"}
+
+
+class TestGateDoesNotReadProjection:
+    """Test 6 — negative pin: the ``expected_bytes`` echo gate binds
+    to ``would_free_bytes`` ONLY. Storing a malicious projection
+    field value (e.g. ``bytes_reclaimable_after_row_prune = 99``)
+    MUST NOT influence the gate — the gate refuses on a real
+    mismatch but accepts when the echoed value matches the stored
+    ``would_free_bytes``, regardless of what the projection says.
+    """
+
+    async def test_expected_bytes_echo_does_not_read_projection(
+        self, runs_repo, as_pg
+    ):
+        """Stored dry-run has ``would_free_bytes = 268435456`` BUT
+        ``bytes_reclaimable_after_row_prune = 99``. Client echoes 99
+        as ``expected_bytes`` → gate MUST refuse with
+        ``byte_count_mismatch`` (gate reads ``would_free_bytes``
+        only, NOT the projection).
+        """
+        # Seed dry-run row: would_free_bytes matches the canonical
+        # 256 MiB; projection field is poisoned to 99.
+        seeded = _seed_dry_run_row(runs_repo)
+        # _seed_dry_run_row defaults to bytes_value=268435456;
+        # poison the projection field for the negative pin.
+        poisoned_summary = dict(seeded.summary_json)
+        poisoned_summary["bytes_reclaimable_after_row_prune"] = 99
+        poisoned_summary["bytes_reclaimable_now"] = (
+            poisoned_summary["would_free_bytes"]
+        )
+        poisoned_summary["bytes_reclaimable_total"] = (
+            poisoned_summary["would_free_bytes"] + 99
+        )
+        row = runs_repo.get(seeded.run_id)
+        row.summary_json = poisoned_summary
+        from sqlalchemy.orm import Session
+        with Session(runs_repo.engine) as s:
+            s.add(row)
+            s.commit()
+        svc = _service(runs_repo)
+        # Echo the poisoned projection value (99). The gate must NOT
+        # read the projection — it must compare against
+        # ``would_delete.bytes`` (268435456) and refuse with 400
+        # ``byte_count_mismatch``.
+        with pytest.raises(MaintenanceError) as ei:
+            await svc.execute(
+                _ExecutePayload(
+                    confirm=True,
+                    dry_run_run_id=seeded.run_id,
+                    expected_bytes=99,
+                ),
+                REQUESTER,
+            )
+        assert ei.value.code == "byte_count_mismatch"
+        assert ei.value.http_status == 400
+        # The detail envelope must show the canonical echo check
+        # (expected=99, stored=268435456) — proof the gate read
+        # ``would_delete.bytes``, NOT the projection field.
+        assert ei.value.details == {
+            "expected": 99,
+            "stored": 268435456,
+        }
+
+    async def test_expected_bytes_echo_accepts_when_would_free_matches(
+        self, runs_repo, as_pg
+    ):
+        """Belt: the canonical ``would_free_bytes = 268435456`` is
+        echoed → gate advances past step 6 (proves the negative pin
+        above isn't a false positive). The projection field
+        ``bytes_reclaimable_after_row_prune = 99`` is irrelevant to
+        the gate, present or not.
+        """
+        seeded = _seed_dry_run_row(runs_repo)  # bytes_value=268435456
+        # Poison the projection field; leave would_delete.bytes alone.
+        poisoned_summary = dict(seeded.summary_json)
+        poisoned_summary["bytes_reclaimable_after_row_prune"] = 99
+        poisoned_summary["bytes_reclaimable_now"] = (
+            poisoned_summary["would_free_bytes"]
+        )
+        poisoned_summary["bytes_reclaimable_total"] = (
+            poisoned_summary["would_free_bytes"] + 99
+        )
+        row = runs_repo.get(seeded.run_id)
+        row.summary_json = poisoned_summary
+        from sqlalchemy.orm import Session
+        with Session(runs_repo.engine) as s:
+            s.add(row)
+            s.commit()
+        svc = _service(runs_repo)
+        # Echo the CANONICAL would_free_bytes. Gate must NOT read the
+        # projection field — so this passes step 6, then hits the
+        # single-flight conflict (the seeded running row in the
+        # execute path is absent; the gate passes; the row is
+        # inserted as a manual_execute). Wait — actually the gate
+        # passes because the value matches; the test then exits at
+        # the create-task step (we don't await it). Capture the
+        # gate-pass as: no MaintenanceError raised from step 6.
+        # Use a fresh service that does NOT have a runs_repo with a
+        # pre-existing conflict.
+        # Easiest check: the execute path returns a 202 dict (run_id,
+        # status, etc.) when the gate passes — but we cannot await
+        # the background task in a unit test cleanly. Instead, patch
+        # _execute_run to be a no-op so the spawn is synchronous-ish.
+        svc._execute_run = AsyncMock()  # type: ignore[method-assign]
+        try:
+            payload = _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=seeded.run_id,
+                expected_bytes=268435456,
+            )
+            resp = await svc.execute(payload, REQUESTER)
+            assert resp["status"] == "running"
+            # Gate passed — projection field was irrelevant.
+        finally:
+            # Wait briefly for the (now no-op) task to finish so the
+            # row cleanup is consistent.
+            pass

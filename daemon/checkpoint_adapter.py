@@ -212,6 +212,34 @@ class CheckpointerAdapter(ABC):
         """
 
     @abstractmethod
+    async def count_blobs_referenced_only_by_excess(
+        self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
+    ) -> tuple[int, int]:
+        """v3.2 projection helper — blobs referenced ONLY by excess rows.
+
+        Returns ``(count, bytes)`` for blobs of (thread_id, checkpoint_ns)
+        whose (channel, version) IS referenced by at least one row in
+        the same (thread_id, checkpoint_ns) whose ``checkpoint_id`` is
+        NOT in ``keep_ids`` AND NOT referenced by any row whose
+        ``checkpoint_id`` IS in ``keep_ids``. This is the "referenced by
+        excess only" reading of the Op-D projection (R-1 in the v3.2
+        amendment) — the bytes that Op D of THIS pass will orphan for a
+        follow-up blob prune run.
+
+        Callers MUST pass a NON-empty ``keep_ids``: pairs whose keep
+        set is empty (max_per_thread=0 edge) are SKIPPED upstream and
+        contribute 0 to the projection (mirroring the destructive
+        arm's skip) — they never reach this method. (With an empty
+        ``keep_ids`` the SQL would degenerate to the pair's full
+        referenced set, which is exactly why the empty case must stay
+        caller-excluded.)
+
+        SQLite: there is no ``checkpoint_blobs`` table — returns
+        ``(0, 0)`` after logging a warning (mirror of
+        :meth:`count_blobs_anti_join`).
+        """
+
+    @abstractmethod
     async def delete_blobs_anti_join(
         self, thread_id: str, checkpoint_ns: str
     ) -> tuple[int, int]:
@@ -440,6 +468,22 @@ class SqliteCheckpointerAdapter(CheckpointerAdapter):
         logger.warning(
             "count_blobs_anti_join: SQLite backend has no checkpoint_blobs "
             "table — blob prune is a no-op (PostgreSQL-only operation)"
+        )
+        return (0, 0)
+
+    async def count_blobs_referenced_only_by_excess(
+        self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
+    ) -> tuple[int, int]:
+        """SQLite no-op — no checkpoint_blobs table exists for this backend.
+
+        Mirror of :meth:`count_blobs_anti_join`'s SQLite stub: the v3.2
+        projection helper is a PostgreSQL-only operation (dry-run path
+        is gated to PG via the service's PG-isinstance check).
+        """
+        logger.warning(
+            "count_blobs_referenced_only_by_excess: SQLite backend has "
+            "no checkpoint_blobs table — projection is a no-op "
+            "(PostgreSQL-only operation)"
         )
         return (0, 0)
 
@@ -728,6 +772,70 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 "FROM checkpoint_blobs b WHERE" + _BLOB_ANTI_JOIN_PREDICATE,
                 thread_id,
                 checkpoint_ns,
+            )
+            if not row:
+                return (0, 0)
+            return (int(row["cnt"]), int(row["bytes"]))
+
+    async def count_blobs_referenced_only_by_excess(
+        self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
+    ) -> tuple[int, int]:
+        """v3.2 projection helper — blobs referenced ONLY by excess rows.
+
+        Returns ``(count, bytes)`` for blobs of (thread_id, checkpoint_ns)
+        whose (channel, version) IS referenced by ≥1 row whose
+        ``checkpoint_id`` is NOT in ``keep_ids`` AND is NOT referenced by
+        any row whose ``checkpoint_id`` IS in ``keep_ids``. Equivalently:
+        blobs that are currently referenced but whose ONLY remaining
+        referencers are excess rows Op D of this pass will delete —
+        exactly the "after-D orphans" the v3.2 projection needs to
+        surface.
+
+        Set algebra vs the existing anti-join predicate:
+        ``count_blobs_anti_join`` returns blobs with ZERO refs (the
+        current ``now`` set); this helper returns blobs referenced by
+        EXCESS rows only (the ``after − now`` delta). Their union is the
+        post-D orphan set; subtracting ``now`` from the union gives
+        ``after`` — this method computes ``after`` directly via
+        EXISTS + NOT EXISTS rather than via the two-query difference
+        (amendment R-1, "compute directly as 'referenced-by-excess-only'").
+
+        Callers MUST pass a NON-empty ``keep_ids``: pairs whose keep
+        set is empty (max_per_thread=0 edge) are SKIPPED upstream
+        (``_compute_row_prune_dry_run`` never queries them) and
+        contribute 0 to the projection, matching the destructive
+        arm's skip. (With an empty ``keep_ids`` the EXISTS branch
+        naturally expands to "any row refs b" and the NOT EXISTS
+        branch is vacuously TRUE — the result would be the pair's
+        full referenced set, which is exactly why the empty case must
+        stay caller-excluded.)
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT COUNT(*) AS cnt, COALESCE(SUM(OCTET_LENGTH(b.blob)), 0) AS bytes
+                FROM checkpoint_blobs b
+                WHERE b.thread_id = $1 AND b.checkpoint_ns = $2
+                  AND EXISTS (
+                      SELECT 1
+                      FROM checkpoints c_excess
+                      WHERE c_excess.thread_id = b.thread_id
+                        AND c_excess.checkpoint_ns = b.checkpoint_ns
+                        AND (c_excess.checkpoint -> 'channel_versions' ->> b.channel) = b.version
+                        AND NOT (c_excess.checkpoint_id = ANY($3::text[]))
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM checkpoints c_keep
+                      WHERE c_keep.thread_id = b.thread_id
+                        AND c_keep.checkpoint_ns = b.checkpoint_ns
+                        AND (c_keep.checkpoint -> 'channel_versions' ->> b.channel) = b.version
+                        AND c_keep.checkpoint_id = ANY($3::text[])
+                  )
+                """,
+                thread_id,
+                checkpoint_ns,
+                list(keep_ids),
             )
             if not row:
                 return (0, 0)

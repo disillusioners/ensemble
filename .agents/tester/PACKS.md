@@ -1,5 +1,22 @@
 # Test Packs
 
+## Completed commission — DRY-RUN PROJECTION v3.2 MERGE-BLOCKING VERIFICATION (2026-09-27)
+
+Branch `feature/dry-run-projection-v3.2` @ **`df89da37`** vs base **`1989b3b5`** (v0.16.0). **VERDICT: PASS — READY TO MERGE. All dev claims confirmed; contract probes 8/8 (incl. SQL-level R-1 delta proof); Playwright 14/14 with clean teardown; whole-tree delta ZERO branch-caused (39 head-only nodes all classified: 17 environmental, 1 load-flake, 21 pre-existing proven at base).** Full report: `RESULTS/2026-09-27-dry-run-projection-v32-verification.md`. All packs env-scrubbed `POSTGRES_*`; `uv run python -m pytest` only; every run `timeout`-wrapped; zero source mods, zero commits (23 read-only workers).
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `v32_be_unit_family` | `timeout 300 uv run python -m pytest <5 guard files> --tb=short -q -rA` | guard family + 6 new | ✅ 128/128 in 9.2s (claim "65→71" = cleanup_service file alone, confirmed; family 122→128) |
+| `v32_be_pg_api` | disposable PG :15532; `PG_TEST_*`; `--override-ini="addopts=" -m "integration and postgres"` | PG API suite | ✅ 40P+1S / 41 (claim 40→41 confirmed; new convergence test green) |
+| `v32_fe_jest_maintenance` | `CI=true timeout 300 npx jest <4 maintenance specs> --watch=false` | FE focused | ✅ 113/113; all 4 v3.2 FE contract items pin-covered |
+| `v32_fe_static_build` | `EXPECTED_BRANCH=feature/dry-run-projection-v3.2 timeout 300 bash test/packs/fe_static_typecheck_build_test.sh` | tsc+build | ✅ exit 0; 5.89 MB < 6 MB; zero warning delta |
+| `v32_pw_e2e14` | `ENSEMBLE_DB_DSN=<disposable :15432> timeout 300 npx playwright test -c playwright.maintenance.config.ts maintenance-checkpoint-cleanup --project maintenance --reporter=line` | 14-case gate | ✅ 14/14, 0 skipped, 41s; F1 teardown leak did NOT reproduce; ports clean |
+| `v32_realsaver_head` | disposable PG :15534; `--override-ini='addopts=' --override-ini='timeout=120'` | adapter blast radius | ✅ 7P+2F ≡ quarantine pair (base-identical) |
+| `v32_probe_pack` | `/tmp/ens-probe-v32/run_probe.sh` (spec: MOCK_TESTS.md §v3.2) | contract probes P0–P6 | ✅ PROBE-PASS 8/8 incl. SQL delta proof (now=1000/after=5000/total=6000; B_both/B_keep nowhere); echo-not-recomputed; gate invariance (202 vs 400 byte_count_mismatch) |
+| `wt_shards_HEAD ×10` / `wt_shards_BASE ×10` | per phase-1 architecture (S1,S2,S5c−34-attestation,S6,U1-3 by test_*.py thirds,T1-2 by test_*.py halves+4 dirs,attest per-file 150/120) at main checkout / detached base worktree | whole-tree default partition ~23.5k | ✅ comm: 287 common, 39 head-only (0 branch-caused), 7 base-only healed; new authoritative pre-existing ledger vs 1989b3b5 |
+| `v32_delta_agg` | node-level comm + 3×/3× solo legs + HEAD-scratch env A/B (no .env) | verdict | ✅ ZERO new attributable; mcp_server_crud ×16 = .env confound (80/80 without), census = socket class, atomic_dequeue = F/P/P flake, S5c cohort ×21 = F/F/F at base |
+
+
 ## Completed commission — MAINTENANCE-CONSOLE FINAL PRE-MERGE VERIFICATION (2026-09-27)
 
 Branch `feature/maintenance-console` @ **`c939aaa0`** (final HEAD = d66af240 + c939aaa0 superset) vs base `666c089d`. **VERDICT: PASS — READY TO MERGE. Zero branch-caused new failures; Playwright 14/14 independently re-run; FE full suite green; all BE claims confirmed.** Full report: `RESULTS/2026-09-27-maintenance-console-final-verification.md`. All packs env-scrubbed `POSTGRES_*`; `uv run python -m pytest` only; every run `timeout`-wrapped; zero source mods, zero commits.

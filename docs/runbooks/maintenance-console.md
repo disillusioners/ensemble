@@ -3,6 +3,17 @@
 Date: 2026-09-27 · Scope: Phase-1 backend (`/api/maintenance/checkpoint-cleanup/*`) ·
 Plan: `.agents/shared/planning/maintenance-console/plan-overview.md` (Contract v3).
 
+## Two-pass reality on a never-pruned database (v3.2)
+
+First manual cleanup on a fresh/never-pruned DB is a two-run journey — the
+console's post-run banner will prompt the second run. Manual composition
+is **E→D** (Op E reference-aware blob prune runs BEFORE Op D row prune) by
+design — pass 1 deletes excess checkpoint rows and frees `now == 0` blob
+bytes when every blob is referenced; the rows D deletes orphan the
+excess-only-referenced blobs, which a follow-up run then frees. The
+`bytes_reclaimable_after_row_prune` projection labels this honestly; the
+post-run banner surfaces the recovery CTA.
+
 ## Kill-switch (AM-13)
 
 `MAINTENANCE_ENDPOINTS_ENABLED=0` (boot-read — restart the daemon after

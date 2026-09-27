@@ -602,3 +602,52 @@ Reproduces the ORIGINAL incident shape from mission f27e2d15 on a synthetic SQLi
 ### Last Run
 - **Date**: 2026-09-27 | **Workers**: 9cfa5016 (a) / 9a6c3136 (b) / 635d3df3 (c) | **Result**: PASS ×3 (15s / 15s / 31s)
 - **Report**: RESULTS/2026-09-27-sel-default-verification.md
+
+---
+
+## Mock Test: Dry-Run Projection Contract v3.2 — Router-Level Probes (merge gate for `feature/dry-run-projection-v3.2`)
+
+### Metadata
+- **Created**: 2026-09-27
+- **Script**: `/tmp/ens-probe-v32/projection_probe_test.py` (untracked — zero repo footprint; runner `/tmp/ens-probe-v32/run_probe.sh`)
+- **Language**: Python (mirrors `tests/integration/test_maintenance_checkpoint_cleanup_api.py` harness: disposable PG + app client through the real router)
+- **Status**: PLANNED (commission: dry-run-projection-v3.2 merge-blocking verification)
+
+### Configuration
+- **Timeout**: dual-layer — outer `timeout 300`, inner `signal.alarm(280)` self-guard
+- **Service Port**: none (in-process app client; all calls end-to-end through the maintenance router)
+- **Mock Ports**: disposable PG on **15540** (fallback 15541) — `initdb -A trust`, `pg_ctl start -o "-p 15540"`, unique db name `ensemble_probe_v32_<pid>`
+- **Cleanup**: kill/verify-start on assigned port before; pg_ctl stop + datadir rm + port-free check after (trap)
+
+### What It Tests (normative source: `.agents/shared/planning/maintenance-console/dry-run-projection-amendment.md` §CONTRACT v3.2)
+- Projection field semantics on the §3 dry-run response: `bytes_reclaimable_now` (= `would_free_bytes`, current orphans), `bytes_reclaimable_after_row_prune` (DELTA — R-1: referenced-only-by-excess, NOT post-D superset), `bytes_reclaimable_total` (= now + after)
+- Skipped-pair exclusion (R-4): MAX_REFS-capped pairs contribute 0 and surface in `skipped[]`
+- Execute summary `projection` block = ECHO of the source dry-run row (not recomputed)
+- Gate invariance: `expected_bytes` echo gate binds stored `would_free_bytes` ONLY — never reads projection fields
+
+### Test Scenarios
+- **P0 already-pruned identity**: no excess rows → now=0, after=0, total=0.
+- **P1 never-pruned (the incident)**: thread with > keep-N checkpoints, ALL blobs referenced (no orphans) → now=0 AND would_free_bytes=0, after>0, total==after, rows>0.
+- **P2 partial-pruned**: current orphans exist (prior deletions) + excess-referenced blobs → now>0, after≥0, total==now+after.
+- **P3 skipped-pair**: force low refs-cap (env knob, name verified from source, e.g. `CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD=2`) → capped pair contributes 0 to after/total; `skipped[]` non-empty.
+- **P4 echo-not-recomputed**: dry-run → capture stored projection → mutate DB state (insert new orphan blobs via SQL) → execute echoing stored `would_free_bytes` → run summary `projection` block byte-equal to dry-run values despite drift.
+- **P5 gate invariance**: SQL-tamper stored dry-run row's projection fields (after=99, total=99+X, keep would_free_bytes=X): (a) echo X → execute proceeds; (b) echo 99 → refused `byte_count_mismatch`.
+- **P6 SQL delta-semantics proof (R-1 real-DB analog)**: one pair, decodable blob sizes — B_orphan=1000 (referenced by nobody) → counted in now ONLY; B_excess=5000 (referenced only by excess rows) → counted in after ONLY; B_both=3000 (referenced by an excess AND a keep checkpoint) → counted NOWHERE; B_keep=7000 (referenced only by keep checkpoints) → counted NOWHERE. Assert now==1000, after==5000, total==6000 (superset/double-count arithmetic would give different numbers — decodable failure). Cross-check with a direct SQL anti-join report.
+
+### Success Criteria
+- [ ] All scenarios P0–P6 PASS with exact-number assertions (not just >0)
+- [ ] Every call traverses the real router (no direct service invocation)
+- [ ] Zero contact with ensemble_prod / 10.44.0.2; zero repo tracked-file modifications
+- [ ] Port 15540 free + datadir removed after run
+
+### Implementation Notes
+- Seeding mirrors the PG API integration suite's checkpoint/blob seeding; keep-N = `CHECKPOINT_MAX_PER_THREAD` default (verify from source before relying)
+- Run-row tamper (P5) via direct SQL UPDATE on the maintenance-run table's summary JSON (locate exact table/column from `maintenance_api_service.py`)
+
+### Last Run
+- **Date**: 2026-09-27T12:20Z (independent execution leg, worker d9121aec, mock-test skill; author leg b40ca5da)
+- **Result**: **PROBE-PASS — RESULT: PASS (8/8), exit 0, 3.1s** (P0 identity; P1 now=0/after=3000/total=3000/rows=3; P2 1000+3000=4000; P3 skipped=[MAX_REFS_EXCEEDED] cap=2 contributes 0; P4 echo byte-equal despite 3 inserted orphan blobs; P5 202-proceed vs 400 byte_count_mismatch; P6 now=1000/after=5000/total=6000 with B_both=3000 + B_keep=7000 counted NOWHERE, anti-join cross-check 1000==1000)
+- **Harness sanity (adjudicated)**: real router (`app.include_router(maintenance_router)` + ASGITransport), real `MaintenanceApiService` + `AsyncPostgresSaver` + `PostgresCheckpointerAdapter` stack; P5 tamper = real asyncpg UPDATE on `maintenance_runs.summary_json`; P4 drift = real INSERT into `checkpoint_blobs`. Sole mock: auxiliary `instance_repo`. Zero product-defect findings.
+- **Teardown**: port 15540 free, 0 pgdata dirs, 0 leftover postgres on 1554x; repo porcelain unchanged
+- **Report**: RESULTS/2026-09-27-dry-run-projection-v32-verification.md
+- **Artifacts**: /tmp/ens-probe-v32/summary-20260927T122043Z.json + logs/run-20260927T122043Z.log (ephemeral; copied into RESULTS narrative)

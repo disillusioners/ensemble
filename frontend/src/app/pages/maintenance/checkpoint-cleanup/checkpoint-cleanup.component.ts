@@ -24,6 +24,7 @@ import type {
   CheckpointCleanupExecute,
   CheckpointCleanupExecuteRequest,
   CheckpointCleanupRun,
+  CheckpointCleanupStatus,
   MaintenanceDisplayCode,
   MaintenanceErrorBody,
 } from '../../../models';
@@ -49,6 +50,22 @@ import type {
  * confirm: true}` — NO `idempotency_key`, NO `crypto.randomUUID`.
  * AM-16 — honest duration copy ("May take several minutes on large
  * databases") + `fresh_until` rendered in the dry-run result panel.
+ *
+ * v3.2 — three additive projection fields on the dry-run response
+ * (`bytes_reclaimable_now`, `bytes_reclaimable_after_row_prune`,
+ * `bytes_reclaimable_total`) PLUS a two-field `projection` block on
+ * the manual_execute run summary (`bytes_reclaimable_now_at_dry_run`,
+ * `bytes_reclaimable_after_row_prune_at_dry_run`). Echo gate AM-3
+ * UNCHANGED — these fields are informational and projection-class;
+ * the existing `would_free_bytes` echo pin is untouched. Rendered as:
+ *
+ *   - Dry-run card three-number render + skip-flag honesty banner
+ *     (R-1, R-4)
+ *   - Confirm dialog journey copy (now + "after" + "running cleanup
+ *     again" anchor)
+ *   - Post-run convergence banner ("Run cleanup again to reclaim ~X
+ *     more" — a NEW dry-run, never a silent execute); hides when a
+ *     fresh dry-run reports `now == 0` (convergence reached)
  */
 @Component({
   selector: 'app-checkpoint-cleanup',
@@ -91,6 +108,19 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   /** Last completed polled run (set on `pollRun` terminal emission). */
   readonly lastExecuteResult = signal<CheckpointCleanupRun | null>(null);
   readonly activeRunId = signal<string | null>(null);
+  /**
+   * v3.2 B1 — `run_id` of the dry-run that backed the most recent
+   * execute (set in `performExecute`). The post-run banner's
+   * "hide on convergence" check (`lastDryRun.bytes_reclaimable_now
+   * === 0`) is SCOPED by this signal: the rule fires ONLY on a
+   * FRESH dry-run whose `run_id` differs from this anchor — i.e.
+   * a dry-run that the user ran AFTER the execute, not the dry-run
+   * that the execute was confirmed against. Without this scope,
+   * on a never-pruned DB the pre-execute dry-run itself reports
+   * `now == 0` (the incident scenario) and the banner never
+   * appears.
+   */
+  readonly executedDryRunId = signal<string | null>(null);
   /** Whether the dry-run is stale (drives the warning border on the dry-run button). */
   readonly dryRunIsStale = computed(() =>
     this.service.isDryRunStale(this.lastDryRun()),
@@ -111,10 +141,80 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
 
   refreshStatus(): void {
     this.service.fetchStatus().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (status: CheckpointCleanupStatus) => {
+        // v3.2 B2 — seed the post-run banner from `status.last_run`
+        // when the page loads (or refreshes) mid-/post-execute. The
+        // banner is a UI affordance, not a poll outcome; without this
+        // seed it only appears for runs the user personally watched
+        // to terminal. The wire-level run-row projection echo
+        // (R-5) IS the persistence source — auto rows have no
+        // projection block and auto rows therefore never seed the
+        // banner.
+        this.seedBannerFromStatus(status);
+      },
       error: () => {
         // Already surfaced via service.lastError.
       },
     });
+  }
+
+  /**
+   * v3.2 B2 — banner persistence across page refresh. Seeds
+   * `lastExecuteResult` from `status.last_run` when the row is a
+   * `manual_execute` that succeeded and carries a projection block
+   * with `bytes_reclaimable_after_row_prune_at_dry_run > 0`. Auto
+   * rows are skipped (no projection block, R-5). Failed/interrupted
+   * runs are skipped (banner is success-only). Page refresh
+   * mid-poll re-runs `refreshStatus()` on init and the banner
+   * re-appears without any client action.
+   *
+   * v3.2 B1 follow-up — `executedDryRunId` is performExecute-owned
+   * state (set when the execute is dispatched). The seed MUST NOT
+   * touch the anchor: on the live execute path, the poll-terminal
+   * handler calls `refreshStatus()` immediately after
+   * `lastExecuteResult` is set, so wiping the anchor here would
+   * re-enable the hide rule to fire on the pre-execute dry-run
+   * itself (now==0 on never-pruned profiles) and the banner would
+   * never appear — the original B1 incident. On a fresh page-load
+   * session the anchor is already null (no performExecute this
+   * session); the seed leaves it null.
+   */
+  private seedBannerFromStatus(status: CheckpointCleanupStatus): void {
+    const last = status.last_run;
+    if (!last) {
+      return;
+    }
+    // R-5 — only `manual_execute` rows carry the additive
+    // projection block; auto rows are skipped.
+    if (last.kind !== 'manual_execute') {
+      return;
+    }
+    if (last.status !== 'succeeded') {
+      return;
+    }
+    if (!last.summary) {
+      return;
+    }
+    const after =
+      last.summary.projection?.bytes_reclaimable_after_row_prune_at_dry_run ?? 0;
+    if (after <= 0) {
+      return;
+    }
+    // Reconstruct a `CheckpointCleanupRun` from the `last_run`
+    // shape (the wire row carries no `error` field — banner source
+    // runs are succeeded by definition).
+    this.lastExecuteResult.set({
+      run_id: last.run_id,
+      kind: last.kind,
+      status: last.status,
+      started_at: last.started_at,
+      completed_at: last.completed_at,
+      summary: last.summary,
+      error: null,
+    });
+    // The anchor (`executedDryRunId`) is intentionally untouched.
+    // See the class JSDoc above for the rationale — wiping it here
+    // would break the live-execute path.
   }
 
   onDryRun(): void {
@@ -209,6 +309,14 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     // operation's outcome is what the user sees; stale errors from
     // a prior run don't bleed into the new attempt.
     this.service.clearLastError();
+    // v3.2 B1 — anchor the banner's "hide on convergence" rule.
+    // The dry-run whose `run_id` is captured here is the one the
+    // execute was confirmed against; the post-run banner's hide
+    // check excludes it so on never-pruned DBs (where the
+    // pre-execute dry-run already reports `now == 0`) the banner
+    // still renders. A subsequent FRESH dry-run with a different
+    // `run_id` and `now == 0` then hides the banner as before.
+    this.executedDryRunId.set(dryRun.run_id);
 
     // AM-17 — payload is EXACTLY `{dry_run_run_id, expected_bytes,
     // confirm: true}` — NO idempotency key, NO client-side UUID generation.
@@ -439,13 +547,180 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
 
   // ── Private helpers ───────────────────────────────────────────────────
 
+  /**
+   * v3.2 — three additive projection fields on the dry-run response.
+   *
+   * Per the amendment's FE display contract: "This run / After this
+   * run (run cleanup again) / Combined". Zero components render as
+   * "—" (amendment copy). Each helper falls back to `would_free_bytes`
+   * for the `now` value (alias-of shape-stability) and treats missing
+   * `after`/`total` fields as 0 — v3.1 legacy dry-run payloads render
+   * with `after: '—'` and a `total === now`.
+   *
+   * R-1 ruling — `total === now + after` is COHERENT only with
+   * delta-semantics `after` (subset of post-D orphans minus the
+   * already-orphan portion). Helpers below are pure; the template
+   * renders them inline.
+   */
+
+  /** "—" for zero, else human-formatted bytes. This-run number. */
+  dryRunProjectionNow(dryRun: CheckpointCleanupDryRun): string {
+    const v = dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes ?? 0;
+    return this.formatOrDash(v);
+  }
+
+  /** "—" for zero, else human-formatted bytes. Follow-up run number. */
+  dryRunProjectionAfter(dryRun: CheckpointCleanupDryRun): string {
+    const v = dryRun.bytes_reclaimable_after_row_prune ?? 0;
+    return this.formatOrDash(v);
+  }
+
+  /**
+   * "—" for zero, else human-formatted bytes. Sum. Reads the
+   * wire-level `bytes_reclaimable_total` when present (exact
+   * server sum), otherwise derives `now + after` — same value
+   * modulo drift. Pin: schema docstring states total is derived.
+   */
+  dryRunProjectionTotal(dryRun: CheckpointCleanupDryRun): string {
+    const now = dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes ?? 0;
+    const after = dryRun.bytes_reclaimable_after_row_prune ?? 0;
+    const v = dryRun.bytes_reclaimable_total ?? now + after;
+    return this.formatOrDash(v);
+  }
+
+  /**
+   * `pure` helper — render zero as the literal "—" sentinel rather
+   * than "0 B" (amendment: "Zero components render as '—' (skipped).").
+   * Negative or non-finite inputs also yield "—" to guard against
+   * malformed wire payloads during a delivery-window defect.
+   */
+  private formatOrDash(v: number): string {
+    return typeof v === 'number' && v > 0 && Number.isFinite(v) ? this.formatBytes(v) : '—';
+  }
+
+  /**
+   * R-4 honesty flag — render the "skipped pairs may understate
+   * effectiveness" notice when `skipped[]` is non-empty. Mirrors
+   * the existing AM-10 skipped summary on the same data, but
+   * lives near the projection so the operator sees it BEFORE
+   * clicking execute (this is the consent-time signal).
+   */
+  dryRunSkippedHonestyActive(dryRun: CheckpointCleanupDryRun): boolean {
+    return dryRun.skipped.length > 0;
+  }
+
+  /**
+   * Sub-copy on never-pruned profiles — `now == 0 && after > 0`
+   * means pass 1 frees no blob bytes (Op D will orphan them) and a
+   * follow-up run is required for the visible reclaim. The note
+   * names the journey explicitly so the operator understands why
+   * the "This run" number is "—" even though retention work is
+   * obvious.
+   */
+  isNeverPrunedProfile(dryRun: CheckpointCleanupDryRun): boolean {
+    const now = dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes ?? 0;
+    const after = dryRun.bytes_reclaimable_after_row_prune ?? 0;
+    return now === 0 && after > 0;
+  }
+
+  // ── Post-run banner helpers (v3.2) ────────────────────────────────────
+
+  /**
+   * Post-run banner visibility (R-5). Renders when:
+   *   1. The last execute run succeeded
+   *   2. Its summary carries a projection with `after > 0`
+   *   3. The user has NOT yet run a fresh dry-run that converged
+   *      (`bytes_reclaimable_now == 0` — they've reached pass 2's
+   *      claim; nothing more to reclaim)
+   *
+   * v3.2 B1 — condition (3) is SCOPED by `executedDryRunId`. The
+   * hide rule fires when `(anchor === null || dry.run_id !== anchor)
+   * && now == 0`. Reading this against the four truth-table rows:
+   *
+   *   - row (a) live execute + same dry-run: anchor === dry.run_id
+   *     → `anchor === null` is false AND `dry.run_id !== anchor` is
+   *     false → hide doesn't fire → banner VISIBLE. The pre-execute
+   *     dry-run on a never-pruned profile reports `now == 0` here;
+   *     without the anchor scope the banner would never appear
+   *     (the incident scenario).
+   *   - row (b) live execute + fresh converging dry-run:
+   *     dry.run_id !== anchor (new id) AND now == 0 → hide fires →
+   *     banner HIDDEN. Triggered by clicking "Run again" (banner CTA)
+   *     or "Dry-run check" after the execute.
+   *   - row (c) seeded session + no user action: anchor is null,
+   *     lastDryRun is null → hide doesn't fire → banner VISIBLE
+   *     (the dry===null short-circuit covers this).
+   *   - row (d) seeded session + fresh converging dry-run: anchor is
+   *     null → `anchor === null` is true → hide fires → banner
+   *     HIDDEN.
+   *
+   * The anchor is `performExecute`-owned state — `seedBannerFromStatus`
+   * must NOT wipe it (otherwise the post-terminal refreshStatus
+   * call would re-anchor null and row (a) regresses). See
+   * `seedBannerFromStatus` JSDoc for the contract.
+   *
+   * The banner is intentionally tied to the run-row's projection
+   * echo — no client-only state. Page refreshes (or DAEMON
+   * restarts during a poll) still recover the banner from the
+   * run summary via `seedBannerFromStatus()` in `refreshStatus()`
+   * (B2). Auto rows have no projection block (R-5) so the banner
+   * never fires on them.
+   */
+  showRunAgainBanner(): boolean {
+    const run = this.lastExecuteResult();
+    if (!run || run.status !== 'succeeded' || !run.summary) {
+      return false;
+    }
+    const after =
+      run.summary.projection?.bytes_reclaimable_after_row_prune_at_dry_run ?? 0;
+    if (after <= 0) {
+      return false;
+    }
+    // v3.2 B1 + B2 — widened hide rule. Fires when:
+    //   (a) `anchor === null` (seeded session: anchor was never
+    //       set because no performExecute this session) AND a
+    //       dry-run with `now == 0` exists, OR
+    //   (b) `dry.run_id !== anchor` (a FRESH dry-run AFTER the
+    //       execute, with a different `run_id` than the execute
+    //       anchor) AND `now == 0`.
+    // In the live execute path, anchor stays as the pre-execute
+    // dry-run's `run_id` (the seed does not wipe it), so the
+    // pre-execute dry-run is excluded — row (a) stays visible.
+    // The `anchor === null` arm covers seeded sessions where
+    // there is no live anchor — row (d) hides on convergence.
+    const dry = this.lastDryRun();
+    const anchor = this.executedDryRunId();
+    if (
+      dry &&
+      (anchor === null || dry.run_id !== anchor) &&
+      (dry.bytes_reclaimable_now ?? 0) === 0
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  /** Banner CTA copy source — the projection's after-reclaim bytes. */
+  runAgainReclaimBytes(): number {
+    const run = this.lastExecuteResult();
+    return run?.summary?.projection?.bytes_reclaimable_after_row_prune_at_dry_run ?? 0;
+  }
+
   private buildConfirmMessage(dryRun: CheckpointCleanupDryRun): string {
-    const bytes = this.formatBytes(dryRun.would_free_bytes);
+    // v3.2 — journey copy (amendment VERBATIM). The amendment splits
+    // per-run honesty (what THIS run does) from journey honesty
+    // (what a follow-up run will reclaim) — the confirm dialog is
+    // the consent instrument, so the journey note belongs here too.
+    const now = this.formatBytes(dryRun.bytes_reclaimable_now ?? dryRun.would_free_bytes);
+    const after = this.formatBytes(
+      dryRun.bytes_reclaimable_after_row_prune ?? 0,
+    );
     const rows = dryRun.would_delete.checkpoint_rows;
     return (
-      `This will permanently delete ~${bytes} of unreferenced blobs and ` +
-      `${rows} excess checkpoint rows. This may take several minutes on ` +
-      `large databases. This cannot be undone.`
+      `This run will permanently delete ~${now} of unreferenced blobs ` +
+      `and ${rows} excess checkpoint rows. After this run, ~${after} ` +
+      `more becomes reclaimable by running cleanup again. This may ` +
+      `take several minutes on large databases. This cannot be undone.`
     );
   }
 

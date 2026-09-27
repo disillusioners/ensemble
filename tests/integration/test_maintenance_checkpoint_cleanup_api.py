@@ -1604,3 +1604,367 @@ class TestPartialIndexBothDrivers:
             eng.dispose()
         finally:
             os.unlink(db)
+# ── v3.2 Test 5 — convergence after pass-1 execute (R-1 live) ──────────────────
+
+
+class TestDryRunProjectionConvergence:
+    """v3.2 Test 5 — convergence after pass-1 execute.
+
+    Amendment Test-deltas table, test #5: dry-run → execute → fresh
+    dry-run; new ``bytes_reclaimable_now`` ≈ previous
+    ``bytes_reclaimable_after_row_prune`` (TOLERANCE for drift, NOT
+    equality — INV-13 spirit).
+
+    Real E→D composition on disposable PG: a thread with more
+    checkpoints than ``max_per_thread`` and all blobs referenced by
+    checkpoint rows has ``now = 0`` and ``after > 0`` (the
+    excess-only-referenced blobs Op D will orphan for a follow-up run).
+    After execute, those previously-after blobs are current orphans;
+    a fresh dry-run reports them as ``now ≈ previous after``.
+    """
+
+    async def test_convergence_after_pass_1_execute(self, pg_db):
+        """Live convergence on a never-pruned-shape thread.
+
+        Scenario: thread with 6 checkpoints (max_per_thread=3 default
+        → 3 excess rows). The dry-run reports an additive projection;
+        execute composes E→D (Op E first, Op D second) and orphans the
+        previously-after blobs. A fresh dry-run must report a larger
+        ``now`` ≥ the previous ``after`` (tolerance for drift — INV-13
+        spirit).
+
+        Invariant: the projection is an ESTIMATE, not a guarantee; the
+        new ``now`` need NOT equal the old ``after`` exactly because
+        live writes can shift the keep-set between passes. The
+        amendment requires "≈ previous after, TOLERANCE for drift,
+        NOT equality".
+        """
+        async with api_stack(pg_db) as st:
+            # Stage a thread with more checkpoints than the cap.
+            await write_turns(st.saver, "thread-conv", 6)
+
+            # Dry-run #1: read the additive projection fields.
+            dry1 = (
+                await st.client.post(f"{SECTION_PREFIX}/dry-run")
+            ).json()
+            now1 = dry1["bytes_reclaimable_now"]
+            after1 = dry1["bytes_reclaimable_after_row_prune"]
+            total1 = dry1["bytes_reclaimable_total"]
+            # Self-consistency pin (amendment R-1): total == now + after
+            # exactly on every dry-run.
+            assert total1 == now1 + after1, (
+                f"projection invariant violated: total={total1} != "
+                f"now={now1} + after={after1}"
+            )
+            # The projection must be NON-TRIVIAL on a never-pruned
+            # thread (test 2 covers the zero-projection post-pass case).
+            assert total1 > 0, (
+                "fixture invariant: never-pruned thread must have a "
+                "non-trivial projection (now > 0 OR after > 0)"
+            )
+
+            # Execute (destructive). E→D composition: pass 1 deletes
+            # rows + the current orphans (0); the previously-after
+            # blobs become CURRENT orphans.
+            r_exec = await st.client.post(
+                f"{SECTION_PREFIX}/execute",
+                json={
+                    "dry_run_run_id": dry1["run_id"],
+                    "expected_bytes": dry1["would_delete"]["bytes"],
+                    "confirm": True,
+                },
+            )
+            assert r_exec.status_code == 202, r_exec.text
+            await drain_tasks(st.svc)
+            run = (
+                await st.client.get(
+                    f"{SECTION_PREFIX}/runs/{r_exec.json()['run_id']}"
+                )
+            ).json()
+            assert run["status"] == "succeeded"
+            # R-5: manual_execute summary carries the projection echo.
+            assert "projection" in run["summary"], (
+                "manual_execute summary must include the projection "
+                "echo block (R-5)"
+            )
+            assert (
+                run["summary"]["projection"][
+                    "bytes_reclaimable_now_at_dry_run"
+                ]
+                == now1
+            )
+            assert (
+                run["summary"]["projection"][
+                    "bytes_reclaimable_after_row_prune_at_dry_run"
+                ]
+                == after1
+            )
+
+            # Dry-run #2: the previously-after blobs are now current
+            # orphans. Convergence: new ``now`` ≈ previous ``after``
+            # (tolerance for live-write drift).
+            dry2 = (
+                await st.client.post(f"{SECTION_PREFIX}/dry-run")
+            ).json()
+            now2 = dry2["bytes_reclaimable_now"]
+            after2 = dry2["bytes_reclaimable_after_row_prune"]
+            total2 = dry2["bytes_reclaimable_total"]
+            # Self-consistency pin carries forward.
+            assert total2 == now2 + after2
+
+            # Core convergence invariant: new_now is at least the
+            # previous-after count (the follow-up frees them; some
+            # additional drift may add a few more). Allow a tight
+            # tolerance (1%) for live-write drift between passes —
+            # INV-13 spirit.
+            assert now2 >= after1 - max(after1 // 100, 1), (
+                f"convergence: new_now={now2} should be ≥ previous "
+                f"after={after1} (1% tolerance for drift)"
+            )
+            # Pin: the new after MUST drop (pass 1 already orphaned
+            # the excess-referenced blobs; the follow-up has nothing
+            # left to project).
+            assert after2 <= after1, (
+                "convergence: after must not GROW across passes "
+                "(pass 1 already orphaned excess-only blobs)"
+            )
+
+
+# ── v3.2 B3 fix pass — discriminating real-PG projection fixture ───────────────
+
+
+class TestDryRunProjectionBlobClasses:
+    """v3.2 B3 (tester P6 port) — FOUR blob classes with DISTINCT sizes
+    in one real-PG fixture; the exact byte arithmetic adjudicates R-1.
+
+    The mocked unit pins return canned adapter tuples; here the REAL
+    EXISTS / NOT EXISTS SQL decides which classes count where:
+
+    * X (zero-ref)    — current orphan          → ``now`` ONLY.
+    * Y (excess-only) — referenced ONLY by rows outside the keep set
+      (excess rows)                            → ``after`` ONLY.
+    * B_both          — referenced by an excess row AND a keep row
+      (still live after D)                     → counted NOWHERE.
+    * B_keep          — referenced only by keep rows → counted NOWHERE.
+
+    Staging is direct-SQL (mirrors ``stage_drifted_pair``): real saver
+    blobs for the pair are removed so the synthetic classes are the
+    ONLY blob rows; refs are added by ``jsonb_set`` on real checkpoint
+    rows' ``channel_versions`` so the anti-join reads real JSON.
+    """
+
+    # Distinct sizes — any inclusion of a wrong class shifts a byte
+    # assertion. Blob PK: (thread_id, checkpoint_ns, channel, version).
+    X_BYTES = 111_111
+    Y_BYTES = 222_222
+    BOTH_BYTES = 333_333
+    KEEP_BYTES = 444_444
+
+    async def _strip_real_blobs(self, pool, thread_id: str) -> None:
+        await execute(
+            pool,
+            "DELETE FROM checkpoint_blobs WHERE thread_id = $1",
+            thread_id,
+        )
+
+    async def _insert_blob(
+        self, pool, thread_id: str, channel: str, version: str, nbytes: int
+    ) -> None:
+        await execute(
+            pool,
+            "INSERT INTO checkpoint_blobs "
+            "(thread_id, checkpoint_ns, channel, version, type, blob) "
+            "VALUES ($1, '', $2, $3, 'json', $4)",
+            thread_id, channel, version, b"b" * nbytes,
+        )
+
+    async def _add_ref(
+        self, pool, checkpoint_id: str, channel: str, version: str
+    ) -> None:
+        """Reference (channel, version) from one checkpoint row's
+        ``channel_versions`` (jsonb_set ADDS the key, keeping the rest)."""
+        await execute(
+            pool,
+            "UPDATE checkpoints SET checkpoint = jsonb_set( "
+            "checkpoint, '{channel_versions," + channel + "}', "
+            "$2::jsonb) WHERE checkpoint_id = $1",
+            checkpoint_id, f'"{version}"',
+        )
+
+    async def _oldest_checkpoint_id(self, pool, thread_id: str) -> str:
+        oldest = await fetchval(
+            pool,
+            "SELECT MIN(checkpoint_id) FROM checkpoints WHERE thread_id = $1",
+            thread_id,
+        )
+        assert oldest is not None, f"fixture: no checkpoints on {thread_id}"
+        return oldest
+
+    async def test_projection_four_blob_classes_discriminate(self, pg_db):
+        """now == bytes(X); after == bytes(Y); total == X + Y; B_both
+        and B_keep counted NOWHERE (distinct sizes make any inclusion
+        fail an exact assertion)."""
+        async with api_stack(pg_db) as st:
+            await write_turns(st.saver, "thread-b3", 6)
+            cnt = await checkpoint_count(st.pool, "thread-b3")
+            assert cnt > 3, "fixture: 6 turns must exceed keep-3"
+
+            keep = set(await st.adapter.get_checkpoint_ids("thread-b3", "", 3))
+            assert len(keep) == 3, "fixture: keep set must be the cap (3)"
+            oldest = await self._oldest_checkpoint_id(st.pool, "thread-b3")
+            assert oldest not in keep, (
+                "fixture: oldest checkpoint must be an excess row"
+            )
+
+            # Real blobs out — the synthetic classes become the pair's
+            # ONLY blob rows (deterministic byte arithmetic).
+            await self._strip_real_blobs(st.pool, "thread-b3")
+
+            await self._insert_blob(
+                st.pool, "thread-b3", "zz_orphan_x", "v-x", self.X_BYTES
+            )
+            await self._insert_blob(
+                st.pool, "thread-b3", "zz_excess_only_y", "v-y", self.Y_BYTES
+            )
+            await self._insert_blob(
+                st.pool, "thread-b3", "zz_both", "v-both", self.BOTH_BYTES
+            )
+            await self._insert_blob(
+                st.pool, "thread-b3", "zz_keep_only", "v-keep", self.KEEP_BYTES
+            )
+
+            # Refs: Y → excess row only; B_both → excess row AND keep
+            # row; B_keep → keep row only; X → referenced by nothing.
+            await self._add_ref(st.pool, oldest, "zz_excess_only_y", "v-y")
+            await self._add_ref(st.pool, oldest, "zz_both", "v-both")
+            keep_anchor = min(keep)
+            await self._add_ref(st.pool, keep_anchor, "zz_both", "v-both")
+            await self._add_ref(st.pool, keep_anchor, "zz_keep_only", "v-keep")
+
+            # Staging validation: the anti-join sees exactly X.
+            orphaned = await orphan_stats(st.pool, "thread-b3")
+            assert orphaned["cnt"] == 1, (
+                f"staging: exactly one zero-ref blob expected, "
+                f"got {orphaned['cnt']}"
+            )
+            assert orphaned["bytes"] == self.X_BYTES
+
+            r = await st.client.post(f"{SECTION_PREFIX}/dry-run")
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["skipped"] == [], (
+                f"fixture: main pair must not be skipped; got {body['skipped']}"
+            )
+            # NOW: the current orphan X only (B_both / B_keep / Y are
+            # all referenced by ≥1 remaining row).
+            assert body["bytes_reclaimable_now"] == self.X_BYTES, (
+                f"now must be bytes(X)={self.X_BYTES}, got "
+                f"{body['bytes_reclaimable_now']}"
+            )
+            assert body["would_free_bytes"] == self.X_BYTES, (
+                "bytes_reclaimable_now is the EXACT alias of "
+                "would_free_bytes (R-1)"
+            )
+            # AFTER: the excess-only Y only — B_both excluded by its
+            # keep-row referencer, B_keep by its lack of an excess
+            # referencer, X by having no referencer at all.
+            assert (
+                body["bytes_reclaimable_after_row_prune"] == self.Y_BYTES
+            ), (
+                f"after must be bytes(Y)={self.Y_BYTES} (NOT X+Y, NOT the "
+                f"referenced-set total), got "
+                f"{body['bytes_reclaimable_after_row_prune']}"
+            )
+            # TOTAL: derived now + after — B_both and B_keep in NEITHER.
+            assert body["bytes_reclaimable_total"] == (
+                self.X_BYTES + self.Y_BYTES
+            ), (
+                f"total must be X+Y={self.X_BYTES + self.Y_BYTES}, got "
+                f"{body['bytes_reclaimable_total']}"
+            )
+
+    async def test_projection_skips_over_cap_pair(self, pg_db):
+        """Pair over the REAL refs cap (``jsonb_object_agg`` builds a
+        100_001-entry channel_versions — no monkeypatching) →
+        ``skipped[]`` carries MAX_REFS_EXCEEDED and that pair's blobs
+        count NOWHERE (E-arm ``continue`` before the anti-join; R-4
+        subtracts it from ``after``), while the under-cap pair still
+        contributes its full now + after."""
+        CAP_X, CAP_Y = 555_555, 777_777
+        OK_X, OK_Y = 888_888, 999_999
+
+        async with api_stack(pg_db) as st:
+            await write_turns(st.saver, "thread-cap", 6)
+            await write_turns(st.saver, "thread-ok", 6)
+
+            keep_cap = set(
+                await st.adapter.get_checkpoint_ids("thread-cap", "", 3)
+            )
+            oldest_cap = await self._oldest_checkpoint_id(st.pool, "thread-cap")
+            assert oldest_cap not in keep_cap
+            keep_ok = set(
+                await st.adapter.get_checkpoint_ids("thread-ok", "", 3)
+            )
+            oldest_ok = await self._oldest_checkpoint_id(st.pool, "thread-ok")
+            assert oldest_ok not in keep_ok
+
+            for thread in ("thread-cap", "thread-ok"):
+                await self._strip_real_blobs(st.pool, thread)
+                await self._insert_blob(
+                    st.pool, thread, "zz_orphan_x", "v-x",
+                    CAP_X if thread == "thread-cap" else OK_X,
+                )
+                await self._insert_blob(
+                    st.pool, thread, "zz_excess_only_y", "v-y",
+                    CAP_Y if thread == "thread-cap" else OK_Y,
+                )
+                await self._add_ref(st.pool, oldest_cap if thread == "thread-cap" else oldest_ok, "zz_excess_only_y", "v-y")
+
+            # Force thread-cap over the REAL cap (100_000 refs): one
+            # excess row gains a 100_001-key channel_versions object —
+            # DISTINCT (channel, version) refs exceed the cap server-side.
+            await execute(
+                st.pool,
+                "UPDATE checkpoints SET checkpoint = jsonb_set( "
+                "checkpoint, '{channel_versions}', "
+                "(SELECT jsonb_object_agg('zz_cap_' || i, 'v' || i) "
+                "FROM generate_series(1, 100001) AS i)) "
+                "WHERE checkpoint_id = $1",
+                oldest_cap,
+            )
+
+            r = await st.client.post(f"{SECTION_PREFIX}/dry-run")
+            assert r.status_code == 200, r.text
+            body = r.json()
+
+            skipped = {
+                (s["thread_id"], s["checkpoint_ns"]): s["reason"]
+                for s in body["skipped"]
+            }
+            assert skipped.get(("thread-cap", "")) == "MAX_REFS_EXCEEDED", (
+                f"over-cap pair must be skipped with MAX_REFS_EXCEEDED; "
+                f"got {skipped}"
+            )
+            assert ("thread-ok", "") not in skipped, (
+                "under-cap pair must NOT be skipped (else the byte pins "
+                "below are vacuous)"
+            )
+
+            # NOW: only thread-ok's zero-ref X — the skipped pair's
+            # blobs are counted NOWHERE (skip fires BEFORE the
+            # anti-join count).
+            assert body["bytes_reclaimable_now"] == OK_X, (
+                f"skipped pair's current orphan must not count; "
+                f"got {body['bytes_reclaimable_now']}, expected {OK_X}"
+            )
+            # AFTER: only thread-ok's excess-only Y (R-4: the skipped
+            # pair contributes 0 even though its excess rows still
+            # delete).
+            assert (
+                body["bytes_reclaimable_after_row_prune"] == OK_Y
+            ), (
+                f"R-4: skipped pair's excess-only blob must not count; "
+                f"got {body['bytes_reclaimable_after_row_prune']}, "
+                f"expected {OK_Y}"
+            )
+            assert body["bytes_reclaimable_total"] == OK_X + OK_Y
