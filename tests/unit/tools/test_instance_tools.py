@@ -90,6 +90,16 @@ def _make_manager(*, status: str) -> MagicMock:
 
     manager = make_send_message_manager(status=status)
     manager.get_injection_count = MagicMock(return_value=1)
+    # Real-shaped LLMConfig default: the documented default for
+    # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
+    # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
+    # P2-WP3 AC-5) fail-CLOSES at factory init on any non-list value —
+    # a bare MagicMock auto-attr is not a list. Mirrors the established
+    # sibling convention (test_dynamic_toolset_expansion.py /
+    # test_upgrade_registration._build_instance_tools). Real-config
+    # enforcement is untouched: this only mirrors what a real manager
+    # with default config presents.
+    manager.config.llm.allowed_models = []
     return manager
 
 
@@ -1313,6 +1323,16 @@ class TestReviveOnceGuardScope:
             real_manager.enqueue_message = AsyncMock(
                 return_value=MagicMock(message_id="msg-real-1")
             )
+            # Real-shaped LLMConfig default: the documented default for
+            # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
+            # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
+            # P2-WP3 AC-5) fail-CLOSES at factory init on any non-list value —
+            # a bare MagicMock auto-attr is not a list. Mirrors the established
+            # sibling convention (test_dynamic_toolset_expansion.py /
+            # test_upgrade_registration._build_instance_tools). Real-config
+            # enforcement is untouched: this only mirrors what a real manager
+            # with default config presents.
+            real_manager.config.llm.allowed_models = []
 
             send_message = _get_send_message_tool(real_manager)
 
@@ -2652,6 +2672,16 @@ def _make_subtree_manager(
     manager.engine = MagicMock()
     manager.write_guard = MagicMock()
     manager._live_hub = MagicMock()
+    # Real-shaped LLMConfig default: the documented default for
+    # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
+    # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
+    # P2-WP3 AC-5) fail-CLOSES at factory init on any non-list value —
+    # a bare MagicMock auto-attr is not a list. Mirrors the established
+    # sibling convention (test_dynamic_toolset_expansion.py /
+    # test_upgrade_registration._build_instance_tools). Real-config
+    # enforcement is untouched: this only mirrors what a real manager
+    # with default config presents.
+    manager.config.llm.allowed_models = []
     return manager
 
 
@@ -2855,6 +2885,16 @@ class TestSubtreeScopingAccept:
         manager.engine = MagicMock()
         manager.write_guard = MagicMock()
         manager._live_hub = MagicMock()
+        # Real-shaped LLMConfig default: the documented default for
+        # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
+        # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
+        # P2-WP3 AC-5) fail-CLOSES at factory init on any non-list value —
+        # a bare MagicMock auto-attr is not a list. Mirrors the established
+        # sibling convention (test_dynamic_toolset_expansion.py /
+        # test_upgrade_registration._build_instance_tools). Real-config
+        # enforcement is untouched: this only mirrors what a real manager
+        # with default config presents.
+        manager.config.llm.allowed_models = []
 
         tool = _get_subtree_messages_tool(manager)
 
@@ -4544,6 +4584,16 @@ def _make_subtree_status_manager(
     manager.engine = MagicMock()
     manager.write_guard = MagicMock()
     manager._live_hub = MagicMock()
+    # Real-shaped LLMConfig default: the documented default for
+    # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
+    # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
+    # P2-WP3 AC-5) fail-CLOSES at factory init on any non-list value —
+    # a bare MagicMock auto-attr is not a list. Mirrors the established
+    # sibling convention (test_dynamic_toolset_expansion.py /
+    # test_upgrade_registration._build_instance_tools). Real-config
+    # enforcement is untouched: this only mirrors what a real manager
+    # with default config presents.
+    manager.config.llm.allowed_models = []
     return manager
 
 
