@@ -1604,3 +1604,127 @@ class TestPartialIndexBothDrivers:
             eng.dispose()
         finally:
             os.unlink(db)
+# ── v3.2 Test 5 — convergence after pass-1 execute (R-1 live) ──────────────────
+
+
+class TestDryRunProjectionConvergence:
+    """v3.2 Test 5 — convergence after pass-1 execute.
+
+    Amendment Test-deltas table, test #5: dry-run → execute → fresh
+    dry-run; new ``bytes_reclaimable_now`` ≈ previous
+    ``bytes_reclaimable_after_row_prune`` (TOLERANCE for drift, NOT
+    equality — INV-13 spirit).
+
+    Real E→D composition on disposable PG: a thread with more
+    checkpoints than ``max_per_thread`` and all blobs referenced by
+    checkpoint rows has ``now = 0`` and ``after > 0`` (the
+    excess-only-referenced blobs Op D will orphan for a follow-up run).
+    After execute, those previously-after blobs are current orphans;
+    a fresh dry-run reports them as ``now ≈ previous after``.
+    """
+
+    async def test_convergence_after_pass_1_execute(self, pg_db):
+        """Live convergence on a never-pruned-shape thread.
+
+        Scenario: thread with 6 checkpoints (max_per_thread=3 default
+        → 3 excess rows). The dry-run reports an additive projection;
+        execute composes E→D (Op E first, Op D second) and orphans the
+        previously-after blobs. A fresh dry-run must report a larger
+        ``now`` ≥ the previous ``after`` (tolerance for drift — INV-13
+        spirit).
+
+        Invariant: the projection is an ESTIMATE, not a guarantee; the
+        new ``now`` need NOT equal the old ``after`` exactly because
+        live writes can shift the keep-set between passes. The
+        amendment requires "≈ previous after, TOLERANCE for drift,
+        NOT equality".
+        """
+        async with api_stack(pg_db) as st:
+            # Stage a thread with more checkpoints than the cap.
+            await write_turns(st.saver, "thread-conv", 6)
+
+            # Dry-run #1: read the additive projection fields.
+            dry1 = (
+                await st.client.post(f"{SECTION_PREFIX}/dry-run")
+            ).json()
+            now1 = dry1["bytes_reclaimable_now"]
+            after1 = dry1["bytes_reclaimable_after_row_prune"]
+            total1 = dry1["bytes_reclaimable_total"]
+            # Self-consistency pin (amendment R-1): total == now + after
+            # exactly on every dry-run.
+            assert total1 == now1 + after1, (
+                f"projection invariant violated: total={total1} != "
+                f"now={now1} + after={after1}"
+            )
+            # The projection must be NON-TRIVIAL on a never-pruned
+            # thread (test 2 covers the zero-projection post-pass case).
+            assert total1 > 0, (
+                "fixture invariant: never-pruned thread must have a "
+                "non-trivial projection (now > 0 OR after > 0)"
+            )
+
+            # Execute (destructive). E→D composition: pass 1 deletes
+            # rows + the current orphans (0); the previously-after
+            # blobs become CURRENT orphans.
+            r_exec = await st.client.post(
+                f"{SECTION_PREFIX}/execute",
+                json={
+                    "dry_run_run_id": dry1["run_id"],
+                    "expected_bytes": dry1["would_delete"]["bytes"],
+                    "confirm": True,
+                },
+            )
+            assert r_exec.status_code == 202, r_exec.text
+            await drain_tasks(st.svc)
+            run = (
+                await st.client.get(
+                    f"{SECTION_PREFIX}/runs/{r_exec.json()['run_id']}"
+                )
+            ).json()
+            assert run["status"] == "succeeded"
+            # R-5: manual_execute summary carries the projection echo.
+            assert "projection" in run["summary"], (
+                "manual_execute summary must include the projection "
+                "echo block (R-5)"
+            )
+            assert (
+                run["summary"]["projection"][
+                    "bytes_reclaimable_now_at_dry_run"
+                ]
+                == now1
+            )
+            assert (
+                run["summary"]["projection"][
+                    "bytes_reclaimable_after_row_prune_at_dry_run"
+                ]
+                == after1
+            )
+
+            # Dry-run #2: the previously-after blobs are now current
+            # orphans. Convergence: new ``now`` ≈ previous ``after``
+            # (tolerance for live-write drift).
+            dry2 = (
+                await st.client.post(f"{SECTION_PREFIX}/dry-run")
+            ).json()
+            now2 = dry2["bytes_reclaimable_now"]
+            after2 = dry2["bytes_reclaimable_after_row_prune"]
+            total2 = dry2["bytes_reclaimable_total"]
+            # Self-consistency pin carries forward.
+            assert total2 == now2 + after2
+
+            # Core convergence invariant: new_now is at least the
+            # previous-after count (the follow-up frees them; some
+            # additional drift may add a few more). Allow a tight
+            # tolerance (1%) for live-write drift between passes —
+            # INV-13 spirit.
+            assert now2 >= after1 - max(after1 // 100, 1), (
+                f"convergence: new_now={now2} should be ≥ previous "
+                f"after={after1} (1% tolerance for drift)"
+            )
+            # Pin: the new after MUST drop (pass 1 already orphaned
+            # the excess-referenced blobs; the follow-up has nothing
+            # left to project).
+            assert after2 <= after1, (
+                "convergence: after must not GROW across passes "
+                "(pass 1 already orphaned excess-only blobs)"
+            )

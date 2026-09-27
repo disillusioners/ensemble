@@ -423,6 +423,16 @@ class CheckpointRowPruneSummary:
     ``GROUP BY`` per cycle — see T1.4 rationale) lets the wire shape
     express ``scanned_pairs=12, excess_pairs=0`` consistently with the
     contract example.
+
+    v3.2 projection (R-1): ``would_free_bytes_after_row_prune`` is the
+    sum across the excess pairs of "blobs currently referenced but
+    whose ONLY referencers are excess rows D will delete" (per-pair
+    computed by ``count_blobs_referenced_only_by_excess``; skipped pairs
+    contribute 0 per R-4). Pairs whose ``ids_to_keep`` is empty
+    (max_per_thread=0 edge) collapse to the pair's referenced-set
+    total. Field is DRY-RUN ONLY — the destructive arm is out of
+    scope (auto never calls this method; manual destructive execute
+    computes the real reclaim at execute time, not at the dry-run).
     """
 
     backend: str = "postgres"
@@ -432,6 +442,7 @@ class CheckpointRowPruneSummary:
     deleted_writes: int = 0           # destructive: sum(delete_writes_excluding)
     would_delete_checkpoints: int = 0 # dry-run: sum(cnt - N) per excess pair
     would_delete_writes: int = 0      # dry-run: sum(count_writes_excluding) (T2b)
+    would_free_bytes_after_row_prune: int = 0  # [v3.2 R-1] dry-run projection only
 
     def to_summary_dict(self) -> dict[str, Any]:
         """The FROZEN ``checkpoint_rows`` + ``writes`` blocks of a cycle summary.
@@ -1304,7 +1315,11 @@ class CheckpointCleanupJob:
             self._checkpointer, destructive=destructive
         )
 
-    async def _compute_row_prune_dry_run(self) -> CheckpointRowPruneSummary:
+    async def _compute_row_prune_dry_run(
+        self,
+        *,
+        blobs_skipped: list[tuple[str, str, str]] | None = None,
+    ) -> CheckpointRowPruneSummary:
         """T1.5 — read-only mirror of Op D for the manual dry-run path.
 
         Iterates ``find_excess_checkpoint_groups(N)`` like the
@@ -1314,9 +1329,36 @@ class CheckpointCleanupJob:
         keep-set arithmetic for the checkpoints accounting. Zero
         DELETE statements; the auto cycle never calls this method
         (INV-1).
+
+        v3.2 projection (R-1): for each excess pair with non-empty
+        ``ids_to_keep`` AND whose ``(thread_id, checkpoint_ns)`` is NOT
+        in ``blobs_skipped`` (the blob prune's ZERO_REFS / MAX_REFS
+        cap skip list — populated by the Op E arm that runs BEFORE
+        this Op D dry-run per AM-2 manual-path ordering), the per-pair
+        ``count_blobs_referenced_only_by_excess`` computes the
+        ``after-row-prune`` bytes (blobs whose ONLY remaining
+        referencers are the excess rows D of THIS pass deletes — the
+        "referenced by excess only" reading of R-1). Skipped pairs
+        contribute 0 per R-4; their excess rows still delete but their
+        blobs' reclaimability is unknown (the FE flag covers the
+        honesty gap). The ``would_free_bytes_after_row_prune`` field
+        on the returned summary is the projection this dry-run hands
+        to the wire composer for ``bytes_reclaimable_after_row_prune``.
+
+        ``blobs_skipped`` is keyword-only (no positional drift) and
+        defaults to ``None`` (= empty skip-set) so the destructive arm
+        does not need to thread the list. Only the manual dry-run path
+        passes it (the wire composer needs the projection; auto does
+        not — INV-1).
         """
         max_per_thread = self._config.checkpoint_max_per_thread
         summary = CheckpointRowPruneSummary()
+        # R-4: a skipped pair's contribution to the projection is 0.
+        # Build a set for O(1) membership; the blob prune's skipped
+        # list is bounded by total thread+ns pair count.
+        skipped_pair_keys: set[tuple[str, str]] = {
+            (tid, ns) for (tid, ns, _reason) in (blobs_skipped or [])
+        }
         try:
             # T1.4 — scanned_pairs (one extra read-only GROUP BY; no
             # delete-behavior change; mirrors the destructive arm).
@@ -1343,11 +1385,31 @@ class CheckpointCleanupJob:
                     would_delete_writes = 0
                 summary.would_delete_checkpoints += would_delete_cps
                 summary.would_delete_writes += would_delete_writes
+                # v3.2 projection (R-1): per-pair ``after`` bytes —
+                # blobs referenced ONLY by excess rows D will delete.
+                # R-4: skipped pairs contribute 0 (their blobs'
+                # reclaimability is unknown; the FE flag covers the
+                # honesty gap). Empty keep_ids (max_per_thread=0 edge)
+                # short-circuits — see adapter docstring for the set
+                # algebra; we simply do not query in that case.
+                if (
+                    ids_to_keep
+                    and (thread_id, checkpoint_ns) not in skipped_pair_keys
+                ):
+                    _cnt_after, bytes_after = (
+                        await self._checkpointer
+                        .count_blobs_referenced_only_by_excess(
+                            thread_id, checkpoint_ns, ids_to_keep
+                        )
+                    )
+                    summary.would_free_bytes_after_row_prune += bytes_after
             logger.debug(
                 f"Op D dry-run: scanned={summary.scanned_pairs} "
                 f"excess={summary.excess_pairs} "
                 f"would_delete_checkpoints={summary.would_delete_checkpoints} "
-                f"would_delete_writes={summary.would_delete_writes}"
+                f"would_delete_writes={summary.would_delete_writes} "
+                f"would_free_bytes_after_row_prune={summary.would_free_bytes_after_row_prune} "
+                f"skipped_excluded={len(skipped_pair_keys & {(t, n) for t, n, _c in excess_pairs})}"
             )
         except Exception as e:
             # Mirror the destructive arm's per-op isolation (INV-1):
@@ -1413,7 +1475,12 @@ class CheckpointCleanupJob:
         if destructive:
             rows = await self._prune_per_thread_checkpoints()
         else:
-            rows = await self._compute_row_prune_dry_run()
+            # v3.2 (R-4): pass the blob prune's ``skipped[]`` so the
+            # projection subtracts skipped pairs (their excess rows
+            # still delete; their blobs' reclaimability is unknown).
+            rows = await self._compute_row_prune_dry_run(
+                blobs_skipped=blobs.skipped,
+            )
         skipped_truncated = len(blobs.skipped) > 1000
         duration_ms = int((time.perf_counter() - t0) * 1000)
         return CheckpointRunResult(

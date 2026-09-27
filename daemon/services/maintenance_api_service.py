@@ -316,6 +316,16 @@ class MaintenanceApiService:
                 datetime.fromisoformat(ctx.started_at)
                 + timedelta(seconds=self._fresh_seconds)
             ).isoformat()
+            # v3.2 projection-class fields (R-1) — informational,
+            # NEVER gate-bound; the echo gate below binds ONLY to
+            # ``would_free_bytes`` (= ``bytes_reclaimable_now``).
+            bytes_reclaimable_now = int(result.blobs.would_free_bytes)
+            bytes_reclaimable_after_row_prune = int(
+                result.rows.would_free_bytes_after_row_prune
+            )
+            bytes_reclaimable_total = (
+                bytes_reclaimable_now + bytes_reclaimable_after_row_prune
+            )
             wire = {
                 "run_id": ctx.run_id,
                 "would_delete": {
@@ -326,6 +336,17 @@ class MaintenanceApiService:
                 },
                 "would_delete_count": result.blobs.would_delete_count,
                 "would_free_bytes": result.blobs.would_free_bytes,
+                # v3.2 R-1 projection fields (additive; default 0
+                # for legacy clients that ignore them). Schema-stability
+                # alias: ``bytes_reclaimable_now`` is the SAME number
+                # as ``would_free_bytes`` — explicit alias per the
+                # amendment, not a recomputation. The echo gate binds
+                # ONLY to ``would_free_bytes``.
+                "bytes_reclaimable_now": bytes_reclaimable_now,
+                "bytes_reclaimable_after_row_prune": (
+                    bytes_reclaimable_after_row_prune
+                ),
+                "bytes_reclaimable_total": bytes_reclaimable_total,
                 "scanned": {
                     "thread_ns_pairs": result.rows.scanned_pairs,
                 },
@@ -339,8 +360,9 @@ class MaintenanceApiService:
                 "fresh_until": fresh_until,
             }
             # Mark the row succeeded; ``summary_json`` carries the
-            # full dry-run payload (incl. skipped[]) — survives any
-            # future dry-run-row pruning.
+            # full dry-run payload (incl. skipped[] + projection
+            # fields) — survives any future dry-run-row pruning and
+            # is the snapshot the manual_execute row echoes from.
             await asyncio.to_thread(
                 self._runs_repo.mark_terminal,
                 ctx.run_id,
@@ -351,6 +373,11 @@ class MaintenanceApiService:
                     "would_delete": wire["would_delete"],
                     "would_delete_count": wire["would_delete_count"],
                     "would_free_bytes": wire["would_free_bytes"],
+                    "bytes_reclaimable_now": bytes_reclaimable_now,
+                    "bytes_reclaimable_after_row_prune": (
+                        bytes_reclaimable_after_row_prune
+                    ),
+                    "bytes_reclaimable_total": bytes_reclaimable_total,
                     "scanned": wire["scanned"],
                     "skipped": wire["skipped"],
                     "skipped_truncated": wire["skipped_truncated"],
@@ -618,12 +645,39 @@ class MaintenanceApiService:
                 result = await self._cleanup_job.run_checkpoint_prunes(
                     destructive=True
                 )
+                # v3.2 (R-5): the manual_execute summary gains ONE
+                # additive ``projection`` block sourced from the
+                # snapshotted dry-run row (``dry_run_summary_json`` —
+                # the field the INSERT above persisted when the
+                # operator executed). Auto rows do NOT get this block
+                # (auto cycle writes ``result.to_summary_dict()``
+                # directly with the FROZEN shape — see
+                # ``CheckpointCleanupJob.execute``). The block is
+                # ECHOED, not recomputed — what the dry-run promised
+                # is what the post-run banner can attest.
+                execute_summary = result.to_summary_dict()
+                dry_run_snapshot = await asyncio.to_thread(
+                    self._runs_repo.get, run_id
+                )
+                if dry_run_snapshot is not None:
+                    snap = dry_run_snapshot.dry_run_summary_json or {}
+                    projection_block: dict[str, int] = {}
+                    if "bytes_reclaimable_now" in snap:
+                        projection_block["bytes_reclaimable_now_at_dry_run"] = (
+                            int(snap["bytes_reclaimable_now"])
+                        )
+                    if "bytes_reclaimable_after_row_prune" in snap:
+                        projection_block[
+                            "bytes_reclaimable_after_row_prune_at_dry_run"
+                        ] = int(snap["bytes_reclaimable_after_row_prune"])
+                    if projection_block:
+                        execute_summary["projection"] = projection_block
                 await asyncio.to_thread(
                     self._runs_repo.mark_terminal,
                     run_id,
                     "succeeded",
                     now_utc_iso(),
-                    summary_json=result.to_summary_dict(),
+                    summary_json=execute_summary,
                 )
             except asyncio.CancelledError:
                 # Shutdown hook (T5.5) — mark the row per the 4-state
