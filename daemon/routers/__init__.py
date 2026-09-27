@@ -25,6 +25,7 @@ from .blueprints import router as blueprints_router
 from .recovery import router as recovery_router
 from .missions import router as missions_router
 from .tmp_images import router as tmp_images_router  # Phase 1: clipboard-image-chat
+from .maintenance import router as maintenance_router  # Section 1: checkpoint cleanup
 
 __all__ = [
     "agents_router",
@@ -52,4 +53,5 @@ __all__ = [
     "recovery_router",
     "missions_router",
     "tmp_images_router",
+    "maintenance_router",
 ]

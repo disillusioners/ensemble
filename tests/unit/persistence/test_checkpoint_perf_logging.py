@@ -682,6 +682,13 @@ class TestMaintenancePruneLogging:
 
         checkpointer = MagicMock()
         instance_repo = MagicMock()
+        # T1.4 (maintenance-console §1): _prune_per_thread_checkpoints
+        # now also calls find_all_thread_ns_pairs() for scanned_pairs
+        # (read-only GROUP BY) and _prune_thread_checkpoints returns a
+        # (deleted_checkpoints, deleted_writes) tuple — mocks follow the
+        # new contract; the pinned LOG contract (op=prune-exit carrying
+        # threads= / deleted= / duration_ms=) is unchanged.
+        checkpointer.find_all_thread_ns_pairs = AsyncMock(return_value=[])
         checkpointer.find_excess_checkpoint_groups = AsyncMock(
             return_value=[("thread-aaaa", "", 100)]
         )
@@ -691,7 +698,7 @@ class TestMaintenancePruneLogging:
         # Stub the inner _prune_thread_checkpoints to return a known deletion
         # count without spinning up a real adapter.
         async def fake_prune(thread_id, checkpoint_ns, max_per_thread):
-            return 50
+            return (50, 3)
 
         with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
             with patch.object(job, "_prune_thread_checkpoints", side_effect=fake_prune):
@@ -712,6 +719,8 @@ class TestMaintenancePruneLogging:
 
         checkpointer = MagicMock()
         instance_repo = MagicMock()
+        # T1.4: scanned_pairs enumeration runs before the excess check.
+        checkpointer.find_all_thread_ns_pairs = AsyncMock(return_value=[])
         checkpointer.find_excess_checkpoint_groups = AsyncMock(return_value=[])
 
         job = CheckpointCleanupJob(PersistenceConfig(), checkpointer, instance_repo)
@@ -741,6 +750,9 @@ class TestMaintenancePruneLogging:
 
         checkpointer = MagicMock()
         instance_repo = MagicMock()
+        # T1.4: scanned_pairs enumeration + tuple-returning stub follow
+        # the new helper contract (log suppression is the pinned part).
+        checkpointer.find_all_thread_ns_pairs = AsyncMock(return_value=[])
         checkpointer.find_excess_checkpoint_groups = AsyncMock(
             return_value=[("thread-aaaa", "", 100)]
         )
@@ -748,7 +760,7 @@ class TestMaintenancePruneLogging:
         job = CheckpointCleanupJob(PersistenceConfig(), checkpointer, instance_repo)
 
         async def fake_prune(thread_id, checkpoint_ns, max_per_thread):
-            return 50
+            return (50, 3)
 
         with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
             with patch.object(job, "_prune_thread_checkpoints", side_effect=fake_prune):

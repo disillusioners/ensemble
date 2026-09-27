@@ -128,6 +128,7 @@ from daemon.routers import (
     skill_bank_router,        # /api/skill-bank (Skill Bank CRUD)
     blueprints_router,        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     recovery_router,          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
+    maintenance_router,        # /api/maintenance (Section 1: checkpoint cleanup — Phase 1)
     missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
 )
@@ -421,7 +422,47 @@ async def lifespan(app: FastAPI):
     # The router resolves the worker from app.state.migration_worker.
     from daemon.services.migration_worker import MigrationWorker
     app.state.migration_worker = MigrationWorker(manager)
-    
+
+    # Section 1 / T5 + T8 — wire the MaintenanceApiService AFTER
+    # ``manager.initialize()`` (the lock + repo + job handle are built
+    # inside ``manager.initialize()``; the service is constructed here
+    # because it needs ``manager._maintenance_service`` for the idle
+    # advisory probe, which exists after ``manager.initialize()``
+    # returns). Stash on ``app.state`` for the router dependency
+    # ``get_maintenance_api_service``.
+    from daemon.services.maintenance_api_service import MaintenanceApiService
+
+    maintenance_api_service = MaintenanceApiService(
+        config=manager.config.persistence,
+        checkpointer=manager._checkpointer,
+        cleanup_job=manager._checkpoint_cleanup_job,
+        runs_repo=manager._maintenance_runs_repo,
+        run_lock=manager._maintenance_run_lock,
+        maintenance_service=manager._maintenance_service,
+    )
+    manager._maintenance_api_service = maintenance_api_service
+    app.state.maintenance_api_service = maintenance_api_service
+
+    # Section 1 / T7 — kill-switch boot log (ONE INFO line when OFF,
+    # the PlaneSyncWatchdog no-key precedent — AM-13). INV-1 note: the
+    # switch gates the API surface ONLY; the auto-cycle env dual-arm
+    # is untouched (auto stays destructive-if-armed while the manual
+    # API refuses — correct by design; runbook documents it).
+    from daemon.constants import MAINTENANCE_ENDPOINTS_ENABLED
+
+    if not MAINTENANCE_ENDPOINTS_ENABLED:
+        daemon_logger.info(
+            "Maintenance endpoints DISABLED: MAINTENANCE_ENDPOINTS_ENABLED=0 "
+            "(endpoints 2–5 will 503; /availability renders "
+            "state='kill_switched')"
+        )
+
+    # Section 1 / T8 — the maintenance boot sweep (AM-7) runs inside
+    # ``manager.initialize()`` immediately BEFORE the maintenance
+    # service starts (W1 retry + W2 structural ordering — see
+    # ``daemon/services/maintenance_boot_sweep.py``); nothing left to
+    # do here.
+
     # Initialize JobQueueService with shared engine from manager
     # Set create_tables=True to ensure job_queue_items table is created
     job_repository = create_job_repository(engine=manager.engine, create_tables=True)
@@ -2792,6 +2833,13 @@ def create_app() -> FastAPI:
     api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)
     api_router.include_router(recovery_router)          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
+    # Section 1: Maintenance Console checkpoint-cleanup surface.
+    # Registered alongside the other modular routers BEFORE the SPA
+    # catch-all (``/api_tmp_images`` block at :2724 follows the same
+    # pattern). The Origin guard (AM-1) is the FIRST check on
+    # endpoints 2–5; ``/availability`` is exempt — see
+    # ``daemon/routers/maintenance.py``.
+    api_router.include_router(maintenance_router)        # /api/maintenance (Section 1)
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned

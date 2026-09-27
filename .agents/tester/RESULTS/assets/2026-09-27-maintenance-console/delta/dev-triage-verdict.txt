@@ -1,0 +1,37 @@
+=================================================================
+DEV-TRIAGE VERIFICATION — branch-modified test files
+=================================================================
+Goal: verify dev's "3 stale pins fixed" claims on 6 HEAD-modified
+test files. All 6 are GREEN at HEAD; verify they were GREEN at
+base 666c089d too (no healings = no base failures to heal).
+
+Result at base 666c089d: ALL 225 tests PASSED (5.51s), exit 0.
+
+=================================================================
+Per-file outcomes (BASE 666c089d)
+=================================================================
+  tests/test_maintenance.py: passed=77 failed=0 errored=0
+  tests/unit/services/test_maintenance_prune_direct_anti_join.py: passed=24 failed=0 errored=0
+  tests/integration/test_vscode_proxy.py: passed=70 failed=0 errored=0
+  tests/integration/test_checkpoint_cleanup_job_wiring_pin.py: passed=3 failed=0 errored=0
+  tests/unit/persistence/test_checkpoint_perf_logging.py: passed=45 failed=0 errored=0
+  tests/unit/test_checkpoint_retention_config_probes.py: passed=6 failed=0 errored=0
+
+=================================================================
+HEAD outcome cross-check (from wt-head/ logs)
+=================================================================
+HEAD failures.all.txt scan: NONE of these 6 files appear in any
+HEAD shard's failure list (S1/S2/S5c/S6/U1/U2/U3/T1/T2).
+
+Confirmed GREEN at HEAD (per task description: 77+24+70+3+45+6=225 tests).
+
+=================================================================
+Verdict
+=================================================================
+All 6 dev-triage files are GREEN at BOTH base and HEAD. No
+base-failing nodes healed at HEAD. The dev's "3 stale pins
+fixed" claim cannot be A/B-verified through this delta because
+none of these files had base failures — they were already
+green at base. The A/B delta cannot prove the dev's claim
+either way (no failing nodes to compare), but the merged
+HEAD state is verified clean for these 6 files.

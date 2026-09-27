@@ -1,4 +1,32 @@
-import { Routes } from '@angular/router';
+import { Routes, CanMatchFn, Router } from '@angular/router';
+import { inject } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { catchError, map, of } from 'rxjs';
+import type { MaintenanceAvailability } from './models';
+import { CheckpointCleanupService } from './pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.service';
+
+/**
+ * AM-14 — canMatch guard for the Maintenance section. Returns true
+ * iff availability.state === 'ready'. On transport failure, returns
+ * `router.parseUrl('/')` so the route is hidden (the SPA fallback
+ * home), not errored — matches gear-menu probe semantics: clean hide,
+ * never an error toast.
+ *
+ * The guard does its OWN `/availability` probe. The duplication with
+ * `checkMaintenanceAvailability()` in app.ts is intentional: the
+ * gear-menu probe runs at app boot; the route guard runs at navigation
+ * time (which may be minutes later — deep-link from bookmark, or
+ * after a state flip). The probe is cheap (one indexed single-row
+ * SELECT — see Focus Area 3 of architect recommendation).
+ */
+export const maintenanceAvailabilityGuard: CanMatchFn = () => {
+  const http = inject(HttpClient);
+  const router = inject(Router);
+  return http.get<MaintenanceAvailability>(CheckpointCleanupService.AVAILABILITY_URL).pipe(
+    map((data) => (data.state === 'ready' ? true : router.parseUrl('/'))),
+    catchError(() => of(router.parseUrl('/'))),
+  );
+};
 
 export const routes: Routes = [
   { path: '', loadComponent: () => import('./pages/home/home.component').then(m => m.HomeComponent) },
@@ -35,5 +63,21 @@ export const routes: Routes = [
   // registered ensures the Angular router reflects /plan in the URL bar
   // and activates the nav link's `active` class.
   { path: 'plan', loadComponent: () => import('./pages/plan/plan.component').then(m => m.PlanComponent) },
+  // Maintenance Console — Section 1 (Checkpoint Cleanup) — Phase 2.
+  // Route target is the PAGE SHELL (`MaintenanceComponent`), not the
+  // section component directly. The shell renders sections via a local
+  // `sections` registry (`maintenance.component.ts`); the registry is
+  // load-bearing for extensibility (adding section 2 = one line, no
+  // template change).
+  //
+  // `canMatch` (not `canActivate`) so the router treats the route as
+  // absent when not ready — prevents the stale-FE-dist + missing-BE-router
+  // class of 404-into-SPA-fallback (AM-14 route hardening).
+  {
+    path: 'maintenance/checkpoint-cleanup',
+    loadComponent: () => import('./pages/maintenance/maintenance.component').then(m => m.MaintenanceComponent),
+    canMatch: [maintenanceAvailabilityGuard],
+    title: 'Maintenance · Checkpoint Cleanup',
+  },
   { path: '**', redirectTo: '' }
 ];

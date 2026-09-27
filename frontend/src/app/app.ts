@@ -26,7 +26,8 @@ import { WorkspaceComponent } from './pages/workspace/workspace.component';
 // (the eager root-mount previously blew the 6 MB initial budget) while
 // preserving the cached-overlay behavior across hide/show cycles.
 import type { ChatComponent } from './pages/chat/chat.component';
-import type { HealthResponse, MigrationAvailability } from './models';
+import type { HealthResponse, MigrationAvailability, MaintenanceAvailability } from './models';
+import { CheckpointCleanupService } from './pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.service';
 
 interface SettingsMenuItem {
   label: string;
@@ -721,6 +722,7 @@ export class App implements OnInit {
     this.loadHealth();
     this.checkMigrationAvailability();
     this.checkPlaneAvailability();
+    this.checkMaintenanceAvailability();
   }
 
   private loadHealth(): void {
@@ -765,6 +767,39 @@ export class App implements OnInit {
       error: () => {
         // Plane not configured; feature stays hidden.
       }
+    });
+  }
+
+  /**
+   * AM-14 — gear-menu probe for the Maintenance section. Branches on
+   * the `state` enum (NOT the legacy `eligible` boolean), so the menu
+   * hides cleanly on every non-`ready` state (`backend_unsupported`,
+   * `subsystem_disabled`, `kill_switched`).
+   *
+   * Probe failures (transport error, daemon unreachable, lifespan not
+   * yet wired) keep the section hidden — there is no "Maintenance
+   * unavailable" disabled-with-tooltip item; the spec says hide, not
+   * disable.
+   *
+   * The probe is idempotent (the `some(...)` guard prevents duplicate
+   * appends on retry). The kill-switch OFF case returns 200 with
+   * `state: "kill_switched"` — handled by the state check (no error).
+   */
+  private checkMaintenanceAvailability(): void {
+    this.http.get<MaintenanceAvailability>(CheckpointCleanupService.AVAILABILITY_URL).subscribe({
+      next: (data) => {
+        if (data.state === 'ready' && !this.settingsMenuItems().some(i => i.route === '/maintenance/checkpoint-cleanup')) {
+          this.settingsMenuItems.update(items => [
+            ...items,
+            { label: 'Maintenance', icon: 'build', route: '/maintenance/checkpoint-cleanup' },
+          ]);
+        }
+      },
+      error: () => {
+        // Maintenance endpoint unreachable (lifespan not run yet, daemon
+        // still booting, or transport failure). Section stays hidden —
+        // an explicit "Maintenance unavailable" UX is out of scope.
+      },
     });
   }
 }

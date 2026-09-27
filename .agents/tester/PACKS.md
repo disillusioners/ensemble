@@ -1,5 +1,41 @@
 # Test Packs
 
+## Completed commission — MAINTENANCE-CONSOLE FINAL PRE-MERGE VERIFICATION (2026-09-27)
+
+Branch `feature/maintenance-console` @ **`c939aaa0`** (final HEAD = d66af240 + c939aaa0 superset) vs base `666c089d`. **VERDICT: PASS — READY TO MERGE. Zero branch-caused new failures; Playwright 14/14 independently re-run; FE full suite green; all BE claims confirmed.** Full report: `RESULTS/2026-09-27-maintenance-console-final-verification.md`. All packs env-scrubbed `POSTGRES_*`; `uv run python -m pytest` only; every run `timeout`-wrapped; zero source mods, zero commits.
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `mc_pw_e2e` (2 attempts) | `ENSEMBLE_DB_DSN=<disposable> timeout 300 npx playwright test -c playwright.maintenance.config.ts maintenance-checkpoint-cleanup --project maintenance --reporter=line` (frontend/; ports 8099/4299/15432, canary=availability-poll, reuseExistingServer:false) | 14-case browser gate, independent re-run | ✅ PASS 14/14, 0 skipped, 41.4s. Attempt-1 lesson: worker-env `ENSEMBLE_DB_DSN` token + positional file filter REQUIRED (config :20-21). ⚠ Deterministic boot-script teardown leak (postgres survives :15432; follow-up F1) |
+| `mc_fe_jest_full` | `CI=true timeout 300 npm test -- --watch=false` (frontend/) | FE Jest full | ✅ 3469 tests = 3388 baseline-class + 77 maintenance all-green; exactly the 4 QUARANTINE.md pre-existing F |
+| `mc_fe_static_build` | `EXPECTED_BRANCH=feature/maintenance-console timeout 300 bash test/packs/fe_static_typecheck_build_test.sh` | tsc + ng build + budget | ✅ exit 0; initial 5.89 MB < 6MB cap (claim confirmed); 2 new NG8113 warnings (F2) |
+| `mc_fe_spot` | `CI=true timeout 300 npx jest <4 maintenance specs>` | 3-behavior coverage | ✅ 77/77 + stale/409-adoption/interrupted all COVERED (mangle-matrix-verified pins) |
+| `mc_be_unit_family` | `timeout 300 uv run python -m pytest <5 guard files> --tb=short -q -rA` | guard family | ✅ 122/122 (claim "65" = cleanup_service file alone) |
+| `mc_be_pg_api` | disposable PG :15532; `PG_TEST_*`; `--override-ini="addopts=" -m "integration and postgres"` | PG API suite | ✅ 39P+1S (collected 40, designed skip) — claim confirmed; "contract 33" = stale phase-1 count |
+| `mc_be_realsaver_ab` | PG :15534 HEAD / :15535 base-worktree; `--override-ini='addopts=' --override-ini='timeout=120'` | real-saver A/B | ✅ 7P/2F ≡ base, same node ids (quarantined pair reconfirmed) |
+| `mc_be_smoke` | `timeout 300 bash tests/manual/maintenance_console_smoke.sh` (port 8199) | 12-check live smoke | ✅ 12/12, exit 0, `-u POSTGRES_URL` form re-proven, 0 ensemble_prod contact |
+| `wt_shards_S1..T2` (9 shards, re-derived splits: unit 331 files, top-level 155) | per phase-1 architecture; per-shard `timeout 300`, silent-wedge-checked, node-level diff vs 204-ledger | whole-tree default partition ~23,012 collected | ✅ 203/204 ledger reproduced, 0 candidate-new non-mock |
+| `wt_attestation_perfile` | 34 files × `timeout 150 ... --override-ini='timeout=120'` | wedge-class family | ✅ 34/34 CLEAN (227P+2S), 0 wedges |
+| `wt_delta_agg` | union partition + census/flake 3× legs + `test_maintenance.py` proof | delta verdict | ✅ union 259 = 203 + 56 mock-artifact; census F/F/F socket-sig = ENVIRONMENTAL; flake P/P/P; test_maintenance 77/77 |
+| `wt_mock_forensics + base_parity` | git provenance + scope-matched 4-file runs at base & HEAD worktrees | 56 ERROR disposition | ✅ files md5-identical base↔HEAD, pre-base commits; 56 ≡ 56 BASE-IDENTICAL → enumeration artifact (see LESSONS 2026-09-27-t-shard-enumeration-contract) |
+
+## Completed commission — MAINTENANCE-CONSOLE PHASE-1 INDEPENDENT VERIFICATION (2026-09-27)
+
+Branch `feature/maintenance-console` @ `3fb798d1` vs base `666c089d` (+2 test-only commits from this commission: `9dbaab90` G1 origin-guard route cells, `691fb557` smoke POSTGRES_URL scrub). **VERDICT: PASS — zero branch-caused new failures (201/204 pre-existing base-identical; 1 environmental worktree-socket, 2 parallel-load flakes, all 3×/3× adjudicated).** Full report: `RESULTS/2026-09-27-maintenance-console-phase1-verification.md`. All packs env-scrubbed `POSTGRES_*`; `uv run python -m pytest` only; every run `timeout 300`.
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `wt_shards_S1..T2` (9 one-shot shards) | `timeout 300 uv run python -m pytest <dir-scope> --tb=short -q` (default addopts; anchored inventory `grep -E '^(FAILED\|ERROR) tests/'`) | whole-tree default partition, 22,995 collected | ⚠️ FAIL-by-count = pre-existing baseline: 204 nodes (181F+23E) / 71 files; branch's own suites 0 failures |
+| `wt_base_delta` (A/B) | union of 71 failing files at detached base worktree, 4 chunks | new-failure verdict | ✅ ZERO branch-caused (201 pre-existing; 3 head-only → adjudicated env/flake) |
+| `attestation_parity` | per-file `--override-ini='timeout=120'` at HEAD + base, 34 files | wedge-class family | ✅ 34/34 PARITY-PASS (195P + 1 identical skip pair) |
+| `maintenance66_unit_test` | `timeout 300 uv run python -m pytest tests/unit/services/test_checkpoint_prune_destructive_override.py tests/unit/services/test_maintenance_checkpoint_cleanup_service.py tests/unit/services/test_maintenance_run_lock_and_capture.py tests/integration/test_checkpoint_cleanup_job_wiring_pin.py --tb=short -q -rA` | 66-case unit side (§4.1+§4.2+§4.4) | ✅ PASS 69/69 in 4.5s (wiring pin 4/4 incl. MANUAL-ONLY AST nodes) |
+| `maintenance_pg_api_test` | disposable PG :15432; `PG_TEST_*`; `--override-ini="addopts=" -m "integration and postgres"` | §4.3 API suite | ✅ PASS 33+1 designed skip (case-64 SQLite-fallback conditional) in 9.9s; after G1 fix: 37+1 |
+| `checkpoint_real_saver_pg_test` (A/B legs) | PG :15434/:15435, `--override-ini='addopts=' --override-ini='timeout=120'` | 9 real-saver tests | ⚠️ 2F/7P **BASE-IDENTICAL** (quarantined caplog pair reconfirmed); effective 7/7 |
+| `maintenance_probes` (6 /tmp probe scripts) | `timeout 120 uv run python /tmp/probe_p*.py` | INV-1/2/9, gate order, byte-echo, TTL | ✅ 6/6 PASS |
+| `maintenance_smoke_test` | `timeout 300 bash tests/manual/maintenance_console_smoke.sh` (port 8199, disposable DB) | 12-check live smoke | ✅ 12/12 PASS incl. origin 403, 4×503 kill-switch, boot sweep heal |
+
+Whole-tree shard architecture note: attestation family (34 files) must run as its own pack / per-file at `timeout=120` in future sweeps (silent-wedge class — see LESSONS/2026-09-27-attestation-shard-wedge-class.md). Delta-adjudication traps (worktree sockets, load flakes) in LESSONS/2026-09-27-delta-adjudication-traps.md.
+
 ## Completed commission — V0.15.3 UPGRADE TOOL-LANE FIX ACCEPTANCE (2026-09-26)
 
 Branch `feature/upgrade-tool-lane-fix` @ `a95b7028` (base `139ba352` = v0.15.2). INDEPENDENT final gate before release-cut. **✅ VERDICT: PASS — zero mission-caused failures; all 5 defect arms DEAD; tool-lane e2e on dev all-phases PASS; mock audit all-real-semantics.** All runs env-fenced (`env -u POSTGRES_* PG* ENSEMBLE_UPGRADE_LIVE ENSEMBLE_ROLLBACK_SAFE`), `timeout 300` wrappers, pre-flight HEAD/branch pin by every worker.

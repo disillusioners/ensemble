@@ -543,6 +543,20 @@ class InstanceManager:
             SnapshotUsageCounter,
         )
 
+        # Section 1 / T4 — register the MaintenanceRun SQLModel with
+        # ``SQLModel.metadata`` BEFORE ``create_all`` so the
+        # ``maintenance_runs`` table + the partial unique index on
+        # ``(section) WHERE status='running'`` + the composite
+        # ``(section, completed_at)`` index are built on BOTH drivers
+        # (PG and SQLite). No ``_ensure_postgres_columns`` mirror —
+        # brand-new tables need none (snapshot precedent verbatim,
+        # ``manager.py:530-546``). The canonical DDL
+        # ``daemon/migrations/versions/20260927_000001_*.sql`` is doc
+        # only — the runner is a NO-OP on PG. [AM-15, R-3 cite fix]
+        from .repositories.maintenance_runs.models import (  # noqa: F401
+            MaintenanceRun,
+        )
+
         SQLModel.metadata.create_all(self._engine)
 
         # Run file-based migrations using MigrationRunner
@@ -1303,6 +1317,13 @@ class InstanceManager:
 
         # Maintenance service for periodic cleanup tasks
         self._maintenance_service: MaintenanceService | None = None
+        # Section 1 / T3 — gate + audit registry handles (one instance
+        # each, owned by the manager). ``MaintenanceApiService``
+        # (T5) is wired later in the same initialize() pass; see the
+        # api lifespan for ``app.state.maintenance_api_service``.
+        self._maintenance_run_lock: "MaintenanceRunLock | None" = None
+        self._maintenance_runs_repo: "MaintenanceRunsRepository | None" = None
+        self._maintenance_api_service: "MaintenanceApiService | None" = None
 
         # Phase 1 / WS-2 — register the ``/compact`` slash command
         # into the dispatcher. Lazy import inside the helper to
@@ -2610,6 +2631,23 @@ class InstanceManager:
         # setup_worker_pool() per daemon/api.py startup order, so calling it
         # here would raise AttributeError.
 
+        # Section 1 / T3 — single-flight gate (MaintenanceRunLock) +
+        # audit row persistence (MaintenanceRunsRepository) wired at
+        # the SAME single CheckpointCleanupJob construction site the
+        # wiring-pin suite asserts (T9 case 55). Same
+        # single-construction rationale as ``message_metadata_repo``
+        # (T5.19 — silent-drop class guard). The lock + repo are
+        # held on ``self`` so the MaintenanceApiService (T5) can
+        # reach them later without a private reach-through.
+        from .services.maintenance_run_lock import MaintenanceRunLock
+
+        self._maintenance_run_lock = MaintenanceRunLock()
+        from .repositories.maintenance_runs import (
+            MaintenanceRunsRepository,
+        )
+
+        self._maintenance_runs_repo = MaintenanceRunsRepository(self._engine)
+
         # Register checkpoint cleanup job
         checkpoint_cleanup = CheckpointCleanupJob(
             config=self.config.persistence,
@@ -2623,7 +2661,16 @@ class InstanceManager:
             # __init__ above (line ~591) — safe to pass here.
             message_metadata_repo=self._message_metadata_repo,
             on_instance_deleted=self._release_cached_instance,
+            # Section 1 / T3 — gate + audit kwargs.
+            run_lock=self._maintenance_run_lock,
+            runs_repo=self._maintenance_runs_repo,
         )
+        # Section 1 / T5 — hold the job handle for the
+        # MaintenanceApiService wiring (api.py lifespan reads it via
+        # ``manager._checkpoint_cleanup_job``; the manual entry point
+        # ``run_checkpoint_prunes`` lives on this instance). Still the
+        # SINGLE construction site the wiring-pin suite guards.
+        self._checkpoint_cleanup_job = checkpoint_cleanup
         self._maintenance_service.register(
             "checkpoint_cleanup",
             self.config.persistence.checkpoint_cleanup_interval,
@@ -2716,6 +2763,24 @@ class InstanceManager:
                 execute_fn=self._blueprint_scan_service.execute,
                 last_run=last_run_dt,
             )
+
+        # Section 1 / T8 + W1 + W2 (v3 fix pass) — boot sweep of
+        # orphaned ``running`` rows (AM-7): unconditional
+        # rowcount-guarded CAS ``running → interrupted``, WITH bounded
+        # retry (W1 — a failed sweep leaves a stale running row that
+        # 409-wedges all cleanup). Runs HERE — immediately BEFORE
+        # ``_maintenance_service.start()`` — so the auto cycle's first
+        # tick can never race the sweep (W2: the ordering is
+        # structural, NOT left to the loop's 60s initial sleep; pinned
+        # by tests/integration/test_checkpoint_cleanup_job_wiring_pin.py).
+        # Best-effort, never raises into the boot path; the runs repo
+        # exists by this point (built above with the shared engine).
+        if self._maintenance_runs_repo is not None:
+            from daemon.services.maintenance_boot_sweep import (
+                run_boot_sweep_with_retry,
+            )
+
+            await run_boot_sweep_with_retry(self._maintenance_runs_repo)
 
         await self._maintenance_service.start()
 
@@ -11576,6 +11641,21 @@ class InstanceManager:
             # exit regardless.
             logger.warning(f"Error closing checkpointer adapter: {e}")
     
+    async def _shutdown_maintenance_api_service(self) -> None:
+        """Section 1 / T5.5 — best-effort stop of the MaintenanceApiService.
+
+        Cancels + awaits the live executing task (its CancelledError
+        handler writes the ``run_interrupted_by_shutdown`` terminal
+        row); never raises.
+        """
+        svc = getattr(self, "_maintenance_api_service", None)
+        if svc is None:
+            return
+        try:
+            await svc.shutdown()
+        except Exception as e:  # noqa: BLE001 — best-effort by contract
+            logger.warning(f"maintenance api service shutdown error: {e}")
+
     async def shutdown(self, grace_period: float = 10.0) -> None:
         """Gracefully shutdown all manager components in order.
         
@@ -11664,6 +11744,14 @@ class InstanceManager:
             ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
             ("shutdown_event_bus", self._event_bus.shutdown()),
             ("shutdown_maintenance_service", self._maintenance_service.stop() if self._maintenance_service else asyncio.sleep(0)),
+            # Section 1 / T5.5 — cancel + await the live maintenance
+            # execute task; its CancelledError handler marks the run
+            # row ``failed`` with ``error_json.code=
+            # 'run_interrupted_by_shutdown'`` (AM-6/AM-7 ruling: a
+            # graceful shutdown is not a crash — ``interrupted`` is
+            # reserved for restart-orphaned rows). Runs BEFORE the DB
+            # pools go away so the terminal write lands on a live pool.
+            ("shutdown_maintenance_api_service", self._shutdown_maintenance_api_service()),
             # Drain the D3 snapshot capture + R10 embedding
             # fire-and-forget tasks BEFORE the DB pools go away —
             # an in-flight terminal write must land on a live pool.

@@ -1,36 +1,24 @@
-"""cpv2 final-gate fold — AST pin for the ``CheckpointCleanupJob``
-construction kwarg ``message_metadata_repo``.
+"""Wiring pins — Section 1 (Checkpoint Cleanup) silent-drop guards.
 
-Binding follow-up from the langgraph-checkpoint-perf-v2 final-gate
-whole-branch review (Finding 🟡3, "Unpinned construction kwarg —
-silent T5.19 revert class"; scan scope widened in verify round 2):
-exactly ONE ``CheckpointCleanupJob(...)`` construction site is
-allowed across ALL of ``daemon/**/*.py`` — the scan is daemon-wide
-so a second site in ANY daemon module trips the count contract.
-Today that single site lives in ``daemon/manager.py`` inside
-``initialize()`` (~line 2300) and wires the T5.19 prune via
-``message_metadata_repo=self._message_metadata_repo``.
+``phase1-backend.md`` §4.4 (case 55) + the T1.7 MANUAL-ONLY AST pin:
 
-``CheckpointCleanupJob.__init__`` declares
-``message_metadata_repo: MessageMetadataRepository | None = None`` — a
-backward-compatible default that SKIPS the T5.19 side-table prune in
-``_cleanup_instance`` (the never-raise prune that runs AFTER
-``adelete_thread`` and keeps a fully-cleaned instance at ZERO
-``message_metadata`` rows). Dropping the kwarg — or passing ``None`` —
-disables the prune with ZERO test failures; the only symptom is slow
-``message_metadata`` table growth in production. This pin makes that
-regression loud instead of silent (same silent-kwarg-drop class the
-branch already pinned for the tap-slot kwargs).
-
-Why AST + static (same rationale as the sibling pin
-``test_message_metadata_lifecycle_wiring.py``): driving a fully armed
-manager fixture through a real maintenance tick to observe the prune
-is expensive and brittle, and the failure mode (a kwarg silently
-dropped in a revert) is a SOURCE-shape regression. The AST pin catches
-the kwarg dropped / None'd / repo handle severed at zero runtime cost.
-
-Marker gating: NO ``integration`` marker — must run under default
-``addopts`` (same property as the sibling wiring pin).
+* **DAEMON-WIDE invariant** — there is EXACTLY ONE
+  ``CheckpointCleanupJob(...)`` construction site anywhere under
+  ``daemon/**/*.py`` (current lone site: ``daemon/manager.py`` ~line 2652).
+  A future second site anywhere in the daemon tree trips this pin,
+  because a silent second construction disables the prune wiring
+  with zero other test failures (same rationale as the existing
+  ``message_metadata_repo`` pin — a dropped kwarg at the construction
+  site silently disables the single-flight gate / audit rows while
+  every unit test stays green);
+* the lone construction site must carry ``run_lock=`` and ``runs_repo=``
+  kwargs (the silent-drop class guard);
+* the AUTO ``execute()`` body must NEVER call ``run_checkpoint_prunes``
+  (the manual entry point is MANUAL-ONLY — the auto cycle must never
+  route through it; INV-1/INV-9);
+* the auto blob-arm call passes NO ``destructive`` kwarg (auto = env
+  dual-arm only; INV-1) — the integration suite's case 47 pins the
+  behavioral half.
 """
 from __future__ import annotations
 
@@ -39,146 +27,284 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DAEMON_DIR = REPO_ROOT / "daemon"
+MANAGER = DAEMON_DIR / "manager.py"
+MAINTENANCE = DAEMON_DIR / "services" / "maintenance.py"
 
 
-def _iter_daemon_sources() -> list[Path]:
-    """Every Python source under ``daemon/`` — the widened (verify
-    round 2) scan scope: a second ``CheckpointCleanupJob(...)``
-    construction site in ANY daemon module must trip the count
-    contract, not just one planted in manager.py."""
-    return sorted(DAEMON_DIR.rglob("*.py"))
-
-CONSTRUCTOR_NAME = "CheckpointCleanupJob"
-MESSAGE_METADATA_KWARG = "message_metadata_repo"
-EXPECTED_VALUE_ATTR = "_message_metadata_repo"
-
-
-def _find_checkpoint_cleanup_job_calls(tree: ast.AST) -> list[ast.Call]:
-    """Every ``CheckpointCleanupJob(...)`` call site in the module."""
-    calls: list[ast.Call] = []
-
-    class _Visitor(ast.NodeVisitor):
-        def visit_Call(self, node: ast.Call) -> None:
-            func = node.func
-            if isinstance(func, ast.Name) and func.id == CONSTRUCTOR_NAME:
-                calls.append(node)
-            self.generic_visit(node)
-
-    _Visitor().visit(tree)
-    return calls
+def _daemon_trees() -> list[tuple[Path, ast.Module]]:
+    """Parse every ``daemon/**/*.py`` (excluding ``__pycache__``) into an
+    AST. The construction-site pin is DAEMON-WIDE — a second construction
+    site anywhere under ``daemon/`` must trip it."""
+    trees: list[tuple[Path, ast.Module]] = []
+    for path in sorted(DAEMON_DIR.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        trees.append((path, ast.parse(path.read_text(encoding="utf-8"))))
+    return trees
 
 
-def _describe(node: ast.AST) -> str:
-    return f"{type(node).__name__}({ast.dump(node)[:80]}…)"
+def _find_single_construction(
+    trees: list[tuple[Path, ast.Module]],
+) -> tuple[Path, ast.Call]:
+    """The SINGLE ``CheckpointCleanupJob(...)`` call site across ``daemon/``.
 
-
-def _enclosing_function_info(
-    tree: ast.AST, calls: list[ast.Call]
-) -> dict[int, str]:
-    """Map each call site's line to its enclosing method name.
-
-    ``calls`` must come from the SAME parsed ``tree`` (node identity is
-    what links a call to its enclosing function).
+    Returns ``(relpath, call)`` for the lone construction. If a future
+    commit adds a second construction site anywhere in the daemon tree,
+    this pin fails LOUDLY and names every site found so the reviewer can
+    wire both (or remove the duplicate).
     """
-    line_to_func: dict[int, str] = {}
-
-    class _Visitor(ast.NodeVisitor):
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            for child in ast.walk(node):
-                if isinstance(child, ast.Call) and child in calls:
-                    line_to_func[child.lineno] = node.name
-            self.generic_visit(node)
-
-        visit_AsyncFunctionDef = visit_FunctionDef
-
-    _Visitor().visit(tree)
-    return line_to_func
-
-
-def _require_message_metadata_repo_wired(call: ast.Call) -> ast.Attribute:
-    """Assert one call site passes ``message_metadata_repo=`` wired to
-    ``self._message_metadata_repo``; return the value node.
-
-    Shared by the pin tests below so the detection logic has exactly
-    one home (the scratch negative-proof exercises THIS function, not a
-    copy of it).
-    """
-    keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
-    assert MESSAGE_METADATA_KWARG in keywords, (
-        f"{CONSTRUCTOR_NAME} call at line {call.lineno} is MISSING the "
-        f"``{MESSAGE_METADATA_KWARG}`` kwarg — the constructor default "
-        "(None) silently SKIPS the T5.19 side-table prune in "
-        "_cleanup_instance, so the message_metadata table grows "
-        "without bound in production with ZERO test failures."
+    sites: list[tuple[Path, ast.Call]] = []
+    for path, tree in trees:
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "CheckpointCleanupJob"
+            ):
+                sites.append((path, node))
+    assert len(sites) == 1, (
+        f"expected exactly ONE CheckpointCleanupJob construction site across "
+        f"daemon/**/*.py, found {len(sites)}: "
+        f"{[str(p.relative_to(REPO_ROOT)) for p, _ in sites]} "
+        "(the wiring pin guards a single site; multiple sites need "
+        "multiple pins)"
     )
-    value = keywords[MESSAGE_METADATA_KWARG]
-    assert isinstance(value, ast.Attribute) and (
-        isinstance(value.value, ast.Name) and value.value.id == "self"
-    ) and value.attr == EXPECTED_VALUE_ATTR, (
-        f"``{MESSAGE_METADATA_KWARG}`` at line {call.lineno} must be "
-        f"``self.{EXPECTED_VALUE_ATTR}``, got {_describe(value)} — "
-        "passing None (or any other shape) silently disables the "
-        "T5.19 message_metadata prune; the wiring must be provably "
-        "never-None."
-    )
-    return value
+    return sites[0]
 
 
 class TestCheckpointCleanupJobWiring:
-    """The ``initialize()`` construction site wires the T5.19 repo."""
+    def test_single_construction_site_carries_gate_and_repo_kwargs(self):
+        """Case 55 — the lone daemon-wide construction site passes
+        ``run_lock=`` and ``runs_repo=`` (T3 silent-drop guard)."""
+        _, call = _find_single_construction(_daemon_trees())
+        kwarg_names = {
+            kw.arg for kw in call.keywords if kw.arg is not None
+        }
+        assert "run_lock" in kwarg_names, (
+            "CheckpointCleanupJob construction lost the run_lock kwarg — "
+            "the auto cycle silently drops out of the single-flight gate "
+            "(AM-4)"
+        )
+        assert "runs_repo" in kwarg_names, (
+            "CheckpointCleanupJob construction lost the runs_repo kwarg — "
+            "the auto cycle silently stops writing maintenance_runs audit "
+            "rows (AM-15)"
+        )
 
-    def setup_method(self):
-        # (path, tree, calls-in-file) for every daemon source that
-        # constructs CheckpointCleanupJob; ``self.calls`` is the
-        # daemon-wide flattening the count contract runs over, and
-        # ``self.call_sites`` carries ``<relpath>:<line>`` labels for
-        # failure messages.
-        self.sources: list[tuple[Path, ast.Module, list[ast.Call]]] = []
-        self.calls: list[ast.Call] = []
-        self.call_sites: list[str] = []
-        for path in _iter_daemon_sources():
-            tree = ast.parse(
-                path.read_text(encoding="utf-8"), filename=str(path)
+    def test_manager_holds_handles_for_service_wiring(self):
+        """Companion — the manager STORES the shared handles the api.py
+        lifespan reads (``self._checkpoint_cleanup_job``,
+        ``self._maintenance_run_lock``, ``self._maintenance_runs_repo``)
+        via real attribute assignments — losing any of them breaks the
+        T5 wiring with an AttributeError at boot.
+
+        AST-based (W6/W17/W5 v3 fix pass — replaces the former
+        substring grep): a comment, docstring, or read-only mention can
+        never satisfy this pin; only an ``Assign``/``AnnAssign`` whose
+        target is ``self.<attr>`` counts."""
+        tree = ast.parse(MANAGER.read_text(encoding="utf-8"))
+        assigned: set[str] = set()
+        for node in ast.walk(tree):
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                targets = [node.target]
+            for t in targets:
+                if (
+                    isinstance(t, ast.Attribute)
+                    and isinstance(t.value, ast.Name)
+                    and t.value.id == "self"
+                ):
+                    assigned.add(t.attr)
+        for attr in (
+            "_checkpoint_cleanup_job",
+            "_maintenance_run_lock",
+            "_maintenance_runs_repo",
+        ):
+            assert attr in assigned, (
+                f"manager.py no longer assigns self.{attr} — the api.py "
+                "lifespan MaintenanceApiService wiring depends on it"
             )
-            calls = _find_checkpoint_cleanup_job_calls(tree)
-            if calls:
-                self.sources.append((path, tree, calls))
-                self.calls.extend(calls)
-                self.call_sites.extend(
-                    f"{path.relative_to(REPO_ROOT)}:{call.lineno}"
-                    for call in calls
+
+    def test_boot_sweep_precedes_maintenance_service_start(self):
+        """W2 (v3 fix pass) — inside ``InstanceManager.initialize``, the
+        maintenance boot sweep call (``run_boot_sweep_with_retry``)
+        must appear BEFORE ``self._maintenance_service.start()``. The
+        ordering must be STRUCTURAL, not left to the service loop's
+        60s initial sleep: a first auto tick racing the sweep could
+        flip a LIVE auto run to ``interrupted``. AST positional pin —
+        call-site order within the ``initialize`` function body."""
+        tree = ast.parse(MANAGER.read_text(encoding="utf-8"))
+        init_fn = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "initialize"
+            ):
+                init_fn = node
+        assert init_fn is not None, "InstanceManager.initialize not found"
+
+        sweep_lines: list[int] = []
+        start_lines: list[int] = []
+        for sub in ast.walk(init_fn):
+            if not isinstance(sub, ast.Call):
+                continue
+            f = sub.func
+            if isinstance(f, ast.Attribute) and f.attr == "start":
+                recv = f.value
+                if (
+                    isinstance(recv, ast.Attribute)
+                    and recv.attr == "_maintenance_service"
+                ):
+                    start_lines.append(sub.lineno)
+            elif isinstance(f, ast.Name) and f.id == "run_boot_sweep_with_retry":
+                sweep_lines.append(sub.lineno)
+        assert sweep_lines, (
+            "initialize() no longer calls run_boot_sweep_with_retry — "
+            "the W2 structural ordering guarantee is gone (the sweep "
+            "must run immediately before the maintenance service starts)"
+        )
+        assert start_lines, (
+            "initialize() no longer starts _maintenance_service — "
+            "the W2 pin needs the start() call site"
+        )
+        assert min(sweep_lines) < min(start_lines), (
+            "W2 violated: the maintenance boot sweep must run BEFORE "
+            "self._maintenance_service.start() (structural ordering, "
+            "not the loop's 60s initial sleep)"
+        )
+
+
+class TestManualOnlyEntryPoint:
+    def test_auto_execute_never_calls_manual_entry_point(self):
+        """T1.7 MANUAL-ONLY pin — the auto ``execute()`` body contains NO
+        call to ``run_checkpoint_prunes`` (AST-level, not grep — a comment
+        or docstring mention can never satisfy it)."""
+        tree = ast.parse(MAINTENANCE.read_text(encoding="utf-8"))
+        execute_fn = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.AsyncFunctionDef)
+                and node.name == "execute"
+                and getattr(node, "lineno", 0) > 500  # the JOB's execute, not the service's
+            ):
+                # Identify by class: find the CheckpointCleanupJob method
+                execute_fn = node
+        # Robust class-scoped lookup instead of lineno heuristics:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "CheckpointCleanupJob":
+                for item in node.body:
+                    if isinstance(item, ast.AsyncFunctionDef) and item.name == "execute":
+                        execute_fn = item
+        assert execute_fn is not None, "CheckpointCleanupJob.execute not found"
+        for sub in ast.walk(execute_fn):
+            if isinstance(sub, ast.Call):
+                target = sub.func
+                name = (
+                    target.attr if isinstance(target, ast.Attribute) else
+                    (target.id if isinstance(target, ast.Name) else None)
+                )
+                assert name != "run_checkpoint_prunes", (
+                    "AUTO execute() must never route through the MANUAL "
+                    "entry point run_checkpoint_prunes (INV-1/INV-9 — the "
+                    "auto cycle keeps its inline A→E sequence)"
                 )
 
-    def test_exactly_one_construction_site(self):
-        """Exactly ONE ``CheckpointCleanupJob(...)`` construction site
-        exists across ALL of ``daemon/**/*.py`` — a second site in any
-        daemon module cannot appear silently unwired (the count is part
-        of the contract; adding one means extending this test)."""
-        assert len(self.calls) == 1, (
-            f"Expected exactly 1 ``{CONSTRUCTOR_NAME}`` construction "
-            f"site across daemon/**/*.py; found {len(self.calls)} at "
-            f"{self.call_sites}. A second construction "
-            f"site would not carry the ``{MESSAGE_METADATA_KWARG}`` "
-            "wiring by construction — wire it and update this pin "
-            "deliberately."
+    def test_manual_entry_point_orders_blob_arm_before_row_arm(self):
+        """Structural companion to unit case 9a — in
+        ``run_checkpoint_prunes`` source order, the ``_prune_unreferenced_blobs``
+        call precedes both row-arm calls (AM-2 ordering, textual witness
+        for reviewers; the behavioral pin is case 9a)."""
+        tree = ast.parse(MAINTENANCE.read_text(encoding="utf-8"))
+        fn = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.AsyncFunctionDef)
+                and node.name == "run_checkpoint_prunes"
+            ):
+                fn = node
+        assert fn is not None, "run_checkpoint_prunes not found"
+        blob_calls = [
+            sub.lineno
+            for sub in ast.walk(fn)
+            if isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == "_prune_unreferenced_blobs"
+        ]
+        row_calls = [
+            sub.lineno
+            for sub in ast.walk(fn)
+            if isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr in {
+                "_prune_per_thread_checkpoints", "_compute_row_prune_dry_run"
+            }
+        ]
+        assert blob_calls and row_calls
+        assert min(blob_calls) < min(row_calls), (
+            "manual entry point must await the blob arm (Op E) BEFORE the "
+            "row arm (Op D) — AM-2 BLOCKING"
         )
 
-    def test_message_metadata_repo_kwarg_wired(self):
-        """The construction passes ``message_metadata_repo`` wired to
-        ``self._message_metadata_repo`` — never a literal ``None`` or
-        any other shape (statically proven never-None)."""
-        for call in self.calls:
-            _require_message_metadata_repo_wired(call)
-
-    def test_wiring_lives_in_initialize_method(self):
-        """The construction site lives inside ``initialize()`` — pins
-        the intent (boot-path wiring), not just the count."""
-        info: dict[int, str] = {}
-        for _path, tree, calls in self.sources:
-            info.update(_enclosing_function_info(tree, calls))
-        names = set(info.values())
-        assert names == {"initialize"}, (
-            f"{CONSTRUCTOR_NAME} construction now lives in {names} — "
-            "expected {'initialize'}; if the boot path moved, update "
-            "this pin deliberately."
+    def test_auto_blob_arm_passes_no_destructive_kwarg(self):
+        """Case-47 AST replacement (tidier fix pass — was a substring
+        pin in the integration suite): the AUTO ``execute()``'s call to
+        ``_prune_unreferenced_blobs`` passes NO ``destructive`` kwarg —
+        the env dual-arm is the auto cycle's only destructive arbiter
+        (INV-1). AST-level: a comment can never satisfy it."""
+        fn = self._auto_execute_fn()
+        for sub in ast.walk(fn):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == "_prune_unreferenced_blobs"
+            ):
+                kw_names = [kw.arg for kw in sub.keywords if kw.arg]
+                assert "destructive" not in kw_names, (
+                    "AUTO execute() must NOT pass destructive= to the "
+                    "blob arm (env dual-arm is the arbiter — INV-1)"
+                )
+                return
+        raise AssertionError(
+            "no _prune_unreferenced_blobs call found in the auto "
+            "execute() body — the AST pin lost its target"
         )
+
+    def test_auto_cycle_keeps_row_before_blob_order(self):
+        """Case-47 AST replacement: in the AUTO ``execute()`` body, the
+        first ``_prune_per_thread_checkpoints`` call precedes the first
+        ``_prune_unreferenced_blobs`` call (auto order stays D→E,
+        INV-9 — the manual entry point is E→D per AM-2)."""
+        fn = self._auto_execute_fn()
+
+        def _first_line(attr: str) -> int:
+            lines = [
+                sub.lineno
+                for sub in ast.walk(fn)
+                if isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == attr
+            ]
+            assert lines, f"no {attr} call in auto execute() body"
+            return min(lines)
+
+        assert _first_line("_prune_per_thread_checkpoints") < _first_line(
+            "_prune_unreferenced_blobs"
+        ), "auto cycle must keep D→E (INV-9)"
+
+    @staticmethod
+    def _auto_execute_fn() -> ast.AsyncFunctionDef:
+        tree = ast.parse(MAINTENANCE.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "CheckpointCleanupJob"
+            ):
+                for item in node.body:
+                    if (
+                        isinstance(item, ast.AsyncFunctionDef)
+                        and item.name == "execute"
+                    ):
+                        return item
+        raise AssertionError("CheckpointCleanupJob.execute not found")

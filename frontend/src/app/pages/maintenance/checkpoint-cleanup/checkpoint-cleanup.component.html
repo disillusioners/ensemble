@@ -1,0 +1,260 @@
+<!-- AM-13 — global banner above all cards when kill-switch OFF. -->
+@if (isMaintenanceDisabled()) {
+  <section class="ck-card ck-banner ck-banner-disabled" data-testid="ck-banner-disabled">
+    <mat-icon>block</mat-icon>
+    <div>
+      <strong>Maintenance endpoints are disabled</strong>
+      <p>
+        The daemon was started with MAINTENANCE_ENDPOINTS_ENABLED=0. Restart
+        with the flag enabled to use this section.
+      </p>
+    </div>
+    <button mat-button (click)="dismissError()">Dismiss</button>
+  </section>
+}
+
+<!-- AM-1 — generic inline error banner (does NOT cover `run_in_flight` — that
+     case is absorbed by 409-adoption before reaching here).
+     Item 4 — banner consumes `displayErrorCode()` so an FE poll-timeout
+     surfaces as the display sentinel `'poll_stale'` (verbiage in
+     errorLabel). The wire `error: 'not_initialized'` is NEVER rendered
+     for a poll-timeout; the discriminator is
+     `details.fe_synthesized_poll_timeout === true`. -->
+@if (lastError() && lastError()?.error !== 'maintenance_disabled') {
+  <section class="ck-card ck-error-banner" data-testid="ck-error-banner">
+    <mat-icon>error_outline</mat-icon>
+    <div>
+      <strong>{{ errorLabel(displayErrorCode()) }}</strong>
+      @if (lastError()?.message) {
+        <p>{{ lastError()?.message }}</p>
+      }
+      @if (displayErrorCode() === 'origin_not_trusted') {
+        <p class="ck-error-note">
+          This origin is not trusted for maintenance actions. If you're seeing
+          this unexpectedly, file a ticket.
+        </p>
+      }
+    </div>
+    <button mat-button (click)="dismissError()">Dismiss</button>
+  </section>
+}
+
+<!-- Status card — always visible. AM-11 dual-flavor branch on
+     `summary.blobs.destructive`. -->
+<section class="ck-card ck-status" data-testid="ck-status">
+  <h3>Current configuration</h3>
+  @if (status()) {
+    <dl>
+      <dt>Keep N checkpoints per thread</dt>
+      <dd>{{ status()?.config?.checkpoint_max_per_thread }}</dd>
+      <dt>Cleanup interval</dt>
+      <dd>{{ status()?.config?.cleanup_interval_hours }} hours</dd>
+      <dt>Blob-prune dry-run default</dt>
+      <dd>
+        {{ status()?.config?.blob_prune_dry_run_env_default === '1' ? 'ON (safe)' : 'OFF (destructive)' }}
+      </dd>
+      <dt>Blob-prune destructive armed</dt>
+      <dd>{{ status()?.config?.blob_prune_destructive_armed ? 'YES' : 'no' }}</dd>
+    </dl>
+  } @else {
+    <p class="ck-muted">Loading status…</p>
+  }
+
+  @if (status()?.last_run; as last) {
+    <h3>Last run</h3>
+    <dl>
+      <dt>Kind</dt><dd>{{ last.kind }}</dd>
+      <dt>Completed at</dt><dd>{{ formatTimestamp(last.completed_at) }}</dd>
+      <dt>Status</dt><dd>{{ last.status }}</dd>
+      <!-- AM-11 / Item 11 — dual-flavor label + value via blobBytesFor(). -->
+      <dt>{{ blobBytesFor(last.summary.blobs).label }}</dt>
+      <dd>{{ formatBytes(blobBytesFor(last.summary.blobs).value) }}</dd>
+      <dt>Duration</dt><dd>{{ formatDuration(last.summary.duration_ms) }}</dd>
+    </dl>
+    <!-- AM-10 — skipped render on last_run summary. -->
+    @if (last.summary.blobs.skipped.length > 0) {
+      <p class="ck-skipped-summary" data-testid="ck-last-skipped-summary">
+        {{ last.summary.blobs.skipped.length }} pairs skipped — fail-safe
+        @if (last.summary.blobs.skipped_truncated) {
+          <span class="ck-truncated-note">(showing first 1000; more were truncated)</span>
+        }
+      </p>
+    }
+  } @else {
+    <p class="ck-muted">No prior cleanup runs.</p>
+  }
+
+  @if (status()?.in_flight; as inFlight) {
+    <div class="ck-warning">
+      <mat-icon>warning</mat-icon>
+      A {{ inFlight.kind }} run is in flight (started {{ formatTimestamp(inFlight.started_at) }}).
+      Dry-run and execute are disabled.
+    </div>
+  }
+</section>
+
+<!-- Dry-run card — action + result. AM-10 + AM-12 + AM-16. -->
+<section class="ck-card ck-dry-run" data-testid="ck-dry-run">
+  <h3>Dry-run check</h3>
+  <p class="ck-muted">
+    Compute what would be deleted without writing anything. Required before execute.
+    <strong>May take several minutes</strong> on large databases.
+  </p>
+  <button
+    mat-raised-button
+    color="primary"
+    data-testid="ck-dry-run-btn"
+    [class.ck-stale]="dryRunIsStale()"
+    [disabled]="!canDryRun() || dryRunning()"
+    (click)="onDryRun()"
+  >
+    @if (dryRunning()) {
+      <mat-spinner diameter="20"></mat-spinner>
+      Running...
+    } @else {
+      Dry-run check
+    }
+  </button>
+
+  @if (lastDryRun(); as dry) {
+    <dl class="ck-result">
+      <!-- AM-11 — dry-flavor keys. -->
+      <dt>Would delete (blobs)</dt><dd data-testid="ck-dry-would-delete">{{ dry.would_delete_count }}</dd>
+      <dt>Would free</dt><dd data-testid="ck-dry-would-free">{{ formatBytes(dry.would_free_bytes) }}</dd>
+      <dt>Excess checkpoint rows</dt><dd>{{ dry.would_delete.checkpoint_rows }}</dd>
+      <dt>Excess writes</dt><dd>{{ dry.would_delete.writes }}</dd>
+      <dt>Scanned thread-ns pairs</dt><dd>{{ dry.scanned.thread_ns_pairs }}</dd>
+      <dt>Duration</dt><dd>{{ formatDuration(dry.duration_ms) }}</dd>
+      <!-- AM-16 — fresh_until rendered so the operator sees when the echo expires. -->
+      <dt>Fresh until</dt><dd data-testid="ck-dry-fresh-until">{{ formatTimestamp(dry.fresh_until) }}</dd>
+    </dl>
+
+    <!-- AM-10 — skipped render: summary + reason badge map + truncated. -->
+    @if (dry.skipped.length > 0) {
+      <div class="ck-skipped" data-testid="ck-dry-skipped">
+        <p class="ck-skipped-summary">
+          <mat-icon>verified_user</mat-icon>
+          <strong>{{ dry.skipped.length }} pairs skipped — fail-safe</strong>
+          @if (dry.skipped_truncated) {
+            <span class="ck-truncated-note">(showing first 1000; more were truncated)</span>
+          }
+        </p>
+        <details>
+          <summary>Show details</summary>
+          <ul class="ck-skipped-list">
+            @for (entry of dry.skipped; track entry.thread_id) {
+              <li>
+                <code class="ck-thread-id">{{ entry.thread_id }}</code>
+                @if (entry.checkpoint_ns) {
+                  <span class="ck-ns">{{ entry.checkpoint_ns }}</span>
+                }
+                <span class="ck-badge ck-badge-{{ skippedReasonLabel(entry.reason).tone }}">
+                  {{ skippedReasonLabel(entry.reason).label }}
+                </span>
+              </li>
+            }
+          </ul>
+        </details>
+      </div>
+    }
+
+    <details><summary>Raw JSON</summary><pre>{{ dry | json }}</pre></details>
+  }
+</section>
+
+<!-- Execute card — action + confirm flow + poll progress. AM-12 hint display. -->
+<section class="ck-card ck-execute" data-testid="ck-execute">
+  <h3>Cleanup now</h3>
+  <p class="ck-warning-text">Destructive — permanently deletes unreferenced blobs and excess checkpoint rows.</p>
+  <button
+    mat-raised-button
+    color="warn"
+    data-testid="ck-execute-btn"
+    [disabled]="!lastDryRun() || executing() || isRunInFlight()"
+    (click)="onExecute()"
+  >
+    @if (executing()) {
+      <mat-spinner diameter="20"></mat-spinner>
+      Executing...
+    } @else {
+      Cleanup now
+    }
+  </button>
+
+  @if (executing()) {
+    <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+    <p class="ck-muted">
+      Polling run status. Run ID:
+      <code data-testid="ck-active-run-id">{{ activeRunId() }}</code>
+    </p>
+    <!-- AM-12 — friendly copy from 202 body's `expected_duration_ms_hint`. -->
+    @if (expectedDurationHintMs() != null) {
+      <p class="ck-muted" data-testid="ck-expected-duration">
+        Expected duration: ~{{ formatDuration(expectedDurationHintMs()) }}
+      </p>
+    }
+  }
+</section>
+
+<!-- Result panel — visible after execute completes. AM-6 interrupted + AM-11 dual-flavor. -->
+@if (lastExecuteResult(); as res) {
+  <section class="ck-card ck-result-panel" data-testid="ck-result">
+    <h3>Run result — {{ res.status }}</h3>
+    <dl>
+      <dt>Run ID</dt><dd><code>{{ res.run_id }}</code></dd>
+      <dt>Kind</dt><dd>{{ res.kind }}</dd>
+      <dt>Started at</dt><dd>{{ formatTimestamp(res.started_at) }}</dd>
+      <dt>Completed at</dt><dd>{{ formatTimestamp(res.completed_at) }}</dd>
+      @if (res.summary; as s) {
+        <!-- AM-11 / Item 11 — dual-flavor label + value via the
+             blobBytesFor() / blobCountFor() helpers. The previous
+             inline `@if/@else` block was duplicated between the
+             status-card "Last run" panel (line ~70) and this
+             result panel; the helpers now own the dual-flavor
+             branching in one place. -->
+        <dt>{{ blobBytesFor(s.blobs).label }}</dt>
+        <dd>{{ formatBytes(blobBytesFor(s.blobs).value) }}</dd>
+        <dt>{{ blobCountFor(s.blobs).label }}</dt>
+        <dd>{{ blobCountFor(s.blobs).value }}</dd>
+        <dt>Checkpoint rows deleted</dt><dd>{{ s.checkpoint_rows.deleted }}</dd>
+        <dt>Duration</dt><dd>{{ formatDuration(s.duration_ms) }}</dd>
+
+        <!-- AM-10 — skipped render on run summary. -->
+        @if (s.blobs.skipped.length > 0) {
+          <dt>Skipped pairs</dt>
+          <dd>
+            <span class="ck-skipped-summary">
+              {{ s.blobs.skipped.length }} pairs skipped — fail-safe
+            </span>
+            @if (s.blobs.skipped_truncated) {
+              <span class="ck-truncated-note">(showing first 1000; more were truncated)</span>
+            }
+          </dd>
+        }
+      }
+      @if (res.error; as err) {
+        <dt class="ck-error">Error</dt>
+        <dd class="ck-error"><code>{{ err.code }}</code>: {{ err.message }}</dd>
+      }
+    </dl>
+
+    <!-- AM-6 — interrupted-state affordance — re-run to converge. -->
+    @if (canRerunInterrupted(res)) {
+      <div class="ck-interrupted-card" data-testid="ck-interrupted-card">
+        <mat-icon>schedule</mat-icon>
+        <div>
+          <strong>Daemon restarted mid-run</strong>
+          <p>
+            Prune is retention-idempotent — re-running converges the remaining
+            work. No cancel button in v1.
+          </p>
+        </div>
+        <button mat-raised-button color="primary" (click)="onExecute()" data-testid="ck-rerun-btn">
+          Re-run
+        </button>
+      </div>
+    }
+
+    <details><summary>Raw JSON</summary><pre>{{ res | json }}</pre></details>
+  </section>
+}

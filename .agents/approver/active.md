@@ -1,9 +1,9 @@
 # Approver Active State
 
-Plan: Mid-flight Question/Answer Channel — question/report/stuck events to watcher, human answer routed back to resume paused asker (doubles as scoped unpause primitive), non-blocking mid-flight reports, wedge guard — all event-driven, no polling (design.md, 921 lines; worktree feature/midflight-qa-channel @ 246b7325)
-Slug: midflight-qa-channel
+Plan: Maintenance Console — Section 1 (Checkpoint Cleanup) — plan package .agents/shared/planning/maintenance-console/ (plan-overview, phase1-backend, phase2-frontend + supporting docs), branch feature/maintenance-console @ 666c089d
+Slug: maintenance-console
 Status: APPROVED
-Iteration: 001 (001 APPROVED 2026-09-21 — 1 worker plan-approval, 0 blocking, 7 non-blocking notes in midflight-qa-channel-tracking.md)
-Started: 2026-09-21T13:29:00Z
-Last Verdict: APPROVED (iteration 001, 2026-09-21 — worker f98755a8 skill plan-approval; pre-impl polish notes: add watcher_models.py row to §4.4, fix ALL_MISSION_TERMINAL_WATCHABLE_EVENTS symbol name, extend AC-(d) grep coverage)
-Note: closed APPROVED iteration 001. Previous: clipboard-image-chat closed APPROVED iteration 001 2026-09-19 (history in clipboard-image-chat-tracking.md). Constraint observed: reads confined to /home/nea/ensemble-worktrees/qa-channel.
+Iteration: 001 (001 APPROVED 2026-09-26 — 1 worker plan-approval, 0 blocking, notes in maintenance-console-tracking.md)
+Started: 2026-09-26T22:20:00Z
+Last Verdict: APPROVED (iteration 001, 2026-09-26 — worker 31c83913 skill plan-approval; 0 blocking; non-blocking notes: architect v3 delta-stamp pending, decision-log strikethrough banner placement, test-count arithmetic, TRUSTED_ORIGINS CSV edge cases)
+Note: closed APPROVED iteration 001. Previous: midflight-qa-channel APPROVED 001 2026-09-21, clipboard-image-chat APPROVED 001 2026-09-19 (history in their tracking files).

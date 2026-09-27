@@ -1,0 +1,13 @@
+<div class="maintenance-container">
+  <header class="maintenance-header">
+    <h1>Maintenance</h1>
+    <p class="maintenance-subtitle">Operator controls for daemon maintenance</p>
+  </header>
+
+  @for (section of sections; track section.id) {
+    <section class="maintenance-section">
+      <h2>{{ section.label }}</h2>
+      <ng-container *ngComponentOutlet="section.component"></ng-container>
+    </section>
+  }
+</div>

@@ -1,7 +1,7 @@
 """Pydantic schemas for Router APIs."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
@@ -1764,3 +1764,281 @@ class SnapshotUsageMetricsResponse(BaseModel):
             "(R16 rider j)."
         ),
     )
+
+
+# ==================== Maintenance Console — Section 1 (Checkpoint Cleanup) ====================
+# AM-15 — FROZEN wire shapes (Contract v3, plan-overview §1–§5).
+# Frozen surfaces: endpoint paths, payload shapes, error-code literals
+# (e.g. 404 code ``not_found`` everywhere; 409 bodies nested under
+# ``details`` everywhere), state enums, gate order (Origin FIRST →
+# kill-switch → not_initialized → service). Schemas document the
+# FROZEN shape via ``Field(..., description=...)`` + ``json_schema_extra``
+# examples; OpenAPI consumers pin against these.
+
+
+class CheckpointCleanupAvailabilityResponse(BaseModel):
+    """Response for ``GET /api/maintenance/checkpoint-cleanup/availability``.
+
+    FROZEN — AM-13 state enum: ``ready | backend_unsupported |
+    subsystem_disabled | kill_switched``. ``eligible`` is DERIVED
+    (``state === 'ready'``); FE branches on ``state`` only.
+    """
+
+    eligible: bool = Field(..., description="Derived: state === 'ready'")
+    backend: str = Field(..., description="'postgres' | 'sqlite'")
+    state: Literal[
+        "ready", "backend_unsupported", "subsystem_disabled", "kill_switched"
+    ] = Field(
+        ...,
+        description="ready | backend_unsupported | subsystem_disabled | kill_switched",
+    )
+    reason: str | None = Field(default=None, description="Diagnostic string; NOT for FE branching")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "eligible": True,
+                    "backend": "postgres",
+                    "state": "ready",
+                    "reason": None,
+                },
+                {
+                    "eligible": False,
+                    "backend": "postgres",
+                    "state": "kill_switched",
+                    "reason": "MAINTENANCE_ENDPOINTS_ENABLED=0",
+                },
+            ]
+        }
+    }
+
+
+class CheckpointCleanupConfigBlock(BaseModel):
+    """The ``config`` block of ``/status`` — LIVE env at request time.
+
+    ``blob_prune_destructive_armed`` reflects the EFFECTIVE dual-arm
+    state (BOTH ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` AND
+    ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0``) — read via
+    ``blob_prune_destructive_enabled()`` at request time, NOT
+    boot-cached config ([R-6, leader ruling (a)]).
+    """
+
+    checkpoint_max_per_thread: int = Field(..., description="Persisted retention cap")
+    checkpoint_max_per_thread_floor: int = Field(
+        ..., description="Floor constant (CHECKPOINT_MAX_PER_THREAD_FLOOR)"
+    )
+    cleanup_interval_hours: float = Field(..., description="Auto-cycle interval (hours)")
+    blob_prune_dry_run_env_default: str = Field(
+        ..., description="CHECKPOINT_BLOB_PRUNE_DRY_RUN env value as '0'|'1'"
+    )
+    blob_prune_destructive_armed: bool = Field(
+        ..., description="Effective dual-arm state at request time"
+    )
+
+
+class CheckpointCleanupLastRunSummary(BaseModel):
+    """``blobs`` block — dual-flavor keys per [AM-11, A-5 RATIFIED]."""
+
+    scanned_pairs: int = Field(..., description="All (thread, ns) groups scanned")
+    would_delete_count: int | None = Field(default=None, description="Dry-run flavor")
+    would_free_bytes: int | None = Field(default=None, description="Dry-run flavor")
+    would_delete: int | None = Field(default=None, description="Dry-run flavor symmetry")
+    bytes: int | None = Field(default=None, description="Dry-run flavor symmetry")
+    deleted: int | None = Field(default=None, description="Destructive flavor")
+    bytes_freed: int | None = Field(default=None, description="Destructive flavor")
+    destructive: bool = Field(..., description="True for destructive runs")
+    skipped: list[dict[str, str]] = Field(
+        default_factory=list, description="[{thread_id, checkpoint_ns, reason}] (capped at 1000)"
+    )
+    skipped_truncated: bool = Field(
+        default=False, description="True when the 1000-entry cap fired"
+    )
+
+
+class CheckpointCleanupRunSummary(BaseModel):
+    """The FROZEN wire shape of ``maintenance_runs.summary_json``.
+
+    Same shape as ``/status`` ``last_run.summary`` (plan-overview §2
+    example: exactly ``checkpoint_rows`` + ``writes`` + ``blobs`` +
+    ``duration_ms``). Dual-flavor keys live ONLY inside ``blobs``
+    (incl. ``blobs.skipped_truncated`` — AM-11); there is no
+    top-level ``skipped_truncated`` on the §2 wire.
+    """
+
+    checkpoint_rows: dict[str, Any] = Field(
+        ..., description="Op D counts: {scanned_pairs, deleted, excess_pairs}"
+    )
+    writes: dict[str, Any] = Field(..., description="Op D writes counts: {deleted}")
+    blobs: CheckpointCleanupLastRunSummary = Field(..., description="Blob prune outcome (dual-flavor)")
+    duration_ms: int = Field(..., description="Wall-clock duration (ms)")
+
+
+class CheckpointCleanupLastRun(BaseModel):
+    """``/status`` ``last_run`` — AM-9 semantics.
+
+    Manual ``dry_run`` rows NEVER surface here; only the latest
+    ``succeeded|failed`` row of ``kind ∈ {auto, manual_execute}``.
+    """
+
+    run_id: str = Field(..., description="ckpt-<...>-<hex8>")
+    kind: str = Field(..., description="'auto' | 'manual_execute' (never 'manual_dry_run')")
+    started_at: str = Field(..., description="TEXT ISO (+00:00)")
+    completed_at: str | None = Field(default=None, description="TEXT ISO (+00:00) on terminal")
+    status: str = Field(..., description="'succeeded' | 'failed'")
+    summary: dict[str, Any] | None = Field(
+        default=None, description="Cycle summary (CheckpointCleanupRunSummary shape)"
+    )
+
+
+class CheckpointCleanupInFlight(BaseModel):
+    """``/status`` ``in_flight`` — any ``running`` row, any kind."""
+
+    run_id: str = Field(..., description="ckpt-<...>-<hex8>")
+    kind: str = Field(..., description="auto | manual_dry_run | manual_execute")
+    started_at: str = Field(..., description="TEXT ISO (+00:00)")
+    triggered_by: str = Field(..., description="'system' | 'user'")
+
+
+class CheckpointCleanupStatusResponse(BaseModel):
+    """Response for ``GET /api/maintenance/checkpoint-cleanup/status``.
+
+    FROZEN — config block + last-run summary + in-flight state.
+    """
+
+    config: CheckpointCleanupConfigBlock = Field(..., description="Live effective env at request time")
+    last_run: CheckpointCleanupLastRun | None = Field(
+        default=None, description="Latest succeeded|failed of kind ∈ {auto, manual_execute}"
+    )
+    in_flight: CheckpointCleanupInFlight | None = Field(
+        default=None, description="Any running row"
+    )
+
+
+class CheckpointCleanupDryRunResponse(BaseModel):
+    """Response for ``POST /api/maintenance/checkpoint-cleanup/dry-run``.
+
+    FROZEN — ``fresh_until = started_at + MAINTENANCE_DRY_RUN_FRESH_SECONDS``
+    (default 300s). ``skipped`` is informational only; not part of
+    the confirm echo (AM-3). ``skipped_truncated`` is True when the
+    1000-entry cap fired.
+    """
+
+    run_id: str = Field(..., description="ckpt-<...>-<hex8> — the audit row's primary key")
+    would_delete: dict[str, int] = Field(
+        ...,
+        description="{checkpoint_rows, writes, blobs, bytes} — destructive-flavor symmetry keys",
+    )
+    would_delete_count: int = Field(
+        ..., description="Canonical count (AM-11)"
+    )
+    would_free_bytes: int = Field(
+        ..., description="Canonical bytes (AM-11)"
+    )
+    scanned: dict[str, int] = Field(
+        ..., description="{thread_ns_pairs} — all (thread, ns) groups"
+    )
+    skipped: list[dict[str, str]] = Field(
+        default_factory=list, description="[{thread_id, checkpoint_ns, reason}] (capped at 1000)"
+    )
+    skipped_truncated: bool = Field(default=False, description="True when the 1000-entry cap fired")
+    duration_ms: int = Field(..., description="Wall-clock (ms)")
+    fresh_until: str = Field(
+        ..., description="TEXT ISO; execute must reference a dry-run fresher than this"
+    )
+
+
+class CheckpointCleanupExecuteRequest(BaseModel):
+    """Request for ``POST /api/maintenance/checkpoint-cleanup/execute``.
+
+    FROZEN — explicit destructive payload. **NO ``idempotency_key``
+    field — AM-17 DROPPED; 409-adoption replaces it** (the FE adopts
+    ``details.run_id`` from a 409 and resumes polling
+    ``GET /runs/{details.run_id}``). Fields are ``Optional`` so the
+    router emits the frozen 400 codes, never FastAPI's bare 422.
+    """
+
+    dry_run_run_id: str | None = Field(
+        default=None,
+        description="The manual dry-run row id (echoed)",
+    )
+    expected_bytes: int | None = Field(
+        default=None,
+        description="Echoed byte count from the dry-run response (AM-3 scope pin)",
+    )
+    confirm: bool = Field(
+        default=False,
+        description="Must be True; otherwise the server returns 400 confirm_required",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "dry_run_run_id": "ckpt-20260927_032000123456-2a18f3c9",
+                "expected_bytes": 268435456,
+                "confirm": True,
+            }
+        }
+    }
+
+
+class CheckpointCleanupExecuteResponse(BaseModel):
+    """Response for ``POST /api/maintenance/checkpoint-cleanup/execute``.
+
+    FROZEN — 202 shape (``{run_id, status, started_at, advisory,
+    expected_duration_ms_hint}``). Both ``advisory`` and
+    ``expected_duration_ms_hint`` are ALWAYS present (AM-12). Hint
+    unit is milliseconds.
+    """
+
+    run_id: str = Field(..., description="ckpt-<...>-<hex8>")
+    status: str = Field(..., description="'running'")
+    started_at: str = Field(..., description="TEXT ISO (+00:00)")
+    advisory: str | None = Field(
+        default=None,
+        description="'system_busy' when the system is not idle; never a refusal",
+    )
+    expected_duration_ms_hint: int = Field(
+        ...,
+        description="The referenced dry-run's duration_ms; unit: milliseconds (AM-12, R-5)",
+    )
+
+
+class CheckpointCleanupRunResponse(BaseModel):
+    """Response for ``GET /api/maintenance/checkpoint-cleanup/runs/{run_id}``.
+
+    FROZEN — ``running`` → ``{status, completed_at:null,
+    summary:null, error:null}``; terminal → full body; unknown →
+    404 ``not_found``.
+    """
+
+    run_id: str = Field(..., description="ckpt-<...>-<hex8>")
+    kind: str = Field(..., description="auto | manual_dry_run | manual_execute")
+    status: str = Field(..., description="running | succeeded | failed | interrupted")
+    started_at: str = Field(..., description="TEXT ISO (+00:00)")
+    completed_at: str | None = Field(default=None, description="TEXT ISO (+00:00) on terminal")
+    summary: dict[str, Any] | None = Field(
+        default=None,
+        description="Cycle summary (CheckpointCleanupRunSummary shape); null while running",
+    )
+    error: dict[str, Any] | None = Field(
+        default=None,
+        description="{code, message} on terminal failure / interrupt; null while running",
+    )
+
+
+class CheckpointCleanupErrorResponse(BaseModel):
+    """Error envelope — A-8 RATIFIED structured-dict shape.
+
+    Stable codes for Section 1:
+      * 404 ``not_found`` — code literal UNIFIED at every site (C-1)
+      * 409 ``run_in_flight`` — ``details.run_id``/``started_at`` for 409-adoption
+      * 400 ``confirm_required`` / ``dry_run_required`` / ``dry_run_stale`` /
+        ``byte_count_mismatch``
+      * 403 ``origin_not_trusted``
+      * 503 ``not_initialized`` / ``backend_unsupported`` / ``maintenance_disabled``
+    """
+
+    error: str = Field(..., description="Stable error code (machine-readable)")
+    message: str = Field(..., description="Human-readable detail")
+    details: dict[str, Any] | None = Field(default=None, description="Per-code extras (e.g. run_id, age_seconds)")

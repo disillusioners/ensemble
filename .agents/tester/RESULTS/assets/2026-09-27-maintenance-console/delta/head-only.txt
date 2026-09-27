@@ -1,0 +1,3 @@
+tests/integration/test_lcancheck_family_separation.py::TestS3WholeTreeCensus::test_s3_whole_tree_census
+tests/services/test_skill_evolution_service.py::TestCheckABTestResolution::test_ab_resolution_force_resolve
+tests/unit/test_mcp_tool_timeout.py::TestToolNodeIntegration::test_tool_node_handles_timeout

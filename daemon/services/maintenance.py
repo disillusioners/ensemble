@@ -31,12 +31,23 @@ Error Handling:
 - Each cleanup operation runs independently with its own try/except.
 - A failure in one operation does NOT prevent subsequent operations from running.
 - job.last_run is only updated when the entire execute() completes successfully.
+
+Size rationale (tidier fix pass 2026-09-27, ~1.8k lines): this module
+predates the Maintenance Console and hosts TWO concerns by design —
+the generic ``MaintenanceService`` scheduler and the
+``CheckpointCleanupJob`` Op A–E engine whose three instance-sweep ops
+(A/B/C) share ``_cleanup_instance`` + the pinned-subtree protection
+set. Splitting the job out would fork those shared helpers or force
+an import cycle; the Section-1 additions (run-lock gate, audit rows,
+dual entry points) deliberately landed IN this file so the auto and
+manual paths stay textually adjacent for the INV-1/INV-9 AST pins.
+Revisit only if a third cleanup section arrives.
 """
 
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Coroutine
 
@@ -53,6 +64,7 @@ from daemon.repositories.instance_ui_prefs.repository import (
 from daemon.repositories.message_metadata.repository import (
     MessageMetadataRepository,
 )
+from daemon.services.checkpoint_prune import BlobPruneSummary
 from daemon.services.job_queue_service import TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -208,7 +220,13 @@ class MaintenanceService:
 
     async def _loop(self) -> None:
         """Main background loop that checks and runs pending jobs."""
-        # Initial delay to let the system stabilize on startup
+        # Initial delay to let the system stabilize on startup. NOTE
+        # (W2, v3 fix pass): this sleep is boot stabilization ONLY —
+        # it is NOT the sweep-vs-first-tick ordering guarantee. That
+        # ordering is structural: the maintenance boot sweep runs in
+        # ``manager.initialize()`` immediately before ``start()`` (see
+        # ``maintenance_boot_sweep.run_boot_sweep_with_retry``; pinned
+        # in test_checkpoint_cleanup_job_wiring_pin.py).
         await asyncio.sleep(60)
 
         while self._running:
@@ -239,6 +257,28 @@ class MaintenanceService:
             except Exception as e:
                 logger.error(f"Maintenance job '{job.name}' failed: {e}")
                 # Don't update last_run — will retry next cycle
+
+    async def is_idle(self) -> bool:
+        """Public idle probe — thin wrapper over :meth:`_is_idle`.
+
+        Section 1 / AM-12: the ``MaintenanceApiService.execute()`` path
+        needs the same system-wide idle signal the auto cycle uses to
+        decide ``advisory: "system_busy"`` (the gate is advisory — a
+        busy signal does NOT refuse an execute; see INV-12 in the
+        plan). Wrapping the existing private method lets the API layer
+        reuse the established ``_is_idle`` docblock (which documents
+        the known blind-spots — ``list_all_pending`` sees only
+        ``admission_state='queued'``; the predicate misses some
+        in-flight paths).
+
+        ``None`` returns from the inner probe (e.g. a missing
+        ``_task_repository``) collapse to ``True`` (idle — no
+        refusal). Same fail-soft semantics as the private method.
+        """
+        try:
+            return await self._is_idle()
+        except Exception:  # noqa: BLE001 — probe MUST be best-effort
+            return True
 
     def _is_due(self, job: MaintenanceJob) -> bool:
         """Check if a job is due to run.
@@ -355,6 +395,103 @@ class MaintenanceService:
         return True
 
 
+# ── Section 1: CheckpointCleanup summary shape ──────────────────────────────────
+#
+# T1.2/1.3 — Section 1 of the Maintenance Console surfaces structured
+# summaries from each checkpoint-cleanup cycle. Two dataclasses carry
+# the per-cycle numbers, plus a ``to_summary_dict`` that emits the
+# FROZEN wire shape (plan-overview §2 — ``/status`` ``last_run.summary``
+# block + the dry-run response shape; see INV-5 / AM-11).
+
+
+@dataclass
+class CheckpointRowPruneSummary:
+    """Op D (per-thread retention) per-cycle counters.
+
+    The fields populated depend on the cycle kind:
+
+    * **destructive** (``run_checkpoint_prunes(destructive=True)`` /
+      auto ``_prune_per_thread_checkpoints``): ``deleted_checkpoints`` +
+      ``deleted_writes`` accumulate the actual DELETE return values.
+    * **dry-run** (``run_checkpoint_prunes(destructive=False)``): the
+      auto cycle never calls this path; the manual dry-run pre-computes
+      ``would_delete_checkpoints`` + ``would_delete_writes`` from the
+      adapter's read-only ``count_writes_excluding`` (T2b) plus the
+      existing ``get_checkpoint_ids``-driven keep-set arithmetic.
+
+    ``scanned_pairs`` (always populated; one extra read-only
+    ``GROUP BY`` per cycle — see T1.4 rationale) lets the wire shape
+    express ``scanned_pairs=12, excess_pairs=0`` consistently with the
+    contract example.
+    """
+
+    backend: str = "postgres"
+    scanned_pairs: int = 0            # len(find_all_thread_ns_pairs()) — ALL groups
+    excess_pairs: int = 0             # len(find_excess_checkpoint_groups(N))
+    deleted_checkpoints: int = 0      # destructive: sum(delete_checkpoints_excluding)
+    deleted_writes: int = 0           # destructive: sum(delete_writes_excluding)
+    would_delete_checkpoints: int = 0 # dry-run: sum(cnt - N) per excess pair
+    would_delete_writes: int = 0      # dry-run: sum(count_writes_excluding) (T2b)
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """The FROZEN ``checkpoint_rows`` + ``writes`` blocks of a cycle summary.
+
+        Matches the contract v3 example in plan-overview §2:
+        ``{"checkpoint_rows": {"scanned_pairs", "deleted", "excess_pairs"},
+        "writes": {"deleted"}}`` — ONE shape. Flavor variation on the
+        summary wire lives ONLY inside the ``blobs`` block (dual-flavor
+        keys, AM-11): ``/status.last_run`` never contains
+        ``manual_dry_run`` rows (AM-9), and the auto cycle's Op D is
+        always destructive — so ``deleted`` is the actual delete count
+        on every row that surfaces through this shape. The manual
+        dry-run response (§3 ``would_delete`` block) is composed by
+        ``MaintenanceApiService`` directly from the
+        ``would_delete_*`` fields above — NOT through this method.
+        """
+        return {
+            "checkpoint_rows": {
+                "scanned_pairs": self.scanned_pairs,
+                "deleted": self.deleted_checkpoints,
+                "excess_pairs": self.excess_pairs,
+            },
+            "writes": {"deleted": self.deleted_writes},
+        }
+
+
+@dataclass
+class CheckpointRunResult:
+    """One checkpoint-cleanup cycle result — wires into the audit table.
+
+    T1.3 — assembled by ``CheckpointCleanupJob.run_checkpoint_prunes``
+    (manual entry point) and by ``CheckpointCleanupJob.execute``
+    (auto-cycle summary assembly). ``to_summary_dict`` emits the FROZEN
+    wire shape for ``maintenance_runs.summary_json`` and ``/status``
+    ``last_run.summary`` (plan-overview §2): exactly
+    ``{checkpoint_rows, writes, blobs, duration_ms}`` — flavor
+    variation lives ONLY inside the ``blobs`` block (dual-flavor keys,
+    AM-11); there is NO top-level ``skipped_truncated`` (the §2 example
+    carries it inside ``blobs`` only).
+    """
+
+    rows: CheckpointRowPruneSummary = field(default_factory=CheckpointRowPruneSummary)
+    blobs: BlobPruneSummary = field(default_factory=BlobPruneSummary)
+    duration_ms: int = 0
+    skipped_truncated: bool = False   # [AM-10/AM-15] 1000-entry cap fired
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """The FROZEN wire shape (plan-overview §2 — last_run.summary)."""
+        rows_dict = self.rows.to_summary_dict()
+        blobs_dict = self.blobs.to_summary_blobs_dict()
+        # skipped_truncated inside the blobs block is the canonical flag;
+        # the dataclass-level field is the same signal pre-serialization
+        # (kept for the dry-run wire composer in MaintenanceApiService).
+        return {
+            **rows_dict,
+            "blobs": blobs_dict,
+            "duration_ms": self.duration_ms,
+        }
+
+
 class CheckpointCleanupJob:
     """Job that cleans up orphaned and expired checkpoint data.
 
@@ -387,6 +524,8 @@ class CheckpointCleanupJob:
         on_instance_deleted: Callable[[str], None] | None = None,
         ui_prefs_repo: InstanceUiPrefsRepository | None = None,
         message_metadata_repo: MessageMetadataRepository | None = None,
+        run_lock: "MaintenanceRunLock | None" = None,
+        runs_repo: "MaintenanceRunsRepository | None" = None,
     ):
         """Initialize the checkpoint cleanup job.
 
@@ -420,6 +559,21 @@ class CheckpointCleanupJob:
                 WARNING and tolerated (orphaned rows never join the read
                 path). ``None`` (the default) skips the prune, preserving the
                 backward-compatible behavior for existing constructors.
+            run_lock: Optional :class:`MaintenanceRunLock` (T3 / AM-4).
+                When wired, the auto ``execute()`` participates in the
+                single-flight gate: if the lock is held at cycle start
+                (by a manual dry-run or execute), the auto cycle
+                non-raising-skips + re-arms ``job.last_run`` + DEBUGs
+                the in-flight run_id (no ops, NO row — AM-6).
+                ``None`` (default) preserves today's exact behavior
+                (no gate, no audit row written).
+            runs_repo: Optional :class:`MaintenanceRunsRepository` (T4 /
+                AM-15). When wired, the auto ``execute()`` writes a
+                ``maintenance_runs`` row (kind='auto', triggered_by='system')
+                whose lifecycle is ``running → succeeded|failed|interrupted``
+                and whose terminal summary carries the
+                :class:`CheckpointRunResult.to_summary_dict` payload. ``None``
+                (default) preserves today's exact behavior (no row written).
         """
         self._config = config
         self._checkpointer = checkpointer
@@ -427,6 +581,13 @@ class CheckpointCleanupJob:
         self._on_instance_deleted = on_instance_deleted
         self._ui_prefs_repo = ui_prefs_repo
         self._message_metadata_repo = message_metadata_repo
+        # T3 — optional gate / audit kwargs. ``None`` = legacy unwired
+        # path; both kwargs default ``None`` so existing unit tests that
+        # construct the job unwired (and the pre-T3 existing wiring-pin
+        # test) stay green — the kwargs are OPTIONAL, behavior on
+        # ``None`` is byte-identical to pre-T3.
+        self._run_lock = run_lock
+        self._runs_repo = runs_repo
 
     async def execute(self) -> None:
         """Run all 5 checkpoint cleanup operations.
@@ -442,8 +603,66 @@ class CheckpointCleanupJob:
         — terminal descendants under pinned roots are now protected from
         TTL purge, and the operator can verify the new behavior is in
         effect without diffing the DB.
+
+        T1.8 / T3 — the auto cycle captures Op D + Op E into a
+        :class:`CheckpointRunResult` (ops A–C remain log-only; not in
+        the contract shape) and hands it to the auto run-row write.
+        The RETURN TYPE stays ``-> None`` (callers at
+        ``MaintenanceService._run_pending_jobs`` ignore returns; no
+        signature ripple — plan T1.8).
+
+        Single-flight (T3 / AM-4): when ``_run_lock`` is wired, the
+        lock is acquired BEFORE the conditional INSERT and released in
+        ``finally``. The auto call site passes no kwargs to the blob
+        arm (``_prune_unreferenced_blobs(destructive=None)``) so the
+        env dual-arm gate is the destructive arbiter for the auto cycle
+        — INV-1 / INV-9. The lock-holder LOSES path (no ops, NO row,
+        DEBUG with the in-flight run_id, ``job.last_run`` updated by
+        the caller to re-arm the interval — the skip is non-raising)
+        is the AM-4 / Focus Area 6 non-raising skip path. An INSERT
+        CONFLICT on the partial unique index (the two-dev-daemons-
+        on-shared-PG class, AM-5) takes the same skip path — the DB
+        claim is the real gate; another daemon's run is in flight.
         """
+        # Lazy imports (why: ``maintenance_run_lock`` and the
+        # ``maintenance_runs`` models live on the same import graph as
+        # the manager; keeping them function-local keeps THIS module
+        # importable during early boot / conftest mock teardown without
+        # pulling the repository layer at module import time. The
+        # checkpoint_prune/timestamps imports are call-frequency
+        # trivial but stay lazy for the same cold-import-cycle reason —
+        # see daemon/config.py→services cold-import cycle precedent).
+        from daemon.services.checkpoint_prune import blob_prune_env_state
+        from daemon.services.maintenance_run_identity import new_maintenance_run_id
+        from daemon.services.timestamps import now_utc_iso
+        from daemon.services.maintenance_run_lock import MaintenanceRunContext
+
         logger.info("Starting checkpoint cleanup job")
+
+        # T3 — auto single-flight gate, step 1 (the in-process lock).
+        # ``acquire`` is FAIL-FAST (returns ``False`` immediately when
+        # held — no await-queueing). The skip is NON-RAISING so the
+        # caller (MaintenanceService._run_pending_jobs) stamps
+        # ``job.last_run`` on this branch too, re-arming the interval.
+        ctx: MaintenanceRunContext | None = None
+        if self._run_lock is not None:
+            ctx = MaintenanceRunContext(
+                run_id=new_maintenance_run_id(),
+                kind="auto",
+                started_at=now_utc_iso(),
+                triggered_by="system",
+            )
+            if not await self._run_lock.acquire(ctx):
+                in_flight_id = (
+                    self._run_lock.in_flight.run_id
+                    if self._run_lock.in_flight is not None
+                    else "unknown"
+                )
+                logger.debug(
+                    "checkpoint_cleanup skipped: maintenance run %s in flight",
+                    in_flight_id,
+                )
+                return
 
         # P1 metric emit (C11). Computed once per tick; summed across
         # pinned roots. Stays a single INFO line so log-asserting tests
@@ -457,30 +676,146 @@ class CheckpointCleanupJob:
                 pinned_terminal_count,
             )
 
-        # Operation A: Cleanup orphaned threads
-        await self._cleanup_orphaned_threads()
+        # T3 — single-flight gate, step 2: the conditional INSERT (the
+        # DB-side claim, AM-5). The lock is held, so an in-process
+        # conflict is impossible; a CONFLICT here means another daemon
+        # shares this PG and owns the lane → same non-raising skip path
+        # (no ops, NO row, DEBUG names the in-flight run).
+        if self._runs_repo is not None and ctx is not None:
+            # Lazy import (why: SQLModel repository model — avoids a
+            # module-level daemon.repositories import in the hot
+            # services graph; same cold-import-cycle rationale as the
+            # block above).
+            from daemon.repositories.maintenance_runs.models import MaintenanceRun
 
-        # Operation B: Cleanup expired terminal instances
-        await self._cleanup_expired_terminal()
+            inserted = True
+            try:
+                inserted = self._runs_repo.insert(
+                    MaintenanceRun(
+                        run_id=ctx.run_id,
+                        section="checkpoint-cleanup",
+                        kind=ctx.kind,
+                        started_at=ctx.started_at,
+                        status="running",
+                        triggered_by=ctx.triggered_by,
+                        env_flags_json={
+                            **blob_prune_env_state(),
+                            "destructive_override": False,  # auto never passes the kwarg
+                        },
+                    )
+                )
+            except Exception as e:
+                # Audit-table availability must not gate the auto cycle
+                # (INV-1 spirit): log + continue WITHOUT the audit row.
+                # [tidier fix pass] exception class + exc_info — the
+                # fail-soft stance is unchanged, but the audit-write
+                # failure class must be diagnosable from the log alone.
+                logger.warning(
+                    f"maintenance_runs insert failed (auto run_id="
+                    f"{ctx.run_id}): {type(e).__name__}: {e}; "
+                    f"continuing without audit row",
+                    exc_info=True,
+                )
+            if not inserted:
+                in_flight = self._runs_repo.get_running("checkpoint-cleanup")
+                logger.debug(
+                    "checkpoint_cleanup skipped: DB claim held by run %s "
+                    "(started %s)",
+                    in_flight.run_id if in_flight else "unknown",
+                    in_flight.started_at if in_flight else "unknown",
+                )
+                if self._run_lock is not None:
+                    self._run_lock.release()
+                return
 
-        # Operation C: Enforce history cap
-        await self._enforce_history_cap()
-
-        # Operation D: Prune per-thread checkpoints
-        await self._prune_per_thread_checkpoints()
-
-        # Operation E (Phase 1 C3): reference-aware checkpoint_blobs prune.
-        # Isolated per the plan — a failure in the blob bucket must NEVER
-        # break the retention prune above (which has already completed)
-        # or any subsequent maintenance cycle. prune_unreferenced_blobs
-        # itself never raises; this belt-and-braces wrapper guarantees
-        # the isolation even if that contract regresses.
         try:
-            await self._prune_unreferenced_blobs()
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"Unreferenced blob prune operation failed: {e}")
+            # Operation A: Cleanup orphaned threads
+            await self._cleanup_orphaned_threads()
 
-        logger.info("Checkpoint cleanup job completed")
+            # Operation B: Cleanup expired terminal instances
+            await self._cleanup_expired_terminal()
+
+            # Operation C: Enforce history cap
+            await self._enforce_history_cap()
+
+            # Operation D: Prune per-thread checkpoints (T1.4 — now
+            # returns a ``CheckpointRowPruneSummary``; existing logs
+            # unchanged, INV-1).
+            rows_summary = await self._prune_per_thread_checkpoints()
+
+            # Operation E (Phase 1 C3): reference-aware checkpoint_blobs
+            # prune. Isolated per the plan — a failure in the blob bucket
+            # must NEVER break the retention prune above (which has
+            # already completed) or any subsequent maintenance cycle.
+            # ``prune_unreferenced_blobs`` itself never raises; this
+            # belt-and-braces wrapper guarantees the isolation even if
+            # that contract regresses. T1.6 — captures the summary for
+            # the audit row; the destructive kwarg is NOT passed (auto
+            # cycle uses the env gate — INV-1).
+            blobs_summary = BlobPruneSummary()
+            try:
+                blobs_summary = await self._prune_unreferenced_blobs()
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Unreferenced blob prune operation failed: {e}")
+
+            logger.info("Checkpoint cleanup job completed")
+
+            result = CheckpointRunResult(
+                rows=rows_summary,
+                blobs=blobs_summary,
+                skipped_truncated=len(blobs_summary.skipped) > 1000,
+            )
+
+            # T3 — terminal write on success.
+            if self._runs_repo is not None and ctx is not None:
+                try:
+                    self._runs_repo.mark_terminal(
+                        ctx.run_id,
+                        "succeeded",
+                        now_utc_iso(),
+                        summary_json=result.to_summary_dict(),
+                    )
+                except Exception as e:
+                    # [tidier fix pass] class + exc_info (fail-soft kept).
+                    logger.warning(
+                        f"maintenance_runs succeeded-mark failed for "
+                        f"{ctx.run_id}: {type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+        except Exception as outer_exc:
+            # T3 — terminal write on failure (infra faults only — pair
+            # failures live in ``summary.skipped``, not this row). The
+            # ops already never raise (per-op isolation); this outer
+            # guard is belt-and-braces per the plan (T3.3).
+            logger.error(
+                f"Checkpoint cleanup job failed: {outer_exc}", exc_info=True
+            )
+            if self._runs_repo is not None and ctx is not None:
+                try:
+                    self._runs_repo.mark_terminal(
+                        ctx.run_id,
+                        "failed",
+                        now_utc_iso(),
+                        error_json={
+                            "code": "execution_error",
+                            "message": f"{type(outer_exc).__name__}: {outer_exc}",
+                        },
+                    )
+                except Exception as e:
+                    # [tidier fix pass] class + exc_info (fail-soft kept).
+                    logger.warning(
+                        f"maintenance_runs failed-mark failed for "
+                        f"{ctx.run_id}: {type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+            raise
+        finally:
+            # T3 — release the in-process lock on every path that
+            # acquired it (success, failure, exception). The two skip
+            # paths above return BEFORE this block: the lock-loss path
+            # never acquired; the DB-conflict path released explicitly.
+            if self._run_lock is not None:
+                self._run_lock.release()
 
     def _compute_pinned_subtree_terminal_count(self) -> int:
         """Sum of terminal descendants across every pinned root.
@@ -790,7 +1125,7 @@ class CheckpointCleanupJob:
         except Exception as e:
             logger.error(f"History cap enforcement failed: {e}")
 
-    async def _prune_per_thread_checkpoints(self) -> None:
+    async def _prune_per_thread_checkpoints(self) -> CheckpointRowPruneSummary:
         """(D) For each thread, keep only the latest ``config.checkpoint_max_per_thread`` checkpoints.
 
         Queries the checkpoint database to find threads with more than
@@ -834,6 +1169,16 @@ class CheckpointCleanupJob:
         OUTSIDE the existing try/except so error semantics stay identical
         (the existing ``except Exception as e`` still swallows and logs
         the error; the finally only adds timing observation).
+
+        T1.4 — the method now returns a :class:`CheckpointRowPruneSummary`
+        (was ``-> None``). Existing logs and behavior unchanged (INV-1);
+        the auto ``execute()`` captures the result into its own
+        ``CheckpointRunResult`` for the audit row (T1.8). The summary
+        carries ``scanned_pairs`` (one extra read-only ``GROUP BY`` per
+        cycle — ``find_all_thread_ns_pairs`` — no delete-behavior
+        change; see T1.4 rationale in the plan) so the wire shape can
+        express ``scanned_pairs=12, excess_pairs=0`` consistently with
+        the contract example.
         """
         import time
         from daemon.checkpoint_perf import log_prune
@@ -846,6 +1191,8 @@ class CheckpointCleanupJob:
         # deletes — the exact defect W7 fixes).
         observed_thread_count = 0
         observed_total_deleted = 0
+        observed_total_deleted_writes = 0
+        summary = CheckpointRowPruneSummary()
         try:
             try:
                 max_per_thread = self._config.checkpoint_max_per_thread
@@ -860,6 +1207,11 @@ class CheckpointCleanupJob:
                     f"(CHECKPOINT_MAX_PER_THREAD env)"
                 )
 
+                # T1.4 — scanned_pairs (one extra read-only GROUP BY,
+                # cycle cadence is 24h; no delete-behavior change).
+                all_pairs = await self._checkpointer.find_all_thread_ns_pairs()
+                summary.scanned_pairs = len(all_pairs)
+
                 # Find threads with excessive checkpoints via the adapter.
                 # The SQLite adapter wraps this in AsyncSqliteSaver's lock.
                 excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
@@ -869,9 +1221,10 @@ class CheckpointCleanupJob:
                 if not excess_pairs:
                     log_prune("prune", 0, 0, 0, note="no excess threads")
                     logger.debug("No threads with excessive checkpoints found")
-                    return
+                    return summary
 
                 observed_thread_count = len(excess_pairs)
+                summary.excess_pairs = len(excess_pairs)
                 log_prune(
                     "prune-entry",
                     threads=observed_thread_count,
@@ -888,9 +1241,11 @@ class CheckpointCleanupJob:
                 # increments as deletions happen so the exit line reports
                 # partial progress even if a later iteration raises.
                 for thread_id, checkpoint_ns, cnt in excess_pairs:
-                    observed_total_deleted += await self._prune_thread_checkpoints(
+                    deleted_cps, deleted_wr = await self._prune_thread_checkpoints(
                         thread_id, checkpoint_ns, max_per_thread
                     )
+                    observed_total_deleted += deleted_cps
+                    observed_total_deleted_writes += deleted_wr
 
                 logger.info(
                     f"Pruned {observed_total_deleted} checkpoints from {len(excess_pairs)} thread/namespace pairs"
@@ -905,8 +1260,13 @@ class CheckpointCleanupJob:
                 deleted=observed_total_deleted,
                 duration_ms=int((time.perf_counter() - t0) * 1000),
             )
+        summary.deleted_checkpoints = observed_total_deleted
+        summary.deleted_writes = observed_total_deleted_writes
+        return summary
 
-    async def _prune_unreferenced_blobs(self) -> None:
+    async def _prune_unreferenced_blobs(
+        self, *, destructive: bool | None = None
+    ) -> "BlobPruneSummary":
         """(E) Phase 1 C3 — reference-aware checkpoint_blobs prune (dry-run default).
 
         Deletes blobs whose (channel, version) is not referenced by
@@ -920,18 +1280,148 @@ class CheckpointCleanupJob:
         Conservative ladder: DRY-RUN ONLY by default (reports would-delete
         counts + bytes, deletes nothing). The destructive arm requires
         BOTH ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND
-        ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` and is structurally
-        unreachable otherwise (see checkpoint_prune module docstring).
-        PostgreSQL-only — no-ops with a WARNING on SQLite backends.
+        ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` (the auto cycle's
+        env-arming path; auto call sites pass no kwarg → env gate) OR
+        an explicit ``destructive=True`` kwarg (the manual Maintenance
+        API execute path; INV-2 — see T2 / T1.6). PostgreSQL-only — no-ops
+        with a WARNING on SQLite backends.
 
         Candidates are enumerated via ``find_all_thread_ns_pairs`` (D21) —
         ALL (thread_id, checkpoint_ns) pairs, NOT
         ``find_excess_checkpoint_groups`` whose HAVING clause would skip
         single-checkpoint threads.
+
+        T1.6 — the previous shape discarded the returned ``BlobPruneSummary``
+        (was ``await prune_unreferenced_blobs(self._checkpointer)`` — the
+        summary object landed in a no-op). It is now captured and
+        returned; the auto ``execute()`` and the manual
+        ``run_checkpoint_prunes`` entry point both consume it for the
+        audit row.
         """
         from daemon.services.checkpoint_prune import prune_unreferenced_blobs
 
-        await prune_unreferenced_blobs(self._checkpointer)
+        return await prune_unreferenced_blobs(
+            self._checkpointer, destructive=destructive
+        )
+
+    async def _compute_row_prune_dry_run(self) -> CheckpointRowPruneSummary:
+        """T1.5 — read-only mirror of Op D for the manual dry-run path.
+
+        Iterates ``find_excess_checkpoint_groups(N)`` like the
+        destructive arm, but instead of DELETE statements calls the
+        adapter's read-only ``count_writes_excluding`` (T2b) for the
+        writes accounting and a non-mutating ``get_checkpoint_ids``-derived
+        keep-set arithmetic for the checkpoints accounting. Zero
+        DELETE statements; the auto cycle never calls this method
+        (INV-1).
+        """
+        max_per_thread = self._config.checkpoint_max_per_thread
+        summary = CheckpointRowPruneSummary()
+        try:
+            # T1.4 — scanned_pairs (one extra read-only GROUP BY; no
+            # delete-behavior change; mirrors the destructive arm).
+            all_pairs = await self._checkpointer.find_all_thread_ns_pairs()
+            summary.scanned_pairs = len(all_pairs)
+            excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
+                max_per_thread
+            )
+            summary.excess_pairs = len(excess_pairs)
+            for thread_id, checkpoint_ns, cnt in excess_pairs:
+                # ``cnt`` is the pair's checkpoint count (from the HAVING
+                # filter); keep the most recent ``max_per_thread`` and
+                # would-delete ``cnt - N``.
+                would_delete_cps = max(0, cnt - max_per_thread)
+                ids_to_keep_list = await self._checkpointer.get_checkpoint_ids(
+                    thread_id, checkpoint_ns, max_per_thread
+                )
+                ids_to_keep = set(ids_to_keep_list)
+                if ids_to_keep:
+                    would_delete_writes = await self._checkpointer.count_writes_excluding(
+                        thread_id, checkpoint_ns, ids_to_keep
+                    )
+                else:
+                    would_delete_writes = 0
+                summary.would_delete_checkpoints += would_delete_cps
+                summary.would_delete_writes += would_delete_writes
+            logger.debug(
+                f"Op D dry-run: scanned={summary.scanned_pairs} "
+                f"excess={summary.excess_pairs} "
+                f"would_delete_checkpoints={summary.would_delete_checkpoints} "
+                f"would_delete_writes={summary.would_delete_writes}"
+            )
+        except Exception as e:
+            # Mirror the destructive arm's per-op isolation (INV-1):
+            # the dry-run is an informational scan, a failure here
+            # must not abort the whole entry point — we surface the
+            # partial counts we managed to compute.
+            logger.error(f"Op D dry-run scan failed: {e}")
+        return summary
+
+    async def run_checkpoint_prunes(
+        self, *, destructive: bool
+    ) -> CheckpointRunResult:
+        """MANUAL-ONLY entry point — Op E → Op D (AM-2, BLOCKING).
+
+        Used by :class:`daemon.services.maintenance_api_service.MaintenanceApiService`
+        for ``POST /api/maintenance/checkpoint-cleanup/dry-run`` and
+        ``POST /api/maintenance/checkpoint-cleanup/execute``. The auto
+        ``execute()`` MUST NOT route through this method (INV-1 / INV-9);
+        the AST pin in
+        ``tests/integration/test_checkpoint_cleanup_job_wiring_pin.py``
+        asserts ``execute()``'s body does not call this method.
+
+        Order rationale (W-1 mechanism restated v3 / AM-2 BLOCKER):
+        Op E runs BEFORE Op D in the manual path. The dry-run's
+        anti-join counts blobs referenced by ANY REMAINING checkpoint
+        row; under the old D-first order every server check PASSES (the
+        byte-equality gate compares the echo against the STORED dry-run
+        row, so it always matches) and the failure is SILENT
+        over-deletion: Op D unreferences blobs the subsequent blob pass
+        then deletes beyond the confirmed echo. E-first keeps
+        ``actual == expected`` on the happy path; the auto-cycle keeps
+        D→E (INV-1). No post-run actual-vs-expected completion gate
+        ever lands (INV-13) — the AM-2 regression pin (test 57 + case
+        44 freed-bytes) is the catcher.
+
+        The manual dry-run's blob arm is FORCED ``destructive=False``
+        even when the operator has the env dual-arm armed: the env
+        default is dry-run, but an armed env must not leak
+        destructivity into the manual preview (INV-2 + the dry-run
+        fidelity rule). Dry-run E→D mirrors destructive E→D for
+        preview fidelity (both dry-run arms are read-only; ordering is
+        immaterial for correctness there, but the preview should not
+        lie about the order it will run in). Residual cost of E-first
+        (accepted per decision-log AM-2): blobs referenced only by
+        excess rows survive one extra cycle — conservative under-delete,
+        self-healing.
+        """
+        # Lazy import (why: ``BlobPruneSummary`` IS already imported at
+        # module top — this line exists as a reader-local re-anchor for
+        # the isinstance guard two lines below; kept lazy + noqa'd so
+        # linters do not "clean" it into a shadow of the module import.
+        from daemon.services.checkpoint_prune import BlobPruneSummary  # noqa: F401 — re-anchored for readers
+
+        t0 = time.perf_counter()
+        # MANUAL dry-run blob arm: forced dry-run (NOT the env gate —
+        # operator's manual preview must NOT inherit an armed env).
+        # Manual destructive execute: explicit ``destructive=True``;
+        # INV-2 — no env pre-arming required.
+        blob_destructive = bool(destructive)
+        blobs = await self._prune_unreferenced_blobs(destructive=blob_destructive)
+        if not isinstance(blobs, BlobPruneSummary):  # belt-and-braces typing guard
+            blobs = BlobPruneSummary()
+        if destructive:
+            rows = await self._prune_per_thread_checkpoints()
+        else:
+            rows = await self._compute_row_prune_dry_run()
+        skipped_truncated = len(blobs.skipped) > 1000
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        return CheckpointRunResult(
+            rows=rows,
+            blobs=blobs,
+            duration_ms=duration_ms,
+            skipped_truncated=skipped_truncated,
+        )
 
     # ── Helper Methods ─────────────────────────────────────────────────────────
 
@@ -1248,7 +1738,7 @@ class CheckpointCleanupJob:
         thread_id: str,
         checkpoint_ns: str,
         max_per_thread: int,
-    ) -> int:
+    ) -> tuple[int, int]:
         """Prune checkpoints for a specific (thread_id, checkpoint_ns), keeping only the latest N.
 
         Uses the CheckpointerAdapter to:
@@ -1266,7 +1756,15 @@ class CheckpointCleanupJob:
             max_per_thread: Number of checkpoints to keep.
 
         Returns:
-            Number of checkpoints deleted.
+            Tuple ``(deleted_checkpoints, deleted_writes)``. T1.4 — the
+            previous shape returned only ``deleted_checkpoints``; the
+            summary capture needs BOTH per-pair delete counts. Existing
+            call sites that only consumed the int return (none — the
+            ``_prune_per_thread_checkpoints`` caller is the only consumer)
+            have been updated; the
+            ``observed_total_deleted`` accumulation is joined with a new
+            ``observed_total_deleted_writes`` accumulator (W7 live-count
+            pattern, mirrors the existing checkpoint accumulator).
         """
         # Step 1: Get checkpoint_ids to KEEP (most recent N)
         ids_to_keep_list = await self._checkpointer.get_checkpoint_ids(
@@ -1275,7 +1773,7 @@ class CheckpointCleanupJob:
         ids_to_keep = set(ids_to_keep_list)
 
         if not ids_to_keep:
-            return 0
+            return (0, 0)
 
         # Step 2: Delete checkpoints NOT in keep list
         checkpoint_rows = await self._checkpointer.delete_checkpoints_excluding(
@@ -1287,4 +1785,4 @@ class CheckpointCleanupJob:
             thread_id, checkpoint_ns, ids_to_keep
         )
 
-        return checkpoint_rows
+        return (checkpoint_rows, write_rows)

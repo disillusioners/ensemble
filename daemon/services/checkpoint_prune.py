@@ -24,11 +24,14 @@ Design invariants (phase1-plan.md §C3, Hard Constraint 6):
    deleting call) are separate, individually tested behaviors.
 
 3. **Conservative ladder** — the operation is DRY-RUN by default. The
-   destructive arm is only reachable when
-   ``blob_prune_destructive_enabled()`` holds at call time: BOTH
-   ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` AND
-   ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0``. With the gate off, the only arm
-   the loop can reach is ``count_blobs_anti_join`` (a SELECT); the
+   destructive arm is reachable when ``blob_prune_destructive_enabled()``
+   holds at call time (BOTH ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` AND
+   ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0``) **OR** the caller passes
+   ``destructive=True`` explicitly (the Maintenance API manual path —
+   :meth:`prune_unreferenced_blobs`'s ``destructive`` override kwarg;
+   INV-2: the explicit kwarg reaches the DELETE arm with the env flags
+   absent). With the gate off AND no explicit kwarg, the only arm the
+   loop can reach is ``count_blobs_anti_join`` (a SELECT); the
    ``delete_blobs_anti_join`` call site sits textually AFTER the
    ``if not destructive: ... continue`` guard, so no call path reaches a
    DELETE. This is structural, not merely conventional —
@@ -84,15 +87,48 @@ def blob_prune_destructive_enabled() -> bool:
     return destructive.strip() == "1" and dry_run.strip() == "0"
 
 
+def blob_prune_env_state() -> dict[str, bool]:
+    """Raw dual-arm env state for the ``maintenance_runs`` audit row (AM-15).
+
+    Returns the two env arms' CURRENT effective values — NOT the
+    combined gate (see :func:`blob_prune_destructive_enabled`).
+    ``maintenance_runs.env_flags_json`` records these alongside
+    ``destructive_override`` to prove INV-2: which mechanism (env
+    dual-arm vs explicit override kwarg) armed the DELETE arm for a
+    given run. Parsing mirrors the gate function exactly (``.strip()``
+    comparisons against the canonical "0"/"1" tokens).
+    """
+    dry_run_default = "1" if CHECKPOINT_BLOB_PRUNE_DRY_RUN else "0"
+    destructive_default = "1" if CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE else "0"
+    dry_run = os.environ.get(ENV_BLOB_PRUNE_DRY_RUN, dry_run_default)
+    destructive = os.environ.get(ENV_BLOB_PRUNE_DESTRUCTIVE, destructive_default)
+    return {
+        "blob_prune_dry_run": dry_run.strip() != "0",
+        "blob_prune_destructive": destructive.strip() == "1",
+    }
+
+
 @dataclass
 class BlobPruneSummary:
-    """One maintenance-cycle result of the blob prune."""
+    """One maintenance-cycle result of the blob prune.
+
+    Carries dual-flavor keys [AM-11, A-2/A-5 RATIFIED]: the dry-run arm
+    populates ``would_delete_count`` + ``would_free_bytes``; the destructive
+    arm populates ``total_deleted`` + ``total_bytes_freed``. Downstream
+    readers (FE / API) branch on :attr:`destructive` (== ``not dry_run``)
+    to pick the active set — never reading the wrong one for the cycle
+    kind. The ``summary`` flavor surfaced to clients is owned by
+    :meth:`daemon.services.maintenance.CheckpointRunResult.to_summary_dict`
+    so the wire shape stays in one place.
+    """
 
     backend: str = "postgres"
     dry_run: bool = True
     scanned_pairs: int = 0
     total_deleted: int = 0
     total_bytes_freed: int = 0
+    would_delete_count: int = 0   # [AM-11] dry-run arm accumulation (canonical name)
+    would_free_bytes: int = 0     # [AM-11] dry-run arm accumulation (canonical name)
     skipped: list[tuple[str, str, str]] = field(default_factory=list)
 
     @property
@@ -100,18 +136,67 @@ class BlobPruneSummary:
         """True when this cycle actually executed DELETEs."""
         return not self.dry_run
 
+    def to_summary_blobs_dict(self, *, skipped_cap: int = 1000) -> dict[str, Any]:
+        """The FROZEN ``blobs`` block of a CycleSummary (plan-overview §2).
+
+        Dual-flavor keys per [AM-11, A-5 RATIFIED]: ``destructive=False``
+        emits the dry-run shape (would_* + symmetry keys); destructive=True
+        emits the destructive shape (deleted/bytes_freed). FE branches on
+        ``destructive`` first. ``skipped`` is serialized as a list of
+        ``{thread_id, checkpoint_ns, reason}`` dicts (tuples are NOT
+        JSON-safe in ``summary_json``) and is capped at ``skipped_cap``
+        entries with ``skipped_truncated: true`` when the cap fires.
+        """
+        skipped_list = [
+            {"thread_id": t, "checkpoint_ns": ns, "reason": r}
+            for (t, ns, r) in self.skipped[:skipped_cap]
+        ]
+        truncated = len(self.skipped) > skipped_cap
+        if self.destructive:
+            return {
+                "scanned_pairs": self.scanned_pairs,
+                "deleted": self.total_deleted,
+                "bytes_freed": self.total_bytes_freed,
+                "destructive": True,
+                "skipped": skipped_list,
+                "skipped_truncated": truncated,
+            }
+        return {
+            "scanned_pairs": self.scanned_pairs,
+            "would_delete_count": self.would_delete_count,
+            "would_free_bytes": self.would_free_bytes,
+            "would_delete": self.would_delete_count,
+            "bytes": self.would_free_bytes,
+            "destructive": False,
+            "skipped": skipped_list,
+            "skipped_truncated": truncated,
+        }
+
 
 async def prune_unreferenced_blobs(
     checkpointer,
     *,
     max_refs_per_thread: int = CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD,
+    destructive: bool | None = None,
 ) -> BlobPruneSummary:
     """Run one reference-aware blob-prune cycle over all (thread, ns) pairs.
 
     Dry-run by default (reports would-delete counts + bytes, deletes
-    nothing). Destructive only when
-    :func:`blob_prune_destructive_enabled` holds — see the module
-    docstring for the structural-gate argument.
+    nothing). Destructive when
+    :func:`blob_prune_destructive_enabled` holds at call time OR when
+    the caller passes ``destructive=True`` explicitly (INV-2: the manual
+    Maintenance API path passes the kwarg so an operator does NOT need
+    to pre-arm the env flags). See the module docstring for the
+    structural-gate argument.
+
+    The override kwarg is read-only; the env dual-arm gate function
+    :func:`blob_prune_destructive_enabled` itself is untouched. The
+    ``destructive`` LOCAL NAME is preserved (shadowed from the kwarg at
+    the gate feed) so the AST dominance pin in
+    ``tests/unit/services/test_maintenance_prune_direct_anti_join.py::
+    test_delete_call_is_structurally_gated_by_destructive_flag`` stays
+    green (the pin keys on ``ast.Name(id="destructive")`` — see INV-3,
+    R-9).
 
     Never raises: per-pair failures are logged and skipped; the outer
     try/except makes even candidate-enumeration failures non-fatal (the
@@ -129,7 +214,12 @@ async def prune_unreferenced_blobs(
             summary.backend = "sqlite"
             return summary
 
-        destructive = blob_prune_destructive_enabled()
+        # T2: gate feed — explicit kwarg wins over env (manual preview /
+        # INV-2 manual destructive execute), env wins over nothing (auto
+        # cycle), ``None`` → env dual-arm (unchanged behavior). The local
+        # ``destructive`` name is preserved for the structural pin (R-9).
+        if destructive is None:
+            destructive = blob_prune_destructive_enabled()  # env dual-arm — AUTO path, unchanged
         summary.dry_run = not destructive
 
         # D21: ALL (thread_id, checkpoint_ns) pairs — find_excess_checkpoint_
@@ -207,6 +297,13 @@ async def prune_unreferenced_blobs(
                             thread_id, checkpoint_ns
                         )
                     )
+                    # T1.1 / [AM-11] canonical accumulation fields.
+                    # Previously the dry-run arm computed and logged
+                    # these but discarded the values — the contract
+                    # wire shape needed them. Destructive arm below
+                    # leaves these at 0.
+                    summary.would_delete_count += would_delete
+                    summary.would_free_bytes += bytes_would_free
                     log_blob_prune(
                         thread_id,
                         dry_run=True,
@@ -263,14 +360,20 @@ async def prune_unreferenced_blobs(
         # still available at DEBUG via ``log_blob_prune`` (emits
         # ``op=blob_prune thread=…``); operators wanting per-pair
         # diagnostics enable ``CHECKPOINT_PERF_LOGS=1`` and tail DEBUG.
+        #
+        # [AM-11] dry-run canonical fields are emitted alongside the
+        # destructive fields — one line carries both, with dry-run
+        # fields zeroed when destructive=True (and vice-versa).
         duration_ms = int((time.perf_counter() - sweep_t0) * 1000)
         logger.info(
             "[CheckpointPerf] op=blob_prune_summary threads=%d deleted=%d "
-            "bytes=%d dry_run=%d duration_ms=%d scanned_pairs=%d "
-            "skipped=%d backend=%s",
+            "bytes=%d would_delete=%d would_free=%d dry_run=%d "
+            "duration_ms=%d scanned_pairs=%d skipped=%d backend=%s",
             len(unique_threads),
             summary.total_deleted,
             summary.total_bytes_freed,
+            summary.would_delete_count,
+            summary.would_free_bytes,
             1 if summary.dry_run else 0,
             duration_ms,
             summary.scanned_pairs,
