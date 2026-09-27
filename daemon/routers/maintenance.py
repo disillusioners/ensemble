@@ -340,10 +340,13 @@ async def get_run(
 async def _call_service(svc: MaintenanceApiService, method: str, **kwargs: Any):
     """Invoke a service method and translate ``MaintenanceError`` → HTTPException.
 
-    The structured dict body (``detail={"error", "message",
-    **details}``) is the A-8 RATIFIED shape binding for all 5
-    endpoints. The 404 ``not_found`` literal + 409 ``details.run_id``
-    nesting live here.
+    The structured dict body (``detail={"error", "message", "details"}``)
+    is the A-8 RATIFIED shape binding for all 5 endpoints. Per [C-2, v3
+    fix pass] the per-code extras nest UNDER ``details`` — including the
+    409-adoption payload (``details.run_id`` / ``details.started_at``).
+    FastAPI wraps the dict under its own ``detail`` key on the wire
+    (``{"detail": {"error": ..., "message": ..., "details": {...}}``),
+    matching the plane.py precedent this pattern was ratified from.
     """
     try:
         result = await getattr(svc, method)(**kwargs)
@@ -351,7 +354,11 @@ async def _call_service(svc: MaintenanceApiService, method: str, **kwargs: Any):
     except MaintenanceError as exc:
         raise HTTPException(
             status_code=exc.http_status,
-            detail={"error": exc.code, "message": exc.message, **exc.details},
+            detail={
+                "error": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            },
         )
 
 
