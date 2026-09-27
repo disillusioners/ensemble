@@ -688,3 +688,244 @@ export interface VSCodeStatus {
 }
 
 export type EditorType = 'builtin' | 'vscode';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Maintenance Console — Section 1: Checkpoint Cleanup (Phase 2, contract v3)
+// AM-17 (idempotency_key DROPPED), AM-14 (state enum + 409-adoption),
+// AM-12 (advisory + expected_duration_ms_hint), AM-11 (dual-flavor keys),
+// AM-10 (skipped[] + truncated), AM-9 (manual_dry_run stripped from last_run),
+// AM-6 (interrupted added to status union), AM-13/AM-1 (10 error codes).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Maintenance availability — gear-menu probe result.
+ *
+ * `eligible` is **derived** (`state === 'ready'`) — FE branches on
+ * `state`, NOT on `eligible` (AM-14 state-enum gating). `reason` is
+ * a diagnostic string for log/UI display, NOT a FE branching signal.
+ */
+export type MaintenanceAvailabilityState =
+  | 'ready'
+  | 'backend_unsupported'
+  | 'subsystem_disabled'
+  | 'kill_switched';
+
+export interface MaintenanceAvailability {
+  eligible: boolean;
+  state: MaintenanceAvailabilityState;
+  backend: 'postgres' | 'sqlite';
+  reason: string | null;
+}
+
+/** Run kind discriminator. Mirrors server schema §3 + §4. */
+export type CheckpointCleanupRunKind =
+  | 'auto'
+  | 'manual_dry_run'
+  | 'manual_execute';
+
+/**
+ * AM-6 — terminal statuses include `interrupted` (boot-sweep CAS'd a
+ * stale `running` row). `overlap_refused` was deleted by architect
+ * ruling (one INFO log line carries requester forensics instead).
+ */
+export type CheckpointCleanupRunStatus =
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'interrupted';
+
+/**
+ * Effective auto-cycle config block read from LIVE env at request time
+ * (`blob_prune_destructive_enabled()`, `checkpoint_prune.py:75-84`).
+ * `blob_prune_destructive_armed` is informational; the manual path
+ * never reads it (INV-2).
+ */
+export interface CheckpointCleanupConfig {
+  checkpoint_max_per_thread: number;
+  checkpoint_max_per_thread_floor: number;
+  cleanup_interval_hours: number;
+  blob_prune_dry_run_env_default: '0' | '1';
+  blob_prune_destructive_armed: boolean;
+}
+
+/**
+ * Reason is machine-code-stable: closed set
+ * `{ZERO_REFS_FAIL_SAFE, MAX_REFS_EXCEEDED}` ∪ open family
+ * `ERROR:<ExceptionName>` (extensible enum).
+ */
+export type CheckpointCleanupSkippedReason =
+  | 'ZERO_REFS_FAIL_SAFE'
+  | 'MAX_REFS_EXCEEDED'
+  | `ERROR:${string}`;
+
+export interface CheckpointCleanupSkippedEntry {
+  thread_id: string;
+  checkpoint_ns: string;
+  reason: CheckpointCleanupSkippedReason;
+}
+
+/**
+ * AM-11 — dual-flavor keys. FE branches on `destructive:bool`:
+ *   destructive:false (dry-run flavor) — `would_delete_count` /
+ *     `would_free_bytes` (+ legacy `would_delete` / `bytes` for shape
+ *     symmetry)
+ *   destructive:true                 — `deleted` / `bytes_freed`
+ * `skipped_truncated:true` is set when BE caps `skipped[]` at 1000.
+ */
+export interface CheckpointCleanupBlobsSummary {
+  scanned_pairs: number;
+  /** Dry-run flavor (canonical) */
+  would_delete_count: number;
+  would_free_bytes: number;
+  /** Legacy dry-flavor (shape symmetry) */
+  would_delete: number;
+  bytes: number;
+  /** Destructive flavor */
+  deleted?: number;
+  bytes_freed?: number;
+  destructive: boolean;
+  skipped: CheckpointCleanupSkippedEntry[];
+  skipped_truncated?: boolean;
+}
+
+export interface CheckpointCleanupSummary {
+  checkpoint_rows: {
+    scanned_pairs: number;
+    deleted: number;
+    excess_pairs: number;
+  };
+  writes: { deleted: number };
+  blobs: CheckpointCleanupBlobsSummary;
+  duration_ms: number;
+}
+
+/**
+ * AM-9 — `last_run` only includes `kind ∈ {auto, manual_execute}`;
+ * `manual_dry_run` never surfaces here. Dry-run history is queryable
+ * via `GET /runs/{id}` by ID.
+ */
+export interface CheckpointCleanupLastRun {
+  run_id: string;
+  kind: 'auto' | 'manual_execute';
+  started_at: string;
+  completed_at: string | null;
+  status: 'succeeded' | 'failed';
+  summary: CheckpointCleanupSummary;
+}
+
+export interface CheckpointCleanupInFlight {
+  run_id: string;
+  kind: CheckpointCleanupRunKind;
+  started_at: string;
+  triggered_by: string;
+}
+
+export interface CheckpointCleanupStatus {
+  config: CheckpointCleanupConfig;
+  last_run: CheckpointCleanupLastRun | null;
+  in_flight: CheckpointCleanupInFlight | null;
+}
+
+export interface CheckpointCleanupWouldDelete {
+  checkpoint_rows: number;
+  writes: number;
+  blobs: number;
+  bytes: number;
+}
+
+export interface CheckpointCleanupScanned {
+  thread_ns_pairs: number;
+}
+
+/**
+ * AM-10, AM-11 — canonical names `would_delete_count` /
+ * `would_free_bytes`; `skipped[]` capped at 1000 with
+ * `skipped_truncated:true` flag.
+ */
+export interface CheckpointCleanupDryRun {
+  run_id: string;
+  would_delete: CheckpointCleanupWouldDelete;
+  would_delete_count: number;
+  would_free_bytes: number;
+  scanned: CheckpointCleanupScanned;
+  skipped: CheckpointCleanupSkippedEntry[];
+  skipped_truncated?: boolean;
+  duration_ms: number;
+  /** ISO timestamp; execute must reference a fresh enough dry-run. */
+  fresh_until: string;
+}
+
+/**
+ * AM-17 DROPPED — NO `idempotency_key` field. The 409-adoption
+ * contract replaces it: on 409 from execute, FE adopts
+ * `details.run_id` and resumes polling.
+ */
+export interface CheckpointCleanupExecuteRequest {
+  dry_run_run_id: string;
+  expected_bytes: number;
+  confirm: true;
+}
+
+/**
+ * AM-12, A-11 RATIFIED — 202 body gains `advisory` + `expected_duration_ms_hint`.
+ * `expected_duration_ms_hint` = the referenced dry-run's `duration_ms`.
+ * **Unit: ms** (canonical unit definition, R-5 v3 fix pass).
+ */
+export interface CheckpointCleanupExecute {
+  run_id: string;
+  status: 'running';
+  started_at: string;
+  advisory: 'system_busy' | null;
+  expected_duration_ms_hint: number;
+}
+
+/**
+ * `interrupted` carries `error.code = "run_interrupted"` (AM-6).
+ */
+export interface CheckpointCleanupRun {
+  run_id: string;
+  kind: CheckpointCleanupRunKind;
+  status: CheckpointCleanupRunStatus;
+  started_at: string;
+  completed_at: string | null;
+  summary: CheckpointCleanupSummary | null;
+  error: { code: string; message: string } | null;
+}
+
+/**
+ * AM-13, AM-1 — 10 stable error codes (was 8 in v1 draft).
+ * `origin_not_trusted` (403) + `maintenance_disabled` (503) added.
+ */
+export type MaintenanceErrorCode =
+  | 'not_initialized'
+  | 'not_found'
+  | 'run_in_flight'
+  | 'confirm_required'
+  | 'dry_run_required'
+  | 'dry_run_stale'
+  | 'byte_count_mismatch'
+  | 'backend_unsupported'
+  | 'origin_not_trusted'
+  | 'maintenance_disabled';
+
+/**
+ * AM-17, AM-14 — `details.run_id` is the canonical key FE adopts on
+ * 409 (`run_in_flight`). Mirror `plane.py:71-170`. The catch-all
+ * 500 body carries `error: "internal_error"` (A-8 amendment) — that
+ * literal lives in the union above.
+ *
+ * Open-family `details` (A-11) — FE tolerates extra keys everywhere.
+ */
+export interface MaintenanceErrorBody {
+  error: MaintenanceErrorCode;
+  message?: string;
+  details?: {
+    run_id?: string;
+    started_at?: string;
+    expected?: number;
+    stored?: number;
+    age_seconds?: number;
+    max_age_seconds?: number;
+    [k: string]: unknown;
+  };
+}
