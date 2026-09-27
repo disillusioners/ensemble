@@ -66,26 +66,12 @@ describe('MaintenanceComponent — page shell + section registry', () => {
   });
 
   describe('production source pins', () => {
-    /**
-     * `sections-registry-load-bearing` (R-addition, v3 fix pass) —
-     * the page MUST render its sections FROM the registry array. A
-     * hard-coded `<app-checkpoint-cleanup>` outside the `@for`
-     * silently dies on extensibility (user requirement #2). The pin
-     * asserts:
-     *   1. Production source declares `readonly sections: readonly MaintenanceSection[]`
-     *      (the readonly tuple is the type contract for downstream
-     *      code; mirror breaks if production drops it).
-     *   2. Template uses `@for (section of sections; track section.id)`
-     *      (or equivalent) + `*ngComponentOutlet="section.component"`
-     *      to render from the registry.
-     */
-    it('sections-registry-load-bearing: registry + @for + ngComponentOutlet', () => {
-      expect(componentSrc).toMatch(
-        /readonly\s+sections\s*:\s*readonly\s+MaintenanceSection\[\]/,
-      );
-      expect(templateSrc).toMatch(/@for\s*\(\s*section\s+of\s+sections\s*;\s*track\s+section\.id\s*\)/);
-      expect(templateSrc).toMatch(/\*ngComponentOutlet\s*=\s*"section\.component"/);
-    });
+    // Item 18 — the `sections-registry-load-bearing` pin is canonical
+    // in `maintenance.bindings.pins.spec.ts` (Pin 1). It was
+    // duplicated here; deleted to keep the two specs in sync.
+    // The mirror-class shape tests above cover the structural concern
+    // (section count + per-section shape), and the bindings-pins spec
+    // covers the source-grep pin (production regex + template shape).
 
     it('page shell imports `CommonModule` (or `@for`/`ngComponentOutlet` support)', () => {
       // Angular 21 standalone + signals — `@for` is a built-in

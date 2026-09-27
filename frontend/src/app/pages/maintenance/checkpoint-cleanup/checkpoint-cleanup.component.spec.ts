@@ -32,8 +32,10 @@ import { Observable, of, throwError } from 'rxjs';
 import type {
   CheckpointCleanupDryRun,
   CheckpointCleanupExecute,
+  CheckpointCleanupExecuteRequest,
   CheckpointCleanupRun,
   CheckpointCleanupStatus,
+  MaintenanceAvailability,
   MaintenanceDisplayCode,
   MaintenanceErrorBody,
 } from '../../../models';
@@ -175,18 +177,10 @@ class MockCheckpointCleanupService {
   }
 }
 
-interface MaintenanceAvailability {
-  eligible: boolean;
-  state: 'ready' | 'backend_unsupported' | 'subsystem_disabled' | 'kill_switched';
-  backend: 'postgres' | 'sqlite';
-  reason: string | null;
-}
-
-interface CheckpointCleanupExecuteRequest {
-  dry_run_run_id: string;
-  expected_bytes: number;
-  confirm: true;
-}
+// Item 15 — `MaintenanceAvailability` + `CheckpointCleanupExecuteRequest`
+// already exist in `../../../models`. The local type shadows were
+// duplicate definitions; import the canonical types instead so the
+// spec cannot drift from production shapes.
 
 // ── Testable mirror component ────────────────────────────────────────────
 
