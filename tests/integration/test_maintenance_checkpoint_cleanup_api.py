@@ -1127,6 +1127,59 @@ class TestOriginGuardIntegration:
             guard.reset_trusted_origins_cache()
             monkeypatch.delenv("MAINTENANCE_TRUSTED_ORIGINS", raising=False)
 
+    # ── audit G1 — Origin guard coverage on the OTHER guarded routes ──────────
+    #
+    # The matrix test above covers ``/status`` (the simplest of the four
+    # guarded endpoints). ``/dry-run`` (POST, source ~:213) and
+    # ``/runs/{id}`` (GET, source ~:310) NEVER see an untrusted Origin in
+    # any test — a silent-drop seam (this repo's known bug class): if
+    # ``dependencies=[Depends(_require_origin)]`` were dropped from either
+    # route's decorator, the existing suite would still pass. This
+    # parametrized test asserts the FIRST-CHECK guarantee (INV-10) on
+    # both routes; evil/null Origins must 403 ``origin_not_trusted`` before
+    # any other gate is consulted.
+    @pytest.mark.parametrize(
+        "method,path,origin",
+        [
+            ("POST", "/dry-run", "http://evil.example"),
+            ("POST", "/dry-run", "null"),
+            ("GET", "/runs/ckpt-x-00000000", "http://evil.example"),
+            ("GET", "/runs/ckpt-x-00000000", "null"),
+        ],
+    )
+    async def test_origin_guard_untrusted_other_routes(
+        self, pg_db, monkeypatch, method, path, origin
+    ):
+        """Audit G1 — UNTRUSTED Origin → 403 ``origin_not_trusted`` on
+        ``/dry-run`` (POST) and ``/runs/{id}`` (GET), same as ``/status``.
+
+        Mirrors the matrix's allowed/refused split but scoped narrowly
+        to the two routes the matrix does NOT touch; ``Origin: null``
+        added on each (the matrix covers it on ``/status``). Per
+        INV-10, the guard runs BEFORE kill-switch + service gates, so
+        a refused Origin can never see 503 ``not_initialized`` or any
+        other body — that contract is the whole point of the audit.
+        """
+        from daemon.routers import maintenance_origin_guard as guard
+
+        monkeypatch.setenv("MAINTENANCE_TRUSTED_ORIGINS", "http://ops-box.lan")
+        guard.reset_trusted_origins_cache()
+        try:
+            async with api_stack(pg_db) as st:
+                headers = {"Host": "testserver", "Origin": origin}
+                url = f"{SECTION_PREFIX}{path}"
+                if method == "POST":
+                    r = await st.client.post(url, headers=headers)
+                else:
+                    r = await st.client.get(url, headers=headers)
+                assert r.status_code == 403, r.text
+                assert (
+                    r.json()["detail"]["error"] == "origin_not_trusted"
+                )
+        finally:
+            guard.reset_trusted_origins_cache()
+            monkeypatch.delenv("MAINTENANCE_TRUSTED_ORIGINS", raising=False)
+
 
 # ── case 60 — kill-switch over the integration stack ──────────────────────────
 
