@@ -919,6 +919,50 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # U1-SLICE FIX (2026-09-27, fix/u1-watch-reconcile) — periodic
+    # backstop for held ``mission_terminal`` watcher rows. The
+    # event hooks in ``JobFeedbackObserver`` (the
+    # ``_fire_watcher_notify_for_terminal`` end-of-method seam
+    # and the ``_finalize_job`` post-commit-outbox seam) carry
+    # the in-session fast-path; this periodic sweep catches the
+    # 310ms parent-lifecycle-completed vs last-child-settle race
+    # the live evidence documented (incident c7f59aaf, mission
+    # 538e2f59 — held row never re-evaluated in-session, only the
+    # next boot would have re-fired it; pre-fix that gap was
+    # unbounded). ALWAYS-ON infrastructure (no kill-switch — per
+    # the project owner's HARD POLICY on Batch A codified in
+    # ``job_lock_sweep.py``); the only tuning knob is the
+    # interval. Default 300s = the U1 commission's upper-bound
+    # guarantee (delivery latency =
+    # ``min(in-session event, 300s sweep)``).
+    #
+    # Wired AFTER the JobLockSweepService boot block (the
+    # same "infrastructure sweeps" neighborhood) so the
+    # boot-time sweep has the helper available before any
+    # in-flight hook fires. The first sweep tick fires after
+    # the first interval sleep — the helper is fail-soft on
+    # partial wiring so a still-bootstrapping repo is a
+    # silent no-op rather than a crash.
+    from daemon.services.watch_reconcile_sweep import (
+        DEFAULT_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS,
+        WatchReconcileSweepService,
+    )
+    watch_reconcile_interval = (
+        config.services.watch_reconcile_sweep_interval_seconds
+    )
+    watch_reconcile_sweep = WatchReconcileSweepService(
+        job_queue_service=job_queue_service,
+        interval_seconds=watch_reconcile_interval,
+    )
+    watch_reconcile_sweep.start()
+    app.state.watch_reconcile_sweep = watch_reconcile_sweep
+    logger.info(
+        f"WatchReconcileSweepService started: interval="
+        f"{watch_reconcile_interval}s (default "
+        f"{DEFAULT_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS}s)"
+    )
+
+    # ─────────────────────────────────────────────────────────────
     # clipboard-image-chat Phase 3 (Tasks 4-5) — tmp-image retention
     # sweep. ALWAYS-ON infrastructure (NO kill-switch env var — per
     # the project owner's HARD POLICY on Batch A, architect amendment
@@ -1973,6 +2017,29 @@ async def lifespan(app: FastAPI):
                 f"PlaneSyncWatchdogService shutdown error: {e}"
             )
         app.state.plane_sync_watchdog = None
+
+    # --- WatchReconcileSweepService shutdown (U1-SLICE) ---
+    # Stop the held-watcher reconcile + zombie-GC sweep BEFORE
+    # the JobLockSweepService shutdown — same shutdown contract
+    # (graceful stop with WARNING on failure, getattr-guarded so
+    # a partial startup failure is a silent no-op). Mirrors the
+    # tmp_image_cleanup / job_lock_sweep / upgrade_journal_sweep
+    # shutdown shapes. The U1-SLICE fix keeps the deliverability
+    # guarantee intact (held rows from events that fire AFTER
+    # stop() are caught by the event hooks at restart, and the
+    # boot-time ``reconcile_terminal_watches`` sweep picks up
+    # any survivor).
+    watch_reconcile_sweep = getattr(
+        app.state, "watch_reconcile_sweep", None
+    )
+    if watch_reconcile_sweep is not None:
+        try:
+            await watch_reconcile_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"WatchReconcileSweepService shutdown error: {e}"
+            )
+        app.state.watch_reconcile_sweep = None
 
     # --- JobLockSweepService shutdown (F3) ---
     # Stop the periodic reclaim sweep BEFORE the manager shuts down

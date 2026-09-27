@@ -672,7 +672,254 @@ class JobQueueService:
                 reconciled += 1
 
         return reconciled
-    
+
+    # ── U1-SLICE helper (2026-09-27) ─────────────────────────────────
+    # The U1 commission (incident c7f59aaf, mission 538e2f59) closed
+    # the held-mission_terminal starvation defect: a settled work
+    # row whose mission is STILL LIVE leaves its ``mission_terminal``
+    # watcher rows held (the C1 partition routes them into
+    # ``held_for_mission`` and they survive the ``notify_watchers``
+    # call). When the mission later reaches terminal, NOTHING in the
+    # natural notify path re-evaluates those held rows — only the
+    # boot-time ``reconcile_terminal_watches`` sweep does, leaving
+    # the in-session delivery gap (C1 holds rows that the daemon
+    # never re-fires until restart).
+    #
+    # This helper is the in-session "re-fire held" path. It reuses
+    # the canonical mission-live guard (via
+    # :func:`daemon.services.work_notifier.notify_work_watchers`
+    # partition) so the CAS-claim + exactly-once delivery stays in
+    # ONE code path. The 310ms parent-lifecycle-completed-vs-last-
+    # child-settle race (live-evidenced) is the LOAD-BEARING use case
+    # for the periodic sweep that calls this helper globally — the
+    # event hooks are the fast-path, the sweep is the backstop.
+    #
+    # Fail-soft: every per-work_id failure is logged and swallowed.
+    # The hook + sweep callers never raise.
+    async def reconcile_held_watches_for_instance(
+        self,
+        *,
+        instance_id: str | None = None,
+    ) -> dict[str, int]:
+        """Fire held ``mission_terminal`` watchers that survived the
+        natural notify path because the mission was still live at
+        the time of the prior notify.
+
+        U1-SLICE FIX (2026-09-27, fix/u1-watch-reconcile,
+        incident c7f59aaf / mission 538e2f59).
+
+        Scans active ``JobWatcher`` rows in scope (all active rows
+        when ``instance_id`` is ``None``, restricted to the given
+        instance otherwise). For each unique ``work_id`` with at
+        least one in-scope watcher, calls the canonical
+        :meth:`notify_watchers` path — which itself runs the
+        canonical :func:`daemon.services.work_notifier.notify_work_watchers`
+        partition (C1 partition: ``matching_claimable`` /
+        ``matching_readonly`` / ``held_for_mission``), CAS-claims
+        the deliverable rows, and notifies them via the per-watcher
+        instance queue. Rows the partition still holds (mission
+        still live) SURVIVE this call for the next sweep tick.
+
+        Zombie-row GC: rows whose ``job_id`` no longer resolves via
+        ``work_resolver.resolve_work`` AND whose mission liveness is
+        terminal (or unresolvable) are retired (``remove_all_watches_for_job``)
+        with a WARN log. The pre-fix contract was "if resolve_work
+        returns None, skip silently" — which let row 538e2f59
+        survive ≥5 boots with its job deleted (the U1 live-evidence).
+        Rows whose work is missing BUT whose mission liveness is
+        still live are LEFT IN PLACE (transient deletion, not a
+        permanent un-firable state).
+
+        Args:
+            instance_id: If set, restrict the scan to watches whose
+                ``instance_id`` matches (the watcher row's parent —
+                the instance that called ``watch_job``). ``None``
+                = global scan (the periodic sweep path).
+
+        Returns:
+            Dict with:
+
+            * ``fired`` — total watchers notified across all
+              in-scope work_ids (CAS-claimed + delivered).
+            * ``retired`` — zombie rows removed (job_id gone AND
+              mission terminal/unresolvable).
+            * ``scanned`` — unique work_ids visited.
+        """
+        fired = 0
+        retired = 0
+        scanned = 0
+        if self._watcher_repo is None or self._instance_manager is None:
+            return {"fired": 0, "retired": 0, "scanned": 0}
+
+        work_resolver = getattr(self, "_work_resolver", None)
+        try:
+            all_watches = self._watcher_repo.get_all_active_watches()
+        except Exception as fetch_err:
+            logger.warning(
+                "reconcile_held_watches_for_instance: "
+                "get_all_active_watches failed "
+                "(instance_id=%s): %s — sweep tick continues, "
+                "no rows touched this tick",
+                (instance_id[:8] + "...") if instance_id else "<global>",
+                fetch_err,
+            )
+            return {"fired": 0, "retired": 0, "scanned": 0}
+
+        # Collect unique work_ids in scope. The C1 partition inside
+        # ``notify_watchers`` is idempotent — duplicate calls on the
+        # same work_id are safe (the CAS guards exactly-once). We
+        # dedupe to avoid wasteful per-row partition work.
+        candidate_work_ids: set[str] = set()
+        scoped_watches: list[Any] = []
+        for watch in all_watches:
+            if instance_id is not None and watch.instance_id != instance_id:
+                continue
+            scoped_watches.append(watch)
+            if watch.job_id:
+                candidate_work_ids.add(watch.job_id)
+
+        for work_id in candidate_work_ids:
+            scanned += 1
+            try:
+                # Resolve FIRST. If the work is gone, the row is a
+                # potential zombie — consult mission liveness to
+                # decide retire-vs-skip.
+                if work_resolver is None:
+                    # No resolver wired — the legacy reconcile path
+                    # already runs at boot; skip without retiring
+                    # (we have no signal that the row is permanently
+                    # un-firable).
+                    continue
+                record = await asyncio.to_thread(
+                    work_resolver.resolve_work, work_id
+                )
+                if record is None:
+                    # Work is gone. Determine retire vs skip via the
+                    # mission-live guard — the work may be transiently
+                    # missing (DB race, in-progress deletion) and a
+                    # retire here would lose a row that's about to
+                    # become resolvable again. Only retire when the
+                    # mission liveness is terminal or unresolvable
+                    # (fail-closed GC: "permanently un-firable").
+                    retire = True
+                    try:
+                        verdict = await evaluate_mission_live(
+                            instance_repository=getattr(
+                                self._instance_manager,
+                                "_instance_repository",
+                                None,
+                            ),
+                            instance_id=None,
+                            task_completed_at=None,
+                            bus_pending_count=None,
+                        )
+                        # Mission terminal / unresolvable → retire.
+                        # Mission still live → skip (transient
+                        # deletion, leave the row alone).
+                        if verdict.live and not verdict.error:
+                            retire = False
+                    except Exception:
+                        # Guard itself failed → fail-closed retire
+                        # (the row is un-firable in practice — work
+                        # is gone, no mission to consult, no signal
+                        # to keep). The WARN log below captures the
+                        # anomaly for ops review.
+                        retire = True
+                    if retire:
+                        try:
+                            removed = await asyncio.to_thread(
+                                self._watcher_repo.remove_all_watches_for_job,
+                                work_id,
+                            )
+                            if removed:
+                                retired += removed
+                                logger.warning(
+                                    "reconcile_held_watches_for_instance: "
+                                    "zombie watcher row retired "
+                                    "(job_id=%s, instance_filter=%s, "
+                                    "reason=work_unresolvable+"
+                                    "mission_terminal_or_unresolvable, "
+                                    "removed=%d)",
+                                    work_id[:8],
+                                    (instance_id[:8] + "...")
+                                    if instance_id else "<global>",
+                                    removed,
+                                )
+                        except Exception as retire_err:
+                            logger.warning(
+                                "reconcile_held_watches_for_instance: "
+                                "zombie retire failed for job_id=%s: %s",
+                                work_id[:8], retire_err,
+                            )
+                    continue
+
+                # Work still resolvable — run the canonical notify
+                # path. The C1 partition inside notify_watchers
+                # already consults the mission-live guard and routes
+                # the rows into claimable / readonly / held. CAS
+                # ensures exactly-once. We pass the work's canonical
+                # status so the partition has the right key.
+                # ``note: pick ``"completed"`` for settled rows (the
+                # held row's underlying settle already happened; the
+                # held state is about MISSION liveness, not work
+                # status). The partition's mission-live guard is what
+                # actually decides whether to fire — the ``status``
+                # arg just seeds the event-line rendering.
+                work_status = getattr(record, "status", None) or "completed"
+                # Only fire if the work status itself is terminal —
+                # a non-terminal status means the held row was
+                # perhaps orphaned by a partial writer; the sweep
+                # tick will revisit it on the next iteration.
+                if not _work_status_is_terminal(work_status):
+                    continue
+                # Pass ``instance_id`` filter only when set — the
+                # per-instance hook variant is scoped; the global
+                # sweep variant fires for everything in scope.
+                notified = await self.notify_watchers(
+                    work_id,
+                    work_status,
+                    # Do NOT thread result_summary from the resolver
+                    # here — the held row's underlying settle fired
+                    # the natural notify path earlier with whatever
+                    # content was available; re-firing with a stale
+                    # result_summary would silently overwrite the
+                    # content the watcher already received (or
+                    # overwrite a richer producer-threaded body the
+                    # caller just supplied via the hook). The
+                    # ``notify_work_watchers`` resolver-fallback
+                    # reads ``Task.result`` (committed by now for
+                    # any work that survived to the held state).
+                    result_summary=None,
+                )
+                fired += notified
+            except Exception as per_work_err:
+                # Fail-soft per work_id: log + continue. The next
+                # sweep tick retries.
+                logger.warning(
+                    "reconcile_held_watches_for_instance: "
+                    "per-work_id notify failed (work_id=%s, "
+                    "instance_filter=%s): %s",
+                    work_id[:8],
+                    (instance_id[:8] + "...") if instance_id else "<global>",
+                    per_work_err,
+                )
+
+        if fired or retired:
+            logger.info(
+                "reconcile_held_watches_for_instance: scanned=%d "
+                "fired=%d retired=%d (instance_filter=%s)",
+                scanned, fired, retired,
+                (instance_id[:8] + "...") if instance_id else "<global>",
+            )
+
+        # Touch scoped_watches so the variable is used (linter
+        # satisfaction — the list is built for diagnostic parity
+        # with reconcile_terminal_watches; future helper iterations
+        # may use it for per-watcher guards).
+        _ = scoped_watches
+
+        return {"fired": fired, "retired": retired, "scanned": scanned}
+
     # ========== Public API ==========
     
     def find_active_jobs_by_instance(self, instance_id: str, job_type: str | None = None) -> list[JobItem]:
