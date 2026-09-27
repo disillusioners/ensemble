@@ -168,6 +168,22 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
       if (!confirmed) {
         return;
       }
+      // Item 6 — re-check `isDryRunStale` BEFORE `performExecute`.
+      // The confirm dialog may have been open long enough for the
+      // dry-run's `fresh_until` to expire (server-side backstop is
+      // the authoritative gate; this is the FE-side echo). The check
+      // uses the SAME `dryRun` reference the user confirmed against;
+      // a stale read here aborts cleanly with a re-run snack-bar
+      // and never hits the execute endpoint.
+      if (this.service.isDryRunStale(dryRun)) {
+        this.lastDryRun.set(null); // force re-run
+        this.snackBar.open(
+          'Dry-run is stale — re-run the check before executing.',
+          'Dismiss',
+          { duration: 5000, panelClass: 'error-snackbar' },
+        );
+        return;
+      }
       this.performExecute(dryRun);
     });
   }
@@ -366,18 +382,22 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     return `${formatted} ${units[i]}`;
   }
 
+  /** Item 17 — duration formatting constants (single-source). */
+  private static readonly MS_PER_SECOND = 1000;
+  private static readonly MS_PER_MINUTE = 60_000;
+
   /** Honest-duration copy: ms → human. "412ms", "1.8s", "2m 14s". */
   formatDuration(ms: number | null | undefined): string {
     if (ms == null || !Number.isFinite(ms) || ms < 0) {
       return '—';
     }
-    if (ms < 1000) {
+    if (ms < CheckpointCleanupComponent.MS_PER_SECOND) {
       return `${Math.round(ms)}ms`;
     }
-    if (ms < 60_000) {
-      return `${(ms / 1000).toFixed(1)}s`;
+    if (ms < CheckpointCleanupComponent.MS_PER_MINUTE) {
+      return `${(ms / CheckpointCleanupComponent.MS_PER_SECOND).toFixed(1)}s`;
     }
-    const totalSec = Math.floor(ms / 1000);
+    const totalSec = Math.floor(ms / CheckpointCleanupComponent.MS_PER_SECOND);
     const m = Math.floor(totalSec / 60);
     const s = totalSec % 60;
     if (m < 60) {

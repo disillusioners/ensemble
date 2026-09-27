@@ -27,6 +27,7 @@ import { WorkspaceComponent } from './pages/workspace/workspace.component';
 // preserving the cached-overlay behavior across hide/show cycles.
 import type { ChatComponent } from './pages/chat/chat.component';
 import type { HealthResponse, MigrationAvailability, MaintenanceAvailability } from './models';
+import { CheckpointCleanupService } from './pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.service';
 
 interface SettingsMenuItem {
   label: string;
@@ -785,7 +786,7 @@ export class App implements OnInit {
    * `state: "kill_switched"` — handled by the state check (no error).
    */
   private checkMaintenanceAvailability(): void {
-    this.http.get<MaintenanceAvailability>('/api/maintenance/checkpoint-cleanup/availability').subscribe({
+    this.http.get<MaintenanceAvailability>(CheckpointCleanupService.AVAILABILITY_URL).subscribe({
       next: (data) => {
         if (data.state === 'ready' && !this.settingsMenuItems().some(i => i.route === '/maintenance/checkpoint-cleanup')) {
           this.settingsMenuItems.update(items => [

@@ -3,6 +3,7 @@ import { inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { catchError, map, of } from 'rxjs';
 import type { MaintenanceAvailability } from './models';
+import { CheckpointCleanupService } from './pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.service';
 
 /**
  * AM-14 — canMatch guard for the Maintenance section. Returns true
@@ -21,7 +22,7 @@ import type { MaintenanceAvailability } from './models';
 export const maintenanceAvailabilityGuard: CanMatchFn = () => {
   const http = inject(HttpClient);
   const router = inject(Router);
-  return http.get<MaintenanceAvailability>('/api/maintenance/checkpoint-cleanup/availability').pipe(
+  return http.get<MaintenanceAvailability>(CheckpointCleanupService.AVAILABILITY_URL).pipe(
     map((data) => (data.state === 'ready' ? true : router.parseUrl('/'))),
     catchError(() => of(router.parseUrl('/'))),
   );

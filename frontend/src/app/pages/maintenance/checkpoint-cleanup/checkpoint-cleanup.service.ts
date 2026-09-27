@@ -48,6 +48,14 @@ export class CheckpointCleanupService {
   /** Five-endpoint base path (relative — proxy.conf.json forwards). */
   private readonly API_BASE = '/api/maintenance/checkpoint-cleanup';
 
+  /**
+   * Item 16 — single-source the availability probe URL. Both the
+   * app.ts gear-menu probe AND the app.routes.ts canMatch guard
+   * import this constant; the FE service uses
+   * `${API_BASE}/availability` to keep all 5 endpoints in lockstep.
+   */
+  static readonly AVAILABILITY_URL = '/api/maintenance/checkpoint-cleanup/availability';
+
   /** AM-14 / A-10 — pinned at 2000 ms (T6.3 source-grep pin target). */
   static readonly POLL_INTERVAL_MS = 2000 as const;
 

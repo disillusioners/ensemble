@@ -273,6 +273,18 @@ class TestableCheckpointCleanupComponent {
     });
     ref.afterClosed().subscribe((confirmed: boolean | undefined) => {
       if (!confirmed) return;
+      // Item 6 — re-check isDryRunStale BEFORE performExecute (the
+      // dialog may have been open long enough for fresh_until to
+      // expire). Mirror production's behavior verbatim.
+      if (this.service.isDryRunStale(dryRun)) {
+        this.lastDryRun.set(null);
+        this.snackBar.open(
+          'Dry-run is stale — re-run the check before executing.',
+          'Dismiss',
+          { duration: 5000, panelClass: 'error-snackbar' },
+        );
+        return;
+      }
       this.performExecute(dryRun);
     });
   }

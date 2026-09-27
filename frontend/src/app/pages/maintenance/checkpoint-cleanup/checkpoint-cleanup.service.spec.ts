@@ -122,6 +122,10 @@ class MockHttpClient {
 class TestableCheckpointCleanupService {
   static readonly POLL_INTERVAL_MS = 2000 as const;
   static readonly POLL_MAX_DURATION_MS: number = 10 * 60 * 1000;
+  // Item 16 — single-source the availability probe URL; mirrored in
+  // the production service. The spec exercises the actual URL by
+  // hard-coding it in tests (the test mocks the HTTP layer).
+  static readonly AVAILABILITY_URL = '/api/maintenance/checkpoint-cleanup/availability';
 
   readonly availability = signal<MaintenanceAvailability | null>(null);
   readonly status = signal<CheckpointCleanupStatus | null>(null);
