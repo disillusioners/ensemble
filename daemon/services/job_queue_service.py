@@ -770,11 +770,9 @@ class JobQueueService:
         # same work_id are safe (the CAS guards exactly-once). We
         # dedupe to avoid wasteful per-row partition work.
         candidate_work_ids: set[str] = set()
-        scoped_watches: list[Any] = []
         for watch in all_watches:
             if instance_id is not None and watch.instance_id != instance_id:
                 continue
-            scoped_watches.append(watch)
             if watch.job_id:
                 candidate_work_ids.add(watch.job_id)
 
@@ -833,12 +831,27 @@ class JobQueueService:
                         # deletion, leave the row alone).
                         if verdict.live and not verdict.error:
                             retire = False
-                    except Exception:
-                        # Guard itself failed → fail-closed retire
-                        # (the row is un-firable in practice — work
-                        # is gone, no mission to consult, no signal
-                        # to keep). The WARN log below captures the
-                        # anomaly for ops review.
+                    except Exception as guard_err:
+                        # Guard itself failed (DB hiccup on the
+                        # instance-tree walk / a wiring gap in the
+                        # leg wiring) → fail-closed retire. The row
+                        # is un-firable in practice — work is gone,
+                        # no mission to consult, no signal to keep.
+                        # The dedicated WARNING here lets ops
+                        # distinguish a "guard DB hiccup → fail-
+                        # closed retire" from a cleanly verified
+                        # terminal verdict (no log line emitted).
+                        logger.warning(
+                            "reconcile_held_watches_for_instance: "
+                            "zombie-GC guard raised %s (%s) for "
+                            "work_id=%s — fail-closed retire "
+                            "(un-firable row): %s",
+                            type(guard_err).__name__,
+                            (instance_id[:8] + "...")
+                            if instance_id else "<global>",
+                            work_id[:8],
+                            guard_err,
+                        )
                         retire = True
                     if retire:
                         try:
@@ -873,9 +886,9 @@ class JobQueueService:
                 # already consults the mission-live guard and routes
                 # the rows into claimable / readonly / held. CAS
                 # ensures exactly-once. We pass the work's canonical
-                # status so the partition has the right key.
-                # ``note: pick ``"completed"`` for settled rows (the
-                # held row's underlying settle already happened; the
+                # status so the partition has the right key. Note:
+                # pick ``"completed"`` for settled rows (the held
+                # row's underlying settle already happened; the
                 # held state is about MISSION liveness, not work
                 # status). The partition's mission-live guard is what
                 # actually decides whether to fire — the ``status``
@@ -926,12 +939,6 @@ class JobQueueService:
                 scanned, fired, retired,
                 (instance_id[:8] + "...") if instance_id else "<global>",
             )
-
-        # Touch scoped_watches so the variable is used (linter
-        # satisfaction — the list is built for diagnostic parity
-        # with reconcile_terminal_watches; future helper iterations
-        # may use it for per-watcher guards).
-        _ = scoped_watches
 
         return {"fired": fired, "retired": retired, "scanned": scanned}
 

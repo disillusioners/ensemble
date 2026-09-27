@@ -36,6 +36,22 @@ retains its coverage and is the upstream of these pins (the C1
 partition is the foundation this fix reuses — no partition
 regression).
 
+## Size rationale
+
+This module is intentionally a single, large pin pack (>1000
+lines) rather than split by bucket. The pins are full-stack
+integration tests over real ``SQLModel`` /
+:class:`JobWatcherRepository` / :class:`TaskRepository` /
+:class:`SQLModelInstanceRepository` fixtures with the canonical
+``evaluate_mission_live`` guard in the path; the C1 partition +
+CAS-claim semantics are what we're pinning, and splitting by
+bucket would break the single-incident narrative (P1 verbatim →
+P4 widening → P5 cross-boot → P6 content → 310ms-race → zombie
+GC) that maps cleanly to the incident c7f59aaf timeline. The
+shared ``u1_components`` fixture + the ``_seed_instance`` /
+``_add_watch`` / ``_patch_resolver_*`` helpers amortize the
+setup cost across the pack.
+
 ## Pins
 
 ### P1 — STARVATION (incident verbatim)
@@ -50,7 +66,17 @@ regression).
    ``WatchReconcileSweepService`` (interval=1s) drives the held
    row to fire WITHIN the cadence window; the event hook is
    bypassed by mocking the observer path so the pin isolates the
-   sweep's delivery contribution.
+   sweep's delivery contribution. Single-tick fast-clock
+   determinism via ``sweep_once()`` direct call.
+3. ``test_p1_sweep_loop_ticks_via_run_async`` — DISTINCT role:
+   the asyncio-task loop ticks via the ``_run`` coroutine (NOT a
+   direct ``sweep_once()`` call) — the structural backstop the
+   U1 commission mandated for the 310ms race + the long-tail
+   case where an instance flips terminal WITHOUT triggering
+   either hook arm. Asserts ``start()`` → ``sleep(2.5)`` →
+   ``stop()`` drives ``counters()["ticks"] >= 1`` via the real
+   asyncio task spawned by the production lifecycle path
+   (``manager.py`` lifespan owns start/stop).
 
 ### P2 — TOOL-ENTRY contract
 
@@ -121,6 +147,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+from pydantic_core import ValidationError
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel
@@ -617,6 +644,114 @@ class TestP1StarvationIncidentVerbatim:
         assert sweep._task is None
         # No errors logged — the periodic path is healthy.
         assert sweep.counters()["errors_total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_p1_sweep_loop_survives_unexpected_tick_exception(
+        self, u1_components,
+    ):
+        """P1 loop-resilience pin (tidier item D, cycle 2) — the
+        ``_run`` loop MUST survive an unexpected ``Exception``
+        raised by ``sweep_once`` and still fire tick N+1.
+
+        ``_run`` is the load-bearing held-mission_terminal
+        starvation BACKSTOP — a permanent exit on an unexpected
+        tick exception would silently re-open U1 (rows stay
+        held forever, no recovery short of a daemon restart).
+        This pin deliberately injects a ``RuntimeError`` on
+        the first ``sweep_once`` call and verifies:
+
+          1. Tick N raised → ``errors_total >= 1`` (the
+             ``logger.exception`` recorded the traceback).
+          2. The loop CONTINUED → tick N+1 still fired
+             (counters()["ticks"] >= 2 over a ~2.5s window
+             with interval=1s — first tick raises immediately,
+             second tick fires after the 1s sleep).
+          3. ``stop()`` exits CLEANLY — ``_task is None``
+             post-stop (no orphaned task, ``CancelledError``
+             propagated cleanly).
+
+        This is the deliberate deviation from the
+        ``JobLockSweepService._run`` Template-B shape (which
+        exits permanently on unexpected Exception — the
+        KNOWN defect this service corrects).
+        """
+        from daemon.services.watch_reconcile_sweep import (
+            WatchReconcileSweepService,
+        )
+
+        jqs = u1_components["jqs"]
+
+        # Patch the underlying ``reconcile_held_watches_for_instance``
+        # call to raise on the FIRST sweep_once invocation, then
+        # return the empty-result shape on subsequent calls. The
+        # ``side_effect`` list is consumed one entry per call.
+        boom = RuntimeError(
+            "simulated unexpected tick exception (U1-slice "
+            "cycle-2 resilience pin)"
+        )
+        empty_result = {
+            "fired": 0, "retired": 0, "scanned": 0,
+        }
+        original_helper = jqs.reconcile_held_watches_for_instance
+        jqs.reconcile_held_watches_for_instance = AsyncMock(
+            side_effect=[boom, empty_result, empty_result, empty_result],
+        )
+
+        sweep = WatchReconcileSweepService(
+            job_queue_service=jqs,
+            interval_seconds=1,
+        )
+        assert sweep.counters()["ticks"] == 0
+        assert sweep.counters()["errors_total"] == 0
+
+        sweep.start()
+        assert sweep._task is not None
+        assert not sweep._task.done()
+
+        try:
+            # Enough wall-clock for: immediate first tick (raises),
+            # sleep(1s), second tick (succeeds), sleep(1s), possibly
+            # a third tick. We assert >= 2 ticks (the BOOM tick + at
+            # least one continuation tick).
+            await asyncio.sleep(2.5)
+        finally:
+            await sweep.stop()
+
+        # Invariant 1: the raised tick was recorded (errors_total
+        # bumped by ``sweep_once``'s own try/except at :241 — the
+        # backstop catches the exception, bumps the counter, and
+        # returns the zero-counts shape; ``_run`` then logs and
+        # continues).
+        assert sweep.counters()["errors_total"] >= 1, (
+            f"P1 loop-resilience: the injected RuntimeError MUST "
+            f"have been caught (errors_total >= 1); got "
+            f"errors_total={sweep.counters()['errors_total']}."
+        )
+
+        # Invariant 2: the loop survived and tick N+1 fired.
+        # (First tick raises immediately at start; second tick
+        # fires after the 1s sleep. With 2.5s wall-clock we expect
+        # 2-3 ticks; >= 2 is the load-bearing invariant.)
+        ticks_via_loop = sweep.counters()["ticks"]
+        assert ticks_via_loop >= 2, (
+            f"P1 loop-resilience: the asyncio _run loop MUST "
+            f"continue past an unexpected tick exception (this "
+            f"service is the load-bearing U1 backstop — a "
+            f"permanent exit would silently re-open U1). Expected "
+            f">= 2 ticks (1st raised + 2nd survived) over 2.5s; "
+            f"got ticks={ticks_via_loop}, "
+            f"errors_total={sweep.counters()['errors_total']}."
+        )
+
+        # Invariant 3: stop() exited cleanly — _task cleared, no
+        # orphaned task. The CancelledError path inside _run
+        # propagated cleanly through ``stop()``'s cancel+await.
+        assert sweep._task is None
+
+        # Restore the helper for any downstream test sharing
+        # this fixture (defensive — u1_components is scoped per
+        # test, but be explicit).
+        jqs.reconcile_held_watches_for_instance = original_helper
 
 
 # ── P2 — TOOL-ENTRY contract ──────────────────────────────────────────────
@@ -1431,7 +1566,6 @@ class TestZombieRowGC:
         # at the ``await`` since its ``return_value`` is not a
         # coroutine).
         import daemon.services.job_queue_service as jqs_module
-        from unittest.mock import AsyncMock
 
         original_eval = jqs_module.evaluate_mission_live
         jqs_module.evaluate_mission_live = AsyncMock(
@@ -1462,6 +1596,109 @@ class TestZombieRowGC:
             "deletion when mission is live."
         )
 
+    @pytest.mark.asyncio
+    async def test_zombie_row_retired_when_guard_raises(
+        self, u1_components, caplog,
+    ):
+        """Zombie GC — guard raises → fail-closed retire + WARN.
+
+        Tidier item E (cycle 2) — verifies the dedicated log
+        line added in ITEM B fires when ``evaluate_mission_live``
+        raises (DB hiccup / wiring gap). The pre-cycle-2 code
+        claimed "The WARN log below captures the anomaly for
+        ops review" but NO WARN log existed — the exception
+        was swallowed silently and the row was retired without
+        any operational trace.
+
+        Invariants:
+
+          1. The row IS retired (fail-closed: work is gone,
+             guard raised, default retire=True — a transient
+             guard failure MUST NOT leave zombie rows stranded
+             on the assumption the guard will recover next
+             tick, since this is the GC leg, not the
+             notify leg).
+          2. The new ITEM B WARNING fires (assert on the log
+             record — the helper's logger name is
+             ``daemon.services.job_queue_service``).
+        """
+        import logging
+
+        import daemon.services.job_queue_service as jqs_module
+
+        engine = u1_components["engine"]
+        watcher_repo = u1_components["watcher_repo"]
+        resolver = u1_components["resolver"]
+        jqs = u1_components["jqs"]
+
+        # Seed a row whose work_id has NO matching Task /
+        # JobItem — the resolver will return None.
+        wid = f"wid-zombie-guard-raises-{uuid4().hex[:8]}"
+        _seed_instance(engine, instance_id="watcher-zombie-guard-raises")
+        _add_watch(
+            engine, work_id=wid,
+            instance_id="watcher-zombie-guard-raises",
+            watch_events=["mission_terminal"],
+        )
+
+        # No Task row + no JobItem row → resolver returns None.
+        original_resolve = resolver.resolve_work
+        resolver.resolve_work = MagicMock(return_value=None)
+        # Patch ``evaluate_mission_live`` to RAISE — exercises the
+        # fail-closed retire branch in the except at
+        # ``job_queue_service.py:834`` (the leg that triggered
+        # the ITEM B log-line addition).
+        original_eval = jqs_module.evaluate_mission_live
+        jqs_module.evaluate_mission_live = AsyncMock(
+            side_effect=RuntimeError(
+                "simulated guard failure (U1-slice cycle-2 "
+                "zombie-GC guard-raises pin)"
+            ),
+        )
+        try:
+            with caplog.at_level(
+                logging.WARNING,
+                logger="daemon.services.job_queue_service",
+            ):
+                result = (
+                    await jqs.reconcile_held_watches_for_instance(
+                        instance_id="watcher-zombie-guard-raises",
+                    )
+                )
+        finally:
+            resolver.resolve_work = original_resolve
+            jqs_module.evaluate_mission_live = original_eval
+
+        # Invariant 1: fail-closed retire.
+        assert result["retired"] >= 1, (
+            f"Zombie GC (guard-raises): a guard exception MUST "
+            f"trigger fail-closed retire — got retired="
+            f"{result['retired']}. A silent skip would leave the "
+            f"row stranded (the pre-fix contract)."
+        )
+        assert len(watcher_repo.get_watchers_for_job(wid)) == 0, (
+            "Zombie GC (guard-raises): row MUST be removed from "
+            "the DB on fail-closed retire."
+        )
+
+        # Invariant 2: the new ITEM B WARNING fired. Search for
+        # the dedicated log line that distinguishes "guard DB
+        # hiccup → fail-closed retire" from "cleanly verified
+        # terminal" (which emits no log line).
+        warning_records = [
+            record for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "zombie-GC guard raised" in record.getMessage()
+        ]
+        assert len(warning_records) >= 1, (
+            f"Zombie GC (guard-raises): the new ITEM B WARNING "
+            f"('zombie-GC guard raised ... fail-closed retire') "
+            f"MUST fire so ops can distinguish a guard DB hiccup "
+            f"from a cleanly verified terminal verdict. Captured "
+            f"WARNING records: "
+            f"{[(r.levelname, r.getMessage()[:60]) for r in caplog.records if r.levelno == logging.WARNING]}"
+        )
+
 
 # ── Boot-marker / config knob PIN ────────────────────────────────────────
 
@@ -1488,7 +1725,9 @@ class TestConfigKnobAndServiceShape:
         )
 
         # Floor 1s — out-of-range values FAIL FAST AT BOOT.
-        with pytest.raises(Exception):
+        # Pydantic's ``Field(ge=1)`` raises
+        # ``pydantic_core.ValidationError`` on constraint violations.
+        with pytest.raises(ValidationError):
             ServicesConfig(
                 watch_reconcile_sweep_interval_seconds=0,
             )

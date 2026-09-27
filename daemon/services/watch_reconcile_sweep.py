@@ -292,24 +292,52 @@ class WatchReconcileSweepService:
         pattern — the ``_stopping`` flag is only a defensive
         guard for the path between ``sweep_once`` return and
         the next ``asyncio.sleep`` call, not the primary exit
-        mechanism (mirrors ``JobLockSweepService._run``).
+        mechanism.
+
+        **DELIBERATE DEVIATION FROM TEMPLATE-B
+        (``JobLockSweepService._run``)** — Template-B exits
+        PERMANENTLY on an unexpected ``Exception`` (the
+        ``JobLockSweepService`` family has the same KNOWN
+        defect, inherited). For *this* service that's
+        unacceptable: it is the load-bearing
+        held-mission_terminal starvation BACKSTOP — one
+        uncaught exception silently re-opens U1 (rows stay
+        held forever, no recovery short of a daemon restart).
+        This loop therefore LOGS AND CONTINUES on unexpected
+        ``Exception`` — ``logger.exception`` captures the
+        traceback, then the loop proceeds to the next
+        ``asyncio.sleep(interval_seconds)`` and fires tick
+        N+1 normally.
+
+        Cancellation (``CancelledError``) is NOT swallowed —
+        it propagates out of the inner ``try`` so ``stop()``
+        exits CLEANLY (the task cancels the ``asyncio.sleep``
+        on the next iteration).
         """
-        try:
-            while not self._stopping:
+        while not self._stopping:
+            try:
                 await self.sweep_once()
-                await asyncio.sleep(self._interval_seconds)
-        except asyncio.CancelledError:
-            # Normal shutdown path via stop() — exit cleanly.
-            return
-        except Exception as loop_err:  # noqa: BLE001
-            # Defensive: an unexpected loop error must not crash
-            # the sweep. Logged; the loop exits so the daemon
-            # lifespan can shut down cleanly. (The next sweep
-            # service restart — if any — would re-enter via
-            # ``start()``; in practice the loop is only stopped
-            # via ``stop()``, so this is a belt-and-braces guard.)
-            logger.error(
-                f"WatchReconcileSweepService: unexpected loop "
-                f"error: {loop_err}",
-                exc_info=True,
-            )
+            except asyncio.CancelledError:
+                # Normal shutdown path via stop() — let it
+                # propagate so stop() awaits a clean exit.
+                raise
+            except Exception as tick_err:  # noqa: BLE001
+                # Unexpected tick error (DB hiccup / repo
+                # wiring glitch / an exception bubbling out of
+                # the helper) — log with full traceback and
+                # continue to the next interval. The structural
+                # backstop MUST survive worker exceptions; a
+                # permanent exit here would silently re-open
+                # the U1 starvation vector (no in-session
+                # re-evaluation until next daemon restart).
+                logger.exception(
+                    f"WatchReconcileSweepService: unexpected "
+                    f"tick error (loop CONTINUES — backstop "
+                    f"must survive worker exceptions): "
+                    f"{type(tick_err).__name__}: {tick_err}"
+                )
+                # Fall through to the sleep; the loop will
+                # re-check ``_stopping`` on the next iteration.
+            if self._stopping:
+                break
+            await asyncio.sleep(self._interval_seconds)

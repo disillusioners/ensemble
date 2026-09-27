@@ -1121,10 +1121,10 @@ class JobFeedbackObserver:
                 error_message=error,
             )
             logger.debug(
-                f"Skipping {status} event for instance "
-                f"{instance_id[:8]}... (held-watcher re-fire via "
-                f"_fire_watcher_notify_for_terminal; "
-                f"notify_status={_u_slice_terminal_notify_status})"
+                f"Handling {status} event for instance "
+                f"{instance_id[:8]}... via held-watcher re-fire "
+                f"through ``_fire_watcher_notify_for_terminal``; "
+                f"notify_status={_u_slice_terminal_notify_status}"
             )
             return
 
@@ -1562,13 +1562,24 @@ class JobFeedbackObserver:
         # existing ``notify_watchers`` CAS-claim. Fail-soft — the
         # ``reconcile_terminal_watches`` boot sweep + the new
         # ``WatchReconcileSweepService`` are the backstops.
+        #
+        # Note: no ``self._job_queue_service is None`` guard here —
+        # the enclosing ``_fire_watcher_notify_for_terminal`` early-
+        # returns at the top when ``_job_queue_service`` is ``None``
+        # (line 1468), so by this point the reference is provably
+        # non-None. Dropping the dead guard keeps the hook arm
+        # symmetric with the post-commit outbox seam at ~:2390
+        # (which DOES still guard — see that comment for the
+        # asymmetry rationale).
         try:
-            if self._job_queue_service is not None:
-                await self._job_queue_service.reconcile_held_watches_for_instance(
-                    instance_id=instance_id,
-                )
+            await self._job_queue_service.reconcile_held_watches_for_instance(
+                instance_id=instance_id,
+            )
         except Exception as hook_err:
-            logger.debug(
+            logger.warning(
+                # WARNING parity with the outer catch at :1547 — the
+                # sweep retries within the interval so a single
+                # transient hook glitch is not silent.
                 f"Observer: u1-slice hook (a) failed for instance "
                 f"{instance_id[:8]}... (non-fatal, swept by "
                 f"WatchReconcileSweepService next tick): {hook_err}"
@@ -2392,7 +2403,11 @@ class JobFeedbackObserver:
                         instance_id=instance_id,
                     )
             except Exception as hook_err:
-                logger.debug(
+                # WARNING parity with the outer catch at :1547 — the
+                # sweep retries within the interval so a single
+                # transient hook glitch is not silent. Same rationale
+                # as hook (a) at :1570.
+                logger.warning(
                     f"Observer: u1-slice hook (b) failed for "
                     f"instance {instance_id[:8]}... (non-fatal, "
                     f"swept by WatchReconcileSweepService next "

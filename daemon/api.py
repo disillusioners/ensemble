@@ -939,10 +939,15 @@ async def lifespan(app: FastAPI):
     # Wired AFTER the JobLockSweepService boot block (the
     # same "infrastructure sweeps" neighborhood) so the
     # boot-time sweep has the helper available before any
-    # in-flight hook fires. The first sweep tick fires after
-    # the first interval sleep — the helper is fail-soft on
-    # partial wiring so a still-bootstrapping repo is a
-    # silent no-op rather than a crash.
+    # in-flight hook fires. The first sweep tick fires
+    # IMMEDIATELY at start (``_run`` calls ``sweep_once()``
+    # before the first ``asyncio.sleep(interval)``) — a
+    # deliberate "fast on-boot catch-up" so a freshly-restarted
+    # daemon drains any held rows accumulated since the
+    # previous shutdown without waiting a full interval.
+    # The helper is fail-soft on partial wiring so a
+    # still-bootstrapping repo is a silent no-op rather than
+    # a crash.
     from daemon.services.watch_reconcile_sweep import (
         DEFAULT_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS,
         WatchReconcileSweepService,
