@@ -110,7 +110,11 @@ dev: stop sync start
 ensure-latest:
 	@echo "$(YELLOW)Switching to latest branch...$(NC)"
 	git checkout latest
-	git pull
+	@if git pull; then \
+		echo "$(GREEN)Remote sync OK.$(NC)"; \
+	else \
+		echo "$(YELLOW)remote sync skipped/failed — proceeding with local latest$(NC)"; \
+	fi
 
 # Build frontend
 build: ensure-latest

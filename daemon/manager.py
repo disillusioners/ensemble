@@ -4046,6 +4046,44 @@ class InstanceManager:
         :meth:`drain_pending_system_execution` at exact turn-end."""
         self._pending_system_executions[instance_id] = dict(spec)
 
+    def set_upgrade_journal_sweep(self, sweep: Any) -> None:
+        """Wire the ``UpgradeJournalSweepService`` (v0.15.3 P1 Item 4) so the
+        drain seam can enqueue armed executors for exit observation. The
+        drain reads the attribute defensively (``getattr`` + try/except) —
+        an unwired service (unit seams, partial boot) degrades to "no reaper
+        enqueue", never to a drain failure."""
+        self._upgrade_journal_sweep = sweep
+
+    def _journal_executor_orphaned(
+        self, install_dir: Path, kind: str, run_id: str
+    ) -> None:
+        """Best-effort ``executor_orphaned`` journal append (R-M5-2 / v0.15.3
+        P1 Item 1 pre-spawn guard): the drain reached the spawn seam but no
+        matching durable pending_op exists (absent, or a different run_id —
+        M-2 binding) — the child would carry no journal record of its own
+        and be unverifiable, so it is NOT spawned. Emit-NOTHING observability
+        class (NOT in ``_TERMINAL_EVENTS``); only the EXPECTED torn-journal /
+        I/O failure modes are swallowed here so the drain path can stay
+        never-raises — genuine faults propagate to the outer drain's
+        context-rich handler."""
+        try:
+            from daemon.tools import upgrade_journal as _uj
+
+            _uj.journal_history_append(
+                install_dir,
+                "executor_orphaned",
+                f"drain refused spawn: no matching durable pending_op for "
+                f"kind={kind} "
+                f"run_id={run_id} install_dir={install_dir} "
+                "(reason=executor-orphaned)",
+            )
+        except (OSError, _uj.JournalTorn) as exc:
+            logger.warning(
+                "[system-execution] executor_orphaned journal write failed "
+                "(refusal stands, nothing spawned): %s",
+                exc,
+            )
+
     async def drain_pending_system_execution(self, instance_id: str) -> bool:
         """Pop the marker and fire the daemonized executor (post-graph path).
 
@@ -4060,12 +4098,20 @@ class InstanceManager:
         * promote  → release the arm-time lock (the handoff — promote.sh
           re-acquires it at its own preflight), then daemonized
           ``promote.sh``; the pending_op closes via lazy reconcile once the
-          promote's terminal event lands in the journal.
+          promote's terminal event lands in the journal. A 3-factor-verified
+          live arm additionally carries the F2 attestation
+          (``--f2-verified-closed`` argv flag + ``ENSEMBLE_UPGRADE_LIVE`` /
+          ``F2_VERIFIED_NOTE`` env extras — v0.15.3 P1 Item 1); unverified
+          arms spawn byte-identically to pre-v0.15.3.
 
         Never raises — a spawn failure is logged as a warning and the
         marker is still consumed (no halt journal event is written here;
         the journal pending_op remains the durable fallback for the
-        boot sweep).
+        boot sweep). If the durable pending_op is MISSING at the spawn
+        seam — or present with a DIFFERENT run_id than the marker (M-2
+        binding: a newer arm superseded the stale marker) — the spawn
+        is refused and an ``executor_orphaned`` journal event records
+        it (R-M5-2 guard).
         """
         spec = self._pending_system_executions.pop(instance_id, None)
         if spec is None:
@@ -4085,6 +4131,12 @@ class InstanceManager:
             if spec.get("port"):
                 extra_env["PORT"] = str(spec["port"])
 
+            # v0.15.3 P1 Item 1: read the pending_op BEFORE the spawn — the
+            # loaded record feeds BOTH the verified-arm argv/env gate below
+            # AND the post-spawn owner stamp (one read, two consumers).
+            # read_pending_op never raises (torn/absent → None).
+            op = _uj.read_pending_op(install_dir)
+
             if kind == "restart":
                 argv = [
                     "bash", str(scripts_dir / "restart.sh"), env,
@@ -4100,11 +4152,39 @@ class InstanceManager:
                     "bash", str(scripts_dir / "promote.sh"), env,
                     "--version", str(spec.get("target", "")),
                 ]
+                # v0.15.3 P1 Item 1 (user ratification 2026-09-26): a
+                # 3-factor-verified live arm carries its F2 attestation to
+                # the gate. Explicit gate — the UNVERIFIED path below is
+                # byte-identical to pre-v0.15.3 (no flag, no env extras →
+                # the child hits require_live_guard and exits 78, now
+                # journaled by the reaper). EXECUTOR_ENV_ALLOWLIST is NOT
+                # widened: the extras ride the executor_env explicit-extra
+                # merge, which is per-call-site and never ambient.
+                if _uj.is_verified_arm(op):
+                    argv_ext, env_ext = _uj._verified_arm_extras(op)
+                    argv = argv + argv_ext
+                    extra_env.update(env_ext)
             else:
                 logger.warning(
                     "drain_pending_system_execution: unknown kind=%r for %s",
                     kind, instance_id[:8],
                 )
+                return False
+
+            if op is None or op.run_id != run_id:
+                # R-M5-2 pre-spawn guard (v0.15.3 P1 Item 1) + M-2 run_id
+                # binding: the drain reached the spawn seam but the durable
+                # pending_op either is gone (torn/lost journal write) or no
+                # longer describes THIS marker's run (a newer arm superseded
+                # the stale marker). A child the durable journal does not
+                # vouch for — no record, or a different run_id — is
+                # unverifiable and must never spawn, and never ride a newer
+                # op's verified-arm attestation. Refuse loudly instead; the
+                # marker stays consumed (one shot per armed op) and the
+                # operator investigates via upgrade.log + journal history.
+                # Mirrors the post-spawn owner stamp below, which likewise
+                # only touches an op whose run_id matches.
+                self._journal_executor_orphaned(install_dir, kind, run_id)
                 return False
 
             child_pid = _uj.spawn_executor(argv, install_dir, extra_env)
@@ -4113,10 +4193,32 @@ class InstanceManager:
                 "(daemonized, start_new_session)",
                 kind, run_id, child_pid,
             )
+            # v0.15.3 P1 Item 2: UNCONDITIONAL reaper enqueue — every armed
+            # executor is observed to its exit by the sweep-service worker
+            # (an UNVERIFIED arm's exit-78 is exactly the observability this
+            # exists for; no is_verified_arm gate here). Best-effort: the
+            # never-raises contract below holds — an enqueue failure (no
+            # sweep wired, queue error) logs a warning and the arm's journal
+            # pending_op remains the durable fallback.
+            sweep = getattr(self, "_upgrade_journal_sweep", None)
+            if sweep is not None:
+                try:
+                    sweep.enqueue_reaper(
+                        child_pid,
+                        [str(a) for a in argv],
+                        install_dir,
+                        run_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[system-execution] reaper enqueue failed for "
+                        "pid=%s run_id=%s: %s — exit will not be observed "
+                        "(journal pending_op remains)",
+                        child_pid, run_id, exc,
+                    )
             # Record the executor identity in the journal pending_op
             # (advisory owner info; the op itself is already durable).
             try:
-                op = _uj.read_pending_op(install_dir)
                 if op is not None and op.run_id == run_id:
                     op.owner_pid = child_pid
                     op.owner_kind = "executor"

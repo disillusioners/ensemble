@@ -43,7 +43,6 @@ from typing import Any, Callable, Coroutine
 from daemon.checkpoint_adapter import CheckpointerAdapter
 from daemon.config import PersistenceConfig
 from daemon.constants import (
-    CHECKPOINT_MAX_PER_THREAD,
     CHECKPOINT_TTL_HOURS,
     MAX_INSTANCE_HISTORY,
 )
@@ -363,7 +362,7 @@ class CheckpointCleanupJob:
     (A) Delete checkpoint threads with no matching instance (orphans)
     (B) Delete checkpoint data for expired terminal instances
     (C) Enforce max_instance_history cap on terminal instances
-    (D) Prune per-thread checkpoints to CHECKPOINT_MAX_PER_THREAD
+    (D) Prune per-thread checkpoints to ``config.checkpoint_max_per_thread``
     (E) Reference-aware checkpoint_blobs prune (Phase 1 C3 — dry-run by
         default, PostgreSQL-only, isolated so blob-bucket failures can
         never affect A-D)
@@ -792,10 +791,20 @@ class CheckpointCleanupJob:
             logger.error(f"History cap enforcement failed: {e}")
 
     async def _prune_per_thread_checkpoints(self) -> None:
-        """(D) For each thread, keep only the latest CHECKPOINT_MAX_PER_THREAD checkpoints.
+        """(D) For each thread, keep only the latest ``config.checkpoint_max_per_thread`` checkpoints.
 
         Queries the checkpoint database to find threads with more than
-        CHECKPOINT_MAX_PER_THREAD checkpoints, then deletes the oldest ones.
+        ``self._config.checkpoint_max_per_thread`` checkpoints, then deletes
+        the oldest ones. The retention N is operator-tunable via the
+        ``CHECKPOINT_MAX_PER_THREAD`` env var (default 3, floor 1 enforced
+        by ``PersistenceConfig.checkpoint_max_per_thread`` ``ge=1`` at config
+        load — the ge=1 guard makes a 0 / negative value unreachable in
+        practice; if it were bypassed, the failure mode would be a silent
+        no-op wedge: ``find_excess_checkpoint_groups(N=0)`` returns no
+        rows (the adapter ``HAVING COUNT(*) > 0`` filters every thread
+        out) AND ``get_checkpoint_ids(N=0)`` returns ``[]`` which makes
+        ``_prune_thread_checkpoints`` early-return without deleting —
+        retention drifts unbounded, never silent-mass-prune).
 
         Uses checkpointer.find_excess_checkpoint_groups() to identify threads
         that exceed the cap, and the partial-pruning helpers
@@ -839,7 +848,17 @@ class CheckpointCleanupJob:
         observed_total_deleted = 0
         try:
             try:
-                max_per_thread = CHECKPOINT_MAX_PER_THREAD
+                max_per_thread = self._config.checkpoint_max_per_thread
+                # DEBUG-level once-per-pass observability for the
+                # env-tunable retention knob. Runs at most once per
+                # ``checkpoint_cleanup_interval`` (default 24h,
+                # ``CHECKPOINT_CLEANUP_INTERVAL_HOURS`` in
+                # ``daemon/constants.py``) so it isn't noisy. Matches the
+                # file's no-op-branch convention of logging at DEBUG.
+                logger.debug(
+                    f"Per-thread checkpoint retention: max_per_thread={max_per_thread} "
+                    f"(CHECKPOINT_MAX_PER_THREAD env)"
+                )
 
                 # Find threads with excessive checkpoints via the adapter.
                 # The SQLite adapter wraps this in AsyncSqliteSaver's lock.

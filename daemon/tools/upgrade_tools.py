@@ -61,6 +61,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -1018,12 +1019,31 @@ def _check_target_env(
     return None
 
 
-def _terminal_outcome(journal: dict[str, Any] | None) -> tuple[str, dict[str, Any] | None]:
-    """Derive the terminal outcome from the last journal history event.
+# v0.15.3 P1 Item 5: the status-view terminal vocabulary — derived FROM
+# ``uj._TERMINAL_EVENTS`` (the single source, never forked) plus ONE
+# status-only extension: ``restart`` is the restart lane's successful-
+# completion event (restart.sh appends it after the /livez gate is green).
+# It is deliberately ABSENT from the reconcile tuple (a restart event must
+# never close a promote pending_op — reconcile uses the strict tuple) but
+# it IS terminal for status display (pinned by the drain round-trip test).
+_TERMINAL_OUTCOME_EVENTS = uj._TERMINAL_EVENTS + ("restart",)
 
-    The P2.1 journal is NOT run-id keyed — its event vocabulary is
-    commit | rollback | quarantine | sweep | sweep_rollback | halt (lib.sh
-    journal schema comment). Outcome mapping is from that vocabulary only.
+
+def _terminal_outcome(journal: dict[str, Any] | None) -> tuple[str | None, dict[str, Any] | None]:
+    """Derive the terminal outcome from the last TERMINAL-CLASS journal
+    history event.
+
+    v0.15.3 P1 Item 5: filter history with ``_TERMINAL_OUTCOME_EVENTS``
+    (``uj._TERMINAL_EVENTS`` + the restart-lane completion event — see
+    above) and return the FIRST entry that passes; the pre-existing
+    ``reversed(history)`` walk is the search direction, not the delta.
+    Transition events (``nonce_consumed`` etc.) no longer masquerade as
+    TERMINAL — history that carries NO terminal event returns
+    ``(None, None)`` (the arm is armed, not finished; the consumer now
+    prints PENDING instead of a bogus TERMINAL block).
+
+    Early returns preserved: ``"unknown"`` for a non-dict journal,
+    ``"idle"`` for empty/missing history.
     """
     if not isinstance(journal, dict):
         return "unknown", None
@@ -1031,9 +1051,12 @@ def _terminal_outcome(journal: dict[str, Any] | None) -> tuple[str, dict[str, An
     if not isinstance(history, list) or not history:
         return "idle", None
     for entry in reversed(history):
-        if isinstance(entry, dict) and entry.get("event"):
+        if (
+            isinstance(entry, dict)
+            and str(entry.get("event", "")) in _TERMINAL_OUTCOME_EVENTS
+        ):
             return str(entry["event"]), entry
-    return "idle", None
+    return None, None
 
 
 _OUTCOME_LABELS: dict[str, str] = {
@@ -1044,7 +1067,11 @@ _OUTCOME_LABELS: dict[str, str] = {
     "halt": "halted-for-human",
     "quarantine": "quarantine recorded",
     "restart": "restarted (intentional)",
-    "nonce_consumed": "live-confirmation nonce consumed",
+    # v0.15.3 P1 Item 5: nonce_consumed is a TRANSITION event (arm completed,
+    # executor not yet observed) — it no longer flows out of
+    # _terminal_outcome as a terminal outcome; the label keeps the honest
+    # "awaiting executor (pending)" wording.
+    "nonce_consumed": "awaiting executor (pending)",
 }
 
 
@@ -1890,7 +1917,22 @@ Returns:
                 )
             else:
                 event_key, last_entry = _terminal_outcome(journal)
-                if journal_status == "ok" and event_key != "idle":
+                if journal_status == "ok" and event_key is None:
+                    # v0.15.3 P1 Item 5: history exists but carries NO
+                    # terminal-class event (e.g. nonce_consumed only — the
+                    # arm completed, the executor has not reported). NOT
+                    # terminal — say so instead of masquerading.
+                    lines.append(
+                        "PENDING — no terminal journal event yet "
+                        "(awaiting executor; nonce_consumed and other "
+                        "transition events are not terminal)"
+                    )
+                    if isinstance(journal, dict):
+                        lines.append(
+                            f"current={journal.get('current')} previous={journal.get('previous')} "
+                            f"{_rollback_window_summary(journal)}"
+                        )
+                elif journal_status == "ok" and event_key != "idle":
                     lines.append("TERMINAL")
                     if last_entry is not None:
                         lines.append(
@@ -2681,6 +2723,107 @@ never decides go/rollback).
                     "pipeline-busy",
                     f"per-env lock held (run_id={busy_run or '?'}) — retry via upgrade_status",
                 )
+            # ── v0.15.3 P1 Item 3: ARM PREFLIGHT (pre-nonce-burn) ──────────
+            # Runs AFTER the lock is ours (correct serialization — the plan's
+            # recommended between-lock-and-burn slot) but BEFORE the nonce
+            # burn below, so a refused preflight NEVER wastes the nonce. Each
+            # check carries its own D-FA2.2 reason token: lock released +
+            # refusal journaled (best-effort via _refusal → the live
+            # read-only carve-out applies) + clean return — the arm simply
+            # did not happen.
+            #
+            # Check 1 — scripts resolvable. Redundant with the pre-lock
+            # refusal above by intent (defense-in-depth): REUSES the existing
+            # ``executor-scripts-unavailable`` token.
+            if scripts_dir is None or not (scripts_dir / "promote.sh").is_file():
+                journal_lock_release(install_dir)
+                return _refusal(
+                    label,
+                    "executor-scripts-unavailable",
+                    "arm preflight: cannot resolve scripts/upgrade/promote.sh "
+                    "(set ENSEMBLE_UPGRADE_SCRIPTS_DIR or run from a source "
+                    "checkout)",
+                )
+            # Check 2 — argv/env construction works. The shared verified-arm
+            # helpers from Item 1 run against a synthetic op built exactly
+            # like the durable one below — the construction must not raise
+            # and the note fields must be sane strings.
+            try:
+                if not isinstance(run_id, str) or not run_id:
+                    raise TypeError(
+                        f"run_id must be a non-empty string, got {run_id!r}"
+                    )
+                if confirmed_source is not None and not isinstance(
+                    confirmed_source, str
+                ):
+                    raise TypeError(
+                        "confirmed_source must be a string, got "
+                        f"{type(confirmed_source).__name__}"
+                    )
+                probe_op = PendingOp(
+                    run_id=run_id,
+                    kind="promote",
+                    env=self_env,
+                    target=version,
+                    nonce_consumed=confirmed_action is not None,
+                    confirmed_by_human=confirmed_source is not None,
+                    confirmed_source=confirmed_source,
+                )
+                argv_ext_probe, env_ext_probe = (
+                    ([], {})
+                    if not uj.is_verified_arm(probe_op)
+                    else uj._verified_arm_extras(probe_op)
+                )
+                if env_ext_probe:
+                    note = env_ext_probe.get("F2_VERIFIED_NOTE", "")
+                    if not isinstance(note, str) or not note:
+                        raise TypeError(
+                            "F2_VERIFIED_NOTE must be a non-empty string, got "
+                            f"{type(note).__name__}"
+                        )
+            except (TypeError, AttributeError, KeyError, ValueError) as exc:
+                # Schema regression (AttributeError / KeyError) must NOT be
+                # masqueraded as the expected preflight-argv-unconstructable
+                # token — log the traceback AND return the refusal so the
+                # tool remains never-raises.
+                logger.warning(
+                    "arm preflight: verified-arm argv/env construction "
+                    "failed (%s: %s)",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                journal_lock_release(install_dir)
+                return _refusal(
+                    label,
+                    "preflight-argv-unconstructable",
+                    f"arm preflight: verified-arm argv/env construction failed "
+                    f"({type(exc).__name__}: {exc}) — nonce NOT burned",
+                )
+            # Check 3 — argv syntactic validity: every flag the verified arm
+            # would append must exist in promote.sh's case statement (READ
+            # ONLY — promote.sh is never edited by this check). A flag the
+            # script does not know would die at its unknown-flag trap (exit
+            # 78) AFTER the nonce was spent.
+            if argv_ext_probe:
+                try:
+                    promote_sh = (scripts_dir / "promote.sh").read_text(
+                        encoding="utf-8"
+                    )
+                except OSError:
+                    promote_sh = ""
+                for flag in argv_ext_probe:
+                    if not re.search(
+                        rf"^[ \t]*{re.escape(flag)}\)", promote_sh, re.MULTILINE
+                    ):
+                        journal_lock_release(install_dir)
+                        return _refusal(
+                            label,
+                            "preflight-argv-malformed",
+                            f"arm preflight: promote.sh at {scripts_dir} has no "
+                            f"case for {flag} — the flag would hit the "
+                            "unknown-flag trap (exit 78); nonce NOT burned",
+                        )
             try:
                 if confirmed_action is not None:
                     uj.consume_pending_action(

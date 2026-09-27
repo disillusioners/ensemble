@@ -594,6 +594,35 @@ class PersistenceConfig(BaseSettings):
     maintenance_check_interval_minutes: int = Field(default=MAINTENANCE_CHECK_INTERVAL_MINUTES)
     max_instance_history: int = Field(default=MAX_INSTANCE_HISTORY)
 
+    # ── Per-thread retention cap (Op D prune, daemon/services/maintenance.py) ─
+    # Max checkpoints to keep per (thread_id, checkpoint_ns). The cleanup job
+    # in ``_prune_per_thread_checkpoints`` reads this value via
+    # ``self._config.checkpoint_max_per_thread`` and prunes the oldest
+    # checkpoints while preserving the latest N. Default 3 (was the hardcoded
+    # ``daemon.constants.CHECKPOINT_MAX_PER_THREAD`` value of 50; lowered to 3
+    # so long-running instances don't accumulate a multi-week checkpoint tail
+    # they never resume against). Floor 1 enforced by ``ge=1`` — 0 / negative
+    # would prune EVERY checkpoint (including the latest) and break resume;
+    # pydantic raises ``ValidationError`` at config load when violated. Override via env: ``CHECKPOINT_MAX_PER_THREAD``.
+    # ``validation_alias`` is explicit (no ``PERSISTENCE_`` prefix) so the
+    # env name matches the historical Python constant and is discoverable
+    # by operators who know the constant name. YAML key remains
+    # ``persistence.checkpoint_max_per_thread``.
+    checkpoint_max_per_thread: int = Field(
+        default=3,
+        ge=1,
+        validation_alias=AliasChoices(
+            "checkpoint_max_per_thread",
+            "CHECKPOINT_MAX_PER_THREAD",
+        ),
+        description=(
+            "Max checkpoints to keep per thread (parent chain preserved). "
+            "Default 3. Floor 1 (0/negative fails loud at config load — "
+            "would prune ALL checkpoints including the latest, breaking "
+            "resume). Override via env: CHECKPOINT_MAX_PER_THREAD."
+        ),
+    )
+
 
 class QueueConfig(BaseSettings):
     """Message queue configuration settings."""
@@ -1564,6 +1593,42 @@ class ServicesConfig(BaseSettings):
             "interval knob tunes responsiveness vs DB load. "
             "Floor 1s; out-of-range values FAIL FAST AT BOOT. "
             "Override via SERVICES_JOB_LOCK_SWEEP_INTERVAL_SECONDS."
+        ),
+    )
+    # v0.15.3 P1 Item 4 — upgrade-journal sweep + executor reaper knobs.
+    # ALWAYS-ON infrastructure (no kill-switch — same HARD POLICY as the
+    # F3 sweep); the levers are the interval + the reaper wait.
+    upgrade_journal_sweep_interval_seconds: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "v0.15.3 P1 Item 4: how often the "
+            "``UpgradeJournalSweepService`` runs its reconcile + "
+            "pending-actions GC tick (seconds). Default 90s matches "
+            "the other periodic sweeps. The tick reuses the UNCHANGED "
+            "``reconcile_pending_op`` (tool entry is no longer the only "
+            "sweep — stale armed ops no longer starve re-arm) and "
+            "``gc_pending_actions(keep_run_id=None)``. A tick skips "
+            "clearing while the armed op's executor pid is alive-recent "
+            "(time-bound liveness, not bare pid-existence). Floor 1s; "
+            "out-of-range values FAIL FAST AT BOOT. Override via "
+            "SERVICES_UPGRADE_JOURNAL_SWEEP_INTERVAL_SECONDS."
+        ),
+    )
+    upgrade_journal_reaper_timeout_seconds: int = Field(
+        default=660,
+        ge=60,
+        description=(
+            "v0.15.3 P1 Item 4: how long the "
+            "``UpgradeJournalSweepService`` reaper waits for an armed "
+            "executor child to exit before BENIGN-DETACH (journal "
+            "``executor_still_running``, no kill, no raise — the child "
+            "leads its own process group and the OS reaps it). Default "
+            "660s: livez 60 + readyz 120 + soak 300 + overhead ≈ 490s "
+            "observed minimum for a live promote. Floor 60s rejects "
+            "nonsensical sub-minute values; out-of-range values FAIL "
+            "FAST AT BOOT. Override via "
+            "SERVICES_UPGRADE_JOURNAL_REAPER_TIMEOUT_SECONDS."
         ),
     )
     # Phase 3 of plane-integration-revival — retry machinery. Knobs for
