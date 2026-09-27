@@ -1931,8 +1931,8 @@ class CheckpointCleanupDryRunResponse(BaseModel):
         referenced but whose ONLY referencers are excess rows Op D
         will delete. Skipped pairs (R-4) contribute 0.
       - ``bytes_reclaimable_total`` — derived ``now + after``;
-        informational; the schema docstring states it is derived and
-        requires two passes to materialize on a never-pruned DB.
+        informational; materializing it on a never-pruned DB takes
+        the second (Op D) pass.
 
     All three are projection-class, NEVER gate-bound. Default 0 for
     legacy clients that ignore them; additive on the wire.

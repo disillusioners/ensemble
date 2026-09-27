@@ -64,7 +64,10 @@ from daemon.repositories.instance_ui_prefs.repository import (
 from daemon.repositories.message_metadata.repository import (
     MessageMetadataRepository,
 )
-from daemon.services.checkpoint_prune import BlobPruneSummary
+from daemon.services.checkpoint_prune import (
+    BlobPruneSummary,
+    prune_unreferenced_blobs,
+)
 from daemon.services.job_queue_service import TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -429,8 +432,10 @@ class CheckpointRowPruneSummary:
     whose ONLY referencers are excess rows D will delete" (per-pair
     computed by ``count_blobs_referenced_only_by_excess``; skipped pairs
     contribute 0 per R-4). Pairs whose ``ids_to_keep`` is empty
-    (max_per_thread=0 edge) collapse to the pair's referenced-set
-    total. Field is DRY-RUN ONLY — the destructive arm is out of
+    (max_per_thread=0 edge) contribute 0 — the loop never queries the
+    adapter for them, matching the destructive arm's skip; they do NOT
+    collapse to the pair's referenced-set total. Field is DRY-RUN ONLY
+    — the destructive arm is out of
     scope (auto never calls this method; manual destructive execute
     computes the real reclaim at execute time, not at the dry-run).
     """
@@ -458,6 +463,11 @@ class CheckpointRowPruneSummary:
         dry-run response (§3 ``would_delete`` block) is composed by
         ``MaintenanceApiService`` directly from the
         ``would_delete_*`` fields above — NOT through this method.
+
+        EXCLUSION: ``would_free_bytes_after_row_prune`` lives on this
+        dataclass but is NOT part of this frozen summary shape — it is
+        consumed ONLY by the ``MaintenanceApiService`` manual dry-run
+        wire composer (the §3 projection fields).
         """
         return {
             "checkpoint_rows": {
@@ -1191,7 +1201,6 @@ class CheckpointCleanupJob:
         express ``scanned_pairs=12, excess_pairs=0`` consistently with
         the contract example.
         """
-        import time
         from daemon.checkpoint_perf import log_prune
 
         t0 = time.perf_counter()
@@ -1309,8 +1318,6 @@ class CheckpointCleanupJob:
         ``run_checkpoint_prunes`` entry point both consume it for the
         audit row.
         """
-        from daemon.services.checkpoint_prune import prune_unreferenced_blobs
-
         return await prune_unreferenced_blobs(
             self._checkpointer, destructive=destructive
         )
@@ -1457,12 +1464,6 @@ class CheckpointCleanupJob:
         excess rows survive one extra cycle — conservative under-delete,
         self-healing.
         """
-        # Lazy import (why: ``BlobPruneSummary`` IS already imported at
-        # module top — this line exists as a reader-local re-anchor for
-        # the isinstance guard two lines below; kept lazy + noqa'd so
-        # linters do not "clean" it into a shadow of the module import.
-        from daemon.services.checkpoint_prune import BlobPruneSummary  # noqa: F401 — re-anchored for readers
-
         t0 = time.perf_counter()
         # MANUAL dry-run blob arm: forced dry-run (NOT the env gate —
         # operator's manual preview must NOT inherit an armed env).
@@ -1685,17 +1686,9 @@ class CheckpointCleanupJob:
             # the repo, so an empty set is the only safe answer here.
             return set()
 
-        # NOTE: this call may raise (e.g. DB connectivity failure). We
-        # intentionally do NOT catch it — a pinned instance is a
-        # user-visible guarantee that the instance (and its tree) is
-        # NEVER deletable. If we cannot determine the protected set, the
-        # safe answer is to skip this cleanup cycle and let the next
-        # cycle retry. The two callers (``_cleanup_expired_terminal`` Op
-        # B and ``_enforce_history_cap`` Op C) each wrap their full
-        # operation body in ``try/except Exception``, so the propagated
-        # exception lands there, logs as
-        # "Expired terminal cleanup failed" / "History cap enforcement
-        # failed", and the cycle is skipped without any deletions.
+        # Fail-closed protection: a pinned-set lookup failure propagates
+        # (never degrades to "no protection") so the per-op try/except in
+        # the callers skips the cycle and the next cycle retries.
         pinned_ids = self._ui_prefs_repo.get_pinned_instance_ids()
 
         if not pinned_ids:

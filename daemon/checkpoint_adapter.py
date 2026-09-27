@@ -226,11 +226,13 @@ class CheckpointerAdapter(ABC):
         amendment) — the bytes that Op D of THIS pass will orphan for a
         follow-up blob prune run.
 
-        Empty ``keep_ids`` is a valid edge case (max_per_thread=0 / all
-        rows excess): the EXISTS branch naturally captures "any row refs
-        b" and the NOT EXISTS branch is vacuously TRUE — the result is
-        blobs of the pair referenced by ≥1 row (= referenced set, the
-        total we will orphan after a full-row delete).
+        Callers MUST pass a NON-empty ``keep_ids``: pairs whose keep
+        set is empty (max_per_thread=0 edge) are SKIPPED upstream and
+        contribute 0 to the projection (mirroring the destructive
+        arm's skip) — they never reach this method. (With an empty
+        ``keep_ids`` the SQL would degenerate to the pair's full
+        referenced set, which is exactly why the empty case must stay
+        caller-excluded.)
 
         SQLite: there is no ``checkpoint_blobs`` table — returns
         ``(0, 0)`` after logging a warning (mirror of
@@ -798,10 +800,15 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         EXISTS + NOT EXISTS rather than via the two-query difference
         (amendment R-1, "compute directly as 'referenced-by-excess-only'").
 
-        Empty ``keep_ids`` (max_per_thread=0 edge case): the EXISTS
-        branch naturally expands to "any row refs b" and the NOT EXISTS
-        branch is vacuously TRUE — the result is the referenced set of
-        the pair (= the post-D orphan set when D wipes every row).
+        Callers MUST pass a NON-empty ``keep_ids``: pairs whose keep
+        set is empty (max_per_thread=0 edge) are SKIPPED upstream
+        (``_compute_row_prune_dry_run`` never queries them) and
+        contribute 0 to the projection, matching the destructive
+        arm's skip. (With an empty ``keep_ids`` the EXISTS branch
+        naturally expands to "any row refs b" and the NOT EXISTS
+        branch is vacuously TRUE — the result would be the pair's
+        full referenced set, which is exactly why the empty case must
+        stay caller-excluded.)
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
