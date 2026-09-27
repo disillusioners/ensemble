@@ -587,6 +587,157 @@ class TestCompareImagesHappyPath:
         assert "criteria_override" in message
 
 
+# ── Findings wire-schema extraction (P2-WP8 schema-fix) ─────────────────────
+
+
+class TestFindingsWireSchemaExtraction:
+    """P2-WP8 schema-fix regression pins.
+
+    Root cause (evidence: verdicts/p2-wp8-e2e-findings.md, §E re-fire
+    2026-09-27T03:57Z; raw child return recovered from checkpoint blob
+    of instance 44c63fc3): the comparator emitted a COMPLETE,
+    untruncated findings JSON (finish_reason=stop, no inline
+    ``<think>`` — reasoning rode ``additional_kwargs.reasoning_content``)
+    but wrapped it in a `` ```json `` fence AND drifted from the wire
+    contract (`criteria` vs `per_criterion`, rows keyed `id`, string
+    `evidence`, `severity: "pass"`). No surface told the model the wire
+    schema. Fix: soul.md now pins the wire schema; the facade extracts
+    shape-level noise (fences / ``<think>`` / prose) BEFORE the
+    UNCHANGED schema validation.
+    """
+
+    # The confirmed root-cause shape, trimmed from the recovered raw
+    # return (long evidence strings elided; keys and structure exact).
+    # NOTE: still schema-INVALID even after fence stripping — the
+    # extractor is shape-level tolerance only, never value substitution.
+    REAL_MODEL_DRIFTED_SHAPE = (
+        "```json\n"
+        "{\n"
+        '  "artifact": "compare_images.findings",\n'
+        '  "schema_version": "1.0",\n'
+        '  "pinned_spec_sha": "81113ea0f2ffe0d2e7994e963e34f04f10989887a659a33774e2966af2c85b24",\n'
+        '  "verdict": "conditional_pass",\n'
+        '  "criteria": [\n'
+        "    {\n"
+        '      "id": "structural_layout",\n'
+        '      "severity": "pass",\n'
+        '      "evidence": "Image A: header block above a white card.",\n'
+        '      "expected": "clean hierarchy",\n'
+        '      "observed": "clean hierarchy"\n'
+        "    }\n"
+        "  ],\n"
+        '  "summary": "One major defect on image B H1 mojibake."\n'
+        "}\n"
+        "```"
+    )
+
+    def test_bare_valid_findings_parse_unchanged(self):
+        """Regression guard: bare contract-valid JSON validates exactly
+        as before the fix."""
+        from daemon.tools.compare_tools import _validate_findings
+
+        findings = json.loads(_valid_findings_json())
+        assert _validate_findings(_valid_findings_json()) == findings
+
+    def test_code_fence_wrapped_valid_findings_parse(self):
+        """A `` ```json ``-fenced CONTRACT-VALID payload now parses —
+        the observed presentation-noise class is absorbed shape-level."""
+        from daemon.tools.compare_tools import _validate_findings
+
+        fenced = "```json\n" + _valid_findings_json() + "\n```"
+        findings = json.loads(_valid_findings_json())
+        assert _validate_findings(fenced) == findings
+
+    def test_think_wrapped_valid_findings_parse(self):
+        """A leading ``<think>…</think>`` reasoning block (the known
+        backing-model inline-reasoning behavior) is stripped before
+        validation."""
+        from daemon.tools.compare_tools import _validate_findings
+
+        wrapped = (
+            "<think>\nThe image A header sits above a card.\n</think>\n"
+            + _valid_findings_json()
+        )
+        findings = json.loads(_valid_findings_json())
+        assert _validate_findings(wrapped) == findings
+
+    def test_prose_wrapped_valid_findings_parse(self):
+        """Prose around the JSON object does not defeat validation —
+        the outermost balanced object is extracted."""
+        from daemon.tools.compare_tools import _validate_findings
+
+        wrapped = (
+            "Here are my findings:\n\n"
+            + _valid_findings_json()
+            + "\n\nLet me know if you need more detail."
+        )
+        findings = json.loads(_valid_findings_json())
+        assert _validate_findings(wrapped) == findings
+
+    def test_real_model_drifted_shape_still_rejected(self):
+        """THE confirmed root-cause pin: the shape the real comparator
+        returned (fence + invented keys) is still schema-INVALID.
+        Schema drift is fixed at the SOURCE (soul wire schema), not by
+        validator leniency."""
+        from daemon.tools.compare_tools import _validate_findings
+
+        assert _validate_findings(self.REAL_MODEL_DRIFTED_SHAPE) is None
+
+    def test_schema_still_enforced_after_stripping(self):
+        """Fence-stripping never weakens schema enforcement: an
+        invalid verdict enum inside a fence is still rejected."""
+        from daemon.tools.compare_tools import _validate_findings
+
+        findings = json.loads(_valid_findings_json())
+        findings["verdict"] = "excellent"
+        fenced = "```json\n" + json.dumps(findings) + "\n```"
+        assert _validate_findings(fenced) is None
+
+    def test_no_json_returns_none(self):
+        """Prose-only returns (and the Error-string lane) yield None."""
+        from daemon.tools.compare_tools import _validate_findings
+
+        assert _validate_findings("this is not a findings JSON object") is None
+        assert _validate_findings("") is None
+
+    def test_unterminated_object_returns_none(self):
+        """Truncated JSON (brace never closes) yields None."""
+        from daemon.tools.compare_tools import _validate_findings
+
+        assert _validate_findings('{"verdict": "pass", "per_criterion": [') is None
+
+    def test_braces_inside_evidence_strings_do_not_desync(self):
+        """The balanced-object scan is string-aware: ``{``/``}`` inside
+        evidence prose cannot truncate the extraction."""
+        from daemon.tools.compare_tools import _validate_findings
+
+        findings = json.loads(_valid_findings_json())
+        findings["per_criterion"][0]["evidence"] = [
+            "palette {off-palette #ABCDEF} observed near hero"
+        ]
+        wrapped = "note: findings follow\n" + json.dumps(findings)
+        assert _validate_findings(wrapped) == findings
+
+    async def test_facade_returns_canonical_stripped_json(self):
+        """Facade-level pin: a fenced-but-valid return surfaces as the
+        canonical (stripped) findings JSON in the tool result — noise
+        never leaks to the caller (both dispatch paths use this seam)."""
+        from daemon.tools.compare_tools import create_compare_tools
+
+        manager = _make_manager()
+        fenced = "```json\n" + _valid_findings_json() + "\n```"
+        mock_invoke = AsyncMock(return_value=(fenced, "comp-1"))
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_compare_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                image_a=_SUBSTRATE_ID_A,
+                image_b=_SUBSTRATE_ID_B,
+            )
+
+        assert result == _valid_findings_json()
+
+
 # ── Reuse-by-discovery (AC-4) ────────────────────────────────────────────────
 
 

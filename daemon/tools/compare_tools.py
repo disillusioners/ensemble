@@ -959,6 +959,73 @@ def _resolve_inputs_pair(
 # ── Findings schema validator (P2-WP3 AC-1 / AC-7) ─────────────────────────
 
 
+def _first_balanced_json_object(text: str) -> str | None:
+    """Return the first balanced ``{…}`` span in ``text`` (string-aware),
+    or ``None`` when no balanced object exists. Brace depth ignores
+    characters inside JSON string literals so evidence prose containing
+    ``{``/``}`` cannot desynchronize the scan.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _extract_findings_json(raw: str) -> str | None:
+    """Extract the candidate findings JSON text from the comparator's
+    raw return (shape-level tolerance — P2-WP8 schema-fix).
+
+    The vision backing model may wrap the JSON payload in presentation
+    noise the wire contract never asked for: an inline reasoning block
+    (``<think>…</think>`` — real backing-model behavior when reasoning
+    lands in content instead of ``reasoning_content``), a markdown code
+    fence (`` ```json … ``` ``), or prose around the object.
+
+    This helper strips exactly that shape-level noise and returns the
+    outermost balanced ``{…}`` object text, or ``None`` when no JSON
+    object is present. It performs NO schema checking — validation
+    stays entirely in ``_validate_findings``. Tolerance here is
+    shape-level only; it never substitutes schema-conformant values.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    text = raw.strip()
+    if text.startswith("<think>"):
+        end = text.find("</think>")
+        if end != -1:
+            text = text[end + len("</think>") :].strip()
+    fence = re.match(
+        r"^```[a-zA-Z0-9_-]*[ \t]*\r?\n(.*?)\r?\n?[ \t]*```\s*\Z",
+        text,
+        re.DOTALL,
+    )
+    if fence:
+        text = fence.group(1).strip()
+    if not text.startswith("{"):
+        return _first_balanced_json_object(text)
+    return text
+
+
 def _validate_findings(raw: str) -> dict[str, Any] | None:
     """Validate the comparator agent's return value against the
     findings schema.
@@ -966,6 +1033,12 @@ def _validate_findings(raw: str) -> dict[str, Any] | None:
     Returns the parsed findings dict on success, or ``None`` on any
     schema violation. The caller is responsible for wrapping
     ``None`` in the ``_KIND_SCHEMA_INVALID`` envelope.
+
+    The raw return first passes through ``_extract_findings_json``
+    (P2-WP8 schema-fix), which strips presentation noise — a leading
+    ``<think>…</think>`` reasoning block, a markdown code fence, or
+    surrounding prose — before parsing. Schema enforcement itself is
+    unchanged: shape-level tolerance only, never value substitution.
 
     Schema (P2-WP3 AC-1 + AC-7):
 
@@ -991,8 +1064,11 @@ def _validate_findings(raw: str) -> dict[str, Any] | None:
     """
     if not isinstance(raw, str) or not raw:
         return None
+    candidate = _extract_findings_json(raw)
+    if candidate is None:
+        return None
     try:
-        findings = json.loads(raw)
+        findings = json.loads(candidate)
     except (ValueError, TypeError):
         return None
     if not isinstance(findings, dict):
@@ -1373,7 +1449,10 @@ def create_compare_tools(
                             "severity / evidence / summary)."
                         ),
                     )
-                return raw
+                # Success returns the canonical (noise-stripped)
+                # findings JSON — fences/reasoning wrappers never
+                # leak into the caller's tool result (P2-WP8).
+                return _extract_findings_json(raw) or raw
 
         # Fresh-spawn path — no reusable comparator child, OR
         # reuse-rail chose respawn (TERMINATED / one-shot-budget
@@ -1430,6 +1509,8 @@ def create_compare_tools(
                     "evidence / summary)."
                 ),
             )
-        return raw
+        # Success returns the canonical (noise-stripped) findings
+        # JSON — mirrors the reuse path (P2-WP8).
+        return _extract_findings_json(raw) or raw
 
     return [compare_images]
