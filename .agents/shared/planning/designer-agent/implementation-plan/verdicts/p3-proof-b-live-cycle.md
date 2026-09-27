@@ -44,3 +44,4 @@ step1-job-create.json, job-final.json ×4 runs, worker{1,2,4}-messages.json (red
 ## 6. Disposition
 - :8081 daemon released gracefully post-evidence (per GO lane discipline; DB ensemble_designer_p3 + /tmp/p3boot retained; gateway :4124 UP, shared, never torn down).
 - Proof (b) = the last pinned slice; BOTH proofs now green (proof (a) per caller 04:37Z) → merge protocol may fire (giter re-fetches upstream first).
+**Containment COMPLETED (caller Decision 1 — SHRED): 2026-09-27T05:26:27Z — instance 4683204f thread fully deleted from ensemble_designer_p3 (380 checkpoint_writes + 98 checkpoint_blobs + 145 checkpoints + 2 message_queue + 2 message_metadata rows); DB-wide residual scan ZERO across checkpoint_blobs/checkpoint_writes/checkpoints/message_queue/message_metadata/event/instances/job_queue_items.message/task.result/task.error (bytea-native position() matching + text LIKE, counts only, values never echoed). Branch-priority landing before merge window.**
