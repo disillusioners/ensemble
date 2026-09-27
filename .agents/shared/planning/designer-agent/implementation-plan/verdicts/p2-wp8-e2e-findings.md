@@ -366,3 +366,155 @@ Disambiguate the comparator's schema-invalid output — likely the image-compara
 ---
 
 *End of Gateway diagnostics + §E E2E re-execution section (NOT-GREEN, comparator schema-invalid). Prior NOT-GREEN proof (2026-09-27T03:51:44Z) preserved intact above.*
+
+---
+
+## Schema-fix commission — comparator schema-enforcement fix + §E re-fire GREEN — 2026-09-27T04:13–04:38Z
+
+- **Date:** commission 2026-09-27 ~04:13Z; §E re-fire 2026-09-27T04:27:38Z–04:37:52Z
+- **Worktree:** `/home/nea/ensemble-src-wt-designer-agent-design` (branch `feature/designer-agent-design`; dispatch tip `2dd943d6`, actual local tip at dispatch `0697ed25`; fix commit lands on top)
+- **Operator:** worker (this report)
+- **Verdict:** **GREEN — first iteration (1 of ≤3); no upstream-flake re-fire consumed**
+
+---
+
+### STEP 1 — Root cause from evidence (read-only persistence forensics)
+
+Raw comparator child return recovered from instance persistence — **NOT** from the error envelope. Method: 5-var-scrubbed standalone `#!/bin/bash` psql probe against `ensemble_designer_p1` @ localhost:5432 (creds sourced from worktree `.env`, never logged; names-only echo-verify), child located via `instances.parent_id = ff78cd41-1d8b-4ddb-be25-c832bc8b68df AND agent_id='image-comparator'` → `44c63fc3-0283-413d-ba78-57834f80a5c4` (completed, created 03:58:11Z); final AI message decoded from the `checkpoint_blobs` `messages` channel (v4, 150 342 B msgpack) with the worktree `.venv` langgraph serde (`JsonPlusSerializer.loads_typed`).
+
+**Byte-level findings on the ACTUAL return (`finish_reason=stop`, model `MiniMax-M3`):**
+
+(a) **`<think>` inlining: ABSENT.** Reasoning rode `additional_kwargs.reasoning_content`; the 4 695-char content contains zero `<think>` bytes. Hypothesis 1 (think-in-content parsing) **ELIMINATED** for this failure.
+
+(b) **Truncation: ABSENT.** `finish_reason="stop"` (not `length`); the JSON object is complete through its closing `}` + fence. Hypothesis 2 (token-budget truncation) **ELIMINATED**.
+
+(c) **Code fence: PRESENT.** Content byte 1–7 is ```` ```json ```` and the final 3 bytes are ```` ``` ````. `json.loads(raw)` fails on byte 1 → `_validate_findings` returns None before ANY schema check (**failure layer A — parse-level**).
+
+(d) **Shape mismatch vs `_validate_findings` contract: PRESENT** (**failure layer B — schema-level**). The model self-invented a different-but-reasonable schema:
+
+| Model emitted | Facade contract (P2-WP3 AC-1) |
+|---|---|
+| `criteria: [...]` | `per_criterion: [...]` |
+| row key `id` | row key `criterion` |
+| no `result` key | `result` ∈ {pass, fail} (required) |
+| `severity: "pass"` | severity ∈ {critical, major, minor, nit} |
+| `evidence: "<string>"` | `evidence: list[str]` |
+| extra `artifact` / `schema_version` / `expected` / `observed` / `blocking_findings` / `followup_ticket` | exact required set: verdict / per_criterion / summary / pinned_spec_sha (+ row criterion/result/severity/evidence) |
+
+Note `verdict: "conditional_pass"` itself IS in the facade enum — the drift was structural, not the verdict value.
+
+**CONFIRMED ROOT CAUSE (hypothesis 3): soul output-format gap — the wire schema was specified NOWHERE the model could see.** `agents/image-comparator/soul.md` pinned the semantics (verdict enum, severity taxonomy, anti-drift evidence, "verdict + per-criterion rows + summary") but never the exact JSON wire contract; the facade's task prompt (`compare_tools.py` `compare_message`) carries only bare labels (`image_a`/`image_b`/`criteria_override`/`pinned_spec_sha`), no schema. Given a free hand, MiniMax-M3 wrapped its JSON in a presentation fence and chose its own keys. Two stacked failure layers, one root cause.
+
+**Raw return preserved** at `/tmp/wp8fix/comparator-return.raw.txt` (worktree-external forensics dir; secret-scanned clean) and excerpted verbatim below.
+
+```
+```json
+{
+  "artifact": "compare_images.findings",
+  "schema_version": "1.0",
+  "pinned_spec_sha": "81113ea0f2ffe0d2e7994e963e34f04f10989887a659a33774e2966af2c85b24",
+  "verdict": "conditional_pass",
+  "criteria": [
+    {
+      "id": "structural_layout",
+      "severity": "pass",
+      "evidence": "Image A: header block (title + subtitle) above a contained white card with 6 key-value rows; …",
+      "expected": "Each page exhibits its own appropriate structural hierarchy; the two pages are not required to match.",
+      "observed": "Both pages exhibit clean, type-appropriate layout for their content."
+    },
+    { "id": "content_parity", "severity": "major", "evidence": "Image B H1 reads 'Home â€\" P2-WP6 Different Page' — em-dash is mojibaked …", … },
+    { "id": "token_color_conformance", "severity": "pass", … },
+    { "id": "spacing_alignment", "severity": "pass", … },
+    { "id": "states_a11y_affordances", "severity": "pass", … }
+  ],
+  "out_of_scope": [],
+  "summary": "Verdict: conditional_pass. …One major defect blocks pass: image B H1 contains UTF-8/Latin-1 mojibake where the em-dash should appear…",
+  "blocking_findings": [],
+  "followup_ticket": "Fix image B H1 em-dash encoding: replace mojibake 'â€\"' with U+2014 '—' in the Home page title source."
+}
+```
+```
+
+(Elisions marked `…`; full bytes at the path above. `pinned_spec_sha` was threaded correctly — D6 caller-side routing never in question.)
+
+---
+
+### STEP 2 — Fenced fix (comparator output path ONLY)
+
+| File | Change |
+|---|---|
+| `agents/image-comparator/soul.md` | NEW § "Findings Wire Schema (facade contract — non-negotiable)": exact JSON template (`verdict` / `per_criterion` rows keyed `criterion`+`result`+`severity`+`evidence` / `summary` / `pinned_spec_sha`), enum rules, `evidence` as string ARRAY, bare-object return rule (no fences / no reasoning narration / no prose), wire encoding for `insufficient_evidence` (`result:"fail"` + `severity:"minor"` + judgment-call note — preserves the conditional_pass-at-minimum semantic); Tone "Submission shape" + Workflow line aligned. |
+| `daemon/tools/compare_tools.py` | NEW `_extract_findings_json` + `_first_balanced_json_object` (string-aware balanced-brace scan): strips a leading `<think>…</think>` block, a markdown code fence, or surrounding prose BEFORE the UNCHANGED `_validate_findings`. Both facade call sites (reuse :1367 / fresh :1424 paths) now return the canonical noise-stripped JSON on success. Schema enforcement untouched — tolerance is shape-level only, never value substitution; the drifted real-model shape still fails validation (pinned by test). |
+| `tests/test_compare_tools.py` | NEW `TestFindingsWireSchemaExtraction` (10 pins): bare/fence/`<think>`/prose-wrapped valid payloads parse; the REAL model drifted shape (verbatim structure from the recovered return) still REJECTED; schema still enforced after stripping (invalid enum inside fence → None); braces inside evidence strings cannot desync the scan; facade returns canonical stripped JSON. **5/10 fail pre-fix → 76/76 pass post-fix** (full `tests/test_compare_tools.py`, 1.73 s). |
+
+No bridge, store, spawn-seam, or daemon-wide parsing changes. Fix commit: `ba76b4d9`.
+
+---
+
+### STEP 3 — §E re-fire VERBATIM (iteration 1 — GREEN)
+
+**STEP 0 probes (04:27:38Z, `/tmp/wp8fix/probe-evidence-20260927T042738Z.txt`):** text POST (agentic) → 200; vision POST (vision model, takeover 32×32 PNG, max_tokens=30) → **200 in 0.7s**, real perception (MiniMax-M3 "deep red or crimson red"). Gateway GREEN — no flake carve-out consumed.
+
+**E.2 boot:** `/tmp/p12/scrub-wp8.sh` wrapper, uvicorn `daemon.api:app` on **8079** (boot log `/tmp/wp8fix/boot.log`, POSTGRES_PASSWORD value redacted in the scrub echo line); `/livez` 200 try 6 (~12 s), `/readyz` 200; PG engine `localhost:5432/ensemble_designer_p1` (LOCAL dev). E.3 fixture re-hash: `81113ea0…85b24` — **EXACT MATCH**.
+
+**E.4 designer turn:** instance `aa55c85f-00a3-40a8-adee-6e2d7c758e70` (designer, agent_dir = worktree path, model=vision). Message 1 (§E.4 verbatim body) → job `e50af2fd` settled 04:29:11Z with a clarification question (LLM nondeterminism — this run the designer asked before dispatching instead of auto-routing as in the prior run); caller confirmed the D6 mapping (`pinned_spec_sha=<SHA>`, `criteria` omitted → five-axis default) in a follow-up message → job `1cf29542` **settled 04:34:28Z**.
+
+**Comparator child (spawn-or-reuse evidenced):** daemon log `04:33:25 — compare_images: caller=<caller8> comparator=spawn mode=fresh prior_status=none` (worktree `data/logs/ensemble.log`); instance `165da9a3-6ce2-4514-b1fb-990068eac112`, `invoked_as_tool: true`, `instance_name compare-61bada-vs-ec8460`, completed. Child raw return recovered from its checkpoint blob (164 800 B, v4): **first 3 bytes `{"v` — bare JSON, no fence, no `<think>`, `finish_reason=stop`**, keys exactly `{per_criterion, pinned_spec_sha, summary, verdict}`, 5 rows all schema-valid (fail/minor ×4, pass/nit ×1, evidence arrays of 3–4 strings), SHA echoed exactly. `_validate_findings(raw)` on the recovered bytes: **PASS**. Designer checkpoint tool message == child raw return **byte-identical** (5 226 chars) — canonical passthrough proven end-to-end.
+
+**E.5 findings artifact — designer turn VERBATIM (job `1cf29542` result_summary):**
+
+```
+## Review — P2-WP6 cross-page capture pair — conditional_pass — `81113ea0f2ffe0d2e7994e963e34f04f10989887a659a33774e2966af2c85b24`
+
+**Verdict:** `conditional_pass` (0 critical · 0 blocking major · 4 minor · 1 nit)
+
+**Per-criterion (all five-axis defaults applied):**
+
+| Criterion | Result | Severity | Note |
+|---|---|---|---|
+| structural_layout | fail | minor | Settings-table vs hero+list — intentional per WP6 acceptance gate |
+| content_parity | fail | minor | Zero shared text — intentional (settings metadata vs verification copy) |
+| token_color_conformance | fail | minor | Inverted light/dark palettes — intentional, no shared token set expected |
+| spacing_alignment | fail | minor | Right-justified two-column vs single-column flow — intentional |
+| states_a11y | pass | nit | Both surfaces use proper semantic structure; badge conveys status via color + text (not color-alone) |
+
+**Designer read:** All four minors are annotated by the comparator as deliberate divergence per the WP6 acceptance gate — settings + home captures must differ in layout and palette so md5-divergence proves the capture is real (not a stub). The single passing axis (states_a11y) confirms both surfaces are accessibility-clean for their respective archetypes. No blocking defects.
+
+**Recommendation:** Ship the pair. Verify md5-divergence check accepts both captures. No spec amendment required — the divergence is the acceptance criterion, not a regression.
+
+**Conformance SHA cited:** `81113ea0f2ffe0d2e7994e963e34f04f10989887a659a33774e2966af2c85b24` (per Cardinal Rule #1).
+
+No re-dispatch needed. If the md5-divergence check fails downstream, escalate back with the rejected capture paths and I'll re-inspect against this same SHA.
+```
+
+**Comparator raw return (new, VERBATIM, first row full + remainder row-summarised; full 5 226 bytes preserved at `/tmp/wp8fix/comparator-return2.raw.txt`, secret-scanned clean):**
+
+```json
+{"verdict":"conditional_pass","per_criterion":[{"criterion":"structural_layout","result":"fail","severity":"minor","evidence":["image_a: header 'Project Settings' + subtitle 'P2-WP6 — designer-agent capture procedure verification' + single white card containing 6 horizontal rows (label left, value right) anchored top-left of viewport at ~32px inset","image_b: header 'Home — P2-WP6 Different Pa…
+
+(…4 more rows in the same shape: content_parity fail/minor, token_color_conformance fail/minor, spacing_alignment fail/minor, states_a11y pass/nit; summary paragraph; pinned_spec_sha exact.)
+
+Full verbatim bytes: /tmp/wp8fix/comparator-return2.raw.txt (committed counterpart of this table = the byte-identity + schema assertions above; the file itself stays out of git to keep verdicts/ lean).
+```
+
+**E.7 cleanup:** designer instance terminated (`{"terminated":true}`); daemon SIGTERM → port 8079 released + `Graceful shutdown complete` 04:37:52Z; substrate ids `61badab6…`/`ec846091…` and PD-31 substrate `2747d340…` PRESERVED untouched; `:4124` gateway and `:8081` launchpad UP and untouched throughout; live 9797 / demo 7979 / prod-demo DBs never approached (5-var scrub + names-only echo-verify on every DB touch).
+
+### §E.5 assertion table (GREEN)
+
+| Assertion | Expected | Observed | Verdict |
+|-----------|----------|----------|---------|
+| Findings schema-valid (real verdict enum + `per_criterion` rows w/ severity + evidence + summary) | Parseable findings matching P2-WP3 AC-1 | `verdict=conditional_pass` (valid enum); 5 rows each with `criterion`/`result`/`severity`/`evidence:list[str]`; `summary` present; `_validate_findings` on recovered bytes = PASS | **PASS** |
+| `pinned_spec_sha` non-null == pinned SHA | `81113ea0f2ffe0d2e7994e963e34f04f10989887a659a33774e2966af2c85b24` | Exact echo in child JSON, facade tool result, designer report header | **PASS** (D6 win held — no regression) |
+| Comparator child spawned-or-reused evidenced | Facade mode log + instance row | `mode=fresh` log 04:33:25Z; instance `165da9a3…` `invoked_as_tool=true`, completed | **PASS** |
+| Never-raise contract intact | Structured results only, no exception escape | Job settled with structured findings; schema-invalid path still envelope-shaped (unit-pinned); 76/76 `tests/test_compare_tools.py` | **PASS** |
+| C4 flip still in place | §C4 vision spot-check cell intact | `verdicts/capture-adopt-or-build.md` §C4 carries the 2026-09-27T03:56:54Z PASS text, untouched | **PASS** |
+| PD-31 record intact | decisions.md row + substrate on disk | PD-31 row present; `data/tmp_images/2747d340…` + sidecar preserved | **PASS** |
+| Root-cause tests pin the defect | Regression tests fail pre-fix, pass post-fix | 5/10 new pins fail on pre-fix code; 76/76 post-fix | **PASS** |
+
+**Iteration count: 1 of ≤3. Upstream flake carve-out: NOT consumed** (STEP-0 probes 200; zero 502s during the window).
+
+**Commits:** fix `ba76b4d9` (`fix(designer): comparator findings schema enforcement — model never told the wire schema; return was fence-wrapped + key-drifted (P2-WP8 schema-fix)`); proof commit follows this section.
+
+---
+
+*End of schema-fix commission section (GREEN, iteration 1). Prior NOT-GREEN sections preserved intact above.*
