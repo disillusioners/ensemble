@@ -16,8 +16,9 @@
 import { signal } from '@angular/core';
 import { Observable, of, throwError } from 'rxjs';
 import { catchError, switchMap, take, takeWhile, tap, throwError as throwErr, timer } from 'rxjs';
-import type {
-  CheckpointCleanupBlobsSummary,
+import {
+  isKnownErrorCode,
+  type CheckpointCleanupBlobsSummary,
   CheckpointCleanupDryRun,
   CheckpointCleanupExecute,
   CheckpointCleanupExecuteRequest,
@@ -295,7 +296,9 @@ class TestableCheckpointCleanupService {
       errorBody &&
       typeof errorBody === 'object' &&
       typeof errorBody.error === 'string' &&
-      this.isKnownErrorCode(errorBody.error)
+      // Item 13 — consume the single-source guard from models
+      // (`isKnownErrorCode`) instead of a parallel local literal.
+      isKnownErrorCode(errorBody.error)
     ) {
       return {
         error: errorBody.error,
@@ -310,23 +313,6 @@ class TestableCheckpointCleanupService {
         e?.message ||
         'Unknown error',
     };
-  }
-
-  private isKnownErrorCode(code: string): boolean {
-    const known = [
-      'not_initialized',
-      'not_found',
-      'run_in_flight',
-      'confirm_required',
-      'dry_run_required',
-      'dry_run_stale',
-      'byte_count_mismatch',
-      'backend_unsupported',
-      'origin_not_trusted',
-      'maintenance_disabled',
-      'internal_error',
-    ];
-    return (known as readonly string[]).includes(code);
   }
 
   clearLastError(): void {

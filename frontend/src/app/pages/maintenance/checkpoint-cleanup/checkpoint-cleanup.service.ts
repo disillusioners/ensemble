@@ -2,14 +2,15 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Observable, catchError, take, takeWhile, tap, throwError, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
-import type {
-  CheckpointCleanupDryRun,
-  CheckpointCleanupExecute,
-  CheckpointCleanupExecuteRequest,
-  CheckpointCleanupRun,
-  CheckpointCleanupStatus,
-  MaintenanceAvailability,
-  MaintenanceErrorBody,
+import {
+  isKnownErrorCode,
+  type CheckpointCleanupDryRun,
+  type CheckpointCleanupExecute,
+  type CheckpointCleanupExecuteRequest,
+  type CheckpointCleanupRun,
+  type CheckpointCleanupStatus,
+  type MaintenanceAvailability,
+  type MaintenanceErrorBody,
 } from '../../../models';
 
 /**
@@ -296,7 +297,9 @@ export class CheckpointCleanupService {
       // `MaintenanceErrorBody.error`. `internal_error` (A-8) is a
       // union member; only genuinely unknown literals fall through
       // to the fallback branch below.
-      this.isKnownErrorCode(errorBody.error)
+      // Item 13 — consume the single-source guard from models
+      // (`isKnownErrorCode`) instead of a parallel local literal.
+      isKnownErrorCode(errorBody.error)
     ) {
       return {
         error: errorBody.error,
@@ -315,23 +318,6 @@ export class CheckpointCleanupService {
         e?.message ||
         'Unknown error',
     };
-  }
-
-  private isKnownErrorCode(code: string): code is MaintenanceErrorBody['error'] {
-    const known: ReadonlyArray<MaintenanceErrorBody['error']> = [
-      'not_initialized',
-      'not_found',
-      'run_in_flight',
-      'confirm_required',
-      'dry_run_required',
-      'dry_run_stale',
-      'byte_count_mismatch',
-      'backend_unsupported',
-      'origin_not_trusted',
-      'maintenance_disabled',
-      'internal_error',
-    ];
-    return (known as readonly string[]).includes(code);
   }
 
   /** Clear the structured-error signal (used by the error-banner dismiss). */

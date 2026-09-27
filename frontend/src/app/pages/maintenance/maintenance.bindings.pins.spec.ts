@@ -146,12 +146,21 @@ describe('Maintenance console — source-grep pins (15 pins)', () => {
 
   // ── Pin 6: error-code-union-exhaustive (11 codes incl. A-8) ────────────
   describe('6. error-code-union-exhaustive (11 codes incl. A-8 internal_error, AM-13/AM-1)', () => {
-    it('MaintenanceErrorCode union enumerates all 11 codes (10 stable + A-8 internal_error)', () => {
-      const unionMatch = modelsSrc.match(
-        /export type MaintenanceErrorCode\s*=([\s\S]*?);/,
+    // Item 13 amendment — the wire union is now DERIVED from the
+    // canonical tuple `MAINTENANCE_ERROR_CODES` via
+    // `(typeof MAINTENANCE_ERROR_CODES)[number]`. The pin asserts
+    // (a) the tuple contains all 11 expected codes in the canonical
+    // order AND (b) the derived union is present (type-derivation
+    // syntax) AND (c) the single-source `isKnownErrorCode` guard
+    // exists. The wire contract (frozen 11 members) is still pinned.
+    it('MaintenanceErrorCode derived from canonical tuple MAINTENANCE_ERROR_CODES (11 codes incl. A-8 internal_error)', () => {
+      // (a) The canonical tuple lists all 11 codes in the canonical
+      // order — frozen contract from v3 fix pass + A-8 amendment.
+      const tupleMatch = modelsSrc.match(
+        /export const MAINTENANCE_ERROR_CODES\s*=\s*\[([\s\S]*?)\]\s*as const/,
       );
-      expect(unionMatch).not.toBeNull();
-      const unionBody = unionMatch![1];
+      expect(tupleMatch).not.toBeNull();
+      const tupleBody = tupleMatch![1];
       const expectedCodes = [
         'not_initialized',
         'not_found',
@@ -166,11 +175,18 @@ describe('Maintenance console — source-grep pins (15 pins)', () => {
         'internal_error',
       ];
       for (const code of expectedCodes) {
-        expect(unionBody).toContain(`'${code}'`);
+        expect(tupleBody).toContain(`'${code}'`);
       }
-      // The union has exactly 11 codes (10 stable + A-8 internal_error).
-      const codeMatches = unionBody.match(/'\w+'/g) ?? [];
-      expect(codeMatches).toHaveLength(11);
+      // Tuple has exactly 11 entries (10 stable + A-8 internal_error).
+      const tupleCodeMatches = tupleBody.match(/'\w+'/g) ?? [];
+      expect(tupleCodeMatches).toHaveLength(11);
+      // (b) Derived union — pin that the tuple-to-type derivation
+      // syntax is present.
+      expect(modelsSrc).toMatch(
+        /export type MaintenanceErrorCode\s*=\s*\(typeof MAINTENANCE_ERROR_CODES\)\[number\]/,
+      );
+      // (c) Single-source guard is exported.
+      expect(modelsSrc).toMatch(/export function isKnownErrorCode/);
     });
   });
 

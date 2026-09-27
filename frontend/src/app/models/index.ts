@@ -899,19 +899,39 @@ export interface CheckpointCleanupRun {
  *
  * Frozen at v3 contract. NEVER add members here without consulting the
  * contract — the BE wire contract pins exactly 11 codes (A-8 amendment).
+ *
+ * Item 13 — single-source: the tuple `MAINTENANCE_ERROR_CODES` is the
+ * canonical list. `MaintenanceErrorCode` is derived from the tuple via
+ * `(typeof MAINTENANCE_ERROR_CODES)[number]`. Adding a code = appending
+ * a tuple member + the BE contract pin; the union updates automatically.
+ * The wire-facing union stays EXACTLY its frozen 11 members.
  */
-export type MaintenanceErrorCode =
-  | 'not_initialized'
-  | 'not_found'
-  | 'run_in_flight'
-  | 'confirm_required'
-  | 'dry_run_required'
-  | 'dry_run_stale'
-  | 'byte_count_mismatch'
-  | 'backend_unsupported'
-  | 'origin_not_trusted'
-  | 'maintenance_disabled'
-  | 'internal_error';
+export const MAINTENANCE_ERROR_CODES = [
+  'not_initialized',
+  'not_found',
+  'run_in_flight',
+  'confirm_required',
+  'dry_run_required',
+  'dry_run_stale',
+  'byte_count_mismatch',
+  'backend_unsupported',
+  'origin_not_trusted',
+  'maintenance_disabled',
+  'internal_error',
+] as const;
+
+export type MaintenanceErrorCode = (typeof MAINTENANCE_ERROR_CODES)[number];
+
+/**
+ * Item 13 — type guard against the canonical tuple. Replaces ad-hoc
+ * local literals in the service `isKnownErrorCode()`. The guard is
+ * the single point of truth for the union membership test; the
+ * service consumes this rather than carrying a parallel literal
+ * array.
+ */
+export function isKnownErrorCode(code: string): code is MaintenanceErrorCode {
+  return (MAINTENANCE_ERROR_CODES as readonly string[]).includes(code);
+}
 
 /**
  * Maintenance display code — superset of `MaintenanceErrorCode` for
