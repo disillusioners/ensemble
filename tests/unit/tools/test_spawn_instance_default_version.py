@@ -309,6 +309,16 @@ class TestSpawnInstanceForwardsTag:
         # reads actual metadata), stubbed ``spawn_instance`` so we can
         # capture the kwargs, and a no-op fallback-notice helper.
         manager = MagicMock()
+        # Real-shaped LLMConfig default: the documented default for
+        # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
+        # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
+        # P2-WP3 AC-5) fail-CLOSES at factory init on any non-list value —
+        # a bare MagicMock auto-attr is not a list. Mirrors the established
+        # sibling convention (test_dynamic_toolset_expansion.py /
+        # test_upgrade_registration._build_instance_tools). Real-config
+        # enforcement is untouched: this only mirrors what a real manager
+        # with default config presents.
+        manager.config.llm.allowed_models = []
         manager._project_repository = repo
         # Auto-inherit-from-parent path: have the parent-instance
         # lookup return None so the tool falls through to the system
@@ -378,6 +388,16 @@ class TestSpawnInstanceForwardsTag:
         # No metadata seeded.
 
         manager = MagicMock()
+        # Real-shaped LLMConfig default: the documented default for
+        # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
+        # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
+        # P2-WP3 AC-5) fail-CLOSES at factory init on any non-list value —
+        # a bare MagicMock auto-attr is not a list. Mirrors the established
+        # sibling convention (test_dynamic_toolset_expansion.py /
+        # test_upgrade_registration._build_instance_tools). Real-config
+        # enforcement is untouched: this only mirrors what a real manager
+        # with default config presents.
+        manager.config.llm.allowed_models = []
         manager._project_repository = repo
         manager._instance_repository.get.return_value = None
         manager.spawn_instance = MagicMock(

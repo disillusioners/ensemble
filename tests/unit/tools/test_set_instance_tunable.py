@@ -55,6 +55,16 @@ def _manager(*, enabled: bool = True, found: bool = True, prior=None):
             side_effect=KeyError("Instance not found")
         )
         manager.set_metadata_many = MagicMock(return_value=None)
+    # Real-shaped LLMConfig default: the documented default for
+    # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
+    # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
+    # P2-WP3 AC-5) fail-CLOSES at factory init on any non-list value —
+    # a bare MagicMock auto-attr is not a list. Mirrors the established
+    # sibling convention (test_dynamic_toolset_expansion.py /
+    # test_upgrade_registration._build_instance_tools). Real-config
+    # enforcement is untouched: this only mirrors what a real manager
+    # with default config presents.
+    manager.config.llm.allowed_models = []
     return manager
 
 

@@ -485,6 +485,14 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
         "workflow.md",
         # Operational README.md (tester's own README in .agents/tester/ — file inventory).
         "README.md",
+        # Operational designer write targets (designer-author/manage:
+        # design-spec.md is the canonical design artifact; design-review.md
+        # is the designer's verdict doc. Same operational-vocabulary
+        # contract as planner/architect entries above: the bare token is
+        # an operational filesystem reference, not a prompt-section
+        # cross-reference. W4 contract applies.)
+        "design-spec.md",
+        "design-review.md",
     }
     # W4 use-awareness — HONEST STATE (2026-09-08 restore, second pass):
     #

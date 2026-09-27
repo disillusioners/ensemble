@@ -151,7 +151,18 @@ def _make_council_manager(
       * ``enqueue_message`` — AsyncMock (used by convene_council; harmless here).
     """
     if allowed_models is None:
-        allowed_models = ["gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro"]
+        # Default list includes "vision" so the comparator's
+        # ``_verify_vision_allowed`` gate (P2-WP3 AC-5,
+        # ``compare_tools._verify_vision_allowed``) passes when
+        # ``create_instance_tools`` reaches the comparator
+        # construction. The factory unconditionally calls
+        # ``create_compare_tools`` — vision must be present in
+        # any non-empty allowlist, OR the list must be empty
+        # (the documented default = "all models allowed"). The
+        # test exercises ``_resolve_model_override`` against the
+        # other entries; adding "vision" leaves the resolution
+        # contract unchanged for every model the tests pass.
+        allowed_models = ["vision", "gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro"]
 
     manager = MagicMock()
     manager.config = MagicMock()
