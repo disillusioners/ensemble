@@ -21,6 +21,10 @@ from daemon.mcp.managed_session import ManagedClientSession
 from daemon.mcp.models import McpToolSchema
 from daemon.mcp.stdio_wrapper import TaskScopedStdioClient
 from daemon.mcp.tool_adapter import _slugify, adapt_mcp_tools
+# P3 review F3: route the stored env through the spawn-time marker
+# resolver so pooled connections see plaintext (never ``__KMS_REF__…__``)
+# in the subprocess env. resolve_env is idempotent for non-marker values.
+from daemon.services.kms_resolver import resolve_env
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +210,7 @@ class McpWarmupPool:
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
-            env=config.env,
+            env=resolve_env(config.env),
         )
         streams_cm = TaskScopedStdioClient(server_params)
         read_stream = write_stream = None

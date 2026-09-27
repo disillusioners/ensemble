@@ -549,6 +549,15 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "context": "daemon.tools.context_tools",
     "shared_meta_kv": "daemon.tools.shared_meta_kv_tools",
     "db": "daemon.tools.db_tools",
+    # Design tools (designer-agent P2-WP8, 2026-09-26) — image-comparator
+    # specialist behind the ``compare_images`` facade. Category key MUST
+    # byte-match ``@register_tool_category("design")`` in
+    # ``daemon/tools/compare_tools.py`` and the ``TOOL_REQUIRED_AGENTS``
+    # row in ``daemon/tools/_auth.py``. Row is load-bearing for boot-time
+    # allow-list validation (registry.py known_categories) — without it
+    # designer's ``tools.allow: ["design"]`` entry emits the
+    # "neither a known category nor a known tool" WARNING (WP8 G2-A3).
+    "design": "daemon.tools.compare_tools",
     "infra": "daemon.tools.infra",
     "system": "daemon.tools.system",
     "skill-evolution": "daemon.tools.skill_evolution_tools",
@@ -640,6 +649,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "blueprint_search",
     "blueprint_update",
     "clear_councilor_errors",
+    "compare_images",
     "convene_council",
     "convene_council_with_skill",
     "db_conn_add",
@@ -670,6 +680,14 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "external_opencode_wait_any",
     "external_opencode_wait_for_result",
     "generate_chart",
+    # image_save / image_list / image_get — designer-agent substrate
+    # (Phase 1 WP7/8/9) — factory-created per-instance alongside
+    # explain_image; never registered at module import. The
+    # explicit names allow agents' ``tools.allow`` to validate the
+    # image category at startup.
+    "image_save",
+    "image_list",
+    "image_get",
     "get_instance_info",
     "get_mission",
     "glob_files",
@@ -699,6 +717,9 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "job_resume",
     "job_retry",
     "job_tree",
+    "kms_attach",
+    "kms_lookup_handle",
+    "kms_request",
     "language_skip_check",
     "list_context",
     "list_directory",

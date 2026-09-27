@@ -1,0 +1,30 @@
+# Designer-Agent Capabilities Registry (Phase 3 WP4)
+#
+# Source of truth for the mapping
+#   capability_id  ->  ( installer_skill, builtin_mcp_class,
+#                       schema_version, requires_secret, kms_service_id )
+#
+# Loaded by daemon.services.capability_resolver.load_capabilities_registry
+# at instance/skill-inject time. Co-located with the dynamic-skill
+# innate skill (NOT agents/dynamic-skill/ which does not exist — the
+# phase-lead path decision was to follow the dynamic-skill skill's
+# actual home at agents/_prompt_system/innate-skills/dynamic-skill/).
+#
+# Day-1 seed carries ONE entry — the OpenDesign MCP. The
+# install-opendesign skill LANDED in P3-WP5 (agents/worker/skill-set.yaml
+# + skills-template/), so this entry is no longer pending:
+# `_pending` is false and the production loader
+# (load_production_capabilities_registry, P3-WP5 strictness flip)
+# enforces strict validation — a dangling installer_skill or an
+# unresolvable builtin_mcp_class now FAILS the load instead of
+# degrading to a warning. Tests keep a fixture-based non-strict
+# surface via load_capabilities_registry called directly.
+
+# OpenDesign — first user of the bootstrap flow.
+- capability_id: opendesign
+  installer_skill: install-opendesign   # landed P3-WP5 (agents/worker)
+  builtin_mcp_class: OpenDesignMCP     # resolved against daemon/mcp/builtin_servers/
+  schema_version: "0.16.1"             # MCP config schema version (drift detection)
+  requires_secret: true                # needs an API key at MCP stdio spawn
+  kms_service_id: opendesign           # KMS-Lite mint target (P3-WP6+WP7)
+  _pending: false                      # skill landed; strict validation ACTIVE

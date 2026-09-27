@@ -37,6 +37,17 @@ TOOL_REQUIRED_AGENTS: dict[str, list[str]] = {
     "chart": ["charter"],
     "image": ["image-reader"],
     "council": ["governor"],
+    # P2-WP2 (2026-09-26): the design-tool category bundles the
+    # image-comparator specialist behind the ``compare_images`` facade.
+    # Category key MUST byte-match the string passed to
+    # ``@register_tool_category(...)`` in ``daemon/tools/compare_tools.py``
+    # (the same MUST-match rule already enforced for the four rows above).
+    # Key choice: ``"design"`` (not the narrower ``"compare"`` /
+    # ``"image-compare"``) — the cluster name fits the designer-agent
+    # workstream this agent belongs to; future design tools (capture,
+    # spec-check, etc.) join the same category without re-shaping
+    # ``TOOL_REQUIRED_AGENTS`` (PD-13 alternative considered and logged).
+    "design": ["image-comparator"],
 }
 
 

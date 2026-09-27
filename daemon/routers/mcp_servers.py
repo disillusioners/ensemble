@@ -2,7 +2,11 @@
 
 import asyncio
 import copy
+import hashlib
+import json
 import logging
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -27,13 +31,25 @@ from daemon.models import (
 from daemon.mcp.config import validate_mcp_server_config, McpConfigValidationError
 from daemon.mcp import get_mcp_connection_manager
 from daemon.mcp.builtin_servers import get_registry
+from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
 from daemon.mcp.builtin_servers.validation import validate_config_values, McpConfigValidationError as BuiltinConfigValidationError
+from daemon.services.install_audit import EVENT_MCP_INSTALL, append_install_audit
+from daemon.services.kms_lite import KMS_MARKER_RE
 from daemon.utils import parse_utc_datetime
 
 logger = logging.getLogger(__name__)
 
 # Create router with /mcp-servers prefix
 router = APIRouter(prefix="/mcp-servers", tags=["mcp-servers"])
+
+# ── Install rails (P3-WP5, arch §7.4) ────────────────────────────────
+
+#: How long a ``prev_config_snapshot`` stays meaningful in
+#: ``instance_metadata``. Day-1: the TTL is STAMPED
+#: (``prev_config_snapshot_expires_at``); sweeping expired snapshots is
+#: deferred (no sweep lane exists — the stamp is the contract readers
+#: and a future sweep check against).
+INSTALL_SNAPSHOT_TTL = timedelta(days=7)
 
 
 def _get_manager(request: Request) -> Any:
@@ -52,6 +68,113 @@ def _invalidate_mcp_schema_cache(manager: Any, server_name: str) -> None:
     mcp_service = getattr(manager, "_mcp_service", None)
     if mcp_service is not None and hasattr(mcp_service, "invalidate_schema_cache"):
         mcp_service.invalidate_schema_cache(server_name)
+
+
+def _compute_install_idempotency_key(
+    definition: "BuiltinServerDefinition", generated_config: dict
+) -> str:
+    """Arch §7.4 idempotency key: ``sha256(name + schema_version + sorted(config))``.
+
+    ``sorted(config)`` is realized as a canonical ``json.dumps(...,
+    sort_keys=True)`` of the GENERATED config — the deterministic
+    serialization of what will actually be persisted. Same inputs →
+    same key → same row (no duplicate INSERT on re-run).
+    """
+    payload = (
+        definition.name
+        + "|"
+        + definition.schema_version
+        + "|"
+        + json.dumps(generated_config, sort_keys=True, default=str)
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _extract_secret_ref(generated_config: dict) -> str | None:
+    """Return the FIRST KMS handle bound in the generated env, if any.
+
+    The handle is the only secret-shaped datum the audit lane may carry
+    (§7.5 handles-not-secrets) — a ``__KMS_REF__<handle>__`` marker
+    value IS the handle reference. Plaintext (a non-marker env value)
+    is never extracted, even by accident.
+    """
+    env = generated_config.get("env") if isinstance(generated_config, dict) else None
+    if not isinstance(env, dict):
+        return None
+    for value in env.values():
+        if isinstance(value, str):
+            # KMS_MARKER_RE is a regex STRING in kms_lite — apply via re.
+            match = re.match(KMS_MARKER_RE, value)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _build_install_metadata(
+    idempotency_key: str,
+    prev_config_snapshot: dict | None,
+) -> dict:
+    """Build the ``instance_metadata`` payload for one install mutation.
+
+    Day-1 shape (JSONB, plaintext-free):
+
+    - ``install_idempotency_key`` — the §7.4 key.
+    - ``install_updated_at`` — ISO ts of this mutation.
+    - ``prev_config_snapshot`` / ``_at`` / ``_expires_at`` — rollback
+      rail (§7.4): the config as it was BEFORE this update, stamped
+      with a 7-day TTL (``INSTALL_SNAPSHOT_TTL``). Sweeping expired
+      snapshots is deferred; the expiry stamp is the contract.
+
+    Callers MUST merge this over a FRESHLY-FETCHED
+    ``instance_metadata`` dict (read-row-fresh invariant — the KMS
+    ``kms_attach`` writer co-owns ``bound_handles`` in this column and
+    a cached rewrite would silently drop its bindings).
+    """
+    now = datetime.now(timezone.utc)
+    meta: dict[str, Any] = {
+        "install_idempotency_key": idempotency_key,
+        "install_updated_at": now.isoformat(),
+    }
+    if prev_config_snapshot is not None:
+        meta["prev_config_snapshot"] = prev_config_snapshot
+        meta["prev_config_snapshot_at"] = now.isoformat()
+        meta["prev_config_snapshot_expires_at"] = (
+            now + INSTALL_SNAPSHOT_TTL
+        ).isoformat()
+    return meta
+
+
+def _write_install_audit(
+    request: Request,
+    definition: "BuiltinServerDefinition",
+    idempotency_key: str,
+    generated_config: dict,
+) -> None:
+    """Best-effort §7.4 audit line for one configure-builtin mutation.
+
+    The daemon writes the audit line server-side (single audit source
+    — the ``install-opendesign`` skill drives this route and surfaces
+    the same fields in its Result envelope). ``actor`` is the HTTP
+    client host day-1 (the API layer has no instance identity);
+    ``parent`` / ``trace_id`` are ``None`` — the skill's Result
+    envelope carries the mission-side correlation. Never fails the
+    request: :func:`append_install_audit` is itself never-raising and
+    this wrapper additionally guards the unexpected.
+    """
+    try:
+        result = append_install_audit(
+            event=EVENT_MCP_INSTALL,
+            name=definition.name,
+            actor=(request.client.host if request.client else None) or "unknown-api",
+            secret_ref=_extract_secret_ref(generated_config),
+            idempotency_key=idempotency_key,
+        )
+        if result.fallback_used:
+            logger.info(
+                "install-audit: written to fallback path %s", result.path
+            )
+    except Exception as e:  # noqa: BLE001 — audit must never fail a request
+        logger.warning("install-audit write failed (non-fatal): %s", e)
 
 
 def redact_secrets(config: dict) -> dict:
@@ -402,7 +525,13 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
         )
     schema_as_dicts = definition.get_config_schema()
 
-    # Check if server already exists
+    # ── Install rails (P3-WP5, arch §7.4) ────────────────────────────
+    # Idempotency key over the GENERATED config (what will persist).
+    idempotency_key = _compute_install_idempotency_key(definition, generated_config)
+
+    # GET-then-create/update (§7.4). Fresh fetch — never trusted from a
+    # cache — so the write below honors the read-row-fresh invariant
+    # shared with the kms_attach writer (R1, arch §8).
     existing = await asyncio.to_thread(
         manager._mcp_server_repository.get_mcp_server_by_name,
         definition.name
@@ -414,14 +543,102 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
                 status_code=409,
                 detail=f"A user-created MCP server with name '{definition.name}' already exists"
             )
-        # Update existing built-in server
+
+        # Schema-version mismatch → REFUSE (§7.4: "schema-version
+        # mismatch → refuse"). A stored row stamped with a different
+        # schema version than the definition means the config surface
+        # drifted; healing is the boot-time schema-drift refresh or an
+        # explicit operator reset-builtin — never a silent overwrite.
+        current_version = existing.config_schema_version or "0"
+        if current_version != definition.schema_version:
+            raise HTTPException(
+                status_code=409,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INVALID_REQUEST,
+                    message=(
+                        f"Schema version mismatch for built-in server "
+                        f"'{definition.name}': row carries "
+                        f"'{current_version}' but the definition is "
+                        f"'{definition.schema_version}'. Refusing to "
+                        f"configure across a schema drift — run "
+                        f"/reset-builtin (operator action) or let the "
+                        f"boot-time bootstrap refresh the row."
+                    ),
+                ).model_dump()
+            )
+
+        # Idempotent replay: same key → same row.
+        # P3-WP2 wiring fix (proof-b, fix 2/3): when the row is
+        # currently ``is_active=False`` (e.g. an earlier configure
+        # left the server inactive, or a kms_attach failure left it
+        # in a non-live state), the replay path must set
+        # ``is_active=True`` so the install actually completes the
+        # install (a no-op replay would silently leave the row dead).
+        # Live evidence: after deactivation the replay currently
+        # returns the inactive row unchanged, blocking downstream
+        # consumers (including the capability gate) from seeing the
+        # server as live.
+        existing_key = (existing.instance_metadata or {}).get(
+            "install_idempotency_key"
+        )
+        if existing_key == idempotency_key:
+            if not existing.is_active:
+                # Replay that REACTIVATES an inactive row. We pass
+                # ``is_active=True`` through ``update_mcp_server``
+                # so the column write is auditable (separate
+                # timestamp); the metadata stays put (no config
+                # change, no install-audit line — same install was
+                # already audited on the original write). The schema
+                # version mismatch 409 path above is unchanged —
+                # that branch fires on a different ``key`` or a
+                # different ``schema_version``, never on this one.
+                reactivated = await asyncio.to_thread(
+                    manager._mcp_server_repository.update_mcp_server,
+                    existing.id,
+                    is_active=True,
+                )
+                if reactivated is not None:
+                    existing = reactivated
+                logger.info(
+                    "configure-builtin: idempotent replay for '%s' "
+                    "(key=%s…) reactivated inactive row to is_active=true",
+                    definition.name,
+                    idempotency_key[:12],
+                )
+            else:
+                logger.info(
+                    "configure-builtin: idempotent replay for '%s' "
+                    "(key=%s…) — returning existing row unchanged",
+                    definition.name,
+                    idempotency_key[:12],
+                )
+            return _mcp_server_to_info(existing)
+
+        # Update path: capture prev_config_snapshot with a 7-day TTL
+        # and MERGE over a fresh re-read of instance_metadata — the
+        # KMS kms_attach writer co-owns ``bound_handles`` in this
+        # JSONB column, and a cached rewrite would silently drop its
+        # bindings (read-row-fresh invariant).
+        fresh = await asyncio.to_thread(
+            manager._mcp_server_repository.get_mcp_server,
+            existing.id
+        )
+        source_row = fresh if fresh is not None else existing
+        merged_meta = dict(source_row.instance_metadata or {})
+        merged_meta.update(
+            _build_install_metadata(
+                idempotency_key, copy.deepcopy(source_row.config or {})
+            )
+        )
         updated = await asyncio.to_thread(
             manager._mcp_server_repository.update_mcp_server,
             existing.id,
-            config=generated_config
+            config=generated_config,
+            instance_metadata=merged_meta,
         )
         # Config changed → drop the schema cache entry.
         _invalidate_mcp_schema_cache(manager, updated.name)
+        _write_install_audit(request, definition, idempotency_key, generated_config)
         return _mcp_server_to_info(updated)
     else:
         # Create new built-in server (handle race condition)
@@ -435,9 +652,20 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
                 config_schema=schema_as_dicts,
                 config_schema_version=definition.schema_version,
             )
+            # create_mcp_server has no instance_metadata parameter —
+            # stamp the install rails (idempotency key) in a follow-up
+            # update. No prev_config_snapshot on a fresh create.
+            stamped = await asyncio.to_thread(
+                manager._mcp_server_repository.update_mcp_server,
+                created.id,
+                instance_metadata=_build_install_metadata(idempotency_key, None),
+            )
+            if stamped is not None:
+                created = stamped
             # First-time build of this built-in server — make sure
             # the schema cache doesn't carry a stale empty entry.
             _invalidate_mcp_schema_cache(manager, created.name)
+            _write_install_audit(request, definition, idempotency_key, generated_config)
             return _mcp_server_to_info(created)
         except Exception as e:
             # Handle race condition: concurrent create attempt
@@ -563,7 +791,14 @@ async def update_mcp_server(
 
 @router.delete("/{server_id}", response_model=McpServerDeleteResponse)
 async def delete_mcp_server(server_id: str, request: Request):
-    """Delete an MCP server."""
+    """Delete an MCP server (STOP-then-DELETE, arch §7.4).
+
+    Rollback-rail semantics: any LIVE MCP connection for this server
+    name is stopped BEFORE the row is deleted, so no session outlives
+    its config. (Before P3-WP5 this route deleted the row and only
+    invalidated the schema cache — a tracked session for the deleted
+    server could survive until instance close.)
+    """
     manager = _get_manager(request)
     if manager.is_write_paused:
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
@@ -590,6 +825,17 @@ async def delete_mcp_server(server_id: str, request: Request):
                 code=ErrorCodes.BUILTIN_SERVER_PROTECTED,
                 message="Cannot delete a built-in MCP server"
             ).model_dump()
+        )
+
+    # STOP first (§7.4 uninstall = STOP then DELETE): close every
+    # tracked session for this server name across all instances so no
+    # live connection outlives the deleted row.
+    conn_mgr = get_mcp_connection_manager()
+    stopped = await conn_mgr.close_server(existing.name)
+    if stopped:
+        logger.info(
+            "delete_mcp_server: stopped %d live connection(s) for '%s' "
+            "before delete", stopped, existing.name,
         )
 
     # Delete MCP server

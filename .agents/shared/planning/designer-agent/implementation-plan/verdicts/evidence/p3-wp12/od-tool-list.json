@@ -1,0 +1,16 @@
+SCRUB-OK: zero POSTGRES_*/PG* vars in environment at 2026-09-26T22:02:52Z
+{
+  "tool_count": 10,
+  "tools": [
+    "od_list_projects",
+    "od_get_project",
+    "od_create_project",
+    "od_update_project",
+    "od_delete_project",
+    "od_save_artifact",
+    "od_lint_artifact",
+    "od_compose_brief",
+    "od_generate_design",
+    "od_save_project_file"
+  ]
+}

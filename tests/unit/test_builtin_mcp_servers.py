@@ -223,8 +223,15 @@ def app(router_engine_and_repo, registry_with_test_def):
 
 
 @pytest.fixture
-def client(app):
-    """Create FastAPI TestClient."""
+def client(app, tmp_path, monkeypatch):
+    """Create FastAPI TestClient.
+
+    P3-WP5: configure-builtin now writes a §7.4 install-audit line to
+    ``<cwd>/.agents/shared/planning/designer-agent/install-audit.jsonl``
+    on every real mutation. Redirect cwd into tmp so test runs never
+    litter the repo tree with audit lines.
+    """
+    monkeypatch.chdir(tmp_path)
     return TestClient(app)
 
 
@@ -1009,14 +1016,20 @@ class TestBuiltinApiEndpoints:
         assert data["is_builtin"] is True
         assert data["config"]["args"] is not None
 
-    def test_configure_builtin_updates_existing(self, client, shared_repository):
+    def test_configure_builtin_updates_existing(self, client, shared_repository, test_definition):
         """Test POST /configure-builtin with existing built-in updates config."""
-        # First create the built-in server using shared repository
+        # First create the built-in server using shared repository.
+        # P3-WP5 (arch §7.4): configure-builtin now REFUSES a
+        # schema-version mismatch (row "0" vs definition "1.0" → 409),
+        # so the pre-created row must carry the definition's version —
+        # the pre-rails behavior (silent update across a version gap)
+        # is exactly what the rail exists to prevent.
         shared_repository.create_mcp_server(
             name="test-builtin",
             description="Test builtin",
             config={"args": [], "env": {}},
             is_builtin=True,
+            config_schema_version=test_definition.schema_version,
         )
 
         # Configure again
@@ -1087,6 +1100,180 @@ class TestBuiltinApiEndpoints:
         )
 
         assert response.status_code == 404
+
+    # ──────────────────────────────────────────────────────────────
+    # P3-WP2 wiring fix (proof-b, fix 2/3) — configure-builtin
+    # replay reactivates an inactive row. Live evidence: after
+    # deactivation (e.g. kms_attach failure or operator reset),
+    # the idempotent-replay path used to leave the row inactive,
+    # silently blocking downstream consumers (including the
+    # capability gate) from seeing the server as live.
+    # ──────────────────────────────────────────────────────────────
+
+    def test_configure_builtin_replay_reactivates_inactive_row(
+        self, client, shared_repository, test_definition
+    ):
+        """Same idempotency_key + is_active=False → row reactivated.
+
+        The replay path computes the install idempotency key from
+        the generated config; when the existing row carries the
+        SAME key (idempotent replay) AND ``is_active=False``, the
+        router MUST set ``is_active=True`` so the install
+        completes the install (a no-op replay would silently
+        leave the row dead). The schema-version-mismatch 409 path
+        above is unchanged — that branch fires on a different
+        schema_version, never on this one.
+        """
+        from daemon.routers.mcp_servers import _compute_install_idempotency_key
+
+        # First call — installs the server, sets
+        # install_idempotency_key on instance_metadata. Capture the
+        # generated config so we can compute the key the same way
+        # the router does.
+        first_response = client.post(
+            "/api/mcp-servers/configure-builtin",
+            json={
+                "template_name": "test-builtin",
+                "values": {
+                    "api_key": "sk-replay",
+                    "timeout": 60,
+                },
+            },
+        )
+        assert first_response.status_code == 201
+        first_data = first_response.json()
+        first_id = first_data["id"]
+        assert first_data["is_active"] is True
+
+        # Compute the idempotency key the router would compute for
+        # this generated config — that key is what gets stamped on
+        # the row.
+        generated_config = first_data["config"]
+        key = _compute_install_idempotency_key(
+            test_definition, generated_config
+        )
+
+        # Now deactivate the row directly (simulates the
+        # kms_attach failure or operator reset scenario from
+        # the live evidence).
+        deactivated = shared_repository.update_mcp_server(
+            first_id, is_active=False
+        )
+        assert deactivated is not None
+        assert deactivated.is_active is False
+
+        # Replay the SAME call (same values → same idempotency
+        # key). The router should detect the matching key + the
+        # inactive state and reactivate.
+        replay_response = client.post(
+            "/api/mcp-servers/configure-builtin",
+            json={
+                "template_name": "test-builtin",
+                "values": {
+                    "api_key": "sk-replay",
+                    "timeout": 60,
+                },
+            },
+        )
+        assert replay_response.status_code == 201
+        replay_data = replay_response.json()
+        # The row IS active now.
+        assert replay_data["is_active"] is True
+        # And the install_idempotency_key is unchanged (no
+        # duplicate install — this is a replay, not a fresh
+        # install).
+        refreshed = shared_repository.get_mcp_server(first_id)
+        assert refreshed is not None
+        assert refreshed.is_active is True
+        assert (refreshed.instance_metadata or {}).get(
+            "install_idempotency_key"
+        ) == key
+
+    def test_configure_builtin_replay_active_row_no_op(
+        self, client, shared_repository, test_definition
+    ):
+        """Same idempotency_key + is_active=True → row unchanged.
+
+        Negative-control: when the row is already active, the
+        replay is a true no-op (no DB write, no audit line). This
+        pins the back-compat behavior so the reactivation fix
+        doesn't accidentally churn already-active rows.
+        """
+        first_response = client.post(
+            "/api/mcp-servers/configure-builtin",
+            json={
+                "template_name": "test-builtin",
+                "values": {
+                    "api_key": "sk-active",
+                    "timeout": 60,
+                },
+            },
+        )
+        assert first_response.status_code == 201
+        first_data = first_response.json()
+        first_id = first_data["id"]
+        first_updated_at = shared_repository.get_mcp_server(
+            first_id
+        ).updated_at
+
+        # Replay — same values → same key, row already active.
+        # The router must NOT bump ``updated_at`` (no DB write).
+        replay_response = client.post(
+            "/api/mcp-servers/configure-builtin",
+            json={
+                "template_name": "test-builtin",
+                "values": {
+                    "api_key": "sk-active",
+                    "timeout": 60,
+                },
+            },
+        )
+        assert replay_response.status_code == 201
+        replay_data = replay_response.json()
+        assert replay_data["is_active"] is True
+        # updated_at unchanged — true no-op.
+        refreshed = shared_repository.get_mcp_server(first_id)
+        assert refreshed.updated_at == first_updated_at
+
+    def test_configure_builtin_schema_version_mismatch_409_unchanged(
+        self, client, shared_repository, test_definition
+    ):
+        """Schema-version mismatch 409 is unchanged by the fix.
+
+        Sanity check that the reactivation fix doesn't relax the
+        schema-drift refusal: a row carrying a stale schema
+        version still returns 409 regardless of is_active.
+        """
+        # Pre-create a row with a deliberately stale schema version.
+        shared_repository.create_mcp_server(
+            name="test-builtin",
+            description="Stale-schema row",
+            config={"args": [], "env": {}},
+            is_builtin=True,
+            config_schema_version="0.0",  # different from test_definition
+            is_active=False,
+        )
+
+        response = client.post(
+            "/api/mcp-servers/configure-builtin",
+            json={
+                "template_name": "test-builtin",
+                "values": {
+                    "api_key": "sk-stale",
+                    "timeout": 60,
+                },
+            },
+        )
+
+        # Schema-version mismatch → 409, NOT a silent reactivation.
+        assert response.status_code == 409
+        assert "Schema version mismatch" in str(response.json())
+        # Row is still inactive.
+        refreshed = shared_repository.get_mcp_server_by_name(
+            "test-builtin"
+        )
+        assert refreshed is not None
+        assert refreshed.is_active is False
 
 
 # =============================================================================

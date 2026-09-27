@@ -72,6 +72,7 @@ class SkillBankRepository:
         template_version: str = "1.0.0",
         agent_id: Optional[str] = None,
         auto_load: bool = False,
+        requirement_json: Optional[str] = None,
     ) -> SkillBankItem:
         """Insert a new SkillBankItem row.
 
@@ -93,6 +94,10 @@ class SkillBankRepository:
             auto_load: Whether skills cloned from this template
                 should be loaded into the system prompt before
                 every task. ``False`` = on-demand only (default).
+            requirement_json: Serialized :class:`CapabilityRequirement`
+                JSON parsed from the skill-set.yaml ``requires:`` block
+                (P3-WP2 wiring fix). ``None`` when the entry omits
+                ``requires:`` — back-compat default.
 
         Returns:
             The newly created :class:`SkillBankItem` instance.
@@ -107,6 +112,7 @@ class SkillBankRepository:
             template_version=template_version,
             agent_id=agent_id,
             auto_load=auto_load,
+            requirement_json=requirement_json,
             created_at=now,
             updated_at=now,
         )

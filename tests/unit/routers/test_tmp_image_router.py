@@ -26,6 +26,7 @@ daemon.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from pathlib import Path
 
@@ -595,3 +596,104 @@ class TestFrozenContractDocstring:
         assert "POST /api/tmp_images" in source
         assert "GET /api/tmp_images" in source
         assert "DELETE /api/tmp_images" in source
+
+
+# ===========================================================================
+# Group 11 — POST optional provenance (P3 rider, P2-deferred)
+#
+# The four optional provenance fields (feature/page/version/source_agent)
+# ride the request into the store's provenance sidecar — the SAME shape
+# the designer tool path writes (daemon/tools/image_tools.py: keys
+# present only when set; the ``provenance`` sidecar key omitted entirely
+# when nothing is set). The HTTP response shape stays FROZEN: no
+# provenance echo. extra="forbid" is preserved on the entry model.
+# ===========================================================================
+
+
+class TestPostProvenance:
+    def test_full_provenance_persists_to_sidecar(
+        self, client: TestClient, store: TmpImageStore, store_dir: Path
+    ):
+        entry = {
+            **_payload(),
+            "feature": "checkout",
+            "page": "payment-v2",
+            "version": "1.2.3",
+            "source_agent": "designer-1",
+        }
+        resp = _post(client, [entry])
+        assert resp.status_code == 200
+        u = resp.json()["uploads"][0]
+        # FROZEN response contract — no provenance echo, exact key set.
+        assert set(u.keys()) == {
+            "image_id",
+            "ref_url",
+            "content_type",
+            "size_bytes",
+            "uploaded_at",
+        }
+        image_id = u["image_id"]
+        # Store-level read-back: the record carries the provenance mapping.
+        record = store.open_full(image_id)
+        assert record.provenance == {
+            "feature": "checkout",
+            "page": "payment-v2",
+            "version": "1.2.3",
+            "source_agent": "designer-1",
+        }
+        # On-disk sidecar carries the canonical top-level provenance key.
+        sidecar = json.loads((store_dir / f"{image_id}.json").read_text())
+        assert sidecar["provenance"] == {
+            "feature": "checkout",
+            "page": "payment-v2",
+            "version": "1.2.3",
+            "source_agent": "designer-1",
+        }
+
+    def test_partial_provenance_omits_unset_keys(
+        self, client: TestClient, store: TmpImageStore
+    ):
+        # Mirrors the in-tool writer: only SET fields appear as keys.
+        entry = {**_payload(), "feature": "designer", "version": "9.9.9"}
+        resp = _post(client, [entry])
+        assert resp.status_code == 200
+        record = store.open_full(resp.json()["uploads"][0]["image_id"])
+        assert record.provenance == {"feature": "designer", "version": "9.9.9"}
+
+    def test_post_without_provenance_unchanged(
+        self, client: TestClient, store: TmpImageStore, store_dir: Path
+    ):
+        # Absent provenance = exactly the pre-rider behavior: no
+        # ``provenance`` sidecar key at all, record.provenance is None.
+        resp = _post(client, [_payload()])
+        assert resp.status_code == 200
+        image_id = resp.json()["uploads"][0]["image_id"]
+        record = store.open_full(image_id)
+        assert record.provenance is None
+        sidecar = json.loads((store_dir / f"{image_id}.json").read_text())
+        assert "provenance" not in sidecar
+
+    def test_unknown_key_still_422_extra_forbid_preserved(self, client: TestClient):
+        entry = {**_payload(), "feature": "ok", "provenance_extra": "nope"}
+        resp = _post(client, [entry])
+        assert resp.status_code == 422
+        # Nothing was persisted — the validation envelope is the
+        # FastAPI/pydantic ``detail`` array (frozen contract).
+        assert isinstance(resp.json()["detail"], list)
+
+    def test_provenance_is_per_image_in_a_batch(
+        self, client: TestClient, store: TmpImageStore
+    ):
+        # Batch semantics unchanged (≤3, per-image failure aborts):
+        # provenance attaches per-image, not per-request.
+        with_prov = {**_payload("with.png"), "source_agent": "agent-a"}
+        without_prov = _payload("without.png")
+        resp = _post(client, [with_prov, without_prov])
+        assert resp.status_code == 200
+        uploads = resp.json()["uploads"]
+        assert len(uploads) == 2
+        # Response order mirrors request order (batch wrapper contract),
+        # so per-image provenance is directly indexable.
+        provenances = [store.open_full(u["image_id"]).provenance for u in uploads]
+        assert provenances[0] == {"source_agent": "agent-a"}
+        assert provenances[1] is None

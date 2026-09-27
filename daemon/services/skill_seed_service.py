@@ -10,19 +10,35 @@ for backward compatibility with existing agents.
 
 NOT gated by config.skill_evolution — the Skill Bank is
 standalone infrastructure. Uses only SkillBankRepository.
+
+Phase 3 (designer-agent bootstrap) — entries may declare a
+``requires:`` block (Phase 3 WP1) carrying ``mcp`` / ``tools`` /
+``env`` capability IDs. The block parses here and attaches as
+:attr:`SkillSetEntry.requirement`. Entries that declare a non-empty
+requirement are validated against their skill body via
+``enforce_mandatory_first_instruction`` from
+:mod:`daemon.services.capability_resolver`; bodies that omit the
+mandatory first ``capability_check(...)`` instruction raise
+:class:`MandatoryFirstInstructionError` named below.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 from ..registry import _parse_agent_dir_name
 from ..repositories.skill.skill_bank_repository import SkillBankRepository
+from .capability_resolver import (
+    CapabilityRequirement,
+    MandatoryFirstInstructionError,
+    enforce_mandatory_first_instruction,
+    extend_skill_entry_with_requires,
+)
 from .skill_include_resolver import resolve_includes
 
 logger = logging.getLogger(__name__)
@@ -40,6 +56,10 @@ class SkillSetEntry:
         category: Free-form category for grouping (e.g. "planning",
             "execution", "validation", "maintenance").
         description: One-line human-readable summary.
+        requirement: Optional :class:`CapabilityRequirement` parsed from
+            the entry's ``requires:`` block (Phase 3 WP1). ``None``
+            when the block is absent — back-compat for all existing
+            skills, which do not declare requirements.
     """
 
     name: str
@@ -47,6 +67,7 @@ class SkillSetEntry:
     auto_load: bool
     category: str
     description: str
+    requirement: CapabilityRequirement | None = None
 
 
 # ── Frontmatter delimiter pattern ────────────────────────────────
@@ -161,12 +182,16 @@ def parse_skill_set_file(skill_set_path: Path) -> list[SkillSetEntry]:
             continue
 
         try:
+            requirement = extend_skill_entry_with_requires(
+                raw_entry, source=str(skill_set_path)
+            )
             entry = SkillSetEntry(
                 name=str(raw_entry["name"]),
                 version=str(raw_entry["version"]),
                 auto_load=bool(raw_entry["auto_load"]),
                 category=str(raw_entry["category"]),
                 description=str(raw_entry["description"]),
+                requirement=requirement,
             )
         except (ValueError, TypeError) as e:
             logger.warning(
@@ -333,7 +358,29 @@ class SkillSeedService:
                 summary["errors"] += 1
                 continue
 
-            template_content = template_path.read_text(encoding="utf-8")
+            # Phase 3 WP2 — mandatory-first-instruction rule.
+            # A skill entry declaring a non-empty ``requires:`` block
+            # must begin its body with ``capability_check(...)``; the
+            # rule fires BEFORE the include-resolver pass so the
+            # author's authored body is what we inspect (not the
+            # include-expanded result).
+            raw_template_content = template_path.read_text(encoding="utf-8")
+            try:
+                enforce_mandatory_first_instruction(
+                    skill_name=entry.name,
+                    skill_body=raw_template_content,
+                    requirement=entry.requirement,
+                    skill_set_path=str(skill_set_path),
+                )
+            except MandatoryFirstInstructionError as e:
+                logger.warning(
+                    f"Mandatory-first-instruction violation in "
+                    f"{e.skill_set_path} skill {e.skill_name!r}: {e}"
+                )
+                summary["errors"] += 1
+                continue
+
+            template_content = raw_template_content
 
             # Resolve ``include:`` directives from the template's
             # YAML frontmatter. The directive lets a skill inline
@@ -357,7 +404,19 @@ class SkillSeedService:
             )
 
             if existing is None:
-                # New template — insert
+                # New template — insert.
+                # P3-WP2 wiring fix: persist the parsed
+                # CapabilityRequirement as JSON so the injection-time
+                # capability gate can look it up via
+                # ``Skill.source_skill_bank_id`` without re-parsing the
+                # template body. Empty requirement → NULL (no row-level
+                # state for advisory skills).
+                req_json = (
+                    entry.requirement.to_json()
+                    if entry.requirement is not None
+                    and not entry.requirement.is_empty()
+                    else None
+                )
                 self._bank_repo.create(
                     name=entry.name,
                     content=template_content,
@@ -367,6 +426,7 @@ class SkillSeedService:
                     template_version=entry.version,
                     agent_id=agent_id,
                     auto_load=entry.auto_load,
+                    requirement_json=req_json,
                 )
                 summary["new"] += 1
                 logger.debug(
@@ -378,6 +438,16 @@ class SkillSeedService:
                 # is strictly higher than the bank's stored version.
                 # Same version = skip (idempotent). Lower version = skip
                 # (bank has a newer version, probably manually updated).
+                # P3-WP2 wiring fix: refresh requirement_json alongside
+                # the template refresh so an entry that adds or
+                # changes ``requires:`` propagates to the bank without
+                # waiting for a separate migration.
+                update_req_json = (
+                    entry.requirement.to_json()
+                    if entry.requirement is not None
+                    and not entry.requirement.is_empty()
+                    else None
+                )
                 self._bank_repo.update(
                     existing.id,
                     content=template_content,
@@ -385,6 +455,7 @@ class SkillSeedService:
                     category=bank_category,
                     template_version=entry.version,
                     auto_load=entry.auto_load,
+                    requirement_json=update_req_json,
                 )
                 summary["updated"] += 1
                 logger.info(

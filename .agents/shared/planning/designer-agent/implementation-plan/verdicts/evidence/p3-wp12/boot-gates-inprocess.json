@@ -1,0 +1,38 @@
+SCRUB-OK: zero POSTGRES_*/PG* vars in environment at 2026-09-26T22:00:31Z
+{
+  "G2_tool_scan": {
+    "kms_tools_found": [
+      "kms_attach",
+      "kms_lookup_handle",
+      "kms_request"
+    ],
+    "pass": true
+  },
+  "G4_builtin_registry": {
+    "found": true,
+    "class": "OpenDesignMCP",
+    "schema_version": "0.16.1",
+    "pass": true
+  },
+  "G5_registry_strict": {
+    "entries": [
+      {
+        "capability_id": "opendesign",
+        "installer_skill": "install-opendesign",
+        "builtin_mcp_class": "OpenDesignMCP",
+        "schema_version": "0.16.1",
+        "requires_secret": true,
+        "kms_service_id": "opendesign",
+        "_pending": false
+      }
+    ],
+    "pass": true
+  },
+  "G6_redaction_filter": {
+    "root_handlers": 0,
+    "root_handlers_covered": 0,
+    "newly_attached_this_call": 0,
+    "pass": true
+  },
+  "ALL_PASS": true
+}

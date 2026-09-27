@@ -235,6 +235,7 @@ from .doc_write import create_doc_write_tools
 from .comment_edit import create_comment_edit_tools
 from .doc_commit import create_doc_commit_tools
 from .chart_tools import create_chart_tools
+from .compare_tools import create_compare_tools
 from .image_tools import create_image_tools
 from .todo_tools import create_todo_tools
 from .question_tools import create_question_tools
@@ -249,7 +250,7 @@ from .project_history import create_project_history_tools
 from .context_tools import create_context_tools
 from .shared_meta_kv_tools import create_shared_meta_kv_tools
 from .db_tools import create_db_tools
-from .infra import create_infra_tools
+from .infra import create_infra_tools, create_kms_tools
 from .system import create_system_tools
 from .system_log_tools import create_system_log_tools
 from .upgrade_tools import create_upgrade_tools
@@ -5151,6 +5152,15 @@ Returns:
     chart_tool_list = create_chart_tools(manager, current_instance_id)
     tools.extend(chart_tool_list)
 
+    # ── Compare tools (delegates to image-comparator agent for structured
+    #    findings, P2-WP2). Always-wired like the chart / image / todo
+    #    factories; per-agent access is gated by ``tools.allow`` via
+    #    ``TOOL_REQUIRED_AGENTS["design"]``. The factory never raises (it
+    #    only builds the closure); tool invocations surface the facade's
+    #    never-raise error envelope on failure.
+    compare_tool_list = create_compare_tools(manager, current_instance_id)
+    tools.extend(compare_tool_list)
+
     # ── Image tools (delegates to image-reader agent for vision analysis, always available) ──
     # Image tools (always available, like chart tools)
     image_tools = create_image_tools(manager, current_instance_id)
@@ -5248,6 +5258,16 @@ Returns:
         repository=manager.infra_repository,
     )
     tools.extend(infra_tool_list)
+
+    # ── KMS-Lite tools (P3-WP7, designer-agent mission) ──
+    # Mint / attach / lookup. Registered under the ``infra`` category
+    # via ``create_kms_tools`` so agents opt-in by adding ``infra`` to
+    # ``tools.allow`` (the same path as ``infra_asset_*``). Day-1
+    # contract: handles-only, fail-closed (P3-WP9), no rotate/revoke.
+    # Note: ``infra`` is NOT in ``agents/worker/meta.json::tools.allow``
+    # today — see P3-WP7 finding. Sibling WPs own agent allowlist edits.
+    kms_tool_list = create_kms_tools(manager, current_instance_id)
+    tools.extend(kms_tool_list)
 
     # ── Context tools (list/read shared context directory) ──
     # Always available — internal agents need this to inspect accumulated context

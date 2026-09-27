@@ -720,80 +720,37 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
         #     it to scope RAG / project-bound tool calls.
 
         # Determine if the calling agent needs a model override.
-        # Explorer's meta.json may declare ``caller_model_overrides``: a map
-        # of caller agent_id -> model name (a string forces that model; ``None``
-        # falls back to the system default model from ``config.llm.model``).
-        # A missing key means no override — explorer uses its default
-        # ``llm_model`` (typically "quick").
         #
-        # Registry lookup follows the project's critical-note pattern:
-        # ``get_version()`` first (versioned meta), falling back to
-        # ``get_resolved()`` (base meta). When the agent_id is missing
-        # (legacy callers), we skip the override entirely.
-        model_override: str | None = None
-        if agent_id:
-            try:
-                # Use the module-level registry singleton (same pattern as
-                # ``daemon.tools.instance._apply_tool_filter``). Lazy
-                # import avoids circular dependency on the registry module
-                # at tool-factory load time.
-                from daemon.registry import get_registry
-
-                registry = get_registry()
-                explorer_meta = (
-                    registry.get_version("explorer", None)
-                    or registry.get_resolved("explorer")
-                )
-                if explorer_meta is not None:
-                    overrides = getattr(explorer_meta, "caller_model_overrides", None) or {}
-                    # Use ``in`` rather than ``.get()`` so we can distinguish
-                    # "no override configured for this caller" (missing key)
-                    # from "explicit override configured" (key present, value
-                    # either a string or ``None``). Only the explicit case
-                    # yields a model override.
-                    if agent_id in overrides:
-                        explicit = overrides[agent_id]
-                        if explicit is None:
-                            # ``null`` in meta.json → "use the system default
-                            # model". Resolve the actual default model name
-                            # from the manager's config so the downstream
-                            # ``spawn_instance`` override layer sees a real
-                            # model string (not a sentinel). This is the
-                            # difference between "explorer keeps its quick
-                            # model" and "explorer upgrades to the system
-                            # default". Uses ``getattr`` defensively so tests
-                            # with bare MagicMock managers still work.
-                            config = getattr(manager, "config", None)
-                            llm_cfg = getattr(config, "llm", None) if config is not None else None
-                            default_model = getattr(llm_cfg, "model", None) if llm_cfg is not None else None
-                            if default_model:
-                                model_override = default_model
-                            else:
-                                # No config available — pass through None,
-                                # which downstream treats as "no override, use
-                                # explorer default". This is the safer
-                                # fallback than guessing a model name.
-                                logger.warning(
-                                    "caller_model_overrides[%s] is null but config.llm.model is falsy; "
-                                    "falling back to default (no override applied)",
-                                    agent_id,
-                                )
-                                model_override = None
-                        else:
-                            model_override = explicit
-            except Exception as e:
-                logger.warning(
-                    "[Explorer] Failed to resolve caller_model_overrides for %s: %s",
-                    agent_id, e,
-                )
+        # MIGRATION NOTE (Cluster A — designer-agent phase 1, WP2):
+        # The legacy explorer-scoped ``caller_model_overrides`` lookup
+        # that USED to live in this function body was retired and
+        # generalized into the spawn seam at
+        # ``daemon/services/instance_lifecycle.py:_resolve_caller_model_override``.
+        # The seam runs at spawn time for EVERY spawn — not just the
+        # explorer tool — and consults both the parent-declares-for-child
+        # map (new general pattern) AND the child-declares-for-parent
+        # map (legacy backward-compat for ``agents/explorer/meta.json``
+        # ``"caller_model_overrides": {"coder": null}``). Therefore this
+        # block is retired: the spawn seam now produces the same
+        # ``model_override`` value the explorer would have computed here,
+        # for every caller, with no behavior regression. Forwarding a
+        # ``model=`` kwarg here would short-circuit the seam's parent-map
+        # lookup (Priority 1 in the precedence chain); we deliberately
+        # leave it as ``None`` and let the spawn seam decide.
+        # ``agent_id`` is still captured in the ``create_knowledge_tools``
+        # closure for diagnostic + telemetry purposes (see
+        # ``create_knowledge_tools`` docstring).
 
         # Invoke explorer agent — always returns (content, child_instance_id) tuple
         # No try/except wrapper: errors propagate to the registry path below
         # so we can still inspect the checkpoint before bailing.
-        # ``model_override`` is forwarded unconditionally so the
-        # ``invoke_agent_and_wait`` boundary sees the value (None / string)
-        # directly. The boundary layer treats ``None`` as "no override" →
-        # the spawn layer keeps the explorer's default ``llm_model``.
+        # ``model=`` is intentionally NOT forwarded — the spawn seam at
+        # ``InstanceLifecycleService._resolve_caller_model_override``
+        # owns caller-driven override resolution now (see migration note
+        # above). The boundary layer treats the absent ``model=`` as "no
+        # caller-supplied override" → the spawn seam's parent-map lookup
+        # runs first, then ``llm_models`` pool, then ``llm_model``,
+        # then global default.
         result, child_instance_id = await invoke_agent_and_wait(
             manager=manager,
             agent_id="explorer",
@@ -803,7 +760,7 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
             instance_name=f"explore-{query[:30]}",
             timeout=300.0,
             return_instance_id=True,
-            model=model_override,
+            # model= intentionally omitted — see migration note above
         )
 
         # Handle error results — but check checkpoint BEFORE returning

@@ -728,6 +728,7 @@ class TestEdgeCases:
             "template_version": "1.0.0",
             "agent_id": None,
             "auto_load": False,
+            "requirement_json": None,
             "created_at": created.created_at,
             "updated_at": created.updated_at,
         }

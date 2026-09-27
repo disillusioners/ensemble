@@ -29,6 +29,7 @@
       "dynamic-skill",
       "system-log",
       "plane_sync",
+      "infra",
       "service",
       "snapshot_create",
       "snapshot_search"

@@ -48,6 +48,13 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+from daemon.services.kms_lite import (
+    KMSUnavailableError,
+    build_marker,
+    kms_fingerprint,
+    kms_request,
+    kms_resolve_handle,
+)
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -861,4 +868,240 @@ def create_infra_tools(
         infra_type_register,
         infra_type_list,
         infra_history_get,
+    ]
+
+
+# ---------------------------------------------------------------------------
+# KMS-Lite tools (P3-WP7 + P3-WP6 — designer-agent mission)
+#
+# Two tool surfaces exposed under the ``infra`` category per arch §7.5:
+#   * ``kms_request`` — mint a new handle; returns {handle, fingerprint}
+#   * ``kms_attach`` — bind an existing handle to an MCP server's env key
+#     (writes the ``__KMS_REF__<handle>__`` marker into that row's
+#     ``config.env[<env_key>]``; appends a handle-binding entry to
+#     ``instance_metadata.bound_handles``). Plaintext NEVER appears in
+#     any return value, log line, or DB column.
+#   * ``kms_lookup_handle`` — read-side: confirm a recorded handle is
+#     still known (fingerprint match). NEVER reveals plaintext.
+#
+# Why a separate factory (vs. folding into ``create_infra_tools``):
+#   * Different concerns: infra assets are typed records; KMS handles
+#     are secret-bearing pointers. Keeping the factories disjoint makes
+#     the audit trail clearer (KMS tools are the only writers of the
+#     ``instance_metadata.bound_handles`` substrate).
+#   * The factory still registers under ``infra`` so agent ``tools.allow``
+#     does not need a new category.
+#
+# Day-1 contract (§7.5 — ratified):
+#   * No policy layer, no allowlist, no TTL sweeps, no rotate/revoke.
+#   * Handles-not-secrets: plaintext NEVER leaves the encrypted store
+#     except at the spawn-time resolver (``kms_resolver.py``).
+# ---------------------------------------------------------------------------
+
+
+def create_kms_tools(
+    manager: "InstanceManager",
+    current_instance_id: str,
+) -> list:
+    """Create KMS-Lite mint / attach / lookup tools.
+
+    Args:
+        manager: The :class:`InstanceManager` instance. Used to access
+            ``manager._mcp_server_repository`` for the ``kms_attach``
+            write path. Accepted for parity with other factories.
+        current_instance_id: The current instance ID. Recorded as the
+            ``actor`` on every mint call and threaded into the
+            ``bound_handles`` audit entry on attach.
+
+    Returns:
+        A list of 3 tool functions:
+        ``[kms_request, kms_attach, kms_lookup_handle]``.
+
+    Failure surfaces:
+
+    * ``kms_request`` returns ``ERROR: KMS_UNAVAILABLE: ...`` when
+      :data:`SYSTEM_ENCRYPTION_KEY` is absent or invalid. The
+      fail-closed ``KMSUnavailableError`` is the day-1 contract (P3-WP9
+      closes arch §8 R2). It is the escalation envelope's signal to
+      report ``installed_but_unconfigured`` /
+      ``detection_evidence=kms_key_absent`` (sibling WP wires the
+      envelope; this tool only emits the typed error).
+    * ``kms_attach`` returns ``ERROR: HANDLE_NOT_FOUND: ...`` if the
+      caller passes a handle the store does not recognise. This is a
+      day-1 contract failure (re-mint is the recovery path; revocation
+      is §7.5a deferred).
+    * All three tools catch generic exceptions and return
+      ``ERROR: <exc-class-name>`` so a misbehaving KMS-Lite cannot
+      crash the agent turn (N9 contract — same as the rest of the
+      ``infra`` category).
+    """
+
+    logger = logging.getLogger(__name__)
+
+    # -------------------------------------------------------------------------
+    # kms_request
+    # -------------------------------------------------------------------------
+    @register_tool_category("infra")
+    @tool
+    def kms_request(
+        service: str,
+        reason: str,
+    ) -> str:
+        """Mint a new KMS handle for a service. Use tool_help("kms_request") for details.
+
+        Returns ``{"handle": "KMS_HANDLE_<uuid>", "fingerprint":
+        "<sha256[:16]>"}`` as JSON. The plaintext secret is held ONLY in
+        the encrypted store; the caller never receives it. Fail-closed:
+        raises :class:`KMSUnavailableError` when ``SYSTEM_ENCRYPTION_KEY``
+        is absent or invalid (P3-WP9 invariant).
+        """
+        try:
+            record = kms_request(
+                service=service,
+                reason=reason,
+                actor=current_instance_id,
+            )
+            return json.dumps(record)
+        except KMSUnavailableError as exc:
+            # Fail-closed (P3-WP9). Surface as a typed tool error so
+            # the escalation envelope (sibling WP) can convert to
+            # ``installed_but_unconfigured`` /
+            # ``detection_evidence=kms_key_absent``. We deliberately do
+            # NOT log the exception's message: it would only echo
+            # env-var state and is already operator-side info.
+            logger.warning(
+                "kms_request refused: kms_unavailable actor=%s",
+                current_instance_id,
+            )
+            return f"ERROR: KMS_UNAVAILABLE: {exc}"
+        except Exception as exc:  # noqa: BLE001 — N9 contract
+            logger.exception(
+                "kms_request unexpected error: actor=%s", current_instance_id
+            )
+            return f"ERROR: {type(exc).__name__}"
+
+    # -------------------------------------------------------------------------
+    # kms_attach
+    # -------------------------------------------------------------------------
+    @register_tool_category("infra")
+    @tool
+    def kms_attach(
+        server_id: str,
+        handle: str,
+        env_key: str,
+    ) -> str:
+        """Bind a KMS handle to an MCP server's env key. Use tool_help("kms_attach") for details.
+
+        Reads the ``mcp_servers`` row fresh from the DB, then writes:
+
+        * ``config.env[<env_key>]`` ← ``__KMS_REF__<handle>__`` marker
+        * ``instance_metadata.bound_handles`` ← ``{handle, env_key,
+          fingerprint, actor}``
+
+        The read-then-write pattern is load-bearing: any code path that
+        re-serialises ``mcp_servers.config`` MUST re-read the row to
+        avoid overwriting a stored marker with cached plaintext (R1).
+        Plaintext NEVER appears in the write — only the marker.
+        """
+        try:
+            # Confirm the handle is known. We do NOT reveal plaintext
+            # at this layer; the attach is a marker-write only.
+            fp = kms_fingerprint(handle)
+            if fp is None:
+                return (
+                    f"ERROR: HANDLE_NOT_FOUND: handle={handle!r} "
+                    "is not known to the KMS-Lite store. Re-mint via "
+                    "kms_request."
+                )
+
+            # R1 invariant: re-read the row fresh before writing. A
+            # cached+rewritten marker row would silently leak plaintext
+            # on the next spawn.
+            repo = manager._mcp_server_repository
+            server = repo.get_mcp_server(server_id)
+            if server is None:
+                return f"ERROR: SERVER_NOT_FOUND: server_id={server_id!r}"
+
+            existing_config = dict(server.config or {})
+            env_block = dict(existing_config.get("env") or {})
+            env_block[env_key] = build_marker(handle)
+            existing_config["env"] = env_block
+
+            existing_meta = dict(server.instance_metadata or {})
+            bindings = list(existing_meta.get("bound_handles") or [])
+            # Idempotent: same (handle, env_key) tuple collapses.
+            bindings = [
+                b for b in bindings
+                if not (b.get("handle") == handle and b.get("env_key") == env_key)
+            ]
+            bindings.append(
+                {
+                    "handle": handle,
+                    "env_key": env_key,
+                    "fingerprint": fp,
+                    "actor": current_instance_id,
+                }
+            )
+            existing_meta["bound_handles"] = bindings
+
+            updated = repo.update_mcp_server(
+                server_id,
+                config=existing_config,
+                instance_metadata=existing_meta,
+            )
+            if updated is None:
+                return f"ERROR: SERVER_NOT_FOUND: server_id={server_id!r}"
+
+            return json.dumps(
+                {
+                    "server_id": server_id,
+                    "handle": handle,
+                    "env_key": env_key,
+                    "fingerprint": fp,
+                    "marker": build_marker(handle),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 — N9 contract
+            # Includes KMSUnavailableError if the store was initialised
+            # with a bad key between the lookup and the attach (very
+            # narrow window). Surface as a typed error.
+            logger.exception(
+                "kms_attach unexpected error: actor=%s server_id=%s",
+                current_instance_id, server_id,
+            )
+            if isinstance(exc, KMSUnavailableError):
+                return f"ERROR: KMS_UNAVAILABLE: {exc}"
+            return f"ERROR: {type(exc).__name__}"
+
+    # -------------------------------------------------------------------------
+    # kms_lookup_handle
+    # -------------------------------------------------------------------------
+    @register_tool_category("infra")
+    @tool
+    def kms_lookup_handle(handle: str) -> str:
+        """Look up the recorded fingerprint for a KMS handle. Use tool_help("kms_lookup_handle") for details.
+
+        Returns ``{"handle": "...", "fingerprint": "<sha256[:16]>"}``
+        when known, or ``ERROR: HANDLE_NOT_FOUND`` when the store does
+        not recognise the handle. NEVER returns plaintext.
+        """
+        try:
+            fp = kms_fingerprint(handle)
+            if fp is None:
+                return f"ERROR: HANDLE_NOT_FOUND: handle={handle!r}"
+            return json.dumps({"handle": handle, "fingerprint": fp})
+        except Exception as exc:  # noqa: BLE001 — N9 contract
+            logger.exception(
+                "kms_lookup_handle unexpected error: actor=%s handle=%s",
+                current_instance_id, handle,
+            )
+            return f"ERROR: {type(exc).__name__}"
+
+    # -------------------------------------------------------------------------
+    # Return
+    # -------------------------------------------------------------------------
+    return [
+        kms_request,
+        kms_attach,
+        kms_lookup_handle,
     ]

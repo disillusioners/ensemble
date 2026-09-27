@@ -10,8 +10,16 @@ FROZEN API CONTRACT (architect §3 ratification)
 ----------------------------------------------------------------------
 
 POST /api/tmp_images
-    Request:  { "images": [{ "filename", "content_type", "data_base64" }, ...] }
+    Request:  { "images": [{ "filename", "content_type", "data_base64",
+                            "feature"?, "page"?, "version"?,
+                            "source_agent"? }, ...] }
               ≤3 images per request; ≤10MB per image (decoded).
+              The four provenance fields are OPTIONAL (P3 rider,
+              P2-deferred): when supplied they persist to the image's
+              provenance sidecar (same shape the designer tool path
+              writes — keys present only when set); when absent the
+              request behaves exactly as before. Unknown keys are
+              still rejected (extra="forbid" preserved).
               content_type MUST be in the 4-type allowlist
               (image/png | image/jpeg | image/jpg | image/gif | image/webp).
     Response: 200 { "uploads": [{ "image_id", "ref_url", "content_type",
@@ -98,6 +106,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from daemon.models.tmp_image import (
     TmpImageCleanupStatus,
     TmpImageDebugListingResponse,
+    TmpImageUpload,
     TmpImageUploadBatchResponse,
     TmpImageUploadRequest,
     TmpImageUploadResponse,
@@ -204,6 +213,28 @@ def _normalize_image_id(raw: str) -> str | None:
     return candidate
 
 
+def _build_provenance(img: TmpImageUpload) -> dict[str, str] | None:
+    """Project optional provenance fields into the store's sidecar shape.
+
+    Mirrors the in-tool writer (``daemon/tools/image_tools.py``): keys
+    are present ONLY when set, and ``None`` is returned when no field
+    was supplied so the persisted sidecar stays byte-identical to the
+    pre-provenance shape (the store omits the ``provenance`` key when
+    None). The HTTP path has NO caller-instance context, so
+    ``source_agent`` is never auto-stamped here — auto-stamp remains
+    tool-path-only behavior.
+    """
+    fields = (
+        ("feature", img.feature),
+        ("page", img.page),
+        ("version", img.version),
+        ("source_agent", img.source_agent),
+    )
+    if all(value is None for _, value in fields):
+        return None
+    return {key: str(value) for key, value in fields if value is not None}
+
+
 # ===========================================================================
 # POST /api/tmp_images
 # ===========================================================================
@@ -257,8 +288,11 @@ async def upload_images(
                 ) from exc
             image_id = uuid.uuid4().hex
             normalized_ct = _normalize_content_type(img.content_type)
+            provenance = _build_provenance(img)
             try:
-                record = store.save(image_id, decoded, normalized_ct)
+                record = store.save(
+                    image_id, decoded, normalized_ct, provenance=provenance
+                )
             except TmpImageStoreFull as exc:
                 _maybe_log_full_warning()
                 raise HTTPException(

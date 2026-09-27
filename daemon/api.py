@@ -384,7 +384,10 @@ async def lifespan(app: FastAPI):
 
     # Initialize InstanceManager
     manager = InstanceManager(
-        config, ensemble_config, credential_manager=credential_manager
+        config,
+        ensemble_config,
+        credential_manager=credential_manager,
+        tmp_image_store=tmp_image_store,
     )
     await manager.initialize()
 

@@ -264,11 +264,13 @@ def create_opencode_tools(
     current_instance_id: str,
 ) -> list:
     """Create opencode orchestration tools with injected manager reference.
-    
+
     Args:
         manager: The InstanceManager instance (provides opencode_registry).
-        current_instance_id: The ID of the current instance (unused for now
-            but kept for pattern parity with knowledge_tools).
+        current_instance_id: The ID of the current instance (consumed by
+            the context-key resolver at module-internal call sites to
+            scope state — kept in the signature for pattern parity with
+            knowledge_tools).
 
     Returns:
         List of 8 tool functions.

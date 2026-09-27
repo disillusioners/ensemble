@@ -346,8 +346,12 @@ class TestResolveModelOverride:
         manager = create_mock_manager(config)
         lifecycle = InstanceLifecycleService(manager, MagicMock())
 
-        # Capture the log so we can assert it was emitted at debug level
-        # (not info/warn) per Fix 3 in this changeset.
+        # WP3 task 1 — observability: silent-fallback log was bumped from
+        # DEBUG to WARNING (PD-1 verdict: DEFER behavior change, ADD
+        # observability — see implementation-plan/phase1-foundations.md
+        # §8 PD-1 / PD-3). The substring-match regression assertions
+        # (no raise, returns None) are unchanged; only the log level
+        # assertion is updated.
         with patch.object(lifecycle_module.logger, "debug") as mock_debug, \
              patch.object(lifecycle_module.logger, "info") as mock_info, \
              patch.object(lifecycle_module.logger, "warning") as mock_warn:
@@ -357,11 +361,19 @@ class TestResolveModelOverride:
             f"BUG REGRESSION: 'gpt-4o' must NOT be allowed when allowed_models=['gpt-4']; "
             f"got {result!r}"
         )
-        # Silent-fallback path must emit a debug-level log, NOT info/warn
-        # (Fix 3: this is a non-actionable "we silently ignored something" event).
-        assert mock_debug.called, "Silent fallback must emit a debug log"
+        # WP3: silent-fallback path now emits at WARNING level (was DEBUG
+        # pre-WP3). This is the load-bearing observability half of PD-1 —
+        # operators see non-allowlisted override attempts at default log
+        # level without needing DEBUG toggled on. Caller-facing ``[NOTE]``
+        # continues to surface via ``_format_model_fallback_notice``.
+        assert mock_warn.called, (
+            "Silent fallback must emit a WARNING log (WP3 observability — "
+            "PD-1 ADD observability verdict)"
+        )
         assert not mock_info.called, "Silent fallback must NOT emit at info level"
-        assert not mock_warn.called, "Silent fallback must NOT emit at warning level"
+        assert not mock_debug.called, (
+            "Silent fallback must NOT emit at debug level (WP3 moved it to WARNING)"
+        )
 
     def test_allowed_case_insensitive_match_accepted(self) -> None:
         """allowed_models=['GPT-4'], model='gpt-4' → accepted (case-insensitive)."""

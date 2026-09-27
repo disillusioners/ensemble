@@ -2134,6 +2134,14 @@ class TestWebviewCspRewrite:
                         "cache-control": "public, max-age=31536000",
                     }
 
+                    # Empty async generator (canonical ``if False:
+                    # yield`` idiom) — LOAD-BEARING: the fake URL's
+                    # query string (``?id=x``) defeats
+                    # ``_path_contains_webview_fragment``'s exact
+                    # 4-segment tuple match, the rewrite returns None,
+                    # and the proxy's streaming fallback iterates
+                    # ``aiter_raw()``; this satisfies that protocol so
+                    # the header assertions still run.
                     async def aiter_raw(self, chunk_size=None):
                         if False:
                             yield

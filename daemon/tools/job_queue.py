@@ -1772,6 +1772,12 @@ def create_job_tools(
         """Continue a completed job by sending a new message to its instance.
 
         Use tool_help("job_continue") for details."""
+        # P3-WP11 (designer-agent, ratified 2026-09-26): the structured
+        # resume shape carried in ``message`` is the ``[resume]`` JSON
+        # convention — parsed by
+        # ``daemon.services.capability_resolver.parse_resume_message``.
+        # This tool intentionally carries NO resume logic (documented
+        # convention, not a code path).
         try:
             # P-B (Phase 5, 2026-06-27): rewrite the LOOKUP half of
             # ``job_continue`` to be resolver-aware. The previous

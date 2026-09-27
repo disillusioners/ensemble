@@ -385,6 +385,22 @@ class TmpImageCleanupService:
             blob_mtime = names_mtime[blob_name]
             sidecar_name = f"{image_id}{_METADATA_SUFFIX}"
             sidecar_mtime = names_mtime.get(sidecar_name)
+            # WP9 — protected entries (design baselines) survive the
+            # sweep regardless of age. The cap still counts them, but
+            # the sweep never silently evicts a protected record;
+            # release path = explicit re-save with
+            # ``retention_class="normal"`` or a project-close sweep
+            # note (documented on ``image_save`` / store docstring).
+            # Treat unreadable / malformed sidecars as "unknown
+            # class" — fail-open to "sweep-eligible" so a tampered
+            # sidecar cannot accidentally exempt an entry. That is
+            # the inverse of the design intent: a protected
+            # designation must be EXPLICIT (literal ``"protected"``
+            # string in the JSON); absence reads as "normal".
+            if sidecar_name in names_mtime and self._is_protected(
+                sidecar_name
+            ):
+                continue
             age_ts = self._resolve_age_seconds(
                 image_id,
                 blob_mtime=blob_mtime,
@@ -411,6 +427,15 @@ class TmpImageCleanupService:
             image_id = sidecar_name[: -len(_METADATA_SUFFIX)]
             if image_id in names_mtime:
                 # Blob still present — the pair was handled in pass 1.
+                continue
+            # WP9 mirror — even orphan sidecars carry the retention
+            # class; protected orphans also survive the reap. (In
+            # practice, an orphan sidecar is itself an edge case —
+            # the blob went away — but the same fail-open rule
+            # applies: malformed/old sidecars default to
+            # sweep-eligible, only a literal ``"protected"`` string
+            # exempts.)
+            if self._is_protected(sidecar_name):
                 continue
             age_ts = self._resolve_age_seconds(
                 image_id,
@@ -441,6 +466,36 @@ class TmpImageCleanupService:
             return (self._store.dir / name).stat().st_size
         except OSError:
             return 0
+
+    def _is_protected(self, sidecar_name: str) -> bool:
+        """WP9 — return True iff the sidecar declares ``"protected"``.
+
+        Fail-open contract: the sweep MUST default to
+        "sweep-eligible" when the sidecar is missing, unreadable,
+        invalid JSON, missing the key, or carries any value other
+        than the literal string ``"protected"``. A tampered or
+        malformed sidecar cannot accidentally exempt an entry from
+        the sweep — the only exemption path is an explicit
+        ``retention_class: "protected"`` write by an authorized
+        caller (``image_save`` tool with the matching kwarg).
+
+        Resolves the bare ``sidecar_name`` against ``self._store.dir``
+        so the caller can pass the same unqualified name format used
+        by ``_sweep_store_dir`` everywhere else (avoid passing two
+        different name shapes between the two helpers).
+        """
+        meta_path = self._store.dir / sidecar_name
+        try:
+            raw = meta_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        try:
+            meta = json.loads(raw)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(meta, dict):
+            return False
+        return meta.get("retention_class") == "protected"
 
     def _resolve_age_seconds(
         self,

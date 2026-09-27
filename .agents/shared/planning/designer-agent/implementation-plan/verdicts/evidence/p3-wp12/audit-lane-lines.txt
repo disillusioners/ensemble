@@ -1,0 +1,9 @@
+# Canonical audit lane — live-boot mcp_install line + mock-e2e lane shape (row 2)
+
+## Live boot (daemon cwd = worktree): mcp_install, secret_ref=null (zero-credential install)
+{"ts":"2026-09-26T22:03:38.401461+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_7184d418a23b43d0b4fa05c5e10159f0","idempotency_key":"","trace_id":"f1c6d8c2b7084f83b0ed918ea22f6b3e"}
+
+## kms_issue line shape (from WP12a unit lane; same writer, handle-only secret_ref)
+{"ts":"<iso>","event":"kms_issue","name":"opendesign","actor":"<caller-iid>","parent":null,"secret_ref":"KMS_HANDLE_<hex>","idempotency_key":"","trace_id":"<uuid-hex>"}
+
+## Row-2 assertion (both events, one lane, one run) is pinned by tests/unit/test_p3_e2e_cycle.py::test_full_bootstrap_cycle_rows_1_3_5 (see row6-test-list-output.txt)

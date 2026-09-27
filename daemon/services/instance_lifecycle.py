@@ -1437,7 +1437,14 @@ class InstanceLifecycleService:
                 return candidate
 
         # Non-empty list + no match → silently fall back to None (no error).
-        logger.debug(
+        # WP3 task 1 — observability: bumped from DEBUG to WARNING. Text
+        # semantics preserved (names the model, the allowlist, and the
+        # fallback). The corresponding caller-facing ``[NOTE]`` already
+        # surfaces via ``_format_model_fallback_notice``; the WARNING here
+        # is the operator-side signal that a non-allowlisted model was
+        # requested during a spawn — visible in production log levels
+        # without needing DEBUG toggled on.
+        logger.warning(
             f"spawn_instance: model override '{candidate}' is not in "
             f"config.llm.allowed_models ({allowed}); silently falling "
             f"back to default model."
@@ -1478,6 +1485,156 @@ class InstanceLifecycleService:
             f"\n[NOTE] Model '{model.strip()}' is not in allowed_models; "
             f"spawned with the default model instead."
         )
+
+    def _resolve_caller_model_override(
+        self,
+        resolved_agent_id: str,
+        parent_id: str | None,
+        child_metadata: "AgentMetadata | None",
+    ) -> tuple[str | None, str | None]:
+        """Resolve a caller-driven model override from the parent→child edge.
+
+        Generalizes the previously explorer-scoped ``caller_model_overrides``
+        lookup (formerly ``daemon/tools/knowledge_tools.py:723-790``) into
+        the spawn seam so EVERY spawn — not just the explore tool — honors
+        a parent's preference.
+
+        Two lookup sources are consulted, in order:
+
+        1. **Parent-declares-for-child (new general pattern, D2).** The
+           parent instance's resolved agent meta declares a
+           ``caller_model_overrides`` map keyed by *child* agent_id. When
+           the parent is spawning this child, the matching value is the
+           model to use. A string value forces that model; ``None`` (null
+           in JSON) means "use the system default model"
+           (``self._config.llm.model``); a missing key means no override.
+
+        2. **Child-declares-for-parent (legacy backward-compat — explorer).**
+           The child agent's meta may declare its own
+           ``caller_model_overrides`` map keyed by *parent* agent_id. This
+           is the older pattern (see ``agents/explorer/meta.json`` with
+           ``"caller_model_overrides": {"coder": null}``) — preserved here
+           so existing meta.json files keep working without an out-of-band
+           migration. The legacy lookup is consulted ONLY if the parent
+           map didn't yield a value.
+
+        Both sources return through the SAME validation path
+        (:meth:`_resolve_model_override`) — non-allowlisted targets fall
+        back silently with the WARNING log (WP3) and the caller-facing
+        ``[NOTE]`` (see :meth:`_format_model_fallback_notice`). No new
+        behavior; just a new resolver.
+
+        Registry lookups follow the project's critical-note pattern:
+        ``get_version()`` first (versioned meta), falling back to
+        ``get_resolved()`` (base meta). On any unexpected error (parent
+        instance gone, agent meta unreadable, registry unavailable), the
+        resolver returns ``(None, None)`` — silent fallback to default —
+        and logs at DEBUG. The spawn must not fail because of a missing
+        parent context.
+
+        Args:
+            resolved_agent_id: The CHILD agent_id (after registry
+                normalization — see :meth:`spawn_instance`). This is the
+                key the parent map looks up.
+            parent_id: The PARENT instance_id, or ``None`` for a tree-root
+                spawn (no parent means no caller-driven override).
+            child_metadata: The CHILD agent meta (already resolved in
+                :meth:`spawn_instance`). Used for the legacy
+                child-declares-for-parent lookup.
+
+        Returns:
+            A ``(candidate_model, source_label)`` tuple. ``candidate_model``
+            is the unvalidated model string (NOT yet run through
+            ``_resolve_model_override`` — the caller does that). When
+            neither source yields a value, both elements are ``None``.
+            ``source_label`` is the log/source-tag string for this
+            resolution path (currently always ``"parent_map"`` regardless
+            of which source produced the candidate).
+        """
+        if not parent_id:
+            # Tree-root spawn: no parent means no caller-driven override.
+            return (None, None)
+
+        try:
+            parent_instance = self._manager._instance_repository.get(parent_id)
+        except Exception as exc:
+            logger.debug(
+                "spawn_instance: parent instance lookup failed for %s; "
+                "skipping caller-driven override (parent_map): %s",
+                parent_id,
+                exc,
+            )
+            return (None, None)
+
+        if parent_instance is None:
+            # Parent gone (terminated, GC'd, etc.) — no override.
+            return (None, None)
+
+        parent_agent_id = getattr(parent_instance, "agent_id", None)
+        if not parent_agent_id:
+            return (None, None)
+
+        # Lazy import to avoid circular dependency at module-load time
+        # (mirrors ``daemon/tools/knowledge_tools.py:740-741``).
+        from daemon.registry import get_registry
+
+        candidate: str | None = None
+        try:
+            registry = get_registry()
+            parent_meta = (
+                registry.get_version(parent_agent_id, None)
+                or registry.get_resolved(parent_agent_id)
+            )
+            if parent_meta is not None:
+                parent_map = getattr(parent_meta, "caller_model_overrides", None) or {}
+                # ``in`` (not ``.get()``) — distinguish "no override
+                # configured for this child" (missing key) from "explicit
+                # override" (key present, value either string or None).
+                # Mirrors the explorer's child-side semantics.
+                if resolved_agent_id in parent_map:
+                    explicit = parent_map[resolved_agent_id]
+                    if explicit is None:
+                        # null in parent meta → "use the system default
+                        # model". Resolve the actual default model name
+                        # so the downstream spawn-instance override layer
+                        # sees a real string (same semantics as the
+                        # explorer's child-side ``null`` branch).
+                        candidate = getattr(self._config.llm, "model", None)
+                    elif isinstance(explicit, str) and explicit.strip():
+                        candidate = explicit
+                    # else (other types, empty string) → no override
+        except Exception as exc:
+            logger.debug(
+                "spawn_instance: parent-meta caller_model_overrides lookup "
+                "failed for parent_agent_id=%s; falling back to legacy "
+                "child-side lookup: %s",
+                parent_agent_id,
+                exc,
+            )
+
+        # Legacy fallback — child-declares-for-parent (explorer pattern).
+        # Consulted only if the parent map didn't yield a value. Same
+        # semantics (string → use it, null → default, missing → skip).
+        if candidate is None and child_metadata is not None:
+            try:
+                child_map = getattr(child_metadata, "caller_model_overrides", None) or {}
+                if parent_agent_id in child_map:
+                    explicit = child_map[parent_agent_id]
+                    if explicit is None:
+                        candidate = getattr(self._config.llm, "model", None)
+                    elif isinstance(explicit, str) and explicit.strip():
+                        candidate = explicit
+            except Exception as exc:
+                logger.debug(
+                    "spawn_instance: child-meta caller_model_overrides lookup "
+                    "failed for child_agent_id=%s; no override applied: %s",
+                    resolved_agent_id,
+                    exc,
+                )
+
+        if candidate is None:
+            return (None, None)
+        return (candidate, "parent_map")
 
     def spawn_instance(
         self,
@@ -1609,6 +1766,39 @@ class InstanceLifecycleService:
         # Resolve and validate the spawn-time model override (silent fallback
         # to None if not in allowed_models — never raises).
         validated_model_override = self._resolve_model_override(model)
+
+        # ── D2 parent-map lookup (Cluster A — designer-agent phase 1) ───────
+        # If the caller (council/leader/explicit spawn) did NOT supply a
+        # ``model=`` arg (i.e. ``validated_model_override`` is None), AND
+        # there is a parent instance, consult the parent's agent meta for
+        # ``caller_model_overrides[child_agent_id]``. When present, that
+        # value becomes the spawn-time override — same precedence slot as
+        # the legacy ``model=`` arg (i.e. above ``llm_models`` pool, above
+        # ``llm_model`` single-model, above global default). Validated
+        # through the same ``_resolve_model_override`` path so non-
+        # allowlisted targets still silent-fall-back with the WARNING log
+        # + caller-facing ``[NOTE]`` (no new failure modes introduced).
+        #
+        # The helper ``_resolve_caller_model_override`` covers TWO sources
+        # in order: (1) parent-declares-for-child (new general pattern,
+        # ``caller_model_overrides`` on the PARENT's meta, keyed by child
+        # agent_id); (2) child-declares-for-parent (legacy explorer
+        # pattern, ``caller_model_overrides`` on the CHILD's meta, keyed by
+        # parent agent_id). Both surface the same downstream slot — the
+        # source label is ``"parent_map"`` in either case. See
+        # ``_resolve_caller_model_override`` for the full contract.
+        _override_source: str = ""  # tracks which override slot won
+        if not (validated_model_override and validated_model_override.strip()):
+            caller_candidate, caller_source = self._resolve_caller_model_override(
+                resolved_agent_id=resolved_agent_id,
+                parent_id=parent_id,
+                child_metadata=metadata,
+            )
+            if caller_candidate:
+                validated_caller = self._resolve_model_override(caller_candidate)
+                if validated_caller and validated_caller.strip():
+                    validated_model_override = validated_caller
+                    _override_source = caller_source or "parent_map"
 
         # Validate instance_id format or auto-generate
         if instance_id is None or not _UUID_PATTERN.match(instance_id):
@@ -1782,9 +1972,19 @@ class InstanceLifecycleService:
         # the chosen model is frozen for the instance's lifetime.
         #
         # Resolution priority (highest → lowest):
-        #   1. validated_model_override (spawn-time override from caller —
-        #      council, leader, explicit spawn param). If this is set,
-        #      llm_models load-balancing is SKIPPED (council/Governor path).
+        #   0. ``model_tier`` — resolved at the tool layer
+        #      (see ``daemon.tools.instance._resolve_intelligence_tier``
+        #      ~1166-1251); the result lands in the ``model=`` param so it
+        #      wins as Priority 1 below. Loud-fail on non-allowlist (D2).
+        #   1. validated_model_override (spawn-time override from caller
+        #      — council, leader, explicit spawn param, OR
+        #      ``caller_model_overrides`` parent-map lookup, see the
+        #      ``_override_source`` variable above). When set, llm_models
+        #      load-balancing is SKIPPED (council/Governor path). The
+        #      ``_override_source`` distinguishes the two:
+        #      - ``""`` / unset → legacy ``model=`` slot (source="override")
+        #      - ``"parent_map"`` → caller_model_overrides parent-map (D2
+        #        generalization, source="parent_map")
         #   2. metadata.llm_models (weighted random) — fires once here.
         #      ``None`` return from _select_weighted_model means all
         #      candidates were filtered (e.g., none in allowed_models);
@@ -1794,9 +1994,11 @@ class InstanceLifecycleService:
         resolved_model: str | None = None
         resolved_source: str = "default"  # tracks WHERE the model came from
         if validated_model_override and validated_model_override.strip():
-            # Priority 1: spawn-time override (council, leader, explicit param)
+            # Priority 1: spawn-time override (council, leader, explicit
+            # param) OR parent-map (D2). Source label distinguishes them
+            # for the spawn log line (WP3).
             resolved_model = validated_model_override.strip()
-            resolved_source = "override"
+            resolved_source = _override_source or "override"
         elif metadata and metadata.llm_models:
             # Priority 2: weighted load balancing. RNG fires here, exactly
             # once. The function returns None when no valid candidates
@@ -1970,6 +2172,15 @@ class InstanceLifecycleService:
         # Gating rules (Phase 4 of llm-model-load-balance):
         #   - source == "override"  → persist the caller's override (existing
         #                             behavior; council/governor path).
+        #   - source == "parent_map"→ persist the caller-driven parent-map
+        #                             override (Cluster A D2 — designer
+        #                             phase 1). Same freeze semantics as
+        #                             ``override``: the parent's intent must
+        #                             survive a daemon restart (otherwise
+        #                             the child silently re-resolves from
+        #                             its own meta / global default, which
+        #                             is a behavior shift the parent never
+        #                             asked for).
         #   - source == "llm_models"→ persist the load-balanced selection
         #                             (NEW — Phase 4). This is the only NEW
         #                             persistence introduced by the feature.
@@ -1978,11 +2189,15 @@ class InstanceLifecycleService:
         #   - source == "default"   → DO NOT persist. Restore uses the
         #                             global default (backward compat).
         #
-        # The dual-write (override vs llm_models) is intentional: both are
-        # caller/algorithm-driven selections that should be frozen, while
-        # the agent-level and global defaults stay dynamic. This keeps the
-        # feature additive — no behavioral change for existing agents.
-        if resolved_source == "override" and validated_model_override:
+        # The triple-write (override vs parent_map vs llm_models) is
+        # intentional: all three are caller/algorithm-driven selections
+        # that should be frozen, while the agent-level and global defaults
+        # stay dynamic. This keeps the feature additive — no behavioral
+        # change for existing agents.
+        if (
+            resolved_source in ("override", "parent_map")
+            and validated_model_override
+        ):
             instance_metadata["model_override"] = validated_model_override
         elif resolved_source == "llm_models" and resolved_model and resolved_model.strip():
             instance_metadata["model_override"] = resolved_model.strip()
@@ -2003,7 +2218,21 @@ class InstanceLifecycleService:
         if source_type:
             instance_metadata["source_type"] = source_type
 
-        logger.info(f"Spawning instance {instance_id} (agent={resolved_agent_id}, parent={parent_id}, name={instance_name})")
+        # WP3 observability — extend the spawn log line to carry the
+        # resolved model + source. Single line; covers all four resolution
+        # paths (override / parent_map / llm_models / llm_model / default).
+        # ``resolved_model`` is the final concrete model the child instance
+        # will run on (already validated against ``allowed_models`` upstream);
+        # ``resolved_source`` identifies which precedence slot won (see
+        # the precedence comment block at the resolution seam above). This
+        # is the load-bearing observability for AC-12b (non-silent
+        # designer resolution) and AC-12c (override chain live). P1-WP12
+        # greps this exact line.
+        logger.info(
+            f"Spawning instance {instance_id} "
+            f"(agent={resolved_agent_id}, parent={parent_id}, name={instance_name}, "
+            f"model={resolved_model}, source={resolved_source})"
+        )
 
         # M8 fix: child creation + parent source inheritance + initial
         # ``created_at`` capture all run inside ONE ``WriteGuardSession``
