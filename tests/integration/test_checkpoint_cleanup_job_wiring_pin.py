@@ -2,12 +2,17 @@
 
 ``phase1-backend.md`` §4.4 (case 55) + the T1.7 MANUAL-ONLY AST pin:
 
-* the SINGLE ``CheckpointCleanupJob(...)`` construction site in
-  ``daemon/manager.py`` must carry ``run_lock=`` and ``runs_repo=``
-  kwargs (the silent-drop class guard — same rationale as the existing
-  ``message_metadata_repo`` pin: a dropped kwarg at the construction
+* **DAEMON-WIDE invariant** — there is EXACTLY ONE
+  ``CheckpointCleanupJob(...)`` construction site anywhere under
+  ``daemon/**/*.py`` (current lone site: ``daemon/manager.py`` ~line 2652).
+  A future second site anywhere in the daemon tree trips this pin,
+  because a silent second construction disables the prune wiring
+  with zero other test failures (same rationale as the existing
+  ``message_metadata_repo`` pin — a dropped kwarg at the construction
   site silently disables the single-flight gate / audit rows while
   every unit test stays green);
+* the lone construction site must carry ``run_lock=`` and ``runs_repo=``
+  kwargs (the silent-drop class guard);
 * the AUTO ``execute()`` body must NEVER call ``run_checkpoint_prunes``
   (the manual entry point is MANUAL-ONLY — the auto cycle must never
   route through it; INV-1/INV-9);
@@ -21,36 +26,57 @@ import ast
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MANAGER = REPO_ROOT / "daemon" / "manager.py"
-MAINTENANCE = REPO_ROOT / "daemon" / "services" / "maintenance.py"
+DAEMON_DIR = REPO_ROOT / "daemon"
+MANAGER = DAEMON_DIR / "manager.py"
+MAINTENANCE = DAEMON_DIR / "services" / "maintenance.py"
 
 
-def _manager_tree() -> ast.Module:
-    return ast.parse(MANAGER.read_text(encoding="utf-8"))
+def _daemon_trees() -> list[tuple[Path, ast.Module]]:
+    """Parse every ``daemon/**/*.py`` (excluding ``__pycache__``) into an
+    AST. The construction-site pin is DAEMON-WIDE — a second construction
+    site anywhere under ``daemon/`` must trip it."""
+    trees: list[tuple[Path, ast.Module]] = []
+    for path in sorted(DAEMON_DIR.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        trees.append((path, ast.parse(path.read_text(encoding="utf-8"))))
+    return trees
 
 
-def _find_single_construction(tree: ast.Module) -> ast.Call:
-    """The single ``CheckpointCleanupJob(...)`` call site."""
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "CheckpointCleanupJob"
-    ]
-    assert len(calls) == 1, (
-        f"expected exactly ONE CheckpointCleanupJob construction site in "
-        f"manager.py, found {len(calls)} (the wiring pin guards a single "
-        "site; multiple sites need multiple pins)"
+def _find_single_construction(
+    trees: list[tuple[Path, ast.Module]],
+) -> tuple[Path, ast.Call]:
+    """The SINGLE ``CheckpointCleanupJob(...)`` call site across ``daemon/``.
+
+    Returns ``(relpath, call)`` for the lone construction. If a future
+    commit adds a second construction site anywhere in the daemon tree,
+    this pin fails LOUDLY and names every site found so the reviewer can
+    wire both (or remove the duplicate).
+    """
+    sites: list[tuple[Path, ast.Call]] = []
+    for path, tree in trees:
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "CheckpointCleanupJob"
+            ):
+                sites.append((path, node))
+    assert len(sites) == 1, (
+        f"expected exactly ONE CheckpointCleanupJob construction site across "
+        f"daemon/**/*.py, found {len(sites)}: "
+        f"{[str(p.relative_to(REPO_ROOT)) for p, _ in sites]} "
+        "(the wiring pin guards a single site; multiple sites need "
+        "multiple pins)"
     )
-    return calls[0]
+    return sites[0]
 
 
 class TestCheckpointCleanupJobWiring:
     def test_single_construction_site_carries_gate_and_repo_kwargs(self):
-        """Case 55 — the single construction site passes ``run_lock=`` and
-        ``runs_repo=`` (T3 silent-drop guard)."""
-        call = _find_single_construction(_manager_tree())
+        """Case 55 — the lone daemon-wide construction site passes
+        ``run_lock=`` and ``runs_repo=`` (T3 silent-drop guard)."""
+        _, call = _find_single_construction(_daemon_trees())
         kwarg_names = {
             kw.arg for kw in call.keywords if kw.arg is not None
         }
