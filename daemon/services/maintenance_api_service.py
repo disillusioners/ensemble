@@ -591,6 +591,7 @@ class MaintenanceApiService:
             # cancellation alike. Once the task is spawned, its own
             # ``finally`` is the sole releaser (releasing here would
             # unlock the gate while the destructive run is live).
+            # Identity re-check is load-bearing: a lost race means a newer claimant owns the lock — release must never revoke the wrong holder.
             if not task_spawned and self._run_lock.in_flight is ctx:
                 self._run_lock.release()
 

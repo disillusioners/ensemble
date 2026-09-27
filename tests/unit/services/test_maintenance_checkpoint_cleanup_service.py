@@ -258,6 +258,30 @@ class TestStatus:
             "triggered_by": "user",
         }
 
+    async def test_run_row_future_started_at_read_sane(
+        self, runs_repo, as_pg
+    ):
+        """Clock-skew edge — a run row dated in the FUTURE (operator
+        clock skew) must not break the run-row read path: ``get_run``
+        and the status section echo the digits verbatim — no crash, no
+        fabricated age math on the read path."""
+        future_iso = (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        ).isoformat()
+        running = MaintenanceRun(
+            run_id="ckpt-20260927_031822987654-f07ba115",
+            kind="manual_execute",
+            started_at=future_iso,
+            status="running",
+            triggered_by="user",
+        )
+        assert runs_repo.insert(running) is True
+        svc = _service(runs_repo)
+        got = await svc.get_run(running.run_id)
+        assert got["status"] == "running"
+        assert got["started_at"] == future_iso
+        assert (await svc.status())["in_flight"]["started_at"] == future_iso
+
 
 # ── cases 21–27 — the execute validation chain (frozen order) ─────────────────
 
@@ -313,6 +337,27 @@ class TestExecuteGates:
         assert ei.value.http_status == 400
         assert ei.value.details["max_age_seconds"] == 300
         assert ei.value.details["age_seconds"] > 300
+
+    async def test_execute_gate_future_dated_dry_run_not_stale(
+        self, runs_repo, as_pg
+    ):
+        """Clock-skew edge — a dry-run reference dated in the FUTURE
+        yields a NEGATIVE age; the age computation tolerates the sign
+        flip (negative never exceeds the fresh window), so the gate
+        does NOT 400 ``dry_run_stale``. Pinned via the chain advancing
+        to the byte gate (``byte_count_mismatch``, not stale)."""
+        future = _seed_dry_run_row(runs_repo, age_seconds=-3600)
+        svc = _service(runs_repo)
+        with pytest.raises(MaintenanceError) as ei:
+            await svc.execute(
+                _ExecutePayload(
+                    confirm=True,
+                    dry_run_run_id=future.run_id,
+                    expected_bytes=1,
+                ),
+                REQUESTER,
+            )
+        assert ei.value.code == "byte_count_mismatch"
 
     async def test_execute_gate_byte_mismatch(self, runs_repo, as_pg):
         """Case 25 — 400 byte_count_mismatch with {expected, stored}
@@ -1099,3 +1144,149 @@ class TestHostAllowlistGuard:
             "http://[::1]:8079", "[::1]:8079",
             True, monkeypatch=monkeypatch,
         )
+
+    # ── C1 hardening pins — static-only bypass classes ─────────────
+    # The cells below pin bypass classes that are ALREADY
+    # defended-by-construction so a refactor cannot silently weaken
+    # them. Behavior was probe-verified 2026-09-27 before pinning.
+
+    async def test_ipv4_mapped_ipv6_origin_refused(self, monkeypatch):
+        """``::ffff:127.0.0.1`` — an IPv4-MAPPED IPv6 address parses as
+        ``IPv6Address``, so the ``isinstance(IPv4Address)`` gate in
+        ``_host_is_localhost`` is the ONLY thing keeping mapped-v4
+        loopback semantics out of the acceptance (on current CPython
+        that v6 address even reports ``is_loopback=True`` — drop the
+        isinstance gate and it sneaks into the v4 branch). The
+        mapped-v6 Origin/Host pair fails closed: no rule-2 vouch, no
+        rule-3, → 403."""
+        import ipaddress as _ipaddress
+
+        from daemon.routers import maintenance_origin_guard as guard
+
+        # Premise pin: mapped-v6 parses as IPv6Address (never the v4
+        # branch) and the loopback helper refuses it.
+        assert isinstance(
+            _ipaddress.ip_address("::ffff:127.0.0.1"),
+            _ipaddress.IPv6Address,
+        )
+        assert guard._host_is_localhost("::ffff:127.0.0.1") is False
+        await self._assert(
+            "http://[::ffff:127.0.0.1]:8079", "[::ffff:127.0.0.1]:8079",
+            False, monkeypatch=monkeypatch,
+        )
+
+    async def test_unspecified_ipv4_0_0_0_0_refused(self, monkeypatch):
+        """``0.0.0.0`` (unspecified address) is NOT loopback — the
+        127.0.0.0/8 range match must not widen to "any IPv4".
+        Fail-closed 403."""
+        await self._assert(
+            "http://0.0.0.0:8079", "0.0.0.0:8079",
+            False, monkeypatch=monkeypatch,
+        )
+
+    def test_ws_wss_never_vouch_same_origin_rule2(self):
+        """Scheme-confusion pin (rule-2 level) — a ``ws://``/``wss://``
+        Origin against the http-scheme daemon must NOT pass the
+        SAME-ORIGIN rule: scheme is part of the comparison. (Rule 3
+        stays host-level/scheme-blind for loopback BY FROZEN DESIGN —
+        this pin is on the C1-hardened same-origin vouch itself.)"""
+        from daemon.routers import maintenance_origin_guard as guard
+
+        for scheme in ("ws", "wss"):
+            request = self._request(
+                f"{scheme}://localhost:8079", "localhost:8079"
+            )
+            assert guard._same_origin(
+                request, f"{scheme}://localhost:8079"
+            ) is False
+
+    async def test_ws_scheme_origin_refused_full_guard(self, monkeypatch):
+        """Full-guard counterpart on a NON-loopback allowed host — a
+        ``ws://`` Origin cannot reach the rule-3/4 absorption paths,
+        so the pair fails closed to the rule-5 403."""
+        await self._assert(
+            "ws://ops-box.lan:8079", "ops-box.lan:8079",
+            False, allowed_hosts="ops-box.lan", monkeypatch=monkeypatch,
+        )
+
+    @pytest.mark.parametrize(
+        "origin,host",
+        [
+            # substring — NOT the exact "localhost" spelling
+            ("http://evillocalhost.com:8079", "evillocalhost.com:8079"),
+            # suffix — same near-miss class
+            ("http://localhost.evil.com:8079", "localhost.evil.com:8079"),
+            # percent-encoded path separators stay IN the host token
+            ("http://localhost%2f..%2fx:8079", "localhost%2f..%2fx:8079"),
+        ],
+    )
+    async def test_exact_match_semantics_refused(
+        self, monkeypatch, origin, host
+    ):
+        """Frozenset EXACT-match semantics — no substring, no prefix/
+        suffix, no encoded-path spelling in the host comparison; every
+        near-miss spelling fails closed to the rule-5 403."""
+        await self._assert(origin, host, False, monkeypatch=monkeypatch)
+
+    async def test_path_traversal_host_spelling_not_localhost(
+        self, monkeypatch
+    ):
+        """``localhost/../x`` — path-traversal spelling is NOT a
+        localhost-family match (the comparison is exact; paths are not
+        a wildcard). Pinned at the comparison helpers AND fail-closed
+        end-to-end with an attacker Origin."""
+        from daemon.routers import maintenance_origin_guard as guard
+
+        guard.reset_trusted_origins_cache()
+        guard.reset_allowed_hosts_cache()
+        try:
+            assert guard._host_is_localhost("localhost/../x") is False
+            assert guard._host_is_allowed("localhost/../x") is False
+            await self._assert(
+                "http://evil.example:8079", "localhost/../x",
+                False, monkeypatch=monkeypatch,
+            )
+        finally:
+            guard.reset_trusted_origins_cache()
+            guard.reset_allowed_hosts_cache()
+
+    async def test_refusal_log_carries_host_field(
+        self, monkeypatch, caplog
+    ):
+        """R-21/C1 forensics pin — the 403 refusal INFO line carries
+        the request ``Host`` (``host=``): a Host agreeing with the
+        refused Origin is the DNS-rebinding signature, so the field
+        must survive log-call refactors."""
+        import logging as _logging
+
+        from daemon.routers import maintenance_origin_guard as guard
+        from fastapi import HTTPException
+
+        monkeypatch.delenv("MAINTENANCE_TRUSTED_ORIGINS", raising=False)
+        monkeypatch.delenv("MAINTENANCE_ALLOWED_HOSTS", raising=False)
+        guard.reset_trusted_origins_cache()
+        guard.reset_allowed_hosts_cache()
+        try:
+            with caplog.at_level(
+                _logging.INFO,
+                logger="daemon.routers.maintenance_origin_guard",
+            ):
+                with pytest.raises(HTTPException) as ei:
+                    await guard.require_trusted_origin(
+                        self._request(
+                            "http://evil.example:8079",
+                            "attacker.example:9999",
+                        )
+                    )
+            assert ei.value.status_code == 403
+            refusals = [
+                r for r in caplog.records
+                if r.name == "daemon.routers.maintenance_origin_guard"
+            ]
+            assert refusals, "expected the one refusal INFO line"
+            line = refusals[-1].getMessage()
+            assert "host=" in line
+            assert "attacker.example:9999" in line
+        finally:
+            guard.reset_trusted_origins_cache()
+            guard.reset_allowed_hosts_cache()

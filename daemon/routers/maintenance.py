@@ -369,6 +369,7 @@ async def _call_service(
                 "details": exc.details,
             },
         )
+    # NOTE: asyncio.CancelledError deliberately escapes (derives from BaseException, not Exception) so graceful shutdown/cancellation propagates rather than becoming a 500 — load-bearing.
     except Exception:
         logger.exception(
             "maintenance endpoint dispatch raised unexpectedly "
