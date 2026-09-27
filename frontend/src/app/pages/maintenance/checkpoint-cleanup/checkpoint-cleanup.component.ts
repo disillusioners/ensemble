@@ -26,6 +26,7 @@ import type {
   CheckpointCleanupRun,
   CheckpointCleanupSkippedEntry,
   CheckpointCleanupStatus,
+  MaintenanceDisplayCode,
   MaintenanceErrorBody,
 } from '../../../models';
 
@@ -311,16 +312,41 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * A-8 — error code → human label for the inline banner. Only codes
-   * with a curated label are mapped; everything else renders verbatim
-   * (the raw code string), preserving the pre-existing behavior for
-   * the 10 stable codes.
+   * Item 4 — error code → human label for the inline banner. Curated
+   * mapping for codes with stable UX copy; everything else renders
+   * verbatim (the raw code string). The display sentinel
+   * `'poll_stale'` is the FE-only label for an FE poll-timeout
+   * (mapped from the wire body via `displayErrorCode()`). It is
+   * NEVER sent over the wire — only displayed.
    */
   errorLabel(code: string): string {
     if (code === 'internal_error') {
       return 'Internal server error';
     }
+    if (code === 'poll_stale') {
+      return 'Polling timed out — check daemon logs';
+    }
     return code;
+  }
+
+  /**
+   * Item 4 — derive the FE display code from the wire body. Branches
+   * a poll-timeout body (wire `error: 'not_initialized'` +
+   * `details.fe_synthesized_poll_timeout: true`) into the FE-only
+   * `'poll_stale'` sentinel. All other bodies surface verbatim. This
+   * is the discriminator the banner uses to render
+   * "FE-gave-up" vs "BE-said".
+   */
+  displayErrorCode(): MaintenanceDisplayCode | '' {
+    const err = this.lastError();
+    if (!err) {
+      return '';
+    }
+    const marker = err.details?.['fe_synthesized_poll_timeout'];
+    if (marker === true) {
+      return 'poll_stale';
+    }
+    return err.error;
   }
 
   /** AM-6 — interrupted-state render guard. */

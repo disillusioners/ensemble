@@ -14,16 +14,21 @@
 }
 
 <!-- AM-1 — generic inline error banner (does NOT cover `run_in_flight` — that
-     case is absorbed by 409-adoption before reaching here). -->
+     case is absorbed by 409-adoption before reaching here).
+     Item 4 — banner consumes `displayErrorCode()` so an FE poll-timeout
+     surfaces as the display sentinel `'poll_stale'` (verbiage in
+     errorLabel). The wire `error: 'not_initialized'` is NEVER rendered
+     for a poll-timeout; the discriminator is
+     `details.fe_synthesized_poll_timeout === true`. -->
 @if (lastError() && lastError()?.error !== 'maintenance_disabled') {
   <section class="ck-card ck-error-banner" data-testid="ck-error-banner">
     <mat-icon>error_outline</mat-icon>
     <div>
-      <strong>{{ errorLabel(lastError()?.error ?? '') }}</strong>
+      <strong>{{ errorLabel(displayErrorCode()) }}</strong>
       @if (lastError()?.message) {
         <p>{{ lastError()?.message }}</p>
       }
-      @if (lastError()?.error === 'origin_not_trusted') {
+      @if (displayErrorCode() === 'origin_not_trusted') {
         <p class="ck-error-note">
           This origin is not trusted for maintenance actions. If you're seeing
           this unexpectedly, file a ticket.

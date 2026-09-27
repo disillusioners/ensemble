@@ -203,11 +203,22 @@ export class CheckpointCleanupService {
       // timeout boundary).
       switchMap(() => {
         if (Date.now() - start >= maxMs) {
+          // PR-2 / Item 4 — the FE poll budget elapsed before the run
+          // reached a terminal status. The wire body carries
+          // `error: 'not_initialized'` (closest wire-compatible literal;
+          // it is a union member and remains the wire-facing truth) +
+          // `details.fe_synthesized_poll_timeout: true` so the FE
+          // display layer can branch into the FE-only `'poll_stale'`
+          // sentinel (see `MaintenanceDisplayCode`). The literal
+          // `'poll_stale'` is NEVER sent — it is a display-only
+          // sentinel OUTSIDE the BE-mirrored `MaintenanceErrorCode`
+          // union.
           const stuck: MaintenanceErrorBody = {
             error: 'not_initialized',
             message:
               `Run ${runId} is still in progress after ` +
               `${Math.round(maxMs / 60000)} min — check daemon logs.`,
+            details: { fe_synthesized_poll_timeout: true },
           };
           this.lastError.set(stuck);
           return throwError(() => stuck);

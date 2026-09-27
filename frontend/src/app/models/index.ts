@@ -896,6 +896,9 @@ export interface CheckpointCleanupRun {
  * AM-13, AM-1 — 10 stable error codes (was 8 in v1 draft), plus the
  * A-8 catch-all literal `internal_error` (11 union members).
  * `origin_not_trusted` (403) + `maintenance_disabled` (503) added.
+ *
+ * Frozen at v3 contract. NEVER add members here without consulting the
+ * contract — the BE wire contract pins exactly 11 codes (A-8 amendment).
  */
 export type MaintenanceErrorCode =
   | 'not_initialized'
@@ -909,6 +912,16 @@ export type MaintenanceErrorCode =
   | 'origin_not_trusted'
   | 'maintenance_disabled'
   | 'internal_error';
+
+/**
+ * Maintenance display code — superset of `MaintenanceErrorCode` for
+ * FE display purposes. Adds the FE-only sentinel `'poll_stale'` which
+ * is mapped from a poll-timeout body (the wire-side
+ * `error: 'not_initialized'` + `details.fe_synthesized_poll_timeout: true`
+ * marker). NEVER sent over the wire — display-only. The wire-facing
+ * `MaintenanceErrorCode` union stays exactly its frozen 11 members.
+ */
+export type MaintenanceDisplayCode = MaintenanceErrorCode | 'poll_stale';
 
 /**
  * AM-17, AM-14 — `details.run_id` is the canonical key FE adopts on

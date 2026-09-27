@@ -27,6 +27,10 @@ import type {
   MaintenanceErrorBody,
 } from '../../../models';
 
+// Note: `MaintenanceDisplayCode` lives in models/index.ts but is a
+// FE-only display sentinel — the service mirror does NOT consume it.
+// The wire `error` field stays `MaintenanceErrorCode` (11 members).
+
 // ── Mock HttpClient ──────────────────────────────────────────────────────
 
 interface RecordedCall {
@@ -253,9 +257,13 @@ class TestableCheckpointCleanupService {
     return timer(0, intervalMs).pipe(
       switchMap(() => {
         if (Date.now() - start >= maxMs) {
+          // Item 4 — the wire body carries the FE-synthesized
+          // poll-timeout marker so the display layer can branch
+          // into the FE-only `'poll_stale'` sentinel.
           const stuck: MaintenanceErrorBody = {
             error: 'not_initialized',
             message: `Run ${runId} is still in progress after ${Math.round(maxMs / 60000)} min — check daemon logs.`,
+            details: { fe_synthesized_poll_timeout: true },
           };
           this.lastError.set(stuck);
           return throwErr(() => stuck);
@@ -545,8 +553,14 @@ describe('CheckpointCleanupService', () => {
         });
       });
       expect(errored).toBe(true);
-      // Inline error carries the `not_initialized` fallback code.
+      // Item 4 — wire `error: 'not_initialized'` (closest wire-
+      // compatible literal; remains a union member). The
+      // FE-synthesized poll-timeout marker rides in `details` so
+      // the display layer can branch into the FE-only `'poll_stale'`
+      // sentinel. The `'poll_stale'` literal is NEVER sent — it is
+      // display-only.
       expect(service.lastError()?.error).toBe('not_initialized');
+      expect(service.lastError()?.details?.fe_synthesized_poll_timeout).toBe(true);
     });
   });
 

@@ -34,6 +34,7 @@ import type {
   CheckpointCleanupExecute,
   CheckpointCleanupRun,
   CheckpointCleanupStatus,
+  MaintenanceDisplayCode,
   MaintenanceErrorBody,
 } from '../../../models';
 import { CheckpointCleanupService } from './checkpoint-cleanup.service';
@@ -297,8 +298,14 @@ class TestableCheckpointCleanupComponent {
         this.startPolling(body.run_id);
       },
       error: (err: MaintenanceErrorBody) => {
+        // Item 1 — mirror production VERBATIM: on `run_in_flight` +
+        // `details.run_id`, call `service.clearLastError()` AND set
+        // activeRunId, then start polling. Silent-adoption UX
+        // (no error banner / no snack-bar) is asserted by the
+        // 409-adoption spec.
         const adoptedRunId = this.service.adoptRunIdFromError(err);
         if (adoptedRunId) {
+          this.service.clearLastError();
           this.activeRunId.set(adoptedRunId);
           this.startPolling(adoptedRunId);
           return;
@@ -382,6 +389,33 @@ class TestableCheckpointCleanupComponent {
 
   canRerunInterrupted(run: CheckpointCleanupRun): boolean {
     return run.status === 'interrupted';
+  }
+
+  /**
+   * Item 4 — error code → human label for the inline banner. Adds
+   * the FE-only `'poll_stale'` sentinel branch (display-only — NEVER
+   * sent over the wire; the wire body uses
+   * `error: 'not_initialized'` + `details.fe_synthesized_poll_timeout: true`).
+   */
+  errorLabel(code: string): string {
+    if (code === 'internal_error') return 'Internal server error';
+    if (code === 'poll_stale') return 'Polling timed out — check daemon logs';
+    return code;
+  }
+
+  /**
+   * Item 4 — derive the FE display code from the wire body.
+   * `details.fe_synthesized_poll_timeout === true` → `'poll_stale'`.
+   * All other bodies surface verbatim.
+   */
+  displayErrorCode(): MaintenanceDisplayCode | '' {
+    const err = this.lastError();
+    if (!err) return '';
+    const marker = err.details?.['fe_synthesized_poll_timeout'];
+    if (marker === true) {
+      return 'poll_stale';
+    }
+    return err.error;
   }
 
   formatBytes(n: number): string {
@@ -693,7 +727,12 @@ describe('CheckpointCleanupComponent', () => {
   });
 
   describe('409-adoption (AM-14, AM-17)', () => {
-    it('on 409 run_in_flight with details.run_id: polls adopted run_id, NO snack-bar', () => {
+    it('on 409 run_in_flight with details.run_id: polls adopted run_id, NO snack-bar, lastError cleared', () => {
+      // Item 1 — production mirrors `service.clearLastError()` on the
+      // 409-adoption path; the spec asserts (a) the call fires, (b)
+      // `lastError()` is null post-adoption (silent-adoption UX
+      // unguarded otherwise — the inline banner would otherwise
+      // re-render against the run_in_flight body), (c) no error toast.
       service.lastDryRun.set(DRY_RUN);
       mockDialog.nextResult = true;
       // Override the mock's execute to throw a 409 body.
@@ -705,6 +744,10 @@ describe('CheckpointCleanupComponent', () => {
       expect(service.pollRunCalls).toHaveLength(1);
       expect(service.pollRunCalls[0].runId).toBe('ckpt-already-running');
       expect(MockSnackBarRef.openCalls).toHaveLength(0); // no error toast
+      // Item 1 pin: silent-adoption UX — lastError MUST be null after
+      // adoption so the inline banner does not render during the
+      // "ride along" polling.
+      expect(component.lastError()).toBeNull();
     });
 
     it('on 409 run_in_flight WITHOUT details.run_id: error banner surfaces (fallthrough)', () => {
@@ -717,6 +760,42 @@ describe('CheckpointCleanupComponent', () => {
       component.onExecute();
       expect(service.pollRunCalls).toHaveLength(0); // no adoption
       expect(component.executing()).toBe(false); // not stuck
+    });
+  });
+
+  describe('display sentinel (Item 4 — poll_stale)', () => {
+    it('maps a poll-timeout body (error: not_initialized + fe_synthesized_poll_timeout) to display sentinel "poll_stale"', () => {
+      // The wire body uses `error: 'not_initialized'` (closest wire-
+      // compatible literal) + `details.fe_synthesized_poll_timeout: true`.
+      // The FE display layer branches into `'poll_stale'` for these.
+      const body: MaintenanceErrorBody = {
+        error: 'not_initialized',
+        message: 'Run x is still in progress after 10 min — check daemon logs.',
+        details: { fe_synthesized_poll_timeout: true },
+      };
+      service.lastError.set(body);
+      expect(component.displayErrorCode()).toBe('poll_stale');
+      expect(component.errorLabel(component.displayErrorCode())).toBe(
+        'Polling timed out — check daemon logs',
+      );
+    });
+
+    it('passes BE-said error codes through verbatim (e.g. internal_error)', () => {
+      service.lastError.set({ error: 'internal_error', message: 'boom' });
+      expect(component.displayErrorCode()).toBe('internal_error');
+      expect(component.errorLabel(component.displayErrorCode())).toBe('Internal server error');
+    });
+
+    it('passes a wire not_initialized body WITHOUT the marker through verbatim (no FE poll-timeout)', () => {
+      // A genuine BE `not_initialized` (e.g. backend unavailable) MUST
+      // surface verbatim — the FE-only sentinel does NOT fire.
+      service.lastError.set({ error: 'not_initialized', message: 'backend not ready' });
+      expect(component.displayErrorCode()).toBe('not_initialized');
+    });
+
+    it('returns empty string when lastError is null (no banner)', () => {
+      service.lastError.set(null);
+      expect(component.displayErrorCode()).toBe('');
     });
   });
 
