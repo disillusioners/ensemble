@@ -11,7 +11,7 @@
 //   3.  `poll-stop-on-terminal` (T6.3)
 //   4.  `no-idempotency-key` (AM-17 — REPLACES `idempotency-key-present`)
 //   5.  `byte-echo-in-confirm-message` (T6.3)
-//   6.  `error-code-union-exhaustive` (10 codes, AM-13/AM-1)
+//   6.  `error-code-union-exhaustive` (11 codes, AM-13/AM-1 + A-8)
 //   7.  `poll-interval-default-2000` (AM-14/A-10)
 //   8.  `format-bytes-uses-binary` (T6.3)
 //   9.  `state-enum-gating` (AM-14)

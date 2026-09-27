@@ -14,6 +14,20 @@ import { join } from 'path';
  *     `scripts/boot-e2e-maintenance-daemon.sh` (initdb + pg_ctl +
  *     createdb on port 15432, distinct from dev :5432).
  *
+ * Item 7 — env requirement:
+ *   The spec at `e2e/maintenance-checkpoint-cleanup.spec.ts` requires
+ *   `ENSEMBLE_DB_DSN` to be set to a disposable PG DSN before the
+ *   suite runs (defense-in-depth refusal — refuses to run destructive
+ *   e2e without a confirmed DB target; refuses any DSN matching
+ *   `/ensemble_prod/i`). The webServer below boots the daemon via
+ *   `POSTGRES_*` env directly, but the spec needs an explicit DSN
+ *   binding the e2e to a disposable PG. Examples:
+ *
+ *     ENSEMBLE_DB_DSN=postgresql://$USER@127.0.0.1:15432/ensemble_e2e_maint_$$
+ *
+ *   The webServer also requires `OPENAI_API_KEY` (any well-formed
+ *   value; the e2e spec does not exercise LLM calls).
+ *
  * This config is INVOKED separately from the default
  * `playwright.config.ts`:
  *

@@ -694,7 +694,7 @@ export type EditorType = 'builtin' | 'vscode';
 // AM-17 (idempotency_key DROPPED), AM-14 (state enum + 409-adoption),
 // AM-12 (advisory + expected_duration_ms_hint), AM-11 (dual-flavor keys),
 // AM-10 (skipped[] + truncated), AM-9 (manual_dry_run stripped from last_run),
-// AM-6 (interrupted added to status union), AM-13/AM-1 (10 error codes).
+// AM-6 (interrupted added to status union), AM-13/AM-1 (11 error codes incl. A-8 internal_error).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**

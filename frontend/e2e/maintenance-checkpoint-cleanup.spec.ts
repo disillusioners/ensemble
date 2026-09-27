@@ -541,13 +541,34 @@ test.describe('Maintenance — Checkpoint Cleanup (14 cases, AM-16 amendments)',
       });
     }
     expect([403, 0]).toContain(res.status()); // 403 OR network-error (0) both acceptable
+    // Item 8 — assert the 403 body in BOTH branches. When status === 403
+    // the BE returned a structured `origin_not_trusted` body (either
+    // raw `{error}` or FastAPI-wrapped `{detail: {error}}`); when
+    // status === 0 (Playwright surfaced the 403 as a network error),
+    // we verify the upstream body via the fetch-fallback branch by
+    // also probing with the structured `error` literal carried on
+    // the wire. The dual-branch assertion prevents a future Playwright
+    // upgrade from silently breaking the body contract.
+    let body: { error?: string; detail?: { error?: string } } | null = null;
     if (res.status() === 403) {
-      const body = await res.json();
-      // FastAPI wraps structured error bodies under `detail` —
-      // the guard raises `HTTPException(403, detail={"error": ...})`.
-      // Accept either shape (raw or wrapped).
-      const errCode = body.error ?? body.detail?.error;
+      body = await res.json();
+      const errCode = body?.error ?? body?.detail?.error;
       expect(errCode).toBe('origin_not_trusted');
+    } else {
+      // status === 0 — the fetch-fallback branch must also return 403.
+      // Re-issue the request with the structured literal in scope.
+      const fallback = await fetch(`${BASE_URL}/api/maintenance/checkpoint-cleanup/dry-run`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'http://evil.example',
+        },
+        body: '{}',
+      });
+      expect(fallback.status).toBe(403);
+      const fallbackBody = await fallback.json();
+      const fallbackErrCode = fallbackBody?.error ?? fallbackBody?.detail?.error;
+      expect(fallbackErrCode).toBe('origin_not_trusted');
     }
     await ctx.close();
   });
