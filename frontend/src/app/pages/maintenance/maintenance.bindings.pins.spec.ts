@@ -480,9 +480,12 @@ describe('Maintenance console — source-grep pins (18 pins)', () => {
       // not onExecute. A silent-execute regression (a re-binding
       // to `onExecute()`) is caught here.
       // We anchor on the run-again button testid and look for the
-      // first `(click)` binding within its opening tag block.
+      // `(click)` binding WITHIN the full button block. The block
+      // extends to `</button>` (NOT the first `>`) so the assertion
+      // catches nested content too — e.g. a `(click)="onExecute()"`
+      // accidentally added inside `@if (dryRunning()) { ... }`.
       const runAgainButton = sectionComponentTemplate.match(
-        /data-testid="ck-run-again-btn"[\s\S]*?>/,
+        /data-testid="ck-run-again-btn"[\s\S]*?<\/button>/,
       );
       expect(runAgainButton).not.toBeNull();
       expect(runAgainButton![0]).toMatch(/\(click\)\s*=\s*["']onDryRun\(\)["']/);
@@ -491,10 +494,15 @@ describe('Maintenance console — source-grep pins (18 pins)', () => {
 
     it('banner CTA disabled while ANY run is in flight (dry-run / execute / daemon isRunInFlight)', () => {
       const runAgainButton = sectionComponentTemplate.match(
-        /data-testid="ck-run-again-btn"[\s\S]*?>/,
+        /data-testid="ck-run-again-btn"[\s\S]*?<\/button>/,
       );
       expect(runAgainButton).not.toBeNull();
-      // All three in-flight signals MUST gate the button.
+      // All three in-flight signals MUST gate the button. The
+      // button block extends to `</button>` (not the first `>`) so
+      // the assertion reads the FULL block — including nested
+      // `@if (dryRunning()) { ... }` content that ALSO references
+      // `dryRunning()`. Widening ensures the in-flight signals are
+      // tested across the whole button, not just the opening tag.
       expect(runAgainButton![0]).toMatch(/dryRunning\(\)/);
       expect(runAgainButton![0]).toMatch(/executing\(\)/);
       expect(runAgainButton![0]).toMatch(/isRunInFlight\(\)/);

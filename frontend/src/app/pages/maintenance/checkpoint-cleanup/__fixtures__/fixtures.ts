@@ -16,6 +16,7 @@ import type {
   CheckpointCleanupBlobsSummary,
   CheckpointCleanupDryRun,
   CheckpointCleanupExecute,
+  CheckpointCleanupLastRun,
   CheckpointCleanupRun,
   CheckpointCleanupStatus,
   MaintenanceAvailability,
@@ -357,4 +358,74 @@ export const RUN_INTERRUPTED_NEVER_PRUNED: CheckpointCleanupRun = {
   status: 'interrupted',
   completed_at: '2026-09-28T11:00:15.000+00:00',
   error: { code: 'run_interrupted', message: 'daemon restart' },
+};
+
+/**
+ * v3.2 B2 — `status.last_run` shaped row that seeds the post-run
+ * banner on page load (refresh persistence). Mirrors
+ * `RUN_SUCCEEDED_NEVER_PRUNED` (same source projection: never-pruned,
+ * after = 11.8 GB) but in the wire-shape `CheckpointCleanupLastRun`
+ * (`error` field absent; status narrowed to 'succeeded' | 'failed').
+ * Drives the B2 spec: page load with this row → `refreshStatus()`
+ * seeds `lastExecuteResult` → banner visible WITHOUT any client action.
+ */
+export const STATUS_LAST_RUN_SUCCEEDED_NEVER_PRUNED: CheckpointCleanupLastRun = {
+  run_id: RUN_SUCCEEDED_NEVER_PRUNED.run_id,
+  kind: 'manual_execute',
+  started_at: RUN_SUCCEEDED_NEVER_PRUNED.started_at,
+  completed_at: RUN_SUCCEEDED_NEVER_PRUNED.completed_at,
+  status: 'succeeded',
+  summary: RUN_SUCCEEDED_NEVER_PRUNED.summary!,
+};
+
+/**
+ * v3.2 B2 — auto-cycle last_run. Drives the negative arm: B2
+ * seeding skips auto rows because R-5 (auto rows have no
+ * `projection` block). Without `after > 0` the banner must NOT
+ * seed.
+ */
+export const STATUS_LAST_RUN_AUTO_SUCCEEDED: CheckpointCleanupLastRun = {
+  run_id: RUN_AUTO_NO_PROJECTION.run_id,
+  kind: 'auto',
+  started_at: RUN_AUTO_NO_PROJECTION.started_at,
+  completed_at: RUN_AUTO_NO_PROJECTION.completed_at,
+  status: 'succeeded',
+  summary: {
+    // Same shape as RUN_AUTO_NO_PROJECTION.summary but stripped
+    // of the absent `projection` (auto rows omit it).
+    checkpoint_rows: { scanned_pairs: 50, deleted: 12, excess_pairs: 12 },
+    writes: { deleted: 4 },
+    blobs: {
+      scanned_pairs: 50,
+      would_delete_count: 0,
+      would_free_bytes: 0,
+      would_delete: 0,
+      bytes: 0,
+      destructive: true,
+      deleted: 8,
+      bytes_freed: 134217728, // 128 MB
+      skipped: [],
+      skipped_truncated: false,
+    },
+    duration_ms: 138000,
+    // No `projection` — auto rows.
+  },
+};
+
+/**
+ * v3.2 B2 — manual_execute last_run with projection.after === 0.
+ * Drives the negative arm: even on `kind: 'manual_execute'`, a
+ * zero after value means nothing more to reclaim — banner MUST NOT
+ * seed (matches `RUN_SUCCEEDED_PRUNED` semantics).
+ */
+export const STATUS_LAST_RUN_SUCCEEDED_AFTER_ZERO: CheckpointCleanupLastRun = {
+  ...STATUS_LAST_RUN_SUCCEEDED_NEVER_PRUNED,
+  run_id: 'ckpt-20260928_pruned-last-run-1',
+  summary: {
+    ...STATUS_LAST_RUN_SUCCEEDED_NEVER_PRUNED.summary,
+    projection: {
+      bytes_reclaimable_now_at_dry_run: 268435456,
+      bytes_reclaimable_after_row_prune_at_dry_run: 0,
+    },
+  },
 };

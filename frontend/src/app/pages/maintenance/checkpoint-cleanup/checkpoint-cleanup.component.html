@@ -136,15 +136,18 @@
          components render as "—" (amendment contract). Echo gate AM-3
          is UNCHANGED — these numbers are projection-class and never
          gate-bound (the execute-time echo still binds to
-         `would_free_bytes`). -->
+         `would_free_bytes`). Each value is prefixed with "~" to mark
+         it as an approximation — matching the confirm dialog + the
+         amendment copy ("This run: ~{now} · After this run
+         (run cleanup again): ~{after} · Combined: ~{total}"). -->
     <div class="ck-projection" data-testid="ck-projection">
       <p class="ck-projection-line">
         This run:
-        <strong data-testid="ck-projection-now">{{ dryRunProjectionNow(dry) }}</strong>
+        <strong data-testid="ck-projection-now">~{{ dryRunProjectionNow(dry) }}</strong>
         · After this run (run cleanup again):
-        <strong data-testid="ck-projection-after">{{ dryRunProjectionAfter(dry) }}</strong>
+        <strong data-testid="ck-projection-after">~{{ dryRunProjectionAfter(dry) }}</strong>
         · Combined:
-        <strong data-testid="ck-projection-total">{{ dryRunProjectionTotal(dry) }}</strong>
+        <strong data-testid="ck-projection-total">~{{ dryRunProjectionTotal(dry) }}</strong>
       </p>
 
       <!-- R-4 — skip-flag honesty banner. The same `skipped[]` already

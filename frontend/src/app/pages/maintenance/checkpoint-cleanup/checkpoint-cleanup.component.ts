@@ -24,6 +24,7 @@ import type {
   CheckpointCleanupExecute,
   CheckpointCleanupExecuteRequest,
   CheckpointCleanupRun,
+  CheckpointCleanupStatus,
   MaintenanceDisplayCode,
   MaintenanceErrorBody,
 } from '../../../models';
@@ -107,6 +108,19 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   /** Last completed polled run (set on `pollRun` terminal emission). */
   readonly lastExecuteResult = signal<CheckpointCleanupRun | null>(null);
   readonly activeRunId = signal<string | null>(null);
+  /**
+   * v3.2 B1 — `run_id` of the dry-run that backed the most recent
+   * execute (set in `performExecute`). The post-run banner's
+   * "hide on convergence" check (`lastDryRun.bytes_reclaimable_now
+   * === 0`) is SCOPED by this signal: the rule fires ONLY on a
+   * FRESH dry-run whose `run_id` differs from this anchor — i.e.
+   * a dry-run that the user ran AFTER the execute, not the dry-run
+   * that the execute was confirmed against. Without this scope,
+   * on a never-pruned DB the pre-execute dry-run itself reports
+   * `now == 0` (the incident scenario) and the banner never
+   * appears.
+   */
+  readonly executedDryRunId = signal<string | null>(null);
   /** Whether the dry-run is stale (drives the warning border on the dry-run button). */
   readonly dryRunIsStale = computed(() =>
     this.service.isDryRunStale(this.lastDryRun()),
@@ -127,10 +141,80 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
 
   refreshStatus(): void {
     this.service.fetchStatus().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (status: CheckpointCleanupStatus) => {
+        // v3.2 B2 — seed the post-run banner from `status.last_run`
+        // when the page loads (or refreshes) mid-/post-execute. The
+        // banner is a UI affordance, not a poll outcome; without this
+        // seed it only appears for runs the user personally watched
+        // to terminal. The wire-level run-row projection echo
+        // (R-5) IS the persistence source — auto rows have no
+        // projection block and auto rows therefore never seed the
+        // banner.
+        this.seedBannerFromStatus(status);
+      },
       error: () => {
         // Already surfaced via service.lastError.
       },
     });
+  }
+
+  /**
+   * v3.2 B2 — banner persistence across page refresh. Seeds
+   * `lastExecuteResult` from `status.last_run` when the row is a
+   * `manual_execute` that succeeded and carries a projection block
+   * with `bytes_reclaimable_after_row_prune_at_dry_run > 0`. Auto
+   * rows are skipped (no projection block, R-5). Failed/interrupted
+   * runs are skipped (banner is success-only). Page refresh
+   * mid-poll re-runs `refreshStatus()` on init and the banner
+   * re-appears without any client action.
+   */
+  private seedBannerFromStatus(status: CheckpointCleanupStatus): void {
+    const last = status.last_run;
+    if (!last) {
+      return;
+    }
+    // R-5 — only `manual_execute` rows carry the additive
+    // projection block; auto rows are skipped.
+    if (last.kind !== 'manual_execute') {
+      return;
+    }
+    if (last.status !== 'succeeded') {
+      return;
+    }
+    if (!last.summary) {
+      return;
+    }
+    const after =
+      last.summary.projection?.bytes_reclaimable_after_row_prune_at_dry_run ?? 0;
+    if (after <= 0) {
+      return;
+    }
+    // Reconstruct a `CheckpointCleanupRun` from the `last_run`
+    // shape (the wire row carries no `error` field — banner source
+    // runs are succeeded by definition).
+    this.lastExecuteResult.set({
+      run_id: last.run_id,
+      kind: last.kind,
+      status: last.status,
+      started_at: last.started_at,
+      completed_at: last.completed_at,
+      summary: last.summary,
+      error: null,
+    });
+    // Anchor the B1 hide-rule scope to the persisted dry-run row
+    // — there is no live `performExecute` to set this on a page
+    // refresh. The source dry-run's `run_id` is NOT carried on the
+    // run summary (only its projection values are), so the seeded
+    // `executedDryRunId` must be null. The B1 hide rule then allows
+    // convergence to hide the banner — but since the seed sets
+    // `lastExecuteResult` only (not `lastDryRun`), and the page-load
+    // dry-run state is empty until the user clicks "Dry-run" /
+    // "Run again", the banner renders until the user's first
+    // post-seed dry-run converges. That matches the pre-B1
+    // user-observable behavior for the page-refresh path; the B1
+    // fix is exercised on the live execute path where
+    // `executedDryRunId` IS set by `performExecute`.
+    this.executedDryRunId.set(null);
   }
 
   onDryRun(): void {
@@ -225,6 +309,14 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     // operation's outcome is what the user sees; stale errors from
     // a prior run don't bleed into the new attempt.
     this.service.clearLastError();
+    // v3.2 B1 — anchor the banner's "hide on convergence" rule.
+    // The dry-run whose `run_id` is captured here is the one the
+    // execute was confirmed against; the post-run banner's hide
+    // check excludes it so on never-pruned DBs (where the
+    // pre-execute dry-run already reports `now == 0`) the banner
+    // still renders. A subsequent FRESH dry-run with a different
+    // `run_id` and `now == 0` then hides the banner as before.
+    this.executedDryRunId.set(dryRun.run_id);
 
     // AM-17 — payload is EXACTLY `{dry_run_run_id, expected_bytes,
     // confirm: true}` — NO idempotency key, NO client-side UUID generation.
@@ -541,11 +633,22 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
    *      (`bytes_reclaimable_now == 0` — they've reached pass 2's
    *      claim; nothing more to reclaim)
    *
+   * v3.2 B1 — condition (3) is SCOPED by `executedDryRunId`: the
+   * "now == 0" check fires only when `lastDryRun.run_id` differs
+   * from the dry-run that backed the most recent execute. The
+   * dry-run the user confirmed against (`run_id === executedDryRunId`)
+   * is excluded, so on a never-pruned DB the banner appears even
+   * though that pre-execute dry-run reports `now == 0` (incident
+   * scenario). After the user clicks the banner CTA (which fires
+   * a NEW dry-run with a different `run_id`) and that fresh run
+   * reports `now == 0`, the banner hides.
+   *
    * The banner is intentionally tied to the run-row's projection
    * echo — no client-only state. Page refreshes (or DAEMON
    * restarts during a poll) still recover the banner from the
-   * run summary. Auto rows have no projection block (R-5) so the
-   * banner never fires on them.
+   * run summary via `seedBannerFromStatus()` in `refreshStatus()`
+   * (B2). Auto rows have no projection block (R-5) so the banner
+   * never fires on them.
    */
   showRunAgainBanner(): boolean {
     const run = this.lastExecuteResult();
@@ -557,11 +660,19 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     if (after <= 0) {
       return false;
     }
-    // Hides once a fresh dry-run converges (`now == 0`). When
-    // `lastDryRun` is null we haven't asked yet — keep the banner
-    // visible so the CTA stays actionable.
+    // v3.2 B1 — scope the convergence hide rule. The hide check
+    // fires only on a FRESH dry-run AFTER the execute: the dry-run
+    // whose `run_id` was the execute anchor is excluded. Without
+    // `executedDryRunId` (e.g. pre-execute / mid-poll) the rule
+    // never fires and the banner stays visible.
     const dry = this.lastDryRun();
-    if (dry && (dry.bytes_reclaimable_now ?? 0) === 0) {
+    const anchor = this.executedDryRunId();
+    if (
+      dry &&
+      anchor !== null &&
+      dry.run_id !== anchor &&
+      (dry.bytes_reclaimable_now ?? 0) === 0
+    ) {
       return false;
     }
     return true;
