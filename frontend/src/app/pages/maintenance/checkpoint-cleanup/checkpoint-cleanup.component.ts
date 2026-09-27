@@ -167,6 +167,17 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
    * runs are skipped (banner is success-only). Page refresh
    * mid-poll re-runs `refreshStatus()` on init and the banner
    * re-appears without any client action.
+   *
+   * v3.2 B1 follow-up — `executedDryRunId` is performExecute-owned
+   * state (set when the execute is dispatched). The seed MUST NOT
+   * touch the anchor: on the live execute path, the poll-terminal
+   * handler calls `refreshStatus()` immediately after
+   * `lastExecuteResult` is set, so wiping the anchor here would
+   * re-enable the hide rule to fire on the pre-execute dry-run
+   * itself (now==0 on never-pruned profiles) and the banner would
+   * never appear — the original B1 incident. On a fresh page-load
+   * session the anchor is already null (no performExecute this
+   * session); the seed leaves it null.
    */
   private seedBannerFromStatus(status: CheckpointCleanupStatus): void {
     const last = status.last_run;
@@ -201,20 +212,9 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
       summary: last.summary,
       error: null,
     });
-    // Anchor the B1 hide-rule scope to the persisted dry-run row
-    // — there is no live `performExecute` to set this on a page
-    // refresh. The source dry-run's `run_id` is NOT carried on the
-    // run summary (only its projection values are), so the seeded
-    // `executedDryRunId` must be null. The B1 hide rule then allows
-    // convergence to hide the banner — but since the seed sets
-    // `lastExecuteResult` only (not `lastDryRun`), and the page-load
-    // dry-run state is empty until the user clicks "Dry-run" /
-    // "Run again", the banner renders until the user's first
-    // post-seed dry-run converges. That matches the pre-B1
-    // user-observable behavior for the page-refresh path; the B1
-    // fix is exercised on the live execute path where
-    // `executedDryRunId` IS set by `performExecute`.
-    this.executedDryRunId.set(null);
+    // The anchor (`executedDryRunId`) is intentionally untouched.
+    // See the class JSDoc above for the rationale — wiping it here
+    // would break the live-execute path.
   }
 
   onDryRun(): void {
@@ -633,15 +633,31 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
    *      (`bytes_reclaimable_now == 0` — they've reached pass 2's
    *      claim; nothing more to reclaim)
    *
-   * v3.2 B1 — condition (3) is SCOPED by `executedDryRunId`: the
-   * "now == 0" check fires only when `lastDryRun.run_id` differs
-   * from the dry-run that backed the most recent execute. The
-   * dry-run the user confirmed against (`run_id === executedDryRunId`)
-   * is excluded, so on a never-pruned DB the banner appears even
-   * though that pre-execute dry-run reports `now == 0` (incident
-   * scenario). After the user clicks the banner CTA (which fires
-   * a NEW dry-run with a different `run_id`) and that fresh run
-   * reports `now == 0`, the banner hides.
+   * v3.2 B1 — condition (3) is SCOPED by `executedDryRunId`. The
+   * hide rule fires when `(anchor === null || dry.run_id !== anchor)
+   * && now == 0`. Reading this against the four truth-table rows:
+   *
+   *   - row (a) live execute + same dry-run: anchor === dry.run_id
+   *     → `anchor === null` is false AND `dry.run_id !== anchor` is
+   *     false → hide doesn't fire → banner VISIBLE. The pre-execute
+   *     dry-run on a never-pruned profile reports `now == 0` here;
+   *     without the anchor scope the banner would never appear
+   *     (the incident scenario).
+   *   - row (b) live execute + fresh converging dry-run:
+   *     dry.run_id !== anchor (new id) AND now == 0 → hide fires →
+   *     banner HIDDEN. Triggered by clicking "Run again" (banner CTA)
+   *     or "Dry-run check" after the execute.
+   *   - row (c) seeded session + no user action: anchor is null,
+   *     lastDryRun is null → hide doesn't fire → banner VISIBLE
+   *     (the dry===null short-circuit covers this).
+   *   - row (d) seeded session + fresh converging dry-run: anchor is
+   *     null → `anchor === null` is true → hide fires → banner
+   *     HIDDEN.
+   *
+   * The anchor is `performExecute`-owned state — `seedBannerFromStatus`
+   * must NOT wipe it (otherwise the post-terminal refreshStatus
+   * call would re-anchor null and row (a) regresses). See
+   * `seedBannerFromStatus` JSDoc for the contract.
    *
    * The banner is intentionally tied to the run-row's projection
    * echo — no client-only state. Page refreshes (or DAEMON
@@ -660,17 +676,23 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     if (after <= 0) {
       return false;
     }
-    // v3.2 B1 — scope the convergence hide rule. The hide check
-    // fires only on a FRESH dry-run AFTER the execute: the dry-run
-    // whose `run_id` was the execute anchor is excluded. Without
-    // `executedDryRunId` (e.g. pre-execute / mid-poll) the rule
-    // never fires and the banner stays visible.
+    // v3.2 B1 + B2 — widened hide rule. Fires when:
+    //   (a) `anchor === null` (seeded session: anchor was never
+    //       set because no performExecute this session) AND a
+    //       dry-run with `now == 0` exists, OR
+    //   (b) `dry.run_id !== anchor` (a FRESH dry-run AFTER the
+    //       execute, with a different `run_id` than the execute
+    //       anchor) AND `now == 0`.
+    // In the live execute path, anchor stays as the pre-execute
+    // dry-run's `run_id` (the seed does not wipe it), so the
+    // pre-execute dry-run is excluded — row (a) stays visible.
+    // The `anchor === null` arm covers seeded sessions where
+    // there is no live anchor — row (d) hides on convergence.
     const dry = this.lastDryRun();
     const anchor = this.executedDryRunId();
     if (
       dry &&
-      anchor !== null &&
-      dry.run_id !== anchor &&
+      (anchor === null || dry.run_id !== anchor) &&
       (dry.bytes_reclaimable_now ?? 0) === 0
     ) {
       return false;

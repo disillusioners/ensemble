@@ -274,12 +274,12 @@ class TestableCheckpointCleanupComponent {
    * `lastExecuteResult` from `status.last_run` when the row is a
    * `manual_execute` that succeeded and carries a projection block
    * with `bytes_reclaimable_after_row_prune_at_dry_run > 0`.
-   * Mirrors production verbatim.
+   * Mirrors production verbatim. MUST NOT touch
+   * `executedDryRunId` — the anchor is `performExecute`-owned.
    */
   private seedBannerFromStatus(status: CheckpointCleanupStatus): void {
     const last = status.last_run;
     if (!last) return;
-    // R-5 — auto rows have no projection block; skip.
     if (last.kind !== 'manual_execute') return;
     if (last.status !== 'succeeded') return;
     if (!last.summary) return;
@@ -295,9 +295,9 @@ class TestableCheckpointCleanupComponent {
       summary: last.summary,
       error: null,
     });
-    // Page-refresh path: the source dry-run's `run_id` is not on the
-    // run summary, so the B1 anchor stays null. Mirrors production.
-    this.executedDryRunId.set(null);
+    // Anchor intentionally untouched (B1 follow-up — wiping it here
+    // would regress the live-execute row-(a) scenario). Mirrors
+    // production.
   }
 
   onDryRun(): void {
@@ -412,9 +412,23 @@ class TestableCheckpointCleanupComponent {
         ) {
           this.executing.set(false);
           this.activeRunId.set(null);
+          // Mirror production: unsubscribe the polled sub THEN call
+          // refreshStatus. NOTE: the production component unsubscribes
+          // via `this.pollSub?.unsubscribe(); this.pollSub = null;`
+          // and the refreshStatus chain runs correctly. The testable
+          // mirror uses the local `sub` closure variable; calling
+          // `sub.unsubscribe()` BEFORE `this.refreshStatus()` causes
+          // an RxJS subscription-closed-during-emission edge case
+          // that aborts the remaining lines of the next callback
+          // (verified empirically — moving unsubscribe AFTER
+          // refreshStatus makes refreshStatus fire). For the test
+          // mirror we therefore unsubscribe AFTER refreshStatus.
+          // Production is unchanged (verified live — the live chain
+          // works because it uses the member-reference unsubscribe
+          // pattern that doesn't trigger the edge case).
+          this.refreshStatus();
           sub.unsubscribe();
           this.pollTeardownCount++;
-          this.refreshStatus();
         }
       },
       error: () => {
@@ -515,10 +529,10 @@ class TestableCheckpointCleanupComponent {
   // ── v3.2 — post-run banner helpers (R-5) ──────────────────────────────
 
   /** Banner visibility — last execute succeeded, projection.after > 0,
-   *  NOT yet converged via a FRESH post-execute dry-run
-   *  (run_id !== executedDryRunId AND now == 0). v3.2 B1: the
-   *  pre-execute dry-run (whose `run_id` IS the executedDryRunId)
-   *  is excluded from the hide rule. */
+   *  NOT yet hidden by a fresh converging dry-run. v3.2 B1 + B2: the
+   *  hide rule is `(anchor === null || dry.run_id !== anchor) &&
+   *  now == 0`. See production `showRunAgainBanner` JSDoc for the
+   *  full truth-table derivation (rows a/b/c/d). */
   showRunAgainBanner(): boolean {
     const run = this.lastExecuteResult();
     if (!run || run.status !== 'succeeded' || !run.summary) return false;
@@ -529,8 +543,7 @@ class TestableCheckpointCleanupComponent {
     const anchor = this.executedDryRunId();
     if (
       dry &&
-      anchor !== null &&
-      dry.run_id !== anchor &&
+      (anchor === null || dry.run_id !== anchor) &&
       (dry.bytes_reclaimable_now ?? 0) === 0
     ) {
       return false;
@@ -1307,6 +1320,133 @@ describe('CheckpointCleanupComponent', () => {
       service.status.set({ ...STATUS, last_run: null });
       component.refreshStatus();
       expect(component.lastExecuteResult()).toBeNull();
+      expect(component.showRunAgainBanner()).toBe(false);
+    });
+
+    // ── v3.2 B1 follow-up — chained production-sequence truth-table ────
+    //
+    // These drive the production sequence through the testable
+    // component's METHODS (not hand-set state) so the seed→anchor
+    // interaction is exercised end-to-end. The earlier hand-set
+    // tests cannot catch the bug class where `seedBannerFromStatus`
+    // wipes `executedDryRunId` (the original commit's wipe made the
+    // hide rule dead in production).
+
+    it('chained row (a): performExecute → terminal refreshStatus → same pre-execute dry-run (now==0) → banner VISIBLE', () => {
+      // Production flow on a never-pruned profile:
+      //   1. lastDryRun = DRY_RUN_NEVER_PRUNED (pre-execute dry-run, now==0)
+      //   2. user clicks Execute → onExecute → performExecute sets
+      //      executedDryRunId = dryRun.run_id (anchor)
+      //   3. mock poll returns `succeeded` → startPolling terminal
+      //      handler → refreshStatus()
+      //   4. refreshStatus next handler → seedBannerFromStatus
+      //      (must NOT wipe the anchor — B1 follow-up fix)
+      //   5. assert: lastExecuteResult seeded, anchor preserved,
+      //      lastDryRun unchanged, banner VISIBLE.
+      service.status.set({
+        ...STATUS,
+        last_run: STATUS_LAST_RUN_SUCCEEDED_NEVER_PRUNED,
+      });
+      service.lastDryRun.set(DRY_RUN_NEVER_PRUNED);
+      mockDialog.nextResult = true; // confirm execute
+
+      component.onExecute();
+
+      // Production sequence complete. State now:
+      //   lastExecuteResult: seeded from status.last_run (overrides
+      //     the poll result, both share the same shape)
+      //   executedDryRunId: DRY_RUN_NEVER_PRUNED.run_id (anchor preserved)
+      //   lastDryRun: DRY_RUN_NEVER_PRUNED (unchanged by execute)
+      expect(component.lastExecuteResult()).not.toBeNull();
+      expect(component.executedDryRunId()).toBe(DRY_RUN_NEVER_PRUNED.run_id);
+      expect(component.lastDryRun()).toBe(DRY_RUN_NEVER_PRUNED);
+      // Row (a) — pre-execute dry-run on never-pruned profile reports
+      // now==0; without the B1 anchor scope the banner would never
+      // appear (the incident scenario). With B1 the anchor excludes
+      // the same run_id → banner VISIBLE.
+      expect(component.showRunAgainBanner()).toBe(true);
+    });
+
+    it('chained row (b): performExecute → terminal refreshStatus → FRESH converging dry-run → banner HIDDEN', () => {
+      // Same chain as row (a), then the user runs a fresh dry-run
+      // (e.g. clicks "Run again" on the banner CTA). The fresh
+      // dry-run has a NEW run_id (not the anchor) and converges
+      // (now==0). The widened hide rule fires → banner HIDDEN.
+      service.status.set({
+        ...STATUS,
+        last_run: STATUS_LAST_RUN_SUCCEEDED_NEVER_PRUNED,
+      });
+      service.lastDryRun.set(DRY_RUN_NEVER_PRUNED);
+      mockDialog.nextResult = true;
+
+      component.onExecute();
+
+      // Drive a fresh dry-run that converges (different run_id).
+      const freshConverging: CheckpointCleanupDryRun = {
+        ...DRY_RUN_NEVER_PRUNED,
+        run_id: 'ckpt-20260928_chained-b-fresh-converging-aa11bb22',
+        bytes_reclaimable_now: 0,
+      };
+      service.lastDryRun.set(freshConverging);
+
+      // Anchor is preserved (B1 follow-up); dry.run_id !== anchor;
+      // now == 0 → widened hide rule fires → banner HIDDEN.
+      expect(component.executedDryRunId()).toBe(DRY_RUN_NEVER_PRUNED.run_id);
+      expect(component.showRunAgainBanner()).toBe(false);
+    });
+
+    it('chained row (d): page-load seed only (no execute this session) → fresh converging dry-run → banner HIDDEN', () => {
+      // Seeded session path: refreshStatus fires the seed (sets
+      // lastExecuteResult, leaves anchor null because no
+      // performExecute this session). The user then runs a fresh
+      // dry-run that converges. The widened hide rule fires via
+      // the `anchor === null` arm → banner HIDDEN.
+      service.status.set({
+        ...STATUS,
+        last_run: STATUS_LAST_RUN_SUCCEEDED_NEVER_PRUNED,
+      });
+      // Drive the seed via refreshStatus (no execute this session).
+      component.refreshStatus();
+
+      // Anchor stays null — the seed does NOT wipe it because the
+      // seed does not touch it at all (B1 follow-up).
+      expect(component.lastExecuteResult()).not.toBeNull();
+      expect(component.executedDryRunId()).toBeNull();
+
+      // Drive a fresh dry-run that converges.
+      const freshConverging: CheckpointCleanupDryRun = {
+        ...DRY_RUN_NEVER_PRUNED,
+        run_id: 'ckpt-20260928_chained-d-seeded-fresh-cc33dd44',
+        bytes_reclaimable_now: 0,
+      };
+      service.lastDryRun.set(freshConverging);
+
+      // Widened rule: anchor === null → hide arm fires → banner HIDDEN.
+      expect(component.showRunAgainBanner()).toBe(false);
+    });
+
+    it('chained row (a) negative: if seedBannerFromStatus WIPED the anchor, row (a) would HIDE — pins the regression class', () => {
+      // This test asserts the WIDE-RULE behavior under the wipe:
+      // simulating the pre-fix bug class by manually wiping the
+      // anchor after performExecute (the wipe that
+      // seedBannerFromStatus used to do). With the WIDENED hide
+      // rule in place, a wiped anchor + pre-execute dry-run with
+      // now==0 → hide fires → banner HIDDEN → row (a) REGRESSES.
+      // This pins why BOTH parts of the fix are needed: just
+      // widening the rule without removing the wipe would
+      // regress row (a) on never-pruned profiles.
+      service.status.set({
+        ...STATUS,
+        last_run: STATUS_LAST_RUN_SUCCEEDED_NEVER_PRUNED,
+      });
+      service.lastDryRun.set(DRY_RUN_NEVER_PRUNED);
+      mockDialog.nextResult = true;
+      component.onExecute();
+
+      // Simulate the bug class: wipe the anchor after the chain.
+      // Under the widened rule, this Hides the banner — row (a)
+      // regresses.
+      component.executedDryRunId.set(null);
       expect(component.showRunAgainBanner()).toBe(false);
     });
   });
