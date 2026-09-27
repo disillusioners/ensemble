@@ -5,17 +5,36 @@ Sole browser-borne defense layer for the destructive endpoints
 EXEMPT (the FE gear-menu probe must see disabled state cleanly; it
 is non-destructive).
 
+**C1 hardening (2026-09-27 fix pass) — Host allowlist inside rule 2.**
+The ``Host`` header is client-controlled: a DNS-rebinding attacker
+(page served from ``http://attacker.example:8079`` that rebinds to
+the daemon's IP) sends ``Origin`` and ``Host`` that AGREE, so a bare
+scheme+host+port comparison against the Host header authorizes the
+attack (and CORS ``*`` + credentials makes the response readable).
+Rule 2 therefore only vouches same-origin when the request ``Host``
+is operator-allowed: the allowlist is the loopback family
+(``localhost``, any ``127.0.0.0/8`` IPv4 loopback, ``::1``) + the
+hosts parsed from ``MAINTENANCE_TRUSTED_ORIGINS`` + the explicit CSV
+``MAINTENANCE_ALLOWED_HOSTS`` (empty default ⇒ loopback + trusted
+only). A Host miss means rule 2 CANNOT match — the request continues
+to rules 3–5, so a rebinding pair (attacker Host + attacker Origin)
+lands in the fail-closed 403. The INV-10 rule set/order, the
+``/availability`` exemption, and the 403 literal are UNCHANGED.
+
 Rule order (fail-closed at the end):
 
     1. No ``Origin`` header → allow (curl, systemd, programmatic).
     2. Same-origin (Origin matches the daemon's own external origin
-       derived from request Host + scheme at request time) → allow.
-       Browsers attach Origin even on same-origin POSTs; deny-all
+       derived from request Host + scheme at request time, where the
+       Host must ALSO pass the C1 allowlist — see the hardening
+       paragraph above) → allow. Browsers attach Origin even on
+       same-origin POSTs; deny-all
        would 403 the daemon-served SPA's own execute — the shipped
        product's primary flow. ``X-Forwarded-*`` is untrusted and
        NOT consulted (no proxy chain assumed in v1 [R-7]).
-    3. ``Origin`` host ∈ localhost-family (``localhost``,
-       ``127.0.0.1``, ``[::1]``, any port, http/https) → allow.
+    3. ``Origin`` host ∈ localhost-family (``localhost``, any
+       ``127.0.0.0/8`` IPv4 loopback address, ``[::1]``, any port,
+       http/https) → allow.
        Zero-config dev: FE dev server on :4199 proxies to :8079;
        the daemon sees ``Origin: http://localhost:4199``.
     4. ``Origin ∈ MAINTENANCE_TRUSTED_ORIGINS`` (CSV env, default
@@ -41,15 +60,18 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
-from typing import Iterable
 from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
 
 logger = logging.getLogger(__name__)
 
-# Localhost-family suffix set (lowercase). The full origin host is
-# matched after a ``lower()`` and any IPv6 brackets are stripped.
+# Localhost-family EXACT-match set (lowercase; no suffix semantics —
+# ``localhost.`` or ``localhost.evil`` never match). The full origin
+# host is compared after a ``lower()`` and IPv6 brackets are
+# stripped; the 127.0.0.0/8 RANGE is matched separately in
+# ``_host_is_localhost`` (``_LOCALHOST_HOSTS`` holds only the exact
+# spellings).
 _LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 # Module-level parsed set, refreshed on first use + on env-touch (the
@@ -106,6 +128,76 @@ def reset_trusted_origins_cache() -> None:
     """
     global _trusted_origins_cache
     _trusted_origins_cache = None
+
+
+# C1 — Host allowlist cache (same lifecycle as the trusted-origins
+# cache: parsed on first use, NOT watched live; the operator restarts
+# the daemon after editing the env).
+_allowed_hosts_cache: frozenset[str] | None = None
+
+
+def _parse_allowed_hosts() -> frozenset[str]:
+    """Build the C1 Host allowlist from the two env sources.
+
+    Sources (all hostnames, lowercased; the loopback family is added
+    at MATCH time via ``_host_is_localhost`` so the whole 127.0.0.0/8
+    range works without enumeration):
+
+    * ``MAINTENANCE_ALLOWED_HOSTS`` — CSV of bare hostnames (the
+      explicit external-hosts opt-in; empty default ⇒ loopback +
+      trusted-origin hosts only). An entry containing ``://`` is
+      tolerated by parsing its hostname (operators pasting a full
+      origin URL still get the host). Ports are NOT part of the
+      allowlist: rule 2's comparison already enforces port equality.
+    * ``MAINTENANCE_TRUSTED_ORIGINS`` — the HOST of each parseable
+      origin joins the set (an operator-trusted origin implies its
+      host is operator-known). Malformed entries contribute nothing
+      (fail-closed, fold-in (c) doctrine: inert, never authoritative).
+    """
+    hosts: set[str] = set()
+    for entry in os.environ.get("MAINTENANCE_ALLOWED_HOSTS", "").split(","):
+        e = entry.strip().lower()
+        if not e:
+            continue
+        if "://" in e:
+            e = (urlparse(e).hostname or "").strip().lower()
+            if not e:
+                continue
+        hosts.add(e)
+    for origin in _parse_trusted_origins():
+        if "://" not in origin:
+            continue  # malformed trusted entry — inert, no host to vouch
+        h = (urlparse(origin).hostname or "").strip().lower()
+        if h:
+            hosts.add(h)
+    return frozenset(hosts)
+
+
+def get_allowed_hosts() -> frozenset[str]:
+    """Return the cached Host allowlist (C1). Mirrors
+    ``get_trusted_origins`` — env NOT watched live; restart applies
+    edits."""
+    global _allowed_hosts_cache
+    if _allowed_hosts_cache is None:
+        _allowed_hosts_cache = _parse_allowed_hosts()
+    return _allowed_hosts_cache
+
+
+def reset_allowed_hosts_cache() -> None:
+    """Test hook — clear the C1 Host-allowlist cache (pair with
+    ``reset_trusted_origins_cache`` when mutating either env)."""
+    global _allowed_hosts_cache
+    _allowed_hosts_cache = None
+
+
+def _host_is_allowed(host: str) -> bool:
+    """C1 — True when ``host`` may vouch for a same-origin match.
+
+    Loopback family (always) OR membership in the parsed allowlist.
+    ``host`` is the normalized (lowercase, bracket-stripped,
+    port-stripped) host part.
+    """
+    return _host_is_localhost(host) or host in get_allowed_hosts()
 
 
 def _host_is_localhost(host: str) -> bool:
@@ -185,6 +277,16 @@ def _same_origin(request: Request, origin: str) -> bool:
     normalized per scheme) — dropping the port would let a page
     served on a different port of the same host masquerade as
     same-origin.
+
+    C1 hardening: the ``Host`` header is itself client-controlled, so
+    a bare Origin-vs-Host comparison is satisfiable by a DNS-rebinding
+    attacker (their page's Origin and the rebound request's Host
+    agree by construction). The derived host is therefore only
+    trusted when it passes the Host allowlist
+    (``_host_is_allowed``: loopback family + hosts from
+    ``MAINTENANCE_TRUSTED_ORIGINS`` + ``MAINTENANCE_ALLOWED_HOSTS``).
+    A Host miss ⇒ rule 2 cannot match — the caller falls through to
+    rules 3–5, so a rebinding pair fails closed at rule 5.
     """
     normalized = _normalize_origin(origin)
     if normalized is None:
@@ -198,6 +300,10 @@ def _same_origin(request: Request, origin: str) -> bool:
     if req_normalized is None:
         return False
     req_scheme, req_host, req_port = req_normalized
+    # C1 — the Host-derived origin only vouches for same-origin when
+    # the Host is operator-allowed; otherwise rule 2 cannot match.
+    if not _host_is_allowed(req_host):
+        return False
     return (
         origin_scheme == req_scheme
         and origin_host == req_host
@@ -235,7 +341,9 @@ async def require_trusted_origin(request: Request) -> None:
         )
     # Rule 2 — same-origin (scheme+host+port match against the
     # request's derived external origin; the FULL origin string is
-    # compared so ports are honored).
+    # compared so ports are honored). C1: the derivation only counts
+    # when the request Host passes the allowlist (see ``_same_origin``)
+    # — a client-controlled Host alone can never vouch same-origin.
     if _same_origin(request, origin_lc):
         return
     # Rule 3 — localhost-family (any port, http/https).
@@ -257,17 +365,38 @@ async def require_trusted_origin(request: Request) -> None:
 
 
 def _emit_refusal_log(request: Request, origin: str | None) -> None:
-    """One INFO line per refused Origin — R-21, v3 fix pass."""
+    """One INFO line per refused Origin — R-21, v3 fix pass.
+
+    C1 forensics: the refusal line also carries the request ``Host``
+    — a Host that agrees with the refused Origin is the DNS-rebinding
+    signature (rule 2 refused it via the allowlist). The ``peer_ip``
+    extraction catch is narrowed to the attribute/type errors a
+    malformed ASGI scope can actually raise (a broad catch here would
+    hide real defects in the logging path itself).
+    """
     try:
         peer_ip = request.client.host if request.client else None
-    except Exception:  # noqa: BLE001
+    except (AttributeError, TypeError):
         peer_ip = None
+        logger.debug(
+            "Origin guard: peer_ip extraction failed for path=%s",
+            request.url.path,
+            exc_info=True,
+        )
+    host_header = request.headers.get("host")
     logger.info(
-        "Origin guard refused: origin=%r peer_ip=%s path=%s",
+        "Origin guard refused: origin=%r host=%r peer_ip=%s path=%s",
         origin,
+        host_header,
         peer_ip,
         request.url.path,
     )
 
 
-__all__ = ["require_trusted_origin", "get_trusted_origins", "reset_trusted_origins_cache"]
+__all__ = [
+    "require_trusted_origin",
+    "get_trusted_origins",
+    "reset_trusted_origins_cache",
+    "get_allowed_hosts",
+    "reset_allowed_hosts_cache",
+]

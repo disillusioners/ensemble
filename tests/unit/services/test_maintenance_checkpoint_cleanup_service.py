@@ -841,3 +841,164 @@ class TestOriginGuardMatrix:
         finally:
             guard.reset_trusted_origins_cache()
             monkeypatch.delenv("MAINTENANCE_TRUSTED_ORIGINS", raising=False)
+
+
+class TestHostAllowlistGuard:
+    """C1 fix pass — DNS-rebinding hardening: rule 2's Host-derived
+    same-origin only vouches when the request Host passes the allowlist
+    (loopback family + MAINTENANCE_TRUSTED_ORIGINS hosts +
+    MAINTENANCE_ALLOWED_HOSTS). Cells mirror the council-confirmed
+    design: scheme confusion, trusted-host port masquerade, trailing
+    dot/slash, userinfo."""
+
+    @staticmethod
+    def _request(origin: str, host: str):
+        from types import SimpleNamespace
+
+        headers = {"host": host, "origin": origin}
+        return SimpleNamespace(
+            headers=headers,
+            url=SimpleNamespace(scheme="http", path="/api/m/x"),
+            client=SimpleNamespace(host="127.0.0.1"),
+        )
+
+    async def _assert(self, origin, host, expected_ok, *, trusted=None,
+                      allowed_hosts=None, monkeypatch):
+        from daemon.routers import maintenance_origin_guard as guard
+        from fastapi import HTTPException
+
+        import pytest as _pytest
+
+        if trusted is not None:
+            monkeypatch.setenv("MAINTENANCE_TRUSTED_ORIGINS", trusted)
+        if allowed_hosts is not None:
+            monkeypatch.setenv("MAINTENANCE_ALLOWED_HOSTS", allowed_hosts)
+        guard.reset_trusted_origins_cache()
+        guard.reset_allowed_hosts_cache()
+        try:
+            request = self._request(origin, host)
+            if expected_ok:
+                await guard.require_trusted_origin(request)
+            else:
+                with _pytest.raises(HTTPException) as ei:
+                    await guard.require_trusted_origin(request)
+                assert ei.value.status_code == 403
+                assert ei.value.detail["error"] == "origin_not_trusted"
+        finally:
+            guard.reset_trusted_origins_cache()
+            guard.reset_allowed_hosts_cache()
+            monkeypatch.delenv("MAINTENANCE_TRUSTED_ORIGINS", raising=False)
+            monkeypatch.delenv("MAINTENANCE_ALLOWED_HOSTS", raising=False)
+
+    async def test_dns_rebinding_pair_refused(self, monkeypatch):
+        """C1 core — attacker Host + attacker Origin AGREE on
+        scheme+host+port; the Host allowlist must keep rule 2 from
+        vouching (fail-closed 403 via rule 5)."""
+        await self._assert(
+            "http://attacker.example:8079", "attacker.example:8079",
+            False, monkeypatch=monkeypatch,
+        )
+
+    async def test_allowed_external_host_vouches_same_origin(
+        self, monkeypatch
+    ):
+        """Positive — MAINTENANCE_ALLOWED_HOSTS opts an external host
+        into rule 2 (full scheme+host+port match)."""
+        await self._assert(
+            "http://ops-box.lan:8079", "ops-box.lan:8079",
+            True, allowed_hosts="ops-box.lan", monkeypatch=monkeypatch,
+        )
+
+    async def test_trusted_origin_host_vouches_host_other_port(
+        self, monkeypatch
+    ):
+        """A trusted ORIGIN (http://ops-box.lan:9999) also vouches its
+        HOST for rule 2 — a same-origin match on a DIFFERENT port
+        (8079) passes rule 2 (the trusted string itself would not have
+        matched rule 4 — port differs)."""
+        await self._assert(
+            "http://ops-box.lan:8079", "ops-box.lan:8079",
+            True, trusted="http://ops-box.lan:9999",
+            monkeypatch=monkeypatch,
+        )
+
+    async def test_scheme_confusion_refused(self, monkeypatch):
+        """https Origin vs http daemon on an ALLOWED host — scheme is
+        part of the origin; rule 2 refuses the scheme flip and rules
+        3/4 do not catch it."""
+        await self._assert(
+            "https://ops-box.lan:8079", "ops-box.lan:8079",
+            False, allowed_hosts="ops-box.lan", monkeypatch=monkeypatch,
+        )
+
+    async def test_rule2_port_masquerade_refused(self, monkeypatch):
+        """Allowed host, but Origin port ≠ Host port — rule 2 refuses
+        (ports are part of the comparison; the allowlist is
+        host-level only)."""
+        await self._assert(
+            "http://ops-box.lan:8080", "ops-box.lan:8079",
+            False, allowed_hosts="ops-box.lan", monkeypatch=monkeypatch,
+        )
+
+    async def test_trusted_origin_port_masquerade_refused(
+        self, monkeypatch
+    ):
+        """TRUSTED_ORIGINS is a full-origin string set — a same host on
+        a different port does NOT match rule 4 (no host-prefix
+        matching)."""
+        await self._assert(
+            "http://ops-box.lan:1234", "localhost:8079",
+            False, trusted="http://ops-box.lan:8080",
+            monkeypatch=monkeypatch,
+        )
+
+    async def test_trailing_dot_host_refused(self, monkeypatch):
+        """``ops-box.lan.`` (trailing dot, DNS-equivalent spelling) is
+        NOT the allowed ``ops-box.lan`` — no suffix/prefix matching in
+        either the allowlist or localhost family (fail-closed)."""
+        await self._assert(
+            "http://ops-box.lan.:8079", "ops-box.lan.:8079",
+            False, allowed_hosts="ops-box.lan", monkeypatch=monkeypatch,
+        )
+
+    async def test_trailing_dot_localhost_refused(self, monkeypatch):
+        """``localhost.`` is not the exact ``localhost`` spelling —
+        refused (exact-match set; documented fail-closed)."""
+        await self._assert(
+            "http://localhost.:8079", "localhost.:8079",
+            False, monkeypatch=monkeypatch,
+        )
+
+    async def test_trailing_slash_origin_tolerated(self, monkeypatch):
+        """A trailing path separator does not change the parsed host —
+        the origin still matches on the allowed host."""
+        await self._assert(
+            "http://ops-box.lan:8079/", "ops-box.lan:8079",
+            True, allowed_hosts="ops-box.lan", monkeypatch=monkeypatch,
+        )
+
+    async def test_userinfo_masquerade_refused(self, monkeypatch):
+        """``http://ops-box.lan@evil.example`` — the HOST is
+        evil.example (userinfo is not the host); urlparse extracts it
+        correctly so the naive-prefix confusion is dead."""
+        await self._assert(
+            "http://ops-box.lan@evil.example", "ops-box.lan:8079",
+            False, allowed_hosts="ops-box.lan", monkeypatch=monkeypatch,
+        )
+
+    async def test_userinfo_loopback_host_extracted(self, monkeypatch):
+        """Counterpart — ``http://evil@127.0.0.1:9999`` has host
+        127.0.0.1 (rule 3 applies; userinfo cannot hide a loopback
+        host from the parser)."""
+        await self._assert(
+            "http://evil@127.0.0.1:9999", "localhost:8079",
+            True, monkeypatch=monkeypatch,
+        )
+
+    async def test_ipv6_loopback_host_vouches(self, monkeypatch):
+        """Bracketed IPv6 Host is normalize-extracted before the
+        allowlist check — loopback v6 vouches rule 2."""
+        await self._assert(
+            "http://[::1]:8079", "[::1]:8079",
+            True, monkeypatch=monkeypatch,
+        )

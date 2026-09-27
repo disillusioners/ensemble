@@ -163,7 +163,18 @@ MAINTENANCE_ENDPOINTS_ENABLED: bool = _boot_read_bool_env(
 MAINTENANCE_DRY_RUN_FRESH_SECONDS: int = _boot_read_int_env(
     "MAINTENANCE_DRY_RUN_FRESH_SECONDS", 300
 )  # [§6.4 CONFIRMED] 5-min dry-run freshness window (env-tunable)
-MAINTENANCE_TRUSTED_ORIGINS: str = ""  # [AM-1] CSV; default empty; localhost-family auto-trust (the guard reads the env directly)
+MAINTENANCE_TRUSTED_ORIGINS: str = ""  # [AM-1] CSV of origin URLs; default empty; localhost-family auto-trust
+# Split-read pointer (tidier 2026-09-27): this constant is the
+# DOCUMENTATION anchor only — ``daemon/routers/maintenance_origin_guard.py``
+# reads ``os.environ["MAINTENANCE_TRUSTED_ORIGINS"]`` directly (lazily,
+# cached on first use; restart the daemon to apply edits, same
+# boot-read lifecycle as the kill-switch above).
+MAINTENANCE_ALLOWED_HOSTS: str = ""  # [C1 fix pass 2026-09-27] CSV of bare HOSTNAMES allowed to vouch
+# same-origin in the Origin guard's rule 2 (DNS-rebinding hardening).
+# Always-allowed regardless: the loopback family + hosts parsed from
+# MAINTENANCE_TRUSTED_ORIGINS. Split-read like TRUSTED_ORIGINS: the
+# guard reads the env directly (constants value = documentation
+# anchor); restart to apply.
 
 # Floor for ``PersistenceConfig.checkpoint_max_per_thread`` (T7). The
 # ``ge=1`` pydantic constraint is bound to this constant so the

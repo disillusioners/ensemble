@@ -1083,11 +1083,19 @@ class TestOriginGuardIntegration:
         self, pg_db, monkeypatch, origin, expected_status
     ):
         """Case 59 — [AM-1/AM-16e] parametrized matrix on /status; the
-        /availability endpoint is EXEMPT (reachable with untrusted Origin)."""
+        /availability endpoint is EXEMPT (reachable with untrusted Origin).
+
+        C1 fix pass: ``testserver`` is not loopback, so the matrix
+        opts it into the rule-2 Host allowlist via
+        ``MAINTENANCE_ALLOWED_HOSTS`` — cell (ii) keeps its genuine
+        rule-2 (same-origin via Host derivation) semantics instead of
+        collapsing onto the localhost family."""
         from daemon.routers import maintenance_origin_guard as guard
 
         monkeypatch.setenv("MAINTENANCE_TRUSTED_ORIGINS", "http://ops-box.lan")
+        monkeypatch.setenv("MAINTENANCE_ALLOWED_HOSTS", "testserver")
         guard.reset_trusted_origins_cache()
+        guard.reset_allowed_hosts_cache()
         try:
             async with api_stack(pg_db) as st:
                 headers = {"Host": "testserver"}
@@ -1108,7 +1116,36 @@ class TestOriginGuardIntegration:
                 assert r2.status_code == 200
         finally:
             guard.reset_trusted_origins_cache()
+            guard.reset_allowed_hosts_cache()
             monkeypatch.delenv("MAINTENANCE_TRUSTED_ORIGINS", raising=False)
+            monkeypatch.delenv("MAINTENANCE_ALLOWED_HOSTS", raising=False)
+
+    async def test_dns_rebinding_pair_refused(self, pg_db, monkeypatch):
+        """C1 fix pass — DNS-rebinding pair over HTTP: an Origin and a
+        Host that AGREE on scheme+host+port must still 403 — the
+        client-controlled Host alone can never vouch same-origin
+        (Host ``rebind.example`` misses the allowlist; rule 2 cannot
+        match; rules 3–5 fail closed)."""
+        from daemon.routers import maintenance_origin_guard as guard
+
+        monkeypatch.setenv("MAINTENANCE_ALLOWED_HOSTS", "testserver")
+        guard.reset_allowed_hosts_cache()
+        try:
+            async with api_stack(pg_db) as st:
+                r = await st.client.get(
+                    f"{SECTION_PREFIX}/status",
+                    headers={
+                        "Host": "rebind.example:8079",
+                        "Origin": "http://rebind.example:8079",
+                    },
+                )
+                assert r.status_code == 403, r.text
+                assert (
+                    r.json()["detail"]["error"] == "origin_not_trusted"
+                )
+        finally:
+            guard.reset_allowed_hosts_cache()
+            monkeypatch.delenv("MAINTENANCE_ALLOWED_HOSTS", raising=False)
 
     async def test_origin_guard_trusted_origins_match(self, pg_db, monkeypatch):
         """Case 59 (iv) — MAINTENANCE_TRUSTED_ORIGINS match → allowed."""
@@ -1211,6 +1248,28 @@ class TestKillSwitchIntegration:
                 assert body["eligible"] is False
                 assert body["state"] == "kill_switched"
                 assert body["reason"] == "MAINTENANCE_ENDPOINTS_ENABLED=0"
+        finally:
+            monkeypatch.setattr(router_mod, "MAINTENANCE_ENDPOINTS_ENABLED", True)
+
+    async def test_origin_guard_precedes_kill_switch(
+        self, pg_db, monkeypatch
+    ):
+        """INV-10 over HTTP — untrusted Origin + kill-switch OFF → 403
+        ``origin_not_trusted`` (NOT 503): the guard is the first check
+        (council ask, C1 fix pass; unit twin = case 28)."""
+        import daemon.routers.maintenance as router_mod
+
+        monkeypatch.setattr(router_mod, "MAINTENANCE_ENDPOINTS_ENABLED", False)
+        try:
+            async with api_stack(pg_db) as st:
+                r = await st.client.get(
+                    f"{SECTION_PREFIX}/status",
+                    headers={"Origin": "http://evil.example"},
+                )
+                assert r.status_code == 403, r.text
+                assert (
+                    r.json()["detail"]["error"] == "origin_not_trusted"
+                )
         finally:
             monkeypatch.setattr(router_mod, "MAINTENANCE_ENDPOINTS_ENABLED", True)
 
