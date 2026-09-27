@@ -212,7 +212,6 @@ class TestableCheckpointCleanupComponent {
   readonly activeRunId = signal<string | null>(null);
   readonly dryRunIsStale = signal(false);
 
-  private staleDryRunBlocked = false;
   private pollSub: { unsubscribe: () => void } | null = null;
   private destroyed = false;
   private pollTeardownCount = 0;
@@ -256,7 +255,6 @@ class TestableCheckpointCleanupComponent {
       return;
     }
     if (this.service.isDryRunStale(dryRun)) {
-      this.staleDryRunBlocked = true;
       this.snackBar.open(
         'Dry-run is stale — re-run the check before executing.',
         'Dismiss',
@@ -264,7 +262,6 @@ class TestableCheckpointCleanupComponent {
       );
       return;
     }
-    this.staleDryRunBlocked = false;
     const ref = this.dialog.open(ConfirmDialogComponent, {
       panelClass: 'dark-modal-panel',
       data: {

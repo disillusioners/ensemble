@@ -94,9 +94,6 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     this.service.isDryRunStale(this.lastDryRun()),
   );
 
-  /** Internal flag: did the execute fail because of a stale dry-run? */
-  private staleDryRunBlocked = false;
-
   // Polling subscription — track so OnDestroy can tear down
   private pollSub: Subscription | null = null;
 
@@ -147,7 +144,6 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
       return;
     }
     if (this.service.isDryRunStale(dryRun)) {
-      this.staleDryRunBlocked = true;
       this.snackBar.open(
         'Dry-run is stale — re-run the check before executing.',
         'Dismiss',
@@ -155,7 +151,6 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
       );
       return;
     }
-    this.staleDryRunBlocked = false;
 
     const ref = this.dialog.open(ConfirmDialogComponent, {
       panelClass: 'dark-modal-panel',

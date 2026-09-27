@@ -305,12 +305,29 @@ describe('Maintenance console — source-grep pins (15 pins)', () => {
 
   // ── Pin count assertion ────────────────────────────────────────────────
   describe('pin count', () => {
-    it('has exactly 15 pin assertions (R-2 + sections-registry addition, v3 fix pass)', () => {
-      // This meta-pin asserts the test file ITSELF pins 15 contracts.
-      // It MUST stay in sync with the pin table; the test fails if
-      // someone removes a pin without updating this count.
-      const pinAssertions = 15;
-      expect(pinAssertions).toBe(15);
+    // Item 2 — derive the pin-count from this file's OWN describe
+    // blocks (each `describe('N. ...', …)` represents one pin
+    // contract). The previous `expect(15).toBe(15)` tautology was
+    // SELF-READING-PIN-TAUTOLOGY (constant-True once the literal
+    // appears in the assert line). The new pin reads this spec's own
+    // source via `readFileSync`, counts the numeric-prefix describes,
+    // and asserts the count is > 0 — removing a describe('N. …')
+    // block breaks the count automatically.
+    it('pin-count derives from this file\'s own describe blocks (no self-tautology)', () => {
+      const selfSrc = readFileSync(__filename, 'utf-8');
+      // Match the pin describes — anchored to line start + 2-space
+      // indent (the actual pin describes are all top-level children
+      // of the parent describe; comment-block prose uses deeper
+      // indentation and would otherwise false-match the regex).
+      const pinDescribes =
+        selfSrc.match(/^  describe\(\s*['"`]\d+\.\s/gm) ?? [];
+      // The meta-pin must always see at least one pin describe; the
+      // count itself stays in sync because every describe('N. …')
+      // increment adds one match.
+      expect(pinDescribes.length).toBeGreaterThan(0);
+      // Anchor: the file ships with 15 pin describes (1–15); if you
+      // add a new describe('16. …'), update this anchor.
+      expect(pinDescribes.length).toBe(15);
     });
   });
 });
