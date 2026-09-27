@@ -28,9 +28,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import tempfile
-import os
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -274,7 +271,12 @@ class TestAutoCycleWiring:
         (the raw dual-arm state + ``destructive_override: False``)."""
         adapter = _mock_adapter()
         job, _lock = _wired_job(runs_repo, adapter)
+        # [AM-2 counterpart pin, reviewer cheap fix] behavioral twin of
+        # the MANUAL-ONLY AST pin: the AUTO path must NEVER route
+        # through the manual entry point (INV-1/INV-9).
+        job.run_checkpoint_prunes = AsyncMock()  # type: ignore[method-assign]
         await job.execute()
+        job.run_checkpoint_prunes.assert_not_called()
 
         rows = runs_repo.list_all()
         assert len(rows) == 1

@@ -18,6 +18,15 @@ HONESTY CONTRACT: if PostgreSQL is unreachable these tests SKIP LOUDLY
 NEVER a pass. PG creds via ``PG_TEST_*`` env only
 (``tests/helpers/checkpoint_prune_pg.py:32-36``); the admin DSN is
 asserted never to contain ``ensemble_prod`` at import time.
+
+Size rationale (tidier fix pass 2026-09-27, ~1.6k lines): the plan's
+§4.3 contract matrix (66+ cases) rides ONE real-saver harness —
+``api_stack`` (disposable PG + real checkpointer + wired job/service/
+router + httpx). Every case needs the same stack; splitting the file
+would either duplicate the harness or force cross-file fixtures for a
+suite the plan treats as one acceptance unit. Keep whole while the
+matrix is one contract; split per-section if Section 2+ adds a second
+endpoint family.
 """
 from __future__ import annotations
 
@@ -29,12 +38,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Annotated, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import create_engine, inspect as sqlinspect, text
+from sqlalchemy import create_engine, inspect as sqlinspect
 from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
@@ -623,25 +632,11 @@ class TestExecuteIntegration:
 
     async def test_auto_env_dual_arm_unchanged(self, pg_db, monkeypatch):
         """Case 47 — BOTH flags armed; no-kwarg auto path → deletes happen
-        (env path intact); source pin: auto never passes the destructive
-        kwarg; auto order stays D→E (INV-9)."""
-        import inspect as _inspect
-
-        from daemon.services import maintenance as maintenance_mod
-
-        # Source pin 1: execute()'s blob-arm call passes NO kwarg.
-        execute_src = _inspect.getsource(maintenance_mod.CheckpointCleanupJob.execute)
-        assert "self._prune_unreferenced_blobs()" in execute_src
-        assert "self._prune_unreferenced_blobs(destructive=" not in execute_src
-        # Source pin 2: auto order D→E — _prune_per_thread_checkpoints is
-        # awaited BEFORE _prune_unreferenced_blobs in execute()'s body.
-        d_pos = execute_src.index("await self._prune_per_thread_checkpoints()")
-        e_pos = execute_src.index("await self._prune_unreferenced_blobs()")
-        assert d_pos < e_pos, "auto cycle must keep D→E (INV-9)"
-        # Source pin 3: execute() NEVER routes through the manual entry
-        # point (the T1.7 AST pin's textual witness).
-        assert "run_checkpoint_prunes" not in execute_src
-
+        (env path intact). [tidier fix pass] the former substring
+        source pins (no-kwarg blob arm / D→E order / never-routes-
+        through-manual) moved to AST pins in
+        test_checkpoint_cleanup_job_wiring_pin.py — a comment or
+        docstring mention can never satisfy an AST pin."""
         _arm_destructive(monkeypatch)
         async with api_stack(pg_db) as st:
             await write_turns(st.saver, "thread-arm", 6)
@@ -1354,8 +1349,6 @@ class TestDualArmContention:
         row, DEBUG, last_run re-arm semantics); (iii) dual-arm env armed
         during both — auto stays destructive-if-armed while the manual
         path 409s (INV-1 cell)."""
-        from daemon.services.maintenance_run_lock import MaintenanceRunContext
-
         _arm_destructive(monkeypatch)
         async with api_stack(pg_db) as st:
             await write_turns(st.saver, "thread-62", 4)

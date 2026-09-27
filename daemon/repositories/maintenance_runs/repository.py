@@ -156,9 +156,13 @@ class MaintenanceRunsRepository:
         with Session(self.engine, expire_on_commit=False) as session:
             run = session.get(MaintenanceRun, run_id)
             if run is None:
-                logger.warning(
+                # [tidier fix pass] DEBUG, not WARNING: a missing row at
+                # terminal-mark time is a benign race (manual runbook
+                # heal / DB surgery removed it) and the boot sweep
+                # already owns the orphan-heal WARNING lane.
+                logger.debug(
                     f"maintenance_runs.mark_terminal: run_id={run_id} "
-                    "not found"
+                    "not found (already removed?) — no-op"
                 )
                 return
             run.status = status

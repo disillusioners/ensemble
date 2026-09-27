@@ -246,3 +246,65 @@ class TestManualOnlyEntryPoint:
             "manual entry point must await the blob arm (Op E) BEFORE the "
             "row arm (Op D) — AM-2 BLOCKING"
         )
+
+    def test_auto_blob_arm_passes_no_destructive_kwarg(self):
+        """Case-47 AST replacement (tidier fix pass — was a substring
+        pin in the integration suite): the AUTO ``execute()``'s call to
+        ``_prune_unreferenced_blobs`` passes NO ``destructive`` kwarg —
+        the env dual-arm is the auto cycle's only destructive arbiter
+        (INV-1). AST-level: a comment can never satisfy it."""
+        fn = self._auto_execute_fn()
+        for sub in ast.walk(fn):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == "_prune_unreferenced_blobs"
+            ):
+                kw_names = [kw.arg for kw in sub.keywords if kw.arg]
+                assert "destructive" not in kw_names, (
+                    "AUTO execute() must NOT pass destructive= to the "
+                    "blob arm (env dual-arm is the arbiter — INV-1)"
+                )
+                return
+        raise AssertionError(
+            "no _prune_unreferenced_blobs call found in the auto "
+            "execute() body — the AST pin lost its target"
+        )
+
+    def test_auto_cycle_keeps_row_before_blob_order(self):
+        """Case-47 AST replacement: in the AUTO ``execute()`` body, the
+        first ``_prune_per_thread_checkpoints`` call precedes the first
+        ``_prune_unreferenced_blobs`` call (auto order stays D→E,
+        INV-9 — the manual entry point is E→D per AM-2)."""
+        fn = self._auto_execute_fn()
+
+        def _first_line(attr: str) -> int:
+            lines = [
+                sub.lineno
+                for sub in ast.walk(fn)
+                if isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == attr
+            ]
+            assert lines, f"no {attr} call in auto execute() body"
+            return min(lines)
+
+        assert _first_line("_prune_per_thread_checkpoints") < _first_line(
+            "_prune_unreferenced_blobs"
+        ), "auto cycle must keep D→E (INV-9)"
+
+    @staticmethod
+    def _auto_execute_fn() -> ast.AsyncFunctionDef:
+        tree = ast.parse(MAINTENANCE.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "CheckpointCleanupJob"
+            ):
+                for item in node.body:
+                    if (
+                        isinstance(item, ast.AsyncFunctionDef)
+                        and item.name == "execute"
+                    ):
+                        return item
+        raise AssertionError("CheckpointCleanupJob.execute not found")

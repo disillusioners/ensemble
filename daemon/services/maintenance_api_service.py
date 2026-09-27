@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Optional
 
 from daemon.checkpoint_adapter import (
@@ -41,7 +41,6 @@ from daemon.checkpoint_adapter import (
 from daemon.config import PersistenceConfig
 from daemon.constants import MAINTENANCE_DRY_RUN_FRESH_SECONDS
 from daemon.services.checkpoint_prune import (
-    BlobPruneSummary,
     blob_prune_destructive_enabled,
     blob_prune_env_state,
 )
@@ -57,6 +56,10 @@ from daemon.repositories.maintenance_runs import (
 )
 
 if TYPE_CHECKING:
+    # TYPE_CHECKING-only: the request schema import must NOT become a
+    # runtime import (the service is deliberately FastAPI-free at
+    # runtime — T5.1; duck-typed payloads keep working).
+    from daemon.routers.schemas import CheckpointCleanupExecuteRequest
     from daemon.services.maintenance import CheckpointCleanupJob, MaintenanceService
 
 logger = logging.getLogger(__name__)
@@ -178,11 +181,9 @@ class MaintenanceApiService:
         """
         # Config block — LIVE env read at request time.
         from daemon.constants import (
-            CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE,
             CHECKPOINT_BLOB_PRUNE_DRY_RUN,
             CHECKPOINT_MAX_PER_THREAD_FLOOR,
         )
-        import os
 
         config_block = {
             "checkpoint_max_per_thread": self._config.checkpoint_max_per_thread,
@@ -195,9 +196,7 @@ class MaintenanceApiService:
         }
 
         # ``last_run`` — AM-9
-        import asyncio as _asyncio
-
-        last = await _asyncio.to_thread(
+        last = await asyncio.to_thread(
             self._runs_repo.latest_completed_for_section, "checkpoint-cleanup"
         )
         if last is None:
@@ -213,7 +212,7 @@ class MaintenanceApiService:
             }
 
         # ``in_flight`` — any running row.
-        inflight = await _asyncio.to_thread(
+        inflight = await asyncio.to_thread(
             self._runs_repo.get_running, "checkpoint-cleanup"
         )
         if inflight is None:
@@ -315,7 +314,7 @@ class MaintenanceApiService:
             # seconds (TEXT ISO +00:00).
             fresh_until = (
                 datetime.fromisoformat(ctx.started_at)
-                + _timedelta_seconds(self._fresh_seconds)
+                + timedelta(seconds=self._fresh_seconds)
             ).isoformat()
             wire = {
                 "run_id": ctx.run_id,
@@ -370,13 +369,17 @@ class MaintenanceApiService:
     # ── execute ───────────────────────────────────────────────────────
 
     async def execute(
-        self, payload: Any, requester: RequesterInfo
+        self,
+        payload: "CheckpointCleanupExecuteRequest",
+        requester: RequesterInfo,
     ) -> dict[str, Any]:
         """FROZEN ``/execute`` 202 response — T5.4 ``execute``.
 
-        Validation chain (in the Contract v2 order — first failure
+        Validation chain (in the Contract v3 order — first failure
         raises a ``MaintenanceError`` which the router maps 1:1 to
-        HTTPException):
+        HTTPException; the HTTP-level gate order [Origin → kill-switch
+        → service] is pinned by case 28,
+        ``TestRouterGates.test_gate_order_first_failure_wins``):
 
           1. backend_unsupported (PG-only)
           2. confirm_required (payload.confirm is not True)
@@ -424,8 +427,22 @@ class MaintenanceApiService:
                 message=f"dry-run row {dry_run_run_id} not found",
                 details={"run_id": dry_run_run_id},
             )
-        # 5. freshness window.
-        started = _parse_iso_naive(dry_run_row.started_at)
+        # 5. freshness window. [tidier fix pass] a corrupt/unparseable
+        # ``started_at`` on the stored row maps to 404 ``not_found``
+        # (the row is unusable as a dry-run reference) instead of an
+        # opaque 500 from ValueError.
+        try:
+            started = _parse_iso_naive(dry_run_row.started_at)
+        except ValueError:
+            raise MaintenanceError(
+                code="not_found",
+                http_status=404,
+                message=(
+                    f"dry-run row {dry_run_run_id} has an unreadable "
+                    f"started_at"
+                ),
+                details={"run_id": dry_run_run_id},
+            ) from None
         age_seconds = (now_utc_naive() - started).total_seconds()
         if age_seconds > self._fresh_seconds:
             raise MaintenanceError(
@@ -442,7 +459,15 @@ class MaintenanceApiService:
         stored_bytes = (
             (dry_run_row.summary_json or {}).get("would_delete", {}).get("bytes")
         )
-        if expected_bytes is None or expected_bytes != stored_bytes:
+        # [reviewer cheap fix] explicit ``stored_bytes is None`` arm:
+        # a dry-run row whose summary lacks ``would_delete.bytes``
+        # (legacy/corrupt row) is not echoable — refuse with the same
+        # frozen 400 literal rather than a confusing ``None != N``.
+        if (
+            expected_bytes is None
+            or stored_bytes is None
+            or expected_bytes != stored_bytes
+        ):
             raise MaintenanceError(
                 code="byte_count_mismatch",
                 http_status=400,
@@ -475,6 +500,7 @@ class MaintenanceApiService:
             )
             raise await self._conflict_error()
 
+        task_spawned = False
         try:
             # Idle advisory — computed BEFORE the claim insert so the
             # row carries it as a decision-input audit field at insert
@@ -533,12 +559,16 @@ class MaintenanceApiService:
                 dry_run_duration_ms, (int, float)
             ) else 0
 
-            # Spawn the executing task (background).
+            # Spawn the executing task (background). From this point
+            # the TASK owns the lock (its ``finally`` releases — see
+            # ``_execute_run``); the sentinel flips so this method's
+            # ``finally`` below does NOT release on the happy return.
             task = asyncio.create_task(
                 self._execute_run(ctx.run_id), name=f"maintenance-execute-{ctx.run_id}"
             )
             self._executing_tasks.add(task)
             task.add_done_callback(self._executing_tasks.discard)
+            task_spawned = True
 
             return {
                 "run_id": ctx.run_id,
@@ -547,12 +577,22 @@ class MaintenanceApiService:
                 "advisory": advisory,
                 "expected_duration_ms_hint": hint_ms,
             }
-        except BaseException:
-            # Anything else (e.g. db/import error before task spawn)
-            # — release the lock to avoid wedging the gate.
-            if self._run_lock.in_flight is ctx:
+        finally:
+            # [tidier fix pass] try/finally lock-release shape (was a
+            # bare ``except BaseException: release; raise`` — the
+            # catch-all was lint-stink and swallowed nothing, but the
+            # sentinel-guarded ``finally`` states the ownership handoff
+            # explicitly, mirroring the sibling ``dry_run`` pattern's
+            # release-only-if-holder discipline): any path that did
+            # NOT hand the lock to the background task releases it
+            # here — pre-spawn infra faults (db/import errors), the
+            # explicit INSERT-conflict branch above (already released;
+            # the holder check makes the double release a no-op), and
+            # cancellation alike. Once the task is spawned, its own
+            # ``finally`` is the sole releaser (releasing here would
+            # unlock the gate while the destructive run is live).
+            if not task_spawned and self._run_lock.in_flight is ctx:
                 self._run_lock.release()
-            raise
 
     async def _execute_run(self, run_id: str) -> None:
         """Run the destructive cycle + terminal write in the background.
@@ -674,10 +714,11 @@ class MaintenanceApiService:
         for t in live:
             t.cancel()
         if live:
-            try:
-                await asyncio.gather(*live, return_exceptions=True)
-            except Exception:  # noqa: BLE001
-                pass
+            # [tidier fix pass] no except needed: with
+            # ``return_exceptions=True`` gather itself never raises
+            # from task failures, and every failure path inside the
+            # tasks is already logged by ``_execute_run``.
+            await asyncio.gather(*live, return_exceptions=True)
         self._executing_tasks.clear()
 
     # ── helpers ───────────────────────────────────────────────────────
@@ -747,12 +788,6 @@ def _parse_iso_naive(s: str) -> datetime:
         return dt
     from datetime import timezone
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
-
-
-def _timedelta_seconds(seconds: int):
-    """Build a ``timedelta(seconds=...)`` without re-importing the symbol."""
-    from datetime import timedelta
-    return timedelta(seconds=seconds)
 
 
 __all__ = [

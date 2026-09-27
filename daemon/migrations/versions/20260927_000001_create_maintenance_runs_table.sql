@@ -1,3 +1,6 @@
+-- Migration: create maintenance_runs audit table (Section 1 Maintenance Console)
+-- Created: 2026-09-27
+-- Author: system
 -- MANUAL: TRUE
 --
 -- Canonical DDL for the ``maintenance_runs`` audit table (Section 1

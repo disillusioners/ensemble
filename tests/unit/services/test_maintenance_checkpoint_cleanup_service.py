@@ -578,8 +578,8 @@ class TestErrorBodyPins:
         )
 
         # origin_not_trusted + maintenance_disabled are ROUTER-level —
-        # pinned over HTTP below (TestRouterGates).
-        assert True
+        # pinned over HTTP below (TestRouterGates). (No trailing
+        # placeholder assert: the section above is the assertion set.)
 
 
 # ── cases 35 / 36 + 28 — boot sweep, kill-switch, gate ORDER (HTTP layer) ─────

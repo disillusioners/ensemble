@@ -2617,4 +2617,3 @@ def _patch_upstream_multi_chunk(
         return fake_client
 
     proxy_module.httpx.AsyncClient = _fake_async_client
-

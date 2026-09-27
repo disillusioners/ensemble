@@ -31,6 +31,17 @@ Error Handling:
 - Each cleanup operation runs independently with its own try/except.
 - A failure in one operation does NOT prevent subsequent operations from running.
 - job.last_run is only updated when the entire execute() completes successfully.
+
+Size rationale (tidier fix pass 2026-09-27, ~1.8k lines): this module
+predates the Maintenance Console and hosts TWO concerns by design —
+the generic ``MaintenanceService`` scheduler and the
+``CheckpointCleanupJob`` Op A–E engine whose three instance-sweep ops
+(A/B/C) share ``_cleanup_instance`` + the pinned-subtree protection
+set. Splitting the job out would fork those shared helpers or force
+an import cycle; the Section-1 additions (run-lock gate, audit rows,
+dual entry points) deliberately landed IN this file so the auto and
+manual paths stay textually adjacent for the INV-1/INV-9 AST pins.
+Revisit only if a third cleanup section arrives.
 """
 
 import asyncio
@@ -613,6 +624,14 @@ class CheckpointCleanupJob:
         on-shared-PG class, AM-5) takes the same skip path — the DB
         claim is the real gate; another daemon's run is in flight.
         """
+        # Lazy imports (why: ``maintenance_run_lock`` and the
+        # ``maintenance_runs`` models live on the same import graph as
+        # the manager; keeping them function-local keeps THIS module
+        # importable during early boot / conftest mock teardown without
+        # pulling the repository layer at module import time. The
+        # checkpoint_prune/timestamps imports are call-frequency
+        # trivial but stay lazy for the same cold-import-cycle reason —
+        # see daemon/config.py→services cold-import cycle precedent).
         from daemon.services.checkpoint_prune import blob_prune_env_state
         from daemon.services.maintenance_run_identity import new_maintenance_run_id
         from daemon.services.timestamps import now_utc_iso
@@ -663,6 +682,10 @@ class CheckpointCleanupJob:
         # shares this PG and owns the lane → same non-raising skip path
         # (no ops, NO row, DEBUG names the in-flight run).
         if self._runs_repo is not None and ctx is not None:
+            # Lazy import (why: SQLModel repository model — avoids a
+            # module-level daemon.repositories import in the hot
+            # services graph; same cold-import-cycle rationale as the
+            # block above).
             from daemon.repositories.maintenance_runs.models import MaintenanceRun
 
             inserted = True
@@ -684,9 +707,14 @@ class CheckpointCleanupJob:
             except Exception as e:
                 # Audit-table availability must not gate the auto cycle
                 # (INV-1 spirit): log + continue WITHOUT the audit row.
+                # [tidier fix pass] exception class + exc_info — the
+                # fail-soft stance is unchanged, but the audit-write
+                # failure class must be diagnosable from the log alone.
                 logger.warning(
                     f"maintenance_runs insert failed (auto run_id="
-                    f"{ctx.run_id}): {e}; continuing without audit row"
+                    f"{ctx.run_id}): {type(e).__name__}: {e}; "
+                    f"continuing without audit row",
+                    exc_info=True,
                 )
             if not inserted:
                 in_flight = self._runs_repo.get_running("checkpoint-cleanup")
@@ -748,9 +776,11 @@ class CheckpointCleanupJob:
                         summary_json=result.to_summary_dict(),
                     )
                 except Exception as e:
+                    # [tidier fix pass] class + exc_info (fail-soft kept).
                     logger.warning(
                         f"maintenance_runs succeeded-mark failed for "
-                        f"{ctx.run_id}: {e}"
+                        f"{ctx.run_id}: {type(e).__name__}: {e}",
+                        exc_info=True,
                     )
         except Exception as outer_exc:
             # T3 — terminal write on failure (infra faults only — pair
@@ -772,9 +802,11 @@ class CheckpointCleanupJob:
                         },
                     )
                 except Exception as e:
+                    # [tidier fix pass] class + exc_info (fail-soft kept).
                     logger.warning(
                         f"maintenance_runs failed-mark failed for "
-                        f"{ctx.run_id}: {e}"
+                        f"{ctx.run_id}: {type(e).__name__}: {e}",
+                        exc_info=True,
                     )
             raise
         finally:
@@ -1363,7 +1395,11 @@ class CheckpointCleanupJob:
         excess rows survive one extra cycle — conservative under-delete,
         self-healing.
         """
-        from daemon.services.checkpoint_prune import BlobPruneSummary  # noqa: F401 — re-exported for readers
+        # Lazy import (why: ``BlobPruneSummary`` IS already imported at
+        # module top — this line exists as a reader-local re-anchor for
+        # the isinstance guard two lines below; kept lazy + noqa'd so
+        # linters do not "clean" it into a shadow of the module import.
+        from daemon.services.checkpoint_prune import BlobPruneSummary  # noqa: F401 — re-anchored for readers
 
         t0 = time.perf_counter()
         # MANUAL dry-run blob arm: forced dry-run (NOT the env gate —

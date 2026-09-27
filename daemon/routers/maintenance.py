@@ -30,8 +30,7 @@ fix pass). No ``idempotency_key`` field anywhere (AM-17 DROPPED).
 from __future__ import annotations
 
 import logging
-import os
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -53,9 +52,6 @@ from daemon.services.maintenance_api_service import (
     MaintenanceError,
     RequesterInfo,
 )
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +121,11 @@ def _check_kill_switch() -> None:
 #   4. service gates.
 #
 # A request whose Origin fails the guard therefore 403s without the
-# kill-switch or service state ever being consulted.
+# kill-switch or service state ever being consulted. The full order
+# (Origin → kill-switch → service gates) is PINNED over HTTP by case
+# 28 — ``TestRouterGates.test_gate_order_first_failure_wins`` in
+# tests/unit/services/test_maintenance_checkpoint_cleanup_service.py
+# (plus the integration twin ``test_origin_guard_precedes_kill_switch``).
 
 
 # ── /availability (EXEMPT from Origin guard AND kill-switch 503) ───────────────
@@ -337,7 +337,9 @@ async def get_run(
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 
-async def _call_service(svc: MaintenanceApiService, method: str, **kwargs: Any):
+async def _call_service(
+    svc: MaintenanceApiService, method: str, **kwargs: Any
+) -> Any:
     """Invoke a service method and translate ``MaintenanceError`` → HTTPException.
 
     The structured dict body (``detail={"error", "message", "details"}``)
@@ -347,6 +349,13 @@ async def _call_service(svc: MaintenanceApiService, method: str, **kwargs: Any):
     FastAPI wraps the dict under its own ``detail`` key on the wire
     (``{"detail": {"error": ..., "message": ..., "details": {...}}``),
     matching the plane.py precedent this pattern was ratified from.
+
+    [tidier fix pass] Unexpected non-``MaintenanceError`` raises are
+    caught, logged with ``logger.exception`` (full traceback), and
+    re-surfaced as a CONTRACT-SHAPED 500 (``{"error": "internal_error",
+    "message": ..., "details": {}}`` per A-8) — an unexpected raise
+    must never break the wire shape silently (FastAPI's default 500
+    body is plain-text ``Internal Server Error``).
     """
     try:
         result = await getattr(svc, method)(**kwargs)
@@ -358,6 +367,20 @@ async def _call_service(svc: MaintenanceApiService, method: str, **kwargs: Any):
                 "error": exc.code,
                 "message": exc.message,
                 "details": exc.details,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "maintenance endpoint dispatch raised unexpectedly "
+            "(service method=%s)",
+            method,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": "Unexpected server error",
+                "details": {},
             },
         )
 
