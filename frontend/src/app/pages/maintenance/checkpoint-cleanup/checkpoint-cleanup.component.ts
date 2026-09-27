@@ -120,6 +120,13 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
       return;
     }
     this.dryRunning.set(true);
+    // Item 14 — optimistic lastError clear at the top of onDryRun().
+    // The dry-run request MAY clear an existing banner before it
+    // even fires; if the request then fails, the new error replaces
+    // the cleared one. If the request succeeds, the banner stays
+    // gone (no stale error from a prior run). Net effect: the user
+    // sees the current operation's outcome, not the last.
+    this.service.clearLastError();
     this.service.dryRun().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: () => {
         this.dryRunning.set(false);
@@ -195,6 +202,11 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     this.executing.set(true);
     this.lastExecuteResult.set(null);
     this.expectedDurationHintMs.set(null);
+    // Item 14 — optimistic lastError clear at the top of
+    // performExecute(). Same rationale as onDryRun(): the current
+    // operation's outcome is what the user sees; stale errors from
+    // a prior run don't bleed into the new attempt.
+    this.service.clearLastError();
 
     // AM-17 — payload is EXACTLY `{dry_run_run_id, expected_bytes,
     // confirm: true}` — NO idempotency key, NO client-side UUID generation.
@@ -323,21 +335,24 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Item 4 — error code → human label for the inline banner. Curated
-   * mapping for codes with stable UX copy; everything else renders
-   * verbatim (the raw code string). The display sentinel
+   * Item 4 / Item 20 — error code → human label for the inline banner.
+   * Curated mapping for codes with stable UX copy; everything else
+   * renders verbatim (the raw code string). The display sentinel
    * `'poll_stale'` is the FE-only label for an FE poll-timeout
    * (mapped from the wire body via `displayErrorCode()`). It is
    * NEVER sent over the wire — only displayed.
+   *
+   * Item 20 — `errorLabel()` table lookup via `Partial<Record<...>>`
+   * keeps the curated labels in one place; adding a code = adding a
+   * tuple entry. Non-curated codes render verbatim (the `??` branch).
    */
+  private static readonly ERROR_LABEL_MAP: Partial<Record<string, string>> = {
+    internal_error: 'Internal server error',
+    poll_stale: 'Polling timed out — check daemon logs',
+  };
+
   errorLabel(code: string): string {
-    if (code === 'internal_error') {
-      return 'Internal server error';
-    }
-    if (code === 'poll_stale') {
-      return 'Polling timed out — check daemon logs';
-    }
-    return code;
+    return CheckpointCleanupComponent.ERROR_LABEL_MAP[code] ?? code;
   }
 
   /**
@@ -432,6 +447,14 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     );
   }
 
+  /** Item 20 — single-source the error-snackbar toast open() helper. */
+  private snackError(message: string, duration: number = 5000): void {
+    this.snackBar.open(message, 'Dismiss', {
+      duration,
+      panelClass: 'error-snackbar',
+    });
+  }
+
   private showSnackForLastError(): void {
     const err = this.lastError();
     if (!err) {
@@ -439,33 +462,22 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     }
     if (err.error === 'dry_run_stale' || err.error === 'dry_run_required') {
       this.lastDryRun.set(null); // force re-run
-      this.snackBar.open('Re-run the dry-run check before executing.', 'Dismiss', {
-        duration: 5000,
-        panelClass: 'error-snackbar',
-      });
+      this.snackError('Re-run the dry-run check before executing.');
       return;
     }
     if (err.error === 'byte_count_mismatch') {
       this.lastDryRun.set(null);
-      this.snackBar.open(
-        'The dry-run result changed since you ran it — re-run and try again.',
-        'Dismiss',
-        { duration: 5000, panelClass: 'error-snackbar' },
-      );
+      this.snackError('The dry-run result changed since you ran it — re-run and try again.');
       return;
     }
     if (err.error === 'not_found') {
-      this.snackBar.open(
+      this.snackError(
         'The run record was not found — re-run from the status page.',
-        'Dismiss',
-        { duration: 6000, panelClass: 'error-snackbar' },
+        6000,
       );
       return;
     }
-    this.snackBar.open(err.message ?? `Error: ${err.error}`, 'Dismiss', {
-      duration: 5000,
-      panelClass: 'error-snackbar',
-    });
+    this.snackError(err.message ?? `Error: ${err.error}`);
   }
 
   /** AM-13 — kill-switch OFF: render the global banner. */

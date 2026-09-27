@@ -64,8 +64,17 @@ export class CheckpointCleanupService {
    * `'running'` past this window, the service surfaces an inline
    * "still in progress" error and stops polling. The BE boot-sweep
    * converges orphaned rows in <1s after a daemon restart; this is
-   * the fallback for other stuck-row classes. Pin target: 10 minutes
-   * (T6.1 fake-timers test verifies the timeout fires).
+   * the fallback for other stuck-row classes.
+   *
+   * Rationale for the 10-minute choice (Item 20): the BE's
+   * `expected_duration_ms_hint` typically lands in the
+   * sub-minute-to-low-minute range (the most expensive case the
+   * suite has measured is ~12 min on a saturated DB). 10 min
+   * absorbs the worst legitimate run while still catching
+   * true wedges within an operator-attention window. Tunable in
+   * the spec via `pollMaxMsOverride` for the PR-2 coverage test.
+   * Pin target: 10 minutes (T6.1 fake-timers test verifies the
+   * timeout fires).
    */
   static readonly POLL_MAX_DURATION_MS: number = 10 * 60 * 1000;
 
@@ -232,10 +241,7 @@ export class CheckpointCleanupService {
           this.lastError.set(stuck);
           return throwError(() => stuck);
         }
-        return this.getRun(runId).pipe(
-          take(1),
-          catchError((err) => throwError(() => err)),
-        );
+        return this.getRun(runId).pipe(take(1));
       }),
       tap((run) => {
         this.lastRun.set(run);
@@ -290,7 +296,7 @@ export class CheckpointCleanupService {
    * reserved for genuinely unknown literals and absent bodies.
    * A-11 — the FE tolerates extra `details` keys.
    */
-  toErrorBody(err: HttpErrorResponse | unknown): MaintenanceErrorBody {
+  toErrorBody(err: unknown): MaintenanceErrorBody {
     const e = err as HttpErrorResponse;
     const errorBody = (e?.error ?? {}) as Partial<MaintenanceErrorBody> & {
       error?: string;

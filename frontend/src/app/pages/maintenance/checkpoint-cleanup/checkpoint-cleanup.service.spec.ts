@@ -14,8 +14,7 @@
 // `idempotency_key`, no client-side UUID.
 
 import { signal } from '@angular/core';
-import { Observable, of, throwError } from 'rxjs';
-import { catchError, switchMap, take, takeWhile, tap, throwError as throwErr, timer } from 'rxjs';
+import { Observable, catchError, of, switchMap, take, takeWhile, tap, throwError, timer } from 'rxjs';
 import {
   isKnownErrorCode,
   type CheckpointCleanupBlobsSummary,
@@ -142,7 +141,7 @@ class TestableCheckpointCleanupService {
   fetchAvailability(): Observable<MaintenanceAvailability> {
     return this.http.get<MaintenanceAvailability>(`${this.API_BASE}/availability`).pipe(
       tap((data) => this.availability.set(data)),
-      catchError((err) => throwErr(() => this.toErrorBody(err))),
+      catchError((err) => throwError(() => this.toErrorBody(err))),
     );
   }
 
@@ -152,7 +151,7 @@ class TestableCheckpointCleanupService {
       catchError((err) => {
         const body = this.toErrorBody(err);
         this.lastError.set(body);
-        return throwErr(() => body);
+        return throwError(() => body);
       }),
     );
   }
@@ -163,7 +162,7 @@ class TestableCheckpointCleanupService {
       catchError((err) => {
         const body = this.toErrorBody(err);
         this.lastError.set(body);
-        return throwErr(() => body);
+        return throwError(() => body);
       }),
     );
   }
@@ -175,7 +174,7 @@ class TestableCheckpointCleanupService {
         catchError((err) => {
           const body = this.toErrorBody(err);
           this.lastError.set(body);
-          return throwErr(() => body);
+          return throwError(() => body);
         }),
       );
   }
@@ -187,7 +186,7 @@ class TestableCheckpointCleanupService {
         catchError((err) => {
           const body = this.toErrorBody(err);
           this.lastError.set(body);
-          return throwErr(() => body);
+          return throwError(() => body);
         }),
       );
   }
@@ -210,12 +209,9 @@ class TestableCheckpointCleanupService {
             details: { fe_synthesized_poll_timeout: true },
           };
           this.lastError.set(stuck);
-          return throwErr(() => stuck);
+          return throwError(() => stuck);
         }
-        return this.getRun(runId).pipe(
-          take(1),
-          catchError((err) => throwErr(() => err)),
-        );
+        return this.getRun(runId).pipe(take(1));
       }),
       tap((run) => this.lastRun.set(run)),
       takeWhile((run) => !this.isTerminalStatus(run.status), true),

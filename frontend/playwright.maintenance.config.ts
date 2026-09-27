@@ -66,11 +66,22 @@ export default defineConfig({
       timeout: 120_000,
       stdout: 'pipe',
       stderr: 'pipe',
-      env: {
-        OPENAI_API_KEY: process.env.OPENAI_API_KEY || 'e2e-placeholder-key-not-used',
-        LOG_LEVEL: process.env.LOG_LEVEL || 'info',
-        MAINTENANCE_ENDPOINTS_ENABLED: process.env.MAINTENANCE_ENDPOINTS_ENABLED || '1',
-      },
+      /**
+ * Item 20 — OPENAI_API_KEY: the webServer env passes it through from
+ * `process.env.OPENAI_API_KEY`. The boot script
+ * (`scripts/boot-e2e-maintenance-daemon.sh:147`) requires the key to
+ * be set and exits 1 with a clear error if not — NO placeholder
+ * fallback here. The previous `'e2e-placeholder-key-not-used'`
+ * fallback was a contradiction: it implied the value was unused
+ * while the boot script guard required it (and would silently accept
+ * the placeholder, masking operator misconfig). Drop the fallback;
+ * the boot script's error message guides the operator.
+ */
+        env: {
+          OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
+          LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+          MAINTENANCE_ENDPOINTS_ENABLED: process.env.MAINTENANCE_ENDPOINTS_ENABLED || '1',
+        },
     },
     {
       // FE dev server bound to a dedicated port (NOT 4199 — that's

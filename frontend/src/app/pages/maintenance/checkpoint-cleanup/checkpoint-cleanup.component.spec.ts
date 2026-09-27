@@ -235,6 +235,8 @@ class TestableCheckpointCleanupComponent {
   onDryRun(): void {
     if (!this.canDryRun() || this.dryRunning()) return;
     this.dryRunning.set(true);
+    // Item 14 — optimistic lastError clear (mirror production).
+    this.service.clearLastError();
     this.service.dryRun().subscribe({
       next: () => this.dryRunning.set(false),
       error: () => {
@@ -294,6 +296,8 @@ class TestableCheckpointCleanupComponent {
     this.executing.set(true);
     this.lastExecuteResult.set(null);
     this.expectedDurationHintMs.set(null);
+    // Item 14 — optimistic lastError clear (mirror production).
+    this.service.clearLastError();
     const payload: CheckpointCleanupExecuteRequest = {
       dry_run_run_id: dryRun.run_id,
       expected_bytes: dryRun.would_free_bytes,
@@ -400,15 +404,18 @@ class TestableCheckpointCleanupComponent {
   }
 
   /**
-   * Item 4 — error code → human label for the inline banner. Adds
-   * the FE-only `'poll_stale'` sentinel branch (display-only — NEVER
-   * sent over the wire; the wire body uses
-   * `error: 'not_initialized'` + `details.fe_synthesized_poll_timeout: true`).
+   * Item 4 / Item 20 — error code → human label for the inline banner.
+   * Curated mapping via `ERROR_LABEL_MAP` (table lookup); everything
+   * else renders verbatim. Includes the FE-only `'poll_stale'`
+   * sentinel (mapped from the wire body via `displayErrorCode()`).
    */
+  private static readonly ERROR_LABEL_MAP: Partial<Record<string, string>> = {
+    internal_error: 'Internal server error',
+    poll_stale: 'Polling timed out — check daemon logs',
+  };
+
   errorLabel(code: string): string {
-    if (code === 'internal_error') return 'Internal server error';
-    if (code === 'poll_stale') return 'Polling timed out — check daemon logs';
-    return code;
+    return TestableCheckpointCleanupComponent.ERROR_LABEL_MAP[code] ?? code;
   }
 
   /**
@@ -469,38 +476,35 @@ class TestableCheckpointCleanupComponent {
     );
   }
 
+  /** Item 20 — single-source the error-snackbar toast open() helper. */
+  private snackError(message: string, duration: number = 5000): void {
+    this.snackBar.open(message, 'Dismiss', {
+      duration,
+      panelClass: 'error-snackbar',
+    });
+  }
+
   private showSnackForLastError(): void {
     const err = this.lastError();
     if (!err) return;
     if (err.error === 'dry_run_stale' || err.error === 'dry_run_required') {
       this.lastDryRun.set(null);
-      this.snackBar.open('Re-run the dry-run check before executing.', 'Dismiss', {
-        duration: 5000,
-        panelClass: 'error-snackbar',
-      });
+      this.snackError('Re-run the dry-run check before executing.');
       return;
     }
     if (err.error === 'byte_count_mismatch') {
       this.lastDryRun.set(null);
-      this.snackBar.open(
-        'The dry-run result changed since you ran it — re-run and try again.',
-        'Dismiss',
-        { duration: 5000, panelClass: 'error-snackbar' },
-      );
+      this.snackError('The dry-run result changed since you ran it — re-run and try again.');
       return;
     }
     if (err.error === 'not_found') {
-      this.snackBar.open(
+      this.snackError(
         'The run record was not found — re-run from the status page.',
-        'Dismiss',
-        { duration: 6000, panelClass: 'error-snackbar' },
+        6000,
       );
       return;
     }
-    this.snackBar.open(err.message ?? `Error: ${err.error}`, 'Dismiss', {
-      duration: 5000,
-      panelClass: 'error-snackbar',
-    });
+    this.snackError(err.message ?? `Error: ${err.error}`);
   }
 }
 

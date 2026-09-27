@@ -22,7 +22,7 @@
  * 14 test cases per the plan T7.2 outline.
  */
 
-import { test, expect, type APIRequestContext, type Browser } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Browser, type Page } from '@playwright/test';
 
 // ── Safety guards ────────────────────────────────────────────────────────
 
@@ -203,20 +203,51 @@ const RUN_INTERRUPTED = {
 
 // ── Canary helper ────────────────────────────────────────────────────────
 
-async function isDaemonReady(): Promise<boolean> {
+/**
+ * Item 20 — split `{ok, state, error}` result. The prior
+ * `Promise<boolean>` lost the distinction between "transport error"
+ * and "BE said NOT ready" — test 2 (kill_switched) and test 3
+ * (backend_unsupported) need the structured body. The split lets
+ * callers branch precisely: ok=false && error===null means
+ * "transport down"; ok=true && state!=='ready' means "BE said".
+ */
+interface DaemonReadyProbe {
+  ok: boolean;
+  state: 'ready' | 'backend_unsupported' | 'subsystem_disabled' | 'kill_switched' | null;
+  error: string | null;
+}
+
+async function probeDaemonReady(): Promise<DaemonReadyProbe> {
   try {
     const res = await fetch(`${BASE_URL}/api/maintenance/checkpoint-cleanup/availability`);
-    if (res.status !== 200) return false;
+    if (res.status !== 200) {
+      return { ok: false, state: null, error: `http ${res.status}` };
+    }
     const body = await res.json();
-    return body.state === 'ready';
-  } catch {
-    return false;
+    return {
+      ok: body?.state === 'ready',
+      state: body?.state ?? null,
+      error: null,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      state: null,
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
+}
+
+async function isDaemonReady(): Promise<boolean> {
+  // Convenience wrapper — preserves the boolean contract that the
+  // suite's `test.skip(!ready, …)` calls expect.
+  const probe = await probeDaemonReady();
+  return probe.ok;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-async function navigateToMaintenance(page: import('@playwright/test').Page) {
+async function navigateToMaintenance(page: Page) {
   await page.goto('/maintenance/checkpoint-cleanup');
   // Wait for at least one card to render.
   await page.waitForSelector('[data-testid="ck-status"]', { timeout: 15000 });
@@ -529,8 +560,12 @@ test.describe('Maintenance — Checkpoint Cleanup (14 cases, AM-16 amendments)',
         data: {},
       });
     } catch (e) {
-      // Some Playwright versions surface 403 as a network error on
-      // the APIRequestContext. Fall back to fetch directly.
+      // Item 20 — 403-fallback `console.warn`. Some Playwright
+      // versions surface 403 as a network error on the
+      // APIRequestContext; surface the branch condition in the
+      // test log so a future operator can correlate the fallback
+      // with a Playwright upgrade.
+      console.warn('[maintenance-e2e] APIRequestContext.post threw — falling back to fetch():', e);
       res = await fetch(`${BASE_URL}/api/maintenance/checkpoint-cleanup/dry-run`, {
         method: 'POST',
         headers: {
