@@ -543,6 +543,20 @@ class InstanceManager:
             SnapshotUsageCounter,
         )
 
+        # Section 1 / T4 — register the MaintenanceRun SQLModel with
+        # ``SQLModel.metadata`` BEFORE ``create_all`` so the
+        # ``maintenance_runs`` table + the partial unique index on
+        # ``(section) WHERE status='running'`` + the composite
+        # ``(section, completed_at)`` index are built on BOTH drivers
+        # (PG and SQLite). No ``_ensure_postgres_columns`` mirror —
+        # brand-new tables need none (snapshot precedent verbatim,
+        # ``manager.py:530-546``). The canonical DDL
+        # ``daemon/migrations/versions/20260927_000001_*.sql`` is doc
+        # only — the runner is a NO-OP on PG. [AM-15, R-3 cite fix]
+        from .repositories.maintenance_runs.models import (  # noqa: F401
+            MaintenanceRun,
+        )
+
         SQLModel.metadata.create_all(self._engine)
 
         # Run file-based migrations using MigrationRunner
@@ -1303,6 +1317,13 @@ class InstanceManager:
 
         # Maintenance service for periodic cleanup tasks
         self._maintenance_service: MaintenanceService | None = None
+        # Section 1 / T3 — gate + audit registry handles (one instance
+        # each, owned by the manager). ``MaintenanceApiService``
+        # (T5) is wired later in the same initialize() pass; see the
+        # api lifespan for ``app.state.maintenance_api_service``.
+        self._maintenance_run_lock: "MaintenanceRunLock | None" = None
+        self._maintenance_runs_repo: "MaintenanceRunsRepository | None" = None
+        self._maintenance_api_service: "MaintenanceApiService | None" = None
 
         # Phase 1 / WS-2 — register the ``/compact`` slash command
         # into the dispatcher. Lazy import inside the helper to
@@ -2610,6 +2631,23 @@ class InstanceManager:
         # setup_worker_pool() per daemon/api.py startup order, so calling it
         # here would raise AttributeError.
 
+        # Section 1 / T3 — single-flight gate (MaintenanceRunLock) +
+        # audit row persistence (MaintenanceRunsRepository) wired at
+        # the SAME single CheckpointCleanupJob construction site the
+        # wiring-pin suite asserts (T9 case 55). Same
+        # single-construction rationale as ``message_metadata_repo``
+        # (T5.19 — silent-drop class guard). The lock + repo are
+        # held on ``self`` so the MaintenanceApiService (T5) can
+        # reach them later without a private reach-through.
+        from .services.maintenance_run_lock import MaintenanceRunLock
+
+        self._maintenance_run_lock = MaintenanceRunLock()
+        from .repositories.maintenance_runs import (
+            MaintenanceRunsRepository,
+        )
+
+        self._maintenance_runs_repo = MaintenanceRunsRepository(self._engine)
+
         # Register checkpoint cleanup job
         checkpoint_cleanup = CheckpointCleanupJob(
             config=self.config.persistence,
@@ -2623,7 +2661,16 @@ class InstanceManager:
             # __init__ above (line ~591) — safe to pass here.
             message_metadata_repo=self._message_metadata_repo,
             on_instance_deleted=self._release_cached_instance,
+            # Section 1 / T3 — gate + audit kwargs.
+            run_lock=self._maintenance_run_lock,
+            runs_repo=self._maintenance_runs_repo,
         )
+        # Section 1 / T5 — hold the job handle for the
+        # MaintenanceApiService wiring (api.py lifespan reads it via
+        # ``manager._checkpoint_cleanup_job``; the manual entry point
+        # ``run_checkpoint_prunes`` lives on this instance). Still the
+        # SINGLE construction site the wiring-pin suite guards.
+        self._checkpoint_cleanup_job = checkpoint_cleanup
         self._maintenance_service.register(
             "checkpoint_cleanup",
             self.config.persistence.checkpoint_cleanup_interval,
