@@ -661,17 +661,33 @@ class MaintenanceApiService:
                 )
                 if dry_run_snapshot is not None:
                     snap = dry_run_snapshot.dry_run_summary_json or {}
-                    projection_block: dict[str, int] = {}
-                    if "bytes_reclaimable_now" in snap:
-                        projection_block["bytes_reclaimable_now_at_dry_run"] = (
-                            int(snap["bytes_reclaimable_now"])
-                        )
-                    if "bytes_reclaimable_after_row_prune" in snap:
-                        projection_block[
-                            "bytes_reclaimable_after_row_prune_at_dry_run"
-                        ] = int(snap["bytes_reclaimable_after_row_prune"])
-                    if projection_block:
-                        execute_summary["projection"] = projection_block
+                    # v3.2 O2 + legacy-row hardening: BOTH-OR-NEITHER.
+                    # The echo block is emitted only when the snapshotted
+                    # dry-run summary carries BOTH projection values;
+                    # pre-v3.2 legacy rows (summary predates the
+                    # projection fields), one-sided rows, and non-dict /
+                    # non-numeric shapes all fall through to NO block —
+                    # never a partial echo, never a KeyError/TypeError
+                    # from an unexpected row shape.
+                    snap_now = (
+                        snap.get("bytes_reclaimable_now")
+                        if isinstance(snap, dict)
+                        else None
+                    )
+                    snap_after = (
+                        snap.get("bytes_reclaimable_after_row_prune")
+                        if isinstance(snap, dict)
+                        else None
+                    )
+                    if isinstance(snap_now, (int, float)) and isinstance(
+                        snap_after, (int, float)
+                    ):
+                        execute_summary["projection"] = {
+                            "bytes_reclaimable_now_at_dry_run": int(snap_now),
+                            "bytes_reclaimable_after_row_prune_at_dry_run": int(
+                                snap_after
+                            ),
+                        }
                 await asyncio.to_thread(
                     self._runs_repo.mark_terminal,
                     run_id,

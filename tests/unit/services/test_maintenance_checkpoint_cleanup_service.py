@@ -20,6 +20,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -529,6 +530,125 @@ class TestExecuteHappyPath:
         await asyncio.gather(*list(idle_svc._executing_tasks))
         assert resp2["advisory"] is None
         assert resp2["expected_duration_ms_hint"] == 412
+
+
+class TestProjectionEchoBothOrNeither:
+    """v3.2 fix-pass O2 — the manual_execute ``projection`` echo is
+    BOTH-OR-NEITHER + legacy-row safe.
+
+    ``_execute_run`` sources the echo from the EXECUTE row's
+    ``dry_run_summary_json`` snapshot. A snapshot whose dict predates
+    the v3.2 projection fields (legacy), carries only ONE of the two
+    values, or is not even a dict must surface NO ``projection`` block
+    — never a partial echo, never a KeyError/TypeError from any legacy
+    row shape. Only a BOTH-present snapshot emits the block.
+    """
+
+    @staticmethod
+    def _with_summary(runs_repo, row, mutation: dict) -> str:
+        """Re-save the seeded dry-run row with extra summary keys
+        (mutating a dict the gate does not read — ``would_delete``
+        stays intact so the execute gate still passes). Returns the
+        row's run_id — the commit expires the passed instance, so
+        callers must use the returned id (never touch ``row`` after)."""
+        from sqlalchemy.orm import Session
+
+        summary = dict(row.summary_json)
+        summary.update(mutation)
+        run_id = row.run_id
+        row.summary_json = summary
+        with Session(runs_repo.engine) as s:
+            s.add(row)
+            s.commit()
+        return run_id
+
+    async def _execute_and_fetch(self, runs_repo, run_id: str):
+        svc = _service(runs_repo, job_result=_result(destructive=True))
+        resp = await svc.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=run_id,
+                expected_bytes=268435456,
+            ),
+            REQUESTER,
+        )
+        await asyncio.gather(*list(svc._executing_tasks))
+        return runs_repo.get(resp["run_id"])
+
+    async def test_legacy_row_absent_projection_fields_no_block(
+        self, runs_repo, as_pg
+    ):
+        """Pre-v3.2 legacy snapshot (no ``*_reclaimable_*`` keys) →
+        summary keeps the FROZEN 4-key shape; NO projection block."""
+        fresh = _seed_dry_run_row(runs_repo)
+        row = await self._execute_and_fetch(runs_repo, fresh.run_id)
+        assert row.status == "succeeded"
+        assert "projection" not in row.summary_json
+        assert set(row.summary_json.keys()) == {
+            "checkpoint_rows", "writes", "blobs", "duration_ms",
+        }
+
+    async def test_now_only_snapshot_emits_no_block(self, runs_repo, as_pg):
+        """One-sided snapshot (``bytes_reclaimable_now`` only) → NO
+        projection block (BOTH-OR-NEITHER — no partial echo)."""
+        fresh = _seed_dry_run_row(runs_repo)
+        run_id = self._with_summary(runs_repo, fresh, {"bytes_reclaimable_now": 111})
+        row = await self._execute_and_fetch(runs_repo, run_id)
+        assert row.status == "succeeded"
+        assert "projection" not in row.summary_json
+
+    async def test_after_only_snapshot_emits_no_block(self, runs_repo, as_pg):
+        """One-sided snapshot (``..._after_row_prune`` only) → NO
+        projection block."""
+        fresh = _seed_dry_run_row(runs_repo)
+        run_id = self._with_summary(
+            runs_repo, fresh, {"bytes_reclaimable_after_row_prune": 222}
+        )
+        row = await self._execute_and_fetch(runs_repo, run_id)
+        assert row.status == "succeeded"
+        assert "projection" not in row.summary_json
+
+    async def test_both_present_emits_both_at_dry_run(self, runs_repo, as_pg):
+        """BOTH values present → the echo block carries both
+        ``*_at_dry_run`` keys with the snapshotted values (R-5)."""
+        fresh = _seed_dry_run_row(runs_repo)
+        run_id = self._with_summary(
+            runs_repo,
+            fresh,
+            {
+                "bytes_reclaimable_now": 111,
+                "bytes_reclaimable_after_row_prune": 222,
+            },
+        )
+        row = await self._execute_and_fetch(runs_repo, run_id)
+        assert row.summary_json["projection"] == {
+            "bytes_reclaimable_now_at_dry_run": 111,
+            "bytes_reclaimable_after_row_prune_at_dry_run": 222,
+        }
+
+    async def test_non_dict_snapshot_never_raises(self, runs_repo, as_pg):
+        """Corrupt snapshot shapes (JSON string / list) → _execute_run
+        completes, row succeeds, NO projection block, NO KeyError /
+        AttributeError / TypeError. Driven directly (the execute gate
+        cannot produce this shape — belt-and-braces for direct repo
+        writes)."""
+        for weird in ("not-a-dict", [1, 2, 3]):
+            run_id = f"ckpt-20260927_032000123456-{uuid4().hex[:8]}"
+            row = MaintenanceRun(
+                run_id=run_id,
+                section="checkpoint-cleanup",
+                kind="manual_execute",
+                started_at=now_utc_iso(),
+                status="running",
+                triggered_by="user",
+                dry_run_summary_json=weird,
+            )
+            assert runs_repo.insert(row) is True
+            svc = _service(runs_repo, job_result=_result(destructive=True))
+            await svc._execute_run(run_id)
+            done = runs_repo.get(run_id)
+            assert done.status == "succeeded"
+            assert "projection" not in done.summary_json
 
 
 class TestDryRun:
