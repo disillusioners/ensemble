@@ -1481,12 +1481,6 @@ class TestRowPruneProjectionDeltaNotSuperset:
         adapter.count_blobs_referenced_only_by_excess = AsyncMock(
             return_value=(1, Y_BYTES)
         )
-        # Blob prune stub — the dry-run path delegates to it; this
-        # stub is empty (no current orphans from the blob arm; the
-        # pair is "all referenced" in the blob arm's view).
-        adapter.find_all_thread_ns_pairs = AsyncMock(
-            return_value=[("t1", "ns1", 5)]
-        )
 
         job = CheckpointCleanupJob(
             config=PersistenceConfig(),
