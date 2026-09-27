@@ -1,4 +1,5 @@
 import { Component, Type } from '@angular/core';
+import { NgComponentOutlet } from '@angular/common';
 import { CheckpointCleanupComponent } from './checkpoint-cleanup/checkpoint-cleanup.component';
 
 /**
@@ -26,7 +27,7 @@ interface MaintenanceSection {
 @Component({
   selector: 'app-maintenance',
   standalone: true,
-  imports: [CheckpointCleanupComponent],
+  imports: [NgComponentOutlet, CheckpointCleanupComponent],
   templateUrl: './maintenance.component.html',
   styleUrl: './maintenance.component.scss',
 })
