@@ -15,7 +15,7 @@ prior sketch and the research-findings §4.1 draft. Verbatim from
     triggered_by           TEXT NOT NULL  'system' | 'user' (no session ids exist)
     requester_json         JSONBType NULL {peer_ip, user_agent, origin}; NULL for auto
     dry_run_run_id         TEXT NULL      soft ref, no FK [AM-15]
-    expected_bytes         INTEGER NULL   echoed promise [AM-15]
+    expected_bytes         BIGINT  NULL   echoed promise [AM-15]; BigInteger (PG int8) — >2GiB cleanups
     dry_run_summary_json   JSONBType NULL full dry-run snapshot incl. skipped[] [AM-15]
     confirm                BOOLEAN NULL   [AM-15]
     advisory               TEXT NULL     'system_busy' | NULL [AM-12/AM-15]
@@ -41,7 +41,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, Index, Integer, Text, text
+from sqlalchemy import BigInteger, Boolean, Column, Index, Text, text
 from sqlmodel import Field, SQLModel
 
 from daemon.repositories.infra.types import JSONBType
@@ -136,8 +136,19 @@ class MaintenanceRun(SQLModel, table=True):
     )
     expected_bytes: Optional[int] = Field(
         default=None,
-        sa_column=Column("expected_bytes", Integer, nullable=True, default=None),
-        description="Echoed promise from the execute payload (AM-15)",
+        sa_column=Column(
+            "expected_bytes", BigInteger, nullable=True, default=None
+        ),
+        description=(
+            "Echoed promise from the execute payload (AM-15). BigInteger "
+            "to hold legitimate >2GiB dry-run byte totals — PostgreSQL "
+            "INTEGER (int4) overflows at 2^31-1 (incident 2026-09-28, "
+            "27.2 GiB echo). The PG-side widening DO block lives in "
+            "EnsembleManager._ensure_postgres_columns "
+            "(migration: daemon/migrations/versions/"
+            "20260928_000001_widen_maintenance_runs_expected_bytes.sql, "
+            "MANUAL: TRUE)."
+        ),
     )
     dry_run_summary_json: Optional[dict] = Field(
         default=None,

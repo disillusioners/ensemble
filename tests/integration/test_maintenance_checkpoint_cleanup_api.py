@@ -47,6 +47,7 @@ from sqlalchemy import create_engine, inspect as sqlinspect
 from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
+from daemon.repositories.maintenance_runs import MaintenanceRun
 from tests.helpers.checkpoint_prune_pg import (
     ADMIN_DSN,
     evict_langgraph_mocks,
@@ -683,6 +684,219 @@ def _blocked_job(config, adapter, runs_repo, lock):
 
     job.run_checkpoint_prunes = blocked_run  # type: ignore[method-assign]
     return job, release
+
+
+# ── int4 → int8 widening pin (incident 2026-09-28) ────────────────────────────
+
+
+# Incident value — 27.2 GiB dry-run echo at execute-time, which
+# overflowed PG int4 (max 2^31-1 = 2,147,483,647) and produced
+# psycopg.errors.NumericValueOutOfRange → HTTP 500.
+_INCIDENT_EXPECTED_BYTES = 27_233_813_846
+_INT4_MAX = 2**31 - 1
+_JUST_OVER_INT4 = 2**31
+
+
+class TestExpectedBytesBigIntegerIntegration:
+    """PG-level pin for the >2^31-1 byte-magnitude window.
+
+    Unit tests (TestExpectedBytesBigInteger in
+    tests/unit/services/test_maintenance_checkpoint_cleanup_service.py)
+    exercise the SQLAlchemy BigInteger round-trip on SQLite (where
+    INTEGER is already 8 bytes). This suite exercises the REAL PG
+    path end-to-end: a dry-run row with the incident byte total,
+    the execute echo at exactly that value, and the audit-row INSERT
+    against a real ``maintenance_runs`` table on a disposable
+    PostgreSQL database.
+
+    Pre-fix behavior (incident 2026-09-28):
+    ``MaintenanceRunsRepository.insert`` raised
+    ``sqlalchemy.exc.DataError`` (``psycopg.errors.NumericValueOutOfRange``,
+    SQLSTATE 22003) at the audit-row INSERT step; the router
+    catch-all converted it to a 500.
+
+    Post-fix: the model declares ``BigInteger`` (PG int8), so
+    ``SQLModel.metadata.create_all()`` builds the wide column on
+    fresh PG databases. The audit-row INSERT round-trips the full
+    int8 range losslessly. The byte-mismatch gate accepts any value
+    the dry-run row stored (no upper bound is enforced anywhere
+    downstream — legitimate >2GiB cleanups must pass).
+    """
+
+    async def test_execute_accepts_incident_oversize_bytes_pg(
+        self, pg_db,
+    ):
+        """Regression for incident 2026-09-28 — the exact 27.2 GiB
+        dry-run echo from the live log round-trips through the
+        real-PG execute path.
+
+        Pre-fix this test would have raised
+        ``DataError(NumericValueOutOfRange)`` at the audit-row
+        INSERT step; post-fix the wide column accepts the value
+        losslessly.
+        """
+        from daemon.services.timestamps import now_utc_iso
+
+        async with api_stack(pg_db) as st:
+            # Seed a manual_dry_run row with the incident byte total
+            # in its summary_json. We don't need to stage 27 GiB of
+            # actual blobs — the dry-run gate reads
+            # ``summary_json.would_delete.bytes``, not the live
+            # adapter. This is the exact shape the production dry-run
+            # row carried before the incident execute.
+            dry = MaintenanceRun(
+                run_id=(
+                    f"ckpt-20260928_oversize_dry_run-"
+                    f"{uuid.uuid4().hex[:8]}"
+                ),
+                section="checkpoint-cleanup",
+                kind="manual_dry_run",
+                started_at=now_utc_iso(),
+                completed_at=now_utc_iso(),
+                status="succeeded",
+                triggered_by="user",
+                summary_json={
+                    "would_delete": {
+                        "checkpoint_rows": 0,
+                        "writes": 0,
+                        "blobs": 4,
+                        "bytes": _INCIDENT_EXPECTED_BYTES,
+                    },
+                    "would_delete_count": 4,
+                    "would_free_bytes": _INCIDENT_EXPECTED_BYTES,
+                    "duration_ms": 412,
+                    "skipped": [],
+                },
+            )
+            assert st.repo.insert(dry) is True
+
+            # Echo the incident byte total. The byte-mismatch gate
+            # compares expected vs stored — same value → gate passes.
+            r = await st.client.post(
+                f"{SECTION_PREFIX}/execute",
+                json={
+                    "dry_run_run_id": dry.run_id,
+                    "expected_bytes": _INCIDENT_EXPECTED_BYTES,
+                    "confirm": True,
+                },
+            )
+            assert r.status_code == 202, (
+                f"execute accepted the incident oversize value but "
+                f"returned {r.status_code}: {r.text}"
+            )
+            await drain_tasks(st.svc)
+
+            # The audit row MUST hold the full int8 value (not a
+            # truncated surrogate). This is the regression pin: the
+            # model declares BigInteger so the INSERT round-trips
+            # losslessly.
+            run = (await st.client.get(
+                f"{SECTION_PREFIX}/runs/{r.json()['run_id']}"
+            )).json()
+            assert run["status"] == "succeeded", run
+            row = st.repo.get(r.json()["run_id"])
+            assert row is not None
+            assert row.expected_bytes == _INCIDENT_EXPECTED_BYTES, (
+                f"audit row.expected_bytes = {row.expected_bytes}, "
+                f"expected {_INCIDENT_EXPECTED_BYTES}"
+            )
+            assert row.kind == "manual_execute"
+
+    async def test_execute_accepts_just_over_int4_pg(self, pg_db):
+        """Threshold pin on real PG — 2^31 (one above int4 max) MUST
+        round-trip through the audit-row INSERT without overflow.
+        The legacy int4 column would have raised
+        ``NumericValueOutOfRange``; BigInteger accepts the full
+        int8 range.
+        """
+        from daemon.services.timestamps import now_utc_iso
+
+        async with api_stack(pg_db) as st:
+            dry = MaintenanceRun(
+                run_id=(
+                    f"ckpt-20260928_just_over_int4-"
+                    f"{uuid.uuid4().hex[:8]}"
+                ),
+                section="checkpoint-cleanup",
+                kind="manual_dry_run",
+                started_at=now_utc_iso(),
+                completed_at=now_utc_iso(),
+                status="succeeded",
+                triggered_by="user",
+                summary_json={
+                    "would_delete": {
+                        "checkpoint_rows": 0,
+                        "writes": 0,
+                        "blobs": 4,
+                        "bytes": _JUST_OVER_INT4,
+                    },
+                    "would_delete_count": 4,
+                    "would_free_bytes": _JUST_OVER_INT4,
+                    "duration_ms": 412,
+                    "skipped": [],
+                },
+            )
+            assert st.repo.insert(dry) is True
+
+            r = await st.client.post(
+                f"{SECTION_PREFIX}/execute",
+                json={
+                    "dry_run_run_id": dry.run_id,
+                    "expected_bytes": _JUST_OVER_INT4,
+                    "confirm": True,
+                },
+            )
+            assert r.status_code == 202, r.text
+            await drain_tasks(st.svc)
+            row = st.repo.get(r.json()["run_id"])
+            assert row.expected_bytes == _JUST_OVER_INT4
+
+    async def test_execute_accepts_int4_max_pg(self, pg_db):
+        """Boundary pin (negative side) on real PG — 2^31-1 (the last
+        value that fits int4) MUST still round-trip after the
+        widening.
+        """
+        from daemon.services.timestamps import now_utc_iso
+
+        async with api_stack(pg_db) as st:
+            dry = MaintenanceRun(
+                run_id=(
+                    f"ckpt-20260928_int4_max-"
+                    f"{uuid.uuid4().hex[:8]}"
+                ),
+                section="checkpoint-cleanup",
+                kind="manual_dry_run",
+                started_at=now_utc_iso(),
+                completed_at=now_utc_iso(),
+                status="succeeded",
+                triggered_by="user",
+                summary_json={
+                    "would_delete": {
+                        "checkpoint_rows": 0,
+                        "writes": 0,
+                        "blobs": 4,
+                        "bytes": _INT4_MAX,
+                    },
+                    "would_delete_count": 4,
+                    "would_free_bytes": _INT4_MAX,
+                    "duration_ms": 412,
+                    "skipped": [],
+                },
+            )
+            assert st.repo.insert(dry) is True
+
+            r = await st.client.post(
+                f"{SECTION_PREFIX}/execute",
+                json={
+                    "dry_run_run_id": dry.run_id,
+                    "expected_bytes": _INT4_MAX,
+                    "confirm": True,
+                },
+            )
+            assert r.status_code == 202, r.text
+            await drain_tasks(st.svc)
+            row = st.repo.get(r.json()["run_id"])
+            assert row.expected_bytes == _INT4_MAX
 
 
 class TestContention:
