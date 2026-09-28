@@ -30,7 +30,10 @@ from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.task.models import TaskStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
-from daemon.services.mission_live_guard import evaluate_mission_live
+from daemon.services.mission_live_guard import (
+    MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+    evaluate_mission_live,
+)
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.services.work_notifier import _format_status_display, notify_work_watchers
 from daemon.services.work_status import (
@@ -748,8 +751,19 @@ class JobQueueService:
         fired = 0
         retired = 0
         scanned = 0
+        # U7 (2026-09-28): orphan-released counter. Counts rows the
+        # backstop forced the fire for (mission tree quiet AND freshest
+        # ``last_activity_at`` older than the window). Surfaced as a
+        # distinct ``orphan_released`` return-key (and as a cumulative
+        # counter on the WatchReconcileSweepService) so operators can
+        # grep for ``ORPHAN_RELEASED`` log lines and discriminate
+        # backstop-forced fires from natural-terminal releases.
+        orphan_released = 0
         if self._watcher_repo is None or self._instance_manager is None:
-            return {"fired": 0, "retired": 0, "scanned": 0}
+            return {
+                "fired": 0, "retired": 0, "scanned": 0,
+                "orphan_released": 0,
+            }
 
         work_resolver = getattr(self, "_work_resolver", None)
         try:
@@ -903,20 +917,93 @@ class JobQueueService:
                 # Pass ``instance_id`` filter only when set — the
                 # per-instance hook variant is scoped; the global
                 # sweep variant fires for everything in scope.
+                # U7 + S15 (2026-09-28, fix/u7-orphan-anchor-s15):
+                # ORPHAN-RELEASED detection + fresh-payload re-fetch.
+                # The helper now consults the canonical mission-live
+                # guard BEFORE calling ``notify_watchers`` to detect
+                # the wave-3 misfire class: a tree where every member
+                # is terminal AND the freshest ``last_activity_at``
+                # is older than ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``
+                # (the new backstop firing condition). When that
+                # verdict fires (``timed_out=True``), the notify path
+                # is going to drain a row the natural arm already
+                # held for ≥6h — emit ``ORPHAN_RELEASED`` as the
+                # distinct emission token (operator grep) BEFORE the
+                # fire so operators can discriminate backstop-forced
+                # releases from natural-terminal fires. The token is
+                # the row's audit-trail identification; downstream
+                # watchers receive the canonical completion envelope
+                # unchanged (backwards-compat with the natural-path
+                # parsing contracts).
+                # Fresh-payload re-fetch: the work_record ``status`` +
+                # ``result_summary`` are re-fetched at this tick (the
+                # call to ``work_resolver.resolve_work`` above already
+                # did that — same SELECT as the natural path). The
+                # ``result_summary=None`` passed to ``notify_watchers``
+                # below intentionally falls through to the
+                # ``work_record`` fallback inside ``notify_work_watchers``,
+                # so the delivered envelope carries the FRESHLY-fetched
+                # content — never any stale value cached from the
+                # hold time. The pre-S15 shape threaded a stale
+                # ``result_summary`` snapshot from the moment the row
+                # was inserted; the post-S15 shape relies on the
+                # resolver-fallback to yield current state at every
+                # fire, which is the c7f59aaf-style stale-payload
+                # class's structural closure.
+                try:
+                    _pre_guard_instance_repo = getattr(
+                        self._instance_manager,
+                        "_instance_repository",
+                        None,
+                    )
+                    _pre_guard_work_root = getattr(
+                        record, "instance_id", None,
+                    ) if record is not None else None
+                    _pre_verdict = await evaluate_mission_live(
+                        instance_repository=_pre_guard_instance_repo,
+                        instance_id=_pre_guard_work_root,
+                        bus_pending_count=None,
+                        task_completed_at=None,  # U7: ignored, kept for compat
+                    )
+                    if _pre_verdict.timed_out:
+                        orphan_released += 1
+                        logger.warning(
+                            "ORPHAN_RELEASED work_id=%s "
+                            "work_status=%s held_since_swEEP_TICK=%d — "
+                            "backstop fired on freshest tree "
+                            "last_activity_at older than %ds (every "
+                            "tree member terminal AND quiet for the "
+                            "full window); the natural arm was held "
+                            "during the entire window; the deliver "
+                            "below carries the FRESHLY-fetched "
+                            "work_record content (resolver-fallback); "
+                            "this row was the U7 wave-3 fix's "
+                            "structural target",
+                            work_id[:8],
+                            work_status,
+                            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+                        )
+                except Exception as _orphan_detect_err:
+                    # The detection is best-effort — a guard DB hiccup
+                    # here must NOT block the fire. Log + continue
+                    # without the orphan_released token.
+                    logger.debug(
+                        "reconcile_held_watches_for_instance: "
+                        "orphan_released detection failed for "
+                        "work_id=%s (non-fatal, defaulting to natural "
+                        "terminal assumption): %s",
+                        work_id[:8], _orphan_detect_err,
+                    )
+
                 notified = await self.notify_watchers(
                     work_id,
                     work_status,
-                    # Do NOT thread result_summary from the resolver
-                    # here — the held row's underlying settle fired
-                    # the natural notify path earlier with whatever
-                    # content was available; re-firing with a stale
-                    # result_summary would silently overwrite the
-                    # content the watcher already received (or
-                    # overwrite a richer producer-threaded body the
-                    # caller just supplied via the hook). The
-                    # ``notify_work_watchers`` resolver-fallback
-                    # reads ``Task.result`` (committed by now for
-                    # any work that survived to the held state).
+                    # Fresh payload fallback: re-fetched at this tick
+                    # via ``work_resolver.resolve_work`` above. The
+                    # resolver-fallback inside ``notify_work_watchers``
+                    # reads ``work_record.result_summary`` at delivery
+                    # time, yielding CURRENT state (S15 closure for
+                    # the c7f59aaf stale-payload class).
                     result_summary=None,
                 )
                 fired += notified
@@ -932,15 +1019,21 @@ class JobQueueService:
                     per_work_err,
                 )
 
-        if fired or retired:
+        if fired or retired or orphan_released:
             logger.info(
                 "reconcile_held_watches_for_instance: scanned=%d "
-                "fired=%d retired=%d (instance_filter=%s)",
-                scanned, fired, retired,
+                "fired=%d retired=%d orphan_released=%d "
+                "(instance_filter=%s)",
+                scanned, fired, retired, orphan_released,
                 (instance_id[:8] + "...") if instance_id else "<global>",
             )
 
-        return {"fired": fired, "retired": retired, "scanned": scanned}
+        return {
+            "fired": fired,
+            "retired": retired,
+            "scanned": scanned,
+            "orphan_released": orphan_released,
+        }
 
     # ========== Public API ==========
     

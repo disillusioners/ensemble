@@ -686,17 +686,35 @@ async def notify_work_watchers(
             # subscribed events have fired NOW — claim + deliver.
             matching_claimable.append(watcher)
 
-        # M2 — debug log when ``mission_terminal`` opt-in held
-        # notifications back. The watcher rows remain in place for
-        # the future terminal event; nothing claims them here.
+        # M2 + U7 (2026-09-28) — held-watcher diagnostic. Pre-U7 this
+        # was DEBUG-only, which made "all rows held, mission still
+        # live, nothing delivered" silent in production logs even
+        # though that shape is the wave-3 misfire surface. Promote
+        # to an INFO line that fires AT MOST once per notify call
+        # (the periodic sweep tick cadence handles the heartbeat
+        # for orphaned rows; per-call INFO here would be spam on a
+        # hot row). Operator greppable: ``held_for_mission_observation``.
         if held_for_mission:
-            logger.debug(
-                "notify_work_watchers: held %d watcher(s) for "
-                "mission_terminal gating on work_id=%s status=%s — "
-                "mission liveness not yet terminal; rows preserved",
-                held_for_mission,
+            log_fn = (
+                logger.info
+                if held_for_mission > 0
+                and not matching_claimable
+                and not matching_readonly
+                else logger.debug
+            )
+            log_fn(
+                "notify_work_watchers: held_for_mission_observation "
+                "work_id=%s status=%s — %d watcher(s) on mission_terminal "
+                "gating; mission_live=%s; ZERO deliverable rows this "
+                "call (the eventual mission-terminal fire claims them "
+                "OR the periodic sweep / hook (b) does so within the "
+                "guaranteed ≤300s interval); pairing this line with "
+                "the row's ``created_at`` lets operators spot rows "
+                "that are stuck past one tick",
                 work_id[:8],
                 status,
+                held_for_mission,
+                mission_live,
             )
 
         # Step 3 (N1 — 2026-09-03, extended by C1 2026-09-25):

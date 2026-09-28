@@ -145,12 +145,26 @@ class WatchReconcileSweepService:
         self._interval_seconds = max(1, int(interval_seconds))
         self._task: asyncio.Task[None] | None = None
         self._stopping: bool = False
-        # Counters for the sweep — useful for tests + observability.
-        # Mirrors the ``OrphanWatcherSweepService.counters()`` shape.
+        # Cumulative counters for the sweep — useful for tests +
+        # observability. Mirrors the OrphanWatcherSweepService pattern.
         self._ticks_total: int = 0
         self._fired_total: int = 0
         self._retired_total: int = 0
         self._errors_total: int = 0
+        # U7 (2026-09-28): heartbeat cadence for the all-hold
+        # observations. The sweep currently logs at INFO when a tick
+        # produced ``fired>0`` or ``retired>0``; the dominant
+        # operational state — a tick that scanned all held rows and
+        # emitted ZERO fires (the mission is still live everywhere —
+        # backstop holding) — was silent. Add a periodic INFO
+        # heartbeat at every Nth tick so operators can confirm the
+        # sweep is alive without log spam. ``_heartbeat_every`` = 12
+        # ticks × 300s = 1h cadence (heavy intervals because the
+        # sweep is the structural backstop, not the fast path; an
+        # all-hold heartbeat every minute would be too noisy on a
+        # long-idle daemon).
+        self._heartbeat_every: int = 12
+        self._last_heartbeat_at: int = 0
 
     @property
     def interval_seconds(self) -> int:
@@ -262,6 +276,32 @@ class WatchReconcileSweepService:
                 f"(cumulative_fired={self._fired_total}, "
                 f"cumulative_retired={self._retired_total})"
             )
+        else:
+            # U7 (2026-09-28): heartbeat for the all-hold state.
+            # Emit INFO every ``_heartbeat_every`` ticks so the
+            # operator can confirm the sweep is alive even when
+            # every held row is in the held_for_mission bucket (the
+            # mission is plausibly live everywhere — the backstop
+            # is holding). Without this, a daemon that has been
+            # quiet for an hour looks indistinguishable from a
+            # daemon whose sweep task has wedged. The cadence
+            # (every Nth tick × 300s) is intentionally light; an
+            # unhealthy tick fires the WARNING block above.
+            if (
+                self._ticks_total - self._last_heartbeat_at
+            ) >= self._heartbeat_every:
+                logger.info(
+                    f"WatchReconcileSweepService: tick "
+                    f"{self._ticks_total} all_hold_heartbeat "
+                    f"scanned={scanned} fired=0 retired=0 "
+                    f"(cumulative_fired={self._fired_total}, "
+                    f"cumulative_retired={self._retired_total}, "
+                    f"errors={self._errors_total}) — every held "
+                    f"row is currently backed by a live mission; "
+                    f"sweep is healthy and waiting for natural "
+                    f"terminal flips"
+                )
+                self._last_heartbeat_at = self._ticks_total
 
         return {
             "fired": fired,
