@@ -132,7 +132,13 @@ _log "preflight: lock · integrity · journal txn · entry checks"
 if ! lock_acquire; then
     exit 78
 fi
-trap 'lock_release' EXIT
+# Signal trap discipline (component 2 of r-20260928-005506-f82e): bash's
+# EXIT trap does NOT fire on untrapped TERM/HUP/INT. Install explicit
+# handlers that journal a halt event and release the lock before exit
+# — otherwise the systemd-cgroup kill leaves an orphan txn AND a
+# stale lock. The helper ALSO swaps the EXIT trap to _trap_safe_exit
+# (no double-release against the signal handler's release).
+_trap_install_signal_handlers "promote:preflight"
 
 # lock held from here on — heartbeat before every long wait
 lock_heartbeat

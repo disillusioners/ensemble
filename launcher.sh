@@ -217,9 +217,29 @@ _js_now_iso() {
 # _js_iso_to_epoch <iso-ts> — parse journal ISO timestamps; nonzero on
 # garbage (callers fail CLOSED: the sweep never fires on an unparseable
 # started_at — it might be a fresh txn we cannot age).
+#
+# Portability (fix/portable-iso-parse-linux, 2026-09-28, r-f82e §3.9
+# #1): mirror of lib.sh's _iso_to_epoch — uname dispatch between BSD
+# ``date -ju -f …`` and GNU ``date -d …``. Same rationale, same
+# precedent (atomic_flip 47630be0). The launcher's _journal_sweep is
+# the ONE consumer that runs on every boot; an unparseable started_at
+# here = the boot sweep fails closed on every startup, an unfixable
+# orphan-txn wedge that nothing else recovers. Verified on macOS
+# date(1) and GNU coreutils 9.x (Linux).
 _js_iso_to_epoch() {
     local ts="$1" epoch
-    epoch="$(date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null)" || return 1
+    case "$(uname -s)" in
+        Darwin|*BSD*|*bsd*)
+            epoch="$(date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null)" || return 1
+            ;;
+        Linux|GNU*|*GNU*)
+            epoch="$(date -d "$ts" +%s 2>/dev/null)" || return 1
+            ;;
+        *)
+            echo "_js_iso_to_epoch: unrecognized platform '$(uname -s)' — refusing (fail-closed; BSD or Linux required)" >&2
+            return 1
+            ;;
+    esac
     [ -n "$epoch" ] || return 1
     printf '%s' "$epoch"
 }
@@ -655,23 +675,56 @@ _journal_sweep() {
 
     # Age the txn. Unparseable started_at → FAIL CLOSED (never fire on a
     # txn we cannot age — it may be fresh).
-    local started_epoch age
+    local started_epoch age now hb_stale owner_dead
     if ! started_epoch="$(_js_iso_to_epoch "$started")" 2>/dev/null; then
         _log "WARN: journal sweep: in_flight started_at unparseable ('$started') — leaving untouched, boot proceeds"
         return 0
     fi
-    age=$(( $(_now) - started_epoch ))
+    now="$(_now)"
+    age=$(( now - started_epoch ))
 
-    # Fresh txn (≤ SWEEP_STALE_S) → the owner may still be alive. Leave it.
-    if [ "$age" -le "$SWEEP_STALE_S" ]; then
-        _log "journal sweep: in_flight $kind txn (target=${target:-?}) is fresh (${age}s ≤ ${SWEEP_STALE_S}s) — leaving alone"
-        return 0
+    # comp3 (r-f82e): liveness fast-path helpers (mirror of lib.sh's
+    # _txn_heartbeat_stale + _txn_owner_dead). Same contract:
+    #   hb_stale=1 → in_flight.last_heartbeat > HEARTBEAT_STALE_S old
+    #                (or missing/garbage → stale);
+    #   owner_dead=1 → kill -0 says owner_pid is dead (EPERM=alive,
+    #                   matches the lock_file _pid_alive above);
+    # The fast path runs BEFORE the freshness gate: hb_stale +
+    # owner_dead → reclaim NOW (skip the SWEEP_STALE_S wait). Closes
+    # the r-f82e gap where the executor died ~2s in, never wrote a
+    # heartbeat, the reaper also died, and the sweep would have held
+    # the txn for the full 600s. Heartbeat fresh OR owner alive →
+    # fall through to the freshness gate (the conservative reading).
+    hb="$(_js_json_field "$inf" "last_heartbeat" 2>/dev/null)" || hb=""
+    hb_stale=1
+    if printf '%s' "$hb" | grep -Eq '^[0-9]+$' \
+       && [ $(( now - hb )) -le "$HEARTBEAT_STALE_S" ]; then
+        hb_stale=0
+    fi
+    owner_dead=1
+    if [ -n "$owner" ] && printf '%s' "$owner" | grep -Eq '^[0-9]+$' \
+       && _pid_alive "$owner" 2>/dev/null; then
+        owner_dead=0
     fi
 
-    # Stale (> SWEEP_STALE_S) → owner presumed dead (R1.3: the 600s gate is
-    # the primary race guard). All mutations below serialize on the D5 lock;
-    # a busy-but-live pipeline (fresh heartbeat / live owner) makes the
-    # sweep DEFER (return 0) rather than block boot.
+    # Fresh txn (≤ SWEEP_STALE_S) → the owner may still be alive. Leave it
+    # UNLESS the liveness fast path fires (hb_stale + owner_dead →
+    # reclaim now). The freshness check below is the conservative reading
+    # when the fast path doesn't apply.
+    if [ "$age" -le "$SWEEP_STALE_S" ]; then
+        if [ "$hb_stale" = "1" ] && [ "$owner_dead" = "1" ]; then
+            _log "journal sweep: comp3 fast path triggered (hb_stale=1 owner_dead=1 age=${age}s ≤ SWEEP_STALE_S=${SWEEP_STALE_S}s) — reclaiming (flipped=${flipped:-—})"
+        else
+            _log "journal sweep: in_flight $kind txn (target=${target:-?}) is fresh (${age}s ≤ ${SWEEP_STALE_S}s, hb_stale=$hb_stale owner_dead=$owner_dead) — leaving alone"
+            return 0
+        fi
+    fi
+
+    # Stale (> SWEEP_STALE_S) — OR fast path above — → owner presumed
+    # dead (R1.3: the 600s gate is the primary race guard). All
+    # mutations below serialize on the D5 lock; a busy-but-live pipeline
+    # (fresh heartbeat / live owner) makes the sweep DEFER (return 0)
+    # rather than block boot.
     if ! _js_lock_acquire "$install_dir"; then
         return 0
     fi

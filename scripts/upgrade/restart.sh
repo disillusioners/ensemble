@@ -159,11 +159,15 @@ lock_heartbeat
 _log "pipeline lock adopted (run_id=$RUN_ID, owner pid $$)"
 
 # D-FA5.1 safety net: every failure path AFTER adoption (stop failure exit 1,
-# journal_fail_loud exits) must not leave the adopted lock dangling. Same
-# trap form as promote.sh; lock_release is a silent no-op when the dir is
-# already gone (normal paths release deliberately before exit), so the
-# deliberate releases below never double-fire noisily.
-trap 'lock_release' EXIT
+# journal_fail_loud exits) must not leave the adopted lock dangling. Signal
+# trap discipline (component 2 of r-20260928-005506-f82e): the helper
+# installs TERM/HUP/INT handlers that journal a halt event and release
+# the lock idempotently (no double-release — see _trap_safe_exit), and
+# also swaps the EXIT trap to the safe variant. lock_release is still a
+# silent no-op when the dir is already gone (normal paths release
+# deliberately before exit), so the deliberate releases below stay
+# quiet either way.
+_trap_install_signal_handlers "restart:adopt"
 
 # Re-stamp the txn owner to the executor (advisory identity in the journal).
 INF_TARGET="$(_json_field "$INF" target)"

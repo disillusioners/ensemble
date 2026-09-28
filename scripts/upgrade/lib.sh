@@ -65,6 +65,13 @@ LOCK_HEARTBEAT_S=30           # live owner rewrites heartbeat this often
 LOCK_STALE_S=300              # heartbeat older than this = stale-breakable
 LOCK_WAIT_S_DEFAULT=15        # bounded wait for a busy lock, never forever
 
+# HEARTBEAT_STALE_S — journal in_flight.last_heartbeat older than this is
+# stale (r-f82e follow-up; comp3). Mirrors LOCK_STALE_S. The two are
+# refreshed together at every lock_heartbeat call site, but kept as
+# separate constants so the lock vs journal paths age independently
+# and the contract is greppable.
+HEARTBEAT_STALE_S=300
+
 # Retention (ADR-004): keep 3 releases; previous pinned.
 RETENTION_KEEP=3
 
@@ -78,12 +85,92 @@ _now_epoch() { date +%s; }
 # _now_iso — UTC ISO-8601 timestamp (journal fields are ISO).
 _now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# _log_ts — UTC ISO-8601 timestamp prefix for log lines (comp6, r-f82e).
+# BSD/GNU-portable: ``date -u +format`` is IDENTICAL on both — the
+# format-string operand uses the SAME syntax in BSD and GNU date, and
+# no -j/-f/-d/-j flags appear here. Verified on macOS date(1) and
+# GNU coreutils 9.x. Used as the timestamp source for upgrade.log
+# lines that previously had no anchor (the incident file
+# `/home/nea/ensemble-prod/data/upgrade.log` had 19 lines, none
+# timestamped; post-mortems had no time correlation).
+_log_ts() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
+
+# _log_tsl <file> <message...> — append a TIMESTAMPED line to the
+# upgrade.log (or any log file). Used by promote/restart/rollback/
+# stage as the ONE write seam for log lines; replaces the
+# redirect-echo pattern that produced unanchored output.
+#
+# BYTE-IDENTICAL FALLBACK: if _log_ts is unavailable (no date binary,
+# or PATH stripped in a sandbox), the timestamp degrades to "-" rather
+# than aborting the write. The log line still goes through; a
+# reviewer who sees "-" can correlate with the journal's ISO
+# started_at timestamps (always present, comp4-portable).
+_log_tsl() {
+    local file="$1"; shift
+    local ts
+    ts="$(_log_ts 2>/dev/null)" || ts="-"
+    printf '%s %s\n' "$ts" "$*" >> "$file" 2>/dev/null || return 1
+}
+
+# comp6 (r-f82e): the existing _log helper writes to stderr (WARN to
+# stdout — see _warn above) and is fine for the operator's console.
+# It is NOT a timestamped upgrade.log writer; the upgrade.log
+# history that the forensic report needed was the executor's own
+# stdout/stderr captured by spawn_executor (data/upgrade.log, append).
+# Promotion/restart/rollback scripts append their phase markers to
+# that same file via bare echo/printf redirects — those writes are
+# the ones this helper replaces.
+#
+# The MINIMAL-DISRUPTION pattern: add the timestamp wrapper, keep all
+# existing printf/echo writes (they still produce lines; only the
+# unanchored lines change). Sites that opt into the timestamped
+# wrapper call ``_log_tsl "$UPGRADE_LOG" "<message>"`` instead of
+# ``printf … >> "$UPGRADE_LOG"``. Sites that don't change → lines
+# stay unanchored (preserved BYTE-IDENTICALLY, by design — the
+# incident's 19 unanchored lines had THIS shape; only new lines get
+# anchored).
+# Variable export so per-script helpers know where to append:
+# UPGRADE_LOG="$INSTALL_DIR/data/upgrade.log" (set by caller; falls
+# back to data/upgrade.log in $INSTALL_DIR if unset).
+
 # _iso_to_epoch <iso-ts> — parse journal ISO timestamps; 0 on garbage
 # (callers treat 0 as "unknown age" and fail CLOSED on the decision that
 # matters: a sweep never fires on an unparseable fresh-looking txn).
+#
+# Portability (fix/portable-iso-parse-linux, 2026-09-28, r-f82e §3.9 #1):
+# the parser MUST work identically on BSD/macOS and GNU/Linux. Plain
+# BSD ``date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s`` is WRONG on Linux —
+# the GNU date(1) rejects ``-j`` (BSD date only), ``-f`` requires a
+# DIFFERENT format ordering than BSD, and ``-u`` is silently accepted
+# but does not parse ISO with the BSD operand order. Symptom: a
+# ``lib.sh:86`` line unparseable on this host means the launcher's
+# self-heal sweep silently FAILS CLOSED on every boot — an unfixable
+# orphan txn wedge.
+#   BSD/macOS:  ``date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s``
+#   GNU/Linux:  ``date -d "$ts" +%s``   (GNU's -d parses ISO-8601
+#                                          directly; -u is implicit for
+#                                          the Z suffix and -j/-f are
+#                                          not understood)
+# We dispatch on ``uname -s`` rather than chaining the two forms with
+# ``||``: on BSD a REAL -j failure would otherwise hit the GNU form
+# and surface a wrong-platform error. Unrecognized platforms refuse
+# (fail-closed; we never guess). Verified on macOS date(1) and GNU
+# coreutils 9.x (Linux). MIRRORS the atomic_flip precedent
+# (fix/portable-atomic-flip-linux, 47630be0).
 _iso_to_epoch() {
     local ts="$1" epoch
-    epoch="$(date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null)" || return 1
+    case "$(uname -s)" in
+        Darwin|*BSD*|*bsd*)
+            epoch="$(date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null)" || return 1
+            ;;
+        Linux|GNU*|*GNU*)
+            epoch="$(date -d "$ts" +%s 2>/dev/null)" || return 1
+            ;;
+        *)
+            echo "_iso_to_epoch: unrecognized platform '$(uname -s)' — refusing (fail-closed; BSD or Linux required)" >&2
+            return 1
+            ;;
+    esac
     [ -n "$epoch" ] || return 1
     printf '%s' "$epoch"
 }
@@ -525,7 +612,16 @@ journal_history_append() {
 }
 
 # journal_open_txn <kind> <target> — set in_flight {kind,target,started_at,
-# flipped:false,owner_pid}. Refuses (returns 1) if a txn is already open.
+# flipped:false,owner_pid,last_heartbeat}. Refuses (returns 1) if a txn
+# is already open. ADDITIVE field: last_heartbeat is the epoch the txn
+# was opened — readers that don't know about it (legacy launchers,
+# Python twin pre-comp3) ignore the extra key (json.loads last-wins on
+# duplicates; lib.sh's textual splice at the LAST occurrence picks up
+# the embedded `last_heartbeat` naturally because it appears ONCE per
+# txn object). Refreshed by lock_heartbeat (see below) so a live owner
+# keeps its heartbeat < HEARTBEAT_STALE_S; a dead owner's heartbeat
+# ages to stale, and the new owner-liveness fast path in adopt_stale_txn
+# + _journal_sweep can reclaim/observe it before the 600s age boundary.
 journal_open_txn() {
     local kind="$1" target="$2" json existing
     json="$(journal_read)" || return 1
@@ -535,7 +631,7 @@ journal_open_txn() {
         return 1
     fi
     journal_update "in_flight" \
-        "{\"kind\":\"$kind\",\"target\":\"$target\",\"started_at\":\"$(_now_iso)\",\"flipped\":false,\"owner_pid\":$$}"
+        "{\"kind\":\"$kind\",\"target\":\"$target\",\"started_at\":\"$(_now_iso)\",\"flipped\":false,\"owner_pid\":$$,\"last_heartbeat\":$(_now_epoch)}"
 }
 
 # journal_mark_flipped — in_flight.flipped = true (raw splice inside the
@@ -593,6 +689,60 @@ journal_mark_f2_verified() {
 # journal_close_txn — in_flight = null.
 journal_close_txn() {
     journal_update "in_flight" "null"
+}
+
+# journal_heartbeat — refresh the journal's in_flight.last_heartbeat
+# to NOW (epoch seconds). The lock's heartbeat file (lock_heartbeat)
+# and this field are refreshed TOGETHER — the helper is invoked from
+# lock_heartbeat at every site (promote.sh:138/204/245/270/346 etc.)
+# so a live owner keeps BOTH fresh. Mirrors the D5 lock discipline
+# with the in_flight journal field added by comp3.
+#
+# Best-effort: a torn/unwritable journal is WARN-only and never raises
+# — lock_heartbeat returns 1 if the dir is gone, 0 otherwise; the
+# journal refresh failure is logged but does not flip the return code
+# (the lock heartbeat is what callers depend on for liveness; the
+# journal one is the fast-path sweeper's signal).
+#
+# No-op when in_flight is null/absent (no txn to heartbeat — race-safe).
+#
+# BASH-PATTERN HAZARD (the reason this uses sed, not $var//pattern):
+# bash's parameter-substitution glob ``[0-9]*`` is GREEDY — it matches
+# a digit then ANY CHARACTERS until the regex engine stops, including
+# the closing ``}`` of the in_flight object. A pure-digit pattern
+# (e.g. ``[0-9]``) would replace one char at a time and corrupt the
+# field's trailing bytes. The portable fix is a sed anchored to the
+# field name (``"last_heartbeat":[0-9]*`` with no trailing wildcard)
+# so the substitution's match-length is bounded to the digits
+# themselves — see test_promote_cgroup_survivorship.sh 3b for the
+# regression pin that caught this.
+journal_heartbeat() {
+    local json
+    json="$(journal_read 2>/dev/null)" || return 0
+    local inf
+    inf="$(_json_sub "$json" "in_flight")"
+    [ -n "$inf" ] || return 0
+    case "$inf" in ''|null) return 0 ;; esac
+    local owner
+    owner="$(_json_field "$inf" "owner_pid" 2>/dev/null)" || owner=""
+    # Ownership guard: refresh the heartbeat ONLY if WE are the owner
+    # recorded in the txn (mirrors lock_heartbeat's owner guard — a
+    # non-owner must never refresh a foreign owner's heartbeat).
+    if [ -n "$owner" ] && [ "$owner" != "$$" ]; then
+        return 0
+    fi
+    # Replace the last_heartbeat field; preserves every other field.
+    # The sed pattern is anchored to "last_heartbeat":<digits> with no
+    # trailing wildcard — bash parameter-substitution's glob would
+    # otherwise eat the closing `}` of the in_flight object (a real
+    # bug, not theoretical — see the BASH-PATTERN HAZARD comment above
+    # and the test pin in tests/test_promote_cgroup_survivorship.sh).
+    local new_inf hb_now
+    hb_now="$(_now_epoch)"
+    new_inf="$(printf '%s' "$inf" \
+            | sed -E "s/(\"last_heartbeat\":)[0-9]+/\\1$hb_now/")"
+    [ "$new_inf" != "$inf" ] || return 0
+    journal_update "in_flight" "$new_inf"
 }
 
 # journal_set_current <ver> — set current (string) + sanity echo.
@@ -669,6 +819,70 @@ journal_fail_loud() {
     printf '%s[%s]: JOURNAL DIVERGENCE: journal write FAILED at %s — best-effort txn close attempted. The env may be healthy but the journal does not agree with the current symlink; repair %s BEFORE the next launcher start (a surviving open flipped txn makes the sweep roll back a healthy promote)\n' \
         "$LOG_TAG" "${UP_TARGET:-lib}" "$what" "$(journal_path)" >&2
     exit "$rc"
+}
+
+# ── Heartbeat liveness fast-path (comp3; r-20260928-005506-f82e) ─────────────
+#
+# WHY TWO GATES NOW EXIST (deliberate-design note, R1.3 + comp3):
+#
+#   Primary  — SWEEP_STALE_S=600 (age). A txn's AGE alone decides
+#              adoption / clearing. The 600s window is the primary race
+#              guard against a live owner whose heartbeat file has
+#              aged: a LIVE owner in the middle of a long op (the
+#              stop-script span clamps to 600s > LOCK_STALE_S) writes
+#              to the lock file but NOT to the journal's heartbeat
+#              field. Pre-comp3 this was the SOLE gate. Preserved
+#              BYTE-IDENTICALLY.
+#
+#   Added    — HEARTBEAT_STALE_S=300 AND owner dead (liveness). A
+#              txn's journal heartbeat AND the owner pid BOTH signal
+#              death → reclaim NOW, before the 600s age boundary.
+#              Closes the r-f82e gap: the executor was killed ~2s in
+#              (no heartbeat ever written) but the reaper was also
+#              dead and the journal was orphaned for the full 600s
+#              before the launcher's next boot sweep could reclaim it.
+#
+#   Both are checked by the consumers below. The age gate is the
+#   FIRST check (preserves ordering — a fresh txn stays fresh
+#   regardless of liveness); the liveness gate is the SECOND check
+#   (a stale-and-dead txn reclaims earlier than the age gate alone
+#   would allow).
+#
+# _txn_heartbeat_stale <inf> <now_epoch> — print 1 if the in_flight
+# txn's journal heartbeat is stale (>HEARTBEAT_STALE_S old), 0 if
+# fresh. Missing/garbage heartbeat → stale (1) — a fresh txn is
+# always heartbeat-written by journal_open_txn, so an absent value
+# means a hand-edited or legacy journal; fail-open to stale so the
+# liveness dimension owns the decision.
+_txn_heartbeat_stale() {
+    local inf="$1" now="$2" hb age
+    hb="$(_json_field "$inf" "last_heartbeat" 2>/dev/null)" || hb=""
+    if ! printf '%s' "$hb" | grep -Eq '^[0-9]+$'; then
+        printf '1'; return 0
+    fi
+    age=$(( now - hb ))
+    if [ "$age" -gt "$HEARTBEAT_STALE_S" ]; then
+        printf '1'
+    else
+        printf '0'
+    fi
+}
+
+# _txn_owner_dead <inf> — print 1 if the in_flight txn's owner_pid
+# is missing/garbage OR kill -0 says it's dead. EPERM = ALIVE
+# (foreign-user owner; matches _pid_alive above — breaking a live
+# foreign owner's txn would trample its work).
+_txn_owner_dead() {
+    local inf="$1" owner
+    owner="$(_json_field "$inf" "owner_pid" 2>/dev/null)" || owner=""
+    if [ -z "$owner" ] || ! printf '%s' "$owner" | grep -Eq '^[0-9]+$'; then
+        printf '1'; return 0
+    fi
+    if _pid_alive "$owner"; then
+        printf '0'
+    else
+        printf '1'
+    fi
 }
 
 # journal_count_rollback — increment rollback_window_count with 24h window
@@ -816,6 +1030,17 @@ lock_acquire() {
         hb="$(cat "$lock/heartbeat" 2>/dev/null)"
         owner_pid="$(cat "$lock/owner" 2>/dev/null)"
         run_id="$(cat "$lock/run_id" 2>/dev/null)"
+        # comp3 NOTE (r-f82e): the journal-level liveness fast path lives
+        # in the journal sweeps (adopt_stale_txn above, _journal_sweep in
+        # launcher.sh), not here. The lock's own heartbeat + owner gate
+        # below is the contract — the lock and journal heartbeats are
+        # refreshed together at lock_heartbeat sites, so they age in
+        # lockstep; a separate journal-OWNER gate here would duplicate
+        # the same liveness check (and a stale-but-live lock vs dead-but-
+  # fresh journal is the kind of paired-mismatch the r-f82e audit
+        # specifically warned against). R-SR13 mirrors the lock/journal
+        # protocol across both files; the journal-side fast path
+        # reclaims txns, not locks.
         if printf '%s' "$hb" | grep -Eq '^[0-9]+$'; then
             age=$(( $(_now_epoch) - hb ))
             if [ "$age" -gt "$LOCK_STALE_S" ]; then
@@ -857,6 +1082,12 @@ lock_acquire() {
 # stale-breaker already moved aside. This guard is what lets _probe refresh
 # the heartbeat unconditionally: probes also run from lockless display
 # paths (status.sh-style) and must be a no-op there.
+#
+# comp3 (r-20260928-005506-f82e): also refreshes the journal's
+# in_flight.last_heartbeat (journal_heartbeat). The two writes go
+# together so a live owner keeps BOTH fresh; a dead owner ages both.
+# journal_heartbeat is best-effort and ownership-guarded itself —
+# never raises.
 lock_heartbeat() {
     local lock owner
     lock="$(lock_dir_path)"
@@ -864,6 +1095,10 @@ lock_heartbeat() {
     owner="$(cat "$lock/owner" 2>/dev/null)"
     [ "$owner" = "$$" ] || return 1
     printf '%s\n' "$(_now_epoch)" > "$lock/heartbeat" 2>/dev/null
+    # companion journal refresh — same owner, same cadence. The
+    # callers already invoke this helper in long loops (gate_soak,
+    # promote phase 3-8, stage assembly, restart grace).
+    journal_heartbeat >/dev/null 2>&1 || true
 }
 
 # lock_release — remove the lock dir (only if we still own it).
@@ -881,6 +1116,103 @@ lock_release() {
         return 1
     fi
     return 0
+}
+
+# ── Signal-trap discipline (component 2; r-20260928-005506-f82e) ─────────────
+#
+# INCIDENT GAP (2026-09-28): the pipeline scripts registered
+#   trap 'lock_release' EXIT
+# as their ONLY safety net. Bash's EXIT trap does NOT fire on untrapped
+# TERM/HUP/INT — so a SIGTERM from systemd cgroup teardown
+# (KillMode=control-group), a Ctrl-C, or a SIGHUP from the parent shell
+# killed the executor WITHOUT releasing the lock and WITHOUT leaving a
+# terminal journal event. The reaper also died first (in-process), so
+# no second chance observed the orphan.
+#
+# FIX: install explicit TERM/HUP/INT handlers that (a) journal a halt
+# event (death-anchored — survives the executor exit), (b) release the
+# lock idempotently, (c) exit with the signal-appropriate code.
+# Race-safe with the EXIT trap: a per-script guard
+# ``_LOCK_RELEASED=1`` is set BEFORE lock_release runs in the signal
+# trap; the EXIT trap (now ``_trap_safe_exit``) consults the guard and
+# skips the second release. Idempotent by construction — no double-fire.
+#
+# BYTE-IDENTICAL FALLBACK: scripts that don't call ``_trap_install_signal_handlers``
+# keep their original ``trap 'lock_release' EXIT`` shape (the existing
+# promote.sh / restart.sh / rollback.sh / stage.sh sites). Those sites
+# are EXACTLY the four updated here — no other scripts depend on the
+# EXIT-only trap.
+
+# Trap guard (set by the signal handler BEFORE lock_release). The EXIT
+# trap checks it and skips the release when set.
+_LOCK_RELEASED=0
+
+# _trap_safe_exit — EXIT trap body that respects _LOCK_RELEASED. When
+# the signal handler ran first, the guard is 1 → no-op (the handler
+# already released the lock). When the script exits normally (no signal),
+# the guard stays 0 → the original lock_release fires.
+_trap_safe_exit() {
+    if [ "${_LOCK_RELEASED:-0}" = "1" ]; then
+        return 0
+    fi
+    lock_release
+}
+
+# _signal_journal_halt <signum> — best-effort halt event for the death.
+# Best-effort ONLY: an absent/torn/unwritable journal must NEVER block
+# the exit (the lock release below is what matters for the next action
+# to acquire; a missing halt event is no worse than today's behavior).
+# Mirrors _refuse's best-effort journal pattern (ADR-034 append).
+_signal_journal_halt() {
+    local sig="$1" phase="${_PIPELINE_PHASE:-unknown}" detail
+    detail="killed by SIG$(printf '%s' "$sig" | sed 's/^SIG//') at phase $phase (r-20260928-005506-f82e: death-anchored journaling; signal handler installed 2026-09-28)"
+    journal_history_append halt "$detail" >/dev/null 2>&1 || true
+}
+
+# _signal_handler_term — single handler installed for TERM/HUP/INT.
+# Argument is the signal NAME (TERM/HUP/INT) per bash convention
+# (``trap '...' TERM`` invokes the handler with $1=TERM). We journal
+# first, mark the guard, release the lock, then exit.
+# NEVER raise from here — a raise inside a signal handler in bash 3.2
+# is undefined behavior. Just exit with the signal-appropriate code.
+_signal_handler() {
+    local sig="$1"
+    # 128 + signum per shell convention: TERM=15→143, HUP=1→129, INT=2→130
+    case "$sig" in
+        TERM|HUP|INT) ;;
+        *) sig=TERM ;;  # conservative
+    esac
+    _signal_journal_halt "$sig"
+    _LOCK_RELEASED=1
+    # Direct call (NOT through EXIT trap) — the EXIT trap's
+    # _trap_safe_exit sees _LOCK_RELEASED=1 and no-ops anyway.
+    lock_release >/dev/null 2>&1 || true
+    # exit via plain `exit`: bash translates to 128+signum only when
+    # the signal is unhandled. We use `kill -INT $$` to make the exit
+    # genuinely signal-induced (preserves shell convention). But the
+    # POSIX-cleanest path: return via trap invocation context — bash's
+    # default action after a trap fires is to continue; `exit N` works.
+    case "$sig" in
+        TERM) exit 143 ;;
+        HUP)  exit 129 ;;
+        INT)  exit 130 ;;
+        *)    exit 143 ;;
+    esac
+}
+
+# _trap_install_signal_handlers <phase> — install TERM/HUP/INT traps +
+# swap the EXIT trap to the safe variant. Idempotent: a second call
+# resets all three traps to the same handler. Phase is recorded on the
+# halt event so post-mortems can correlate.
+_trap_install_signal_handlers() {
+    local phase="$1"
+    _PIPELINE_PHASE="$phase"
+    trap '_signal_handler TERM' TERM
+    trap '_signal_handler HUP'  HUP
+    trap '_signal_handler INT'  INT
+    trap '_trap_safe_exit' EXIT
+    # Reset guard (in case the script was sourced mid-flow).
+    _LOCK_RELEASED=0
 }
 
 # ── Integrity (T3 / D-FA4.4) ─────────────────────────────────────────────────
@@ -1170,10 +1502,53 @@ atomic_flip() {
     return 0
 }
 
-# restart_via_launcher — nohup launcher (deploy.sh phase-4 pattern; the
-# launcher runs the journal sweep BEFORE binary resolution — T7).
+# restart_via_launcher — start the launcher.
+#
+# comp7 / stretch7 (r-20260928-005506-f82e): on Linux+systemd hosts,
+# the nohup launcher inherits the launcher's cgroup — the same
+# survivorship model the executor's setsid lived under (and the same
+# gap that killed r-f82e). The safer path is to let systemd manage
+# the launcher via its unit file (the unit IS the cgroup boundary —
+# the executor that follows lives inside it; a unit teardown
+# propagates predictably). The systemd-aware branch is OPT-IN
+# (``ENSEMBLE_RESTART_UNIT`` env var) because:
+#   (a) unit discovery is HOST-MADE (the unit file at
+#       /etc/systemd/system/ensemble-live.service is hand-provisioned
+#       on ensemble-vm by devops, out-of-repo — see
+#       incident doc §2.2 / r-f82e §1.7 #4). A probe here would have
+#       to guess unit names that the operator chose;
+#   (b) switching the default would break operator hand-runs where
+#       the unit doesn't exist (drill / sandbox hosts);
+#   (c) the nohup path is the SAME PATH THE PIPELINE USED BEFORE
+#       r-f82e — preserving it as the default is a deliberate
+#       backstop for hosts that don't run the daemon under systemd.
+#
+# DELIBERATELY DEFERRED (r-f82e follow-up commission candidate):
+# auto-discovery of the right unit name. Not implemented here —
+# operator-set opt-in only. The full unit-ownership lifecycle
+# (which unit, where it's provisioned, how stage.sh promotes the
+# unit file) belongs to a separate commission per incident doc
+# §1.7 #4 + the deploy-ownership-fix ticket family.
+#
+# Returns 0 always (the launch is fire-and-forget; the caller's
+# gate_* helpers observe the result via /livez + /readyz).
 restart_via_launcher() {
     mkdir -p "$INSTALL_DIR/data"
+    local log="$INSTALL_DIR/data/launcher.log"
+    # Linux+systemd + operator-opted-in → systemctl start the named unit.
+    # The unit, if present, runs the launcher as the service user; the
+    # unit's cgroup is the survivorship boundary for the executor that
+    # follows. Byte-identical macOS / no-systemd / no-opt-in fallback to
+    # nohup.
+    if [ "$(uname -s)" = "Linux" ] \
+       && [ -d "/run/systemd/system" ] \
+       && [ -n "${ENSEMBLE_RESTART_UNIT:-}" ]; then
+        if systemctl start "$ENSEMBLE_RESTART_UNIT" 2>/dev/null; then
+            _log "launcher started via systemd unit $ENSEMBLE_RESTART_UNIT (comp7: cgroup-bound; immune to setsid inheritance) — logs: $log"
+            return 0
+        fi
+        _warn "systemctl start $ENSEMBLE_RESTART_UNIT failed — falling back to nohup launcher (comp7 opt-in path)"
+    fi
     ( cd "$INSTALL_DIR" && nohup ./launcher.sh >> data/launcher.log 2>&1 & )
     _log "launcher started (nohup) — logs: $INSTALL_DIR/data/launcher.log"
 }
@@ -1353,10 +1728,16 @@ promote_entry_check() {
 #   kind=restart → NEVER adopted (D-FA4.3: the daemon boot sweep owns
 #       restart txns; the launcher sweep skips them too) — refuse, leave
 #       untouched;
+#   comp3 FAST PATH (heartbeat-stale + owner-dead, age ≤ SWEEP_STALE_S):
+#       reclaim NOW (skip the 600s wait). Closes the r-f82e gap where
+#       the executor died 2s in (no heartbeat) AND the owner pid was
+#       gone, but the launcher sweep wouldn't reclaim for 600s.
+#       Heartbeat fresh OR owner alive → fall through to the age gate
+#       below (do NOT short-circuit; the liveness fast path is
+#       ADDITIVE to the primary age gate, not a replacement);
 #   fresh (age ≤ SWEEP_STALE_S) → leave alone + refuse (pipeline-busy).
-#       DEAD OWNER MAKES NO DIFFERENCE: the sweep leaves any fresh txn
-#       alone regardless of owner liveness (the 600s gate is the primary
-#       race guard, R1.3) — adoption does too;
+#       Only reached when the fast path didn't fire (heartbeat fresh
+#       OR owner alive — the conservative reading);
 #   stale + flipped:true → the SAME recovery the sweep would perform:
 #       manifest gate on previous FIRST (null / QUARANTINED (M4) / release
 #       dir missing / not rollback_safe → halt event, NO repoint, txn LEFT
@@ -1372,13 +1753,22 @@ promote_entry_check() {
 #       warn-only (over-count is the safe drift direction);
 #   stale + flipped:false → clear (history event 'sweep'). Close failure
 #       → txn LEFT OPEN + loud warn + exit 78 (W3 — same contract).
+#
+# comp3 (r-f82e): both the liveness fast path (HEARTBEAT_STALE_S ×
+# owner dead → reclaim early, before SWEEP_STALE_S) and the
+# launcher.sh _journal_sweep mirror this decision. The launcher
+# mirror is at BOOT (no concurrent activity to race against) and is
+# the safer place; the adopt path also gets it because a manual recovery
+# push (run-this-pipeline-now) shouldn't wait 600s for a heartbeat
+# gap that's already been confirmed by liveness.
+#
 # Runs UNDER the caller's lock (promote acquires before calling). After a
 # sweep-rollback adoption the enclosing promote continues into its ENTRY
 # checks, which then apply the freshly armed cooldown/cap — PER DESIGN
 # (D-FA4.2/ADR-024: the NEXT entry is refused inside the 10-min window;
 # rollback.sh manual recovery never refuses on cooldown/cap).
 adopt_stale_txn() {
-    local json inf kind target started flipped owner epoch age
+    local json inf kind target started flipped owner epoch age now hb_stale owner_dead
     json="$(journal_read)" || return 0
     inf="$(_json_sub "$json" in_flight)"
     [ -z "$inf" ] && return 0
@@ -1388,6 +1778,10 @@ adopt_stale_txn() {
     started="$(_json_field "$inf" started_at)"
     flipped="$(_json_field "$inf" flipped)"
     owner="$(_json_field "$inf" owner_pid)"
+    now="$(_now_epoch)"
+    # comp3: liveness state computed once, consulted below.
+    hb_stale="$(_txn_heartbeat_stale "$inf" "$now")"
+    owner_dead="$(_txn_owner_dead "$inf")"
     # D-FA4.3 / R-SR13: restart-kind pending-ops are NEVER adopted (the
     # launcher sweep skips them too) — restarts are self-completing and the
     # daemon boot sweep owns them (P2.2). Leave untouched; pipeline-busy.
@@ -1402,13 +1796,35 @@ adopt_stale_txn() {
         _warn "promote refused: in_flight $kind txn (target=$target) has unparseable started_at ('$started') — leaving untouched, pipeline-busy (the sweep fails closed on it too)"
         exit 78
     fi
-    age=$(( $(_now_epoch) - epoch ))
-    # fresh txn → leave alone + refuse, REGARDLESS of owner liveness (the
-    # sweep's freshness gate ignores liveness; a fresh txn with a dead
-    # owner is resolved by the sweep once it ages, or by the owner).
-    if [ "$age" -le "$SWEEP_STALE_S" ]; then
-        _warn "promote refused: in_flight $kind txn (target=$target, pid=${owner:-?}, age ${age}s ≤ ${SWEEP_STALE_S}s) is FRESH — left alone (owner may be alive; the sweep ages it) — pipeline-busy"
+    age=$(( now - epoch ))
+    # comp3 FAST PATH (heartbeat-stale + owner-dead → reclaim now).
+    # Runs BEFORE the freshness refuse: closes the r-f82e gap where
+    # the executor died ~2s in (no heartbeat ever written, owner gone)
+    # and the existing freshness gate would have held the txn for
+    # the full SWEEP_STALE_S=600s before the next launcher sweep
+    # could reclaim it. The fast path SKIPS the freshness refuse and
+    # goes straight to the standard stale-adopt body below — so the
+    # hold-or-reclaim decision is uniform across the age-gated and
+    # fast-paths (same manifest gate, same flip, same quarantine,
+    # same counter increment).
+    local _FAST_PATH=0
+    if [ "$hb_stale" = "1" ] && [ "$owner_dead" = "1" ]; then
+        _log "adopt_stale_txn: comp3 fast path triggered (hb_stale=1 owner_dead=1 age=${age}s) — reclaiming via the standard recovery (flipped=${flipped:-—})"
+        _FAST_PATH=1
+    fi
+    # fresh txn (no fast path fired) → refuse. The fast path above
+    # only fires when heartbeat is stale AND owner is dead; a fresh
+    # heartbeat OR a live owner with a fresh-age txn still hits this
+    # refuse (the conservative reading — never trample a possibly-
+    # about-to-write owner).
+    if [ "$_FAST_PATH" -eq 0 ] && [ "$age" -le "$SWEEP_STALE_S" ]; then
+        _warn "promote refused: in_flight $kind txn (target=$target, pid=${owner:-?}, age ${age}s ≤ ${SWEEP_STALE_S}s) is FRESH — left alone (heartbeat-fresh OR owner-alive; comp3 fast path consulted above) — pipeline-busy"
         exit 78
+    fi
+    # comp3 audit: log the liveness state at adoption so post-mortems
+    # can correlate (the launcher sweep logs the same fields).
+    if [ "$hb_stale" = "1" ] && [ "$owner_dead" = "1" ]; then
+        _log "adopt_stale_txn: comp3 audit — heartbeat-stale + owner-dead (hb_stale=$hb_stale, owner_dead=$owner_dead) reclaimed via the standard recovery"
     fi
     if [ "$flipped" = "true" ]; then
         # ── stale flipped → adopt via the sweep-rollback recovery ──────────
