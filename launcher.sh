@@ -77,6 +77,12 @@ SWEEP_LOCK_WAIT_S=0            # the launcher NEVER delays boot on a busy
                               # pipeline lock — if another action holds it
                               # with a fresh heartbeat, the sweep defers to
                               # the next start (availability-first).
+HEARTBEAT_STALE_S=300          # mirror of lib.sh HEARTBEAT_STALE_S (lib.sh:73)
+                              # — journal in_flight.last_heartbeat older than
+                              # this is stale. Used by _journal_sweep's
+                              # comp3 liveness fast path (mirror-discipline:
+                              # both sweep tables must agree, R-SR13 /
+                              # lib.sh:1757 commentary).
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 # To stderr only. Under launchd, StandardErrorPath captures it

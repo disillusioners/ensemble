@@ -305,6 +305,93 @@ assert_contains "3d live owner + fresh hb → refuse (exit 78)" "adopt_rc=78" "$
 rm -rf "$HB_FIXT" "$HB_FIXT2" "$DEAD_OWNER_FIXT" "$FRESH_FIXT" "$LIVE_OWNER_FIXT"
 
 # ===========================================================================
+section "comp3b — launcher.sh _journal_sweep heartbeat fast path (HEARTBEAT_STALE_S regression pin)"
+
+# Regression pin for the missing-HEARTBEAT_STALE_S bug: launcher.sh
+# references HEARTBEAT_STALE_S at :707 but only defined it in
+# scripts/upgrade/lib.sh (:73). launcher.sh is staged standalone (does
+# NOT source lib.sh — see lib.sh:55-60 / launcher.sh:55-60 protocol
+# commentary), so the integer comparison
+#   [ $(( now - hb )) -le "$HEARTBEAT_STALE_S" ]
+# evaluated with empty HEARTBEAT_STALE_S, returned false (bash
+# "[: : integer expression expected"), hb_stale defaulted to 1 always,
+# and the comp3 owner-liveness fast path in _journal_sweep fired
+# whenever the owner was dead regardless of heartbeat freshness. The
+# three cases below pin the FIX at the launcher side (mirror of the
+# comp3 lib.sh side; both sweep tables must agree, R-SR13).
+#
+# Cases (age=100s ≤ SWEEP_STALE_S=600, so the freshness gate does NOT
+# short-circuit — the comp3 fast path is the only reclaim trigger):
+#   3b-i  fresh-hb (now) + dead-owner → HELD (hb_stale=0 holds)
+#   3b-ii stale-hb (NOW-1000) + dead-owner → RECLAIM (fast path fires)
+#   3b-iii fresh-hb (now) + live-owner (this $$) → HELD
+
+# Helper: source launcher.sh, run _journal_sweep on $1, capture all
+# output (stderr where _log writes + stdout).
+_js_run_sweep() {
+    local fix="$1"
+    bash -c "
+        INSTALL_DIR='$fix'
+        . '$LAUNCHER' >/dev/null 2>&1
+        _journal_sweep 2>&1
+    "
+}
+
+# 3b-i. fresh-hb + dead-owner → HELD
+JS_HELD_FIXT="$(mktemp -d -t comp3b-held.XXXXXX)"
+make_fixture "$JS_HELD_FIXT" vNEW vOLD
+mkdir -p "$JS_HELD_FIXT/releases"
+NOW="$(date +%s)"   # captured once; hb=now → 0s old → fresh
+cat > "$JS_HELD_FIXT/releases/state.json" <<JOURNAL
+{"current":"vOLD","previous":"vOLD","in_flight":{"kind":"promote","target":"vNEW","started_at":"$(iso_off -100)","flipped":false,"owner_pid":999999,"last_heartbeat":$NOW},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JOURNAL
+JS_HELD_LOG="$(_js_run_sweep "$JS_HELD_FIXT")"
+JS_HELD_JOURNAL="$(cat "$JS_HELD_FIXT/releases/state.json")"
+assert_contains "3b-i fresh-hb + dead-owner → 'leaving alone' (hb_stale=0 holds)" "leaving alone" "$JS_HELD_LOG"
+assert_not_contains "3b-i fresh-hb + dead-owner → no fast-path fired" "comp3 fast path triggered" "$JS_HELD_LOG"
+case "$JS_HELD_JOURNAL" in
+    *'"in_flight":{"kind":"promote"'*) _pass "3b-i in_flight preserved (txn held)" ;;
+    *) _fail "3b-i in_flight preserved" "object" "$(printf '%s' "$JS_HELD_JOURNAL" | head -c 200)" ;;
+esac
+
+# 3b-ii. stale-hb + dead-owner → RECLAIM
+JS_STALE_FIXT="$(mktemp -d -t comp3b-stale.XXXXXX)"
+make_fixture "$JS_STALE_FIXT" vNEW vOLD
+mkdir -p "$JS_STALE_FIXT/releases"
+NOW="$(date +%s)"
+JS_STALE_HB=$((NOW - 1000))   # 1000s old > HEARTBEAT_STALE_S=300
+cat > "$JS_STALE_FIXT/releases/state.json" <<JOURNAL
+{"current":"vOLD","previous":"vOLD","in_flight":{"kind":"promote","target":"vNEW","started_at":"$(iso_off -100)","flipped":false,"owner_pid":999998,"last_heartbeat":$JS_STALE_HB},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JOURNAL
+JS_STALE_LOG="$(_js_run_sweep "$JS_STALE_FIXT")"
+JS_STALE_JOURNAL="$(cat "$JS_STALE_FIXT/releases/state.json")"
+assert_contains "3b-ii stale-hb + dead-owner → comp3 fast path fired" "comp3 fast path triggered" "$JS_STALE_LOG"
+case "$JS_STALE_JOURNAL" in
+    *'"in_flight": null'*|'"in_flight":null'*) _pass "3b-ii in_flight cleared (txn reclaimed)" ;;
+    *) _fail "3b-ii in_flight cleared" "null" "$(printf '%s' "$JS_STALE_JOURNAL" | head -c 200)" ;;
+esac
+
+# 3b-iii. fresh-hb + live-owner → HELD
+JS_LIVE_FIXT="$(mktemp -d -t comp3b-live.XXXXXX)"
+make_fixture "$JS_LIVE_FIXT" vNEW vOLD
+mkdir -p "$JS_LIVE_FIXT/releases"
+NOW="$(date +%s)"
+JS_LIVE_OWNER=$$               # parent test pid is alive throughout
+cat > "$JS_LIVE_FIXT/releases/state.json" <<JOURNAL
+{"current":"vOLD","previous":"vOLD","in_flight":{"kind":"promote","target":"vNEW","started_at":"$(iso_off -100)","flipped":false,"owner_pid":$JS_LIVE_OWNER,"last_heartbeat":$NOW},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JOURNAL
+JS_LIVE_LOG="$(_js_run_sweep "$JS_LIVE_FIXT")"
+JS_LIVE_JOURNAL="$(cat "$JS_LIVE_FIXT/releases/state.json")"
+assert_contains "3b-iii fresh-hb + live-owner → 'leaving alone' (owner alive holds)" "leaving alone" "$JS_LIVE_LOG"
+assert_not_contains "3b-iii fresh-hb + live-owner → no fast-path fired" "comp3 fast path triggered" "$JS_LIVE_LOG"
+case "$JS_LIVE_JOURNAL" in
+    *'"in_flight":{"kind":"promote"'*) _pass "3b-iii in_flight preserved (txn held)" ;;
+    *) _fail "3b-iii in_flight preserved" "object" "$(printf '%s' "$JS_LIVE_JOURNAL" | head -c 200)" ;;
+esac
+
+rm -rf "$JS_HELD_FIXT" "$JS_STALE_FIXT" "$JS_LIVE_FIXT"
+
+# ===========================================================================
 section "comp4 — ISO parser GNU branch (mirrors atomic_flip test shape)"
 
 # 4a. GNU branch: round-trip an ISO timestamp on this Linux host.

@@ -1148,7 +1148,7 @@ def _scope_detect_real() -> tuple[bool, str]:
     detection step fails (no /run/systemd/system, no systemd-run on
     PATH, uname != Linux, etc.) so a misconfigured host falls back
     to the legacy ``start_new_session=True`` path byte-identically.
-    # """
+    """
     try:
         if sys.platform != "linux":
             return (False, "")
