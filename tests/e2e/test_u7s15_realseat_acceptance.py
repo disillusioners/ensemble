@@ -728,19 +728,33 @@ def test_leg_a_natural_notify_delivers_job_event_to_seat():
         import re as _re
 
         # Get the mission_id for the watcher's wait-for-task helper.
-        job_record = _get_job(job_id)
-        mission_id = str(job_record.get("instance_id") or "")
-        if not mission_id:
+        # The dispatch is async relative to the synchronous
+        # ``job_create`` response — wait briefly for the instance_id
+        # to land on the JobItem row.
+        worker_instance_id: str | None = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                job_record = _get_job(job_id)
+                worker_instance_id = str(
+                    job_record.get("instance_id") or ""
+                ) or None
+                if worker_instance_id:
+                    break
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(0.3)
+        if not worker_instance_id:
             pytest.fail(
                 f"[LEG-A] job {job_id[:8]}... has no instance_id "
-                f"after job_create — the dispatch never happened; "
-                f"the test cannot proceed"
+                f"after job_create within 15s — the dispatch never "
+                f"happened; the test cannot proceed"
             )
         task_count = _wait_for_task_rows(
-            mission_id, min_rows=1, timeout=15
+            worker_instance_id, min_rows=1, timeout=15
         )
         logger.info(
-            f"[LEG-A] task rows visible for mission {mission_id[:8]}...: "
+            f"[LEG-A] task rows visible for mission {worker_instance_id[:8]}...: "
             f"{task_count}"
         )
         if task_count < 1:
@@ -848,34 +862,30 @@ def test_leg_a_natural_notify_delivers_job_event_to_seat():
             f"within 120s; last_status={terminal_status}"
         )
 
-        # 6. Artificially age the worker instance's last_activity_at
-        # so the mission-live guard's zombie backstop fires. The
-        # production contract is "min(in-session event, 300s
-        # sweep)" — the backstop is the 6h+ quiet-tree arm. Without
-        # this artificial aging, the backstop would not fire within
-        # the test's bounded runtime (6h is impractical for smoke).
-        # The natural notify path correctly HOLDS the row when the
-        # activity is recent — this is the documented U7 behavior,
-        # NOT a defect.
-        if worker_instance_id:
-            aged = _age_worker_instance_last_activity(
-                worker_instance_id, age_seconds=7 * 3600
-            )
-            logger.info(
-                f"[LEG-A] aged worker {worker_instance_id[:8]}... "
-                f"last_activity_at by 7h: {aged}"
-            )
+        # 6. U7 fixback (FIXBACK, 2026-09-28): all-terminal tree
+        # → ``live=False`` IMMEDIATELY. No artificial aging needed
+        # — the natural notify path fires within ~1s of the job
+        # becoming terminal. The pre-fixback behavior was to
+        # hold the row up to 6h, requiring aging for any test to
+        # see [JOB_EVENT] in bounded time; the C1 fix restored
+        # the frozen terminal contract.
+        #
+        # The sweep timing is fixed at sweep_interval_s + 30s margin
+        # so we wait through at least one sweep tick (the backstop
+        # carrier takes the sweep path when hook (a)/(b) miss in
+        # session). For Leg A the natural path typically carries
+        # within ~1s; the sweep window is the upper bound.
 
-        # 7. Wait for the next sweep tick (interval is 10s in smoke).
-        # The backstop fires the orphan-released row with the
-        # ``ORPHAN_RELEASED work_id=X work_status=Y`` WARNING token
-        # at job_queue_service.py:~935 (DIAGNOSTIC — visible in
-        # the daemon log).
+        # 7. Wait for [JOB_EVENT] delivery on the watcher seat.
         sweep_interval_s = int(
             os.environ.get(
                 "SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS", "300"
             )
         )
+        # Bounded wait — natural path typically carries within ~1s
+        # of the terminal flip (FIXBACK C1), but we tolerate the
+        # full sweep interval + margin for the rare case where
+        # the sweep path carries (hook (a)/(b) miss in session).
         wait_bound = sweep_interval_s + 30
         logger.info(
             f"[LEG-A] waiting up to {wait_bound}s for sweep tick "
@@ -1026,6 +1036,35 @@ def test_leg_b_lifecycle_no_job_carrier_fires_via_hook_b():
         )
         logger.info(f"[LEG-B] created job_id={job_id}")
 
+        # Wait for the Task row to be visible (dispatch race).
+        # ``job_create`` returns synchronously, but the Task row
+        # mint happens during dispatch (async relative to the
+        # response). Without this wait, ``watch_mission`` errors
+        # with "Mission X has no receipts" — the documented
+        # behavior, NOT a defect.
+        job_record = _get_job(job_id)
+        worker_instance_id: str | None = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                job_record = _get_job(job_id)
+                worker_instance_id = str(
+                    job_record.get("instance_id") or ""
+                ) or None
+                if worker_instance_id:
+                    break
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(0.3)
+        if worker_instance_id:
+            task_count = _wait_for_task_rows(
+                worker_instance_id, min_rows=1, timeout=15
+            )
+            logger.info(
+                f"[LEG-B] task rows visible for worker "
+                f"{worker_instance_id[:8]}...: {task_count}"
+            )
+
         # 4. Sidecar-arm the parent against the work_id (use
         # default events=["mission_terminal"] so the held row
         # waits on mission-terminal, which exercises the
@@ -1169,8 +1208,24 @@ def test_leg_c_sweep_once_backstop_fires_held_row():
         )
 
         # Wait for the Task row to be visible (dispatch race).
-        job_record = _get_job(job_id)
-        worker_instance_id = str(job_record.get("instance_id") or "")
+        # ``job_create`` returns synchronously, but the Task row
+        # mint happens during dispatch (async relative to the
+        # response). Without this wait, ``watch_mission`` errors
+        # with "Mission X has no receipts" — the documented
+        # behavior, NOT a defect.
+        worker_instance_id: str | None = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                job_record = _get_job(job_id)
+                worker_instance_id = str(
+                    job_record.get("instance_id") or ""
+                ) or None
+                if worker_instance_id:
+                    break
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(0.3)
         if worker_instance_id:
             task_count = _wait_for_task_rows(
                 worker_instance_id, min_rows=1, timeout=15
