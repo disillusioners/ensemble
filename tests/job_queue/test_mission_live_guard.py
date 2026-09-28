@@ -96,18 +96,35 @@ def _insert_instance(
     project_id: str = "test-project",
     parent_id: str | None = None,
     created_at: datetime | None = None,
+    last_activity_at: datetime | None = None,
 ) -> None:
+    """Insert an ``instances`` row.
+
+    Args:
+        last_activity_at: Override the U7 backstop anchor value for
+            the row. ``None`` (default) leaves the column NULL, which
+            the guard treats as "no activity signal yet". For zombie
+            tests set this to an old naive-UTC datetime; for live-tree
+            tests set it to ``now_utc_naive()`` (or any recent value).
+    """
     now = (created_at or datetime.now(timezone.utc)).isoformat()
+    activity_iso = (
+        last_activity_at.isoformat()
+        if last_activity_at is not None
+        else None
+    )
     with engine.begin() as conn:
         conn.execute(
             text(
                 """
                 INSERT INTO instances
                     (instance_id, agent_id, agent_dir, status, project_id,
-                     created_at, updated_at, version, parent_id)
+                     created_at, updated_at, last_activity_at, version,
+                     parent_id)
                 VALUES
                     (:instance_id, :agent_id, :agent_dir, :status,
-                     :project_id, :created_at, :updated_at, 1, :parent_id)
+                     :project_id, :created_at, :updated_at,
+                     :last_activity_at, 1, :parent_id)
                 """
             ),
             {
@@ -118,6 +135,7 @@ def _insert_instance(
                 "project_id": project_id,
                 "created_at": now,
                 "updated_at": now,
+                "last_activity_at": activity_iso,
                 "parent_id": parent_id,
             },
         )
@@ -414,9 +432,21 @@ class TestMissionLiveGuardUnit:
 
     @pytest.mark.asyncio
     async def test_timeout_overrides_live_legs(self, engine):
-        """(v) guard still seeing live + anchor older than the window
-        → finalize door opens (starvation impossible)."""
-        _insert_instance(engine, "root-5", status="running")
+        """(v, U7) Live legs always win — the backstop fires ONLY when
+        the tree is genuinely quiet (every member terminal AND the
+        freshest ``last_activity_at`` older than the window). Under the
+        pre-U7 anchor (``task_completed_at``) the backstop would
+        override live legs; under the new tree-anchor it cannot
+        (live descendant activity rolls the anchor forward)."""
+        # Root IS running + last_activity recent → leg (c) holds the
+        # mission live; backstop must NOT fire, even if a stale per-work
+        # ``task_completed_at`` was passed (the wave-3 shape).
+        _insert_instance(
+            engine,
+            "root-5",
+            status="running",
+            last_activity_at=now_utc_naive(),
+        )
         repo = SQLModelInstanceRepository(engine=engine)
         old_anchor = now_utc_naive() - timedelta(
             seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60
@@ -425,6 +455,33 @@ class TestMissionLiveGuardUnit:
             instance_repository=repo,
             instance_id="root-5",
             task_completed_at=old_anchor,
+        )
+        assert verdict.live, (
+            "U7: live legs always win — root instance is "
+            "non-terminal so the backstop must NOT fire on a stale "
+            "task_completed_at anchor (wave-3 misfire shape)"
+        )
+        assert not verdict.timed_out
+
+    @pytest.mark.asyncio
+    async def test_backstop_fires_when_tree_actually_quiet(self, engine):
+        """U7 — symmetric counterpart: when the tree is genuinely
+        quiet (every member terminal) AND the freshest
+        ``last_activity_at`` is older than the window, the backstop
+        fires (starvation impossible)."""
+        _insert_instance(
+            engine,
+            "root-quiet",
+            status="completed",
+            last_activity_at=now_utc_naive() - timedelta(
+                seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60
+            ),
+        )
+        repo = SQLModelInstanceRepository(engine=engine)
+        verdict = await _mlg.evaluate_mission_live(
+            instance_repository=repo,
+            instance_id="root-quiet",
+            task_completed_at=None,
         )
         assert not verdict.live
         assert verdict.timed_out and not verdict.error
@@ -912,14 +969,19 @@ class TestPatternF2MissionLiveGuard:
         ], "revive→terminal must finalize (backstop preserved)"
 
     @pytest.mark.asyncio
-    async def test_orphan_timeout_fires_while_guard_sees_live(
+    async def test_orphan_timeout_fires_when_tree_actually_quiet(
         self, engine, repository, task_repository, lock_repo,
         instance_repo,
     ):
-        """(v) Guard still seeing live (root running) but the backing
-        task's ``completed_at`` is older than the zombie window → the
-        finalize fires through the REAL notify path (starvation
-        impossible)."""
+        """(v, U7) The backstop fires only when the tree is genuinely
+        quiet — every member terminal AND the freshest
+        ``last_activity_at`` older than the window. The drift Pattern
+        f2 site must therefore propagate the row all the way through
+        the REAL notify path on that exact tree-shape.
+
+        The pre-U7 anchor-based test was inverted: a running root +
+        stale ``task_completed_at`` would fire the backstop under
+        the old design but HOLDS under U7 (live leg wins)."""
         from unittest.mock import patch
 
         watcher_repo = JobWatcherRepository(engine)
@@ -927,16 +989,22 @@ class TestPatternF2MissionLiveGuard:
             engine, repository, task_repository, instance_repo,
         )
 
-        _insert_instance(engine, "leader-5", status="running")
+        # U7-shaped tree: leader settled + every descendant settled +
+        # last_activity_at older than the zombie window → backstop
+        # fires and the drift site proceeds with finalize.
+        old_activity = now_utc_naive() - timedelta(
+            seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 300
+        )
+        _insert_instance(
+            engine, "leader-5", status="completed",
+            last_activity_at=old_activity,
+        )
         _insert_job_item(engine, job_id="job-mlg-5", instance_id="leader-5")
         _insert_completed_task(
             engine,
             work_id="job-mlg-5",
             instance_id="leader-5",
-            completed_at=now_utc_naive()
-            - timedelta(
-                seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 300
-            ),
+            completed_at=old_activity,
         )
         _add_watch(watcher_repo, "job-mlg-5")
 
@@ -959,8 +1027,10 @@ class TestPatternF2MissionLiveGuard:
             and d.get("job_id") == "job-mlg-5"
         ]
         assert done, (
-            f"zombie backstop must open the finalize door past the "
-            f"timeout: {stats['details']}"
+            f"U7 zombie backstop must open the finalize door when "
+            f"the tree is genuinely quiet (every member terminal + "
+            f"freshest last_activity_at older than the window): "
+            f"{stats['details']}"
         )
         assert repository.get("job-mlg-5").admission_state == (
             AdmissionState.DONE.value
