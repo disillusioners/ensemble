@@ -1168,6 +1168,18 @@ def test_leg_c_sweep_once_backstop_fires_held_row():
             f"job={job_id[:8]}"
         )
 
+        # Wait for the Task row to be visible (dispatch race).
+        job_record = _get_job(job_id)
+        worker_instance_id = str(job_record.get("instance_id") or "")
+        if worker_instance_id:
+            task_count = _wait_for_task_rows(
+                worker_instance_id, min_rows=1, timeout=15
+            )
+            logger.info(
+                f"[LEG-C] task rows visible for worker "
+                f"{worker_instance_id[:8]}...: {task_count}"
+            )
+
         arm_result = _arm_seat_via_watch_mission(
             target=job_id,
             watcher_instance_id=parent_id,
