@@ -566,11 +566,22 @@ class JobQueueService:
         Returns ``True`` when the mission is still live (caller must
         SKIP the terminal notify so the watcher row survives). Any
         internal error resolves to ``False`` (fail-open — proceed with
-        notify; at-least-once terminal delivery takes precedence), and
-        the zombie backstop (``completed_at`` older than
-        ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``) also resolves to
-        ``False`` so a stuck mission cannot strand its watchers
-        forever.
+        notify; at-least-once terminal delivery takes precedence).
+
+        FIXBACK (2026-09-28, fixback cycle 1): the docstring on this
+        helper drifted from the guard's actual behavior under the new
+        U7 anchor. The guard's anchor is now the FRESHEST tree signal
+        (``max(root.last_activity_at, max(d.last_activity_at) for d in
+        descendants)``) — NOT the per-work ``completed_at`` — and the
+        backstop fires IFF a non-terminal member is present AND the
+        freshest tree activity is older than
+        ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (true zombie-break; the
+        only legitimate use). All-terminal trees finalize immediately
+        via the natural path; the anchor plays no role there. The
+        ``completed_at_anchor`` parameter survives on the signature
+        for backward-call-site compatibility but is no longer
+        consulted (U7) — it is IGNORED by the guard, not "resolves
+        to False" as the pre-fixback docstring claimed.
 
         Leg (a) uses the bus's target-side pending count (children
         reports still expected by the mission instance); a missing bus
@@ -917,24 +928,27 @@ class JobQueueService:
                 # Pass ``instance_id`` filter only when set — the
                 # per-instance hook variant is scoped; the global
                 # sweep variant fires for everything in scope.
-                # U7 + S15 (2026-09-28, fix/u7-orphan-anchor-s15):
+                # U7 + S15 (FIXBACK, 2026-09-28,
+                # fix/u7-orphan-anchor-s15, fixback cycle 1):
                 # ORPHAN-RELEASED detection + fresh-payload re-fetch.
-                # The helper now consults the canonical mission-live
-                # guard BEFORE calling ``notify_watchers`` to detect
-                # the wave-3 misfire class: a tree where every member
-                # is terminal AND the freshest ``last_activity_at``
-                # is older than ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``
-                # (the new backstop firing condition). When that
-                # verdict fires (``timed_out=True``), the notify path
-                # is going to drain a row the natural arm already
-                # held for ≥6h — emit ``ORPHAN_RELEASED`` as the
-                # distinct emission token (operator grep) BEFORE the
-                # fire so operators can discriminate backstop-forced
-                # releases from natural-terminal fires. The token is
-                # the row's audit-trail identification; downstream
-                # watchers receive the canonical completion envelope
-                # unchanged (backwards-compat with the natural-path
-                # parsing contracts).
+                #
+                # FIXBACK: the backstop now fires ONLY on the true
+                # zombie shape — non-terminal tree member present AND
+                # every observed ``last_activity_at`` in the row's tree
+                # older than ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``.
+                # All-terminal trees finalize immediately via the
+                # natural path (the anchor plays no role there — see
+                # ``_evaluate_legs`` decision tree). When the verdict
+                # carries ``timed_out=True``, the notify path is going
+                # to drain a row the natural arm already held for ≥6h
+                # — emit ``ORPHAN_RELEASED`` as the distinct emission
+                # token (operator grep) BEFORE the fire so operators
+                # can discriminate backstop-forced releases from
+                # natural-terminal fires. The token is the row's
+                # audit-trail identification; downstream watchers
+                # receive the canonical completion envelope unchanged
+                # (backwards-compat with the natural-path parsing
+                # contracts).
                 # Fresh-payload re-fetch: the work_record ``status`` +
                 # ``result_summary`` are re-fetched at this tick (the
                 # call to ``work_resolver.resolve_work`` above already
@@ -969,18 +983,21 @@ class JobQueueService:
                         orphan_released += 1
                         logger.warning(
                             "ORPHAN_RELEASED work_id=%s "
-                            "work_status=%s held_since_swEEP_TICK=%d — "
-                            "backstop fired on freshest tree "
-                            "last_activity_at older than %ds (every "
-                            "tree member terminal AND quiet for the "
-                            "full window); the natural arm was held "
-                            "during the entire window; the deliver "
-                            "below carries the FRESHLY-fetched "
-                            "work_record content (resolver-fallback); "
-                            "this row was the U7 wave-3 fix's "
-                            "structural target",
+                            "work_status=%s window_s=%d — "
+                            "backstop fires: non-terminal tree "
+                            "member present AND freshest tree "
+                            "last_activity_at older than %ds "
+                            "threshold (true zombie shape — every "
+                            "observed activity in the row's tree is "
+                            "older than the window); the natural "
+                            "arm was held during the entire window; "
+                            "the deliver below carries the FRESHLY-"
+                            "fetched work_record content "
+                            "(resolver-fallback); this row is the "
+                            "U7 wave-3 fix's structural target",
                             work_id[:8],
                             work_status,
+                            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
                             MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
                         )
                 except Exception as _orphan_detect_err:

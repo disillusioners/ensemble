@@ -37,7 +37,7 @@ Seats tested (one per leg):
   * Leg C — ``WatchReconcileSweepService.sweep_once()`` public seam
   * Leg D — negative control (IDLE mission → no fire)
   * Leg E — real 300s sweep tick (smoke uses a shorter interval via
-            ``ENSEMBLE_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS`` env knob;
+            ``SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS`` env knob;
             full 300s leg is the tester's call)
 
 The "armed via REAL watch_mission tool path" is satisfied by a sidecar
@@ -59,7 +59,7 @@ Run with::
     ./dev_with_mock.sh &     # port 8079 + mock LLM on 4124
 
     # OR for an isolated test run on a different port:
-    ENSEMBLE_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS=10 \
+    SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS=10 \
     E2E_BASE_URL=http://localhost:19797 \
     E2E_PG_DB=ensemble_dev_scratch \
         pytest tests/e2e/test_u7s15_realseat_acceptance.py -v -s -m integration
@@ -1130,7 +1130,7 @@ def test_leg_c_sweep_once_backstop_fires_held_row():
     (a) nor hook (b) fires in-session (the natural-path windows
     miss), the periodic sweep is the load-bearing delivery path.
     The default interval is 300s; we use a short interval via the
-    ``ENSEMBLE_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS`` env knob
+    ``SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS`` env knob
     (set by the smoke wrapper to 10s) so the test completes in
     bounded time.
 
@@ -1363,7 +1363,7 @@ def test_leg_e_sweep_backstop_at_real_tick():
 
     The 300s default sweep interval makes a real-tick leg expensive
     to run (≥300s of waiting per leg). The smoke wrapper sets
-    ``ENSEMBLE_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS`` to a shorter
+    ``SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS`` to a shorter
     value (10s in smoke, 60s in the full suite) so the leg completes
     in bounded time. The assertion is on the SEAT's [JOB_EVENT]
     delivery — the CARRIER identification (sweep vs hook) is
@@ -1434,12 +1434,12 @@ def test_leg_e_sweep_backstop_at_real_tick():
         )
 
         # Read the configured interval (the smoke wrapper sets
-        # ENSEMBLE_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS=10 for
+        # SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS=10 for
         # bounded runtime; the full suite runs with the production
-        # 300s default).
+        # 300s default — same env var as Leg A).
         sweep_interval_s = int(
             os.environ.get(
-                "ENSEMBLE_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS", "300"
+                "SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS", "300"
             )
         )
         # Bound the wait to the sweep interval + 30s margin.
@@ -1498,5 +1498,5 @@ def test_leg_e_sweep_backstop_at_real_tick():
 logger.info(
     f"[BOOT-CONTEXT] E2E_BASE_URL={BASE_URL} E2E_PG_DB={E2E_PG_DB} "
     f"E2E_PG_HOST={E2E_PG_HOST}:{E2E_PG_PORT} "
-    f"sweep_interval_s={os.environ.get('ENSEMBLE_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS', '300 (default)')}"
+    f"sweep_interval_s={os.environ.get('SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS', '300 (default)')}"
 )

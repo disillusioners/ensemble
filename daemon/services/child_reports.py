@@ -4442,14 +4442,17 @@ Provide a concise summary:"""
             # turn-end has no carrier until the 300s periodic
             # sweep picks it up (the very gap the U1 cycle-4
             # fixback was meant to close for in-session delivery).
-            # The lifecycle-COMPLETED event here fires on EVERY
-            # per-turn flip (including no_job; regardless of the
-            # presence of any Task / JobItem / held watcher), so
-            # it is the natural no_job carrier. The hook uses the
-            # GLOBAL scan (``instance_id=None``) — same axis
-            # hook (a) uses per the U1 cycle-4 fixback — so a
-            # held watcher whose parent is EXTERNAL to the
-            # completing instance's tree still gets visited.
+            # The lifecycle-COMPLETED event here fires on the
+            # terminal-only root_completed fan-out (NOT on every
+            # per-turn flip — it is the root-side COMPLETED outbox,
+            # distinct from the per-turn ``_update_turn`` reactor
+            # which may carry idempotent wake/sleep pings), so it is
+            # the natural no_job carrier for the root-terminal
+            # shape. The hook uses the GLOBAL scan
+            # (``instance_id=None``) — same axis hook (a) uses per
+            # the U1 cycle-4 fixback — so a held watcher whose
+            # parent is EXTERNAL to the completing instance's tree
+            # still gets visited.
             # Idempotent: a held row the helper has already
             # claimed returns CAS rowcount == 0 on the second
             # call, so back-to-back hook (a/b) firing from any

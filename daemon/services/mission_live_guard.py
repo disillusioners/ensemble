@@ -281,13 +281,32 @@ async def _evaluate_legs(
     ``asyncio.to_thread`` per the repo's standard pattern). Raises on
     wiring gaps — the wrapper fail-opens.
 
-    U7 (2026-09-28) — the tree walk now ALSO collects the freshest
-    ``last_activity_at`` across root + descendants (the new backstop
-    anchor). The collection piggybacks on the existing per-row read in
-    the legs (b)/(c) loop — no extra DB round-trip — and the MAX
-    is reduced in-memory after the walk. ``parse_completed_at_naive``
-    is reused so the anchor obeys the same naive-UTC binding as the
-    pre-U7 ``task_completed_at`` path did.
+    U7 fixback (FIXBACK, 2026-09-28): the council verdict crystallized
+    the anchor's role to a single legitimate use — the ZOMBIE-BACKSTOP
+    path. The decision tree after the walk:
+
+    * **ALL-TERMINAL tree** (root + every descendant terminal) →
+      ``live=False`` IMMEDIATELY. The tree-activity anchor plays NO
+      role here. This is the wave-3 overshoot's exact failure mode
+      (the pre-fixback fall-through returned ``live=True`` for
+      all-terminal + fresh anchor, poisoning the natural notify path
+      and demanding 6h backstop hold for every ordinary terminal).
+    * **Non-terminal member present** + tree-activity anchor stale ≥6h
+      → ``live=False, timed_out=True`` (zombie-break). The anchor's
+      ONLY legitimate role. A tree that LOOKS live (children still
+      nominally non-terminal) but has gone quiet for ≥6h is
+      backstop-fired so the at-least-once guarantee holds.
+    * **Non-terminal member present** + tree-activity anchor fresh
+      → ``live=True`` (defer; the mission is plausibly alive).
+    * **Non-terminal member present** + no anchor on any member
+      → ``live=True`` (pre-U7 data-gap disarm preserved — missing
+      anchor is not zombie evidence).
+
+    The single-walk optimization is preserved (per pre-fixback
+    review): ``freshest_activity`` is the in-memory MAX over
+    ``last_activity_at`` seen during the loop; no extra DB
+    round-trip. The pre-U7 missing-anchor disarm rule now lives at
+    the non-terminal branch only.
     """
     # ── Leg (a): bus pending watchers ─────────────────────────────
     if bus_pending_count is not None and bus_pending_count > 0:
@@ -305,19 +324,17 @@ async def _evaluate_legs(
             "unwired — cannot evaluate tree liveness"
         )
 
-    # ── Legs (b) + (c) + U7 anchor ───────────────────────────────
-    # One walk returns [root, *descendants] over ``instances.parent_id``
-    # (the permanent record — same source of truth as the mission
-    # resolver / child_reports reference semantics; the
+    # ── Single walk: legs (b) + (c) + anchor collection ───────────
+    # The walk NEVER short-circuits on a non-terminal observation
+    # (the pre-fixback early-return was the overshoot's root cause
+    # when paired with the fall-through bug). Instead, the loop
+    # RECORDS non-terminal presence and CONTINUES collecting the
+    # anchor — the post-walk decision tree (above) is the only
+    # site that picks ``live``/``timed_out``. Reference semantics:
+    # ``instances.parent_id`` (the permanent record) — same source
+    # of truth as the mission resolver + child_reports walks. The
     # ``instance_hierarchy`` working set deletes rows on child
-    # completion and would silently miss live descendants). During
-    # the walk, the U7 zombie-backstop anchor is collected
-    # in-memory — ``freshest_activity`` is the MAX of every
-    # ``last_activity_at`` we see; NULL rows are skipped (the
-    # pre-U7 missing-anchor disarm rule applies to a tree with NO
-    # ``last_activity_at`` at all). The anchor is exposed in the
-    # post-walk verdict's ``reason`` so operators can see WHY the
-    # backstop did/did not fire on a given tick.
+    # completion and would silently miss live descendants.
     tree_ids = await asyncio.to_thread(
         instance_repository.get_tree_ids_permanent, instance_id
     )
@@ -331,8 +348,9 @@ async def _evaluate_legs(
             ),
         )
 
-    freshest_activity = None  # max ``last_activity_at`` seen during the walk
-    anchor_missing = True     # a single non-NULL value flips this to False
+    any_non_terminal = False        # FIXBACK: drives the all-terminal short-circuit
+    freshest_activity = None        # max ``last_activity_at`` seen during the walk
+    anchor_missing = True           # a single non-NULL value flips this to False
     for tree_id in tree_ids:
         instance = await asyncio.to_thread(
             instance_repository.get, tree_id
@@ -342,22 +360,14 @@ async def _evaluate_legs(
             # row cannot hold the mission open; skip it.
             continue
         status = getattr(instance, "status", None)
+        # FIXBACK: do NOT early-return on a non-terminal observation.
+        # Record it; the post-walk decision tree decides the verdict.
         if status is not None and status not in TERMINAL_INSTANCE_STATUSES:
-            leg = "c (root instance)" if tree_id == instance_id else (
-                f"b (descendant {tree_id[:8]}...)"
-            )
-            return MissionLiveVerdict(
-                live=True,
-                reason=(
-                    f"instance {tree_id[:8]}... status={status!r} is "
-                    f"non-terminal — {leg} reports the mission live"
-                ),
-            )
-        # Tree member is terminal but contribute its last_activity_at
-        # to the U7 anchor (a recently-settled descendant keeps the
-        # backstop from firing on the OLD settle moment of the work
-        # row itself — this is precisely the wave-3 fix: live
-        # descendant activity within the window keeps the row held).
+            any_non_terminal = True
+        # Terminal-or-not, contribute ``last_activity_at`` to the
+        # anchor (a live descendant's recent activity keeps the
+        # backstop from firing on a tree that is plausibly still
+        # alive — that is the legitimate zombie-break input).
         activity_str = getattr(instance, "last_activity_at", None)
         parsed_activity = parse_completed_at_naive(activity_str)
         if parsed_activity is not None:
@@ -365,25 +375,42 @@ async def _evaluate_legs(
             if freshest_activity is None or parsed_activity > freshest_activity:
                 freshest_activity = parsed_activity
 
-    # ── All legs quiet — evaluate the U7 zombie backstop ──────────
-    # The freshest tree signal is the new anchor. If no member has
-    # any ``last_activity_at`` yet (fresh tree, never-active), the
-    # backstop is disarmed (data gap, not evidence of a zombie) —
-    # the row is treated as terminal-dead and the caller finalizes.
-    # Otherwise the backstop fires IFF the freshest activity is older
-    # than ``timeout_seconds`` — a genuinely quiet tree.
-    if anchor_missing:
-        # Pre-U7 missing-anchor disarm contract preserved verbatim:
-        # the row's leg verdict is terminal-dead AND the backstop
-        # cannot fire; surface the disarm in the reason so operators
-        # can spot a data gap rather than a stranded fire.
+    # ── C1: ALL-TERMINAL tree → finalize immediately ──────────────
+    # FIXBACK: the anchor plays NO role here. Every tree member is
+    # terminal — the mission is closed, the held row may drain. This
+    # restores the pre-U7 frozen terminal contract that the
+    # predecessor's overshoot (fall-through ``live=True``) violated.
+    if not any_non_terminal:
         return MissionLiveVerdict(
             live=False,
             reason=(
-                f"no live leg: root + descendants terminal, bus quiet, "
-                f"no last_activity_at anchor on any tree member — "
-                f"backstop disarmed (finalize fires; data gap, not "
-                f"zombie)"
+                "no live leg: root + descendants terminal, bus quiet "
+                "— all-terminal tree finalizes immediately "
+                "(tree-activity anchor plays no role on all-terminal "
+                "trees; timed_out is reserved for the zombie-backstop "
+                "path on non-terminal members)"
+            ),
+        )
+
+    # ── Non-terminal members present: anchor check (zombie-break) ──
+    # The tree LOOKS live (at least one non-terminal member). The
+    # only remaining failure mode is a zombie: the tree is stuck in
+    # a non-terminal posture but the freshest tree activity is
+    # older than ``timeout_seconds``. The pre-U7 missing-anchor
+    # disarm is preserved here — a non-terminal tree with no anchor
+    # data is "data gap, not zombie evidence"; the leg verdict
+    # wins (``live=True``).
+    if anchor_missing:
+        # FIXBACK: pre-U7 missing-anchor disarm contract preserved
+        # verbatim, now scoped to the non-terminal branch (the
+        # all-terminal branch above covers the all-terminal case).
+        return MissionLiveVerdict(
+            live=True,
+            reason=(
+                "non-terminal member present (live leg holds) but no "
+                "last_activity_at anchor on any tree member — "
+                "backstop disarmed (data gap, not zombie evidence); "
+                "the leg verdict wins"
             ),
         )
 
@@ -394,25 +421,22 @@ async def _evaluate_legs(
         return MissionLiveVerdict(
             live=False,
             reason=(
-                f"mission-tree backstop fires: freshest tree "
-                f"last_activity_at is {int(age_seconds)}s old "
-                f"(>{timeout_seconds}s threshold) — every tree member "
-                f"terminal AND quiet for {timeout_seconds}s; at-least-"
-                f"once terminal delivery takes precedence"
+                f"mission-tree backstop fires: non-terminal members "
+                f"present AND freshest tree last_activity_at is "
+                f"{int(age_seconds)}s old (>{timeout_seconds}s "
+                f"threshold) — zombie-break, at-least-once terminal "
+                f"delivery takes precedence"
             ),
             timed_out=True,
         )
 
-    # ── All legs quiet AND recent tree activity within window ─────
-    # The mission is plausibly live — defer; the next tick will
-    # re-evaluate. The reason carries the anchor age so operators
-    # can see how close the row sits to the timeout.
+    # ── Non-terminal + anchor fresh → defer ───────────────────────
     return MissionLiveVerdict(
         live=True,
         reason=(
-            f"all legs quiet (root + descendants terminal, bus quiet) "
-            f"but freshest tree last_activity_at is {int(age_seconds)}s "
-            f"old (<{timeout_seconds}s threshold) — recent activity "
-            f"suggests the mission is still deferring; backstop holds"
+            f"non-terminal member present (live leg holds) and "
+            f"freshest tree last_activity_at is {int(age_seconds)}s "
+            f"old (<{timeout_seconds}s threshold) — mission is "
+            f"plausibly alive; defer to the next tick"
         ),
     )

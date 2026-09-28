@@ -363,19 +363,36 @@ class TestMissionLiveGuardUnit:
 
     @pytest.mark.asyncio
     async def test_leg_c_root_running_is_live(self, engine):
-        repo = self._repo_with(engine, {"root-1": "running"})
+        # Production-realistic fixture: a running root has recent
+        # ``last_activity_at`` (the resolver stamps it on every wake;
+        # the guard's no-anchor disarm is preserved but the leg-holds
+        # prose is emitted only when the anchor IS present so the
+        # reason is unambiguous to operators).
+        recent = now_utc_naive()
+        _insert_instance(
+            engine, "root-1", status="running",
+            last_activity_at=recent,
+        )
+        repo = SQLModelInstanceRepository(engine=engine)
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-1",
             task_completed_at=now_utc_naive(),
         )
         assert verdict.live and not verdict.error
-        assert "c (root instance)" in verdict.reason
+        assert "live leg holds" in verdict.reason
 
     @pytest.mark.asyncio
     async def test_leg_b_descendant_running_is_live(self, engine):
-        _insert_instance(engine, "root-2", status="completed")
-        _insert_instance(engine, "child-2", status="running", parent_id="root-2")
+        recent = now_utc_naive()
+        _insert_instance(
+            engine, "root-2", status="completed",
+            last_activity_at=recent,
+        )
+        _insert_instance(
+            engine, "child-2", status="running",
+            parent_id="root-2", last_activity_at=recent,
+        )
         repo = SQLModelInstanceRepository(engine=engine)
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
@@ -383,7 +400,7 @@ class TestMissionLiveGuardUnit:
             task_completed_at=now_utc_naive(),
         )
         assert verdict.live and not verdict.error
-        assert "b (descendant" in verdict.reason
+        assert "live leg holds" in verdict.reason
 
     @pytest.mark.asyncio
     async def test_idle_root_is_live_resolver_parity(self, engine):
@@ -403,9 +420,25 @@ class TestMissionLiveGuardUnit:
 
     @pytest.mark.asyncio
     async def test_all_terminal_bus_quiet_is_not_live(self, engine):
-        _insert_instance(engine, "root-3", status="completed")
+        """ALL-TERMINAL tree + a fresh ``last_activity_at`` anchor → the
+        anchor plays NO role: ``live=False`` immediately (the C1 frozen
+        contract).
+
+        Production-realistic fixture: every member carries a
+        ``last_activity_at`` (a row that never observed activity would
+        trip the data-gap disarm, masking the C1 bug). With the C1
+        fall-through intact, this test MUST fail because the guard
+        returns ``live=True`` ("recent activity suggests the mission is
+        still deferring") — exactly the overshoot the fixback
+        closes."""
+        fresh = now_utc_naive()
         _insert_instance(
-            engine, "child-3", status="completed", parent_id="root-3"
+            engine, "root-3", status="completed",
+            last_activity_at=fresh,
+        )
+        _insert_instance(
+            engine, "child-3", status="completed",
+            parent_id="root-3", last_activity_at=fresh,
         )
         repo = SQLModelInstanceRepository(engine=engine)
         verdict = await _mlg.evaluate_mission_live(
@@ -414,8 +447,130 @@ class TestMissionLiveGuardUnit:
             task_completed_at=now_utc_naive(),
             bus_pending_count=0,
         )
-        assert not verdict.live
-        assert not verdict.timed_out
+        assert not verdict.live, (
+            f"C1: all-terminal tree + fresh anchor MUST finalize "
+            f"immediately (anchor plays no role); got {verdict}"
+        )
+        assert not verdict.timed_out, (
+            f"C1: all-terminal tree MUST NOT carry timed_out=True "
+            f"(the anchor plays no role here — timed_out=True is "
+            f"reserved for the zombie-backstop path on non-terminal "
+            f"members); got {verdict}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_u7_fixback_discriminating_pin_all_terminal_fresh_anchor(
+        self, engine,
+    ):
+        """MINOR-1 (FIXBACK, 2026-09-28) — the discriminating pin.
+
+        The C1 overshoot returns ``live=True`` whenever:
+
+        * every tree member is terminal (root + descendants), AND
+        * the freshest ``last_activity_at`` is RECENT (<6h).
+
+        — even though the mission is dead. Per the council verdict
+        (fixback review cycle 1): **the tree-activity anchor plays NO
+        role on all-terminal trees**. The anchor's only legitimate
+        use is the zombie-backstop on non-terminal trees that have
+        gone quiet.
+
+        This test exercises the EXACT shape that triggers the
+        overshoot (all-terminal + fresh anchor) AND a stale
+        ``task_completed_at`` (the wave-3 anchor the predecessor
+        anchored to — preserved at zero relevance by the U7 design
+        but still in the signature).
+
+        PRE-fixback expectation: FAIL — the buggy fall-through
+        returns ``live=True`` because the fresh anchor rolls the
+        timeout window forward on a tree that is, in fact, dead.
+
+        POST-fixback expectation: PASS — all-terminal short-circuits
+        to ``live=False`` regardless of anchor age.
+        """
+        fresh = now_utc_naive() - timedelta(seconds=15)
+        _insert_instance(
+            engine, "root-fixb", status="completed",
+            last_activity_at=fresh,
+        )
+        _insert_instance(
+            engine, "child-fixb", status="completed",
+            parent_id="root-fixb", last_activity_at=fresh,
+        )
+        repo = SQLModelInstanceRepository(engine=engine)
+        # Stale task_completed_at to prove it is also ignored on
+        # all-terminal trees (U7 already del-anchored; C1 makes
+        # the rule authoritative across all shapes).
+        stale_task_completed = now_utc_naive() - timedelta(
+            seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60
+        )
+        verdict = await _mlg.evaluate_mission_live(
+            instance_repository=repo,
+            instance_id="root-fixb",
+            task_completed_at=stale_task_completed,
+            bus_pending_count=0,
+        )
+        assert not verdict.live, (
+            "FIXBACK MINOR-1: all-terminal tree + fresh anchor MUST "
+            "finalize immediately (live=False). The council verdict "
+            "rules the anchor plays NO role on all-terminal trees. "
+            f"Got: {verdict}"
+        )
+        assert not verdict.timed_out, (
+            "FIXBACK MINOR-1: timed_out=True is the zombie-backstop "
+            "tag — it is reserved for non-terminal trees with stale "
+            f"anchors. All-terminal trees MUST NOT carry it. Got: {verdict}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_u7_fixback_zombie_backstop_fires_on_non_terminal_stale(
+        self, engine,
+    ):
+        """FIXBACK MINOR-1 — zombie-backstop path (preserved).
+
+        The council verdict: the anchor's ONLY legitimate use is the
+        zombie-backstop path — non-terminal members + anchor stale
+        ≥6h → force terminal (at-least-once wins). This test pins
+        that path so the fixback does not close it.
+
+        PRE-fixback expectation: PASS (no overshoot on this shape —
+        the loop's non-terminal early-return fires ``live=True``
+        regardless of age; but the sticky issue is: under the
+        overshoot, the fall-through never reaches this branch
+        because the early-return already returned live=True. So
+        even though the loop returns live=True here, the
+        ``timed_out`` flag never fires — confirming the need to
+        suppress the early return in the fix).
+        """
+        stale_activity = now_utc_naive() - timedelta(
+            seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60
+        )
+        # Root terminal + descendant NON-terminal (waiting_children) +
+        # anchor stale ≥6h.
+        _insert_instance(
+            engine, "root-zombie", status="completed",
+            last_activity_at=stale_activity,
+        )
+        _insert_instance(
+            engine, "child-zombie", status="waiting_children",
+            parent_id="root-zombie", last_activity_at=stale_activity,
+        )
+        repo = SQLModelInstanceRepository(engine=engine)
+        verdict = await _mlg.evaluate_mission_live(
+            instance_repository=repo,
+            instance_id="root-zombie",
+            task_completed_at=stale_activity,
+            bus_pending_count=0,
+        )
+        assert not verdict.live, (
+            "FIXBACK MINOR-1 zombie-backstop: non-terminal + stale "
+            f"anchor MUST force terminal. Got: {verdict}"
+        )
+        assert verdict.timed_out, (
+            "FIXBACK MINOR-1 zombie-backstop: timed_out=True MUST be "
+            "set on this shape (it is the operator-grep tag for "
+            f"backstop fires). Got: {verdict}"
+        )
 
     @pytest.mark.asyncio
     async def test_leg_a_bus_pending_is_live(self, engine):
@@ -464,18 +619,37 @@ class TestMissionLiveGuardUnit:
         assert not verdict.timed_out
 
     @pytest.mark.asyncio
-    async def test_backstop_fires_when_tree_actually_quiet(self, engine):
-        """U7 — symmetric counterpart: when the tree is genuinely
-        quiet (every member terminal) AND the freshest
-        ``last_activity_at`` is older than the window, the backstop
-        fires (starvation impossible)."""
+    async def test_zombie_backstop_fires_on_non_terminal_stale(self, engine):
+        """FIXBACK (2026-09-28) — the council-ruling zombie-backstop
+        path: a tree with at least one NON-TERMINAL member AND the
+        freshest ``last_activity_at`` older than the window MUST fire
+        the backstop (``live=False, timed_out=True``). This is the
+        ONLY legitimate anchor use.
+
+        Symmetric counterpart to ``test_timeout_overrides_live_legs``
+        (the positive case where a fresh anchor holds the mission).
+        Together they pin the two halves of the FIXBACK decision tree:
+        * non-terminal + fresh anchor → ``live=True`` (defer);
+        * non-terminal + stale anchor → ``live=False, timed_out=True``
+          (zombie-break, at-least-once wins).
+        """
+        stale_activity = now_utc_naive() - timedelta(
+            seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60
+        )
+        # Root terminal + descendant non-terminal (waiting_children),
+        # both carrying the stale anchor.
         _insert_instance(
             engine,
             "root-quiet",
             status="completed",
-            last_activity_at=now_utc_naive() - timedelta(
-                seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60
-            ),
+            last_activity_at=stale_activity,
+        )
+        _insert_instance(
+            engine,
+            "child-quiet",
+            status="waiting_children",
+            parent_id="root-quiet",
+            last_activity_at=stale_activity,
         )
         repo = SQLModelInstanceRepository(engine=engine)
         verdict = await _mlg.evaluate_mission_live(
@@ -483,8 +657,67 @@ class TestMissionLiveGuardUnit:
             instance_id="root-quiet",
             task_completed_at=None,
         )
-        assert not verdict.live
-        assert verdict.timed_out and not verdict.error
+        assert not verdict.live, (
+            "FIXBACK zombie-backstop: non-terminal descendant + stale "
+            f"anchor MUST force terminal. Got: {verdict}"
+        )
+        assert verdict.timed_out and not verdict.error, (
+            "FIXBACK zombie-backstop: timed_out=True MUST be set on "
+            "this shape (operator-grep tag for backstop fires) AND "
+            f"the row must not be in fail-open error mode. Got: {verdict}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_terminal_stale_anchor_does_not_carry_timed_out(
+        self, engine,
+    ):
+        """FIXBACK (2026-09-28) — all-terminal + stale anchor MUST NOT
+        carry ``timed_out=True`` (the anchor plays no role here; the
+        row is dead on its own legs). The natural notify path drains
+        the row immediately; the operator-grep tag
+        ``ORPHAN_RELEASED`` is reserved for genuine zombie cases (a
+        row that had to be held by the guard for ≥6h before
+        finalizing).
+
+        The pre-fixback ``test_backstop_fires_when_tree_actually_quiet``
+        pinned WRONG semantics (all-terminal + stale → timed_out=True).
+        The FIXBACK splits the assertion in two: this test pins
+        all-terminal + stale → ``live=False, timed_out=False`` (anchor
+        ignored), and ``test_zombie_backstop_fires_on_non_terminal_stale``
+        above pins the true zombie shape.
+        """
+        stale_activity = now_utc_naive() - timedelta(
+            seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60
+        )
+        _insert_instance(
+            engine,
+            "root-quietall",
+            status="completed",
+            last_activity_at=stale_activity,
+        )
+        _insert_instance(
+            engine,
+            "child-quietall",
+            status="completed",
+            parent_id="root-quietall",
+            last_activity_at=stale_activity,
+        )
+        repo = SQLModelInstanceRepository(engine=engine)
+        verdict = await _mlg.evaluate_mission_live(
+            instance_repository=repo,
+            instance_id="root-quietall",
+            task_completed_at=None,
+        )
+        assert not verdict.live, (
+            "FIXBACK: all-terminal tree + stale anchor MUST finalize "
+            f"immediately (live=False). Got: {verdict}"
+        )
+        assert not verdict.timed_out, (
+            "FIXBACK: timed_out=True is the zombie-backstop tag — "
+            "RESERVED for the non-terminal-stale-anchor shape. "
+            "All-terminal trees MUST NOT carry it (the anchor plays "
+            f"no role here). Got: {verdict}"
+        )
 
     @pytest.mark.asyncio
     async def test_missing_anchor_does_not_open_the_door(self, engine):

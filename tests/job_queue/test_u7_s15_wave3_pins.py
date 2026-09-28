@@ -412,13 +412,24 @@ class TestW1LiveTreeHoldsBackstop:
 
 
 class TestW2QuietTreeFiresBackstop:
-    """W2 (2026-09-28) — the inverse of W1: a tree where every member
-    is terminal AND the freshest ``last_activity_at`` is older than
-    ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` MUST fire the backstop
-    (starvation impossible). The new observability emissions carry
-    the ``timed_out=True`` flag, which the helper then surfaces as
-    ``orphan_released`` (the counter) + ``ORPHAN_RELEASED`` (the log
-    token)."""
+    """W2 (FIXBACK, 2026-09-28) — the legitimate zombie-backstop path.
+
+    FIXBACK (council verdict, fixback cycle 1): the backstop's ONLY
+    legitimate use is the zombie-break on a NON-TERMINAL tree that has
+    gone quiet (≥6h since the freshest ``last_activity_at``). The
+    predecessor's ``test_w2_backstop_fires_quiet_tree_with_orphan_released``
+    pinned an all-terminal shape — under the FIXBACK that shape
+    finalizes immediately via the natural path and emits
+    ``orphan_released=0`` (the anchor plays no role on all-terminal
+    trees). The FIXBACK W2 reshapes the fixture to a NON-TERMINAL
+    descendant + stale anchor so the assertions pin the LEGITIMATE
+    zombie-break path.
+
+    The observability emissions (``timed_out=True`` →
+    ``orphan_released`` counter +1 + ``ORPHAN_RELEASED`` log token)
+    fire IFF the verdict carries ``timed_out=True`` — and under the
+    FIXBACK that flag is reserved for the non-terminal-stale shape.
+    """
 
     @pytest.mark.asyncio
     async def test_w2_backstop_fires_quiet_tree_with_orphan_released(
@@ -432,12 +443,23 @@ class TestW2QuietTreeFiresBackstop:
             seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 300,
         )
         work_id = f"wid-w2-{uuid4().hex[:8]}"
-        instance_id = "root-w2-quiet"
+        # FIXBACK: root terminal + descendant NON-TERMINAL — the
+        # tree LOOKS live (descendant is non-terminal) but every
+        # observed activity is older than the window. That is the
+        # only shape on which the backstop now fires.
+        root_instance_id = "root-w2-quiet"
+        descendant_instance_id = "desc-w2-zombie"
         watcher_id = "watcher-w2-quiet"
 
         _insert_tree_member(
-            engine, instance_id=instance_id,
+            engine, instance_id=root_instance_id,
             status="completed",
+            last_activity_at=quiet_time,
+        )
+        _insert_tree_member(
+            engine, instance_id=descendant_instance_id,
+            status="waiting_children",  # NON-terminal
+            parent_id=root_instance_id,
             last_activity_at=quiet_time,
         )
         _add_watch(
@@ -451,7 +473,7 @@ class TestW2QuietTreeFiresBackstop:
         original = _patch_resolver_terminal(
             components["resolver"],
             work_id=work_id,
-            instance_id=instance_id,
+            instance_id=root_instance_id,
         )
         try:
             result = (
@@ -462,12 +484,14 @@ class TestW2QuietTreeFiresBackstop:
         finally:
             components["resolver"].resolve_work = original
 
-        # W2 invariants: orphan_released counter +1, watcher row CAS-
-        # claimed, exactly-once delivered (enqueue_message called).
+        # W2 invariants: orphan_released counter +1 (true zombie:
+        # non-terminal + stale anchor → backstop fires), watcher row
+        # CAS-claimed, exactly-once delivered (enqueue_message called).
         assert result["orphan_released"] == 1, (
-            f"W2: genuinely-quiet tree MUST surface orphan_released=1 "
-            f"via the helper's return-key counter; got "
-            f"result={result}"
+            f"FIXBACK W2: a non-terminal tree with every activity "
+            f"older than the window is a TRUE zombie — the backstop "
+            f"MUST fire orphan_released=1 via the helper's return-"
+            f"key counter; got result={result}"
         )
         assert result["fired"] == 1
         assert len(
@@ -479,8 +503,9 @@ class TestW2QuietTreeFiresBackstop:
 
     def test_w2_mission_live_verdict_carries_timed_out(self, components):
         """W2 sentinel — the verdict itself must carry ``timed_out``
-        so the helper can branch on it. Directly exercises the
-        guard with a quiet tree where all members are terminal."""
+        so the helper can branch on it. Directly exercises the guard
+        with the FIXBACK zombie shape: NON-TERMINAL descendant +
+        every ``last_activity_at`` older than the window."""
         engine = components["engine"]
         repo = components["instance_repo"]
 
@@ -490,6 +515,12 @@ class TestW2QuietTreeFiresBackstop:
         _insert_tree_member(
             engine, instance_id="root-w2-sentinel",
             status="completed",
+            last_activity_at=quiet_time,
+        )
+        _insert_tree_member(
+            engine, instance_id="desc-w2-sentinel",
+            status="waiting_children",  # FIXBACK: non-terminal
+            parent_id="root-w2-sentinel",
             last_activity_at=quiet_time,
         )
 
@@ -505,6 +536,115 @@ class TestW2QuietTreeFiresBackstop:
         assert not verdict.live
         assert verdict.timed_out
         assert not verdict.error
+
+    @pytest.mark.asyncio
+    async def test_w2_minor2_caplog_pin_orphan_released_reaches_sink(
+        self, components, caplog,
+    ):
+        """MINOR-2 (FIXBACK, 2026-09-28) — the caplog pin.
+
+        The ORPHAN_RELEASED log token is the operator-grep identity for
+        true zombie-backstop fires (non-terminal + stale anchor).
+        Round-0 missed exactly this assertion: the format string at
+        ``job_queue_service.py:971-984`` had 4 ``%`` placeholders but
+        only 3 args, so the warning raised ``TypeError`` BEFORE it
+        could reach the sink — the counter incremented (orphan_released
+        += 1) but the log line never landed, and the caplog assertion
+        was missing entirely. This test pins:
+
+        * the format op executes without raising (the format-string
+          arity fix);
+        * the resulting log record carries the canonical
+          ``ORPHAN_RELEASED`` prefix the operator-grep workflow is
+          bound to;
+        * the warning reaches the log sink (``caplog.records``).
+        """
+        caplog.set_level(
+            logging.WARNING,
+            logger="daemon.services.job_queue_service",
+        )
+        engine = components["engine"]
+        jqs = components["jqs"]
+
+        quiet_time = now_utc_naive() - timedelta(
+            seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 300,
+        )
+        # True zombie shape — root terminal + non-terminal descendant.
+        _insert_tree_member(
+            engine, instance_id="root-w2-caplog",
+            status="completed",
+            last_activity_at=quiet_time,
+        )
+        _insert_tree_member(
+            engine, instance_id="desc-w2-caplog",
+            status="waiting_children",
+            parent_id="root-w2-caplog",
+            last_activity_at=quiet_time,
+        )
+
+        work_id = f"wid-w2-caplog-{uuid4().hex[:8]}"
+        watcher_id = "watcher-w2-caplog"
+        _add_watch(
+            engine, work_id=work_id,
+            instance_id=watcher_id,
+            watch_events=["mission_terminal"],
+        )
+
+        original = _patch_resolver_terminal(
+            components["resolver"],
+            work_id=work_id,
+            instance_id="root-w2-caplog",
+        )
+        try:
+            result = (
+                await jqs.reconcile_held_watches_for_instance(
+                    instance_id=None,
+                )
+            )
+        finally:
+            components["resolver"].resolve_work = original
+
+        # Counter incremented → backstop fired:
+        assert result["orphan_released"] == 1, (
+            f"MINOR-2: orphan_released counter MUST increment "
+            f"(backstop fired); got result={result}"
+        )
+
+        # Caplog pin: at least one WARNING with the ORPHAN_RELEASED
+        # prefix reached the sink. The rename "held_since_swEEP_TICK"
+        # → "window_s" is operator-visible too — assert the renamed
+        # token is the one present (round-0 had the miscapitalized
+        # token; this is the discriminant that proves the format
+        # string is the FIXBACK one, not a leftover copy).
+        matching = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "ORPHAN_RELEASED" in r.getMessage()
+        ]
+        assert matching, (
+            f"MINOR-2: the ORPHAN_RELEASED WARNING MUST reach the "
+            f"log sink — round-0 the format-string arity mismatch "
+            f"raised TypeError before the warning landed. caplog "
+            f"saw: {[r.getMessage()[:80] for r in caplog.records]}"
+        )
+        # The misnamed token must NOT be present (rename pin).
+        assert not any(
+            "held_since_swEEP_TICK" in r.getMessage()
+            for r in caplog.records
+        ), (
+            "MINOR-2: the FIXBACK renamed ``held_since_swEEP_TICK`` "
+            "→ ``window_s``; the old token must not appear in any "
+            "ORPHAN_RELEASED log line (operator grep is bound to "
+            "window_s)."
+        )
+        # And the new token MUST be present.
+        assert any(
+            "window_s=" in r.getMessage()
+            for r in caplog.records
+        ), (
+            "MINOR-2: the FIXBACK renamed token ``window_s=`` MUST "
+            "appear in the ORPHAN_RELEASED log line."
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -860,7 +1000,17 @@ class TestW5HookBNoJobAndExternalSeat:
             f"visited by the global-scan hook (b) and delivered — "
             f"got result={result}"
         )
-        assert result["orphan_released"] == 1
+        # FIXBACK: under the new contract, all-terminal trees
+        # finalize immediately via the natural path — the backstop
+        # (and orphan_released tag) is reserved for the non-terminal
+        # zombie shape. The W5 invariant is that the external-seat
+        # watcher is reached by the global scan, NOT that the
+        # backstop fired.
+        assert result["orphan_released"] == 0, (
+            f"FIXBACK W5: all-terminal shape finalizes via natural "
+            f"path (anchor plays no role); orphan_released MUST be 0. "
+            f"Got result={result}"
+        )
         assert len(watcher_repo.get_watchers_for_job(work_id)) == 0
         # Verify the enqueue reached the EXTERNAL watcher (NOT
         # the instance the helper was scoped to).
