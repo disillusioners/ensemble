@@ -564,9 +564,12 @@ class InstanceManager:
         # ``maintenance_runs`` table + the partial unique index on
         # ``(section) WHERE status='running'`` + the composite
         # ``(section, completed_at)`` index are built on BOTH drivers
-        # (PG and SQLite). No ``_ensure_postgres_columns`` mirror —
-        # brand-new tables need none (snapshot precedent verbatim,
-        # ``manager.py:530-546``). The canonical DDL
+        # (PG and SQLite). No CREATE-TABLE mirror in
+        # ``_ensure_postgres_columns`` — brand-new tables need none
+        # (snapshot precedent verbatim, ``manager.py:530-546``). The
+        # ONLY ``maintenance_runs`` entry in ``_ensure_postgres_columns``
+        # is the ``expected_bytes`` int4→int8 widening DO block
+        # (incident 2026-09-28, >2GiB dry-run byte totals). The canonical DDL
         # ``daemon/migrations/versions/20260927_000001_*.sql`` is doc
         # only — the runner is a NO-OP on PG. [AM-15, R-3 cite fix]
         from .repositories.maintenance_runs.models import (  # noqa: F401
@@ -5815,6 +5818,43 @@ class InstanceManager:
           ``daemon/migrations/versions/20260819_000001_report_injections_deferred_marker.sql``.
           See C1 case-lockstep contract in
           ``daemon/repositories/report_injection/models.py``.
+        - maintenance_runs.expected_bytes int4 → int8 widening
+          (incident 2026-09-28, ckpt-cleanup 500 NumericValueOutOfRange):
+          the original table declared ``expected_bytes`` as INTEGER /
+          int4. A legitimate 27.2 GiB dry-run echo at execute-time
+          (27,233,813,846 bytes) overflowed int4 max (2^31-1 = 2,147,483,647),
+          psycopg raised ``NumericValueOutOfRange`` (SQLSTATE 22003),
+          SQLAlchemy surfaced ``DataError``, and the router catch-all
+          converted the audit-row INSERT failure to a 500 (the
+          refused caller's bytes are not yet on disk — the failure is
+          at the audit INSERT, BEFORE any blob DELETE starts). The
+          model was retyped to BigInteger; fresh Postgres databases
+          get the widened column from ``SQLModel.metadata.create_all()``
+          via ``MaintenanceRun.expected_bytes``. Existing Postgres
+          databases receive the widening via the DO block below:
+          ``information_schema.columns`` is probed for
+          ``data_type='integer'`` on
+          ``maintenance_runs.expected_bytes`` and the column is
+          retyped to ``bigint`` ONLY on a hit. The probe makes the
+          statement idempotent on re-run (a no-op once the column
+          is already bigint). int4→int8 is an implicit-cast
+          widening (no ``USING`` required), but it is NOT a
+          metadata-only change: PG takes an ACCESS EXCLUSIVE lock
+          and REWRITES the table — trivial at 9 rows, never free at
+          scale. There is NO inner EXCEPTION handler on purpose:
+          this is a single probe-gated ALTER with no data-dependent
+          failure mode (every int4 value is representable in int8,
+          so the rewrite cannot fail on row data) — there is nothing
+          to catch, and a failure must fail loud and abort boot,
+          matching the host fail-loud convention (the JSON→JSONB
+          block's per-column EXCEPTION handler exists precisely
+          because invalid JSON IS data-dependent — a different
+          situation). SQLite counterpart:
+          ``daemon/migrations/versions/
+          20260928_000001_widen_maintenance_runs_expected_bytes.sql``
+          (MANUAL: TRUE; conceptual-only — SQLite INTEGER is already
+          8 bytes via the dynamic-type affinity, so no schema
+          migration is needed on the SQLite path).
 
         When a new column needs this treatment: add the IF NOT EXISTS
         ALTER + (optional) CREATE INDEX here. Do NOT add raw
@@ -6872,6 +6912,55 @@ class InstanceManager:
             (
                 "CREATE INDEX IF NOT EXISTS idx_service_tracking_pid "
                 "ON service_tracking (pid)"
+            ),
+            # ── maintenance_runs.expected_bytes int4 → int8 widening ──
+            # (incident 2026-09-28). The original ``INTEGER`` column
+            # overflows at 2^31-1; legitimate >2GiB dry-run echoes (the
+            # 27.2 GiB incident value 27,233,813,846) raised
+            # ``psycopg.errors.NumericValueOutOfRange`` at INSERT time
+            # and the router converted the audit-row failure to a 500.
+            # The model at
+            # ``daemon/repositories/maintenance_runs/models.py`` now
+            # declares the column ``BigInteger`` so fresh Postgres
+            # databases get the widened type from
+            # ``SQLModel.metadata.create_all()``; existing databases
+            # receive the widening via this DO block. The probe on
+            # ``information_schema.columns.data_type='integer'`` makes
+            # the statement idempotent on re-run — once the column is
+            # ``bigint`` the WHERE filter excludes it and the block is
+            # a no-op. int4→int8 is an implicit-cast widening (no ``USING``
+            # required), but it is NOT a metadata-only change: PG
+            # takes an ACCESS EXCLUSIVE lock and REWRITES the table —
+            # trivial at 9 rows, never free at scale. There is NO
+            # inner EXCEPTION handler on purpose: this is a single
+            # probe-gated ALTER with no data-dependent failure mode
+            # (every int4 value is representable in int8, so the
+            # rewrite cannot fail on row data) — there is nothing to
+            # catch, and a failure must fail loud and abort boot,
+            # matching the host fail-loud convention (the JSON→JSONB
+            # block's per-column EXCEPTION handler exists precisely
+            # because invalid JSON IS data-dependent — a different
+            # situation). The existing ``0``/``NULL`` values stay
+            # lossless on rollback (the rollback path is
+            # ``ALTER COLUMN ... TYPE INTEGER`` — currently safe
+            # because every row fits int4). SQLite counterpart
+            # (conceptual only, no schema work needed):
+            # ``daemon/migrations/versions/
+            # 20260928_000001_widen_maintenance_runs_expected_bytes.sql``.
+            (
+                "DO $$\n"
+                "BEGIN\n"
+                "    IF EXISTS (\n"
+                "        SELECT 1 FROM information_schema.columns\n"
+                "        WHERE table_schema = 'public'\n"
+                "          AND table_name = 'maintenance_runs'\n"
+                "          AND column_name = 'expected_bytes'\n"
+                "          AND data_type = 'integer'\n"
+                "    ) THEN\n"
+                "        ALTER TABLE maintenance_runs "
+                "ALTER COLUMN expected_bytes TYPE bigint;\n"
+                "    END IF;\n"
+                "END $$\n"
             ),
         ]
         with self._engine.begin() as conn:

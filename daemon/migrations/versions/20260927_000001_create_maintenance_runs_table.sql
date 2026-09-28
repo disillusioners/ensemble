@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS maintenance_runs (
     triggered_by         TEXT NOT NULL,      -- 'system' | 'user'
     requester_json       JSON,               -- {peer_ip, user_agent, origin}; NULL for auto
     dry_run_run_id       TEXT,               -- soft ref, no FK
-    expected_bytes       INTEGER,            -- echoed promise
+    expected_bytes       BIGINT,            -- echoed promise (BigInteger model, >2GiB cleanups — incident 2026-09-28)
     dry_run_summary_json JSON,               -- full dry-run snapshot (incl. skipped[])
     confirm              BOOLEAN,            -- execute confirm flag
     advisory             TEXT,               -- 'system_busy' | NULL

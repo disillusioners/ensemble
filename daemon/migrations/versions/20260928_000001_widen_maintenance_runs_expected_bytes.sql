@@ -1,0 +1,108 @@
+-- Migration: widen maintenance_runs.expected_bytes from INTEGER to BIGINT
+-- Created: 2026-09-28
+-- Author: dev-coder-fix-int4-overflow
+-- MANUAL: TRUE
+-- Description:
+--   Widens the ``maintenance_runs.expected_bytes`` column from INTEGER
+--   (PG int4, max 2,147,483,647) to BIGINT (PG int8, max
+--   9,223,372,036,854,775,807). Incident 2026-09-28 — a legitimate
+--   27.2 GiB dry-run echo at execute-time (27,233,813,846 bytes)
+--   overflowed int4, psycopg raised ``NumericValueOutOfRange`` (SQLSTATE
+--   22003) on the audit-row INSERT, SQLAlchemy surfaced ``DataError``,
+--   and the router catch-all returned HTTP 500. The INSERT fails BEFORE
+--   any blob DELETE — no partial deletion occurred; the ~25.4 GiB of
+--   orphaned blobs remained on disk pending fix.
+--
+--   The model at ``daemon/repositories/maintenance_runs/models.py``
+--   now declares the column as ``BigInteger`` (int8 on PG; SQLite
+--   INTEGER is already 8 bytes via dynamic-type affinity, so the model
+--   change is a no-op on the SQLite path). Fresh PostgreSQL databases
+--   receive the widened column from
+--   ``SQLModel.metadata.create_all()`` via the MaintenanceRun model
+--   declaration; existing PostgreSQL databases receive the widening
+--   from the idempotent DO block in
+--   ``EnsembleManager._ensure_postgres_columns`` (anchor:
+--   ``maintenance_runs.expected_bytes`` probe on
+--   ``information_schema.columns.data_type='integer'``).
+--
+-- DUAL-DRIVER NOTES:
+--   For SQLite (this file): no schema migration needed — SQLite
+--   ``INTEGER`` affinity maps to 8-byte storage regardless of declared
+--   width, so a legacy ``INTEGER`` column already holds the full
+--   2^63-1 range. The audit-row INSERT against a BigInteger-typed
+--   column succeeds for any value the client can echo. This file
+--   exists for audit/discoverability only — the UP section below is
+--   informational and the runner treats MANUAL: TRUE files as
+--   operator-applied only. Per
+--   ``daemon/migrations/runner.py:719-727``, the runner is a NO-OP
+--   on non-SQLite engines regardless.
+--   For PostgreSQL: the equivalent statement lives in
+--     ``daemon/manager.py::_ensure_postgres_columns`` (the migration
+--     runner is SQLite-only by design). Fresh PG databases get the
+--     widened column from ``SQLModel.metadata.create_all()`` via the
+--     BigInteger model declaration; existing PG databases get the
+--     idempotent ALTER from the DO block referenced above.
+--
+-- IDEMPOTENCY / SAFETY:
+--   int4 → int8 is an implicit-cast widening (no ``USING`` required). It
+--   is NOT, however, a metadata-only change: PostgreSQL
+--   takes an ACCESS EXCLUSIVE lock and REWRITES the table (trivial at
+--   the live prod DB's 9 rows of ``0``/``NULL``, never free at scale).
+--   There is deliberately NO inner EXCEPTION handler in the DO block:
+--   it is a single probe-gated ALTER with no data-dependent failure
+--   mode (every int4 value is representable in int8, so the rewrite
+--   cannot fail on row data) — nothing to catch, and a failure must
+--   abort boot loud, matching the ``_ensure_postgres_columns``
+--   fail-loud convention (the JSON→JSONB block's per-column EXCEPTION
+--   handler exists precisely because invalid JSON IS data-dependent).
+--   The probe-style DO block makes the operation a no-op on re-run
+--   once the column is already ``bigint``. The rollback path
+--   (``ALTER COLUMN ... TYPE INTEGER``) is lossless while every value
+--   fits int4 — currently true.
+--
+--   The widened column is referenced by the
+--   ``MaintenanceRunsRepository.insert`` audit-row write path on the
+--   ``POST /api/maintenance/checkpoint-cleanup/execute`` execute
+--   payload; the request schema
+--   ``CheckpointCleanupExecuteRequest`` carries no upper bound on
+--   ``expected_bytes`` (legitimate >2GiB cleanups must pass).
+
+-- UP
+
+-- Informational: PostgreSQL canonical evolution. The runner does NOT
+-- apply this on PG (MigrationRunner is a SQLite-only by design;
+-- runner.py:719-727). The runtime hook in
+-- ``EnsembleManager._ensure_postgres_columns`` is the source of truth
+-- for PG schema evolution. Listed here for discoverability — an
+-- operator who runs this file manually against PG must apply a
+-- probe-gated ALTER (the same shape the runtime uses):
+--
+--   DO $$
+--   BEGIN
+--       IF EXISTS (
+--           SELECT 1 FROM information_schema.columns
+--           WHERE table_schema = 'public'
+--             AND table_name = 'maintenance_runs'
+--             AND column_name = 'expected_bytes'
+--             AND data_type = 'integer'
+--       ) THEN
+--           ALTER TABLE maintenance_runs
+--             ALTER COLUMN expected_bytes TYPE bigint;
+--       END IF;
+--   END $$;
+--
+-- SQLite side: no-op (INTEGER affinity is already 8-byte); no schema
+-- change needed on either fresh or existing databases.
+
+-- DOWN
+
+-- Informational rollback. Lossless while every row fits int4 (the
+-- live prod DB has 9 rows of 0/NULL — verified in the incident
+-- 2026-09-28 query). Operators must verify pre-conditions before
+-- rolling back; a >2GiB echo would be truncated/truncated-error on
+-- the re-narrowed column. The runtime hook re-runs the widening on
+-- the next startup, so a rollback followed by a daemon restart
+-- automatically restores the widening.
+--
+--   ALTER TABLE maintenance_runs
+--     ALTER COLUMN expected_bytes TYPE INTEGER;

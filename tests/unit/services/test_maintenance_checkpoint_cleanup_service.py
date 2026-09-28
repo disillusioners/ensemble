@@ -46,6 +46,11 @@ from daemon.services.maintenance_api_service import (
 )
 from daemon.services.timestamps import now_utc_iso
 from daemon.config import PersistenceConfig
+from tests.helpers.maintenance_byte_pins import (
+    _INCIDENT_EXPECTED_BYTES,
+    _INT4_MAX,
+    _JUST_OVER_INT4,
+)
 
 
 # ── fixtures ───────────────────────────────────────────────────────────────────
@@ -838,8 +843,6 @@ class TestRouterGates:
         non-MaintenanceError raise must surface as a CONTRACT-SHAPED
         500 (``{error: internal_error, message, details}`` per A-8),
         never FastAPI's plain-text default."""
-        from unittest.mock import MagicMock
-
         svc = MagicMock(spec=MaintenanceApiService)
         svc.status = AsyncMock(side_effect=RuntimeError("boom"))
         app = _http_app(svc)
@@ -1743,3 +1746,315 @@ class TestGateDoesNotReadProjection:
             # Wait briefly for the (now no-op) task to finish so the
             # row cleanup is consistent.
             pass
+
+
+# ── >2GiB byte-magnitude window (incident 2026-09-28) ────────────────────────
+#
+# Sentinel byte values are hoisted to tests/helpers/maintenance_byte_pins.py
+# (shared with tests/integration/test_maintenance_checkpoint_cleanup_api.py)
+# so the same incident value + int4 boundary pair are pinned byte-identical
+# across both suites. See that module's docstring for the full rationale.
+
+
+class TestExpectedBytesBigInteger:
+    """Pin the >2GiB byte-magnitude window (incident 2026-09-28).
+
+    The legacy ``expected_bytes`` was PG ``INTEGER`` (int4, max
+    2,147,483,647). A legitimate 27.2 GiB dry-run echo at execute-time
+    (27,233,813,846 bytes) overflowed int4 and
+    ``MaintenanceRunsRepository.insert`` raised
+    ``sqlalchemy.exc.DataError``
+    (``psycopg.errors.NumericValueOutOfRange``, SQLSTATE 22003). The
+    router catch-all converted the audit-row failure to a 500 — no
+    partial deletion occurred (the INSERT fails BEFORE any blob
+    DELETE starts; see the incident doc at
+    ``docs/2026-09-28-checkpoint-cleanup-500-int4-overflow.md``).
+
+    Fix:
+    - Model: ``BigInteger`` so fresh PG DBs get a wide column from
+      ``SQLModel.metadata.create_all()``.
+    - PG evolution: idempotent DO block in
+      ``InstanceManager._ensure_postgres_columns`` widens existing PG
+      DBs from int4 → int8.
+
+    These tests exercise the >2^31-1 byte window end-to-end on a real
+    SQLite-backed ``MaintenanceRunsRepository`` (SQLite ``INTEGER`` is
+    already 8 bytes via dynamic-type affinity, so the SQLite path is a
+    no-op model-wise — this suite is about the Python/SQLAlchemy
+    contract that BigInteger round-trips the full int8 range; the PG
+    schema-evolution side is pinned separately by the AST/source test
+    in :meth:`test_manager_widening_statement_exists_and_is_probe_gated`).
+    """
+
+    async def test_execute_accepts_incident_oversize_bytes(
+        self, runs_repo, as_pg
+    ):
+        """Regression for incident 2026-09-28 — the exact dry-run
+        echo value from the live log (27,233,813,846 bytes) survives
+        the byte-mismatch gate (matches the stored dry-run), the
+        audit-row INSERT round-trips losslessly, and the row reads
+        back with the full int8 value.
+
+        Pre-fix this would have raised ``NumericValueOutOfRange`` at
+        the INSERT step; the router's exception handler would have
+        converted it to a 500 (the legacy 27.2 GiB echo).
+        """
+        # Seed dry-run with the same oversize byte total the execute
+        # payload echoes.
+        fresh = _seed_dry_run_row(
+            runs_repo, bytes_value=_INCIDENT_EXPECTED_BYTES
+        )
+        svc = _service(runs_repo)
+        # Stub the background task so the test stays unit-bounded;
+        # the row INSERT happens BEFORE the task is spawned (it is
+        # the part that overflowed on the legacy int4 column), so
+        # stubbing _execute_run here still exercises the gate
+        # pass-through → INSERT round-trip path we care about.
+        svc._execute_run = AsyncMock()  # type: ignore[method-assign]
+
+        resp = await svc.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=fresh.run_id,
+                expected_bytes=_INCIDENT_EXPECTED_BYTES,
+            ),
+            REQUESTER,
+        )
+
+        assert resp["status"] == "running"
+        # The audit row MUST hold the OVERSIZE value (not 0, not a
+        # truncated/casted surrogate). If the model regressed to
+        # Integer, the INSERT would have raised before reaching this
+        # assertion.
+        row = runs_repo.get(resp["run_id"])
+        assert row is not None
+        assert row.expected_bytes == _INCIDENT_EXPECTED_BYTES
+        assert row.kind == "manual_execute"
+        assert row.status == "running"
+
+    async def test_execute_accepts_just_over_int4(self, runs_repo, as_pg):
+        """Threshold pin — 2^31 (one above int4 max) MUST round-trip
+        without overflow. The legacy int4 column would have raised
+        ``NumericValueOutOfRange``; BigInteger accepts the full int8
+        range.
+
+        Distinct from the incident value test: this pins the exact
+        boundary so a future refactor that silently narrows back to
+        int4 fails here first (the smallest value that overflows).
+        """
+        fresh = _seed_dry_run_row(runs_repo, bytes_value=_JUST_OVER_INT4)
+        svc = _service(runs_repo)
+        svc._execute_run = AsyncMock()  # type: ignore[method-assign]
+
+        resp = await svc.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=fresh.run_id,
+                expected_bytes=_JUST_OVER_INT4,
+            ),
+            REQUESTER,
+        )
+
+        row = runs_repo.get(resp["run_id"])
+        assert row is not None
+        assert row.expected_bytes == _JUST_OVER_INT4
+
+    async def test_execute_accepts_int4_max(self, runs_repo, as_pg):
+        """Boundary pin (negative side) — the largest value that fits
+        in the legacy int4 column (2^31-1) MUST still round-trip
+        after the widening. A naive ``Integer``-narrowing regression
+        would also accept this value; this test exists so the
+        boundary is pinned on both sides.
+        """
+        fresh = _seed_dry_run_row(runs_repo, bytes_value=_INT4_MAX)
+        svc = _service(runs_repo)
+        svc._execute_run = AsyncMock()  # type: ignore[method-assign]
+
+        resp = await svc.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=fresh.run_id,
+                expected_bytes=_INT4_MAX,
+            ),
+            REQUESTER,
+        )
+
+        row = runs_repo.get(resp["run_id"])
+        assert row is not None
+        assert row.expected_bytes == _INT4_MAX
+
+    def test_model_expected_bytes_declares_biginteger(self):
+        """Pin — ``MaintenanceRun.expected_bytes`` MUST be a
+        ``BigInteger`` so fresh PostgreSQL databases get a wide column
+        from ``SQLModel.metadata.create_all()``.
+
+        If a future change narrows this back to plain ``Integer``
+        (the legacy int4 type that overflowed at the incident), this
+        test fails immediately and surfaces the drift before the next
+        overflow incident can land.
+
+        Implementation note: SQLAlchemy's ``BigInteger`` IS a subclass
+        of ``Integer`` (the PG ``bigint`` type is a wider variant of
+        ``integer``), so ``isinstance(col.type, Integer)`` is True
+        for BOTH the legacy and the widened types. The contract here
+        is the *exact* type — ``type(col.type) is BigInteger`` —
+        not just the broader integer-family membership.
+        """
+        from sqlalchemy import BigInteger, Integer
+        from sqlalchemy.dialects.postgresql import base as pg_base
+        from daemon.repositories.maintenance_runs.models import (
+            MaintenanceRun,
+        )
+
+        col = MaintenanceRun.__table__.columns["expected_bytes"]
+        # Positive: must be BigInteger (the widened type).
+        assert isinstance(col.type, BigInteger), (
+            "MaintenanceRun.expected_bytes MUST be BigInteger — "
+            "Integer (int4) overflows at 2^31-1 (incident 2026-09-28). "
+            "Got type: " + repr(col.type)
+        )
+        # Negative (strict): must NOT be plain Integer. SQLAlchemy's
+        # ``BigInteger`` subclasses ``Integer``, so we check the exact
+        # type (not isinstance) to distinguish BigInteger from
+        # Integer — a future re-narrowing back to plain Integer fails
+        # this branch even though isinstance(BigInteger, Integer) is
+        # True.
+        assert type(col.type) is not Integer, (
+            "MaintenanceRun.expected_bytes must NOT be plain Integer "
+            "(int4 — the legacy type that overflowed at the "
+            "incident 2026-09-28 dry-run echo). Got "
+            + repr(type(col.type))
+        )
+        # Belt: SQLAlchemy BigInteger maps to PG BIGINT. Verify the
+        # dialect-level compiled form so a future re-bind (e.g. type
+        # adapter) that nominally returns BigInteger but compiles to
+        # INTEGER would still fail.
+        compiled = col.type.compile(dialect=pg_base.dialect())
+        assert "BIGINT" in compiled.upper(), (
+            "MaintenanceRun.expected_bytes must compile to BIGINT on "
+            "PG; got: " + repr(compiled)
+        )
+
+    def test_manager_widening_statement_exists_and_is_probe_gated(self):
+        """Pin — ``InstanceManager._ensure_postgres_columns`` MUST
+        carry a widening DO block for
+        ``maintenance_runs.expected_bytes`` that probes
+        ``information_schema.columns.data_type='integer'`` so the
+        operation is idempotent on re-run.
+
+        Source-of-truth check via ``inspect.getsource`` (the same
+        pattern used by
+        ``tests/unit/repositories/test_service_tool_repository.py``
+        and ``tests/postgres/test_report_deferred_migration_pg.py``).
+        """
+        import inspect
+        from daemon.manager import InstanceManager
+
+        src = inspect.getsource(InstanceManager._ensure_postgres_columns)
+
+        # The DO block must reference the table + column + widening
+        # target + idempotency probe.
+        assert "maintenance_runs" in src, (
+            "_ensure_postgres_columns must reference the "
+            "maintenance_runs table in the widening block."
+        )
+        assert "expected_bytes" in src, (
+            "_ensure_postgres_columns must reference the "
+            "expected_bytes column in the widening block."
+        )
+        assert "TYPE bigint" in src, (
+            "_ensure_postgres_columns widening block must ALTER "
+            "COLUMN ... TYPE bigint (the int4 → int8 widening)."
+        )
+        # The probe-style idempotency gate — same shape as the
+        # JSON→JSONB conversion at daemon/manager.py:6175-6210.
+        assert "data_type = 'integer'" in src, (
+            "_ensure_postgres_columns widening block must probe "
+            "information_schema.columns for data_type='integer' so "
+            "the operation is idempotent on re-run."
+        )
+        # The probe must check the specific table + column (not
+        # just any integer column — that would risk widening a
+        # different column).
+        assert "table_name = 'maintenance_runs'" in src, (
+            "_ensure_postgres_columns widening block must scope the "
+            "probe to table_name = 'maintenance_runs'."
+        )
+        assert "column_name = 'expected_bytes'" in src, (
+            "_ensure_postgres_columns widening block must scope the "
+            "probe to column_name = 'expected_bytes'."
+        )
+        # Belt (de-vacuoused, M3 2026-09-28): a bare ``"DO $$" in src``
+        # check is VACUOUS — that token already appears in the
+        # pre-existing JSON→JSONB DO block higher up in the same
+        # method, so it would pass even if the widening block were
+        # deleted. Instead, extract THE widening statement literal
+        # from the method's AST (the adjacent-string-literal
+        # concatenation folds into a single Constant) and pin, inside
+        # the extracted production string: (a) the DO $$ ... END $$
+        # wrap, and (b) the CONTIGUOUS four-qualifier probe —
+        # table_schema → table_name → column_name → data_type, in
+        # sequence (whitespace-normalized) — so the widening can only
+        # ever target exactly maintenance_runs.expected_bytes, and
+        # never drift from a hand-copied transcription.
+        import ast
+        import textwrap
+        candidates = [
+            node.value
+            for node in ast.walk(ast.parse(textwrap.dedent(src)))
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and "maintenance_runs" in node.value
+            and "TYPE bigint" in node.value
+        ]
+        assert len(candidates) == 1, (
+            "Expected exactly ONE widening DO-block string literal in "
+            f"_ensure_postgres_columns, found {len(candidates)} — the "
+            "pin cannot unambiguously identify the widening statement."
+        )
+        widening_stmt = candidates[0]
+        assert widening_stmt.lstrip().startswith("DO $$") and (
+            widening_stmt.rstrip().endswith("END $$")
+        ), (
+            "_ensure_postgres_columns widening block must wrap the "
+            "probe + ALTER inside a DO $$ ... END $$ block (got: "
+            + repr(widening_stmt[:60]) + "…)"
+        )
+        normalized = " ".join(widening_stmt.split())
+        four_qualifier_fragment = (
+            "table_schema = 'public' "
+            "AND table_name = 'maintenance_runs' "
+            "AND column_name = 'expected_bytes' "
+            "AND data_type = 'integer'"
+        )
+        assert four_qualifier_fragment in normalized, (
+            "_ensure_postgres_columns widening block must probe via "
+            "the CONTIGUOUS four-qualifier fragment (table_schema → "
+            "table_name → column_name → data_type, in sequence) so "
+            "the ALTER targets exactly "
+            "maintenance_runs.expected_bytes; got: " + repr(normalized)
+        )
+
+    def test_manager_widening_block_present_for_incident_doc(
+        self,
+    ):
+        """Pin — the docstring of ``_ensure_postgres_columns`` MUST
+        reference the int4→int8 widening so future contributors find
+        it without grepping the SQL. The widening anchor is the
+        contract — the docstring is the discoverability surface.
+        """
+        import inspect
+        from daemon.manager import InstanceManager
+
+        doc = InstanceManager._ensure_postgres_columns.__doc__ or ""
+        # The docstring must mention the column AND the widening.
+        assert "maintenance_runs.expected_bytes" in doc, (
+            "_ensure_postgres_columns docstring must document the "
+            "maintenance_runs.expected_bytes widening so future "
+            "contributors find it without grepping."
+        )
+        assert "int4" in doc and "int8" in doc, (
+            "_ensure_postgres_columns docstring must call out the "
+            "int4 → int8 widening (the same shape the JSON→JSONB "
+            "conversion uses)."
+        )

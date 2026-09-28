@@ -47,10 +47,16 @@ from sqlalchemy import create_engine, inspect as sqlinspect
 from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
+from daemon.repositories.maintenance_runs import MaintenanceRun
 from tests.helpers.checkpoint_prune_pg import (
     ADMIN_DSN,
     evict_langgraph_mocks,
     restore_langgraph_mocks,
+)
+from tests.helpers.maintenance_byte_pins import (
+    _INCIDENT_EXPECTED_BYTES,
+    _INT4_MAX,
+    _JUST_OVER_INT4,
 )
 
 # DSN hygiene (R-10): disposable DBs only — never the live prod DB.
@@ -683,6 +689,313 @@ def _blocked_job(config, adapter, runs_repo, lock):
 
     job.run_checkpoint_prunes = blocked_run  # type: ignore[method-assign]
     return job, release
+
+
+# ── int4 → int8 widening pin (incident 2026-09-28) ────────────────────────────
+#
+# Sentinel byte values are hoisted to tests/helpers/maintenance_byte_pins.py
+# (shared with tests/unit/services/test_maintenance_checkpoint_cleanup_service.py)
+# so the same incident value + int4 boundary pair are pinned byte-identical
+# across both suites. See that module's docstring for the full rationale.
+
+
+class TestExpectedBytesBigIntegerIntegration:
+    """PG-level pin for the >2^31-1 byte-magnitude window.
+
+    Unit tests (TestExpectedBytesBigInteger in
+    tests/unit/services/test_maintenance_checkpoint_cleanup_service.py)
+    exercise the SQLAlchemy BigInteger round-trip on SQLite (where
+    INTEGER is already 8 bytes). This suite exercises the REAL PG
+    path end-to-end: a dry-run row with the incident byte total,
+    the execute echo at exactly that value, and the audit-row INSERT
+    against a real ``maintenance_runs`` table on a disposable
+    PostgreSQL database.
+
+    Pre-fix behavior (incident 2026-09-28):
+    ``MaintenanceRunsRepository.insert`` raised
+    ``sqlalchemy.exc.DataError`` (``psycopg.errors.NumericValueOutOfRange``,
+    SQLSTATE 22003) at the audit-row INSERT step; the router
+    catch-all converted it to a 500.
+
+    Post-fix: the model declares ``BigInteger`` (PG int8), so
+    ``SQLModel.metadata.create_all()`` builds the wide column on
+    fresh PG databases. The audit-row INSERT round-trips the full
+    int8 range losslessly. The byte-mismatch gate accepts any value
+    the dry-run row stored (no upper bound is enforced anywhere
+    downstream — legitimate >2GiB cleanups must pass).
+    """
+
+    async def test_execute_accepts_incident_oversize_bytes_pg(
+        self, pg_db,
+    ):
+        """Regression for incident 2026-09-28 — the exact 27.2 GiB
+        dry-run echo from the live log round-trips through the
+        real-PG execute path.
+
+        Pre-fix this test would have raised
+        ``DataError(NumericValueOutOfRange)`` at the audit-row
+        INSERT step; post-fix the wide column accepts the value
+        losslessly.
+        """
+        from daemon.services.timestamps import now_utc_iso
+
+        async with api_stack(pg_db) as st:
+            # Seed a manual_dry_run row with the incident byte total
+            # in its summary_json. We don't need to stage 27 GiB of
+            # actual blobs — the dry-run gate reads
+            # ``summary_json.would_delete.bytes``, not the live
+            # adapter. This is the exact shape the production dry-run
+            # row carried before the incident execute.
+            dry = MaintenanceRun(
+                run_id=(
+                    f"ckpt-20260928_oversize_dry_run-"
+                    f"{uuid.uuid4().hex[:8]}"
+                ),
+                section="checkpoint-cleanup",
+                kind="manual_dry_run",
+                started_at=now_utc_iso(),
+                completed_at=now_utc_iso(),
+                status="succeeded",
+                triggered_by="user",
+                summary_json={
+                    "would_delete": {
+                        "checkpoint_rows": 0,
+                        "writes": 0,
+                        "blobs": 4,
+                        "bytes": _INCIDENT_EXPECTED_BYTES,
+                    },
+                    "would_delete_count": 4,
+                    "would_free_bytes": _INCIDENT_EXPECTED_BYTES,
+                    "duration_ms": 412,
+                    "skipped": [],
+                },
+            )
+            assert st.repo.insert(dry) is True
+
+            # Echo the incident byte total. The byte-mismatch gate
+            # compares expected vs stored — same value → gate passes.
+            r = await st.client.post(
+                f"{SECTION_PREFIX}/execute",
+                json={
+                    "dry_run_run_id": dry.run_id,
+                    "expected_bytes": _INCIDENT_EXPECTED_BYTES,
+                    "confirm": True,
+                },
+            )
+            assert r.status_code == 202, (
+                f"execute accepted the incident oversize value but "
+                f"returned {r.status_code}: {r.text}"
+            )
+            await drain_tasks(st.svc)
+
+            # The audit row MUST hold the full int8 value (not a
+            # truncated surrogate). This is the regression pin: the
+            # model declares BigInteger so the INSERT round-trips
+            # losslessly.
+            run = (await st.client.get(
+                f"{SECTION_PREFIX}/runs/{r.json()['run_id']}"
+            )).json()
+            assert run["status"] == "succeeded", run
+            row = st.repo.get(r.json()["run_id"])
+            assert row is not None
+            assert row.expected_bytes == _INCIDENT_EXPECTED_BYTES, (
+                f"audit row.expected_bytes = {row.expected_bytes}, "
+                f"expected {_INCIDENT_EXPECTED_BYTES}"
+            )
+            assert row.kind == "manual_execute"
+
+    async def test_execute_accepts_just_over_int4_pg(self, pg_db):
+        """Threshold pin on real PG — 2^31 (one above int4 max) MUST
+        round-trip through the audit-row INSERT without overflow.
+        The legacy int4 column would have raised
+        ``NumericValueOutOfRange``; BigInteger accepts the full
+        int8 range.
+        """
+        from daemon.services.timestamps import now_utc_iso
+
+        async with api_stack(pg_db) as st:
+            dry = MaintenanceRun(
+                run_id=(
+                    f"ckpt-20260928_just_over_int4-"
+                    f"{uuid.uuid4().hex[:8]}"
+                ),
+                section="checkpoint-cleanup",
+                kind="manual_dry_run",
+                started_at=now_utc_iso(),
+                completed_at=now_utc_iso(),
+                status="succeeded",
+                triggered_by="user",
+                summary_json={
+                    "would_delete": {
+                        "checkpoint_rows": 0,
+                        "writes": 0,
+                        "blobs": 4,
+                        "bytes": _JUST_OVER_INT4,
+                    },
+                    "would_delete_count": 4,
+                    "would_free_bytes": _JUST_OVER_INT4,
+                    "duration_ms": 412,
+                    "skipped": [],
+                },
+            )
+            assert st.repo.insert(dry) is True
+
+            r = await st.client.post(
+                f"{SECTION_PREFIX}/execute",
+                json={
+                    "dry_run_run_id": dry.run_id,
+                    "expected_bytes": _JUST_OVER_INT4,
+                    "confirm": True,
+                },
+            )
+            assert r.status_code == 202, r.text
+            await drain_tasks(st.svc)
+            row = st.repo.get(r.json()["run_id"])
+            assert row.expected_bytes == _JUST_OVER_INT4
+
+    async def test_execute_accepts_int4_max_pg(self, pg_db):
+        """Boundary pin (negative side) on real PG — 2^31-1 (the last
+        value that fits int4) MUST still round-trip after the
+        widening.
+        """
+        from daemon.services.timestamps import now_utc_iso
+
+        async with api_stack(pg_db) as st:
+            dry = MaintenanceRun(
+                run_id=(
+                    f"ckpt-20260928_int4_max-"
+                    f"{uuid.uuid4().hex[:8]}"
+                ),
+                section="checkpoint-cleanup",
+                kind="manual_dry_run",
+                started_at=now_utc_iso(),
+                completed_at=now_utc_iso(),
+                status="succeeded",
+                triggered_by="user",
+                summary_json={
+                    "would_delete": {
+                        "checkpoint_rows": 0,
+                        "writes": 0,
+                        "blobs": 4,
+                        "bytes": _INT4_MAX,
+                    },
+                    "would_delete_count": 4,
+                    "would_free_bytes": _INT4_MAX,
+                    "duration_ms": 412,
+                    "skipped": [],
+                },
+            )
+            assert st.repo.insert(dry) is True
+
+            r = await st.client.post(
+                f"{SECTION_PREFIX}/execute",
+                json={
+                    "dry_run_run_id": dry.run_id,
+                    "expected_bytes": _INT4_MAX,
+                    "confirm": True,
+                },
+            )
+            assert r.status_code == 202, r.text
+            await drain_tasks(st.svc)
+            row = st.repo.get(r.json()["run_id"])
+            assert row.expected_bytes == _INT4_MAX
+
+    async def test_ensure_postgres_columns_widens_existing_int4_column(
+        self, pg_db,
+    ):
+        """W1 behavioral pin (review follow-up 2026-09-28) — the
+        ALTER-on-existing-int4 path, executed for real.
+
+        The trio above exercises the POST-fix schema (``create_all``
+        builds ``bigint`` directly on fresh disposable DBs). THIS test
+        is the first real execution of the widening DO block outside a
+        production boot: it fabricates the LEGACY int4 column via raw
+        DDL, invokes the actual production
+        ``InstanceManager._ensure_postgres_columns`` body against the
+        disposable database, requires int4 → bigint, then re-runs the
+        same path and requires idempotency.
+
+        FIDELITY: the executed string is the production string BY
+        CONSTRUCTION — we call the real method, which internally runs
+        ``with engine.begin() as conn: conn.execute(text(stmt))`` over
+        its statement list (the exact boot execution shape). Full
+        ``InstanceManager(...)`` construction is deliberately avoided
+        (it wires repositories/sources/graph — not cheap): source
+        inspection shows ``_ensure_postgres_columns`` touches ONLY
+        ``self._engine`` and ``self._ensemble_config.is_postgres``, so
+        a bare ``__new__`` stub carrying exactly those two attributes
+        executes the real method body with no mock anywhere in the
+        widening path. The method makes an unconditional tail call
+        ``self._migrate_overloaded_image_refs_rows()``
+        (manager.py:7147) whose body (:7149-7239) was verified to
+        touch only the same two attributes (``self._engine`` and
+        ``self._ensemble_config.is_postgres``) plus the module logger,
+        so stub-safety holds transitively — a future callee edit that
+        added other ``self.*`` reads would fail this stub loudly with
+        ``AttributeError``.
+        """
+        from sqlalchemy import text
+        from daemon.manager import InstanceManager
+
+        await _probe_pg_or_skip()
+        name, dsn = pg_db
+        assert "ensemble_prod" not in dsn  # R-10 (fixture asserts too)
+        engine = create_engine(_sync_pg_url(dsn), poolclass=NullPool)
+
+        # 1. LEGACY shape: raw-DDL int4 column (pre-incident table),
+        #    created BEFORE create_all so checkfirst skips it and the
+        #    legacy type survives into the ensure pass.
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "CREATE TABLE maintenance_runs ("
+                    "  run_id TEXT PRIMARY KEY,"
+                    "  section TEXT NOT NULL,"
+                    "  kind TEXT NOT NULL,"
+                    "  started_at TEXT NOT NULL,"
+                    "  status TEXT NOT NULL,"
+                    "  triggered_by TEXT NOT NULL,"
+                    "  expected_bytes INTEGER"
+                    ")"
+                ))
+
+            def _data_type():
+                with engine.connect() as conn:
+                    row = conn.execute(text(
+                        "SELECT data_type FROM information_schema.columns "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name = 'maintenance_runs' "
+                        "AND column_name = 'expected_bytes'"
+                    )).fetchone()
+                return row[0] if row else None
+
+            assert _data_type() == "integer", _data_type()
+
+            # 2. Boot-order parity: create_all first (every OTHER table at
+            #    current shape — the pre-existing legacy table is skipped),
+            #    then the ensure path. This mirrors manager boot exactly
+            #    (daemon/manager.py:579 create_all → :601 ensure).
+            SQLModel.metadata.create_all(engine)
+
+            # 3. REAL production method on a two-attribute stub.
+            mgr = InstanceManager.__new__(InstanceManager)
+            mgr._engine = engine
+            mgr._ensemble_config = SimpleNamespace(is_postgres=True)
+            mgr._ensure_postgres_columns()
+
+            # 4. The widening MUST have fired on the legacy int4 column.
+            assert _data_type() == "bigint", (
+                "expected_bytes still "
+                f"{_data_type()!r} after _ensure_postgres_columns — the "
+                "widening DO block did not fire on the legacy int4 column"
+            )
+
+            # 5. Idempotency: second ensure pass → still bigint, no error
+            #    (the data_type='integer' probe excludes the column).
+            mgr._ensure_postgres_columns()
+            assert _data_type() == "bigint", _data_type()
+        finally:
+            engine.dispose()
 
 
 class TestContention:
