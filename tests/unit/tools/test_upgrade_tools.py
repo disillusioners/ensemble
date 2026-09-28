@@ -157,7 +157,7 @@ def no_spawn(monkeypatch: pytest.MonkeyPatch) -> list:
     subprocesses)."""
     calls: list = []
 
-    def _recorder(*args: Any, **kwargs: Any) -> int:
+    def _recorder(*args: Any, **kwargs: Any) -> tuple[int, str]:
         calls.append((args, kwargs))
         raise AssertionError(
             f"spawn_executor fired inside the tool call: {args!r} — actor "
@@ -3462,7 +3462,7 @@ class TestManagerDrainPendingExecution:
         held when the executor takes over)."""
         calls: list = []
 
-        def _rec(argv, install_dir, extra_env=None) -> int:
+        def _rec(argv, install_dir, extra_env=None, *, run_id=None) -> tuple:
             inst = Path(str(install_dir))
             calls.append(
                 {
@@ -3472,7 +3472,7 @@ class TestManagerDrainPendingExecution:
                     "lock_held_at_spawn": uj.lock_dir(inst).exists(),
                 }
             )
-            return self.EXECUTOR_PID
+            return self.EXECUTOR_PID, "(daemonized, start_new_session)"
 
         monkeypatch.setattr(uj, "spawn_executor", _rec)
         return calls

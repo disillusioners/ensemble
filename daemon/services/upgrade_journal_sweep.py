@@ -49,6 +49,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import signal
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -346,7 +347,18 @@ class UpgradeJournalSweepService:
         """Consume the reaper queue forever: await the child exit (bounded),
         journal the outcome, continue. Benign-detach on timeout (C2): NO
         kill, NO raise — the child keeps its own process group and the OS
-        reaps it; the journal entry is the operator's audit trail."""
+        reaps it; the journal entry is the operator's audit trail.
+
+        comp5 (r-20260928-005506-f82e): the journal ``executor_exit``
+        detail MUST surface the SIGNAL NAME when the executor was
+        killed by a signal (r-f82e's exit code 143 = SIGTERM, but a
+        bare ``143`` reads as "exited 143" — the operator has to know
+        that 128+N = SIG(N); a signal attribution line removes that
+        lookup). Implemented via ``os.WIFSIGNALED``/``os.WTERMSIG``
+        inside ``_reaper_worker`` (the worker thread runs the raw
+        waitpid; the result flows back into ``_journal_executor_exit``
+        AFTER ``_waitpid_blocking`` returns the raw status).
+        """
         while True:
             job = await self._reaper_queue.get()
             try:
@@ -374,7 +386,35 @@ class UpgradeJournalSweepService:
                     ),
                     timeout=self._reaper_timeout_s,
                 )
-                exit_code = os.waitstatus_to_exitcode(status)
+                # os.waitstatus_to_exitcode returns:
+                #   - low 8 bits for normal exits (0..255)
+                #   - negative signal number for signal kills (-15, etc.)
+                # For signal kills we want the shell's convention
+                # 128+signum so the journal detail reads ``exit_code=143``
+                # for SIGTERM — matches the operator's mental model and
+                # the shell's $? from a SIGTERM'd process.
+                raw_exit_code = os.waitstatus_to_exitcode(status)
+                if os.WIFSIGNALED(status):
+                    exit_code = 128 + os.WTERMSIG(status)
+                else:
+                    exit_code = raw_exit_code
+                # comp5: capture signal attribution when the child was
+                # killed by a signal. ``os.WIFSIGNALED(status)`` returns
+                # True iff the child died from an untrapped signal;
+                # ``os.WTERMSIG(status)`` returns the signal number.
+                # ``signal.Signals(...)`` maps to the canonical name
+                # (e.g. SIGTERM, SIGKILL). On non-signal exits the
+                # tuple is ``(None, None)`` and the journal surfaces
+                # only the exit_code.
+                if os.WIFSIGNALED(status):
+                    sig_num = os.WTERMSIG(status)
+                    try:
+                        sig_name = signal.Signals(sig_num).name
+                    except ValueError:
+                        sig_name = f"SIG{sig_num}"
+                    signal_info = (sig_name, sig_num)
+                else:
+                    signal_info = (None, None)
             except asyncio.CancelledError:
                 # FM-11: never swallow — propagate to stop().
                 raise
@@ -386,19 +426,28 @@ class UpgradeJournalSweepService:
             except ChildProcessError:
                 # The child died (or was reaped) before we got to it — the
                 # exit code is unobservable; journal the gap loudly.
-                await self._journal_executor_exit(job, exit_code=-1)
+                await self._journal_executor_exit(
+                    job, exit_code=-1, signal_name=None, signal_num=None
+                )
                 continue
             except Exception as exc:  # noqa: BLE001 — one bad job never
                 # kills the worker; journal + move on.
                 await self._journal_executor_error(job, exc)
                 continue
-            await self._journal_executor_exit(job, exit_code=exit_code)
+            await self._journal_executor_exit(
+                job,
+                exit_code=exit_code,
+                signal_name=signal_info[0],
+                signal_num=signal_info[1],
+            )
 
     @staticmethod
     def _waitpid_blocking(pid: int) -> int:
         """Blocking ``os.waitpid`` — runs in a thread on the service-owned
         DEDICATED executor (M-1, not ``asyncio.to_thread``). Returns the
-        raw wait status (decoded by the worker)."""
+        raw wait status; the worker decodes signal kills via
+        ``os.WIFSIGNALED``/``os.WTERMSIG`` and normal exits via
+        ``os.waitstatus_to_exitcode``."""
         _, status = os.waitpid(pid, 0)
         return status
 
@@ -426,13 +475,31 @@ class UpgradeJournalSweepService:
             return ""
 
     async def _journal_executor_exit(
-        self, job: ReaperJob, *, exit_code: int
+        self,
+        job: ReaperJob,
+        *,
+        exit_code: int,
+        signal_name: str | None = None,
+        signal_num: int | None = None,
     ) -> None:
         tail = self._log_tail(job.install_dir)
+        # comp5 (r-f82e): when the executor was killed by a signal,
+        # surface the signal name in the journal detail so the operator
+        # reads "executor_exit run_id=… exit_code=143 terminated by
+        # SIGTERM (15)" instead of having to recall that 128+N maps to
+        # SIG(N). On non-signal exits (exit_code=0, 78, etc.) the
+        # detail is the original bare exit_code line — preserves the
+        # contract for the common (non-r-f82e) cases.
         detail = (
             f"run_id={job.run_id} pid={job.pid} exit_code={exit_code} "
             f"argv={list(job.argv_summary)} upgrade.log tail:\n{tail}"
         )
+        if signal_name is not None and signal_num is not None:
+            detail = (
+                f"run_id={job.run_id} pid={job.pid} exit_code={exit_code} "
+                f"terminated by {signal_name} ({signal_num}) "
+                f"argv={list(job.argv_summary)} upgrade.log tail:\n{tail}"
+            )
         try:
             uj.journal_history_append(job.install_dir, "executor_exit", detail)
         except OSError as exc:

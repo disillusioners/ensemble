@@ -83,6 +83,14 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys  # r-f82e cycle 0 detector bug fix: bare `sys.platform` reference
+            # in _scope_detect_real raised NameError on every call, silently
+            # swallowed by the broad `except Exception:` in the detector —
+            # the detector ALWAYS returned (False, "") regardless of host.
+            # cycle 1 fixback: this import is REQUIRED for Item 1(a) — the
+            # env= kwarg forwarded to subprocess.run is meaningless if the
+            # probe never runs. (Pre-existing; cycle 0 reviewer caught this
+            # only as a minor, but it blocked pin 6a outright.)
 import threading
 import time
 import uuid
@@ -1065,8 +1073,20 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
 # R-SR09 env allowlist — the executor inherits the MINIMUM a pipeline
 # script needs. NEVER the daemon's full environment (no .env passthrough,
 # no API keys). PG* covers the sandbox drill harness's throwaway PG vars.
+#
+# Bus-discovery vars (r-f82e fix cycle 1): on session-env Linux hosts
+# (dev/demo login-session daemons), ``systemd-run --user`` needs
+# ``XDG_RUNTIME_DIR`` + ``DBUS_SESSION_BUS_ADDRESS`` to locate the user
+# bus. They are non-secrets (only bus socket addresses, never keys) and
+# the F2 fence is preserved — ``ENSEMBLE_UPGRADE_LIVE`` and other
+# privileged/secret vars are NOT in this allowlist and stay stripped.
+# Pin: tests/unit/tools/test_promote_cgroup_survivorship_python.py
+# 6b + 6c (cycle-1 fixback).
 EXECUTOR_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH", "HOME", "INSTALL_DIR", "PORT", "POSTGRES_DB", "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_SYSTEM_BUS_ADDRESS",
 )
 EXECUTOR_ENV_PREFIXES: tuple[str, ...] = ("PG",)
 
@@ -1089,20 +1109,271 @@ def executor_log_path(install_dir: Path) -> Path:
     return install_dir / "data" / "upgrade.log"
 
 
-def spawn_executor(
-    argv: list[str], install_dir: Path, extra_env: dict[str, str] | None = None
-) -> int:
-    """Daemonize the executor payload (``start_new_session=True`` ≡
-    double-fork + setsid). Returns the child pid.
+# ── systemd transient scope (r-20260928-005506-f82e; component 1 of 6) ────────
+#
+# INCIDENT (2026-09-28, ensemble-vm LIVE): the promote executor was spawned
+# with ``start_new_session=True`` (≡ setsid). That creates a new SESSION
+# — it does NOT leave the systemd unit's cgroup. When ``ensemble-live.service``
+# deactivated under KillMode=control-group, the cgroup teardown SIGTERMed
+# every process in the unit — including the executor — BEFORE the symlink
+# flip could run, leaving an orphaned ``in_flight`` txn the reaper had
+# stopped observing 2 seconds earlier.
+#
+# FIX: on Linux+systemd hosts, wrap the executor in a transient SCOPE unit
+# (``systemd-run --scope --unit=ensemble-upgrade-<run_id> …``). The scope is
+# its OWN cgroup, outside ``ensemble-live.service`` — the unit teardown
+# cannot reach it, the executor survives to flip + close the txn.
+#
+# BYTE-IDENTICALITY (macOS / no-systemd / Linux-no-systemd): today's
+# ``start_new_session=True`` path is preserved verbatim. Detection is
+# test-injectable via ``_scope_detect_fn`` so the three branches are
+# pinned deterministically (Linux+systemd, Linux-no-systemd, non-Linux).
+#
+# UNIT NAME: ``ensemble-upgrade-<run_id>`` — the polkit rule on
+# ensemble-vm (§3.4 of the incident doc) name-restricts scope creation
+# to ``^ensemble-[0-9A-Za-z@._-]+\.scope$`` via the detail-carrying
+# path; systemd 255's StartTransientUnit path carries no detail, so
+# the rule's detail-less branch (granted) covers us. The
+# ``ensemble-upgrade-`` prefix is conservative and matches the rule's
+# regex; future tightening to ``^ensemble-upgrade-`` is straightforward.
+#
+# USER vs SYSTEM bus: the daemon runs as the service user (no root).
+# A non-root process cannot create scope units on the system bus; we
+# therefore use the USER bus via ``systemd-run --user --scope`` when
+# available, falling back to the system bus when --user is unavailable
+# (daemons running as root in containers, etc.). Detection mirrors
+# the systemd-run helper's own logic: try ``--user`` first and watch
+# for a clear "not available" stderr; if it fails for any reason,
+# fall back to ``--scope`` (system bus).
+#
+# R-SR09 ENV ALLOWLIST PRESERVED: the scope wrapper's child inherits the
+# SAME allowlist as today's Popen — no .env passthrough, no API keys.
+# The wrapper argv carries the SAME inner argv; the env dict flows
+# through unchanged.
 
-    Deliberately NOT registered in ``BashProcessRegistry`` or any other
-    teardown registry (D4/T5 static-assertion target): the child must
-    survive BOTH tool-harness teardown and daemon death. stdio →
+
+# Sentinel object the spawner uses to thread the run_id (and ONLY the
+# run_id) into the scope-unit name. Re-exported from upgrade_tools for
+# the test pin; production code passes the run_id via the existing
+# reaper-enqueue seam, NOT through argv mutation.
+SCOPE_UNIT_PREFIX = "ensemble-upgrade-"
+
+# Test seam: ``_scope_detect_fn`` returns ``(use_scope, bus_kind)``
+# where ``bus_kind`` is ``"user"`` or ``"system"``. Default = the real
+# detector. Tests inject a stub returning deterministic values for
+# the three branches (Linux+systemd / Linux-no-systemd / non-Linux).
+# r-f82e fix cycle 1: the seam now accepts the spawn-time env dict
+# (executor_env shape) so detection sees exactly what the wrapper
+# inherits — pin 6a (Python) asserts the env dict is forwarded.
+def _scope_detect_real(env: dict[str, str] | None = None) -> tuple[bool, str]:
+    """Real detector — Linux+systemd → (True, "user"|"system") else
+    (False, ""). Conservative: returns ``(False, "")`` whenever ANY
+    detection step fails (no /run/systemd/system, no systemd-run on
+    PATH, uname != Linux, etc.) so a misconfigured host falls back
+    to the legacy ``start_new_session=True`` path byte-identically.
+
+    The ``env`` arg, when supplied, is the EXACT env the scope wrapper
+    inherits from the caller (executor_env(extra_env)). Detection uses
+    THIS env, NOT the daemon's full ambient — on session-env Linux
+    hosts (r-f82e fix cycle 1), the bus-discovery vars
+    (XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS) are ambient in the
+    daemon process but the allowlist strips them from the wrapper, so
+    probing with ambient would falsely report "user bus available"
+    while the wrapper would lack the bus address and the payload
+    would never reach systemd-run. ``env=None`` preserves the
+    pre-cycle-1 probe (inherit ambient) for the existing pin 5 call
+    site that exercises "never raises" on a hostile PATH.
+    """
+    try:
+        if sys.platform != "linux":
+            return (False, "")
+        # systemd's "I'm PID 1" mark — universal across distros.
+        if not Path("/run/systemd/system").exists():
+            return (False, "")
+        # systemd-run must be on PATH (NOT just present elsewhere).
+        # shutil.which honors PATH and respects current env.
+        if shutil.which("systemd-run") is None:
+            return (False, "")
+        # We MUST know whether to use --user or --scope. The clean
+        # test: try ``systemd-run --user --scope --unit=… /bin/true``
+        # with stderr captured; an "not available" message means the
+        # user instance isn't running (the common case for service
+        # users). Anything else (success) → use --user. If --user
+        # fails for any OTHER reason we conservatively fall back to
+        # the system bus (--scope alone) — the unit-name match still
+        # passes the polkit rule's detail-less branch.
+        #
+        # r-f82e fix cycle 1: probe is run with ``env=env`` (the
+        # wrapper's env), NOT the daemon's full ambient. Without this
+        # gate, the probe inherits ambient XDG_RUNTIME_DIR +
+        # DBUS_SESSION_BUS_ADDRESS, decides "user bus OK", and the
+        # wrapper then lacks the bus address at spawn time — the
+        # payload never runs. Pin: tests/unit/tools/test_
+        # promote_cgroup_survivorship_python.py 6a.
+        probe_unit = f"ensemble-upgrade-detect-{os.getpid()}-{int(time.time())}"
+        try:
+            r = subprocess.run(
+                ["systemd-run", "--user", "--scope", f"--unit={probe_unit}",
+                 "/bin/true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=5.0,
+                env=env,
+            )
+            if r.returncode == 0:
+                return (True, "user")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        # Fall back to system bus: --scope alone (no --user). Still
+        # needs systemd-run AND the polkit grant for nea (live).
+        try:
+            r = subprocess.run(
+                ["systemd-run", "--scope", f"--unit={probe_unit}",
+                 "/bin/true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=5.0,
+                env=env,
+            )
+            if r.returncode == 0:
+                return (True, "system")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return (False, "")
+    except Exception as exc:  # noqa: BLE001 — detection must never raise
+        # r-f82e fix cycle 2 (review-cycle-2 fixback): one WARNING so a silent
+        # detector regression (e.g. a NameError from a typo'd import that the
+        # bare-except swallow hides for days) leaves a forensic breadcrumb.
+        # The 3-commit silent NameError is the dispositive cost-of-silence
+        # evidence; spawn rarity makes noise negligible. NO behavior change —
+        # detection still falls back to legacy path byte-identically.
+        logger.warning(
+            "upgrade_journal: _scope_detect_real swallowed exception — "
+            "falling back to legacy path: %s: %s",
+            type(exc).__name__, exc,
+        )
+        return (False, "")
+
+
+_scope_detect_fn: Callable[[dict[str, str] | None], tuple[bool, str]] = _scope_detect_real
+
+
+def build_scope_argv(
+    inner_argv: list[str], run_id: str, bus_kind: str
+) -> list[str]:
+    """Build the systemd-run argv wrapping ``inner_argv`` in a transient
+    scope. The SCOPE UNIT NAME carries the run_id for observability
+    (visible via ``systemctl list-units ensemble-upgrade-*`` and in
+    the journal). Returns ``["systemd-run", "--user"|"--scope",
+    "--unit=ensemble-upgrade-<run_id>", "--", <inner_argv...>]``.
+
+    Caller's responsibility: this helper does NO detection — pass the
+    result of ``_scope_detect_fn()`` directly. Pure function for test
+    injection; the detector itself has a test seam above.
+    """
+    unit = f"{SCOPE_UNIT_PREFIX}{run_id}"
+    # systemd-run args: --user/--scope first (mutually exclusive),
+    # --unit=NAME next, then -- (separator), then the inner argv.
+    head: list[str] = ["systemd-run"]
+    if bus_kind == "user":
+        head.append("--user")
+    # else "system" → just --scope (no --user)
+    head.append("--scope")
+    head.append(f"--unit={unit}")
+    head.append("--")
+    return head + list(inner_argv)
+
+
+def spawn_executor(
+    argv: list[str],
+    install_dir: Path,
+    extra_env: dict[str, str] | None = None,
+    *,
+    run_id: str | None = None,
+) -> tuple[int, str]:
+    """Daemonize the executor payload. THREE BRANCHES (r-f82e fix):
+
+    1. Linux + systemd + polkit grant: wrap in a transient scope unit
+       (``systemd-run --user/--scope --unit=ensemble-upgrade-<run_id>``).
+       The scope is its OWN cgroup — unit teardown cannot reach it
+       (the live promote survives daemon shutdown, flips the symlink,
+       closes the txn). Detected via ``_scope_detect_fn`` (test-injectable).
+    2. Linux + no systemd / systemd-run denied: fall back to today's
+       ``start_new_session=True`` path BYTE-IDENTICALLY. The setsid
+       child shares the unit's cgroup — known-bad under KillMode=
+       control-group, but the only available option on a non-systemd
+       host.
+    3. Non-Linux (macOS, BSD): the legacy ``start_new_session=True``
+       path BYTE-IDENTICALLY. setsid works correctly on launchd —
+       the survivorship model was designed on macOS launchd semantics.
+
+    Returns ``(child_pid, mode_note)``. ``mode_note`` is derived from the
+    SAME internal detection result (``scope=ensemble-upgrade-<run_id>``
+    for the SCOPE branch, ``(daemonized, start_new_session)`` for the
+    legacy branch) so the caller never has to re-detect. Deliberately
+    NOT registered in ``BashProcessRegistry`` or any other teardown
+    registry (D4/T5 static-assertion target): the child must survive
+    BOTH tool-harness teardown AND daemon death. stdio →
     ``data/upgrade.log`` (append). The child re-points its cwd at the
     install dir so relative pipeline output lands in the right place.
+    Env: same allowlist semantics (R-SR09) — no .env passthrough, no
+    API keys. The scope-wrapper inherits the SAME env dict.
+
+    ``run_id`` (r-f82e fix cycle 1, kw-only): when supplied, the
+    SCOPE UNIT NAME carries it directly (``ensemble-upgrade-<run_id>``),
+    giving journal↔unit correlation and a stable per-promote unit
+    identity even when argv lacks ``--run-id`` (the promote argv today
+    carries ``--version`` only). When ``None``, falls back to argv
+    extraction (legacy behavior) and finally to a pid+epoch sentinel.
+    Manager's drain path threads ``run_id`` explicitly so the unit
+    name is reliable; tests and any future call site may omit it.
     """
     log = executor_log_path(install_dir)
     log.parent.mkdir(parents=True, exist_ok=True)
+
+    # r-f82e fix cycle 1: build the env dict FIRST — detection must see
+    # exactly the env the wrapper inherits (executor_env shape).
+    # Without this gate the probe inherits ambient bus-discovery vars
+    # and decides "user bus OK"; the wrapper then lacks them and the
+    # payload never runs. Pin: 6a (Python).
+    env = executor_env(extra_env)
+    use_scope, bus_kind = _scope_detect_fn(env)
+
+    if use_scope:
+        # r-f82e fix cycle 1: prefer the explicit run_id kwarg (set by
+        # the manager drain seam — promotion callers always have it),
+        # then argv extraction (restart argv carries --run-id), then
+        # the pid+epoch sentinel as a last-resort unique unit name.
+        # The scope unit MUST be unique per promote — systemd refuses
+        # the second transient creation against an existing name.
+        if not run_id:
+            run_id = ""
+            for i, tok in enumerate(argv[:-1]):
+                if tok == "--run-id" and i + 1 < len(argv):
+                    run_id = argv[i + 1]
+                    break
+            if not run_id:
+                run_id = f"spawn-{os.getpid()}-{int(time.time())}"
+        wrapped_argv = build_scope_argv(argv, run_id, bus_kind)
+        with log.open("ab") as log_fh:
+            proc = subprocess.Popen(
+                wrapped_argv,
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                cwd=str(install_dir),
+                env=env,
+                # start_new_session MUST be False: systemd-run is the
+                # new session leader; setsid on the daemon side
+                # would put the systemd-run child in OUR cgroup,
+                # defeating the scope escape.
+                start_new_session=False,
+                close_fds=True,
+            )
+        return proc.pid, f"scope=ensemble-upgrade-{run_id}"
+
+    # Legacy path: BYTE-IDENTICAL to pre-r-f82e behavior. Any host
+    # where the scope detector returns (False, "") lands here.
     with log.open("ab") as log_fh:
         proc = subprocess.Popen(
             argv,
@@ -1110,11 +1381,11 @@ def spawn_executor(
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             cwd=str(install_dir),
-            env=executor_env(extra_env),
+            env=env,
             start_new_session=True,  # ≡ setsid: detaches the process group
             close_fds=True,
         )
-    return proc.pid
+    return proc.pid, "(daemonized, start_new_session)"
 
 
 # ── User-origin classification (assumption #1 closure — D-FA3.1; verdict §4) ──

@@ -88,7 +88,11 @@ fi
 if ! lock_acquire; then
     exit 78   # pipeline-busy (structured, logged)
 fi
-trap 'lock_release' EXIT
+# Signal trap discipline (component 2 of r-20260928-005506-f82e): see
+# lib.sh _trap_install_signal_handlers. Installs TERM/HUP/INT handlers
+# that journal halt + release the lock; EXIT trap is swapped to the
+# safe variant to avoid double-release.
+_trap_install_signal_handlers "rollback:preflight"
 lock_heartbeat
 
 # Re-read the journal under the lock (state may have moved since).

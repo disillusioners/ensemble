@@ -715,7 +715,16 @@ adopt_rel() {  # <dir> <ver> <rollback_safe>
         > "$1/releases/$2/manifest.json"
     printf 'stub' > "$1/releases/$2/ensemble-prod"
 }
-ADOPT_SEED='{"current":"vP","previous":"PREV","in_flight":{"kind":"KIND","target":"vX","started_at":"STARTED","flipped":FLIP,"owner_pid":OWNERPID},"rollback_window_count":{"24h":CNT,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}'
+# ADOPT_SEED — the journal template adopt_fixture splices. Includes
+# last_heartbeat as the SAME epoch as started_at (so the in_flight looks
+# like one journal_open_txn wrote it; the r-f82e fast path
+# (hb_stale + owner_dead → reclaim) does not fire on a fresh heartbeat).
+# Adding the field is additive (legacy readers ignore unknown keys).
+# NB: the placeholder for last_heartbeat is "LASTHB" (a separate token),
+# NOT a `$2_EPOCH` variable — bash variable-name rules reject
+# "$<digit>_<chars>", so a "$2_EPOCH" expansion would silently
+# mis-resolve and the fixture would carry a malformed heartbeat.
+ADOPT_SEED='{"current":"vP","previous":"PREV","in_flight":{"kind":"KIND","target":"vX","started_at":"STARTED","flipped":FLIP,"owner_pid":OWNERPID,"last_heartbeat":LASTHB},"rollback_window_count":{"24h":CNT,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}'
 adopt_fixture() {  # <dir> <started-iso-or-GARBAGE> <flipped> <prev> <cnt> <ownerpid> <prev_rbs> [kind]
     rm -rf "$1"; mkdir -p "$1/releases"
     adopt_rel "$1" vX true
@@ -725,6 +734,39 @@ adopt_fixture() {  # <dir> <started-iso-or-GARBAGE> <flipped> <prev> <cnt> <owne
     printf '%s' "$ADOPT_SEED" \
         | sed -e "s/STARTED/$2/" -e "s/FLIP/$3/" -e "s/PREV/$4/" -e "s/CNT/$5/" -e "s/OWNERPID/$6/" -e "s/KIND/${8:-promote}/" \
         > "$1/releases/state.json"
+    # Touch up LASTHB → real epoch of $2 (started_at). Bash variable-name
+    # rules reject "$2_EPOCH" so the placeholder uses a sentinel string.
+    # Used by the r-f82e fast-path contract: a fresh last_heartbeat
+    # keeps hb_stale=0, so the fast path does NOT reclaim a fresh txn
+    # even when the owner pid is dead. Pre-r-f82e the existing tests
+    # pinned the OLD "fresh age + dead owner → refuse" contract — that
+    # contract still holds WITH the heartbeat present (the fast path
+    # reads heartbeat, not age, as the fast-path gate).
+    #
+    # Test-harness quirk on Linux hosts: ``FRESH30="$(date -ju -v-30S …)"``
+    # fails (BSD date syntax) and leaves FRESH30 empty. If we stamped
+    # 0 in that case the heartbeat would be ~56 years old → STALE →
+    # the fast path would reclaim (rc 0), breaking the existing 8c/8d
+    # "fresh age + dead owner → refuse" pin. We instead stamp
+    # ``$(date +%s)`` (the LIVE current epoch) so the heartbeat is
+    # fresh regardless of the BSD-syntax outcome — that preserves the
+    # original contract the tests pin.
+    local _epoch_val _live_now
+    _live_now="$(date +%s)"
+    _epoch_val="$(python3 -c "
+import datetime, sys
+try:
+    print(int(datetime.datetime.strptime(sys.argv[1], '%Y-%m-%dT%H:%M:%SZ').timestamp()))
+except Exception:
+    print(0)
+" "$2" 2>/dev/null)"
+    if [ -z "$_epoch_val" ] || [ "$_epoch_val" = "0" ]; then
+        # BSD date likely failed (Linux host); substitute a fresh epoch
+        # so the heartbeat-stale gate stays 0 — the test's "fresh age"
+        # contract is preserved.
+        _epoch_val="$_live_now"
+    fi
+    sed -i '' "s/LASTHB/${_epoch_val}/" "$1/releases/state.json"
     ln -sfn releases/vX "$1/current"   # the orphaned flip (vX) — adopt may repoint
 }
 adopt_run() {  # <dir>

@@ -215,11 +215,15 @@ BINARY_VERSION="${ENSEMBLE_BINARY_VERSION:-${VERSION#v}}"
 if ! lock_acquire; then
     exit 78   # pipeline-busy already logged (structured, not an error)
 fi
-trap 'lock_release' EXIT
-# stage holds this lock through LONG assembly phases (tree copies + sha256
-# walks can exceed LOCK_STALE_S=300s on big trees) — heartbeat at every
-# phase boundary so a concurrent promote/sweep never stale-breaks the lock
-# of a LIVE owner (review m3; promote/rollback heartbeat the same way)
+# Signal trap discipline (component 2 of r-20260928-005506-f82e): see
+# lib.sh _trap_install_signal_handlers. Installs TERM/HUP/INT handlers
+# that journal halt + release the lock; EXIT trap is swapped to the
+# safe variant to avoid double-release. Stage holds this lock through
+# LONG assembly phases (tree copies + sha256 walks can exceed
+# LOCK_STALE_S=300s on big trees) — heartbeat at every phase boundary
+# so a concurrent promote/sweep never stale-breaks the lock of a LIVE
+# owner (review m3; promote/rollback heartbeat the same way)
+_trap_install_signal_handlers "stage:lock"
 lock_heartbeat
 
 # ── Install dir (demo/sandbox created on demand; live must pre-exist) ───────

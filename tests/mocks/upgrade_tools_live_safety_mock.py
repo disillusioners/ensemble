@@ -753,7 +753,7 @@ async def s5_spawn_proof(tools: dict, mgr: _ManagerFacade) -> tuple[str, int] | 
         dump.unlink()
     argv = ["/bin/bash", str(SANDBOX / "fixture_executor_payload.sh"), str(dump)]
     try:
-        child_pid = uj.spawn_executor(
+        child_pid, _spawn_mode_note = uj.spawn_executor(
             argv, FAKE_DEMO,
             {"INSTALL_DIR": str(FAKE_DEMO), "PORT": str(SELF_PORT)},
         )
