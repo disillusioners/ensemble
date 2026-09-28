@@ -1,5 +1,22 @@
 # Test Packs
 
+## Completed commission — CHECKPOINT-CLEANUP INT4-OVERFLOW CLOSING GATE (2026-09-28)
+
+Branch `fix/checkpoint-cleanup-int4-overflow` @ **`0386c344`** (commits `0179f11e`+`0386c344`; base `64da8806` = latest). **VERDICT: PASS — READY TO MERGE. Original symptom DEAD (incident value 27,233,813,846 through full execute path → 202 + terminal `succeeded` + persisted `expected_bytes`); W1 real-widening gate green; zero branch-caused failures; sole sweep red proven base-identical.** Full report: `RESULTS/2026-09-28-checkpoint-cleanup-int4-overflow-verification.md`. All packs env-scrubbed via the NEW `scripts/run_tests_scrubbed.sh` (family-wide POSTGRES_* echo-verify, exit-78 on leak — functionally proven here); every run `timeout`-wrapped; zero source mods, zero commits (9 workers).
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `int4_pg_api` | throwaway initdb PG :15532; `PG_TEST_*`; `timeout 300 bash scripts/run_tests_scrubbed.sh tests/integration/test_maintenance_checkpoint_cleanup_api.py --override-ini="addopts=" -m "integration and postgres" --tb=short -q -rA` | PG API suite incl. symptom+W1 | ✅ 46P+1S/47 in 74.02s (skip = designed SQLite-dialect fallback) |
+| `int4_unit_service` | `timeout 300 bash scripts/run_tests_scrubbed.sh tests/unit/services/test_maintenance_checkpoint_cleanup_service.py --tb=short -q -rA` | unit side | ✅ 82P/0F in 40.03s (incl. 6 BigInteger + AST widening pin + 5 echo-contract) |
+| `int4_companions` | same wrapper; 4 files: lock_and_capture + destructive_override + prune_direct_anti_join + job_wiring_pin | companion family superset | ✅ 57P (15/11/24/7) in 12.77s |
+| `int4_repositories` | same wrapper; `tests/unit/repositories/` | repositories layer | ✅ 116P/0F in 26.09s |
+| `int4_breadth_migration` | same wrapper; `tests/migration/` + deferred-schema-pin + critical-notes-migrations | migration/schema breadth | ✅ 71P/1F/5S in 10.19s (1F = pre-known attestation red, base-proven; 5S = PG-env skips) |
+| `concurrency_atomic_unit_test` (registered) | `timeout 300 env -u <POSTGRES/PG fence> PATH=… bash test/packs/concurrency_atomic_unit_test.sh` | ensure.md Core #2/#3 | ✅ 98P/0F/74S baseline-exact in 64.70s |
+| `int4_fe_pw` | `ENSEMBLE_DB_DSN=<:15432 disposable> OPENAI_API_KEY=<dummy> PATH=… timeout 300 npx playwright test --config playwright.maintenance.config.ts maintenance-checkpoint-cleanup --reporter=line` (drop `--project` — see LESSONS) | 14-case web gate + real-boot sanity | ✅ 14/14 in 1.4m; ports 8099/4299/15432 freed; live PIDs stable |
+| `int4_base_red` | detached worktree @ `64da8806`; single node; PYTHONPATH-pinned; POSTGRES-scrubbed | base attribution leg | ✅ BASE-RED CONFIRMED (attestation node fails verbatim-identically at base; worktree removed) |
+
+Attribution: `TestNoBooleanIntegerDefaultInShippedMigrations::test_no_boolean_int_literal_default` → QUARANTINE.md (base-attributed at 64da8806, deterministic file-parse). Checksum-ledger analysis (same commission): the `20260927_000001` INTEGER→BIGINT canonical-DDL edit is SAFE — checksums recorded at apply time are never re-verified; pending-set math is version-ID membership only; PG never executes `.sql`.
+
 ## Completed commission — DRY-RUN PROJECTION v3.2 MERGE-BLOCKING VERIFICATION (2026-09-27)
 
 Branch `feature/dry-run-projection-v3.2` @ **`df89da37`** vs base **`1989b3b5`** (v0.16.0). **VERDICT: PASS — READY TO MERGE. All dev claims confirmed; contract probes 8/8 (incl. SQL-level R-1 delta proof); Playwright 14/14 with clean teardown; whole-tree delta ZERO branch-caused (39 head-only nodes all classified: 17 environmental, 1 load-flake, 21 pre-existing proven at base).** Full report: `RESULTS/2026-09-27-dry-run-projection-v32-verification.md`. All packs env-scrubbed `POSTGRES_*`; `uv run python -m pytest` only; every run `timeout`-wrapped; zero source mods, zero commits (23 read-only workers).
