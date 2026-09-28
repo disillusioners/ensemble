@@ -45,7 +45,7 @@
 #   # proof invoked this shape):
 #   E2E_BASE_URL=http://localhost:19797 \
 #   E2E_PG_DB=ensemble_dev_scratch \
-#   ENSEMBLE_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS=10 \
+#   SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS=10 \
 #       ./test/packs/u7s15_realseat_acceptance_unit_test.sh
 #
 #   # Full suite (uses production-default 300s sweep interval):
@@ -116,6 +116,8 @@ Usage: $0 [--full] [--leg LEG_NAME]
   --leg NAME   Run only the named leg (leg_a|leg_b|leg_c|leg_d|leg_e)
 
 Default: 5-leg run with shortened sweep interval (10s) for bounded runtime.
+  The sweep interval env var is ``SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS``
+  (env_prefix="SERVICES_" per daemon/config.py:1172).
 USAGE
             exit 0
             ;;
@@ -141,7 +143,7 @@ fi
 echo
 echo "[BOOT-CONTEXT] E2E_BASE_URL=${E2E_BASE_URL:-http://localhost:8079 (default)}"
 echo "[BOOT-CONTEXT] E2E_PG_DB=${E2E_PG_DB:-ensemble_dev (default)}"
-echo "[BOOT-CONTEXT] sweep_interval_s=$ENSEMBLE_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS"
+echo "[BOOT-CONTEXT] sweep_interval_s=${SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS:-300}"
 echo "[BOOT-CONTEXT] timeout_s=$TIMEOUT_S (Layer 1)"
 echo "[BOOT-CONTEXT] pytest_timeout_s=$PYTEST_TIMEOUT_S (Layer 2)"
 
