@@ -16,6 +16,10 @@ Coverage:
   2. build_scope_argv pure-function correctness
   3. Reaper signal surfacing (os.WIFSIGNALED + os.WTERMSIG → "SIGTERM (15)")
   4. _scope_detect_real (real detector) never raises — fail-closed contract
+  6. r-f82e fix cycle 1 — detection-env == spawn-env parity
+     6a. detector probes with caller-supplied env (forwards to subprocess.run)
+     6b. XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS survive executor_env
+     6c. ENSEMBLE_UPGRADE_LIVE STILL stripped (F2 fence holds post-widening)
 """
 from __future__ import annotations
 
@@ -64,7 +68,7 @@ def main():
     # + assert the detector was honored at the seam.
 
     # Branch A: Linux+systemd, user bus
-    def fake_user():
+    def fake_user(*args, **kwargs):
         return (True, "user")
     uj._scope_detect_fn = fake_user
     argv = ["bash", "promote.sh", "live", "--run-id", "r-test-foo"]
@@ -78,7 +82,7 @@ def main():
     print("PASS: 1a Linux+systemd (user bus) → systemd-run --user --scope --unit=ensemble-upgrade-r-test-foo")
 
     # Branch B: Linux+systemd, system bus
-    def fake_system():
+    def fake_system(*args, **kwargs):
         return (True, "system")
     uj._scope_detect_fn = fake_system
     scoped_sys = uj.build_scope_argv(argv, "r-test-foo", "system")
@@ -89,7 +93,7 @@ def main():
     print("PASS: 1b Linux+systemd (system bus) → systemd-run --scope --unit=…")
 
     # Branch C: non-Linux (detector returns (False, ""))
-    def fake_legacy():
+    def fake_legacy(*args, **kwargs):
         return (False, "")
     uj._scope_detect_fn = fake_legacy
     use_scope, bus_kind = uj._scope_detect_fn()
@@ -181,6 +185,120 @@ def main():
     except Exception as e:
         print(f"FAIL: 5 _scope_detect_real raised {type(e).__name__}: {e}")
         sys.exit(1)
+
+    # ── 6. r-f82e fix cycle 1 — detection-env == spawn-env parity ──────────
+    # The probe must see EXACTLY the env the wrapper inherits. Without
+    # this gate, on session-env Linux hosts, the probe inherits ambient
+    # XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS, decides "user bus OK",
+    # and the wrapper then lacks those vars at spawn time — the payload
+    # never runs (the cycle-1 bug). Pins 6a/6b/6c freeze the contract.
+
+    # 6a: detector probes with caller-supplied env (forwards to subprocess.run).
+    # We monkey-patch subprocess.run on the upgrade_journal module so the
+    # detector's two probes record the env= kwarg verbatim. Both probes
+    # fail (returncode=1) so the detector short-circuits to (False, "")
+    # without spawning real systemd-run.
+    captured_envs: list = []
+    real_run = uj.subprocess.run
+
+    def _cap_run(*args, **kwargs):
+        captured_envs.append(kwargs.get("env"))
+        class _Result:
+            returncode = 1
+            stderr = b""
+        return _Result()
+
+    uj.subprocess.run = _cap_run
+    try:
+        probe_env = {
+            "PATH": "/x",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        }
+        res6a = uj._scope_detect_real(probe_env)
+        assert isinstance(res6a, tuple) and len(res6a) == 2
+        assert res6a == (False, ""), res6a
+        # Every captured env= must be the SAME dict reference we passed —
+        # not a copy, not None, not the daemon's full ambient. Verifies
+        # the detector forwards the caller's env dict verbatim.
+        assert captured_envs, "detector did not invoke subprocess.run"
+        for i, env_seen in enumerate(captured_envs):
+            assert env_seen is probe_env, (
+                f"probe {i} env mismatch: expected our probe_env dict, got {env_seen!r}"
+            )
+        print(
+            "PASS: 6a detector probes with caller-supplied env "
+            f"(forwarded to {len(captured_envs)} subprocess.run call(s))"
+        )
+    finally:
+        uj.subprocess.run = real_run
+
+    # 6b: XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS survive executor_env.
+    # The bus-discovery vars are now in EXECUTOR_ENV_ALLOWLIST (cycle-1
+    # widening). Set them in os.environ and assert executor_env passes
+    # them through. DBUS_SYSTEM_BUS_ADDRESS only verified structurally
+    # (the allowlist membership; it stays None on user-bus hosts).
+    saved_env = {}
+    bus_vars = (
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "DBUS_SYSTEM_BUS_ADDRESS",
+    )
+    for k in bus_vars:
+        saved_env[k] = os.environ.pop(k, None)
+    try:
+        os.environ["XDG_RUNTIME_DIR"] = "/run/user/1000"
+        os.environ["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus"
+        env6b = uj.executor_env(None)
+        assert env6b.get("XDG_RUNTIME_DIR") == "/run/user/1000", env6b.get("XDG_RUNTIME_DIR")
+        assert env6b.get("DBUS_SESSION_BUS_ADDRESS") == "unix:path=/run/user/1000/bus", (
+            env6b.get("DBUS_SESSION_BUS_ADDRESS")
+        )
+        # Structural allowlist membership check (DBUS_SYSTEM_BUS_ADDRESS
+        # isn't set in this host's ambient; the allowlist itself carries it).
+        assert "DBUS_SYSTEM_BUS_ADDRESS" in uj.EXECUTOR_ENV_ALLOWLIST, (
+            "DBUS_SYSTEM_BUS_ADDRESS must be in EXECUTOR_ENV_ALLOWLIST"
+        )
+        print(
+            "PASS: 6b XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS survive allowlist "
+            "(DBUS_SYSTEM_BUS_ADDRESS allowlist-pinned)"
+        )
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # 6c: ENSEMBLE_UPGRADE_LIVE STILL stripped (F2 fence invariant).
+    # The cycle-1 widening added 3 bus-discovery vars. ENSEMBLE_UPGRADE_LIVE
+    # must remain absent from the executor env — that's the F2 fence the
+    # dispatcher spelled out. Pin via the ambient setenv path: even when
+    # ENSEMBLE_UPGRADE_LIVE=1 is in os.environ, executor_env() must NOT
+    # carry it (the allowlist is the strip mechanism). The structural
+    # allowlist-membership check nails the invariant at the source — a
+    # future widening that adds ENSEMBLE_UPGRADE_LIVE to the allowlist
+    # would flip this pin loudly. (Extras passthrough is a separate
+    # seam — verified by the existing test_env_allowlist_pure_function
+    # RUN_ID pin — and is NOT a fence; the fence is the allowlist strip.)
+    assert "ENSEMBLE_UPGRADE_LIVE" not in uj.EXECUTOR_ENV_ALLOWLIST, (
+        f"F2 FENCE VIOLATED at allowlist source — ENSEMBLE_UPGRADE_LIVE "
+        f"must NOT be in EXECUTOR_ENV_ALLOWLIST, got {uj.EXECUTOR_ENV_ALLOWLIST!r}"
+    )
+    saved_live = os.environ.pop("ENSEMBLE_UPGRADE_LIVE", None)
+    try:
+        os.environ["ENSEMBLE_UPGRADE_LIVE"] = "1"
+        env6c = uj.executor_env(None)
+        assert "ENSEMBLE_UPGRADE_LIVE" not in env6c, (
+            f"F2 FENCE VIOLATED — ENSEMBLE_UPGRADE_LIVE leaked into executor "
+            f"env from ambient: {env6c!r}"
+        )
+        print("PASS: 6c ENSEMBLE_UPGRADE_LIVE STILL stripped (F2 fence invariant holds)")
+    finally:
+        if saved_live is None:
+            os.environ.pop("ENSEMBLE_UPGRADE_LIVE", None)
+        else:
+            os.environ["ENSEMBLE_UPGRADE_LIVE"] = saved_live
 
     print("\n=== ALL PYTHON PIN TESTS PASSED ===")
 

@@ -83,6 +83,14 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys  # r-f82e cycle 0 detector bug fix: bare `sys.platform` reference
+            # at upgrade_journal.py:1180 raised NameError on every call,
+            # silently swallowed by the broad `except Exception:` at :1247 —
+            # the detector ALWAYS returned (False, "") regardless of host.
+            # cycle 1 fixback: this import is REQUIRED for Item 1(a) — the
+            # env= kwarg forwarded to subprocess.run is meaningless if the
+            # probe never runs. (Pre-existing; cycle 0 reviewer caught this
+            # only as a minor, but it blocked pin 6a outright.)
 import threading
 import time
 import uuid
@@ -1065,8 +1073,20 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
 # R-SR09 env allowlist — the executor inherits the MINIMUM a pipeline
 # script needs. NEVER the daemon's full environment (no .env passthrough,
 # no API keys). PG* covers the sandbox drill harness's throwaway PG vars.
+#
+# Bus-discovery vars (r-f82e fix cycle 1): on session-env Linux hosts
+# (dev/demo login-session daemons), ``systemd-run --user`` needs
+# ``XDG_RUNTIME_DIR`` + ``DBUS_SESSION_BUS_ADDRESS`` to locate the user
+# bus. They are non-secrets (only bus socket addresses, never keys) and
+# the F2 fence is preserved — ``ENSEMBLE_UPGRADE_LIVE`` and other
+# privileged/secret vars are NOT in this allowlist and stay stripped.
+# Pin: tests/unit/tools/test_promote_cgroup_survivorship_python.py
+# 6b + 6c (cycle-1 fixback).
 EXECUTOR_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH", "HOME", "INSTALL_DIR", "PORT", "POSTGRES_DB", "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_SYSTEM_BUS_ADDRESS",
 )
 EXECUTOR_ENV_PREFIXES: tuple[str, ...] = ("PG",)
 
@@ -1142,12 +1162,27 @@ SCOPE_UNIT_PREFIX = "ensemble-upgrade-"
 # where ``bus_kind`` is ``"user"`` or ``"system"``. Default = the real
 # detector. Tests inject a stub returning deterministic values for
 # the three branches (Linux+systemd / Linux-no-systemd / non-Linux).
-def _scope_detect_real() -> tuple[bool, str]:
+# r-f82e fix cycle 1: the seam now accepts the spawn-time env dict
+# (executor_env shape) so detection sees exactly what the wrapper
+# inherits — pin 6a (Python) asserts the env dict is forwarded.
+def _scope_detect_real(env: dict[str, str] | None = None) -> tuple[bool, str]:
     """Real detector — Linux+systemd → (True, "user"|"system") else
     (False, ""). Conservative: returns ``(False, "")`` whenever ANY
     detection step fails (no /run/systemd/system, no systemd-run on
     PATH, uname != Linux, etc.) so a misconfigured host falls back
     to the legacy ``start_new_session=True`` path byte-identically.
+
+    The ``env`` arg, when supplied, is the EXACT env the scope wrapper
+    inherits from the caller (executor_env(extra_env)). Detection uses
+    THIS env, NOT the daemon's full ambient — on session-env Linux
+    hosts (r-f82e fix cycle 1), the bus-discovery vars
+    (XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS) are ambient in the
+    daemon process but the allowlist strips them from the wrapper, so
+    probing with ambient would falsely report "user bus available"
+    while the wrapper would lack the bus address and the payload
+    would never reach systemd-run. ``env=None`` preserves the
+    pre-cycle-1 probe (inherit ambient) for the existing pin 5 call
+    site that exercises "never raises" on a hostile PATH.
     """
     try:
         if sys.platform != "linux":
@@ -1167,6 +1202,14 @@ def _scope_detect_real() -> tuple[bool, str]:
         # fails for any OTHER reason we conservatively fall back to
         # the system bus (--scope alone) — the unit-name match still
         # passes the polkit rule's detail-less branch.
+        #
+        # r-f82e fix cycle 1: probe is run with ``env=env`` (the
+        # wrapper's env), NOT the daemon's full ambient. Without this
+        # gate, the probe inherits ambient XDG_RUNTIME_DIR +
+        # DBUS_SESSION_BUS_ADDRESS, decides "user bus OK", and the
+        # wrapper then lacks the bus address at spawn time — the
+        # payload never runs. Pin: tests/unit/tools/test_
+        # promote_cgroup_survivorship_python.py 6a.
         probe_unit = f"ensemble-upgrade-detect-{os.getpid()}-{os.getpid()}"
         try:
             r = subprocess.run(
@@ -1175,6 +1218,7 @@ def _scope_detect_real() -> tuple[bool, str]:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 timeout=5.0,
+                env=env,
             )
             if r.returncode == 0:
                 return (True, "user")
@@ -1189,6 +1233,7 @@ def _scope_detect_real() -> tuple[bool, str]:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 timeout=5.0,
+                env=env,
             )
             if r.returncode == 0:
                 return (True, "system")
@@ -1229,7 +1274,11 @@ def build_scope_argv(
 
 
 def spawn_executor(
-    argv: list[str], install_dir: Path, extra_env: dict[str, str] | None = None
+    argv: list[str],
+    install_dir: Path,
+    extra_env: dict[str, str] | None = None,
+    *,
+    run_id: str | None = None,
 ) -> int:
     """Daemonize the executor payload. THREE BRANCHES (r-f82e fix):
 
@@ -1255,30 +1304,44 @@ def spawn_executor(
     pipeline output lands in the right place. Env: same allowlist
     semantics (R-SR09) — no .env passthrough, no API keys. The
     scope-wrapper inherits the SAME env dict.
+
+    ``run_id`` (r-f82e fix cycle 1, kw-only): when supplied, the
+    SCOPE UNIT NAME carries it directly (``ensemble-upgrade-<run_id>``),
+    giving journal↔unit correlation and a stable per-promote unit
+    identity even when argv lacks ``--run-id`` (the promote argv today
+    carries ``--version`` only). When ``None``, falls back to argv
+    extraction (legacy behavior) and finally to a pid+epoch sentinel.
+    Manager's drain path threads ``run_id`` explicitly so the unit
+    name is reliable; tests and any future call site may omit it.
     """
     log = executor_log_path(install_dir)
     log.parent.mkdir(parents=True, exist_ok=True)
 
-    use_scope, bus_kind = _scope_detect_fn()
+    # r-f82e fix cycle 1: build the env dict FIRST — detection must see
+    # exactly the env the wrapper inherits (executor_env shape).
+    # Without this gate the probe inherits ambient bus-discovery vars
+    # and decides "user bus OK"; the wrapper then lacks them and the
+    # payload never runs. Pin: 6a (Python).
     env = executor_env(extra_env)
+    use_scope, bus_kind = _scope_detect_fn(env)
 
     if use_scope:
-        # The run_id flows through the scope-unit NAME; we synthesize
-        # one if argv didn't already carry --run-id (the convention).
-        # Promotion callers always pass run_id via manager's argv
-        # builder, but the reaper-enqueue record carries the run_id
-        # independently — and the scope unit MUST be unique per promote,
-        # else systemd refuses the second transient creation. We
-        # extract from argv first; fall back to a deterministic
-        # caller-pid + epoch so an unrelated spawn path still gets a
-        # unique unit name.
-        run_id = ""
-        for i, tok in enumerate(argv[:-1]):
-            if tok == "--run-id" and i + 1 < len(argv):
-                run_id = argv[i + 1]
-                break
-        if not run_id:
-            run_id = f"spawn-{os.getpid()}-{int(time.time())}"
+        # r-f82e fix cycle 1: prefer the explicit run_id kwarg (set by
+        # the manager drain seam — promotion callers always have it),
+        # then argv extraction (restart argv carries --run-id), then
+        # the pid+epoch sentinel as a last-resort unique unit name.
+        # The scope unit MUST be unique per promote — systemd refuses
+        # the second transient creation against an existing name.
+        if run_id:
+            pass  # use directly
+        else:
+            run_id = ""
+            for i, tok in enumerate(argv[:-1]):
+                if tok == "--run-id" and i + 1 < len(argv):
+                    run_id = argv[i + 1]
+                    break
+            if not run_id:
+                run_id = f"spawn-{os.getpid()}-{int(time.time())}"
         wrapped_argv = build_scope_argv(argv, run_id, bus_kind)
         with log.open("ab") as log_fh:
             proc = subprocess.Popen(

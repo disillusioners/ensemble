@@ -4223,8 +4223,13 @@ class InstanceManager:
                 # byte-identical to pre-v0.15.3 (no flag, no env extras →
                 # the child hits require_live_guard and exits 78, now
                 # journaled by the reaper). EXECUTOR_ENV_ALLOWLIST is NOT
-                # widened: the extras ride the executor_env explicit-extra
-                # merge, which is per-call-site and never ambient.
+                # widened for verified-arm passthrough: the extras ride
+                # the executor_env explicit-extra merge, which is
+                # per-call-site and never ambient. (r-f82e fix cycle 1
+                # added XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS /
+                # DBUS_SYSTEM_BUS_ADDRESS to the allowlist for bus
+                # discovery on session-env Linux hosts — non-secret
+                # F2-fence-neutral; ENSEMBLE_UPGRADE_LIVE stays stripped.)
                 if _uj.is_verified_arm(op):
                     argv_ext, env_ext = _uj._verified_arm_extras(op)
                     argv = argv + argv_ext
@@ -4252,11 +4257,22 @@ class InstanceManager:
                 self._journal_executor_orphaned(install_dir, kind, run_id)
                 return False
 
-            child_pid = _uj.spawn_executor(argv, install_dir, extra_env)
+            child_pid = _uj.spawn_executor(argv, install_dir, extra_env, run_id=run_id)
+            # r-f82e fix cycle 1: log the ACTUAL spawn mode — scope unit
+            # name when scope, legacy text otherwise. Pre-cycle-1 log
+            # always said "(daemonized, start_new_session)" which was
+            # stale under scope mode. Detection is cheap + idempotent
+            # (one extra systemd-run probe at most), so we re-run it
+            # here on the same env dict the spawn actually inherited.
+            _spawn_env = _uj.executor_env(extra_env)
+            _use_scope, _ = _uj._scope_detect_fn(_spawn_env)
+            _spawn_mode_note = (
+                f"scope=ensemble-upgrade-{run_id}" if _use_scope
+                else "(daemonized, start_new_session)"
+            )
             logger.info(
-                "[system-execution] fired %s executor run_id=%s pid=%s "
-                "(daemonized, start_new_session)",
-                kind, run_id, child_pid,
+                "[system-execution] fired %s executor run_id=%s pid=%s %s",
+                kind, run_id, child_pid, _spawn_mode_note,
             )
             # v0.15.3 P1 Item 2: UNCONDITIONAL reaper enqueue — every armed
             # executor is observed to its exit by the sweep-service worker

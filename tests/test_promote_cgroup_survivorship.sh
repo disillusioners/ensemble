@@ -108,6 +108,28 @@ src_with_install() {
 # ===========================================================================
 section "comp1 — spawn_executor scope escape (3-branch pin via Python helper)"
 
+# r-f82e fix cycle 1: the Python helper is now run via an INLINE env scrub
+# (previously relied on /tmp/coder-scrub.sh — out-of-repo cruft; rc 127 on
+# any host that lacked it). Inline scrub strips POSTGRES_* + ENSEMBLE_*
+# before exec and echo-verifies zero survivors. Self-contained: the test
+# does not depend on any host artifact.
+env_scrub_python() {
+    (
+        unset POSTGRES_URL POSTGRES_HOST POSTGRES_PORT POSTGRES_DB \
+              POSTGRES_USER POSTGRES_PASSWORD POSTGRES_SSLMODE \
+              POSTGRES_SSL CERT PATH_POSTGRES \
+              ENSEMBLE_UPGRADE_LIVE ENSEMBLE_INSTALL_DIR \
+              ENSEMBLE_RESTART_UNIT 2>/dev/null
+        local survivors
+        survivors="$(env | grep -iE '^(POSTGRES_|ENSEMBLE_UPGRADE_LIVE=|ENSEMBLE_INSTALL_DIR=|ENSEMBLE_RESTART_UNIT=)' || true)"
+        if [ -n "$survivors" ]; then
+            printf 'ENV_SCRUB_FAIL: survivors=%s\n' "$survivors" >&2
+            return 99
+        fi
+        python3 "$@"
+    )
+}
+
 # The Python module's _scope_detect_fn is the test seam. The actual
 # unit-name shape + detector contract are pinned in the Python helper
 # (tests/unit/tools/test_promote_cgroup_survivorship_python.py). Here
@@ -116,7 +138,9 @@ section "comp1 — spawn_executor scope escape (3-branch pin via Python helper)"
 #   - the run_id flows into the unit name
 #   - the legacy path byte-identical when detector returns (False, "")
 #   - the scope prefix is pinned to "ensemble-upgrade-"
-PY_OUT="$(/tmp/coder-scrub.sh python3 tests/unit/tools/test_promote_cgroup_survivorship_python.py 2>&1)"
+#   - r-f82e cycle 1 pins (6a/6b/6c): detector env forwarding + bus vars
+#     survive allowlist + ENSEMBLE_UPGRADE_LIVE still stripped
+PY_OUT="$(env_scrub_python tests/unit/tools/test_promote_cgroup_survivorship_python.py 2>&1)"
 PY_RC=$?
 if [ "$PY_RC" -ne 0 ]; then
     printf '%s\n' "$PY_OUT" >&2
@@ -131,6 +155,10 @@ assert_contains "2 build_scope_argv inner argv byte-identical" "2 build_scope_ar
 assert_contains "3 SCOPE_UNIT_PREFIX pinned to 'ensemble-upgrade-'" "3 SCOPE_UNIT_PREFIX pinned" "$PY_OUT"
 assert_contains "4a normal exit → no signal attribution" "4a normal exit" "$PY_OUT"
 assert_contains "5 _scope_detect_real never raises" "5 _scope_detect_real never raises" "$PY_OUT"
+# r-f82e fix cycle 1: detector-env == spawn-env parity pins (6a/6b/6c)
+assert_contains "6a detector probes with caller-supplied env" "6a detector probes with caller-supplied env" "$PY_OUT"
+assert_contains "6b bus-discovery vars survive allowlist" "6b XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS survive allowlist" "$PY_OUT"
+assert_contains "6c ENSEMBLE_UPGRADE_LIVE STILL stripped" "6c ENSEMBLE_UPGRADE_LIVE STILL stripped" "$PY_OUT"
 
 # ===========================================================================
 section "comp2 — signal traps (TERM mid-flight → halt event + lock release)"
