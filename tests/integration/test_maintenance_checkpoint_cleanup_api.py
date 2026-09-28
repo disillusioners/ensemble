@@ -53,6 +53,11 @@ from tests.helpers.checkpoint_prune_pg import (
     evict_langgraph_mocks,
     restore_langgraph_mocks,
 )
+from tests.helpers.maintenance_byte_pins import (
+    _INCIDENT_EXPECTED_BYTES,
+    _INT4_MAX,
+    _JUST_OVER_INT4,
+)
 
 # DSN hygiene (R-10): disposable DBs only — never the live prod DB.
 assert "ensemble_prod" not in ADMIN_DSN, (
@@ -687,14 +692,11 @@ def _blocked_job(config, adapter, runs_repo, lock):
 
 
 # ── int4 → int8 widening pin (incident 2026-09-28) ────────────────────────────
-
-
-# Incident value — 27.2 GiB dry-run echo at execute-time, which
-# overflowed PG int4 (max 2^31-1 = 2,147,483,647) and produced
-# psycopg.errors.NumericValueOutOfRange → HTTP 500.
-_INCIDENT_EXPECTED_BYTES = 27_233_813_846
-_INT4_MAX = 2**31 - 1
-_JUST_OVER_INT4 = 2**31
+#
+# Sentinel byte values are hoisted to tests/helpers/maintenance_byte_pins.py
+# (shared with tests/unit/services/test_maintenance_checkpoint_cleanup_service.py)
+# so the same incident value + int4 boundary pair are pinned byte-identical
+# across both suites. See that module's docstring for the full rationale.
 
 
 class TestExpectedBytesBigIntegerIntegration:
@@ -943,56 +945,57 @@ class TestExpectedBytesBigIntegerIntegration:
         # 1. LEGACY shape: raw-DDL int4 column (pre-incident table),
         #    created BEFORE create_all so checkfirst skips it and the
         #    legacy type survives into the ensure pass.
-        with engine.begin() as conn:
-            conn.execute(text(
-                "CREATE TABLE maintenance_runs ("
-                "  run_id TEXT PRIMARY KEY,"
-                "  section TEXT NOT NULL,"
-                "  kind TEXT NOT NULL,"
-                "  started_at TEXT NOT NULL,"
-                "  status TEXT NOT NULL,"
-                "  triggered_by TEXT NOT NULL,"
-                "  expected_bytes INTEGER"
-                ")"
-            ))
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "CREATE TABLE maintenance_runs ("
+                    "  run_id TEXT PRIMARY KEY,"
+                    "  section TEXT NOT NULL,"
+                    "  kind TEXT NOT NULL,"
+                    "  started_at TEXT NOT NULL,"
+                    "  status TEXT NOT NULL,"
+                    "  triggered_by TEXT NOT NULL,"
+                    "  expected_bytes INTEGER"
+                    ")"
+                ))
 
-        def _data_type():
-            with engine.connect() as conn:
-                row = conn.execute(text(
-                    "SELECT data_type FROM information_schema.columns "
-                    "WHERE table_schema = 'public' "
-                    "AND table_name = 'maintenance_runs' "
-                    "AND column_name = 'expected_bytes'"
-                )).fetchone()
-            return row[0] if row else None
+            def _data_type():
+                with engine.connect() as conn:
+                    row = conn.execute(text(
+                        "SELECT data_type FROM information_schema.columns "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name = 'maintenance_runs' "
+                        "AND column_name = 'expected_bytes'"
+                    )).fetchone()
+                return row[0] if row else None
 
-        assert _data_type() == "integer", _data_type()
+            assert _data_type() == "integer", _data_type()
 
-        # 2. Boot-order parity: create_all first (every OTHER table at
-        #    current shape — the pre-existing legacy table is skipped),
-        #    then the ensure path. This mirrors manager boot exactly
-        #    (daemon/manager.py:579 create_all → :601 ensure).
-        SQLModel.metadata.create_all(engine)
+            # 2. Boot-order parity: create_all first (every OTHER table at
+            #    current shape — the pre-existing legacy table is skipped),
+            #    then the ensure path. This mirrors manager boot exactly
+            #    (daemon/manager.py:579 create_all → :601 ensure).
+            SQLModel.metadata.create_all(engine)
 
-        # 3. REAL production method on a two-attribute stub.
-        mgr = InstanceManager.__new__(InstanceManager)
-        mgr._engine = engine
-        mgr._ensemble_config = SimpleNamespace(is_postgres=True)
-        mgr._ensure_postgres_columns()
+            # 3. REAL production method on a two-attribute stub.
+            mgr = InstanceManager.__new__(InstanceManager)
+            mgr._engine = engine
+            mgr._ensemble_config = SimpleNamespace(is_postgres=True)
+            mgr._ensure_postgres_columns()
 
-        # 4. The widening MUST have fired on the legacy int4 column.
-        assert _data_type() == "bigint", (
-            "expected_bytes still "
-            f"{_data_type()!r} after _ensure_postgres_columns — the "
-            "widening DO block did not fire on the legacy int4 column"
-        )
+            # 4. The widening MUST have fired on the legacy int4 column.
+            assert _data_type() == "bigint", (
+                "expected_bytes still "
+                f"{_data_type()!r} after _ensure_postgres_columns — the "
+                "widening DO block did not fire on the legacy int4 column"
+            )
 
-        # 5. Idempotency: second ensure pass → still bigint, no error
-        #    (the data_type='integer' probe excludes the column).
-        mgr._ensure_postgres_columns()
-        assert _data_type() == "bigint", _data_type()
-
-        engine.dispose()
+            # 5. Idempotency: second ensure pass → still bigint, no error
+            #    (the data_type='integer' probe excludes the column).
+            mgr._ensure_postgres_columns()
+            assert _data_type() == "bigint", _data_type()
+        finally:
+            engine.dispose()
 
 
 class TestContention:

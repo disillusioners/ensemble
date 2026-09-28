@@ -46,6 +46,11 @@ from daemon.services.maintenance_api_service import (
 )
 from daemon.services.timestamps import now_utc_iso
 from daemon.config import PersistenceConfig
+from tests.helpers.maintenance_byte_pins import (
+    _INCIDENT_EXPECTED_BYTES,
+    _INT4_MAX,
+    _JUST_OVER_INT4,
+)
 
 
 # ── fixtures ───────────────────────────────────────────────────────────────────
@@ -838,8 +843,6 @@ class TestRouterGates:
         non-MaintenanceError raise must surface as a CONTRACT-SHAPED
         500 (``{error: internal_error, message, details}`` per A-8),
         never FastAPI's plain-text default."""
-        from unittest.mock import MagicMock
-
         svc = MagicMock(spec=MaintenanceApiService)
         svc.status = AsyncMock(side_effect=RuntimeError("boom"))
         app = _http_app(svc)
@@ -1746,18 +1749,11 @@ class TestGateDoesNotReadProjection:
 
 
 # ── >2GiB byte-magnitude window (incident 2026-09-28) ────────────────────────
-
-
-# Sentinel byte value from the incident log evidence (the dry-run's
-# orphaned-blob layer hit 27.2 GiB; the execute payload echoed the same
-# value, which overflowed PG int4 and produced HTTP 500). Pinning the
-# exact number anchors the regression test against future refactors.
-_INCIDENT_EXPECTED_BYTES = 27_233_813_846
-# Threshold: 2^31 is the first value that overflows int4 (max 2^31-1).
-# Below this the legacy int4 column accepts the value; at or above it
-# the legacy column raises NumericValueOutOfRange.
-_INT4_MAX = 2**31 - 1
-_JUST_OVER_INT4 = 2**31
+#
+# Sentinel byte values are hoisted to tests/helpers/maintenance_byte_pins.py
+# (shared with tests/integration/test_maintenance_checkpoint_cleanup_api.py)
+# so the same incident value + int4 boundary pair are pinned byte-identical
+# across both suites. See that module's docstring for the full rationale.
 
 
 class TestExpectedBytesBigInteger:

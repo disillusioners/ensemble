@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Env-scrub wrapper for running ensemble-src test suites.
 #
 # Required pattern (per the 2 prior live-probe incidents — most recently
@@ -10,8 +10,8 @@
 # Usage:  ./scripts/run_tests_scrubbed.sh <pytest-args...>
 #
 # Examples:
-#   ./scripts/run_tests_scrubbed.sh tests/unit/services/test_maintenance_checkpoint_cleanup_service.py -k TestExpectedBytesBigInteger
-#   ./scripts/run_tests_scrubbed.sh tests/unit/services/test_maintenance_checkpoint_cleanup_service.py
+#   ./scripts/run_tests_scrubbed.sh <test-file-or-args>
+#   ./scripts/run_tests_scrubbed.sh <test-file-or-args> -k <expr>
 #
 # Hard-coded here (NOT opt-in via env): we always scrub, never carry
 # ambient POSTGRES_* through. The bash unset is built-in; the verify
@@ -46,17 +46,45 @@ unset PGSSLMODE PGSERVICE PGSERVICEFILE
 #    silently. Now: ANY POSTGRES_* name still in the environment fails,
 #    plus legacy DATABASE_URL_POSTGRES (not covered by the POSTGRES_
 #    prefix) and the enumerated libpq set above.
-#    pipefail safety: grep exits 1 on no-match — each pipeline carries
-#    `|| true` so the substitution's status can never trip `set -e`;
-#    we test EMPTINESS of the captured NAME list instead. Names are
-#    echoed, never values — a leaked var may hold credentials.
-LEAKED="$(
-    env | cut -d= -f1 | grep -E '^POSTGRES_' || true
-    env | cut -d= -f1 | grep -E '^(DATABASE_URL_POSTGRES|PGHOST|PGPORT|PGDATABASE|PGUSER|PGPASSWORD|PGPASSFILE|PGSSLMODE|PGSERVICE|PGSERVICEFILE)$' || true
-)"
+#
+#    Walk NAMES only (via `compgen -v`, a pure bash builtin — no GNU/
+#    BSD divergence, immune to multi-line env values where continuation
+#    lines previously parsed as fabricated NAME= records). `compgen -v`
+#    also lists readonly/bashed internals (BASH_VERSINFO etc.), so the
+#    test below filters to ONLY the target families. Names are echoed,
+#    never values — a leaked var may hold credentials.
+#
+#    `set -u` safety: `${!v+x}` is the "exists-or-not" form; under
+#    `set -u` the indirect expansion is safe because `+` does not
+#    error on an unset parameter (per bash(1) §Parameter Expansion).
+LEAKED=""
+while IFS= read -r v; do
+    case "$v" in
+        POSTGRES_*)                                              LEAKED+="$v"$'\n' ;;
+        DATABASE_URL_POSTGRES)                                   LEAKED+="$v"$'\n' ;;
+        PGHOST|PGPORT|PGDATABASE|PGUSER|PGPASSWORD|PGPASSFILE)   LEAKED+="$v"$'\n' ;;
+        PGSSLMODE|PGSERVICE|PGSERVICEFILE)                       LEAKED+="$v"$'\n' ;;
+    esac
+done < <(compgen -v)
+# Drop any candidate that became unset between compgen -v enumeration
+# and this check (defensive — nothing else in this script unsets these,
+# but the brief mandates the guard).
+drop=""
+while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    if [ -z "${!v+x}" ]; then
+        drop+="$v"$'\n'
+    fi
+done < <(printf '%s\n' "$LEAKED")
+if [ -n "$drop" ]; then
+    while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        LEAKED="${LEAKED//$v$'\n'/}"
+    done < <(printf '%s\n' "$drop")
+fi
 if [ -n "$LEAKED" ]; then
     echo "ENV-SCRUB FAILURE: leaked connection vars still set:" >&2
-    echo "$LEAKED" | sed 's/^/  /' >&2
+    printf '%s\n' "$LEAKED" | sed 's/^/  /' >&2
     echo "Refusing to run tests with leaked POSTGRES_*/libpq vars." >&2
     exit 78  # EX_CONFIG — mirrors lib.sh exit-78 convention
 fi
