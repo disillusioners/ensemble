@@ -916,7 +916,16 @@ class TestExecutorSpawn:
     ) -> None:
         """Spawn a REAL harmless fixture script via spawn_executor and verify
         (a) the child env contains the allowlist ONLY (poison vars absent),
-        (b) the child leads an independent process group (start_new_session),
+        (b) process-group behavior — MODE-AWARE (r-f82e fix cycle 2):
+            - LEGACY (start_new_session=True): the child leads its own group,
+              distinct from THIS test process's group.
+            - SCOPE (systemd-run --user/--scope, start_new_session=False on
+              the daemon side): the systemd-run wrapper stays in OUR group
+              (no setsid on daemon side; systemd-run is the new session
+              leader via --scope). Direct evidence of engagement = the bash
+              payload inside the scope inherits the wrapper's pgid (= our
+              pgid), so its self-reported PGID log line equals our pgid
+              rather than its own pid.
         (c) stdio lands in <install>/data/upgrade.log."""
         install = tmp_path / "install"
         (install / "releases").mkdir(parents=True)
@@ -941,13 +950,34 @@ class TestExecutorSpawn:
         ):
             monkeypatch.setenv(key, val)
 
+        # r-f82e fix cycle 2 (review-cycle-2 fixback): detect the mode via the
+        # SAME seam spawn_executor uses (_scope_detect_fn), so the test follows
+        # the host (legacy vs scope branch) without any platform branching.
+        env = uj.executor_env({"RUN_ID": "r-spawn"})
+        use_scope, _bus_kind = uj._scope_detect_fn(env)
+
         pid = uj.spawn_executor(["bash", str(script)], install, {"RUN_ID": "r-spawn"})
         try:
-            # (b) process-group independence: the child leads its own group,
-            # distinct from THIS test process's group (survives teardown).
+            # (b) process-group independence — mode-aware.
             child_pgid = os.getpgid(pid)
-            assert child_pgid == pid, "executor must be its own group leader"
-            assert child_pgid != os.getpgrp(), "executor must leave our group"
+            if use_scope:
+                # SCOPE mode: systemd-run wrapper is started with
+                # start_new_session=False (no setsid on the daemon side;
+                # systemd-run is the new session leader via --scope). The
+                # wrapper stays in OUR process group; the bash payload
+                # executes inside the scope cgroup but inherits our pgid.
+                assert child_pgid == os.getpgrp(), (
+                    "scope mode: executor wrapper must stay in our process group "
+                    "(start_new_session=False on daemon side)"
+                )
+                assert child_pgid != pid, (
+                    "scope mode: executor wrapper must NOT be its own session/group "
+                    "leader \u2014 systemd-run is the new session leader via --scope"
+                )
+            else:
+                # LEGACY mode: byte-identical to pre-r-f82e behavior.
+                assert child_pgid == pid, "executor must be its own group leader"
+                assert child_pgid != os.getpgrp(), "executor must leave our group"
 
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline and not dump_path.is_file():
@@ -968,7 +998,23 @@ class TestExecutorSpawn:
                 ln for ln in (install / "data" / "upgrade.log").read_text().splitlines()
                 if ln.startswith("PGID=")
             ]
-            assert pgid_line and pgid_line[0] == f"PGID={child_pgid}"
+            assert pgid_line, "no PGID line in upgrade.log"
+            if use_scope:
+                # SCOPE mode direct evidence: the bash payload's self-reported
+                # PGID equals our pgid (it inherits the systemd-run wrapper's
+                # pgid). If the wrapper accidentally fell through to legacy,
+                # bash would be its own session leader and report its own pid.
+                assert pgid_line[0] == f"PGID={os.getpgrp()}", (
+                    f"scope mode: bash payload must inherit systemd-run pgid "
+                    f"(= our pgid {os.getpgrp()}); got {pgid_line[0]!r} \u2014 "
+                    "scope wrapper did not engage at runtime"
+                )
+            else:
+                # LEGACY mode: bash is its own session leader; pgid == pid.
+                assert pgid_line[0] == f"PGID={child_pgid}", (
+                    f"legacy mode: bash payload pgid ({pgid_line[0]!r}) must "
+                    f"equal child_pgid ({child_pgid})"
+                )
         finally:
             # Reap the disowned child (spawn_executor deliberately does not).
             try:

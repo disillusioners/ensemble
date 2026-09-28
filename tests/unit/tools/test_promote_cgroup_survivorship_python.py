@@ -198,40 +198,58 @@ def main():
     # detector's two probes record the env= kwarg verbatim. Both probes
     # fail (returncode=1) so the detector short-circuits to (False, "")
     # without spawning real systemd-run.
-    captured_envs: list = []
-    real_run = uj.subprocess.run
-
-    def _cap_run(*args, **kwargs):
-        captured_envs.append(kwargs.get("env"))
-        class _Result:
-            returncode = 1
-            stderr = b""
-        return _Result()
-
-    uj.subprocess.run = _cap_run
-    try:
-        probe_env = {
-            "PATH": "/x",
-            "XDG_RUNTIME_DIR": "/run/user/1000",
-            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
-        }
-        res6a = uj._scope_detect_real(probe_env)
-        assert isinstance(res6a, tuple) and len(res6a) == 2
-        assert res6a == (False, ""), res6a
-        # Every captured env= must be the SAME dict reference we passed —
-        # not a copy, not None, not the daemon's full ambient. Verifies
-        # the detector forwards the caller's env dict verbatim.
-        assert captured_envs, "detector did not invoke subprocess.run"
-        for i, env_seen in enumerate(captured_envs):
-            assert env_seen is probe_env, (
-                f"probe {i} env mismatch: expected our probe_env dict, got {env_seen!r}"
-            )
-        print(
-            "PASS: 6a detector probes with caller-supplied env "
-            f"(forwarded to {len(captured_envs)} subprocess.run call(s))"
+    #
+    # r-f82e fix cycle 2 (review-cycle-2 fixback): conditional-skip when the
+    # host cannot reach the detector's two subprocess.run probes — i.e. the
+    # detector short-circuits at the platform/systemd guards (sys.platform
+    # != "linux" OR /run/systemd/system missing) before any probe runs. The
+    # captured-envs assertion below is meaningless in that case (captured_envs
+    # stays empty). Mirrors the 4b host-dependent skip pattern.
+    if sys.platform != "linux" or not Path("/run/systemd/system").exists():
+        skip_reason = (
+            "non-Linux" if sys.platform != "linux"
+            else "host lacks /run/systemd/system (no systemd)"
         )
-    finally:
-        uj.subprocess.run = real_run
+        print(
+            "INFO: 6a SKIPPED — "
+            f"{skip_reason}; detector short-circuits before subprocess.run probes "
+            "(captured_envs assertion is meaningless)"
+        )
+    else:
+        captured_envs: list = []
+        real_run = uj.subprocess.run
+
+        def _cap_run(*args, **kwargs):
+            captured_envs.append(kwargs.get("env"))
+            class _Result:
+                returncode = 1
+                stderr = b""
+            return _Result()
+
+        uj.subprocess.run = _cap_run
+        try:
+            probe_env = {
+                "PATH": "/x",
+                "XDG_RUNTIME_DIR": "/run/user/1000",
+                "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+            }
+            res6a = uj._scope_detect_real(probe_env)
+            assert isinstance(res6a, tuple) and len(res6a) == 2
+            assert res6a == (False, ""), res6a
+            # Every captured env= must be the SAME dict reference we passed —
+            # not a copy, not None, not the daemon's full ambient. Verifies
+            # the detector forwards the caller's env dict verbatim.
+            assert captured_envs, "detector did not invoke subprocess.run"
+            for i, env_seen in enumerate(captured_envs):
+                assert env_seen is probe_env, (
+                    f"probe {i} env mismatch: expected our probe_env dict, got {env_seen!r}"
+                )
+            print(
+                "PASS: 6a detector probes with caller-supplied env "
+                f"(forwarded to {len(captured_envs)} subprocess.run call(s))"
+            )
+        finally:
+            uj.subprocess.run = real_run
 
     # 6b: XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS survive executor_env.
     # The bus-discovery vars are now in EXECUTOR_ENV_ALLOWLIST (cycle-1

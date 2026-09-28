@@ -1240,7 +1240,18 @@ def _scope_detect_real(env: dict[str, str] | None = None) -> tuple[bool, str]:
         except (OSError, subprocess.TimeoutExpired):
             pass
         return (False, "")
-    except Exception:  # noqa: BLE001 — detection must never raise
+    except Exception as exc:  # noqa: BLE001 — detection must never raise
+        # r-f82e fix cycle 2 (review-cycle-2 fixback): one WARNING so a silent
+        # detector regression (e.g. a NameError from a typo'd import that the
+        # bare-except swallow hides for days) leaves a forensic breadcrumb.
+        # The 3-commit silent NameError is the dispositive cost-of-silence
+        # evidence; spawn rarity makes noise negligible. NO behavior change —
+        # detection still falls back to legacy path byte-identically.
+        logger.warning(
+            "upgrade_journal: _scope_detect_real swallowed exception — "
+            "falling back to legacy path: %s: %s",
+            type(exc).__name__, exc,
+        )
         return (False, "")
 
 
