@@ -4429,6 +4429,52 @@ Provide a concise summary:"""
                             f"{_work_id[:8]}... ({_token}): {e}"
                         )
 
+            # ── S15 + U7 (2026-09-28, fix/u7-orphan-anchor-s15): ──
+            # LIFECYCLE-COMPLETED hook (b) for no_job-linkage
+            # terminals. The observer's hook (b) at
+            # ``job_feedback_observer.py:~2430`` lives inside
+            # ``_finalize_job`` — the COMPLETED/ERROR outbox that
+            # only runs WHEN a JobItem exists for the work row.
+            # For a ``no_job`` linkage turn-end there is no
+            # JobItem, so the post-commit outbox never runs, so
+            # the observer hook (b) never fires, so a held
+            # ``mission_terminal`` watcher row subscribed to that
+            # turn-end has no carrier until the 300s periodic
+            # sweep picks it up (the very gap the U1 cycle-4
+            # fixback was meant to close for in-session delivery).
+            # The lifecycle-COMPLETED event here fires on EVERY
+            # per-turn flip (including no_job; regardless of the
+            # presence of any Task / JobItem / held watcher), so
+            # it is the natural no_job carrier. The hook uses the
+            # GLOBAL scan (``instance_id=None``) — same axis
+            # hook (a) uses per the U1 cycle-4 fixback — so a
+            # held watcher whose parent is EXTERNAL to the
+            # completing instance's tree still gets visited.
+            # Idempotent: a held row the helper has already
+            # claimed returns CAS rowcount == 0 on the second
+            # call, so back-to-back hook (a/b) firing from any
+            # other path on the same row cannot double-fire
+            # delivery (the N1 exactly-once invariant survives).
+            # Fail-soft: the lifecycle event has already been
+            # emitted, so an exception here must not undo the
+            # publish; logged at WARNING and swallowed.
+            try:
+                _jq_service = getattr(
+                    self._manager, "_job_queue_service", None
+                )
+                if _jq_service is not None:
+                    await _jq_service.reconcile_held_watches_for_instance(
+                        instance_id=None,  # global work-side scan
+                    )
+            except Exception as s15_hook_err:
+                logger.warning(
+                    f"ChildReportsService: lifecycle-COMPLETED hook "
+                    f"(b) no_job carrier failed for "
+                    f"{instance_id[:8]}... (non-fatal, swept by "
+                    f"WatchReconcileSweepService next tick): "
+                    f"{s15_hook_err}"
+                )
+
             self._trigger_title_generation(instance_id, completed_message_id)
 
             # ─── B.S.1-iii: (b) enforcement (flag-gated, fail-OPEN) ───
