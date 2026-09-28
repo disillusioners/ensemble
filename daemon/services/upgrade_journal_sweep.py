@@ -355,8 +355,9 @@ class UpgradeJournalSweepService:
         bare ``143`` reads as "exited 143" — the operator has to know
         that 128+N = SIG(N); a signal attribution line removes that
         lookup). Implemented via ``os.WIFSIGNALED``/``os.WTERMSIG``
-        inside ``_waitpid_blocking`` (the worker thread runs the raw
-        waitpid; the result flows back into ``_journal_executor_exit``).
+        inside ``_reaper_worker`` (the worker thread runs the raw
+        waitpid; the result flows back into ``_journal_executor_exit``
+        AFTER ``_waitpid_blocking`` returns the raw status).
         """
         while True:
             job = await self._reaper_queue.get()
@@ -444,7 +445,9 @@ class UpgradeJournalSweepService:
     def _waitpid_blocking(pid: int) -> int:
         """Blocking ``os.waitpid`` — runs in a thread on the service-owned
         DEDICATED executor (M-1, not ``asyncio.to_thread``). Returns the
-        raw wait status (decoded by the worker via ``os.waitstatus_to_exitcode``)."""
+        raw wait status; the worker decodes signal kills via
+        ``os.WIFSIGNALED``/``os.WTERMSIG`` and normal exits via
+        ``os.waitstatus_to_exitcode``."""
         _, status = os.waitpid(pid, 0)
         return status
 

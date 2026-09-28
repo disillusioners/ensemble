@@ -81,6 +81,17 @@ A failed promote in this class looks like:
   test (per the documented incident pattern — twice leaked probes into
   LIVE ensemble_prod on 2026-09-21 and 2026-09-26).
 - All anchors grep-verified before editing; drift noted (see commit message).
+- **Unit-name reconciliation:** live ops docs reference `ensemble-exec-*` (the
+  provisioned unit pattern); this repo's code uses `ensemble-upgrade-*` (the
+  systemd-run scoped unit prefix from comp 1). Both match the polkit regex —
+  the two namespaces are intentional (comp 7 hand-provisioned; comp 1
+  runtime-generated).
+- **Nested-cgroup caveat (comp 7 default nohup path):** when
+  `ENSEMBLE_RESTART_UNIT` is unset (the default), the nohup'd launcher
+  inherits the calling executor's cgroup scope, so a unit-level stop on
+  `ensemble-live.service` will NOT reach the restarted daemon. This is
+  the same family as the deploy-ownership conflict (see critical notes);
+  opt-in to comp 7 systemctl path for production deploys.
 
 ## 6. Tests
 
@@ -100,6 +111,11 @@ Component-level pin tests (one per component):
 
 Existing `tests/test_release_journal.sh` + `tests/test_atomic_flip.sh`
 must remain green; the BSD/GNU portable invariants must remain intact.
+
+Note: the 6 numbered items map to comps 1–6 (the pinned components); comp 7
+(`restart_via_launcher` opt-in systemctl path) is exercised via the comp7
+stretch slot in `tests/test_promote_cgroup_survivorship.sh`, and comp 8 is
+this doc itself.
 
 ## 7. What the daemon did right
 

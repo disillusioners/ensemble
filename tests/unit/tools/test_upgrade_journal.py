@@ -55,6 +55,7 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -956,7 +957,22 @@ class TestExecutorSpawn:
         env = uj.executor_env({"RUN_ID": "r-spawn"})
         use_scope, _bus_kind = uj._scope_detect_fn(env)
 
-        pid = uj.spawn_executor(["bash", str(script)], install, {"RUN_ID": "r-spawn"})
+        pid, mode_note = uj.spawn_executor(
+            ["bash", str(script)], install, {"RUN_ID": "r-spawn"},
+            run_id="r-spawn",
+        )
+        # spawn_executor returns (pid, mode_note) derived from the SAME
+        # detection call — the test follows the host via the returned
+        # note instead of re-running _scope_detect_fn. The detector's
+        # answer is observable end-to-end via the pgid assertions below.
+        if use_scope:
+            assert mode_note == "scope=ensemble-upgrade-r-spawn", (
+                f"scope mode: mode_note must carry run_id, got {mode_note!r}"
+            )
+        else:
+            assert mode_note == "(daemonized, start_new_session)", (
+                f"legacy mode: mode_note must be the legacy text, got {mode_note!r}"
+            )
         try:
             # (b) process-group independence — mode-aware.
             child_pgid = os.getpgid(pid)
@@ -1464,6 +1480,13 @@ class TestUpgradeJournalSweepService:
                 # still proven correct in the Python pin test
                 # (test_promote_cgroup_survivorship_python.py 4b) on a
                 # host that DOESN'T mask the signal.
+                warnings.warn(
+                    "sandbox quirk: SIGTERM reaped before the reaper "
+                    "observed WIFSIGNALED (ChildProcessError fallback; "
+                    "exit_code=-1 contract); see 4b for the attribution "
+                    "proof on a host that delivers the signal",
+                    stacklevel=2,
+                )
                 assert "exit_code=-1" in detail, (
                     f"unexpected detail shape (no signal attribution, "
                     f"no ChildProcessError fallback): {detail!r}"

@@ -6,7 +6,7 @@
 # Component coverage (one section per comp, all six required + stretch 7):
 #   1. Executor scope escape (Python: spawn_executor / build_scope_argv) —
 #      pin via mocked _scope_detect_fn for the three branches.
-#   2. Signal traps (TER death-anchored event + lock release + no
+#   2. Signal traps (TERM death-anchored event + lock release + no
 #      double-release with EXIT trap) — pin via direct TERM of a sourced
 #      lib.sh + scripts subprocess.
 #   3. TXN heartbeat (in_flight.last_heartbeat refreshed at lock_heartbeat
@@ -14,9 +14,9 @@
 #      mirrored tables agree).
 #   4. ISO parser GNU branch (mirrors atomic_flip test_atomic_flip.sh
 #      shape; uname dispatch).
-#   5. Reaper signal surfacing — pure Python (test_upgrade_reaper_signal.py
-#      is the dedicated pytest file; this shell suite probes the journal
-#      detail the Python code emits).
+#   5. Reaper signal surfacing — pure Python (tests/unit/tools/test_
+#      promote_cgroup_survivorship_python.py §4b is the dedicated pin;
+#      this shell suite probes the journal detail the Python code emits).
 #   6. Timestamp hygiene (portable date wrapper).
 #   7. (stretch) restart_via_launcher opt-in systemctl path.
 #

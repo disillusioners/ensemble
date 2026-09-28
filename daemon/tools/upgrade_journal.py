@@ -84,8 +84,8 @@ import secrets
 import shutil
 import subprocess
 import sys  # r-f82e cycle 0 detector bug fix: bare `sys.platform` reference
-            # at upgrade_journal.py:1180 raised NameError on every call,
-            # silently swallowed by the broad `except Exception:` at :1247 —
+            # in _scope_detect_real raised NameError on every call, silently
+            # swallowed by the broad `except Exception:` in the detector —
             # the detector ALWAYS returned (False, "") regardless of host.
             # cycle 1 fixback: this import is REQUIRED for Item 1(a) — the
             # env= kwarg forwarded to subprocess.run is meaningless if the
@@ -1210,7 +1210,7 @@ def _scope_detect_real(env: dict[str, str] | None = None) -> tuple[bool, str]:
         # wrapper then lacks the bus address at spawn time — the
         # payload never runs. Pin: tests/unit/tools/test_
         # promote_cgroup_survivorship_python.py 6a.
-        probe_unit = f"ensemble-upgrade-detect-{os.getpid()}-{os.getpid()}"
+        probe_unit = f"ensemble-upgrade-detect-{os.getpid()}-{int(time.time())}"
         try:
             r = subprocess.run(
                 ["systemd-run", "--user", "--scope", f"--unit={probe_unit}",
@@ -1255,7 +1255,7 @@ def _scope_detect_real(env: dict[str, str] | None = None) -> tuple[bool, str]:
         return (False, "")
 
 
-_scope_detect_fn: Callable[[], tuple[bool, str]] = _scope_detect_real
+_scope_detect_fn: Callable[[dict[str, str] | None], tuple[bool, str]] = _scope_detect_real
 
 
 def build_scope_argv(
@@ -1290,7 +1290,7 @@ def spawn_executor(
     extra_env: dict[str, str] | None = None,
     *,
     run_id: str | None = None,
-) -> int:
+) -> tuple[int, str]:
     """Daemonize the executor payload. THREE BRANCHES (r-f82e fix):
 
     1. Linux + systemd + polkit grant: wrap in a transient scope unit
@@ -1307,14 +1307,17 @@ def spawn_executor(
        path BYTE-IDENTICALLY. setsid works correctly on launchd —
        the survivorship model was designed on macOS launchd semantics.
 
-    Returns the child pid. Deliberately NOT registered in
-    ``BashProcessRegistry`` or any other teardown registry (D4/T5
-    static-assertion target): the child must survive BOTH tool-harness
-    teardown AND daemon death. stdio → ``data/upgrade.log`` (append).
-    The child re-points its cwd at the install dir so relative
-    pipeline output lands in the right place. Env: same allowlist
-    semantics (R-SR09) — no .env passthrough, no API keys. The
-    scope-wrapper inherits the SAME env dict.
+    Returns ``(child_pid, mode_note)``. ``mode_note`` is derived from the
+    SAME internal detection result (``scope=ensemble-upgrade-<run_id>``
+    for the SCOPE branch, ``(daemonized, start_new_session)`` for the
+    legacy branch) so the caller never has to re-detect. Deliberately
+    NOT registered in ``BashProcessRegistry`` or any other teardown
+    registry (D4/T5 static-assertion target): the child must survive
+    BOTH tool-harness teardown AND daemon death. stdio →
+    ``data/upgrade.log`` (append). The child re-points its cwd at the
+    install dir so relative pipeline output lands in the right place.
+    Env: same allowlist semantics (R-SR09) — no .env passthrough, no
+    API keys. The scope-wrapper inherits the SAME env dict.
 
     ``run_id`` (r-f82e fix cycle 1, kw-only): when supplied, the
     SCOPE UNIT NAME carries it directly (``ensemble-upgrade-<run_id>``),
@@ -1343,9 +1346,7 @@ def spawn_executor(
         # the pid+epoch sentinel as a last-resort unique unit name.
         # The scope unit MUST be unique per promote — systemd refuses
         # the second transient creation against an existing name.
-        if run_id:
-            pass  # use directly
-        else:
+        if not run_id:
             run_id = ""
             for i, tok in enumerate(argv[:-1]):
                 if tok == "--run-id" and i + 1 < len(argv):
@@ -1369,7 +1370,7 @@ def spawn_executor(
                 start_new_session=False,
                 close_fds=True,
             )
-        return proc.pid
+        return proc.pid, f"scope=ensemble-upgrade-{run_id}"
 
     # Legacy path: BYTE-IDENTICAL to pre-r-f82e behavior. Any host
     # where the scope detector returns (False, "") lands here.
@@ -1384,7 +1385,7 @@ def spawn_executor(
             start_new_session=True,  # ≡ setsid: detaches the process group
             close_fds=True,
         )
-    return proc.pid
+    return proc.pid, "(daemonized, start_new_session)"
 
 
 # ── User-origin classification (assumption #1 closure — D-FA3.1; verdict §4) ──

@@ -766,7 +766,7 @@ except Exception:
         # contract is preserved.
         _epoch_val="$_live_now"
     fi
-    sed -i "s/LASTHB/${_epoch_val}/" "$1/releases/state.json"
+    sed -i '' "s/LASTHB/${_epoch_val}/" "$1/releases/state.json"
     ln -sfn releases/vX "$1/current"   # the orphaned flip (vX) — adopt may repoint
 }
 adopt_run() {  # <dir>

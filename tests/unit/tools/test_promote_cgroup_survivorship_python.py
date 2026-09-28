@@ -16,6 +16,10 @@ Coverage:
   2. build_scope_argv pure-function correctness
   3. Reaper signal surfacing (os.WIFSIGNALED + os.WTERMSIG → "SIGTERM (15)")
   4. _scope_detect_real (real detector) never raises — fail-closed contract
+  5. _scope_detect_real never-raises: bare call (no env) returns a tuple
+     without raising on any host — even when the detector short-circuits
+     at the platform/systemd guards the contract is "return (False, "")",
+     never raise.
   6. r-f82e fix cycle 1 — detection-env == spawn-env parity
      6a. detector probes with caller-supplied env (forwards to subprocess.run)
      6b. XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS survive executor_env
@@ -27,15 +31,16 @@ import importlib.machinery
 import importlib.util
 import os
 import signal
-import subprocess
 import sys
+import time
 import types
+import warnings
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/unit/tools/.. → repo root
 
 
-def _load_uj_with_stubs():
+def _load_uj_with_stubs() -> types.ModuleType:
     """Load daemon/tools/upgrade_journal.py with a stubbed daemon.constants.
 
     The file imports ``from daemon.constants import is_reserved_source``;
@@ -59,7 +64,7 @@ def _load_uj_with_stubs():
     return uj
 
 
-def main():
+def main() -> None:
     uj = _load_uj_with_stubs()
 
     # ── 1a. spawn_executor scope escape — 3-branch pin ─────────────────────
@@ -173,6 +178,13 @@ def main():
     else:
         # Some platforms / sandbox configs intercept SIGTERM before delivery
         # to the child. Skip the assertion rather than fail.
+        warnings.warn(
+            "sandbox quirk: SIGTERM was NOT observed via WIFSIGNALED on "
+            f"this host (status={status2}); skipping 4b assertion (the "
+            "attribution contract is still proven on a host that delivers "
+            "the signal)",
+            stacklevel=2,
+        )
         print(f"INFO: 4b SIGTERM was NOT observed via WIFSIGNALED on this host (status={status2}); skipped (sandbox quirk)")
 
     # ── 5. _scope_detect_real never raises — fail-closed contract ──────────
@@ -210,13 +222,19 @@ def main():
             "non-Linux" if sys.platform != "linux"
             else "host lacks /run/systemd/system (no systemd)"
         )
+        warnings.warn(
+            "sandbox quirk: 6a skipped because "
+            f"{skip_reason}; detector short-circuits before subprocess.run "
+            "probes (captured_envs assertion is meaningless on this host)",
+            stacklevel=2,
+        )
         print(
             "INFO: 6a SKIPPED — "
             f"{skip_reason}; detector short-circuits before subprocess.run probes "
             "(captured_envs assertion is meaningless)"
         )
     else:
-        captured_envs: list = []
+        captured_envs: list[dict[str, str] | None] = []
         real_run = uj.subprocess.run
 
         def _cap_run(*args, **kwargs):
@@ -322,5 +340,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import time  # local import so the module-level imports stay minimal
     main()

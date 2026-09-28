@@ -77,12 +77,13 @@ SWEEP_LOCK_WAIT_S=0            # the launcher NEVER delays boot on a busy
                               # pipeline lock — if another action holds it
                               # with a fresh heartbeat, the sweep defers to
                               # the next start (availability-first).
-HEARTBEAT_STALE_S=300          # mirror of lib.sh HEARTBEAT_STALE_S (lib.sh:73)
-                              # — journal in_flight.last_heartbeat older than
-                              # this is stale. Used by _journal_sweep's
-                              # comp3 liveness fast path (mirror-discipline:
-                              # both sweep tables must agree, R-SR13 /
-                              # lib.sh:1757 commentary).
+HEARTBEAT_STALE_S=300          # mirror of lib.sh HEARTBEAT_STALE_S (lib.sh
+                              # constant block) — journal in_flight.last_
+                              # heartbeat older than this is stale. Used by
+                              # _journal_sweep's comp3 liveness fast path
+                              # (mirror-discipline: both sweep tables must
+                              # agree, R-SR13 / lib.sh adopt_stale_txn
+                              # comp3 block commentary).
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 # To stderr only. Under launchd, StandardErrorPath captures it
@@ -681,7 +682,7 @@ _journal_sweep() {
 
     # Age the txn. Unparseable started_at → FAIL CLOSED (never fire on a
     # txn we cannot age — it may be fresh).
-    local started_epoch age now hb_stale owner_dead
+    local started_epoch age now hb hb_stale owner_dead
     if ! started_epoch="$(_js_iso_to_epoch "$started")" 2>/dev/null; then
         _log "WARN: journal sweep: in_flight started_at unparseable ('$started') — leaving untouched, boot proceeds"
         return 0

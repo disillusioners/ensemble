@@ -4257,19 +4257,15 @@ class InstanceManager:
                 self._journal_executor_orphaned(install_dir, kind, run_id)
                 return False
 
-            child_pid = _uj.spawn_executor(argv, install_dir, extra_env, run_id=run_id)
+            child_pid, _spawn_mode_note = _uj.spawn_executor(
+                argv, install_dir, extra_env, run_id=run_id
+            )
             # r-f82e fix cycle 1: log the ACTUAL spawn mode — scope unit
             # name when scope, legacy text otherwise. Pre-cycle-1 log
             # always said "(daemonized, start_new_session)" which was
-            # stale under scope mode. Detection is cheap + idempotent
-            # (one extra systemd-run probe at most), so we re-run it
-            # here on the same env dict the spawn actually inherited.
-            _spawn_env = _uj.executor_env(extra_env)
-            _use_scope, _ = _uj._scope_detect_fn(_spawn_env)
-            _spawn_mode_note = (
-                f"scope=ensemble-upgrade-{run_id}" if _use_scope
-                else "(daemonized, start_new_session)"
-            )
+            # stale under scope mode. The note is computed inside
+            # spawn_executor from the SAME detection result, so we
+            # consume it directly (no second detection here).
             logger.info(
                 "[system-execution] fired %s executor run_id=%s pid=%s %s",
                 kind, run_id, child_pid, _spawn_mode_note,

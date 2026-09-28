@@ -21,6 +21,11 @@
 #   _probe                    health-gate probe (2s sleep, curl max-time 5s —
 #                             the same budget as deploy.sh phase 5)
 #
+# Size rationale: ~1927 lines is the single shared substrate for the five
+# entry scripts (stage/promote/rollback/restart/status); splitting would
+# duplicate cross-cutting contracts (journal layout, lock semantics, ENV
+# allowlist, BSD/GNU dispatch). The file is the contract inventory.
+#
 # ENV DISCIPLINE (D-FA4.6 + test-strategy §5):
 #   - the resolved triple (INSTALL_DIR / PORT / POSTGRES_DB) is asserted and
 #     echoed by every action script before doing anything;
@@ -65,11 +70,9 @@ LOCK_HEARTBEAT_S=30           # live owner rewrites heartbeat this often
 LOCK_STALE_S=300              # heartbeat older than this = stale-breakable
 LOCK_WAIT_S_DEFAULT=15        # bounded wait for a busy lock, never forever
 
-# HEARTBEAT_STALE_S — journal in_flight.last_heartbeat older than this is
-# stale (r-f82e follow-up; comp3). Mirrors LOCK_STALE_S. The two are
-# refreshed together at every lock_heartbeat call site, but kept as
-# separate constants so the lock vs journal paths age independently
-# and the contract is greppable.
+# HEARTBEAT_STALE_S mirrors LOCK_STALE_S; the two are refreshed
+# together at every lock_heartbeat call site but kept as separate
+# constants so the lock vs journal paths age independently.
 HEARTBEAT_STALE_S=300
 
 # Retention (ADR-004): keep 3 releases; previous pinned.
@@ -96,9 +99,13 @@ _now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _log_ts() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
 
 # _log_tsl <file> <message...> — append a TIMESTAMPED line to the
-# upgrade.log (or any log file). Used by promote/restart/rollback/
-# stage as the ONE write seam for log lines; replaces the
-# redirect-echo pattern that produced unanchored output.
+# upgrade.log (or any log file). Test-exercised only — NOT yet wired
+# into promote/restart/rollback/stage. Sites that DO need a
+# timestamped log line can opt in by calling
+# ``_log_tsl "$UPGRADE_LOG" "<message>"`` in place of the
+# ``printf … >> "$UPGRADE_LOG"`` pattern that produced unanchored
+# output. (See the comp6 paragraph below for the minimal-disruption
+# adoption plan.)
 #
 # BYTE-IDENTICAL FALLBACK: if _log_ts is unavailable (no date binary,
 # or PATH stripped in a sandbox), the timestamp degrades to "-" rather
@@ -694,9 +701,9 @@ journal_close_txn() {
 # journal_heartbeat — refresh the journal's in_flight.last_heartbeat
 # to NOW (epoch seconds). The lock's heartbeat file (lock_heartbeat)
 # and this field are refreshed TOGETHER — the helper is invoked from
-# lock_heartbeat at every site (promote.sh:138/204/245/270/346 etc.)
-# so a live owner keeps BOTH fresh. Mirrors the D5 lock discipline
-# with the in_flight journal field added by comp3.
+# every lock_heartbeat site (promote/restart/rollback/stage) so a live
+# owner keeps BOTH fresh. Mirrors the D5 lock discipline with the
+# in_flight journal field added by comp3.
 #
 # Best-effort: a torn/unwritable journal is WARN-only and never raises
 # — lock_heartbeat returns 1 if the dir is gone, 0 otherwise; the
@@ -712,7 +719,7 @@ journal_close_txn() {
 # the closing ``}`` of the in_flight object. A pure-digit pattern
 # (e.g. ``[0-9]``) would replace one char at a time and corrupt the
 # field's trailing bytes. The portable fix is a sed anchored to the
-# field name (``"last_heartbeat":[0-9]*`` with no trailing wildcard)
+# field name (``"last_heartbeat":[0-9]+`` with no trailing wildcard)
 # so the substitution's match-length is bounded to the digits
 # themselves — see test_promote_cgroup_survivorship.sh 3b for the
 # regression pin that caught this.
@@ -739,6 +746,8 @@ journal_heartbeat() {
     # and the test pin in tests/test_promote_cgroup_survivorship.sh).
     local new_inf hb_now
     hb_now="$(_now_epoch)"
+    # heartbeat values are epoch-second integers; [0-9]+ assumes no
+    # sign/decimal/fractional — true for _now_epoch output.
     new_inf="$(printf '%s' "$inf" \
             | sed -E "s/(\"last_heartbeat\":)[0-9]+/\\1$hb_now/")"
     [ "$new_inf" != "$inf" ] || return 0
@@ -1037,7 +1046,7 @@ lock_acquire() {
         # refreshed together at lock_heartbeat sites, so they age in
         # lockstep; a separate journal-OWNER gate here would duplicate
         # the same liveness check (and a stale-but-live lock vs dead-but-
-  # fresh journal is the kind of paired-mismatch the r-f82e audit
+        # fresh journal is the kind of paired-mismatch the r-f82e audit
         # specifically warned against). R-SR13 mirrors the lock/journal
         # protocol across both files; the journal-side fast path
         # reclaims txns, not locks.
@@ -1169,7 +1178,7 @@ _signal_journal_halt() {
     journal_history_append halt "$detail" >/dev/null 2>&1 || true
 }
 
-# _signal_handler_term — single handler installed for TERM/HUP/INT.
+# _signal_handler — single handler installed for TERM/HUP/INT.
 # Argument is the signal NAME (TERM/HUP/INT) per bash convention
 # (``trap '...' TERM`` invokes the handler with $1=TERM). We journal
 # first, mark the guard, release the lock, then exit.
@@ -1187,11 +1196,8 @@ _signal_handler() {
     # Direct call (NOT through EXIT trap) — the EXIT trap's
     # _trap_safe_exit sees _LOCK_RELEASED=1 and no-ops anyway.
     lock_release >/dev/null 2>&1 || true
-    # exit via plain `exit`: bash translates to 128+signum only when
-    # the signal is unhandled. We use `kill -INT $$` to make the exit
-    # genuinely signal-induced (preserves shell convention). But the
-    # POSIX-cleanest path: return via trap invocation context — bash's
-    # default action after a trap fires is to continue; `exit N` works.
+    # Exit via plain `exit N`: the trap runs in-process, so the exit
+    # code carries the signal attribution directly.
     case "$sig" in
         TERM) exit 143 ;;
         HUP)  exit 129 ;;
@@ -1543,11 +1549,16 @@ restart_via_launcher() {
     if [ "$(uname -s)" = "Linux" ] \
        && [ -d "/run/systemd/system" ] \
        && [ -n "${ENSEMBLE_RESTART_UNIT:-}" ]; then
-        if systemctl start "$ENSEMBLE_RESTART_UNIT" 2>/dev/null; then
+        local _sc_errfile="/tmp/.ensemble-scerr.$$"
+        if systemctl start "$ENSEMBLE_RESTART_UNIT" 2>"$_sc_errfile"; then
+            rm -f "$_sc_errfile"
             _log "launcher started via systemd unit $ENSEMBLE_RESTART_UNIT (comp7: cgroup-bound; immune to setsid inheritance) — logs: $log"
             return 0
         fi
-        _warn "systemctl start $ENSEMBLE_RESTART_UNIT failed — falling back to nohup launcher (comp7 opt-in path)"
+        local _sc_first
+        _sc_first="$(head -n1 "$_sc_errfile" 2>/dev/null || true)"
+        rm -f "$_sc_errfile"
+        _warn "systemctl start $ENSEMBLE_RESTART_UNIT failed: ${_sc_first:-no stderr} — falling back to nohup launcher (comp7 opt-in path)"
     fi
     ( cd "$INSTALL_DIR" && nohup ./launcher.sh >> data/launcher.log 2>&1 & )
     _log "launcher started (nohup) — logs: $INSTALL_DIR/data/launcher.log"
