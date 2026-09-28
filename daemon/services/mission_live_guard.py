@@ -36,9 +36,9 @@ premature one — at-least-once terminal delivery is preserved.
 
 **Zombie backstop — anchored to TREE ACTIVITY (U7 fix,
 2026-09-28).** The pre-U7 anchor was the work row's
-``task_completed_at`` — a per-work stamp that captured the per-turn
+``completed_at`` — a per-work stamp that captured the per-turn
 settle moment. On a long-lived mission (the wave-3 evidence: a 6h5m
-mission where the leader was still mid-LLM) ``task_completed_at`` is
+mission where the leader was still mid-LLM) ``completed_at`` is
 hours old while tree members continue to wake/sleep/respond, so the
 backstop fired 73s pre-terminal on a live row, consuming the
 exactly-once notify row with stale text. The new anchor is the freshest
@@ -56,10 +56,7 @@ the backstop never fires; on a truly quiet tree (no activity for
 The pre-existing missing-anchor disarm rule is preserved: a tree where
 no instance has ever recorded ``last_activity_at`` cannot fire the
 backstop (data gap, not evidence of a zombie); the leg verdict — all
-terminal + bus quiet — decides the row (terminal, finalize). The
-``task_completed_at`` argument is kept in the signature for
-backward-call-site compatibility but is now ignored by the backstop
-logic; new callers may stop passing it.
+terminal + bus quiet — decides the row (terminal, finalize).
 
 Age math uses ``now_utc_naive()`` per the naive-UTC binding
 convention — no schema changes, no new env flags (repo policy:
@@ -139,7 +136,7 @@ class MissionLiveVerdict:
     timed_out: bool = False
 
 
-def parse_completed_at_naive(value) -> datetime | None:
+def parse_completed_at_naive(value: datetime | str | None) -> datetime | None:
     """Parse a ``completed_at`` anchor into naive-UTC digits.
 
     Accepts ``datetime`` or ISO-8601 string (Task rows store
@@ -164,43 +161,10 @@ def parse_completed_at_naive(value) -> datetime | None:
     return aware.replace(tzinfo=None)
 
 
-# Module-private helper kept for back-compat with external callers that
-# may import the symbol (None of the in-tree callers do post-U7 — the
-# helper is now purely functional, used by tests). The U7 backstop
-# routes through ``parse_completed_at_naive`` + in-memory MAX during
-# the tree walk inside ``_evaluate_legs``.
-def _completed_at_age_exceeds(
-    anchor,
-    timeout_seconds: int,
-) -> bool | None:
-    """Has the anchor aged past the timeout?
-
-    Returns ``True`` (backstop fires → finalize), ``False`` (within
-    window → keep deferring), or ``None`` (no usable anchor — the
-    backstop cannot fire; the caller stays in the defer-holding
-    default). An absent anchor must NOT open the guard: the guard's
-    whole purpose is holding terminal delivery while the mission is
-    plausibly alive, and a missing stamp is a data gap, not evidence
-    of a zombie.
-
-    .. note::
-       U7 (2026-09-28): the production backstop no longer routes
-       through this helper — it computes the anchor from the freshest
-       ``last_activity_at`` across the permanent lineage during the
-       tree walk. The helper survives for legacy callers + tests.
-    """
-    parsed = parse_completed_at_naive(anchor)
-    if parsed is None:
-        return None
-    age_seconds = (now_utc_naive() - parsed).total_seconds()
-    return age_seconds >= timeout_seconds
-
-
 async def evaluate_mission_live(
     *,
     instance_repository: "SQLModelInstanceRepository | None",
     instance_id: str | None,
-    task_completed_at=None,
     bus_pending_count: int | None = None,
     timeout_seconds: int = MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
 ) -> MissionLiveVerdict:
@@ -209,14 +173,11 @@ async def evaluate_mission_live(
     U7 (2026-09-28): the zombie backstop is anchored to the FRESHEST
     tree signal available in the read path —
     ``max(root.last_activity_at, max(d.last_activity_at) for d in
-    descendants)`` — NOT to the per-work ``task_completed_at`` (which
-    on a long-lived mission is hours old while tree members continue
-    to wake / sleep / respond, and which misfired 73s pre-terminal on
+    descendants)`` — NOT to the per-work ``completed_at`` (which on a
+    long-lived mission is hours old while tree members continue to
+    wake / sleep / respond, and which misfired 73s pre-terminal on
     the wave-3 evidence). The anchor is collected during the same
-    legs (b)/(c) tree walk; no extra DB round-trip. The
-    ``task_completed_at`` parameter is KEPT on the signature for
-    backward-call-site compatibility but is no longer consulted by
-    the backstop; new callers may stop passing it.
+    legs (b)/(c) tree walk; no extra DB round-trip.
 
     Args:
         instance_repository: Instance repository for the permanent
@@ -225,10 +186,6 @@ async def evaluate_mission_live(
         instance_id: The work row's instance id (the mission's root
             for task-kind jobs). ``None`` → fail-open (nothing to
             consult; at-least-once wins).
-        task_completed_at: DEPRECATED (U7, 2026-09-28) — the work
-            row's ``completed_at``. Ignored by the backstop; kept on
-            the signature so existing callers compile. Pass ``None``
-            in new code.
         bus_pending_count: Leg (a) — pending dependency-bus watchers
             for this work, precomputed by the caller (each call site
             owns its bus seam: f2 passes the Gate-1 source-task count;
@@ -243,7 +200,6 @@ async def evaluate_mission_live(
         collapse to ``live=False, error=True`` (fail-open; the caller
         finalizes).
     """
-    del task_completed_at  # U7: backstop no longer anchored here.
     try:
         return await _evaluate_legs(
             instance_repository=instance_repository,
@@ -272,9 +228,9 @@ async def evaluate_mission_live(
 
 async def _evaluate_legs(
     *,
-    instance_repository,
-    instance_id,
-    bus_pending_count,
+    instance_repository: "SQLModelInstanceRepository | None",
+    instance_id: str | None,
+    bus_pending_count: int | None,
     timeout_seconds: int,
 ) -> MissionLiveVerdict:
     """Leg evaluation (async — blocking repo reads go through
@@ -386,9 +342,7 @@ async def _evaluate_legs(
             reason=(
                 "no live leg: root + descendants terminal, bus quiet "
                 "— all-terminal tree finalizes immediately "
-                "(tree-activity anchor plays no role on all-terminal "
-                "trees; timed_out is reserved for the zombie-backstop "
-                "path on non-terminal members)"
+                "(anchor plays no role on all-terminal trees)"
             ),
         )
 
@@ -407,10 +361,10 @@ async def _evaluate_legs(
         return MissionLiveVerdict(
             live=True,
             reason=(
-                "non-terminal member present (live leg holds) but no "
+                "non-terminal member present but no "
                 "last_activity_at anchor on any tree member — "
                 "backstop disarmed (data gap, not zombie evidence); "
-                "the leg verdict wins"
+                "the live leg holds by default"
             ),
         )
 

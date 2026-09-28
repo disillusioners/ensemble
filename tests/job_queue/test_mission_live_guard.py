@@ -19,7 +19,7 @@ The fix inserts a shared mission-live guard
   descendant, (c) non-terminal root — non-terminal = NOT IN
   ``TERMINAL_INSTANCE_STATUSES`` (the mission resolver canonicalizes
   IDLE → ``processing``, so idle counts LIVE);
-* zombie backstop: ``completed_at`` older than
+* zombie backstop: freshest tree ``last_activity_at`` older than
   ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (6h) falls through to
   finalize (at-least-once delivery, starvation impossible);
 * fail-open: any guard error → finalize proceeds.
@@ -27,6 +27,13 @@ The fix inserts a shared mission-live guard
 HARD CONSTRAINT under test: at-least-once terminal delivery — the
 mission-dead shapes MUST still finalize + notify (the original
 missing-report bug must not regress).
+
+Size rationale (TIDIER, 2026-09-28): the file is intentionally one
+file — every leg of the three-leg guard + the U7 re-anchor + the
+backstop + the fail-open seam is exercised against a real
+SQLite-backed SQLModelInstanceRepository, and the legs share a
+single engine + insertion scaffold; per-leg extraction would
+duplicate the repo wiring.
 """
 
 from __future__ import annotations
@@ -40,17 +47,17 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
-from daemon.repositories.instance.models import Instance  # noqa: F401
+from daemon.repositories.instance.models import Instance  # noqa: F401 — required for SQLModel.metadata.create_all(engine) in the engine fixture
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.repository import JobRepository
-from daemon.repositories.job_queue.watcher_models import JobWatcher  # noqa: F401
+from daemon.repositories.job_queue.watcher_models import JobWatcher  # noqa: F401 — required for SQLModel.metadata.create_all(engine) in the engine fixture
 from daemon.repositories.job_queue.watcher_repository import (
     JobWatcherRepository,
 )
-from daemon.repositories.task.models import Task as TaskModel  # noqa: F401
-from daemon.repositories.task.models import TaskStatus, TaskType  # noqa: F401
+from daemon.repositories.task.models import Task as TaskModel  # noqa: F401 — required for SQLModel.metadata.create_all(engine) in the engine fixture
+from daemon.repositories.task.models import TaskStatus, TaskType  # noqa: F401 — required for SQLModel.metadata.create_all(engine) in the engine fixture
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services import mission_live_guard as _mlg
 from daemon.services.job_queue_service import JobQueueService
@@ -377,7 +384,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-1",
-            task_completed_at=now_utc_naive(),
         )
         assert verdict.live and not verdict.error
         assert "live leg holds" in verdict.reason
@@ -397,7 +403,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-2",
-            task_completed_at=now_utc_naive(),
         )
         assert verdict.live and not verdict.error
         assert "live leg holds" in verdict.reason
@@ -411,7 +416,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-idle",
-            task_completed_at=now_utc_naive(),
         )
         assert verdict.live, (
             f"idle must be LIVE per the resolver's IDLE→processing "
@@ -444,7 +448,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-3",
-            task_completed_at=now_utc_naive(),
             bus_pending_count=0,
         )
         assert not verdict.live, (
@@ -507,7 +510,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-fixb",
-            task_completed_at=stale_task_completed,
             bus_pending_count=0,
         )
         assert not verdict.live, (
@@ -559,7 +561,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-zombie",
-            task_completed_at=stale_activity,
             bus_pending_count=0,
         )
         assert not verdict.live, (
@@ -579,7 +580,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-4",
-            task_completed_at=now_utc_naive(),
             bus_pending_count=2,
         )
         assert verdict.live
@@ -609,7 +609,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-5",
-            task_completed_at=old_anchor,
         )
         assert verdict.live, (
             "U7: live legs always win — root instance is "
@@ -655,7 +654,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-quiet",
-            task_completed_at=None,
         )
         assert not verdict.live, (
             "FIXBACK zombie-backstop: non-terminal descendant + stale "
@@ -706,7 +704,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-quietall",
-            task_completed_at=None,
         )
         assert not verdict.live, (
             "FIXBACK: all-terminal tree + stale anchor MUST finalize "
@@ -728,7 +725,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-6",
-            task_completed_at=None,
         )
         assert verdict.live and not verdict.timed_out
 
@@ -741,7 +737,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-7",
-            task_completed_at=now_utc_naive(),
         )
         assert not verdict.live
         assert verdict.error, "guard errors must fail OPEN (finalize)"
@@ -751,7 +746,6 @@ class TestMissionLiveGuardUnit:
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=None,
             instance_id="root-8",
-            task_completed_at=now_utc_naive(),
         )
         assert not verdict.live
         assert verdict.error

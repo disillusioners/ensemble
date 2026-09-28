@@ -536,7 +536,6 @@ class JobQueueService:
             ):
                 guard_held = await self._mission_live_guard_holds(
                     instance_id=getattr(record, "instance_id", None),
-                    completed_at_anchor=getattr(record, "completed_at", None),
                 )
                 if guard_held:
                     logger.info(
@@ -559,7 +558,6 @@ class JobQueueService:
         self,
         *,
         instance_id: str | None,
-        completed_at_anchor,
     ) -> bool:
         """Evaluate the shared mission-live guard for the boot sweep.
 
@@ -577,11 +575,7 @@ class JobQueueService:
         freshest tree activity is older than
         ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (true zombie-break; the
         only legitimate use). All-terminal trees finalize immediately
-        via the natural path; the anchor plays no role there. The
-        ``completed_at_anchor`` parameter survives on the signature
-        for backward-call-site compatibility but is no longer
-        consulted (U7) — it is IGNORED by the guard, not "resolves
-        to False" as the pre-fixback docstring claimed.
+        via the natural path; the anchor plays no role there.
 
         Leg (a) uses the bus's target-side pending count (children
         reports still expected by the mission instance); a missing bus
@@ -617,7 +611,6 @@ class JobQueueService:
         verdict = await evaluate_mission_live(
             instance_repository=instance_repository,
             instance_id=instance_id,
-            task_completed_at=completed_at_anchor,
             bus_pending_count=bus_pending_count,
         )
         if verdict.live:
@@ -848,7 +841,6 @@ class JobQueueService:
                                 None,
                             ),
                             instance_id=None,
-                            task_completed_at=None,
                             bus_pending_count=None,
                         )
                         # Mission terminal / unresolvable → retire.
@@ -977,7 +969,6 @@ class JobQueueService:
                         instance_repository=_pre_guard_instance_repo,
                         instance_id=_pre_guard_work_root,
                         bus_pending_count=None,
-                        task_completed_at=None,  # U7: ignored, kept for compat
                     )
                     if _pre_verdict.timed_out:
                         orphan_released += 1
@@ -986,18 +977,17 @@ class JobQueueService:
                             "work_status=%s window_s=%d — "
                             "backstop fires: non-terminal tree "
                             "member present AND freshest tree "
-                            "last_activity_at older than %ds "
-                            "threshold (true zombie shape — every "
-                            "observed activity in the row's tree is "
-                            "older than the window); the natural "
-                            "arm was held during the entire window; "
-                            "the deliver below carries the FRESHLY-"
-                            "fetched work_record content "
+                            "last_activity_at older than the "
+                            "timeout window (true zombie shape — "
+                            "every observed activity in the row's "
+                            "tree is older than the window); the "
+                            "natural arm was held during the entire "
+                            "window; the deliver below carries the "
+                            "FRESHLY-fetched work_record content "
                             "(resolver-fallback); this row is the "
                             "U7 wave-3 fix's structural target",
                             work_id[:8],
                             work_status,
-                            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
                             MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
                         )
                 except Exception as _orphan_detect_err:

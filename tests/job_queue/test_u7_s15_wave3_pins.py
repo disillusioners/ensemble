@@ -37,6 +37,11 @@ This pack pins the wave-3 shape:
 Each pin focuses on ONE observable invariant; the W5b follow-up
 (real-seat acceptance suite) authors the natural-path integration
 shape separately.
+
+Size rationale (TIDIER, 2026-09-28): the pack is intentionally one
+file — six wave-3 regression pins share the engine + fixture
+scaffold and the all-terminal discriminator; per-pin extraction
+would force a six-way helper fork with no test-clarity win.
 """
 
 from __future__ import annotations
@@ -51,20 +56,14 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.engine import Engine
-from sqlmodel import Session, SQLModel
+from sqlmodel import SQLModel
 
 from daemon.repositories.instance.repository import (
     SQLModelInstanceRepository,
 )
 from daemon.repositories.instance.models import Instance
-from daemon.repositories.job_queue.watcher_models import JobWatcher
 from daemon.repositories.job_queue.watcher_repository import (
     JobWatcherRepository,
-)
-from daemon.repositories.task.models import (
-    Task as TaskModel,
-    TaskStatus,
 )
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services import mission_live_guard as _mlg
@@ -349,9 +348,6 @@ class TestW1LiveTreeHoldsBackstop:
         verdict = await evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-w1",
-            task_completed_at=now_utc_naive() - timedelta(
-                seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60,
-            ),
             bus_pending_count=None,
         )
 
@@ -396,9 +392,6 @@ class TestW1LiveTreeHoldsBackstop:
         verdict = await evaluate_mission_live(
             instance_repository=repo,
             instance_id="root-w6",
-            task_completed_at=now_utc_naive() - timedelta(
-                seconds=_mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60,
-            ),
             bus_pending_count=None,
         )
 
@@ -732,7 +725,7 @@ class TestW3FreshPayloadAtFireTime:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestW15S15CompensationRecoversDroppedRows:
+class TestW4S15CompensationRecoversDroppedRows:
     """W4 (2026-09-28) — S15 hazard closure.
 
     Pre-S15 an enqueue throw mid-loop silently DROPPED every claimed
@@ -1028,6 +1021,16 @@ class TestW5HookBNoJobAndExternalSeat:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# Helper used by W6 only — runs notify via the full chain.
+async def _notify_via_helper(components) -> int:
+    jqs = components["jqs"]
+    return (
+        await jqs.reconcile_held_watches_for_instance(
+            instance_id=None,
+        )
+    ).get("fired", 0)
+
+
 class TestW6NegativeControls:
     """W6 (2026-09-28) — negative controls that the U7 re-anchor must
     NOT regress."""
@@ -1137,9 +1140,7 @@ class TestW6NegativeControls:
             instance_id="root-w6-held",
         )
         try:
-            notified = await _notify_via_helper(
-                components, work_id, status="completed",
-            )
+            notified = await _notify_via_helper(components)
         finally:
             resolver.resolve_work = original
 
@@ -1150,12 +1151,3 @@ class TestW6NegativeControls:
         )
         assert len(watcher_repo.get_watchers_for_job(work_id)) == 1
 
-
-# Helper used by W6 only — runs notify via the full chain.
-async def _notify_via_helper(components, work_id: str, status: str) -> int:
-    jqs = components["jqs"]
-    return (
-        await jqs.reconcile_held_watches_for_instance(
-            instance_id=None,
-        )
-    ).get("fired", 0)

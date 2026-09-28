@@ -243,13 +243,15 @@ async def notify_work_watchers(
               the canonical ``evaluate_mission_live`` guard
               (``daemon/services/mission_live_guard.py``) is invoked
               exactly ONCE per ``notify_work_watchers`` call. The
-              guard consults the dependency-bus pending count, the
-              permanent ``instances.parent_id`` tree, and the
-              ``completed_at`` zombie-backstop window — the same
-              legs the boot-sweep ``reconcile_terminal_watches``
-              and the observer's ``_fire_watcher_notify_for_terminal``
-              re-fire already use. This replaces the pre-C1 proxy
-              check (``work_record.mission_liveness`` /
+              guard consults the dependency-bus pending count and
+              the permanent ``instances.parent_id`` tree; the
+              zombie backstop is anchored to the freshest
+              ``last_activity_at`` across the tree (U7,
+              2026-09-28) — the same legs the boot-sweep
+              ``reconcile_terminal_watches`` and the observer's
+              ``_fire_watcher_notify_for_terminal`` re-fire
+              already use. This replaces the pre-C1 proxy check
+              (``work_record.mission_liveness`` /
               ``work_record.status``) that missed live children
               on the 2026-09-25 mission 36be8aef incident.
 
@@ -520,9 +522,6 @@ async def notify_work_watchers(
                 _guard_verdict = await evaluate_mission_live(
                     instance_repository=instance_repository,
                     instance_id=mission_instance_id,
-                    task_completed_at=getattr(
-                        work_record, "completed_at", None
-                    ),
                     bus_pending_count=None,
                 )
                 mission_live = _guard_verdict.live
@@ -824,7 +823,7 @@ async def notify_work_watchers(
         # transitions a row out of the DB); failure path
         # at-least-once via compensation.
         notified = 0
-        failed_claimed: list = []  # S15: per-watch failures → compensation
+        failed_claimed: list[JobWatcher] = []  # S15: per-watch failures → compensation
         for watcher in notify_list:
             notification_parts = [
                 f"[JOB_EVENT] Job {work_id[:8]}... {status_display}",
@@ -923,10 +922,27 @@ async def notify_work_watchers(
         # ``watch_events`` list, so the periodic sweep OR a future
         # terminal re-fire can deliver. The UPSERT is per-row inside
         # its own transaction; one row's failure does not block the
-        # others. ``added_watch`` includes both INSERT and UPDATE
-        # branches, so a row that ANOTHER concurrent claim raced and
-        # re-deleted (extremely unlikely under the claim-first
-        # semantics) gets re-supplied here.
+        # others. ``add_watch`` UPSERTs the row — both INSERT and
+        # UPDATE branches are covered by the same
+        # ``INSERT ... ON CONFLICT DO UPDATE`` statement (see
+        # ``JobWatcherRepository.add_watch``); the UPDATE side only
+        # touches ``watch_events`` (created_at is preserved on the
+        # UPDATE branch, re-stamped on the INSERT branch — see the
+        # S15 created_at re-stamp seam below). A row that ANOTHER
+        # concurrent claim raced and re-deleted (extremely unlikely
+        # under the claim-first semantics) gets re-supplied here.
+        # S15 created_at re-stamp seam (MINOR-8, 2026-09-28): the
+        # compensation INSERTs a FRESH row — the original was
+        # CAS-claim DELETEd in step 3 — so ``JobWatcher.created_at``
+        # is re-stamped to the compensation's current INSERT time,
+        # NOT preserved from the original observation. Operators
+        # reading ``created_at`` to spot stuck rows must therefore
+        # take the re-stamp into account: a row that survived
+        # compensation appears "fresh" relative to the original
+        # observation, even though the watch itself is not new.
+        # This is the only S15 site that resets a row's created_at;
+        # the natural notify path leaves created_at untouched on
+        # first insert (the row exists from registration to fire).
         if failed_claimed:
             _compensated = 0
             _lost = 0

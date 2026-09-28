@@ -67,6 +67,13 @@ Run with::
 The pack wrapper at ``test/packs/u7s15_realseat_acceptance_unit_test.sh``
 runs each leg with explicit timeout layering (Layer 1 caller timeout,
 Layer 2 internal pytest timeout).
+
+Size rationale (TIDIER, 2026-09-28): the file is intentionally one
+file — five real-seat legs (A natural notify, B lifecycle-COMPLETED
+no_job carrier, C sweep_once seam, D negative control, E real 300s
+tick) all need the sidecar watch_mission arming helper + the
+PG-diagnostic + the seat-state matrix; per-leg extraction would
+duplicate the harness boilerplate five times.
 """
 
 from __future__ import annotations
@@ -74,15 +81,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import time
 from typing import Any
 
 import pytest
 import requests
-import sqlalchemy
 from sqlalchemy import create_engine, text
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -208,11 +213,10 @@ pytestmark = [
 # HTTP helpers (reuse the project convention)
 # --------------------------------------------------------------------------- #
 
-PROJECT_ID = os.environ.get("ENSEMBLE_PROJECT_ID", None)
 POLL_INTERVAL = 2
 
 
-def _spawn_instance(agent_id: str, project_id: str | None = PROJECT_ID) -> str:
+def _spawn_instance(agent_id: str, project_id: str | None = None) -> str:
     """POST /api/instances and return the new instance_id."""
     payload: dict[str, Any] = {"agent_id": agent_id}
     if project_id is not None:

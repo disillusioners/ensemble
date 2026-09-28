@@ -163,6 +163,18 @@ class WatchReconcileSweepService:
         # sweep is the structural backstop, not the fast path; an
         # all-hold heartbeat every minute would be too noisy on a
         # long-idle daemon).
+        # ASSUMPTION (TIDIER, 2026-09-28, ledgered — do NOT derive
+        # from interval): ``_heartbeat_every=12`` is HARDCODED against
+        # the default 300s interval (12 × 300s = 1h). If the sweep
+        # interval is overridden via
+        # ``SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS``, the
+        # heartbeat cadence DOES NOT scale — the count remains 12
+        # ticks. The current behavior is intentional (the heartbeat
+        # is a sweep-process liveness signal, not a wall-clock
+        # heartbeat; per-tick is the correct grain) but the coupling
+        # is NOT obvious to a reader who only sees the constant.
+        # Any future wall-clock-anchored heartbeat must be a separate
+        # implementation, not a derivation from this counter.
         self._heartbeat_every: int = 12
         self._last_heartbeat_at: int = 0
 

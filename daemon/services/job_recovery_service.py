@@ -2884,7 +2884,6 @@ class JobRecoveryService:
                     mission_verdict = await evaluate_mission_live(
                         instance_repository=self._instance_repository,
                         instance_id=instance_id,
-                        task_completed_at=task_completed_at,
                         # Leg (a): Gate 1 already computed the bus
                         # pending count for this task; pass it so the
                         # guard's bus leg agrees with the gate seam.
