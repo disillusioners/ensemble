@@ -1457,6 +1457,35 @@ def test_leg_e_sweep_backstop_at_real_tick():
             f"[LEG-E] parent={parent_id[:8]} worker={worker_id[:8]} "
             f"job={job_id[:8]}"
         )
+        # Wait for the dispatched instance to be visible (A/B/C
+        # pattern): job_create returns synchronously, but the
+        # dispatch spawns the mission instance ASYNC — poll the job
+        # record for its instance_id, then wait for that instance's
+        # Task rows before arming. NOTE: worker_id above is a decoy
+        # (cleanup-only); the mission instance is the job's
+        # dispatched instance_id, same as Legs A/B/C.
+        job_record = _get_job(job_id)
+        worker_instance_id: str | None = None
+        arm_poll_deadline = time.monotonic() + 15
+        while time.monotonic() < arm_poll_deadline:
+            try:
+                job_record = _get_job(job_id)
+                worker_instance_id = str(
+                    job_record.get("instance_id") or ""
+                ) or None
+                if worker_instance_id:
+                    break
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(0.3)
+        if worker_instance_id:
+            task_count = _wait_for_task_rows(
+                worker_instance_id, min_rows=1, timeout=15
+            )
+            logger.info(
+                f"[LEG-E] task rows visible for dispatched worker "
+                f"{worker_instance_id[:8]}...: {task_count}"
+            )
 
         arm_result = _arm_seat_via_watch_mission(
             target=job_id,
