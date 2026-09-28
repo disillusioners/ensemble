@@ -2864,9 +2864,19 @@ class JobRecoveryService:
                     # set; ``idle`` counts live per the mission
                     # resolver's IDLE → ``processing`` mapping) and
                     # SKIPs finalize + notify while the mission is
-                    # live. The zombie backstop (completed_at older
-                    # than ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``)
-                    # falls through so at-least-once terminal
+                    # live. The zombie backstop is anchored to
+                    # TREE ACTIVITY (FIXBACK U7,
+                    # 2026-09-28): the freshest
+                    # ``last_activity_at`` across root + descendants
+                    # (NOT the per-work ``completed_at`` — that was
+                    # the pre-U7 anchor and the wave-3 misfire
+                    # class). Under the FIXBACK, the backstop fires
+                    # IFF a non-terminal tree member is present AND
+                    # that freshest activity is older than
+                    # ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (true
+                    # zombie-break). All-terminal trees finalize
+                    # immediately via the natural path (anchor plays
+                    # no role there), so at-least-once terminal
                     # delivery is preserved even against stuck
                     # children. Internal guard errors fail OPEN
                     # (finalize proceeds) — a missing terminal is
@@ -2874,7 +2884,6 @@ class JobRecoveryService:
                     mission_verdict = await evaluate_mission_live(
                         instance_repository=self._instance_repository,
                         instance_id=instance_id,
-                        task_completed_at=task_completed_at,
                         # Leg (a): Gate 1 already computed the bus
                         # pending count for this task; pass it so the
                         # guard's bus leg agrees with the gate seam.

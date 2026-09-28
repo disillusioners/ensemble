@@ -2426,13 +2426,24 @@ class JobFeedbackObserver:
             # terminal) or leaves them alone (if the mission is
             # still live — the periodic sweep is the backstop).
             #
+            # U7 + S15 (2026-09-28, fix/u7-orphan-anchor-s15) —
+            # GLOBALIZED: ``instance_id=None`` is the work-side scan
+            # hook (a) was globalized to in the U1 cycle-4 fixback.
+            # The per-instance scope of this hook (a companion to
+            # the JobItem-linkage branch) was the AXIS bug — held
+            # rows can belong to watchers whose parent is OUTSIDE
+            # the job's instance subtree (external seats); the
+            # global scan finds them. CAS-claim remains
+            # exactly-once across the hook fires because each
+            # call only claims rows that are still claimable.
+            #
             # Fail-soft: any hook error is logged at DEBUG and
             # swallowed — the post-commit outbox has already
             # succeeded and must not be undone by a helper glitch.
             try:
                 if self._job_queue_service is not None:
                     await self._job_queue_service.reconcile_held_watches_for_instance(
-                        instance_id=instance_id,
+                        instance_id=None,  # U7: globalize to work-side scan
                     )
             except Exception as hook_err:
                 # WARNING parity with the outer catch at :1547 — the

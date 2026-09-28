@@ -213,15 +213,23 @@ async def notify_work_watchers(
     JobItem-originated terminal events.
 
     Delivery contract:
-        * **Exactly-once on success, at-least-once on failure.**
-          Watchers are deleted only AFTER all notifications are
-          successfully delivered. If ``resolve_work`` fails (work
-          gone) or any ``enqueue_message`` throws, watcher rows
-          remain in place for ``reconcile_terminal_watches`` cleanup
-          at next startup — the watching instance is never
-          permanently un-notified.
+        * **Exactly-once on success; at-least-once on transient
+          enqueue failure.** Watchers are CAS-claimed via the
+          repo-level atomic ``DELETE ... RETURNING`` (the N1
+          exactly-once invariant), enqueued per-row, and on
+          per-watch enqueue failure each dropped-claim row is
+          re-inserted via ``watcher_repo.add_watch`` UPSERT so the
+          next sweep tick OR a future terminal re-fire can
+          deliver. The pre-S15 flow claimed-then-enqueued-threw
+          and silently lost the row (the docstring claim was
+          structurally false under that throw path); S15
+          (2026-09-28) catches per-watch and runs compensation
+          AFTER the loop completes. If ``resolve_work`` fails
+          (work gone), watchers stay in place for reconcile
+          cleanup at the next startup — the watching instance
+          is never permanently un-notified.
 
-    Ordering (resolve → partition → claim-first → notify):
+    Ordering (resolve → partition → claim-first → notify → compensate-on-fail):
 
         1. **Resolve FIRST.** ``work_resolver.resolve_work`` runs
            before any watcher fetch. If the work is gone, return 0
@@ -235,13 +243,15 @@ async def notify_work_watchers(
               the canonical ``evaluate_mission_live`` guard
               (``daemon/services/mission_live_guard.py``) is invoked
               exactly ONCE per ``notify_work_watchers`` call. The
-              guard consults the dependency-bus pending count, the
-              permanent ``instances.parent_id`` tree, and the
-              ``completed_at`` zombie-backstop window — the same
-              legs the boot-sweep ``reconcile_terminal_watches``
-              and the observer's ``_fire_watcher_notify_for_terminal``
-              re-fire already use. This replaces the pre-C1 proxy
-              check (``work_record.mission_liveness`` /
+              guard consults the dependency-bus pending count and
+              the permanent ``instances.parent_id`` tree; the
+              zombie backstop is anchored to the freshest
+              ``last_activity_at`` across the tree (U7,
+              2026-09-28) — the same legs the boot-sweep
+              ``reconcile_terminal_watches`` and the observer's
+              ``_fire_watcher_notify_for_terminal`` re-fire
+              already use. This replaces the pre-C1 proxy check
+              (``work_record.mission_liveness`` /
               ``work_record.status``) that missed live children
               on the 2026-09-25 mission 36be8aef incident.
 
@@ -512,9 +522,6 @@ async def notify_work_watchers(
                 _guard_verdict = await evaluate_mission_live(
                     instance_repository=instance_repository,
                     instance_id=mission_instance_id,
-                    task_completed_at=getattr(
-                        work_record, "completed_at", None
-                    ),
                     bus_pending_count=None,
                 )
                 mission_live = _guard_verdict.live
@@ -678,17 +685,35 @@ async def notify_work_watchers(
             # subscribed events have fired NOW — claim + deliver.
             matching_claimable.append(watcher)
 
-        # M2 — debug log when ``mission_terminal`` opt-in held
-        # notifications back. The watcher rows remain in place for
-        # the future terminal event; nothing claims them here.
+        # M2 + U7 (2026-09-28) — held-watcher diagnostic. Pre-U7 this
+        # was DEBUG-only, which made "all rows held, mission still
+        # live, nothing delivered" silent in production logs even
+        # though that shape is the wave-3 misfire surface. Promote
+        # to an INFO line that fires AT MOST once per notify call
+        # (the periodic sweep tick cadence handles the heartbeat
+        # for orphaned rows; per-call INFO here would be spam on a
+        # hot row). Operator greppable: ``held_for_mission_observation``.
         if held_for_mission:
-            logger.debug(
-                "notify_work_watchers: held %d watcher(s) for "
-                "mission_terminal gating on work_id=%s status=%s — "
-                "mission liveness not yet terminal; rows preserved",
-                held_for_mission,
+            log_fn = (
+                logger.info
+                if held_for_mission > 0
+                and not matching_claimable
+                and not matching_readonly
+                else logger.debug
+            )
+            log_fn(
+                "notify_work_watchers: held_for_mission_observation "
+                "work_id=%s status=%s — %d watcher(s) on mission_terminal "
+                "gating; mission_live=%s; ZERO deliverable rows this "
+                "call (the eventual mission-terminal fire claims them "
+                "OR the periodic sweep / hook (b) does so within the "
+                "guaranteed ≤300s interval); pairing this line with "
+                "the row's ``created_at`` lets operators spot rows "
+                "that are stuck past one tick",
                 work_id[:8],
                 status,
+                held_for_mission,
+                mission_live,
             )
 
         # Step 3 (N1 — 2026-09-03, extended by C1 2026-09-25):
@@ -782,7 +807,23 @@ async def notify_work_watchers(
         # By construction ``notify_list`` has no overlap with any
         # concurrent caller's notify list on the same terminal
         # ``work_id`` — the caller-level exactly-once invariant.
+        #
+        # S15 (2026-09-28, fix/u7-orphan-anchor-s15): per-watcher
+        # exception boundary. The pre-S15 flow threw into the
+        # outer ``except Exception`` on the FIRST enqueue failure,
+        # which logged a warning and returned 0 — silently DROPPING
+        # every claimed row whose enqueue hadn't yet completed.
+        # The module docstring claim that "watchers are deleted
+        # only AFTER all notifications are delivered" was
+        # structurally false under this throw path. The fix:
+        # catch per-watch, accumulate the failed-claimed set, run
+        # compensation (``watcher_repo.add_watch`` UPSERT to put
+        # the dropped rows BACK) AFTER the loop. Success path
+        # exactly-once (CAS-claim remains the only thing that
+        # transitions a row out of the DB); failure path
+        # at-least-once via compensation.
         notified = 0
+        failed_claimed: list[JobWatcher] = []  # S15: per-watch failures → compensation
         for watcher in notify_list:
             notification_parts = [
                 f"[JOB_EVENT] Job {work_id[:8]}... {status_display}",
@@ -835,16 +876,113 @@ async def notify_work_watchers(
                     _slice,
                 )
 
-            # ``enqueue_message`` is async — call it directly since we
-            # are already on the event loop. The watcher's instance
-            # may not be running; ``enqueue_message`` queues the
-            # message in the DB for later delivery in that case.
-            await instance_manager.enqueue_message(
-                instance_id=watcher.instance_id,
-                message=notification,
-                source=f"internal_agent:job_event:{work_id}:{status}",
+            # S15 (2026-09-28): per-watch exception boundary. The
+            # CAS-claim above DELETED this row; an enqueue throw
+            # here used to silently drop the row (the outer
+            # ``except Exception`` caught, returned 0, and the
+            # docstring's "deleted only AFTER delivery" promise
+            # was structurally false). Now: catch here, record
+            # the failed-claimed watcher for compensation, and
+            # continue with the rest. The compensation (add_watch
+            # UPSERT) runs AFTER the loop completes — restores
+            # the dropped rows so the periodic sweep / natural
+            # retry can re-attempt. The success path still pays
+            # only one claim cost (atomic DELETE...RETURNING);
+            # failure path becomes at-least-once instead of
+            # permanent-loss.
+            try:
+                await instance_manager.enqueue_message(
+                    instance_id=watcher.instance_id,
+                    message=notification,
+                    source=f"internal_agent:job_event:{work_id}:{status}",
+                )
+                notified += 1
+            except Exception as enq_err:  # noqa: BLE001
+                # Accumulate for compensation; do NOT propagate
+                # (the outer try/except used to catch this and
+                # return 0, which was structurally wrong under the
+                # docstring's delivery contract).
+                failed_claimed.append(watcher)
+                logger.warning(
+                    "S15: notify_work_watchers enqueue failed for "
+                    "watcher work_id=%s status=%s to=%s (%s: %s) — "
+                    "scheduling compensation UPSERT after the loop "
+                    "so the dropped-claim row is preserved for the "
+                    "next sweep tick (at-least-once path)",
+                    work_id[:8] if work_id else "<none>",
+                    status,
+                    watcher.instance_id[:8],
+                    type(enq_err).__name__,
+                    enq_err,
+                )
+
+        # S15 compensation: re-insert every claimed row whose enqueue
+        # threw. ``add_watch`` is the UPSERT (``INSERT ... ON CONFLICT
+        # DO UPDATE``) — restores the row with the original
+        # ``watch_events`` list, so the periodic sweep OR a future
+        # terminal re-fire can deliver. The UPSERT is per-row inside
+        # its own transaction; one row's failure does not block the
+        # others. ``add_watch`` UPSERTs the row — both INSERT and
+        # UPDATE branches are covered by the same
+        # ``INSERT ... ON CONFLICT DO UPDATE`` statement (see
+        # ``JobWatcherRepository.add_watch``); the UPDATE side only
+        # touches ``watch_events`` (created_at is preserved on the
+        # UPDATE branch, re-stamped on the INSERT branch — see the
+        # S15 created_at re-stamp seam below). A row that ANOTHER
+        # concurrent claim raced and re-deleted (extremely unlikely
+        # under the claim-first semantics) gets re-supplied here.
+        # S15 created_at re-stamp seam (MINOR-8, 2026-09-28): the
+        # compensation INSERTs a FRESH row — the original was
+        # CAS-claim DELETEd in step 3 — so ``JobWatcher.created_at``
+        # is re-stamped to the compensation's current INSERT time,
+        # NOT preserved from the original observation. Operators
+        # reading ``created_at`` to spot stuck rows must therefore
+        # take the re-stamp into account: a row that survived
+        # compensation appears "fresh" relative to the original
+        # observation, even though the watch itself is not new.
+        # This is the only S15 site that resets a row's created_at;
+        # the natural notify path leaves created_at untouched on
+        # first insert (the row exists from registration to fire).
+        if failed_claimed:
+            _compensated = 0
+            _lost = 0
+            for watcher in failed_claimed:
+                try:
+                    await asyncio.to_thread(
+                        watcher_repo.add_watch,
+                        job_id=watcher.job_id,
+                        instance_id=watcher.instance_id,
+                        watch_events=list(watcher.watch_events or []),
+                    )
+                    _compensated += 1
+                except Exception as comp_err:  # noqa: BLE001
+                    _lost += 1
+                    logger.error(
+                        "S15: compensation UPSERT failed for "
+                        "watcher work_id=%s to=%s (%s: %s) — row "
+                        "DROPPED from the DB; the next sweep tick "
+                        "WILL NOT see it. This is the residual "
+                        "exactly-once-vs-at-least-once edge case: "
+                        "log loudly so the operator can spot the "
+                        "stranded row",
+                        watcher.job_id[:8] if watcher.job_id else "<none>",
+                        watcher.instance_id[:8],
+                        type(comp_err).__name__,
+                        comp_err,
+                    )
+            # Diagnostic INFO line — the operator can grep this for
+            # "compensation" and count dropout ratios during incident
+            # triage.
+            logger.info(
+                "S15: notify_work_watchers for work_id=%s status=%s "
+                "completed with partial drops: notified=%d "
+                "compensated=%d lost=%d",
+                work_id[:8] if work_id else "<none>",
+                status,
+                notified,
+                _compensated,
+                _lost,
             )
-            notified += 1
 
         return notified
 
@@ -855,6 +993,15 @@ async def notify_work_watchers(
         # ``reconcile_terminal_watches`` sweep will pick up at next
         # startup. Log at warning so operators can spot systemic
         # issues without crashing the worker thread.
+        #
+        # S15 NOTE (2026-09-28): the per-watch compensation path
+        # above catches enqueue failures explicitly. This outer
+        # except now covers UNEXPECTED exceptions only (e.g. a
+        # repo read failure during ``get_watchers_for_job`` or
+        # ``claim_watchers_for_job_for_instances``). Compensation
+        # is NOT possible here because we never reached the
+        # claim step — no rows were deleted, so there is nothing
+        # to put back.
         logger.warning(
             "notify_work_watchers: failed to notify watchers for "
             "work_id=%s status=%s: %s",
