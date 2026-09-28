@@ -898,6 +898,102 @@ class TestExpectedBytesBigIntegerIntegration:
             row = st.repo.get(r.json()["run_id"])
             assert row.expected_bytes == _INT4_MAX
 
+    async def test_ensure_postgres_columns_widens_existing_int4_column(
+        self, pg_db,
+    ):
+        """W1 behavioral pin (review follow-up 2026-09-28) — the
+        ALTER-on-existing-int4 path, executed for real.
+
+        The trio above exercises the POST-fix schema (``create_all``
+        builds ``bigint`` directly on fresh disposable DBs). THIS test
+        is the first real execution of the widening DO block outside a
+        production boot: it fabricates the LEGACY int4 column via raw
+        DDL, invokes the actual production
+        ``InstanceManager._ensure_postgres_columns`` body against the
+        disposable database, requires int4 → bigint, then re-runs the
+        same path and requires idempotency.
+
+        FIDELITY: the executed string is the production string BY
+        CONSTRUCTION — we call the real method, which internally runs
+        ``with engine.begin() as conn: conn.execute(text(stmt))`` over
+        its statement list (the exact boot execution shape). Full
+        ``InstanceManager(...)`` construction is deliberately avoided
+        (it wires repositories/sources/graph — not cheap): source
+        inspection shows ``_ensure_postgres_columns`` touches ONLY
+        ``self._engine`` and ``self._ensemble_config.is_postgres``, so
+        a bare ``__new__`` stub carrying exactly those two attributes
+        executes the real method body with no mock anywhere in the
+        widening path. The method makes an unconditional tail call
+        ``self._migrate_overloaded_image_refs_rows()``
+        (manager.py:7147) whose body (:7149-7239) was verified to
+        touch only the same two attributes (``self._engine`` and
+        ``self._ensemble_config.is_postgres``) plus the module logger,
+        so stub-safety holds transitively — a future callee edit that
+        added other ``self.*`` reads would fail this stub loudly with
+        ``AttributeError``.
+        """
+        from sqlalchemy import text
+        from daemon.manager import InstanceManager
+
+        await _probe_pg_or_skip()
+        name, dsn = pg_db
+        assert "ensemble_prod" not in dsn  # R-10 (fixture asserts too)
+        engine = create_engine(_sync_pg_url(dsn), poolclass=NullPool)
+
+        # 1. LEGACY shape: raw-DDL int4 column (pre-incident table),
+        #    created BEFORE create_all so checkfirst skips it and the
+        #    legacy type survives into the ensure pass.
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE maintenance_runs ("
+                "  run_id TEXT PRIMARY KEY,"
+                "  section TEXT NOT NULL,"
+                "  kind TEXT NOT NULL,"
+                "  started_at TEXT NOT NULL,"
+                "  status TEXT NOT NULL,"
+                "  triggered_by TEXT NOT NULL,"
+                "  expected_bytes INTEGER"
+                ")"
+            ))
+
+        def _data_type():
+            with engine.connect() as conn:
+                row = conn.execute(text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = 'maintenance_runs' "
+                    "AND column_name = 'expected_bytes'"
+                )).fetchone()
+            return row[0] if row else None
+
+        assert _data_type() == "integer", _data_type()
+
+        # 2. Boot-order parity: create_all first (every OTHER table at
+        #    current shape — the pre-existing legacy table is skipped),
+        #    then the ensure path. This mirrors manager boot exactly
+        #    (daemon/manager.py:579 create_all → :601 ensure).
+        SQLModel.metadata.create_all(engine)
+
+        # 3. REAL production method on a two-attribute stub.
+        mgr = InstanceManager.__new__(InstanceManager)
+        mgr._engine = engine
+        mgr._ensemble_config = SimpleNamespace(is_postgres=True)
+        mgr._ensure_postgres_columns()
+
+        # 4. The widening MUST have fired on the legacy int4 column.
+        assert _data_type() == "bigint", (
+            "expected_bytes still "
+            f"{_data_type()!r} after _ensure_postgres_columns — the "
+            "widening DO block did not fire on the legacy int4 column"
+        )
+
+        # 5. Idempotency: second ensure pass → still bigint, no error
+        #    (the data_type='integer' probe excludes the column).
+        mgr._ensure_postgres_columns()
+        assert _data_type() == "bigint", _data_type()
+
+        engine.dispose()
+
 
 class TestContention:
     async def test_overlap_manual_holds_auto_defers(self, pg_db, caplog):

@@ -1988,17 +1988,55 @@ class TestExpectedBytesBigInteger:
             "_ensure_postgres_columns widening block must scope the "
             "probe to column_name = 'expected_bytes'."
         )
-        # Belt: the probe MUST be inside a DO $$ ... END $$ block
-        # (psycopg requires the EXECUTE-style ALTER inside a DO for
-        # the IF EXISTS gate to short-circuit the ALTER). The literal
-        # in the source file is the escape sequence ``"DO $$\\n"``
-        # (backslash-n, two characters in the Python source code); we
-        # assert either the escape-sequence form OR the literal
-        # "DO $$" start token — either is acceptable evidence the
-        # DO-block convention is in use.
-        assert ("DO $$\\n" in src) or ("DO $$" in src), (
+        # Belt (de-vacuoused, M3 2026-09-28): a bare ``"DO $$" in src``
+        # check is VACUOUS — that token already appears in the
+        # pre-existing JSON→JSONB DO block higher up in the same
+        # method, so it would pass even if the widening block were
+        # deleted. Instead, extract THE widening statement literal
+        # from the method's AST (the adjacent-string-literal
+        # concatenation folds into a single Constant) and pin, inside
+        # the extracted production string: (a) the DO $$ ... END $$
+        # wrap, and (b) the CONTIGUOUS four-qualifier probe —
+        # table_schema → table_name → column_name → data_type, in
+        # sequence (whitespace-normalized) — so the widening can only
+        # ever target exactly maintenance_runs.expected_bytes, and
+        # never drift from a hand-copied transcription.
+        import ast
+        import textwrap
+        candidates = [
+            node.value
+            for node in ast.walk(ast.parse(textwrap.dedent(src)))
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and "maintenance_runs" in node.value
+            and "TYPE bigint" in node.value
+        ]
+        assert len(candidates) == 1, (
+            "Expected exactly ONE widening DO-block string literal in "
+            f"_ensure_postgres_columns, found {len(candidates)} — the "
+            "pin cannot unambiguously identify the widening statement."
+        )
+        widening_stmt = candidates[0]
+        assert widening_stmt.lstrip().startswith("DO $$") and (
+            widening_stmt.rstrip().endswith("END $$")
+        ), (
             "_ensure_postgres_columns widening block must wrap the "
-            "probe + ALTER inside a DO $$ ... END $$ block."
+            "probe + ALTER inside a DO $$ ... END $$ block (got: "
+            + repr(widening_stmt[:60]) + "…)"
+        )
+        normalized = " ".join(widening_stmt.split())
+        four_qualifier_fragment = (
+            "table_schema = 'public' "
+            "AND table_name = 'maintenance_runs' "
+            "AND column_name = 'expected_bytes' "
+            "AND data_type = 'integer'"
+        )
+        assert four_qualifier_fragment in normalized, (
+            "_ensure_postgres_columns widening block must probe via "
+            "the CONTIGUOUS four-qualifier fragment (table_schema → "
+            "table_name → column_name → data_type, in sequence) so "
+            "the ALTER targets exactly "
+            "maintenance_runs.expected_bytes; got: " + repr(normalized)
         )
 
     def test_manager_widening_block_present_for_incident_doc(

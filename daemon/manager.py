@@ -5837,11 +5837,20 @@ class InstanceManager:
           ``maintenance_runs.expected_bytes`` and the column is
           retyped to ``bigint`` ONLY on a hit. The probe makes the
           statement idempotent on re-run (a no-op once the column
-          is already bigint). int4→int8 is a binary-coercible
-          widening — no ``USING`` cast is required (PG handles the
-          re-interpretation implicitly), so the operation is
-          metadata-only and non-destructive on a 9-row table. SQLite
-          counterpart: ``daemon/migrations/versions/
+          is already bigint). int4→int8 is an implicit-cast
+          widening (no ``USING`` required), but it is NOT a
+          metadata-only change: PG takes an ACCESS EXCLUSIVE lock
+          and REWRITES the table — trivial at 9 rows, never free at
+          scale. There is NO inner EXCEPTION handler on purpose:
+          this is a single probe-gated ALTER with no data-dependent
+          failure mode (every int4 value is representable in int8,
+          so the rewrite cannot fail on row data) — there is nothing
+          to catch, and a failure must fail loud and abort boot,
+          matching the host fail-loud convention (the JSON→JSONB
+          block's per-column EXCEPTION handler exists precisely
+          because invalid JSON IS data-dependent — a different
+          situation). SQLite counterpart:
+          ``daemon/migrations/versions/
           20260928_000001_widen_maintenance_runs_expected_bytes.sql``
           (MANUAL: TRUE; conceptual-only — SQLite INTEGER is already
           8 bytes via the dynamic-type affinity, so no schema
@@ -6919,10 +6928,19 @@ class InstanceManager:
             # ``information_schema.columns.data_type='integer'`` makes
             # the statement idempotent on re-run — once the column is
             # ``bigint`` the WHERE filter excludes it and the block is
-            # a no-op. int4→int8 is a binary-coercible widening, so no
-            # ``USING`` cast is required; PG reinterprets the bytes
-            # in place, the operation is metadata-only on a 9-row
-            # table, and the existing ``0``/``NULL`` values stay
+            # a no-op. int4→int8 is an implicit-cast widening (no ``USING``
+            # required), but it is NOT a metadata-only change: PG
+            # takes an ACCESS EXCLUSIVE lock and REWRITES the table —
+            # trivial at 9 rows, never free at scale. There is NO
+            # inner EXCEPTION handler on purpose: this is a single
+            # probe-gated ALTER with no data-dependent failure mode
+            # (every int4 value is representable in int8, so the
+            # rewrite cannot fail on row data) — there is nothing to
+            # catch, and a failure must fail loud and abort boot,
+            # matching the host fail-loud convention (the JSON→JSONB
+            # block's per-column EXCEPTION handler exists precisely
+            # because invalid JSON IS data-dependent — a different
+            # situation). The existing ``0``/``NULL`` values stay
             # lossless on rollback (the rollback path is
             # ``ALTER COLUMN ... TYPE INTEGER`` — currently safe
             # because every row fits int4). SQLite counterpart

@@ -44,13 +44,21 @@
 --     idempotent ALTER from the DO block referenced above.
 --
 -- IDEMPOTENCY / SAFETY:
---   int4 → int8 is a binary-coercible widening — PostgreSQL reinterprets
---   the existing bytes in place; no ``USING`` cast is required and the
---   operation is metadata-only on a small table (the live prod DB
---   carries 9 rows of ``0``/``NULL``). The probe-style DO block makes
---   the operation a no-op on re-run once the column is already
---   ``bigint``. The rollback path (``ALTER COLUMN ... TYPE INTEGER``)
---   is lossless while every value fits int4 — currently true.
+--   int4 → int8 is an implicit-cast widening (no ``USING`` required). It
+--   is NOT, however, a metadata-only change: PostgreSQL
+--   takes an ACCESS EXCLUSIVE lock and REWRITES the table (trivial at
+--   the live prod DB's 9 rows of ``0``/``NULL``, never free at scale).
+--   There is deliberately NO inner EXCEPTION handler in the DO block:
+--   it is a single probe-gated ALTER with no data-dependent failure
+--   mode (every int4 value is representable in int8, so the rewrite
+--   cannot fail on row data) — nothing to catch, and a failure must
+--   abort boot loud, matching the ``_ensure_postgres_columns``
+--   fail-loud convention (the JSON→JSONB block's per-column EXCEPTION
+--   handler exists precisely because invalid JSON IS data-dependent).
+--   The probe-style DO block makes the operation a no-op on re-run
+--   once the column is already ``bigint``. The rollback path
+--   (``ALTER COLUMN ... TYPE INTEGER``) is lossless while every value
+--   fits int4 — currently true.
 --
 --   The widened column is referenced by the
 --   ``MaintenanceRunsRepository.insert`` audit-row write path on the
