@@ -190,6 +190,48 @@ class UpgradeJournalSweepService:
             f"{DEFAULT_REAPER_TIMEOUT_SECONDS}s), install_dir="
             f"{self._install_dir or '<none — dev/unresolved>'}"
         )
+        # P1 §5(c) — daemon-boot supervision advisory (ownership-mode
+        # commission): ONE journal history event carrying this daemon's
+        # classification. Boot-time ONLY — deliberately NO periodic sweep.
+        self._emit_supervision_boot_advisory()
+
+    def _emit_supervision_boot_advisory(self) -> None:
+        """One advisory ``supervision_boot`` journal event at start().
+
+        Advisory only — never gates boot, never retries, never raises; a
+        missing/torn journal (dev repo checkouts have none) is a debug
+        line, not a warning. Uses the python twin's compute-once memo
+        (``uj.supervision_detect``) — no disk writes in the detector
+        itself; this hook is the journal side of the contract.
+        """
+        if self._install_dir is None:
+            return
+        try:
+            det = uj.supervision_detect()
+            detail = (
+                f"state={det.state} mode={det.mode} "
+                f"unit={det.unit or '<none>'}"
+            )
+            if det.note:
+                detail += f' note="{det.note}"'
+            uj.journal_history_append(
+                self._install_dir, "supervision_boot", detail
+            )
+            logger.info(
+                "UpgradeJournalSweepService: boot supervision advisory — "
+                "%s",
+                detail,
+            )
+        except uj.JournalTorn:
+            logger.debug(
+                "UpgradeJournalSweepService: journal absent/torn — no "
+                "supervision boot advisory (normal on dev checkouts)"
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory, never gates boot
+            logger.warning(
+                "UpgradeJournalSweepService: supervision boot advisory "
+                f"failed: {exc!r} — continuing (advisory only)"
+            )
 
     async def stop(self) -> None:
         """Cancel both tasks and await their cancellation. Safe to call when
