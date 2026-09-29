@@ -1234,6 +1234,9 @@ pipeline_settled() {
     if [ -n "$json" ]; then
         # in_flight — null/empty/missing is OK; anything else is a settle
         # failure with the txn's identifying fields named.
+        # NOTE: shallow top-level extraction (relies on journal schema
+        # discipline — no nested in_flight-named field exists today; any
+        # future nested field with the same name will be missed here).
         inf="$(_json_sub "$json" in_flight 2>/dev/null)" || inf=""
         case "$inf" in
             ""|null) ;;
@@ -1250,6 +1253,8 @@ pipeline_settled() {
         # (D-FA1.1). The shell pipeline NEVER writes pending_op (it's the
         # in-daemon tool-armed promote record); its presence means a tool
         # arm is in flight, which must not race a stop/adopt.
+        # NOTE: shallow top-level extraction — same hazard as in_flight
+        # above (no nested pending_op-named field today).
         pop="$(_json_field "$json" pending_op 2>/dev/null)" || pop=""
         case "$pop" in
             ""|null) ;;
@@ -1323,8 +1328,13 @@ adoption_marker_write() {
     return 0
 }
 
-# adoption_marker_clear — best-effort clear; owner-guarded (mirrors
-# lock_release's discipline). Idempotent: absent marker → 0, never an error.
+# adoption_marker_clear — best-effort + idempotent. NOT owner-guarded by
+# design: the operator stale-recovery lane is `rm -f` against the marker
+# path (runbook §3c), which is intentionally a non-pid-checked clear so
+# stale pids / orphaned runs can be cleaned by hand. Idempotent: absent
+# marker → 0, never an error. Used by the verify-success closure path
+# (where pid-match is implicit — the writer IS the caller) and as the
+# helper behind operator `rm -f` documentation.
 adoption_marker_clear() {
     local mp
     mp="$(adoption_marker_path)"

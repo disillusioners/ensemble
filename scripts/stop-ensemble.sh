@@ -112,16 +112,24 @@ _die() { echo "stop-ensemble: $*" >&2; exit 2; }
 
 INSTALL_DIR="${1:-$HOME/agents-ensemble}"
 REPORT_PORT="${2:-}"
-# parse --force in ANY position (including $2 when port is omitted) —
-# non-destructive to existing positional usage; legacy invocations pass
-# exactly <dir> <port>, modern invocations may pass <dir> --force or
-# <dir> <port> --force. Walk all args; STOP_FORCE flips on first match.
+# Pre-parse --force in ANY position, REMOVING it from the positional list.
+# Walks the full argv; each non-flag arg is copied into the remaining
+# positional list, so INSTALL_DIR=$1 / REPORT_PORT=$2 below resolve from
+# the dir/port only. Accepted orders (documented at usage below):
+#   <dir> --force | <dir> <port> --force | --force <dir> | --force <dir> <port>
+# The legacy <dir> <port> form (no flag) leaves STOP_FORCE=0 and both
+# remaining slots intact — prior test 16a semantics preserved.
+# STOP_FORCE was declared at the top (line 108); the walk below sets it.
+REMAINING=()
 for arg in "$@"; do
     if [ "$arg" = "--force" ]; then
         STOP_FORCE=1
-        break
+    else
+        REMAINING+=("$arg")
     fi
 done
+INSTALL_DIR="${REMAINING[0]:-$HOME/agents-ensemble}"
+REPORT_PORT="${REMAINING[1]:-}"
 
 [ -n "$INSTALL_DIR" ] || _die "empty INSTALL_DIR"
 

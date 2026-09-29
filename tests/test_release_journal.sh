@@ -1790,6 +1790,48 @@ kill "$LOCK_OWNER_PID" 2>/dev/null
 wait "$LOCK_OWNER_PID" 2>/dev/null
 rm -rf "$MUT_BASE/releases/rollback.lock.d"
 
+# 16c. m2 fix: --force pre-parse. ALL four positions must resolve
+# INSTALL_DIR correctly (the doc'd <dir> --force form already pins via
+# 16a; this section pins the other three). Pre-fix: $@ walk left
+# positional $1 bound to literal '--force' when it appeared first → the
+# `cd "$INSTALL_DIR"` resolution died with rc=2.
+PF_BASE="$FIXTURE/pos-force"; mkdir -p "$PF_BASE/releases/$SBX_V1"
+( cd "$PF_BASE" && ln -sfn "releases/$SBX_V1" current )
+INSTALL_DIR="$PF_BASE" journal_init >/dev/null
+INSTALL_DIR="$PF_BASE" journal_set_current "$SBX_V1" >/dev/null
+printf '#!/bin/bash\n# stub launcher\n' > "$PF_BASE/launcher.sh"
+chmod +x "$PF_BASE/launcher.sh"
+# Position form: --force <dir> <port> (the m2 edge case).
+OUT_PF="$(HOME="$FAKE_HOME" bash "$FAKE_REPO/scripts/stop-ensemble.sh" --force "$PF_BASE" "$SBX_PORT" 2>&1)"
+RC_PF=$?
+if [ "$RC_PF" = "2" ] || printf '%s' "$OUT_PF" | grep -qE "cannot resolve INSTALL_DIR|empty INSTALL_DIR"; then
+    _fail "16c m2: --force <dir> <port> resolves INSTALL_DIR" "resolved (rc≠2, no resolve-failure)" "rc=$RC_PF out='$OUT_PF'"
+else
+    _pass
+fi
+# Sanity: the run actually scoped to PF_BASE (not a literal "--force" cwd).
+if printf '%s' "$OUT_PF" | grep -q "scoping to INSTALL_DIR=$PF_BASE"; then
+    _pass
+else
+    _fail "16c m2: --force <dir> <port> scoped to PF_BASE" "INSTALL_DIR=$PF_BASE" "out='$OUT_PF'"
+fi
+# Position form: <dir> <port> --force (16a variant with explicit port).
+OUT_PF2="$(HOME="$FAKE_HOME" bash "$FAKE_REPO/scripts/stop-ensemble.sh" "$PF_BASE" "$SBX_PORT" --force 2>&1)"
+RC_PF2=$?
+if [ "$RC_PF2" = "2" ] || printf '%s' "$OUT_PF2" | grep -qE "cannot resolve INSTALL_DIR|empty INSTALL_DIR"; then
+    _fail "16c m2: <dir> <port> --force resolves INSTALL_DIR" "resolved (rc≠2)" "rc=$RC_PF2 out='$OUT_PF2'"
+else
+    _pass
+fi
+# Position form: --force <dir> (no port; port is optional in stop).
+OUT_PF3="$(HOME="$FAKE_HOME" bash "$FAKE_REPO/scripts/stop-ensemble.sh" --force "$PF_BASE" 2>&1)"
+RC_PF3=$?
+if [ "$RC_PF3" = "2" ] || printf '%s' "$OUT_PF3" | grep -qE "cannot resolve INSTALL_DIR|empty INSTALL_DIR"; then
+    _fail "16c m2: --force <dir> resolves INSTALL_DIR" "resolved (rc≠2)" "rc=$RC_PF3 out='$OUT_PF3'"
+else
+    _pass
+fi
+
 # ─── 17. Adoption-marker preflight + clear (commission v0.16.6 c2) ─────────
 # adopt-unit.sh writes a marker file BEFORE any mutation and clears it
 # on verify success. promote_entry_check refuses (78) while the marker
@@ -1868,6 +1910,41 @@ else
     _pass
 fi
 adoption_marker_clear || _pass   # idempotent on absent marker
+
+# 17d. M1 fix: DRY_RUN=1 preview MUST stay side-effect-free end-to-end.
+# Pre-fix: _step_pre_settle + _step_lock ran unconditionally at
+# adopt-unit.sh:505-506 BEFORE the DRY_RUN gate, so the preview held
+# rollback.lock.d until exit 0 (78 on later gates; 0 on the preview
+# branch). A concurrent promote preflight (lib.sh:1228 settle-check
+# on `lock-held`) would refuse (78) for the preview duration. Post-fix:
+# _step_lock is gated on DRY_RUN; the preview leaves no lock and no
+# marker. Pin both invariants (lock absent + marker absent).
+DRY_BASE="$FIXTURE/dry-preview"; mkdir -p "$DRY_BASE/releases/$SBX_V1"
+( cd "$DRY_BASE" && ln -sfn "releases/$SBX_V1" current )
+INSTALL_DIR="$DRY_BASE" journal_init >/dev/null
+INSTALL_DIR="$DRY_BASE" journal_set_current "$SBX_V1" >/dev/null
+# rc may be non-zero on later gates (polkit / owned pids / etc.) — what
+# matters is that the lock + marker are NOT written.
+HOME="$FAKE_HOME" DRY_RUN=1 bash "$FAKE_REPO/scripts/upgrade/adopt-unit.sh" "$DRY_BASE" >/dev/null 2>&1
+RC_DRY=$?
+if [ -d "$DRY_BASE/releases/rollback.lock.d" ]; then
+    _fail "17d M1: DRY_RUN=1 preview must NOT acquire rollback.lock.d" "absent" "present (rc=$RC_DRY)"
+else
+    _pass
+fi
+if [ -e "$DRY_BASE/releases/.adoption_in_progress" ]; then
+    _fail "17d M1: DRY_RUN=1 preview must NOT write adoption marker" "absent" "present"
+else
+    _pass
+fi
+# Idempotent re-run: a second DRY_RUN=1 still leaves both absent (no
+# leaked state from the first preview).
+HOME="$FAKE_HOME" DRY_RUN=1 bash "$FAKE_REPO/scripts/upgrade/adopt-unit.sh" "$DRY_BASE" >/dev/null 2>&1
+if [ -d "$DRY_BASE/releases/rollback.lock.d" ] || [ -e "$DRY_BASE/releases/.adoption_in_progress" ]; then
+    _fail "17d M1: second DRY_RUN=1 preview stays side-effect-free" "absent + absent" "lock=$([ -d "$DRY_BASE/releases/rollback.lock.d" ] && echo present || echo absent) marker=$([ -e "$DRY_BASE/releases/.adoption_in_progress" ] && echo present || echo absent)"
+else
+    _pass
+fi
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"

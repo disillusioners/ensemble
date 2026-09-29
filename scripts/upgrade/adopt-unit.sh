@@ -503,7 +503,12 @@ _verify_adoption() {
 # half-staged state (settle). The settle+lock pair is OPT-IN equivalent
 # to the promote's preflight (lib.sh promote_entry_check + lock_acquire).
 _step_pre_settle
-_step_lock
+# Layer-ii lock: ONLY in the mutation path. The DRY_RUN preview must stay
+# side-effect-free end-to-end — no rollback.lock.d held (runbook §3 §3c),
+# no marker written. _step_pre_settle is read-only and safe in both modes.
+if [ "$DRY_RUN" != "1" ]; then
+    _step_lock
+fi
 _step_a_owned_pids
 _step_b_host
 _step_c_polkit

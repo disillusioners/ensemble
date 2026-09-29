@@ -307,6 +307,15 @@ was; the operator can run `status.sh` and decide); auto-clearing
 silently under operator-confusion would re-create the original
 half-staged hazard.
 
+**Coordination note (race window):** if an operator `rm -f`s the marker
+while a concurrent `adopt-unit.sh` is mid-sequence (between marker
+write and verify-clear), the clear's idempotent-absent path still
+returns 0, but the marker was absent during that window — a concurrent
+promote preflight could have proceeded through the refusal surface.
+Coordinate the manual removal with no adoption in flight (the `pid=`
+line in the marker file names the writer; check it is dead before
+clearing).
+
 ---
 
 ## 4. Polkit prerequisite (🔴 adoption blocker without it)
