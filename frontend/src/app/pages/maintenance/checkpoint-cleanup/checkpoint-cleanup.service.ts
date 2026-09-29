@@ -1,7 +1,6 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
-import { Observable, catchError, take, takeWhile, tap, throwError, timer } from 'rxjs';
-import { switchMap } from 'rxjs/operators';
+import { Observable, EMPTY, catchError, concat, defer, expand, of, switchMap, take, takeUntil, takeWhile, tap, throwError, timer } from 'rxjs';
 import {
   isKnownErrorCode,
   type CheckpointCleanupDryRun,
@@ -60,23 +59,118 @@ export class CheckpointCleanupService {
   static readonly POLL_INTERVAL_MS = 2000 as const;
 
   /**
-   * AM-6 / PR-2 — hard-timeout fallback. If a polled run stays in
-   * `'running'` past this window, the service surfaces an inline
-   * "still in progress" error and stops polling. The BE boot-sweep
-   * converges orphaned rows in <1s after a daemon restart; this is
-   * the fallback for other stuck-row classes.
-   *
-   * Rationale for the 10-minute choice (Item 20): the BE's
-   * `expected_duration_ms_hint` typically lands in the
-   * sub-minute-to-low-minute range (the most expensive case the
-   * suite has measured is ~12 min on a saturated DB). 10 min
-   * absorbs the worst legitimate run while still catching
-   * true wedges within an operator-attention window. Tunable in
-   * the spec via `pollMaxMsOverride` for the PR-2 coverage test.
-   * Pin target: 10 minutes (T6.1 fake-timers test verifies the
-   * timeout fires).
+   * Hint multiplier for sizing the active poll budget. The BE 202 body
+   * carries `expected_duration_ms_hint`; doubling it covers 2x variance
+   * (the upper-bound 20-30 min class the suite has measured). A run
+   * with `hint=0` (legacy execute) falls back to the floor; `hint > 0`
+   * uses `max(hint × N, floor)` — never below floor, never below
+   * `hint` itself.
    */
-  static readonly POLL_MAX_DURATION_MS: number = 10 * 60 * 1000;
+  static readonly HINT_MULTIPLIER = 2 as const;
+
+  /**
+   * Absolute minimum poll budget — 15 min. Aligns with the BE
+   * service JSDoc's "12 min measured worst case" + a 25% safety
+   * margin. The previous 10-min hard cap under-shot the worst
+   * legitimate class (12m33.5s on ckpt-20260929_045639524546-3f6e42a4,
+   * 2026-09-29).
+   */
+  static readonly POLL_BUDGET_FLOOR_MS: number = 15 * 60 * 1000;
+
+  /**
+   * Absolute maximum active poll budget — 60 min (MINOR-1, iter3).
+   * Pure overflow clamp: `hint × HINT_MULTIPLIER` with a
+   * huge-but-finite hint (e.g. `Number.MAX_VALUE`) evaluates to
+   * `Infinity`, and `timer(Infinity)` NEVER fires — the ACTIVE
+   * phase could never yield to BACKOFF and polling would wedge at
+   * the active cadence. The clamp guarantees a finite budget so
+   * `takeUntil(timer(budgetMs))` always fires. Legit hint classes
+   * (measured worst case ~25 min → 50-min budget) sit far below;
+   * anything above clamps to the ceiling and BACKOFF then carries
+   * the run to terminal.
+   */
+  static readonly POLL_BUDGET_CEILING_MS: number = 60 * 60 * 1000;
+
+  /**
+   * Post-budget backoff step (ms added to each successive poll
+   * interval once the active budget is exhausted). The first
+   * post-budget gap is the outer `timer(intervalMs)` (= 2 s at
+   * production cadence); subsequent gaps follow the linear ramp
+   * `intervalMs + tickIdx × BACKOFF_STEP_MS` via `expand()`,
+   * clamped at `BACKOFF_CEILING_MS`. The full post-budget cadence
+   * at production values is therefore 2 s, 2 s, 4 s, 6 s, 8 s,
+   * ..., 30 s, 30 s, ... (ceiling first reached at tickIdx=14).
+   */
+  static readonly BACKOFF_STEP_MS: number = 2000;
+
+  /**
+   * Post-budget backoff ceiling — 30 s. Aligns with the upper end
+   * of the 15-30 s guidance; chosen to keep the post-cap cadence
+   * responsive without flooding the BE during a multi-hour run.
+   */
+  static readonly BACKOFF_CEILING_MS: number = 30_000;
+
+  /**
+   * Pure helper — derive the active poll budget from an optional
+   * hint. Exposed as a static so the test mirror can pin the
+   * contract without going through RxJS plumbing.
+   *
+   *   hint > 0  →  min(max(hint × HINT_MULTIPLIER, POLL_BUDGET_FLOOR_MS),
+   *                    POLL_BUDGET_CEILING_MS)
+   *   hint ≤ 0  →  POLL_BUDGET_FLOOR_MS
+   *
+   * Floor wins when hint × N lands below it (small hints on tiny
+   * runs); the multiplier caps the upper bound (a 25-min class hint
+   * → 50-min active budget, then backoff forever until terminal).
+   * POLL_BUDGET_CEILING_MS clamps degenerate huge hints (MINOR-1,
+   * iter3): `Number.MAX_VALUE × 2 = Infinity`, and an Infinite
+   * budget would make `timer(budgetMs)` never fire — starving the
+   * BACKOFF phase forever.
+   */
+  static computePollBudgetMs(hintMs: number | null | undefined): number {
+    if (typeof hintMs === 'number' && Number.isFinite(hintMs) && hintMs > 0) {
+      return Math.min(
+        Math.max(
+          hintMs * CheckpointCleanupService.HINT_MULTIPLIER,
+          CheckpointCleanupService.POLL_BUDGET_FLOOR_MS,
+        ),
+        CheckpointCleanupService.POLL_BUDGET_CEILING_MS,
+      );
+    }
+    return CheckpointCleanupService.POLL_BUDGET_FLOOR_MS;
+  }
+
+  /**
+   * Pure helper — backoff interval for the Nth `expand`-driven
+   * gap inside the BACKOFF phase. `tickIdx` is 0-based, where 0
+   * is the FIRST gap produced by `expand()` (i.e., the gap that
+   * follows the BACKOFF phase's initial outer `timer(intervalMs)`
+   * seed). Linear ramp `intervalMs + tickIdx × BACKOFF_STEP_MS`,
+   * clamped to `BACKOFF_CEILING_MS`. Defaults `intervalMs` to
+   * `POLL_INTERVAL_MS` so the production cadence starts at 2 s;
+   * tests override `intervalMs` to a smaller value to keep the
+   * post-cap continuation test under the jest timeout.
+   *
+   * NOTE — this helper covers the gaps AFTER the BACKOFF-phase
+   * outer timer, which itself waits `intervalMs` (= 2 s at
+   * production cadence) before the first post-budget poll. The
+   * full post-budget cadence at production values is therefore:
+   *
+   *   gap 1 (outer timer):              2000 ms
+   *   gap 2 (expand tickIdx=0):         2000 ms
+   *   gap 3 (expand tickIdx=1):         4000 ms
+   *   gap 4 (expand tickIdx=2):         6000 ms
+   *   ...
+   *   intervalMs=2000, tickIdx 14 → 30000 ms (ceiling)
+   *   intervalMs=2000, tickIdx ≥ 14 → 30000 ms (clamped)
+   */
+  static computeBackoffMs(
+    tickIdx: number,
+    intervalMs: number = CheckpointCleanupService.POLL_INTERVAL_MS,
+  ): number {
+    const base = intervalMs + tickIdx * CheckpointCleanupService.BACKOFF_STEP_MS;
+    return Math.min(base, CheckpointCleanupService.BACKOFF_CEILING_MS);
+  }
 
   // ── Public signals (read by the component template) ───────────────────
   readonly status = signal<CheckpointCleanupStatus | null>(null);
@@ -200,67 +294,118 @@ export class CheckpointCleanupService {
 
   /**
    * AM-6 — poll `/runs/{run_id}` until the run reaches a terminal
-   * status (`'succeeded' | 'failed' | 'interrupted'`), or until the
-   * hard-timeout window elapses. AM-14 — pure observable, no
-   * side-effects beyond signal updates; caller is responsible for
-   * `takeUntilDestroyed` / `unsubscribe` to prevent leak when the
-   * user navigates away mid-poll.
+   * status (`'succeeded' | 'failed' | 'interrupted'`). AM-14 —
+   * pure observable, no side-effects beyond signal updates;
+   * caller is responsible for `takeUntilDestroyed` /
+   * `unsubscribe` to prevent leak when the user navigates away
+   * mid-poll.
    *
-   * Emits the first polled value immediately, then every
-   * `intervalMs` (default `POLL_INTERVAL_MS = 2000`). Emits the
-   * terminal value one final time before completing. On 404,
-   * surfaces the error via `lastError` and completes. On
-   * hard-timeout, surfaces an inline "still in progress" error and
-   * completes.
+   * Two-phase polling contract (Item 21, fix commission 2026-09-29):
+   *
+   *   1. ACTIVE — `timer(0, intervalMs)` fetches every
+   *      `POLL_INTERVAL_MS` (default 2 s) until the run reaches a
+   *      terminal status OR the active budget
+   *      `computePollBudgetMs(hintMs)` elapses.
+   *   2. BACKOFF — once the active budget is exhausted and the
+   *      run is still non-terminal, polling CONTINUES with a
+   *      linear-ramp backoff (`POLL_INTERVAL_MS + tickIdx ×
+   *      BACKOFF_STEP_MS`, clamped at `BACKOFF_CEILING_MS = 30 s`)
+   *      until terminal OR teardown.
+   *
+   * The active-budget phase used to error out with an
+   * FE-synthesized `fe_synthesized_poll_timeout` body; that
+   * dead-end was removed. A run that outlives the budget now
+   * keeps the FE in live tracking — the page refresh / re-entry
+   * path resumes polling automatically via the `in_flight`
+   * branch in the component.
+   *
+   * Emits the first polled value immediately (t=0), then every
+   * `intervalMs`. Emits the terminal value one final time before
+   * completing. On 404, surfaces the error via `lastError` and
+   * completes (terminal-equivalent — backend no longer has the
+   * row).
    */
   pollRun(
     runId: string,
     intervalMs: number = CheckpointCleanupService.POLL_INTERVAL_MS,
+    hintMs: number | null = null,
   ): Observable<CheckpointCleanupRun> {
-    const start = Date.now();
-    const maxMs = CheckpointCleanupService.POLL_MAX_DURATION_MS;
-    return timer(0, intervalMs).pipe(
-      // Each tick: GET /runs/{run_id}; switchMap cancels the previous
-      // in-flight request when the next tick fires (matters at the
-      // timeout boundary).
-      switchMap(() => {
-        if (Date.now() - start >= maxMs) {
-          // PR-2 / Item 4 — the FE poll budget elapsed before the run
-          // reached a terminal status. The wire body carries
-          // `error: 'not_initialized'` (closest wire-compatible literal;
-          // it is a union member and remains the wire-facing truth) +
-          // `details.fe_synthesized_poll_timeout: true` so the FE
-          // display layer can branch into the FE-only `'poll_stale'`
-          // sentinel (see `MaintenanceDisplayCode`). The literal
-          // `'poll_stale'` is NEVER sent — it is a display-only
-          // sentinel OUTSIDE the BE-mirrored `MaintenanceErrorCode`
-          // union.
-          const stuck: MaintenanceErrorBody = {
-            error: 'not_initialized',
-            message:
-              `Run ${runId} is still in progress after ` +
-              `${Math.round(maxMs / 60000)} min — check daemon logs.`,
-            details: { fe_synthesized_poll_timeout: true },
-          };
-          this.lastError.set(stuck);
-          return throwError(() => stuck);
-        }
-        return this.getRun(runId).pipe(take(1));
-      }),
-      // Item 12 — the tap that wrote the dead `lastRun` signal is
-      // removed. The caller (component.startPolling → setPolling)
-      // owns the terminal row in `lastExecuteResult` directly; the
-      // service's `lastRun` signal was a no-op echo. `takeWhile`
-      // below still emits the terminal value LAST (Item 4 AM-6).
-      // AM-6 — stop on terminal, but emit the terminal value LAST so
-      // the caller can update its terminal-row signal from the
+    const budgetMs = CheckpointCleanupService.computePollBudgetMs(hintMs);
+
+    // ACTIVE phase — timer fires at t=0 then every `intervalMs`.
+    // `takeUntil(timer(budgetMs))` completes the active observable
+    // when the budget elapses; the same `takeWhile(..., true)`
+    // short-circuits on terminal. Either branch triggers the
+    // transition into BACKOFF (via concat) — the BACKOFF phase
+    // is gated by an outer defer so its expand() doesn't start
+    // until the active phase is fully drained.
+    //
+    // `activeSawTerminal` is a closure-captured flag set when
+    // `takeWhile`'s predicate observes a terminal run. If the
+    // ACTIVE phase emits terminal, BACKOFF short-circuits to
+    // EMPTY — the consumer has already received the terminal
+    // value (via `takeWhile(..., true)`), and an extra
+    // post-budget fetch would emit a duplicate terminal value
+    // that violates the "terminal value LAST" contract.
+    let activeSawTerminal = false;
+    const activePhase = timer(0, intervalMs).pipe(
+      // Each tick: GET /runs/{run_id}; switchMap cancels the
+      // previous in-flight request when the next tick fires.
+      switchMap(() => this.getRun(runId).pipe(take(1))),
+      // AM-6 — stop on terminal, but emit the terminal value LAST
+      // so the caller can update its terminal-row signal from the
       // final emission. `inclusive: true` re-emits the terminal
-      // row, then completes.
+      // row, then completes. The predicate is also the side-effect
+      // site that flips `activeSawTerminal` so BACKOFF can
+      // short-circuit (see above).
       takeWhile(
-        (run) => !this.isTerminalStatus(run.status),
+        (run) => {
+          if (this.isTerminalStatus(run.status)) {
+            activeSawTerminal = true;
+            return false;
+          }
+          return true;
+        },
         true,
       ),
+      // Active-phase terminator — budget elapsed AND still
+      // non-terminal → transition into the BACKOFF phase.
+      takeUntil(timer(budgetMs)),
     );
+
+    // BACKOFF phase — defer so the recursive expand() only
+    // seeds when the ACTIVE phase has completed (i.e., the
+    // budget actually elapsed; a terminal during ACTIVE already
+    // completed the stream via takeWhile inclusive and set
+    // `activeSawTerminal` so this defer returns EMPTY without
+    // an extra fetch).
+    const backoffPhase = defer(() => {
+      if (activeSawTerminal) {
+        return EMPTY;
+      }
+      return timer(intervalMs).pipe(
+        // MAJOR-1 (iter3) — bind expand's SECOND projection arg (the
+        // zero-based recurrence index), NOT the emitted value. The
+        // seed `timer(intervalMs)` always emits 0, so the old
+        // `(tickIdx) =>` binding collapsed every gap to
+        // `computeBackoffMs(0, intervalMs)` = intervalMs — a
+        // constant 2-s cadence with the ramp and the 30-s ceiling
+        // dead. With the index binding, inter-emission gaps are
+        // exactly `computeBackoffMs(n, intervalMs)`: 2 s, 2 s,
+        // 4 s, 6 s, …, 30 s (ceiling first at tickIdx 14) — the
+        // JSDoc cadence contract below is now actually true.
+        expand((_, tickIdx) =>
+          timer(CheckpointCleanupService.computeBackoffMs(tickIdx, intervalMs)),
+        ),
+        switchMap(() => this.getRun(runId).pipe(take(1))),
+        takeWhile(
+          (run) => !this.isTerminalStatus(run.status),
+          true,
+        ),
+      );
+    });
+
+    return concat(activePhase, backoffPhase);
   }
 
   private isTerminalStatus(status: CheckpointCleanupRun['status']): boolean {

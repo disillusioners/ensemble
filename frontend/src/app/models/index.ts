@@ -987,14 +987,18 @@ export function isKnownErrorCode(code: string): code is MaintenanceErrorCode {
 }
 
 /**
- * Maintenance display code — superset of `MaintenanceErrorCode` for
- * FE display purposes. Adds the FE-only sentinel `'poll_stale'` which
- * is mapped from a poll-timeout body (the wire-side
- * `error: 'not_initialized'` + `details.fe_synthesized_poll_timeout: true`
- * marker). NEVER sent over the wire — display-only. The wire-facing
- * `MaintenanceErrorCode` union stays exactly its frozen 11 members.
+ * Maintenance display code — FE display alias of the wire-facing
+ * `MaintenanceErrorCode` union. Kept as a named type because the
+ * checkpoint-cleanup component's `displayErrorCode()` returns it.
+ *
+ * Iter3 (2026-09-29) — the FE-only `'poll_stale'` sentinel member
+ * was REMOVED: the FE no longer synthesizes poll-timeout errors
+ * (the post-cap backoff phase keeps polling until terminal), and a
+ * frontend-wide grep confirmed zero producers and zero consumers of
+ * the literal remained. The wire-facing `MaintenanceErrorCode`
+ * union stays exactly its frozen 11 members.
  */
-export type MaintenanceDisplayCode = MaintenanceErrorCode | 'poll_stale';
+export type MaintenanceDisplayCode = MaintenanceErrorCode;
 
 /**
  * AM-17, AM-14 — `details.run_id` is the canonical key FE adopts on

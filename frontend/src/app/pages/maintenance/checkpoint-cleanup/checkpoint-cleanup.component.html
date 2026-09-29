@@ -15,11 +15,10 @@
 
 <!-- AM-1 — generic inline error banner (does NOT cover `run_in_flight` — that
      case is absorbed by 409-adoption before reaching here).
-     Item 4 — banner consumes `displayErrorCode()` so an FE poll-timeout
-     surfaces as the display sentinel `'poll_stale'` (verbiage in
-     errorLabel). The wire `error: 'not_initialized'` is NEVER rendered
-     for a poll-timeout; the discriminator is
-     `details.fe_synthesized_poll_timeout === true`. -->
+     Fix commission 2026-09-29 — `displayErrorCode()` is a thin
+     pass-through over `lastError().error`; the OLD poll-timeout
+     sentinel `'poll_stale'` is removed. Error banner copy renders
+     the wire error code verbatim (via `errorLabel`). -->
 @if (lastError() && lastError()?.error !== 'maintenance_disabled') {
   <section class="ck-card ck-error-banner" data-testid="ck-error-banner">
     <mat-icon>error_outline</mat-icon>
