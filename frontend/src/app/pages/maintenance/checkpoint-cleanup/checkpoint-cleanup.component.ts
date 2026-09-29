@@ -534,9 +534,11 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
    * `details.fe_synthesized_poll_timeout: true`) is REMOVED. The
    * service no longer synthesizes a poll-timeout error — the
    * post-cap backoff phase keeps polling until terminal, so the
-   * UI never surfaces a stale-poll dead-end. The `MaintenanceDisplayCode`
-   * type still carries `'poll_stale'` for backward compat (no
-   * emitter exists), but no production code path triggers it.
+   * UI never surfaces a stale-poll dead-end. Iter3: the dead
+   * `'poll_stale'` member was also dropped from the
+   * `MaintenanceDisplayCode` type (frontend-wide grep: zero
+   * remaining producers/consumers) — the type is now a pure
+   * display alias of the wire union.
    *
    * Item 20 — `errorLabel()` table lookup via `Partial<Record<...>>`
    * keeps the curated labels in one place; adding a code = adding a

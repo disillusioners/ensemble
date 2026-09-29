@@ -670,11 +670,16 @@ test.describe('Maintenance — Checkpoint Cleanup (15 cases, AM-16 amendments + 
   //
   // Wrong-math pin (iter2 review finding 1, was: "10-min / 2-s =
   // 5 polls"): 10 min = 600_000 ms; 600_000 / 2000 = 300 polls
-  // is the OLD cap's poll count. KEEP_RUNNING_COUNT for the
-  // virtual-clock harness must exceed the active-phase poll
-  // count (450 at 15-min budget) AND the first backoff polls
-  // (≈ 30 in 5 min at the 2-s/2-s/4-s/... cadence) so the
-  // run stays non-terminal across the entire test.
+  // is the OLD cap's poll count. The inline `pollCount` counter
+  // (iter2 harness — the old KEEP_RUNNING_COUNT constant is gone)
+  // must exceed the active-phase poll count (450 at the 15-min
+  // budget) AND the first backoff polls so the run stays
+  // non-terminal across the entire test. At the CORRECT backoff
+  // ramp (iter3 MAJOR-1 fix: 2 s, 2 s, 4 s, …, 30 s ceiling at
+  // tickIdx 14), 5 virtual minutes of backoff yields ~15-17
+  // polls — cadence-exact counts are pinned by the unit cadence
+  // tests in checkpoint-cleanup.service.spec.ts; this e2e asserts
+  // continuation only.
   test('15. post-budget continuation: a run that outlives the budget and completes later transitions the UI to success (ORIGINAL SYMPTOM DEAD)', async ({ page }) => {
     const RUN_ID = 'ckpt-20260929_045639524546-3f6e42a4';
     // Install the virtual clock BEFORE navigation. Best practice
@@ -766,12 +771,22 @@ test.describe('Maintenance — Checkpoint Cleanup (15 cases, AM-16 amendments + 
     // and the takeUntil terminator has fired → activePhase
     // completed → backoffPhase seeded via defer() (the outer
     // `timer(intervalMs)` waits 2 s before the first backoff
-    // poll). ~450 polls should have fired during the loop (449
+    // poll). ~450 active-phase polls fired during the loop (449
     // pre-budget ticks + the t=0 tick already counted in
     // pollsAtBudgetEntry).
+    //
+    // MAJOR-1 (iter3) — the old `.toBeGreaterThan(400)` only held
+    // under the BROKEN constant 2-s backoff cadence; under the
+    // correct 2 s, 2 s, 4 s, …, 30 s ramp the post-boundary
+    // backoff window yields ~15-17 polls per 5 virtual minutes,
+    // not 400+. The exact ramp is pinned by the unit cadence
+    // tests in checkpoint-cleanup.service.spec.ts. Here we assert
+    // cadence-agnostic CONTINUATION: at least one poll fired
+    // after the budget boundary marker.
     await expect
       .poll(() => pollCount - pollsAtBudgetEntry, { timeout: 5_000 })
-      .toBeGreaterThan(400);
+      .toBeGreaterThan(0);
+    const pollsAtBudgetExit = pollCount;
 
     // ORIGINAL-SYMPTOM-DEAD assertion (1): the FE MUST NOT render
     // an error banner — the OLD contract surfaced
@@ -786,21 +801,29 @@ test.describe('Maintenance — Checkpoint Cleanup (15 cases, AM-16 amendments + 
     // DRIVE INTO THE BACKOFF PHASE. The backoff phase's outer
     // timer waits intervalMs (= 2 s) for the first post-budget
     // poll; subsequent expand-driven waits ramp 2 s, 4 s, 6 s,
-    // ..., up to the 30-s ceiling. We loop fastForward(2_000) for
-    // ~150 iterations to cover 5 min of backoff cadence — well
-    // past the first ~5 backoff polls.
+    // ..., up to the 30-s ceiling (first reached at tickIdx 14).
+    // We loop fastForward(2_000) for ~150 iterations to cover
+    // 5 virtual minutes of backoff cadence — at the correct ramp
+    // that window produces ~15-17 backoff polls.
     for (let i = 0; i < 150; i++) {
       await page.clock.fastForward(2000);
     }
     await expect(page.locator('[data-testid="ck-error-banner"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="ck-active-run-id"]')).toBeVisible();
+    // Cadence-agnostic continuation proof (iter3 MAJOR-1): pollCount
+    // MUST strictly increase across the backoff window — the FE
+    // keeps tracking the run instead of dead-ending.
+    expect(pollCount).toBeGreaterThan(pollsAtBudgetExit);
 
     // Flip the route — the next /runs/{id} response is the
     // terminal value.
     succeedOnNext = true;
     // Fast-forward enough for at least one more backoff poll to
-    // fire (backoff ceiling is 30 s; we step 30 × 2 s = 60 s of
-    // virtual time to cover the longest backoff step).
+    // fire. By this point the ramp has reached its 30-s ceiling
+    // (iter3: correct cadence, not constant 2 s), so we step
+    // 30 × 2 s = 60 s of virtual time — at least one (typically
+    // two) ceiling-cadence backoff polls fire, carrying the
+    // terminal value into the FE.
     for (let i = 0; i < 30; i++) {
       await page.clock.fastForward(2000);
     }

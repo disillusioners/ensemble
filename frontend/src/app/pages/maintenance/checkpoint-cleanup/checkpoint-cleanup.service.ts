@@ -78,6 +78,20 @@ export class CheckpointCleanupService {
   static readonly POLL_BUDGET_FLOOR_MS: number = 15 * 60 * 1000;
 
   /**
+   * Absolute maximum active poll budget — 60 min (MINOR-1, iter3).
+   * Pure overflow clamp: `hint × HINT_MULTIPLIER` with a
+   * huge-but-finite hint (e.g. `Number.MAX_VALUE`) evaluates to
+   * `Infinity`, and `timer(Infinity)` NEVER fires — the ACTIVE
+   * phase could never yield to BACKOFF and polling would wedge at
+   * the active cadence. The clamp guarantees a finite budget so
+   * `takeUntil(timer(budgetMs))` always fires. Legit hint classes
+   * (measured worst case ~25 min → 50-min budget) sit far below;
+   * anything above clamps to the ceiling and BACKOFF then carries
+   * the run to terminal.
+   */
+  static readonly POLL_BUDGET_CEILING_MS: number = 60 * 60 * 1000;
+
+  /**
    * Post-budget backoff step (ms added to each successive poll
    * interval once the active budget is exhausted). The first
    * post-budget gap is the outer `timer(intervalMs)` (= 2 s at
@@ -101,18 +115,26 @@ export class CheckpointCleanupService {
    * hint. Exposed as a static so the test mirror can pin the
    * contract without going through RxJS plumbing.
    *
-   *   hint > 0  →  max(hint × HINT_MULTIPLIER, POLL_BUDGET_FLOOR_MS)
+   *   hint > 0  →  min(max(hint × HINT_MULTIPLIER, POLL_BUDGET_FLOOR_MS),
+   *                    POLL_BUDGET_CEILING_MS)
    *   hint ≤ 0  →  POLL_BUDGET_FLOOR_MS
    *
    * Floor wins when hint × N lands below it (small hints on tiny
    * runs); the multiplier caps the upper bound (a 25-min class hint
    * → 50-min active budget, then backoff forever until terminal).
+   * POLL_BUDGET_CEILING_MS clamps degenerate huge hints (MINOR-1,
+   * iter3): `Number.MAX_VALUE × 2 = Infinity`, and an Infinite
+   * budget would make `timer(budgetMs)` never fire — starving the
+   * BACKOFF phase forever.
    */
   static computePollBudgetMs(hintMs: number | null | undefined): number {
     if (typeof hintMs === 'number' && Number.isFinite(hintMs) && hintMs > 0) {
-      return Math.max(
-        hintMs * CheckpointCleanupService.HINT_MULTIPLIER,
-        CheckpointCleanupService.POLL_BUDGET_FLOOR_MS,
+      return Math.min(
+        Math.max(
+          hintMs * CheckpointCleanupService.HINT_MULTIPLIER,
+          CheckpointCleanupService.POLL_BUDGET_FLOOR_MS,
+        ),
+        CheckpointCleanupService.POLL_BUDGET_CEILING_MS,
       );
     }
     return CheckpointCleanupService.POLL_BUDGET_FLOOR_MS;
@@ -362,7 +384,17 @@ export class CheckpointCleanupService {
         return EMPTY;
       }
       return timer(intervalMs).pipe(
-        expand((tickIdx) =>
+        // MAJOR-1 (iter3) — bind expand's SECOND projection arg (the
+        // zero-based recurrence index), NOT the emitted value. The
+        // seed `timer(intervalMs)` always emits 0, so the old
+        // `(tickIdx) =>` binding collapsed every gap to
+        // `computeBackoffMs(0, intervalMs)` = intervalMs — a
+        // constant 2-s cadence with the ramp and the 30-s ceiling
+        // dead. With the index binding, inter-emission gaps are
+        // exactly `computeBackoffMs(n, intervalMs)`: 2 s, 2 s,
+        // 4 s, 6 s, …, 30 s (ceiling first at tickIdx 14) — the
+        // JSDoc cadence contract below is now actually true.
+        expand((_, tickIdx) =>
           timer(CheckpointCleanupService.computeBackoffMs(tickIdx, intervalMs)),
         ),
         switchMap(() => this.getRun(runId).pipe(take(1))),

@@ -14,7 +14,7 @@
 // `idempotency_key`, no client-side UUID.
 
 import { signal } from '@angular/core';
-import { Observable, EMPTY, catchError, concat, defer, expand, of, switchMap, take, takeUntil, takeWhile, tap, throwError, timer } from 'rxjs';
+import { Observable, EMPTY, Subscription, catchError, concat, defer, expand, of, switchMap, take, takeUntil, takeWhile, tap, throwError, timer } from 'rxjs';
 import {
   isKnownErrorCode,
   type CheckpointCleanupBlobsSummary,
@@ -127,14 +127,21 @@ class TestableCheckpointCleanupService {
   // synthesized error.
   static readonly HINT_MULTIPLIER = 2 as const;
   static readonly POLL_BUDGET_FLOOR_MS: number = 15 * 60 * 1000;
+  static readonly POLL_BUDGET_CEILING_MS: number = 60 * 60 * 1000;
   static readonly BACKOFF_STEP_MS: number = 2000;
   static readonly BACKOFF_CEILING_MS: number = 30_000;
 
+  // MINOR-1 (iter3) — mirrored clamp: huge-but-finite hints must
+  // produce a FINITE budget (product Infinity would make
+  // `timer(budgetMs)` never fire, starving the BACKOFF phase).
   static computePollBudgetMs(hintMs: number | null | undefined): number {
     if (typeof hintMs === 'number' && Number.isFinite(hintMs) && hintMs > 0) {
-      return Math.max(
-        hintMs * TestableCheckpointCleanupService.HINT_MULTIPLIER,
-        TestableCheckpointCleanupService.POLL_BUDGET_FLOOR_MS,
+      return Math.min(
+        Math.max(
+          hintMs * TestableCheckpointCleanupService.HINT_MULTIPLIER,
+          TestableCheckpointCleanupService.POLL_BUDGET_FLOOR_MS,
+        ),
+        TestableCheckpointCleanupService.POLL_BUDGET_CEILING_MS,
       );
     }
     return TestableCheckpointCleanupService.POLL_BUDGET_FLOOR_MS;
@@ -267,7 +274,13 @@ class TestableCheckpointCleanupService {
         return EMPTY;
       }
       return timer(intervalMs).pipe(
-        expand((tickIdx) =>
+        // MAJOR-1 (iter3) — mirrored fix: bind expand's SECOND
+        // projection arg (the recurrence index), not the emitted
+        // value (the seed timer always emits 0, so the old
+        // value-binding pinned every gap at computeBackoffMs(0) —
+        // constant cadence, dead ramp). See the cadence-pinning
+        // tests below.
+        expand((_, tickIdx) =>
           timer(TestableCheckpointCleanupService.computeBackoffMs(tickIdx, intervalMs)),
         ),
         switchMap(() => this.getRun(runId).pipe(take(1))),
@@ -357,6 +370,12 @@ describe('CheckpointCleanupService', () => {
     it('BACKOFF_CEILING_MS = 30_000 (post-cap cadence cap)', () => {
       expect(TestableCheckpointCleanupService.BACKOFF_CEILING_MS).toBe(30_000);
     });
+
+    it('POLL_BUDGET_CEILING_MS = 60 min (MINOR-1 overflow clamp; ≥ floor, finite)', () => {
+      expect(TestableCheckpointCleanupService.POLL_BUDGET_CEILING_MS).toBe(3_600_000);
+      expect(TestableCheckpointCleanupService.POLL_BUDGET_CEILING_MS)
+        .toBeGreaterThanOrEqual(TestableCheckpointCleanupService.POLL_BUDGET_FLOOR_MS);
+    });
   });
 
   describe('computePollBudgetMs() — pure helper (fix commission 2026-09-29)', () => {
@@ -399,6 +418,29 @@ describe('CheckpointCleanupService', () => {
       expect(TestableCheckpointCleanupService.computePollBudgetMs(Infinity)).toBe(900_000);
     });
 
+    it('hint = 1e10 → clamped to POLL_BUDGET_CEILING_MS (MINOR-1: finite budget that still yields to backoff)', () => {
+      // 1e10 × 2 = 2e10 — finite but absurd; without the ceiling
+      // clamp the ACTIVE phase would hold the active cadence for
+      // ~231 days before ever yielding to backoff. The clamp keeps
+      // the budget finite AND bounded.
+      expect(TestableCheckpointCleanupService.computePollBudgetMs(1e10)).toBe(
+        TestableCheckpointCleanupService.POLL_BUDGET_CEILING_MS,
+      );
+    });
+
+    it('hint = Number.MAX_VALUE → product = Infinity → clamped to POLL_BUDGET_CEILING_MS (MINOR-1: timer(budget) must always fire)', () => {
+      // The hazard, pinned: a huge-but-finite hint makes the
+      // hint × HINT_MULTIPLIER product Infinity (Number.isFinite
+      // does NOT gate it), and `timer(Infinity)` never fires — the
+      // ACTIVE phase would never yield to BACKOFF. The clamp is the
+      // fix; the yield-to-backoff behavior is proven end-to-end in
+      // the pollRun() MINOR-1 test below.
+      expect(Number.MAX_VALUE * 2).toBe(Infinity);
+      expect(TestableCheckpointCleanupService.computePollBudgetMs(Number.MAX_VALUE)).toBe(
+        TestableCheckpointCleanupService.POLL_BUDGET_CEILING_MS,
+      );
+    });
+
     it('hint = negative → floor (defensive against malformed bodies)', () => {
       expect(TestableCheckpointCleanupService.computePollBudgetMs(-5_000)).toBe(900_000);
     });
@@ -420,6 +462,146 @@ describe('CheckpointCleanupService', () => {
     it('tickIdx ≥ 14 → ceiling (clamped)', () => {
       expect(TestableCheckpointCleanupService.computeBackoffMs(15)).toBe(30_000);
       expect(TestableCheckpointCleanupService.computeBackoffMs(100)).toBe(30_000);
+    });
+  });
+
+  // ── MAJOR-1 regression (iter3) — BACKOFF-phase cadence pinning ─────────
+  //
+  // MAJOR-1 shipped because NO test pinned the BACKOFF cadence: the
+  // old `expand((tickIdx) => timer(...))` bound the EMITTED VALUE
+  // (always 0 from the seed timer) instead of the recurrence index,
+  // collapsing every inter-emission gap to
+  // `computeBackoffMs(0, intervalMs)` = intervalMs — a constant 2-s
+  // cadence with the ramp and the 30-s ceiling dead. These tests
+  // advance the fake clock PER GAP and pin each BACKOFF
+  // inter-emission gap to `computeBackoffMs(n, 2000)` — the JSDoc
+  // cadence contract: 2 s (outer seed), 2 s (idx 0), 4 s (idx 1),
+  // 6 s (idx 2), …, 30 s ceiling first reached at idx 14, clamped
+  // at 30 s beyond.
+  describe('pollRun() BACKOFF cadence — MAJOR-1 regression (iter3: expand index binding)', () => {
+    /**
+     * Drain the ACTIVE phase against fake timers and land at the
+     * BACKOFF seed. `pollBudgetOverrideMs = 1` + `intervalMs` gives
+     * exactly one active emission (t=0) before the budget
+     * terminator (t=1); the BACKOFF defer then seeds its outer
+     * `timer(intervalMs)`. Returns the emission recorder.
+     */
+    async function drainToBackoffSeed(
+      svc: TestableCheckpointCleanupService,
+      http: MockHttpClient,
+      intervalMs: number,
+    ): Promise<{ sub: Subscription; emissionTimes: number[] }> {
+      const running = makeRun('running');
+      // Never terminal — the BACKOFF phase must keep polling until
+      // WE advance the clock, so every gap is observable.
+      http.customGet = <T>(_url: string) => of(running as T);
+      svc.pollBudgetOverrideMs = 1;
+      const emissionTimes: number[] = [];
+      const sub = svc
+        .pollRun('ckpt-cadence', intervalMs, null)
+        .subscribe({ next: () => emissionTimes.push(Date.now()) });
+      // t=0 — the only ACTIVE tick inside the 1-ms budget.
+      await jest.advanceTimersToNextTimerAsync();
+      // t=1 — budget terminator fires → ACTIVE yields → BACKOFF
+      // defer seeds the outer `timer(intervalMs)`.
+      await jest.advanceTimersByTimeAsync(1);
+      expect(emissionTimes.length).toBe(1);
+      // BACKOFF poll #1 — the outer seed. NOT gap-pinned: the seed
+      // timer is scheduled at t=1 (after the terminator), so the
+      // ACTIVE→BACKOFF transition gap carries +1 ms of terminator
+      // skew. Presence only.
+      await jest.advanceTimersByTimeAsync(intervalMs);
+      expect(emissionTimes.length).toBe(2);
+      return { sub, emissionTimes };
+    }
+
+    /** Advance exactly one expected gap; assert one emission landed and the gap matches. */
+    async function pinGap(
+      emissionTimes: number[],
+      tickIdx: number,
+      expectedGapMs: number,
+    ): Promise<void> {
+      // Cross-check the table against the helper under test.
+      expect(TestableCheckpointCleanupService.computeBackoffMs(tickIdx, 2000)).toBe(expectedGapMs);
+      const before = emissionTimes.length;
+      await jest.advanceTimersByTimeAsync(expectedGapMs);
+      expect(emissionTimes.length).toBe(before + 1);
+      const gap = emissionTimes[emissionTimes.length - 1] - emissionTimes[emissionTimes.length - 2];
+      expect(gap).toBe(expectedGapMs);
+    }
+
+    it('early ramp pinned: BACKOFF gaps are exactly 2 s (idx 0), 4 s (idx 1), 6 s (idx 2) — full JSDoc cadence 2 s, 2 s, 4 s, 6 s', async () => {
+      jest.useFakeTimers();
+      let sub: Subscription | null = null;
+      try {
+        const { sub: s, emissionTimes } = await drainToBackoffSeed(service, http, 2000);
+        sub = s;
+        // JSDoc gap table: gap 1 = outer seed 2 s (asserted in
+        // drainToBackoffSeed by advancing exactly intervalMs and
+        // requiring exactly one emission); gaps 2-4 below.
+        await pinGap(emissionTimes, 0, 2000); // gap 2 — expand idx 0
+        await pinGap(emissionTimes, 1, 4000); // gap 3 — expand idx 1
+        await pinGap(emissionTimes, 2, 6000); // gap 4 — expand idx 2
+      } finally {
+        sub?.unsubscribe();
+        jest.useRealTimers();
+      }
+    });
+
+    it('ceiling pin: the ramp reaches the 30-s ceiling exactly at tickIdx 14 (idx 13 → 28 s) and clamps at 30 s beyond (idx 14, 15)', async () => {
+      jest.useFakeTimers();
+      let sub: Subscription | null = null;
+      try {
+        const { sub: s, emissionTimes } = await drainToBackoffSeed(service, http, 2000);
+        sub = s;
+        // Walk the linear ramp to the last pre-ceiling step.
+        // Ceiling must NOT have been reached at idx 13.
+        expect(TestableCheckpointCleanupService.computeBackoffMs(13, 2000)).toBe(28_000);
+        for (const [tickIdx, gapMs] of [
+          [0, 2000], [1, 4000], [2, 6000], [3, 8000], [4, 10_000],
+          [5, 12_000], [6, 14_000], [7, 16_000], [8, 18_000], [9, 20_000],
+          [10, 22_000], [11, 24_000], [12, 26_000], [13, 28_000],
+        ] as Array<[number, number]>) {
+          await pinGap(emissionTimes, tickIdx, gapMs);
+        }
+        // Ceiling FIRST reached at tickIdx 14 → exactly 30 s …
+        await pinGap(emissionTimes, 14, 30_000);
+        // … and CLAMPED beyond: idx 15 also 30 s (not 32 s).
+        await pinGap(emissionTimes, 15, 30_000);
+      } finally {
+        sub?.unsubscribe();
+        jest.useRealTimers();
+      }
+    });
+
+    it('MINOR-1: a Number.MAX_VALUE hint clamps to POLL_BUDGET_CEILING_MS and the ACTIVE phase still yields to BACKOFF (timer(budget) fires)', async () => {
+      jest.useFakeTimers();
+      let sub: Subscription | null = null;
+      try {
+        const running = makeRun('running');
+        http.customGet = <T>(_url: string) => of(running as T); // never terminal
+        // Production budget path (NO override): hint=Number.MAX_VALUE
+        // → hint × 2 = Infinity → MUST clamp to the ceiling, else
+        // `timer(Infinity)` never fires and BACKOFF is starved
+        // forever. intervalMs=60_000 keeps the tick count low.
+        const emissionTimes: number[] = [];
+        sub = service
+          .pollRun('ckpt-minor1', 60_000, Number.MAX_VALUE)
+          .subscribe({ next: () => emissionTimes.push(Date.now()) });
+        await jest.advanceTimersToNextTimerAsync(); // t=0 active tick
+        expect(emissionTimes.length).toBe(1);
+        // Cross the clamped budget (3_600_000 ms): the terminator
+        // MUST fire → ACTIVE yields…
+        await jest.advanceTimersByTimeAsync(3_600_000);
+        const atBoundary = emissionTimes.length;
+        expect(atBoundary).toBeGreaterThan(1); // active ticks across the window
+        // …and BACKOFF seeded: outer `timer(60_000)` poll lands.
+        await jest.advanceTimersByTimeAsync(60_000);
+        expect(emissionTimes.length).toBe(atBoundary + 1);
+      } finally {
+        sub?.unsubscribe();
+        jest.useRealTimers();
+      }
     });
   });
 
@@ -601,16 +783,30 @@ describe('CheckpointCleanupService', () => {
       expect(emitted[emitted.length - 1]).toBe('failed');
     });
 
-    it('post-budget: keeps polling with backoff and never errors when run stays non-terminal (fix commission 2026-09-29, replaces PR-2 timeout)', async () => {
-      // The active phase uses a 5 ms budget (override) so it
-      // exhausts on the first tick. The run stays non-terminal
-      // for several backoff ticks, then becomes succeeded. The
+    it('post-budget: polling CONTINUES past the budget until terminal, terminal value LAST, no synthesized error (fix commission 2026-09-29, replaces PR-2 timeout; renamed iter3 — cadence is pinned separately by the MAJOR-1 cadence describe)', async () => {
+      // The active phase uses a 1 ms budget (override) so it
+      // exhausts on the first tick(s). The run stays non-terminal
+      // for several backoff polls, then becomes succeeded. The
       // stream MUST NOT error; polling continues into the
       // BACKOFF phase; the terminal value emits LAST.
+      //
+      // iter3 rename — the old label ("keeps polling with
+      // backoff") implied a cadence assertion this test never
+      // made; that coverage gap is exactly how MAJOR-1 shipped.
+      // Cadence is now pinned by the
+      // `pollRun() BACKOFF cadence — MAJOR-1 regression` describe
+      // above.
+      //
+      // iter3 timing fix — with the CORRECTED ramp the backoff
+      // gaps grow past jest's real-time timeout (6 s at idx 3,
+      // 8 s at idx 4 on a 1-ms interval), so this test drives the
+      // stream on JEST FAKE TIMERS: one 30-s virtual advance
+      // walks the whole ACTIVE→BACKOFF→terminal sequence
+      // deterministically, in milliseconds of wall time.
       const running = makeRun('running');
       const succeeded = makeRun('succeeded');
       const emitted: string[] = [];
-      // Multi-stage queue: 1 initial running (active), several
+      // Multi-stage queue: first poll(s) running (active), several
       // running (backoff ramp), then succeeded.
       const queue: CheckpointCleanupRun[] = [
         running,
@@ -621,14 +817,25 @@ describe('CheckpointCleanupService', () => {
         const next = queue.shift() ?? succeeded;
         return of(next as T);
       };
-      service.pollBudgetOverrideMs = 5;
-      await new Promise<void>((resolve, reject) => {
-        service.pollRun('ckpt-test', 1, null).subscribe({
-          next: (run) => emitted.push(run.status),
-          error: (err) => reject(new Error(`unexpected error: ${JSON.stringify(err)}`)),
-          complete: resolve,
+      jest.useFakeTimers();
+      try {
+        service.pollBudgetOverrideMs = 1;
+        const completed = new Promise<void>((resolve, reject) => {
+          service.pollRun('ckpt-test', 1, null).subscribe({
+            next: (run) => emitted.push(run.status),
+            error: (err) => reject(new Error(`unexpected error: ${JSON.stringify(err)}`)),
+            complete: resolve,
+          });
         });
-      });
+        // Walk the entire stream in virtual time: active tick(s) at
+        // t=0/1 ms, budget terminator, backoff seed, then the ramped
+        // gaps (1, 2001, 4001, 6001, 8001 ms) until the queue's
+        // terminal entry completes the stream. 30 s covers it all.
+        await jest.advanceTimersByTimeAsync(30_000);
+        await completed;
+      } finally {
+        jest.useRealTimers();
+      }
       // Terminal LAST — backoff preserved the active-phase takeWhile
       // inclusive semantics through the phase transition.
       expect(emitted[emitted.length - 1]).toBe('succeeded');
@@ -645,17 +852,16 @@ describe('CheckpointCleanupService', () => {
       expect(runningCount).toBeGreaterThanOrEqual(4);
     });
 
-    it('post-budget: with a huge hint the active budget is large (no spurious early transition)', async () => {
-      // Production contract: a 10-min hint × 2 → 20-min active
-      // budget. With `pollBudgetOverrideMs` cleared and a real
-      // hint, the active phase must NOT transition into backoff
-      // for the first ~20 min of polling. We use a `Date.now`
-      // override is impractical here; instead we exercise the
-      // budget sizing function directly (covered by
-      // `computePollBudgetMs` tests above) and assert here that
-      // `pollRun(hint=10min)` reads the same value through
-      // the production path. Smoke test: subscribe with a tight
-      // intervalMs but a hint that lands well above the floor.
+    it('post-budget: a run that terminals on the FIRST poll completes immediately regardless of a hint-sized budget (MINOR-4 rename, iter3 — budget sizing itself is pinned by the computePollBudgetMs tests)', async () => {
+      // What this actually exercises: with `pollBudgetOverrideMs`
+      // cleared and a real hint (10-min hint × 2 → 20-min active
+      // budget), the run is ALREADY terminal on the first poll —
+      // `takeWhile(..., true)` short-circuits and the stream
+      // completes immediately. The budget value never comes into
+      // play (no ~20-min wait, no backoff transition); the smoke
+      // proof is that the terminal value emits LAST with no
+      // synthesized error. The budget MATH is pinned by the
+      // `computePollBudgetMs()` describe above.
       const succeeded = makeRun('succeeded');
       http.customGet = <T>(_url: string) => of(succeeded as T);
       const emitted: string[] = [];

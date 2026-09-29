@@ -1005,9 +1005,9 @@ describe('CheckpointCleanupComponent', () => {
     // into the FE-only `'poll_stale'` sentinel. The NEW contract
     // (post-cap backoff phase, no synthesized poll-timeout) drops the
     // marker branch — `displayErrorCode()` is a thin pass-through over
-    // `lastError().error`. The `'poll_stale'` literal is preserved on
-    // the `MaintenanceDisplayCode` type for backward compat but no
-    // production emitter exists.
+    // `lastError().error`. Iter3: the dead `'poll_stale'` member was
+    // dropped from the `MaintenanceDisplayCode` type too — no
+    // producer, no consumer.
 
     it('passes BE-said error codes through verbatim (e.g. internal_error)', () => {
       service.lastError.set({ error: 'internal_error', message: 'boom' });
