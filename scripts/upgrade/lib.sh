@@ -1733,6 +1733,12 @@ _supervision_handback_unit() {
 #                             (already-active verifies port serving
 #                             instead of trusting a no-op rc) — while
 #                             KEEPING the nohup fallback (comp7 7c pin).
+#   EXPLICIT unit + unit-    → M3 (review cycle 1, leader FAIL-CLOSED):
+#     incapable host           REFUSES exit 78 (supervision-unit-
+#                             incapable-host) — never loud-degrade +
+#                             nohup at rc 0. Normally caught at the
+#                             preflight; this is the defense-in-depth
+#                             arm (SUPERVISION_EXPLICIT_UNIT=1 keys it).
 #   everything else         → today's nohup path byte-identical.
 #
 # (e) SCOPE ESCAPE — deliberately UNCHANGED by P3: the promote
@@ -1752,8 +1758,10 @@ _supervision_handback_unit() {
 # Returns: 0 on every legacy shape (fire-and-forget nohup, comp7 unit
 # start, comp7 fallback) AND on a VERIFIED unit hand-back; 1 ONLY on a
 # unit-path hand-back failure (Amendment #1: no nohup fallback — the
-# caller must halt + B4; never a false success). The caller's gate_*
-# helpers still observe the deep result via /livez + /readyz.
+# caller must halt + B4; never a false success). M3 exception: the
+# EXPLICIT-unit-on-unit-incapable-host arm _refuse-EXITS 78 (journaled
+# refusal) instead of returning. The caller's gate_* helpers still
+# observe the deep result via /livez + /readyz.
 restart_via_launcher() {
     mkdir -p "$INSTALL_DIR/data"
     local log="$INSTALL_DIR/data/launcher.log"
@@ -1784,9 +1792,23 @@ restart_via_launcher() {
         esac
     elif [ "${SUPERVISION_STATE:-}" = "UNIT_MANAGED" ] && [ -n "${SUPERVISION_UNIT:-}" ]; then
         # Byte-identical BSD/macOS arms: unit paths live behind the host
-        # guard; an explicit UNIT_MANAGED classification on a host that
-        # cannot do a unit hand-back degrades LOUD (stop-ensemble.sh
-        # :354 precedent), never silently.
+        # guard. M3 (review cycle 1, leader-ruled FAIL-CLOSED): an
+        # EXPLICIT unit declaration (SUPERVISION_EXPLICIT_UNIT=1, set by
+        # the ladder-top 'unit' arm of supervision_classify) on a host
+        # that cannot do a unit hand-back REFUSES (exit 78,
+        # supervision-unit-incapable-host) — silently degrading an
+        # explicit assertion to the nohup lineage at rc 0 is the r-f82e
+        # surprise class. Defense-in-depth: the preflight normally
+        # refuses this shape BEFORE the pipeline starts; only a
+        # capability change mid-run (or a direct call) lands here.
+        # NON-explicit shapes (auto-resolved UNIT_MANAGED — e.g. systemd
+        # present at classify time but systemctl unresolvable at
+        # hand-back) KEEP the legacy degrade-LOUD-to-nohup semantics
+        # (stop-ensemble.sh :354 precedent) — M3 is confined to the
+        # explicit arm.
+        if [ "${SUPERVISION_EXPLICIT_UNIT:-0}" = "1" ]; then
+            _refuse supervision-unit-incapable-host "restart refused: ENSEMBLE_SUPERVISION=unit is explicit (classification UNIT_MANAGED:${SUPERVISION_UNIT}) but unit hand-back is unavailable here (non-Linux / no systemd / no resolvable systemctl) — never silent-degrade to the nohup lineage (the r-f82e surprise class)"
+        fi
         _warn "classification UNIT_MANAGED:${SUPERVISION_UNIT} but unit hand-back is unavailable here (non-Linux / no systemd / no resolvable systemctl) — degrading LOUD to the nohup path"
     fi
 
@@ -2051,14 +2073,38 @@ _supervision_unit_from_dotenv() {
 #   SUPERVISION_MODE   resolved mode: 'unit' | 'script'
 #   SUPERVISION_STATE  SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR
 #   SUPERVISION_UNIT   unit name ('' when none)
+#   SUPERVISION_EXPLICIT_UNIT   1 ONLY for a ladder-top EXPLICIT 'unit'
+#                       declaration (M3 discriminator — auto-derived
+#                       UNIT_MANAGED also resolves MODE=unit)
+#   SUPERVISION_REFUSE_REASON   '' | 'unit-unresolved' |
+#                       'unit-incapable-host' (M3; the preflight branches
+#                       its exit-78 _refuse token on this)
 # Prints EXACTLY ONE machine-readable line:
 #   ENSEMBLE_SUPERVISION_RESULT=<state>[:<unit>]
-# Returns 1 ONLY for explicit-unit-unresolved (the PREFLIGHT caller refuses
-# with exit 78; the stop site ignores rc — it never refuses mid-pipeline).
+# Returns 1 for the two EXPLICIT-unit fail-closed classes (the PREFLIGHT
+# caller refuses with exit 78; the stop site ignores rc — it never refuses
+# mid-pipeline). SUPERVISION_REFUSE_REASON discriminates them:
+#   "unit-unresolved"     — explicit unit, no name resolvable (env >
+#                           cgroup > INSTALL_DIR/.env all empty)
+#   "unit-incapable-host" — explicit unit, this host CANNOT honor unit
+#                           supervision at all (non-Linux / no systemd /
+#                           systemctl unresolvable) — M3 (review cycle 1,
+#                           leader-ruled FAIL-CLOSED): silently degrading
+#                           an explicit assertion to the nohup lineage at
+#                           rc 0 is the r-f82e surprise class; the name
+#                           (if one resolved from env/.env) is carried for
+#                           the refusal diagnosis, never acted on.
+# Sets one additional consumed global: SUPERVISION_EXPLICIT_UNIT (1 only
+# when the ladder top saw an EXPLICIT 'unit' declaration; 0 otherwise —
+# an auto-derived UNIT_MANAGED leaf also resolves MODE=unit, so MODE alone
+# cannot discriminate the declared shape). restart_via_launcher's M3
+# refusal arm keys on it.
 supervision_classify() {
     SUPERVISION_MODE="script"
     SUPERVISION_STATE="SCRIPT_NOHUP"
     SUPERVISION_UNIT=""
+    SUPERVISION_EXPLICIT_UNIT=0
+    SUPERVISION_REFUSE_REASON=""
     local raw low leaf pid inv
     raw="${ENSEMBLE_SUPERVISION:-}"
     raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
@@ -2078,6 +2124,7 @@ supervision_classify() {
             unit)
                 SUPERVISION_MODE="unit"
                 SUPERVISION_STATE="UNIT_MANAGED"
+                SUPERVISION_EXPLICIT_UNIT=1
                 SUPERVISION_UNIT="${ENSEMBLE_RESTART_UNIT:-}"
                 if [ -z "$SUPERVISION_UNIT" ] && [ "$(uname -s)" = "Linux" ] \
                    && [ -d /run/systemd/system ]; then
@@ -2090,6 +2137,23 @@ supervision_classify() {
                 if [ -z "$SUPERVISION_UNIT" ]; then
                     SUPERVISION_UNIT="$(_supervision_unit_from_dotenv)" \
                         || SUPERVISION_UNIT=""
+                fi
+                # ── M3 host-capability rung (review cycle 1, leader-ruled
+                # FAIL-CLOSED): an EXPLICIT unit assertion on a host that
+                # cannot honor unit supervision (non-Linux / no systemd /
+                # systemctl unresolvable) refuses at preflight (78) — NEVER
+                # loud-degrades to the nohup lineage at rc 0 (silently
+                # degrading an explicit assertion is the r-f82e surprise
+                # class). The resolved name (env/.env), if any, is carried
+                # in the machine line + globals for the refusal diagnosis.
+                # Non-explicit (auto/script) modes never reach this rung.
+                # Zero /proc reads on incapable hosts (the cgroup rung
+                # above is already uname-guarded).
+                if ! _supervision_host_allows_unit || ! command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
+                    _supervision_warn_once "mode 'unit' explicit but this host cannot honor unit supervision (non-Linux / no systemd / no resolvable systemctl${SUPERVISION_UNIT:+; name '$SUPERVISION_UNIT' from env/INSTALL_DIR/.env is unusable here}) — preflight must refuse (78); never silent-degrade to nohup"
+                    printf 'ENSEMBLE_SUPERVISION_RESULT=%s%s\n' "$SUPERVISION_STATE" "${SUPERVISION_UNIT:+:$SUPERVISION_UNIT}"
+                    SUPERVISION_REFUSE_REASON="unit-incapable-host"
+                    return 1
                 fi
                 if [ -n "$SUPERVISION_UNIT" ]; then
                     printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
@@ -2350,6 +2414,13 @@ supervision_dualfight_check() {
 # deliberately NOT machine-surfaced.
 supervision_preflight() {
     if ! supervision_classify; then
+        if [ "${SUPERVISION_REFUSE_REASON:-}" = "unit-incapable-host" ]; then
+            # M3 (review cycle 1, leader-ruled FAIL-CLOSED): explicit unit
+            # on a unit-INCAPABLE host — same exit-78 preflight refusal
+            # semantics as supervision-unit-unresolved, its own greppable
+            # reason token. NEVER loud-degrade + nohup at rc 0.
+            _refuse supervision-unit-incapable-host "preflight refused: ENSEMBLE_SUPERVISION=unit is explicit but this host cannot honor unit supervision (non-Linux / no systemd / systemctl unresolvable) — never silent-degrade to the nohup lineage (the r-f82e surprise class); run under systemd or declare ENSEMBLE_SUPERVISION=script"
+        fi
         _refuse supervision-unit-unresolved "preflight refused: ENSEMBLE_SUPERVISION=unit is explicit but no unit name is resolvable (env ENSEMBLE_RESTART_UNIT > cgroup-derived > INSTALL_DIR/.env all empty) — never silent-degrade (P1 §2); set ENSEMBLE_RESTART_UNIT or run under the unit"
     fi
     supervision_dualfight_check

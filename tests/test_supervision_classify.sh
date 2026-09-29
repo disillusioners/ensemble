@@ -206,6 +206,44 @@ assert_contains "explicit-unit unresolved: WARN names the refusal" "preflight mu
 XG="$(run_classify linux session-9.scope 'ENSEMBLE_SUPERVISION=garbageval')"
 assert_eq "garbage: rc 0 (fail-toward-script)" "0" "$(rc_line "$XG")"
 
+# ── M3 (review cycle 1 fixback): explicit unit on a unit-INCAPABLE host ────
+# The Darwin uname PATH-stub simulates a host that cannot honor unit
+# supervision (non-Linux ⇒ no systemd, no systemctl — zero /proc reads by
+# the guard discipline). An EXPLICIT ENSEMBLE_SUPERVISION=unit assertion
+# there must FAIL CLOSED at classify (rc 1, refuse reason carried for the
+# preflight's exit-78) — NEVER loud-degrade + nohup at rc 0 (the r-f82e
+# surprise class). Pinned for BOTH name shapes: name resolved from env
+# (the defect arm — used to return rc 0 'conforming') and no name at all.
+# The globals keep the DECLARED shape (UNIT_MANAGED + the name) so the
+# refusal is diagnosable and the machine-line grammar stays frozen.
+SUP_DARWIN_PATH="$(mktemp -d -t supclass-m3darwin.XXXXXX)"
+cat > "$SUP_DARWIN_PATH/uname" <<STUB
+#!/bin/bash
+case "\$1" in
+    -s) echo "Darwin" ;;
+    *) "$REAL_UNAME" "\$@" ;;
+esac
+STUB
+chmod +x "$SUP_DARWIN_PATH/uname"
+
+M3A="$(run_classify darwin session-9.scope 'ENSEMBLE_SUPERVISION=unit ENSEMBLE_RESTART_UNIT=ensemble-m3.service')"
+assert_eq "M3 incapable host + env name: rc 1 (fail-closed, never silent-degrade)" "1" "$(rc_line "$M3A")"
+assert_eq "M3 incapable host: state keeps the declared shape" "UNIT_MANAGED" "$(globals_state "$M3A")"
+assert_eq "M3 incapable host: unit carried for the diagnosis" "ensemble-m3.service" "$(globals_unit "$M3A")"
+assert_eq "M3 incapable host: mode unit" "unit" "$(globals_mode "$M3A")"
+assert_eq "M3 incapable host: machine line grammar frozen (name carried)" "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-m3.service" "$(machine_line "$M3A")"
+assert_contains "M3 incapable host: WARN names the host incapability" "cannot honor unit supervision" "$M3A"
+assert_contains "M3 incapable host: WARN names the refusal" "preflight must refuse (78)" "$M3A"
+assert_contains "M3 incapable host: WARN cites the env/.env name as unusable" "ensemble-m3.service' from env/INSTALL_DIR/.env is unusable here" "$M3A"
+assert_eq "M3 incapable host: zero /proc reads (guard short-circuits)" "" "$(calls_of "$M3A")"
+
+M3B="$(run_classify darwin session-9.scope 'ENSEMBLE_SUPERVISION=unit')"
+assert_eq "M3 incapable host, no name: rc 1" "1" "$(rc_line "$M3B")"
+assert_eq "M3 incapable host, no name: bare machine line" "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED" "$(machine_line "$M3B")"
+assert_contains "M3 incapable host, no name: WARN names the refusal" "preflight must refuse (78)" "$M3B"
+assert_eq "M3 incapable host, no name: zero /proc reads" "" "$(calls_of "$M3B")"
+rm -rf "$SUP_DARWIN_PATH"
+
 # WARN-once semantics: a garbage declaration warns EXACTLY once per
 # process even across three classify calls.
 WO="$(mktemp -t supclass-wo.XXXXXX)"
@@ -457,6 +495,55 @@ case "$PF2_OUT" in
     *) _fail "4c happy: rc 0" "pf-rc=0" "$(printf '%s' "$PF2_OUT" | grep -o 'pf-rc=[0-9]*' || echo none)" ;;
 esac
 rm -rf "$PF2_FIXT" "$SC_STUB"
+
+# 4d. M3 (review cycle 1): EXPLICIT unit on a unit-INCAPABLE host (Darwin
+#     uname PATH-stub) with the name RESOLVED from env — the preflight
+#     converts the classify rc into _refuse supervision-unit-incapable-host
+#     + exit 78 (its own greppable token, distinct from
+#     supervision-unit-unresolved); the refusal is journaled.
+PF3_FIXT="$(mktemp -d -t supclass-pf3.XXXXXX)"
+mkdir -p "$PF3_FIXT/releases"
+cat > "$PF3_FIXT/releases/state.json" <<'JOURNAL'
+{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JOURNAL
+PF3_DARWIN="$(mktemp -d -t supclass-pf3darwin.XXXXXX)"
+cat > "$PF3_DARWIN/uname" <<STUB
+#!/bin/bash
+case "\$1" in
+    -s) echo "Darwin" ;;
+    *) "$REAL_UNAME" "\$@" ;;
+esac
+STUB
+chmod +x "$PF3_DARWIN/uname"
+PF3_OUT="$(
+    (
+        export INSTALL_DIR="$PF3_FIXT"
+        export ENSEMBLE_SUPERVISION=unit
+        export ENSEMBLE_RESTART_UNIT=ensemble-m3pf.service
+        unset SYSTEMCTL_BIN 2>/dev/null || true
+        # nested subshell so _refuse's exit 78 does not kill the harness;
+        # lib.sh sourced INSIDE the PATH-stubbed shell so every uname call
+        # the classifier makes (host guard + preflight) sees Darwin
+        PATH="$PF3_DARWIN:$PATH" bash -c '
+            . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+            ( supervision_preflight )
+            echo "pf-rc=$?"
+        '
+    ) 2>&1
+)"
+assert_contains "4d M3 refusal message names the host incapability" "this host cannot honor unit supervision" "$PF3_OUT"
+assert_contains "4d M3 refusal cites never silent-degrade" "never silent-degrade" "$PF3_OUT"
+case "$PF3_OUT" in
+    *pf-rc=78*) _pass "4d M3 preflight exit 78" ;;
+    *) _fail "4d M3 preflight exit 78" "pf-rc=78" "$(printf '%s' "$PF3_OUT" | grep -o 'pf-rc=[0-9]*' || echo none)" ;;
+esac
+assert_contains "4d machine line emitted pre-refusal (name carried)" "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-m3pf.service" "$PF3_OUT"
+assert_not_contains "4d no stale outcome line on refusal" "ENSEMBLE_SUPERVISION_OUTCOME=" "$PF3_OUT"
+PF3_J="$(cat "$PF3_FIXT/releases/state.json")"
+assert_contains "4d refusal journaled" '"event":"refusal"' "$PF3_J"
+assert_contains "4d refusal carries the supervision-unit-incapable-host token" "reason=supervision-unit-incapable-host" "$PF3_J"
+assert_not_contains "4d NOT the unresolved token (distinct class)" "reason=supervision-unit-unresolved" "$PF3_J"
+rm -rf "$PF3_FIXT" "$PF3_DARWIN"
 
 # ===========================================================================
 section "5 — non-Linux arm (Darwin uname stub): zero /proc reads attempted"

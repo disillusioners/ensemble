@@ -684,7 +684,16 @@ JOURNAL
     assert_contains "C9 first stderr line propagated" "Startup timed out" "$C9_OUT"
     assert_contains "C9 nohup launched" "launcher started (nohup)" "$C9_OUT"
 
-    # C10 unit classification on a non-Linux host → degrade LOUD, nohup.
+    # C10 EXPLICIT-unit classification on a unit-INCAPABLE host — M3
+    # (review cycle 1, leader-ruled FAIL-CLOSED): a ladder-top EXPLICIT
+    # unit declaration (SUPERVISION_EXPLICIT_UNIT=1, set by
+    # supervision_classify's 'unit' arm) must REFUSE exit 78 at the
+    # restart_via_launcher elif — NEVER loud-degrade + nohup at rc 0
+    # (the r-f82e surprise class). The Darwin uname PATH-stub simulates
+    # the incapable host; the nested subshell keeps _refuse's exit 78
+    # from killing the rc-capture. C10b pins the complementary contract:
+    # the NON-explicit (auto-resolved) UNIT_MANAGED shape KEEPS the
+    # legacy loud-degrade — M3 is confined to the explicit arm.
     DARWIN_BIN="$(mktemp -d -t suphb-darwin.XXXXXX)"
     cat > "$DARWIN_BIN/uname" <<STUB
 #!/bin/bash
@@ -695,14 +704,48 @@ esac
 STUB
     chmod +x "$DARWIN_BIN/uname"
     reset_stub_state "$CFIX/sc4.log"
-    C10_OUT="$(run_rvl "$LSOF_OK:$DARWIN_BIN" '
+    C10_OUT="$(PATH="$LSOF_OK:$DARWIN_BIN:$PATH" bash -c '
+        export INSTALL_DIR="'"$CFIX"'"
+        export SYSTEMCTL_BIN="'"$SC4"'"
+        export SC_LOG="'"$CFIX"'/sc4.log"
+        export PORT=19997
+        unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+        . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
         SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
         SUPERVISION_UNIT=ensemble-c10.service; SUPERVISION_PRESTOP_MAINPID=777
-    ')"
-    assert_eq "C10 BSD arm: rc 0 (legacy nohup shape)" "rvl-rc=0" "$(rvl_rc "$C10_OUT")"
-    assert_contains "C10 degrade LOUD" "degrading LOUD to the nohup path" "$C10_OUT"
-    assert_contains "C10 byte-identical nohup line" "launcher started (nohup)" "$C10_OUT"
+        SUPERVISION_EXPLICIT_UNIT=1
+        ( restart_via_launcher )
+        echo "rvl-rc=$?"
+    ' 2>&1)"
+    assert_eq "C10 explicit unit + incapable host: rc 78 (fail-closed refusal)" "rvl-rc=78" "$(rvl_rc "$C10_OUT")"
+    assert_contains "C10 refusal names never silent-degrade" "never silent-degrade" "$C10_OUT"
+    assert_contains "C10 refusal cites the r-f82e surprise class" "r-f82e surprise class" "$C10_OUT"
+    assert_contains "C10 refusal names the unit + host guards" "unit hand-back is unavailable here (non-Linux / no systemd / no resolvable systemctl)" "$C10_OUT"
+    assert_not_contains "C10 NEVER nohup'd the explicit-unit lineage" "launcher started (nohup)" "$C10_OUT"
     assert_eq "C10 zero systemctl calls (host guard first)" "" "$(cat "$CFIX/sc4.log")"
+    C10_J="$(cat "$CFIX/releases/state.json")"
+    assert_contains "C10 refusal journaled" '"event":"refusal"' "$C10_J"
+    assert_contains "C10 refusal carries the supervision-unit-incapable-host token" "reason=supervision-unit-incapable-host" "$C10_J"
+
+    # C10b NON-explicit (auto-resolved) UNIT_MANAGED on the same incapable
+    # host: legacy loud-degrade to the nohup path stays AS-IS.
+    reset_stub_state "$CFIX/sc4.log"
+    C10B_OUT="$(PATH="$LSOF_OK:$DARWIN_BIN:$PATH" bash -c '
+        export INSTALL_DIR="'"$CFIX"'"
+        export SYSTEMCTL_BIN="'"$SC4"'"
+        export SC_LOG="'"$CFIX"'/sc4.log"
+        export PORT=19997
+        unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+        . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+        SUPERVISION_UNIT=ensemble-c10b.service; SUPERVISION_PRESTOP_MAINPID=777
+        ( restart_via_launcher )
+        echo "rvl-rc=$?"
+    ' 2>&1)"
+    assert_eq "C10b auto-resolved unit + incapable host: rc 0 (legacy degrade)" "rvl-rc=0" "$(rvl_rc "$C10B_OUT")"
+    assert_contains "C10b degrade LOUD" "degrading LOUD to the nohup path" "$C10B_OUT"
+    assert_contains "C10b byte-identical nohup line" "launcher started (nohup)" "$C10B_OUT"
+    assert_eq "C10b zero systemctl calls (host guard first)" "" "$(cat "$CFIX/sc4.log")"
     rm -rf "$DARWIN_BIN"
 
     # C11 consumed-never-rederived contract: a FAULT-INJECTING classify
