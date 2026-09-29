@@ -152,6 +152,19 @@ if [ "$SKIP_BUILD" = "0" ]; then
             _warn "  3) invoke stage.sh from a session that already has uv on PATH (systemd user units, tmux server, etc.)"
             exit 78
         fi
+        # DIVERGENCE AWARENESS (commission v0.16.6 c2 fix-back): when both
+        # PATH-resolved `uv` AND $HOME/.local/bin/uv exist but resolve to
+        # different binaries (different inodes / sizes / mtimes), surface
+        # a non-blocking WARN. The PATH-resolved one wins (it was resolved
+        # first), but the operator should know their session has two
+        # installs. Skipped silently if only one resolves (the common case).
+        if command -v uv >/dev/null 2>&1 && [ -x "$HOME/.local/bin/uv" ]; then
+            _uv_path="$(command -v uv)"
+            if [ "$_uv_path" != "$HOME/.local/bin/uv" ] \
+                && ! cmp -s "$_uv_path" "$HOME/.local/bin/uv" 2>/dev/null; then
+                _warn "uv DIVERGENCE: PATH=$_uv_path and \$HOME/.local/bin/uv resolve to DIFFERENT binaries (byte-different via cmp). Using PATH version; reconcile your install if this is unintentional."
+            fi
+        fi
         _log "PyInstaller build (bare, branch-safe — NEVER make build/pyinstaller: ensure-latest would yank the branch)"
         # _uv_bin is the absolute path resolved above — never rely on PATH
         # resolution at the subshell's exec time.
@@ -321,16 +334,24 @@ EOF
 
 # staged_at: REFRESHED on every stage (M6, commission v0.16.6 component 2).
 # Pre-rider behavior preserved the original timestamp across idempotent
-# re-stages (stable checksums → retention ordering must not wobble). The
-# motivating bug: 16:22:32Z survived a 17:50 re-stage, masking the
-# operator's actual restage event from any tooling that sorts by
-# `staged_at` (or that surfaces "last re-stage was N days ago"). The
-# retention-relevant identity is the manifest checksums (sha256 is
-# stable across identical re-stages), NOT the timestamp — checksums
-# carry the wobble-prevention; the timestamp carries the restage-event
-# signal. Write the FRESH now-iso unconditionally. (If the operator
-# truly wants idempotent staging across an identical re-stage, they
-# can compare manifest.json checksums before/after — those ARE stable.)
+# re-stages, so the manifest was byte-identical — and tooling that
+# sorts by `staged_at` (or surfaces "last re-stage was N days ago")
+# could not tell the operator's restage event apart from a no-op.
+# The motivating bug: 16:22:32Z survived a 17:50 re-stage, masking the
+# restage event. Write the FRESH now-iso unconditionally (idempotency
+# is preserved by the per-file checksums, which DO stay stable across
+# identical re-stages — operators wanting identity compare can diff
+# manifest.json checksums before/after; those ARE stable).
+#
+# EVICTION IDENTITY (lib.sh:2839-2853, retention): the key the retention
+# sort uses is the `staged_at` EPOCH (manifest-stamped ISO converted via
+# _iso_to_epoch; dir mtime fallback when the manifest is missing). NOT
+# the checksums — checksums are wobble-prevention for IDENTITY (re-stage
+# of the same payload stays at the same retention position because
+# staged_at moves with the restage event, not because checksums are
+# stable). The TWO roles do NOT conflict: checksums gate IDENTITY (you
+# can trust the binary); staged_at EPOCH sorts the EVICTION list (oldest
+# staged_at = first to evict).
 STAGED_AT="$(_now_iso)"
 
 cat > "$STAGE_TMP/manifest.json" <<EOF
