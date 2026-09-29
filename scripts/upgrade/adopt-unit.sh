@@ -160,6 +160,48 @@ _step_a_owned_pids() {
     _log "step (a): no owned pid alive (anchored tiers vs $INSTALL_DIR) — OK"
 }
 
+# ── Step (-1): pipeline lock + Layer (i) settle-check (commission v0.16.6 c2)
+#
+# Lock: same mkdir-lock as promote/stage/rollback (D5/D-FA5.1) — adopts the
+# same mutex semantics so a concurrent promote cannot race the half-staged
+# adoption. Bounded 15s wait, stale-break ownership-guarded; release on
+# every exit path via the EXIT trap below (lock_release is itself
+# ownership-guarded — a non-owner's release is a silent no-op).
+#
+# Settle-check: pipeline_settled refuses (exit 78) on any of: missing/
+# unset journal current, journal/symlink drift, open in_flight txn, non-null
+# pending_op, lock-held (the latter is redundant with the explicit
+# lock-acquire below but keeps the error surface uniform — the
+# lock-busy reason token is distinct from a generic acquire-time rc 1).
+#
+# NO --force escape on adopt-unit.sh (per spec): adoption already refuses
+# on a running daemon (step a); refusing to adopt over a live pipeline is
+# the same defense surface, the lock IS the live pipeline.
+ADOPT_LOCK_HELD_BY_ME=0
+_adopt_unit_exit_trap() {
+    if [ "$ADOPT_LOCK_HELD_BY_ME" = "1" ]; then
+        lock_release || true
+    fi
+}
+trap '_adopt_unit_exit_trap' EXIT
+
+_step_pre_settle() {
+    if ! SETTLE_OUT="$(pipeline_settled)"; then
+        _warn "REFUSED (Layer i): pipeline is not settled ($SETTLE_OUT) — adoption cannot proceed over a live mutation; wait for the upgrade pipeline to settle, then re-run"
+        exit 78
+    fi
+    _log "step (pre): pipeline settled — OK (journal/symlink agree, no in_flight, no pending_op, lock free)"
+}
+
+_step_lock() {
+    if ! lock_acquire; then
+        _warn "REFUSED: pipeline lock busy (another promote/stage/rollback in flight) — adopt-unit.sh takes the same lock to serialize against concurrent pipeline mutations; wait for it to settle, then re-run"
+        exit 78
+    fi
+    ADOPT_LOCK_HELD_BY_ME=1
+    _log "step (pre): pipeline lock acquired — OK"
+}
+
 # ── Step (b): host guards — Linux + live systemd + resolvable systemctl ─────
 _step_b_host() {
     if [ "$(uname -s)" != "Linux" ]; then
@@ -455,6 +497,13 @@ _verify_adoption() {
 # ── Main sequence ────────────────────────────────────────────────────────────
 # Refusal order is the mission's atomic-handover order: (a) owned pids,
 # (b) host guards, (c) polkit — THEN config/name/generation/sequence.
+# Commission v0.16.6 component 2 (Layer i+ii) inserts (pre) settle-check
+# + lock BEFORE step (a) so the refusal surface is uniform with promote.sh:
+# adopt cannot race a live mutation (lock) and cannot adopt over a
+# half-staged state (settle). The settle+lock pair is OPT-IN equivalent
+# to the promote's preflight (lib.sh promote_entry_check + lock_acquire).
+_step_pre_settle
+_step_lock
 _step_a_owned_pids
 _step_b_host
 _step_c_polkit
@@ -484,6 +533,16 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 # (d) — the atomic handover sequence, fail-loud at every step.
+# Commission v0.16.6 component 2 (Layer ii, promote-side symmetric
+# refusal): write the adoption-in-progress marker IMMEDIATELY before any
+# mutation — a concurrent promote whose restart routes through systemctl
+# (lib.sh keys off ENSEMBLE_RESTART_UNIT directly) would misroute onto a
+# half-staged unit. The marker makes promote_entry_check refuse (78) on
+# every preflight until the marker is cleared (verify success path) or
+# removed by the operator (stale-recovery; see the runbook).
+if ! adoption_marker_write; then
+    _report_partial_and_fail "adoption-marker" "could not write $INSTALL_DIR/releases/.adoption_in_progress (filesystem permissions? the releases/ dir is the lock-holder's territory)"
+fi
 umask 077
 UNIT_TMP="$(mktemp "${TMPDIR:-/tmp}/adopt-unit.XXXXXX")" \
     || _report_partial_and_fail "generate/tmpfile"
@@ -514,6 +573,15 @@ LEDGER_ENABLED="yes"
 _log "step (d).4: enable --now $UNIT_NAME — issued"
 
 _verify_adoption
+
+# Layer ii closure: clear the adoption-in-progress marker on verify success
+# — the next promote preflight may now proceed. Marker-removal failure is
+# best-effort WARN-only here (the verification already succeeded; a
+# follow-up promote refusing because of a stale marker is recoverable
+# via the documented manual removal path).
+if ! adoption_marker_clear; then
+    _warn "adoption marker CLEAR FAILED — next promote will refuse until manually removed (see runbook §Adoption-marker stale-recovery): bash -c 'rm -f $INSTALL_DIR/releases/.adoption_in_progress'"
+fi
 
 _log "ADOPTION COMPLETE: $INSTALL_DIR is now SERVICE MODE under $UNIT_NAME (launcher stays ExecStart; declared×verified conforming per the A1 map)."
 _log "logs: journalctl -u $UNIT_NAME -f  (unit journal — service-mode ADDS structured journald capture)"
