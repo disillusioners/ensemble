@@ -32,6 +32,15 @@
 #
 # Signal hygiene (ADR-009): SIGTERM first, bounded wait, SIGKILL last resort.
 #
+# UNIT-AWARE STOP (P2, ownership-mode commission 2026-09-29): when the
+# caller hands the P1 supervision classification over as env
+# ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:<unit> (scripts/upgrade/lib.sh
+# stop_via_stop_script does), the stop routes through `systemctl stop
+# <unit>` + a UNIT-STATE poll instead of pid TERMs — see the P2 section
+# in the main flow. Every other shape (no classification, SCRIPT_NOHUP,
+# SCOPE_SURVIVOR, non-Linux) keeps the pid-scoped path below,
+# byte-identical.
+#
 # SINGLE-TERM CONTRACT (review M2, 2026-08-16): when a launcher owns the
 # daemon, ONLY the launcher is TERMed. The launcher trap forwards SIGTERM
 # to its child exactly once, waits bounded, and exits with the child's
@@ -282,6 +291,112 @@ if [ "${STOP_BY_PORT:-0}" = "1" ] && [ -n "$REPORT_PORT" ]; then
         _log "nothing on port $REPORT_PORT"
     fi
     exit 0
+fi
+
+# ── P2 unit-aware stop (ownership-mode commission, 2026-09-29) ───────────────
+# b″ DEFECT FIXED HERE: the pid poll in _stop_pids watches TODAY'S pids; a
+# unit-respawned replacement pid is INVISIBLE to that poll, so the old stop
+# path false-succeeds while a daemon is still alive under the unit. When
+# the P1 seam classifies this install UNIT_MANAGED with a resolvable unit,
+# the stop goes through the UNIT instead: `systemctl stop` (an INTENTIONAL
+# stop — systemd suppresses Restart= for it, which is also why this path
+# does not race the port) and verification polls UNIT STATE (is-active not
+# running AND MainPID=0 AND port free), never pids.
+#
+# SEAM CONTRACT (P1 reuse — classification is CONSUMED, never re-derived
+# here): scripts/upgrade/lib.sh stop_via_stop_script (the P1 stop site)
+# hands the machine-line VALUE over as env ENSEMBLE_SUPERVISION_RESULT,
+# exact machine-line grammar '<state>[:<unit>]'. ABSENT (every direct
+# invocation: deploy.sh / Makefile / start.sh / operator / the ownership
+# tests) → today's pid-scoped path below, byte-identical — and ZERO new
+# /proc or /run/systemd reads on ANY platform: the guard short-circuits
+# on the env var BEFORE the uname check (P1 guard discipline).
+#
+# STUB SEAM (P5): every systemctl interaction routes through SYSTEMCTL_BIN
+# (default 'systemctl' — PATH-resolved, so PATH-injected stubs work exactly
+# like the comp7 suite's systemctl stubs); point SYSTEMCTL_BIN at a script
+# to drive scripted is-active / MainPID sequences (incl. the b″ respawn
+# simulation: old pids dead, unit still active). lsof (port-free conjunct)
+# is PATH-stubbable the same way; the poll budget is WAIT_S (explicit
+# WAIT_S=2 keeps stub runs fast) and UNIT_KILL_GRACE_S bounds the
+# post-escalation re-verify.
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
+UNIT_KILL_GRACE_S="${UNIT_KILL_GRACE_S:-10}"
+
+_unit_stopped() {
+    # $1 = unit, $2 = poll port ('' = unknown). True when the unit is NOT
+    # running AND MainPID is 0 AND (port unknown OR port free).
+    # 'inactive' AND 'failed' both count as not-running — we verify
+    # GONE-ness, not health; 'activating'/'reloading' keep waiting (a
+    # unit mid-activate can hold the port). Empty is-active/MainPID
+    # (D-Bus hiccup) counts as NOT stopped — fail-closed, keep polling.
+    local unit="$1" port="$2" isact mp
+    isact="$("$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null || true)"
+    case "$isact" in
+        active|activating|reloading) return 1 ;;
+    esac
+    mp="$("$SYSTEMCTL_BIN" show "$unit" -p MainPID --value 2>/dev/null || true)"
+    [ "$mp" = "0" ] || return 1
+    if [ -n "$port" ] && command -v lsof >/dev/null 2>&1; then
+        lsof -ti:"$port" >/dev/null 2>&1 && return 1
+    fi
+    return 0
+}
+
+SU_UNIT=""
+case "${ENSEMBLE_SUPERVISION_RESULT:-}" in
+    UNIT_MANAGED:?*) SU_UNIT="${ENSEMBLE_SUPERVISION_RESULT#UNIT_MANAGED:}" ;;
+esac
+if [ -n "$SU_UNIT" ] \
+   && { [ "$(uname -s)" != "Linux" ] || ! command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; }; then
+    # Non-Linux or no systemctl: today's TERM shapes stay authoritative
+    # (design item 2 — BSD/macOS arms byte-identical). Degrade LOUD.
+    _log "unit classification UNIT_MANAGED:$SU_UNIT present but unit path unavailable on this host — falling back to pid-scoped stop (degraded)"
+    SU_UNIT=""
+fi
+if [ -n "$SU_UNIT" ]; then
+    UNIT_POLL_PORT="$REPORT_PORT"
+    [ -n "$UNIT_POLL_PORT" ] || UNIT_POLL_PORT="${PROD_PORT_HINT:-}"
+    if [ "$DRY_RUN" = "1" ]; then
+        _log "DRY_RUN: would systemctl stop $SU_UNIT, then poll unit state (is-active not running + MainPID=0 + port ${UNIT_POLL_PORT:-unknown} free) bounded by ${WAIT_S}s, escalating to systemctl kill"
+        exit 0
+    fi
+    _log "unit-owned stop: systemctl stop $SU_UNIT (intentional stop — Restart= respawn suppressed; verifying UNIT STATE, not pids — b″)"
+    SC_ERR="$(mktemp /tmp/.ensemble-stop-sc.XXXXXX)"
+    if ! "$SYSTEMCTL_BIN" stop "$SU_UNIT" 2>"$SC_ERR"; then
+        SC_FIRST="$(head -n1 "$SC_ERR" 2>/dev/null)"
+        rm -f "$SC_ERR"
+        _log "systemctl stop $SU_UNIT FAILED (${SC_FIRST:-no stderr}) — NOT falling back to pid TERMs under a live unit (a respawn would false-succeed the stop; b″) — failing loud"
+        exit 1
+    fi
+    rm -f "$SC_ERR"
+    WAITED=0
+    while [ "$WAITED" -lt "$WAIT_S" ]; do
+        if _unit_stopped "$SU_UNIT" "$UNIT_POLL_PORT"; then
+            _log "unit $SU_UNIT stopped (unit not running + MainPID=0${UNIT_POLL_PORT:+ + port $UNIT_POLL_PORT free})"
+            _log "done — $INSTALL_DIR is stopped (unit path)"
+            exit 0
+        fi
+        sleep 1
+        WAITED=$((WAITED + 1))
+    done
+    _log "unit $SU_UNIT not confirmed stopped after ${WAIT_S}s — escalating: systemctl kill (SIGKILL to the unit's cgroup)"
+    "$SYSTEMCTL_BIN" kill "$SU_UNIT" 2>/dev/null || true
+    # re-verify after escalation: short bounded grace (cgroup teardown
+    # post-SIGKILL is fast) — deliberately NOT another WAIT_S, so the
+    # total window stays ~WAIT_S + UNIT_KILL_GRACE_S.
+    WAITED=0
+    while [ "$WAITED" -lt "$UNIT_KILL_GRACE_S" ]; do
+        if _unit_stopped "$SU_UNIT" "$UNIT_POLL_PORT"; then
+            _log "unit $SU_UNIT stopped after SIGKILL escalation"
+            _log "done — $INSTALL_DIR is stopped (unit path)"
+            exit 0
+        fi
+        sleep 1
+        WAITED=$((WAITED + 1))
+    done
+    _log "unit $SU_UNIT STILL not confirmed stopped after systemctl kill — stop NOT confirmed; failing loud (caller aborts; its txn policy owns recovery)"
+    exit 1
 fi
 
 # Collect + classify.
