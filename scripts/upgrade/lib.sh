@@ -1564,6 +1564,391 @@ restart_via_launcher() {
     _log "launcher started (nohup) — logs: $INSTALL_DIR/data/launcher.log"
 }
 
+# ── Supervision classification (ownership-mode commission P1, 2026-09-29) ────
+#
+# DETECTION + CLASSIFIER ONLY — zero behavior change to existing paths.
+# Consumers (stop-path P2, hand-back P3, unit adoption P4) land later; this
+# section exposes the classifier, the preflight refusal seam (explicit-unit
+# unresolved + DUAL_FIGHT fault) and the additive txn stamp.
+#
+# §0 MANDATORY (architect 2026-09-29, leader-ratified): the cgroup BASENAME
+# of the owning pid's cgroup leaf (/proc/<pid>/cgroup) is the PRIMARY
+# signal. INVOCATION_ID is CORROBORATION/DIAGNOSTIC ONLY — it is set for
+# transient scopes too (systemd-run --scope mints one for every promote
+# executor) and the executor env allowlist strips it, so an
+# INVOCATION_ID-first gate would misclassify today's live survivor as
+# SCRIPT. On disagreement: trust the cgroup, WARN-once.
+#
+#   leaf ends '.service'                      → UNIT_MANAGED (yields unit name)
+#   leaf matches 'ensemble-upgrade-*.scope'   → SCOPE_SURVIVOR
+#   'session-*' / user-slice / init scope     → SCRIPT_NOHUP
+#
+# TWINS CONTRACT: the ladder is implemented TWICE — this shell twin
+# (pipeline-side: preflight + stop site) and _supervision_detect_real in
+# daemon/tools/upgrade_journal.py (daemon-side: boot advisory). The ~6-line
+# cgroup-leaf parse below is DELIBERATELY duplicated across the twins
+# (cross-language seam — twins-pinned); the P5 twins-agree drift-guard test
+# enforces agreement. Do not "DRY" them into one side.
+#
+# Env contract (TWO variables, deliberately NOT merged):
+#   ENSEMBLE_SUPERVISION   mode: 'unit' | 'script' | 'auto' (default auto)
+#   ENSEMBLE_RESTART_UNIT  unit name / comp7 opt-in — its ALREADY-SHIPPED
+#                          semantics in restart_via_launcher are untouched.
+#
+# Resolution ladder (mirrors the ENSEMBLE_SELF_ENV shape, upgrade_tools
+# :199-242): explicit unit/script wins → '0|false|no|off' = silent script
+# opt-out → any other garbage → WARN-once → script (fail-toward-script) →
+# 'auto'/unset → auto-derive chain: non-Linux → script (ZERO /proc + /run
+# reads — the BSD/macOS arms stay byte-identical) → /run/systemd/system
+# absent → script → cgroup basename decisive → unreadable cgroup →
+# script + WARN-once.
+#
+# Unit-name resolution (§3 precedence, when a name is needed):
+#   env ENSEMBLE_RESTART_UNIT > cgroup-derived (UNIT_MANAGED only) >
+#   INSTALL_DIR/.env read directly (precedent: _resolve_wait_s in
+#   scripts/stop-ensemble.sh:97-116 — deploy/Makefile invocations do not
+#   export the staged env, so the file is the only reliable source).
+#   All fail → WARN → script (or exit 78 at PREFLIGHT when mode was
+#   explicitly 'unit' — never silent-degrade; the STOP SITE classifies
+#   again but never refuses mid-pipeline).
+
+SUPERVISION_WARN_DONE=0
+_supervision_warn_once() {
+    [ "$SUPERVISION_WARN_DONE" -eq 0 ] || return 0
+    SUPERVISION_WARN_DONE=1
+    _warn "supervision: $*"
+}
+
+# ERE-escape an install dir for pgrep patterns (stop-ensemble.sh :137-139
+# mirror — pinned with the tier mirror below).
+_supervision_ere_escape() {
+    printf '%s' "$1" | sed -e 's/[][\.*^$()+?{}|\\]/\\&/g'
+}
+
+# _supervision_owned_pids — pid discovery MIRRORING the anchored ownership
+# tiers of scripts/stop-ensemble.sh (_list_candidates + _classify, :148-217
+# — the design cites the tier contract at :11-25). Pinned mirror, not a
+# shared helper: stop-ensemble.sh is an executable entry script (sourcing
+# it here would run its stop machinery), and D6's "reused, never
+# duplicated" rule governs the STOP ACTION, which still goes through
+# stop_via_stop_script. Tier 1a: anchored executable paths. Tier 1b:
+# ensemble-shaped process whose cwd IS the install dir (logical OR
+# physical — lsof reports physical). Deduped, ascending, one per line.
+_supervision_owned_pids() {
+    local esc phys esc_phys
+    esc="$(_supervision_ere_escape "$INSTALL_DIR")"
+    phys="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
+    esc_phys="$(_supervision_ere_escape "$phys")"
+    {
+        pgrep -f "${esc}/launcher\.sh( |$)" 2>/dev/null
+        pgrep -f "${esc}/ensemble-prod( |$)" 2>/dev/null
+        pgrep -f "${esc}/current/ensemble-prod( |$)" 2>/dev/null
+        ps -axo pid=,comm=,args= 2>/dev/null \
+            | grep -E '[e]nsemble-prod|[l]auncher\.sh' \
+            | awk '{
+                pid=$1; comm=$2; $1=""; $2=""; args=$0; sub(/^  */, "", args)
+                if (args ~ /(ensemble-prod)( |$)/ || comm ~ /ensemble-prod/ || \
+                    args ~ /(^|\/)launcher\.sh( |$)/)
+                    print pid}'
+    } 2>/dev/null | sort -n | awk '!seen[$0]++' \
+      | while read -r pid; do
+            [ -n "$pid" ] || continue
+            # Tier-1b candidates without an anchored path need the cwd
+            # ownership check (foreign installs / dev daemons / editors
+            # must never be probed). Anchored-path pids (tier 1a) pass.
+            if ! ps -o args= -p "$pid" 2>/dev/null | grep -Eq \
+                "(${esc}|${esc_phys})/(current/)?ensemble-prod( |$)|${esc}/launcher\.sh( |$)"; then
+                cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+                [ "$cwd" = "$INSTALL_DIR" ] || [ "$cwd" = "$phys" ] || continue
+            fi
+            printf '%s\n' "$pid"
+        done
+}
+
+# _supervision_pid_cgroup_leaf <pid> — basename of the pid's cgroup LEAF,
+# or nothing. TWINS-PINNED parse (~6 lines, duplicated in the python twin
+# _supervision_read_cgroup_leaf — cross-language seam; see the section
+# comment). EVERY /proc read is behind [ -r ... ] per the P1 contract.
+_supervision_pid_cgroup_leaf() {
+    local pid="$1" line path leaf
+    [ -n "$pid" ] || return 1
+    [ -r "/proc/$pid/cgroup" ] || return 1
+    line="$(tail -n 1 "/proc/$pid/cgroup" 2>/dev/null)" || return 1
+    [ -n "$line" ] || return 1
+    path="${line##*:}"
+    leaf="${path##*/}"
+    [ -n "$leaf" ] || return 1
+    printf '%s\n' "$leaf"
+}
+
+# _supervision_unit_from_dotenv — read ENSEMBLE_RESTART_UNIT directly from
+# $INSTALL_DIR/.env (§3 step 3; _resolve_wait_s precedent: sed-extract,
+# strip optional quotes, validate non-empty).
+_supervision_unit_from_dotenv() {
+    local raw env_file="${INSTALL_DIR:-}/.env"
+    [ -n "${INSTALL_DIR:-}" ] || return 1
+    raw="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}ENSEMBLE_RESTART_UNIT[[:space:]]*=[[:space:]]*//p' "$env_file" 2>/dev/null | head -1)"
+    raw="${raw%$'\r'}"
+    case "$raw" in
+        \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+        \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+    esac
+    [ -n "$raw" ] || return 1
+    printf '%s\n' "$raw"
+}
+
+# supervision_classify — THE classifier. Uncached per-run (state may change
+# across a run: the daemon stops mid-promote). Sets globals:
+#   SUPERVISION_MODE   resolved mode: 'unit' | 'script'
+#   SUPERVISION_STATE  SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR
+#   SUPERVISION_UNIT   unit name ('' when none)
+# Prints EXACTLY ONE machine-readable line:
+#   ENSEMBLE_SUPERVISION_RESULT=<state>[:<unit>]
+# Returns 1 ONLY for explicit-unit-unresolved (the PREFLIGHT caller refuses
+# with exit 78; the stop site ignores rc — it never refuses mid-pipeline).
+supervision_classify() {
+    SUPERVISION_MODE="script"
+    SUPERVISION_STATE="SCRIPT_NOHUP"
+    SUPERVISION_UNIT=""
+    local raw low leaf pid inv
+    raw="${ENSEMBLE_SUPERVISION:-}"
+    raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    low="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+
+    # ── explicit / opt-out / garbage (ladder top) ────────────────────────
+    if [ -n "$low" ]; then
+        case "$low" in
+            0|false|no|off)
+                printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                return 0
+                ;;
+            script)
+                printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                return 0
+                ;;
+            unit)
+                SUPERVISION_MODE="unit"
+                SUPERVISION_STATE="UNIT_MANAGED"
+                SUPERVISION_UNIT="${ENSEMBLE_RESTART_UNIT:-}"
+                if [ -z "$SUPERVISION_UNIT" ] && [ "$(uname -s)" = "Linux" ] \
+                   && [ -d /run/systemd/system ]; then
+                    pid="$(_supervision_owned_pids | head -1)"
+                    if [ -n "$pid" ]; then
+                        leaf="$(_supervision_pid_cgroup_leaf "$pid")"
+                        case "$leaf" in *.service) SUPERVISION_UNIT="$leaf" ;; esac
+                    fi
+                fi
+                if [ -z "$SUPERVISION_UNIT" ]; then
+                    SUPERVISION_UNIT="$(_supervision_unit_from_dotenv)" \
+                        || SUPERVISION_UNIT=""
+                fi
+                if [ -n "$SUPERVISION_UNIT" ]; then
+                    printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
+                    return 0
+                fi
+                # explicit unit, no resolvable name — never silent-degrade;
+                # the preflight caller turns rc 1 into exit 78.
+                _supervision_warn_once "mode 'unit' explicit but no unit name resolvable (env ENSEMBLE_RESTART_UNIT unset, cgroup not unit-managed, INSTALL_DIR/.env has none) — preflight must refuse (78)"
+                printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                return 1
+                ;;
+            auto)
+                ;;
+            *)
+                _supervision_warn_once "garbage ENSEMBLE_SUPERVISION='$raw' — WARN-once, failing toward script"
+                printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                return 0
+                ;;
+        esac
+    fi
+
+    # ── auto-derive chain (ZERO /proc + /run reads before the guards) ────
+    if [ "$(uname -s)" != "Linux" ]; then
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+        return 0
+    fi
+    if ! [ -d /run/systemd/system ]; then
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+        return 0
+    fi
+    pid="$(_supervision_owned_pids | head -1)"
+    if [ -z "$pid" ]; then
+        _supervision_warn_once "no owned pid discovered (anchored tiers vs INSTALL_DIR=$INSTALL_DIR) — classifying script"
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+        return 0
+    fi
+    leaf="$(_supervision_pid_cgroup_leaf "$pid")"
+    if [ -z "$leaf" ]; then
+        _supervision_warn_once "cgroup unreadable for owned pid $pid — classifying script"
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+        return 0
+    fi
+    case "$leaf" in
+        *.service)
+            SUPERVISION_STATE="UNIT_MANAGED"
+            SUPERVISION_MODE="unit"
+            SUPERVISION_UNIT="$leaf"
+            ;;
+        ensemble-upgrade-*.scope)
+            SUPERVISION_STATE="SCOPE_SURVIVOR"
+            ;;
+        session-*.scope|init.scope|user.slice|*.user.slice|user-*.slice|*.user-*.slice|machine.slice|*.machine.slice)
+            SUPERVISION_STATE="SCRIPT_NOHUP"
+            ;;
+        *)
+            # Unknown leaf shape — fail toward script, no unit name.
+            SUPERVISION_STATE="SCRIPT_NOHUP"
+            ;;
+    esac
+
+    # ── INVOCATION_ID corroboration (diagnostic ONLY — §0) — read the
+    # OWNING pid's environ (same-uid readable; [ -r ] guarded like every
+    # other /proc read), not our own: the script's INVOCATION_ID describes
+    # the script (a scope executor mints one), not the daemon.
+    inv=""
+    if [ -r "/proc/$pid/environ" ]; then
+        inv="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^INVOCATION_ID=//p' | head -1)"
+    fi
+    if [ -n "$inv" ] && [ "$SUPERVISION_STATE" != "UNIT_MANAGED" ]; then
+        _supervision_warn_once "owned pid $pid has INVOCATION_ID but cgroup leaf '$leaf' classifies $SUPERVISION_STATE — trusting cgroup (§0: transient scopes mint INVOCATION_ID too)"
+    elif [ -z "$inv" ] && [ "$SUPERVISION_STATE" = "UNIT_MANAGED" ]; then
+        _supervision_warn_once "UNIT_MANAGED (leaf '$leaf') but owned pid $pid has no INVOCATION_ID — trusting cgroup (§0 corroboration only)"
+    fi
+
+    if [ "$SUPERVISION_STATE" = "UNIT_MANAGED" ] && [ -n "$SUPERVISION_UNIT" ]; then
+        # §3: env-explicit unit name OVERRIDES the cgroup-derived one.
+        if [ -n "${ENSEMBLE_RESTART_UNIT:-}" ]; then
+            SUPERVISION_UNIT="$ENSEMBLE_RESTART_UNIT"
+        fi
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
+        return 0
+    fi
+    printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+    return 0
+}
+
+# supervision_dualfight_check — §6 FAULT detector, PREFLIGHT ONLY (call
+# before any journal txn / stop / flip mutation): when the resolved unit is
+# active or auto-restart-armed AND reality disagrees (owned pids NOT inside
+# the unit's cgroup, OR the port-holder outside the unit's MainPID lineage)
+# → halt journal event + exit 78. Two masters must never meet a flip.
+# MainPID lineage is tested as cgroup containment within the unit's
+# ControlGroup (systemd's canonical process lineage under
+# KillMode=control-group) — PPID-walking breaks on double-forked daemons.
+# Linux+systemd only; every other shape returns 0 (zero behavior change).
+supervision_dualfight_check() {
+    [ "${SUPERVISION_MODE:-}" = "unit" ] || return 0
+    [ -n "${SUPERVISION_UNIT:-}" ] || return 0
+    [ "$(uname -s)" = "Linux" ] || return 0
+    [ -d /run/systemd/system ] || return 0
+    local unit="${SUPERVISION_UNIT:-}" is_active restart main_pid cg pid pcg hpid fault=""
+    is_active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    restart="$(systemctl show "$unit" -p Restart --value 2>/dev/null || true)"
+    if [ "$is_active" != "active" ] \
+       && [ "$restart" != "always" ] && [ "$restart" != "on-failure" ]; then
+        return 0  # unit dormant and unarmed — no fight possible
+    fi
+    main_pid="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+    cg="$(systemctl show "$unit" -p ControlGroup --value 2>/dev/null || true)"
+    if [ -z "$cg" ] || [ "$cg" = "/" ]; then
+        _supervision_warn_once "unit $unit active/armed but ControlGroup unobservable — skipping DUAL_FIGHT pid checks (diagnostic only)"
+        return 0
+    fi
+    # Check A: every owned pid must sit inside the unit's cgroup. The
+    # subshell pipe captures the fault marker (the while-loop runs in a
+    # subshell; the temp file carries the verdict out).
+    _supervision_owned_pids | while read -r pid; do
+        [ -n "$pid" ] || continue
+        pcg=""
+        if [ -r "/proc/$pid/cgroup" ]; then
+            pcg="$(tail -n 1 "/proc/$pid/cgroup" 2>/dev/null)"
+            pcg="${pcg##*:}"
+        fi
+        case "$pcg" in
+            *"$cg"*) ;;
+            *)
+                _warn "supervision DUAL_FIGHT: owned pid $pid cgroup '${pcg:-<unreadable>}' is OUTSIDE unit $unit cgroup $cg — two masters"
+                echo "__DUALFIGHT_FAULT__"
+                ;;
+        esac
+    done > /tmp/.ensemble-df.$$ 2>/dev/null
+    if grep -q '__DUALFIGHT_FAULT__' /tmp/.ensemble-df.$$ 2>/dev/null; then
+        fault="owned-pids-outside-unit-cgroup"
+    fi
+    rm -f /tmp/.ensemble-df.$$ 2>/dev/null
+    # Check B: the port-holder must be the unit's MainPID or inside its
+    # cgroup (report-only port lookup, stop-ensemble.sh precedent — lsof
+    # absent → skip the check, never fault on a missing tool).
+    if [ -z "$fault" ] && [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
+        for hpid in $(lsof -ti:"$PORT" 2>/dev/null); do
+            [ -n "$hpid" ] || continue
+            [ "$hpid" = "$main_pid" ] && continue
+            pcg=""
+            if [ -r "/proc/$hpid/cgroup" ]; then
+                pcg="$(tail -n 1 "/proc/$hpid/cgroup" 2>/dev/null)"
+                pcg="${pcg##*:}"
+            fi
+            case "$pcg" in
+                *"$cg"*) ;;
+                *)
+                    _warn "supervision DUAL_FIGHT: port $PORT holder $hpid is outside unit $unit lineage (MainPID=${main_pid:-?} cgroup='${pcg:-<unreadable>}') — two masters"
+                    fault="port-holder-outside-unit-lineage"
+                    ;;
+            esac
+        done
+    fi
+    if [ -n "$fault" ]; then
+        journal_history_append halt "supervision DUAL_FIGHT ($fault): unit $unit is active/auto-restart while owned pids or the port-holder sit OUTSIDE it — refusing PRE-TXN (two masters must never meet a flip; halt-for-human, resolve the supervision split before any pipeline mutation)" >/dev/null 2>&1 \
+            || _warn "DUAL_FIGHT halt journal append FAILED (best-effort) — proceeding to exit 78"
+        exit 78
+    fi
+    return 0
+}
+
+# supervision_preflight — one call per action script's PREFLIGHT: classify
+# (emits the machine line), refuse 78 on explicit-unit-unresolved, then the
+# §6 DUAL_FIGHT fault check. PRE-TXN by call-site contract (promote/rollback
+# call it before journal_open_txn; restart calls it after lock adoption,
+# before its stop phase — the restart txn was armed by the tool earlier and
+# the executor is its completion, not its opener).
+supervision_preflight() {
+    if ! supervision_classify; then
+        _refuse supervision-unit-unresolved "preflight refused: ENSEMBLE_SUPERVISION=unit is explicit but no unit name is resolvable (env ENSEMBLE_RESTART_UNIT > cgroup-derived > INSTALL_DIR/.env all empty) — never silent-degrade (P1 §2); set ENSEMBLE_RESTART_UNIT or run under the unit"
+    fi
+    supervision_dualfight_check
+}
+
+# journal_mark_supervision — stamp supervision=<state> / unit=<name|null>
+# ADDITIVELY on the open in_flight txn (D4 splice discipline: additive-only
+# textual splice; existing stamp lines and journal whitespace byte-preserved
+# — journal JSON whitespace differs between launcher and lib.sh by design,
+# assert semantically, never raw-spacing). Mirrors journal_mark_f2_verified.
+# Reads the globals set by the last supervision_classify in this process.
+journal_mark_supervision() {
+    local json inf new_inf unit_json
+    json="$(journal_read)" || return 1
+    inf="$(_json_sub "$json" in_flight)"
+    case "$inf" in
+        '{'*) ;;
+        ''|null)
+            _warn "journal_mark_supervision: no in_flight txn (in_flight null/absent) — refusing to stamp (journal untouched)"
+            return 1
+            ;;
+        *)
+            _warn "journal_mark_supervision: in_flight read is null/malformed (not a JSON object: '${inf:0:40}') — refusing to stamp (journal untouched)"
+            return 1
+            ;;
+    esac
+    if [ -n "${SUPERVISION_UNIT:-}" ]; then
+        unit_json="\"$(_json_escape "$SUPERVISION_UNIT")\""
+    else
+        unit_json="null"
+    fi
+    new_inf="${inf%\}}"
+    new_inf="${new_inf},\"supervision\":\"$(_json_escape "${SUPERVISION_STATE:-unknown}")\",\"unit\":$unit_json}"
+    journal_update "in_flight" "$new_inf"
+}
+
 # gate_livez / gate_readyz — budgeted probes (D2). Print body; nonzero on fail.
 gate_livez()  { _probe "/livez"  "$LIVEZ_BUDGET_S"  "$PORT"; }
 gate_readyz() { _probe "/readyz" "$READYZ_BUDGET_S" "$PORT"; }
