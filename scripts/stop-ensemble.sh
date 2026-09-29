@@ -168,6 +168,12 @@ UP_TARGET="${UP_TARGET:-stop}"
 # already holds the lock (PIPELINE_LOCK_HELD_BY_CALLER=1) we skip our own
 # acquire below AND the exit trap must NOT touch the lock (the caller
 # owns the release; double-release would race the caller's cleanup).
+# NOTE (fix-back cycle 2): when the acquire below SUCCEEDS (operator
+# lane), _trap_install_signal_handlers REPLACES this EXIT trap with
+# _trap_safe_exit + installs TERM/HUP/INT handlers — see the lock-acquire
+# block. This trap remains the active net only for exits BEFORE the
+# acquire (where it no-ops: STOP_LOCK_HELD_BY_ME=0) and for the
+# caller-held lane (where it also no-ops).
 _stop_ensemble_exit_trap() {
     if [ "$STOP_LOCK_HELD_BY_ME" = "1" ]; then
         lock_release || true
@@ -225,6 +231,21 @@ if [ "$PIPELINE_LOCK_HELD" != "1" ]; then
         fi
     else
         STOP_LOCK_HELD_BY_ME=1
+        # Signal trap discipline (component 2 of r-20260928-005506-f82e,
+        # fix-back cycle 2): the EXIT-only trap above does NOT fire on
+        # untrapped TERM/HUP/INT — a systemd cgroup teardown of THIS
+        # stop invocation would orphan the rollback.lock.d it just
+        # acquired (up to LOCK_STALE_S) with no terminal journal event.
+        # Install the lib.sh handlers: TERM/HUP/INT → halt journal event +
+        # idempotent lock release + signal exit. Installed ONLY when this
+        # invocation owns the lock: in the PIPELINE_LOCK_HELD_BY_CALLER=1
+        # lane the lock belongs to the parent promote/rollback/restart,
+        # whose OWN handlers already cover it — a child-side release is a
+        # non-owner no-op (lock_release ownership guard) and a child-side
+        # halt event would double-count against the rollback cap while
+        # the parent continues live.
+        _trap_install_signal_handlers "stop:lock"
+        lock_heartbeat
     fi
 fi
 

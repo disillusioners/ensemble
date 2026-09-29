@@ -184,6 +184,10 @@ _adopt_unit_exit_trap() {
     fi
 }
 trap '_adopt_unit_exit_trap' EXIT
+# NOTE (fix-back cycle 2): _step_lock REPLACES this EXIT trap with lib.sh
+# _trap_safe_exit + installs TERM/HUP/INT handlers once the acquire
+# succeeds — see _step_lock. This trap stays the active net only for
+# exits BEFORE the acquire (it no-ops there: ADOPT_LOCK_HELD_BY_ME=0).
 
 _step_pre_settle() {
     if ! SETTLE_OUT="$(pipeline_settled)"; then
@@ -199,6 +203,19 @@ _step_lock() {
         exit 78
     fi
     ADOPT_LOCK_HELD_BY_ME=1
+    # Signal trap discipline (component 2 of r-20260928-005506-f82e,
+    # fix-back cycle 2): mirrors promote.sh/rollback.sh/stage.sh — the
+    # EXIT-only trap above does NOT fire on untrapped TERM/HUP/INT, so a
+    # systemd cgroup teardown mid-adoption would orphan rollback.lock.d
+    # (up to LOCK_STALE_S) with no terminal journal event AND leave the
+    # half-staged unit/.env state invisible to the pipeline (the exact
+    # half-staged state the Layer-ii mutex exists to serialize). The
+    # helper installs TERM/HUP/INT handlers (halt journal event +
+    # idempotent release + signal exit) and swaps the EXIT trap to
+    # _trap_safe_exit — from here to exit, ADOPT_LOCK_HELD_BY_ME=1
+    # always, so the swap is behavior-identical on the EXIT path.
+    _trap_install_signal_handlers "adopt:lock"
+    lock_heartbeat
     _log "step (pre): pipeline lock acquired — OK"
 }
 

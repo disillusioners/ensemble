@@ -1844,6 +1844,70 @@ else
     _pass
 fi
 
+# 16d. TERM-release pin (fix-back cycle 2, HIGH-1): the operator-lane stop
+#      holds rollback.lock.d through its bounded TERM→wait→KILL span; a
+#      SIGTERM to the STOP SCRIPT ITSELF (the systemd cgroup-teardown
+#      shape) must fire the lib.sh signal handlers — halt journal event +
+#      idempotent lock release + exit 143 — instead of dying on the
+#      EXIT-only trap (which bash does NOT run on untrapped TERM; the
+#      r-20260928 orphan-lock class, stop-ensemble.sh arm). Real signal,
+#      real lock, no faked pass: a TERM-immune fake daemon (anchored
+#      <dir>/ensemble-prod cmdline, Tier 1a) pins the stop inside its
+#      WAIT_S window so the lock is provably held when the TERM lands.
+MUT2_BASE="$FIXTURE/mut-term"; mkdir -p "$MUT2_BASE/releases/$SBX_V1"
+( cd "$MUT2_BASE" && ln -sfn "releases/$SBX_V1" current )
+INSTALL_DIR="$MUT2_BASE" journal_init >/dev/null
+INSTALL_DIR="$MUT2_BASE" journal_set_current "$SBX_V1" >/dev/null
+printf '#!/bin/bash\n# stub launcher\n' > "$MUT2_BASE/launcher.sh"
+chmod +x "$MUT2_BASE/launcher.sh"
+# Fake daemon: executing the script directly makes its cmdline carry the
+# anchored "<dir>/ensemble-prod" token (Tier 1a); `trap "" TERM` makes it
+# survive the stop's SIGTERM so the stop enters the bounded WAIT loop
+# (WAIT_S=6) — that loop is the window where the lock is held and the
+# pin's TERM is delivered.
+printf '#!/bin/bash\ntrap "" TERM\nwhile :; do sleep 1; done\n' > "$MUT2_BASE/ensemble-prod"
+chmod +x "$MUT2_BASE/ensemble-prod"
+"$MUT2_BASE/ensemble-prod" &
+FAKE_DAEMON_PID=$!
+HOME="$FAKE_HOME" WAIT_S=6 bash "$FAKE_REPO/scripts/stop-ensemble.sh" "$MUT2_BASE" >/dev/null 2>&1 &
+STOP_TERM_PID=$!
+# Bounded (≤5s) wait for the lock to appear — evidence the stop is IN its
+# lock-held span before the signal. Fail-loud if it never appears.
+LOCK_SEEN=0; TERM_T=0
+while [ "$TERM_T" -lt 5 ]; do
+    if [ -d "$MUT2_BASE/releases/rollback.lock.d" ]; then LOCK_SEEN=1; break; fi
+    sleep 1
+    TERM_T=$((TERM_T + 1))
+done
+if [ "$LOCK_SEEN" = "1" ]; then
+    _pass
+else
+    _fail "16d TERM pin: lock held before TERM" "rollback.lock.d present ≤5s" "never appeared"
+fi
+kill -TERM "$STOP_TERM_PID" 2>/dev/null
+wait "$STOP_TERM_PID"; TERM_RC=$?
+# Signal-appropriate exit (128+15) proves the handler ran — an EXIT-only
+# death surfaces 0 (nothing-to-stop) or 1, never 143.
+if [ "$TERM_RC" = "143" ]; then
+    _pass
+else
+    _fail "16d TERM pin: exit code carries the signal" "143" "$TERM_RC"
+fi
+# Lock released by the handler, not orphaned for LOCK_STALE_S.
+if [ -d "$MUT2_BASE/releases/rollback.lock.d" ]; then
+    _fail "16d TERM pin: lock released on SIGTERM" "absent" "present (orphan)"
+else
+    _pass
+fi
+# Death-anchored terminal journal event landed in the journal.
+if grep -q '"event": *"halt"' "$MUT2_BASE/releases/state.json" 2>/dev/null; then
+    _pass
+else
+    _fail "16d TERM pin: halt event journaled" "history carries event=halt" "absent"
+fi
+# Cleanup: the TERM-immune fake daemon outlives the interrupted stop.
+kill -9 "$FAKE_DAEMON_PID" 2>/dev/null || true
+
 # ─── 17. Adoption-marker preflight + clear (commission v0.16.6 c2) ─────────
 # adopt-unit.sh writes a marker file BEFORE any mutation and clears it
 # on verify success. promote_entry_check refuses (78) while the marker

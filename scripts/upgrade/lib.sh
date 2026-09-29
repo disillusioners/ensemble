@@ -1290,11 +1290,12 @@ pipeline_settled() {
 #
 # RATIONALE: adopt-unit.sh mutates the host in two distinct phases — install
 # the unit file (.env NOT staged) → daemon-reload → .env staged BUT unit
-# NOT enabled. A concurrent promote whose stop/restart would route through
-# `systemctl restart <unit>` (lib.sh:1837-1839 keys off ENSEMBLE_RESTART_UNIT
-# directly) hits the half-staged state and silently misroutes to a
-# systemctl hand-back for a unit that doesn't exist yet — promoting onto
-# nothing. The marker tells the promote preflight: "an adoption is mid-
+# NOT enabled. A concurrent promote whose restart/hand-back keys off the
+# staged ENSEMBLE_RESTART_UNIT (lib.sh:2029-2031 hb_unit resolution — env
+# override then INSTALL_DIR/.env read — and lib.sh:2082 launcher unit-path
+# gate, both inside restart_via_launcher) hits the half-staged state and
+# silently misroutes to a systemctl hand-back for a unit that doesn't
+# exist yet — promoting onto nothing. The marker tells the promote preflight: "an adoption is mid-
 # sequence; refuse (78) until the marker is cleared". The marker lives as
 # a file (NOT a journal field — schema discipline: additive journal fields
 # require migrations and the Python twin must learn them; a marker file is
