@@ -364,7 +364,7 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
     assert_contains "§0 INVOCATION_ID present + scope → still SCOPE_SURVIVOR" "STATE=SCOPE_SURVIVOR" "$PRESENT_OUT"
     assert_contains "§0 INVOCATION_ID present + scope → WARN trusting cgroup" "trusting cgroup (§0: transient scopes mint INVOCATION_ID too)" "$PRESENT_OUT"
     assert_not_contains "§0 INVOCATION_ID present must NOT mint UNIT_MANAGED" "STATE=UNIT_MANAGED" "$PRESENT_OUT"
-    rm -f "$PRESENT_OUT"
+    rm -f "$PRESENT_OUT" 2>/dev/null
 else
     _skip "2 §0 allowlist-strip pins — FENCE: no /run/systemd/system on this host"
 fi
