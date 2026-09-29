@@ -71,6 +71,11 @@ L8 (tidier, P2.3 final batch): this module is deliberately large — the
 module split (journal / lock / nonce / alert) is fenced to the post-P2.3
 refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
 grow it further without pulling that fence.
+
+Size rationale: ~2017 lines is the protocol twin of scripts/upgrade/lib.sh
+supervision section + the journal/lock/nonce/alert/spawn tool surface —
+the single journal protocol home. Splitting the protocol twin from the
+tool surface would force every contract change to touch two modules.
 """
 
 from __future__ import annotations
@@ -1490,6 +1495,8 @@ SUPERVISION_STATE_DUALFIGHT = "DUAL_FIGHT"
 # Opt-out vocabulary — matches ``daemon.config._PROACTIVE_FALSE_BOOLS`` /
 # upgrade_tools ``_OPT_OUT_FALSES`` (same permissive bool parser the repo
 # uses for kill-switch env knobs; lower-cased + trimmed at the compare site).
+# Module-level (frozen constant) — mirrors the cross-module opt-out
+# vocabulary placement convention.
 _SUPERVISION_OPT_OUT_FALSES = frozenset({"0", "false", "no", "off"})
 
 

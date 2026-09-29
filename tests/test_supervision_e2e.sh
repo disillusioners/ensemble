@@ -21,7 +21,7 @@
 #      hand-back STARTS the unit for real and verifies a NEW MainPID ≠
 #      pre-stop + port serving, gates pass, journal commits — and the
 #      post-promote daemon is still inside the unit's cgroup.
-#   E3 SURVIVOR-HEAL — the daemon runs as a scope SURVIOR
+#   E3 SURVIVOR-HEAL — the daemon runs as a scope SURVIVOR
 #      (systemd-run --user --scope --unit=ensemble-upgrade-e2e-<ts>.scope,
 #      today's live shape) with the unit configured: the promote's
 #      hand-back SELF-HEALS scope→unit (+ `supervision_handback` journal
@@ -503,7 +503,6 @@ else
     _pass "E4 foreign daemon alive (owned-by-install, outside-unit)"
 fi
 
-E4_PRE_J="$(cat "$E4FIX/releases/state.json")"
 E4_LOG="$WORK/e4-promote.log"
 (
     ENSEMBLE_SUPERVISION=unit ENSEMBLE_RESTART_UNIT="$U4" \
@@ -512,9 +511,8 @@ E4_LOG="$WORK/e4-promote.log"
     SYSTEMCTL_BIN="$SC_WRAP" \
     XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
     bash "$E4D/repo/scripts/upgrade/promote.sh" sandbox
-) > "$E4_LOG" 2>&1
+) > /dev/null 2> "$E4_LOG"
 E4_RC=$?
-E4_OUT="$(cat "$E4_LOG")"
 
 assert_eq "E4 DUAL_FIGHT: exit 78 PRE-TXN" "78" "$E4_RC"
 E4_POST_J="$(cat "$E4FIX/releases/state.json")"

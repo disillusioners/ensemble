@@ -583,7 +583,6 @@ JOURNAL
 
     # C3 stale MainPID (new == prestop): fail FAST, no retry loop.
     reset_stub_state "$CFIX/sc4.log"
-    unset SC_START_RC SC_START_ERR; export SC_START_RC=0 2>/dev/null || true
     SC_START_RC=0; unset SC_START_ERR; export SC_START_RC
     SC_MAINPID=777; export SC_MAINPID
     C3_OUT="$(run_rvl "$LSOF_OK" '

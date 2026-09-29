@@ -21,10 +21,13 @@
 #   _probe                    health-gate probe (2s sleep, curl max-time 5s —
 #                             the same budget as deploy.sh phase 5)
 #
-# Size rationale: ~1927 lines is the single shared substrate for the five
+# Size rationale: ~2875 lines is the single shared substrate for the five
 # entry scripts (stage/promote/rollback/restart/status); splitting would
 # duplicate cross-cutting contracts (journal layout, lock semantics, ENV
-# allowlist, BSD/GNU dispatch). The file is the contract inventory.
+# allowlist, BSD/GNU dispatch). The file is the contract inventory. The
+# recent growth is the supervision-detection section (classify / outcome
+# map / dualfight / unit hand-back) — one twin lives here, the python
+# twin in daemon/tools/upgrade_journal.py.
 #
 # ENV DISCIPLINE (D-FA4.6 + test-strategy §5):
 #   - the resolved triple (INSTALL_DIR / PORT / POSTGRES_DB) is asserted and
@@ -2013,14 +2016,14 @@ _supervision_warn_once() {
     _warn "supervision: $*"
 }
 
-# ERE-escape an install dir for pgrep patterns (stop-ensemble.sh :137-139
+# ERE-escape an install dir for pgrep patterns (stop-ensemble.sh :146-149
 # mirror — pinned with the tier mirror below).
 _supervision_ere_escape() {
     printf '%s' "$1" | sed -e 's/[][\.*^$()+?{}|\\]/\\&/g'
 }
 
 # _supervision_owned_pids — pid discovery MIRRORING the anchored ownership
-# tiers of scripts/stop-ensemble.sh (_list_candidates + _classify, :148-217
+# tiers of scripts/stop-ensemble.sh (_list_candidates + _classify, :157-226
 # — the design cites the tier contract at :11-25). Pinned mirror, not a
 # shared helper: stop-ensemble.sh is an executable entry script (sourcing
 # it here would run its stop machinery), and D6's "reused, never
@@ -2348,8 +2351,18 @@ supervision_map_outcome() {
 # stop-site re-check in stop_via_stop_script (still pre-stop-mutation —
 # the state may drift between preflight and the stop).
 # MainPID lineage is tested as cgroup containment within the unit's
-# ControlGroup (systemd's canonical process lineage under
-# KillMode=control-group) — PPID-walking breaks on double-forked daemons.
+# ControlGroup. The unit's KillMode=mixed (scripts/systemd/ensemble-
+# daemon.service:85) TERMs only the launcher (the cgroup root) — cgroup
+# siblings/nested children outlive a stop until SIGKILL escalation.
+# That is precisely why a cgroup-substring containment check is the
+# canonical lineage signal here: PPID-walking breaks on double-forked
+# daemons (the launcher's child renames itself to the daemon pid), so
+# we consult /proc/<pid>/cgroup instead.
+# Containment test note: the `case "$pcg" in *"$cg"*` match is an
+# UNANCHORED substring test; sibling or nested cgroups that share a
+# prefix with $cg (e.g. a transient scope nested under the unit's
+# slice) may over-include. Deliberately conservative — diagnostic-
+# only — the FAULT arm only fires when reality disagrees.
 # Linux+systemd only; every other shape returns 0 (zero behavior change).
 supervision_dualfight_check() {
     [ "${SUPERVISION_MODE:-}" = "unit" ] || return 0
@@ -2372,6 +2385,8 @@ supervision_dualfight_check() {
     # Check A: every owned pid must sit inside the unit's cgroup. The
     # subshell pipe captures the fault marker (the while-loop runs in a
     # subshell; the temp file carries the verdict out).
+    local df_tmp
+    df_tmp="$(mktemp /tmp/.ensemble-df.XXXXXX)" || return 0
     _supervision_owned_pids | while read -r pid; do
         [ -n "$pid" ] || continue
         pcg=""
@@ -2386,11 +2401,11 @@ supervision_dualfight_check() {
                 echo "__DUALFIGHT_FAULT__"
                 ;;
         esac
-    done > /tmp/.ensemble-df.$$ 2>/dev/null
-    if grep -q '__DUALFIGHT_FAULT__' /tmp/.ensemble-df.$$ 2>/dev/null; then
+    done > "$df_tmp" 2>/dev/null
+    if grep -q '__DUALFIGHT_FAULT__' "$df_tmp" 2>/dev/null; then
         fault="owned-pids-outside-unit-cgroup"
     fi
-    rm -f /tmp/.ensemble-df.$$ 2>/dev/null
+    rm -f "$df_tmp" 2>/dev/null
     # Check B: the port-holder must be the unit's MainPID or inside its
     # cgroup (report-only port lookup, stop-ensemble.sh precedent — lsof
     # absent → skip the check, never fault on a missing tool).
@@ -2415,6 +2430,12 @@ supervision_dualfight_check() {
     if [ -n "$fault" ]; then
         journal_history_append halt "supervision DUAL_FIGHT ($fault): unit $unit is active/auto-restart while owned pids or the port-holder sit OUTSIDE it — refusing PRE-TXN (two masters must never meet a flip; halt-for-human, resolve the supervision split before any pipeline mutation)" >/dev/null 2>&1 \
             || _warn "DUAL_FIGHT halt journal append FAILED (best-effort) — proceeding to exit 78"
+        # Direct invocation only — supervision_dualfight_check must be called
+        # directly (statement form), NEVER wrapped in `$( ... )` or any other
+        # subshell. The exit 78 below must kill the calling pipeline script;
+        # a subshell swallows the exit and the refusal silently degrades to
+        # the caller's rc, which is exactly the r-f82e surprise class the
+        # DUAL_FIGHT halt exists to prevent.
         exit 78
     fi
     return 0

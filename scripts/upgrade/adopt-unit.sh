@@ -194,6 +194,11 @@ _step_c_polkit() {
         [ -f "$f" ] || continue
         if grep -q 'org\.freedesktop\.systemd1\.manage-units' "$f" 2>/dev/null \
            && grep -Eq 'ensemble-[^"'"'"']*\.service' "$f" 2>/dev/null; then
+            # Scanner regex is DELIBERATELY LOOSER than _unit_name's strict
+            # ^ensemble-[0-9A-Za-z@._-]+\.service$ validator — polkit rule
+            # source may use a different regex flavor (anchors, char classes,
+            # optional quoting). The authoritative gate is systemctl itself
+            # (step d); this scanner only refuses on a clearly-absent rule.
             found="$f"
             break
         fi
@@ -280,6 +285,11 @@ _derive_unit_name() {
 
 _unit_name() {
     # sets UNIT_NAME; returns 1 (after a loud warn) on an invalid name.
+    # Convention asymmetry: _step_* helpers (a/b/c/d) call `exit 78` directly
+    # because they own the failure surface (one terminal path each); this
+    # helper `return 1`s after _warn and the central caller at line ~457
+    # converts the failure to `exit 78`. Same refuse surface, different
+    # control-flow ownership.
     local name="${UNIT_NAME_ARG:-}"
     [ -n "$name" ] || name="$(_derive_unit_name)"
     printf '%s' "$name" | grep -Eq '^ensemble-[0-9A-Za-z@._-]+\.service$' || {
@@ -374,7 +384,7 @@ _stage_restart_unit_env() {
     tmp="$(mktemp "${TMPDIR:-/tmp}/adopt-env.XXXXXX")" || return 1
     if [ -f "$ENV_FILE" ]; then
         # delete ONLY the ENSEMBLE_RESTART_UNIT assignment grammar that
-        # _supervision_unit_from_dotenv reads (lib.sh:2034-2048); every other
+        # _supervision_unit_from_dotenv reads (lib.sh:2081-2095); every other
         # line — comments included — is carried byte-for-byte.
         sed '/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}ENSEMBLE_RESTART_UNIT[[:space:]]*=/d' \
             "$ENV_FILE" > "$tmp" || { rm -f "$tmp"; return 1; }

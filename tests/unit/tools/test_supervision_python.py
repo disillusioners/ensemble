@@ -90,7 +90,7 @@ def main() -> None:
     uj._supervision_reset_memo()
     calls = []
 
-    def stub_det(env=None):
+    def stub_det(env: dict[str, str] | None = None) -> object:
         calls.append(env)
         return uj.SupervisionDetection("UNIT_MANAGED", unit="stub.service", mode="unit")
 

@@ -136,9 +136,11 @@ with the hand-provisioned `ensemble-live.service` on ensemble-vm);
 **Test seams** (P5 drives these; also usable by operators on fixture hosts):
 `SYSTEMCTL_BIN` (stub the systemctl interactions), `UNIT_DIR` (unit-file
 destination), `POLKIT_RULES_DIR` (the §(c) scan), `ADOPT_SYSTEMD_RUN_DIR`
-(host guard), `ADOPT_USER`, `ADOPT_LIVEZ_BUDGET_S`, `DRY_RUN=1`, plus
-`curl`/`uname` PATH-stubs for the verify/host arms. The P4 smoke used all of
-these against fixture dirs — no live/demo contact, no real daemon-reload.
+(host guard), `ADOPT_USER`, `ADOPT_LIVEZ_BUDGET_S`, `DRY_RUN=1`
+(preview-only mode — print the sequence + the generated unit with the
+PG password masked; zero mutations), plus `curl`/`uname` PATH-stubs for
+the verify/host arms. The P4 smoke used all of these against fixture
+dirs — no live/demo contact, no real daemon-reload.
 
 ---
 

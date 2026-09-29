@@ -175,15 +175,15 @@ assert_contains "(b1) cites launchd future scope" "launchd (documented FUTURE sc
 rm -rf "$STUB_D"
 
 # b2: ADOPT_SYSTEMD_RUN_DIR absent
-B2_OUT="$(UNIT_DIR="$UNITDIR" POLKIT_RULES_DIR="$POLKIT" \
+UNIT_DIR="$UNITDIR" POLKIT_RULES_DIR="$POLKIT" \
     ADOPT_SYSTEMD_RUN_DIR="$WORK/no-such-run" SYSTEMCTL_BIN="$SCBIN/systemctl" \
-    bash "$ADOPT" "$FIX" 2>&1)"
+    bash "$ADOPT" "$FIX" > /dev/null 2>&1
 assert_eq "(b2) no live systemd marker: exit 78" "78" "$?"
 
 # b3: systemctl unresolvable
-B3_OUT="$(UNIT_DIR="$UNITDIR" POLKIT_RULES_DIR="$POLKIT" \
+UNIT_DIR="$UNITDIR" POLKIT_RULES_DIR="$POLKIT" \
     ADOPT_SYSTEMD_RUN_DIR="$RUND" SYSTEMCTL_BIN="$WORK/no-such-systemctl" \
-    bash "$ADOPT" "$FIX" 2>&1)"
+    bash "$ADOPT" "$FIX" > /dev/null 2>&1
 assert_eq "(b3) unresolvable systemctl: exit 78" "78" "$?"
 
 # ===========================================================================

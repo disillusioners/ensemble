@@ -33,7 +33,6 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
-PYTWIN="$REPO_ROOT/tests/unit/tools/test_supervision_python.py"
 
 PASS=0
 FAIL=0

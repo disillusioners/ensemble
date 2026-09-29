@@ -34,10 +34,9 @@ import json
 import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-_got_term = False
 
 
 def _emit_advisory(install_dir: Path) -> str:
@@ -63,7 +62,7 @@ def _emit_advisory(install_dir: Path) -> str:
     sys.modules["daemon.constants"] = constants
     sys.modules["daemon.tools"] = tools
 
-    def _load(name: str, path: Path):
+    def _load(name: str, path: Path) -> "types.ModuleType":
         loader = importlib.machinery.SourceFileLoader(name, str(path))
         spec = importlib.util.spec_from_loader(name, loader)
         mod = importlib.util.module_from_spec(spec)
@@ -137,14 +136,12 @@ def main() -> int:
             self.end_headers()
             self.wfile.write(payload)
 
-        def log_message(self, fmt: str, *a) -> None:  # silence
+        def log_message(self, fmt: str, *a: object) -> None:  # silence
             pass
 
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
 
-    def _term(_sig, _frm):
-        global _got_term
-        _got_term = True
+    def _term(_sig: int, _frm: Any) -> None:
         # shutdown from the handler thread risks deadlock; use the
         # documented serve_forever shutdown via a daemon thread.
         import threading
