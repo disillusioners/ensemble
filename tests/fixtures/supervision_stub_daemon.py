@@ -94,6 +94,13 @@ def main() -> int:
     ap.add_argument("--version", required=True)
     ap.add_argument("--install-dir", default="")
     ap.add_argument("--emit-advisory", action="store_true")
+    # --anchor: an inert cmdline token carrying the anchored binary path
+    # (<INSTALL_DIR>/current/ensemble-prod). The stub wrappers exec python
+    # directly (so a launcher TERM reaches THIS process), which erases the
+    # script path from the cmdline — the anchor keeps the ownership tiers
+    # (and the supervision classifier's owned-pid discovery) able to see
+    # the process. Purely positional in argv; never otherwise used.
+    ap.add_argument("--anchor", default="")
     args = ap.parse_args()
 
     advisory_detail = ""
