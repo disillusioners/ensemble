@@ -21,13 +21,23 @@
 #   _probe                    health-gate probe (2s sleep, curl max-time 5s —
 #                             the same budget as deploy.sh phase 5)
 #
-# Size rationale: ~2875 lines is the single shared substrate for the five
-# entry scripts (stage/promote/rollback/restart/status); splitting would
-# duplicate cross-cutting contracts (journal layout, lock semantics, ENV
-# allowlist, BSD/GNU dispatch). The file is the contract inventory. The
-# recent growth is the supervision-detection section (classify / outcome
-# map / dualfight / unit hand-back) — one twin lives here, the python
-# twin in daemon/tools/upgrade_journal.py.
+# Size rationale: ~3140 lines (crossed the >3000 tier during the
+# supervision-detection + 3-layer adoption-protocol growth) is still the
+# single shared substrate for the five entry scripts (stage/promote/
+# rollback/restart/status) plus the SOURCED consumers stop-ensemble.sh /
+# adopt-unit.sh; splitting would duplicate cross-cutting contracts
+# (journal layout, lock semantics, ENV allowlist, BSD/GNU dispatch). The
+# file is the contract inventory. The recent growth is the supervision-
+# detection section (classify / outcome map / dualfight / unit hand-back)
+# — one twin lives here, the python twin in daemon/tools/upgrade_journal.py.
+# BACKLOG (fix-back cycle 2 — candidates ONLY, no split executed; any
+# split must keep every consumer's sourcing line byte-identical and re-run
+# the full journal/lock/supervision suites):
+#   (a) supervision_* family (~:1879-2900: hand-back, restart_via_launcher,
+#       owned_pids, classify, outcome map, dualfight) → supervision_lib.sh;
+#   (b) pipeline_settled + adoption_marker_* (~:1212-1527, Layer i/ii) →
+#       settle_lib.sh;
+#   (c) journal_* family (~:481-1014, atomic state.json IO) → journal_lib.sh.
 #
 # ENV DISCIPLINE (D-FA4.6 + test-strategy §5):
 #   - the resolved triple (INSTALL_DIR / PORT / POSTGRES_DB) is asserted and

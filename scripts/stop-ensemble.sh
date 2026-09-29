@@ -127,7 +127,8 @@ REPORT_PORT="${2:-}"
 #   <dir> --force | <dir> <port> --force | --force <dir> | --force <dir> <port>
 # The legacy <dir> <port> form (no flag) leaves STOP_FORCE=0 and both
 # remaining slots intact — prior test 16a semantics preserved.
-# STOP_FORCE was declared at the top (line 108); the walk below sets it.
+# STOP_FORCE is declared with the WAIT_S knobs at the top of the file;
+# the argv walk below is the only site that sets it.
 REMAINING=()
 for arg in "$@"; do
     if [ "$arg" = "--force" ]; then
@@ -207,8 +208,12 @@ if [ "$PIPELINE_LOCK_HELD" != "1" ]; then
             echo "stop-ensemble: ⚠️  --force OVERRIDE: bypassing settle refusal ($SETTLE_OUT)" >&2
             echo "stop-ensemble: ⚠️  --force can break a running promote (the pipeline is by definition in flight). Use only for emergency recovery when the operator intends to proceed despite a half-completed promote." >&2
         else
-            echo "stop-ensemble: REFUSED (exit 78): pipeline is not settled ($SETTLE_OUT)" >&2
-            echo "stop-ensemble: the install cannot be safely stopped while the upgrade pipeline is in flight — wait for it to settle or pass --force for operator emergencies" >&2
+            # Structured refusal (fix-back cycle 2, mirrors adopt-unit.sh
+            # _step_pre_settle): Layer-tagged prefix + best-effort refusal
+            # journal append (_refuse's ADR-034 pattern — a torn/absent
+            # journal must never block the refusal itself).
+            _warn "REFUSED (Layer i): pipeline is not settled ($SETTLE_OUT) — the install cannot be safely stopped while the upgrade pipeline is in flight; wait for it to settle or pass --force for operator emergencies"
+            journal_history_append refusal "stop refused: pipeline not settled ($SETTLE_OUT) (reason=layer-i-pipeline-unsettled)" >/dev/null 2>&1 || true
             exit 78
         fi
     fi
@@ -226,7 +231,12 @@ if [ "$PIPELINE_LOCK_HELD" != "1" ]; then
             echo "stop-ensemble: ⚠️  --force OVERRIDE: bypassing lock-busy refusal (the lock is held by another pipeline action)" >&2
             echo "stop-ensemble: ⚠️  --force can race a live promote; expect journal divergence / sweep recovery / restart thrash" >&2
         else
-            echo "stop-ensemble: REFUSED (exit 78): pipeline lock busy (another promote/stage/rollback in flight) — wait for it to settle or pass --force for operator emergencies" >&2
+            # Structured refusal (fix-back cycle 2, mirrors adopt-unit.sh
+            # _step_lock): Layer-tagged prefix + best-effort refusal journal
+            # append (the concurrent holder owns the mutation window — the
+            # append is atomic temp+mv and best-effort by contract).
+            _warn "REFUSED (Layer ii): pipeline lock busy (another promote/stage/rollback in flight) — stop-ensemble serializes on the same rollback.lock.d; wait for it to settle or pass --force for operator emergencies"
+            journal_history_append refusal "stop refused: pipeline lock busy (reason=layer-ii-lock-busy)" >/dev/null 2>&1 || true
             exit 78
         fi
     else

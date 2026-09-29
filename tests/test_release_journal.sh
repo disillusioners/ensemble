@@ -1613,12 +1613,24 @@ _assert_settled_refuses_with_token() {
     fi
 }
 
+# helper: seed a settle-fixture install dir (fix-back cycle 2 dedupe —
+# was an 8× copy-paste across 15a-15h): releases/<SBX_V1> present,
+# journal initialized with current=<SBX_V1>, symlink pointing at it.
+# 15b (journal absent) and 15c (raw-JSON current=null) stay BESPOKE —
+# they assert the absent/unset shapes this helper cannot produce.
+# Dedupe only: the assertion count is unchanged.
+_seed_pipeline_settled_fixture() {
+    local dir="$1"
+    mkdir -p "$dir/releases/$SBX_V1"
+    ( cd "$dir" && ln -sfn "releases/$SBX_V1" current )
+    INSTALL_DIR="$dir" journal_init >/dev/null
+    INSTALL_DIR="$dir" journal_set_current "$SBX_V1" >/dev/null
+}
+
 # 15a. happy path: journal current set + on-disk symlink matches + no
 #      in_flight + no pending_op + lock free → returns 0 silently.
-SE_BASE="$FIXTURE/se-happy"; mkdir -p "$SE_BASE/releases/$SBX_V1"
-( cd "$SE_BASE" && ln -sfn "releases/$SBX_V1" current )
-INSTALL_DIR="$SE_BASE" journal_init >/dev/null
-INSTALL_DIR="$SE_BASE" journal_set_current "$SBX_V1" >/dev/null
+SE_BASE="$FIXTURE/se-happy"
+_seed_pipeline_settled_fixture "$SE_BASE"
 INSTALL_DIR="$SE_BASE" SE_OUT="$(pipeline_settled 2>&1)"; SE_RC=$?
 if [ "$SE_RC" = "0" ] && [ -z "$SE_OUT" ]; then
     _pass
@@ -1650,36 +1662,30 @@ _assert_settled_refuses_with_token "$SE_UN" "journal-current-unset" "" \
     "15c journal-current-unset token"
 
 # 15d. current-symlink-absent token — journal says X, no symlink
-SE_SA="$FIXTURE/se-symabs"; mkdir -p "$SE_SA/releases/$SBX_V1"
-INSTALL_DIR="$SE_SA" journal_init >/dev/null
-INSTALL_DIR="$SE_SA" journal_set_current "$SBX_V1" >/dev/null
+SE_SA="$FIXTURE/se-symabs"
+_seed_pipeline_settled_fixture "$SE_SA"
 rm -f "$SE_SA/current"
 _assert_settled_refuses_with_token "$SE_SA" "current-symlink-absent" "" \
     "15d current-symlink-absent token"
 
 # 15e. current-symlink-mismatch token — journal says X, symlink points at Y
-SE_SM="$FIXTURE/se-symmis"; mkdir -p "$SE_SM/releases/$SBX_V1" "$SE_SM/releases/vOther"
-INSTALL_DIR="$SE_SM" journal_init >/dev/null
-INSTALL_DIR="$SE_SM" journal_set_current "$SBX_V1" >/dev/null
+SE_SM="$FIXTURE/se-symmis"; mkdir -p "$SE_SM/releases/vOther"
+_seed_pipeline_settled_fixture "$SE_SM"
 ln -sfn "releases/vOther" "$SE_SM/current"
 _assert_settled_refuses_with_token "$SE_SM" "current-symlink-mismatch" "" \
     "15e current-symlink-mismatch token"
 
 # 15f. in-flight-txn token — journal has an open txn
-SE_IF="$FIXTURE/se-inflight"; mkdir -p "$SE_IF/releases/$SBX_V1"
-INSTALL_DIR="$SE_IF" journal_init >/dev/null
-INSTALL_DIR="$SE_IF" journal_set_current "$SBX_V1" >/dev/null
-ln -sfn "releases/$SBX_V1" "$SE_IF/current"
+SE_IF="$FIXTURE/se-inflight"
+_seed_pipeline_settled_fixture "$SE_IF"
 INSTALL_DIR="$SE_IF" journal_open_txn "promote" "vX" >/dev/null
 _assert_settled_refuses_with_token "$SE_IF" "in-flight-txn" "kind=promote" \
     "15f in-flight-txn token + kind detail"
 INSTALL_DIR="$SE_IF" journal_close_txn >/dev/null
 
 # 15g. pending-op token — journal has a non-null pending_op (Python twin field)
-SE_PO="$FIXTURE/se-pendingop"; mkdir -p "$SE_PO/releases/$SBX_V1"
-INSTALL_DIR="$SE_PO" journal_init >/dev/null
-INSTALL_DIR="$SE_PO" journal_set_current "$SBX_V1" >/dev/null
-ln -sfn "releases/$SBX_V1" "$SE_PO/current"
+SE_PO="$FIXTURE/se-pendingop"
+_seed_pipeline_settled_fixture "$SE_PO"
 # write pending_op additively via raw journal_write (D4 discipline;
 # the shell never writes pending_op natively — that's the Python twin)
 raw="$(cat "$SE_PO/releases/state.json")"
@@ -1689,13 +1695,11 @@ _assert_settled_refuses_with_token "$SE_PO" "pending-op" "" \
     "15g pending-op token"
 
 # 15h. lock-held token — rollback.lock.d present (live owner)
-SE_LK="$FIXTURE/se-lockheld"; mkdir -p "$SE_LK/releases/rollback.lock.d" "$SE_LK/releases/$SBX_V1"
+SE_LK="$FIXTURE/se-lockheld"; mkdir -p "$SE_LK/releases/rollback.lock.d"
 printf '%s\n' "$$" > "$SE_LK/releases/rollback.lock.d/owner"
 printf '%s\n' "run-test-$$" > "$SE_LK/releases/rollback.lock.d/run_id"
 printf '%s\n' "$(date +%s)" > "$SE_LK/releases/rollback.lock.d/heartbeat"
-INSTALL_DIR="$SE_LK" journal_init >/dev/null
-INSTALL_DIR="$SE_LK" journal_set_current "$SBX_V1" >/dev/null
-ln -sfn "releases/$SBX_V1" "$SE_LK/current"
+_seed_pipeline_settled_fixture "$SE_LK"
 _assert_settled_refuses_with_token "$SE_LK" "lock-held" "owner=" \
     "15h lock-held token + owner detail"
 rm -rf "$SE_LK/releases/rollback.lock.d"
@@ -2090,7 +2094,7 @@ fi
 # verify success, and releases the lock — pinned end-to-end. The refusal
 # surface (a/b/c/naming/DRY_RUN) is already pinned by tests/test_adopt_unit.sh
 # which is UNCHANGED for v0.16.6 c2 (see docs/runbooks/systemd-adoption.md
-# A2 row 4 attribution fix + §10 §19 row). Hosts WITHOUT systemd emit
+# A2 row 4 attribution fix + §8 §19 row). Hosts WITHOUT systemd emit
 # SKIP(no-systemd-host): no fake pass.
 section "adopt-unit MUTATION-mode lock/marker integration (NAMED FENCE)"
 
@@ -2125,7 +2129,7 @@ else
     # No-systemd host — emit the NAMED SKIP-with-reason fence, no fake pass.
     printf 'SKIP(no-systemd-host): 19a MUTATION-mode lock+marker integration\n'
     printf '  ↳ host lacks /run/systemd/system or `systemctl` — substrate absent.\n'
-    printf '    Pin target (under real systemd): (a) lock acquired before mutation (b) marker written before mutation (c) marker cleared on verify (d) lock released on exit. Cannot pin without systemd substrate. MUTATION-mode refuse surface remains covered by tests/test_adopt_unit.sh (a/b/c/naming/DRY_RUN arms, unchanged for v0.16.6 c2 — see docs/runbooks/systemd-adoption.md A2 row 4 + §10).\n'
+    printf '    Pin target (under real systemd): (a) lock acquired before mutation (b) marker written before mutation (c) marker cleared on verify (d) lock released on exit. Cannot pin without systemd substrate. MUTATION-mode refuse surface remains covered by tests/test_adopt_unit.sh (a/b/c/naming/DRY_RUN arms, unchanged for v0.16.6 c2 — see docs/runbooks/systemd-adoption.md A2 row 4 + §8).\n'
 fi
 # Always emit a pass for the SKIP fence itself — the NAMED FENCE is
 # present (its text is the assertion). Faked PASS would be a real failure

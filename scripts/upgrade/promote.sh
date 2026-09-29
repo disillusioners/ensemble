@@ -333,7 +333,7 @@ if [ -z "$gate_fail_reason" ] && READYZ_JSON="$(gate_readyz)"; then
                 || INFLIGHT=""
             case "$INFLIGHT" in
                 ""|null) ;;   # absent or null — older daemon, silent
-                *[!0-9]*) ;;  # defensive: present but not an int, silent
+                *[!0-9]*) _logv "readyz advisory: detail.inflight_turns present but non-numeric ($INFLIGHT) — ignored (defensive)";;
                 0) ;;         # present but no in-flight turns, silent
                 *)
                     _log "readyz advisory: detail.inflight_turns=$INFLIGHT (busy daemon — promote is legal under v0.16.6 amnesty; operator awareness only)"

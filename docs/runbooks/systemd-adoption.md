@@ -106,10 +106,11 @@ on test hosts).
    ```bash
    DRY_RUN=1 bash scripts/upgrade/adopt-unit.sh <INSTALL_DIR>
    ```
-   Runs every refusal check (pre/i/ii/a/b/c), reads config, generates
-   the unit, and prints the sequence + the unit with the PG password
-   masked. Zero mutations; no marker written; no lock acquired (DRY_RUN
-   exits before the lock call to keep the preview side-effect-free).
+   Runs every refusal check except the Layer-ii lock acquire (pre/i/a/
+   b/c — DRY_RUN exits before the lock call so the preview stays
+   side-effect-free), reads config, generates the unit, and prints the
+   sequence + the unit with the PG password masked. Zero mutations; no
+   marker written; no lock acquired.
 4. **Adopt:**
    ```bash
    sudo bash scripts/upgrade/adopt-unit.sh <INSTALL_DIR>
@@ -224,7 +225,9 @@ shape MUST consume the same helpers.
 position** of the argv (the m2 pre-parse walk extracts it from the full
 `$@`, so `--force <dir>`, `<dir> --force`, `--force <dir> <port>`, and
 `<dir> <port> --force` all resolve correctly — `tests/test_release_journal.sh`
-§16c pins all four forms; the legacy `<dir> <port>` no-flag form leaves
+§16c pins three of the four forms (`--force <dir> <port>`, `<dir> <port>
+--force`, `--force <dir>`) while §16a pins `<dir> --force`; the legacy
+`<dir> <port>` no-flag form leaves
 `STOP_FORCE=0` and both remaining slots intact). On `--force`:
 
 - The Layer-i settle-check refusal is BYPASSED with a LOUD warning
@@ -482,4 +485,21 @@ the wrapper stays the single home for the journal unit battery).
 | §17 — Adoption-marker preflight + clear | `adopt-unit.sh` writes the marker pre-mutation; promote preflight refuses with `adoption-in-progress` reason; verify-success path clears; stale-marker manual removal path. | This runbook §3c; `scripts/upgrade/lib.sh` `promote_entry_check`, `adoption_marker_*`. |
 | §18 — stage.sh uv hard-refuse (fix-back add) | PATH-scrubbed + HOME-overridden stage.sh invocation refuses (78) when neither `command -v uv` nor `$HOME/.local/bin/uv` resolves; the remedy text is asserted. | `scripts/upgrade/stage.sh` (refuse gate). |
 | §19 — adopt-unit MUTATION-mode lock/marker integration (NAMED FENCE) | Under a real-systemd host: lock acquired before mutation, marker written pre-mutation, marker cleared on verify success, lock released on exit — pinned end-to-end. Hosts WITHOUT systemd emit `SKIP(no-systemd-host)` (no faked pass; the refuse surface stays covered by `tests/test_adopt_unit.sh`, unchanged). | This runbook §3c; `scripts/upgrade/adopt-unit.sh` `_step_lock`, `adoption_marker_*`. |
+
+Reason-token taxonomy (two tiers; every refusal carries exactly one
+`reason=<token>` — L10 discipline: a token-less refusal never journals):
+
+- **Single-concept legacy tokens** — `journal-current-unset`,
+  `current-symlink-absent`, `current-symlink-mismatch`,
+  `current-symlink-garbled`, `in-flight-txn`, `pending-op`, `lock-held`,
+  `cap`, `cooldown`, `quarantine`, `not-staged`, `txn-busy`,
+  `adoption-in-progress`. Short names for the STATE that fired, nothing
+  more; downstream tooling and older runbooks key on them verbatim —
+  never rename.
+- **Descriptive newer tokens** — `f2-not-verified`,
+  `supervision-unit-incapable-host`, `supervision-unit-unresolved`,
+  `layer-i-pipeline-unsettled`, `layer-ii-lock-busy`. Carry the gate
+  family in the token itself, so a journal/history grep reads without
+  this runbook open. New tokens SHOULD be descriptive unless they extend
+  an existing legacy family.
 | §19 — adopt-unit MUTATION-mode lock/marker integration (NAMED FENCE; deferred when host lacks systemd) | Under a real-systemd host, `adopt-unit.sh` in MUTATION mode (DRY_RUN=0) acquires `rollback.lock.d`, writes the adoption-in-progress marker, runs the install/enable/daemon-reload sequence, clears the marker on verify success, releases the lock — pinned end-to-end. Hosts WITHOUT systemd emit `SKIP(no-systemd-host)` (no fake pass). | `scripts/upgrade/adopt-unit.sh` (MUTATION-mode lifecycle). |
