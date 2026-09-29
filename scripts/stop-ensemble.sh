@@ -69,6 +69,14 @@
 #                                     MUST skip its own acquire (otherwise
 #                                     every promote deadlocks 15s on the
 #                                     busy-lock wait).
+#                                     ⚠️  TRUST ASSUMPTION: ONLY lib.sh
+#                                     stop_via_stop_script (the in-pipeline
+#                                     caller) may set this. Any external
+#                                     caller is equivalent to --force —
+#                                     a LOUD stderr WARN fires at the
+#                                     honor site. Prefer --force for any
+#                                     operator emergency (auditable in
+#                                     shell history; the env var is not).
 #   --force                         — operator emergency: bypass both the
 #                                     settle-check AND the lock-check with
 #                                     a LOUD warning. Use case: the
@@ -175,6 +183,18 @@ trap '_stop_ensemble_exit_trap' EXIT
 # manifestly not settled (the lock holder IS the mutation in flight). The
 # settle-check is for the OPERATOR lane where the script is a top-level
 # invocation.
+#
+# PIPELINE_LOCK_HELD_BY_CALLER=1 is --force-equivalent in safety: any caller
+# can set the env var and bypass BOTH Layer (i) settle-check AND Layer (ii)
+# lock acquire. Emit a loud WARN (commission v0.16.6 c2 fix-back) so a
+# misconfigured / foreign caller cannot silently sidestep the gates.
+# Trusted set: ONLY lib.sh stop_via_stop_script (the only legitimate
+# lock-holding caller; everything else is an operator emergency and should
+# pass --force explicitly).
+if [ "$PIPELINE_LOCK_HELD" = "1" ]; then
+    echo "stop-ensemble: ⚠️  PIPELINE_LOCK_HELD_BY_CALLER=1 — BOTH Layer (i) settle-check AND Layer (ii) lock-acquire are being SKIPPED (equivalent to --force). This flag is ONLY for lib.sh stop_via_stop_script (in-pipeline promote/rollback/restart); any external caller can race a live flip." >&2
+    echo "stop-ensemble: ⚠️  if you intended an operator emergency, prefer passing --force explicitly — the flag is auditable in shell history; the env var is not." >&2
+fi
 if [ "$PIPELINE_LOCK_HELD" != "1" ]; then
     if ! SETTLE_OUT="$(pipeline_settled)"; then
         if [ "$STOP_FORCE" = "1" ]; then
