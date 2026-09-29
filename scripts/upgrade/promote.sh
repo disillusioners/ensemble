@@ -218,6 +218,12 @@ PROMOTE_START="$(_now_epoch)"
 _log "txn open: promote target=$VERSION pid=$$ (outer window $((SWEEP_STALE_S))s from txn start)"
 
 # ═══════════════════════════ 2. STOP (D6) ══════════════════════════════════
+# P2 (ownership-mode commission 2026-09-29): stop_via_stop_script now
+# re-runs the DUAL_FIGHT check pre-stop (refuses exit 78 before any stop
+# action) and, when the P1 classification says UNIT_MANAGED with a
+# resolvable unit, routes the stop through `systemctl stop <unit>` +
+# UNIT-STATE polling (b″ fix) — see stop_via_stop_script in lib.sh.
+# Script/scope-survivor shapes keep the SIGTERM-bounded path unchanged.
 lock_heartbeat
 if ! stop_via_stop_script; then
     # B4 policy (leave-txn-open, applied at all four abort sites): the txn

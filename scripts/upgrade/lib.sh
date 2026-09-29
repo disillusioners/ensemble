@@ -1444,8 +1444,33 @@ stop_via_stop_script() {
     # own; enforcement stayed there — the stop site NEVER refuses
     # mid-pipeline, so an unresolved-explicit-unit rc is ignored here).
     supervision_classify || true
-    _log "stop: ownership-scoped SINGLE-TERM via $stop_script"
-    bash "$stop_script" "$INSTALL_DIR" "$PORT"
+    # P2 §3 (2026-09-29) — DUAL_FIGHT refuses BEFORE any stop action: no
+    # TERM is sent, no systemctl stop issued. Distinct from the
+    # unresolved-explicit-unit rc ignored above: an unresolvable NAME is a
+    # benign degradation (the script path still stops owned pids
+    # correctly), while a DUAL_FIGHT fault means two masters are live —
+    # stopping via EITHER path could kill the wrong thing or
+    # false-succeed — so the halt path (journal halt event + exit 78,
+    # inside supervision_dualfight_check) is the only safe answer. The
+    # pre-flight already checked; this is the stop-site re-check (state
+    # may have drifted across the run — e.g. promote's rollback stop runs
+    # ~5min after its pre-flight, post flip + restart).
+    supervision_dualfight_check
+    # P2 §1 (b″ fix) — UNIT_MANAGED with a resolvable unit name hands the
+    # classification VALUE to the stop script (machine-line grammar, same
+    # '<state>[:<unit>]' format as the machine line above) so it stops
+    # via `systemctl stop` + a UNIT-STATE poll (a unit-respawned
+    # replacement pid is invisible to a pid poll; the unit state is not).
+    # Every other shape keeps the byte-identical pid-scoped invocation —
+    # no new env reaches the child on the script path.
+    if [ "${SUPERVISION_STATE:-}" = "UNIT_MANAGED" ] && [ -n "${SUPERVISION_UNIT:-}" ]; then
+        _log "stop: UNIT path — systemctl stop ${SUPERVISION_UNIT} + unit-state poll via $stop_script (b″: respawn-invisible-to-pid-poll fix)"
+        ENSEMBLE_SUPERVISION_RESULT="${SUPERVISION_STATE}:${SUPERVISION_UNIT}" \
+            bash "$stop_script" "$INSTALL_DIR" "$PORT"
+    else
+        _log "stop: ownership-scoped SINGLE-TERM via $stop_script"
+        bash "$stop_script" "$INSTALL_DIR" "$PORT"
+    fi
 }
 
 # launcher_swap <ver> — swap INSTALL_DIR/launcher.sh from a release's staged
@@ -1572,9 +1597,12 @@ restart_via_launcher() {
 # ── Supervision classification (ownership-mode commission P1, 2026-09-29) ────
 #
 # DETECTION + CLASSIFIER ONLY — zero behavior change to existing paths.
-# Consumers (stop-path P2, hand-back P3, unit adoption P4) land later; this
-# section exposes the classifier, the preflight refusal seam (explicit-unit
-# unresolved + DUAL_FIGHT fault) and the additive txn stamp.
+# Consumers: stop-path P2 LANDED 2026-09-29 (unit-aware stop + stop-site
+# DUAL_FIGHT re-check via stop_via_stop_script + the ENSEMBLE_SUPERVISION_
+# RESULT env handoff into scripts/stop-ensemble.sh's unit branch);
+# hand-back P3 and unit adoption P4 land later. This section exposes the
+# classifier, the preflight refusal seam (explicit-unit unresolved +
+# DUAL_FIGHT fault) and the additive txn stamp.
 #
 # §0 MANDATORY (architect 2026-09-29, leader-ratified): the cgroup BASENAME
 # of the owning pid's cgroup leaf (/proc/<pid>/cgroup) is the PRIMARY
@@ -1832,11 +1860,14 @@ supervision_classify() {
     return 0
 }
 
-# supervision_dualfight_check — §6 FAULT detector, PREFLIGHT ONLY (call
-# before any journal txn / stop / flip mutation): when the resolved unit is
-# active or auto-restart-armed AND reality disagrees (owned pids NOT inside
-# the unit's cgroup, OR the port-holder outside the unit's MainPID lineage)
+# supervision_dualfight_check — §6 FAULT detector (call before any journal
+# txn / stop / flip mutation): when the resolved unit is active or
+# auto-restart-armed AND reality disagrees (owned pids NOT inside the
+# unit's cgroup, OR the port-holder outside the unit's MainPID lineage)
 # → halt journal event + exit 78. Two masters must never meet a flip.
+# Call sites: PREFLIGHT via supervision_preflight (P1), plus the P2
+# stop-site re-check in stop_via_stop_script (still pre-stop-mutation —
+# the state may drift between preflight and the stop).
 # MainPID lineage is tested as cgroup containment within the unit's
 # ControlGroup (systemd's canonical process lineage under
 # KillMode=control-group) — PPID-walking breaks on double-forked daemons.
