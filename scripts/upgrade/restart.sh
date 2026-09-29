@@ -169,12 +169,22 @@ _log "pipeline lock adopted (run_id=$RUN_ID, owner pid $$)"
 # quiet either way.
 _trap_install_signal_handlers "restart:adopt"
 
+# Supervision preflight (ownership-mode P1, 2026-09-29): classify + ONE
+# machine-readable ENSEMBLE_SUPERVISION_RESULT line + explicit-unit
+# exit-78 refusal + the §6 DUAL_FIGHT fault check. The restart txn was
+# armed by the tool earlier — this executor COMPLETES it — so "pre-txn"
+# here means pre-mutation (before the grace/stop/start phases below).
+supervision_preflight
+
 # Re-stamp the txn owner to the executor (advisory identity in the journal).
 INF_TARGET="$(_json_field "$INF" target)"
 case "$INF_TARGET" in ""|null) INF_TARGET_JSON="null" ;; *) INF_TARGET_JSON="\"$INF_TARGET\"" ;; esac
 journal_update "in_flight" \
     "{\"kind\":\"restart\",\"target\":$INF_TARGET_JSON,\"started_at\":\"$(_json_field "$INF" started_at)\",\"flipped\":false,\"owner_pid\":$$,\"run_id\":\"$RUN_ID\"}" \
     || _warn "could not re-stamp in_flight owner_pid (continuing — advisory field)"
+# P1 §5: stamp supervision additively on the adopted txn (advisory — a
+# stamp failure never aborts the restart).
+journal_mark_supervision || _warn "supervision txn stamp failed (advisory — continuing)"
 
 # ═══════════════════════════ 1. GRACE WAIT ══════════════════════════════════
 # The PRIMARY trigger (post-turn callback) fires this script at exact

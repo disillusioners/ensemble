@@ -161,6 +161,12 @@ adopt_stale_txn || _refuse txn-busy "promote refused: unresolved in_flight txn (
 # path inside it exits 78 itself (_refuse) — so no caller-side exit arm.
 promote_entry_check "$VERSION"
 
+# 1d-sup. Supervision classification (ownership-mode P1, 2026-09-29):
+# classify + ONE machine-readable ENSEMBLE_SUPERVISION_RESULT line +
+# explicit-unit exit-78 refusal + the §6 DUAL_FIGHT fault check — PRE-TXN
+# (before 1f opens the journal txn; before any stop/flip mutation).
+supervision_preflight
+
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
 # fields + no-.env invariant. Same-version re-promote verifies once.
 CUR_JSON="$(journal_read)"
@@ -203,6 +209,11 @@ fi
 if [ "$UP_TARGET" = "live" ] && [ "$F2_VERIFIED_CLOSED" = "1" ]; then
     journal_mark_f2_verified || journal_fail_loud "preflight: journal_mark_f2_verified (F2 attestation record)"
 fi
+# P1 §5: stamp supervision=<state> / unit=<name|null> ADDITIVELY on the
+# open txn (D4 splice discipline — additive-only textual splice; existing
+# readers parse named fields and ignore extras). Advisory: a stamp failure
+# never aborts the promote.
+journal_mark_supervision || _warn "supervision txn stamp failed (advisory — continuing)"
 PROMOTE_START="$(_now_epoch)"
 _log "txn open: promote target=$VERSION pid=$$ (outer window $((SWEEP_STALE_S))s from txn start)"
 

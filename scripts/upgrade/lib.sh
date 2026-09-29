@@ -1439,6 +1439,11 @@ stop_via_stop_script() {
         # when lib.sh is sourced from a copied tree, fall back to repo layout
         stop_script="$(pwd)/scripts/stop-ensemble.sh"
     fi
+    # P1 §5(b) — the STOP SITE: emit exactly ONE machine-readable
+    # ENSEMBLE_SUPERVISION_RESULT line (the pre-flight already emitted its
+    # own; enforcement stayed there — the stop site NEVER refuses
+    # mid-pipeline, so an unresolved-explicit-unit rc is ignored here).
+    supervision_classify || true
     _log "stop: ownership-scoped SINGLE-TERM via $stop_script"
     bash "$stop_script" "$INSTALL_DIR" "$PORT"
 }

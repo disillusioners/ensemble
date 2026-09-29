@@ -95,6 +95,12 @@ fi
 _trap_install_signal_handlers "rollback:preflight"
 lock_heartbeat
 
+# Supervision preflight (ownership-mode P1, 2026-09-29): classify + ONE
+# machine-readable ENSEMBLE_SUPERVISION_RESULT line + explicit-unit
+# exit-78 refusal + the §6 DUAL_FIGHT fault check — PRE-TXN (the rollback
+# txn opens below at the Transaction section; before any stop/flip).
+supervision_preflight
+
 # Re-read the journal under the lock (state may have moved since).
 J="$(journal_read)" || exit 78
 
@@ -124,6 +130,9 @@ if ! journal_open_txn "rollback" "$TO_VERSION"; then
     _warn "an in_flight txn is open — pipeline-busy (resolve it or wait for the sweep)"
     exit 78
 fi
+# P1 §5: stamp supervision additively on the open txn (advisory — a stamp
+# failure never aborts the rollback).
+journal_mark_supervision || _warn "supervision txn stamp failed (advisory — continuing)"
 
 # ── Stop → launcher swap → repoint → restart (D6 + amendment) ───────────────
 lock_heartbeat
