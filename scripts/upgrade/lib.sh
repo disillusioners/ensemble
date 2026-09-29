@@ -2077,11 +2077,22 @@ supervision_dualfight_check() {
 # call it before journal_open_txn; restart calls it after lock adoption,
 # before its stop phase — the restart txn was armed by the tool earlier and
 # the executor is its completion, not its opener).
+# A1 (2026-09-29): also emits the NAMED declared×verified outcome as ONE
+# SEPARATE additive machine line ENSEMBLE_SUPERVISION_OUTCOME=<outcome>
+# (conforming|degraded|fault) — a DIFFERENT variable name on its own line;
+# the ENSEMBLE_SUPERVISION_RESULT=<state>[:<unit>] grammar is FROZEN (P2
+# consumes it — never extend that line). Emitted AFTER the DUAL_FIGHT
+# check so a fault run (exit 78 inside the check) never prints a stale
+# 'conforming' — DUAL_FIGHT's named surface is the halt event itself.
+# The reason half of supervision_map_outcome is human prose and is
+# deliberately NOT machine-surfaced.
 supervision_preflight() {
     if ! supervision_classify; then
         _refuse supervision-unit-unresolved "preflight refused: ENSEMBLE_SUPERVISION=unit is explicit but no unit name is resolvable (env ENSEMBLE_RESTART_UNIT > cgroup-derived > INSTALL_DIR/.env all empty) — never silent-degrade (P1 §2); set ENSEMBLE_RESTART_UNIT or run under the unit"
     fi
     supervision_dualfight_check
+    SUPERVISION_OUTCOME="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-}" "${SUPERVISION_UNIT:-}")"
+    printf 'ENSEMBLE_SUPERVISION_OUTCOME=%s\n' "${SUPERVISION_OUTCOME%%|*}"
 }
 
 # journal_mark_supervision — stamp supervision=<state> / unit=<name|null>
@@ -2090,8 +2101,13 @@ supervision_preflight() {
 # — journal JSON whitespace differs between launcher and lib.sh by design,
 # assert semantically, never raw-spacing). Mirrors journal_mark_f2_verified.
 # Reads the globals set by the last supervision_classify in this process.
+# A1 (2026-09-29): also stamps outcome=<conforming|degraded|fault> — the
+# NAMED declared×verified cell from supervision_map_outcome (additive field
+# only; existing readers parse named fields and ignore extras). Computed
+# from the resolved-mode globals — RESOLVED-MODE EQUIVALENCE (section
+# comment) makes that cell-for-cell identical to the declared-mode cell.
 journal_mark_supervision() {
-    local json inf new_inf unit_json
+    local json inf new_inf unit_json outcome
     json="$(journal_read)" || return 1
     inf="$(_json_sub "$json" in_flight)"
     case "$inf" in
@@ -2110,8 +2126,10 @@ journal_mark_supervision() {
     else
         unit_json="null"
     fi
+    outcome="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-unknown}" "${SUPERVISION_UNIT:-}")"
+    outcome="${outcome%%|*}"
     new_inf="${inf%\}}"
-    new_inf="${new_inf},\"supervision\":\"$(_json_escape "${SUPERVISION_STATE:-unknown}")\",\"unit\":$unit_json}"
+    new_inf="${new_inf},\"supervision\":\"$(_json_escape "${SUPERVISION_STATE:-unknown}")\",\"unit\":$unit_json,\"outcome\":\"$outcome\"}"
     journal_update "in_flight" "$new_inf"
 }
 

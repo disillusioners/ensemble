@@ -208,9 +208,17 @@ class UpgradeJournalSweepService:
             return
         try:
             det = uj.supervision_detect()
+            # A1 (2026-09-29): NAME the declared×verified outcome — the
+            # mapping twin supervision_outcome on the same module
+            # (resolved-mode equivalence: det.mode is the declaration
+            # POST-ladder, cells agree either way). Additive field in the
+            # free-form advisory detail; the ENSEMBLE_SUPERVISION_RESULT
+            # machine-line grammar stays frozen (shell side, P2 consumer).
+            mapped = uj.supervision_outcome(det.mode, det.state, det.unit)
             detail = (
                 f"state={det.state} mode={det.mode} "
-                f"unit={det.unit or '<none>'}"
+                f"unit={det.unit or '<none>'} "
+                f"outcome={mapped.outcome}"
             )
             if det.note:
                 detail += f' note="{det.note}"'
