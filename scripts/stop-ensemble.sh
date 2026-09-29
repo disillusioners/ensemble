@@ -58,13 +58,38 @@
 # always wins. Clamp 10..600 — malformed env can never produce garbage
 # sleeps or 0s kills.
 #
+# SETTLE + LOCK PREFlight (commission v0.16.6 component 2, Layer i+ii,
+# incident r-20260929-170301-0cb2): the upgrade pipeline's only mutex is
+# the lib.sh mkdir-lock (rollback.lock.d). stop-ensemble.sh now takes
+# that lock around its mutate window (the operator lane), with two
+# escape paths:
+#   PIPELINE_LOCK_HELD_BY_CALLER=1  — the caller (lib.sh stop_via_stop_script
+#                                     inside promote/rollback) already
+#                                     holds the lock; stop-ensemble.sh
+#                                     MUST skip its own acquire (otherwise
+#                                     every promote deadlocks 15s on the
+#                                     busy-lock wait).
+#   --force                         — operator emergency: bypass both the
+#                                     settle-check AND the lock-check with
+#                                     a LOUD warning. Use case: the
+#                                     daemon is wedged under a live
+#                                     promote and the operator must stop
+#                                     it anyway (adopt-unit.sh needs no
+#                                     override — it already refuses on
+#                                     live pids).
+# The preflight ALSO refuses when the pipeline is unsettled (open txn,
+# journal/symlink drift, pending_op, or another lock holder) — that
+# kills the racy "current == X + health" anti-pattern; the runbook
+# documents the FORBIDDEN pattern with the incident citation.
+#
 # Usage:
-#   bash scripts/stop-ensemble.sh [INSTALL_DIR]     (default ~/agents-ensemble)
-#   bash scripts/stop-ensemble.sh <dir> <port>      (port = reporting hint)
-#   DRY_RUN=1 bash scripts/stop-ensemble.sh <dir>   (print the stop plan; never signal)
+#   bash scripts/stop-ensemble.sh [INSTALL_DIR]           (default ~/agents-ensemble)
+#   bash scripts/stop-ensemble.sh <dir> <port>            (port = reporting hint)
+#   DRY_RUN=1 bash scripts/stop-ensemble.sh <dir>         (print the stop plan; never signal)
+#   bash scripts/stop-ensemble.sh <dir> <port> --force    (operator emergency; bypass settle/lock)
 #
 # Bash 3.2 / BSD tools compatible. Exit 0 when the install is stopped
-# (or nothing was owned); exit 2 on usage errors.
+# (or nothing was owned); exit 2 on usage errors; exit 78 on settle/lock refusal.
 # ============================================================================
 
 set -u
@@ -80,11 +105,24 @@ WAIT_S_CAP=600
 WAIT_S_EXPLICIT="${WAIT_S:-}"
 DRY_RUN="${DRY_RUN:-0}"
 SELF_PID=$$
-
+STOP_FORCE="${STOP_FORCE:-0}"        # --force flag (set by CLI parser)
+PIPELINE_LOCK_HELD="${PIPELINE_LOCK_HELD_BY_CALLER:-0}"   # lib.sh stop_via_stop_script sets this
+STOP_LOCK_HELD_BY_ME=0               # set if this invocation acquired the lock itself
 _die() { echo "stop-ensemble: $*" >&2; exit 2; }
 
 INSTALL_DIR="${1:-$HOME/agents-ensemble}"
 REPORT_PORT="${2:-}"
+# parse --force in ANY position (including $2 when port is omitted) —
+# non-destructive to existing positional usage; legacy invocations pass
+# exactly <dir> <port>, modern invocations may pass <dir> --force or
+# <dir> <port> --force. Walk all args; STOP_FORCE flips on first match.
+for arg in "$@"; do
+    if [ "$arg" = "--force" ]; then
+        STOP_FORCE=1
+        break
+    fi
+done
+
 [ -n "$INSTALL_DIR" ] || _die "empty INSTALL_DIR"
 
 # Absolute, no trailing slash — cwd comparisons are exact.
@@ -94,6 +132,73 @@ INSTALL_DIR="$(cd "$INSTALL_DIR" 2>/dev/null && pwd)" || _die "cannot resolve IN
 # path. Ownership checks accept either form.
 PHYS_DIR="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd)"
 [ -n "$PHYS_DIR" ] || PHYS_DIR="$INSTALL_DIR"
+
+# ── Source lib.sh (commission v0.16.6 component 2) ──────────────────────────
+# Sourced ONLY for pipeline_settled + lock_acquire/lock_release — no other
+# pipeline semantics are reached by the stop path. Sourced AFTER INSTALL_DIR
+# resolution because pipeline_settled reads INSTALL_DIR/current + the
+# journal path. lib.sh has no sourcing side effects beyond defining helpers
+# (no journal_init / lock_acquire auto-fire on source). log tag pinned to
+# stop-ensemble so _log/_warn don't print "[lib]" tags.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_TAG="stop-ensemble"
+UP_TARGET="${UP_TARGET:-stop}"
+# shellcheck source=scripts/upgrade/lib.sh
+. "$SELF_DIR/upgrade/lib.sh" || _die "cannot source scripts/upgrade/lib.sh"
+
+# ── EXIT trap: release the lock on every exit path (Layer ii) ────────────────
+# Mirrors lib.sh's _trap_safe_exit discipline; idempotent (lock_release is
+# ownership-guarded — a non-owner's release is a no-op). When the caller
+# already holds the lock (PIPELINE_LOCK_HELD_BY_CALLER=1) we skip our own
+# acquire below AND the exit trap must NOT touch the lock (the caller
+# owns the release; double-release would race the caller's cleanup).
+_stop_ensemble_exit_trap() {
+    if [ "$STOP_LOCK_HELD_BY_ME" = "1" ]; then
+        lock_release || true
+    fi
+}
+trap '_stop_ensemble_exit_trap' EXIT
+
+# ── Layer (i) preflight — pipeline_settled (commission v0.16.6 component 2) ─
+# Refuses 78 when the upgrade pipeline is not in a quiescent state. Bypassed
+# by --force (operator emergency — loud warning below). PIPELINE_LOCK_HELD_BY_CALLER=1
+# callers (lib.sh stop_via_stop_script inside promote/rollback) SKIP this
+# check too: they were called BY the lock holder, so the pipeline is
+# manifestly not settled (the lock holder IS the mutation in flight). The
+# settle-check is for the OPERATOR lane where the script is a top-level
+# invocation.
+if [ "$PIPELINE_LOCK_HELD" != "1" ]; then
+    if ! SETTLE_OUT="$(pipeline_settled)"; then
+        if [ "$STOP_FORCE" = "1" ]; then
+            echo "stop-ensemble: ⚠️  --force OVERRIDE: bypassing settle refusal ($SETTLE_OUT)" >&2
+            echo "stop-ensemble: ⚠️  --force can break a running promote (the pipeline is by definition in flight). Use only for emergency recovery when the operator intends to proceed despite a half-completed promote." >&2
+        else
+            echo "stop-ensemble: REFUSED (exit 78): pipeline is not settled ($SETTLE_OUT)" >&2
+            echo "stop-ensemble: the install cannot be safely stopped while the upgrade pipeline is in flight — wait for it to settle or pass --force for operator emergencies" >&2
+            exit 78
+        fi
+    fi
+fi
+
+# ── Layer (ii) — acquire the pipeline lock around the mutate window ────────
+# Skipped when PIPELINE_LOCK_HELD_BY_CALLER=1 (lib.sh stop_via_stop_script
+# already holds the lock). Otherwise: acquire the same mkdir-lock the
+# promote/rollback/stage scripts use (D5/D-FA5.1). Bounded wait (15s) —
+# a longer hold by a concurrent action is the correct refusal. --force
+# bypasses with a LOUD warning. STOP_LOCK_HELD_BY_ME arms the EXIT trap.
+if [ "$PIPELINE_LOCK_HELD" != "1" ]; then
+    if ! lock_acquire; then
+        if [ "$STOP_FORCE" = "1" ]; then
+            echo "stop-ensemble: ⚠️  --force OVERRIDE: bypassing lock-busy refusal (the lock is held by another pipeline action)" >&2
+            echo "stop-ensemble: ⚠️  --force can race a live promote; expect journal divergence / sweep recovery / restart thrash" >&2
+        else
+            echo "stop-ensemble: REFUSED (exit 78): pipeline lock busy (another promote/stage/rollback in flight) — wait for it to settle or pass --force for operator emergencies" >&2
+            exit 78
+        fi
+    else
+        STOP_LOCK_HELD_BY_ME=1
+    fi
+fi
 
 # ── WAIT_S resolution (review M3) ────────────────────────────────────────────
 # Single-source-of-truth: the SAME staged INSTALL_DIR/.env the launcher
