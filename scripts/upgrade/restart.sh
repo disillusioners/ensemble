@@ -199,7 +199,6 @@ fi
 lock_heartbeat
 
 # ═══════════════════════════ 2. STOP (D6 — SINGLE-TERM) ════════════════════
-_log "stop: ownership-scoped SINGLE-TERM via stop-ensemble.sh"
 if ! stop_via_stop_script; then
     journal_history_append halt "restart run_id=$RUN_ID: stop FAILED — daemon state unknown; txn left open for boot-sweep convergence"
     _warn "stop-ensemble.sh FAILED — daemon state unknown; txn left open (boot sweep owns convergence)"
@@ -208,7 +207,16 @@ fi
 
 # ═══════════════════════════ 3. START (detached launcher) ══════════════════
 lock_heartbeat
-restart_via_launcher
+# P3: supervision-aware hand-back — the P1 classification (consumed from
+# the stop-site globals, never re-derived here) selects the mode. A
+# unit-path hand-back failure returns nonzero (NO nohup fallback —
+# Amendment #1): halt + leave the txn open for boot-sweep convergence,
+# mirroring the stop-failure arm above (never a false success).
+if ! restart_via_launcher; then
+    journal_history_append halt "restart run_id=$RUN_ID: unit hand-back FAILED — daemon down; txn left open for boot-sweep convergence (no nohup fallback — Amendment #1)"
+    _warn "unit hand-back FAILED — txn left open (boot sweep owns convergence)"
+    exit 1
+fi
 
 # ═══════════════════════════ 4. GATE (/livez ≤60s + version) ════════════════
 GATE_FAIL=""

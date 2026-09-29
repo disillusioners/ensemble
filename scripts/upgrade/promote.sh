@@ -267,8 +267,23 @@ fi
 journal_mark_flipped || { _warn "cannot mark flipped — halting for human (sweep will find the txn)"; exit 1; }
 lock_heartbeat
 
-# ═══════════════════════════ 6. RESTART (launcher) ═════════════════════════
-restart_via_launcher
+# ═════════════ 6. RESTART — supervision-aware hand-back (P3) ═════════════════
+# The executor's P1 classification — consumed from the stop-site globals
+# (SUPERVISION_* set while the daemon still ran; never re-derived here,
+# the daemon is down) — selects the hand-back mode: UNIT_MANAGED → unit
+# hand-back (NO nohup fallback — Amendment #1: a fallback re-creates the
+# survivor lineage; systemd brings up the flipped release); SCOPE_SURVIVOR
+# + unit → same unit hand-back + the scope→unit self-heal journal event;
+# script shapes → today's nohup / comp7 paths. A unit hand-back failure
+# is NEVER a false success: halt journal event + B4 leave-txn-open (the
+# txn is flipped:true here — the next launcher start sweep-ROLLS-BACK to
+# previous; the halt event alerts the human).
+if ! restart_via_launcher; then
+    _warn "unit hand-back FAILED — halting promote (txn left open for sweep recovery; NO nohup fallback, never a false success)"
+    journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1)" \
+                              || true   # history is advisory; the open txn IS the B4 contract
+    exit 1
+fi
 
 # ═══════════════════════════ 7. HEALTH GATE (D2) ═══════════════════════════
 gate_fail_reason=""
@@ -378,7 +393,16 @@ if ! atomic_flip "$PREV"; then
     journal_history_append halt "rollback repoint to $PREV failed — halt-for-human; txn left open for sweep recovery"
     exit 1
 fi
-restart_via_launcher
+# P3: the rollback hand-back obeys the SAME supervision selection — on a
+# unit-managed host the rollback target is handed back to the unit (no
+# nohup fallback). Failure = halt journal event + B4 leave-txn-open (the
+# open flipped txn makes the next launcher start sweep-ROLL-BACK again).
+if ! restart_via_launcher; then
+    _warn "rollback: unit hand-back of $PREV FAILED — halting for human (txn left open — the next launcher start sweep-rolls-back to previous; NO nohup fallback)"
+    journal_history_append halt "rollback hand-back of $PREV failed — halt-for-human; txn left open for sweep recovery (no nohup fallback — Amendment #1)" \
+                              || true   # history is advisory; the open txn IS the B4 contract
+    exit 1
+fi
 
 # short re-gate: livez + readyz + version (no soak)
 REGATE_FAIL=""

@@ -161,7 +161,17 @@ if ! atomic_flip "$TO_VERSION"; then
 fi
 journal_mark_flipped
 lock_heartbeat
-restart_via_launcher
+# P3: supervision-aware hand-back — the P1 classification (consumed from
+# the stop-site globals, never re-derived here) selects the mode. A
+# unit-path hand-back failure returns nonzero (NO nohup fallback —
+# Amendment #1): halt journal event + B4 leave-txn-open (the open
+# flipped txn makes the next launcher start sweep-ROLL-BACK again).
+if ! restart_via_launcher; then
+    _warn "unit hand-back FAILED — halting rollback (txn left open for sweep recovery; NO nohup fallback, never a false success)"
+    journal_history_append halt "manual rollback to $TO_VERSION: unit hand-back failed — halt-for-human, txn left open for sweep recovery (no nohup fallback — Amendment #1)" \
+                              || true   # history is advisory; the open txn IS the B4 contract
+    exit 1
+fi
 
 # ── Short re-gate (livez + readyz + version; no soak) ───────────────────────
 REGATE_FAIL=""
