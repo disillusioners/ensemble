@@ -127,8 +127,35 @@ if [ "$SKIP_BUILD" = "0" ]; then
         _log "no binary at $BINARY — building"
     fi
     if [ "$NEED_BUILD" = "1" ]; then
+        # M6 (commission v0.16.6 component 2, uv PATH hardening): `uv` is
+        # NOT always on PATH — the executor session that prompted this
+        # rider had no `~/.local/bin` on PATH, so `uv: command not found`
+        # failed the build at stage.sh:131. Resolve via `command -v`
+        # first, then fall back to the conventional pip user-install
+        # location; HARD refuse (no silent degradation, no PATH mutation)
+        # with remedy text if BOTH miss — the operator's session is the
+        # right place to fix their PATH, never this script. WHY NOT
+        # MUTATE PATH: a stage.sh PATH prepend would silently change the
+        # operator's shell environment on exit (well-behaved scripts
+        # don't write export-side-effects), and a shell-local export
+        # would not survive the subshell `cd && rm -rf && uv run …` form
+        # below.
+        _uv_bin=""
+        if command -v uv >/dev/null 2>&1; then
+            _uv_bin="$(command -v uv)"
+        elif [ -x "$HOME/.local/bin/uv" ]; then
+            _uv_bin="$HOME/.local/bin/uv"
+        else
+            _warn "uv not found on PATH and no $HOME/.local/bin/uv — refusing to build (motivating failure: executor session PATH lacked ~/.local/bin → 'uv: command not found' at stage.sh:131 → build-failed exit 1). Remedies, in order:"
+            _warn "  1) source your shell rc (bash: 'source ~/.bashrc'; zsh: 'source ~/.zshrc') — most installs put uv on PATH via ~/.local/bin"
+            _warn "  2) install uv per https://docs.astral.sh/uv/ (curl -LsSf https://astral.sh/uv/install.sh | sh)"
+            _warn "  3) invoke stage.sh from a session that already has uv on PATH (systemd user units, tmux server, etc.)"
+            exit 78
+        fi
         _log "PyInstaller build (bare, branch-safe — NEVER make build/pyinstaller: ensure-latest would yank the branch)"
-        if ! (cd "$REPO_ROOT" && rm -rf build/ && uv run python -m PyInstaller ensemble.spec); then
+        # _uv_bin is the absolute path resolved above — never rely on PATH
+        # resolution at the subshell's exec time.
+        if ! (cd "$REPO_ROOT" && rm -rf build/ && "$_uv_bin" run python -m PyInstaller ensemble.spec); then
             _warn "PyInstaller build FAILED"
             exit 1
         fi
@@ -292,13 +319,19 @@ done <<EOF
 $FRONTEND_LINES
 EOF
 
-# staged_at: STABLE across idempotent re-stages (kept from an existing
-# manifest of the same version) — retention ordering must not wobble.
+# staged_at: REFRESHED on every stage (M6, commission v0.16.6 component 2).
+# Pre-rider behavior preserved the original timestamp across idempotent
+# re-stages (stable checksums → retention ordering must not wobble). The
+# motivating bug: 16:22:32Z survived a 17:50 re-stage, masking the
+# operator's actual restage event from any tooling that sorts by
+# `staged_at` (or that surfaces "last re-stage was N days ago"). The
+# retention-relevant identity is the manifest checksums (sha256 is
+# stable across identical re-stages), NOT the timestamp — checksums
+# carry the wobble-prevention; the timestamp carries the restage-event
+# signal. Write the FRESH now-iso unconditionally. (If the operator
+# truly wants idempotent staging across an identical re-stage, they
+# can compare manifest.json checksums before/after — those ARE stable.)
 STAGED_AT="$(_now_iso)"
-if [ -f "$REL/manifest.json" ]; then
-    prev_staged="$(manifest_field "$VERSION" staged_at 2>/dev/null)"
-    [ -n "$prev_staged" ] && STAGED_AT="$prev_staged"
-fi
 
 cat > "$STAGE_TMP/manifest.json" <<EOF
 {
