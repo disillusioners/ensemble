@@ -151,11 +151,82 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
         // projection block and auto rows therefore never seed the
         // banner.
         this.seedBannerFromStatus(status);
+        // Fix commission 2026-09-29 — re-entry: if the BE reports
+        // an in-flight run (page refreshed mid-poll, or another
+        // tab started a run), resume polling that run automatically.
+        // Without this branch a refresh mid-run orphans the FE
+        // poll and the terminal state never surfaces.
+        this.resumePollingIfInFlight(status);
       },
       error: () => {
         // Already surfaced via service.lastError.
       },
     });
+  }
+
+  /**
+   * Fix commission 2026-09-29 — re-entry resume. On
+   * `refreshStatus()` landing, if `status.in_flight` carries a
+   * `run_id`, start polling it (without a hint — re-entry has no
+   * hint; the service defaults to the floor budget and the
+   * post-cap backoff carries the load). Idempotent — `activeRunId()`
+   * is the source of truth: if a poll is already active against
+   * the same id, the early return short-circuits; a different id
+   * takes over (the prior subscription is unsubscribed by
+   * `startPolling`).
+   *
+   * `in_flight` is non-null ONLY while the run is non-terminal
+   * (BE clears the slot on terminal). The `activeRunId()` guard
+   * covers the rapid double-fetch edge case where two
+   * `refreshStatus()` calls fire in quick succession.
+   *
+   * Re-entry feedback-loop guard (iter2 review finding 2): the
+   * terminal handler nulls `activeRunId` BEFORE calling
+   * `refreshStatus()`, so the `activeRunId()` guard alone is not
+   * sufficient — if the BE transiently retains `in_flight` after
+   * the run reached terminal, a post-terminal refreshStatus()
+   * would see `in_flight` set, find `activeRunId` null, start a
+   * new poll subscription, observe the terminal value, fire the
+   * terminal handler again, which calls `refreshStatus()`
+   * again → tight loop until the BE finally clears the slot.
+   * The `lastExecuteResult()` guard breaks that loop by treating
+   * "we already know this run_id is terminal" as the source of
+   * truth: the terminal handler has already fired for this id
+   * and nothing more can be learned from another poll round.
+   */
+  private resumePollingIfInFlight(status: CheckpointCleanupStatus): void {
+    const inFlight = status.in_flight;
+    if (!inFlight || !inFlight.run_id) {
+      return;
+    }
+    if (this.activeRunId() === inFlight.run_id) {
+      // Already polling this id — nothing to do. The
+      // `activeRunId` match is the source of truth (the
+      // terminal-stop handler nulls `activeRunId` before any
+      // post-terminal refresh fires).
+      return;
+    }
+    // Feedback-loop guard (iter2 review finding 2): if we already
+    // observed a terminal row for this id via a prior poll round,
+    // the terminal handler has fired and any further poll only
+    // re-emits the same terminal value (which the BE has now
+    // caught up with). Suppressing here breaks the
+    // refreshStatus → resume → poll-terminal → terminal-handler
+    // → refreshStatus loop that a BE-side `in_flight`-retained
+    // window would otherwise trigger.
+    const last = this.lastExecuteResult();
+    if (
+      last &&
+      last.run_id === inFlight.run_id &&
+      (last.status === 'succeeded' ||
+        last.status === 'failed' ||
+        last.status === 'interrupted')
+    ) {
+      return;
+    }
+    this.service.clearLastError();
+    this.activeRunId.set(inFlight.run_id);
+    this.startPolling(inFlight.run_id);
   }
 
   /**
@@ -329,8 +400,12 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     this.service.execute(payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (body: CheckpointCleanupExecute) => {
         this.activeRunId.set(body.run_id);
+        // Fix commission 2026-09-29 — pass the 202 body's
+        // `expected_duration_ms_hint` through to `startPolling` so
+        // the service can size the active poll budget
+        // (`max(hint × N, floor)`) per the new contract.
         this.expectedDurationHintMs.set(body.expected_duration_ms_hint);
-        this.startPolling(body.run_id);
+        this.startPolling(body.run_id, body.expected_duration_ms_hint);
       },
       error: (err: MaintenanceErrorBody) => {
         // AM-14, AM-17 — 409-adoption. If `run_in_flight` carries a
@@ -343,6 +418,8 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
           this.service.clearLastError();
           this.activeRunId.set(adoptedRunId);
           // No snack-bar for this case — ride along UX.
+          // No hint is available on the 409 body; the service
+          // defaults to the floor budget.
           this.startPolling(adoptedRunId);
           return;
         }
@@ -353,10 +430,13 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     });
   }
 
-  private startPolling(runId: string): void {
+  private startPolling(runId: string, hintMs: number | null = null): void {
     // AM-6 — poll terminates on `succeeded | failed | interrupted`.
+    // Fix commission 2026-09-29 — `hintMs` plumbs through to the
+    // service so the active budget is hint-sized; the post-cap
+    // backoff phase keeps polling until terminal or teardown.
     this.pollSub?.unsubscribe();
-    this.pollSub = this.service.pollRun(runId).subscribe({
+    this.pollSub = this.service.pollRun(runId, undefined, hintMs).subscribe({
       next: (run: CheckpointCleanupRun) => {
         this.lastExecuteResult.set(run);
         if (
@@ -447,10 +527,16 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   /**
    * Item 4 / Item 20 — error code → human label for the inline banner.
    * Curated mapping for codes with stable UX copy; everything else
-   * renders verbatim (the raw code string). The display sentinel
-   * `'poll_stale'` is the FE-only label for an FE poll-timeout
-   * (mapped from the wire body via `displayErrorCode()`). It is
-   * NEVER sent over the wire — only displayed.
+   * renders verbatim (the raw code string).
+   *
+   * Fix commission 2026-09-29 — the FE-only `'poll_stale'` sentinel
+   * (mapped from a poll-timeout body carrying
+   * `details.fe_synthesized_poll_timeout: true`) is REMOVED. The
+   * service no longer synthesizes a poll-timeout error — the
+   * post-cap backoff phase keeps polling until terminal, so the
+   * UI never surfaces a stale-poll dead-end. The `MaintenanceDisplayCode`
+   * type still carries `'poll_stale'` for backward compat (no
+   * emitter exists), but no production code path triggers it.
    *
    * Item 20 — `errorLabel()` table lookup via `Partial<Record<...>>`
    * keeps the curated labels in one place; adding a code = adding a
@@ -458,7 +544,6 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
    */
   private static readonly ERROR_LABEL_MAP: Partial<Record<string, string>> = {
     internal_error: 'Internal server error',
-    poll_stale: 'Polling timed out — check daemon logs',
   };
 
   errorLabel(code: string): string {
@@ -466,23 +551,15 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Item 4 — derive the FE display code from the wire body. Branches
-   * a poll-timeout body (wire `error: 'not_initialized'` +
-   * `details.fe_synthesized_poll_timeout: true`) into the FE-only
-   * `'poll_stale'` sentinel. All other bodies surface verbatim. This
-   * is the discriminator the banner uses to render
-   * "FE-gave-up" vs "BE-said".
+   * Item 4 — derive the FE display code from the wire body. With
+   * the FE-synthesized poll-timeout marker removed (fix commission
+   * 2026-09-29), the marker-based branch into `'poll_stale'` is
+   * gone — every body surfaces verbatim. This function is now a
+   * thin pass-through over `lastError().error`.
    */
   displayErrorCode(): MaintenanceDisplayCode | '' {
     const err = this.lastError();
-    if (!err) {
-      return '';
-    }
-    const marker = err.details?.['fe_synthesized_poll_timeout'];
-    if (marker === true) {
-      return 'poll_stale';
-    }
-    return err.error;
+    return err ? err.error : '';
   }
 
   /** AM-6 — interrupted-state render guard. */

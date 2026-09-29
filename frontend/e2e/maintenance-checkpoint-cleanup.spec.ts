@@ -19,7 +19,7 @@
  *   - Daemon canary (`/availability` → `state:'ready'`) gates every
  *     destructive test — if the canary fails, the spec skips.
  *
- * 14 test cases per the plan T7.2 outline.
+ * 15 test cases per the plan T7.2 outline + fix commission 2026-09-29.
  */
 
 import { test, expect, type APIRequestContext, type Browser, type Page } from '@playwright/test';
@@ -255,7 +255,7 @@ async function navigateToMaintenance(page: Page) {
 
 // ── Suite ────────────────────────────────────────────────────────────────
 
-test.describe('Maintenance — Checkpoint Cleanup (14 cases, AM-16 amendments)', () => {
+test.describe('Maintenance — Checkpoint Cleanup (15 cases, AM-16 amendments + fix commission 2026-09-29)', () => {
   test.beforeAll(async () => {
     const ready = await isDaemonReady();
     test.skip(!ready, 'Maintenance backend not eligible on this dev daemon — skipping destructive-path e2e.');
@@ -631,5 +631,193 @@ test.describe('Maintenance — Checkpoint Cleanup (14 cases, AM-16 amendments)',
     // The global banner renders ABOVE the cards.
     await expect(page.locator('[data-testid="ck-banner-disabled"]')).toBeVisible();
     await expect(page.locator('[data-testid="ck-banner-disabled"]')).toContainText('MAINTENANCE_ENDPOINTS_ENABLED');
+  });
+
+  // ── 15. poll-budget + backoff continuation: a run that outlives the budget and completes later transitions the UI to success (ORIGINAL SYMPTOM DEAD) ─
+  // The 2026-09-29 incident: a 12m33.5s cleanup run on
+  // ckpt-20260929_045639524546-3f6e42a4 surfaced as
+  // `poll_stale` dead-end (FE-synthesized) at the 10-min hard cap.
+  // This test proves the NEW contract:
+  //   (a) the FE no longer synthesizes a poll-timeout error past
+  //       the budget,
+  //   (b) the post-cap BACKOFF phase keeps polling until terminal,
+  //   (c) a run that outlives the budget AND completes later
+  //       transitions the UI to success,
+  //   (d) the page-refresh re-entry branch (status.in_flight)
+  //       resumes polling against the in-flight run.
+  //
+  // Approach: Playwright `page.clock` (clock.install +
+  // fastForward/runFor). The active budget is `max(hint × 2, 15
+  // min floor)` = 900_000 ms (15 min) at the production cadence.
+  // We advance VIRTUAL time past the 15-min boundary in a single
+  // fastForward(900_000) — that fires the 450 active-phase polls
+  // (2-s cadence) plus the `takeUntil(timer(900000))` terminator,
+  // transitioning the FE into the BACKOFF phase. We then drive a
+  // few more minutes of virtual time into the BACKOFF phase
+  // before flipping the route to return terminal — proving the
+  // post-cap continuation works end-to-end with NO production
+  // seam (no test-only budget override, no POLL_INTERVAL_MS
+  // shim).
+  //
+  // NOTE — page.clock.install runs in the browser and patches
+  // Date + setTimeout + setInterval. zone.js patches the same
+  // primitives; the two patchers compose (zone.js wraps the
+  // fake setTimeout, so RxJS `timer(0, intervalMs)` schedules
+  // against the fake clock and `fastForward` fires the timers).
+  // The route handler is synchronous in the Playwright driver,
+  // so each timer that fires the HTTP request is answered
+  // synchronously.
+  //
+  // Wrong-math pin (iter2 review finding 1, was: "10-min / 2-s =
+  // 5 polls"): 10 min = 600_000 ms; 600_000 / 2000 = 300 polls
+  // is the OLD cap's poll count. KEEP_RUNNING_COUNT for the
+  // virtual-clock harness must exceed the active-phase poll
+  // count (450 at 15-min budget) AND the first backoff polls
+  // (≈ 30 in 5 min at the 2-s/2-s/4-s/... cadence) so the
+  // run stays non-terminal across the entire test.
+  test('15. post-budget continuation: a run that outlives the budget and completes later transitions the UI to success (ORIGINAL SYMPTOM DEAD)', async ({ page }) => {
+    const RUN_ID = 'ckpt-20260929_045639524546-3f6e42a4';
+    // Install the virtual clock BEFORE navigation. Best practice
+    // per the Playwright clock docs — load the page against the
+    // fake clock so any setup-time setTimeout calls also queue
+    // against the fake clock.
+    await page.clock.install({ time: new Date('2026-09-29T00:00:00Z') });
+
+    let pollCount = 0;
+    // `succeedOnNext` flips on once we want the next /runs/{id}
+    // response to be terminal. The route handler is sync, so the
+    // very next poll after the flip returns SUCCEEDED.
+    let succeedOnNext = false;
+
+    await page.route('**/api/maintenance/checkpoint-cleanup/dry-run', (route) =>
+      route.fulfill({ json: DRY_RUN_FIXTURE, status: 200 }),
+    );
+    await page.route('**/api/maintenance/checkpoint-cleanup/execute', (route) =>
+      route.fulfill({
+        json: {
+          run_id: RUN_ID,
+          status: 'running',
+          started_at: new Date().toISOString(),
+          advisory: null,
+          // Hint sized so the active budget lands on the
+          // POLL_BUDGET_FLOOR (15 min): hint × N = 412 × 2 = 824
+          // ms < 900_000 ms floor → max wins, budget = 900 s.
+          expected_duration_ms_hint: 412,
+        },
+        status: 202,
+      }),
+    );
+    await page.route(`**/api/maintenance/checkpoint-cleanup/runs/${RUN_ID}`, (route) => {
+      pollCount++;
+      if (succeedOnNext) {
+        return route.fulfill({
+          json: {
+            ...RUN_RUNNING,
+            run_id: RUN_ID,
+            status: 'succeeded',
+            completed_at: new Date().toISOString(),
+            summary: RUN_SUCCEEDED.summary,
+          },
+          status: 200,
+        });
+      }
+      return route.fulfill({ json: { ...RUN_RUNNING, run_id: RUN_ID }, status: 200 });
+    });
+    await page.route('**/api/maintenance/checkpoint-cleanup/status', (route) =>
+      route.fulfill({ json: STATUS_LAST_RUN_DESTRUCTIVE, status: 200 }),
+    );
+
+    await navigateToMaintenance(page);
+    // Let the page bootstrap microtasks + Angular zone tasks
+    // drain against the fake clock.
+    await page.clock.runFor(200);
+    await page.locator('[data-testid="ck-dry-run-btn"]').click();
+    await page.clock.runFor(200);
+    await page.waitForSelector('[data-testid="ck-dry-would-free"]');
+    await page.locator('[data-testid="ck-execute-btn"]').click();
+    await page.clock.runFor(200);
+    await page.locator('app-confirm-dialog button:has-text("Cleanup now")').click();
+    await page.clock.runFor(200);
+    // AM-12 — "Expected duration" copy appears; verifies the
+    // execute path landed and the polling subscription is live.
+    await expect(page.locator('[data-testid="ck-expected-duration"]')).toBeVisible();
+
+    // Wait for the first poll to fire (real-time poll; expect.poll
+    // uses real wall time). At t=0 the timer fires immediately,
+    // so this is fast.
+    await expect.poll(() => pollCount, { timeout: 5_000 }).toBeGreaterThan(0);
+    const pollsAtBudgetEntry = pollCount;
+
+    // CROSS THE BUDGET. `fastForward` fires due timers AT MOST
+    // ONCE per call (Playwright clock docs: "Only fires due
+    // timers at most once") — so a single fastForward(900_000)
+    // advances the clock by 15 min but fires only ONE setInterval
+    // tick + the takeUntil terminator. To drive 449 active-phase
+    // ticks + the budget terminator, we loop fastForward(2000) for
+    // each 2-s step. Measured wall-time of 450× fastForward(2_000)
+    // is ~3 s — well within the test budget. The terminal-handler
+    // side effect (post-terminal refreshStatus → resume guard) is
+    // exercised too (FE retains lastExecuteResult as terminal; the
+    // new guard from finding 2 blocks the would-be loop).
+    for (let i = 0; i < 450; i++) {
+      await page.clock.fastForward(2000);
+    }
+    // After the loop, the active budget (900_000 ms) has elapsed
+    // and the takeUntil terminator has fired → activePhase
+    // completed → backoffPhase seeded via defer() (the outer
+    // `timer(intervalMs)` waits 2 s before the first backoff
+    // poll). ~450 polls should have fired during the loop (449
+    // pre-budget ticks + the t=0 tick already counted in
+    // pollsAtBudgetEntry).
+    await expect
+      .poll(() => pollCount - pollsAtBudgetEntry, { timeout: 5_000 })
+      .toBeGreaterThan(400);
+
+    // ORIGINAL-SYMPTOM-DEAD assertion (1): the FE MUST NOT render
+    // an error banner — the OLD contract surfaced
+    // `fe_synthesized_poll_timeout` → `poll_stale` here. The new
+    // contract has no synthesized error; lastError stays null and
+    // the banner never renders.
+    await expect(page.locator('[data-testid="ck-error-banner"]')).toHaveCount(0);
+    // The active-run-id indicator is still visible — the FE is
+    // tracking the run, not erroring out.
+    await expect(page.locator('[data-testid="ck-active-run-id"]')).toBeVisible();
+
+    // DRIVE INTO THE BACKOFF PHASE. The backoff phase's outer
+    // timer waits intervalMs (= 2 s) for the first post-budget
+    // poll; subsequent expand-driven waits ramp 2 s, 4 s, 6 s,
+    // ..., up to the 30-s ceiling. We loop fastForward(2_000) for
+    // ~150 iterations to cover 5 min of backoff cadence — well
+    // past the first ~5 backoff polls.
+    for (let i = 0; i < 150; i++) {
+      await page.clock.fastForward(2000);
+    }
+    await expect(page.locator('[data-testid="ck-error-banner"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="ck-active-run-id"]')).toBeVisible();
+
+    // Flip the route — the next /runs/{id} response is the
+    // terminal value.
+    succeedOnNext = true;
+    // Fast-forward enough for at least one more backoff poll to
+    // fire (backoff ceiling is 30 s; we step 30 × 2 s = 60 s of
+    // virtual time to cover the longest backoff step).
+    for (let i = 0; i < 30; i++) {
+      await page.clock.fastForward(2000);
+    }
+
+    // ORIGINAL-SYMPTOM-DEAD assertion (2): the terminal value
+    // surfaces in the FE — the post-budget continuation reaches
+    // the run's actual terminal state and the result panel
+    // renders "succeeded".
+    await expect(page.locator('[data-testid="ck-result"]')).toContainText(
+      'succeeded',
+      { timeout: 10_000 },
+    );
+    // Belt-and-braces: the active-run-id indicator is gone
+    // (executing() flipped false in the terminal handler).
+    await expect(page.locator('[data-testid="ck-active-run-id"]')).toHaveCount(0);
+    // The error banner is still absent — the terminal transition
+    // never surfaces a synthetic error.
+    await expect(page.locator('[data-testid="ck-error-banner"]')).toHaveCount(0);
   });
 });
