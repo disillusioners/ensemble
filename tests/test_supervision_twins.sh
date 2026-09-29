@@ -261,6 +261,18 @@ section "C — cgroup-leaf parse twins (the ~6-line duplication)"
 
 # C1. REAL-shape agreement: every readable /proc/<pid>/cgroup on this host
 #     yields the same leaf from both twins' parsers.
+#     M2 (review cycle 1 fixback — de-flake): the leg used to let each
+#     twin's parser do its OWN /proc/<pid>/cgroup read; a pid EXITING
+#     between the python and shell reads produced leaf-vs-<none> and
+#     counted as DRIFT (observed 1/168). The pid-taking twin functions
+#     hardcode /proc and admit no content injection (stubbing them would
+#     void the pin), so the same-bytes guarantee is enforced AROUND the
+#     leg instead: the file is snapshotted BEFORE, both REAL parsers run,
+#     and the file is re-read AFTER — a vanished pid or a changed cgroup
+#     mid-leg is SKIP-not-drift (the drift guard must not cry wolf); only
+#     a stable-content disagreement between the real parsers counts.
+#     Both-parse-empty normalizes to agreement (shell "" and python
+#     "<none>" are the same no-leaf verdict on identical bytes).
 py_leaf_of_pid() { # <pid>
     python3 - "$REPO_ROOT" "$1" <<'PYEOF'
 import importlib.machinery, importlib.util, types, sys
@@ -284,19 +296,31 @@ sh_leaf_of_pid() { # <pid> — the shell twin's parse, verbatim from lib.sh
     ' _ "$UPGRADE_DIR/lib.sh" "$1"
 }
 
-AGREE=0; DISAGREE=0; UNREADABLE=0
+AGREE=0; DISAGREE=0; UNREADABLE=0; VANISHED=0
 for pid in $(pgrep -u "$(id -u)" | head -60); do
-    [ -r "/proc/$pid/cgroup" ] || { UNREADABLE=$((UNREADABLE + 1)); continue; }
+    snap_before="$(cat "/proc/$pid/cgroup" 2>/dev/null || true)"
+    if [ -z "$snap_before" ]; then
+        UNREADABLE=$((UNREADABLE + 1)); continue
+    fi
     pl="$(py_leaf_of_pid "$pid")"
     sl="$(sh_leaf_of_pid "$pid")"
+    snap_after="$(cat "/proc/$pid/cgroup" 2>/dev/null || true)"
+    if [ -z "$snap_after" ] || [ "$snap_before" != "$snap_after" ]; then
+        # the pid left (or its cgroup migrated) between the parsers'
+        # reads — the parsers did NOT necessarily see the same bytes;
+        # not a drift signal
+        VANISHED=$((VANISHED + 1)); continue
+    fi
+    [ -n "$pl" ] || pl="<none>"
+    [ -n "$sl" ] || sl="<none>"
     if [ "$pl" = "$sl" ]; then
         AGREE=$((AGREE + 1))
     else
         DISAGREE=$((DISAGREE + 1))
-        printf 'C1 DRIFT at pid %s: python=%s shell=%s\n' "$pid" "$pl" "$sl" >&2
+        printf 'C1 DRIFT at pid %s (stable content): python=%s shell=%s\n' "$pid" "$pl" "$sl" >&2
     fi
 done
-[ "$DISAGREE" -eq 0 ] && _pass "C1 real-pid parse agreement ($AGREE pids agree, $UNREADABLE unreadable)" \
+[ "$DISAGREE" -eq 0 ] && _pass "C1 real-pid parse agreement ($AGREE pids agree, $UNREADABLE unreadable, $VANISHED vanished-mid-leg skipped)" \
     || _fail "C1 real-pid parse agreement" "0 drifts" "$DISAGREE drifts"
 [ "$AGREE" -gt 0 ] && _pass "C1 at least one real pid exercised" \
     || _fail "C1 at least one real pid exercised" ">0" "0"
