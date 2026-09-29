@@ -1,5 +1,14 @@
 # Test Packs
 
+## Completed commission — FE POLL-TERMINAL-STATE FINAL VERIFICATION GATE (2026-09-29)
+
+Branch `fix/fe-poll-terminal-state` @ **`0d20480c`** (commits `10f1b9ab`+`0d20480c`; base `b56a1a7e`), worktree `/home/nea/ensemble-src-fe-poll-fix`. **VERDICT: PASS — READY TO MERGE. Reviewer-flagged unverified claim (E2E 15/15) closed by real execution: 15/15 in 1.6m, test 15 (original-symptom closure, exact incident run_id) ✓ 14.1s; units 109/109 (51+58) in 3.995s; scope 7 files ALL frontend/ (zero backend); test 15 judged GENUINELY PINS (3-checkpoint DOM assertions: post-budget continuation ×2, zero-error-banner ×3, terminal `succeeded` surfaces); A/B base-red leg SKIPPED-documented (uv-venv fiddle; would-fail structurally forced — pre-fix `poll_stale` banner contradicts zero-banner assertions). Zero source mods, zero commits, live :9797 untouched, ports 8099/4299/15432 freed.** Full report: `RESULTS/2026-09-29-fe-poll-terminal-state-final-gate.md`.
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `fe_poll_e2e15` | worktree frontend/; parent env `ENSEMBLE_DB_DSN=<:15432 disposable>` + dummy key + `PATH=/home/nea/.local/bin:/usr/lib/postgresql/16/bin:$PATH`; `timeout 300 npx playwright test -c playwright.maintenance.config.ts maintenance-checkpoint-cleanup --project maintenance --reporter=list` (positional BEFORE `--project` — variadic trap, LESSONS 2026-09-28) | 15-case gate incl. symptom-closure test 15 | ✅ 15/15, 0 skipped, 0 retries, 1.6m; test 15 ✓ 14.1s; ports freed |
+| `fe_poll_unit109` | `CI=true timeout 300 npx jest <service.spec.ts> <component.spec.ts> --watch=false --verbose` | FE unit pair incl. 6 cadence-pinning | ✅ 109/109 (51+58), 0 skipped, 3.995s |
+
 ## Completed commission — CHECKPOINT-CLEANUP INT4-OVERFLOW CLOSING GATE (2026-09-28)
 
 Branch `fix/checkpoint-cleanup-int4-overflow` @ **`0386c344`** (commits `0179f11e`+`0386c344`; base `64da8806` = latest). **VERDICT: PASS — READY TO MERGE. Original symptom DEAD (incident value 27,233,813,846 through full execute path → 202 + terminal `succeeded` + persisted `expected_bytes`); W1 real-widening gate green; zero branch-caused failures; sole sweep red proven base-identical.** Full report: `RESULTS/2026-09-28-checkpoint-cleanup-int4-overflow-verification.md`. All packs env-scrubbed via the NEW `scripts/run_tests_scrubbed.sh` (family-wide POSTGRES_* echo-verify, exit-78 on leak — functionally proven here); every run `timeout`-wrapped; zero source mods, zero commits (9 workers).
