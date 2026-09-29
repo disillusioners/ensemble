@@ -47,7 +47,7 @@ moves an install from row 3 to row 4.
 | 1 | **script × macOS** | The byte-identical no-systemd arm: classifier short-circuits before ANY `/proc` / `/run` read (P1 guard discipline — `supervision_classify` non-Linux gate; python twin `supervision_detect` same). Launcher lineage self-respawns; launchd plist (`scripts/ensemble-prod.plist`) owns boot-restart where installed. | **Nothing on this row — by design.** `adopt-unit.sh` REFUSES non-Linux (step b). A1 naming only (`SCRIPT_NOHUP` = conforming). | `tests/test_supervision_classify.sh` §5 (Darwin uname stub: ZERO /proc reads, auto + explicit-unit arms); `tests/test_supervision_stop_handback.sh` A′4 (BSD degrade-loud stop fallback) + C10 (hand-back degrades LOUD to nohup); `tests/test_adopt_unit.sh` (b1) non-Linux refusal; `tests/unit/tools/test_supervision_python.py` 8d (platform guard cells). |
 | 2 | **script × ubuntu (no systemd)** | The SAME byte-identical arm: `/run/systemd/system` absent → classifier returns `SCRIPT_NOHUP` without further reads; launcher backoff loop is the whole supervision story. | **Nothing on this row.** `adopt-unit.sh` refuses (step b host guard — no systemd to adopt into). | `tests/test_supervision_classify.sh` §1a (ladder-top zero-read cells) + the NAMED FENCE "no /run/systemd/system" (the auto-chain's /run-absent early return IS this row's classifier shape — the suite exercises it live on hosts without the marker, fences it with the name on hosts that have it); `tests/test_supervision_stop_handback.sh` A′1–A′3 (byte-identical pid-path arms, zero systemctl calls); `tests/test_adopt_unit.sh` (b2) ADOPT_SYSTEMD_RUN_DIR refusal. |
 | 3 | **script × ubuntu (systemd present, NOT adopted) — TODAY'S LIVE TOPOLOGY** | systemd exists but the install runs as a direct/nohup lineage; cgroup leaf = `session-*`/user-slice → verified `SCRIPT_NOHUP`; declared `auto` → **conforming** (A1). This is ensemble-vm live (port = live port) TODAY. | **A documented, one-command graduation path** (this runbook + `adopt-unit.sh`), plus the P3 in-promote self-heal: with a unit configured (`ENSEMBLE_RESTART_UNIT`), the next promote's hand-back moves the install INTO the unit (scope→unit / script→unit). | `tests/test_supervision_classify.sh` §2 (§0 allowlist-strip pin: INVOCATION_ID absent + upgrade-scope cgroup → SCOPE_SURVIVOR, never SCRIPT) + §1b scope-leaf cells + §3h; `tests/test_supervision_stop_handback.sh` C6 (scope-no-unit → nohup byte-identical + WARN, zero systemctl) + C5 (scope→unit self-heal + `supervision_handback` journal event, outcome=degraded); `tests/test_supervision_twins.sh` (ladder agreement incl. the scope leaf); `tests/test_supervision_e2e.sh` E3 (real scope-survivor heal under real systemd). |
-| 4 | **service × ubuntu (systemd substrate) — THE NEW PATH** | Before P4: reachable ONLY by hand-provisioning a unit (the `ensemble-live.service` precedent on ensemble-vm — out-of-repo, incident doc §5). | **The adoption lane (P4):** static base template (`scripts/systemd/ensemble-daemon.service`) + `scripts/upgrade/adopt-unit.sh` generation from CURRENT install config + verified handover (polkit-gated, fail-loud, rollback documented below). Declared `unit` × verified `UNIT_MANAGED` = conforming; P3 unit hand-back keeps the unit across promotes (NO nohup fallback — Amendment #1). **Layered on top of P4 (commission v0.16.6 component 2, 2026-09-29): the 3-layer adoption protocol (Layer i settle-check + Layer ii mutex + Layer iii this runbook) closes the racy-precondition class proven by incident `r-20260929-170301-0cb2`.** | `tests/test_adopt_unit.sh` (all arms: refusals a/b/c, naming table, DRY_RUN unit content + %h rule + secret masking + zero mutations; **plus the v0.16.6 component 2 additions**: preflight settle-check (L1) + pipeline lock + adoption marker write/clear); `tests/test_supervision_stop_handback.sh` A (unit-path stop incl. b″ respawn sim + escalation + fail-loud) + C1–C4 (hand-back happy/stale/timeout/start-fail — NO nohup fallback) + C7–C9 (comp7 a′); `tests/test_supervision_journal.sh` J3 (halt-B4 stamped open txn); `tests/test_supervision_e2e.sh` E1 (boot under a real service: INVOCATION_ID + livez + UNIT_MANAGED boot advisory) + E2 (full real promote under the unit: classify → unit-stop → hand-back NEW-MainPID verify → commit) — the DR-4 leg (e) drill, `upgrade-drills.md` §5(e). **New for v0.16.6 component 2**: `tests/test_release_journal.sh` §15 (pipeline_settled reason-token matrix) + §16 (mutex/lock-held path) + §17 (adoption marker preflight + clear path) — see §10 below. |
+| 4 | **service × ubuntu (systemd substrate) — THE NEW PATH** | Before P4: reachable ONLY by hand-provisioning a unit (the `ensemble-live.service` precedent on ensemble-vm — out-of-repo, incident doc §5). | **The adoption lane (P4):** static base template (`scripts/systemd/ensemble-daemon.service`) + `scripts/upgrade/adopt-unit.sh` generation from CURRENT install config + verified handover (polkit-gated, fail-loud, rollback documented below). Declared `unit` × verified `UNIT_MANAGED` = conforming; P3 unit hand-back keeps the unit across promotes (NO nohup fallback — Amendment #1). **Layered on top of P4 (commission v0.16.6 component 2, 2026-09-29): the 3-layer adoption protocol (Layer i settle-check + Layer ii mutex + Layer iii this runbook) closes the racy-precondition class proven by incident `r-20260929-170301-0cb2`.** | `tests/test_adopt_unit.sh` (all arms: refusals a/b/c, naming table, DRY_RUN unit content + %h rule + secret masking + zero mutations); `tests/test_supervision_stop_handback.sh` A (unit-path stop incl. b″ respawn sim + escalation + fail-loud) + C1–C4 (hand-back happy/stale/timeout/start-fail — NO nohup fallback) + C7–C9 (comp7 a′); `tests/test_supervision_journal.sh` J3 (halt-B4 stamped open txn); `tests/test_supervision_e2e.sh` E1 (boot under a real service: INVOCATION_ID + livez + UNIT_MANAGED boot advisory) + E2 (full real promote under the unit: classify → unit-stop → hand-back NEW-MainPID verify → commit) — the DR-4 leg (e) drill, `upgrade-drills.md` §5(e). **New for v0.16.6 component 2**: `tests/test_release_journal.sh` §15 (pipeline_settled reason-token matrix) + §16 (Layer-ii mutex: stop-ensemble.sh acquire + PIPELINE_LOCK_HELD_BY_CALLER escape + --force pre-parse all positions) + §17 (adoption marker preflight + clear path) — see §10 below. **`tests/test_adopt_unit.sh` is UNCHANGED for v0.16.6 component 2** — it pins the MUTATION-mode refusal surface only (a/b/c + naming + DRY_RUN), which is the same surface the 3-layer protocol inherits (no new mutation-mode lock/marker integration). MUTATION-mode lock/marker integration coverage lives in the NAMED FENCE `tests/test_release_journal.sh` §19 — a real-systemd host is required to exercise the lock+marker acquisition under the actual unit lifecycle, and the suite emits a `SKIP(no-systemd-host)` when that host is absent (no faked pass). |
 | 5 | **service × macOS (launchd) — documented FUTURE scope** | `scripts/ensemble-prod.plist` (daemon) + `scripts/watchdog-watcher.plist` (watchdog) exist as launchd substrates. | **Nothing — FUTURE scope by decision.** The A1/A2 vocabulary (declared×verified) is substrate-neutral; a launchd adoption tool would slot here. Not commissioned. | Named future-scope fence: `tests/test_supervision_e2e.sh` FENCE "no /run/systemd/system (non-systemd host)" (all legs counted-SKIP, never FAIL) + `tests/test_supervision_stop_handback.sh` C10 (a UNIT_MANAGED classification on a non-Linux host degrades LOUD to nohup — the safe intersection while launchd is unbuilt). |
 
 *(Test ids filled by P5 (2026-09-29): every row is covered by stub-driven
@@ -220,9 +220,12 @@ shape MUST consume the same helpers.
 
 ## 3b. `--force` override on stop-ensemble.sh (operator emergency only)
 
-`scripts/stop-ensemble.sh` accepts a single `--force` flag (any position
-from arg 3 onward; non-destructive to the existing positional `<dir>
-<port>` usage). On `--force`:
+`scripts/stop-ensemble.sh` accepts a single `--force` flag in **any
+position** of the argv (the m2 pre-parse walk extracts it from the full
+`$@`, so `--force <dir>`, `<dir> --force`, `--force <dir> <port>`, and
+`<dir> <port> --force` all resolve correctly — `tests/test_release_journal.sh`
+§16c pins all four forms; the legacy `<dir> <port>` no-flag form leaves
+`STOP_FORCE=0` and both remaining slots intact). On `--force`:
 
 - The Layer-i settle-check refusal is BYPASSED with a LOUD warning
   printed to stderr:
@@ -254,6 +257,33 @@ Risks:
 already refuses on a running daemon (step a) and an UNSETTLED pipeline
 (Layer i); refusing to adopt over a live pipeline is the same defense
 surface — the lock IS the live pipeline.
+
+### `PIPELINE_LOCK_HELD_BY_CALLER=1` (env-var escape — trust-assumption statement)
+
+`stop-ensemble.sh` also honors the **env var** `PIPELINE_LOCK_HELD_BY_CALLER=1`,
+which SKIPS BOTH the Layer-i settle-check AND the Layer-ii lock-acquire.
+This is `--force`-equivalent in safety: any caller can set the env var
+and bypass both gates silently.
+
+**TRUST ASSUMPTION: ONLY `lib.sh stop_via_stop_script` (the in-pipeline
+caller inside `promote.sh` / `rollback.sh` / `restart.sh`) may set this
+env var.** It exists because every in-pipeline stop call already holds
+the rollback.lock.d — without the escape, every promote would busy-wait
+15s on the lock the parent already holds (every promote would deadlock
+on its own stop span). The env var is the only shape that lets the
+parent flag the child without changing the argv.
+
+**External use is equivalent to `--force`** — there is no audit trail
+(env var does not show in shell history). The script emits a LOUD
+two-line stderr WARN at the honor site (`stop-ensemble.sh:178-181`,
+commission v0.16.6 c2 fix-back) the moment the env var is honored, so
+a misconfigured / foreign caller cannot silently sidestep the gates.
+
+**Operator preference: pass `--force` explicitly for any operator
+emergency.** It is auditable in shell history, the bypass warnings are
+more granular (settle-bypass vs lock-busy-bypass), and there is no
+in-pipeline-call ambiguity. Reach for `PIPELINE_LOCK_HELD_BY_CALLER=1`
+ONLY if you are inside `lib.sh stop_via_stop_script`.
 
 ---
 
@@ -447,6 +477,8 @@ the wrapper stays the single home for the journal unit battery).
 
 | Suite section | Subject | Refs |
 |---|---|---|
-| §15 — `pipeline_settled` reason-token matrix | Each of the 8 settle refusal tokens fires exactly once with the named token; happy path returns 0 silently. | This runbook §3a; `scripts/upgrade/lib.sh` `pipeline_settled`. |
-| §16 — Layer-ii mutex (adopt + stop) | Adopt takes the lock; concurrent promote_entry_check fails; `--force` overrides with loud warning; `PIPELINE_LOCK_HELD_BY_CALLER=1` escape path keeps promote's in-pipeline stop call lock-free. | This runbook §3a/§3b; `scripts/upgrade/lib.sh` `lock_acquire`. |
+| §15 — `pipeline_settled` reason-token matrix | Each of the 7 settle refusal tokens fires exactly once with the named token; the no-journal case asserts the NEW INFO contract (rc 0 + INFO line, NOT a `reason=no-journal:` refusal — see fix-back cycle); happy path returns 0 silently. | This runbook §3a; `scripts/upgrade/lib.sh` `pipeline_settled`. |
+| §16 — Layer-ii mutex (adopt + stop) | Adopt takes the lock; concurrent promote_entry_check fails; `--force` overrides with loud warning; `PIPELINE_LOCK_HELD_BY_CALLER=1` escape path keeps promote's in-pipeline stop call lock-free (and emits a LOUD stderr WARN at the honor site — see §3b). | This runbook §3a/§3b; `scripts/upgrade/lib.sh` `lock_acquire`. |
 | §17 — Adoption-marker preflight + clear | `adopt-unit.sh` writes the marker pre-mutation; promote preflight refuses with `adoption-in-progress` reason; verify-success path clears; stale-marker manual removal path. | This runbook §3c; `scripts/upgrade/lib.sh` `promote_entry_check`, `adoption_marker_*`. |
+| §18 — stage.sh uv hard-refuse (fix-back add) | PATH-scrubbed + HOME-overridden stage.sh invocation refuses (78) when neither `command -v uv` nor `$HOME/.local/bin/uv` resolves; the remedy text is asserted. | `scripts/upgrade/stage.sh` (refuse gate). |
+| §19 — adopt-unit MUTATION-mode lock/marker integration (NAMED FENCE; deferred when host lacks systemd) | Under a real-systemd host, `adopt-unit.sh` in MUTATION mode (DRY_RUN=0) acquires `rollback.lock.d`, writes the adoption-in-progress marker, runs the install/enable/daemon-reload sequence, clears the marker on verify success, releases the lock — pinned end-to-end. Hosts WITHOUT systemd emit `SKIP(no-systemd-host)` (no fake pass). | `scripts/upgrade/adopt-unit.sh` (MUTATION-mode lifecycle). |
