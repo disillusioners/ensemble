@@ -1,0 +1,93 @@
+# ============================================================================
+# scripts/systemd/ensemble-daemon.service — STATIC BASE template for the
+# Ensemble systemd instance unit (supervision-detection commission P4,
+# 2026-09-29).
+# ============================================================================
+# THIS FILE IS A TEMPLATE — NEVER INSTALLED AS-IS. scripts/upgrade/
+# adopt-unit.sh derives the per-install instance unit from it by splicing
+# placeholder tokens (a torn-substitution guard refuses any survivor):
+#
+#   header note token   → provenance comment (generator + date)
+#   label token         → human label (unit name + install dir)   [Description]
+#   user token          → service user (default: adopting user)   [User=]
+#   working-dir token   → install dir — %h-relative when natural  [WorkingDirectory=]
+#   launcher token      → ABSOLUTE path to the EXISTING launcher  [ExecStart=]
+#   env-lines token     → one Environment= line per staged key    (PORT +
+#                         POSTGRES_* read from INSTALL_DIR/.env)
+#
+# (Token literals are deliberately NOT spelled out in this header — a
+# surviving header mention would false-positive the torn-substitution
+# guard and would itself get spliced into noise.)
+#
+# WHY THE LAUNCHER IS THE ExecStart (architect's unit-inert finding, P4
+# ruling): the launcher's exit-code map (0 clean / 75 tempfail / 78 refuse /
+# other crash — launcher.sh classify_exit) and its exponential backoff +
+# burst budget stay IN the loop between systemd restarts. systemd owns
+# crash-level revival (Restart=on-failure); the launcher owns within-life
+# supervision (tempfail pacing, burst abort, exit-78 refusal). The unit adds
+# NO second supervisor around it.
+#
+# Directive rationale — full table + adoption procedure + rollback:
+# docs/runbooks/systemd-adoption.md. Summary:
+#   Type=simple              launcher is a foreground supervisor — no
+#                            forking, no PIDFile; MainPID IS the launcher.
+#   Restart=on-failure       crash-level revival ONLY (`on-success` would
+#                            defeat the launcher's deliberate clean-stop
+#                            exit 0 = operator asked it to stay down).
+#   RestartSec=10            paced restarts; the launcher's own backoff
+#                            (base 10s) covers within-life pacing.
+#   RestartPreventExitStatus=78  exit 78 = refuse (fatal config / missing
+#                            binary / schema refusal) — restarting a refuser
+#                            is a tight loop; the launcher exits 78 precisely
+#                            so the OS supervisor gives up (ADR-010/011).
+#   SuccessExitStatus=143    SIGTERM-forwarded graceful stop (launcher trap
+#                            exits with the child's 143) counts as SUCCESS so
+#                            a clean `systemctl stop` is not a "failure".
+#   KillMode=mixed           TERM to the main process (launcher) only;
+#                            SIGKILL to remaining cgroup members after the
+#                            timeout — preserves the launcher's SINGLE-TERM
+#                            contract (stop-ensemble.sh M2) while bounding
+#                            stragglers. NOT control-group: a cgroup-wide
+#                            TERM would trip uvicorn's force_exit
+#                            (crash-equivalent teardown — the r-f82e shape).
+#   StandardOutput/Error=journal  structured journald capture (service-mode
+#                            ADDS this over file logs — the A4 gap table).
+#   TimeoutStopSec=90        daemon graceful drain ~60s
+#                            (DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS) +
+#                            launcher margin 70s → 90 bounds the systemd
+#                            side (KillMode=mixed escalates after this).
+#   NO WatchdogSec — DEFERRED BY DESIGN (P4 decision; sd_notify is not wired
+#   into the launcher/daemon; a WatchdogSec without notify would be an
+#   unconditional restart loop). See docs/runbooks/systemd-adoption.md.
+#
+# INERT: no real values and no secrets in this file — only placeholders. The
+# generated instance unit carries the substituted PORT + POSTGRES_* values
+# and is installed mode 0600 (root-owned) precisely because it then contains
+# secret env; this template stays safe to commit.
+# ============================================================================
+
+__GENERATED_NOTE__
+
+[Unit]
+Description=Ensemble daemon — __UNIT_LABEL__
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKING_DIRECTORY__
+ExecStart=__LAUNCHER__
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=78
+SuccessExitStatus=143
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=90
+# NO WatchdogSec — deferred by design (see header + systemd-adoption.md).
+__ENV_LINES__
+
+[Install]
+WantedBy=multi-user.target

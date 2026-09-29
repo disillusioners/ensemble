@@ -1547,12 +1547,18 @@ class TestUpgradeJournalSweepService:
         calls = {"n": 0}
 
         def _flaky_append(dir_, event, detail):
+            # A1 supervision-aware: start() fires the boot advisory's
+            # ``supervision_boot`` append BEFORE the reaper's write — it
+            # must neither satisfy the first-fire count nor simulate the
+            # fault. Only the event under test (executor_exit) is flaky.
+            if event != "executor_exit":
+                return
             calls["n"] += 1
             raise OSError(28, "No space left on device")
 
         uj.journal_history_append = _flaky_append  # type: ignore[assignment]
-        svc.start()
         try:
+            svc.start()
             with caplog.at_level(logging.WARNING, logger="daemon.services.upgrade_journal_sweep"):
                 deadline = time.monotonic() + 5.0
                 while time.monotonic() < deadline and calls["n"] == 0:
@@ -1575,6 +1581,11 @@ class TestUpgradeJournalSweepService:
             assert "r-after-oserr" in entry["detail"]
             assert calls["n"] == 1  # no retry of the failed write
         finally:
+            # Restore BEFORE stop(): a failing assert above must never leak
+            # _flaky_append session-wide (it cascade-killed the journal-
+            # writing tests that follow this module). stop() is a safe
+            # no-op even if start() never ran.
+            uj.journal_history_append = real_append  # type: ignore[assignment]
             await svc.stop()
 
     # ── M-1: dedicated waitpid executor (hygiene + isolation) ────────────

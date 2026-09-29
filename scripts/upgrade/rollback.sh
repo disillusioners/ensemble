@@ -95,6 +95,12 @@ fi
 _trap_install_signal_handlers "rollback:preflight"
 lock_heartbeat
 
+# Supervision preflight (ownership-mode P1, 2026-09-29): classify + ONE
+# machine-readable ENSEMBLE_SUPERVISION_RESULT line + explicit-unit
+# exit-78 refusal + the §6 DUAL_FIGHT fault check — PRE-TXN (the rollback
+# txn opens below at the Transaction section; before any stop/flip).
+supervision_preflight
+
 # Re-read the journal under the lock (state may have moved since).
 J="$(journal_read)" || exit 78
 
@@ -124,6 +130,9 @@ if ! journal_open_txn "rollback" "$TO_VERSION"; then
     _warn "an in_flight txn is open — pipeline-busy (resolve it or wait for the sweep)"
     exit 78
 fi
+# P1 §5: stamp supervision additively on the open txn (advisory — a stamp
+# failure never aborts the rollback).
+journal_mark_supervision || _warn "supervision txn stamp failed (advisory — continuing)"
 
 # ── Stop → launcher swap → repoint → restart (D6 + amendment) ───────────────
 lock_heartbeat
@@ -152,7 +161,17 @@ if ! atomic_flip "$TO_VERSION"; then
 fi
 journal_mark_flipped
 lock_heartbeat
-restart_via_launcher
+# P3: supervision-aware hand-back — the P1 classification (consumed from
+# the stop-site globals, never re-derived here) selects the mode. A
+# unit-path hand-back failure returns nonzero (NO nohup fallback —
+# Amendment #1): halt journal event + B4 leave-txn-open (the open
+# flipped txn makes the next launcher start sweep-ROLL-BACK again).
+if ! restart_via_launcher; then
+    _warn "unit hand-back FAILED — halting rollback (txn left open for sweep recovery; NO nohup fallback, never a false success)"
+    journal_history_append halt "manual rollback to $TO_VERSION: unit hand-back failed — halt-for-human, txn left open for sweep recovery (no nohup fallback — Amendment #1)" \
+                              || true   # history is advisory; the open txn IS the B4 contract
+    exit 1
+fi
 
 # ── Short re-gate (livez + readyz + version; no soak) ───────────────────────
 REGATE_FAIL=""

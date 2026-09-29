@@ -21,10 +21,13 @@
 #   _probe                    health-gate probe (2s sleep, curl max-time 5s —
 #                             the same budget as deploy.sh phase 5)
 #
-# Size rationale: ~1927 lines is the single shared substrate for the five
+# Size rationale: ~2875 lines is the single shared substrate for the five
 # entry scripts (stage/promote/rollback/restart/status); splitting would
 # duplicate cross-cutting contracts (journal layout, lock semantics, ENV
-# allowlist, BSD/GNU dispatch). The file is the contract inventory.
+# allowlist, BSD/GNU dispatch). The file is the contract inventory. The
+# recent growth is the supervision-detection section (classify / outcome
+# map / dualfight / unit hand-back) — one twin lives here, the python
+# twin in daemon/tools/upgrade_journal.py.
 #
 # ENV DISCIPLINE (D-FA4.6 + test-strategy §5):
 #   - the resolved triple (INSTALL_DIR / PORT / POSTGRES_DB) is asserted and
@@ -1439,8 +1442,49 @@ stop_via_stop_script() {
         # when lib.sh is sourced from a copied tree, fall back to repo layout
         stop_script="$(pwd)/scripts/stop-ensemble.sh"
     fi
-    _log "stop: ownership-scoped SINGLE-TERM via $stop_script"
-    bash "$stop_script" "$INSTALL_DIR" "$PORT"
+    # P1 §5(b) — the STOP SITE: emit exactly ONE machine-readable
+    # ENSEMBLE_SUPERVISION_RESULT line (the pre-flight already emitted its
+    # own; enforcement stayed there — the stop site NEVER refuses
+    # mid-pipeline, so an unresolved-explicit-unit rc is ignored here).
+    supervision_classify || true
+    # P2 §3 (2026-09-29) — DUAL_FIGHT refuses BEFORE any stop action: no
+    # TERM is sent, no systemctl stop issued. Distinct from the
+    # unresolved-explicit-unit rc ignored above: an unresolvable NAME is a
+    # benign degradation (the script path still stops owned pids
+    # correctly), while a DUAL_FIGHT fault means two masters are live —
+    # stopping via EITHER path could kill the wrong thing or
+    # false-succeed — so the halt path (journal halt event + exit 78,
+    # inside supervision_dualfight_check) is the only safe answer. The
+    # pre-flight already checked; this is the stop-site re-check (state
+    # may have drifted across the run — e.g. promote's rollback stop runs
+    # ~5min after its pre-flight, post flip + restart).
+    supervision_dualfight_check
+    # P2 §1 (b″ fix) — UNIT_MANAGED with a resolvable unit name hands the
+    # classification VALUE to the stop script (machine-line grammar, same
+    # '<state>[:<unit>]' format as the machine line above) so it stops
+    # via `systemctl stop` + a UNIT-STATE poll (a unit-respawned
+    # replacement pid is invisible to a pid poll; the unit state is not).
+    # Every other shape keeps the byte-identical pid-scoped invocation —
+    # no new env reaches the child on the script path.
+    if [ "${SUPERVISION_STATE:-}" = "UNIT_MANAGED" ] && [ -n "${SUPERVISION_UNIT:-}" ]; then
+        _log "stop: UNIT path — systemctl stop ${SUPERVISION_UNIT} + unit-state poll via $stop_script (b″: respawn-invisible-to-pid-poll fix)"
+        # P3: snapshot the unit's PRE-STOP MainPID (behind the same host
+        # guard family as the hand-back; the daemon is still live HERE —
+        # stop_via_stop_script runs pre-stop by contract) —
+        # restart_via_launcher's unit hand-back verifies the post-start
+        # MainPID is NEW (≠ this). Unresolvable → empty (the verify then
+        # requires only a nonzero NEW pid).
+        SUPERVISION_PRESTOP_MAINPID=""
+        if _supervision_host_allows_unit && command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
+            SUPERVISION_PRESTOP_MAINPID="$("$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p MainPID --value 2>/dev/null || true)"
+            [ -n "$SUPERVISION_PRESTOP_MAINPID" ] || SUPERVISION_PRESTOP_MAINPID=""
+        fi
+        ENSEMBLE_SUPERVISION_RESULT="${SUPERVISION_STATE}:${SUPERVISION_UNIT}" \
+            bash "$stop_script" "$INSTALL_DIR" "$PORT"
+    else
+        _log "stop: ownership-scoped SINGLE-TERM via $stop_script"
+        bash "$stop_script" "$INSTALL_DIR" "$PORT"
+    fi
 }
 
 # launcher_swap <ver> — swap INSTALL_DIR/launcher.sh from a release's staged
@@ -1508,6 +1552,135 @@ atomic_flip() {
     return 0
 }
 
+# ── Supervision-aware hand-back (P3, ownership-mode commission 2026-09-29) ───
+#
+# STUB SEAM (P2/P5 — mirrors scripts/stop-ensemble.sh:323): EVERY systemctl
+# interaction on the lib.sh side routes through SYSTEMCTL_BIN (default
+# 'systemctl' — PATH-resolved, so PATH-injected stubs work exactly like the
+# comp7 suite's systemctl stubs). Point SYSTEMCTL_BIN at a script to drive
+# scripted sequences: hand-back failure→halt-NO-fallback, is-active
+# sequences, MainPID changes (P5 will script all of these).
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
+
+# _supervision_host_allows_unit — the shared host guard for every unit
+# hand-back path: Linux + a live systemd ONLY. The uname check runs FIRST
+# so non-Linux hosts take zero new /proc or /run reads (P1 guard
+# discipline — the BSD/macOS arms stay byte-identical).
+_supervision_host_allows_unit() {
+    [ "$(uname -s)" = "Linux" ] || return 1
+    [ -d /run/systemd/system ] || return 1
+    return 0
+}
+
+# _supervision_unit_serving <unit> <prestop_pid> — hand-back VERIFIER.
+# Polls (deadline-bounded by LIVEZ_BUDGET_S, lock-heartbeat every
+# iteration — the _probe precedent) until the unit's MainPID is a NEW
+# nonzero pid — ≠ <prestop_pid> whenever one was captured — AND the port
+# is serving (lsof conjunct, PATH-stubbable; lsof absent or PORT unknown
+# → the MainPID check alone decides — never fault on a missing tool,
+# _unit_stopped precedent in stop-ensemble.sh). Prints the new MainPID on
+# success; returns 1 with a loud warn otherwise. A MainPID EQUAL to the
+# pre-stop pid fails FAST (no retry loop can fix it: the old daemon never
+# left — the start no-op'd on an active unit, or the stop
+# false-succeeded).
+_supervision_unit_serving() {
+    local unit="$1" prestop="$2" deadline now mp
+    deadline=$(( $(_now_epoch) + LIVEZ_BUDGET_S ))
+    while :; do
+        lock_heartbeat
+        mp="$("$SYSTEMCTL_BIN" show "$unit" -p MainPID --value 2>/dev/null || true)"
+        case "$mp" in
+            ''|0) ;;  # not up yet — keep polling
+            *)
+                if [ -n "$prestop" ] && [ "$mp" = "$prestop" ]; then
+                    _warn "hand-back verify: unit $unit MainPID=$mp EQUALS the pre-stop pid — the old daemon never left (start no-op'd on an active unit, or the stop false-succeeded); NOT success"
+                    return 1
+                fi
+                if [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
+                    if lsof -ti:"$PORT" >/dev/null 2>&1; then
+                        printf '%s\n' "$mp"
+                        return 0
+                    fi
+                    # port not serving yet — fall through to the deadline
+                else
+                    printf '%s\n' "$mp"
+                    return 0
+                fi
+                ;;
+        esac
+        now="$(_now_epoch)"
+        [ "$now" -lt "$deadline" ] || break
+        sleep 2
+    done
+    _warn "hand-back verify: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving) within ${LIVEZ_BUDGET_S}s"
+    return 1
+}
+
+# _supervision_handback_unit <unit> <prestop_pid> <scope_heal 0|1> <logfile>
+# — the unit hand-back (P3 design items 2+3). Sequence:
+#   reset-failed → is-active preflight → unit start → verify NEW MainPID
+#   (≠ pre-stop) + port serving.
+# NO NOHUP FALLBACK — ABSOLUTE (Amendment #1): falling back would
+# re-create the survivor lineage; service-mode Restart=/journald
+# ownership must remain INTACT through the upgrade — systemd brings up
+# the flipped release, never a nohup lineage. ANY failure returns 1
+# (never a false success); the CALLER journals its halt event and
+# applies the B4 leave-txn-open policy.
+#
+# [7b SUBSTRING TRAP — the byte-identity spine: the banned systemctl-start
+# literal must NEVER appear inside a success-path log line
+# (the comp7 7b assert_not_contains pin is the authoritative check).
+# Command invocations below route through "$SYSTEMCTL_BIN" and every
+# _log/_warn string stays free of that literal — guard comment honored
+# at each nearby log site.]
+_supervision_handback_unit() {
+    local unit="$1" prestop="$2" scope_heal="$3" log="$4"
+    local isact errfile first newpid outcome
+    # 1. reset-failed — clear any stale failed state so neither the
+    #    is-active preflight nor the start is poisoned by it
+    #    (best-effort: a reset-failed failure is not itself fatal —
+    #    the start below surfaces real problems).
+    "$SYSTEMCTL_BIN" reset-failed "$unit" >/dev/null 2>&1 || true
+    # 2. is-active preflight — ALREADY-ACTIVE ≠ SUCCESS: a unit start on
+    #    an active unit is a NO-OP that exits 0 (the false-success
+    #    shape). The verdict comes from the MainPID/port verification
+    #    below, NEVER from the start rc.
+    isact="$("$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null || true)"
+    [ "$isact" = "active" ] \
+        && _warn "unit $unit ALREADY ACTIVE at hand-back — a unit start on an active unit no-ops (exit 0); the MainPID/port verification decides, not the start rc"
+    # 3. the start itself (pure command invocation — see the substring-
+    #    trap guard at the top of this function).
+    errfile="$(mktemp /tmp/.ensemble-hb-sc.XXXXXX)"
+    if ! "$SYSTEMCTL_BIN" start "$unit" 2>"$errfile"; then
+        first="$(head -n1 "$errfile" 2>/dev/null || true)"
+        rm -f "$errfile"
+        _warn "unit hand-back FAILED: unit $unit did not come up (${first:-no stderr}) — NO nohup fallback (Amendment #1: a fallback re-creates the survivor lineage and abandons Restart=/journald ownership) — halting for the caller's B4 policy"
+        return 1
+    fi
+    rm -f "$errfile"
+    # 4. verify NEW MainPID (differs from pre-stop) + port serving.
+    if ! newpid="$(_supervision_unit_serving "$unit" "$prestop")"; then
+        _warn "unit hand-back FAILED verification for $unit — NO nohup fallback (Amendment #1) — halting for the caller's B4 policy"
+        return 1
+    fi
+    outcome="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-unknown}" "${SUPERVISION_UNIT:-}")"
+    outcome="${outcome%%|*}"
+    if [ "$scope_heal" = "1" ]; then
+        # P3 design item 3: the self-heal of today's live shape, inside
+        # the promote — journaled as its own event (D4 splice
+        # discipline: additive event kind; A1 outcome name in the
+        # payload, additive field naming).
+        journal_history_append supervision_handback "scope→unit: scope-survivor lineage handed back to unit $unit inside the promote (self-heal; declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} outcome=$outcome; new MainPID $newpid; port ${PORT:-?} serving)" \
+            || _warn "supervision_handback scope→unit journal event append FAILED (best-effort — the hand-back itself succeeded)"
+    fi
+    # (f) mode-aware tail logging: the unit path mentions the unit
+    # journal AND the fallback file. [Substring-trap guard: this success
+    # line deliberately phrases the start as "serves" — never the banned
+    # systemctl-start literal.]
+    _log "unit hand-back COMPLETE: $unit serves the flipped release (new MainPID $newpid${prestop:+, pre-stop was $prestop}; port ${PORT:-?} serving; outcome=$outcome) — logs: journalctl -u $unit -f (unit journal) or $log (fallback file)"
+    return 0
+}
+
 # restart_via_launcher — start the launcher.
 #
 # comp7 / stretch7 (r-20260928-005506-f82e): on Linux+systemd hosts,
@@ -1529,6 +1702,55 @@ atomic_flip() {
 #       r-f82e — preserving it as the default is a deliberate
 #       backstop for hosts that don't run the daemon under systemd.
 #
+# P3 (ownership-mode commission 2026-09-29) — SUPERVISION-AWARE
+# HAND-BACK. The executor's P1 classification — the SUPERVISION_*
+# globals set by the LAST supervision_classify in this process (the
+# action script's preflight, or fresher: stop_via_stop_script's
+# stop-site re-classify — always PRE-STOP, i.e. while the daemon still
+# ran) — now SELECTS the hand-back mode. CONSUMED, never re-derived
+# here: a fresh classify at hand-back time sees a STOPPED daemon (no
+# owned pid) and collapses every shape to SCRIPT_NOHUP, which would
+# hand a unit-managed host back via nohup — the exact defect P3
+# fixes. Modes:
+#   UNIT_MANAGED (+unit)    → unit hand-back (_supervision_handback_unit,
+#                             scope_heal=0): reset-failed → is-active
+#                             preflight → start → verify NEW MainPID +
+#                             port serving. NO NOHUP FALLBACK — ABSOLUTE
+#                             (Amendment #1: a fallback re-creates the
+#                             survivor lineage; service-mode Restart=/
+#                             journald ownership must stay intact through
+#                             the upgrade). Failure → rc 1 → the caller
+#                             journals a halt event + B4 leave-txn-open
+#                             (never false-success).
+#   SCOPE_SURVIVOR + unit   → the SAME unit hand-back (scope_heal=1) +
+#                             the `supervision_handback scope→unit`
+#                             journal event — the self-heal of today's
+#                             live shape, inside the promote.
+#   SCOPE_SURVIVOR, no unit → today's nohup path BYTE-IDENTICAL + WARN
+#                             (the survivor lineage continues; the WARN
+#                             names the self-heal configuration).
+#   SCRIPT + ENSEMBLE_RESTART_UNIT set → the comp7 opt-in path WITH
+#                             the a′ fixes — is-active preflight before
+#                             the start, real error propagation (first
+#                             stderr line surfaces), no false-success
+#                             (already-active verifies port serving
+#                             instead of trusting a no-op rc) — while
+#                             KEEPING the nohup fallback (comp7 7c pin).
+#   EXPLICIT unit + unit-    → M3 (review cycle 1, leader FAIL-CLOSED):
+#     incapable host           REFUSES exit 78 (supervision-unit-
+#                             incapable-host) — never loud-degrade +
+#                             nohup at rc 0. Normally caught at the
+#                             preflight; this is the defense-in-depth
+#                             arm (SUPERVISION_EXPLICIT_UNIT=1 keys it).
+#   everything else         → today's nohup path byte-identical.
+#
+# (e) SCOPE ESCAPE — deliberately UNCHANGED by P3: the promote
+# executor's own scope escape (comp1: systemd-run --scope) places the
+# executor in a SIBLING cgroup of the unit, NOT inside it — that is
+# what lets the executor SURVIVE a mid-promote unit teardown (the
+# r-f82e death mode). P3 moves only the DAEMON's ownership back to
+# the unit at hand-back; the executor keeps its sibling scope.
+#
 # DELIBERATELY DEFERRED (r-f82e follow-up commission candidate):
 # auto-discovery of the right unit name. Not implemented here —
 # operator-set opt-in only. The full unit-ownership lifecycle
@@ -1536,12 +1758,78 @@ atomic_flip() {
 # unit file) belongs to a separate commission per incident doc
 # §1.7 #4 + the deploy-ownership-fix ticket family.
 #
-# Returns 0 always (the launch is fire-and-forget; the caller's
-# gate_* helpers observe the result via /livez + /readyz).
+# Returns: 0 on every legacy shape (fire-and-forget nohup, comp7 unit
+# start, comp7 fallback) AND on a VERIFIED unit hand-back; 1 ONLY on a
+# unit-path hand-back failure (Amendment #1: no nohup fallback — the
+# caller must halt + B4; never a false success). M3 exception: the
+# EXPLICIT-unit-on-unit-incapable-host arm _refuse-EXITS 78 (journaled
+# refusal) instead of returning. The caller's gate_* helpers still
+# observe the deep result via /livez + /readyz.
 restart_via_launcher() {
     mkdir -p "$INSTALL_DIR/data"
     local log="$INSTALL_DIR/data/launcher.log"
-    # Linux+systemd + operator-opted-in → systemctl start the named unit.
+    local hb_unit="" hb_mode="" hb_prestop="${SUPERVISION_PRESTOP_MAINPID:-}"
+
+    # ── P3 mode selection (consume the PRE-STOP classification) ───────
+    if _supervision_host_allows_unit && command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
+        case "${SUPERVISION_STATE:-}" in
+            UNIT_MANAGED)
+                if [ -n "${SUPERVISION_UNIT:-}" ]; then
+                    hb_mode="unit"
+                    hb_unit="$SUPERVISION_UNIT"
+                fi
+                ;;
+            SCOPE_SURVIVOR)
+                # §3 precedence for a NEEDED name, minus the cgroup rung
+                # (a scope leaf yields no unit): env ENSEMBLE_RESTART_UNIT
+                # > INSTALL_DIR/.env read directly.
+                hb_unit="${ENSEMBLE_RESTART_UNIT:-}"
+                if [ -z "$hb_unit" ]; then
+                    hb_unit="$(_supervision_unit_from_dotenv)"
+                    [ -n "$hb_unit" ] || hb_unit=""
+                fi
+                if [ -n "$hb_unit" ]; then
+                    hb_mode="scope-to-unit"
+                fi
+                ;;
+        esac
+    elif [ "${SUPERVISION_STATE:-}" = "UNIT_MANAGED" ] && [ -n "${SUPERVISION_UNIT:-}" ]; then
+        # Byte-identical BSD/macOS arms: unit paths live behind the host
+        # guard. M3 (review cycle 1, leader-ruled FAIL-CLOSED): an
+        # EXPLICIT unit declaration (SUPERVISION_EXPLICIT_UNIT=1, set by
+        # the ladder-top 'unit' arm of supervision_classify) on a host
+        # that cannot do a unit hand-back REFUSES (exit 78,
+        # supervision-unit-incapable-host) — silently degrading an
+        # explicit assertion to the nohup lineage at rc 0 is the r-f82e
+        # surprise class. Defense-in-depth: the preflight normally
+        # refuses this shape BEFORE the pipeline starts; only a
+        # capability change mid-run (or a direct call) lands here.
+        # NON-explicit shapes (auto-resolved UNIT_MANAGED — e.g. systemd
+        # present at classify time but systemctl unresolvable at
+        # hand-back) KEEP the legacy degrade-LOUD-to-nohup semantics
+        # (stop-ensemble.sh :354 precedent) — M3 is confined to the
+        # explicit arm.
+        if [ "${SUPERVISION_EXPLICIT_UNIT:-0}" = "1" ]; then
+            _refuse supervision-unit-incapable-host "restart refused: ENSEMBLE_SUPERVISION=unit is explicit (classification UNIT_MANAGED:${SUPERVISION_UNIT}) but unit hand-back is unavailable here (non-Linux / no systemd / no resolvable systemctl) — never silent-degrade to the nohup lineage (the r-f82e surprise class)"
+        fi
+        _warn "classification UNIT_MANAGED:${SUPERVISION_UNIT} but unit hand-back is unavailable here (non-Linux / no systemd / no resolvable systemctl) — degrading LOUD to the nohup path"
+    fi
+
+    if [ "$hb_mode" = "unit" ]; then
+        _log "hand-back: UNIT_MANAGED — the flipped release returns to unit $hb_unit (service-mode Restart=/journald ownership intact; no nohup lineage)"
+        _supervision_handback_unit "$hb_unit" "$hb_prestop" 0 "$log"
+        return $?
+    fi
+    if [ "$hb_mode" = "scope-to-unit" ]; then
+        _log "hand-back: SCOPE_SURVIVOR + unit $hb_unit configured — SAME unit hand-back (the self-heal of today's live shape, inside the promote)"
+        _supervision_handback_unit "$hb_unit" "$hb_prestop" 1 "$log"
+        return $?
+    fi
+    if [ "${SUPERVISION_STATE:-}" = "SCOPE_SURVIVOR" ]; then
+        _warn "supervision: SCOPE_SURVIVOR with NO unit configured (env ENSEMBLE_RESTART_UNIT and INSTALL_DIR/.env both empty) — handing back via the byte-identical nohup path (the survivor lineage continues); configure a unit to self-heal into unit ownership at the next promote"
+    fi
+
+    # Linux+systemd + operator-opted-in → unit path for the launcher.
     # The unit, if present, runs the launcher as the service user; the
     # unit's cgroup is the survivorship boundary for the executor that
     # follows. Byte-identical macOS / no-systemd / no-opt-in fallback to
@@ -1549,19 +1837,677 @@ restart_via_launcher() {
     if [ "$(uname -s)" = "Linux" ] \
        && [ -d "/run/systemd/system" ] \
        && [ -n "${ENSEMBLE_RESTART_UNIT:-}" ]; then
-        local _sc_errfile="/tmp/.ensemble-scerr.$$"
-        if systemctl start "$ENSEMBLE_RESTART_UNIT" 2>"$_sc_errfile"; then
-            rm -f "$_sc_errfile"
-            _log "launcher started via systemd unit $ENSEMBLE_RESTART_UNIT (comp7: cgroup-bound; immune to setsid inheritance) — logs: $log"
-            return 0
+        # a′-1 PREFLIGHT (P3 design item 4): already-active ≠ success —
+        # a unit start on an ACTIVE unit is a NO-OP that exits 0 (the
+        # false-success shape). Detect it FIRST; verify port serving
+        # instead of ever trusting a no-op rc.
+        #
+        # [7b FREEZE CONTRACT — M5 (review cycle 1), stated explicitly so
+        # future edits don't re-litigate: comp7 7b is SUBSTRING-TRAP-
+        # frozen, NOT full-line-frozen. The frozen property is exactly
+        # one: NO success-path log line below may contain the banned
+        # 'systemctl start' literal (command invocations only). The
+        # journalctl-hint tails edited onto the success lines this cycle
+        # ('— logs: journalctl -u <unit> -f (unit journal) or <file>
+        # (fallback file)') are LEGITIMATE under this contract — they
+        # carry no banned substring and the comp7 7b pin asserts
+        # assert_not_contains 'systemctl start' on the success output,
+        # not line-by-line byte identity. The FAILURE path alone carries
+        # the frozen 7c wording (see the guard below).]
+        local _sc_isact _sc_skip_start=0
+        _sc_isact="$("$SYSTEMCTL_BIN" is-active "$ENSEMBLE_RESTART_UNIT" 2>/dev/null || true)"
+        if [ "$_sc_isact" = "active" ]; then
+            if [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
+                if lsof -ti:"$PORT" >/dev/null 2>&1; then
+                    _log "unit $ENSEMBLE_RESTART_UNIT already active and serving :$PORT — no unit start needed (a no-op's exit 0 is NOT success; verified port serving instead) — logs: journalctl -u $ENSEMBLE_RESTART_UNIT -f (unit journal) or $log (fallback file)"
+                    return 0
+                fi
+                _warn "unit $ENSEMBLE_RESTART_UNIT already active but :$PORT NOT serving — skipping the no-op start; falling back (comp7 opt-in keeps the nohup fallback)"
+                _sc_skip_start=1
+            else
+                _log "unit $ENSEMBLE_RESTART_UNIT already active (port ${PORT:-unknown} / lsof unavailable — not verifiable here; the caller's gate owns the deep checks) — logs: journalctl -u $ENSEMBLE_RESTART_UNIT -f (unit journal) or $log (fallback file)"
+                return 0
+            fi
         fi
-        local _sc_first
-        _sc_first="$(head -n1 "$_sc_errfile" 2>/dev/null || true)"
-        rm -f "$_sc_errfile"
-        _warn "systemctl start $ENSEMBLE_RESTART_UNIT failed: ${_sc_first:-no stderr} — falling back to nohup launcher (comp7 opt-in path)"
+        if [ "$_sc_skip_start" = "0" ]; then
+            local _sc_errfile="/tmp/.ensemble-scerr.$$"
+            if "$SYSTEMCTL_BIN" start "$ENSEMBLE_RESTART_UNIT" 2>"$_sc_errfile"; then
+                rm -f "$_sc_errfile"
+                _log "launcher started via systemd unit $ENSEMBLE_RESTART_UNIT (comp7: cgroup-bound; immune to setsid inheritance) — logs: journalctl -u $ENSEMBLE_RESTART_UNIT -f (unit journal) or $log (fallback file)"
+                return 0
+            fi
+            local _sc_first
+            _sc_first="$(head -n1 "$_sc_errfile" 2>/dev/null || true)"
+            rm -f "$_sc_errfile"
+            # [7b substring-trap guard: this is the FAILURE path — the
+            # FROZEN comp7 7c wording (pinned by assert_contains in the
+            # comp7 suite) lives ONLY here, never on a success line.]
+            _warn "systemctl start $ENSEMBLE_RESTART_UNIT failed: ${_sc_first:-no stderr} — falling back to nohup launcher (comp7 opt-in path)"
+        fi
     fi
     ( cd "$INSTALL_DIR" && nohup ./launcher.sh >> data/launcher.log 2>&1 & )
     _log "launcher started (nohup) — logs: $INSTALL_DIR/data/launcher.log"
+}
+
+# ── Supervision classification (ownership-mode commission P1, 2026-09-29) ────
+#
+# DETECTION + CLASSIFIER ONLY — zero behavior change to existing paths.
+# Consumers: stop-path P2 LANDED 2026-09-29 (unit-aware stop + stop-site
+# DUAL_FIGHT re-check via stop_via_stop_script + the ENSEMBLE_SUPERVISION_
+# RESULT env handoff into scripts/stop-ensemble.sh's unit branch);
+# hand-back P3 LANDED 2026-09-29 (restart_via_launcher consumes the
+# classification to select the hand-back mode — unit / scope→unit
+# self-heal / comp7-a′ / nohup); unit adoption P4 lands later. This
+# section exposes the classifier, the preflight refusal seam
+# (explicit-unit unresolved + DUAL_FIGHT fault) and the additive txn
+# stamp.
+#
+# §0 MANDATORY (architect 2026-09-29, leader-ratified): the cgroup BASENAME
+# of the owning pid's cgroup leaf (/proc/<pid>/cgroup) is the PRIMARY
+# signal. INVOCATION_ID is CORROBORATION/DIAGNOSTIC ONLY — it is set for
+# transient scopes too (systemd-run --scope mints one for every promote
+# executor) and the executor env allowlist strips it, so an
+# INVOCATION_ID-first gate would misclassify today's live survivor as
+# SCRIPT. On disagreement: trust the cgroup, WARN-once.
+#
+#   leaf ends '.service'                      → UNIT_MANAGED (yields unit name)
+#   leaf matches 'ensemble-upgrade-*.scope'   → SCOPE_SURVIVOR
+#   'session-*' / user-slice / init scope     → SCRIPT_NOHUP
+#
+# TWINS CONTRACT: the ladder is implemented TWICE — this shell twin
+# (pipeline-side: preflight + stop site) and _supervision_detect_real in
+# daemon/tools/upgrade_journal.py (daemon-side: boot advisory). The ~6-line
+# cgroup-leaf parse below is DELIBERATELY duplicated across the twins
+# (cross-language seam — twins-pinned); the P5 twins-agree drift-guard test
+# enforces agreement. Do not "DRY" them into one side.
+#
+# Env contract (TWO variables, deliberately NOT merged):
+#   ENSEMBLE_SUPERVISION   mode: 'unit' | 'script' | 'auto' (default auto)
+#   ENSEMBLE_RESTART_UNIT  unit name / comp7 opt-in — its ALREADY-SHIPPED
+#                          semantics in restart_via_launcher are untouched.
+#
+# Resolution ladder (mirrors the ENSEMBLE_SELF_ENV shape, upgrade_tools
+# :199-242): explicit unit/script wins → '0|false|no|off' = silent script
+# opt-out → any other garbage → WARN-once → script (fail-toward-script) →
+# 'auto'/unset → auto-derive chain: non-Linux → script (ZERO /proc + /run
+# reads — the BSD/macOS arms stay byte-identical) → /run/systemd/system
+# absent → script → cgroup basename decisive → unreadable cgroup →
+# script + WARN-once.
+#
+# Unit-name resolution (§3 precedence, when a name is needed):
+#   env ENSEMBLE_RESTART_UNIT > cgroup-derived (UNIT_MANAGED only) >
+#   INSTALL_DIR/.env read directly (precedent: _resolve_wait_s in
+#   scripts/stop-ensemble.sh:97-116 — deploy/Makefile invocations do not
+#   export the staged env, so the file is the only reliable source).
+#   All fail → WARN → script (or exit 78 at PREFLIGHT when mode was
+#   explicitly 'unit' — never silent-degrade; the STOP SITE classifies
+#   again but never refuses mid-pipeline).
+#
+#   TWINS DIVERGENCE (M1, review cycle 1 — pinned + documented, NOT
+#   implemented in the python twin): the python twin
+#   (_supervision_detect_real in daemon/tools/upgrade_journal.py)
+#   resolves env > cgroup ONLY — NO .env rung, DELIBERATELY. The daemon
+#   is launcher-started, and launcher.sh load_env_file EXPORTS every
+#   .env key into the daemon process env, so a .env-sourced
+#   ENSEMBLE_RESTART_UNIT already reaches the python env rung
+#   transitively; a .env read in the daemon would need the install-dir
+#   ladder re-implemented across the twins seam (cyclic import + ambient
+#   live-install reads from dev-context tests). The .env rung — and the
+#   exit-78 refusals — are PIPELINE-side only.
+#
+# ── Named deployment topologies + declared×verified outcome map (A1) ────
+#
+# TWO named topologies (Amendment #1, 2026-09-29):
+#   SCRIPT MODE  — the operator runs the script; the launcher lineage
+#                  self-respawns (crash backoff, ADR-011). Today's
+#                  live/prod shape: direct start, no OS supervisor.
+#   SERVICE MODE — an OS service owns monitoring/restart. systemd is THIS
+#                  commission's substrate (ENSEMBLE_SUPERVISION=unit +
+#                  ENSEMBLE_RESTART_UNIT); service×macOS = launchd =
+#                  documented FUTURE scope.
+#
+# Deployment type is a FIRST-CLASS dimension alongside OS detection: the
+# DECLARED mode (ENSEMBLE_SUPERVISION: unit|script|auto) and the
+# classifier's VERIFIED state (UNIT_MANAGED / SCOPE_SURVIVOR /
+# SCRIPT_NOHUP / DUAL_FIGHT) form one explicit matrix with NAMED outcome
+# classes — conforming / degraded / fault (supervision_map_outcome
+# below). A1 is BEHAVIOR-PRESERVING: every conforming/degraded/fault PATH
+# predates this mapping and is unchanged (exit-78 preflights,
+# WARN-degradeds, DUAL_FIGHT halts); A1 adds only naming, documentation
+# and the mapping surface.
+#
+#   declared        verified                 outcome     (existing behavior named)
+#   ─────────────── ──────────────────────── ──────────  ──────────────────────
+#   script          SCRIPT_NOHUP             conforming  SCRIPT MODE healthy
+#   script          UNIT_MANAGED             degraded    decl-mismatch; latent two-masters (UNREACHABLE: explicit script never verifies the cgroup)
+#   script          SCOPE_SURVIVOR           degraded    WARN-once + self-heals at next promote with a unit configured
+#   unit            UNIT_MANAGED (name set)  conforming  SERVICE MODE healthy
+#   unit            UNIT_MANAGED (no name)   fault       exit-78 at preflight — never silent-degrade
+#   unit            anything else            fault       never silent-degrade (DUAL_FIGHT arm halts loud)
+#   auto            SCRIPT_NOHUP             conforming  auto defers to verification
+#   auto            UNIT_MANAGED             conforming  auto defers to verification (P4 adoption signal)
+#   auto            SCOPE_SURVIVOR           degraded    WARN-once + self-heals at next promote with a unit configured
+#   any             DUAL_FIGHT               fault       halt-loud (two masters must never meet a flip)
+#   unknown         anything                 fault       fail-closed
+#
+# RESOLVED-MODE EQUIVALENCE: supervision_classify resolves 'auto' INTO
+# 'unit'|'script' before returning ($SUPERVISION_MODE = the declaration
+# POST-ladder), and the resolved-mode cells agree with the declared cells
+# above row-for-row — runtime callers pass $SUPERVISION_MODE and the
+# twins agree cell-for-cell either way.
+#
+# OS×deployment matrix — canonical home: docs/runbooks/systemd-adoption.md
+# (lands in P4; the forward reference is INTENTIONAL). Rows: script×macOS
+# = byte-identical no-systemd arm; script×ubuntu-no-systemd = same arm;
+# script×ubuntu-systemd-present-not-adopted = TODAY's live topology;
+# service×ubuntu = systemd substrate; service×macOS = FUTURE scope (launchd).
+#
+# Surfaced outcome name (additive only): the supervision_preflight machine
+# line ENSEMBLE_SUPERVISION_OUTCOME=<outcome> (SEPARATE line — the
+# ENSEMBLE_SUPERVISION_RESULT=<state>[:<unit>] grammar is FROZEN, P2
+# consumes it) + the in_flight journal stamp field "outcome"
+# (journal_mark_supervision) + the daemon boot-advisory detail
+# (upgrade_journal_sweep.py, python twin).
+
+SUPERVISION_WARN_DONE=0
+_supervision_warn_once() {
+    [ "$SUPERVISION_WARN_DONE" -eq 0 ] || return 0
+    SUPERVISION_WARN_DONE=1
+    _warn "supervision: $*"
+}
+
+# ERE-escape an install dir for pgrep patterns (stop-ensemble.sh :146-149
+# mirror — pinned with the tier mirror below).
+_supervision_ere_escape() {
+    printf '%s' "$1" | sed -e 's/[][\.*^$()+?{}|\\]/\\&/g'
+}
+
+# _supervision_owned_pids — pid discovery MIRRORING the anchored ownership
+# tiers of scripts/stop-ensemble.sh (_list_candidates + _classify, :157-226
+# — the design cites the tier contract at :11-25). Pinned mirror, not a
+# shared helper: stop-ensemble.sh is an executable entry script (sourcing
+# it here would run its stop machinery), and D6's "reused, never
+# duplicated" rule governs the STOP ACTION, which still goes through
+# stop_via_stop_script. Tier 1a: anchored executable paths. Tier 1b:
+# ensemble-shaped process whose cwd IS the install dir (logical OR
+# physical — lsof reports physical). Deduped, ascending, one per line.
+_supervision_owned_pids() {
+    local esc phys esc_phys
+    esc="$(_supervision_ere_escape "$INSTALL_DIR")"
+    phys="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
+    esc_phys="$(_supervision_ere_escape "$phys")"
+    {
+        pgrep -f "${esc}/launcher\.sh( |$)" 2>/dev/null
+        pgrep -f "${esc}/ensemble-prod( |$)" 2>/dev/null
+        pgrep -f "${esc}/current/ensemble-prod( |$)" 2>/dev/null
+        ps -axo pid=,comm=,args= 2>/dev/null \
+            | grep -E '[e]nsemble-prod|[l]auncher\.sh' \
+            | awk '{
+                pid=$1; comm=$2; $1=""; $2=""; args=$0; sub(/^  */, "", args)
+                if (args ~ /(ensemble-prod)( |$)/ || comm ~ /ensemble-prod/ || \
+                    args ~ /(^|\/)launcher\.sh( |$)/)
+                    print pid}'
+    } 2>/dev/null | sort -n | awk '!seen[$0]++' \
+      | while read -r pid; do
+            [ -n "$pid" ] || continue
+            # Tier-1b candidates without an anchored path need the cwd
+            # ownership check (foreign installs / dev daemons / editors
+            # must never be probed). Anchored-path pids (tier 1a) pass.
+            if ! ps -o args= -p "$pid" 2>/dev/null | grep -Eq \
+                "(${esc}|${esc_phys})/(current/)?ensemble-prod( |$)|${esc}/launcher\.sh( |$)"; then
+                cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+                [ "$cwd" = "$INSTALL_DIR" ] || [ "$cwd" = "$phys" ] || continue
+            fi
+            printf '%s\n' "$pid"
+        done
+}
+
+# _supervision_pid_cgroup_leaf <pid> — basename of the pid's cgroup LEAF,
+# or nothing. TWINS-PINNED parse (~6 lines, duplicated in the python twin
+# _supervision_read_cgroup_leaf — cross-language seam; see the section
+# comment). EVERY /proc read is behind [ -r ... ] per the P1 contract.
+_supervision_pid_cgroup_leaf() {
+    local pid="$1" line path leaf
+    [ -n "$pid" ] || return 1
+    [ -r "/proc/$pid/cgroup" ] || return 1
+    line="$(tail -n 1 "/proc/$pid/cgroup" 2>/dev/null)" || return 1
+    [ -n "$line" ] || return 1
+    path="${line##*:}"
+    leaf="${path##*/}"
+    [ -n "$leaf" ] || return 1
+    printf '%s\n' "$leaf"
+}
+
+# _supervision_unit_from_dotenv — read ENSEMBLE_RESTART_UNIT directly from
+# $INSTALL_DIR/.env (§3 step 3; _resolve_wait_s precedent: sed-extract,
+# strip optional quotes, validate non-empty).
+_supervision_unit_from_dotenv() {
+    local raw env_file="${INSTALL_DIR:-}/.env"
+    [ -n "${INSTALL_DIR:-}" ] || return 1
+    raw="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}ENSEMBLE_RESTART_UNIT[[:space:]]*=[[:space:]]*//p' "$env_file" 2>/dev/null | head -1)"
+    raw="${raw%$'\r'}"
+    case "$raw" in
+        \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+        \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+    esac
+    [ -n "$raw" ] || return 1
+    printf '%s\n' "$raw"
+}
+
+# supervision_classify — THE classifier. Uncached per-run (state may change
+# across a run: the daemon stops mid-promote). Sets globals:
+#   SUPERVISION_MODE   resolved mode: 'unit' | 'script'
+#   SUPERVISION_STATE  SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR
+#   SUPERVISION_UNIT   unit name ('' when none)
+#   SUPERVISION_EXPLICIT_UNIT   1 ONLY for a ladder-top EXPLICIT 'unit'
+#                       declaration (M3 discriminator — auto-derived
+#                       UNIT_MANAGED also resolves MODE=unit)
+#   SUPERVISION_REFUSE_REASON   '' | 'unit-unresolved' |
+#                       'unit-incapable-host' (M3; the preflight branches
+#                       its exit-78 _refuse token on this)
+# Prints EXACTLY ONE machine-readable line:
+#   ENSEMBLE_SUPERVISION_RESULT=<state>[:<unit>]
+# Returns 1 for the two EXPLICIT-unit fail-closed classes (the PREFLIGHT
+# caller refuses with exit 78; the stop site ignores rc — it never refuses
+# mid-pipeline). SUPERVISION_REFUSE_REASON discriminates them:
+#   "unit-unresolved"     — explicit unit, no name resolvable (env >
+#                           cgroup > INSTALL_DIR/.env all empty)
+#   "unit-incapable-host" — explicit unit, this host CANNOT honor unit
+#                           supervision at all (non-Linux / no systemd /
+#                           systemctl unresolvable) — M3 (review cycle 1,
+#                           leader-ruled FAIL-CLOSED): silently degrading
+#                           an explicit assertion to the nohup lineage at
+#                           rc 0 is the r-f82e surprise class; the name
+#                           (if one resolved from env/.env) is carried for
+#                           the refusal diagnosis, never acted on.
+# Sets one additional consumed global: SUPERVISION_EXPLICIT_UNIT (1 only
+# when the ladder top saw an EXPLICIT 'unit' declaration; 0 otherwise —
+# an auto-derived UNIT_MANAGED leaf also resolves MODE=unit, so MODE alone
+# cannot discriminate the declared shape). restart_via_launcher's M3
+# refusal arm keys on it.
+supervision_classify() {
+    SUPERVISION_MODE="script"
+    SUPERVISION_STATE="SCRIPT_NOHUP"
+    SUPERVISION_UNIT=""
+    SUPERVISION_EXPLICIT_UNIT=0
+    SUPERVISION_REFUSE_REASON=""
+    local raw low leaf pid inv
+    raw="${ENSEMBLE_SUPERVISION:-}"
+    raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    low="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+
+    # ── explicit / opt-out / garbage (ladder top) ────────────────────────
+    if [ -n "$low" ]; then
+        case "$low" in
+            0|false|no|off)
+                printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                return 0
+                ;;
+            script)
+                printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                return 0
+                ;;
+            unit)
+                SUPERVISION_MODE="unit"
+                SUPERVISION_STATE="UNIT_MANAGED"
+                SUPERVISION_EXPLICIT_UNIT=1
+                SUPERVISION_UNIT="${ENSEMBLE_RESTART_UNIT:-}"
+                if [ -z "$SUPERVISION_UNIT" ] && [ "$(uname -s)" = "Linux" ] \
+                   && [ -d /run/systemd/system ]; then
+                    pid="$(_supervision_owned_pids | head -1)"
+                    if [ -n "$pid" ]; then
+                        leaf="$(_supervision_pid_cgroup_leaf "$pid")"
+                        case "$leaf" in *.service) SUPERVISION_UNIT="$leaf" ;; esac
+                    fi
+                fi
+                if [ -z "$SUPERVISION_UNIT" ]; then
+                    SUPERVISION_UNIT="$(_supervision_unit_from_dotenv)" \
+                        || SUPERVISION_UNIT=""
+                fi
+                # ── M3 host-capability rung (review cycle 1, leader-ruled
+                # FAIL-CLOSED): an EXPLICIT unit assertion on a host that
+                # cannot honor unit supervision (non-Linux / no systemd /
+                # systemctl unresolvable) refuses at preflight (78) — NEVER
+                # loud-degrades to the nohup lineage at rc 0 (silently
+                # degrading an explicit assertion is the r-f82e surprise
+                # class). The resolved name (env/.env), if any, is carried
+                # in the machine line + globals for the refusal diagnosis.
+                # Non-explicit (auto/script) modes never reach this rung.
+                # Zero /proc reads on incapable hosts (the cgroup rung
+                # above is already uname-guarded).
+                if ! _supervision_host_allows_unit || ! command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
+                    _supervision_warn_once "mode 'unit' explicit but this host cannot honor unit supervision (non-Linux / no systemd / no resolvable systemctl${SUPERVISION_UNIT:+; name '$SUPERVISION_UNIT' from env/INSTALL_DIR/.env is unusable here}) — preflight must refuse (78); never silent-degrade to nohup"
+                    printf 'ENSEMBLE_SUPERVISION_RESULT=%s%s\n' "$SUPERVISION_STATE" "${SUPERVISION_UNIT:+:$SUPERVISION_UNIT}"
+                    SUPERVISION_REFUSE_REASON="unit-incapable-host"
+                    return 1
+                fi
+                if [ -n "$SUPERVISION_UNIT" ]; then
+                    printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
+                    return 0
+                fi
+                # explicit unit, no resolvable name — never silent-degrade;
+                # the preflight caller turns rc 1 into exit 78.
+                _supervision_warn_once "mode 'unit' explicit but no unit name resolvable (env ENSEMBLE_RESTART_UNIT unset, cgroup not unit-managed, INSTALL_DIR/.env has none) — preflight must refuse (78)"
+                printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                return 1
+                ;;
+            auto)
+                ;;
+            *)
+                _supervision_warn_once "garbage ENSEMBLE_SUPERVISION='$raw' — WARN-once, failing toward script"
+                printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                return 0
+                ;;
+        esac
+    fi
+
+    # ── auto-derive chain (ZERO /proc + /run reads before the guards) ────
+    if [ "$(uname -s)" != "Linux" ]; then
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+        return 0
+    fi
+    if ! [ -d /run/systemd/system ]; then
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+        return 0
+    fi
+    pid="$(_supervision_owned_pids | head -1)"
+    if [ -z "$pid" ]; then
+        _supervision_warn_once "no owned pid discovered (anchored tiers vs INSTALL_DIR=$INSTALL_DIR) — classifying script"
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+        return 0
+    fi
+    leaf="$(_supervision_pid_cgroup_leaf "$pid")"
+    if [ -z "$leaf" ]; then
+        _supervision_warn_once "cgroup unreadable for owned pid $pid — classifying script"
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+        return 0
+    fi
+    case "$leaf" in
+        *.service)
+            SUPERVISION_STATE="UNIT_MANAGED"
+            SUPERVISION_MODE="unit"
+            SUPERVISION_UNIT="$leaf"
+            ;;
+        ensemble-upgrade-*.scope)
+            SUPERVISION_STATE="SCOPE_SURVIVOR"
+            ;;
+        session-*.scope|init.scope|user.slice|*.user.slice|user-*.slice|*.user-*.slice|machine.slice|*.machine.slice)
+            SUPERVISION_STATE="SCRIPT_NOHUP"
+            ;;
+        *)
+            # Unknown leaf shape — fail toward script, no unit name.
+            SUPERVISION_STATE="SCRIPT_NOHUP"
+            ;;
+    esac
+
+    # ── INVOCATION_ID corroboration (diagnostic ONLY — §0) — read the
+    # OWNING pid's environ (same-uid readable; [ -r ] guarded like every
+    # other /proc read), not our own: the script's INVOCATION_ID describes
+    # the script (a scope executor mints one), not the daemon.
+    inv=""
+    if [ -r "/proc/$pid/environ" ]; then
+        inv="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^INVOCATION_ID=//p' | head -1)"
+    fi
+    if [ -n "$inv" ] && [ "$SUPERVISION_STATE" != "UNIT_MANAGED" ]; then
+        _supervision_warn_once "owned pid $pid has INVOCATION_ID but cgroup leaf '$leaf' classifies $SUPERVISION_STATE — trusting cgroup (§0: transient scopes mint INVOCATION_ID too)"
+    elif [ -z "$inv" ] && [ "$SUPERVISION_STATE" = "UNIT_MANAGED" ]; then
+        _supervision_warn_once "UNIT_MANAGED (leaf '$leaf') but owned pid $pid has no INVOCATION_ID — trusting cgroup (§0 corroboration only)"
+    fi
+
+    if [ "$SUPERVISION_STATE" = "UNIT_MANAGED" ] && [ -n "$SUPERVISION_UNIT" ]; then
+        # §3: env-explicit unit name OVERRIDES the cgroup-derived one.
+        if [ -n "${ENSEMBLE_RESTART_UNIT:-}" ]; then
+            SUPERVISION_UNIT="$ENSEMBLE_RESTART_UNIT"
+        fi
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
+        return 0
+    fi
+    printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+    return 0
+}
+
+# supervision_map_outcome <declared> <verified> [<unit>] — the NAMED
+# declared×verified mapping (Amendment #1 delta A1, 2026-09-29). Echoes
+# ONE line '<outcome>|<short reason>' (outcome = conforming | degraded |
+# fault; reason = twins-pinned prose, never contains '|'); ALWAYS returns
+# 0 — this is a pure NAMING function, not a gate: it never refuses,
+# warns, or journals. The runtime paths it names (exit-78 preflight
+# refusal, WARN-once degradeds, DUAL_FIGHT halt) predate A1 and are
+# untouched.
+#
+#   $1 declared — unit | script | auto (ENSEMBLE_SUPERVISION vocabulary;
+#                 runtime callers pass $SUPERVISION_MODE — RESOLVED-MODE
+#                 EQUIVALENCE, section comment)
+#   $2 verified — SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR |
+#                 DUAL_FIGHT (classifier / dualfight vocabulary)
+#   $3 unit     — optional resolved unit name; ONLY consulted for
+#                 declared=unit × verified=UNIT_MANAGED, where EMPTY
+#                 names the reachable exit-78 cell (explicit unit,
+#                 nothing resolvable) → fault.
+#
+# Cell-for-cell table: see the section comment above. TWINS-PINNED: the
+# python twin supervision_outcome (daemon/tools/upgrade_journal.py)
+# implements the IDENTICAL table — outcome names AND reason strings
+# byte-identical; the P5 twins-agree drift-guard test pins this. Do not
+# "DRY" them into one side.
+supervision_map_outcome() {
+    local declared="${1:-}" verified="${2:-}" unit="${3:-}" low
+    low="$(printf '%s' "$declared" | tr '[:upper:]' '[:lower:]')"
+
+    if [ "$verified" = "DUAL_FIGHT" ]; then
+        printf 'fault|two masters live (unit active/armed while owned pids or port-holder sit outside it) — halt-loud\n'
+        return 0
+    fi
+    case "$low" in
+        script)
+            case "$verified" in
+                SCRIPT_NOHUP)
+                    printf 'conforming|script topology declared and verified (SCRIPT MODE — launcher lineage self-respawns)\n' ;;
+                UNIT_MANAGED)
+                    printf 'degraded|declaration mismatch: script declared but unit-managed reality — latent two-masters hazard (unreachable today: explicit script never verifies the cgroup)\n' ;;
+                SCOPE_SURVIVOR)
+                    printf 'degraded|scope survivor under script declaration: WARN-once + self-heals at next promote with a unit configured\n' ;;
+                *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
+            esac
+            ;;
+        unit)
+            case "$verified" in
+                UNIT_MANAGED)
+                    if [ -n "$unit" ]; then
+                        printf 'conforming|service topology declared and verified, unit name resolved (SERVICE MODE)\n'
+                    else
+                        printf 'fault|unit declared but no unit name resolvable — preflight refuses (exit 78), never silent-degrade\n'
+                    fi
+                    ;;
+                SCRIPT_NOHUP)
+                    printf 'fault|declaration mismatch: unit declared but script reality — never silent-degrade (unreachable today: explicit unit never verifies the cgroup)\n' ;;
+                SCOPE_SURVIVOR)
+                    printf 'fault|declaration mismatch: unit declared but scope-survivor reality — never silent-degrade (unreachable today)\n' ;;
+                *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
+            esac
+            ;;
+        auto)
+            case "$verified" in
+                SCRIPT_NOHUP)
+                    printf 'conforming|auto defers to verification: script topology confirmed (today'"'"'s nohup direct/live-prod shape)\n' ;;
+                UNIT_MANAGED)
+                    printf 'conforming|auto defers to verification: unit topology confirmed (P4 adoption signal)\n' ;;
+                SCOPE_SURVIVOR)
+                    printf 'degraded|scope survivor under auto declaration: WARN-once + self-heals at next promote with a unit configured\n' ;;
+                *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
+            esac
+            ;;
+        *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
+    esac
+    return 0
+}
+
+# supervision_dualfight_check — §6 FAULT detector (call before any journal
+# txn / stop / flip mutation): when the resolved unit is active or
+# auto-restart-armed AND reality disagrees (owned pids NOT inside the
+# unit's cgroup, OR the port-holder outside the unit's MainPID lineage)
+# → halt journal event + exit 78. Two masters must never meet a flip.
+# Call sites: PREFLIGHT via supervision_preflight (P1), plus the P2
+# stop-site re-check in stop_via_stop_script (still pre-stop-mutation —
+# the state may drift between preflight and the stop).
+# MainPID lineage is tested as cgroup containment within the unit's
+# ControlGroup. The unit's KillMode=mixed (scripts/systemd/ensemble-
+# daemon.service:85) TERMs only the launcher (the cgroup root) — cgroup
+# siblings/nested children outlive a stop until SIGKILL escalation.
+# That is precisely why a cgroup-substring containment check is the
+# canonical lineage signal here: PPID-walking breaks on double-forked
+# daemons (the launcher's child renames itself to the daemon pid), so
+# we consult /proc/<pid>/cgroup instead.
+# Containment test note: the `case "$pcg" in *"$cg"*` match is an
+# UNANCHORED substring test; sibling or nested cgroups that share a
+# prefix with $cg (e.g. a transient scope nested under the unit's
+# slice) may over-include. Deliberately conservative — diagnostic-
+# only — the FAULT arm only fires when reality disagrees.
+# Linux+systemd only; every other shape returns 0 (zero behavior change).
+supervision_dualfight_check() {
+    [ "${SUPERVISION_MODE:-}" = "unit" ] || return 0
+    [ -n "${SUPERVISION_UNIT:-}" ] || return 0
+    [ "$(uname -s)" = "Linux" ] || return 0
+    [ -d /run/systemd/system ] || return 0
+    local unit="${SUPERVISION_UNIT:-}" is_active restart main_pid cg pid pcg hpid fault=""
+    is_active="$("$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null || true)"
+    restart="$("$SYSTEMCTL_BIN" show "$unit" -p Restart --value 2>/dev/null || true)"
+    if [ "$is_active" != "active" ] \
+       && [ "$restart" != "always" ] && [ "$restart" != "on-failure" ]; then
+        return 0  # unit dormant and unarmed — no fight possible
+    fi
+    main_pid="$("$SYSTEMCTL_BIN" show "$unit" -p MainPID --value 2>/dev/null || true)"
+    cg="$("$SYSTEMCTL_BIN" show "$unit" -p ControlGroup --value 2>/dev/null || true)"
+    if [ -z "$cg" ] || [ "$cg" = "/" ]; then
+        _supervision_warn_once "unit $unit active/armed but ControlGroup unobservable — skipping DUAL_FIGHT pid checks (diagnostic only)"
+        return 0
+    fi
+    # Check A: every owned pid must sit inside the unit's cgroup. The
+    # subshell pipe captures the fault marker (the while-loop runs in a
+    # subshell; the temp file carries the verdict out).
+    local df_tmp
+    df_tmp="$(mktemp /tmp/.ensemble-df.XXXXXX)" || return 0
+    _supervision_owned_pids | while read -r pid; do
+        [ -n "$pid" ] || continue
+        pcg=""
+        if [ -r "/proc/$pid/cgroup" ]; then
+            pcg="$(tail -n 1 "/proc/$pid/cgroup" 2>/dev/null)"
+            pcg="${pcg##*:}"
+        fi
+        case "$pcg" in
+            *"$cg"*) ;;
+            *)
+                _warn "supervision DUAL_FIGHT: owned pid $pid cgroup '${pcg:-<unreadable>}' is OUTSIDE unit $unit cgroup $cg — two masters"
+                echo "__DUALFIGHT_FAULT__"
+                ;;
+        esac
+    done > "$df_tmp" 2>/dev/null
+    if grep -q '__DUALFIGHT_FAULT__' "$df_tmp" 2>/dev/null; then
+        fault="owned-pids-outside-unit-cgroup"
+    fi
+    rm -f "$df_tmp" 2>/dev/null
+    # Check B: the port-holder must be the unit's MainPID or inside its
+    # cgroup (report-only port lookup, stop-ensemble.sh precedent — lsof
+    # absent → skip the check, never fault on a missing tool).
+    if [ -z "$fault" ] && [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
+        for hpid in $(lsof -ti:"$PORT" 2>/dev/null); do
+            [ -n "$hpid" ] || continue
+            [ "$hpid" = "$main_pid" ] && continue
+            pcg=""
+            if [ -r "/proc/$hpid/cgroup" ]; then
+                pcg="$(tail -n 1 "/proc/$hpid/cgroup" 2>/dev/null)"
+                pcg="${pcg##*:}"
+            fi
+            case "$pcg" in
+                *"$cg"*) ;;
+                *)
+                    _warn "supervision DUAL_FIGHT: port $PORT holder $hpid is outside unit $unit lineage (MainPID=${main_pid:-?} cgroup='${pcg:-<unreadable>}') — two masters"
+                    fault="port-holder-outside-unit-lineage"
+                    ;;
+            esac
+        done
+    fi
+    if [ -n "$fault" ]; then
+        journal_history_append halt "supervision DUAL_FIGHT ($fault): unit $unit is active/auto-restart while owned pids or the port-holder sit OUTSIDE it — refusing PRE-TXN (two masters must never meet a flip; halt-for-human, resolve the supervision split before any pipeline mutation)" >/dev/null 2>&1 \
+            || _warn "DUAL_FIGHT halt journal append FAILED (best-effort) — proceeding to exit 78"
+        # Direct invocation only — supervision_dualfight_check must be called
+        # directly (statement form), NEVER wrapped in `$( ... )` or any other
+        # subshell. The exit 78 below must kill the calling pipeline script;
+        # a subshell swallows the exit and the refusal silently degrades to
+        # the caller's rc, which is exactly the r-f82e surprise class the
+        # DUAL_FIGHT halt exists to prevent.
+        exit 78
+    fi
+    return 0
+}
+
+# supervision_preflight — one call per action script's PREFLIGHT: classify
+# (emits the machine line), refuse 78 on explicit-unit-unresolved, then the
+# §6 DUAL_FIGHT fault check. PRE-TXN by call-site contract (promote/rollback
+# call it before journal_open_txn; restart calls it after lock adoption,
+# before its stop phase — the restart txn was armed by the tool earlier and
+# the executor is its completion, not its opener).
+# A1 (2026-09-29): also emits the NAMED declared×verified outcome as ONE
+# SEPARATE additive machine line ENSEMBLE_SUPERVISION_OUTCOME=<outcome>
+# (conforming|degraded|fault) — a DIFFERENT variable name on its own line;
+# the ENSEMBLE_SUPERVISION_RESULT=<state>[:<unit>] grammar is FROZEN (P2
+# consumes it — never extend that line). Emitted AFTER the DUAL_FIGHT
+# check so a fault run (exit 78 inside the check) never prints a stale
+# 'conforming' — DUAL_FIGHT's named surface is the halt event itself.
+# The reason half of supervision_map_outcome is human prose and is
+# deliberately NOT machine-surfaced.
+supervision_preflight() {
+    if ! supervision_classify; then
+        if [ "${SUPERVISION_REFUSE_REASON:-}" = "unit-incapable-host" ]; then
+            # M3 (review cycle 1, leader-ruled FAIL-CLOSED): explicit unit
+            # on a unit-INCAPABLE host — same exit-78 preflight refusal
+            # semantics as supervision-unit-unresolved, its own greppable
+            # reason token. NEVER loud-degrade + nohup at rc 0.
+            _refuse supervision-unit-incapable-host "preflight refused: ENSEMBLE_SUPERVISION=unit is explicit but this host cannot honor unit supervision (non-Linux / no systemd / systemctl unresolvable) — never silent-degrade to the nohup lineage (the r-f82e surprise class); run under systemd or declare ENSEMBLE_SUPERVISION=script"
+        fi
+        _refuse supervision-unit-unresolved "preflight refused: ENSEMBLE_SUPERVISION=unit is explicit but no unit name is resolvable (env ENSEMBLE_RESTART_UNIT > cgroup-derived > INSTALL_DIR/.env all empty) — never silent-degrade (P1 §2); set ENSEMBLE_RESTART_UNIT or run under the unit"
+    fi
+    supervision_dualfight_check
+    SUPERVISION_OUTCOME="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-}" "${SUPERVISION_UNIT:-}")"
+    printf 'ENSEMBLE_SUPERVISION_OUTCOME=%s\n' "${SUPERVISION_OUTCOME%%|*}"
+}
+
+# journal_mark_supervision — stamp supervision=<state> / unit=<name|null>
+# ADDITIVELY on the open in_flight txn (D4 splice discipline: additive-only
+# textual splice; existing stamp lines and journal whitespace byte-preserved
+# — journal JSON whitespace differs between launcher and lib.sh by design,
+# assert semantically, never raw-spacing). Mirrors journal_mark_f2_verified.
+# Reads the globals set by the last supervision_classify in this process.
+# A1 (2026-09-29): also stamps outcome=<conforming|degraded|fault> — the
+# NAMED declared×verified cell from supervision_map_outcome (additive field
+# only; existing readers parse named fields and ignore extras). Computed
+# from the resolved-mode globals — RESOLVED-MODE EQUIVALENCE (section
+# comment) makes that cell-for-cell identical to the declared-mode cell.
+journal_mark_supervision() {
+    local json inf new_inf unit_json outcome
+    json="$(journal_read)" || return 1
+    inf="$(_json_sub "$json" in_flight)"
+    case "$inf" in
+        '{'*) ;;
+        ''|null)
+            _warn "journal_mark_supervision: no in_flight txn (in_flight null/absent) — refusing to stamp (journal untouched)"
+            return 1
+            ;;
+        *)
+            _warn "journal_mark_supervision: in_flight read is null/malformed (not a JSON object: '${inf:0:40}') — refusing to stamp (journal untouched)"
+            return 1
+            ;;
+    esac
+    if [ -n "${SUPERVISION_UNIT:-}" ]; then
+        unit_json="\"$(_json_escape "$SUPERVISION_UNIT")\""
+    else
+        unit_json="null"
+    fi
+    outcome="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-unknown}" "${SUPERVISION_UNIT:-}")"
+    outcome="${outcome%%|*}"
+    new_inf="${inf%\}}"
+    new_inf="${new_inf},\"supervision\":\"$(_json_escape "${SUPERVISION_STATE:-unknown}")\",\"unit\":$unit_json,\"outcome\":\"$outcome\"}"
+    journal_update "in_flight" "$new_inf"
 }
 
 # gate_livez / gate_readyz — budgeted probes (D2). Print body; nonzero on fail.

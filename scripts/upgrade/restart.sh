@@ -169,12 +169,22 @@ _log "pipeline lock adopted (run_id=$RUN_ID, owner pid $$)"
 # quiet either way.
 _trap_install_signal_handlers "restart:adopt"
 
+# Supervision preflight (ownership-mode P1, 2026-09-29): classify + ONE
+# machine-readable ENSEMBLE_SUPERVISION_RESULT line + explicit-unit
+# exit-78 refusal + the §6 DUAL_FIGHT fault check. The restart txn was
+# armed by the tool earlier — this executor COMPLETES it — so "pre-txn"
+# here means pre-mutation (before the grace/stop/start phases below).
+supervision_preflight
+
 # Re-stamp the txn owner to the executor (advisory identity in the journal).
 INF_TARGET="$(_json_field "$INF" target)"
 case "$INF_TARGET" in ""|null) INF_TARGET_JSON="null" ;; *) INF_TARGET_JSON="\"$INF_TARGET\"" ;; esac
 journal_update "in_flight" \
     "{\"kind\":\"restart\",\"target\":$INF_TARGET_JSON,\"started_at\":\"$(_json_field "$INF" started_at)\",\"flipped\":false,\"owner_pid\":$$,\"run_id\":\"$RUN_ID\"}" \
     || _warn "could not re-stamp in_flight owner_pid (continuing — advisory field)"
+# P1 §5: stamp supervision additively on the adopted txn (advisory — a
+# stamp failure never aborts the restart).
+journal_mark_supervision || _warn "supervision txn stamp failed (advisory — continuing)"
 
 # ═══════════════════════════ 1. GRACE WAIT ══════════════════════════════════
 # The PRIMARY trigger (post-turn callback) fires this script at exact
@@ -189,7 +199,6 @@ fi
 lock_heartbeat
 
 # ═══════════════════════════ 2. STOP (D6 — SINGLE-TERM) ════════════════════
-_log "stop: ownership-scoped SINGLE-TERM via stop-ensemble.sh"
 if ! stop_via_stop_script; then
     journal_history_append halt "restart run_id=$RUN_ID: stop FAILED — daemon state unknown; txn left open for boot-sweep convergence"
     _warn "stop-ensemble.sh FAILED — daemon state unknown; txn left open (boot sweep owns convergence)"
@@ -198,7 +207,16 @@ fi
 
 # ═══════════════════════════ 3. START (detached launcher) ══════════════════
 lock_heartbeat
-restart_via_launcher
+# P3: supervision-aware hand-back — the P1 classification (consumed from
+# the stop-site globals, never re-derived here) selects the mode. A
+# unit-path hand-back failure returns nonzero (NO nohup fallback —
+# Amendment #1): halt + leave the txn open for boot-sweep convergence,
+# mirroring the stop-failure arm above (never a false success).
+if ! restart_via_launcher; then
+    journal_history_append halt "restart run_id=$RUN_ID: unit hand-back FAILED — daemon down; txn left open for boot-sweep convergence (no nohup fallback — Amendment #1)"
+    _warn "unit hand-back FAILED — txn left open (boot sweep owns convergence)"
+    exit 1
+fi
 
 # ═══════════════════════════ 4. GATE (/livez ≤60s + version) ════════════════
 GATE_FAIL=""
