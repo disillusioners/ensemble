@@ -283,7 +283,7 @@ Knob removed (`.env` restored byte-identical from `.env.dr3-backup`; backup kept
 
 ---
 
-## 5. DR-4 — pipeline drills (demo) — 4 legs + MANDATORY journal reset
+## 5. DR-4 — pipeline drills (demo) — 4 legs + MANDATORY journal reset (+ leg (e) real-seat unit, runbook arm landed P4; execution lands P5)
 
 **What it proves:** the P2.1 pipeline (stage/promote/gate/rollback/sweep) behaves per ADR-005/012 semantics on the real demo install. **Pass criterion (one line):** the 4 legs produce journal events exactly matching ADR-005/012 semantics (`commit` / `rollback`+quarantine+cooldown / cap-`halt` / `sweep_rollback`) with demo restored green after each leg and the post-DR-4 journal reset executed + verified (counters zeroed, halt cleared).
 
@@ -345,6 +345,68 @@ bash scripts/upgrade/status.sh demo   # journal: sweep_rollback event; current r
 ```
 
 Expected (decision table): in-flight **>600s & flipped** → sweep **executes rollback** (journal `sweep_rollback`; counts toward the cap + cooldown per ADR-024); in-flight **>600s & NOT flipped** → sweep **clears the txn** (no rollback — also acceptable to capture as the second branch); **≤600s (fresh)** → sweep leaves it + refuses (pipeline-busy). Capture whichever branch was induced; the flipped branch is the primary acceptance.
+
+### (e) Promote-under-real-unit — real-seat E2E leg (P5; runbook arm landed P4 2026-09-29)
+
+**What it proves:** the supervision-detection P1–P4 stack end-to-end on a REAL
+systemd seat: the daemon runs inside a genuine **service** unit (not a
+scope), a full promote classifies `UNIT_MANAGED:<unit>` at preflight, stops
+via the P2 unit branch (`systemctl stop` + unit-state poll), and hands back
+via the P3 **unit hand-back** (`reset-failed → is-active → start → verify
+NEW MainPID + port serving`) — the A1 conforming cell `unit × UNIT_MANAGED`
+on a live seat. **This leg also evidences the deploy-ownership steady-state
+arm closure** (in-flight arm closed v0.16.2; steady-state arm closed by P4 —
+ledger: `docs/runbooks/systemd-adoption.md` §6).
+
+**A SERVICE, not a scope (the load-bearing distinction):** the promote
+executor's own escape is `systemd-run --scope` (a SIBLING cgroup so the
+executor survives unit teardown — the r-f82e fix). This leg's seat is the
+opposite shape: `systemd-run` WITHOUT `--scope` mints a transient **service**
+unit — its own cgroup with restart semantics, mirroring the adopted-unit
+directives (`scripts/systemd/ensemble-daemon.service` static base). The unit
+name MUST match the polkit pattern `ensemble-*.service`
+(`^ensemble-[0-9A-Za-z@._-]+\.service$` — covered by the adoption rule,
+`systemd-adoption.md` §4; the `ensemble-e2e-<ts>` prefix satisfies it).
+
+```bash
+# §0 checklist + pid baseline; env scrub per §0.7/standing discipline.
+# Target: SANDBOX first (throwaway PG + fixture install per §1), then demo.
+TS=$(date -u +%Y%m%d-%H%M%S)
+UNIT=ensemble-e2e-$TS.service                     # matches the polkit pattern
+systemd-run --unit=ensemble-e2e-$TS \
+    --property=Type=simple \
+    --property=Restart=on-failure \
+    --property=RestartSec=10 \
+    --property=RestartPreventExitStatus=78 \
+    --property=SuccessExitStatus=143 \
+    --property=KillMode=mixed \
+    --property=StandardOutput=journal \
+    --property=StandardError=journal \
+    --property=TimeoutStopSec=90 \
+    --working-directory=<INSTALL_DIR> \
+    <INSTALL_DIR>/launcher.sh
+systemctl show ensemble-e2e-$TS -p Type,MainPID,SubState   # Type=simple, running — a SERVICE
+
+# stage a throwaway drill release (rollback-safe override per D-FA4.5), then:
+VERSION=v0.16.4-dr4e ENSEMBLE_ROLLBACK_SAFE=1 bash scripts/upgrade/stage.sh <target>
+ENSEMBLE_RESTART_UNIT=$UNIT bash scripts/upgrade/promote.sh <target>; echo "exit=$?"
+```
+
+Expected: promote exit 0; preflight machine line
+`ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-e2e-<ts>.service`; stop
+leg routes `systemctl stop` + unit-state poll; hand-back verify logs a NEW
+MainPID ≠ pre-stop; post-promote boot advisory (`supervision_boot`) reads
+`state=UNIT_MANAGED ... unit=ensemble-e2e-<ts>.service outcome=conforming`;
+journal `commit` event; gates green within budgets. **P5 owns the test ids +
+assertion pack** (placeholder — do not invent them here).
+
+```bash
+# Teardown (evidence captured first): stop + clean the transient unit, then
+# restore the target's normal start shape (sandbox: discard; demo: the
+# documented nohup restart per §(d)) — and the R3.2 reset still applies.
+systemctl stop ensemble-e2e-$TS
+systemctl reset-failed ensemble-e2e-$TS 2>/dev/null || true
+```
 
 ### MANDATORY post-DR-4 journal reset (R3.2) — REQUIRED before any clean cycles (T9)
 
