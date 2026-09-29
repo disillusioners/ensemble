@@ -88,7 +88,7 @@ def test_queue_probe_empty_running_set_is_none(pg_engine):
         _clear_tasks(conn)
 
     probe = make_queue_probe(pg_engine)
-    assert probe() is None
+    assert probe().max_age_seconds is None
 
     fresh, age = evaluate_queue_freshness(None, threshold_seconds=120)
     assert fresh is True
@@ -125,7 +125,7 @@ def test_queue_probe_returns_newest_running_age(pg_engine):
             work_id="wq-completed-old",
         )
 
-    age = make_queue_probe(pg_engine)()
+    age = make_queue_probe(pg_engine)().max_age_seconds
     assert age is not None
     assert 25 <= age <= 35, f"30s-old RUNNING heartbeat, got age={age}"
 
@@ -148,9 +148,104 @@ def test_queue_probe_stale_running_heartbeat_degrades(pg_engine):
             work_id="wq-running-stale",
         )
 
-    age = make_queue_probe(pg_engine)()
+    age = make_queue_probe(pg_engine)().max_age_seconds
     assert age is not None
     assert 175 <= age <= 185, f"180s-old RUNNING heartbeat, got age={age}"
 
     fresh, _ = evaluate_queue_freshness(age, threshold_seconds=120)
     assert fresh is False
+
+
+# ── Stop-frozen heartbeat amnesty (r-20260929-170301-0cb2), PG SQL ────────
+
+
+def test_pg_amnesty_all_frozen_pre_boot_beats_read_fresh(pg_engine):
+    """Incident shape on real PG: every RUNNING beat predates the boot
+
+    epoch → excluded from MAX() → age None → fresh (promote commits
+    with a busy daemon). The no-epoch probe over the SAME rows still
+    reads stale — the legacy semantics that failed the promote.
+    """
+    now = datetime.now(timezone.utc)
+    frozen_beat = now - timedelta(seconds=180)
+    boot = now - timedelta(seconds=125)  # booted AFTER the freeze
+
+    with pg_engine.begin() as conn:
+        _clear_tasks(conn)
+        _insert_task(
+            conn,
+            status=TaskStatus.RUNNING.value,
+            heartbeat=frozen_beat,
+            work_id="wq-frozen-pre-boot",
+        )
+
+    legacy = make_queue_probe(pg_engine)()
+    assert legacy.max_age_seconds is not None
+    assert legacy.max_age_seconds >= 175
+    fresh, _ = evaluate_queue_freshness(
+        legacy.max_age_seconds, threshold_seconds=120
+    )
+    assert fresh is False  # the incident, on legacy semantics
+
+    amnestied = make_queue_probe(pg_engine, boot_epoch=boot.replace(tzinfo=None))()
+    assert amnestied.max_age_seconds is None
+    fresh, age = evaluate_queue_freshness(None, threshold_seconds=120)
+    assert fresh is True and age is None
+
+
+def test_pg_signal_preservation_post_boot_stale_still_degrades(pg_engine):
+    """INVARIANT on real PG: a post-boot beat going stale still counts."""
+    now = datetime.now(timezone.utc)
+    boot = now - timedelta(hours=1)  # continuously up — beat is post-boot
+    stale_beat = now - timedelta(seconds=180)
+
+    with pg_engine.begin() as conn:
+        _clear_tasks(conn)
+        _insert_task(
+            conn,
+            status=TaskStatus.RUNNING.value,
+            heartbeat=stale_beat,
+            work_id="wq-stale-post-boot",
+        )
+
+    result = make_queue_probe(pg_engine, boot_epoch=boot.replace(tzinfo=None))()
+    assert result.max_age_seconds is not None
+    assert result.max_age_seconds >= 175
+    fresh, _ = evaluate_queue_freshness(
+        result.max_age_seconds, threshold_seconds=120
+    )
+    assert fresh is False
+
+
+def test_pg_inflight_turns_advisory_count(pg_engine):
+    """Advisory count on real PG: fresh post-boot beats only."""
+    now = datetime.now(timezone.utc)
+    boot = now - timedelta(seconds=125)
+
+    with pg_engine.begin() as conn:
+        _clear_tasks(conn)
+        _insert_task(
+            conn,
+            status=TaskStatus.RUNNING.value,
+            heartbeat=now - timedelta(seconds=10),
+            work_id="wq-inflight-fresh",
+        )
+        _insert_task(
+            conn,
+            status=TaskStatus.RUNNING.value,
+            heartbeat=now - timedelta(seconds=180),
+            work_id="wq-inflight-stale-post",
+        )
+        _insert_task(
+            conn,
+            status=TaskStatus.RUNNING.value,
+            heartbeat=now - timedelta(seconds=200),  # frozen pre-boot
+            work_id="wq-inflight-frozen-pre",
+        )
+
+    result = make_queue_probe(
+        pg_engine, boot_epoch=boot.replace(tzinfo=None), freshness_threshold_seconds=120
+    )()
+    assert result.inflight_turns == 1
+    assert result.max_age_seconds is not None
+    assert 5 <= result.max_age_seconds <= 20  # the 10s beat sets the MAX
