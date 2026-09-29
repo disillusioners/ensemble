@@ -299,21 +299,30 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
     assert_not_contains "§0 allowlist-strip: no unit invented" ":ensemble" "$(machine_line "$LIVE_OUT")"
     assert_not_contains "§0 allowlist-strip: NEVER classifies SCRIPT" "STATE=SCRIPT_NOHUP" "$LIVE_OUT"
 
-    # Complementary cell: INVOCATION_ID PRESENT (own pid — real environ,
-    # exported in the subshell) + scope leaf → STILL scope (§0: transient
-    # scopes mint INVOCATION_ID too) + WARN trusting cgroup.
-    PRESENT_OUT="$(
-        (
-            export INSTALL_DIR="$FIXT"
-            export ENSEMBLE_SUPERVISION=auto
-            export INVOCATION_ID=feedface0000111122223333444455556
-            . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
-            _supervision_owned_pids() { printf '%s\n' "$$"; }
-            _supervision_pid_cgroup_leaf() { [ "$1" = "$$" ] && printf '%s\n' 'ensemble-upgrade-r-live.scope'; return 1; }
+    # Complementary cell: INVOCATION_ID PRESENT + scope leaf → STILL scope
+    # (§0: transient scopes mint INVOCATION_ID too) + WARN trusting cgroup.
+    # /proc/<pid>/environ shows the EXEC-TIME environment, so the probe
+    # child is EXEC'D with INVOCATION_ID already set (an export inside a
+    # running shell would be invisible to the classifier's environ read —
+    # the very allowlist-strip shape this cell guards).
+    PRESENT_OUT="$(INVOCATION_ID=feedface0000111122223333444455556 \
+        INSTALL_DIR="$FIXT" ENSEMBLE_SUPERVISION=auto bash -c '
+            # capture ONE pid for both stubs — $BASHPID inside a command
+            # substitution is the SUBSHELL pid, so a per-stub BASHPID
+            # comparison would never match
+            TARGET_PID="$BASHPID"
+            . "$1" >/dev/null 2>&1
+            _supervision_owned_pids() { printf "%s\n" "$TARGET_PID"; }
+            _supervision_pid_cgroup_leaf() {
+                if [ "$1" = "$TARGET_PID" ]; then
+                    printf "%s\n" "ensemble-upgrade-r-live.scope"
+                    return 0
+                fi
+                return 1
+            }
             supervision_classify
-            printf 'STATE=%s\n' "${SUPERVISION_STATE:-}"
-        ) 2>&1
-    )"
+            printf "STATE=%s\n" "${SUPERVISION_STATE:-}"
+        ' _ "$UPGRADE_DIR/lib.sh" 2>&1)"
     assert_contains "§0 INVOCATION_ID present + scope → still SCOPE_SURVIVOR" "STATE=SCOPE_SURVIVOR" "$PRESENT_OUT"
     assert_contains "§0 INVOCATION_ID present + scope → WARN trusting cgroup" "trusting cgroup (§0: transient scopes mint INVOCATION_ID too)" "$PRESENT_OUT"
     assert_not_contains "§0 INVOCATION_ID present must NOT mint UNIT_MANAGED" "STATE=UNIT_MANAGED" "$PRESENT_OUT"

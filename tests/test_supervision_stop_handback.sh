@@ -373,6 +373,7 @@ JOURNAL
         (
             export INSTALL_DIR="$BFIX"
             export SYSTEMCTL_BIN="$SC3"
+            export PORT=19999   # report hint for the stop child (set -u)
             unset ENSEMBLE_SUPERVISION_RESULT ENSEMBLE_RESTART_UNIT ENSEMBLE_SUPERVISION 2>/dev/null || true
             . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
             supervision_classify() {
@@ -397,6 +398,7 @@ JOURNAL
         (
             export INSTALL_DIR="$BFIX"
             export SYSTEMCTL_BIN="$SC3"
+            export PORT=19999
             . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
             supervision_classify() {
                 SUPERVISION_MODE="script"; SUPERVISION_STATE="SCRIPT_NOHUP"; SUPERVISION_UNIT=""
@@ -738,6 +740,7 @@ make_fixture "$DFIX"
 D1_OUT="$(
     (
         export INSTALL_DIR="$DFIX"
+        export PORT=19999
         . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
         supervision_classify() {
             SUPERVISION_MODE="script"; SUPERVISION_STATE="SCRIPT_NOHUP"; SUPERVISION_UNIT=""
