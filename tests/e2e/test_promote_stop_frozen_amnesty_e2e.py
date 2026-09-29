@@ -37,7 +37,7 @@ from sqlmodel import Session as SQLModelSession
 import daemon.repositories.task.models  # noqa: F401 — register Task in metadata
 import daemon.repositories.instance.models  # noqa: F401 — register Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import JobItem
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
@@ -152,7 +152,9 @@ def _seed_busy_daemon_state(engine, *, beat_age_s: float) -> None:
         db.commit()
 
 
-async def _one_refresh_cycle(engine, *, boot_epoch, threshold_s: int):
+async def _one_refresh_cycle(
+    engine, *, boot_epoch, threshold_s: int
+) -> ReadinessComposite:
     """One /readyz refresh cycle with the real probes."""
     return await refresh_readiness_composite(
         db_probe=make_db_probe(engine),

@@ -11,7 +11,12 @@ Two layers:
   database.
 
 PostgreSQL-backed verification of the probe SQL lives in
-``tests/postgres/test_readiness_pg.py`` (``-m postgres``).
+``tests/postgres/test_readiness_pg.py`` (``-m postgres``). The
+DB-backed suite added for incident r-20260929-170301-0cb2 (stop-frozen
+heartbeat amnesty + the INFLIGHT advisory count) exercises the real
+probe factories against an in-memory SQLite engine — it bridges the
+pure-logic and HTTP layers so the SQL arms of ``make_queue_probe`` are
+pinned to behavior, not just to the seam's callable signature.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -27,6 +32,8 @@ from daemon.services.readiness import (
     compute_readiness_composite,
     evaluate_queue_freshness,
     forced_degradation_active,
+    make_db_probe,
+    make_queue_probe,
     refresh_readiness_composite,
 )
 
@@ -885,8 +892,6 @@ def test_amnesty_pre_boot_beat_is_invisible_to_freshness(task_engine):
     boot = now - timedelta(seconds=125)  # daemon booted AFTER the freeze
     _insert_running_task(task_engine, heartbeat=frozen_beat, work_id="w-frozen")
 
-    from daemon.services.readiness import evaluate_queue_freshness, make_queue_probe
-
     # No-epoch probe (BOOT_EPOCH_FLOOR): identical to pre-amnesty SQL —
     # the frozen beat IS stale evidence.
     legacy = make_queue_probe(task_engine)()
@@ -908,8 +913,6 @@ def test_amnesty_epoch_boundary_is_inclusive(task_engine):
     the epoch is pre-boot (exempt). The boundary pins the >= in the
     SQL CASE arm.
     """
-    from daemon.services.readiness import make_queue_probe
-
     now = datetime.now(timezone.utc)
     boot = _naive_utc(now - timedelta(seconds=300))
     at_epoch = boot  # exactly at the epoch, old enough to be stale
@@ -936,8 +939,6 @@ def test_signal_preservation_post_boot_stale_still_degrades(task_engine):
     degrades exactly as today. The amnesty may only mask beats older
     than the boot.
     """
-    from daemon.services.readiness import evaluate_queue_freshness, make_queue_probe
-
     now = datetime.now(timezone.utc)
     boot = now - timedelta(hours=1)  # daemon up an hour — beat is post-boot
     stale_beat = now - timedelta(seconds=180)
@@ -962,8 +963,6 @@ def test_amnesty_mixed_set_max_uses_only_post_boot_beats(task_engine):
     is the post-boot beat's age (mixes never fabricate freshness for
     the post-boot side, and the frozen row contributes nothing).
     """
-    from daemon.services.readiness import make_queue_probe
-
     now = datetime.now(timezone.utc)
     boot = _naive_utc(now - timedelta(seconds=125))
     _insert_running_task(
@@ -984,8 +983,6 @@ def test_inflight_turns_counts_fresh_post_boot_beats_only(task_engine):
     post-boot, stop-frozen pre-boot, NULL-heartbeat, and non-RUNNING
     rows never do.
     """
-    from daemon.services.readiness import make_queue_probe
-
     now = datetime.now(timezone.utc)
     boot = _naive_utc(now - timedelta(seconds=125))
     _insert_running_task(
@@ -1031,8 +1028,6 @@ def test_inflight_turns_zero_on_all_frozen_and_none_without_threshold(task_engin
     not an unknown. Without a threshold bound the count is None
     (unknown), never a guess.
     """
-    from daemon.services.readiness import make_queue_probe
-
     now = datetime.now(timezone.utc)
     boot = _naive_utc(now - timedelta(seconds=125))
     _insert_running_task(
@@ -1083,16 +1078,12 @@ async def test_composite_carries_inflight_advisory_without_affecting_status(task
     assert degraded.inflight_turns == 1  # still reported — advisory survives
 
 
-async def _refresh_with_real_probes(engine, *, boot, threshold, database_ok, services_ok):
+async def _refresh_with_real_probes(
+    engine, *, boot, threshold, database_ok, services_ok
+) -> ReadinessComposite:
     """Run one refresh cycle with real probes; ``database_ok=False``
 
     forces the database component to fail via a raising probe."""
-    from daemon.services.readiness import (
-        make_db_probe,
-        make_queue_probe,
-        refresh_readiness_composite,
-    )
-
     def _raising_db_probe():
         raise ConnectionError("probe down")
 

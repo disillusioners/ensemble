@@ -113,6 +113,9 @@ def capture_boot_epoch(engine: Engine) -> datetime | None:
             raw = conn.execute(statement).scalar()
         epoch = _to_naive_utc(raw)
     except Exception as exc:
+        # Capture failure must not crash boot: epoch stays None and
+        # every consumer falls back to legacy stricter freshness
+        # semantics (the pre-amnesty behavior). See module docstring.
         logger.warning(
             "Boot-epoch capture failed (stop-frozen heartbeat amnesty "
             "disabled for this process — legacy freshness semantics): %s",

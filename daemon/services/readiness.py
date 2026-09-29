@@ -425,6 +425,8 @@ async def refresh_readiness_composite(
     elif isinstance(queue_result, QueueProbeResult):
         queue_max_age_seconds = queue_result.max_age_seconds
         inflight_turns = queue_result.inflight_turns
+        # Negative ages clamp to 0.0 inside evaluate_queue_freshness —
+        # see the freshness-clamp docstring at :245.
         fresh, age = evaluate_queue_freshness(
             queue_max_age_seconds,
             threshold_seconds=queue_freshness_threshold_seconds,
@@ -432,6 +434,8 @@ async def refresh_readiness_composite(
         queue_max_age_seconds = age
     else:
         queue_max_age_seconds = queue_result
+        # Negative ages clamp to 0.0 inside evaluate_queue_freshness —
+        # see the freshness-clamp docstring at :245.
         fresh, age = evaluate_queue_freshness(
             queue_max_age_seconds,
             threshold_seconds=queue_freshness_threshold_seconds,

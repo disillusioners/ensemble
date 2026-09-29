@@ -20,10 +20,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
-from daemon.services import boot_epoch
 from daemon.services.boot_epoch import (
     BOOT_EPOCH_FLOOR,
     capture_boot_epoch,
