@@ -1388,6 +1388,241 @@ def spawn_executor(
     return proc.pid, "(daemonized, start_new_session)"
 
 
+# ── Supervision classification (ownership-mode commission P1, 2026-09-29) ────
+#
+# DETECTION + CLASSIFIER ONLY — zero behavior change to existing paths.
+# Consumers (stop-path P2, hand-back P3, unit adoption P4) land later; this
+# section exposes the seam and the boot-time advisory only.
+#
+# §0 MANDATORY (architect 2026-09-29, leader-ratified): the cgroup BASENAME
+# of the owning pid's cgroup leaf (/proc/<pid>/cgroup) is the PRIMARY
+# signal. INVOCATION_ID is CORROBORATION/DIAGNOSTIC ONLY — it is set for
+# transient scopes too (systemd-run --scope mints one for every promote
+# executor) AND ``executor_env`` strips it from the allowlist, so an
+# INVOCATION_ID-first gate would misclassify today's live survivor as
+# SCRIPT. On disagreement: trust the cgroup, WARN-once.
+#
+#   leaf ends ``.service``                 → UNIT_MANAGED (yields unit name)
+#   leaf matches ``ensemble-upgrade-*.scope`` → SCOPE_SURVIVOR
+#   ``session-*`` / user-slice / init scope → SCRIPT_NOHUP
+#
+# TWINS CONTRACT: the classification ladder is implemented TWICE — this
+# Python twin (daemon-side, boot advisory) and ``supervision_classify`` in
+# scripts/upgrade/lib.sh (pipeline-side, preflight + stop site). The ~6-line
+# cgroup-leaf parse below is DELIBERATELY duplicated across the twins
+# (cross-language seam — twins-pinned); the P5 twins-agree drift-guard test
+# enforces agreement. Do not "DRY" them into one side.
+#
+# This twin classifies the DAEMON'S OWN pid (it runs inside the daemon at
+# boot); the shell twin discovers the install's owning pid via the anchored
+# tiers (scripts/stop-ensemble.sh) and reads ITS cgroup. Both observe the
+# same daemon, so the states agree wherever the daemon actually lives.
+#
+# ZERO-CHANGE GUARDS: NEVER raises (every failure path degrades to a
+# classified state); NO disk writes (the boot advisory journal event is
+# appended by the sweep-service startup hook, not the detector); non-Linux
+# hosts take the script branch with ZERO /proc and /run reads (byte-safe on
+# BSD/macOS arms).
+
+# Resolved supervision states (the machine-line vocabulary shared with the
+# shell twin — twins-pinned).
+SUPERVISION_STATE_SCRIPT = "SCRIPT_NOHUP"
+SUPERVISION_STATE_UNIT = "UNIT_MANAGED"
+SUPERVISION_STATE_SCOPE = "SCOPE_SURVIVOR"
+
+# Opt-out vocabulary — matches ``daemon.config._PROACTIVE_FALSE_BOOLS`` /
+# upgrade_tools ``_OPT_OUT_FALSES`` (same permissive bool parser the repo
+# uses for kill-switch env knobs; lower-cased + trimmed at the compare site).
+_SUPERVISION_OPT_OUT_FALSES = frozenset({"0", "false", "no", "off"})
+
+
+@dataclass(frozen=True)
+class SupervisionDetection:
+    """One supervision classification result.
+
+    ``state``  — SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR
+    ``unit``   — unit name when UNIT_MANAGED ("" when none resolved)
+    ``mode``   — resolved mode AFTER the ladder: "unit" | "script"
+    ``note``   — WARN-once diagnostic ("" when the ladder ran clean)
+    """
+
+    state: str
+    unit: str = ""
+    mode: str = "script"
+    note: str = ""
+
+
+def _supervision_read_cgroup_leaf(pid: int) -> str | None:
+    """Basename of the owning pid's cgroup LEAF, or None on any failure.
+
+    TWINS-PINNED parse (~6 lines, duplicated in lib.sh ``supervision_classify``
+    — cross-language seam; see the section comment). cgroup v2 emits one
+    ``0::/path`` line; hybrid v1 emits several — the LAST line's last path
+    segment is the leaf on both.
+    """
+    try:
+        raw = Path(f"/proc/{int(pid)}/cgroup").read_text(encoding="utf-8")
+        line = raw.strip().splitlines()[-1]
+        path = line.split(":", 2)[-1]
+        leaf = path.rstrip("/").rsplit("/", 1)[-1]
+        return leaf or None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _supervision_classify_leaf(leaf: str) -> tuple[str, str]:
+    """Leaf basename → (state, unit). §0 table; conservative default script."""
+    if leaf.endswith(".service"):
+        return SUPERVISION_STATE_UNIT, leaf
+    if leaf.startswith("ensemble-upgrade-") and leaf.endswith(".scope"):
+        return SUPERVISION_STATE_SCOPE, ""
+    if leaf.startswith("session-") or leaf == "init.scope":
+        return SUPERVISION_STATE_SCRIPT, ""
+    if leaf.endswith(".slice") and ("user" in leaf or "machine" in leaf):
+        # user-1000.slice / user.slice / machine.slice hierarchies — login
+        # sessions and containers, not a service unit.
+        return SUPERVISION_STATE_SCRIPT, ""
+    # Unknown leaf shape (raw system.slice child, cgroupns oddity) —
+    # fail toward script, no unit name.
+    return SUPERVISION_STATE_SCRIPT, ""
+
+
+def _supervision_detect_real(
+    env: dict[str, str] | None = None,
+) -> SupervisionDetection:
+    """Real detector — NEVER raises; every failure path degrades to a
+    classified state (fail-toward-script, mirroring ENSEMBLE_SELF_ENV's
+    resolution shape at upgrade_tools:199-242).
+
+    Resolution ladder (P1 §2):
+      explicit ``ENSEMBLE_SUPERVISION=unit|script``  → wins
+      ``0|false|no|off``                            → silent script opt-out
+      any other garbage value                       → WARN-once → script
+      ``auto`` / unset                              → auto-derive chain:
+        non-Linux            → script  (ZERO /proc + /run reads)
+        /run/systemd/system absent → script (ZERO /proc reads)
+        own-pid cgroup leaf decisive → UNIT_MANAGED / SCOPE_SURVIVOR / script
+        unreadable cgroup   → script + WARN-once
+      INVOCATION_ID = corroboration ONLY: on disagreement with the cgroup
+      state, trust the cgroup + carry a WARN-once note (§0 — it is set for
+      transient scopes too, and executor_env strips it).
+
+    Unit-name resolution (P1 §3, only when a unit name is needed):
+      env ENSEMBLE_RESTART_UNIT > cgroup-derived (UNIT_MANAGED only).
+      The python side NEVER refuses on an unresolved explicit-unit — the
+      exit-78 refusal belongs to the shell preflight (scripts/upgrade);
+      here the unresolved case is carried as (UNIT_MANAGED, unit="",
+      note="unit-unresolved") for the advisory record.
+    """
+    try:
+        e = os.environ if env is None else env
+        raw = (e.get("ENSEMBLE_SUPERVISION") or "").strip()
+
+        # ── explicit / opt-out / garbage parsing (ladder top) ─────────────
+        if raw:
+            low = raw.lower()
+            if low in _SUPERVISION_OPT_OUT_FALSES:
+                return SupervisionDetection(SUPERVISION_STATE_SCRIPT)
+            if low == "script":
+                return SupervisionDetection(SUPERVISION_STATE_SCRIPT, mode="script")
+            if low == "unit":
+                # explicit unit: resolve the NAME (env > cgroup); the
+                # daemon cannot refuse (boot advisory) — carry the note.
+                unit = (e.get("ENSEMBLE_RESTART_UNIT") or "").strip()
+                if not unit and sys.platform == "linux":
+                    leaf = _supervision_read_cgroup_leaf(os.getpid())
+                    if leaf and leaf.endswith(".service"):
+                        unit = leaf
+                if unit:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_UNIT, unit=unit, mode="unit"
+                    )
+                return SupervisionDetection(
+                    SUPERVISION_STATE_UNIT,
+                    unit="",
+                    mode="unit",
+                    note=(
+                        "unit mode explicit but no unit name resolvable "
+                        "(env ENSEMBLE_RESTART_UNIT unset; cgroup not "
+                        "unit-managed) — shell preflight owns the exit-78 "
+                        "refusal"
+                    ),
+                )
+            if low != "auto":
+                return SupervisionDetection(
+                    SUPERVISION_STATE_SCRIPT,
+                    note=f"garbage ENSEMBLE_SUPERVISION='{raw}' — WARN-once, failing toward script",
+                )
+
+        # ── auto-derive chain ─────────────────────────────────────────────
+        if sys.platform != "linux":
+            return SupervisionDetection(SUPERVISION_STATE_SCRIPT)
+        if not Path("/run/systemd/system").exists():
+            return SupervisionDetection(SUPERVISION_STATE_SCRIPT)
+        leaf = _supervision_read_cgroup_leaf(os.getpid())
+        if not leaf:
+            return SupervisionDetection(
+                SUPERVISION_STATE_SCRIPT,
+                note="cgroup unreadable for own pid — WARN-once, failing toward script",
+            )
+        state, unit = _supervision_classify_leaf(leaf)
+
+        # ── INVOCATION_ID corroboration (diagnostic ONLY — §0) ───────────
+        inv = (e.get("INVOCATION_ID") or "").strip()
+        note = ""
+        if inv and state != SUPERVISION_STATE_UNIT:
+            note = (
+                f"INVOCATION_ID present but cgroup leaf '{leaf}' classifies "
+                f"{state} — trusting cgroup (§0: transient scopes mint "
+                "INVOCATION_ID too)"
+            )
+        elif not inv and state == SUPERVISION_STATE_UNIT:
+            note = (
+                f"UNIT_MANAGED (leaf '{leaf}') without INVOCATION_ID in "
+                "env — trusting cgroup (§0 corroboration only)"
+            )
+        mode = "unit" if state == SUPERVISION_STATE_UNIT else "script"
+        return SupervisionDetection(state, unit=unit, mode=mode, note=note)
+    except Exception as exc:  # noqa: BLE001 — detection must never raise
+        logger.warning(
+            "upgrade_journal: _supervision_detect_real swallowed exception — "
+            "degrading to script: %s: %s",
+            type(exc).__name__, exc,
+        )
+        return SupervisionDetection(SUPERVISION_STATE_SCRIPT)
+
+
+# Test seam (mirrors ``_scope_detect_fn``): tests inject a stub returning a
+# deterministic SupervisionDetection; production calls the real detector.
+_supervision_detect_fn: Callable[
+    [dict[str, str] | None], SupervisionDetection
+] = _supervision_detect_real
+
+# Compute-once-per-process memo. The ladder is pure observation (no disk
+# writes) and the daemon's supervision state cannot change within a
+# process lifetime (a unit↔nohup switch IS a process switch), so one
+# classification per boot is correct. Tests bypass the memo by calling
+# ``_supervision_detect_real`` / the seam directly (same pattern the scope
+# pins use); ``_supervision_reset_memo()`` clears it for test hygiene.
+_SUPERVISION_MEMO: SupervisionDetection | None = None
+
+
+def supervision_detect(env: dict[str, str] | None = None) -> SupervisionDetection:
+    """Memoized classification for in-daemon consumers (boot advisory).
+    First call wins regardless of ``env`` — ``env`` is a seam/testing
+    override; production callers pass nothing and read os.environ."""
+    global _SUPERVISION_MEMO
+    if _SUPERVISION_MEMO is None:
+        _SUPERVISION_MEMO = _supervision_detect_fn(env)
+    return _SUPERVISION_MEMO
+
+
+def _supervision_reset_memo() -> None:
+    """Test hygiene: clear the compute-once memo."""
+    global _SUPERVISION_MEMO
+    _SUPERVISION_MEMO = None
+
+
 # ── User-origin classification (assumption #1 closure — D-FA3.1; verdict §4) ──
 # HISTORY: this was a STATIC whitelist (exact "api" + the
 # telegram:/webhook:/whatsapp:/discord:/slack: id prefixes). The live-gate
