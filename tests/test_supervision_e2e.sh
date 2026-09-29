@@ -541,14 +541,28 @@ cleanup_e2e
 unset E2E_UNITS E2E_FIXTURES 2>/dev/null || true
 E2E_UNITS=""; E2E_FIXTURES=""
 
+# M4 (review cycle 1): the port-free assert used to be a bare
+# `lsof -ti:<port>` — on a host WITHOUT lsof the command fails, the
+# value collapses to "" and the assert passes VACUOUSLY. Guard with
+# command -v and fall back to the pgrep -f stub-daemon pattern (the same
+# pattern LEFT_DAEMONS uses) so the assert has teeth on lsof-less hosts.
+port_holders() { # <port> — pids holding the port (lsof) or its stub daemon
+    local port="$1"
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -ti:"$port" 2>/dev/null || true
+    else
+        pgrep -f "supervision_stub_daemon.py --port $port" 2>/dev/null || true
+    fi
+}
+
 LEFT_UNITS="$("$SC_WRAP" list-units 'ensemble-e2e-*' --all --no-legend 2>/dev/null | awk '{print $1}' | grep -v '^$' || true)"
 LEFT_FILES="$(ls "$HOME/.config/systemd/user/"ensemble-e2e-* 2>/dev/null || true)"
 LEFT_DAEMONS="$(pgrep -f "supervision_stub_daemon.py --port $PORT_BASE" || true)$(pgrep -f "supervision_stub_daemon.py --port $((PORT_BASE + 1))" || true)$(pgrep -f "supervision_stub_daemon.py --port $((PORT_BASE + 2))" || true)$(pgrep -f "supervision_stub_daemon.py --port $((PORT_BASE + 3))" || true)"
-LEFT_PORT="$(lsof -ti:"$PORT_BASE" 2>/dev/null || true)$(lsof -ti:"$((PORT_BASE + 1))" 2>/dev/null || true)$(lsof -ti:"$((PORT_BASE + 2))" 2>/dev/null || true)$(lsof -ti:"$((PORT_BASE + 3))" 2>/dev/null || true)"
+LEFT_PORT="$(port_holders "$PORT_BASE")$(port_holders "$((PORT_BASE + 1))")$(port_holders "$((PORT_BASE + 2))")$(port_holders "$((PORT_BASE + 3))")"
 assert_eq "no ensemble-e2e-* units remain" "" "$LEFT_UNITS"
 assert_eq "no ensemble-e2e-* unit files remain" "" "$LEFT_FILES"
 assert_eq "no fixture stub daemons remain" "" "$LEFT_DAEMONS"
-assert_eq "fixture port free" "" "$LEFT_PORT"
+assert_eq "fixture port free (lsof-guarded, pgrep fallback — never vacuous)" "" "$LEFT_PORT"
 
 # ===========================================================================
 section "summary"
