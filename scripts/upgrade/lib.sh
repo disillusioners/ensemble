@@ -1644,6 +1644,60 @@ restart_via_launcher() {
 #   All fail → WARN → script (or exit 78 at PREFLIGHT when mode was
 #   explicitly 'unit' — never silent-degrade; the STOP SITE classifies
 #   again but never refuses mid-pipeline).
+#
+# ── Named deployment topologies + declared×verified outcome map (A1) ────
+#
+# TWO named topologies (Amendment #1, 2026-09-29):
+#   SCRIPT MODE  — the operator runs the script; the launcher lineage
+#                  self-respawns (crash backoff, ADR-011). Today's
+#                  live/prod shape: direct start, no OS supervisor.
+#   SERVICE MODE — an OS service owns monitoring/restart. systemd is THIS
+#                  commission's substrate (ENSEMBLE_SUPERVISION=unit +
+#                  ENSEMBLE_RESTART_UNIT); service×macOS = launchd =
+#                  documented FUTURE scope.
+#
+# Deployment type is a FIRST-CLASS dimension alongside OS detection: the
+# DECLARED mode (ENSEMBLE_SUPERVISION: unit|script|auto) and the
+# classifier's VERIFIED state (UNIT_MANAGED / SCOPE_SURVIVOR /
+# SCRIPT_NOHUP / DUAL_FIGHT) form one explicit matrix with NAMED outcome
+# classes — conforming / degraded / fault (supervision_map_outcome
+# below). A1 is BEHAVIOR-PRESERVING: every conforming/degraded/fault PATH
+# predates this mapping and is unchanged (exit-78 preflights,
+# WARN-degradeds, DUAL_FIGHT halts); A1 adds only naming, documentation
+# and the mapping surface.
+#
+#   declared        verified                 outcome     (existing behavior named)
+#   ─────────────── ──────────────────────── ──────────  ──────────────────────
+#   script          SCRIPT_NOHUP             conforming  SCRIPT MODE healthy
+#   script          UNIT_MANAGED             degraded    decl-mismatch; latent two-masters (UNREACHABLE: explicit script never verifies the cgroup)
+#   script          SCOPE_SURVIVOR           degraded    WARN-once + self-heals at next promote with a unit configured
+#   unit            UNIT_MANAGED (name set)  conforming  SERVICE MODE healthy
+#   unit            UNIT_MANAGED (no name)   fault       exit-78 at preflight — never silent-degrade
+#   unit            anything else            fault       never silent-degrade (DUAL_FIGHT arm halts loud)
+#   auto            SCRIPT_NOHUP             conforming  auto defers to verification
+#   auto            UNIT_MANAGED             conforming  auto defers to verification (P4 adoption signal)
+#   auto            SCOPE_SURVIVOR           degraded    WARN-once + self-heals at next promote with a unit configured
+#   any             DUAL_FIGHT               fault       halt-loud (two masters must never meet a flip)
+#   unknown         anything                 fault       fail-closed
+#
+# RESOLVED-MODE EQUIVALENCE: supervision_classify resolves 'auto' INTO
+# 'unit'|'script' before returning ($SUPERVISION_MODE = the declaration
+# POST-ladder), and the resolved-mode cells agree with the declared cells
+# above row-for-row — runtime callers pass $SUPERVISION_MODE and the
+# twins agree cell-for-cell either way.
+#
+# OS×deployment matrix — canonical home: docs/runbooks/systemd-adoption.md
+# (lands in P4; the forward reference is INTENTIONAL). Rows: script×macOS
+# = byte-identical no-systemd arm; script×ubuntu-no-systemd = same arm;
+# script×ubuntu-systemd-present-not-adopted = TODAY's live topology;
+# service×ubuntu = systemd substrate; service×macOS = FUTURE scope (launchd).
+#
+# Surfaced outcome name (additive only): the supervision_preflight machine
+# line ENSEMBLE_SUPERVISION_OUTCOME=<outcome> (SEPARATE line — the
+# ENSEMBLE_SUPERVISION_RESULT=<state>[:<unit>] grammar is FROZEN, P2
+# consumes it) + the in_flight journal stamp field "outcome"
+# (journal_mark_supervision) + the daemon boot-advisory detail
+# (upgrade_journal_sweep.py, python twin).
 
 SUPERVISION_WARN_DONE=0
 _supervision_warn_once() {
@@ -1857,6 +1911,82 @@ supervision_classify() {
         return 0
     fi
     printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+    return 0
+}
+
+# supervision_map_outcome <declared> <verified> [<unit>] — the NAMED
+# declared×verified mapping (Amendment #1 delta A1, 2026-09-29). Echoes
+# ONE line '<outcome>|<short reason>' (outcome = conforming | degraded |
+# fault; reason = twins-pinned prose, never contains '|'); ALWAYS returns
+# 0 — this is a pure NAMING function, not a gate: it never refuses,
+# warns, or journals. The runtime paths it names (exit-78 preflight
+# refusal, WARN-once degradeds, DUAL_FIGHT halt) predate A1 and are
+# untouched.
+#
+#   $1 declared — unit | script | auto (ENSEMBLE_SUPERVISION vocabulary;
+#                 runtime callers pass $SUPERVISION_MODE — RESOLVED-MODE
+#                 EQUIVALENCE, section comment)
+#   $2 verified — SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR |
+#                 DUAL_FIGHT (classifier / dualfight vocabulary)
+#   $3 unit     — optional resolved unit name; ONLY consulted for
+#                 declared=unit × verified=UNIT_MANAGED, where EMPTY
+#                 names the reachable exit-78 cell (explicit unit,
+#                 nothing resolvable) → fault.
+#
+# Cell-for-cell table: see the section comment above. TWINS-PINNED: the
+# python twin supervision_outcome (daemon/tools/upgrade_journal.py)
+# implements the IDENTICAL table — outcome names AND reason strings
+# byte-identical; the P5 twins-agree drift-guard test pins this. Do not
+# "DRY" them into one side.
+supervision_map_outcome() {
+    local declared="${1:-}" verified="${2:-}" unit="${3:-}" low
+    low="$(printf '%s' "$declared" | tr '[:upper:]' '[:lower:]')"
+
+    if [ "$verified" = "DUAL_FIGHT" ]; then
+        printf 'fault|two masters live (unit active/armed while owned pids or port-holder sit outside it) — halt-loud\n'
+        return 0
+    fi
+    case "$low" in
+        script)
+            case "$verified" in
+                SCRIPT_NOHUP)
+                    printf 'conforming|script topology declared and verified (SCRIPT MODE — launcher lineage self-respawns)\n' ;;
+                UNIT_MANAGED)
+                    printf 'degraded|declaration mismatch: script declared but unit-managed reality — latent two-masters hazard (unreachable today: explicit script never verifies the cgroup)\n' ;;
+                SCOPE_SURVIVOR)
+                    printf 'degraded|scope survivor under script declaration: WARN-once + self-heals at next promote with a unit configured\n' ;;
+                *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
+            esac
+            ;;
+        unit)
+            case "$verified" in
+                UNIT_MANAGED)
+                    if [ -n "$unit" ]; then
+                        printf 'conforming|service topology declared and verified, unit name resolved (SERVICE MODE)\n'
+                    else
+                        printf 'fault|unit declared but no unit name resolvable — preflight refuses (exit 78), never silent-degrade\n'
+                    fi
+                    ;;
+                SCRIPT_NOHUP)
+                    printf 'fault|declaration mismatch: unit declared but script reality — never silent-degrade (unreachable today: explicit unit never verifies the cgroup)\n' ;;
+                SCOPE_SURVIVOR)
+                    printf 'fault|declaration mismatch: unit declared but scope-survivor reality — never silent-degrade (unreachable today)\n' ;;
+                *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
+            esac
+            ;;
+        auto)
+            case "$verified" in
+                SCRIPT_NOHUP)
+                    printf 'conforming|auto defers to verification: script topology confirmed (today'"'"'s nohup direct/live-prod shape)\n' ;;
+                UNIT_MANAGED)
+                    printf 'conforming|auto defers to verification: unit topology confirmed (P4 adoption signal)\n' ;;
+                SCOPE_SURVIVOR)
+                    printf 'degraded|scope survivor under auto declaration: WARN-once + self-heals at next promote with a unit configured\n' ;;
+                *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
+            esac
+            ;;
+        *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
+    esac
     return 0
 }
 

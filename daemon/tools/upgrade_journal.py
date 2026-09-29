@@ -97,7 +97,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from daemon.constants import is_reserved_source
 
@@ -1423,12 +1423,69 @@ def spawn_executor(
 # appended by the sweep-service startup hook, not the detector); non-Linux
 # hosts take the script branch with ZERO /proc and /run reads (byte-safe on
 # BSD/macOS arms).
+#
+# ── Named deployment topologies + declared×verified outcome map (A1) ────────
+#
+# TWO named topologies (Amendment #1, 2026-09-29):
+#
+#   SCRIPT MODE  — the operator runs the script; the launcher lineage
+#                  self-respawns (crash backoff, ADR-011). Today's
+#                  live/prod shape: direct start, no OS supervisor.
+#   SERVICE MODE — an OS service owns monitoring/restart. systemd is THIS
+#                  commission's substrate (ENSEMBLE_SUPERVISION=unit +
+#                  ENSEMBLE_RESTART_UNIT); service×macOS = launchd =
+#                  documented FUTURE scope.
+#
+# Deployment type is a FIRST-CLASS dimension alongside OS detection: the
+# DECLARED mode (``ENSEMBLE_SUPERVISION``: unit|script|auto) and the
+# classifier's VERIFIED state (UNIT_MANAGED / SCOPE_SURVIVOR /
+# SCRIPT_NOHUP / DUAL_FIGHT) form one explicit matrix with NAMED outcome
+# classes — ``conforming`` / ``degraded`` / ``fault`` (see
+# ``supervision_outcome`` below). A1 is BEHAVIOR-PRESERVING: every
+# conforming/degraded/fault PATH predates this mapping and is unchanged
+# (exit-78 preflights, WARN-degradeds, DUAL_FIGHT halts); A1 adds only
+# naming, documentation and the mapping surface.
+#
+#   declared        verified                 outcome     (existing behavior named)
+#   ─────────────── ──────────────────────── ──────────  ──────────────────────
+#   script          SCRIPT_NOHUP             conforming  SCRIPT MODE healthy
+#   script          UNIT_MANAGED             degraded    decl-mismatch; latent two-masters (UNREACHABLE: explicit script never verifies the cgroup)
+#   script          SCOPE_SURVIVOR           degraded    WARN-once + self-heals at next promote with a unit configured
+#   unit            UNIT_MANAGED (name set)  conforming  SERVICE MODE healthy
+#   unit            UNIT_MANAGED (no name)   fault       exit-78 at preflight — never silent-degrade
+#   unit            anything else            fault       never silent-degrade (DUAL_FIGHT arm halts loud)
+#   auto            SCRIPT_NOHUP             conforming  auto defers to verification
+#   auto            UNIT_MANAGED             conforming  auto defers to verification (P4 adoption signal)
+#   auto            SCOPE_SURVIVOR           degraded    WARN-once + self-heals at next promote with a unit configured
+#   any             DUAL_FIGHT               fault       halt-loud (two masters must never meet a flip)
+#   unknown         anything                 fault       fail-closed
+#
+# RESOLVED-MODE EQUIVALENCE: the detector resolves ``auto`` INTO
+# ``unit``|``script`` before returning (``mode`` = the declaration
+# POST-ladder), and the resolved-mode cells agree with the declared cells
+# above row-for-row — runtime callers therefore pass ``detection.mode``
+# and the twins agree cell-for-cell either way.
+#
+# OS×deployment matrix — canonical home: ``docs/runbooks/systemd-adoption.md``
+# (lands in P4; the forward reference is INTENTIONAL). Rows: script×macOS
+# = byte-identical no-systemd arm; script×ubuntu-no-systemd = same arm;
+# script×ubuntu-systemd-present-not-adopted = TODAY's live topology;
+# service×ubuntu = systemd substrate; service×macOS = FUTURE scope (launchd).
+#
+# Surfaced outcome name (additive only): the boot-advisory detail string
+# gains ``outcome=<name>`` (upgrade_journal_sweep.py); the machine line
+# ``ENSEMBLE_SUPERVISION_RESULT=<state>[:<unit>]`` grammar is FROZEN (P2
+# consumes it) and is never extended here.
 
 # Resolved supervision states (the machine-line vocabulary shared with the
 # shell twin — twins-pinned).
 SUPERVISION_STATE_SCRIPT = "SCRIPT_NOHUP"
 SUPERVISION_STATE_UNIT = "UNIT_MANAGED"
 SUPERVISION_STATE_SCOPE = "SCOPE_SURVIVOR"
+# §6 DUAL_FIGHT is a supervision_dualfight_check VERDICT, not a classify
+# state — but it is a first-class VERIFIED input to the outcome map below
+# (twins-pinned vocabulary, shell twin literal "DUAL_FIGHT").
+SUPERVISION_STATE_DUALFIGHT = "DUAL_FIGHT"
 
 # Opt-out vocabulary — matches ``daemon.config._PROACTIVE_FALSE_BOOLS`` /
 # upgrade_tools ``_OPT_OUT_FALSES`` (same permissive bool parser the repo
@@ -1621,6 +1678,150 @@ def _supervision_reset_memo() -> None:
     """Test hygiene: clear the compute-once memo."""
     global _SUPERVISION_MEMO
     _SUPERVISION_MEMO = None
+
+
+# ── Declared×verified outcome mapping (Amendment #1 delta A1, 2026-09-29) ────
+#
+# NAMED outcome classes for the declared-mode × verified-state matrix
+# (section comment above holds the full table + named topologies). Pure
+# function: no I/O, never raises, returns a fail-closed ``fault`` for any
+# unknown input. TWINS-PINNED: ``supervision_map_outcome`` in
+# scripts/upgrade/lib.sh implements the IDENTICAL cell-for-cell table
+# (outcome names AND reason strings byte-identical) — the P5
+# twins-agree drift-guard test pins this. Do not "DRY" them into one side.
+#
+# Behavior-preserving by construction: this function NAMES existing
+# outcomes; it does not gate, refuse, warn, or journal anything. The
+# runtime paths (exit-78 preflight refusal, WARN-once degradeds,
+# DUAL_FIGHT halt) predate A1 and are untouched.
+
+# Outcome vocabulary (twins-pinned with the shell twin's literals).
+SUPERVISION_OUTCOME_CONFORMING = "conforming"
+SUPERVISION_OUTCOME_DEGRADED = "degraded"
+SUPERVISION_OUTCOME_FAULT = "fault"
+
+
+class SupervisionOutcome(NamedTuple):
+    """One declared×verified mapping verdict.
+
+    ``outcome`` — conforming | degraded | fault
+    ``reason``  — short human-readable cell reason (twins-pinned
+                  byte-identical with the shell twin)
+    """
+
+    outcome: str
+    reason: str
+
+
+def supervision_outcome(
+    declared: str, verified: str, unit: str = ""
+) -> SupervisionOutcome:
+    """Map (declared mode, verified state[, unit name]) → named outcome.
+
+    ``declared`` — "unit" | "script" | "auto" (the ENSEMBLE_SUPERVISION
+                   vocabulary; the detector's resolved ``mode`` may also be
+                   passed — see RESOLVED-MODE EQUIVALENCE, section comment)
+    ``verified`` — SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR |
+                   DUAL_FIGHT (the classifier / dualfight vocabulary)
+    ``unit``     — resolved unit name; ONLY consulted for
+                   declared=unit × verified=UNIT_MANAGED, where an EMPTY
+                   name is the reachable exit-78 arm (explicit unit,
+                   nothing resolvable) and names the cell ``fault``.
+
+    Cell-for-cell table (mirrors the section comment; the twins-pinned
+    shell twin ``supervision_map_outcome`` agrees on every cell):
+
+      script × SCRIPT_NOHUP  → conforming  (SCRIPT MODE healthy)
+      script × UNIT_MANAGED  → degraded    (decl-mismatch; UNREACHABLE today)
+      script × SCOPE_SURVIVOR→ degraded    (WARN + self-heal at next promote)
+      unit   × UNIT_MANAGED  → conforming with a name, fault without
+                               (exit-78 arm; never silent-degrade)
+      unit   × else          → fault       (never silent-degrade)
+      auto   × SCRIPT_NOHUP  → conforming  (verification deferred, confirmed)
+      auto   × UNIT_MANAGED  → conforming  (P4 adoption signal)
+      auto   × SCOPE_SURVIVOR→ degraded    (WARN + self-heal at next promote)
+      any    × DUAL_FIGHT    → fault       (halt-loud)
+      unknown × anything     → fault       (fail-closed)
+    """
+    dec = (declared or "").strip().lower()
+    ver = (verified or "").strip()
+
+    if ver == SUPERVISION_STATE_DUALFIGHT:
+        return SupervisionOutcome(
+            SUPERVISION_OUTCOME_FAULT,
+            "two masters live (unit active/armed while owned pids or "
+            "port-holder sit outside it) — halt-loud",
+        )
+    if dec == "script":
+        if ver == SUPERVISION_STATE_SCRIPT:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_CONFORMING,
+                "script topology declared and verified (SCRIPT MODE — "
+                "launcher lineage self-respawns)",
+            )
+        if ver == SUPERVISION_STATE_UNIT:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_DEGRADED,
+                "declaration mismatch: script declared but unit-managed "
+                "reality — latent two-masters hazard (unreachable today: "
+                "explicit script never verifies the cgroup)",
+            )
+        if ver == SUPERVISION_STATE_SCOPE:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_DEGRADED,
+                "scope survivor under script declaration: WARN-once + "
+                "self-heals at next promote with a unit configured",
+            )
+    elif dec == "unit":
+        if ver == SUPERVISION_STATE_UNIT:
+            if unit:
+                return SupervisionOutcome(
+                    SUPERVISION_OUTCOME_CONFORMING,
+                    "service topology declared and verified, unit name "
+                    "resolved (SERVICE MODE)",
+                )
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_FAULT,
+                "unit declared but no unit name resolvable — preflight "
+                "refuses (exit 78), never silent-degrade",
+            )
+        if ver == SUPERVISION_STATE_SCRIPT:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_FAULT,
+                "declaration mismatch: unit declared but script reality "
+                "— never silent-degrade (unreachable today: explicit "
+                "unit never verifies the cgroup)",
+            )
+        if ver == SUPERVISION_STATE_SCOPE:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_FAULT,
+                "declaration mismatch: unit declared but scope-survivor "
+                "reality — never silent-degrade (unreachable today)",
+            )
+    elif dec == "auto":
+        if ver == SUPERVISION_STATE_SCRIPT:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_CONFORMING,
+                "auto defers to verification: script topology confirmed "
+                "(today's nohup direct/live-prod shape)",
+            )
+        if ver == SUPERVISION_STATE_UNIT:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_CONFORMING,
+                "auto defers to verification: unit topology confirmed "
+                "(P4 adoption signal)",
+            )
+        if ver == SUPERVISION_STATE_SCOPE:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_DEGRADED,
+                "scope survivor under auto declaration: WARN-once + "
+                "self-heals at next promote with a unit configured",
+            )
+    # Unknown declared mode or verified state — fail-closed.
+    return SupervisionOutcome(
+        SUPERVISION_OUTCOME_FAULT,
+        "unknown declared mode or verified state — fail-closed",
+    )
 
 
 # ── User-origin classification (assumption #1 closure — D-FA3.1; verdict §4) ──
