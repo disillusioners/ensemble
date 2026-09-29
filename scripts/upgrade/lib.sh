@@ -1130,6 +1130,212 @@ lock_release() {
     return 0
 }
 
+# ── pipeline_settled / adoption marker (commission v0.16.6 component 2) ─────
+#
+# INCIDENT (r-20260929-170301-0cb2, 2026-09-29): a systemd-adoption mission
+# gated on "current == v0.16.5 + healthy" — STRUCTURALLY RACY because the
+# `current` symlink flips at promote.sh:258 BEFORE gates+soak complete, so
+# the check passes mid-flight and the adoption raced a live flip. ZERO
+# mutual exclusion between promote and adoption: stop-ensemble.sh and
+# adopt-unit.sh took NO lock and read NO pipeline state.
+#
+# FIX (v0.16.6 component 2 — 3-layer adoption protocol):
+#   Layer (i)  pipeline_settled preflight (this section) — adoption/stop
+#              may NEVER gate on "current == X + health". They MUST gate on
+#              this settle check (current set, on-disk symlink matches
+#              journal current, no in_flight, no pending_op, lock free).
+#   Layer (ii) pipeline lock + adoption marker (this section + the calling
+#              scripts) — adoption/stop acquire the rollback.lock.d the
+#              same way promote/stage do; an adoption-in-progress marker
+#              file refuses concurrent promote prefights symmetrically.
+#   Layer (iii) runbook (docs/runbooks/systemd-adoption.md) — the operator
+#              procedure; explicit "FORBIDDEN: current == X + health check
+#              pattern" with the incident citation.
+#
+# CONTRACT: pipeline_settled prints ONE machine-readable line on stdout
+# ("reason=<token>: …") on failure and returns 1; returns 0 silently on
+# success. Consumers wrap the call with their own loud warn + exit 78 —
+# this helper stays a PURE check, no side effects, no journal writes.
+# BSD date flags BEFORE the `-f fmt value` operand; portable grep -E;
+# safe-glob (no set -f in this lib). JSON parse is intentionally shallow
+# (`_json_field` returns the first comma/close-brace slice — sufficient
+# for top-level scalars here, never reaches into nested structures).
+
+# _pipeline_current_target — print the journal `current` value (empty if
+# absent/null/garbled). Strips a leading/trailing JSON-string quote pair.
+_pipeline_current_target() {
+    local json jp cur
+    jp="$(journal_path 2>/dev/null)" || return 1
+    [ -f "$jp" ] || return 1
+    json="$(journal_read 2>/dev/null)" || return 1
+    cur="$(_json_field "$json" current 2>/dev/null)" || cur=""
+    case "$cur" in
+        null|"") return 1 ;;
+        \"*\")    cur="${cur#\"}"; cur="${cur%\"}" ;;
+    esac
+    [ -n "$cur" ] || return 1
+    printf '%s' "$cur"
+}
+
+# pipeline_settled — Layer (i) gate. Verifies the upgrade pipeline is in a
+# quiescent state: a committed `current`, the on-disk symlink agrees with
+# the journal, no in_flight txn, no pending_op, the rollback lock is free.
+# Prints ONE machine-readable refusal line on stdout and returns 1 on any
+# failure. Returns 0 silently on success — the caller's quiet path.
+#
+# The refusal line format is FIXED so downstream tooling (incident triage,
+# operator scripts, future tests) can grep `^reason=<token>:` and act:
+#   reason=no-journal           — journal file absent (never promoted)
+#   reason=journal-current-unset — journal has no current (fresh install
+#                                  or post-rollback halt)
+#   reason=current-symlink-absent — INSTALL_DIR/current symlink missing
+#                                  while journal claims one (layout drift)
+#   reason=current-symlink-mismatch — symlink points at a DIFFERENT release
+#                                  than the journal (an uncommitted flip;
+#                                  the symlink MUST be trusted over the
+#                                  journal only when both agree)
+#   reason=current-symlink-garbled — symlink target not shaped like
+#                                  releases/<ver> (operator-tampered?)
+#   reason=in-flight-txn        — journal has an open txn (kind/target/
+#                                  started_at/flipped printed in detail)
+#   reason=pending-op           — journal has a non-null pending_op
+#                                  (in-daemon tool-armed promote record)
+#   reason=lock-held            — rollback.lock.d present, owned by pid/
+#                                  run_id (promote/stage/rollback in flight)
+pipeline_settled() {
+    local jp cur target reason=""
+    jp="$(journal_path 2>/dev/null)" || true
+    if [ -z "$jp" ] || [ ! -f "$jp" ]; then
+        printf 'reason=no-journal: %s absent — never promoted (or pre-init install); refuse stop/adopt that needs a settled baseline\n' "${jp:-<unresolved>}"
+        return 1
+    fi
+    if ! cur="$(_pipeline_current_target)"; then
+        printf 'reason=journal-current-unset: journal at %s has no `current` — fresh install or post-rollback halt; refuse stop/adopt that needs a committed baseline\n' "$jp"
+        return 1
+    fi
+    if [ ! -L "$INSTALL_DIR/current" ]; then
+        printf 'reason=current-symlink-absent: $INSTALL_DIR/current symlink missing while journal claims %s — layout divergence (D-FA5.3 freezes mutations)\n' "$cur"
+        return 1
+    fi
+    target="$(readlink "$INSTALL_DIR/current" 2>/dev/null)" || target=""
+    case "$target" in
+        "releases/$cur") ;;   # agreement — OK
+        "releases/"*)
+            printf 'reason=current-symlink-mismatch: on-disk current→%s but journal says current=%s (symlink was flipped without committing the journal — never trust either side; halt-for-human)\n' "$target" "$cur"
+            return 1
+            ;;
+        *)
+            printf 'reason=current-symlink-garbled: on-disk current→%s (not shaped like releases/<ver>); refuse (operator-tampered?)\n' "${target:-<empty>}"
+            return 1
+            ;;
+    esac
+    local json inf pop kind targ started flipped
+    json="$(journal_read 2>/dev/null)" || json=""
+    if [ -n "$json" ]; then
+        # in_flight — null/empty/missing is OK; anything else is a settle
+        # failure with the txn's identifying fields named.
+        inf="$(_json_sub "$json" in_flight 2>/dev/null)" || inf=""
+        case "$inf" in
+            ""|null) ;;
+            *)
+                kind="$(_json_field "$inf" kind 2>/dev/null)"
+                targ="$(_json_field "$inf" target 2>/dev/null)"
+                started="$(_json_field "$inf" started_at 2>/dev/null)"
+                flipped="$(_json_field "$inf" flipped 2>/dev/null)"
+                printf 'reason=in-flight-txn: journal has an open txn (kind=%s target=%s started_at=%s flipped=%s) — refuse any stop/adopt that would race the in-flight mutation\n' "${kind:-?}" "${targ:-?}" "${started:-?}" "${flipped:-?}"
+                return 1
+                ;;
+        esac
+        # pending_op — ADDITIVE field owned by the Python journal twin
+        # (D-FA1.1). The shell pipeline NEVER writes pending_op (it's the
+        # in-daemon tool-armed promote record); its presence means a tool
+        # arm is in flight, which must not race a stop/adopt.
+        pop="$(_json_field "$json" pending_op 2>/dev/null)" || pop=""
+        case "$pop" in
+            ""|null) ;;
+            *)
+                printf 'reason=pending-op: journal has a non-null pending_op (in-daemon tool-armed promote record) — refuse stop/adopt that would race the tool arm\n'
+                return 1
+                ;;
+        esac
+    fi
+    # lock free? — the lock_dir_path helper takes INSTALL_DIR; the dir's
+    # presence is itself the acquire, regardless of owner contents.
+    if [ -d "$(lock_dir_path)" ]; then
+        local owner run_id
+        owner="$(cat "$(lock_dir_path)/owner" 2>/dev/null)" || owner="?"
+        run_id="$(cat "$(lock_dir_path)/run_id" 2>/dev/null)" || run_id="?"
+        printf 'reason=lock-held: rollback.lock.d present (owner=%s run_id=%s) — promote/stage/rollback in flight; refuse concurrent stop/adopt\n' "${owner:-?}" "${run_id:-?}"
+        return 1
+    fi
+    return 0
+}
+
+# ── Adoption-in-progress marker (Layer ii, promote-side symmetric refusal) ──
+#
+# RATIONALE: adopt-unit.sh mutates the host in two distinct phases — install
+# the unit file (.env NOT staged) → daemon-reload → .env staged BUT unit
+# NOT enabled. A concurrent promote whose stop/restart would route through
+# `systemctl restart <unit>` (lib.sh:1837-1839 keys off ENSEMBLE_RESTART_UNIT
+# directly) hits the half-staged state and silently misroutes to a
+# systemctl hand-back for a unit that doesn't exist yet — promoting onto
+# nothing. The marker tells the promote preflight: "an adoption is mid-
+# sequence; refuse (78) until the marker is cleared". The marker lives as
+# a file (NOT a journal field — schema discipline: additive journal fields
+# require migrations and the Python twin must learn them; a marker file is
+# schema-gen-safe by construction and is owned by exactly one tool).
+#
+# FORMAT: plain text, three lines:
+#   pid=<pid>
+#   run_id=<run-id>
+#   started_at=<iso>
+# (no JSON, no shell eval — consumed by read-only inspection; the file's
+# mere existence is the gate signal.)
+#
+# LIFECYCLE: adopt-unit.sh writes it BEFORE install and clears it AFTER
+# verify success (or after a step-d failure, with a loud warn — the
+# recover path is the documented manual procedure). Promote preflight
+# refuses on presence; no auto-expiry (the operator must remove a stale
+# marker — see the runbook).
+
+adoption_marker_path() { printf '%s/releases/.adoption_in_progress' "$INSTALL_DIR"; }
+
+# adoption_marker_present — 0 if marker present (refuse), 1 if absent.
+adoption_marker_present() {
+    [ -e "$(adoption_marker_path)" ] && return 0
+    return 1
+}
+
+# adoption_marker_write — best-effort stamp; named fields, plain text.
+adoption_marker_write() {
+    local mp pid run_id started
+    mp="$(adoption_marker_path)"
+    mkdir -p "$(dirname "$mp")" 2>/dev/null || return 1
+    pid="$$"
+    run_id="run-$(date +%Y%m%d-%H%M%S)-$$"
+    started="$(_now_iso)"
+    {
+        printf 'pid=%s\n' "$pid"
+        printf 'run_id=%s\n' "$run_id"
+        printf 'started_at=%s\n' "$started"
+    } > "$mp.tmp.$$" 2>/dev/null || { rm -f "$mp.tmp.$$" 2>/dev/null; return 1; }
+    mv -f "$mp.tmp.$$" "$mp" 2>/dev/null || { rm -f "$mp.tmp.$$" 2>/dev/null; return 1; }
+    return 0
+}
+
+# adoption_marker_clear — best-effort clear; owner-guarded (mirrors
+# lock_release's discipline). Idempotent: absent marker → 0, never an error.
+adoption_marker_clear() {
+    local mp
+    mp="$(adoption_marker_path)"
+    [ -e "$mp" ] || return 0
+    rm -f "$mp" 2>/dev/null || {
+        _warn "adoption_marker_clear: cannot remove $mp (manual: rm -f $mp) — promote preflight will keep refusing until the file is gone"
+        return 1
+    }
+    return 0
+}
+
 # ── Signal-trap discipline (component 2; r-20260928-005506-f82e) ─────────────
 #
 # INCIDENT GAP (2026-09-28): the pipeline scripts registered
@@ -1435,6 +1641,13 @@ _probe_once() {
 # ── Promote/rollback shared mechanics (D6 + D-FA4.1 amendment) ──────────────
 # stop_via_stop_script — SIGTERM-bounded, ownership-scoped stop. ALWAYS via
 # scripts/stop-ensemble.sh (D6: reused, never duplicated; NEVER a raw kill).
+#
+# Commission v0.16.6 component 2 (Layer ii): this is called FROM a lock
+# holder — promote.sh / rollback.sh / restart.sh hold the rollback.lock.d
+# through soak+rollback. Set PIPELINE_LOCK_HELD_BY_CALLER=1 so the child
+# stop-ensemble.sh skips its own lock acquire (otherwise it would busy-wait
+# 15s on the lock the parent already holds — every promote would deadlock
+# 15s on its stop span).
 stop_via_stop_script() {
     local stop_script
     stop_script="$(cd "$(dirname "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")" && pwd)/../stop-ensemble.sh"
@@ -1479,11 +1692,20 @@ stop_via_stop_script() {
             SUPERVISION_PRESTOP_MAINPID="$("$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p MainPID --value 2>/dev/null || true)"
             [ -n "$SUPERVISION_PRESTOP_MAINPID" ] || SUPERVISION_PRESTOP_MAINPID=""
         fi
-        ENSEMBLE_SUPERVISION_RESULT="${SUPERVISION_STATE}:${SUPERVISION_UNIT}" \
+        # PIPELINE_LOCK_HELD_BY_CALLER=1 — the parent caller (promote /
+        # rollback / restart) already holds the rollback.lock.d through
+        # soak+rollback; the child stop-ensemble.sh MUST skip its own
+        # acquire (Layer ii — Layer i's settle-check too: the pipeline
+        # is manifestly not settled while the parent holds the lock).
+        PIPELINE_LOCK_HELD_BY_CALLER=1 \
+            ENSEMBLE_SUPERVISION_RESULT="${SUPERVISION_STATE}:${SUPERVISION_UNIT}" \
             bash "$stop_script" "$INSTALL_DIR" "$PORT"
     else
         _log "stop: ownership-scoped SINGLE-TERM via $stop_script"
-        bash "$stop_script" "$INSTALL_DIR" "$PORT"
+        # PIPELINE_LOCK_HELD_BY_CALLER=1 — same reason: the parent holds
+        # the lock; the child MUST NOT acquire (Layer ii).
+        PIPELINE_LOCK_HELD_BY_CALLER=1 \
+            bash "$stop_script" "$INSTALL_DIR" "$PORT"
     fi
 }
 
@@ -2654,7 +2876,8 @@ _refuse() {
 }
 
 # promote_entry_check <target_ver> — refuses (exit 78) on: halthead (cap
-# exhausted in-window), cooldown window, quarantined target, fresh in_flight.
+# exhausted in-window), cooldown window, quarantined target, fresh in_flight,
+# adoption-in-progress marker (Layer ii, commission v0.16.6 component 2).
 # The AUTO-ROLLBACK path and the launcher sweep NEVER call this.
 promote_entry_check() {
     local target_ver="$1" json cnt
@@ -2672,6 +2895,19 @@ promote_entry_check() {
     # quarantined target
     if journal_is_quarantined "$target_ver"; then
         _refuse quarantine "promote refused: version '$target_ver' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version"
+    fi
+    # adoption-in-progress marker (commission v0.16.6 component 2, Layer ii).
+    # Symmetric refusal: a half-staged adoption (.env staged, unit NOT
+    # enabled) would silently misroute a concurrent promote's restart
+    # through `systemctl restart <unit>` (lib.sh keys off
+    # ENSEMBLE_RESTART_UNIT directly) onto a unit that does not exist
+    # yet — promoting onto nothing. Marker present → refuse; the marker
+    # is removed by adopt-unit.sh on verify success or by the operator
+    # on a half-staged recovery (see the runbook).
+    if adoption_marker_present; then
+        local mp
+        mp="$(adoption_marker_path)"
+        _refuse adoption-in-progress "promote refused: adoption-in-progress marker present at $mp (adopt-unit.sh mid-sequence or stalled) — a concurrent promote would race the half-staged .env/unit state and silently misroute the restart; wait for the adoption to clear the marker, or remove it manually after verifying the unit is NOT half-staged"
     fi
     return 0
 }
