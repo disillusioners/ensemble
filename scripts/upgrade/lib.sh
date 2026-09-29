@@ -1185,7 +1185,6 @@ _pipeline_current_target() {
 #
 # The refusal line format is FIXED so downstream tooling (incident triage,
 # operator scripts, future tests) can grep `^reason=<token>:` and act:
-#   reason=no-journal           — journal file absent (never promoted)
 #   reason=journal-current-unset — journal has no current (fresh install
 #                                  or post-rollback halt)
 #   reason=current-symlink-absent — INSTALL_DIR/current symlink missing
@@ -1202,12 +1201,23 @@ _pipeline_current_target() {
 #                                  (in-daemon tool-armed promote record)
 #   reason=lock-held            — rollback.lock.d present, owned by pid/
 #                                  run_id (promote/stage/rollback in flight)
+#
+# SPECIAL CASE — no-journal: NOT a refusal. No journal = no pipeline state
+# to be unsettled (fresh install, never promoted, post-init). Refusing
+# stop here would gate every `Makefile stop`, every fresh-install
+# lifecycle, and every operator emergency on a category error. We log an
+# INFO line (NOT a `reason=<token>:` failure line — the failure-vocabulary
+# contract stays intact for the 7 refusal tokens above) and return 0.
+# Fix-back commission v0.16.6 c2.
 pipeline_settled() {
     local jp cur target reason=""
     jp="$(journal_path 2>/dev/null)" || true
     if [ -z "$jp" ] || [ ! -f "$jp" ]; then
-        printf 'reason=no-journal: %s absent — never promoted (or pre-init install); refuse stop/adopt that needs a settled baseline\n' "${jp:-<unresolved>}"
-        return 1
+        # TRIVIALLY SETTLED — no journal = no baseline to protect.
+        # INFO line, NOT a refusal (no `reason=<token>:` prefix; the
+        # failure-vocabulary contract holds for the 7 refusal tokens).
+        printf 'INFO: pipeline_settled — no journal at %s (fresh install / never promoted); trivially settled, no baseline to protect\n' "${jp:-<unresolved>}"
+        return 0
     fi
     if ! cur="$(_pipeline_current_target)"; then
         printf 'reason=journal-current-unset: journal at %s has no `current` — fresh install or post-rollback halt; refuse stop/adopt that needs a committed baseline\n' "$jp"
