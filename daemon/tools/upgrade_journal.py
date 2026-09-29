@@ -1570,6 +1570,22 @@ def _supervision_detect_real(
       exit-78 refusal belongs to the shell preflight (scripts/upgrade);
       here the unresolved case is carried as (UNIT_MANAGED, unit="",
       note="unit-unresolved") for the advisory record.
+
+    TWINS DIVERGENCE — no .env rung (M1, review cycle 1; pinned +
+    documented, deliberately NOT implemented): the shell twin has a
+    THIRD name rung (INSTALL_DIR/.env read directly, pipeline-side);
+    this twin resolves env > cgroup ONLY. Rationale: the daemon is
+    launcher-started and launcher.sh ``load_env_file`` EXPORTS every
+    .env key into the daemon process env, so a .env-sourced
+    ENSEMBLE_RESTART_UNIT already reaches the env rung transitively on
+    every supported start; a daemon-side .env read would require the
+    install-dir ladder (live/demo topology + frozen-binary sandbox)
+    re-implemented here — a cyclic import away in upgrade_tools and an
+    ambient read of the REAL live install from dev-context tests. A
+    boot advisory on a non-launcher start may therefore note
+    ``unit-unresolved`` where the shell preflight would resolve via
+    .env — advisory-only, never a gate; the exit-78 semantics live in
+    the shell preflight either way.
     """
     try:
         e = os.environ if env is None else env

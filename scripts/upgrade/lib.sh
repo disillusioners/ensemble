@@ -1837,9 +1837,20 @@ restart_via_launcher() {
         # a′-1 PREFLIGHT (P3 design item 4): already-active ≠ success —
         # a unit start on an ACTIVE unit is a NO-OP that exits 0 (the
         # false-success shape). Detect it FIRST; verify port serving
-        # instead of ever trusting a no-op rc. [7b SUBSTRING TRAP guard:
-        # no success-path log line below contains the banned
-        # systemctl-start literal — command invocations only.]
+        # instead of ever trusting a no-op rc.
+        #
+        # [7b FREEZE CONTRACT — M5 (review cycle 1), stated explicitly so
+        # future edits don't re-litigate: comp7 7b is SUBSTRING-TRAP-
+        # frozen, NOT full-line-frozen. The frozen property is exactly
+        # one: NO success-path log line below may contain the banned
+        # 'systemctl start' literal (command invocations only). The
+        # journalctl-hint tails edited onto the success lines this cycle
+        # ('— logs: journalctl -u <unit> -f (unit journal) or <file>
+        # (fallback file)') are LEGITIMATE under this contract — they
+        # carry no banned substring and the comp7 7b pin asserts
+        # assert_not_contains 'systemctl start' on the success output,
+        # not line-by-line byte identity. The FAILURE path alone carries
+        # the frozen 7c wording (see the guard below).]
         local _sc_isact _sc_skip_start=0
         _sc_isact="$("$SYSTEMCTL_BIN" is-active "$ENSEMBLE_RESTART_UNIT" 2>/dev/null || true)"
         if [ "$_sc_isact" = "active" ]; then
@@ -1928,6 +1939,18 @@ restart_via_launcher() {
 #   All fail → WARN → script (or exit 78 at PREFLIGHT when mode was
 #   explicitly 'unit' — never silent-degrade; the STOP SITE classifies
 #   again but never refuses mid-pipeline).
+#
+#   TWINS DIVERGENCE (M1, review cycle 1 — pinned + documented, NOT
+#   implemented in the python twin): the python twin
+#   (_supervision_detect_real in daemon/tools/upgrade_journal.py)
+#   resolves env > cgroup ONLY — NO .env rung, DELIBERATELY. The daemon
+#   is launcher-started, and launcher.sh load_env_file EXPORTS every
+#   .env key into the daemon process env, so a .env-sourced
+#   ENSEMBLE_RESTART_UNIT already reaches the python env rung
+#   transitively; a .env read in the daemon would need the install-dir
+#   ladder re-implemented across the twins seam (cyclic import + ambient
+#   live-install reads from dev-context tests). The .env rung — and the
+#   exit-78 refusals — are PIPELINE-side only.
 #
 # ── Named deployment topologies + declared×verified outcome map (A1) ────
 #
