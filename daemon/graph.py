@@ -4829,6 +4829,122 @@ ATTESTATION_ANY_SUBSTANTIVE_KEY: str = "attestation_any_substantive_deny"
 #: State channel key — tool-call snapshot taken at the last deny.
 ATTESTATION_DENY_PROGRESS_KEY: str = "attestation_deny_progress_tools"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# P1 — per-dispatch withhold budget (2026-09-30, incident 34978dfc mute-wall)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Single source of truth: the budget constant lives HERE so any
+# operator review of the gate can see the cap inline. The actual
+# predicate (``withhold_budget_exhausted``) is exported from
+# ``daemon.services.attestation_gate`` and consulted by the gate
+# node — extending the budget is an explicit constant edit + a
+# deliberate test run.
+WITHHOLD_DENY_BUDGET: int = 8
+#: State channel key — per-dispatch withhold-epoch deny counter.
+#: Increments only on the never-spoke-judge composition-gate
+#: conversion (``TERMINAL_AFTER_BOUND → DENIED`` with
+#: ``any_substantive_deny=False``). Resets via the standard
+#: SessionState channel clearing rules (attested allow, HOLD cap
+#: fall-through, fresh-episode sentinel, terminal). Different
+#: lifetime from ``attestation_denied_count`` (per-dispatch vs
+#: per-epoch) — see ``withhold_budget_exhausted`` docstring.
+ATTESTATION_WITHHOLD_DENY_COUNT_KEY: str = "attestation_withhold_deny_count"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P2 — consecutive-identical-content guard (2026-09-30, incident 34978dfc)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The mute wall emitted the SAME bare-emoji content 137 times. The
+# guard tracks consecutive bare no-tool-call AIMessages whose
+# whitespace-normalized content is identical. After N identical
+# messages (threshold = 3) the leader gets a one-shot repair nudge
+# telling it the loop is real; on the next identical reply it
+# exits LOUDLY via the gate's terminal machinery.
+ATTESTATION_CONSECUTIVE_IDENTICAL_KEY: str = (
+    "attestation_consecutive_identical"
+)
+#: State channel key — the whitespace-normalized content of the
+#: LAST bare no-tool-call AIMessage, for the next-turn comparison.
+#: ``None`` when the last AI message carried tool calls or the
+#: gate hasn't seen one yet.
+ATTESTATION_LAST_BARE_AI_CONTENT_KEY: str = (
+    "attestation_last_bare_ai_content"
+)
+#: State channel key — ``True`` once the repair nudge has been
+#: sent in the current mission; a second consecutive-identical
+#: reply after the repair nudge triggers the loud terminal
+#: (the loop is now a clear-and-confirmed failure mode).
+ATTESTATION_REPAIR_NUDGE_SENT_KEY: str = "attestation_repair_nudge_sent"
+#: Threshold (single source of truth, P2 — incident 34978dfc mute
+#: caught at reply #3 of 137). Three identical bare replies is
+#: enough signal to act; lower (e.g. 2) would risk false
+#: positives on legitimate two-step acks; higher (e.g. 5) lets
+#: too many mutereplies accumulate before the guard fires.
+CONSECUTIVE_IDENTICAL_THRESHOLD: int = 3
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P3 — degenerate-shape anti-silence retry (2026-09-30, gradient family)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Incident 6a0d60c9 (gradient precursor): word-count collapse
+# 213→165→25→8→3→1 with interleaved coherent blips — the
+# consecutive-identical guard cannot catch this because the
+# content is genuinely different each turn. P3 catches the
+# DEGENERATE SHAPE of the final AIMessage: emoji-only content,
+# or non-empty but very short (<= 3 words) and no tool calls,
+# INSIDE an active deny-loop. One explicit anti-silence retry,
+# then the bound path.
+ATTESTATION_DEGENERATE_STREAK_KEY: str = "attestation_degenerate_streak"
+#: Threshold — three consecutive degenerate finals inside a
+# deny-loop trigger the loud terminal (mirrors the
+# CONSECUTIVE_IDENTICAL_THRESHOLD rationale).
+DEGENERATE_STREAK_THRESHOLD: int = 3
+#: Degenerate-shape classifier — emoji-only OR non-empty with
+# <= 3 words and NO tool calls. Applied to the FINAL AI message
+# in the messages tail; the guard fires inside an active
+# deny-loop (denied_count > 0) only — degenerate finals on the
+# ALLOW path are not in scope (a single emoji on a legitimate
+# reply is not a gate-withhold event).
+DEGENERATE_WORD_THRESHOLD: int = 3
+
+#: Repair nudge body — P2 consecutive-identical guard (CANONICAL
+#: VERBATIM, single source of truth). Embedded exactly as the
+#: incident-response team specified; the lead-in bracketed line
+#: matches the F1 Shape A injection contract so the LLM reads it
+#: as system-origin. The body is intentionally SHORT and
+#: action-oriented — a leader that hit the loop is unlikely to
+#: read a long nudge; this asks for ONE concrete action.
+ATTESTATION_IDENTICAL_REPAIR_NUDGE_TEXT = (
+    "[Attestation Gate — Repair Nudge] Your last "
+    f"{CONSECUTIVE_IDENTICAL_THRESHOLD} replies were identical and "
+    "carried no tool calls. The gate is in a withhold loop on this "
+    "mission and will not respond to additional copies. Choose "
+    "exactly one now: (1) call attest_completion ALONE in a pure "
+    "toolcall turn (empty content) then deliver your final report as "
+    "a separate standalone message; (2) dispatch or finish the "
+    "remaining work via send_message; (3) ask the user a direct "
+    "question. Repeating this same reply will end the mission "
+    "loudly as COMPLETED-UNVERIFIED (gate escalated)."
+)
+
+#: Anti-silence retry nudge body — P3 degenerate-shape guard
+#: (CANONICAL VERBATIM, single source of truth). Different
+#: shape from the P2 nudge (tells the leader its content is
+#: degenerate, not identical) so the LLM recognises them as
+#: distinct system-origin instructions.
+ATTESTATION_DEGENERATE_RETRY_NUDGE_TEXT = (
+    "[Attestation Gate — Anti-Silence] The gate has received "
+    "multiple very short or emoji-only replies on this mission. "
+    "Your final message must be a complete, readable progress "
+    "report — multiple sentences, no emoji placeholders, no "
+    "empty acknowledgment. If the work is truly complete call "
+    "attest_completion ALONE in a pure toolcall turn then deliver "
+    "your full detailed report as a subsequent standalone message. "
+    "If work remains, dispatch it. If you are uncertain, ask the "
+    "user. Continuing to emit degenerate replies will end the "
+    "mission loudly as COMPLETED-UNVERIFIED (gate escalated)."
+)
+
 #: Directive deny nudge (Fix 3, 2026-09-26) — CANONICAL VERBATIM BODY.
 #: Embedded exactly as specified by the 7d4a3bd9 fix cycle; the text is
 #: quoted verbatim in the phase report and docs/setup.md. Like the
@@ -4868,6 +4984,140 @@ def _count_episode_tool_calls(messages: Any) -> int:
         if calls:
             total += len(calls)
     return total
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P2/P3 helpers — content normalization + degenerate-shape detection
+# (2026-09-30, incidents 34978dfc mute-wall + 6a0d60c9 gradient family)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The P2 consecutive-identical guard and the P3 degenerate-shape guard
+# both need a stable view of the FINAL AIMessage content. Both helpers
+# below are pure functions over the messages tail; they raise NOTHING
+# on degenerate inputs (None, empty list, non-AI messages, tool-call
+# messages) — those cases read as "not bare prose" and short-circuit
+# to the allow side of their respective guards (zero counter movement).
+#
+# _normalize_bare_content collapses ALL whitespace into single spaces
+# and strips the result — the canonicalization makes the
+# consecutive-identical comparison robust against the trivial
+# "trailing newline" / "double space" variations an LLM might emit
+# while still hitting the same logical answer. Tool-call messages
+# are filtered OUT upstream of both guards: the leader that
+# interleaves tool calls is NOT in a mute loop, the streak must
+# reset on every tool call (the policy: real work breaks the
+# streak, always).
+
+
+def _normalize_bare_content(content: str) -> str:
+    """Whitespace-insensitive canonicalization of bare AI text (P2).
+
+    Strips leading/trailing whitespace and collapses every
+    internal whitespace run into a single space. Returns the
+    empty string for ``None`` input. The 34978dfc mute wall
+    emitted the same single-emoji content 137 times — every
+    reply normalized to the same canonical string and the
+    guard's three-strike rule fired at reply #3.
+    """
+    if not content:
+        return ""
+    return " ".join(str(content).split())
+
+
+def _is_degenerate_shape(content: str, tool_calls: Any) -> bool:
+    """Degenerate-shape classifier (P3 — gradient family catcher).
+
+    Returns True when the FINAL AIMessage is EITHER:
+
+    * emoji-only (no ASCII alphanumeric / word characters at all
+      and at least one non-whitespace character); OR
+    * non-empty with ``<= DEGENERATE_WORD_THRESHOLD`` whitespace-
+      separated tokens AND no tool calls.
+
+    Tool-call messages ALWAYS read as not-degenerate — a leader
+    that interleaves tool calls is doing real work, even if its
+    surrounding prose is brief. The classifier is intentionally
+    cheap (string scan + split); a precise emoji-Codepoint walk
+    is unnecessary because the guard fires INSIDE a deny-loop
+    only (denied_count > 0) and only at the threshold —
+    false-positive cost is one anti-silence retry nudge.
+
+    Args:
+        content: Final AIMessage ``content`` (may be ``None``).
+        tool_calls: Final AIMessage ``tool_calls`` (may be
+            ``None`` / empty list).
+
+    Returns:
+        True when the message is degenerate (catches the P3
+        gradient family); False otherwise.
+    """
+    if tool_calls:
+        return False
+    if content is None:
+        return False
+    text = str(content).strip()
+    if not text:
+        return False
+    # emoji-only: no alphanumeric / word characters
+    has_word_char = any(ch.isalnum() for ch in text)
+    if not has_word_char:
+        return True
+    # very-short prose (≤ DEGENERATE_WORD_THRESHOLD words) and no tool calls
+    tokens = text.split()
+    if len(tokens) <= DEGENERATE_WORD_THRESHOLD:
+        return True
+    return False
+
+
+def _extract_final_bare_ai_content(
+    messages: Any,
+) -> tuple[str | None, bool, bool]:
+    """Extract the LAST AIMessage's content + tool-call flag + prior-AI tool-call flag (P2 + P3).
+
+    Walks the messages tail (most recent first) and returns the
+    FINAL AIMessage's content + whether it carries tool calls,
+    PLUS whether the IMMEDIATELY-PRECEDING AI message in the
+    tail carried tool calls. The third value feeds the P2
+    consecutive-identical guard: a leader that interleaves a
+    tool call between the prior bare reply and the current bare
+    reply has done REAL WORK between identical texts and the
+    streak must reset (the false-positive case from the task).
+
+    Non-AI messages (HumanMessage, ToolMessage, etc.) are
+    skipped — the gate cares about the LAST AI turn.
+
+    Returns:
+        ``(content, has_tool_calls, prior_ai_has_tool_calls)``
+        for the FINAL AIMessage.
+        ``(None, False, False)`` when no AIMessage is present.
+    """
+    if not messages:
+        return (None, False, False)
+    msgs = list(messages)
+    # Walk backward to find the FINAL AIMessage.
+    final_idx = None
+    for i in range(len(msgs) - 1, -1, -1):
+        if isinstance(msgs[i], AIMessage):
+            final_idx = i
+            break
+    if final_idx is None:
+        return (None, False, False)
+    final_msg = msgs[final_idx]
+    content = getattr(final_msg, "content", None)
+    tool_calls = getattr(final_msg, "tool_calls", None) or []
+    # Walk backward from the message BEFORE the FINAL to find
+    # the IMMEDIATELY-PRECEDING AI message. If it carries
+    # tool calls, the leader did real work between the prior
+    # bare and the current bare — streak resets.
+    prior_ai_has_tool_calls = False
+    for j in range(final_idx - 1, -1, -1):
+        prev = msgs[j]
+        if isinstance(prev, AIMessage):
+            prior_calls = getattr(prev, "tool_calls", None) or []
+            if prior_calls:
+                prior_ai_has_tool_calls = True
+            break  # only the IMMEDIATELY-preceding AI matters
+    return (content, bool(tool_calls), prior_ai_has_tool_calls)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Attest-first HOLD-state factory (2026-09-19, c5d9a38a remediation)
@@ -5247,6 +5497,11 @@ def create_attestation_gate_node(
         Decision,
         deny_bound_exceeded,
         evaluate,
+        # P1 — per-dispatch withhold budget (2026-09-30, incident 34978dfc).
+        # Single source of truth for the budget predicate lives in
+        # ``daemon.services.attestation_gate``; extend, don't fork.
+        WITHHOLD_DENY_BUDGET_DEFAULT,
+        withhold_budget_exhausted,
     )
     from .services.attestation_ledger import (
         safe_get_denied_count,
@@ -5262,7 +5517,9 @@ def create_attestation_gate_node(
     def _consume_fresh_episode_reset(
         payload: dict[str, Any], messages_local: list[Any]
     ) -> dict[str, Any]:
-        """7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak).
+        """7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak) +
+        P1/P2/P3 channel reset (2026-09-30, incidents 34978dfc +
+        6a0d60c9).
 
         If the user-message sentinel ``fresh_episode_attestation_reset``
         is present on any HumanMessage in the evaluated turn's
@@ -5274,12 +5531,22 @@ def create_attestation_gate_node(
 
         The reset is additive: the existing return payload
         (decision / route / channel writes from the deny or allow
-        branch) is preserved; only the two channel keys are
-        overridden to their defaults. This guarantees the
-        exhaustion composition gate on the new episode's first
-        bound exhaustion sees ``any_substantive_deny=False`` (the
-        never-spoke arc behaviour holds, even if the prior
-        episode had stamped True on a substantive deny).
+        branch) is preserved; the cleared channels are overridden
+        to their defaults. This guarantees:
+
+        * the exhaustion composition gate on the new episode's
+          first bound exhaustion sees ``any_substantive_deny=False``
+          (the never-spoke arc behaviour holds, even if the prior
+          episode had stamped True on a substantive deny);
+        * the P1 withhold budget counter starts at 0 (no
+          accumulated budget from a prior episode's mute wall
+          can carry into the new episode);
+        * the P2 consecutive-identical guard resets (the
+          ``last_bare_ai_content`` sentinel + the
+          ``repair_nudge_sent`` flag clear so a fresh episode's
+          identical-reply arc starts from zero);
+        * the P3 degenerate-streak counter resets (no carry-over
+          from a prior episode's gradient arc).
         """
         sentinel_seen = any(
             isinstance(m, HumanMessage)
@@ -5297,6 +5564,14 @@ def create_attestation_gate_node(
             **payload,
             ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
             ATTESTATION_DENY_PROGRESS_KEY: None,
+            # P1 — withhold budget reset (2026-09-30).
+            ATTESTATION_WITHHOLD_DENY_COUNT_KEY: 0,
+            # P2 — consecutive-identical reset (2026-09-30).
+            ATTESTATION_CONSECUTIVE_IDENTICAL_KEY: 0,
+            ATTESTATION_LAST_BARE_AI_CONTENT_KEY: None,
+            ATTESTATION_REPAIR_NUDGE_SENT_KEY: False,
+            # P3 — degenerate-streak reset (2026-09-30).
+            ATTESTATION_DEGENERATE_STREAK_KEY: 0,
         }
 
     async def attestation_gate_node(
@@ -5349,6 +5624,156 @@ def create_attestation_gate_node(
                     state, ATTESTATION_ANY_SUBSTANTIVE_KEY, False
                 )
             any_substantive_deny = bool(_raw_substantive)
+            # P1 — read the per-dispatch withhold-epoch counter
+            # (2026-09-30, incident 34978dfc mute-wall). The
+            # counter accumulates each time the composition gate
+            # converts a never-spoke-judge bound exhaustion into
+            # a DENIED; reset via the standard SessionState
+            # channel clearing rules (terminal / attested allow /
+            # HOLD cap fall-through / fresh-episode sentinel).
+            # Channel-defaulting: missing key reads as 0 (fresh
+            # mission); existing key reads its int value (defensive
+            # coercion handles magicmock / duck-typed embeddings).
+            if isinstance(state, dict):
+                _raw_withhold = state.get(
+                    ATTESTATION_WITHHOLD_DENY_COUNT_KEY, 0
+                )
+            else:
+                _raw_withhold = getattr(
+                    state, ATTESTATION_WITHHOLD_DENY_COUNT_KEY, 0
+                ) or 0
+            try:
+                withhold_deny_count = int(_raw_withhold)
+            except (TypeError, ValueError):
+                withhold_deny_count = 0
+            # The composition gate below mutates
+            # ``withhold_deny_count`` ONLY when the gate fires a
+            # conversion; on every other code path the value
+            # persists unchanged. Initialize the write-back variable
+            # so the deny branch's return path can echo the current
+            # value even when the composition gate didn't fire
+            # (the budget counter is per-dispatch, not per-epoch —
+            # it does NOT reset on a normal deny, only on
+            # terminal / attested allow / fresh-episode).
+            next_withhold_deny_count = withhold_deny_count
+
+            # P2 — consecutive-identical-content guard (2026-09-30,
+            # incident 34978dfc mute-wall). Read the prior turn's
+            # counter + the last-bare-AI content fingerprint from
+            # state, then update based on the FINAL AIMessage in
+            # the messages tail. The counter tracks CONSECUTIVE bare
+            # no-tool-call AIMessages whose whitespace-normalized
+            # content matches the prior one — tool calls or a
+            # different content reset the streak.
+            final_ai_content, final_ai_has_tool_calls, prior_ai_has_tool_calls = (
+                _extract_final_bare_ai_content(messages)
+            )
+            final_ai_normalized = (
+                _normalize_bare_content(final_ai_content)
+                if final_ai_content is not None
+                else None
+            )
+            if isinstance(state, dict):
+                _raw_p2_count = state.get(
+                    ATTESTATION_CONSECUTIVE_IDENTICAL_KEY, 0
+                )
+                _raw_last_norm = state.get(
+                    ATTESTATION_LAST_BARE_AI_CONTENT_KEY
+                )
+                _raw_repair_sent = state.get(
+                    ATTESTATION_REPAIR_NUDGE_SENT_KEY, False
+                )
+            else:
+                _raw_p2_count = getattr(
+                    state, ATTESTATION_CONSECUTIVE_IDENTICAL_KEY, 0
+                ) or 0
+                _raw_last_norm = getattr(
+                    state, ATTESTATION_LAST_BARE_AI_CONTENT_KEY, None
+                )
+                _raw_repair_sent = getattr(
+                    state, ATTESTATION_REPAIR_NUDGE_SENT_KEY, False
+                )
+            try:
+                consecutive_identical = int(_raw_p2_count)
+            except (TypeError, ValueError):
+                consecutive_identical = 0
+            last_bare_ai_content = (
+                _raw_last_norm
+                if isinstance(_raw_last_norm, str)
+                else None
+            )
+            repair_nudge_sent = bool(_raw_repair_sent)
+
+            # Update the streak based on the FINAL AIMessage. The
+            # rules: tool calls OR no AI message → reset to 0;
+            # IMMEDIATELY-PRECEDING AI carried tool calls → reset
+            # to 1 (the leader did real work between identical
+            # texts — the false-positive case); first bare reply
+            # → start at 1; identical bare reply → increment;
+            # different bare reply → reset to 1 (a new streak
+            # starts, not zero — the first reply is itself one
+            # data point).
+            if final_ai_has_tool_calls or final_ai_normalized is None:
+                consecutive_identical = 0
+                last_bare_ai_content = None
+            elif prior_ai_has_tool_calls:
+                # Real work happened between the prior bare and
+                # the current bare — the streak resets to 1 (a
+                # fresh streak anchored at this reply, NOT 0,
+                # because the current reply is itself one data
+                # point).
+                consecutive_identical = 1
+                last_bare_ai_content = final_ai_normalized
+            elif last_bare_ai_content is None or last_bare_ai_content == "":
+                consecutive_identical = 1
+                last_bare_ai_content = final_ai_normalized
+            elif last_bare_ai_content == final_ai_normalized:
+                consecutive_identical += 1
+                last_bare_ai_content = final_ai_normalized
+            else:
+                consecutive_identical = 1
+                last_bare_ai_content = final_ai_normalized
+
+            # P3 — degenerate-shape guard (2026-09-30, gradient
+            # family incident 6a0d60c9). Tracks consecutive
+            # degenerate finals (emoji-only OR very-short prose
+            # without tool calls) INSIDE an active deny-loop only.
+            # On the ALLOW path the degenerate shape doesn't matter
+            # — a single emoji on a legitimate reply is fine. The
+            # streak resets on every non-degenerate reply OR when
+            # denied_count drops back to 0 (the leader recovers
+            # from the loop).
+            if isinstance(state, dict):
+                _raw_degenerate = state.get(
+                    ATTESTATION_DEGENERATE_STREAK_KEY, 0
+                )
+            else:
+                _raw_degenerate = getattr(
+                    state, ATTESTATION_DEGENERATE_STREAK_KEY, 0
+                ) or 0
+            try:
+                degenerate_streak = int(_raw_degenerate)
+            except (TypeError, ValueError):
+                degenerate_streak = 0
+            if (
+                denied_count > 0
+                and _is_degenerate_shape(
+                    final_ai_content, final_ai_has_tool_calls
+                )
+            ):
+                degenerate_streak += 1
+            else:
+                degenerate_streak = 0
+
+            # P2/P3 guard activation flags — read by the DENIED
+            # branch below to choose the nudge body, and read by
+            # the composition-gate block above to force a loud
+            # terminal when the guard has already fired its repair
+            # nudge and the loop continues. Initialized False;
+            # set True inside the guards below.
+            p2_loud_terminal = False
+            p3_loud_terminal = False
+            p2_repair_pending = False
             decision = await asyncio.to_thread(
                 evaluate,
                 effective_instance_id,
@@ -5825,28 +6250,189 @@ def create_attestation_gate_node(
         #     Deliberately unbounded-by-user-ruling for this
         #     never-spoke case (C1 supersession note, decisions.md);
         #     C1 remains fully intact for the judge-spoke path.
+        #
+        # P1 — per-dispatch withhold budget (2026-09-30, incident
+        # 34978dfc mute-wall): the user-ruling "never-spoke
+        # continuation" is PRESERVED on the never-spoke path, BUT
+        # each conversion to DENIED increments a per-dispatch
+        # counter (separate from the normal deny bound). When the
+        # counter exceeds the budget the leader exits LOUDLY via
+        # the standard terminal_after_bound machinery — recursion_
+        # limit must never be the only terminator. The budget is
+        # checked via the SINGLE-SOURCE predicate
+        # ``withhold_budget_exhausted`` in
+        # ``daemon.services.attestation_gate`` — extend, don't
+        # fork.
         if (
             decision.decision is Decision.TERMINAL_AFTER_BOUND
             and not any_substantive_deny
         ):
-            decision = _replace(
-                decision,
-                decision=Decision.DENIED,
-                should_inject_nudge=True,
-                next_denied_count=decision.denied_count + 1,
-            )
-            logger.info(
-                "event=leader_completion_gate_bound_exhausted_never_spoke "
-                "instance_id=%s denied_count=%s next_denied_count=%s "
-                "any_substantive_deny=false "
-                "decision=terminal_withheld_deny_continues "
-                "detail=judge-never-spoke epoch: no not_complete verdict; "
-                "terminal withheld per user ruling (exits: attest / "
-                "finish work / ask user)",
+            # Read the current withhold-deny counter from state.
+            # Channel-defaulting semantics: missing key reads as 0
+            # (fresh mission); existing key reads its integer value.
+            if isinstance(state, dict):
+                _raw_withhold = state.get(
+                    ATTESTATION_WITHHOLD_DENY_COUNT_KEY, 0
+                )
+            else:
+                _raw_withhold = getattr(
+                    state, ATTESTATION_WITHHOLD_DENY_COUNT_KEY, 0
+                ) or 0
+            try:
+                current_withhold_deny_count = int(_raw_withhold)
+            except (TypeError, ValueError):
+                current_withhold_deny_count = 0
+
+            if withhold_budget_exhausted(
+                current_withhold_deny_count,
+                WITHHOLD_DENY_BUDGET_DEFAULT,
+            ):
+                # Budget exhausted — KEEP the terminal_after_bound
+                # decision (the standard loud exit machinery below
+                # writes ``completed (gate escalated — unverified)``,
+                # sets the escalation flag, resets the counter).
+                # The withhold counter is reset on the terminal
+                # return path so a fresh mission episode starts at 0.
+                # Emit the P1 audit row so operators can see the
+                # withhold budget fired (greppable; distinct from
+                # the never-spoke continuation row).
+                logger.warning(
+                    "event=leader_completion_gate_withholding_exit "
+                    "instance_id=%s withhold_deny_count=%s budget=%s "
+                    "decision=terminal_after_bound_forced "
+                    "detail=P1 per-dispatch withhold budget exhausted; "
+                    "loud terminal writes COMPLETED-UNVERIFIED (gate "
+                    "escalated) — recursion_limit must never be the only "
+                    "terminator",
+                    effective_instance_id,
+                    current_withhold_deny_count,
+                    WITHHOLD_DENY_BUDGET_DEFAULT,
+                )
+            else:
+                # Budget NOT exhausted — preserve the v3 ruling:
+                # convert to DENIED, increment the withhold counter
+                # (so the next conversion knows we used one budget
+                # slot), and emit the never-spoke continuation row.
+                # The withheld-terminal row is unchanged from
+                # pre-P1; the budget check is additive.
+                next_withhold_deny_count = current_withhold_deny_count + 1
+                decision = _replace(
+                    decision,
+                    decision=Decision.DENIED,
+                    should_inject_nudge=True,
+                    next_denied_count=decision.denied_count + 1,
+                )
+                logger.info(
+                    "event=leader_completion_gate_bound_exhausted_never_spoke "
+                    "instance_id=%s denied_count=%s next_denied_count=%s "
+                    "withhold_deny_count=%s next_withhold_deny_count=%s "
+                    "budget=%s any_substantive_deny=false "
+                    "decision=terminal_withheld_deny_continues "
+                    "detail=judge-never-spoke epoch: no not_complete "
+                    "verdict; terminal withheld per user ruling "
+                    "(exits: attest / finish work / ask user)",
+                    effective_instance_id,
+                    decision.denied_count,
+                    decision.next_denied_count,
+                    current_withhold_deny_count,
+                    next_withhold_deny_count,
+                    WITHHOLD_DENY_BUDGET_DEFAULT,
+                )
+
+        # ─── P2 + P3 guards (2026-09-30, incidents 34978dfc + 6a0d60c9) ──
+        # These run AFTER the composition gate so the P1 withhold
+        # budget can fire its loud-terminal escape first (preserved
+        # priority: P1 budget > P2 repair > P3 retry > normal
+        # deny+nudge flow). When a guard fires loud terminal the
+        # decision is replaced with TERMINAL_AFTER_BOUND and the
+        # standard terminal machinery below writes the escalation
+        # flag + resets the counter. When a guard fires a repair
+        # nudge, the DENIED branch below uses the guard-specific
+        # body and marks the per-mission flag so the next
+        # identical reply escalates loudly.
+        if (
+            decision.decision is Decision.DENIED
+            and consecutive_identical >= CONSECUTIVE_IDENTICAL_THRESHOLD
+        ):
+            if repair_nudge_sent:
+                # P2 — second-strike: leader ignored the repair
+                # nudge. Force the loud terminal. Same machinery
+                # as the normal exhaustion path: ledger escalation
+                # + counter reset + the canonical
+                # ``leader_completion_gate_terminal_after_bound``
+                # row (plus the P2 audit row so operators can see
+                # WHICH guard fired).
+                p2_loud_terminal = True
+                logger.warning(
+                    "event=leader_completion_gate_consecutive_identical_"
+                    "terminal instance_id=%s consecutive_identical=%s "
+                    "repair_nudge_sent=true "
+                    "decision=terminal_after_bound_forced "
+                    "detail=P2 guard second-strike: leader ignored the "
+                    "repair nudge; loud terminal writes COMPLETED-UNVERIFIED "
+                    "(gate escalated)",
+                    effective_instance_id,
+                    consecutive_identical,
+                )
+                decision = _replace(
+                    decision,
+                    decision=Decision.TERMINAL_AFTER_BOUND,
+                    next_denied_count=0,
+                    should_inject_nudge=False,
+                )
+            else:
+                # P2 — first-strike: emit the repair nudge. The
+                # DENIED branch below will pick the repair body
+                # (overriding the standard / directive selection).
+                p2_repair_pending = True
+                logger.warning(
+                    "event=leader_completion_gate_consecutive_identical_"
+                    "nudge instance_id=%s consecutive_identical=%s "
+                    "decision=deny_with_repair_nudge "
+                    "detail=P2 guard first-strike: emitting repair nudge "
+                    "(a second identical reply will loud-terminal)",
+                    effective_instance_id,
+                    consecutive_identical,
+                )
+        elif (
+            decision.decision is Decision.DENIED
+            and degenerate_streak >= DEGENERATE_STREAK_THRESHOLD
+        ):
+            # P3 — degenerate-shape anti-silence retry. Distinct
+            # from the P2 repair (the leader is sending DIFFERENT
+            # degenerate replies, not identical ones — the
+            # gradient-family catcher). The single anti-silence
+            # retry nudge rides the standard DENIED branch; on the
+            # second streak crossing we force the loud terminal
+            # via the same machinery as P2 (the bound path stays
+            # consistent across both guards).
+            logger.warning(
+                "event=leader_completion_gate_degenerate_retry "
+                "instance_id=%s degenerate_streak=%s "
+                "decision=deny_with_anti_silence_retry "
+                "detail=P3 guard first-strike: emitting anti-silence "
+                "retry (degenerate finals inside the deny-loop)",
                 effective_instance_id,
-                decision.denied_count,
-                decision.next_denied_count,
+                degenerate_streak,
             )
+            if degenerate_streak >= DEGENERATE_STREAK_THRESHOLD * 2:
+                p3_loud_terminal = True
+                logger.warning(
+                    "event=leader_completion_gate_degenerate_terminal "
+                    "instance_id=%s degenerate_streak=%s "
+                    "decision=terminal_after_bound_forced "
+                    "detail=P3 guard second-strike: leader ignored the "
+                    "anti-silence retry; loud terminal writes "
+                    "COMPLETED-UNVERIFIED (gate escalated)",
+                    effective_instance_id,
+                    degenerate_streak,
+                )
+                decision = _replace(
+                    decision,
+                    decision=Decision.TERMINAL_AFTER_BOUND,
+                    next_denied_count=0,
+                    should_inject_nudge=False,
+                )
 
         # Phase 3 — ledger writes (C3 fail-open wrapper). NO writes on
         # the meta-conditions / dry / R2 un-attested allow paths. The
@@ -5940,22 +6526,51 @@ def create_attestation_gate_node(
             # ``completed (gate escalated — unverified)`` terminal
             # stands. (The zero-substantive case was converted to DENIED
             # by the exhaustion gate above and never reaches this row.)
+            #
+            # P1 + P2 + P3 — all three guards can also force a loud
+            # terminal: P1 via the composition-gate withhold budget
+            # exhaustion, P2 via the consecutive-identical second-strike,
+            # P3 via the degenerate-shape second-strike. The terminal
+            # event is the same shape (loud COMPLETED-UNVERIFIED);
+            # the operator's view is the canonical
+            # ``leader_completion_gate_terminal_after_bound`` row plus
+            # the per-guard audit row emitted above (any_substantive
+            # deny stays True for the P1 case — the withhold budget
+            # is the conversion cause, not the judge speaking).
             logger.info(
                 "event=leader_completion_gate_terminal_after_bound "
                 "instance_id=%s "
                 "attestation_denied_count=%s completion_gate_escalated=true "
-                "any_substantive_deny=true",
+                "any_substantive_deny=%s withhold_deny_count=%s "
+                "consecutive_identical=%s degenerate_streak=%s "
+                "p2_loud_terminal=%s p3_loud_terminal=%s",
                 effective_instance_id,
                 decision.denied_count,
+                any_substantive_deny,
+                withhold_deny_count,
+                consecutive_identical,
+                degenerate_streak,
+                p2_loud_terminal,
+                p3_loud_terminal,
             )
             # Terminal reset (trigger 2) — clear the fix-3 + exhaustion
             # channels alongside the substantive counter reset (the
             # ledger's ``set_escalated_and_reset`` cleared the instance
-            # column above). The next episode starts clean.
+            # column above). The next episode starts clean. P1 + P2 +
+            # P3 channels all reset here too so a fresh mission
+            # episode starts from zero on every guard.
             return {
                 "attestation_route": None,
                 ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
                 ATTESTATION_DENY_PROGRESS_KEY: None,
+                # P1 — withhold budget reset.
+                ATTESTATION_WITHHOLD_DENY_COUNT_KEY: 0,
+                # P2 — consecutive-identical reset.
+                ATTESTATION_CONSECUTIVE_IDENTICAL_KEY: 0,
+                ATTESTATION_LAST_BARE_AI_CONTENT_KEY: None,
+                ATTESTATION_REPAIR_NUDGE_SENT_KEY: False,
+                # P3 — degenerate-streak reset.
+                ATTESTATION_DEGENERATE_STREAK_KEY: 0,
             }
 
         if decision.decision is Decision.DENIED:
@@ -6010,22 +6625,38 @@ def create_attestation_gate_node(
                 and _current_tool_calls <= _prior_progress
             )
             _nudge_is_directive = _is_repeat_deny and _zero_progress
-            _nudge_body = (
-                ATTESTATION_DIRECTIVE_NUDGE_TEXT
-                if _nudge_is_directive
-                else ATTESTATION_NUDGE_TEXT
-            )
+            # P2 — repair-nudge body takes precedence over the
+            # standard / directive selection when the consecutive-
+            # identical guard fires first-strike (the repair
+            # message is the one specific to the loop, not the
+            # generic "the work isn't finished" framing). The
+            # second-strike path already converted the decision to
+            # TERMINAL_AFTER_BOUND above so this branch is only
+            # reached on first-strike or non-P2 fires.
+            if p2_repair_pending:
+                _nudge_body = ATTESTATION_IDENTICAL_REPAIR_NUDGE_TEXT
+                _nudge_kind = "repair"
+            else:
+                _nudge_body = (
+                    ATTESTATION_DIRECTIVE_NUDGE_TEXT
+                    if _nudge_is_directive
+                    else ATTESTATION_NUDGE_TEXT
+                )
+                _nudge_kind = "directive" if _nudge_is_directive else "standard"
             logger.info(
                 "[AttestationGate] deny instance=%s denied_count=%s -> "
                 "next=%s nudge_kind=%s "
                 "progress_tools=%s prior_progress=%s "
+                "consecutive_identical=%s degenerate_streak=%s "
                 "nudge_inject_ts=%s; injecting in-graph nudge",
                 effective_instance_id,
                 decision.denied_count,
                 decision.next_denied_count,
-                "directive" if _nudge_is_directive else "standard",
+                _nudge_kind,
                 _current_tool_calls,
                 _prior_progress,
+                consecutive_identical,
+                degenerate_streak,
                 now_utc_iso(),
             )
             # FIX-3 (2026-09-16, incident 6a0d60c9): the nudge carries
@@ -6051,13 +6682,15 @@ def create_attestation_gate_node(
                 additional_kwargs={
                     "attestation_nudge": True,
                     # 7d4a3bd9 Fix 3 (2026-09-26) — which nudge shape
-                    # fired ("standard" | "directive"). The stable id is
-                    # SHARED with the standard nudge so the directive
-                    # supersede's the prior standard block in place
-                    # (no accumulation).
-                    "attestation_nudge_kind": (
-                        "directive" if _nudge_is_directive else "standard"
-                    ),
+                    # fired ("standard" | "directive" | "repair"). The
+                    # stable id is SHARED with the standard nudge so
+                    # the directive supersede's the prior standard
+                    # block in place (no accumulation). The P2
+                    # repair nudge is a NEW shape (2026-09-30) — its
+                    # content differs from the standard / directive
+                    # ones so the marker kwargs gain a third value
+                    # rather than overloading "directive".
+                    "attestation_nudge_kind": _nudge_kind,
                     # C1 (2026-09-12 review): stamp server-injected like
                     # every other injection site — the S1 turn-window
                     # scan must skip this nudge instead of reading it as
@@ -6082,6 +6715,43 @@ def create_attestation_gate_node(
                 # exhaustion composition gate's input).
                 ATTESTATION_ANY_SUBSTANTIVE_KEY: any_substantive_deny,
                 ATTESTATION_DENY_PROGRESS_KEY: _current_tool_calls,
+                # P1 — write the withhold-deny count so the NEXT
+                # evaluation knows the accumulated budget state.
+                # ``next_withhold_deny_count`` is updated by the
+                # composition gate conversion (when it fires); on a
+                # normal deny path the value is unchanged from the
+                # input read at the top of the node. Either way the
+                # channel write persists for cross-turn
+                # accountability (the 24-pre-accumulation fact — the
+                # incident's counter accumulated 24 denials before the
+                # fatal turn, so the channel write MUST survive
+                # subsequent turns, not just the current one).
+                ATTESTATION_WITHHOLD_DENY_COUNT_KEY: next_withhold_deny_count,
+                # P2 — write the consecutive-identical counter so
+                # the next turn's comparison sees the current
+                # streak (reset to 0 when the repair-nudge fires
+                # so the leader's next reply starts a fresh
+                # evaluation; carried forward unchanged when a
+                # normal deny fires so the streak survives). The
+                # last-bare-AI fingerprint rides alongside so the
+                # next turn's identical-reply comparison has the
+                # reference value to compare against.
+                ATTESTATION_CONSECUTIVE_IDENTICAL_KEY: (
+                    0 if p2_repair_pending else consecutive_identical
+                ),
+                ATTESTATION_LAST_BARE_AI_CONTENT_KEY: (
+                    None if p2_repair_pending else last_bare_ai_content
+                ),
+                ATTESTATION_REPAIR_NUDGE_SENT_KEY: (
+                    True if p2_repair_pending else repair_nudge_sent
+                ),
+                # P3 — degenerate streak rides the channel so the
+                # next turn's evaluation can detect a continuing
+                # gradient arc. The P3 loud-terminal path resets
+                # the streak via the terminal branch below; the
+                # normal-deny path carries the streak unchanged so
+                # the next degenerate reply extends it.
+                ATTESTATION_DEGENERATE_STREAK_KEY: degenerate_streak,
             }
 
         # ─────────────────────────────────────────────────────────────
@@ -6209,12 +6879,26 @@ def create_attestation_gate_node(
         # deny=True`` would otherwise leak across the cap fall-through
         # into the next sub-turn's exhaustion composition gate and
         # wrongly terminalize a never-spoke arc.
+        #
+        # P1 + P2 + P3 — every ALLOW / terminal / HOLD branch MUST
+        # also clear the new SessionState channels so a stale
+        # withhold_deny_count or repair_nudge_sent flag cannot leak
+        # across episodes / sub-turns via checkpoint and wrongly
+        # trigger a guard on a fresh mission.
         if decision.decision is Decision.HOLD:
             return {
                 "attestation_route": None,
                 ATTESTATION_REMINDER_COUNT_KEY: 0,
                 ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
                 ATTESTATION_DENY_PROGRESS_KEY: None,
+                # P1 — withhold budget reset.
+                ATTESTATION_WITHHOLD_DENY_COUNT_KEY: 0,
+                # P2 — consecutive-identical reset.
+                ATTESTATION_CONSECUTIVE_IDENTICAL_KEY: 0,
+                ATTESTATION_LAST_BARE_AI_CONTENT_KEY: None,
+                ATTESTATION_REPAIR_NUDGE_SENT_KEY: False,
+                # P3 — degenerate-streak reset.
+                ATTESTATION_DEGENERATE_STREAK_KEY: 0,
             }
         # Attested allow (Decision.ALLOWED with attestation_present=True)
         # — the leader delivered a proper standalone text report and
@@ -6230,6 +6914,13 @@ def create_attestation_gate_node(
                 ATTESTATION_REMINDER_COUNT_KEY: 0,
                 ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
                 ATTESTATION_DENY_PROGRESS_KEY: None,
+                # P1 + P2 + P3 — same reset contract as the
+                # HOLD-cap fall-through above.
+                ATTESTATION_WITHHOLD_DENY_COUNT_KEY: 0,
+                ATTESTATION_CONSECUTIVE_IDENTICAL_KEY: 0,
+                ATTESTATION_LAST_BARE_AI_CONTENT_KEY: None,
+                ATTESTATION_REPAIR_NUDGE_SENT_KEY: False,
+                ATTESTATION_DEGENERATE_STREAK_KEY: 0,
             }
         # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak):
         # every ALLOW / terminal branch that does NOT take the attested
@@ -6241,10 +6932,18 @@ def create_attestation_gate_node(
         # The reset is unconditional on every non-terminal-bearing
         # allow branch — same reset-semantics contract as the
         # attested-allow reset above.
+        #
+        # P1 + P2 + P3 — same reset contract: stale withhold /
+        # consecutive / degenerate channel writes must NOT leak.
         return {
             "attestation_route": None,
             ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
             ATTESTATION_DENY_PROGRESS_KEY: None,
+            ATTESTATION_WITHHOLD_DENY_COUNT_KEY: 0,
+            ATTESTATION_CONSECUTIVE_IDENTICAL_KEY: 0,
+            ATTESTATION_LAST_BARE_AI_CONTENT_KEY: None,
+            ATTESTATION_REPAIR_NUDGE_SENT_KEY: False,
+            ATTESTATION_DEGENERATE_STREAK_KEY: 0,
         }
 
     # O8 surface: the exact config the gate will run with, auditable in
