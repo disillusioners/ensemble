@@ -33,6 +33,21 @@
 
 set -u
 
+# ---------------------------------------------------------------------------
+# Layer-2 internal watchdog (test-pack skill: dual-layer timeout). The suite
+# normally finishes in ~30s; 240s self-interrupt guards a hung arm (e.g. the
+# tier-1a real-launcher wait). Outer `timeout 300` remains layer 1.
+_adopt_test_on_timeout() {
+    printf 'RESULT: TIMEOUT (internal %ss watchdog)\n' "$_ADOPT_TEST_MAX_S" >&2
+    exit 124
+}
+_ADOPT_TEST_MAX_S=240
+trap _adopt_test_on_timeout TERM
+( sleep "$_ADOPT_TEST_MAX_S" && kill -TERM "$$" ) 2>/dev/null &
+_ADOPT_WATCHDOG=$!
+trap 'kill "$_ADOPT_WATCHDOG" 2>/dev/null; wait "$_ADOPT_WATCHDOG" 2>/dev/null' EXIT
+# ---------------------------------------------------------------------------
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ADOPT="$REPO_ROOT/scripts/upgrade/adopt-unit.sh"
 REAL_UNAME="$(command -v uname)"
