@@ -2657,7 +2657,7 @@ class TestLiveThreeFactorGate:
         # ``daemon/tools/upgrade_tools.py:2869``:
         #   f"UPGRADE ARMED — run_id={run_id} env={self_env} target={version} mode=promote"
         # The same token is pinned for the canonical fake-live PASS path
-        # by ``test_armed_pass_fake_live_full_three_factor`` (line ~2710).
+        # by ``test_full_pass_consumes_nonce_and_arms`` (line :2713).
         # (The reviewer's suggestion of ``noop-on-demo-or-non-staged`` was
         # a guess — that token does NOT exist in the current code.)
         assert "UPGRADE ARMED" in out, (
@@ -2670,11 +2670,7 @@ class TestLiveThreeFactorGate:
         )
 
     async def test_nonce_ttl_boundary_60m01s_expired(self, live_harness) -> None:
-        """ADR-036 boundary (60min window): a nonce aged past 60:00 by
-        even 1 second IS expired — strict ``now > ttl`` semantics at the
-        upper edge. The offset is derived symbolically from NONCE_TTL_S
-        so the test means "TTL+1s past mint" for ANY canonical width
-        (FIX-BACK review hygiene N2 — Option A)."""
+        """Expiry backdated to now − (NONCE_TTL_S + 1) so strict now > ttl fires with proportional margin."""
         from daemon.tools.upgrade_journal import NONCE_TTL_S
         live = live_harness
         run_id, nonce, grouped = await self._mint_nonce(live)

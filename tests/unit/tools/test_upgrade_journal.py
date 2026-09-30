@@ -734,7 +734,7 @@ class TestNonceStore:
         ttl = uj.parse_iso_utc(action.ttl_expires_at) - uj.parse_iso_utc(action.issued_at)
         assert abs(ttl.total_seconds() - NONCE_TTL_S) < 5
 
-    def test_manager_fallback_noncel_literal_matches_canonical(self) -> None:
+    def test_manager_fallback_nonce_literal_matches_canonical(self) -> None:
         """ADR-036 + FIX-BACK review hygiene N1: ``daemon/manager.py:4078``
         carries a defensive pragma fallback (``NONCE_TTL_S = 60 * 60``)
         that fires ONLY when the canonical ``daemon.tools.upgrade_journal``

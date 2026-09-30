@@ -18,7 +18,7 @@ last-verified-against: v0.12.4
 
 ## R3 — Live gate via 3-factor
 **T:** any live `system_upgrade` arming (never `system_restart`).
-**S:** `system_upgrade(dry_run=True)` persists nonce. Relay verbatim via `ask_user`; agent MUST NOT fabricate or echo. User echoes in-thread ≤15 min (F2 via `USER_ORIGIN_SOURCES` at `upgrade_journal.py:1081-1083`). `system_upgrade(user_confirmed=True, nonce=<echoed>)` clears 3-factor.
+**S:** `system_upgrade(dry_run=True)` persists nonce. Relay verbatim via `ask_user`; agent MUST NOT fabricate or echo. User echoes in-thread ≤60 min — the nonce window was widened from 15min to 60min per user decision 2026-09-30 (ADR-036) to cover the worst-case ceremony latency across mint→echo on slow chat paths; F2 via `USER_ORIGIN_SOURCES` at `upgrade_journal.py:1081-1083` (canonical `NONCE_TTL_S = 60 * 60` at `upgrade_journal.py:116`). `system_upgrade(user_confirmed=True, nonce=<echoed>)` clears 3-factor.
 **V:** journal: pending then commit. **A:** `daemon/tools/upgrade_tools.py:1877-2036`.
 
 ## R4 — `adopt_stale_txn`

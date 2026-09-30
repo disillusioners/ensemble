@@ -233,7 +233,7 @@ Covers:
 **Data model** (`daemon/tools/upgrade_journal.py`):
 - `PendingAction` dataclass :759-786: run_id, nonce, kind, env, target, issued_at, `ttl_expires_at = iso_plus(now_iso(), NONCE_TTL_S)` (:770), issued_to_instance, consumed_at, consumed_by_message_id.
 - Persisted in `$INSTALL_DIR/releases/state.json` under the `pending_actions` MAP keyed by run_id (:829-830). Nonce format `CONFIRM-` + 8 base32 chars (`NONCE_RE` :123; grouped `CONFIRM-XXXX-XXXX` accepted).
-- **NONCE_TTL_S = 15 min** (:103). Expiry = timestamp comparison `now > parse_iso_utc(ttl_expires_at)`.
+- **NONCE_TTL_S = 60 min (per ADR-036, 2026-09-30)** (:116). Expiry = timestamp comparison `now > parse_iso_utc(ttl_expires_at)`.
 
 **Current GC** (`_gc_pending_actions`, :789-821) — quoted in full in the session; semantics:
 ```python
