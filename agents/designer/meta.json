@@ -7,7 +7,7 @@
   "version": "1.0.0",
   "llm_model": "vision",
   "innate_skills": ["dynamic-skill", "todo"],
-  "skill_injection": true,
+  "skill_injection": false,
   "no_force_explore": true,
   "recursion_limit_multiplier": 7,
   "tools": {
