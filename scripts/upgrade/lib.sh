@@ -1857,6 +1857,15 @@ atomic_flip() {
 # sequences, MainPID changes (P5 will script all of these).
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 
+# SUPERVISION_UNIT_DIR — directory scanned for unit FILES by the
+# nohup-survivor heal inside supervision_classify (supervisor war r3,
+# 2026-09-30). Default /etc/systemd/system = the adopt-unit.sh DEST
+# convention (admin-managed units: adopt-unit generates there, the
+# runbook's hand-provisioned ensemble-*.service units live there —
+# lib.sh:1990 context). Test seam, SYSTEMCTL_BIN style: point it at a
+# fixture dir so heal cells never depend on the host's real /etc/systemd.
+SUPERVISION_UNIT_DIR="${SUPERVISION_UNIT_DIR:-/etc/systemd/system}"
+
 # _supervision_host_allows_unit — the shared host guard for every unit
 # hand-back path: Linux + a live systemd ONLY. The uname check runs FIRST
 # so non-Linux hosts take zero new /proc or /run reads (P1 guard
@@ -2389,6 +2398,33 @@ _supervision_unit_from_dotenv() {
     printf '%s\n' "$raw"
 }
 
+# _supervision_derive_unit_name — LAST-resort unit-name derivation for the
+# nohup-survivor heal in supervision_classify (supervisor war r3, 2026-09-30):
+# PINNED MIRROR of adopt-unit.sh _derive_unit_name (the header naming rule:
+# ensemble-<slug>.service, slug = basename(INSTALL_DIR) minus a leading
+# "agents-"/"ensemble-", sanitized to [0-9A-Za-z@._-]; empty or bare
+# "ensemble" slug → "main" — ~/agents-ensemble → ensemble-main.service,
+# ~/agents-ensemble-demo → ensemble-demo.service). Mirrored, not sourced:
+# adopt-unit.sh is an entry script (sourcing it runs the adoption
+# machinery); same pin discipline as _supervision_owned_pids (the
+# stop-ensemble.sh tier mirror). Deliberately NOT the nonexistent
+# 'ensemble-${TARGET}.service' template (supervisor war r3 review: on
+# ensemble-vm that would adopt the RETIRED ensemble-live.service lane
+# while INSTALL_DIR/.env pins ensemble-main.service).
+_supervision_derive_unit_name() {
+    local base
+    base="$(basename "${INSTALL_DIR:-}")"
+    case "$base" in agents-*) base="${base#agents-}" ;; esac
+    # avoid a double prefix: agents-ensemble-demo → ensemble-demo (not
+    # ensemble-ensemble-demo); a BARE ensemble dir falls to "main" below.
+    case "$base" in ensemble-*) base="${base#ensemble-}" ;; esac
+    base="$(printf '%s' "$base" | sed -e 's/[^0-9A-Za-z@._-]/-/g' -e 's/^[-.]*//' -e 's/[-.]*$//')"
+    if [ -z "$base" ] || [ "$base" = "ensemble" ]; then
+        base="main"
+    fi
+    printf 'ensemble-%s.service' "$base"
+}
+
 # supervision_classify — THE classifier. Uncached per-run (state may change
 # across a run: the daemon stops mid-promote). Sets globals:
 #   SUPERVISION_MODE   resolved mode: 'unit' | 'script'
@@ -2426,7 +2462,8 @@ supervision_classify() {
     SUPERVISION_UNIT=""
     SUPERVISION_EXPLICIT_UNIT=0
     SUPERVISION_REFUSE_REASON=""
-    local raw low leaf pid inv
+    local raw low leaf pid inv heal_unit heal_on
+    heal_on=0
     raw="${ENSEMBLE_SUPERVISION:-}"
     raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     low="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
@@ -2549,10 +2586,83 @@ supervision_classify() {
         _supervision_warn_once "UNIT_MANAGED (leaf '$leaf') but owned pid $pid has no INVOCATION_ID — trusting cgroup (§0 corroboration only)"
     fi
 
+    # ── nohup-survivor heal (supervisor war r3, 2026-09-30) ─────────────
+    # A nohup survivor from an old-version promote (cgroup session-*.scope
+    # / a user or machine slice / an unknown leaf) kept EVERY later promote
+    # on the nohup spawn path: the v0.16.5 unit hand-back was compiled in
+    # but never reached, because THIS classifier trusted the survivor's
+    # cgroup (live 139 restarts ~5.5h; demo 2,561 restarts 43h). Heal:
+    # when the outcome would be SCRIPT_NOHUP but a systemd unit FILE
+    # exists for this install, adopt UNIT_MANAGED so the stop/hand-back
+    # paths treat the install as unit-managed — the FIRST promote running
+    # this code hands the lineage back to systemd regardless of the
+    # current daemon's cgroup. Guards UNCHANGED and still downstream:
+    # supervision_dualfight_check still halts two LIVE masters, and the
+    # unit-path stop still fails loud when a foreign pid holds the port —
+    # the heal NEVER bypasses them (fail-closed everywhere). Name
+    # resolution: INSTALL_DIR/.env pin FIRST (_supervision_unit_from_dotenv
+    # — the per-install record adopt-unit.sh stages; the pin must conform
+    # to the ensemble-*.service shape or it is treated as ABSENT —
+    # finding 4, r3 hardening), then the adopt-unit naming-convention
+    # derivation; the -f file gate applies to the
+    # RESOLVED name — file absent → NO heal (SCRIPT_NOHUP stands).
+    # COLD-STATE BYPASS IS DELIBERATE (finding 3, r3 hardening): the
+    # auto-derive early returns above (no owned pid / unreadable cgroup)
+    # skip the heal BY DESIGN — those arms describe a cold or
+    # unobservable install, not a nohup survivor; adopting from them is a
+    # separate commission if ever wanted. Host
+    # guards: the auto-derive chain above already returned on non-Linux /
+    # no-/run/systemd/system shapes (BSD/macOS arms byte-identical;
+    # requirement: unchanged SCRIPT_NOHUP), and _supervision_host_allows_
+    # unit re-asserts both defensively. EXPLICIT script/opt-out
+    # declarations return at the ladder top — the heal can never override
+    # an operator opt-out. SUPERVISION_EXPLICIT_UNIT stays 0 (auto-derived
+    # heal, not a ladder-top declaration — restart_via_launcher's M3 arm
+    # keys on it). SCOPE_SURVIVOR is untouched: it already carries its own
+    # hand-back (the comp7 opt-in path).
+    if [ "$SUPERVISION_STATE" = "SCRIPT_NOHUP" ] && _supervision_host_allows_unit; then
+        heal_unit="$(_supervision_unit_from_dotenv)" || heal_unit=""
+        case "$heal_unit" in
+            ensemble-*.service) ;;
+            # finding 4: a non-conforming .env pin is treated as ABSENT
+            # (falls through to the derivation rung) — the heal never
+            # adopts a name outside the ensemble-*.service family the
+            # adopt-unit polkit pattern governs.
+            *) heal_unit="" ;;
+        esac
+        if [ -z "$heal_unit" ]; then
+            heal_unit="$(_supervision_derive_unit_name)"
+        fi
+        if [ -n "$heal_unit" ] && [ -f "$SUPERVISION_UNIT_DIR/$heal_unit" ]; then
+            SUPERVISION_STATE="UNIT_MANAGED"
+            SUPERVISION_MODE="unit"
+            SUPERVISION_UNIT="$heal_unit"
+            heal_on=1
+            _log "supervision: unit file exists for $heal_unit at $SUPERVISION_UNIT_DIR — adopting UNIT_MANAGED (healing from nohup-survivor state; cgroup leaf '$leaf' classified SCRIPT_NOHUP)"
+        fi
+    fi
+
     if [ "$SUPERVISION_STATE" = "UNIT_MANAGED" ] && [ -n "$SUPERVISION_UNIT" ]; then
-        # §3: env-explicit unit name OVERRIDES the cgroup-derived one.
+        # §3: env-explicit unit name OVERRIDES the cgroup-derived one —
+        # NATIVE path only. POST-HEAL (finding 1, r3 hardening): the
+        # ambient ENSEMBLE_RESTART_UNIT override is WITHHELD — the healed
+        # resolution (.env pin > adopt-unit derivation, both already -f
+        # gated + conformance-checked) outranks the operator shell.
+        # Rationale: file-existence + ensemble-*.service conformance
+        # gating alone cannot reject a PRESENT-FILE stale lane
+        # (ensemble-vm's retired ensemble-live.service still carries its
+        # unit file), so any post-heal env application re-opens the
+        # silent stale-lane adoption the heal exists to close. Divergence
+        # logged loud so the operator sees their ambient pin was not
+        # honored.
         if [ -n "${ENSEMBLE_RESTART_UNIT:-}" ]; then
-            SUPERVISION_UNIT="$ENSEMBLE_RESTART_UNIT"
+            if [ "$heal_on" = "1" ]; then
+                if [ "$ENSEMBLE_RESTART_UNIT" != "$SUPERVISION_UNIT" ]; then
+                    _log "supervision: keeping healed unit $SUPERVISION_UNIT — ambient ENSEMBLE_RESTART_UNIT='$ENSEMBLE_RESTART_UNIT' NOT applied post-heal (stale-lane guard; the override needs no-heal provenance + ensemble-*.service conformance + a $SUPERVISION_UNIT_DIR file)"
+                fi
+            else
+                SUPERVISION_UNIT="$ENSEMBLE_RESTART_UNIT"
+            fi
         fi
         printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
         return 0

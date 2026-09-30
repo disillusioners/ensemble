@@ -187,6 +187,12 @@ unknown-leaf-shape
         # seam the classify suite uses
         got="$(
             INSTALL_DIR="$WORK" ENSEMBLE_SUPERVISION=auto bash -c '
+                # hermetic (env-poison lesson 3, 2026-09-30): runners inside
+                # the live daemon inherit ambient ENSEMBLE_RESTART_UNIT,
+                # which the classifier tail §3-override would consume and
+                # desync this agreement pin — scrub it like every other
+                # supervision harness does.
+                unset ENSEMBLE_RESTART_UNIT
                 . "$1" >/dev/null 2>&1
                 _supervision_owned_pids() { printf "%s\n" 424242; }
                 _supervision_pid_cgroup_leaf() { printf "%s\n" "$SUP_TWINS_LEAF"; return 0; }

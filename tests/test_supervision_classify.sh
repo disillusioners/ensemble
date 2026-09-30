@@ -96,6 +96,16 @@ FIXT="$(mktemp -d -t supclass.XXXXXX)"
 CALLLOG="$(mktemp -t supclass-calls.XXXXXX)"
 export CALLLOG
 
+# Heal-seam hermetic default (supervisor war r3): an EMPTY unit-file dir.
+# Every run_classify cell sources lib.sh, whose nohup-survivor heal reads
+# SUPERVISION_UNIT_DIR (default /etc/systemd/system — the HOST's real dir);
+# defaulting the seam here keeps the heal's -f gate deterministically
+# ABSENT for every pre-existing cell unless a case explicitly overrides
+# SUPERVISION_UNIT_DIR, so this suite NEVER depends on the host's real
+# /etc/systemd (the r3 test contract).
+NOHEAL_DIR="$(mktemp -d -t supclass-noheal.XXXXXX)"
+export NOHEAL_DIR
+
 # run_classify <linux|darwin> <leaf|SPECIAL> <env-assignments ;-separated>
 #   SPECIAL leaf values:
 #     UNREADABLE — leaf helper returns nothing (cgroup unreadable)
@@ -110,6 +120,7 @@ run_classify() {
     {
         printf 'export INSTALL_DIR="%s"\n' "$FIXT"
         printf 'unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT\n'
+        printf 'export SUPERVISION_UNIT_DIR="${SUPERVISION_UNIT_DIR:-%s}"\n' "$NOHEAL_DIR"
         printf 'export SUP_FIXT_LEAF="%s"\n' "$leaf"
         local a
         if [ -n "$envs" ]; then
@@ -585,7 +596,241 @@ assert_not_contains "5 Darwin: no cgroup_leaf call" "cgroup_leaf" "$DAR_OUT"
 rm -rf "$STUBDIR" "$DAR_SCRIPT"
 
 # ===========================================================================
-section "summary"
+section "6 — nohup-survivor heal (supervisor war r3, 2026-09-30)"
+
+# HEAL CONTRACT (investigation-note-supervisor-war-r3 §3 + commission
+# corrections): when the cgroup-derived outcome would be SCRIPT_NOHUP
+# (session-*.scope / user-machine slices / unknown leaf = a nohup
+# survivor from an old-version promote) but a systemd unit FILE exists
+# for this install, the classifier adopts UNIT_MANAGED — name resolved
+# INSTALL_DIR/.env FIRST (_supervision_unit_from_dotenv — the per-install
+# record adopt-unit.sh stages), then the adopt-unit.sh naming-convention
+# derivation; NEVER a hardcoded 'ensemble-${TARGET}.service' template
+# (on ensemble-vm that would adopt the RETIRED ensemble-live.service lane
+# while .env pins ensemble-main.service). The -f gate applies to the
+# RESOLVED name; file absent → NO heal. Non-Linux / no /run/systemd/
+# system → unchanged SCRIPT_NOHUP (the auto-derive chain returns at its
+# inline guards BEFORE the case block; the non-Linux arm is pinned below
+# via the Darwin stub — the no-/run arm is the same guard line, not
+# stubbable without overriding the function under test).
+# All cells below pin SUPERVISION_UNIT_DIR at a FIXTURE dir — the host's
+# real /etc/systemd is never consulted (r3 test contract).
+
+HEAL_UNITDIR="$(mktemp -d -t supclass-heal.XXXXXX)"
+
+if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
+    # 6a. session-*.scope + .env pin + unit file present → HEAL
+    #     (commission case 1: resolved via .env ENSEMBLE_RESTART_UNIT pin).
+    printf 'PORT=1\nENSEMBLE_RESTART_UNIT=ensemble-heal-a.service\n' > "$FIXT/.env"
+    touch "$HEAL_UNITDIR/ensemble-heal-a.service"
+    H1="$(run_classify linux session-7.scope "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR")"
+    assert_eq "6a session-scope + .env pin + file: state HEALS to UNIT_MANAGED" "UNIT_MANAGED" "$(globals_state "$H1")"
+    assert_eq "6a healed unit name is the .env pin" "ensemble-heal-a.service" "$(globals_unit "$H1")"
+    assert_eq "6a healed mode" "unit" "$(globals_mode "$H1")"
+    assert_eq "6a heal rc 0" "0" "$(rc_line "$H1")"
+    assert_eq "6a machine line downstream-identical to native UNIT_MANAGED" "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-heal-a.service" "$(machine_line "$H1")"
+    assert_contains "6a heal log line (note §3 wording)" "adopting UNIT_MANAGED (healing from nohup-survivor state" "$H1"
+    assert_contains "6a heal log names the resolved unit" "ensemble-heal-a.service" "$H1"
+
+    # 6b. .env-pinned unit whose file does NOT exist → NO heal
+    #     (commission case 3: the -f gate applies to the RESOLVED name).
+    printf 'ENSEMBLE_RESTART_UNIT=ensemble-ghost.service\n' > "$FIXT/.env"
+    H2="$(run_classify linux session-7.scope "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR")"
+    assert_eq "6b pinned-but-fileless unit: state stays SCRIPT_NOHUP" "SCRIPT_NOHUP" "$(globals_state "$H2")"
+    assert_eq "6b no unit invented" "" "$(globals_unit "$H2")"
+    assert_eq "6b bare machine line" "ENSEMBLE_SUPERVISION_RESULT=SCRIPT_NOHUP" "$(machine_line "$H2")"
+    case "$H2" in
+        *"healing from nohup-survivor"*) _fail "6b NO heal log when file absent" "absent 'healing from nohup-survivor'" "$H2" ;;
+        *) _pass "6b no heal log when file absent" ;;
+    esac
+
+    # 6c. session-*.scope + no .env + no unit file → SCRIPT_NOHUP unchanged
+    #     (commission case 2; also the hermetic-default shape every
+    #     pre-existing matrix cell relies on).
+    rm -f "$FIXT/.env"
+    H3="$(run_classify linux session-7.scope 'ENSEMBLE_SUPERVISION=auto')"
+    assert_eq "6c session-scope, no unit anywhere: SCRIPT_NOHUP unchanged" "SCRIPT_NOHUP" "$(globals_state "$H3")"
+    assert_eq "6c no unit" "" "$(globals_unit "$H3")"
+    case "$H3" in
+        *"healing from nohup-survivor"*) _fail "6c no heal log" "absent 'healing from nohup-survivor'" "$H3" ;;
+        *) _pass "6c no heal log" ;;
+    esac
+
+    # 6d. non-Linux → NO heal even with everything heal-shaped
+    #     (commission case 4, non-Linux arm via the Darwin uname stub; the
+    #     classifier returns at the auto-derive uname guard BEFORE the
+    #     cgroup case block — zero /proc reads). Fresh stub dir: the
+    #     section-1a SUP_DARWIN_PATH was rm'd at its end.
+    R3_DARWIN="$(mktemp -d -t supclass-r3darwin.XXXXXX)"
+    cat > "$R3_DARWIN/uname" <<STUB
+#!/bin/bash
+case "\$1" in
+    -s) echo "Darwin" ;;
+    *) "$REAL_UNAME" "\$@" ;;
+esac
+STUB
+    chmod +x "$R3_DARWIN/uname"
+    SUP_DARWIN_PATH="$R3_DARWIN"
+    printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-a.service\n' > "$FIXT/.env"
+    H4="$(run_classify darwin session-7.scope "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR")"
+    assert_eq "6d Darwin: SCRIPT_NOHUP unchanged" "SCRIPT_NOHUP" "$(globals_state "$H4")"
+    assert_eq "6d Darwin: zero /proc reads" "" "$(calls_of "$H4")"
+    case "$H4" in
+        *"healing from nohup-survivor"*) _fail "6d Darwin: no heal log" "absent 'healing from nohup-survivor'" "$H4" ;;
+        *) _pass "6d Darwin: no heal log" ;;
+    esac
+    rm -f "$FIXT/.env" && rm -rf "$R3_DARWIN"
+
+    # 6e. EXPLICIT script opt-out + unit file present → NO heal (an
+    #     operator opt-out outranks the heal; the ladder top returns
+    #     before the auto-derive chain).
+    printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-a.service\n' > "$FIXT/.env"
+    H5="$(run_classify linux session-7.scope "ENSEMBLE_SUPERVISION=script SUPERVISION_UNIT_DIR=$HEAL_UNITDIR")"
+    assert_eq "6e explicit script opt-out: SCRIPT_NOHUP stands" "SCRIPT_NOHUP" "$(globals_state "$H5")"
+    assert_eq "6e explicit script: zero /proc reads" "" "$(calls_of "$H5")"
+    rm -f "$FIXT/.env"
+
+    # 6f. SCOPE_SURVIVOR is NOT healed (SCRIPT_NOHUP-only contract; the
+    #     scope shape keeps its own comp7 hand-back path).
+    printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-a.service\n' > "$FIXT/.env"
+    H6="$(run_classify linux ensemble-upgrade-r-heal.scope "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR")"
+    assert_eq "6f scope survivor: state unchanged" "SCOPE_SURVIVOR" "$(globals_state "$H6")"
+    assert_eq "6f scope survivor: no unit at classify time" "" "$(globals_unit "$H6")"
+    case "$H6" in
+        *"healing from nohup-survivor"*) _fail "6f scope: no heal log" "absent 'healing from nohup-survivor'" "$H6" ;;
+        *) _pass "6f scope: no heal log" ;;
+    esac
+    rm -f "$FIXT/.env"
+
+    # 6g. the WHOLE SCRIPT_NOHUP leaf family heals, not just session-*:
+    #     machine.slice + user slice + unknown leaf (the r3 gap covered
+    #     every non-.service, non-upgrade-scope leaf).
+    printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-a.service\n' > "$FIXT/.env"
+    for hleaf in machine.slice user-1000.slice systemd-tmpfiles-setup; do
+        H7="$(run_classify linux "$hleaf" "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR")"
+        assert_eq "6g leaf [$hleaf]: heals to UNIT_MANAGED" "UNIT_MANAGED" "$(globals_state "$H7")"
+        assert_eq "6g leaf [$hleaf]: healed unit" "ensemble-heal-a.service" "$(globals_unit "$H7")"
+    done
+    rm -f "$FIXT/.env"
+
+    # 6k. POST-HEAL §3 WITHHOLD (finding 1, r3 hardening — the
+    #     load-bearing one): .env pin ensemble-heal-a.service + a
+    #     DIVERGENT runtime ambient ENSEMBLE_RESTART_UNIT=
+    #     ensemble-heal-b.service, BOTH unit files present → final unit
+    #     = a (the pin wins). The §3 ambient override only applies on
+    #     the NATIVE path — post-heal it is withheld entirely: file-
+    #     existence + name-conformance gating alone cannot reject a
+    #     PRESENT-FILE stale lane (ensemble-vm's retired
+    #     ensemble-live.service still carries its unit file), so any
+    #     post-heal env application re-opens silent stale-lane adoption.
+    printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-a.service\n' > "$FIXT/.env"
+    touch "$HEAL_UNITDIR/ensemble-heal-b.service"
+    HK="$(run_classify linux session-7.scope "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR ENSEMBLE_RESTART_UNIT=ensemble-heal-b.service")"
+    assert_eq "6k divergent ambient env (both files present): pin wins" "ensemble-heal-a.service" "$(globals_unit "$HK")"
+    assert_eq "6k state" "UNIT_MANAGED" "$(globals_state "$HK")"
+    assert_eq "6k machine line carries the PIN, not the ambient env" "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-heal-a.service" "$(machine_line "$HK")"
+    assert_contains "6k withhold log explains the stale-lane guard" "keeping healed unit ensemble-heal-a.service" "$HK"
+    assert_contains "6k withhold log names the rejected ambient pin" "ensemble-heal-b.service' NOT applied post-heal" "$HK"
+    rm -f "$HEAL_UNITDIR/ensemble-heal-b.service"
+
+    # 6k′. complementary: conforming-but-FILELESS ambient env (the
+    #      reviewer's gate failure shape) — the healed pin still wins.
+    HK2="$(run_classify linux session-7.scope "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR ENSEMBLE_RESTART_UNIT=ensemble-retired-lane.service")"
+    assert_eq "6k′ fileless ambient env: pin wins" "ensemble-heal-a.service" "$(globals_unit "$HK2")"
+    assert_contains "6k′ withhold log fires" "NOT applied post-heal" "$HK2"
+
+    # 6k″. control: the §3 override STILL applies on the NATIVE path
+    #      (cgroup .service leaf, no heal) — cells 3a/3e pin the same
+    #      contract; restated here with a conforming present-file name so
+    #      the native/post-heal split is visible in one section.
+    HK3="$(run_classify linux native-leaf.service "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR ENSEMBLE_RESTART_UNIT=ensemble-heal-a.service")"
+    assert_eq "6k″ NATIVE path: env override still applies" "ensemble-heal-a.service" "$(globals_unit "$HK3")"
+    case "$HK3" in
+        *"NOT applied post-heal"*) _fail "6k″ native override must NOT log the withhold line" "absent 'NOT applied post-heal'" "$HK3" ;;
+        *) _pass "6k″ native override must NOT log the withhold line" ;;
+    esac
+    rm -f "$FIXT/.env"
+
+    # 6l. FINDING 4 conformance rung: a non-conforming .env pin is
+    #     treated as ABSENT (falls through to derivation). INSTALL_DIR
+    #     basename "agents-ensemble" derives ensemble-main.service; the
+    #     derived file is present → heal via DERIVATION, not the bad pin.
+    HEAL_ROOT_L="$(mktemp -d -t supclass-healL.XXXXXX)"
+    mkdir -p "$HEAL_ROOT_L/agents-ensemble"
+    touch "$HEAL_UNITDIR/ensemble-main.service"
+    HL="$(INSTALL_DIR="$HEAL_ROOT_L/agents-ensemble" SUPERVISION_UNIT_DIR="$HEAL_UNITDIR" bash -c '
+        unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT
+        printf "ENSEMBLE_RESTART_UNIT=bad-name.foo\n" > "'"$HEAL_ROOT_L"'/agents-ensemble/.env"
+        . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+        _supervision_pid_cgroup_leaf() { printf "%s\n" "session-11.scope"; }
+        supervision_classify >/dev/null 2>&1
+        printf "STATE=%s\nUNIT=%s\n" "${SUPERVISION_STATE:-}" "${SUPERVISION_UNIT:-}"
+    ' 2>&1)"
+    assert_eq "6l non-conforming pin ignored: heals via derivation" "UNIT_MANAGED" "$(printf '%s' "$HL" | sed -n 's/^STATE=//p')"
+    assert_eq "6l derived name used (pin treated as absent)" "ensemble-main.service" "$(printf '%s' "$HL" | sed -n 's/^UNIT=//p')"
+    rm -rf "$HEAL_ROOT_L"
+
+    # 6h-6j. DERIVATION rung (no .env pin): resolved via the adopt-unit.sh
+    #     naming convention, -f gated on the DERIVED name.
+    HEAL_ROOT="$(mktemp -d -t supclass-healroot.XXXXXX)"
+    mkdir -p "$HEAL_ROOT/agents-ensemble-demo" "$HEAL_ROOT/agents-ensemble"
+    touch "$HEAL_UNITDIR/ensemble-demo.service" "$HEAL_UNITDIR/ensemble-main.service"
+    for hpair in "agents-ensemble-demo|ensemble-demo.service" "agents-ensemble|ensemble-main.service"; do
+        hdir="${hpair%%|*}"; hwant="${hpair##*|}"
+        H8="$(INSTALL_DIR="$HEAL_ROOT/$hdir" SUPERVISION_UNIT_DIR="$HEAL_UNITDIR" bash -c '
+            unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT
+            . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+            _supervision_owned_pids() { printf "%s\n" 424242; }
+            _supervision_pid_cgroup_leaf() { printf "%s\n" "session-11.scope"; }
+            supervision_classify >/dev/null 2>&1
+            printf "STATE=%s\nUNIT=%s\n" "${SUPERVISION_STATE:-}" "${SUPERVISION_UNIT:-}"
+            supervision_classify 2>/dev/null | grep "^ENSEMBLE_SUPERVISION_RESULT="
+        ' 2>&1)"
+        assert_eq "6h derived [$hdir]: heals via convention" "UNIT_MANAGED" "$(printf '%s' "$H8" | sed -n 's/^STATE=//p')"
+        assert_eq "6h derived [$hdir]: derived name" "$hwant" "$(printf '%s' "$H8" | sed -n 's/^UNIT=//p')"
+        assert_contains "6h derived [$hdir]: machine line" "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:$hwant" "$H8"
+    done
+    # 6i. derived name whose file does NOT exist → NO heal (protects every
+    #     pre-existing fixture-shaped cell on any host).
+    HEAL_ABSENT="$(mktemp -d -t supclass-healabs.XXXXXX)"
+    H9="$(INSTALL_DIR="$HEAL_ROOT/agents-ensemble-demo" SUPERVISION_UNIT_DIR="$HEAL_ABSENT" bash -c '
+        unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT
+        . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+        _supervision_pid_cgroup_leaf() { printf "%s\n" "session-11.scope"; }
+        supervision_classify >/dev/null 2>&1
+        printf "STATE=%s\nUNIT=%s\n" "${SUPERVISION_STATE:-}" "${SUPERVISION_UNIT:-}"
+    ' 2>&1)"
+    assert_eq "6i derived-but-fileless: SCRIPT_NOHUP stands" "SCRIPT_NOHUP" "$(printf '%s' "$H9" | sed -n 's/^STATE=//p')"
+    assert_eq "6i derived-but-fileless: no unit" "" "$(printf '%s' "$H9" | sed -n 's/^UNIT=//p')"
+    rm -rf "$HEAL_ROOT" "$HEAL_ABSENT"
+else
+    _skip "6 heal cells (6a-6c, 6e-6i) — FENCE: no /run/systemd/system on this host (the auto-derive chain's inline guard short-circuits before the heal)"
+    # 6d (Darwin non-Linux arm) needs NO systemd host — it pins the
+    # classifier's uname guard, which fires regardless of /run state.
+    # Fresh stub dir: the section-1a SUP_DARWIN_PATH was rm'd at its end.
+    R3_DARWIN_D="$(mktemp -d -t supclass-r3darwin.XXXXXX)"
+    cat > "$R3_DARWIN_D/uname" <<STUB
+#!/bin/bash
+case "\$1" in
+    -s) echo "Darwin" ;;
+    *) "$REAL_UNAME" "\$@" ;;
+esac
+STUB
+    chmod +x "$R3_DARWIN_D/uname"
+    SUP_DARWIN_PATH="$R3_DARWIN_D"
+    HEAL_UNITDIR_D="$(mktemp -d -t supclass-heald.XXXXXX)"
+    touch "$HEAL_UNITDIR_D/ensemble-heal-a.service"
+    printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-a.service\n' > "$FIXT/.env"
+    H4="$(run_classify darwin session-7.scope "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR_D")"
+    assert_eq "6d Darwin (non-systemd host): SCRIPT_NOHUP unchanged" "SCRIPT_NOHUP" "$(globals_state "$H4")"
+    assert_eq "6d Darwin (non-systemd host): zero /proc reads" "" "$(calls_of "$H4")"
+    rm -f "$FIXT/.env" && rm -rf "$HEAL_UNITDIR_D" "$R3_DARWIN_D"
+fi
+rm -rf "$HEAL_UNITDIR"
+
+
 printf 'PASS=%s FAIL=%s SKIP=%s\n' "$PASS" "$FAIL" "$SKIP"
 if [ "$SKIP" -gt 0 ]; then
     printf 'SKIPPED (named fences):%s\n' "$SKIPPED"
