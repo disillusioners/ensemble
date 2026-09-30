@@ -10,6 +10,7 @@ from typing import Callable, TYPE_CHECKING
 
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.task.models import TaskStatus
+from daemon.services.boot_epoch import get_boot_epoch
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.usage_limit_schedule import (
     DEFAULT_USAGE_LIMIT_RETRY_DELAYS_SECONDS,
@@ -397,9 +398,13 @@ class StaleTaskRecovery:
         # worker tasks exist.
         self._sweep_watchover_terminate_markers()
 
-        # Step 1: Find stale running tasks not yet flagged
+        # Step 1: Find stale running tasks not yet flagged.
+        # boot_epoch (stop-frozen amnesty, r-20260929-170301-0cb2): the
+        # stale clock for beats frozen by a previous process's death
+        # runs from THIS daemon's boot — never instantly reaped.
         stale_tasks = self._task_repo.find_cancellable_tasks(
-            threshold_minutes=self._threshold_minutes
+            threshold_minutes=self._threshold_minutes,
+            boot_epoch=get_boot_epoch(),
         )
         
         if not stale_tasks:
@@ -752,9 +757,13 @@ class StaleTaskRecovery:
         """
         logger.info("Running startup crash recovery (no grace period)...")
         
-        # Phase A: Handle stale RUNNING tasks (worker crashed mid-execution)
+        # Phase A: Handle stale RUNNING tasks (worker crashed mid-execution).
+        # boot_epoch (stop-frozen amnesty, r-20260929-170301-0cb2): a
+        # beat frozen minutes before this boot must not be instantly
+        # reaped at startup — the epoch clamp defers it ~boot+threshold.
         stale_tasks = self._task_repo.find_stale_running_tasks(
-            threshold_minutes=self._threshold_minutes
+            threshold_minutes=self._threshold_minutes,
+            boot_epoch=get_boot_epoch(),
         )
         
         recovered = 0

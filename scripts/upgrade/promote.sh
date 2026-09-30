@@ -296,6 +296,51 @@ fi
 
 if [ -z "$gate_fail_reason" ] && READYZ_JSON="$(gate_readyz)"; then
     _log "readyz OK:"; _logv "$READYZ_JSON"
+    # M7 (commission v0.16.6 component 2, interface contract): /readyz MAY
+    # carry an optional advisory field `detail.inflight_turns` (int,
+    # RUNNING tasks with fresh heartbeats — NESTED under `detail`, NOT
+    # top-level; the producer emits it inside the `detail` object, see
+    # daemon/services/readiness.py:225-230). When present and > 0,
+    # print a non-blocking INFO note — busy-daemon promote is LEGAL
+    # under the new amnesty (operator awareness only; this is a
+    # deliberate departure from the pre-v0.16 era where a busy gate
+    # was a fail).
+    #
+    # POSITION-INDEPENDENT EXTRACTION: scope by the `detail` key first
+    # (via _json_sub — a depth-counting balanced-brace parser that finds
+    # the FIRST occurrence of `"detail"` and extracts the `{...}` body),
+    # THEN extract `inflight_turns` from that body. A top-level regex
+    # would silently match by accident of position (e.g. the JSON
+    # already has a top-level `"reasons"` key; future fields could
+    # collide). The nested-only path is the producer's contract; the
+    # flat-top-level path was rejected in Dev A's review and would
+    # also break against the `reasons` alias duplicate at both levels.
+    #
+    # TOLERATE all of:
+    #   - field absent (older daemon / base build; `detail` key missing)
+    #   - field present but null (Python twin emits None → JSON null)
+    #   - field present but non-integer (defensive parse — the producer
+    #     is a Python int but a future proxy or stub might write garbage)
+    #   - field = 0 (silent — no note; promote is a normal exit)
+    #   - /readyz unreachable (READY gate fails FIRST, rc 1 → no note)
+    # Degrade gracefully via _json_sub + _json_field; no jq dependency
+    # (the repo's shell toolchain has none). The note is informational;
+    # the gate result above is the only thing that matters for promotion.
+    if [ -n "$READYZ_JSON" ]; then
+        DETAIL_JSON="$(_json_sub "$READYZ_JSON" detail 2>/dev/null)" || DETAIL_JSON=""
+        if [ -n "$DETAIL_JSON" ]; then
+            INFLIGHT="$(_json_field "$DETAIL_JSON" inflight_turns 2>/dev/null)" \
+                || INFLIGHT=""
+            case "$INFLIGHT" in
+                ""|null) ;;   # absent or null — older daemon, silent
+                *[!0-9]*) _logv "readyz advisory: detail.inflight_turns present but non-numeric ($INFLIGHT) — ignored (defensive)";;
+                0) ;;         # present but no in-flight turns, silent
+                *)
+                    _log "readyz advisory: detail.inflight_turns=$INFLIGHT (busy daemon — promote is legal under v0.16.6 amnesty; operator awareness only)"
+                    ;;
+            esac
+        fi
+    fi
 elif [ -z "$gate_fail_reason" ]; then
     gate_fail_reason="/readyz unreachable >${READYZ_BUDGET_S}s"
 fi

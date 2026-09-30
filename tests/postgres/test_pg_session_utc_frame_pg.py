@@ -193,8 +193,8 @@ def test_readiness_heartbeat_age_is_frame_aligned(pg_engine, utc_frame):
     control = _control_engine()
     fixed = create_postgres_engine(utc_frame)
     try:
-        control_age = make_queue_probe(control)()
-        fixed_age = make_queue_probe(fixed)()
+        control_age = make_queue_probe(control)().max_age_seconds
+        fixed_age = make_queue_probe(fixed)().max_age_seconds
 
         # Fixed engine: same frame as the writer → fresh.
         assert fixed_age is not None

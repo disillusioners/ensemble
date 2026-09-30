@@ -2862,7 +2862,11 @@ class TaskRepository:
     # RECOVERY
     # --------------------------------------------------------
 
-    def find_stale_running_tasks(self, threshold_minutes: int = 15) -> list[Task]:
+    def find_stale_running_tasks(
+        self,
+        threshold_minutes: int = 15,
+        boot_epoch: datetime | None = None,
+    ) -> list[Task]:
         """Find tasks that have been running too long.
 
         Used for crash recovery to detect tasks that may have been
@@ -2878,10 +2882,22 @@ class TaskRepository:
         distinguish them within the configured threshold (default 5 min)
         without false-positively flagging long-running live tasks.
 
+        Stop-frozen heartbeat amnesty (incident r-20260929-170301-0cb2):
+        ``boot_epoch`` clamps the effective last-beat floor to the daemon
+        boot epoch, so startup recovery cannot instantly reap a task whose
+        beat froze minutes before the boot (the promote-stop shape) — it
+        reaps ~boot+threshold instead. ``None`` keeps pre-amnesty
+        behavior. Same task-independent short-circuit as
+        ``find_cancellable_tasks``: a daemon younger than the threshold
+        has no stale evidence.
+
         Args:
             threshold_minutes: Minutes after which a running task is
                 considered stale. Sized for *time since last heartbeat*,
                 not *time since started*.
+            boot_epoch: Naive-UTC daemon boot epoch
+                (``daemon.services.boot_epoch.get_boot_epoch``), or None
+                to disable the amnesty clamp.
 
         Returns:
             List of stale running tasks.
@@ -2889,6 +2905,11 @@ class TaskRepository:
         # Naive-UTC frame (DC-A fix) — same frame as the stored
         # heartbeat/started digits.
         threshold = now_utc_naive() - timedelta(minutes=threshold_minutes)
+
+        # Amnesty arm — see docstring. max(beat, boot) < threshold
+        # requires boot < threshold; a young daemon short-circuits.
+        if boot_epoch is not None and boot_epoch >= threshold:
+            return []
 
         with SQLModelSession(self.engine) as db_session:
             stmt = select(Task).where(
@@ -4102,16 +4123,40 @@ class TaskRepository:
             )
             return result.rowcount > 0
 
-    def find_cancellable_tasks(self, threshold_minutes: int) -> list[Task]:
+    def find_cancellable_tasks(
+        self,
+        threshold_minutes: int,
+        boot_epoch: datetime | None = None,
+    ) -> list[Task]:
         """Find running tasks that have exceeded the timeout threshold
         and haven't been marked for cancellation yet.
 
         Liveness signal: predicate is on ``COALESCE(last_heartbeat_at,
         started_at)`` so live long-running tasks aren't flagged.
+
+        Stop-frozen heartbeat amnesty (incident r-20260929-170301-0cb2):
+        ``boot_epoch`` clamps every task's effective last-beat floor to
+        the daemon boot epoch — the stale clock for a task whose beat
+        predates the boot runs from the BOOT, not the beat (reaped
+        ~boot+threshold, never instantly after a promote's daemon
+        stop). Equivalent predicate: ``max(beat, boot) < threshold``,
+        and the ``boot < threshold`` arm is task-independent, so a
+        daemon younger than the threshold short-circuits to no stale
+        tasks at all. ``None`` keeps the pre-amnesty behavior (the
+        floor is -∞); callers that never captured an epoch are
+        unaffected.
         """
         # Naive-UTC frame (DC-A fix) — same frame as the stored
         # heartbeat/started digits.
         threshold = now_utc_naive() - timedelta(minutes=threshold_minutes)
+
+        # Amnesty arm: max(beat, boot) < threshold requires
+        # boot < threshold. A daemon up less than the threshold has no
+        # stale evidence yet — post-boot beats cannot have aged past
+        # it, and pre-boot beats are stop-frozen (readiness excludes
+        # them; recovery waits for the boot clock).
+        if boot_epoch is not None and boot_epoch >= threshold:
+            return []
 
         with self.engine.begin() as conn:
             # Use bound parameter with Python False so the boolean

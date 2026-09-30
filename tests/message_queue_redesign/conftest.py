@@ -158,11 +158,14 @@ class MockTaskRepository:
         self._retry_tasks = []  # Tasks to return from schedule_retry
         self.reset_count = 0
     
-    def find_stale_running_tasks(self, threshold_minutes):
+    def find_stale_running_tasks(self, threshold_minutes, boot_epoch=None):
+        # ``boot_epoch`` (stop-frozen amnesty) is accepted for call-shape
+        # parity with TaskRepository; the amnesty clamp itself is tested
+        # against the real repository SQL, not this mock.
         threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
         return [t for t in self.stale_tasks if t.started_at and t.started_at < threshold]
     
-    def find_cancellable_tasks(self, threshold_minutes):
+    def find_cancellable_tasks(self, threshold_minutes, boot_epoch=None):
         """Find running tasks past threshold that haven't been flagged for cancel."""
         threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
         return [

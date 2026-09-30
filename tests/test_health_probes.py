@@ -11,10 +11,15 @@ Two layers:
   database.
 
 PostgreSQL-backed verification of the probe SQL lives in
-``tests/postgres/test_readiness_pg.py`` (``-m postgres``).
+``tests/postgres/test_readiness_pg.py`` (``-m postgres``). The
+DB-backed suite added for incident r-20260929-170301-0cb2 (stop-frozen
+heartbeat amnesty + the INFLIGHT advisory count) exercises the real
+probe factories against an in-memory SQLite engine — it bridges the
+pure-logic and HTTP layers so the SQL arms of ``make_queue_probe`` are
+pinned to behavior, not just to the seam's callable signature.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import httpx
@@ -27,6 +32,8 @@ from daemon.services.readiness import (
     compute_readiness_composite,
     evaluate_queue_freshness,
     forced_degradation_active,
+    make_db_probe,
+    make_queue_probe,
     refresh_readiness_composite,
 )
 
@@ -797,3 +804,323 @@ async def test_periodic_refresh_loop_applies_drill_knob_between_ticks(
             await asyncio.wait_for(task, timeout=2)
         except asyncio.CancelledError:
             pass
+
+
+# ── Stop-frozen heartbeat amnesty + inflight_turns advisory ───────────────
+#
+# Incident r-20260929-170301-0cb2: a live promote's own daemon stop froze
+# RUNNING task heartbeats mid-turn; the replacement daemon's readiness
+# probe read the frozen beats as a CURRENT stall → /readyz red mid-soak →
+# auto-rollback. The amnesty: a beat older than the daemon boot epoch was
+# written by a dead process — it is invisible to freshness accounting.
+# Signal-preservation invariant (tested both ways below): a beat going
+# stale while the daemon has been continuously up degrades EXACTLY as
+# before. See daemon/services/boot_epoch.py.
+
+
+@pytest.fixture
+def task_engine():
+    """In-memory SQLite engine with the real task-table schema."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel
+
+    import daemon.repositories.task.models  # noqa: F401 — register Task
+    import daemon.repositories.instance.models  # noqa: F401 — register Instance
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+def _insert_running_task(
+    engine,
+    *,
+    heartbeat,
+    work_id,
+    status="running",
+):
+    """Insert one task row; ``heartbeat=None`` leaves the column NULL."""
+    from sqlalchemy import text as sa_text
+    from daemon.repositories.task.models import TaskStatus, TaskType
+
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        conn.execute(
+            sa_text(
+                """
+                INSERT INTO task (task_type, instance_id, message_id, status,
+                                  retry_count, created_at, cancel_requested,
+                                  retry_scheduled, work_id, is_deferred,
+                                  is_background, worker_id, started_at,
+                                  last_heartbeat_at)
+                VALUES (:task_type, :instance_id, NULL, :status,
+                        0, :created_at, 0, 0, :work_id, 0,
+                        0, NULL, :started_at, :heartbeat)
+                """
+            ),
+            {
+                "task_type": TaskType.PROCESS_MESSAGE.value,
+                "instance_id": "readiness-amnesty-test",
+                "status": status if status != "running" else TaskStatus.RUNNING.value,
+                "created_at": now,
+                "work_id": work_id,
+                "started_at": now,
+                "heartbeat": heartbeat,
+            },
+        )
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def test_amnesty_pre_boot_beat_is_invisible_to_freshness(task_engine):
+    """Beat frozen BEFORE the boot epoch → excluded from the MAX();
+
+    the all-frozen RUNNING set reads as age None (= fresh), while the
+    SAME data through a no-epoch probe reads stale — proving the
+    scenario that killed promote r-20260929-170301-0cb2 now passes.
+    """
+    now = datetime.now(timezone.utc)
+    frozen_beat = now - timedelta(seconds=180)
+    boot = now - timedelta(seconds=125)  # daemon booted AFTER the freeze
+    _insert_running_task(task_engine, heartbeat=frozen_beat, work_id="w-frozen")
+
+    # No-epoch probe (BOOT_EPOCH_FLOOR): identical to pre-amnesty SQL —
+    # the frozen beat IS stale evidence.
+    legacy = make_queue_probe(task_engine)()
+    assert legacy.max_age_seconds is not None
+    assert legacy.max_age_seconds >= 175
+    fresh, _ = evaluate_queue_freshness(legacy.max_age_seconds, threshold_seconds=120)
+    assert fresh is False  # the incident, reproduced on legacy semantics
+
+    # Epoch probe: the pre-boot beat is invisible → age None → fresh.
+    amnestied = make_queue_probe(task_engine, boot_epoch=_naive_utc(boot))()
+    assert amnestied.max_age_seconds is None
+    fresh, age = evaluate_queue_freshness(None, threshold_seconds=120)
+    assert fresh is True and age is None
+
+
+def test_amnesty_epoch_boundary_is_inclusive(task_engine):
+    """A beat exactly AT the epoch is post-boot (counted); 1µs before
+
+    the epoch is pre-boot (exempt). The boundary pins the >= in the
+    SQL CASE arm.
+    """
+    now = datetime.now(timezone.utc)
+    boot = _naive_utc(now - timedelta(seconds=300))
+    at_epoch = boot  # exactly at the epoch, old enough to be stale
+
+    _insert_running_task(task_engine, heartbeat=at_epoch, work_id="w-at-epoch")
+    result = make_queue_probe(task_engine, boot_epoch=boot)()
+    assert result.max_age_seconds is not None
+    assert result.max_age_seconds >= 295  # counted → stale evidence
+
+    with task_engine.begin() as conn:
+        from sqlalchemy import text as sa_text
+
+        conn.execute(
+            sa_text("UPDATE task SET last_heartbeat_at = :hb"),
+            {"hb": at_epoch - timedelta(microseconds=1)},
+        )
+    result = make_queue_probe(task_engine, boot_epoch=boot)()
+    assert result.max_age_seconds is None  # 1µs pre-boot → exempt
+
+
+def test_signal_preservation_post_boot_stale_still_degrades(task_engine):
+    """INVARIANT: continuously-up daemon, beat going stale post-boot →
+
+    degrades exactly as today. The amnesty may only mask beats older
+    than the boot.
+    """
+    now = datetime.now(timezone.utc)
+    boot = now - timedelta(hours=1)  # daemon up an hour — beat is post-boot
+    stale_beat = now - timedelta(seconds=180)
+
+    _insert_running_task(task_engine, heartbeat=stale_beat, work_id="w-stale")
+
+    result = make_queue_probe(task_engine, boot_epoch=_naive_utc(boot))()
+    assert result.max_age_seconds is not None
+    assert result.max_age_seconds >= 175
+    fresh, _ = evaluate_queue_freshness(result.max_age_seconds, threshold_seconds=120)
+    assert fresh is False
+
+    # And with no epoch at all (never captured): same degradation.
+    legacy = make_queue_probe(task_engine)()
+    assert legacy.max_age_seconds is not None
+    assert legacy.max_age_seconds >= 175
+
+
+def test_amnesty_mixed_set_max_uses_only_post_boot_beats(task_engine):
+    """A fresh post-boot beat alongside a frozen pre-boot beat: the MAX
+
+    is the post-boot beat's age (mixes never fabricate freshness for
+    the post-boot side, and the frozen row contributes nothing).
+    """
+    now = datetime.now(timezone.utc)
+    boot = _naive_utc(now - timedelta(seconds=125))
+    _insert_running_task(
+        task_engine, heartbeat=now - timedelta(seconds=180), work_id="w-frozen"
+    )
+    _insert_running_task(
+        task_engine, heartbeat=now - timedelta(seconds=30), work_id="w-live"
+    )
+
+    result = make_queue_probe(task_engine, boot_epoch=boot)()
+    assert result.max_age_seconds is not None
+    assert 25 <= result.max_age_seconds <= 35  # the 30s beat, not the 180s
+
+
+def test_inflight_turns_counts_fresh_post_boot_beats_only(task_engine):
+    """ADVISORY count correctness: fresh post-boot beats count; stale
+
+    post-boot, stop-frozen pre-boot, NULL-heartbeat, and non-RUNNING
+    rows never do.
+    """
+    now = datetime.now(timezone.utc)
+    boot = _naive_utc(now - timedelta(seconds=125))
+    _insert_running_task(
+        task_engine, heartbeat=now - timedelta(seconds=10), work_id="w-fresh-1"
+    )
+    _insert_running_task(
+        task_engine, heartbeat=now - timedelta(seconds=15), work_id="w-fresh-2"
+    )
+    _insert_running_task(
+        task_engine, heartbeat=now - timedelta(seconds=180), work_id="w-stale-post"
+    )
+    _insert_running_task(
+        task_engine, heartbeat=now - timedelta(seconds=180), work_id="w-frozen-pre"
+    )
+    # NULL heartbeat — no beat, no liveness signal.
+    _insert_running_task(task_engine, heartbeat=None, work_id="w-null-beat")
+    # Fresh beat but NOT running — status filter still applies.
+    _insert_running_task(
+        task_engine,
+        heartbeat=now - timedelta(seconds=10),
+        work_id="w-completed",
+        status="completed",
+    )
+    # Push w-frozen-pre's beat before the boot epoch.
+    with task_engine.begin() as conn:
+        from sqlalchemy import text as sa_text
+
+        conn.execute(
+            sa_text("UPDATE task SET last_heartbeat_at = :hb WHERE work_id = 'w-frozen-pre'"),
+            {"hb": now - timedelta(seconds=200)},
+        )
+
+    result = make_queue_probe(
+        task_engine, boot_epoch=boot, freshness_threshold_seconds=120
+    )()
+    assert result.inflight_turns == 2
+    assert result.max_age_seconds is not None  # newest post-boot beat (10s)
+
+
+def test_inflight_turns_zero_on_all_frozen_and_none_without_threshold(task_engine):
+    """All-frozen set: age None (fresh) AND inflight 0 — a real count,
+
+    not an unknown. Without a threshold bound the count is None
+    (unknown), never a guess.
+    """
+    now = datetime.now(timezone.utc)
+    boot = _naive_utc(now - timedelta(seconds=125))
+    _insert_running_task(
+        task_engine, heartbeat=now - timedelta(seconds=180), work_id="w-frozen"
+    )
+
+    armed = make_queue_probe(
+        task_engine, boot_epoch=boot, freshness_threshold_seconds=120
+    )()
+    assert armed.max_age_seconds is None
+    assert armed.inflight_turns == 0
+
+    unarmed = make_queue_probe(task_engine, boot_epoch=boot)()
+    assert unarmed.inflight_turns is None
+
+
+async def test_composite_carries_inflight_advisory_without_affecting_status(task_engine):
+    """Composite integration: the advisory rides detail.inflight_turns
+
+    and NEVER the status/components/reasons — a degraded database with
+    inflight=2 stays degraded; a ready composite with inflight stays
+    ready.
+    """
+    now = datetime.now(timezone.utc)
+    boot = _naive_utc(now - timedelta(seconds=125))
+    _insert_running_task(
+        task_engine, heartbeat=now - timedelta(seconds=10), work_id="w-live"
+    )
+    _insert_running_task(
+        task_engine, heartbeat=now - timedelta(seconds=180), work_id="w-frozen"
+    )
+
+    composite = await _refresh_with_real_probes(
+        task_engine, boot=boot, threshold=120, database_ok=True, services_ok=True
+    )
+    assert composite.ready is True
+    assert composite.inflight_turns == 1
+    payload = composite.to_payload()
+    assert payload["detail"]["inflight_turns"] == 1
+    assert "inflight" not in " ".join(payload["detail"]["reasons"])
+
+    # Advisory must not rescue a degraded composite.
+    degraded = await _refresh_with_real_probes(
+        task_engine, boot=boot, threshold=120, database_ok=False, services_ok=True
+    )
+    assert degraded.ready is False
+    assert degraded.database is False
+    assert degraded.inflight_turns == 1  # still reported — advisory survives
+
+
+async def _refresh_with_real_probes(
+    engine, *, boot, threshold, database_ok, services_ok
+) -> ReadinessComposite:
+    """Run one refresh cycle with real probes; ``database_ok=False``
+
+    forces the database component to fail via a raising probe."""
+    def _raising_db_probe():
+        raise ConnectionError("probe down")
+
+    return await refresh_readiness_composite(
+        db_probe=make_db_probe(engine) if database_ok else _raising_db_probe,
+        queue_probe=make_queue_probe(
+            engine, boot_epoch=boot, freshness_threshold_seconds=threshold
+        ),
+        services_ok=services_ok,
+        queue_freshness_threshold_seconds=threshold,
+    )
+
+
+async def test_readyz_http_serves_inflight_advisory(root_client, app_with_mock_manager):
+    """HTTP surface: detail.inflight_turns is served verbatim from the
+
+    cached composite (200 ready and 503 degraded alike)."""
+    app_with_mock_manager.state.readiness_composite = compute_readiness_composite(
+        database_ok=True,
+        queue_fresh_ok=True,
+        services_ok=True,
+        queue_max_age_seconds=12.5,
+        checked_at=datetime(2026, 8, 16, 0, 0, 0, tzinfo=timezone.utc),
+        inflight_turns=2,
+    )
+    response = await root_client.get("/readyz")
+    assert response.status_code == 200
+    assert response.json()["detail"]["inflight_turns"] == 2
+
+    app_with_mock_manager.state.readiness_composite = compute_readiness_composite(
+        database_ok=False,
+        queue_fresh_ok=True,
+        services_ok=True,
+        queue_max_age_seconds=None,
+        checked_at=datetime(2026, 8, 16, 0, 0, 0, tzinfo=timezone.utc),
+        inflight_turns=1,
+    )
+    response = await root_client.get("/readyz")
+    assert response.status_code == 503
+    assert response.json()["detail"]["inflight_turns"] == 1

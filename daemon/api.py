@@ -155,6 +155,7 @@ from daemon.ensemble_config import EnsembleConfig
 from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.notification_broadcaster import get_notification_broadcaster
 from daemon.services.editor_utils import get_editor_preference
+from daemon.services.boot_epoch import get_boot_epoch
 from daemon.services.readiness import (
     READINESS_FORCE_DEGRADED_ENV,
     ReadinessComposite,
@@ -396,6 +397,19 @@ async def lifespan(app: FastAPI):
         tmp_image_store=tmp_image_store,
     )
     await manager.initialize()
+
+    # Stop-frozen heartbeat amnesty (incident r-20260929-170301-0cb2):
+    # capture THIS process's boot epoch, in DB time, as the anchor for
+    # heartbeat-staleness evidence (readiness queue_freshness excludes
+    # pre-epoch beats; StaleTaskRecovery clocks stop-frozen tasks from
+    # the epoch). Placed immediately after the engine exists and
+    # before any worker can write heartbeats — every beat older than
+    # this instant belongs to a dead process. Best-effort: on failure
+    # the epoch stays None and consumers fall back to legacy
+    # (stricter) freshness semantics.
+    from daemon.services.boot_epoch import capture_boot_epoch
+
+    capture_boot_epoch(manager.engine)
 
     # Phase-2 critical-notes boot-state probe (B2 fix): the probe needs
     # the LIVE engine, which only exists after manager.initialize().
@@ -2283,7 +2297,13 @@ async def _periodic_readiness_refresh_loop(
             )
             composite = await refresh_readiness_composite(
                 db_probe=make_db_probe(manager.engine),
-                queue_probe=make_queue_probe(manager.engine),
+                queue_probe=make_queue_probe(
+                    manager.engine,
+                    boot_epoch=get_boot_epoch(),
+                    freshness_threshold_seconds=(
+                        queue_freshness_threshold_seconds
+                    ),
+                ),
                 services_ok=services_ok,
                 queue_freshness_threshold_seconds=queue_freshness_threshold_seconds,
             )
@@ -3012,6 +3032,7 @@ def create_app() -> FastAPI:
                         "reasons": ["readiness composite not yet computed"],
                         "queue_max_age_seconds": None,
                         "checked_at": None,
+                        "inflight_turns": None,
                     },
                     draining=False,
                 ).model_dump(),

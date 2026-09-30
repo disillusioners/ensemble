@@ -167,7 +167,11 @@ class ReadyzResponse(BaseModel):
         description=(
             "Diagnostics: reasons (list of degraded reasons), "
             "queue_max_age_seconds (None when no RUNNING tasks), "
-            "checked_at (ISO timestamp of the last composite refresh)."
+            "checked_at (ISO timestamp of the last composite refresh), "
+            "inflight_turns (ADVISORY integer — RUNNING tasks with fresh "
+            "heartbeats, i.e. alive-and-working turns; None when unknown. "
+            "Never affects status/components/reasons; consumers must "
+            "tolerate its absence)."
         ),
     )
     draining: bool = Field(
@@ -188,6 +192,7 @@ class ReadyzResponse(BaseModel):
                     "reasons": [],
                     "queue_max_age_seconds": 12.3,
                     "checked_at": "2026-08-16T01:00:00+00:00",
+                    "inflight_turns": 2,
                 },
                 "draining": False,
             }

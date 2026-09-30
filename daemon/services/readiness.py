@@ -19,10 +19,12 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine
+
+from daemon.services.boot_epoch import BOOT_EPOCH_FLOOR
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +102,52 @@ _FORCED_DEGRADED_VALUES = frozenset(
 # settings or driver bind rendering, and also removes app-host vs
 # DB-host clock skew. SQLite's ``julianday`` handles the offset
 # stored in the timestamp string the same way.
+#
+# Stop-frozen heartbeat amnesty (incident r-20260929-170301-0cb2):
+# the MAX() only aggregates heartbeats at/after the daemon boot
+# epoch (``:boot_epoch`` bind). A beat older than the boot epoch was
+# written by a dead process — it cannot prove a CURRENT stall, so it
+# is invisible to freshness accounting. When every RUNNING task is
+# stop-frozen the aggregate is NULL → age None → fresh (empty-set
+# semantics), letting a promote commit with a busy daemon. Callers
+# that never captured an epoch bind ``BOOT_EPOCH_FLOOR`` (year 1) —
+# every real beat passes the CASE, i.e. byte-equivalent semantics to
+# the pre-amnesty aggregate. See daemon/services/boot_epoch.py.
 _QUEUE_MAX_AGE_SQL_POSTGRES = sa_text(
-    "SELECT EXTRACT(EPOCH FROM (now() - MAX(last_heartbeat_at))) "
+    "SELECT EXTRACT(EPOCH FROM (now() - MAX(CASE WHEN last_heartbeat_at >= :boot_epoch"
+    " THEN last_heartbeat_at END))) "
     "FROM task WHERE status = :status_running"
 )
 _QUEUE_MAX_AGE_SQL_SQLITE = sa_text(
-    "SELECT (julianday('now') - julianday(MAX(last_heartbeat_at))) * 86400.0 "
+    "SELECT (julianday('now') - julianday(MAX(CASE WHEN last_heartbeat_at >= :boot_epoch"
+    " THEN last_heartbeat_at END))) * 86400.0 "
+    "FROM task WHERE status = :status_running"
+)
+
+# Advisory inflight-turns count (promote-quiesce commission, v0.16.6
+# component 1): RUNNING tasks whose heartbeat is FRESH — within the
+# queue-freshness threshold AND at/after the boot epoch (a frozen
+# pre-epoch beat is not "alive-and-working"). Purely advisory: the
+# count rides ``detail.inflight_turns`` in the /readyz payload and
+# NEVER feeds the readiness status or reasons. A parallel consumer
+# (promote.sh preflight) prints it as a non-blocking INFO note;
+# absent field = older-consumer tolerance.
+#
+# Freshness cutoff is computed DB-side (same clock as the age
+# aggregate). NULL heartbeats fail both arms of the CASE and never
+# count — no beat, no liveness. In SQLite the cutoff comparison runs
+# through ``julianday`` on both sides (a TEXT column compared
+# against a REAL bound is a type-ordering trap — text always sorts
+# above numbers); the epoch arm stays a TEXT-vs-TEXT lexicographic
+# compare, which is well-formed for the uniform ISO bind rendering.
+_INFLIGHT_COUNT_SQL_POSTGRES = sa_text(
+    "SELECT COUNT(CASE WHEN last_heartbeat_at >= now() - (:fresh_threshold_secs * interval '1 second')"
+    " AND last_heartbeat_at >= :boot_epoch THEN 1 END) "
+    "FROM task WHERE status = :status_running"
+)
+_INFLIGHT_COUNT_SQL_SQLITE = sa_text(
+    "SELECT COUNT(CASE WHEN julianday(last_heartbeat_at) >= julianday('now') - :fresh_threshold_secs / 86400.0"
+    " AND last_heartbeat_at >= :boot_epoch THEN 1 END) "
     "FROM task WHERE status = :status_running"
 )
 
@@ -119,13 +161,15 @@ class ReadinessComposite:
             the probe budget.
         queue_freshness: newest RUNNING-task heartbeat age is within
             the configured threshold (empty RUNNING set = fresh).
+            Stop-frozen pre-boot heartbeats are excluded from the
+            aggregate (see daemon/services/boot_epoch.py).
         services: critical services (job_processor, live_hub) are
             bound on ``app.state``.
         reasons: human-readable degraded reasons, one per failing
             component (empty when ready).
         queue_max_age_seconds: age of the newest RUNNING heartbeat in
             seconds, computed SQL-side; None when no RUNNING tasks
-            exist.
+            exist (or all RUNNING tasks are stop-frozen pre-boot).
         checked_at: UTC timestamp captured at refresh start — the
             composite may be served for up to one refresh interval
             after this moment.
@@ -134,6 +178,14 @@ class ReadinessComposite:
             the real component readings. Readiness-only surface: the
             components stay truthful, the reason list names the knob,
             and the aggregate flips. Never set by real probe paths.
+        inflight_turns: ADVISORY count of RUNNING tasks with fresh
+            heartbeats (alive-and-working turns: within the freshness
+            threshold AND at/after the boot epoch). Never affects
+            ``ready`` or ``reasons``; surfaced in ``detail`` for
+            consumers (e.g. a promote preflight printing a
+            non-blocking INFO note). None when the count is unknown
+            (probe timeout/failure or no threshold bound) — absent
+            value is the older-consumer tolerance contract.
     """
 
     database: bool
@@ -143,6 +195,7 @@ class ReadinessComposite:
     queue_max_age_seconds: Optional[float] = None
     checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     forced_degraded: bool = False
+    inflight_turns: Optional[int] = None
 
     @property
     def ready(self) -> bool:
@@ -158,7 +211,9 @@ class ReadinessComposite:
         """Serialize to the ``ReadyzResponse`` body shape.
 
         ``draining`` is a reserved Phase-4 drain-controller field; the
-        caller passes false in Phase 1.
+        caller passes false in Phase 1. ``inflight_turns`` rides
+        ``detail`` as an ADVISORY field — it never participates in
+        the status/components/reasons contract.
         """
         return {
             "status": "ready" if self.ready else "degraded",
@@ -171,6 +226,7 @@ class ReadinessComposite:
                 "reasons": list(self.reasons),
                 "queue_max_age_seconds": self.queue_max_age_seconds,
                 "checked_at": self.checked_at.isoformat(),
+                "inflight_turns": self.inflight_turns,
             },
             "draining": draining,
         }
@@ -202,11 +258,14 @@ def compute_readiness_composite(
     queue_max_age_seconds: Optional[float],
     checked_at: Optional[datetime] = None,
     extra_reasons: Optional[list[str]] = None,
+    inflight_turns: Optional[int] = None,
 ) -> ReadinessComposite:
     """Assemble a composite from component outcomes.
 
     Reasons are derived mechanically from failing components so the
-    degraded body always explains itself.
+    degraded body always explains itself. ``inflight_turns`` is
+    advisory-only: it is carried verbatim onto the composite and
+    never consulted for ``ready`` or ``reasons``.
     """
     reasons: list[str] = list(extra_reasons or [])
     if not database_ok:
@@ -228,6 +287,7 @@ def compute_readiness_composite(
         reasons=reasons,
         queue_max_age_seconds=queue_max_age_seconds,
         checked_at=checked_at or datetime.now(timezone.utc),
+        inflight_turns=inflight_turns,
     )
 
 
@@ -313,6 +373,12 @@ async def refresh_readiness_composite(
     raised error → fresh) — an unreachable database already reports
     through the ``database`` component and must not double-report
     here.
+
+    The queue probe may return either the legacy scalar age (older
+    probes / pure-seam tests) or a :class:`QueueProbeResult` carrying
+    the advisory ``inflight_turns`` count alongside the age. A
+    timeout or failure leaves the count None (unknown — advisory
+    fields never guess).
     """
     checked_at = (now or (lambda: datetime.now(timezone.utc)))()
 
@@ -348,6 +414,7 @@ async def refresh_readiness_composite(
         queue_probe, QUEUE_PROBE_TIMEOUT_S, None
     )
 
+    inflight_turns: Optional[int] = None
     extra_reasons: list[str] = []
     if queue_timed_out:
         # Distinguish "no RUNNING tasks" (None → fresh) from "never
@@ -355,8 +422,20 @@ async def refresh_readiness_composite(
         queue_max_age_seconds = None
         fresh = False
         extra_reasons.append("queue_freshness: queue probe timed out")
+    elif isinstance(queue_result, QueueProbeResult):
+        queue_max_age_seconds = queue_result.max_age_seconds
+        inflight_turns = queue_result.inflight_turns
+        # Negative ages clamp to 0.0 inside evaluate_queue_freshness —
+        # see the freshness-clamp docstring at :245.
+        fresh, age = evaluate_queue_freshness(
+            queue_max_age_seconds,
+            threshold_seconds=queue_freshness_threshold_seconds,
+        )
+        queue_max_age_seconds = age
     else:
         queue_max_age_seconds = queue_result
+        # Negative ages clamp to 0.0 inside evaluate_queue_freshness —
+        # see the freshness-clamp docstring at :245.
         fresh, age = evaluate_queue_freshness(
             queue_max_age_seconds,
             threshold_seconds=queue_freshness_threshold_seconds,
@@ -369,6 +448,7 @@ async def refresh_readiness_composite(
         queue_max_age_seconds=queue_max_age_seconds,
         checked_at=checked_at,
         extra_reasons=extra_reasons,
+        inflight_turns=inflight_turns,
     )
 
 
@@ -387,7 +467,29 @@ def make_db_probe(engine: Engine) -> Callable[[], bool]:
     return _probe
 
 
-def make_queue_probe(engine: Engine) -> Callable[[], Optional[float]]:
+class QueueProbeResult(NamedTuple):
+    """Outcome of one queue-freshness probe cycle.
+
+    ``max_age_seconds``: age of the newest RUNNING heartbeat at/after
+        the boot epoch, SQL-side; ``None`` when no RUNNING task has a
+        post-epoch heartbeat (empty set — or all stop-frozen, the
+        amnesty case) → fresh.
+    ``inflight_turns``: ADVISORY count of RUNNING tasks with fresh
+        heartbeats (within the freshness threshold AND at/after the
+        boot epoch); ``None`` when unknown (no threshold bound, or
+        the count query failed).
+    """
+
+    max_age_seconds: Optional[float]
+    inflight_turns: Optional[int]
+
+
+def make_queue_probe(
+    engine: Engine,
+    *,
+    boot_epoch: Optional[datetime] = None,
+    freshness_threshold_seconds: Optional[float] = None,
+) -> Callable[[], QueueProbeResult]:
     """Build the queue-freshness component probe bound to a sync engine.
 
     Returns the age in seconds of the newest ``last_heartbeat_at``
@@ -398,24 +500,61 @@ def make_queue_probe(engine: Engine) -> Callable[[], Optional[float]]:
     coercion is lenient because the drivers disagree on the return
     type: psycopg's EXTRACT comes back as ``decimal.Decimal``, SQLite
     arithmetic as ``float``.
-    """
 
-    def _probe() -> Optional[float]:
-        statement = (
-            _QUEUE_MAX_AGE_SQL_POSTGRES
-            if engine.dialect.name == "postgresql"
-            else _QUEUE_MAX_AGE_SQL_SQLITE
+    Stop-frozen heartbeat amnesty (incident r-20260929-170301-0cb2):
+    ``boot_epoch`` bounds the MAX() aggregate to heartbeats at/after
+    the daemon boot epoch — a beat written by a dead process cannot
+    prove a stall of THIS daemon. ``None`` binds ``BOOT_EPOCH_FLOOR``
+    (year 1), making the epoch filter a no-op — pre-amnesty
+    semantics.
+
+    ``freshness_threshold_seconds`` additionally arms the ADVISORY
+    ``inflight_turns`` count (RUNNING tasks with fresh heartbeats);
+    without it the count is ``None`` (unknown), never a guess.
+    """
+    epoch_bind = boot_epoch if boot_epoch is not None else BOOT_EPOCH_FLOOR
+
+    def _probe() -> QueueProbeResult:
+        is_postgres = engine.dialect.name == "postgresql"
+        age_statement = (
+            _QUEUE_MAX_AGE_SQL_POSTGRES if is_postgres else _QUEUE_MAX_AGE_SQL_SQLITE
         )
+        inflight: Optional[int] = None
         with engine.connect() as conn:
             value = conn.execute(
-                statement, {"status_running": TASK_STATUS_RUNNING}
+                age_statement,
+                {"status_running": TASK_STATUS_RUNNING, "boot_epoch": epoch_bind},
             ).scalar()
+            if freshness_threshold_seconds is not None:
+                count_statement = (
+                    _INFLIGHT_COUNT_SQL_POSTGRES
+                    if is_postgres
+                    else _INFLIGHT_COUNT_SQL_SQLITE
+                )
+                raw_count = conn.execute(
+                    count_statement,
+                    {
+                        "status_running": TASK_STATUS_RUNNING,
+                        "boot_epoch": epoch_bind,
+                        "fresh_threshold_secs": float(freshness_threshold_seconds),
+                    },
+                ).scalar()
+                try:
+                    inflight = int(raw_count)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Inflight-turns probe returned non-numeric count: %r",
+                        raw_count,
+                    )
+                    inflight = None
         if value is None:
-            return None
+            return QueueProbeResult(max_age_seconds=None, inflight_turns=inflight)
         try:
-            return float(value)
+            return QueueProbeResult(
+                max_age_seconds=float(value), inflight_turns=inflight
+            )
         except (TypeError, ValueError):
             logger.warning("Queue probe returned non-numeric age: %r", value)
-            return None
+            return QueueProbeResult(max_age_seconds=None, inflight_turns=inflight)
 
     return _probe

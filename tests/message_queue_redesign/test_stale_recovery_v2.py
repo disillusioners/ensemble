@@ -1324,3 +1324,205 @@ class TestPausedInstanceSkipped:
         # No message was failed (this is the symptom that triggered the
         # user-visible auto-resume in the original bug).
         assert len(mock_message_repo.failed_messages) == 0
+
+
+# ============================================================================
+# Stop-frozen heartbeat amnesty (incident r-20260929-170301-0cb2)
+# ============================================================================
+
+
+class TestStopFrozenAmnesty:
+    """Boot-epoch clamp on the stale finders.
+
+    A promote's daemon stop freezes RUNNING heartbeats mid-turn; the
+    replacement daemon must not reap those tasks instantly (readiness
+    excludes pre-boot beats; the stale clock runs from the boot).
+    Abandoned-but-alive tasks still reap once the daemon outlives the
+    threshold. Signal preservation: a beat going stale while the
+    daemon has been continuously up still reaps exactly as before.
+    """
+
+    def test_cancellable_young_daemon_never_reaps_stop_frozen(self, repository):
+        """Beat frozen 20min ago, daemon booted 5min ago → NOT stale.
+
+        This is the promote-stop shape that must not be instantly
+        reaped: the stale clock runs from the boot epoch.
+        """
+        create_stale_running_task(
+            repository, instance_id="frozen-1", message_id="frozen-msg-1",
+            age_minutes=20,
+        )
+        boot = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+        assert repository.find_cancellable_tasks(
+            threshold_minutes=15, boot_epoch=boot.replace(tzinfo=None)
+        ) == []
+
+    def test_cancellable_continuously_up_still_reaps(self, repository):
+        """Beat frozen 20min ago, daemon up 25min (beat post-boot) →
+
+        reaped exactly as before the amnesty. The clamp only delays
+        PRE-boot beats.
+        """
+        stale_task = create_stale_running_task(
+            repository, instance_id="stale-live-1", message_id="stale-live-msg-1",
+            age_minutes=20,
+        )
+        boot = datetime.now(timezone.utc) - timedelta(minutes=25)
+
+        found = repository.find_cancellable_tasks(
+            threshold_minutes=15, boot_epoch=boot.replace(tzinfo=None)
+        )
+        assert [t.id for t in found] == [stale_task.id]
+
+    def test_cancellable_old_daemon_reaps_stop_frozen_after_threshold(self, repository):
+        """Beat frozen 20min ago, daemon booted 16min ago → reaped.
+
+        boot+threshold (16m+15m=31m from beat's perspective... the
+        effective clock max(beat, boot)+15m) — boot(16m) is older than
+        the threshold(15m) window, so the amnesty arm no longer holds
+        the task: reaped ~boot+15m as designed.
+        """
+        stale_task = create_stale_running_task(
+            repository, instance_id="stale-old-1", message_id="stale-old-msg-1",
+            age_minutes=20,
+        )
+        boot = datetime.now(timezone.utc) - timedelta(minutes=16)
+
+        found = repository.find_cancellable_tasks(
+            threshold_minutes=15, boot_epoch=boot.replace(tzinfo=None)
+        )
+        assert [t.id for t in found] == [stale_task.id]
+
+    def test_cancellable_boundary_daemon_younger_than_threshold(self, repository):
+        """Boundary pin: boot 1s YOUNGER than the threshold window → no
+
+        reap. The amnesty arm is strict (``boot_epoch >= threshold`` →
+        none); the 1s margin keeps the pin deterministic against
+        now()-jitter between this computation and the repository's.
+        """
+        create_stale_running_task(
+            repository, instance_id="frozen-b-1", message_id="frozen-b-msg-1",
+            age_minutes=20,
+        )
+        boot = datetime.now(timezone.utc) - timedelta(minutes=15) + timedelta(seconds=1)
+
+        assert repository.find_cancellable_tasks(
+            threshold_minutes=15, boot_epoch=boot.replace(tzinfo=None)
+        ) == []
+
+    def test_cancellable_none_epoch_keeps_legacy_behavior(self, repository):
+        """boot_epoch=None (never captured) → pre-amnesty semantics."""
+        stale_task = create_stale_running_task(
+            repository, instance_id="legacy-1", message_id="legacy-msg-1",
+            age_minutes=20,
+        )
+        found = repository.find_cancellable_tasks(threshold_minutes=15)
+        assert [t.id for t in found] == [stale_task.id]
+
+    def test_stale_running_young_daemon_never_reaps_stop_frozen(self, repository):
+        """Same clamp on the startup-recovery finder
+
+        (``find_stale_running_tasks``) — the instantly-reap-at-boot
+        hazard lives in ``StaleTaskRecovery.recover_on_startup``."""
+        create_stale_running_task(
+            repository, instance_id="frozen-su-1", message_id="frozen-su-msg-1",
+            age_minutes=20,
+        )
+        boot = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+        assert repository.find_stale_running_tasks(
+            threshold_minutes=15, boot_epoch=boot.replace(tzinfo=None)
+        ) == []
+
+    def test_stale_running_continuously_up_still_reaps(self, repository):
+        stale_task = create_stale_running_task(
+            repository, instance_id="stale-su-1", message_id="stale-su-msg-1",
+            age_minutes=20,
+        )
+        boot = datetime.now(timezone.utc) - timedelta(minutes=25)
+
+        found = repository.find_stale_running_tasks(
+            threshold_minutes=15, boot_epoch=boot.replace(tzinfo=None)
+        )
+        assert [t.id for t in found] == [stale_task.id]
+
+    def test_stale_running_none_epoch_keeps_legacy_behavior(self, repository):
+        stale_task = create_stale_running_task(
+            repository, instance_id="legacy-su-1", message_id="legacy-su-msg-1",
+            age_minutes=20,
+        )
+        found = repository.find_stale_running_tasks(threshold_minutes=15)
+        assert [t.id for t in found] == [stale_task.id]
+
+
+class TestStopFrozenAmnestyWiring:
+    """StaleTaskRecovery must pass the process boot epoch to both finders."""
+
+    class _RecordingTaskRepo:
+        """Minimal task-repo stub recording finder kwargs, finding none."""
+
+        def __init__(self):
+            self.cancellable_calls = []
+            self.stale_running_calls = []
+
+        def find_cancellable_tasks(self, threshold_minutes, boot_epoch=None):
+            self.cancellable_calls.append(
+                {"threshold_minutes": threshold_minutes, "boot_epoch": boot_epoch}
+            )
+            return []
+
+        def find_stale_running_tasks(self, threshold_minutes=15, boot_epoch=None):
+            self.stale_running_calls.append(
+                {"threshold_minutes": threshold_minutes, "boot_epoch": boot_epoch}
+            )
+            return []
+
+        def find_orphaned_cancelled_tasks(self):
+            return []  # Phase B finds nothing — startup recovery ends here
+
+    @pytest.fixture(autouse=True)
+    def _reset_epoch(self):
+        from daemon.services.boot_epoch import set_boot_epoch
+
+        set_boot_epoch(None)
+        yield
+        set_boot_epoch(None)
+
+    def test_recover_stale_tasks_threads_boot_epoch(self):
+        task_repo = self._RecordingTaskRepo()
+        recovery = StaleTaskRecovery(
+            task_repository=task_repo,
+            message_repository=object(),  # unused on the empty-stale path
+            threshold_minutes=15,
+            cancel_grace_seconds=0,
+        )
+        from daemon.services.boot_epoch import set_boot_epoch
+
+        epoch = datetime(2026, 9, 29, 17, 5, 51)
+        set_boot_epoch(epoch)
+
+        assert recovery.recover_stale_tasks() == 0
+
+        assert task_repo.cancellable_calls == [
+            {"threshold_minutes": 15, "boot_epoch": epoch}
+        ]
+
+    def test_recover_on_startup_threads_boot_epoch(self):
+        task_repo = self._RecordingTaskRepo()
+        recovery = StaleTaskRecovery(
+            task_repository=task_repo,
+            message_repository=object(),  # unused on the empty-stale path
+            threshold_minutes=15,
+            cancel_grace_seconds=0,
+        )
+        from daemon.services.boot_epoch import set_boot_epoch
+
+        epoch = datetime(2026, 9, 29, 17, 5, 51)
+        set_boot_epoch(epoch)
+
+        recovery.recover_on_startup()
+
+        assert task_repo.stale_running_calls == [
+            {"threshold_minutes": 15, "boot_epoch": epoch}
+        ]
