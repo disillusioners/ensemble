@@ -4075,7 +4075,7 @@ class InstanceManager:
         try:
             from daemon.tools.upgrade_journal import NONCE_TTL_S
         except Exception:  # pragma: no cover — defensive; module always present
-            NONCE_TTL_S = 15 * 60  # noqa: N816
+            NONCE_TTL_S = 60 * 60  # noqa: N816 — mirror upgrade_journal.NONCE_TTL_S (60min, ADR-036)
         try:
             from daemon.tools import upgrade_journal as _uj
 

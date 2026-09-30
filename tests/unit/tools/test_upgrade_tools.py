@@ -2627,6 +2627,58 @@ class TestLiveThreeFactorGate:
         )
         assert _refusal_reason(out) == "nonce-expired"
 
+    async def test_nonce_ttl_boundary_59m59s_still_valid(self, live_harness) -> None:
+        """ADR-036 (NONCE_TTL_S widened 15min→60min, 2026-09-30): a nonce
+        aged to 59:59 of its 60-minute window is STILL VALID — the
+        comparison is strict (``now > ttl``), so an in-window record
+        (ttl = now + 59*60+59s = +3599s) returns ``now <= ttl`` → not
+        expired → the gate proceeds (and consumes the nonce)."""
+        live = live_harness
+        from daemon.tools.upgrade_journal import NONCE_TTL_S
+        run_id, nonce, grouped = await self._mint_nonce(live)
+        self._stamp_window(live, content=grouped)
+        # Sanity: the fresh mint must carry the new 60min TTL.
+        assert NONCE_TTL_S == 60 * 60, NONCE_TTL_S
+        data = uj.journal_read(live["install"])
+        # Set TTL to NONCE_TTL_S - 1 (= 59min 59s in the future) — boundary.
+        data["pending_actions"][run_id]["ttl_expires_at"] = uj.iso_plus(
+            uj.now_iso(), NONCE_TTL_S - 1
+        )
+        uj.journal_write(live["install"], data)
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped}
+        )
+        # Nonce is still in-window → the 3-factor gate proceeds; the
+        # tool's terminal outcome for the fake-live arm is
+        # ``noop-on-demo-or-non-staged`` (the harness is /tmp-fixture only),
+        # NOT nonce-expired. The key assertion is the NEGATIVE: we did
+        # NOT get the expiry refusal.
+        assert _refusal_reason(out) != "nonce-expired", (
+            f"expected valid nonce at 59:59 boundary, got expiry refusal: {out}"
+        )
+
+    async def test_nonce_ttl_boundary_60m01s_expired(self, live_harness) -> None:
+        """ADR-036 boundary (60min window): a nonce aged past 60:00 by
+        even 1 second IS expired — strict ``now > ttl`` semantics at the
+        upper edge. Pin: ttl = now - 1s (just past the 60min mark)."""
+        live = live_harness
+        run_id, nonce, grouped = await self._mint_nonce(live)
+        self._stamp_window(live, content=grouped)
+        data = uj.journal_read(live["install"])
+        # ttl = now - 1s → comparison now > now-1s → True → expired.
+        data["pending_actions"][run_id]["ttl_expires_at"] = uj.iso_plus(
+            uj.now_iso(), -1
+        )
+        uj.journal_write(live["install"], data)
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped}
+        )
+        assert _refusal_reason(out) == "nonce-expired", (
+            f"expected nonce-expired at 60:01 past, got: {out}"
+        )
+
     async def test_nonce_verification_unavailable(self, live_harness) -> None:
         """The MessageQueue row is unreadable (daemon restarted — rows wiped
         at boot) → fail-closed nonce-verification-unavailable (D-FA3.3)."""
