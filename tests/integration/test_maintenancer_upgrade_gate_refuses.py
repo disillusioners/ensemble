@@ -4,7 +4,7 @@ The 3-factor gate at ``upgrade_tools.py:1877-2036``:
 
 * F1: ``user_confirmed`` parameter
 * F2: per-instance user-origin window (whitelisted source prefixes)
-* F3: single-use, 15-min TTL, instance-bound, action-bound nonce
+* F3: single-use, 60-min TTL, instance-bound, action-bound nonce
   in the triggering message row content
 
 The gate fires ONLY on ``self_env == "live"`` (call-time refusal at

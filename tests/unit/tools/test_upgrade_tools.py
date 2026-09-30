@@ -2627,6 +2627,70 @@ class TestLiveThreeFactorGate:
         )
         assert _refusal_reason(out) == "nonce-expired"
 
+    async def test_nonce_ttl_boundary_59m59s_still_valid(self, live_harness) -> None:
+        """ADR-036 (NONCE_TTL_S widened 15min→60min, 2026-09-30): a nonce
+        aged to 59:59 of its 60-minute window is STILL VALID — the
+        comparison is strict (``now > ttl``), so an in-window record
+        (ttl = now + 59*60+59s = +3599s) returns ``now <= ttl`` → not
+        expired → the 3-factor gate proceeds and the tool arms the
+        fake-live /tmp install (FIX-BACK review hygiene N4 — positive
+        assertion of the real success token, not the reviewer's guess)."""
+        live = live_harness
+        from daemon.tools.upgrade_journal import NONCE_TTL_S
+        run_id, nonce, grouped = await self._mint_nonce(live)
+        self._stamp_window(live, content=grouped)
+        # Sanity: the fresh mint must carry the new 60min TTL.
+        assert NONCE_TTL_S == 60 * 60, NONCE_TTL_S
+        data = uj.journal_read(live["install"])
+        # Set TTL to NONCE_TTL_S - 1 (= 59min 59s in the future) — boundary.
+        data["pending_actions"][run_id]["ttl_expires_at"] = uj.iso_plus(
+            uj.now_iso(), NONCE_TTL_S - 1
+        )
+        uj.journal_write(live["install"], data)
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped}
+        )
+        # Nonce is still in-window → the 3-factor gate passes → the tool
+        # proceeds to ARM the fake-live /tmp install. The terminal token
+        # is the success-banner first line, defined at
+        # ``daemon/tools/upgrade_tools.py:2869``:
+        #   f"UPGRADE ARMED — run_id={run_id} env={self_env} target={version} mode=promote"
+        # The same token is pinned for the canonical fake-live PASS path
+        # by ``test_full_pass_consumes_nonce_and_arms`` (line :2713).
+        # (The reviewer's suggestion of ``noop-on-demo-or-non-staged`` was
+        # a guess — that token does NOT exist in the current code.)
+        assert "UPGRADE ARMED" in out, (
+            f"expected in-window nonce to arm the gate ('UPGRADE ARMED' "
+            f"banner per upgrade_tools.py:2869), got: {out}"
+        )
+        assert _refusal_reason(out) is None, (
+            f"in-window nonce should NOT be a refusal, got refusal "
+            f"reason={_refusal_reason(out)!r}: {out}"
+        )
+
+    async def test_nonce_ttl_boundary_60m01s_expired(self, live_harness) -> None:
+        """Expiry backdated to now − (NONCE_TTL_S + 1) so strict now > ttl fires with proportional margin."""
+        from daemon.tools.upgrade_journal import NONCE_TTL_S
+        live = live_harness
+        run_id, nonce, grouped = await self._mint_nonce(live)
+        self._stamp_window(live, content=grouped)
+        data = uj.journal_read(live["install"])
+        # ttl = now - (NONCE_TTL_S + 1) → "TTL+1s past the upper edge of a
+        # NONCE_TTL_S-wide window whose mint was ≈ now". The gate's
+        # ``now > ttl_expires_at`` check fires True → nonce-expired refusal.
+        data["pending_actions"][run_id]["ttl_expires_at"] = uj.iso_plus(
+            uj.now_iso(), -(NONCE_TTL_S + 1)
+        )
+        uj.journal_write(live["install"], data)
+        out = await live["tools"]["system_upgrade"].ainvoke(
+            {"target_env": "live", "version": "1.2.3", "dry_run": False,
+             "user_confirmed": True, "nonce": grouped}
+        )
+        assert _refusal_reason(out) == "nonce-expired", (
+            f"expected nonce-expired at TTL+1s past, got: {out}"
+        )
+
     async def test_nonce_verification_unavailable(self, live_harness) -> None:
         """The MessageQueue row is unreadable (daemon restarted — rows wiped
         at boot) → fail-closed nonce-verification-unavailable (D-FA3.3)."""

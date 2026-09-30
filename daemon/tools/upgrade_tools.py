@@ -2478,7 +2478,7 @@ never decides go/rollback).
                         f"{nonce_grouped(action.nonce)} — the user must reply "
                         "with this nonce; then call system_upgrade("
                         f"user_confirmed=true, nonce=\"{nonce_grouped(action.nonce)}\"). "
-                        "Nonce single-use, expires in 15min."
+                        "Nonce single-use, expires in 60min."
                     )
                     lines.append(
                         "NOTE: this preflight persisted ONLY the nonce "
@@ -2598,7 +2598,7 @@ never decides go/rollback).
                             if ttl is None or datetime.now(tz=timezone.utc) > ttl:
                                 factor_failures.append(
                                     f"nonce-expired: nonce issued at "
-                                    f"{action.issued_at}, TTL 15min elapsed. "
+                                    f"{action.issued_at}, TTL 60min elapsed. "
                                     "Re-run dry_run to obtain a fresh nonce."
                                 )
                             elif (
@@ -2922,7 +2922,7 @@ message — registry-backed classification (verdict §4): the exact source
 source_type is one of telegram/slack/discord/whatsapp (see
 upgrade_journal.classify_user_origin — the single source of truth;
 webhook has no adapter and never arms); (3) that HUMAN message's CONTENT
-contains the action-binding nonce (single-use, TTL 15min, persisted in
+contains the action-binding nonce (single-use, TTL 60min, persisted in
 the journal — survives daemon death). A fabricated param fails (2); a
 self-echoed nonce in an agent/internal-origin message fails (2)+(3).
 NOTE: this initiative never exercises the live happy path — live

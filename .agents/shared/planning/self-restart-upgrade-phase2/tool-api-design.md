@@ -1,5 +1,7 @@
 # Tool API Design — Self-Restart / Self-Upgrade (Phase 2)
 
+> **⚠ SUPERSEDED NOTE (2026-09-30, FIX-BACK review hygiene N3):** this document's nonce-window prose ("expires in 15min", "TTL 15min", "TTL=15min", "issued_at + 15min < now") refers to the **historical** 15-minute ceremony nonce window. The current nonce window is **60 minutes** (per user decision 2026-09-30, ADR-036 in `decisions.md`); canonical constant `daemon.tools.upgrade_journal.NONCE_TTL_S = 60 * 60` (mirrored at `daemon/manager.py:4078`). The 3-factor gate's other security properties (single-use, identity-bound `issued_to_instance`, action-bound `kind/env/target`, message-row nonce content match) are UNCHANGED. **Do not edit the historical prose below — it documents the P2.2-era decision context. Refer to ADR-036 + `daemon/tools/upgrade_journal.py:116` for current behavior.**
+
 - **Initiative:** self-restart-upgrade-phase2
 - **Branch:** `plan/self-restart-upgrade-phase2` @ `653e8e71`
 - **Owner:** W2 (deepest-design docs)
