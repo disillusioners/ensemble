@@ -1,5 +1,7 @@
 # Architecture Recommendation — Self-Restart / Self-Upgrade Phase 2 (Seam Resolution)
 
+> **⚠ SUPERSEDED NOTE (2026-09-30, FIX-BACK review hygiene N3):** this document's nonce-window prose ("expires_at (+15min)" at §4.2(b), "TTL 15min" at §4.3) refers to the **historical** 15-minute ceremony nonce window. The current nonce window is **60 minutes** (per user decision 2026-09-30, ADR-036 in `decisions.md`); canonical constant `daemon.tools.upgrade_journal.NONCE_TTL_S = 60 * 60` (mirrored at `daemon/manager.py:4078`). The 3-factor gate's other security properties (single-use, identity-bound `issued_to_instance`, action-bound `kind/env/target`, message-row nonce content match) are UNCHANGED. **Do not edit the historical prose below — it documents the P2.2-era decision context. Refer to ADR-036 + `daemon/tools/upgrade_journal.py:116` for current behavior.**
+
 - **Date:** 2026-08-22 · **Author:** architect (controller) — synthesis of a 4-councilor governor council (2 models × `trade-off-analysis`; 2/2 completed, ~80% unanimous, 4 forks adjudicated — dissent preserved per fork)
 - **Input:** plan corpus `plan-overview.md` + 8 siblings @ branch `plan/self-restart-upgrade-phase2`; parent ADR-001…015 (`.agents/shared/planning/auto-restart-upgrade/decisions.md`); sibling ADR-016…027 (`decisions.md`, this dir)
 - **Status:** DECIDED — every focus area ends in one implementable recommendation. Where I override a planner decision, it is marked **⟲ OVERRIDE** with rationale for the reviewer to arbitrate.

@@ -734,6 +734,36 @@ class TestNonceStore:
         ttl = uj.parse_iso_utc(action.ttl_expires_at) - uj.parse_iso_utc(action.issued_at)
         assert abs(ttl.total_seconds() - NONCE_TTL_S) < 5
 
+    def test_manager_fallback_noncel_literal_matches_canonical(self) -> None:
+        """ADR-036 + FIX-BACK review hygiene N1: ``daemon/manager.py:4078``
+        carries a defensive pragma fallback (``NONCE_TTL_S = 60 * 60``)
+        that fires ONLY when the canonical ``daemon.tools.upgrade_journal``
+        import fails. The fallback exists precisely for that failure
+        mode, so aliasing it at the site is IMPOSSIBLE-by-construction
+        (a module-level re-export from upgrade_journal would defeat the
+        pragma's purpose — the pragma must be a self-contained literal).
+        The chosen pin is therefore dual-mode: assert the canonical is
+        reachable AND the pragma fallback's literal matches the canonical
+        post-ADR-036 value, so a drift between the two surfaces here
+        before any user-origin window is stamped with the wrong TTL."""
+        # (a) the canonical is reachable AND reflects the ADR-036 width.
+        assert NONCE_TTL_S == 60 * 60, (
+            f"canonical NONCE_TTL_S drifted from ADR-036 (60min): {NONCE_TTL_S!r}"
+        )
+        # (b) the manager-side pragma fallback carries the same literal.
+        # Inspect the source of the stamp method (the only call site of
+        # the fallback) — the literal ``NONCE_TTL_S = 60 * 60`` must
+        # appear in the pragma branch so a widening in the canonical
+        # forces an explicit update of the fallback in lockstep.
+        import inspect
+        from daemon.manager import InstanceManager
+        src = inspect.getsource(InstanceManager.stamp_user_origin_window)
+        assert "NONCE_TTL_S = 60 * 60" in src, (
+            "daemon/manager.py fallback NONCE_TTL_S literal drifted from "
+            "ADR-036 (must remain 60 * 60); update daemon/manager.py:4078 "
+            "in lockstep with daemon/tools/upgrade_journal.py:116"
+        )
+
 
 # ── reconcile_pending_op (lazy closure) ──────────────────────────────────────
 
