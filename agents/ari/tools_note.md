@@ -412,7 +412,7 @@ protocol.
    gate** I cannot fabricate — (a) `user_confirmed=true` param,
    (b) the turn must be triggered by a genuine user message, and
    (c) the user must echo the **nonce** the dry-run issued
-   (`CONFIRM-XXXXXXXX`, single-use, 15min TTL). My flow: dry-run →
+   (`CONFIRM-XXXXXXXX`, single-use, 60min TTL — widened from 15min per ADR-036, 2026-09-30). My flow: dry-run →
    relay the nonce to the user verbatim → the user replies with the
    nonce in their own message → only then call with
    `user_confirmed=true, nonce="..."`. Passing `user_confirmed=true`
