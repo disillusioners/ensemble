@@ -1704,6 +1704,127 @@ _assert_settled_refuses_with_token "$SE_LK" "lock-held" "owner=" \
     "15h lock-held token + owner detail"
 rm -rf "$SE_LK/releases/rollback.lock.d"
 
+# ─── 15i-m. parser-defect regression (commission v0.16.7 hotfix) ──────────
+# The live journal had "pending_op" embedded inside a sweep detail string
+# (position 875, the 2026-09-26T10:02:10Z event: "pending_op run_id=
+# r-20260926-092839-5bf2 cleared by reconcile: no in_flight, no terminal
+# event, past expires_at ...") BEFORE the top-level "pending_op":null at
+# file end. _json_field's bare-substring anchor returned "no in_flight"
+# (non-null) and pipeline_settled refused every stop/adopt, blocking the
+# in-progress systemd adoption. _json_field_quoted anchors on the QUOTED
+# key form (`"pending_op":`) so only the real top-level field matches.
+# These tests pin both directions — the fix must NOT weaken the gate
+# (positive control) AND must defeat the decoy (regression).
+section "pipeline_settled parser-defect regression (v0.16.7 hotfix)"
+
+# 15i. THE EXACT live shape — history detail embeds the bare word
+#      "pending_op" AND the substring "no in_flight" BEFORE the top-level
+#      "pending_op":null. Mirrors the live journal byte-for-byte so any
+#      drift in the live fixture would surface here too. Must settle
+#      silently (rc=0, empty stdout) — the decoy must NOT bite.
+SE_LJ="$FIXTURE/se-livejournal-shape"; mkdir -p "$SE_LJ/releases/$SBX_V1"
+( cd "$SE_LJ" && ln -sfn "releases/$SBX_V1" current )
+# Hand-crafted journal with the verbatim sweep detail string the live
+# journal carried (event=sweep at 2026-09-26T10:02:10Z). The first
+# literal "pending_op" lives inside that detail string — well before
+# the top-level "pending_op":null at file end.
+cat > "$SE_LJ/releases/state.json" <<EOF
+{"current":"$SBX_V1","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-09-26T10:02:10Z","event":"sweep","detail":"pending_op run_id=r-20260926-092839-5bf2 cleared by reconcile: no in_flight, no terminal event, past expires_at 2026-09-26T09:39:08Z+grace (executor died pre-open?)"}],"pending_op":null,"pending_restart":null,"pending_actions":{}}
+EOF
+INSTALL_DIR="$SE_LJ" SE_OUT="$(pipeline_settled 2>&1)"; SE_RC=$?
+if [ "$SE_RC" = "0" ] && [ -z "$SE_OUT" ]; then
+    _pass
+else
+    _fail "15i live-journal-shape decoy: pipeline_settled returns 0 silently (decoy must not bite)" "rc=0 empty stdout" "rc=$SE_RC out='$SE_OUT'"
+fi
+
+# 15j. POSITIVE CONTROL — top-level pending_op IS non-null (real tool arm
+#      in flight). The fix must NOT weaken the gate: the refusal must
+#      still fire with reason=pending-op. Mirrors the existing 15g shape
+#      but lives in its own fixture so the 15i/15j pair is self-contained.
+SE_PN="$FIXTURE/se-pendingop-positive"; mkdir -p "$SE_PN/releases/$SBX_V1"
+( cd "$SE_PN" && ln -sfn "releases/$SBX_V1" current )
+# Start from the verbatim live-shape journal, then OVERWRITE the top-level
+# pending_op to a real value. This proves the quoted anchor still fires
+# on a REAL non-null top-level pending_op.
+sed -E 's/"pending_op":null/"pending_op":{"op":"promote","run_id":"run-test-pos"}/' \
+    "$SE_LJ/releases/state.json" > "$SE_PN/releases/state.json"
+_assert_settled_refuses_with_token "$SE_PN" "pending-op" "" \
+    "15j positive control: real non-null top-level pending_op still refuses"
+
+# 15k. CURRENT-FIELD decoy — history detail embeds the literal `"current":"x"`
+#      pair BEFORE the top-level `"current":"$SBX_V1"`. The bare-substring
+#      _json_field anchor (`${json#*"current"}`) would match this detail
+#      first and mis-extract the value. The quoted-anchored
+#      _json_field_quoted (`${json#*'"current":'}`) only matches the real
+#      top-level field. With the fix, pipeline_settled settles silently.
+#
+#      NB: this fixture uses NON-STANDARD field order (history BEFORE
+#      top-level `current`) to simulate a future journal schema variant
+#      where the defect would bite. The standard journal keeps history
+#      last; if a future schema moves history earlier or a history detail
+#      embeds `"current":"x"` before any real field, _json_field would
+#      silently mis-extract.
+SE_CD="$FIXTURE/se-current-decoy"; mkdir -p "$SE_CD/releases/$SBX_V1"
+( cd "$SE_CD" && ln -sfn "releases/$SBX_V1" current )
+# history BEFORE top-level `current` — the bare-word `current` literal
+# now appears BEFORE the top-level field. _json_field (old) extracts the
+# detail substring; _json_field_quoted (new) extracts the top-level.
+cat > "$SE_CD/releases/state.json" <<EOF
+{"previous":null,"in_flight":null,"history":[{"ts":"2026-09-30T00:00:00Z","event":"halt","detail":"\"current\":\"vDecoy\" referenced in legacy history entry"}],"current":"$SBX_V1"}
+EOF
+INSTALL_DIR="$SE_CD" SE_OUT="$(pipeline_settled 2>&1)"; SE_RC=$?
+if [ "$SE_RC" = "0" ] && [ -z "$SE_OUT" ]; then
+    _pass
+else
+    _fail "15k current-field decoy: pipeline_settled returns 0 silently (quoted anchor must read top-level)" "rc=0 empty stdout" "rc=$SE_RC out='$SE_OUT'"
+fi
+
+# 15l. CURRENT-field decoy — parser-level assertion. The OLD _json_field
+#      MUST mis-extract (proves regression coverage), the NEW
+#      _json_field_quoted MUST read the top-level correctly. Uses the
+#      same fixture as 15k — extracted to a sibling copy to keep each
+#      test independent.
+SE_QC="$FIXTURE/se-quoted-helper-check"; mkdir -p "$SE_QC/releases/$SBX_V1"
+cp "$SE_CD/releases/state.json" "$SE_QC/releases/state.json"
+QC_JSON="$(cat "$SE_QC/releases/state.json")"
+QC_CUR="$(_json_field_quoted "$QC_JSON" '"current":' 2>/dev/null)"
+if [ "$QC_CUR" = "$SBX_V1" ]; then
+    _pass
+else
+    _fail "15l _json_field_quoted current reads top-level despite history decoy" "$SBX_V1" "$QC_CUR"
+fi
+# Also confirm the OLD _json_field DOES mis-extract on the same input
+# (proves the test would catch a regression where someone reverts the
+# helper to the bare-substring form — the OLD form is the trap we're
+# hardening against).
+QC_OLD="$(_json_field "$QC_JSON" current 2>/dev/null)"
+if [ "$QC_OLD" != "$SBX_V1" ] && [ -n "$QC_OLD" ]; then
+    _pass
+else
+    _fail "15l _json_field (old) on current decoy: must mis-extract to prove regression coverage" "non-null garbage != $SBX_V1" "$QC_OLD"
+fi
+
+# 15m. PENDING_OP-field decoy POSITIVE control — same idea as 15l but
+#      for pending_op. Verifies the underlying _json_field_quoted helper
+#      reads null (not "no in_flight") from the verbatim live-shape
+#      journal, AND that the old _json_field WOULD mis-extract (regression
+#      coverage anchor — if a future change restores the old form, this
+#      fails the helper-level contract).
+MP_JSON="$(cat "$SE_LJ/releases/state.json")"
+MP_FIX="$(_json_field_quoted "$MP_JSON" '"pending_op":' 2>/dev/null)"
+if [ "$MP_FIX" = "null" ]; then
+    _pass
+else
+    _fail "15m _json_field_quoted pending_op reads top-level null on live-shape decoy" "null" "$MP_FIX"
+fi
+MP_OLD="$(_json_field "$MP_JSON" pending_op 2>/dev/null)"
+if [ "$MP_OLD" != "null" ] && [ -n "$MP_OLD" ]; then
+    _pass
+else
+    _fail "15m _json_field (old) on pending_op decoy: must mis-extract to prove regression coverage" "non-null garbage" "$MP_OLD"
+fi
+
 # ─── 16. Layer-ii mutex (commission v0.16.6 c2) ─────────────────────────────
 # The pipeline's only mutex is `rollback.lock.d`. Layer ii wires
 # stop-ensemble.sh + adopt-unit.sh to take the SAME lock around their

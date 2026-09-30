@@ -264,6 +264,35 @@ _json_field() {
     printf '%s' "$rest"
 }
 
+# _json_field_quoted <json> <qkey> — like _json_field, but anchored on the
+# FULL JSON key form `"key":` (with both quotes AND the colon) rather
+# than the bare key substring. This defeats the textual first-occurrence
+# hazard that bites _json_field when a field name appears inside a
+# history detail string BEFORE the top-level field (the live journal had
+# "pending_op" at position 875 inside a sweep detail string, ahead of
+# the top-level `"pending_op":null` at file end — _json_field returned
+# "no in_flight" and pipeline_settled refused every stop/adopt).
+#
+# Callers MUST pass the quoted form: _json_field_quoted "$json" '"pending_op":'.
+# Pure bash, no jq dependency (matches the existing _json_field/_json_sub
+# portability invariant).
+_json_field_quoted() {
+    local json="$1" qkey="$2" rest
+    rest="${json#*"$qkey"}"
+    [ "$rest" = "$json" ] && return 1
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    if [ "${rest:0:1}" = "\"" ]; then
+        rest="${rest:1}"                 # opening quote
+        rest="${rest%%\"*}"              # up to the closing quote
+    else
+        rest="${rest%%\,*}"              # number / bool / null
+        rest="${rest%%\}*}"
+    fi
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    rest="${rest%"${rest##*[![:space:]]}"}"
+    printf '%s' "$rest"
+}
+
 # _json_has <json> <key> — key present at top level?
 _json_has() {
     case "$1" in
@@ -1173,12 +1202,17 @@ lock_release() {
 
 # _pipeline_current_target — print the journal `current` value (empty if
 # absent/null/garbled). Strips a leading/trailing JSON-string quote pair.
+# Anchored on the QUOTED-KEY form (`"current":`) via _json_field_quoted —
+# _json_field would also work today (top-level appears first), but a
+# future history detail containing the bare word "current" would silently
+# shift the anchor to a substring inside a string value. The quoted form
+# is robust against any future history detail content.
 _pipeline_current_target() {
     local json jp cur
     jp="$(journal_path 2>/dev/null)" || return 1
     [ -f "$jp" ] || return 1
     json="$(journal_read 2>/dev/null)" || return 1
-    cur="$(_json_field "$json" current 2>/dev/null)" || cur=""
+    cur="$(_json_field_quoted "$json" '"current":' 2>/dev/null)" || cur=""
     case "$cur" in
         null|"") return 1 ;;
         \"*\")    cur="${cur#\"}"; cur="${cur%\"}" ;;
@@ -1273,9 +1307,17 @@ pipeline_settled() {
         # (D-FA1.1). The shell pipeline NEVER writes pending_op (it's the
         # in-daemon tool-armed promote record); its presence means a tool
         # arm is in flight, which must not race a stop/adopt.
-        # NOTE: shallow top-level extraction — same hazard as in_flight
-        # above (no nested pending_op-named field today).
-        pop="$(_json_field "$json" pending_op 2>/dev/null)" || pop=""
+        # NOTE: anchored on the QUOTED-KEY form `"pending_op":` via
+        # _json_field_quoted — _json_field's bare-substring anchor returns
+        # a false-positive when the literal "pending_op" appears inside a
+        # history detail string BEFORE the top-level field (the live
+        # journal's 2026-09-26T10:02:10Z sweep detail at position 875
+        # contains `pending_op run_id=... cleared by reconcile: no in_flight,
+        # no terminal event, past expires_at ...` — _json_field extracted
+        # "no in_flight" and pipeline_settled refused every stop/adopt,
+        # blocking the in-progress systemd adoption). The quoted anchor
+        # (`"pending_op":`) only matches the real top-level field.
+        pop="$(_json_field_quoted "$json" '"pending_op":' 2>/dev/null)" || pop=""
         case "$pop" in
             ""|null) ;;
             *)
