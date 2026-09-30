@@ -1,5 +1,63 @@
 # Test Packs
 
+## Completed commission — SUPERVISOR WAR r3 FIX GATE (deploy-ownership r3, report-only) (2026-09-30)
+
+Branch `feature/deploy-ownership-r3-fix` @ **`3ad48b9a`** (base `fc285a27`). **VERDICT: GREEN — commit validated.** All 7 suites exact-match implementer counts; release_journal A/B re-derived at rebased base fc285a27: **0 new / 0 masked / 14 common** (stderr byte-identical after timing normalization; GNU-debt family quarantined); symptom simulation **4/4 cells + BASE A/B** (base `SCRIPT_NOHUP` → fix `UNIT_MANAGED` heal, hash-pinned to commit blobs); mock audit 14/14 stubs OK, **0 critical**, B1h1/B1h2 real-classifier verified; hygiene exactly 5 files +505/−4, scratch disjoint. ⚠️ Post-gate: external actor staged a third-state partial unwind at 19:31:02Z (tree ≠ 3ad48b9a ≠ fc285a27) — all gate evidence timeline/hash-pinned PRE-mutation; any r4 must re-gate. Full report: `RESULTS/2026-09-30-gate-3ad48b9a-supervision-war-r3.md`.
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `supervision_classify` (standing) | `timeout 300 bash tests/test_supervision_classify.sh` | commit's §6 heal family + §1–§5 | ✅ 237/0/0 in 6s |
+| `supervision_stop_handback` (standing) | `timeout 300 bash tests/test_supervision_stop_handback.sh` | A/A′/B/C/D incl. B1h1/B1h2 | ✅ 133/0/0 in 122s |
+| `adopt_unit` (standing) | `timeout 300 bash tests/test_adopt_unit.sh` | adoption refusals + dry-run | ✅ 63/0 in <60s |
+| `supervision_twins` (standing) | same, ambient AND scrubbed legs | shell-vs-python twin drift | ✅ 84/0 both legs (~3s each) |
+| `supervision_journal` (standing) | `timeout 300 bash tests/test_supervision_journal.sh` | J1–J4 journal stamps | ✅ 39/0/0 in 23.3s |
+| `supervision_e2e` (standing) | `timeout 300 bash tests/test_supervision_e2e.sh` | fence-handling only (no user systemd bus) | ✅ 1P/0F/1S named-fence, 0.05s |
+| `release_journal` (standing) | branch leg + detached-worktree base leg @fc285a27 | pre-existing reds attribution | ✅ 320P/14F ≡ base 320P/14F; 0 new/0 masked/14 common; quarantined (GNU debt) |
+| `r3_symptom_sim` (ad-hoc) | hermetic driver, `git show`-pinned blobs, dual timeout | acceptance core: heal + guards + stale-lane | ✅ 4/4 cells + base A/B (SCRIPT_NOHUP→UNIT_MANAGED) |
+| `mock_fidelity_audit` (ad-hoc) | read-only stub-vs-parser contract check | careful-mock rule | ✅ 14/14 stubs OK, 0 critical; B1h1/B1h2 real-classifier |
+
+## Completed commission — NONCE TTL 15→60min (ADR-036) v0.16.7 PRE-FINALIZE GATE (2026-09-30)
+
+Branch `feature/nonce-ttl-60m` @ **`4622c669`** (3 commits over base `7c24fee4`) **+ disclosed tester docs-fix `814c0ed3`** (gate F1). **VERDICT: GREEN — PROCEED TO FINALIZE.** Zero branch-caused failures anywhere: full-dir 3156c/3142P/9F/5S/0E with ALL 9 reds + 5 skips **verbatim base-identical** (A/B at `7c24fee4`, cd-into-worktree isolation); corpus 278P/0F; mock-reality PROVEN by 900s mutation — corpus width-locked to 60min by TWO independent locks (mirror pin + boundary fixture-lock), semantics TTL-agnostic; ceremony targets TTL-INDEPENDENT; `-k nonce` = **26/26** (commission's "11" = commit-body inaccuracy, D1); 1 stale user-facing claim (ari/tools_note:415) fixed in `814c0ed3`, re-sweep CLEAN. Full report: `RESULTS/2026-09-30-nonce-ttl-v0167-gate.md`.
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `upgrade_corpus_ttl` | `timeout 300 bash scripts/run_tests_scrubbed.sh tests/unit/tools/test_upgrade_journal.py tests/unit/tools/test_upgrade_tools.py --tb=short -q -rA` | commission gate 1 + mock-reality + worktree mutation | ✅ 278P/0F in 14.7s; mutation: 2 tests flip @900s (width-lock), 60m01s stays green (TTL-agnostic) |
+| `tools_half_a_unit` (full-dir ½) | wrapper + `tests/unit/tools/ --ignore=<4 HALF_B files>` | full-dir-per-merge | ✅ 1588c/1576P/7F-known/5S in 214s |
+| `tools_half_b_unit` (full-dir ½) | wrapper + 4 explicit HALF_B files | full-dir-per-merge | ✅ 1568c/1566P/2F-known/0S in 16s |
+| `frozen_tool_name_unit` | wrapper + `test_frozen_tool_name_discovery.py` | repo contract (daemon/tools touched) | ✅ 7/7 in 5s |
+| `maintenancer_gate_integration` | wrapper + `tests/integration/test_maintenancer_upgrade_gate_refuses.py --override-ini="addopts="` | commission gate 4 | ✅ 2/2 in 5s; docstring 60-min confirmed |
+| `nonce_micro_gate` | wrapper + `tests/unit/tools/ -k nonce` | commission gate 5 (rename) | ✅ 26c/26P in 2.9s (3130 deselected) |
+| `stale_string_sweep` (static) | greps daemon/ agents/ docs/runbooks/ + dev.sh flag | commission gate 6 + ensure Core #4 | 🚩→✅ 1 stale (ari/tools_note:415) → `814c0ed3` → CLEAN |
+| `upgrade_tool_interlock_unit_test` (standing) | `timeout 120 bash test/packs/upgrade_tool_interlock_unit_test.sh` | commission gate 7 ceremony | ✅ 278P in 13.7s; spoof + full-pass TTL-INDEPENDENT (quoted) |
+| `tools_base_ab` (A/B leg) | detached worktree @7c24fee4, cd-isolated, both halves | pre-existing reds isolation | ✅ 1587c/7F/5S + 1566c/2F/0S — verbatim match, zero divergence |
+
+## Completed commission — v0.16.6 FIX COMMISSION GATE (promote busy-daemon fix + 3-layer adoption protocol) (2026-09-30)
+
+Branch `feature/promote-quiesce-adoption-protocol` @ **`ec89bd85`** + tester test-only gap-close **`3de1621c`** (base `792ff304`; **20 commits, not 19**). **VERDICT: GREEN — PROCEED TO FINALIZE. Zero branch-caused failures across 21 packs/drills; decisive amnesty e2e PASS with proven non-tautology control witness; release-journal A/B byte-identical 14/14 (base truth 274P/14F — commission's cited 308P/19F NOT reproducible); unit/services EXACT 2164P/15F; mq_redesign 2F = documented pre-existing; §16d real-TERM drill PASS (143/lock-released/halt-journaled); stage.sh rider 3/3; promote.sh parser non-blocking under 5 adversarial shapes.** Incident: 3rd env-poison event (scrub-only insufficient; hardened = export ENSEMBLE_SELF_ENV=dev). Full report: `RESULTS/2026-09-29-v0166-fix-commission-gate.md`.
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `v166_amnesty_e2e` | `PYTEST_TIMEOUT=280 timeout 300 bash scripts/run_tests_scrubbed.sh tests/e2e/test_promote_stop_frozen_amnesty_e2e.py --override-ini="addopts=" --override-ini="timeout=280" --tb=short -q -rA` | DECISIVE acceptance e2e + tautology audit | ✅ 2/2 in 2.0s; control witness present; negative regression green |
+| `v166_boot_regression` | same wrapper, `tests/integration/test_boot_report_recovery.py::TestBootSmokeRegression --override-ini="addopts="` | api.py boot-order pins (no epoch pins — finding F1) | ✅ 3/3 in 8s |
+| `v166_boot_smoke` | setsid scrub+`export ENSEMBLE_SELF_ENV=dev` wrapper → `exec bash ./dev.sh` (port 8079) | REAL boot: epoch captured (log-proven ordering), readyz ready, `detail.inflight_turns: 0` int, livez, clean shutdown | ✅ all checks, 73s cycle (disclosure: 1 advisory write to LIVE state.json on pre-hardening attempt) |
+| `stop_ownership` (standing) | `timeout 300 bash tests/test_stop_ownership.sh` (fenced) | changed stop-ensemble.sh | ✅ 43/43 in 157s |
+| `supervision_stop_handback` (standing) | `timeout 300 bash tests/test_supervision_stop_handback.sh` (fenced) | changed stop/handback scripts | ✅ 116/116 in 140s |
+| `release_journal` (standing) | `timeout 300 bash tests/test_release_journal.sh` (fenced); base leg in detached worktree @792ff304 | changed lib.sh/promote.sh/stage.sh + §15-§19 | ✅ 313P/14F/2S ≡ base 274P/14F (14/14 byte-identical; 0 new); §16d arms in-suite green; `assert_not_contains` inherited defect flagged |
+| `v166_boot_epoch_unit` | `timeout 300 bash scripts/run_tests_scrubbed.sh tests/unit/services/test_boot_epoch.py --tb=short -q -rA` | new module units | ✅ 12/12 in 0.35s (real engines/SQL) |
+| `health_probes_unit` | same wrapper, `tests/test_health_probes.py` | /readyz emission surface | ✅ 56/56 in 9.7s (4 new HTTP-shape tests on real ASGI) |
+| `unit_services_full` (full-dir-per-merge) | same wrapper, `tests/unit/services/` | changed daemon/services | ✅ 2164P/15F EXACT baseline, 205s (B9 base leg skipped-redundant) |
+| `mq_redesign_full` (full-dir-per-merge) | same wrapper, `tests/message_queue_redesign/` | changed stale-recovery | ✅ 465P/2F/13S in 48s; 2F = documented asset names; flake absent (B10 skipped-redundant) |
+| `pg_readiness_pair` | throwaway initdb PG :16930 + `PG_TEST_*`; `timeout 300 bash scripts/run_tests_scrubbed.sh tests/postgres/test_readiness_pg.py tests/postgres/test_pg_session_utc_frame_pg.py --override-ini="addopts=" --tb=short -q -rA` | epoch-bound SQL on real PG | ✅ 10/10 (7+3) in 2.8s; cleanup verified |
+| `e2e_dir_full` (leg 2) | `PYTEST_TIMEOUT=280 timeout 300 … tests/e2e/ --ignore=tests/e2e/test_context_injection_hybrid.py …` | full-dir collateral check | ✅ 14P/4F/51S; 4F=baseline count, all in pre-branch files; amnesty 2/2 in-dir; 1E bypass documented |
+| `term16d_drill` (ad-hoc) | standalone §16d reproduction, sandbox /tmp, real `kill -TERM`, `timeout 240` | gate item 5 | ✅ 143 + lock released + halt journaled; neg-sanity EXIT-only=0 |
+| `stage_rider_drill` (ad-hoc) | sandbox INSTALL_DIR + stubbed uv/builds; `timeout 120` per run | gate item 6 | ✅ 3/3 (uv exit-78/fallback/divergence; staged_at refresh; checksums identical) |
+| `concurrency_atomic_unit_test` (registered) | `timeout 300 bash test/packs/concurrency_atomic_unit_test.sh` (fenced) | ensure.md Core #2/#3 | ✅ 98P/0F/74S baseline-exact in 67s |
+| `adopt_unit` (added) | `timeout 300 bash tests/test_adopt_unit.sh` (fenced) | changed adopt-unit.sh (coverage-gap close) | ✅ 58/58 in 79s; tester commit 3de1621c (layer-2 watchdog) |
+| `supervision_e2e` (added) | `timeout 300 bash tests/test_supervision_e2e.sh` (fenced) | changed stop-ensemble.sh real-seat legs | ✅ 52/52 in 74s (healthy-host shape, fence not tripped) |
+| `supervision_journal` (added) | `timeout 300 bash tests/test_supervision_journal.sh` (fenced) | changed lib.sh journal paths | ✅ 39/39 in 30s |
+| `supervision_twins` (added) | `timeout 300 bash tests/test_supervision_twins.sh` (fenced) | lib.sh↔upgrade_journal.py parity | ✅ 84/84 in 22s |
+
 ## Completed commission — FE POLL-TERMINAL-STATE FINAL VERIFICATION GATE (2026-09-29)
 
 Branch `fix/fe-poll-terminal-state` @ **`0d20480c`** (commits `10f1b9ab`+`0d20480c`; base `b56a1a7e`), worktree `/home/nea/ensemble-src-fe-poll-fix`. **VERDICT: PASS — READY TO MERGE. Reviewer-flagged unverified claim (E2E 15/15) closed by real execution: 15/15 in 1.6m, test 15 (original-symptom closure, exact incident run_id) ✓ 14.1s; units 109/109 (51+58) in 3.995s; scope 7 files ALL frontend/ (zero backend); test 15 judged GENUINELY PINS (3-checkpoint DOM assertions: post-budget continuation ×2, zero-error-banner ×3, terminal `succeeded` surfaces); A/B base-red leg SKIPPED-documented (uv-venv fiddle; would-fail structurally forced — pre-fix `poll_stale` banner contradicts zero-banner assertions). Zero source mods, zero commits, live :9797 untouched, ports 8099/4299/15432 freed.** Full report: `RESULTS/2026-09-29-fe-poll-terminal-state-final-gate.md`.
