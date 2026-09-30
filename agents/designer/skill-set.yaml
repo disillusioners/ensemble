@@ -1,0 +1,7 @@
+agent_id: designer
+skills:
+  - name: design-strategy
+    version: "1.0.0"
+    auto_load: true
+    category: planning
+    description: "Brief intake validation, design-spec authorship, SHA pinning, conformance review, re-conformance flow"

@@ -449,7 +449,7 @@ class McpWarmupPool:
                     await pool.put(conn)
                     logger.debug(f"Replenished pool for {server_name}")
                 except Exception as e:
-                    logger.warning(f"Failed to replenish pool for {server_name}: {e}", exc_info=True)
+                    logger.debug(f"Failed to replenish pool for {server_name}: {e}", exc_info=True)
 
     async def health_check(self) -> None:
         """
