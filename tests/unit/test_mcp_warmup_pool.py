@@ -861,8 +861,8 @@ class TestReplenish:
                 # Should not raise
                 await pool._replenish("context7")
 
-                # Should log warning
-                mock_logger.warning.assert_called()
+                # Should log debug
+                mock_logger.debug.assert_called()
 
 
 class TestDrain:
