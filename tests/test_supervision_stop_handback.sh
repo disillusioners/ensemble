@@ -390,6 +390,127 @@ JOURNAL
     assert_contains "B1 prestop MainPID captured" "PRESTOP=777" "$B1_OUT"
     assert_contains "B1 stop dispatched through the stub" "stop ensemble-b1.service" "$(cat "$SC_LOG")"
 
+    # B1h nohup-survivor heal (supervisor war r3, 2026-09-30): the REAL
+    # classifier (NOT stubbed) + a heal fixture — session-*.scope leaf +
+    # INSTALL_DIR/.env pin + the unit FILE in SUPERVISION_UNIT_DIR — must
+    # heal inside stop_via_stop_script and route the stop through the
+    # UNIT path (the r3 downstream-consistency requirement: healed
+    # UNIT_MANAGED behaves exactly like a native one at the stop seam;
+    # dualfight still runs first — dormant+unarmed unit → no fault).
+    reset_stub_state "$SC_LOG"; rm -f "$SC_LOG".*
+    SC_IS_ACTIVE=inactive SC_MAINPID=0 SC_RESTART=no; export SC_IS_ACTIVE SC_MAINPID SC_RESTART
+    B1H_UNITS="$(mktemp -d -t supstop-heal.XXXXXX)"
+    touch "$B1H_UNITS/ensemble-heal-stop.service"
+    printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-stop.service\n' > "$BFIX/.env"
+    B1H_OUT="$(
+        (
+            export INSTALL_DIR="$BFIX"
+            export SYSTEMCTL_BIN="$SC3"
+            export SUPERVISION_UNIT_DIR="$B1H_UNITS"
+            export PORT=19996
+            unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+            . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
+            # NO supervision_classify stub — the REAL classifier runs,
+            # both at the classify seam and inside stop_via_stop_script.
+            _supervision_owned_pids() { printf '%s\n' 424242; }
+            _supervision_pid_cgroup_leaf() { printf '%s\n' 'session-7.scope'; }
+            stop_via_stop_script
+            echo "svs-rc=$?"
+        ) 2>&1
+    )"
+    assert_contains "B1h heal log fires at the stop site" "adopting UNIT_MANAGED (healing from nohup-survivor state" "$B1H_OUT"
+    assert_contains "B1h healed classification routes the UNIT path" "stop: UNIT path — systemctl stop ensemble-heal-stop.service + unit-state poll" "$B1H_OUT"
+    assert_contains "B1h stop dispatched through the stub" "stop ensemble-heal-stop.service" "$(cat "$SC_LOG")"
+    case "$B1H_OUT" in
+        *svs-rc=0*) _pass "B1h healed unit-path stop succeeds (rc 0)" ;;
+        *) _fail "B1h healed unit-path stop succeeds (rc 0)" "svs-rc=0" "$(printf '%s' "$B1H_OUT" | grep -o 'svs-rc=[0-9]*' || echo none)" ;;
+    esac
+    rm -f "$BFIX/.env" && rm -rf "$B1H_UNITS"
+
+    # B1h1 heal × DUAL_FIGHT composition (finding 2, r3 hardening): the
+    # healed classifier + an ARMED+ACTIVE unit + the owned pid genuinely
+    # outside the unit's cgroup (a REAL pid — its /proc cgroup can never
+    # contain the stubbed ControlGroup) → supervision_dualfight_check
+    # must HALT the pipeline (exit 78) BEFORE any stop action. Pinned by
+    # EXECUTION: the heal never bypasses the two-masters guard (the r3
+    # war shape — nohup survivor + crash-looping unit — halts for a
+    # human, never flips).
+    reset_stub_state "$SC_LOG"; rm -f "$SC_LOG".*
+    SC_IS_ACTIVE=active SC_RESTART=on-failure SC_MAINPID=555 SC_CONTROLGROUP=/ensemble-r3h1-cg
+    export SC_IS_ACTIVE SC_RESTART SC_MAINPID SC_CONTROLGROUP
+    B1H1_UNITS="$(mktemp -d -t supstop-heal1.XXXXXX)"
+    touch "$B1H1_UNITS/ensemble-heal-guard.service"
+    printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-guard.service\n' > "$BFIX/.env"
+    B1H1_OUT="$(
+        (
+            export INSTALL_DIR="$BFIX"
+            export SYSTEMCTL_BIN="$SC3"
+            export SUPERVISION_UNIT_DIR="$B1H1_UNITS"
+            export PORT=19995
+            unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+            . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
+            _supervision_owned_pids() { printf '%s\n' $$; }
+            _supervision_pid_cgroup_leaf() { printf '%s\n' 'session-7.scope'; }
+            stop_via_stop_script
+            echo "unreachable-svs-rc=$?"
+        ) 2>&1
+    )"; B1H1_RC=$?
+    assert_contains "B1h1 heal fires before the guard halts" "adopting UNIT_MANAGED (healing from nohup-survivor state" "$B1H1_OUT"
+    assert_contains "B1h1 halt journaled" '"event":"halt"' "$(cat "$BFIX/releases/state.json")"
+    assert_contains "B1h1 halt cites DUAL_FIGHT" "supervision DUAL_FIGHT" "$(cat "$BFIX/releases/state.json")"
+    assert_contains "B1h1 DUAL_FIGHT cites the outside-cgroup fault" "owned-pids-outside-unit-cgroup" "$(cat "$BFIX/releases/state.json")"
+    case "$B1H1_RC" in
+        78) _pass "B1h1 heal×dualfight halts the pipeline (rc 78)" ;;
+        *) _fail "B1h1 heal×dualfight halts the pipeline (rc 78)" "78" "$B1H1_RC" ;;
+    esac
+    assert_not_contains "B1h1 NO stop dispatched (halt pre-mutation)" "stop ensemble-heal-guard.service" "$(cat "$SC_LOG")"
+    case "$B1H1_OUT" in
+        *"unreachable-svs-rc"*) _fail "B1h1 the halt must PREVENT the stop (line past dualfight printed)" "absent 'unreachable-svs-rc'" "$B1H1_OUT" ;;
+        *) _pass "B1h1 execution never passed the guard" ;;
+    esac
+    rm -f "$BFIX/.env" && rm -rf "$B1H1_UNITS"
+
+    # B1h2 heal × port-held composition (finding 2, r3 hardening): healed
+    # classifier + DORMANT/UNARMED unit (dualfight passes) + a stubbed
+    # lsof always reporting a foreign port holder → the unit-path stop
+    # must FAIL LOUD: poll exhausts, systemctl kill escalation fires,
+    # exit 1 — never a silent nohup fallback, never a false success over
+    # a foreign port holder.
+    reset_stub_state "$SC_LOG"; rm -f "$SC_LOG".*
+    SC_IS_ACTIVE=inactive SC_RESTART=no SC_MAINPID=0; export SC_IS_ACTIVE SC_RESTART SC_MAINPID
+    B1H2_UNITS="$(mktemp -d -t supstop-heal2.XXXXXX)"
+    touch "$B1H2_UNITS/ensemble-heal-held.service"
+    printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-held.service\n' > "$BFIX/.env"
+    B1H2_LSOF="$(mktemp -d -t supstop-lsof2.XXXXXX)"
+    printf '#!/bin/bash\necho 654321\n' > "$B1H2_LSOF/lsof"
+    chmod +x "$B1H2_LSOF/lsof"
+    B1H2_OUT="$(
+        (
+            export INSTALL_DIR="$BFIX"
+            export SYSTEMCTL_BIN="$SC3"
+            export SUPERVISION_UNIT_DIR="$B1H2_UNITS"
+            export PORT=19994
+            export WAIT_S=2 UNIT_KILL_GRACE_S=2
+            unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+            export PATH="$B1H2_LSOF:$PATH"
+            . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
+            _supervision_owned_pids() { printf '%s\n' $$; }
+            _supervision_pid_cgroup_leaf() { printf '%s\n' 'session-7.scope'; }
+            stop_via_stop_script
+            echo "svs-rc=$?"
+        ) 2>&1
+    )"
+    assert_contains "B1h2 heal routes the UNIT path" "stop: UNIT path — systemctl stop ensemble-heal-held.service" "$B1H2_OUT"
+    assert_contains "B1h2 failing loud: STILL not confirmed stopped" "STILL not confirmed stopped" "$B1H2_OUT"
+    assert_contains "B1h2 cites the failing-loud policy" "failing loud" "$B1H2_OUT"
+    case "$B1H2_OUT" in
+        *svs-rc=1*) _pass "B1h2 port-held unit-path stop exits 1 (loud, no fallback)" ;;
+        *) _fail "B1h2 port-held unit-path stop exits 1 (loud, no fallback)" "svs-rc=1" "$(printf '%s' "$B1H2_OUT" | grep -o 'svs-rc=[0-9]*' || echo none)" ;;
+    esac
+    assert_contains "B1h2 stop dispatched via stub" "stop ensemble-heal-held.service" "$(cat "$SC_LOG")"
+    assert_contains "B1h2 kill escalation dispatched via stub" "kill ensemble-heal-held.service" "$(cat "$SC_LOG")"
+    rm -f "$BFIX/.env" && rm -rf "$B1H2_UNITS" "$B1H2_LSOF"
+
     # B2 script-arm byte-identical: classification says SCRIPT → the SAME
     # pid-scoped invocation, no env handoff, zero systemctl calls.
     reset_stub_state "$SC_LOG"; rm -f "$SC_LOG".*

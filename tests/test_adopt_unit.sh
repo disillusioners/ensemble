@@ -269,6 +269,25 @@ assert_eq "ensemble-prod-eu → ensemble-prod-eu.service" "ensemble-prod-eu.serv
 assert_eq "bare 'ensemble' → ensemble-main.service" "ensemble-main.service" "$(derive_name ensemble)"
 assert_eq "space sanitized to dash" "ensemble-ens-foo.service" "$(derive_name 'ens foo')"
 
+# r3 mirror pin (supervisor war r3, 2026-09-30): scripts/upgrade/lib.sh
+# _supervision_derive_unit_name — the nohup-survivor heal's last-resort
+# name rung — is a PINNED MIRROR of the adopt-unit.sh naming rule above.
+# Same table, cross-pinned: drift in EITHER function fails its own table,
+# so the two can never silently diverge (the mirror is not sourced from
+# here — adopt-unit.sh is an entry script; same pin discipline as
+# lib.sh's _supervision_owned_pids tier mirror).
+libsh_derive() { # <basename-of-fake-install-dir> → lib.sh derived unit name
+    INSTALL_DIR="$WORK/names/$1" bash -c '
+        . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh" >/dev/null 2>&1
+        _supervision_derive_unit_name
+    '
+}
+assert_eq "r3 mirror: agents-ensemble → ensemble-main.service" "ensemble-main.service" "$(libsh_derive agents-ensemble)"
+assert_eq "r3 mirror: agents-ensemble-demo → ensemble-demo.service" "ensemble-demo.service" "$(libsh_derive agents-ensemble-demo)"
+assert_eq "r3 mirror: ensemble-prod-eu → ensemble-prod-eu.service" "ensemble-prod-eu.service" "$(libsh_derive ensemble-prod-eu)"
+assert_eq "r3 mirror: bare 'ensemble' → ensemble-main.service" "ensemble-main.service" "$(libsh_derive ensemble)"
+assert_eq "r3 mirror: space sanitized to dash" "ensemble-ens-foo.service" "$(libsh_derive 'ens foo')"
+
 # explicit name override (2nd argv) + validation
 make_install "$FIX"
 E1_OUT="$(UNIT_DIR="$UNITDIR" POLKIT_RULES_DIR="$POLKIT" ADOPT_SYSTEMD_RUN_DIR="$RUND" \
