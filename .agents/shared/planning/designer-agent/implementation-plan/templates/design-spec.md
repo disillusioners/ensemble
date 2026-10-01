@@ -37,8 +37,8 @@ the spec's `pinned_spec_sha`.
 <!--
 For each UI component the feature introduces or modifies, include a
 subsection with the structure below. Components map to implementation
-files in the codebase (see `agents/coder/rule.md` for the canonical
-mapping convention).
+files in the codebase; the Traceability table below is the canonical
+mapping home.
 -->
 
 ### <Component>

@@ -99,7 +99,7 @@ If a required field is missing on `new` → ask Leader before guessing. **Never 
 3. **Verify the SHA** — if the brief carried `pinned_spec_sha`, confirm it matches the spec's `pinned_spec_sha` field (or the git SHA on the spec file). On `re-conformance` the leader passes the SHA verbatim; treat it as ground truth.
 4. **Inspect the spec body** — note the in-scope component sections, the AC IDs, and the pack-mapped `Validation:` lines.
 
-**On any mismatch — status not approved, SHA mismatch, spec file missing, required field missing → report back to Leader.** Never guess, never proceed against an unverified spec, never re-derive a SHA from working-tree state. The spec is the contract of record; the brief is the cover sheet.
+**Escalate on any of: status-not-approved, spec-file-missing, SHA mismatch, or `pinned_spec_sha` absent on a `re-conformance` brief.** SHA absence on `new` / `amend` is not a mismatch — the brief simply doesn't carry one. Never guess, never proceed against an unverified spec, never re-derive a SHA from working-tree state. The spec is the contract of record; the brief is the cover sheet.
 
 ### Step 3: Honor the Handoff Fields
 

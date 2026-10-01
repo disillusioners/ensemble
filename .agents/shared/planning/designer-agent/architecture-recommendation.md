@@ -185,7 +185,7 @@ owners: {spec: designer-*, implement: developer-*, check: tester-*}     # adviso
 ### 4.5 In-flight state exposure & handoff contract (agent-first)
 
 - **Primary: `shared_meta_kv`** — keys `design.<task-id>.{phase, artifact_path, pinned_spec_sha, conformance_iter, heartbeat_at}`; phase transitions + ≤15 min heartbeat. Secondary: `decisions.md`.
-- **Per-edge handoff** (self-contained; inline slice = decision-relevant subset; paths by reference): leader→designer brief (task_id, phase, pinned_spec_sha on re-conformance, escalation_path); designer→developer (task_id, pinned_spec_sha, AC IDs in scope, token_change_set, blast_radius, do_not_touch); developer→designer (commit_sha, diff_stat, pages_changed, conformance_iter, capture paths); designer→tester (pack_list AC→PACKS.md, regression_pages); tester→designer (pack_name, page_url, capture path, failed AC ID).
+- **Per-edge handoff** (self-contained; inline slice = decision-relevant subset; paths by reference): leader→designer brief (task_id, phase, pinned_spec_sha on re-conformance, escalation_path); designer→developer (task_id, **pinned_spec_sha only on re-conformance** — absence on `new` / `amend` is not a mismatch, AC IDs in scope, token_change_set, blast_radius, do_not_touch); developer→designer (commit_sha, diff_stat, pages_changed, conformance_iter, capture paths); designer→tester (pack_list AC→PACKS.md, regression_pages); tester→designer (pack_name, page_url, capture path, failed AC ID).
 
 ---
 

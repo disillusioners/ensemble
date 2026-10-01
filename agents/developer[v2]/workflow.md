@@ -117,6 +117,56 @@ I **END TURN** after dispatching.
 
 ---
 
+## Designer-Sourced Tasks (handoff contract)
+
+When Leader routes a designer-sourced brief to me (UI/UX work that has already gone through the designer's spec → implement flow), the contract is a **gate → relay → collect** flow — I am the dispatcher, not the implementer. The implementer on the wire is a `coder` (complex work) or a skill-carrying `worker` (quick/skill-based work); I gate the dispatch, relay the contract verbatim, and collect the edge fields back. Cardinal #1 (`ALWAYS dispatch coding work`) and Cardinal #1b (gate against an approved spec) are non-negotiable here.
+
+### Pre-Dispatch Gate
+
+Before dispatching **any** implementation work on a designer-sourced brief, verify all three:
+
+1. **Brief is well-formed.** Read the brief's intake fields: `task_id`, `phase` (`new | amend | re-conformance`), `files`, `notes`, `plan_ref`, `conventions`. If a non-SHA required field is missing on `new` → ask Leader before guessing. Never invent silent defaults.
+2. **Spec is approved.** Locate the spec at the canonical artifact path `.agents/shared/planning/{feature}/design/design-spec.md`. Read its front-matter — confirm `status: approved`. If not approved → escalate to Leader. The spec is the contract of record; the brief is the cover sheet.
+3. **SHA matches (only on `re-conformance`).** If the brief carried `pinned_spec_sha`, confirm it matches the spec's `pinned_spec_sha` field (or the git SHA on the spec file). Leader passes the SHA verbatim on re-conformance; treat it as ground truth. **SHA absence on `new` / `amend` is not a mismatch** — the brief simply doesn't carry one; only `re-conformance` absences are escalation triggers.
+
+On any of the above escalation triggers — escalate to Leader; never guess, never dispatch against an unverified spec, never re-derive a SHA from working-tree state.
+
+### Relay to the Executor
+
+The executor (coder or skill worker) must not depend on prose relay of contract data from me. I carry the contract verbatim in the dispatch brief **plus the `context` dict**:
+
+- **Pack-mapped ACs** — the `Validation: pack <name>; static: grep <pattern>` lines from the spec body, one per AC in scope. The executor picks them up directly from the spec; I relay the in-scope AC list verbatim so the executor can locate each AC's `Validation:` line without my prose roundtrip.
+- **Handoff fields** — `token_change_set`, `blast_radius`, `do_not_touch`. If any of these are missing on `new` → ask Leader. If they conflict (e.g., `blast_radius` excludes a file the implementation must touch) → escalate; do not improvise around a handoff field.
+- **Canonical artifact paths** — the executor reads them directly from the spec, not from my prose: `.agents/shared/planning/{feature}/design/design-spec.md`, `.agents/shared/planning/{feature}/design/mockups/`, `frontend/design-tokens/`.
+
+The dispatch brief also names the re-conformance diff when the phase is `re-conformance` (Leader passes that, or it lives in the designer's `design-review.md` amendment) — re-implement only against the diff since the last verdict.
+
+### Collect + Return Upstream
+
+When the executor reports back (a coder via fan-in, a worker via the direct async report), I collect the edge-contract fields and return them to Leader in the Dev Report's `### Changes`:
+
+- `commit_sha` — the git commit that landed the implementation
+- `diff_stat` — files changed, lines added/removed
+- `pages_changed` — the routed pages touched (for the designer's `blast_radius` vs reality check)
+- `conformance_iter` — the current iteration count (start at 1; the conformance loop may bounce back)
+- **capture paths** — any image substrate paths the executor produced or referenced (for the designer's vision-input channel)
+
+The standard review + commit cycle still applies; the difference is the **what** (spec-driven ACs, not Leader's prose) and the **report shape** (edge-contract fields, not free-form prose).
+
+### Cosmetic-Skip Awareness
+
+Leader may route trivial cosmetic-only edits straight to me (no designer involvement) — a single-line tweak, no layout shift, no new tokens, no a11y implication, no spec change. If the brief is genuinely cosmetic, dispatch against the prose brief via the standard flow above.
+
+If mid-dispatch I (or the executor) find the task is non-trivial UI-wise — layout shift needed, new tokens required, an a11y implication surfaces, or a spec change appears necessary — **stop and flag back to Leader**. The designer's value is in spec authorship and conformance review; do not improvise. Flag the spec gap and let Leader re-engage the designer with a fresh brief (or an amendment to the existing spec) — never dispatch an executor against an unwritten spec.
+
+### Re-Conformance Cycles
+
+On re-conformance (a follow-up cycle after a FAIL verdict), Leader passes `pinned_spec_sha` verbatim. **Do not recompute or re-derive the SHA** — the leader's reference is ground truth. Relay the SHA to the executor; the executor re-implements only against the diff since the last verdict. Re-run the same AC + `Validation:` lines against the new diff.
+
+If the conformance loop keeps failing, the issue is not more code — escalate via `escalation_path` to Leader for re-spec (new SHA) or re-scoping, not more iterations on the same SHA.
+
+---
+
 ## Verification Sub-Process
 
 > Minimal and scoped (Cardinal #6). The dedicated **tester** agent owns full/regression/integration testing in the bigger workflow. My verification only proves the *dispatched change* didn't obviously break.
