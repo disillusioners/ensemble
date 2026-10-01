@@ -15,7 +15,9 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
-import { MatStepperModule } from '@angular/material/stepper';
+import { MatStepperModule, MatStepper } from '@angular/material/stepper';
+import { BreakpointObserver } from '@angular/cdk/layout';
+import { map } from 'rxjs/operators';
 import { Subscription } from 'rxjs';
 import { CheckpointCleanupService } from './checkpoint-cleanup.service';
 import { ConfirmDialogComponent } from '../../../components/confirm-dialog/confirm-dialog.component';
@@ -36,11 +38,15 @@ import type {
  * ck-redesign-2026q4 — 4-step Material wizard + persistent Status Strip.
  * DOM order: kill-switch / origin-guard banners → Status Strip → mat-stepper
  * → custom footer (Back / Back to start / Continue / Cleanup now per step) →
- * page-level Debug expander (raw JSON). Each step is rendered as a
- * `<mat-step>` child of a single `<mat-stepper [orientation]="'vertical'"
- * [linear]="false" [selectedIndex]="activeStep()">`. Step content blocks
- * preserve every existing `data-testid`; the per-card Raw JSON `<details>`
- * blocks were consolidated into the page-level Debug expander (AC-13).
+ * page-level Debug expander (raw JSON). Stepper orientation is
+ * viewport-conditional via `@if (isDesktop())` (BreakpointObserver:
+ * ≥1024px → horizontal, below → vertical) — TWO source-level `<mat-stepper>`
+ * instances (one per orientation branch), each rendering its four
+ * `<mat-step>` children from the shared `ckStepContent` `<ng-template>`
+ * (no duplication of step bodies). `[linear]="false" [selectedIndex]="activeStep()"`
+ * on both branches. Step content blocks preserve every existing
+ * `data-testid`; the per-card Raw JSON `<details>` blocks were
+ * consolidated into the page-level Debug expander (AC-13).
  *
  * Step 4 auto-renders post-execute via `lastExecuteResult()`; with
  * `[linear]="false"` a page refresh during execute lands the operator
@@ -105,6 +111,18 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly breakpoints = inject(BreakpointObserver);
+
+  /** Stepper orientation breakpoint (spec §2.2 amendment, AC-2 / AC-15).
+   *  `isDesktop()` is `true` when the viewport is ≥1024px wide (the
+   *  horizontal-orientation arm). BreakpointObserver emits synchronously
+   *  on subscribe so the signal seeds correctly on initial render —
+   *  no orientation flash on first paint. */
+  readonly isDesktop = signal(false);
+  private readonly bpSub: Subscription = this.breakpoints
+    .observe(['(min-width: 1024px)'])
+    .pipe(map((r) => r.matches))
+    .subscribe((matches) => this.isDesktop.set(matches));
 
   // ── Service signals re-exposed for the template ───────────────────────
   readonly status = this.service.status;
@@ -160,20 +178,27 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     backToStart: () => this.activeStep.set(0),
   });
 
-  /** Footer h2 copy per step (visible label on the active step). */
-  readonly footerHeading = computed(() => {
-    switch (this.activeStep()) {
-      case 0:
-        return 'Review';
-      case 1:
-        return 'Dry-run';
-      case 2:
-        return 'Confirm & Execute';
-      case 3:
-      default:
-        return 'Result';
+  /**
+   * W1 — sync `activeStep()` with Material's `<mat-stepper>` selection.
+   * Bound to `(selectionChange)` on BOTH orientation branches in the
+   * template. Without this, header-driven step jumps leave the custom
+   * footer rendering the WRONG active-step buttons (per-step branch
+   * in the template reads `activeStep()`, but the stepper's internal
+   * `selectedIndex` would diverge). The handler clamps to the valid
+   * 0..3 range as a defensive belt — the stepper already clamps.
+   */
+  onStepperSelectionChange(stepper: MatStepper | undefined): void {
+    if (!stepper) {
+      return;
     }
-  });
+    const idx = stepper.selectedIndex;
+    if (idx < 0 || idx > 3) {
+      return;
+    }
+    if (idx !== this.activeStep()) {
+      this.activeStep.set(idx);
+    }
+  }
 
   // ── Status Strip render helpers (spec §2.1) ────────────────────────────
   /** Keep N — first tile of the Status Strip. "—" when disabled/killed. */
@@ -257,6 +282,7 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.pollSub?.unsubscribe();
+    this.bpSub.unsubscribe();
   }
 
   // ── Actions ───────────────────────────────────────────────────────────
@@ -572,7 +598,19 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
           this.pollSub = null;
           // Re-fetch status so `last_run` reflects the new row.
           this.refreshStatus();
+          // W1 — auto-advance to Step 4 (Result) on successful execute.
+          // The result panel is rendered from `lastExecuteResult()`, which
+          // is set above; this `activeStep.set(3)` flips the stepper's
+          // selectedIndex so the operator lands on the Result step
+          // without a manual navigation. `succeeded` only — `failed`
+          // surfaces inline on Step 3, `interrupted` surfaces inline on
+          // Step 3 (the rerun card); both stay on the Confirm step.
+          // The header `(selectionChange)` handler is the read-side
+          // back-pressure: any stepper-side jump propagates back into
+          // `activeStep()` so the footer always renders the active
+          // step's buttons.
           if (run.status === 'succeeded') {
+            this.activeStep.set(3);
             this.snackBar.open('Cleanup succeeded.', 'Dismiss', {
               duration: 4000,
               panelClass: 'success-snackbar',

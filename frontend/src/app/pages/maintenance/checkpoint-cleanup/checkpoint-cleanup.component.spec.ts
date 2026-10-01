@@ -37,7 +37,12 @@
 //   - `expected_duration_ms_hint` display (AM-12)
 //   - Destroy tears down poll
 
-import { signal, computed } from '@angular/core';
+import { CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA, signal, computed } from '@angular/core';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { BreakpointObserver } from '@angular/cdk/layout';
+import { MatDialog } from '@angular/material/dialog';
+import { MatSnackBar } from '@angular/material/snack-bar';
+import { MatStepperModule } from '@angular/material/stepper';
 import { Observable, of, throwError } from 'rxjs';
 import type {
   CheckpointCleanupDryRun,
@@ -49,6 +54,7 @@ import type {
   MaintenanceErrorBody,
 } from '../../../models';
 import { CheckpointCleanupService } from './checkpoint-cleanup.service';
+import { CheckpointCleanupComponent } from './checkpoint-cleanup.component';
 import { ConfirmDialogComponent } from '../../../components/confirm-dialog/confirm-dialog.component';
 import {
   DRY_RUN,
@@ -255,24 +261,31 @@ class TestableCheckpointCleanupComponent {
 
   // ── Wizard state (ck-redesign-2026q4) — mirror production verbatim. ──
   readonly activeStep = signal(0);
-  readonly footerHeading = computed(() => {
-    switch (this.activeStep()) {
-      case 0:
-        return 'Review';
-      case 1:
-        return 'Dry-run';
-      case 2:
-        return 'Confirm & Execute';
-      case 3:
-      default:
-        return 'Result';
-    }
-  });
   readonly stepperNav = () => ({
     next: () => this.activeStep.update((i) => Math.min(i + 1, 3)),
     back: () => this.activeStep.update((i) => Math.max(i - 1, 0)),
     backToStart: () => this.activeStep.set(0),
   });
+  // C1 — `isDesktop` signal drives the @if/@else orientation switch
+  // in the template. Production wires this to BreakpointObserver;
+  // the mirror's default is `false` (vertical orientation, narrow).
+  // Spec calls test via direct mutation of this signal.
+  readonly isDesktop = signal(false);
+  /**
+   * W1 — selectionChange handler. Mirrors production: clamps to the
+   * 0..3 valid step range and updates `activeStep()` from the
+   * stepper's `selectedIndex`. Header-driven jumps propagate here;
+   * the footer's `activeStep()` branch reads pick up the new index
+   * and render the right buttons.
+   */
+  onStepperSelectionChange(stepper: { selectedIndex: number } | undefined): void {
+    if (!stepper) return;
+    const idx = stepper.selectedIndex;
+    if (idx < 0 || idx > 3) return;
+    if (idx !== this.activeStep()) {
+      this.activeStep.set(idx);
+    }
+  }
   // canContinueFromStep1 / Step2 / Step3 are pure functions of the
   // service-exposed signals + local UI state. Mirror production.
 
@@ -500,20 +513,30 @@ class TestableCheckpointCleanupComponent {
         ) {
           this.executing.set(false);
           this.activeRunId.set(null);
-          // Mirror production: unsubscribe the polled sub THEN call
-          // refreshStatus. NOTE: the production component unsubscribes
-          // via `this.pollSub?.unsubscribe(); this.pollSub = null;`
-          // and the refreshStatus chain runs correctly. The testable
-          // mirror uses the local `sub` closure variable; calling
-          // `sub.unsubscribe()` BEFORE `this.refreshStatus()` causes
-          // an RxJS subscription-closed-during-emission edge case
-          // that aborts the remaining lines of the next callback
-          // (verified empirically — moving unsubscribe AFTER
-          // refreshStatus makes refreshStatus fire). For the test
-          // mirror we therefore unsubscribe AFTER refreshStatus.
-          // Production is unchanged (verified live — the live chain
-          // works because it uses the member-reference unsubscribe
-          // pattern that doesn't trigger the edge case).
+          // Mirror-vs-production ordering note (test-mirror only):
+          // Production (member-ref `pollSub`) executes, in order:
+          //   pollSub.unsubscribe() → pollSub = null → refreshStatus()
+          //   → activeStep.set(3) (on `succeeded`)
+          //   — see ts:608-624.
+          // The mirror uses a local `sub` closure reference. A
+          // synchronous `sub.unsubscribe()` during the next handler
+          // closes the subscription mid-emission and aborts the
+          // statements that follow in the same callback (RxJS
+          // closed-during-emission edge case). To avoid that, the
+          // mirror intentionally runs `activeStep.set(3)` BEFORE
+          // `sub.unsubscribe()`. The mirror's local-ref ordering is
+          // therefore: activeStep.set(3) → refreshStatus() →
+          // sub.unsubscribe() — NOT identical to production's
+          // member-ref ordering. Assertions in this file are
+          // order-independent (no test asserts the relative order
+          // of these three calls), so the divergence is safe.
+          //
+          // W1 — auto-advance to Step 4 (Result) on successful
+          // execute. Mirrors production: succeeded only — failed
+          // and interrupted stay on Step 3 with inline UI affordances.
+          if (run.status === 'succeeded') {
+            this.activeStep.set(3);
+          }
           this.refreshStatus();
           sub.unsubscribe();
           sub.closed = true;
@@ -1905,16 +1928,6 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
     it('starts at 0 (Review)', () => {
       expect(component.activeStep()).toBe(0);
     });
-
-    it('footerHeading mirrors activeStep()', () => {
-      expect(component.footerHeading()).toBe('Review');
-      component.activeStep.set(1);
-      expect(component.footerHeading()).toBe('Dry-run');
-      component.activeStep.set(2);
-      expect(component.footerHeading()).toBe('Confirm & Execute');
-      component.activeStep.set(3);
-      expect(component.footerHeading()).toBe('Result');
-    });
   });
 
   describe('stepperNav helpers (AC-9)', () => {
@@ -1947,6 +1960,82 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
       component.activeStep.set(3);
       component.stepperNav().backToStart();
       expect(component.activeStep()).toBe(0);
+    });
+  });
+
+  describe('isDesktop signal (C1 — responsive orientation, AC-2)', () => {
+    it('defaults to false (vertical orientation; matches narrow <1024px branch)', () => {
+      expect(component.isDesktop()).toBe(false);
+    });
+
+    it('can be flipped to true to model the horizontal-orientation branch', () => {
+      component.isDesktop.set(true);
+      expect(component.isDesktop()).toBe(true);
+    });
+  });
+
+  describe('onStepperSelectionChange (W1 — stepper navigation desync)', () => {
+    it('updates activeStep() from the stepper selectedIndex (header-driven jump)', () => {
+      // Simulate the operator clicking the "Result" step header
+      // (index 3). The custom footer reads `activeStep()` to
+      // render the right per-step buttons; without this sync the
+      // footer would stay stuck on the previous step's buttons.
+      component.onStepperSelectionChange({ selectedIndex: 3 });
+      expect(component.activeStep()).toBe(3);
+    });
+
+    it('updates activeStep() from an arbitrary valid index', () => {
+      component.onStepperSelectionChange({ selectedIndex: 1 });
+      expect(component.activeStep()).toBe(1);
+      component.onStepperSelectionChange({ selectedIndex: 2 });
+      expect(component.activeStep()).toBe(2);
+      component.onStepperSelectionChange({ selectedIndex: 0 });
+      expect(component.activeStep()).toBe(0);
+    });
+
+    it('is a no-op when the stepper arg is undefined', () => {
+      component.activeStep.set(2);
+      component.onStepperSelectionChange(undefined);
+      expect(component.activeStep()).toBe(2);
+    });
+
+    it('clamps out-of-range selectedIndex (does not write activeStep)', () => {
+      component.activeStep.set(1);
+      // Negative or >3 should be ignored — Material stepper already
+      // clamps, but the handler defends defensively.
+      component.onStepperSelectionChange({ selectedIndex: -1 });
+      expect(component.activeStep()).toBe(1);
+      component.onStepperSelectionChange({ selectedIndex: 4 });
+      expect(component.activeStep()).toBe(1);
+    });
+
+    it('is idempotent when selectedIndex === activeStep()', () => {
+      component.activeStep.set(2);
+      // No-op signal.set call — just verifying no spurious write
+      // (signal-equality dedupes on its own; this asserts the
+      // short-circuit guard is explicit).
+      component.onStepperSelectionChange({ selectedIndex: 2 });
+      expect(component.activeStep()).toBe(2);
+    });
+  });
+
+  describe('W1 — auto-advance to Step 4 on successful execute', () => {
+    // The terminal-poll handler flips `activeStep` to 3 (Result)
+    // on a `succeeded` run. `failed` and `interrupted` runs stay
+    // on Step 3 (the operator is already looking at the destructive
+    // affordances; the failure / interrupted state renders inline
+    // there). The mirror's `startPolling` is private, so we exercise
+    // the path via `onExecute()` → confirm-true → poll-terminal.
+    it('flips activeStep to 3 after a succeeded run', () => {
+      component.activeStep.set(2);
+      service.lastDryRun.set(DRY_RUN);
+      mockDialog.nextResult = true;
+      component.onExecute();
+      // pollRun emits a single succeeded row synchronously; the
+      // terminal branch (mirror of production) calls set(3) BEFORE
+      // refreshStatus + unsubscribe (local-ref `sub` would abort
+      // the rest of the callback if unsubscribe ran first).
+      expect(component.activeStep()).toBe(3);
     });
   });
 
@@ -2132,5 +2221,176 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
       const out = component.statusStripDryRunFresh();
       expect(out).toMatch(/^\d+ pairs · expires in /);
     });
+  });
+});
+
+// ── Orientation locator contract (spec amend v3 validation clause) ────────
+//
+// Spec amend v3 pins a Playwright e2e locator:
+//   `mat-stepper[orientation="horizontal"]`
+// against the rendered DOM when isDesktop() is true (and the vertical
+// variant when isDesktop() is false). The production template now places
+// the four `<mat-step>` blocks as DIRECT children of each
+// `<mat-stepper>` (CRITICAL-3 Option A restructure — the previous
+// `<ng-container *ngTemplateOutlet>` indirection broke the
+// ContentChildren contract and rendered an empty stepper, empirically
+// verified). Static `orientation="horizontal"` / `orientation="vertical"`
+// attributes land on the rendered host element regardless of structural
+// context; these tests pin that contract at the rendered-DOM level.
+//
+// The rest of this file uses a logic-mirror pattern with no TestBed (a
+// deliberate design choice — see file header). These two tests use a
+// minimal TestBed harness in an isolated describe block so the contract
+// is verified at the rendered-DOM level without perturbing the other
+// tests. NO_ERRORS_SCHEMA skips Angular Material element validation
+// (`<mat-stepper>`, `<mat-step>`, etc.) — the static `orientation="..."`
+// attribute lands on the rendered host element regardless.
+//
+// BREAKPOINT STUB NOTE — the previous `NG0201: No provider found for
+// _CdkStepper` failure was caused by the `*ngTemplateOutlet`
+// indirection: outlet-stamped `<mat-step>` elements never registered
+// with the parent `<mat-stepper>`'s ContentChildren query, so the
+// stepper rendered empty (and any harness that surfaced the DI chain
+// surfaced NG0201 instead). The restructure (direct mat-step children)
+// lets the production template render under TestBed without an
+// override — this describe no longer defines an `orientationPinTemplate`.
+//
+// If either of the locator tests fails (attribute absent from the
+// rendered DOM), the production fix is to add `[attr.orientation]="..."`
+// alongside the existing inputs on both `<mat-stepper>` tags in the
+// template — attr bindings guarantee the literal DOM attribute.
+//
+// Parity guard (added in this restructure) — the set of
+// `[data-testid]` attributes rendered in desktop mode MUST equal the
+// set rendered in narrow mode; this catches any drift between the two
+// duplicated `<mat-step>` block copies. If a future edit diverges one
+// branch, the parity assertion fails immediately.
+describe('CheckpointCleanupComponent — orientation locator contract (spec amend v3 validation clause)', () => {
+  let fixture: ComponentFixture<CheckpointCleanupComponent>;
+
+  async function renderWithMatches(matches: boolean): Promise<void> {
+    // Stub BreakpointObserver — synchronous emit of the requested
+    // `matches` value, identical shape to the production ObserveResult
+    // (BreakpointObserver emits { matches, breakpoints }).
+    const stubBPO = {
+      observe: jest.fn().mockReturnValue(
+        of({ matches, breakpoints: { '(min-width: 1024px)': matches } }),
+      ),
+    };
+
+    // Fresh service mock per test so signal state doesn't leak across
+    // tests (the existing `MockCheckpointCleanupService` mirrors
+    // production surface — full method coverage is not required here,
+    // only fetchStatus() because ngOnInit calls refreshStatus()).
+    const serviceStub = new MockCheckpointCleanupService();
+    // STATUS fixture has no last_run and no in_flight — ngOnInit's
+    // refreshStatus() subscription handlers will no-op cleanly.
+    serviceStub.status.set(STATUS);
+
+    // Compile the REAL component (no template override) with the
+    // BreakpointObserver stub. MatDialog / MatSnackBar / service are
+    // provided as test doubles — same shape as the existing tests.
+    await TestBed.configureTestingModule({
+      imports: [CheckpointCleanupComponent, MatStepperModule],
+      providers: [
+        { provide: BreakpointObserver, useValue: stubBPO },
+        { provide: CheckpointCleanupService, useValue: serviceStub },
+        { provide: MatDialog, useValue: mockDialog },
+        { provide: MatSnackBar, useValue: new MockSnackBar() },
+      ],
+      schemas: [CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(CheckpointCleanupComponent);
+    // First detectChanges triggers ngOnInit → refreshStatus() → service
+    // fetchStatus subscription. Second detectChanges flushes the
+    // @if/@else orientation branch AFTER the BreakpointObserver emit
+    // synchronously sets isDesktop (the subscribe runs in the
+    // component's field initializer, before detectChanges returns).
+    fixture.detectChanges();
+  }
+
+  afterEach(() => {
+    fixture?.destroy();
+    TestBed.resetTestingModule();
+    mockDialog.reset();
+    MockSnackBarRef.reset();
+  });
+
+  /**
+   * Extract the set of `[data-testid]` attribute values rendered in the
+   * current fixture DOM. Used by the parity guard — both orientation
+   * branches MUST render the same set of testids.
+   */
+  function renderedTestIds(): Set<string> {
+    const nodes = fixture.nativeElement.querySelectorAll('[data-testid]');
+    const ids = new Set<string>();
+    nodes.forEach((el: Element) => {
+      const v = el.getAttribute('data-testid');
+      if (v) ids.add(v);
+    });
+    return ids;
+  }
+
+  it('renders the 4 mat-step blocks and the horizontal mat-stepper when isDesktop=true', async () => {
+    await renderWithMatches(true);
+
+    // (a) exactly 4 mat-step-header elements render
+    const headers = fixture.nativeElement.querySelectorAll('mat-step-header');
+    expect(headers.length).toBe(4);
+
+    // (b) mat-stepper[orientation="horizontal"] matches 1 / vertical 0 (desktop)
+    const horizontal = fixture.nativeElement.querySelectorAll(
+      'mat-stepper[orientation="horizontal"]',
+    );
+    const vertical = fixture.nativeElement.querySelectorAll(
+      'mat-stepper[orientation="vertical"]',
+    );
+    expect(horizontal.length).toBe(1);
+    expect(vertical.length).toBe(0);
+  });
+
+  it('renders the 4 mat-step blocks and the vertical mat-stepper when isDesktop=false', async () => {
+    await renderWithMatches(false);
+
+    // (a) exactly 4 mat-step-header elements render
+    const headers = fixture.nativeElement.querySelectorAll('mat-step-header');
+    expect(headers.length).toBe(4);
+
+    // (b) inverse of desktop: mat-stepper[orientation="vertical"] matches 1 / horizontal 0
+    const horizontal = fixture.nativeElement.querySelectorAll(
+      'mat-stepper[orientation="horizontal"]',
+    );
+    const vertical = fixture.nativeElement.querySelectorAll(
+      'mat-stepper[orientation="vertical"]',
+    );
+    expect(horizontal.length).toBe(0);
+    expect(vertical.length).toBe(1);
+  });
+
+  // (c) PARITY: the set of [data-testid] attributes rendered in
+  // desktop mode MUST equal the set rendered in narrow mode. This
+  // guards the duplicated <mat-step> blocks against drift forever —
+  // a future edit that diverges one branch fails this assertion
+  // immediately, surfacing the divergence before it can ship.
+  it('renders the same set of [data-testid] attributes in desktop and narrow modes (parity guard)', async () => {
+    await renderWithMatches(true);
+    const desktopTestIds = renderedTestIds();
+
+    // Reset TestBed between renders — `renderWithMatches` calls
+    // `TestBed.configureTestingModule` which throws if the test
+    // module is already instantiated. The describe-level `afterEach`
+    // runs once per test, not per render, so we reset explicitly
+    // between the two renders.
+    fixture.destroy();
+    TestBed.resetTestingModule();
+    mockDialog.reset();
+    MockSnackBarRef.reset();
+
+    await renderWithMatches(false);
+    const narrowTestIds = renderedTestIds();
+
+    expect(narrowTestIds.size).toBeGreaterThan(0);
+    expect(desktopTestIds).toEqual(narrowTestIds);
   });
 });
