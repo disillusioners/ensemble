@@ -67,7 +67,15 @@
 LOG_TAG="${LOG_TAG:-upgrade}"
 
 # Health-gate budgets (seconds) — same numbers as deploy.sh phase 5.
-LIVEZ_BUDGET_S="${LIVEZ_BUDGET_S:-60}"
+# LIVEZ_BUDGET_S = 180s (v0.16.9, was 60s): attempt-2 halt showed the
+# post-flip boot alone eats ~51s for the journal sweep on the first live
+# restart; a 60s verify budget is too tight and halts the promote on
+# otherwise-healthy boot-and-livez delays. 180s gives ~3x the base 60s
+# headroom for cold-boot + verify span. Worst-case cost = extra wait
+# before halt on a genuinely-dead boot (still halts); too-short budget
+# = false halt on a healthy boot (the worse outcome — every verify-
+# budget halt is a LIVE promote halt).
+LIVEZ_BUDGET_S="${LIVEZ_BUDGET_S:-180}"
 READYZ_BUDGET_S="${READYZ_BUDGET_S:-120}"
 # Post-flip soak (ADR-005 gate: 300s). Overridable for sandbox drills only
 # (ENSEMBLE_PROMOTE_SOAK_S); production default stays 300.
