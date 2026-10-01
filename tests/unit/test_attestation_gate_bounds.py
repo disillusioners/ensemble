@@ -40,8 +40,6 @@ in ``tests/job_queue``. NOT the whole repo suite.
 from __future__ import annotations
 
 import asyncio
-import logging
-from copy import deepcopy
 from unittest.mock import MagicMock
 
 import pytest

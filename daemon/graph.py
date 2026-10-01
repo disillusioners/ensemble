@@ -5124,14 +5124,15 @@ def _count_episode_tool_calls(messages: Any) -> int:
 # streak, always).
 
 
-def _normalize_bare_content(content: str) -> str:
+def _normalize_bare_content(content: str | None) -> str:
     """Whitespace-insensitive canonicalization of bare AI text (P2).
 
     Strips leading/trailing whitespace and collapses every
     internal whitespace run into a single space. Returns the
-    empty string for ``None`` input. The 34978dfc mute wall
-    emitted the same single-emoji content 137 times — every
-    reply normalized to the same canonical string and the
+    empty string for ``None`` input (the caller passes the FINAL
+    AIMessage's content, which is ``str | None``). The 34978dfc
+    mute wall emitted the same single-emoji content 137 times —
+    every reply normalized to the same canonical string and the
     guard's three-strike rule fired at reply #3.
     """
     if not content:
