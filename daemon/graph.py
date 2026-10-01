@@ -3999,6 +3999,12 @@ class SessionState(MessagesState):
     # as the five channels above.
     attestation_run_deny_count: int = 0
 
+    # Fresh-episode sentinel one-shot consumption marker (2026-10-01)
+    # — id of the last sentinel message whose channel reset fired.
+    # See ``ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY`` for why pure
+    # presence detection was a defect (per-evaluation counter wipes).
+    attestation_fresh_episode_consumed_id: str = ""
+
 
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end.
@@ -4984,6 +4990,25 @@ ATTESTATION_RUN_DENY_CAP: int = 100
 #: for the silent-drop hazard this closes.
 ATTESTATION_RUN_DENY_COUNT_KEY: str = "attestation_run_deny_count"
 
+#: State channel key — id of the LAST fresh-episode sentinel message
+#: whose channel reset has been consumed (2026-10-01). The sentinel
+#: HumanMessage PERSISTS in the checkpointed history for the rest of
+#: the mission (``add_messages`` keeps it), so detecting it by pure
+#: presence re-fired the episode reset on EVERY gate evaluation —
+#: silently zeroing the per-mission guard counters (withhold /
+#: run-deny / consecutive-identical / degenerate) after each write
+#: and making every bound unable to accumulate in exactly the
+#: post-revival missions the mute-wall incidents describe. Consuming
+#: by message id makes the reset one-shot per DISTINCT sentinel
+#: message: a second revival stamps a NEW user message (new id) and
+#: legitimately resets again; a replayed evaluation of the same
+#: sentinel does not. Deliberately NOT part of the terminal / allow
+#: reset contract — consumption is episode identity, not a mission
+#: counter (keeping it sticky across sub-turns is the point).
+ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY: str = (
+    "attestation_fresh_episode_consumed_id"
+)
+
 #: Repair nudge body — P2 consecutive-identical guard (CANONICAL
 #: VERBATIM, single source of truth). Embedded exactly as the
 #: incident-response team specified; the lead-in bracketed line
@@ -5623,11 +5648,13 @@ def create_attestation_gate_node(
     getter = denied_count_getter
 
     def _consume_fresh_episode_reset(
-        payload: dict[str, Any], messages_local: list[Any]
+        payload: dict[str, Any],
+        messages_local: list[Any],
+        state_local: Any = None,
     ) -> dict[str, Any]:
         """7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak) +
         P1/P2/P3 channel reset (2026-09-30, incidents 34978dfc +
-        6a0d60c9).
+        6a0d60c9) + one-shot consumption by sentinel id (2026-10-01).
 
         If the user-message sentinel ``fresh_episode_attestation_reset``
         is present on any HumanMessage in the evaluated turn's
@@ -5636,6 +5663,22 @@ def create_attestation_gate_node(
         into the new episode via checkpoint. The sentinel is
         consumed on the FIRST post-revival turn — subsequent turns
         see the cleared channels and read defaults.
+
+        One-shot consumption (2026-10-01): the sentinel HumanMessage
+        PERSISTS in the checkpointed history for the rest of the
+        mission (``add_messages`` keeps it), so the original pure
+        presence detection re-fired the reset on EVERY gate
+        evaluation — silently zeroing the per-mission guard counters
+        after each write, making the withhold budget / run-deny cap
+        unable to accumulate in exactly the post-revival missions the
+        mute-wall incidents describe. Consumption is therefore keyed
+        by the sentinel MESSAGE ID (``ATTESTATION_FRESH_EPISODE_
+        CONSUMED_ID_KEY``): the reset fires once per DISTINCT
+        sentinel message — a second revival stamps a NEW user
+        message (new id) and legitimately resets again; a replayed
+        evaluation of the same sentinel does not. A sentinel message
+        with no id fires once per mission (empty-vs-empty comparison
+        goes skip on the second evaluation).
 
         The reset is additive: the existing return payload
         (decision / route / channel writes from the deny or allow
@@ -5658,19 +5701,48 @@ def create_attestation_gate_node(
         * the b3 run-deny cap counter resets (a fresh
           user-dispatched episode gets its own bounded continuation
           budget — see the deny-cap constant block).
+
+        Safety argument for the per-dispatch budget under recovery
+        restarts (commission case c): a recovery commission that
+        re-dispatches the leader WITH a fresh user message starts a
+        NEW bounded episode — the counters reset to 0 AND the new
+        mission is itself bounded (budget enforced per-mission from
+        zero, one-shot per revival message). A revival WITHOUT a
+        fresh user message (mid-loop resume) carries the counters
+        unchanged — no budget laundering via kill/revive loops.
         """
-        sentinel_seen = any(
-            isinstance(m, HumanMessage)
+        sentinel_msgs = [
+            m
+            for m in (messages_local or [])
+            if isinstance(m, HumanMessage)
             and bool(
                 getattr(m, "additional_kwargs", None)
                 and m.additional_kwargs.get(
                     "fresh_episode_attestation_reset"
                 )
             )
-            for m in (messages_local or [])
-        )
-        if not sentinel_seen:
+        ]
+        if not sentinel_msgs:
             return payload
+        # One-shot consumption: skip when the newest sentinel's id
+        # was already consumed (see docstring). The NEWEST sentinel
+        # wins — multiple revivals stack one sentinel message each,
+        # and the current episode is the latest one.
+        newest_sentinel = sentinel_msgs[-1]
+        sentinel_id = str(getattr(newest_sentinel, "id", "") or "")
+        if state_local is not None:
+            if isinstance(state_local, dict):
+                raw_consumed = state_local.get(
+                    ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY, ""
+                )
+            else:
+                raw_consumed = getattr(
+                    state_local,
+                    ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY,
+                    "",
+                )
+            if sentinel_id == str(raw_consumed or ""):
+                return payload
         return {
             **payload,
             ATTESTATION_ANY_SUBSTANTIVE_KEY: False,
@@ -5691,6 +5763,10 @@ def create_attestation_gate_node(
             # WITHOUT a fresh user message carries the counter
             # unchanged — no budget laundering via kill/revive loops.
             ATTESTATION_RUN_DENY_COUNT_KEY: 0,
+            # One-shot consumption marker (2026-10-01) — records
+            # WHICH sentinel fired so replays of the same message
+            # do not wipe the counters again.
+            ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY: sentinel_id,
         }
 
     async def attestation_gate_node(
@@ -7154,7 +7230,7 @@ def create_attestation_gate_node(
     ) -> dict:
         payload = await _raw_gate_node(state, config)
         messages_local = state["messages"] if isinstance(state, dict) else state.messages
-        return _consume_fresh_episode_reset(payload, messages_local)
+        return _consume_fresh_episode_reset(payload, messages_local, state)
 
     # Preserve the O8 surface attribute on the wrapped node (the
     # auditable config — tests inspect ``attestation_gate_node.attestation_config``).
