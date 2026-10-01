@@ -1,3 +1,14 @@
+<!-- ck-redesign-2026q4 — Maintenance / Checkpoint Cleanup wizard.
+
+     Spec compliance §2.7/§5: DOM order is global banners first, then
+     the persistent Status Strip (§2.1), then the Material stepper
+     (§2.2), then the custom footer (h2 + Back / Continue / Cleanup now
+     per step), and finally the page-level Debug expander (§2.8).
+
+     Step content blocks preserve every existing `data-testid`; the
+     per-card diagnostic-JSON `<details>` blocks were consolidated
+     into the page-level Debug expander (AC-13). -->
+
 <!-- AM-13 — global banner above all cards when kill-switch OFF. -->
 @if (isMaintenanceDisabled()) {
   <section class="ck-card ck-banner ck-banner-disabled" data-testid="ck-banner-disabled">
@@ -13,12 +24,10 @@
   </section>
 }
 
-<!-- AM-1 — generic inline error banner (does NOT cover `run_in_flight` — that
-     case is absorbed by 409-adoption before reaching here).
-     Fix commission 2026-09-29 — `displayErrorCode()` is a thin
-     pass-through over `lastError().error`; the OLD poll-timeout
-     sentinel `'poll_stale'` is removed. Error banner copy renders
-     the wire error code verbatim (via `errorLabel`). -->
+<!-- AM-1 — generic inline error banner (does NOT cover `run_in_flight` —
+     that case is absorbed by 409-adoption before reaching here).
+     Error banner copy renders the wire error code verbatim (via
+     `errorLabel`). -->
 @if (lastError() && lastError()?.error !== 'maintenance_disabled') {
   <section class="ck-card ck-error-banner" data-testid="ck-error-banner">
     <mat-icon>error_outline</mat-icon>
@@ -38,305 +47,482 @@
   </section>
 }
 
-<!-- Status card — always visible. AM-11 dual-flavor branch on
-     `summary.blobs.destructive`. -->
-<section class="ck-card ck-status" data-testid="ck-status">
-  <h3>Current configuration</h3>
-  @if (status()) {
-    <dl>
-      <dt>Keep N checkpoints per thread</dt>
-      <dd>{{ status()?.config?.checkpoint_max_per_thread }}</dd>
-      <dt>Cleanup interval</dt>
-      <dd>{{ status()?.config?.cleanup_interval_hours }} hours</dd>
-      <dt>Blob-prune dry-run default</dt>
-      <dd>
-        {{ status()?.config?.blob_prune_dry_run_env_default === '1' ? 'ON (safe)' : 'OFF (destructive)' }}
-      </dd>
-      <dt>Blob-prune destructive armed</dt>
-      <dd>{{ status()?.config?.blob_prune_destructive_armed ? 'YES' : 'no' }}</dd>
-    </dl>
-  } @else {
-    <p class="ck-muted">Loading status…</p>
-  }
+<!-- Status Strip (spec §2.1) — 3-tile always-visible summary.
+     aria-live="polite" so screen readers announce changes; tiles are
+     semantic `<dl>` so each term/definition pair is reachable. -->
+<dl
+  class="ck-status-strip"
+  data-testid="ck-status-strip"
+  role="status"
+  aria-live="polite"
+  [class.ck-status-strip-muted]="isMaintenanceDisabled() || !status()"
+>
+  <div class="ck-status-strip-tile">
+    <dt>Keep N</dt>
+    <dd>{{ statusStripKeepN() }}</dd>
+  </div>
+  <div class="ck-status-strip-tile">
+    <dt>Last run</dt>
+    <dd>{{ statusStripLastRun() }}</dd>
+  </div>
+  <div class="ck-status-strip-tile">
+    <dt>Dry-run fresh</dt>
+    <dd>{{ statusStripDryRunFresh() }}</dd>
+  </div>
+</dl>
 
-  @if (status()?.last_run; as last) {
-    <h3>Last run</h3>
-    <dl>
-      <dt>Kind</dt><dd>{{ last.kind }}</dd>
-      <dt>Completed at</dt><dd>{{ formatTimestamp(last.completed_at) }}</dd>
-      <dt>Status</dt><dd>{{ last.status }}</dd>
-      <!-- AM-11 / Item 11 — dual-flavor label + value via blobBytesFor(). -->
-      <dt>{{ blobBytesFor(last.summary.blobs).label }}</dt>
-      <dd>{{ formatBytes(blobBytesFor(last.summary.blobs).value) }}</dd>
-      <dt>Duration</dt><dd>{{ formatDuration(last.summary.duration_ms) }}</dd>
-    </dl>
-    <!-- AM-10 — skipped render on last_run summary. -->
-    @if (last.summary.blobs.skipped.length > 0) {
-      <p class="ck-skipped-summary" data-testid="ck-last-skipped-summary">
-        {{ last.summary.blobs.skipped.length }} pairs skipped — fail-safe
-        @if (last.summary.blobs.skipped_truncated) {
-          <span class="ck-truncated-note">(showing first 1000; more were truncated)</span>
-        }
-      </p>
-    }
-  } @else {
-    <p class="ck-muted">No prior cleanup runs.</p>
-  }
-
-  @if (status()?.in_flight; as inFlight) {
-    <div class="ck-warning">
-      <mat-icon>warning</mat-icon>
-      A {{ inFlight.kind }} run is in flight (started {{ formatTimestamp(inFlight.started_at) }}).
-      Dry-run and execute are disabled.
-    </div>
-  }
-</section>
-
-<!-- Dry-run card — action + result. AM-10 + AM-12 + AM-16. -->
-<section class="ck-card ck-dry-run" data-testid="ck-dry-run">
-  <h3>Dry-run check</h3>
-  <p class="ck-muted">
-    Compute what would be deleted without writing anything. Required before execute.
-    <strong>May take several minutes</strong> on large databases.
-  </p>
-  <button
-    mat-raised-button
-    color="primary"
-    data-testid="ck-dry-run-btn"
-    [class.ck-stale]="dryRunIsStale()"
-    [disabled]="!canDryRun() || dryRunning()"
-    (click)="onDryRun()"
+<!-- Wizard container — caps at 1100px (spec §3, AC-12). -->
+<div class="ck-wizard">
+  <!-- 4-step Material stepper (spec §2.2, AC-2). Vertical orientation;
+       non-linear (Step 4 auto-renders post-execute from
+       lastExecuteResult() — page-refresh-safe via status endpoint's
+       last_run). Step labels are explicit so the screen-reader header
+       is meaningful without needing custom aria-label. -->
+  <mat-stepper
+    orientation="vertical"
+    [linear]="false"
+    [selectedIndex]="activeStep()"
   >
-    @if (dryRunning()) {
-      <mat-spinner diameter="20"></mat-spinner>
-      Running...
-    } @else {
-      Dry-run check
-    }
-  </button>
-
-  @if (lastDryRun(); as dry) {
-    <dl class="ck-result">
-      <!-- AM-11 — dry-flavor keys. -->
-      <dt>Would delete (blobs)</dt><dd data-testid="ck-dry-would-delete">{{ dry.would_delete_count }}</dd>
-      <dt>Would free</dt><dd data-testid="ck-dry-would-free">{{ formatBytes(dry.would_free_bytes) }}</dd>
-      <dt>Excess checkpoint rows</dt><dd>{{ dry.would_delete.checkpoint_rows }}</dd>
-      <dt>Excess writes</dt><dd>{{ dry.would_delete.writes }}</dd>
-      <dt>Scanned thread-ns pairs</dt><dd>{{ dry.scanned.thread_ns_pairs }}</dd>
-      <dt>Duration</dt><dd>{{ formatDuration(dry.duration_ms) }}</dd>
-      <!-- AM-16 — fresh_until rendered so the operator sees when the echo expires. -->
-      <dt>Fresh until</dt><dd data-testid="ck-dry-fresh-until">{{ formatTimestamp(dry.fresh_until) }}</dd>
-    </dl>
-
-    <!-- v3.2 — projection-class informational three-number render (R-1).
-         Reads three dry-run fields (`bytes_reclaimable_now`,
-         `bytes_reclaimable_after_row_prune`, `bytes_reclaimable_total`)
-         via the `dryRunProjectionNow/After/Total()` helpers. Zero
-         components render as "—" (amendment contract). Echo gate AM-3
-         is UNCHANGED — these numbers are projection-class and never
-         gate-bound (the execute-time echo still binds to
-         `would_free_bytes`). Each value is prefixed with "~" to mark
-         it as an approximation — matching the confirm dialog + the
-         amendment copy ("This run: ~{now} · After this run
-         (run cleanup again): ~{after} · Combined: ~{total}"). -->
-    <div class="ck-projection" data-testid="ck-projection">
-      <p class="ck-projection-line">
-        This run:
-        <strong data-testid="ck-projection-now">~{{ dryRunProjectionNow(dry) }}</strong>
-        · After this run (run cleanup again):
-        <strong data-testid="ck-projection-after">~{{ dryRunProjectionAfter(dry) }}</strong>
-        · Combined:
-        <strong data-testid="ck-projection-total">~{{ dryRunProjectionTotal(dry) }}</strong>
-      </p>
-
-      <!-- R-4 — skip-flag honesty banner. The same `skipped[]` already
-           renders an itemized block below; this near-projection note
-           surfaces the under-reclaim risk at consent time (before the
-           operator clicks execute). -->
-      @if (dryRunSkippedHonestyActive(dry)) {
-        <p class="ck-projection-skipped" data-testid="ck-projection-skipped">
-          <mat-icon>verified_user</mat-icon>
-          {{ dry.skipped.length }} pairs skipped — cleanup effectiveness may be understated
-        </p>
-      }
-
-      <!-- Never-pruned sub-copy — names the journey when this run
-           frees 0 blob bytes (Op D will orphan them for pass 2). -->
-      @if (isNeverPrunedProfile(dry)) {
-        <p class="ck-never-pruned-subcopy" data-testid="ck-never-pruned-subcopy">
-          On a DB that has never run retention, run 1 deletes rows only;
-          run 2 frees the blob bytes.
-        </p>
-      }
-    </div>
-
-    <!-- AM-10 — skipped render: summary + reason badge map + truncated. -->
-    @if (dry.skipped.length > 0) {
-      <div class="ck-skipped" data-testid="ck-dry-skipped">
-        <p class="ck-skipped-summary">
-          <mat-icon>verified_user</mat-icon>
-          <strong>{{ dry.skipped.length }} pairs skipped — fail-safe</strong>
-          @if (dry.skipped_truncated) {
-            <span class="ck-truncated-note">(showing first 1000; more were truncated)</span>
+    <!-- ── Step 1: Review (spec §2.3) ─────────────────────────────────── -->
+    <mat-step label="1. Review">
+      <div class="ck-step-content">
+        <section class="ck-card ck-status" data-testid="ck-status">
+          <h3>Configuration</h3>
+          @if (status()) {
+            <dl class="ck-step-grid-config">
+              <dt>Keep N checkpoints per thread</dt>
+              <dd>{{ status()?.config?.checkpoint_max_per_thread }}</dd>
+              <dt>Cleanup interval</dt>
+              <dd>{{ status()?.config?.cleanup_interval_hours }} hours</dd>
+              <dt>Blob-prune dry-run default</dt>
+              <dd>
+                {{
+                  status()?.config?.blob_prune_dry_run_env_default === '1'
+                    ? 'ON (safe)'
+                    : 'OFF (destructive)'
+                }}
+              </dd>
+              <dt>Blob-prune destructive armed</dt>
+              <dd>{{ status()?.config?.blob_prune_destructive_armed ? 'YES' : 'no' }}</dd>
+            </dl>
+          } @else {
+            <p class="ck-muted">Loading status…</p>
           }
-        </p>
-        <details>
-          <summary>Show details</summary>
-          <ul class="ck-skipped-list">
-            @for (entry of dry.skipped; track entry.thread_id) {
-              <li>
-                <code class="ck-thread-id">{{ entry.thread_id }}</code>
-                @if (entry.checkpoint_ns) {
-                  <span class="ck-ns">{{ entry.checkpoint_ns }}</span>
+
+          @if (status()?.last_run; as last) {
+            <h3>Last run</h3>
+            <dl class="ck-step-grid-lastrun">
+              <dt>Kind</dt>
+              <dd>{{ last.kind }}</dd>
+              <dt>Completed at</dt>
+              <dd>{{ formatTimestamp(last.completed_at) }}</dd>
+              <dt>Status</dt>
+              <dd>{{ last.status }}</dd>
+              <dt>{{ blobBytesFor(last.summary.blobs).label }}</dt>
+              <dd>{{ formatBytes(blobBytesFor(last.summary.blobs).value) }}</dd>
+              <dt>Duration</dt>
+              <dd>{{ formatDuration(last.summary.duration_ms) }}</dd>
+              <!-- Skipped-summary sits in its own row at the end so the
+                   6-row grid stays readable on narrow viewports. -->
+              @if (last.summary.blobs.skipped.length > 0) {
+                <dt>Skipped</dt>
+                <dd>
+                  <span class="ck-skipped-summary" data-testid="ck-last-skipped-summary">
+                    {{ last.summary.blobs.skipped.length }} pairs skipped — fail-safe
+                    @if (last.summary.blobs.skipped_truncated) {
+                      <span class="ck-truncated-note">(showing first 1000; more were truncated)</span>
+                    }
+                  </span>
+                </dd>
+              }
+            </dl>
+          } @else {
+            <p class="ck-muted">No prior cleanup runs.</p>
+          }
+
+          <!-- AM-16 / AC-16 — in-flight notice: rendered ONLY on Step 1
+               per spec. Step 1 is the operator's landing; an inline
+               notice here makes the system state unmissable before
+               they reach the action buttons. Subsequent steps disable
+               the action controls but do NOT duplicate the notice. -->
+          @if (status()?.in_flight; as inFlight) {
+            <div class="ck-step-inflight-notice" role="alert">
+              <mat-icon>warning</mat-icon>
+              A {{ inFlight.kind }} run is in flight (started
+              {{ formatTimestamp(inFlight.started_at) }}). Dry-run and execute
+              are disabled.
+            </div>
+          }
+        </section>
+      </div>
+    </mat-step>
+
+    <!-- ── Step 2: Dry-run (spec §2.4) ────────────────────────────────── -->
+    <mat-step label="2. Dry-run">
+      <div class="ck-step-content">
+        <section class="ck-card ck-dry-run" data-testid="ck-dry-run">
+          <h3>Dry-run check</h3>
+          <p class="ck-muted">
+            Compute what would be deleted without writing anything. Required before execute.
+            <strong>May take several minutes</strong> on large databases.
+          </p>
+          <button
+            mat-raised-button
+            color="primary"
+            data-testid="ck-dry-run-btn"
+            [class.ck-stale]="dryRunIsStale()"
+            [disabled]="!canDryRun() || dryRunning() || isRunInFlight() || isMaintenanceDisabled()"
+            (click)="onDryRun()"
+          >
+            @if (dryRunning()) {
+              <mat-spinner diameter="20"></mat-spinner>
+              Running...
+            } @else {
+              Dry-run check
+            }
+          </button>
+
+          @if (lastDryRun(); as dry) {
+            <dl class="ck-result">
+              <dt>Would delete (blobs)</dt>
+              <dd data-testid="ck-dry-would-delete">{{ dry.would_delete_count }}</dd>
+              <dt>Would free</dt>
+              <dd data-testid="ck-dry-would-free">{{ formatBytes(dry.would_free_bytes) }}</dd>
+              <dt>Excess checkpoint rows</dt>
+              <dd>{{ dry.would_delete.checkpoint_rows }}</dd>
+              <dt>Excess writes</dt>
+              <dd>{{ dry.would_delete.writes }}</dd>
+              <dt>Scanned thread-ns pairs</dt>
+              <dd>{{ dry.scanned.thread_ns_pairs }}</dd>
+              <dt>Duration</dt>
+              <dd>{{ formatDuration(dry.duration_ms) }}</dd>
+              <!-- AM-16 — fresh_until rendered so the operator sees when the echo expires. -->
+              <dt>Fresh until</dt>
+              <dd data-testid="ck-dry-fresh-until">{{ formatTimestamp(dry.fresh_until) }}</dd>
+            </dl>
+
+            <!-- v3.2 — projection-class informational three-number render (R-1). -->
+            <div class="ck-projection" data-testid="ck-projection">
+              <p class="ck-projection-line">
+                This run:
+                <strong data-testid="ck-projection-now">~{{ dryRunProjectionNow(dry) }}</strong>
+                · After this run (run cleanup again):
+                <strong data-testid="ck-projection-after">~{{ dryRunProjectionAfter(dry) }}</strong>
+                · Combined:
+                <strong data-testid="ck-projection-total">~{{ dryRunProjectionTotal(dry) }}</strong>
+              </p>
+
+              @if (dryRunSkippedHonestyActive(dry)) {
+                <p class="ck-projection-skipped" data-testid="ck-projection-skipped">
+                  <mat-icon>verified_user</mat-icon>
+                  {{ dry.skipped.length }} pairs skipped — cleanup effectiveness may be understated
+                </p>
+              }
+
+              @if (isNeverPrunedProfile(dry)) {
+                <p class="ck-never-pruned-subcopy" data-testid="ck-never-pruned-subcopy">
+                  On a DB that has never run retention, run 1 deletes rows only;
+                  run 2 frees the blob bytes.
+                </p>
+              }
+            </div>
+
+            <!-- AM-10 — skipped render: summary + reason badge map + truncated. -->
+            @if (dry.skipped.length > 0) {
+              <div class="ck-skipped" data-testid="ck-dry-skipped">
+                <p class="ck-skipped-summary">
+                  <mat-icon>verified_user</mat-icon>
+                  <strong>{{ dry.skipped.length }} pairs skipped — fail-safe</strong>
+                  @if (dry.skipped_truncated) {
+                    <span class="ck-truncated-note">(showing first 1000; more were truncated)</span>
+                  }
+                </p>
+                <details>
+                  <summary>Show details</summary>
+                  <ul class="ck-skipped-list">
+                    @for (entry of dry.skipped; track entry.thread_id) {
+                      <li>
+                        <code class="ck-thread-id">{{ entry.thread_id }}</code>
+                        @if (entry.checkpoint_ns) {
+                          <span class="ck-ns">{{ entry.checkpoint_ns }}</span>
+                        }
+                        <span class="ck-badge ck-badge-{{ skippedReasonLabel(entry.reason).tone }}">
+                          {{ skippedReasonLabel(entry.reason).label }}
+                        </span>
+                      </li>
+                    }
+                  </ul>
+                </details>
+              </div>
+            }
+          }
+        </section>
+      </div>
+    </mat-step>
+
+    <!-- ── Step 3: Confirm & Execute (spec §2.5) ──────────────────────── -->
+    <mat-step label="3. Confirm & Execute">
+      <div class="ck-step-content">
+        <section class="ck-card ck-execute" data-testid="ck-execute">
+          <h3>Confirm cleanup</h3>
+          @if (lastDryRun(); as dry) {
+            <p class="ck-muted">
+              This run will delete
+              <strong>{{ dry.would_delete_count }}</strong>
+              excess checkpoint rows and reclaim
+              <strong>{{ formatBytes(dry.would_free_bytes) }}</strong>.
+            </p>
+          } @else {
+            <p class="ck-muted">
+              No dry-run result yet — complete Step 2 to populate the echo.
+            </p>
+          }
+          <p class="ck-warning-text" id="ck-warning-text" data-testid="ck-warning-text">
+            Destructive — permanently deletes unreferenced blobs and excess
+            checkpoint rows.
+          </p>
+          <!-- ck-execute-btn: gated on dry-run AND !executing AND
+               !isRunInFlight. Reuses the existing ConfirmDialogComponent
+               (destructive: true, panelClass: 'dark-modal-panel'); only
+               result === true triggers onExecute().
+               aria-describedby (spec §2.5) points to the warning copy
+               above so screen readers announce the destructive
+               description when the button receives focus. -->
+          <button
+            mat-raised-button
+            color="warn"
+            data-testid="ck-execute-btn"
+            aria-describedby="ck-warning-text"
+            [disabled]="!canContinueFromStep3()"
+            (click)="onExecute()"
+          >
+            @if (executing()) {
+              <mat-spinner diameter="20"></mat-spinner>
+              Executing...
+            } @else {
+              Cleanup now
+            }
+          </button>
+
+          @if (executing()) {
+            <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+            <p class="ck-muted">
+              Polling run status. Run ID:
+              <code data-testid="ck-active-run-id">{{ activeRunId() }}</code>
+            </p>
+            <!-- AM-12 — friendly copy from 202 body's `expected_duration_ms_hint`. -->
+            @if (expectedDurationHintMs() != null) {
+              <p class="ck-muted" data-testid="ck-expected-duration">
+                Expected duration: ~{{ formatDuration(expectedDurationHintMs()) }}
+              </p>
+            }
+          }
+        </section>
+      </div>
+    </mat-step>
+
+    <!-- ── Step 4: Result (spec §2.6) ────────────────────────────────── -->
+    <mat-step label="4. Result">
+      <div class="ck-step-content">
+        @if (lastExecuteResult(); as res) {
+          <section class="ck-card ck-result-panel" data-testid="ck-result">
+            <!-- Status banner (spec §2.6) — color via emerald/amber/rose.
+                 Completed/failed → role="status"; interrupted → role="alert". -->
+            @if (res.status === 'succeeded') {
+              <div class="ck-result-banner ck-result-banner-completed" role="status">
+                <mat-icon>check_circle</mat-icon>
+                Run completed
+              </div>
+            } @else if (res.status === 'interrupted') {
+              <div class="ck-result-banner ck-result-banner-interrupted" role="alert">
+                <mat-icon>schedule</mat-icon>
+                Run interrupted
+              </div>
+            } @else if (res.status === 'failed') {
+              <div class="ck-result-banner ck-result-banner-failed" role="status">
+                <mat-icon>error</mat-icon>
+                Run failed
+              </div>
+            } @else {
+              <!-- res.status === 'running' (or any other value) — mid-flight,
+                   not yet terminal. Renders a muted info banner so the
+                   result panel is never empty while the run is in flight. -->
+              <div class="ck-result-banner ck-result-banner-completed" role="status">
+                <mat-icon>info</mat-icon>
+                Run — {{ res.status }}
+              </div>
+            }
+
+            <dl>
+              <dt>Run ID</dt>
+              <dd><code>{{ res.run_id }}</code></dd>
+              <dt>Kind</dt>
+              <dd>{{ res.kind }}</dd>
+              <dt>Started at</dt>
+              <dd>{{ formatTimestamp(res.started_at) }}</dd>
+              <dt>Completed at</dt>
+              <dd>{{ formatTimestamp(res.completed_at) }}</dd>
+              @if (res.summary; as s) {
+                <dt>{{ blobBytesFor(s.blobs).label }}</dt>
+                <dd>{{ formatBytes(blobBytesFor(s.blobs).value) }}</dd>
+                <dt>{{ blobCountFor(s.blobs).label }}</dt>
+                <dd>{{ blobCountFor(s.blobs).value }}</dd>
+                <dt>Checkpoint rows deleted</dt>
+                <dd>{{ s.checkpoint_rows.deleted }}</dd>
+                <dt>Duration</dt>
+                <dd>{{ formatDuration(s.duration_ms) }}</dd>
+
+                <!-- AM-10 — skipped render on run summary. -->
+                @if (s.blobs.skipped.length > 0) {
+                  <dt>Skipped pairs</dt>
+                  <dd>
+                    <span class="ck-skipped-summary" data-testid="ck-last-skipped-summary">
+                      {{ s.blobs.skipped.length }} pairs skipped — fail-safe
+                    </span>
+                    @if (s.blobs.skipped_truncated) {
+                      <span class="ck-truncated-note">(showing first 1000; more were truncated)</span>
+                    }
+                  </dd>
                 }
-                <span class="ck-badge ck-badge-{{ skippedReasonLabel(entry.reason).tone }}">
-                  {{ skippedReasonLabel(entry.reason).label }}
-                </span>
-              </li>
+              }
+              @if (res.error; as err) {
+                <dt class="ck-error">Error</dt>
+                <dd class="ck-error"><code>{{ err.code }}</code>: {{ err.message }}</dd>
+              }
+            </dl>
+
+            <!-- AM-6 — interrupted-state affordance — re-run to converge. -->
+            @if (canRerunInterrupted(res)) {
+              <div class="ck-interrupted-card" data-testid="ck-interrupted-card">
+                <mat-icon>schedule</mat-icon>
+                <div>
+                  <strong>Daemon restarted mid-run</strong>
+                  <p>
+                    Prune is retention-idempotent — re-running converges the remaining
+                    work. No cancel button in v1.
+                  </p>
+                </div>
+                <button
+                  mat-raised-button
+                  color="primary"
+                  (click)="onExecute()"
+                  data-testid="ck-rerun-btn"
+                >
+                  Re-run
+                </button>
+              </div>
             }
-          </ul>
-        </details>
-      </div>
-    }
 
-    <details><summary>Raw JSON</summary><pre>{{ dry | json }}</pre></details>
-  }
-</section>
-
-<!-- Execute card — action + confirm flow + poll progress. AM-12 hint display. -->
-<section class="ck-card ck-execute" data-testid="ck-execute">
-  <h3>Cleanup now</h3>
-  <p class="ck-warning-text">Destructive — permanently deletes unreferenced blobs and excess checkpoint rows.</p>
-  <button
-    mat-raised-button
-    color="warn"
-    data-testid="ck-execute-btn"
-    [disabled]="!lastDryRun() || executing() || isRunInFlight()"
-    (click)="onExecute()"
-  >
-    @if (executing()) {
-      <mat-spinner diameter="20"></mat-spinner>
-      Executing...
-    } @else {
-      Cleanup now
-    }
-  </button>
-
-  @if (executing()) {
-    <mat-progress-bar mode="indeterminate"></mat-progress-bar>
-    <p class="ck-muted">
-      Polling run status. Run ID:
-      <code data-testid="ck-active-run-id">{{ activeRunId() }}</code>
-    </p>
-    <!-- AM-12 — friendly copy from 202 body's `expected_duration_ms_hint`. -->
-    @if (expectedDurationHintMs() != null) {
-      <p class="ck-muted" data-testid="ck-expected-duration">
-        Expected duration: ~{{ formatDuration(expectedDurationHintMs()) }}
-      </p>
-    }
-  }
-</section>
-
-<!-- Result panel — visible after execute completes. AM-6 interrupted + AM-11 dual-flavor. -->
-@if (lastExecuteResult(); as res) {
-  <section class="ck-card ck-result-panel" data-testid="ck-result">
-    <h3>Run result — {{ res.status }}</h3>
-    <dl>
-      <dt>Run ID</dt><dd><code>{{ res.run_id }}</code></dd>
-      <dt>Kind</dt><dd>{{ res.kind }}</dd>
-      <dt>Started at</dt><dd>{{ formatTimestamp(res.started_at) }}</dd>
-      <dt>Completed at</dt><dd>{{ formatTimestamp(res.completed_at) }}</dd>
-      @if (res.summary; as s) {
-        <!-- AM-11 / Item 11 — dual-flavor label + value via the
-             blobBytesFor() / blobCountFor() helpers. The previous
-             inline `@if/@else` block was duplicated between the
-             status-card "Last run" panel (line ~70) and this
-             result panel; the helpers now own the dual-flavor
-             branching in one place. -->
-        <dt>{{ blobBytesFor(s.blobs).label }}</dt>
-        <dd>{{ formatBytes(blobBytesFor(s.blobs).value) }}</dd>
-        <dt>{{ blobCountFor(s.blobs).label }}</dt>
-        <dd>{{ blobCountFor(s.blobs).value }}</dd>
-        <dt>Checkpoint rows deleted</dt><dd>{{ s.checkpoint_rows.deleted }}</dd>
-        <dt>Duration</dt><dd>{{ formatDuration(s.duration_ms) }}</dd>
-
-        <!-- AM-10 — skipped render on run summary. -->
-        @if (s.blobs.skipped.length > 0) {
-          <dt>Skipped pairs</dt>
-          <dd>
-            <span class="ck-skipped-summary">
-              {{ s.blobs.skipped.length }} pairs skipped — fail-safe
-            </span>
-            @if (s.blobs.skipped_truncated) {
-              <span class="ck-truncated-note">(showing first 1000; more were truncated)</span>
+            <!-- v3.2 — post-run convergence banner (R-5). -->
+            @if (showRunAgainBanner()) {
+              <div class="ck-run-again-banner" data-testid="ck-run-again-banner">
+                <mat-icon>autorenew</mat-icon>
+                <div>
+                  <strong>
+                    Run cleanup again to reclaim
+                    ~{{ formatBytes(runAgainReclaimBytes()) }} more
+                  </strong>
+                  <p>
+                    A follow-up run will free the blobs orphaned by the row
+                    deletions that just completed.
+                  </p>
+                </div>
+                <button
+                  mat-raised-button
+                  color="primary"
+                  data-testid="ck-run-again-btn"
+                  [disabled]="dryRunning() || executing() || isRunInFlight()"
+                  (click)="onDryRun()"
+                >
+                  @if (dryRunning()) {
+                    <mat-spinner diameter="20"></mat-spinner>
+                    Running...
+                  } @else {
+                    Run again
+                  }
+                </button>
+              </div>
             }
-          </dd>
+          </section>
+        } @else {
+          <p class="ck-muted">
+            No result yet — execute a run from Step 3 to populate this view.
+          </p>
         }
-      }
-      @if (res.error; as err) {
-        <dt class="ck-error">Error</dt>
-        <dd class="ck-error"><code>{{ err.code }}</code>: {{ err.message }}</dd>
-      }
-    </dl>
-
-    <!-- AM-6 — interrupted-state affordance — re-run to converge. -->
-    @if (canRerunInterrupted(res)) {
-      <div class="ck-interrupted-card" data-testid="ck-interrupted-card">
-        <mat-icon>schedule</mat-icon>
-        <div>
-          <strong>Daemon restarted mid-run</strong>
-          <p>
-            Prune is retention-idempotent — re-running converges the remaining
-            work. No cancel button in v1.
-          </p>
-        </div>
-        <button mat-raised-button color="primary" (click)="onExecute()" data-testid="ck-rerun-btn">
-          Re-run
-        </button>
       </div>
-    }
+    </mat-step>
+  </mat-stepper>
 
-    <!-- v3.2 — post-run convergence banner. Visible when the last execute
-         succeeded AND its summary's projection-after is > 0. The CTA
-         starts a NEW dry-run (NEVER a silent execute — onDryRun is the
-         entry point and the standard dry-run → confirm → execute
-         flow still gates the actual destructive action). The button is
-         disabled while ANY run is in flight (dry-run / execute /
-         daemon-reported `isRunInFlight`). Persistence across page
-         refreshes comes from the run-summary's projection block — NO
-         client-only state. Banner hides once a fresh dry-run reports
-         `bytes_reclaimable_now == 0` (convergence reached, signalled by
-         `showRunAgainBanner()`). -->
-    @if (showRunAgainBanner()) {
-      <div class="ck-run-again-banner" data-testid="ck-run-again-banner">
-        <mat-icon>autorenew</mat-icon>
-        <div>
-          <strong>
-            Run cleanup again to reclaim
-            ~{{ formatBytes(runAgainReclaimBytes()) }} more
-          </strong>
-          <p>
-            A follow-up run will free the blobs orphaned by the row
-            deletions that just completed.
-          </p>
-        </div>
+  <!-- Custom stepper footer (spec §2.2) — h2 + Back / Continue /
+       Cleanup now per step. Material's default nav buttons are hidden
+       (they live inside each <mat-step> body by default and we render
+       the controls here instead). Back is visible from steps 2/3/4
+       only; "Back to start" on Step 4 resets activeStep() to 0. -->
+  <footer class="ck-stepper-footer" aria-label="Step navigation">
+    <h2>{{ footerHeading() }}</h2>
+    <div class="ck-stepper-buttons">
+      @if (activeStep() === 0) {
+        <!-- Step 1: Continue → (disabled on kill-switch / in-flight /
+             !canDryRun() per spec §2.3 + AC-4). -->
         <button
           mat-raised-button
           color="primary"
-          data-testid="ck-run-again-btn"
-          [disabled]="dryRunning() || executing() || isRunInFlight()"
-          (click)="onDryRun()"
+          (click)="stepperNav().next()"
+          [disabled]="!canContinueFromStep1()"
+          data-testid="ck-step-continue-1"
         >
-          @if (dryRunning()) {
-            <mat-spinner diameter="20"></mat-spinner>
-            Running...
-          } @else {
-            Run again
-          }
+          Continue →
         </button>
-      </div>
-    }
+      } @else if (activeStep() === 1) {
+        <!-- Step 2: ← Back + Continue → (Continue gated on a fresh dry-run
+             with would_delete_count > 0 — spec §2.4). -->
+        <button
+          mat-stroked-button
+          (click)="stepperNav().back()"
+          data-testid="ck-step-back-2"
+        >
+          ← Back
+        </button>
+        <button
+          mat-raised-button
+          color="primary"
+          (click)="stepperNav().next()"
+          [disabled]="!canContinueFromStep2()"
+          data-testid="ck-step-continue-2"
+        >
+          Continue →
+        </button>
+      } @else if (activeStep() === 2) {
+        <!-- Step 3: ← Back (the destructive action lives inside Step 3
+             content as ck-execute-btn — gated by canContinueFromStep3
+             and the existing ConfirmDialogComponent flow). -->
+        <button
+          mat-stroked-button
+          (click)="stepperNav().back()"
+          data-testid="ck-step-back-3"
+        >
+          ← Back
+        </button>
+      } @else if (activeStep() === 3) {
+        <!-- Step 4: ← Back to start — resets activeStep() to 0 (AC-9). -->
+        <button
+          mat-stroked-button
+          (click)="stepperNav().backToStart()"
+          data-testid="ck-step-back-to-start"
+        >
+          ← Back to start
+        </button>
+      }
+    </div>
+  </footer>
+</div>
 
-    <details><summary>Raw JSON</summary><pre>{{ res | json }}</pre></details>
-  </section>
-}
+<!-- Page-level Debug expander (spec §2.8) — single consolidated
+     diagnostic-payload block, collapsed by default. Replaces the
+     per-card JSON `<details>` blocks removed from each step (AC-13). -->
+<details class="ck-debug-expander">
+  <summary>Debug — raw response payloads (diagnostics)</summary>
+  <pre><code>{{ status() | json }}</code></pre>
+  <pre><code>{{ lastDryRun() | json }}</code></pre>
+  <pre><code>{{ lastExecuteResult() | json }}</code></pre>
+</details>

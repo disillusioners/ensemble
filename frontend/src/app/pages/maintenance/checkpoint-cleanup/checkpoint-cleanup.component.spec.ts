@@ -37,7 +37,7 @@
 //   - `expected_duration_ms_hint` display (AM-12)
 //   - Destroy tears down poll
 
-import { signal } from '@angular/core';
+import { signal, computed } from '@angular/core';
 import { Observable, of, throwError } from 'rxjs';
 import type {
   CheckpointCleanupDryRun,
@@ -252,6 +252,29 @@ class TestableCheckpointCleanupComponent {
   // showRunAgainBanner() in the production class for the rationale.
   readonly executedDryRunId = signal<string | null>(null);
   readonly dryRunIsStale = signal(false);
+
+  // ── Wizard state (ck-redesign-2026q4) — mirror production verbatim. ──
+  readonly activeStep = signal(0);
+  readonly footerHeading = computed(() => {
+    switch (this.activeStep()) {
+      case 0:
+        return 'Review';
+      case 1:
+        return 'Dry-run';
+      case 2:
+        return 'Confirm & Execute';
+      case 3:
+      default:
+        return 'Result';
+    }
+  });
+  readonly stepperNav = () => ({
+    next: () => this.activeStep.update((i) => Math.min(i + 1, 3)),
+    back: () => this.activeStep.update((i) => Math.max(i - 1, 0)),
+    backToStart: () => this.activeStep.set(0),
+  });
+  // canContinueFromStep1 / Step2 / Step3 are pure functions of the
+  // service-exposed signals + local UI state. Mirror production.
 
   private pollSub: { unsubscribe: () => void; closed: boolean } | null = null;
   private destroyed = false;
@@ -553,6 +576,51 @@ class TestableCheckpointCleanupComponent {
 
   canRerunInterrupted(run: CheckpointCleanupRun): boolean {
     return run.status === 'interrupted';
+  }
+
+  // ── Wizard helpers (ck-redesign-2026q4) — mirror production verbatim.
+
+  /** Step 1 → Step 2 gate (spec §2.3, AC-4). */
+  canContinueFromStep1(): boolean {
+    return this.canDryRun() && !this.isMaintenanceDisabled() && !this.isRunInFlight();
+  }
+
+  /** Step 2 → Step 3 gate (spec §2.4). */
+  canContinueFromStep2(): boolean {
+    const dry = this.lastDryRun();
+    if (!dry) return false;
+    if (this.dryRunning() || this.executing() || this.isRunInFlight()) return false;
+    return (dry.would_delete_count ?? 0) > 0;
+  }
+
+  /** Step 3 action gate (spec §2.5). */
+  canContinueFromStep3(): boolean {
+    return !!this.lastDryRun() && !this.executing() && !this.isRunInFlight();
+  }
+
+  // Status Strip render helpers (spec §2.1).
+  statusStripKeepN(): string {
+    if (this.isMaintenanceDisabled() || !this.status()) return '—';
+    const v = this.status()?.config?.checkpoint_max_per_thread;
+    return typeof v === 'number' ? String(v) : '—';
+  }
+  statusStripLastRun(): string {
+    if (this.isMaintenanceDisabled() || !this.status()) return '—';
+    const last = this.status()?.last_run;
+    if (!last) return 'Never run';
+    const bytes =
+      last.summary?.blobs?.bytes_freed ?? last.summary?.blobs?.would_free_bytes ?? 0;
+    const time = this.formatTimestamp(last.completed_at);
+    return `${last.status} · ${this.formatBytes(bytes)} · ${time}`;
+  }
+  statusStripDryRunFresh(): string {
+    if (this.isMaintenanceDisabled() || !this.lastDryRun()) {
+      return 'Stale — run dry-check';
+    }
+    const dry = this.lastDryRun()!;
+    const scanned = dry.scanned?.thread_ns_pairs ?? 0;
+    const time = this.formatTimestamp(dry.fresh_until);
+    return `${scanned} pairs · expires in ${time}`;
   }
 
   // ── v3.2 — dry-run projection helpers ─────────────────────────────────
@@ -1814,6 +1882,255 @@ describe('CheckpointCleanupComponent', () => {
       // regresses.
       component.executedDryRunId.set(null);
       expect(component.showRunAgainBanner()).toBe(false);
+    });
+  });
+});
+
+// ── ck-redesign-2026q4 — wizard navigation, gating, Status Strip ───────
+
+describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
+  let service: MockCheckpointCleanupService;
+  let snackBar: MockSnackBar;
+  let component: TestableCheckpointCleanupComponent;
+
+  beforeEach(() => {
+    mockDialog.reset();
+    MockSnackBarRef.reset();
+    service = new MockCheckpointCleanupService();
+    snackBar = new MockSnackBar();
+    component = new TestableCheckpointCleanupComponent(service, mockDialog, snackBar);
+  });
+
+  describe('activeStep initial value (AC-9)', () => {
+    it('starts at 0 (Review)', () => {
+      expect(component.activeStep()).toBe(0);
+    });
+
+    it('footerHeading mirrors activeStep()', () => {
+      expect(component.footerHeading()).toBe('Review');
+      component.activeStep.set(1);
+      expect(component.footerHeading()).toBe('Dry-run');
+      component.activeStep.set(2);
+      expect(component.footerHeading()).toBe('Confirm & Execute');
+      component.activeStep.set(3);
+      expect(component.footerHeading()).toBe('Result');
+    });
+  });
+
+  describe('stepperNav helpers (AC-9)', () => {
+    it('next() advances activeStep by 1, clamped at 3', () => {
+      component.stepperNav().next();
+      expect(component.activeStep()).toBe(1);
+      component.stepperNav().next();
+      component.stepperNav().next();
+      component.stepperNav().next();
+      expect(component.activeStep()).toBe(3);
+      // Clamped at 3 — no rollover past Result.
+      component.stepperNav().next();
+      expect(component.activeStep()).toBe(3);
+    });
+
+    it('back() decrements activeStep by 1, clamped at 0', () => {
+      component.activeStep.set(3);
+      component.stepperNav().back();
+      expect(component.activeStep()).toBe(2);
+      component.stepperNav().back();
+      component.stepperNav().back();
+      component.stepperNav().back();
+      expect(component.activeStep()).toBe(0);
+      // Clamped at 0 — no negative roll.
+      component.stepperNav().back();
+      expect(component.activeStep()).toBe(0);
+    });
+
+    it('backToStart() resets activeStep to 0', () => {
+      component.activeStep.set(3);
+      component.stepperNav().backToStart();
+      expect(component.activeStep()).toBe(0);
+    });
+  });
+
+  describe('step gating — canContinueFromStep1 (AC-4)', () => {
+    it('is true when canDryRun && !maintenanceDisabled && !isRunInFlight', () => {
+      service.canDryRun.set(true);
+      service.isRunInFlight.set(false);
+      service.lastError.set(null);
+      expect(component.canContinueFromStep1()).toBe(true);
+    });
+
+    it('is false when canDryRun() is false', () => {
+      service.canDryRun.set(false);
+      expect(component.canContinueFromStep1()).toBe(false);
+    });
+
+    it('is false when maintenance is disabled (kill-switch)', () => {
+      service.canDryRun.set(true);
+      service.lastError.set({ error: 'maintenance_disabled', message: 'kill' });
+      expect(component.isMaintenanceDisabled()).toBe(true);
+      expect(component.canContinueFromStep1()).toBe(false);
+    });
+
+    it('is false when a daemon run is in flight (AC-16)', () => {
+      service.canDryRun.set(true);
+      service.isRunInFlight.set(true);
+      expect(component.canContinueFromStep1()).toBe(false);
+    });
+  });
+
+  describe('step gating — canContinueFromStep2 (spec §2.4)', () => {
+    it('is true when lastDryRun exists with would_delete_count > 0 AND not in flight', () => {
+      service.lastDryRun.set(DRY_RUN);
+      service.canDryRun.set(true);
+      service.isRunInFlight.set(false);
+      expect(component.canContinueFromStep2()).toBe(true);
+    });
+
+    it('is false when no dry-run is on record', () => {
+      service.lastDryRun.set(null);
+      expect(component.canContinueFromStep2()).toBe(false);
+    });
+
+    it('is false when dry-run reports would_delete_count == 0', () => {
+      const zero: CheckpointCleanupDryRun = {
+        ...DRY_RUN,
+        would_delete_count: 0,
+      };
+      service.lastDryRun.set(zero);
+      expect(component.canContinueFromStep2()).toBe(false);
+    });
+
+    it('is false during dry-run / execute / isRunInFlight (AC-16)', () => {
+      service.lastDryRun.set(DRY_RUN);
+      component.dryRunning.set(true);
+      expect(component.canContinueFromStep2()).toBe(false);
+      component.dryRunning.set(false);
+      component.executing.set(true);
+      expect(component.canContinueFromStep2()).toBe(false);
+      component.executing.set(false);
+      service.isRunInFlight.set(true);
+      expect(component.canContinueFromStep2()).toBe(false);
+    });
+  });
+
+  describe('step gating — canContinueFromStep3 (spec §2.5)', () => {
+    it('is true when dry-run exists AND not executing AND not in-flight', () => {
+      service.lastDryRun.set(DRY_RUN);
+      expect(component.canContinueFromStep3()).toBe(true);
+    });
+
+    it('is false when no dry-run on record', () => {
+      service.lastDryRun.set(null);
+      expect(component.canContinueFromStep3()).toBe(false);
+    });
+
+    it('is false during executing (AC-16)', () => {
+      service.lastDryRun.set(DRY_RUN);
+      component.executing.set(true);
+      expect(component.canContinueFromStep3()).toBe(false);
+    });
+
+    it('is false when daemon-reported in-flight (AC-16)', () => {
+      service.lastDryRun.set(DRY_RUN);
+      service.isRunInFlight.set(true);
+      expect(component.canContinueFromStep3()).toBe(false);
+    });
+  });
+
+  describe('in-flight handling (AC-16)', () => {
+    it('dry-run and execute gates both lock when isRunInFlight is true', () => {
+      service.lastDryRun.set(DRY_RUN);
+      service.isRunInFlight.set(true);
+      expect(component.canContinueFromStep1()).toBe(false);
+      expect(component.canContinueFromStep3()).toBe(false);
+    });
+
+    it('dry-run gate stays locked when local dryRunning() is true', () => {
+      service.lastDryRun.set(DRY_RUN);
+      component.dryRunning.set(true);
+      expect(component.canContinueFromStep2()).toBe(false);
+    });
+  });
+
+  describe('Status Strip render (spec §2.1)', () => {
+    it('keepN renders the configured max_per_thread', () => {
+      service.status.set({
+        ...STATUS,
+        config: {
+          checkpoint_max_per_thread: 6,
+          cleanup_interval_hours: 6,
+          blob_prune_dry_run_env_default: '1',
+          blob_prune_destructive_armed: false,
+        },
+      });
+      expect(component.statusStripKeepN()).toBe('6');
+    });
+
+    it('keepN renders "—" when status is missing', () => {
+      service.status.set(null);
+      expect(component.statusStripKeepN()).toBe('—');
+    });
+
+    it('keepN renders "—" when maintenance is disabled', () => {
+      service.lastError.set({ error: 'maintenance_disabled', message: 'off' });
+      service.status.set({
+        ...STATUS,
+        config: {
+          checkpoint_max_per_thread: 6,
+          cleanup_interval_hours: 6,
+          blob_prune_dry_run_env_default: '1',
+          blob_prune_destructive_armed: false,
+        },
+      });
+      expect(component.statusStripKeepN()).toBe('—');
+    });
+
+    it('lastRun renders "Never run" when status().last_run is null', () => {
+      service.status.set({ ...STATUS, last_run: null });
+      expect(component.statusStripLastRun()).toBe('Never run');
+    });
+
+    it('lastRun renders "{status} · {bytes} · {time}" when a row exists', () => {
+      service.status.set({
+        ...STATUS,
+        last_run: {
+          run_id: 'ckpt-1',
+          kind: 'manual_execute',
+          started_at: '2026-10-01T02:14:00.000Z',
+          completed_at: '2026-10-01T02:21:00.000Z',
+          status: 'succeeded',
+          summary: {
+            checkpoint_rows: { scanned_pairs: 12, deleted: 4, excess_pairs: 4 },
+            writes: { deleted: 0 },
+            blobs: {
+              scanned_pairs: 12,
+              would_delete_count: 0,
+              would_free_bytes: 0,
+              would_delete: 0,
+              bytes: 0,
+              destructive: true,
+              deleted: 4,
+              bytes_freed: 268435456,
+              skipped: [],
+              skipped_truncated: false,
+            },
+            duration_ms: 192000,
+          },
+        },
+      });
+      const out = component.statusStripLastRun();
+      expect(out).toContain('succeeded');
+      expect(out).toContain('256 MB');
+    });
+
+    it('dryRunFresh renders "Stale — run dry-check" when no dry-run', () => {
+      service.lastDryRun.set(null);
+      expect(component.statusStripDryRunFresh()).toBe('Stale — run dry-check');
+    });
+
+    it('dryRunFresh renders "{scanned} pairs · expires in {time}" when present', () => {
+      service.lastDryRun.set(DRY_RUN);
+      const out = component.statusStripDryRunFresh();
+      expect(out).toMatch(/^\d+ pairs · expires in /);
     });
   });
 });

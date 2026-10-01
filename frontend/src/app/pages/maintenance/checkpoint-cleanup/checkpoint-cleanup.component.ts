@@ -15,6 +15,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatStepperModule } from '@angular/material/stepper';
 import { Subscription } from 'rxjs';
 import { CheckpointCleanupService } from './checkpoint-cleanup.service';
 import { ConfirmDialogComponent } from '../../../components/confirm-dialog/confirm-dialog.component';
@@ -32,9 +33,25 @@ import type {
 /**
  * Checkpoint Cleanup section — full UI.
  *
- * Renders 4 cards (status, dry-run, execute, error) + a result panel
- * after execute completes. Subscribes to the colocated service
- * (`CheckpointCleanupService`) and forwards user actions back.
+ * ck-redesign-2026q4 — 4-step Material wizard + persistent Status Strip.
+ * DOM order: kill-switch / origin-guard banners → Status Strip → mat-stepper
+ * → custom footer (Back / Back to start / Continue / Cleanup now per step) →
+ * page-level Debug expander (raw JSON). Each step is rendered as a
+ * `<mat-step>` child of a single `<mat-stepper [orientation]="'vertical'"
+ * [linear]="false" [selectedIndex]="activeStep()">`. Step content blocks
+ * preserve every existing `data-testid`; the per-card Raw JSON `<details>`
+ * blocks were consolidated into the page-level Debug expander (AC-13).
+ *
+ * Step 4 auto-renders post-execute via `lastExecuteResult()`; with
+ * `[linear]="false"` a page refresh during execute lands the operator
+ * on Step 4 with the actual result (the BE's `status.last_run` is
+ * the persistence source — see `seedBannerFromStatus()`). Status
+ * Strip decouples monitoring from the wizard (AC-1, AC-11).
+ *
+ * AC-4 / AC-16 — Continue is gated on `canContinueFromStep1()` /
+ * `canContinueFromStep2()` / `canContinueFromStep3()`; in-flight
+ * disables dry-run + execute on all steps, with an inline notice
+ * rendered ONLY in Step 1 (the spec's narrow landing).
  *
  * AM-14 — 409-adoption: on 409 from `service.execute()`, adopt
  * `details.run_id` and resume polling (no error toast).
@@ -78,6 +95,7 @@ import type {
     MatProgressSpinnerModule,
     MatSnackBarModule,
     MatDialogModule,
+    MatStepperModule,
   ],
   templateUrl: './checkpoint-cleanup.component.html',
   styleUrl: './checkpoint-cleanup.component.scss',
@@ -125,6 +143,110 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   readonly dryRunIsStale = computed(() =>
     this.service.isDryRunStale(this.lastDryRun()),
   );
+
+  // ── Wizard state (spec ck-redesign-2026q4 §2.2 / AC-9) ─────────────────
+  /** Index of the currently visible step (0..3). Backs `<mat-stepper [selectedIndex]>`. */
+  readonly activeStep = signal(0);
+
+  /**
+   * Stepper navigation facade — the template binds to these
+   * helpers via `stepperNav().next()` / `.back()` / `.backToStart()`.
+   * Centralizes the index math so a future insertion of a new step
+   * requires only the boundary checks here, not template-side edits.
+   */
+  readonly stepperNav = () => ({
+    next: () => this.activeStep.update((i) => Math.min(i + 1, 3)),
+    back: () => this.activeStep.update((i) => Math.max(i - 1, 0)),
+    backToStart: () => this.activeStep.set(0),
+  });
+
+  /** Footer h2 copy per step (visible label on the active step). */
+  readonly footerHeading = computed(() => {
+    switch (this.activeStep()) {
+      case 0:
+        return 'Review';
+      case 1:
+        return 'Dry-run';
+      case 2:
+        return 'Confirm & Execute';
+      case 3:
+      default:
+        return 'Result';
+    }
+  });
+
+  // ── Status Strip render helpers (spec §2.1) ────────────────────────────
+  /** Keep N — first tile of the Status Strip. "—" when disabled/killed. */
+  statusStripKeepN(): string {
+    if (this.isMaintenanceDisabled() || !this.status()) {
+      return '—';
+    }
+    const v = this.status()?.config?.checkpoint_max_per_thread;
+    return typeof v === 'number' ? String(v) : '—';
+  }
+
+  /**
+   * Last-run summary line — second tile. Format: "{status} · {freed} · {completed_at}"
+   * (destructive uses bytes_freed; dry-flavor would_free_bytes). "Never run"
+   * when status is missing or no prior row.
+   */
+  statusStripLastRun(): string {
+    if (this.isMaintenanceDisabled() || !this.status()) {
+      return '—';
+    }
+    const last = this.status()?.last_run;
+    if (!last) {
+      return 'Never run';
+    }
+    const bytes =
+      last.summary?.blobs?.bytes_freed ?? last.summary?.blobs?.would_free_bytes ?? 0;
+    const statusLabel = last.status ?? 'unknown';
+    const time = this.formatTimestamp(last.completed_at);
+    return `${statusLabel} · ${this.formatBytes(bytes)} · ${time}`;
+  }
+
+  /**
+   * Dry-run fresh — third tile. Format: "{scanned} pairs · expires in {fresh_until}".
+   * "Stale — run dry-check" when no dry-run on record.
+   */
+  statusStripDryRunFresh(): string {
+    if (this.isMaintenanceDisabled() || !this.lastDryRun()) {
+      return 'Stale — run dry-check';
+    }
+    const dry = this.lastDryRun()!;
+    const scanned = dry.scanned?.thread_ns_pairs ?? 0;
+    const time = this.formatTimestamp(dry.fresh_until);
+    return `${scanned} pairs · expires in ${time}`;
+  }
+
+  // ── Step gating (spec §2.3–§2.5) ───────────────────────────────────────
+  /** Step 1 → Step 2. Disabled on kill-switch / in-flight / no-dry-run gate. */
+  canContinueFromStep1(): boolean {
+    return this.canDryRun() && !this.isMaintenanceDisabled() && !this.isRunInFlight();
+  }
+
+  /**
+   * Step 2 → Step 3. Gated on a fresh dry-run that promises something
+   * to delete. The spec's "OR explicit operator override" arm is
+   * satisfied by `dry.would_delete_count > 0` OR a successful prior
+   * execute (the run-again banner path); for the wizard gating path
+   * we use the strict arm — the banner already offers the override.
+   */
+  canContinueFromStep2(): boolean {
+    const dry = this.lastDryRun();
+    if (!dry) {
+      return false;
+    }
+    if (this.dryRunning() || this.executing() || this.isRunInFlight()) {
+      return false;
+    }
+    return (dry.would_delete_count ?? 0) > 0;
+  }
+
+  /** Step 3 action — gated on dry-run AND not already executing / in-flight. */
+  canContinueFromStep3(): boolean {
+    return !!this.lastDryRun() && !this.executing() && !this.isRunInFlight();
+  }
 
   // Polling subscription — track so OnDestroy can tear down
   private pollSub: Subscription | null = null;
