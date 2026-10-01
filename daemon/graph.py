@@ -7179,6 +7179,22 @@ def create_attestation_gate_node(
         instead of the stale checkpointed ones (reading the stale
         withhold budget would loud-terminal the fresh episode on its
         very first deny — a false positive against the new arc).
+
+        Failure posture: NO silent fallback. The dict path is
+        infallible (dict copy + item assignment). The object path
+        (duck-typed state, exotic test doubles) can raise on
+        copy/setattr — and a silent ``return state_local`` there
+        would hand the body STALE checkpoint counters, which is
+        exactly the dead-bounds-post-revival defect class this
+        function exists to prevent (round-2 tidier: the previous
+        ``except Exception: return state_local`` was that bug class
+        wearing a fail-open costume). Any failure now RAISES out of
+        the wrapper into LangGraph's node execution — a loud turn
+        failure, not a silently-degraded bound. Production state is
+        always a plain dict (LangGraph passes the channel-values
+        dict), so the raising path is test-double-only in practice;
+        any test that relied on the swallow needs a plain-dict
+        fixture.
         """
         if isinstance(state_local, dict):
             rebuilt = dict(state_local)
@@ -7186,19 +7202,13 @@ def create_attestation_gate_node(
                 rebuilt[key] = default
             return rebuilt
         # Duck-typed / object state (test embeddings): shallow-copy +
-        # setattr, fail-open to the original state (the payload-side
-        # merge below still stamps the consumption marker, so the
-        # worst case is the pre-2026-10-01 read-stale behaviour, not
-        # an error).
-        try:
-            import copy as _copy
+        # setattr. No catch — see the failure posture above.
+        import copy as _copy
 
-            rebuilt = _copy.copy(state_local)
-            for key, default in _FRESH_EPISODE_RESET_CHANNELS:
-                setattr(rebuilt, key, default)
-            return rebuilt
-        except Exception:  # noqa: BLE001 — fail-open, never error the gate
-            return state_local
+        rebuilt = _copy.copy(state_local)
+        for key, default in _FRESH_EPISODE_RESET_CHANNELS:
+            setattr(rebuilt, key, default)
+        return rebuilt
 
     async def _attestation_gate_node_with_reset(
         state: Any, config: Optional[RunnableConfig] = None
