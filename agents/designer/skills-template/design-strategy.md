@@ -31,7 +31,7 @@ Validate the brief BEFORE designing — a spec built on a soft brief fails at co
 - **Missing field on `new`** → ask before guessing. Never invent silent defaults.
 - **`re-conformance`** adds `pinned_spec_sha`, sent verbatim from the parent's frozen reference — treat it as ground truth, never re-derive it. The brief is the spec + parent diff.
 - **`amend`** → confirm what changed and whether it warrants a new spec SHA or an amendment file.
-- **Vague or unverifiable ACs** → return `NEEDS MORE INFO` listing each gap concretely. Every accepted AC is observable, testable, and mapped to a `Validation:` block (`Validation: pack <name>; static: grep <pattern>`) so coder and tester can pick it up directly.
+- **Vague or unverifiable ACs** → return `NEEDS MORE INFO` listing each gap concretely. Every accepted AC is observable, testable, and mapped to a `Validation:` block (`Validation: pack <name>; static: grep <pattern>`) so developer and tester can pick it up directly.
 
 ---
 
@@ -62,7 +62,7 @@ Open a fresh `design-spec.md` from the canonical template. Front-matter carries 
 
 ## Conformance Review (against pinned_spec_sha)
 
-Runs after the coder reports `implemented`. **Every verdict cites the `pinned_spec_sha` it was checked against — a verdict without the SHA is void.**
+Runs after the developer reports `implemented`. **Every verdict cites the `pinned_spec_sha` it was checked against — a verdict without the SHA is void.**
 
 1. **Scope** — read the diff (`commit_sha`, `pages_changed`, `blast_radius`) and the in-scope ACs. Blast radius sets the review boundary.
 2. **Inspect** — code reading (components, templates, tokens) + optional vision input (substrate path → `explain_image` text-out, or direct base64 dispatch).
@@ -87,7 +87,7 @@ Triggered when a settled change must be re-checked against a previously pinned s
 1. **Resolve the reference** — take `pinned_spec_sha` verbatim from the brief. Do NOT read working-tree spec state or recompute a SHA; the pinned SHA is the only ground truth.
 2. **Re-derive the change set** — fresh diff since the last verdict, scoped to the drifted surfaces the trigger names.
 3. **Re-run the conformance review** — same procedure, same verdict grammar, citing the SAME `pinned_spec_sha`; reset `conformance_iter` for the new cycle.
-4. **Route the verdict** — PASS → close and mirror state to KV; FAIL within budget → focused amendment to coder; budget exhausted → escalate via `escalation_path` with remaining diffs. **Never re-pin a SHA mid-loop to turn a FAIL into a PASS.**
+4. **Route the verdict** — PASS → close and mirror state to KV; FAIL within budget → focused amendment to developer; budget exhausted → escalate via `escalation_path` with remaining diffs. **Never re-pin a SHA mid-loop to turn a FAIL into a PASS.**
 
 ---
 

@@ -71,6 +71,80 @@ Read phase plan → Extract tasks → Plan opencode sessions → Execute batches
 
 ---
 
+## 🎨 Implementing Designer-Sourced Tasks
+
+When Leader spawns me on a designer-sourced brief (UI/UX work that has already gone through the designer's spec → implement flow), the contract is different from a plain phase plan — I implement against a frozen design spec, not against Leader's prose.
+
+### Step 1: Receive the Brief
+
+The brief carries the designer's intake contract fields:
+
+- `task_id` — handle for the designer's shared KV state
+- `phase` — `new | amend | re-conformance`
+- `files` — in-scope paths or page list
+- `notes` — architectural context, prior decisions, ACs from the parent plan
+- `plan_ref` — parent planning doc for the feature
+- `conventions` — project conventions that apply
+- `pinned_spec_sha` — **only on `re-conformance`**, sent verbatim from the parent's frozen reference; treat it as ground truth
+- `escalation_path` — where diffs go when the conformance budget exhausts
+
+If a required field is missing on `new` → ask Leader before guessing. **Never invent silent defaults.**
+
+### Step 2: Verify the Spec is Ready to Implement
+
+**Before implementing anything**, verify the `design-spec.md` is actually approved and the SHA matches. Lifecycle: the designer sets `pinned_spec_sha` exactly once, at `status: approved`; after that the spec is immutable.
+
+1. **Locate the spec** at the canonical artifact path the brief resolves to (the canonical home is `.agents/shared/planning/{feature}/design/design-spec.md`).
+2. **Read the front-matter** — confirm `status: approved`.
+3. **Verify the SHA** — if the brief carried `pinned_spec_sha`, confirm it matches the spec's `pinned_spec_sha` field (or the git SHA on the spec file). On `re-conformance` the leader passes the SHA verbatim; treat it as ground truth.
+4. **Inspect the spec body** — note the in-scope component sections, the AC IDs, and the pack-mapped `Validation:` lines.
+
+**On any mismatch — status not approved, SHA mismatch, spec file missing, required field missing → report back to Leader.** Never guess, never proceed against an unverified spec, never re-derive a SHA from working-tree state. The spec is the contract of record; the brief is the cover sheet.
+
+### Step 3: Honor the Handoff Fields
+
+The designer's brief carries fields that scope my implementation:
+
+- `token_change_set` — the design tokens this task is allowed to add or modify. Do not touch other tokens.
+- `blast_radius` — the surfaces (pages, components, routes) in scope for review. Stay within it.
+- `do_not_touch` — files, paths, or behaviors explicitly out of scope. Never edit them; if I genuinely need to, escalate back to Leader.
+
+If any of these are missing on `new` → ask Leader. If they conflict with each other (e.g., `blast_radius` excludes a file my implementation must touch) → escalate. Do not improvise around a handoff field.
+
+### Step 4: Implement Against the Pack-Mapped ACs
+
+The spec body has acceptance criteria with pack-mapped Validation blocks (e.g. `Validation: pack frontend_playwright_sweep_a; static: grep <pattern>`). Each AC is my acceptance test.
+
+- Use the canonical artifact paths directly: the spec at `.agents/shared/planning/{feature}/design/design-spec.md`, mockups at `.agents/shared/planning/{feature}/design/mockups/`, tokens at `frontend/design-tokens/`. Do not depend on prose relay of these paths from Leader — the spec carries the truth.
+- Implement to the spec body, not to the prose brief. The brief is the cover sheet; the spec is the contract of record.
+- When spawning opencode sessions, point each session at the in-scope AC list from the spec body so each session picks up its `Validation:` line directly. This is how the designer and conformance review agents will find the work later.
+
+### Step 5: Cosmetic-Skip Awareness
+
+Leader may route trivial cosmetic-only edits straight to me (no designer involvement) — a single-line tweak, no layout shift, no new tokens, no a11y implication, no spec change. If the brief is genuinely cosmetic, proceed with the standard implementation flow against the prose brief.
+
+**If, mid-implementation, I discover the task is non-trivial UI-wise** — layout shift is needed, new tokens are required, an a11y implication surfaces, or a spec change appears necessary — **stop and flag back to Leader.** The designer's value is in spec authorship and conformance review; do not improvise. Flag the spec gap and let Leader re-engage the designer with a fresh brief (or an amendment to the existing spec).
+
+### Step 6: Report Back the Edge-Contract Fields
+
+On completion, report to Leader (and back to the designer via Leader) the edge-contract fields the conformance loop expects:
+
+- `commit_sha` — the git commit that landed the implementation
+- `diff_stat` — files changed, lines added/removed
+- `pages_changed` — the routed pages touched (for the designer's `blast_radius` vs reality check)
+- `conformance_iter` — the current iteration count (start at 1; the conformance loop may bounce me back)
+- `capture paths` — any image substrate paths I produced or referenced during implementation (for the designer's vision-input channel)
+
+The follow-up protocol does not change — the standard implementation review + commit cycle still applies. The difference is the **what** (spec-driven ACs, not Leader's prose) and the **report shape** (edge-contract fields).
+
+### Step 7: Re-Conformance Cycles
+
+On re-conformance (a follow-up cycle after a FAIL verdict), Leader passes `pinned_spec_sha` verbatim. **Do not recompute or re-derive the SHA** — the leader's reference is ground truth. Re-implement only against the diff since the last verdict (Leader passes that, or it lives in the designer's `design-review.md` amendment). Re-run the same AC + `Validation:` lines against the new diff.
+
+If I keep failing the same conformance loop, the issue is not more code — escalate via `escalation_path` to Leader for re-spec (new SHA) or re-scoping, not more iterations on the same SHA.
+
+---
+
 ## Task Processing
 
 1. **Verify Project Context** — Use `project_get` or `project_search` to confirm correct project

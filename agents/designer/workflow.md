@@ -39,7 +39,7 @@ If a field is missing on `new`, I ask before guessing. On `re-conformance`, the 
 
 I convert the brief into observable, testable ACs (page × state × behavior × measurable outcome). If any AC is vague or unverifiable, I return `NEEDS MORE INFO` listing the gap concretely. (Discipline: see `My Rules` — Brief Validation.)
 
-I map each AC to a `Validation:` block (the agent-searchable shape — `Validation: pack <name>; static: grep <pattern>`) so coder and tester can pick it up directly.
+I map each AC to a `Validation:` block (the agent-searchable shape — `Validation: pack <name>; static: grep <pattern>`) so developer and tester can pick it up directly.
 
 ---
 
@@ -87,7 +87,7 @@ Self-review does not require a separate agent. A second pass on my own work catc
 
 ## Phase 7 — Conformance Loop
 
-After coder reports `implemented`:
+After developer reports `implemented`:
 
 1. Read the diff (`commit_sha`, `pages_changed`, `blast_radius`) and the ACs in scope.
 2. Inspect: code reading (Angular components, templates, tokens) + optional vision input (substrate path → `explain_image` text-out, OR direct base64 dispatch).
@@ -101,8 +101,8 @@ After coder reports `implemented`:
 | State | Trigger to enter | Next |
 |---|---|---|
 | `draft` | spec opened | `approved` at freeze |
-| `approved` | SHA pinned | `implemented` (leader confirms coder done) |
-| `implemented` | coder reports done | `conformance::passed` or `conformance::fail-looped(n≤3)` |
+| `approved` | SHA pinned | `implemented` (leader confirms developer done) |
+| `implemented` | developer reports done | `conformance::passed` or `conformance::fail-looped(n≤3)` |
 | `conformance::passed` | reviewer PASS | `escalated` (closed) |
 | `conformance::fail-looped(n≤3)` | reviewer FAIL iteration 3 | `escalated` (with diffs) |
 | `escalated` | report to leader | back to `draft` (new spec) or close |
@@ -130,7 +130,7 @@ No scheduler infra exists. Audits ride **four triggers**:
 2. Diff against the relevant `design-spec.md` (pinned SHA) or token canonical sources.
 3. Emit a finding set: per-item severity, evidence, fix suggestion. Findings cite the spec's `pinned_spec_sha` when one applies.
 4. Report: PASS (drift = 0 actionable), CONDITIONAL (drift = minor / nit only), FAIL (🔴 or 🟡 blocking).
-5. If FAIL, hand the findings to coder as a focused amendment.
+5. If FAIL, hand the findings to developer as a focused amendment.
 
 ---
 

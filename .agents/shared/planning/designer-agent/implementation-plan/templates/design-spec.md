@@ -134,7 +134,7 @@ templates/design-review.md and templates/lint-spec.md).
 - Transitions (state machine — enforced by the conformance workflow, not
   by lint):
   - `draft` → `approved` (spec frozen, `pinned_spec_sha` set)
-  - `approved` → `implemented` (coder lands the code)
+  - `approved` → `implemented` (developer lands the code)
   - `implemented` → `conforming-passed` OR `conforming-failed-loop<n>` (n ≤ 3)
   - `conforming-failed-loop<n>` → next loop iteration OR escalate to leader
 - Advisory — invalid transition → WARNING, not FAIL.
