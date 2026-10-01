@@ -1946,6 +1946,125 @@ class TestRunDenyCap:
             in log_text
         )
 
+    def test_composed_node_then_router_across_cap(
+        self, monkeypatch, caplog
+    ):
+        """Composed both-layer regression (round-3 item 2): a REAL
+        deny sequence driven through the gate NODE with the ROUTER
+        invoked on each merged state — exactly the production
+        ordering (node computes decision + writes route hint +
+        counters → checkpoint merge → conditional-edge router
+        reads the merged state).
+
+        Pins, over one sequence crossing the cap (cap=3):
+        * evals 1-3: node denies (route 'agent', count climbs
+          1→2→3) and the ROUTER routes 'agent' every time —
+          including at exactly the cap (round-2 fix: no preemption);
+        * eval 4: the NODE's loud terminal fires (run_cap_exit
+          token, escalation write, counters reset) and the router
+          — reading route=None — ENDs without its token;
+        * double-fault epilogue PAST cap: with the node's
+          substitution skipped (count corrupted to cap+1 on an
+          'agent' route), the ROUTER backstop fires (END + ERROR
+          token).
+
+        The two isolation tests
+        (test_router_does_not_fire_at_cap /
+        test_router_backstop_forces_end_past_cap) pin the router
+        predicate on hand-built dicts; THIS test pins the composed
+        ordering over the real node."""
+        from daemon.graph import create_attestation_gate_node as _factory
+
+        monkeypatch.setattr(
+            judge_mod, "_invoke_judge_llm", _judge_never_called
+        )
+        # One namespace guarantees the setitem below governs BOTH
+        # layers (node closure + router read the same module dict).
+        assert (
+            should_end_attestation.__globals__
+            is _factory.__globals__
+        )
+        monkeypatch.setitem(
+            _factory.__globals__, "ATTESTATION_RUN_DENY_CAP", 3
+        )
+
+        node, _manager, ledger = _make_gate_node(
+            instance_id="composed-cap-it",
+            denied_count_getter=lambda: 3,
+        )
+        state = _delegated_without_attest_messages("Holding.")
+        # Non-degenerate AND distinct per pass — the content guards
+        # (P2/P3) stay out; b3 is the only operative bound.
+        router_verdicts: list = []
+        deny_routes: list = []
+        with caplog.at_level("INFO", logger="daemon.graph"):
+            for pass_no in range(1, 5):
+                result = asyncio.run(
+                    node(
+                        state,
+                        config={
+                            "configurable": {
+                                "thread_id": "composed-cap-it"
+                            }
+                        },
+                    )
+                )
+                # Simulate the node-boundary checkpoint merge.
+                for key, value in result.items():
+                    if key != "messages":
+                        state[key] = value
+                state["messages"].extend(result.get("messages", []))
+                # The conditional edge: router reads the MERGED state.
+                router_verdicts.append(should_end_attestation(state))
+                if result.get("attestation_route") != "agent":
+                    break
+                deny_routes.append(result["attestation_route"])
+                # The leader's next turn: a fresh (different,
+                # non-degenerate) hold reply.
+                state["messages"].append(
+                    AIMessage(
+                        content=(
+                            "Status is unchanged for now. Holding "
+                            f"steady — pass {pass_no}."
+                        )
+                    )
+                )
+
+        # Evals 1-3 denied + routed 'agent'; the router verdict at
+        # exactly the cap (3) was STILL 'agent' — node-first holds.
+        assert deny_routes == ["agent", "agent", "agent"]
+        assert router_verdicts[:3] == ["agent", "agent", "agent"]
+        # Eval 4: the NODE's loud terminal owns the exit…
+        assert len(router_verdicts) == 4
+        assert router_verdicts[3] is GRAPH_END
+        log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "event=leader_completion_gate_run_cap_exit" in log_text
+        ledger.set_escalated_and_reset.assert_called_once()
+        # …and the router token stayed silent across the whole run.
+        assert (
+            "event=leader_completion_gate_run_cap_router_backstop"
+            not in log_text
+        )
+
+        # Double-fault epilogue — PAST cap: the node's at-cap
+        # substitution skipped (count corrupted to cap+1 on an
+        # 'agent' route). The router backstop now fires: bounded
+        # END + the loud ERROR token.
+        corrupted = dict(state)
+        corrupted["attestation_route"] = "agent"
+        corrupted[ATTESTATION_RUN_DENY_COUNT_KEY] = (
+            ATTESTATION_RUN_DENY_CAP
+        )  # the pre-write cap value the node should have consumed
+        corrupted[ATTESTATION_RUN_DENY_COUNT_KEY] += 1  # skipped → past cap
+        with caplog.at_level("ERROR", logger="daemon.graph"):
+            verdict = should_end_attestation(corrupted)
+        assert verdict is GRAPH_END
+        log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert (
+            "event=leader_completion_gate_run_cap_router_backstop"
+            in log_text
+        )
+
     def test_router_under_cap_routes_normally(self):
         """Below the cap the router is byte-identical to the legacy
         behavior: hint 'agent' routes to the agent, absent hint
