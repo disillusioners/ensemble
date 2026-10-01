@@ -157,7 +157,7 @@ All three are thin wrappers over the shared `daemon.services.scheduling_service`
 - (+) Existing `/api/schedules` routes unchanged; pause/resume reuse the proven stop/start routes.
 - (+) Service seam is the single source of truth for create/cancel/get semantics; tools and REST cannot drift.
 - (+) 503 gate text is literal-identical to existing sites (audit at phase-3 §Task 2 + §Risk 7).
-- (-) Operators must understand the distinction between `DELETE /api/schedules/{id}` (cancel, history preserved) and `DELETE /api/sources/{id}` (purge, history destroyed). Phase-3 OPEN DECISION recommends extending `_reject_scheduler_lifecycle` at `sources.py:44-66` to also cover DELETE — flagged for follow-up.
+- (-) Operators must understand the distinction between `DELETE /api/schedules/{id}` (cancel, history preserved) and `DELETE /api/sources/{id}` (purge, history destroyed). Phase-3 §Task 4.2 closes this hazard at the HTTP boundary (ADOPTED per architecture §2 OD-5; placement corrected to AFTER the get-or-404 at `sources.py:382`/BEFORE `:394`).
 
 ---
 
@@ -320,9 +320,9 @@ Existing callers that pass everything positionally BEFORE `metadata` are unaffec
 |---|----------|--------|-------|----------------|
 | OD-1 | **Defense-in-depth migration on `schedule_executions`** (phase-1 §Task 6) — `planned_run_at` column + unique partial index on `(schedule_id, planned_run_at)`. Task 3 alone closes D4; Task 6 is belt-and-suspenders. | **DROPPED — permanently, not a fast-follow** (architecture §2 OD-1 ratified). The only failure mode the migration would close is structurally unreachable (one adapter = one config row = one `run_at`). Phase-1 §Task 6 is marked `[DELETED]` with a historical-traceability note; "OPTIONAL planned_run_at column" clause is scrubbed from plan-overview.md. | Architecture (ratified) | phase-1 |
 | OD-2 | **DST semantics** (phase-1 §Task 8.1) — croniter-default (skip-the-gap, first-occurrence-on-fall-back) for cron path; `daemon.utils.tz.anchor_local_to_utc` (fold=0, gap-shift+warning) for one-shot path. Architecture §4.2. | **DEFAULT-TO-PHASE-1-DOC + anchor_local_to_utc helper**. Phase-5 §Task 1.2 parameterizes over BOTH paths; the croniter-default semantic is pinned and tested. | Architecture (ratified) | phase-1, phase-5 |
-| OD-3 | **`task_schedule` agent existence check** (phase-2 §OPEN DECISION 3) — reject at create time if `agent_id` resolves to a non-existent agent? | **FAIL-FAST at create time** (architecture §2 OD-3 ratified). `agent_registry.exists(payload.agent)` in `create_schedule` (phase-2 §Task 6.4). Catches typos before stale `source_configs` row exists. | Architecture (ratified) | phase-2 |
+| OD-3 | **`task_schedule` agent existence check** (ratified by architecture §2 OD-3) — reject at create time if `agent_id` resolves to a non-existent agent? | **FAIL-FAST at create time** (architecture §2 OD-3 ratified). `agent_registry.exists(payload.agent)` in `create_schedule` (phase-2 §Task 6.4). Catches typos before stale `source_configs` row exists. | Architecture (ratified) | phase-2 |
 | OD-4 | **Suppress tz-fallback warning for "now-ish" one-shots?** | **KEEP the warning — never suppress** (architecture §2 OD-4 ratified). Relative times anchor to daemon clock; warning is the only signal of mis-detected tz. Fleet operators kill wholesale via `ENSEMBLE_SCHEDULING_DEFAULT_TZ`. | Architecture (ratified) | phase-2 |
-| OD-5 | **Cancel-confusion guard** (ADR-012) — extend `_reject_scheduler_lifecycle` to cover DELETE. | **ADOPT NOW in phase-3** (architecture §8 item 16 ratified). Placement corrected to AFTER the get-or-404 at `sources.py:382` and BEFORE `:394`, so unknown ids still 404 (NOT 400). Response code `SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED`. ~3 lines + one test. | Architecture (ratified) | phase-3 |
+| OD-5 | **Cancel-confusion guard** (ADR-012) — extend `_reject_scheduler_lifecycle` to cover DELETE. | **ADOPT NOW in phase-3** (architecture §8 item 15 ratified; §2 OD-5). Placement corrected to AFTER the get-or-404 at `sources.py:382` and BEFORE `:394`, so unknown ids still 404 (NOT 400). Response code `SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED`. ~3 lines + one test. | Architecture (ratified) | phase-3 |
 | OD-6 | **Phase 2 + Phase 4 merge gating** — drift test is bidirectional. | **ONE PR** (architecture §8 item 16 ratified). Phase-4 is NOT-MERGEABLE until phase-2 lands. If leader/jober registration is deferred, parameterize registration tests over only the agents actually registered — do NOT xfail. Single green CI gate proves ADR-009's static posture. | Architecture (ratified) | phase-2, phase-4 |
 | OD-7 | **Phase-5 xfail/skip parking** — tests that depend on phase-1/2/3 semantics. | **REMOVED — pack is the merge gate** (architecture §8 item 16 ratified). All architecture-pinned semantics (croniter-default, anchor_local_to_utc fold=0/gap-shift, key from `self._run_at`, gate to `SCHEDULE_TYPE_ONE_TIME`) are asserted directly; no `pytest.skip`, no `@pytest.mark.xfail`. The acceptance pack (`tests/packs/scheduled_tasks_acceptance.sh`) is the CI merge gate. | Architecture (ratified) | phase-5 |
 | OD-8 | **5-second retry loop removal** (`scheduler.py:447-450/:697-709`) — separate decision; phase-1 §Task 3.3 note documents the loop is preserved. | **DEFERRED**. Loop-removal depends on host tolerance for repeated attempts of a failing one-shot. Idempotency-key closes the duplicate-work consequence; log-spam remains. **NEW (architecture §1.5):** `tests/job_queue/test_idempotent_enqueue_atomic.py:365` already uses `source="scheduler"` — fixture audit needed so pre-set keys don't trip stale assertions. | Future commission | post-merge |
@@ -345,18 +345,18 @@ async def create_schedule(
     ...
 ```
 
-Same pattern for `update_schedule(payload: ScheduleUpdatePayload | dict, ...)`. Tools always pass a Pydantic model (built from tool args via `ScheduleCreatePayload(**kwargs)`); phase-3 REST passes `payload.model_dump()` (a dict); the service validates at entry. One validated contract downstream of the boundary.
+Same pattern for `update_schedule(payload: ScheduleUpdatePayload | dict, ...)`. Tools always pass a Pydantic model (built from tool args via `ScheduleCreatePayload(**kwargs)`); phase-3 REST passes a fully-typed `ScheduleCreatePayload` (built by `_schedule_create_to_payload(req)` in `daemon/routers/schedules.py`, per F1 rewrite); the service's `model_validate` bridge covers any future dict-accept callers. One validated contract downstream of the boundary.
 
 **Rationale:**
 - Architecture §2 OD-2 (closed): dict-accept wins on Maintainability+Risk scoring (3.05 dict-only vs 4.30 weighted) and removes the phase-3 vs phase-2 contract drift risk that phase-2 §Risk 1 named as load-bearing.
 - One line (`isinstance(payload, dict) → model_validate`) covers both callers without changing either surface.
 - The Pydantic models live in `daemon.services.scheduling_service` as the canonical home (phase-2 §Task 1.1); tools and REST both consume the same `ScheduleCreatePayload` fields by name.
-- Phase-3 router passes `payload.model_dump()` (a dict, per the existing handler skeleton at phase-3 §Task 2.1); the dict-accept pattern keeps phase-3's handler concise.
+- **F1 REWRITE:** Phase-3 router builds a fully-typed `ScheduleCreatePayload` via `_schedule_create_to_payload(req)` (Task 1.2/1.7) and passes that — NOT `req.model_dump()` (which would fail `model_validate` on `name/agent_id/local_time+run_at` mismatching `label/agent/when`). The dict-accept signature is retained for non-REST callers (tools, tests, future internal callers) that may legitimately want to pass a dict.
 
 **Consequences:**
 - (+) One validated contract downstream of the boundary — no drift between tools and REST.
 - (+) Phase-2 risk #1 (contract name drift) closes — phase-2 pins the names; phase-3 cannot redefine them.
-- (+) Phase-3 router stays thin: handler delegates to `manager.scheduling_service.create_schedule(payload.model_dump())` without re-validation.
+- (+) Phase-3 router stays thin: handler builds typed payload via `_schedule_create_to_payload(req)` and delegates to `manager.scheduling_service.create_schedule(payload)`.
 - (-) One extra branch at function entry (`isinstance(payload, dict)`) — negligible.
 - (-) `ScheduleCreatePayload` fields must stay aligned with what the tools send (canonical field names: `timezone`, `cron_expression`, `weekday=Sun=0`). Any drift breaks the `model_validate` bridge.
 

@@ -261,7 +261,7 @@ The "OPTIONAL planned_run_at column" clause is also removed from plan-overview.m
 
 > **OPEN DECISION 1:** ~~Task 6 (defense-in-depth migration on `schedule_executions`)~~ — **DROPPED per architecture §2 OD-1 (ratified)**. Task 6 is deleted from this plan; no migration. The only failure mode the migration would close is structurally unreachable (one adapter = one config row = one `run_at`). See Task 6 [DELETED] note above.
 
-> **OPEN DECISION 2:** Task 8.1 pins croniter-default for spring-forward gap (skip the gap) and fall-back ambiguity (first occurrence / pre-DST). If product wants different semantics (e.g. fire twice on fall-back), the croniter wrapper must override — flag before phase 5 tests land.
+> **OPEN DECISION 2:** ~~DST semantics~~ — **CLOSED per architecture §2 OD-2 (ratified): DEFAULT-TO-PHASE-1-DOC**. Task 8.1 pins croniter-default for spring-forward gap (skip the gap) and fall-back ambiguity (first occurrence / pre-DST). If product later wants different semantics (e.g. fire twice on fall-back), the croniter wrapper must override — flag before phase 5 tests land.
 
 > **OPEN DECISION 3 (NEW — from architecture §4.2):** `anchor_local_to_utc(naive_local, tz)` semantics: aware→trust; fold→0 (first occurrence, matches croniter); gap→shift-forward+warning. This is the canonical one-shot anchor rule and MUST match croniter's behavior — one DST rule for the whole feature. Phase-5 gap/fold tests parameterize over BOTH paths (cron + one-shot anchor) so they can't drift. Implemented as Task 9 helper below.
 

@@ -70,9 +70,9 @@ All three handlers stay thin: validation, is_write_paused → 503 gate, an `asyn
 | # | Sub-task | Details | Key Files |
 |---|----------|---------|-----------|
 | 1.0 | **Canonical ownership** (no work — reference only) | `SourceStatus.CANCELLED = "cancelled"` is added to **BOTH** enum sites by **phase-1** (`daemon/models/source.py:8-14` and `daemon/repositories/source/models.py:20-25`). Phase-3 does NOT add it (would be a duplicate). Phase-3 only USES the value. See phase-1 §Task 7.1. | (no edit) |
-| 1.1 | Add **thin REST request body** `ScheduleCreate` (FastAPI) | DIFFERENT shape from phase-2's `ScheduleCreatePayload`; phase-3 is the HTTP surface and uses REST conventions (`source_id` + `name` as separate fields, where `name` is a human-readable display name; `source_id` is the URL-stable identifier). Fields: `source_id: str` (regex `^[a-zA-Z0-9_-]+$` 1-64 — this IS the schedule's canonical id, used as `source_configs.source_id` PRIMARY KEY on the DB row); `name: str` (1-128, human-readable display name, OPTIONAL, defaults to `source_id` if omitted); `agent_id: str`; `message: str`; `project_id: str`; `priority: int = 5`; `instance_mode: Literal["new_instance", "reuse_instance"] = "new_instance"`; `recurrence: Literal["once", "daily", "weekly", "cron"]`; **`timezone: str \| None`** (canonical name — matches phase-2); **`weekday: int \| None`** (canonical base = `0=Sun..6=Sat` per phase-2 / cron DOW); **`cron_expression: str \| None`** (canonical name — matches phase-2); `local_time: str \| None` (HH:MM for daily/weekly); `run_at: datetime \| None` (tz-aware preferred; naive → treated as local per resolved tz); `enabled: bool = True`; `autostart: bool = True`. Cross-field validation: `cron_expression` required iff `recurrence == "cron"`; `weekday` required iff `recurrence == "weekly"`; exactly one of `local_time` / `run_at` required for `once`; for `daily`/`weekly`, `local_time` required. | `daemon/models/schedule.py` |
-| 1.2 | **REST↔Service field-mapping function** `def _schedule_create_to_payload(req: ScheduleCreate) -> ScheduleCreatePayload` (NEW, in `daemon/routers/schedules.py`) | Maps REST surface to phase-2 canonical model. Body: see code below. Critical mappings: (a) `source_id` → `label` (phase-2's `ScheduleCreatePayload.label`); (b) `name` → merged into `label` ONLY if `source_id != name` (else drop `name` to avoid duplication in human-echo); (c) `agent_id` → `agent`; (d) `local_time` OR `run_at` → `when` (one of them per recurrence); (e) `timezone` → `timezone` (same name); (f) `cron_expression` → `cron_expression` (same name); (g) `weekday` → `weekday`; (h) `priority` / `project_id` / `instance_mode` → passthrough. **DEFAULTS from REST-only fields:** `source_id` is used as the phase-2 `label` (uniqueness check); `name` defaults to `source_id` if omitted. `enabled` / `autostart` are REST-only and are NOT passed to the service — they are handled by the underlying `source_repo.create_source_config(enabled=req.enabled, autostart=req.autostart)` call (Task 2.1). | `daemon/routers/schedules.py` |
-| 1.3 | **Unified uniqueness semantics — `source_id` is the canonical primary key (REST) = `label` (service)** | Phase-2's `ScheduleCreatePayload` uniqueness check (409 Conflict on duplicate `label`) is the canonical check. Phase-3 REST calls `_schedule_create_to_payload(req)` first, which translates `source_id` → `label`; then the service raises `ValueError("label already exists")` → handler maps to `409 Conflict`. **Single source of truth for uniqueness** — phase-3 does NOT add a separate `source_id`-based uniqueness check. The DB row's PRIMARY KEY is `source_configs.source_id` (`models.py:50-52`), but uniqueness is enforced semantically on the human-readable `label` per phase-2's contract; operators MUST provide a unique `source_id` (the URL-stable id) and the service uses `source_id` as the `label` for create. **Operational rule:** if a user wants a different `label` than `source_id`, they should use the tool (`task_schedule` takes `label` directly) — REST requires `source_id == label`. | (no edit — doc + Task 2.1 enforcement) |
+| 1.1 | Add **thin REST request body** `ScheduleCreate` (FastAPI) | DIFFERENT shape from phase-2's `ScheduleCreatePayload`; phase-3 is the HTTP surface and uses REST conventions (`source_id` + `name` as separate fields, where `name` is a human-readable display name; `source_id` is the URL-stable identifier). Fields: `source_id: str` (regex `^[a-zA-Z0-9_-]+$` 1-64 — this IS the schedule's canonical id, used as `source_configs.source_id` PRIMARY KEY on the DB row); `name: str` (1-128, human-readable display name, OPTIONAL, defaults to `source_id` if omitted); `agent_id: str`; `message: str`; `project_id: str`; `priority: int = 5`; `instance_mode: Literal["new_instance", "reuse_instance"] = "new_instance"`; `recurrence: Literal["once", "daily", "weekly", "cron"]`; **`timezone: str \| None`** (canonical name — matches phase-2); **`weekday: int \| None`** (canonical base = `0=Sun..6=Sat` per phase-2 / cron DOW); **`cron_expression: str \| None`** (canonical name — matches phase-2); `local_time: str \| None` (HH:MM for daily/weekly); `run_at: datetime \| None` (tz-aware preferred; naive → treated as local per resolved tz). **NO `enabled` / `autostart` fields** — schedules are always created enabled+autostart; lifecycle via `update`/pause/cancel (see `task_schedule_update` / POST `/schedules/{id}/stop|start` / DELETE `/schedules/{id}`). Cross-field validation: `cron_expression` required iff `recurrence == "cron"`; `weekday` required iff `recurrence == "weekly"`; exactly one of `local_time` / `run_at` required for `once`; for `daily`/`weekly`, `local_time` required. | `daemon/models/schedule.py` |
+| 1.2 | **REST↔Service field-mapping function** `def _schedule_create_to_payload(req: ScheduleCreate) -> ScheduleCreatePayload` (NEW, in `daemon/routers/schedules.py`) | Maps REST surface to phase-2 canonical model. Body: see code below. Critical mappings: (a) `source_id` → `label` (phase-2's `ScheduleCreatePayload.label`); (b) `name` → merged into `label` ONLY if `source_id != name` (else drop `name` to avoid duplication in human-echo); (c) `agent_id` → `agent`; (d) `local_time` OR `run_at` → `when` (one of them per recurrence); (e) `timezone` → `timezone` (same name); (f) `cron_expression` → `cron_expression` (same name); (g) `weekday` → `weekday`; (h) `priority` / `project_id` / `instance_mode` → passthrough. **REST-only fields `enabled`/`autostart` are REMOVED** (F2): schedules are always created enabled+autostart per phase-2 §Task 1.2 step (6) hardcoded `enabled=True, autostart=True`. Lifecycle control flows through `update`/pause/cancel, NOT through create. | `daemon/routers/schedules.py` |
+| 1.3 | **Unified uniqueness semantics — REST CREATE: `source_id == label`** | Phase-2's `ScheduleCreatePayload` uniqueness check (409 Conflict on duplicate `label`) is the canonical check. Phase-3 REST CREATE calls `_schedule_create_to_payload(req)` first, which translates `source_id` → `label` (and `name` defaults to `source_id` when omitted); then the service raises `ValueError("label already exists")` → handler maps to `409 Conflict`. **Single source of truth for uniqueness** — phase-3 does NOT add a separate `source_id`-based uniqueness check. The DB row's PRIMARY KEY is `source_configs.source_id` (`models.py:50-52`), but uniqueness is enforced semantically on the human-readable `label` per phase-2's contract. **Operational rule:** REST CREATE requires `source_id == label` (i.e. operators must provide a unique URL-stable `source_id` and the service uses `source_id` as the `label`). Tools (`task_schedule`) accept the full REST surface as `label` directly and can use any string — tools do NOT enforce `source_id == label`. GET/DELETE/UPDATE REST handlers accept either `source_id` or `label` as identifier (Task 1.5 / Task 2.4 — service resolves via `get_source_config_by_name`). | (no edit — doc + Task 2.1 enforcement) |
 | 1.4 | Add **REST response models** that wrap phase-2's canonical models | **REST responses use a thin wrapper** that ECHOES the phase-2 response. The handler calls the service, gets `ScheduleCreateResponse` / `ScheduleDetail` / `ScheduleCancelResponse`, then constructs a REST model with REST-conventional field names: `ScheduleCreateRestResponse` wraps phase-2's `ScheduleCreateResponse` and re-exposes its fields under REST names (`source_id` = phase-2's `source_id`, `label` = phase-2's `label`); `ScheduleDetailRestResponse` wraps phase-2's `ScheduleDetail` (adds `id` field = `source_id` for REST URL consistency); `ScheduleCancelRestResponse` wraps phase-2's `ScheduleCancelResponse` and **adds `last_execution_id: str \| None`** (architecture §5.3 echo) + `message: str`. Single source of truth for response shape = phase-2. Phase-3 only renames fields for REST conventions. | `daemon/models/schedule.py` |
 | 1.5 | Cancel-by-label semantics (REST) | `DELETE /api/schedules/{schedule_id}` accepts both forms: (a) `source_id` (REST URL-stable id = phase-2 `label`); (b) `label` directly. **Path param regex** does NOT enforce UUID; the service resolves either via `get_source_config_by_name` (`repository.py:212-216`). Handler passes `schedule_id` (the path string) directly to `scheduling_service.cancel_schedule(schedule_id)`; the service decides whether it's an id or a label. | (no edit — doc + Task 2.3-2.4) |
 | 1.6 | Export new symbols | Add REST models (`ScheduleCreate`, `ScheduleCreateRestResponse`, `ScheduleDetailRestResponse`, `ScheduleCancelRestResponse`) to module `__all__`. **Do NOT re-export phase-2 models from this module** — phase-3 REST code imports phase-2 models directly via `from daemon.services.scheduling_service import ScheduleCreatePayload, ...` (canonical home stays phase-2). | `daemon/models/schedule.py:__all__` |
@@ -100,8 +100,10 @@ class ScheduleCreate(BaseModel):
     cron_expression: str | None = Field(default=None)
     weekday: int | None = Field(default=None, ge=0, le=6, description="0=Sun..6=Sat (matches phase-2 / cron DOW)")
     run_at: datetime | None = Field(default=None, description="tz-aware preferred; naive → treated as local per resolved tz")
-    enabled: bool = True
-    autostart: bool = True
+    # NOTE: NO `enabled` or `autostart` fields (F2). Schedules are created enabled+autostart;
+    # lifecycle via update/pause/cancel — see task_schedule_update / POST /schedules/{id}/stop|start
+    # / DELETE /schedules/{id}. Adding these fields would require plumbing through phase-2's
+    # canonical signature (which does NOT carry them) — least contract churn is to keep them out.
 
     @model_validator(mode="after")
     def _validate_recurrence_requirements(self):
@@ -179,18 +181,18 @@ class ScheduleCancelRestResponse(BaseModel):
 
 | # | Sub-task | Details | Key Files |
 |---|----------|---------|-----------|
-| 2.1 | Add `POST /schedules` handler | 503 `is_write_paused` gate FIRST (mirror `:87-88`); 400 on `instance_mode` invalid (`validate_instance_mode`); **build canonical payload via `_schedule_create_to_payload(req)`** (Task 1.2/1.7) — NOT `req.model_dump()` (the model fields don't match phase-2 canonical); pass `enabled`/`autostart` from `req` to `source_repo.create_source_config` (REST-only fields, NOT in `ScheduleCreatePayload`); call `await asyncio.to_thread(manager.scheduling_service.create_schedule, payload)` where `payload: ScheduleCreatePayload` (already typed — service's `model_validate` bridge is bypassed for REST callers); respond `201 Created` with `ScheduleCreateRestResponse` wrapping the service response. **Uniqueness semantics (Task 1.3):** 409 on duplicate `source_id` is enforced by phase-2's `ScheduleCreatePayload` check on `label` (since `source_id == label` for REST creates) — handler maps `ValueError("label already exists")` → `409 Conflict`. Single source of truth for uniqueness. | `daemon/routers/schedules.py` |
+| 2.1 | Add `POST /schedules` handler | 503 `is_write_paused` gate FIRST (mirror `:87-88`); 400 on `instance_mode` invalid (`validate_instance_mode`); **build canonical payload via `_schedule_create_to_payload(req)`** (Task 1.2/1.7) — NOT `req.model_dump()` (the model fields don't match phase-2 canonical); **`enabled`/`autostart` are NOT in the REST body** (F2) — phase-2 §Task 1.2 step (6) hardcodes `enabled=True, autostart=True`; lifecycle via update/pause/cancel (Task 2.5 reuses existing `/schedules/{id}/stop|start`); call `await asyncio.to_thread(manager.scheduling_service.create_schedule, payload)` where `payload: ScheduleCreatePayload` (already typed — service's `model_validate` bridge is bypassed for REST callers); respond `201 Created` with **flat** `ScheduleCreateRestResponse` (no `detail=` wrapping). **Uniqueness semantics (Task 1.3):** 409 on duplicate `source_id` is enforced by phase-2's `ScheduleCreatePayload` check on `label` (since `source_id == label` for REST creates) — handler maps `ValueError("label already exists")` → `409 Conflict`. Single source of truth for uniqueness. | `daemon/routers/schedules.py` |
 | 2.2 | Add `GET /schedules/{id}` handler | No 503 gate (GET house posture). 404 if not found OR not `source_type == "scheduler"` (mirror `:91-99`, `:101-108`); call `await asyncio.to_thread(manager.scheduling_service.get_schedule, schedule_id)`; respond `ScheduleDetailRestResponse` (Task 1.4 wrapper around phase-2 `ScheduleDetail`). **`GET /schedules/{id}` DOES return cancelled rows** (architecture §3.4 — the "did I actually cancel X?" path); `cancelled_at` is populated in the response when `status == "cancelled"`. Service computes BOTH local+UTC from canonical config (phase-2 §Task 1.5). | `daemon/routers/schedules.py` |
 | 2.3 | Add `DELETE /schedules/{id}` handler | 503 `is_write_paused` gate FIRST; 404 if not found OR not scheduler type; call `await asyncio.to_thread(manager.scheduling_service.cancel_schedule, schedule_id)` (atomic via `cancel_source_config` — phase-1 §Task 7.3); respond `200 OK` with `ScheduleCancelRestResponse` carrying `last_execution_id` echo (architecture §5.3) + `message="Schedule {id} cancelled (history retained)"`. **MUST NOT** call `manager._source_repository.delete_source_config` (purges history — see Context "Cancel contract"); the service uses the atomic method which preserves history. | `daemon/routers/schedules.py` |
 | 2.4 | Cancel-by-label resolver | If `schedule_id` path param looks like a label (no uuid4 hex pattern), the shared service must resolve via `get_source_config_by_name` (repository.py:212-216) and return the underlying row; the router delegates the resolution to the service, NOT the router. (Implementation note: the path param `schedule_id` accepts both forms; the service decides. Router only validates path shape via the regex above.) | `daemon/routers/schedules.py` |
 | 2.5 | Pause/Resume routing (D5) | Pause and resume are NOT new endpoints — they reuse `POST /schedules/{id}/stop` and `POST /schedules/{id}/start` respectively (existing routes :251-339 and :343-387). Update the openapi docstring on each route to clarify "stop = pause (resumable)" / "start = resume". Do NOT add new `pause`/`resume` routes. | `daemon/routers/schedules.py:251, :343` |
 
-**Handler skeleton (frozen for implementer):**
+**Handler skeleton (frozen for implementer — REWRITTEN to match Task 1 mapping + flat REST responses):**
 
 ```python
 # POST /schedules - Create a new schedule
-@router.post("", response_model=ScheduleCreateResponse, status_code=201)
-async def create_schedule(schedule_create: ScheduleCreate, request: Request):
+@router.post("", response_model=ScheduleCreateRestResponse, status_code=201)
+async def create_schedule(req: ScheduleCreate, request: Request):
     """Create a new scheduled task.
 
     The body mirrors the scheduling tool category's `task_schedule` semantics
@@ -198,23 +200,95 @@ async def create_schedule(schedule_create: ScheduleCreate, request: Request):
     ALWAYS interpreted in the supplied `timezone` (or the configured default
     chain). The response echoes BOTH local and UTC for `next_run_at_*` so
     external callers never have to re-derive timezone.
+
+    Schedules are created enabled+autostart; lifecycle via update/pause/cancel
+    (see `task_schedule_update` / POST `/schedules/{id}/stop|start` /
+    DELETE `/schedules/{id}`).
     """
     manager = _get_manager(request)
     if manager.is_write_paused:
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
 
-    # 409 on duplicate source_id — service raises domain exception, handler maps
-    # 400 on instance_mode — validate_instance_mode handles (mirror schedules.py:121-125)
+    # 400 on instance_mode invalid — validate_instance_mode handles (mirror schedules.py:121-125)
+    validate_instance_mode(instance_mode=req.instance_mode, config={})
 
-    created = await asyncio.to_thread(
-        manager.scheduling_service.create_schedule,
-        schedule_create.model_dump(),
+    # REST ↔ canonical mapping (phase-3 §Task 1.2/1.7; canonical code at :79):
+    # source_id → label (REST CREATE enforces source_id == label — Task 1.3);
+    # name defaults to source_id when omitted (so source_id == label holds);
+    # agent_id → agent; for `recurrence == "once"`, run_at.isoformat() OR local_time → when;
+    # for daily/weekly/cron, local_time → when; timezone/cron_expression/weekday/priority/project_id/instance_mode
+    # pass through. enabled/autostart are NOT in the canonical payload (F2 — phase-2 §Task 1.2
+    # hardcodes enabled=True, autostart=True — lifecycle via update/pause/cancel).
+    payload = _schedule_create_to_payload(req)
+
+    # 409 on duplicate label: phase-2's uniqueness check on `label` raises ValueError;
+    # handler maps to 409 Conflict. Per Task 1.3, the REST body uses source_id
+    # (which becomes label via the mapping), so a 409 here indicates a duplicate
+    # REST source_id — operationally identical to a duplicate label.
+    try:
+        created = await asyncio.to_thread(
+            manager.scheduling_service.create_schedule, payload,
+        )
+    except ValueError as e:
+        if "label" in str(e).lower() and "exists" in str(e).lower():
+            raise HTTPException(status_code=409, detail={
+                "code": "SCHEDULE_LABEL_CONFLICT",
+                "message": str(e),
+            })
+        raise
+
+    # Flat ScheduleCreateRestResponse (no `detail=` wrapping).
+    return ScheduleCreateRestResponse(
+        id=created.source_id,
+        source_id=created.source_id,
+        label=created.label,
+        status=created.status,
+        next_run_at_local=created.next_run_at_local,
+        next_run_at_utc=created.next_run_at_utc,
+        tz_warning=created.tz_warning,
     )
-    return ScheduleCreateResponse(detail=created, status=created.status)
 
 
-# GET /schedules/{schedule_id} - Cancel a schedule (terminal)
-@router.delete("/{schedule_id}", response_model=ScheduleCancelResponse)
+# GET /schedules/{schedule_id} - Single fetch (returns cancelled rows per architecture §3.4)
+@router.get("/{schedule_id}", response_model=ScheduleDetailRestResponse)
+async def get_schedule(schedule_id: str, request: Request):
+    """Fetch a single schedule by source_id (or label — service resolves).
+
+    Returns cancelled rows too: this is the "did I actually cancel X?" path
+    (architecture §3.4). Service computes BOTH local+UTC from canonical config.
+    """
+    manager = _get_manager(request)
+    detail = await asyncio.to_thread(
+        manager.scheduling_service.get_schedule, schedule_id,
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail={
+            "code": "SCHEDULE_NOT_FOUND",
+            "message": f"Schedule not found: {schedule_id}",
+        })
+    return ScheduleDetailRestResponse(
+        id=detail.source_id,
+        source_id=detail.source_id,
+        label=detail.label,
+        status=detail.status,
+        recurrence=detail.recurrence,
+        local_time=detail.local_time,
+        timezone=detail.timezone,
+        cron_expression=detail.cron_expression,
+        weekday=detail.weekday,
+        next_run_at_local=detail.next_run_at_local,
+        next_run_at_utc=detail.next_run_at_utc,
+        last_run_at=detail.last_run_at,
+        agent_id=detail.agent,
+        project_id=detail.project_id,
+        instance_mode=detail.instance_mode,
+        cancelled_at=detail.cancelled_at,
+        tz_warning=detail.tz_warning,
+    )
+
+
+# DELETE /schedules/{schedule_id} - Cancel a schedule (terminal)
+@router.delete("/{schedule_id}", response_model=ScheduleCancelRestResponse)
 async def cancel_schedule(schedule_id: str, request: Request):
     """Cancel a schedule.
 
@@ -227,12 +301,14 @@ async def cancel_schedule(schedule_id: str, request: Request):
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
 
     cancelled = await asyncio.to_thread(
-        manager.scheduling_service.cancel_schedule, schedule_id
+        manager.scheduling_service.cancel_schedule, schedule_id,
     )
-    return ScheduleCancelResponse(
-        id=cancelled.id,
+    return ScheduleCancelRestResponse(
+        id=cancelled.source_id,
+        source_id=cancelled.source_id,
         status=cancelled.status,
         cancelled_at=cancelled.cancelled_at,
+        last_execution_id=cancelled.last_execution_id,  # architecture §5.3 echo
         message=f"Schedule {schedule_id} cancelled (history retained)",
     )
 ```
@@ -266,9 +342,9 @@ async def cancel_schedule(schedule_id: str, request: Request):
 
 ## Acceptance Criteria
 
-- [ ] `POST /api/schedules` exists and returns `201 Created` with body conforming to `ScheduleCreateResponse` schema (validates against the frozen Pydantic example)
-- [ ] `GET /api/schedules/{id}` exists, returns `200 OK` with `ScheduleDetail`, surfaces BOTH `next_run_at_local` AND `next_run_at_utc` (both `null` when no upcoming run — never only one populated)
-- [ ] `DELETE /api/schedules/{id}` exists, returns `200 OK` with `ScheduleCancelResponse`, sets `status="cancelled"`, NEVER calls `delete_source_config` (history preservation contract)
+- [ ] `POST /api/schedules` exists and returns `201 Created` with **flat** `ScheduleCreateRestResponse` body (no `detail=` envelope); wraps phase-2's canonical `ScheduleCreateResponse` (validates against the frozen Pydantic example at Task 1.4)
+- [ ] `GET /api/schedules/{id}` exists, returns `200 OK` with **flat** `ScheduleDetailRestResponse` body (no `detail=` envelope); wraps phase-2's canonical `ScheduleDetail`; surfaces BOTH `next_run_at_local` AND `next_run_at_utc` (both `null` when no upcoming run — never only one populated); returns cancelled rows too (architecture §3.4 "did I actually cancel X?" path)
+- [ ] `DELETE /api/schedules/{id}` exists, returns `200 OK` with **flat** `ScheduleCancelRestResponse` body (no `detail=` envelope); wraps phase-2's canonical `ScheduleCancelResponse`; sets `status="cancelled"`, echoes `last_execution_id` (architecture §5.3); NEVER calls `delete_source_config` (history preservation contract); accepts either `source_id` OR `label` as identifier (Task 1.5 / Task 2.4 cancel-by-label)
 - [ ] All three handlers gate on `is_write_paused` with the literal string `"Writes are paused for database migration"` (POST/DELETE only — GET is ungated per house posture)
 - [ ] All three handlers use `asyncio.to_thread(...)` around every service call (matches existing `:47, :91, :135, :189, :259, :432` pattern)
 - [ ] All three handlers get the manager via `request.app.state.manager` (existing `_get_manager` helper)

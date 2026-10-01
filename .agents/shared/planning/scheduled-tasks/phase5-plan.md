@@ -207,16 +207,21 @@ class TestIdempotencyRestart:
 # tests/test_scheduler_api.py (NEW classes appended at end of file)
 
 
-class TestCreateSchedule:
-    """Tests for POST /api/schedules endpoint (phase-3 contract)."""
+class ScheduleCreateSchedule:
+    """Tests for POST /api/schedules endpoint (phase-3 contract — FLAT REST response, no detail wrapping)."""
 
     @pytest.mark.asyncio
     async def test_create_returns_201_with_both_timezones(self, client, mock_manager):
-        mock_manager.scheduling_service.create_schedule = AsyncMock(return_value=_mock_schedule_detail(
-            id="morning-briefing",
+        # Mock returns a phase-2 ScheduleCreateResponse (canonical shape: source_id, label, status,
+        # next_run_at_local, next_run_at_utc, tz_warning). The handler wraps it into a flat
+        # ScheduleCreateRestResponse — no `detail=` envelope.
+        mock_manager.scheduling_service.create_schedule = AsyncMock(return_value=_mock_create_response(
+            source_id="morning-briefing",
+            label="morning-briefing",
             status="running",
             next_run_at_local="2026-10-02T06:00:00-04:00",
             next_run_at_utc="2026-10-02T10:00:00+00:00",
+            tz_warning="",
         ))
         body = {
             "source_id": "morning-briefing",
@@ -230,33 +235,76 @@ class TestCreateSchedule:
         }
         response = await client.post("/schedules", json=body)
         assert response.status_code == 201
+        # FLAT response (Task 1.4 / F1): no `detail=` wrapping.
         data = response.json()
-        assert data["detail"]["next_run_at_local"] == "2026-10-02T06:00:00-04:00"
-        assert data["detail"]["next_run_at_utc"] == "2026-10-02T10:00:00+00:00"
+        assert data["next_run_at_local"] == "2026-10-02T06:00:00-04:00"
+        assert data["next_run_at_utc"] == "2026-10-02T10:00:00+00:00"
+        assert data["source_id"] == "morning-briefing"
+        assert data["label"] == "morning-briefing"
+        assert data["status"] == "running"
+        assert data["tz_warning"] == ""
 
     @pytest.mark.asyncio
     async def test_create_503_when_write_paused(self, client, mock_manager):
         mock_manager.is_write_paused = True
-        response = await client.post("/schedules", json={...})
+        response = await client.post("/schedules", json={
+            "source_id": "x", "agent_id": "ari", "message": "x",
+            "project_id": "default", "recurrence": "once", "run_at": "2026-10-15T06:00:00",
+        })
         assert response.status_code == 503
+        # 503 message envelope (house pattern: "Writes are paused ..."); NOT a `detail=` wrap of create.
         assert "Writes are paused" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_create_409_on_duplicate_source_id(self, client, mock_manager):
+        """Phase-2's uniqueness check on `label` raises ValueError("label already exists");
+        handler maps to 409 Conflict."""
+        mock_manager.scheduling_service.create_schedule = AsyncMock(
+            side_effect=ValueError("label already exists: morning-briefing"),
+        )
+        body = {
+            "source_id": "morning-briefing",
+            "name": "Morning Briefing",
+            "agent_id": "ari",
+            "message": "Give me a morning briefing",
+            "project_id": "default",
+            "recurrence": "daily",
+            "local_time": "06:00",
+            "timezone": "America/New_York",
+        }
+        response = await client.post("/schedules", json=body)
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "SCHEDULE_LABEL_CONFLICT"
 
 
 class TestCancelSchedule:
-    """Tests for DELETE /api/schedules/{id} — terminal cancel, history preserved."""
+    """Tests for DELETE /api/schedules/{id} — terminal cancel, history preserved.
+    FLAT ScheduleCancelRestResponse (no detail wrapping); phase-2's canonical
+    ScheduleCancelResponse uses `source_id` field, not `id`.
+    """
 
     @pytest.mark.asyncio
     async def test_cancel_calls_cancel_schedule_NOT_delete_source_config(self, client, mock_manager):
+        # Mock returns phase-2 ScheduleCancelResponse: source_id, status, cancelled_at,
+        # last_execution_id (architecture §5.3 echo).
         mock_manager.scheduling_service.cancel_schedule = AsyncMock(return_value=_mock_cancelled(
-            id="morning-briefing",
+            source_id="morning-briefing",
             status="cancelled",
             cancelled_at="2026-10-01T20:00:00+00:00",
+            last_execution_id=None,
         ))
         mock_manager._source_repository.delete_source_config = Mock()
         response = await client.delete("/schedules/morning-briefing")
         assert response.status_code == 200
         assert mock_manager.scheduling_service.cancel_schedule.await_count == 1
         mock_manager._source_repository.delete_source_config.assert_not_called()
+        # FLAT response assertions (Task 1.4 wrapper):
+        data = response.json()
+        assert data["source_id"] == "morning-briefing"
+        assert data["status"] == "cancelled"
+        assert data["cancelled_at"] == "2026-10-01T20:00:00+00:00"
+        assert data["last_execution_id"] is None  # architecture §5.3 echo
+        assert "history retained" in data["message"]
 ```
 
 ### Task 3: Integration test (happy path + cancel-prevent-dispatch)
@@ -294,19 +342,29 @@ pytestmark = pytest.mark.integration
 
 
 async def test_one_shot_schedule_creates_job_item():
-    """D4 single-uuid contract: schedule → dispatch → JobItem.job_id == Task.work_id."""
+    """D4 single-uuid contract: schedule → dispatch → JobItem.job_id == Task.work_id.
+
+    Phase-2 §Task 1.1 signature: `create_schedule(payload: ScheduleCreatePayload | dict, ...)`
+    (Pydantic-at-boundary dict-accept, architecture §2 OD-2). This integration test calls
+    through the shared scheduling service; the REST mapping function `_schedule_create_to_payload`
+    is NOT involved here (that's a REST-layer concern). The dict below matches
+    ScheduleCreatePayload field names: label, agent, message, when, timezone, recurrence, etc.
+    """
     manager = await build_live_pool_manager()
     try:
-        schedule = await manager.scheduling_service.create_schedule({
-            "source_id": "int-test-1",
-            "name": "Integration Test",
-            "agent_id": "ari",
-            "message": "fire",
-            "project_id": "default",
-            "recurrence": "once",
-            "run_at": "...",  # tz-qualified ISO near-now
-            "timezone": "UTC",
-        })
+        schedule = await manager.scheduling_service.create_schedule(
+            ScheduleCreatePayload(
+                label="int-test-1",
+                agent="ari",
+                message="fire",
+                project_id="default",
+                when="2026-10-15T06:00:00",
+                timezone="UTC",
+                recurrence="once",
+                priority=5,
+                instance_mode="new_instance",
+            )
+        )
         # Manual trigger the schedule.
         execution_id = await manager.source_registry.get(schedule.id).manual_trigger()
         # Wait for the JobItem to land in job_queue_items.
@@ -441,7 +499,6 @@ Branch `feature/scheduled-tasks` @ **`<pending>`** (base `<pending>`). **VERDICT
 - [ ] `TestGetScheduleById` (Task 2.2) — 5 test cases PASS: 200-existing, 404-missing, 400-non-scheduler, both-local+utc, cancelled_at-null-vs-string
 - [ ] `TestCancelSchedule` (Task 2.3) — 7 test cases PASS: 200-existing, 503-paused, 404-missing, 400-non-scheduler, response-shape, **`delete_source_config.assert_not_called()` PASSES** (history preservation), cancel-by-label
 - [ ] `TestScheduleListFilter` (phase-3 §Task 4.1, `tests/test_scheduler_api.py`) — 3 test cases PASS: `default_excludes_cancelled`, `?include_cancelled=true_returns_cancelled`, `?include_cancelled=false_excludes_cancelled`. Server-side SQL filter; `GET /schedules/{id}` (Task 2.2) DOES return cancelled rows — pinned via `TestGetScheduleById` cancelled-row case.
-- [ ] `TestScheduleEdgeCases` (Task 2.4) — 3 test cases PASS: past-due-kickoff, idempotent-cancel, cancelled-get-shows-cancelled_at. No skip.
 - [ ] `mock_manager` fixture extended to provide `manager.scheduling_service` MagicMock (Task Risk #6)
 - [ ] All existing classes in `tests/test_scheduler_api.py` remain GREEN (1068L baseline)
 

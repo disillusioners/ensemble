@@ -18,7 +18,7 @@ Land the shared scheduling service (`daemon/services/scheduling_service.py`) use
   - `daemon/utils/tz.py` (NEW — phase 1 owner; phase 2 calls `resolve_timezone()`)
 - **Shared APIs/interfaces** (contract pinned by phase 3 — phase2 is the CANONICAL HOME):
   - Module-level async functions on `daemon.services.scheduling_service`:
-    - `async def create_schedule(payload: ScheduleCreatePayload | dict, *, caller_instance_id: str, caller_agent_id: str) -> ScheduleCreateResponse` — accepts **either Pydantic model OR `dict`** at the service boundary; if dict, validate via `ScheduleCreatePayload.model_validate(payload)` at function entry (architecture §2 OD-2 closure; covers phase-3 REST caller passing `model_dump()` dict, ensures one validated contract for tools+REST).
+    - `async def create_schedule(payload: ScheduleCreatePayload | dict, *, caller_instance_id: str, caller_agent_id: str) -> ScheduleCreateResponse` — accepts **either Pydantic model OR `dict`** at the service boundary; if dict, validate via `ScheduleCreatePayload.model_validate(payload)` at function entry (architecture §2 OD-2 closure; the dict-accept branch serves NON-REST callers — tools, tests, future internal callers; phase-3 REST passes a fully-typed `ScheduleCreatePayload` so the `model_validate` bridge is bypassed for REST — see phase-3 §Task 2.1 and ADR-013).
     - `async def cancel_schedule(schedule_id: str) -> ScheduleCancelResponse` — returns `{source_id, status, cancelled_at, last_execution_id}` (last_execution_id is NEW per architecture §5.3).
     - `async def get_schedule(schedule_id: str) -> ScheduleDetail | None`
     - `async def list_schedules(*, project_id: str | None = None, status: str | None = None, include_cancelled: bool = False, caller_agent_id: str | None = None) -> list[ScheduleListItem]`
@@ -108,20 +108,27 @@ class ScheduleCancelResponse(BaseModel):
     source_id: str
     status: str                    # "cancelled"
     cancelled_at: str              # ISO UTC
+    last_execution_id: str | None = None  # architecture §5.3 echo: latest execution_id from
+                                          # schedule_executions (SELECT MAX(triggered_at)) so operators
+                                          # can cancel an in-flight JobItem directly. None if no history.
 
 
 class ScheduleDetail(BaseModel):
     source_id: str
     label: str
     status: str
-    recurrence: str | None
-    local_time: str | None
-    timezone: str | None
+    recurrence: str | None         # "once" | "daily" | "weekly" | "cron"
+    local_time: str | None        # HH:MM for daily/weekly; full ISO for once
+    timezone: str | None          # IANA name (resolved)
+    weekday: int | None           # 0=Sun..6=Sat (canonical, matches cron DOW)
+    cron_expression: str | None   # raw cron for recurrence="cron"
+    instance_mode: str | None     # "new_instance" | "reuse_instance"
     next_run_at_local: str | None
     next_run_at_utc: str | None
-    agent: str | None
+    agent: str | None             # = REST `agent_id`
     project_id: str | None
     last_run_at: str | None
+    cancelled_at: str | None      # populated when status == "cancelled"
     tz_warning: str = ""
 
 
