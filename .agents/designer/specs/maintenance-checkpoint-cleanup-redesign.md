@@ -6,7 +6,7 @@ phase: new
 author: designer
 created_at: 2026-10-01
 approved_at: 2026-10-01
-pinned_spec_sha: 63a5ae5d9798ed985199bab6b7cba80822d33064
+pinned_spec_sha: 647eb4bb518025856e2615fc48e0e6d7a4a91e72
 task_id: ck-redesign-2026q4
 plan_ref: .agents/shared/planning/maintenance-console/phase2-frontend.md
 advisory_fields:
@@ -285,6 +285,31 @@ These two banners are the only blocks that survive across all steps; everything 
 
 **A11y.** `<details>` is native; no extra ARIA needed.
 
+### 2.9 Sanctioned compaction levers (amend v3 — AC-15 budget reconciliation)
+
+**Purpose.** Enumerate the density adjustments the implementation may apply to land within AC-15's ≤760px budget at Playwright viewport 1024×768 (768px content height with zero browser chrome; 760px = 768 − 8px safety margin). These levers are **spec-sanctioned**: applying them does not count as a deviation on re-review and does not require a new spec amendment. Anything outside this list requires a new amendment round.
+
+**Sanctioned levers** (cumulative budget recovery ≈ 80–115px):
+
+| # | Lever | Component | Approx. reduction | Constraint |
+|---|---|---|---|---|
+| 1 | Status Strip tile padding: 1rem → 0.5rem vertical (horizontal stays at 1rem) | §2.1 | ~14px | Internal padding only — tile sizes (`$status-strip-min-width` 200px, label/value typography 0.6875rem / 1rem 600) UNCHANGED |
+| 2 | Wizard container padding: 1.5rem → 1rem vertical | §2.2 wrapper | ~16px | Container max-width stays `$wizard-max-width: 1100px`; horizontal padding unchanged |
+| 3 | Step card padding: 1.5rem → 1rem vertical | §2.3 / §2.4 / §2.5 / §2.6 | ~16px | Card grid (`dl` 2×2 / 2×3, gap 0.5rem row / 1.5rem col) UNCHANGED; only outer card padding shrinks |
+| 4 | Footer `<h2>` removal (was echoing the step name above the buttons) | §2.2 footer | ~32px | Step name is already visible in the active `<mat-step>` header; footer becomes button-only `<div>` (Back / Continue / Cleanup now) |
+| 5 | Status Strip min-height tighten: 200px → 168px per tile | §2.1 | ~30px | Achieved via padding reduction only; min-width remains 200px (horizontal axis) |
+| 6 | Wizard container top margin reduced (1rem → 0.5rem above the wizard) | §2.2 wrapper | ~8px | Spacing token `$step-gap` UNCHANGED at 1.5rem (used between step content cards, not page chrome) |
+
+**Explicitly NOT sanctioned** (any of these requires amend v4+):
+
+- Changes to grid columns (2×2 / 2×3 / 1-col responsive) in §2.3 / §2.4 / §2.6
+- Changes to typography sizes (`<h2>` 1.125rem / `<h3>` 1.0625rem / `<dl>` rows 0.5rem / tile value 1rem 600 / tile label 0.6875rem)
+- Changes to color tokens, borders, or `$accent-*` semantics
+- Changes to `$step-gap`, `$wizard-max-width`, or `$status-strip-min-width` (horizontal min-width)
+- Removal or consolidation of any of the four element groups asserted by AC-15 (Status Strip, stepper header row, Step-1 card, Continue button)
+
+**Verification.** Each applied lever must be visible in the commit's `git diff` for the relevant `ck-*.scss` / `checkpoint-cleanup.component.html` / `checkpoint-cleanup.component.ts` and must not affect any `data-testid` (AC-5/7/8), responsive breakpoint (AC-2), or section-registry invariant (AC-14).
+
 ## 3. Tokens
 
 ### Color palette (already adopted by `ck-*.scss`; no change)
@@ -381,6 +406,7 @@ Same page chrome. Status Strip wraps to 1-col. The 4 step headers stack vertical
 | **Sub-component for Status Strip** | Rejected | Only one consumer (this page). Inline in template is simpler; can extract later if a second use appears. |
 | **Add cancel/abort to execute** | Rejected (out of scope) | Plan decision-log R-1: deferred to v2. Not in this redesign. |
 | **Hide Status Strip inside the wizard (per-step header instead)** | Rejected | Operators want state at-a-glance; Status Strip stays page-level. |
+| **AC-15 budget recalibration (amend v3)** | Resolved | Original AC-15 budget of 640px assumed headed-browser chrome (~128px toolbars) — internal inconsistency with the validation clause (Playwright `viewport 1024×768` = 768px content height, zero chrome). Real accounting from implemented horizontal layout: app-main stack ~754px + global app-header ~56px = ~810px full-page. Revised budget: full-page stack including global app-header ≤ 760px (768 − 8px safety margin). The 640px figure is retained as an informational note about headed-browser windows with toolbars, not as the test budget. Code-side compaction per §2.9 closes the gap (~80–115px recovery). |
 
 ## 7. Acceptance criteria (observable + testable)
 
@@ -496,8 +522,16 @@ Each AC packs to a `Validation:` block (the agent-searchable shape). Static grep
   2. All 4 step headers (in a single horizontal row: ① Review · ② Dry-run · ③ Confirm & Execute · ④ Result)
   3. The Step-1 card content (Configuration sub-card + Last run sub-card, 2-col grid)
   4. The Continue → button (right-aligned in the step footer)
-- **And** total page chrome + Status Strip + stepper header row + Step-1 card + footer height ≤ 640px (fits 768 − browser chrome)
-- **Validation:** `pack e2e/maintenance-checkpoint-cleanup.spec.ts` — Playwright viewport assertion: set viewport to 1024×768, navigate to `/maintenance/checkpoint-cleanup`, then assert `await expect(page.locator('[data-testid="ck-status-strip"]')).toBeInViewport()` AND `await expect(page.locator('mat-stepper[orientation="horizontal"]')).toBeVisible()` AND `await expect(page.locator('[data-testid="ck-continue-btn"]').first()).toBeInViewport()`. The `toBeInViewport()` matcher requires the element's bounding box to be fully inside the visible viewport without overflow.
+- **And** the full-page stack **including the global app-header** is ≤ 760px (Playwright `viewport 1024×768` provides 768px content height with zero browser chrome; 8px safety margin)
+- **And** the implementation may apply any of the sanctioned compaction levers in §2.9 to land within this budget — these adjustments are spec-sanctioned and do not count as deviations on re-review
+- **Note (informational, not asserted):** the original 640px figure referenced "768 − browser chrome" assuming a headed browser with toolbars. Playwright viewport mode has zero browser chrome, so that figure does not apply to the test budget. The 640px reference is retained only for operator-workstation context (headed browser with devtools / toolbars visible); the asserted budget is 760px.
+- **Validation:** `pack e2e/maintenance-checkpoint-cleanup.spec.ts` — Playwright viewport assertion: set viewport to 1024×768, navigate to `/maintenance/checkpoint-cleanup`, then assert:
+  - `await expect(page.locator('[data-testid="ck-status-strip"]')).toBeInViewport()`
+  - `await expect(page.locator('mat-stepper[orientation="horizontal"]')).toBeVisible()`
+  - `await expect(page.locator('[data-testid="ck-continue-btn"]').first()).toBeInViewport()`
+  - `await expect(page).toHaveScreenshot('checkpoint-cleanup-1024x768.png', { maxDiffPixelRatio: 0.02 })` (catches compaction-lever clamp in shared viewport)
+  - The four `toBeInViewport()` assertions confirm zero-scroll for the four element groups; the screenshot confirms compaction-lever clamp (visual diff < 2% pixel ratio).
+  - Additionally (unit-style): full-page height including `app-maintenance > header` (the global app-header) ≤ 760px via `await expect(page.locator('app-maintenance')).toHaveScreenshot(...)` or `document.documentElement.scrollHeight ≤ 760` assertion.
 
 ### AC-16 — In-flight run state disables dry-run + execute buttons across all steps
 
@@ -542,4 +576,4 @@ Each AC packs to a `Validation:` block (the agent-searchable shape). Static grep
 | Existing Jest unit `frontend/src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.spec.ts` | Needs new stepper nav specs + Status Strip spec; existing data-signal specs remain. |
 | Existing source-grep pin `sections-registry-load-bearing` | Must continue to pass (AC-14). |
 | New unit specs | Add `activeStep` initial-value, Continue/Back navigation, gating logic, in-flight handling. |
-| New E2E specs | Add Status Strip visibility, stepper orientation switching (horizontal at ≥1024px, vertical at <1024px), no-scroll at 1024×768 (per AC-15 amended wording: ck-status-strip + horizontal mat-stepper + ck-continue-btn all `toBeInViewport()`), debug-expander visibility. |
+| New E2E specs | Add Status Strip visibility, stepper orientation switching (horizontal at ≥1024px, vertical at <1024px), no-scroll at 1024×768 (per AC-15 amend v3 wording: ck-status-strip + horizontal mat-stepper + ck-continue-btn all `toBeInViewport()`; full-page height including app-header ≤ 760px via `document.documentElement.scrollHeight` or screenshot clamp), debug-expander visibility. Screenshot regression: `checkpoint-cleanup-1024x768.png` baseline (maxDiffPixelRatio ≤ 0.02) — catches compaction-lever over-rotation. |
