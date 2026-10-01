@@ -5366,19 +5366,27 @@ def should_end_attestation(state: Any) -> str:
     fires ONLY on ``denied``, never on terminal_after_bound, never on
     dry_log).
 
-    b3 router backstop (2026-10-01, incident 6f961c43): if the route
-    hint STILL says ``"agent"`` when the per-mission run-deny counter
-    is already at ``ATTESTATION_RUN_DENY_CAP``, END anyway. The gate
-    node's b3 substitution should have converted the decision to a
-    loud terminal one evaluation earlier (at count+1 > cap), so
-    reaching here means a double fault — the node's substitution was
-    skipped or the counter channel changed between the node write and
-    this read. The backstop converts a would-be GraphRecursionError
-    (instance 'error') into a bounded early END; the ERROR row carries
+    b3 router backstop (2026-10-01, incident 6f961c43; predicate
+    corrected round-2 per council adjudication): fires only when the
+    route hint says ``"agent"`` AND the persisted run-deny counter
+    EXCEEDS ``ATTESTATION_RUN_DENY_CAP``. Firing-order contract: the
+    gate node converts AT the cap (its pre-write check is
+    ``count + 1 > cap``), so in a correct sustained loop the count
+    never exceeds the cap on a ``"agent"`` route — the node's loud
+    terminal owns the exit. ``count > cap`` at routing time is
+    therefore PROOF the node's substitution was skipped (node logic
+    fault, counter corruption/drift past the cap) — a genuine double
+    fault. The backstop converts that would-be GraphRecursionError
+    (instance 'error') into a bounded early END; the ERROR row is
     the loud failure signal (routers cannot write state, so the
     terminal write + escalation machinery is impossible from here —
-    this path is unreachable in correct operation and exists purely
-    as the last-resort bound, belt-and-braces behind the node's b3).
+    this is the last-resort bound, strictly behind the node's b3).
+
+    Round-1 bug (fixed): the predicate used ``>=``, which fired at
+    exactly the cap — the same count at which the node's conversion
+    was still one evaluation away — so in a sustained deny loop the
+    router preempted the node's LOUD terminal with a silent unattested
+    END. ``>`` restores the node-first ordering.
     """
     if isinstance(state, dict):
         route = state.get("attestation_route")
@@ -5391,7 +5399,7 @@ def should_end_attestation(state: Any) -> str:
             run_deny_count = int(raw_run_deny)
         except (TypeError, ValueError):
             run_deny_count = 0
-        if run_deny_count >= ATTESTATION_RUN_DENY_CAP:
+        if run_deny_count > ATTESTATION_RUN_DENY_CAP:
             logger.error(
                 "event=leader_completion_gate_run_cap_router_backstop "
                 "run_deny_count=%s cap=%s detail=b3 router backstop: "
@@ -6357,24 +6365,15 @@ def create_attestation_gate_node(
             decision.decision is Decision.TERMINAL_AFTER_BOUND
             and not any_substantive_deny
         ):
-            # Read the current withhold-deny counter from state.
-            # Channel-defaulting semantics: missing key reads as 0
-            # (fresh mission); existing key reads its integer value.
-            if isinstance(state, dict):
-                _raw_withhold = state.get(
-                    ATTESTATION_WITHHOLD_DENY_COUNT_KEY, 0
-                )
-            else:
-                _raw_withhold = getattr(
-                    state, ATTESTATION_WITHHOLD_DENY_COUNT_KEY, 0
-                ) or 0
-            try:
-                current_withhold_deny_count = int(_raw_withhold)
-            except (TypeError, ValueError):
-                current_withhold_deny_count = 0
+            # The withhold counter was already read into the
+            # ``withhold_deny_count`` local at the top of this
+            # invocation (same state, no mutation between) — reuse
+            # it; a second channel-read ladder here was a
+            # duplicate-of-``5710`` maintenance hazard (round-2
+            # tidier 4a).
 
             if withhold_budget_exhausted(
-                current_withhold_deny_count,
+                withhold_deny_count,
                 WITHHOLD_DENY_BUDGET_DEFAULT,
             ):
                 # Budget exhausted — KEEP the terminal_after_bound
@@ -6395,7 +6394,7 @@ def create_attestation_gate_node(
                     "escalated) — recursion_limit must never be the only "
                     "terminator",
                     effective_instance_id,
-                    current_withhold_deny_count,
+                    withhold_deny_count,
                     WITHHOLD_DENY_BUDGET_DEFAULT,
                 )
             else:
@@ -6405,7 +6404,7 @@ def create_attestation_gate_node(
                 # slot), and emit the never-spoke continuation row.
                 # The withheld-terminal row is unchanged from
                 # pre-P1; the budget check is additive.
-                next_withhold_deny_count = current_withhold_deny_count + 1
+                next_withhold_deny_count = withhold_deny_count + 1
                 decision = _replace(
                     decision,
                     decision=Decision.DENIED,
@@ -6424,7 +6423,7 @@ def create_attestation_gate_node(
                     effective_instance_id,
                     decision.denied_count,
                     decision.next_denied_count,
-                    current_withhold_deny_count,
+                    withhold_deny_count,
                     next_withhold_deny_count,
                     WITHHOLD_DENY_BUDGET_DEFAULT,
                 )

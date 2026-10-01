@@ -1828,6 +1828,13 @@ class TestRunDenyCap:
         assert "event=leader_completion_gate_run_cap_exit" in log_text
         # P1 stayed out — the withhold channel was inert.
         assert "event=leader_completion_gate_withholding_exit" not in log_text
+        # Round-2 firing-order pin: the NODE substitution token fired;
+        # the router backstop token did NOT (the router must never
+        # preempt the node's loud terminal at the cap).
+        assert (
+            "event=leader_completion_gate_run_cap_router_backstop"
+            not in log_text
+        )
 
     def test_cap_independent_of_withhold_channel(
         self, monkeypatch, caplog
@@ -1873,14 +1880,41 @@ class TestRunDenyCap:
         assert "event=leader_completion_gate_withholding_exit" not in log_text
         assert "degenerate_terminal" not in log_text
         assert "consecutive_identical_terminal" not in log_text
+        # Round-2 firing-order pin: node token fired, router token silent.
+        assert (
+            "event=leader_completion_gate_run_cap_router_backstop"
+            not in log_text
+        )
 
-    def test_router_backstop_forces_end_at_cap(self, monkeypatch, caplog):
-        """The router backstop: route hint 'agent' at the cap forces
-        END with the ERROR row (unreachable in correct operation —
-        the node's substitution fires one evaluation earlier)."""
+    def test_router_does_not_fire_at_cap(self, caplog):
+        """Round-2 firing-order pin (council CRITICAL): AT the cap
+        the NODE owns the exit — its substitution converts on the
+        pre-write check ``count + 1 > cap``. The router must NOT
+        preempt it: route 'agent' at exactly the cap routes to the
+        agent (the node will loud-terminal on its next evaluation),
+        and the router token stays silent."""
         state = {
             "attestation_route": "agent",
             ATTESTATION_RUN_DENY_COUNT_KEY: ATTESTATION_RUN_DENY_CAP,
+        }
+        with caplog.at_level("ERROR", logger="daemon.graph"):
+            verdict = should_end_attestation(state)
+        assert verdict == "agent"
+        log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert (
+            "event=leader_completion_gate_run_cap_router_backstop"
+            not in log_text
+        )
+
+    def test_router_backstop_forces_end_past_cap(self, caplog):
+        """The router backstop fires ONLY when the persisted count
+        EXCEEDS the cap (cap+1) — proof the node's at-cap
+        substitution was skipped (a genuine double fault: node logic
+        fault or counter drift past the cap). Converts the would-be
+        recursion_limit death into a bounded logged END."""
+        state = {
+            "attestation_route": "agent",
+            ATTESTATION_RUN_DENY_COUNT_KEY: ATTESTATION_RUN_DENY_CAP + 1,
         }
         with caplog.at_level("ERROR", logger="daemon.graph"):
             verdict = should_end_attestation(state)
