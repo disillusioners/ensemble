@@ -49,6 +49,7 @@ from daemon.graph import (
     ATTESTATION_ANY_SUBSTANTIVE_KEY,
     ATTESTATION_CONSECUTIVE_IDENTICAL_KEY,
     ATTESTATION_DEGENERATE_STREAK_KEY,
+    ATTESTATION_DEGENERATE_RETRY_NUDGE_TEXT,
     ATTESTATION_DENY_PROGRESS_KEY,
     ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY,
     ATTESTATION_IDENTICAL_REPAIR_NUDGE_TEXT,
@@ -894,9 +895,10 @@ class TestDegenerateShapeGuard:
     * degenerate finals inside a deny-loop ⇒ streak increments
     * non-degenerate reply (real prose, or any reply with tool
       calls) resets the streak
-    * 3rd degenerate final ⇒ anti-silence retry (audit row +
-      standard nudge — the anti-silence instruction rides the
-      existing DENIED branch)
+    * 3rd degenerate final ⇒ anti-silence RETRY AUDIT ROW; the
+      nudge that ships is the STANDARD/DIRECTIVE deny nudge (the
+      dedicated anti-silence body is canonical-but-unwired —
+      round-3 F2 disposition, wiring ledgered)
     * 6th degenerate final (second streak crossing) ⇒ loud
       TERMINAL_AFTER_BOUND
     * degenerate replies OUTSIDE a deny-loop (denied_count == 0)
@@ -908,7 +910,10 @@ class TestDegenerateShapeGuard:
         self, monkeypatch, caplog
     ):
         """Three emoji-only finals inside a deny-loop: anti-silence
-        audit row fires (P3 first-strike)."""
+        retry AUDIT ROW fires (P3 first-strike). The shipped nudge
+        is the standard/directive body — the dedicated anti-silence
+        text is unwired (ledgered), so this test pins the row, not
+        a special body."""
         monkeypatch.setattr(
             judge_mod, "_invoke_judge_llm", _judge_never_called
         )
@@ -935,6 +940,19 @@ class TestDegenerateShapeGuard:
         )
         # Streak at 3 — crosses the threshold.
         assert result[ATTESTATION_DEGENERATE_STREAK_KEY] == 3
+        # Round-3 F2 pin: the SHIPPED nudge is the standard/directive
+        # deny body — NOT the canonical-but-unwired anti-silence text.
+        nudge = result["messages"][-1]
+        assert (
+            nudge.content != ATTESTATION_DEGENERATE_RETRY_NUDGE_TEXT
+        )
+        assert not nudge.content.startswith(
+            "[Attestation Gate — Anti-Silence]"
+        )
+        assert nudge.additional_kwargs["attestation_nudge_kind"] in (
+            "standard",
+            "directive",
+        )
 
     def test_sixth_degenerate_loud_terminal(
         self, monkeypatch, caplog

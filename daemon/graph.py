@@ -4944,8 +4944,11 @@ CONSECUTIVE_IDENTICAL_THRESHOLD: int = 3
 # content is genuinely different each turn. P3 catches the
 # DEGENERATE SHAPE of the final AIMessage: emoji-only content,
 # or non-empty but very short (<= 3 words) and no tool calls,
-# INSIDE an active deny-loop. One explicit anti-silence retry,
-# then the bound path.
+# INSIDE an active deny-loop. Escalation ladder: first streak
+# crossing ⇒ the retry deny (``leader_completion_gate_degenerate_
+# retry`` audit row; the STANDARD/DIRECTIVE deny nudge rides it —
+# the dedicated anti-silence body is canonical-but-unwired,
+# ledgered); second crossing ⇒ the loud terminal.
 ATTESTATION_DEGENERATE_STREAK_KEY: str = "attestation_degenerate_streak"
 #: Threshold — three consecutive degenerate finals inside a
 # deny-loop trigger the loud terminal (mirrors the
@@ -5043,10 +5046,15 @@ ATTESTATION_IDENTICAL_REPAIR_NUDGE_TEXT = (
 )
 
 #: Anti-silence retry nudge body — P3 degenerate-shape guard
-#: (CANONICAL VERBATIM, single source of truth). Different
-#: shape from the P2 nudge (tells the leader its content is
-#: degenerate, not identical) so the LLM recognises them as
-#: distinct system-origin instructions.
+#: (CANONICAL VERBATIM). Round-3 F2 disposition: this body is
+#: canonical-but-UNWIRED — the P3 first-strike deny currently ships
+#: the standard/directive nudge (the ``deny_with_anti_silence_retry``
+#: audit row marks the escalation step, not a special nudge body).
+#: The dedicated body + a fourth ``attestation_nudge_kind`` value are
+#: LEDGERED for the wiring follow-up (needs a design call on
+#: directive-vs-anti-silence precedence with the Fix-3 progress
+#: machinery). Until wired, this constant is intentionally unused —
+#: do NOT cite it as shipped behavior.
 ATTESTATION_DEGENERATE_RETRY_NUDGE_TEXT = (
     "[Attestation Gate — Anti-Silence] The gate has received "
     "multiple very short or emoji-only replies on this mission. "
@@ -6504,17 +6512,23 @@ def create_attestation_gate_node(
             # P3 — degenerate-shape anti-silence retry. Distinct
             # from the P2 repair (the leader is sending DIFFERENT
             # degenerate replies, not identical ones — the
-            # gradient-family catcher). The single anti-silence
-            # retry nudge rides the standard DENIED branch; on the
-            # second streak crossing we force the loud terminal
-            # via the same machinery as P2 (the bound path stays
-            # consistent across both guards).
+            # gradient-family catcher). The first-strike nudge is
+            # the STANDARD/DIRECTIVE deny nudge riding this DENIED
+            # branch — the dedicated anti-silence body
+            # (``ATTESTATION_DEGENERATE_RETRY_NUDGE_TEXT``) is
+            # canonical-but-unwired (round-3 F2 disposition,
+            # wiring ledgered). On the second streak crossing we
+            # force the loud terminal via the same machinery as
+            # P2 (the bound path stays consistent across both
+            # guards).
             logger.warning(
                 "event=leader_completion_gate_degenerate_retry "
                 "instance_id=%s degenerate_streak=%s "
                 "decision=deny_with_anti_silence_retry "
-                "detail=P3 guard first-strike: emitting anti-silence "
-                "retry (degenerate finals inside the deny-loop)",
+                "detail=P3 guard first-strike: degenerate finals "
+                "inside the deny-loop; the standard/directive deny "
+                "nudge rides this deny (dedicated anti-silence body "
+                "unwired — ledgered)",
                 effective_instance_id,
                 degenerate_streak,
             )
@@ -6524,8 +6538,9 @@ def create_attestation_gate_node(
                     "event=leader_completion_gate_degenerate_terminal "
                     "instance_id=%s degenerate_streak=%s "
                     "decision=terminal_after_bound_forced "
-                    "detail=P3 guard second-strike: leader ignored the "
-                    "anti-silence retry; loud terminal writes "
+                    "detail=P3 guard second-strike: leader kept "
+                    "emitting degenerate finals across the deny loop; "
+                    "loud terminal writes "
                     "COMPLETED-UNVERIFIED (gate escalated)",
                     effective_instance_id,
                     degenerate_streak,
