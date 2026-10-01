@@ -176,6 +176,24 @@ class Decision(str, Enum):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FOLLOW-UP (deliberately NOT implemented in the v0.16.9 bundle, 2026-10-01):
+# extending ALLOWED_LEGITIMATE_PENDING_WAKEUP to recognize "arm-owner leader
+# awaiting a user nonce echo" (incident 6f961c43) was evaluated and SKIPPED.
+# The R2 inputs (``pending_children``, ``queued_or_expected_wakeups``) carry
+# no user-input-await signal; recognizing an armed ceremony nonce requires
+# NEW SIGNAL PLUMBING — reading the live install's ``releases/state.json``
+# pending_actions (a cross-process file owned by the upgrade subsystem) or
+# threading a nonce-armed channel from the minting path into the gate —
+# neither is a small narrow change. Meanwhile b1 (withhold budget) + b3
+# (run-deny cap) already bound the await-forever loop: the leader can no
+# longer die to GRAPH_RECURSION_LIMIT while waiting on a nonce; it exits
+# LOUD at the budget and a later nonce echo can revive/re-dispatch.
+# Revisit only if ceremony missions need the leader to HOLD (not exit)
+# across long nonce waits.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Settings — Phase 4 canonical resolver lives in
 # ``daemon.services.attestation_resolver``. The legacy NamedTuple below
 # is preserved as the public seam the gate (``build_instance_graph``,
