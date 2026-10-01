@@ -1,5 +1,5 @@
 ---
-version: 1.1.0
+version: 1.2.0
 category: planning
 auto_load: true
 ---
@@ -65,19 +65,13 @@ Open a fresh `design-spec.md` from the canonical template. Front-matter carries 
 
 The Wireframe section and the Design artifacts table are fed by one of two lanes. **The repo copy under `.agents/shared/planning/{feature}/design/mockups/` is the contract of record** — the developer reads from disk, not from prose or OD-UI. The lane marker records which lane actually shipped; conformance treats the lane + lint verdict as the quality bar.
 
-**Default: `opendesign`.** When the OpenDesign MCP is registered, licensed, and reachable, the spec wires the OD lane:
+**Concept.** OD-first: default to the OpenDesign lane whenever the MCP is registered, licensed, and reachable; graceful degradation: any OD-side failure (tool error, daemon unreachable, license/BYOK unconfigured, page outside the per-call ceiling) routes back to the text-native lane for that page — the workflow never blocks on OD availability. Per the v0.16.1 capability ceiling, OD produces exactly one HTML per call, inline, at generation time — tokens, component scaffolds, and TS templates remain v0.17.0 scope and are not promised.
 
-1. `od_compose_brief` — assemble the design brief from the spec sections in scope.
-2. `od_generate_design` — produce **one self-contained HTML document per call, inline, at generation time**. Treat the returned HTML as the contract of record for that page.
-3. `od_lint_artifact` — run as a quality gate against the AC and pages in scope. A `fail` verdict never rides into the developer's brief — fix the underlying issue before freezing the spec.
-4. Write the returned HTML through to the canonical path (`.agents/shared/planning/{feature}/design/mockups/{page}.html`). The repo copy is daemon-independent — it survives an OD outage after spec freeze.
-5. Record OD-UI provenance via `od_save_artifact` / `od_save_project_file`; capture the returned URL/path as `od_url` in the Design artifacts table.
+**Design-artifacts table contract.** Each row in the spec's Design artifacts table carries the full edge shape developer consumes: `path` (the canonical repo-relative path under `mockups/`, daemon-independent), `kind` (`html-mockup` | `text-mockup` | `render`), `ac_refs` (the AC IDs that row serves), `od_url` (OD-UI provenance — reference only, present only on `mockup_lane: opendesign` rows; `render` rows carry an `od_url` and no mockup path), and `lint` (`pass` | `fail-N` | `n/a`). The lane marker (`mockup_lane: opendesign | text`) declares which lane actually shipped; the `kind` column carries the per-row kind.
 
-**Fallback: `text`.** When OD is unavailable — daemon down, BYOK unconfigured, tool error, capability not registered, or a page outside OD's per-call ceiling — fall back to the existing text-native mockup lane (`.asc` ASCII wireframe, `.mmd` mermaid flow, or hand-authored `.html` fragment under the same canonical `mockups/` directory). Per architecture §4.1: text mockups never claim pixel fidelity. Lane = `text`; `lint` = `n/a`.
+**Procedure (full step list).** The five-step procedure — `od_compose_brief` → `od_generate_design` → `od_lint_artifact` → write-through to canonical `mockups/` path → record OD-UI provenance — lives canonically in **Mockup lane** of the designer's workflow file. See Mockup lane for the executable steps.
 
-**Graceful degradation is mandatory.** Any OD-side failure (tool error, daemon unreachable, license / BYOK unconfigured) routes the spec back to the text lane for that page. `mockup_lane` records what actually shipped. The workflow never blocks on OD availability — defensive dispatch idiom (wrap each `od_*` call so an exception or empty result triggers the text-lane fallback automatically). Per the v0.16.1 capability ceiling, OD produces exactly one HTML per call, inline, at generation time — tokens, component scaffolds, and TS templates remain v0.17.0 scope and are not promised.
-
-**Implement-brief relay.** The developer's implement-brief carries the `design_artifacts` list (one row per artifact with concrete path, kind, AC refs, OD-UI URL, lint) plus the `mockup_lane` marker — see **Architecture Recommendation** §4.5 for the full edge field shape. v1 developer reads each path from disk and ports the DOM/structure/CSS intent into components; v2 developer relays the field verbatim to the executor.
+**Implement-brief relay.** The developer's implement-brief carries the `design_artifacts` list (one row per artifact with concrete path, kind, AC refs, OD-UI URL, lint) plus the `mockup_lane` marker — see architecture §4.5 for the full edge field shape. v1 developer reads each path from disk and ports the DOM/structure/CSS intent into components; v2 developer relays the field verbatim to the executor.
 
 **Freeze:** set `status: approved` and record the file's git SHA in `pinned_spec_sha`. From this point the spec is immutable — later changes ride a new spec (new SHA) or an amendment file. Surface the approved spec + SHA to the leader so the parent plan freezes the conformance reference.
 

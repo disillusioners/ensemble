@@ -121,7 +121,7 @@ The spec body has acceptance criteria with pack-mapped Validation blocks (e.g. `
 
 ### Step 4b: Consume the HTML Mockups
 
-The designer's brief carries a `design_artifacts` field plus a `mockup_lane` marker — one row per renderable artifact, each row pinning a concrete repo-relative path to the canonical `mockups/` directory and the AC IDs that row serves. **The path is the contract, not prose** — read the file from disk and port its DOM / structure / CSS intent into components. The lane + lint verdict set the quality bar, not the implementation surface.
+The designer's brief carries a `design_artifacts` field plus a `mockup_lane` marker — one row per renderable artifact, each row carrying `kind` (`html-mockup` | `text-mockup` | `render`), a concrete repo-relative path to the canonical `mockups/` directory, and the AC IDs that row serves. **The path is the contract, not prose** — read the file from disk and port its DOM / structure / CSS intent into components. The lane + lint verdict set the quality bar, not the implementation surface.
 
 **Implementer steps (per artifact row):**
 

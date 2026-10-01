@@ -120,12 +120,18 @@ the canonical `mockups/` directory that developer reads directly. The lane
 marker + lint status inform the conformance quality bar — `text` mockups
 never claim pixel fidelity; `opendesign` mockups claim what the lint verdict
 supports.
+
+`render` rows are provenance-only — they carry an `od_url` (OD-UI reference)
+and no mockup path under `mockups/`. Use them when OD produced only an
+OD-UI-hosted render that the conformance loop reads from `od_url` rather
+than from a repo copy.
 -->
 
 | Page | Artifact path (canonical) | Kind | AC refs | OD-UI URL | Lint |
 |------|---------------------------|------|---------|-----------|------|
 | `<page>` | `.agents/shared/planning/<feature>/design/mockups/<page>.html` | `html-mockup` | AC-A1, AC-A2 | `<od_url or —>` | `pass` / `fail-N` / `n/a` |
 | `<page>` | `.agents/shared/planning/<feature>/design/mockups/<page>.asc` | `text-mockup` | AC-B1 | — | `n/a` |
+| `<page>` | — | `render` | AC-C1 | `<od_url>` | — |
 
 **Lane used:** `mockup_lane: opendesign` | `mockup_lane: text`
 

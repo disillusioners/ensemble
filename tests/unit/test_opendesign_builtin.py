@@ -144,8 +144,10 @@ class TestBuildConfig:
         marker = "__KMS_REF__KMS_HANDLE_byok456__"
         config = OpenDesignMCP().build_config({"byok_api_key": marker})
         assert config["env"]["BYOK_API_KEY"] == marker
-        # Plaintext hygiene: the ONLY secret-shaped datum is the marker.
-        assert "sk-" not in config["env"]["BYOK_API_KEY"]
+        # Plaintext hygiene: the ONLY secret-shaped datum is the marker (no `sk-` plaintext).
+        # Marker shape contract: `__KMS_REF__<handle>__` — KMS-bound reference, never plaintext.
+        assert config["env"]["BYOK_API_KEY"].startswith("__KMS_REF__")
+        assert config["env"]["BYOK_API_KEY"].endswith("__")
 
     def test_byok_keys_absent_when_omitted(self):
         """byok_* keys are SKIPPED when omitted AND default is None — no env leakage."""

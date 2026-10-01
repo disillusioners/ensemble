@@ -77,7 +77,7 @@ The Wireframe section of the spec is fed by one of two lanes. **The repo copy at
 
 **Graceful degradation is mandatory — the workflow never blocks or fails on OD unavailability.** Any OD-side error mid-call routes the spec back to the text lane for that page; `mockup_lane` records what actually shipped. Defensive dispatch: every `od_*` call is wrapped so an exception or empty result triggers the text-lane fallback automatically, without re-asking the leader. Per the v0.16.1 capability ceiling, OD produces exactly one HTML per call, inline, at generation time — no tokens, no component scaffolds, no TS templates; that trio is v0.17.0 scope.
 
-The implement-brief carries one structured artifact field for developer consumption — see `Architecture Recommendation` §4.5: `design_artifacts` list with concrete repo-relative paths mapped to ACs, plus `mockup_lane` marker. Developer reads the HTML at the path, not prose.
+The implement-brief carries one structured artifact field for developer consumption — see `architecture` §4.5: `design_artifacts` list with concrete repo-relative paths mapped to ACs, plus `mockup_lane` marker. Developer reads the HTML at the path, not prose.
 
 ---
 
