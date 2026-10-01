@@ -2080,7 +2080,10 @@ _supervision_handback_unit() {
 restart_via_launcher() {
     mkdir -p "$INSTALL_DIR/data"
     local log="$INSTALL_DIR/data/launcher.log"
-    local hb_unit="" hb_mode="" hb_prestop="${SUPERVISION_PRESTOP_MAINPID:-}" _hb_pin=""
+    local hb_unit=""
+    local hb_mode=""
+    local hb_prestop="${SUPERVISION_PRESTOP_MAINPID:-}"
+    local _hb_pin=""
 
     # ── P3 mode selection (consume the PRE-STOP classification) ───────
     if _supervision_host_allows_unit && command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
@@ -2109,11 +2112,11 @@ restart_via_launcher() {
                         if [ -f "$SUPERVISION_UNIT_DIR/$_hb_pin" ]; then
                             hb_unit="$_hb_pin"
                         else
-                            _log "hand-back: pin '$_hb_pin' set but unit file absent at $SUPERVISION_UNIT_DIR — falling through to cgroup leaf ${SUPERVISION_UNIT:-<none>}"
+                            _warn "hand-back: pin '$_hb_pin' set but unit file absent at $SUPERVISION_UNIT_DIR (manual: create the unit file at $SUPERVISION_UNIT_DIR/$_hb_pin or unset ENSEMBLE_RESTART_UNIT) — falling through to cgroup leaf ${SUPERVISION_UNIT:-<none>}"
                         fi
                         ;;
                     *)
-                        [ -n "$_hb_pin" ] && _log "hand-back: pin '$_hb_pin' not ensemble-*.service — falling through to cgroup leaf ${SUPERVISION_UNIT:-<none>}"
+                        [ -n "$_hb_pin" ] && _warn "hand-back: pin '$_hb_pin' not ensemble-*.service (manual: correct the name to ensemble-*.service or unset ENSEMBLE_RESTART_UNIT) — falling through to cgroup leaf ${SUPERVISION_UNIT:-<none>}"
                         ;;
                 esac
                 if [ -z "$hb_unit" ] && [ -n "${SUPERVISION_UNIT:-}" ]; then

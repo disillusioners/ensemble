@@ -1026,7 +1026,7 @@ STUB
         ' 2>&1)"
     assert_eq "C12b invalid pin (non-conforming): rc 0" "rvl-rc=0" "$(rvl_rc "$C12B_INVALID_OUT")"
     assert_contains "C12b invalid pin: hand-back falls back to cgroup leaf" "returns to unit ensemble-c12bfb.service" "$C12B_INVALID_OUT"
-    assert_contains "C12b invalid pin: WARN logs non-conforming pin" "not ensemble-*.service" "$C12B_INVALID_OUT"
+    assert_contains "C12b invalid pin: WARN logs non-conforming pin (WARN: prefix)" "WARN: hand-back: pin 'foo.service' not ensemble-*.service" "$C12B_INVALID_OUT"
 
     # C12b invalid pin (unit file missing): ENSEMBLE_RESTART_UNIT
     # set + conforming name + NO unit file → cgroup leaf (with WARN).
@@ -1047,7 +1047,7 @@ STUB
         ' 2>&1)"
     assert_eq "C12b missing-unit-file: rc 0" "rvl-rc=0" "$(rvl_rc "$C12B_NOF_OUT")"
     assert_contains "C12b missing-unit-file: hand-back falls back to cgroup leaf" "returns to unit ensemble-c12bfb.service" "$C12B_NOF_OUT"
-    assert_contains "C12b missing-unit-file: WARN logs absent file" "unit file absent at" "$C12B_NOF_OUT"
+    assert_contains "C12b missing-unit-file: WARN logs absent file (WARN: prefix)" "WARN: hand-back: pin 'ensemble-c12bfb-missing.service' set but unit file absent at" "$C12B_NOF_OUT"
 
     # C12b STOP PATH UNCHANGED (the hard constraint from the brief):
     # the fix is HAND-BACK SCOPED ONLY — stop_via_stop_script must

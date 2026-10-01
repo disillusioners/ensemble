@@ -817,8 +817,9 @@ assert_eq "8w dead owner → acquire succeeds via stale-break (0)" "0" "$?"
 # Two arms: (1) a regression pin that _journal_sweep at the current
 # branch DOES NOT use unbounded pipe reads or `wait` against subprocesses
 # — the brief premise was a "sweep pipe_read wedge" but HEAD code uses
-# pure bash JSON parsing; the live-install launcher is byte-identical
-# to repo HEAD (verified by diff at commit time). (2) correctness tests
+# pure bash JSON parsing; the live-install launcher is byte-identical to
+# the BASE (post-v0.16.8) commit — HEAD carries the bounded-subprocess pass
+# that converges at the next v0.16.9 promote. (2) correctness tests
 # for the bounded-run helper _js_run_bounded and the bounded pid-alive
 # wrapper _js_pid_alive_bounded (genuine D-state kill-0 / wedged-cmd
 # wedge defense; the kill -0 call IS a real blocking risk at HEAD).
