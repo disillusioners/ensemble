@@ -557,7 +557,10 @@ def deny_bound_exceeded(denied_count: int, bound: int) -> bool:
 # ``daemon/graph.py`` and any future per-dispatch budget check
 # (e.g. a maintenance admin who wants to instrument the gate
 # with a budget probe) MUST consult this helper. Mirrors the
-# ``deny_bound_exceeded`` discipline verbatim.
+# ``deny_bound_exceeded`` discipline verbatim. (Round-2 tidier:
+# ``daemon.graph.WITHHOLD_DENY_BUDGET`` is a lazy compat alias
+# served by that module's ``__getattr__`` — it resolves HERE, so
+# editing this constant is the only way to change the budget.)
 WITHHOLD_DENY_BUDGET_DEFAULT: int = 8
 
 

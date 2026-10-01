@@ -9,7 +9,9 @@ Each guard lives in production code with a single canonical
 counterpart (no double bookkeeping, no per-test stubbing):
 
 * P1 — ``daemon.services.attestation_gate.withhold_budget_exhausted``
-  + ``daemon.graph.WITHHOLD_DENY_BUDGET`` (constant). Composition
+  + ``WITHHOLD_DENY_BUDGET_DEFAULT`` (the single runtime home;
+  ``daemon.graph.WITHHOLD_DENY_BUDGET`` is a lazy compat alias
+  resolved by that module's ``__getattr__``). Composition
   gate in ``daemon.graph.create_attestation_gate_node`` consults
   the predicate; ``ATTESTATION_WITHHOLD_DENY_COUNT_KEY`` carries the
   per-mission counter.
@@ -315,6 +317,9 @@ class TestWithholdBudgetExhausted:
     """
 
     def test_default_matches_constant(self):
+        # Round-2 tidier: ``daemon.graph.WITHHOLD_DENY_BUDGET`` is a
+        # lazy compat alias (module ``__getattr__``) resolving to the
+        # true home — this pin asserts the alias wiring stays intact.
         assert WITHHOLD_DENY_BUDGET_DEFAULT == WITHHOLD_DENY_BUDGET
 
     def test_default_value_is_eight(self):

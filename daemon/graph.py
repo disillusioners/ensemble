@@ -4872,13 +4872,26 @@ ATTESTATION_DENY_PROGRESS_KEY: str = "attestation_deny_progress_tools"
 # P1 — per-dispatch withhold budget (2026-09-30, incident 34978dfc mute-wall)
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Single source of truth: the budget constant lives HERE so any
-# operator review of the gate can see the cap inline. The actual
-# predicate (``withhold_budget_exhausted``) is exported from
-# ``daemon.services.attestation_gate`` and consulted by the gate
-# node — extending the budget is an explicit constant edit + a
-# deliberate test run.
-WITHHOLD_DENY_BUDGET: int = 8
+# The withhold budget's SINGLE runtime home is
+# ``WITHHOLD_DENY_BUDGET_DEFAULT`` in ``daemon.services.attestation_gate``
+# (alongside its predicate ``withhold_budget_exhausted`` — the gate
+# node imports both from there, lazily: a module-level import here
+# would cycle through ``daemon.services.__init__`` → child_reports →
+# daemon.graph). ``daemon.graph.WITHHOLD_DENY_BUDGET`` is a COMPAT
+# ALIAS served by the module ``__getattr__`` below (round-2 tidier:
+# the previous declaration here forked the constant with a false
+# "single source of truth lives HERE" claim while every use site
+# imported the attestation_gate constant — green sync tests, one
+# live side). Never read by gate logic.
+def __getattr__(name: str):
+    if name == "WITHHOLD_DENY_BUDGET":
+        # Compat alias → the true home (PEP 562 lazy re-export).
+        from .services.attestation_gate import WITHHOLD_DENY_BUDGET_DEFAULT
+
+        return WITHHOLD_DENY_BUDGET_DEFAULT
+    raise AttributeError(
+        f"module {__name__!r} has no attribute {name!r}"
+    )
 #: State channel key — per-dispatch withhold-epoch deny counter.
 #: Increments only on the never-spoke-judge composition-gate
 #: conversion (``TERMINAL_AFTER_BOUND → DENIED`` with
