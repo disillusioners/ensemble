@@ -176,6 +176,24 @@ class Decision(str, Enum):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FOLLOW-UP (deliberately NOT implemented in the v0.16.9 bundle, 2026-10-01):
+# extending ALLOWED_LEGITIMATE_PENDING_WAKEUP to recognize "arm-owner leader
+# awaiting a user nonce echo" (incident 6f961c43) was evaluated and SKIPPED.
+# The R2 inputs (``pending_children``, ``queued_or_expected_wakeups``) carry
+# no user-input-await signal; recognizing an armed ceremony nonce requires
+# NEW SIGNAL PLUMBING — reading the live install's ``releases/state.json``
+# pending_actions (a cross-process file owned by the upgrade subsystem) or
+# threading a nonce-armed channel from the minting path into the gate —
+# neither is a small narrow change. Meanwhile b1 (withhold budget) + b3
+# (run-deny cap) already bound the await-forever loop: the leader can no
+# longer die to GRAPH_RECURSION_LIMIT while waiting on a nonce; it exits
+# LOUD at the budget and a later nonce echo can revive/re-dispatch.
+# Revisit only if ceremony missions need the leader to HOLD (not exit)
+# across long nonce waits.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Settings — Phase 4 canonical resolver lives in
 # ``daemon.services.attestation_resolver``. The legacy NamedTuple below
 # is preserved as the public seam the gate (``build_instance_graph``,
@@ -495,6 +513,92 @@ def deny_bound_exceeded(denied_count: int, bound: int) -> bool:
         True when this deny would exceed the bound.
     """
     return denied_count + 1 > bound
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P1 — per-dispatch withhold-epoch budget (2026-09-30, incident 34978dfc)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Incident 34978dfc (mute-wall on live): the gate's normal deny
+# bound is 3, but the "exhaustion composition gate" in
+# ``daemon/graph.py`` converts ``TERMINAL_AFTER_BOUND`` →
+# ``DENIED`` whenever the judge NEVER SPOKE (every deny so far was
+# a timeout / error / kill-switch-off / unparsable). Under user
+# ruling v3 the deny+nudge cycle continues indefinitely; the
+# committed counter rises past the bound (24 → 163 in the
+# incident). ``recursion_limit`` was the only terminator — 137
+# mute replies, then ``GraphRecursionError`` → instance error,
+# result_summary='🔇'.
+#
+# Fix (P1): a SECOND bound, evaluated per-dispatch when the
+# composition gate would convert to DENIED. The budget is
+# deliberately SEPARATE from the normal-epoch bound (different
+# unit, different lifetime, different consumer). The normal
+# bound is PER-EPOCH and resets at terminal_after_bound; the
+# withhold budget is PER-DISPATCH and accumulates across epochs
+# until mission end (an attest / attested allow / fresh episode
+# clears it via the gate's normal reset channels).
+#
+# Justification of value 8 (single-digit, task constraint):
+#   * the normal bound is 3 → up to 4 deny+counter advances per
+#     epoch (0,1,2 then terminal-after-bound fires on counter=3);
+#   * the budget MUST let a legitimate multi-epoch deny arc
+#     complete — e.g. a real work-then-deny-then-deny cycle
+#     legitimately needs 2-3 epochs of runway. Budget=8 = ~2
+#     epochs of headroom past the first, comfortable for honest
+#     work without enabling a mute wall;
+#   * the incident accumulated 24 denials before the fatal turn;
+#     budget=8 caps that arc to <1/3 of the abuse threshold;
+#   * the incident emitted 137 mute replies total; budget=8
+#     truncates that mute wall to ~6% of its observed length.
+#
+# This helper is the SINGLE SOURCE OF TRUTH for the withhold
+# bound — extend, don't fork. The composition gate in
+# ``daemon/graph.py`` and any future per-dispatch budget check
+# (e.g. a maintenance admin who wants to instrument the gate
+# with a budget probe) MUST consult this helper. Mirrors the
+# ``deny_bound_exceeded`` discipline verbatim. (Round-2 tidier:
+# ``daemon.graph.WITHHOLD_DENY_BUDGET`` is a lazy compat alias
+# served by that module's ``__getattr__`` — it resolves HERE, so
+# editing this constant is the only way to change the budget.)
+WITHHOLD_DENY_BUDGET_DEFAULT: int = 8
+
+
+def withhold_budget_exhausted(
+    withhold_deny_count: int, budget: int = WITHHOLD_DENY_BUDGET_DEFAULT
+) -> bool:
+    """Per-dispatch withhold-epoch budget predicate (2026-09-30, P1).
+
+    The composition gate in ``daemon/graph.py`` (the 7d4a3bd9
+    exhaustion branch at ``decision.decision is TERMINAL_AFTER_BOUND
+    and not any_substantive_deny``) increments ``withhold_deny_count``
+    by 1 on every conversion to ``DENIED``. When this predicate
+    returns True the leader exits LOUDLY with the standard
+    terminal_after_bound machinery (loud ``completed (gate
+    escalated — unverified)`` surface; ledger ``set_escalated_and_
+    reset``; ``leader_completion_gate_withholding_exit`` event).
+
+    The predicate is byte-equivalent in shape to
+    :func:`deny_bound_exceeded` but applies to a DIFFERENT counter
+    with a DIFFERENT lifetime — the normal deny bound is per-epoch
+    (resets at terminal_after_bound), the withhold budget is
+    per-dispatch (accumulates across epochs until mission-end reset
+    via the SessionState channel clearing at attested allow /
+    HOLD cap fall-through / fresh-episode sentinel).
+
+    Args:
+        withhold_deny_count: Current accumulated withhold-deny
+            count (per-mission; reset by the gate's normal
+            SessionState channel clearing rules).
+        budget: Withhold-deny budget (default
+            :data:`WITHHOLD_DENY_BUDGET_DEFAULT` = 8). Single
+            source of truth — extending the budget is an explicit
+            configuration change to this constant.
+
+    Returns:
+        True when this conversion would exhaust the budget.
+    """
+    return withhold_deny_count + 1 > budget
 
 
 def decide(

@@ -67,7 +67,15 @@
 LOG_TAG="${LOG_TAG:-upgrade}"
 
 # Health-gate budgets (seconds) — same numbers as deploy.sh phase 5.
-LIVEZ_BUDGET_S="${LIVEZ_BUDGET_S:-60}"
+# LIVEZ_BUDGET_S = 180s (v0.16.9, was 60s): attempt-2 halt showed the
+# post-flip boot alone eats ~51s for the journal sweep on the first live
+# restart; a 60s verify budget is too tight and halts the promote on
+# otherwise-healthy boot-and-livez delays. 180s gives ~3x the base 60s
+# headroom for cold-boot + verify span. Worst-case cost = extra wait
+# before halt on a genuinely-dead boot (still halts); too-short budget
+# = false halt on a healthy boot (the worse outcome — every verify-
+# budget halt is a LIVE promote halt).
+LIVEZ_BUDGET_S="${LIVEZ_BUDGET_S:-180}"
 READYZ_BUDGET_S="${READYZ_BUDGET_S:-120}"
 # Post-flip soak (ADR-005 gate: 300s). Overridable for sandbox drills only
 # (ENSEMBLE_PROMOTE_SOAK_S); production default stays 300.
@@ -2072,15 +2080,50 @@ _supervision_handback_unit() {
 restart_via_launcher() {
     mkdir -p "$INSTALL_DIR/data"
     local log="$INSTALL_DIR/data/launcher.log"
-    local hb_unit="" hb_mode="" hb_prestop="${SUPERVISION_PRESTOP_MAINPID:-}"
+    local hb_unit=""
+    local hb_mode=""
+    local hb_prestop="${SUPERVISION_PRESTOP_MAINPID:-}"
+    local _hb_pin=""
 
     # ── P3 mode selection (consume the PRE-STOP classification) ───────
     if _supervision_host_allows_unit && command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
         case "${SUPERVISION_STATE:-}" in
             UNIT_MANAGED)
-                if [ -n "${SUPERVISION_UNIT:-}" ]; then
-                    hb_mode="unit"
+                # ── v0.16.9 hand-back pin rung (lane-convergence fix) ──
+                # Pre-convergence the daemon runs under ensemble-live.service
+                # (cgroup-derived SUPERVISION_UNIT); promoting to
+                # ensemble-main.service requires the hand-back to declare/
+                # verify the NEW unit so the promote completes instead of
+                # halting on declared≠verified. Precedence: env var > .env
+                # pin > cgroup leaf, with r3-style validation
+                # (ensemble-*.service conformance + unit-file existence,
+                # commit e56f2e85) — missing or non-conforming falls
+                # through to the cgroup leaf, BYTE-IDENTICAL to current
+                # behavior. HAND-BACK SCOPED ONLY: the stop path keeps
+                # the cgroup-leaf selection (pre-convergence stop aimed at
+                # the pinned unit would pre-flip-abort; a global override
+                # would leak into the stop seam).
+                _hb_pin="${ENSEMBLE_RESTART_UNIT:-}"
+                if [ -z "$_hb_pin" ]; then
+                    _hb_pin="$(_supervision_unit_from_dotenv 2>/dev/null)" || _hb_pin=""
+                fi
+                case "$_hb_pin" in
+                    ensemble-*.service)
+                        if [ -f "$SUPERVISION_UNIT_DIR/$_hb_pin" ]; then
+                            hb_unit="$_hb_pin"
+                        else
+                            _warn "hand-back: pin '$_hb_pin' set but unit file absent at $SUPERVISION_UNIT_DIR (manual: create the unit file at $SUPERVISION_UNIT_DIR/$_hb_pin or unset ENSEMBLE_RESTART_UNIT) — falling through to cgroup leaf ${SUPERVISION_UNIT:-<none>}"
+                        fi
+                        ;;
+                    *)
+                        [ -n "$_hb_pin" ] && _warn "hand-back: pin '$_hb_pin' not ensemble-*.service (manual: correct the name to ensemble-*.service or unset ENSEMBLE_RESTART_UNIT) — falling through to cgroup leaf ${SUPERVISION_UNIT:-<none>}"
+                        ;;
+                esac
+                if [ -z "$hb_unit" ] && [ -n "${SUPERVISION_UNIT:-}" ]; then
                     hb_unit="$SUPERVISION_UNIT"
+                fi
+                if [ -n "$hb_unit" ]; then
+                    hb_mode="unit"
                 fi
                 ;;
             SCOPE_SURVIVOR)

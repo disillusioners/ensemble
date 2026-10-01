@@ -813,6 +813,152 @@ assert_eq "8w dead owner → acquire succeeds via stale-break (0)" "0" "$?"
 ( . "$LAUNCHER"; _js_lock_release "$JS_W" >/dev/null 2>&1 )
 
 
+# ─── 8b. Sweep-hang timeouts (fix #4, v0.16.9) ─────────────────────────────
+# Two arms: (1) a regression pin that _journal_sweep at the current
+# branch DOES NOT use unbounded pipe reads or `wait` against subprocesses
+# — the brief premise was a "sweep pipe_read wedge" but HEAD code uses
+# pure bash JSON parsing; the live-install launcher is byte-identical to
+# the BASE (post-v0.16.8) commit — HEAD carries the bounded-subprocess pass
+# that converges at the next v0.16.9 promote. (2) correctness tests
+# for the bounded-run helper _js_run_bounded and the bounded pid-alive
+# wrapper _js_pid_alive_bounded (genuine D-state kill-0 / wedged-cmd
+# wedge defense; the kill -0 call IS a real blocking risk at HEAD).
+section "sweep-hang timeouts"
+
+# 8b-r1: _journal_sweep SOURCE PIN — no pipe reads / no `wait` against
+# subprocesses in the sweep body. The brief's "sweep pipe_read wedge"
+# shape doesn't exist at HEAD; this regression pin ensures any future
+# PR that re-introduces it gets caught. Extracted via line-range grep
+# (the function body is _journal_sweep() until the next top-level fn).
+SWEEP_BODY="$(awk '
+    /^_journal_sweep\(\)/ { in_fn=1; next }
+    in_fn && /^}/ { in_fn=0; next }
+    in_fn { print }
+' "$LAUNCHER")"
+# Strip bash comments + blank lines so a comment that says "wait" or
+# "while read" in a docstring does not trip the pin (the comments ARE
+# in the source — pure bash with no parser-level meaning).
+SWEEP_CODE="$(printf '%s\n' "$SWEEP_BODY" | sed -e 's/#.*$//' -e '/^[[:space:]]*$/d')"
+if printf '%s' "$SWEEP_CODE" | grep -qE 'wait[[:space:]]+"?\$[A-Za-z_][A-Za-z_0-9]*"?( |$)'; then
+    _fail "8b-r1 _journal_sweep has no `wait` against subprocess pids" "absent" "$(printf '%s' "$SWEEP_CODE" | grep -nE 'wait' | head -3)"
+else
+    _pass "8b-r1 _journal_sweep has no `wait` against subprocess pids (regression pin)"
+fi
+# `pipe()` bash builtin / redirection to/from a pipe is the OTHER way the
+# sweep could wedge (the brief's specific case). Pin: no `| while` or
+# `while read` (line-buffered pipe loop) inside the sweep body.
+if printf '%s' "$SWEEP_CODE" | grep -qE '\|[[:space:]]*(while|read)|while[[:space:]]+read'; then
+    _fail "8b-r1 _journal_sweep has no pipe reads" "absent" "$(printf '%s' "$SWEEP_CODE" | grep -nE 'while read|\\| while' | head -3)"
+else
+    _pass "8b-r1 _journal_sweep has no pipe reads (regression pin)"
+fi
+
+# 8b-r2: live-install launcher state (informational). The live install's
+# launcher copy at /home/nea/agents-ensemble/launcher.sh runs until the
+# NEXT successful v0.16.9 promote carries the fix payload. Until then the
+# live copy is byte-identical to the BASE commit (no fix), while HEAD has
+# the bounded-subprocess pass. This is informational — it does NOT fail
+# the suite; v0.16.9 promote closes it. Replaces the early 'drift guard'
+# (which was a strict equality check that fired BEFORE v0.16.9 promotes
+# — the wrong outcome to optimize against).
+LIVE_LAUNCHER="/home/nea/agents-ensemble/launcher.sh"
+if [ -f "$LIVE_LAUNCHER" ]; then
+    # Compare the _journal_sweep function body between repo and live.
+    LIVE_SWEEP_BODY="$(awk '
+        /^_journal_sweep\(\)/ { in_fn=1; next }
+        in_fn && /^}/ { in_fn=0; next }
+        in_fn { print }
+    ' "$LIVE_LAUNCHER")"
+    if [ "$SWEEP_BODY" = "$LIVE_SWEEP_BODY" ]; then
+        _pass "8b-r2 repo _journal_sweep body ≡ live-install copy (post-promote convergence)"
+    else
+        # informational pass — v0.16.9 promote will converge
+        printf 'INFO: 8b-r2 live-install _journal_sweep ≠ repo HEAD (v0.16.9 not promoted yet; v0.16.9 promote will close)\n'
+        LIVE_KILLS=$(printf '%s' "$LIVE_SWEEP_BODY" | sed -e 's/#.*$//' | grep -c '_js_pid_alive_bounded\|_js_run_bounded' || true)
+        if [ "$LIVE_KILLS" -gt 0 ]; then
+            _pass "8b-r2 live-install _journal_sweep body has the bounded-subprocess pass (post-promote)"
+        else
+            printf 'INFO: 8b-r2 live-install _journal_sweep body pre-promote (no bounded pass; will land at v0.16.9)\n'
+        fi
+    fi
+else
+    _skip "8b-r2 repo _journal_sweep body ≡ live-install copy — live install absent (no /home/nea/agents-ensemble/launcher.sh)"
+fi
+
+# 8b-c1: _js_run_bounded — fast command returns the inner rc (0 / nonzero)
+( . "$LAUNCHER" >/dev/null 2>&1 )
+assert_eq "8b-c1 fast command: rc 0" "0" "$( . "$LAUNCHER" >/dev/null 2>&1; _js_run_bounded 3 -- true; echo $? )"
+assert_eq "8b-c1 nonzero command: rc preserved (7)" "7" "$( . "$LAUNCHER" >/dev/null 2>&1; _js_run_bounded 3 -- sh -c 'exit 7'; echo $? )"
+
+# 8b-c2: _js_run_bounded — slow command gets SIGKILLed, returns 124
+TIMEOUT_OUT="$( . "$LAUNCHER" >/dev/null 2>&1
+    T0=$SECONDS
+    _js_run_bounded 1 -- sleep 5
+    rc=$?
+    echo "rc=$rc elapsed=$((SECONDS - T0))" )"
+case "$TIMEOUT_OUT" in
+    "rc=124 elapsed=1") _pass "8b-c2 slow command: rc 124, SIGKILLed within deadline" ;;
+    *) _fail "8b-c2 slow command: rc 124, SIGKILLed within deadline" "rc=124 elapsed=1" "$TIMEOUT_OUT" ;;
+esac
+
+# 8b-c3: _js_pid_alive_bounded — own pid alive (rc 0); bogus pid dead (rc 1)
+assert_eq "8b-c3 own pid: alive (rc 0)" "0" "$( . "$LAUNCHER" >/dev/null 2>&1; _js_pid_alive_bounded $$; echo $? )"
+assert_eq "8b-c3 bogus pid: dead (rc 1)" "1" "$( . "$LAUNCHER" >/dev/null 2>&1; _js_pid_alive_bounded 999999; echo $? )"
+
+# 8b-c4: _js_pid_alive_bounded — on wedge, conservative-ALIVE (rc 0).
+# Simulate the wedge by mocking _js_run_bounded to immediately return 124
+# (the SIGKILL-by-watchdog code); the wrapper must downgrade to ALIVE.
+MOCK_WEDGE_OUT="$( . "$LAUNCHER" >/dev/null 2>&1
+    eval '_js_run_bounded() { return 124; }'
+    _js_pid_alive_bounded $$ >/dev/null 2>&1
+    echo "wedge-rc=$?" )"
+case "$MOCK_WEDGE_OUT" in
+    "wedge-rc=0") _pass "8b-c4 wedge → conservative-ALIVE (lock NEVER broken on wedge)" ;;
+    *) _fail "8b-c4 wedge → conservative-ALIVE (lock NEVER broken on wedge)" "wedge-rc=0" "$MOCK_WEDGE_OUT" ;;
+esac
+
+# 8b-c5: sweep integration — the bounds survive a real sweep call.
+# Fixture: stale + flipped:true → sweep-rollback (which calls the
+# bounded cat on the journal + bounded date -p on started_at + bounded
+# kill -0 on the (deceased) owner pid). Each bounded call must NOT
+# wedge the sweep; the sweep must complete with rc 0.
+JS_F4="$JS_TEST_DIR/f4"; _js_fixture "$JS_F4"; _js_seed "$JS_F4" "$STALE_TS" true
+( . "$LAUNCHER"; INSTALL_DIR="$JS_F4" _journal_sweep >/dev/null 2>&1 )
+F4_RC=$?
+assert_eq "8b-c5 sweep survives bounded subprocess calls" "0" "$F4_RC"
+assert_eq "8b-c5 sweep-rollback repointed (bounded cat + date + kill -0)" "releases/v0.10.5" "$(readlink "$JS_F4/current")"
+
+# 8b-c6: _js_run_bounded — instant commands do not stall (regression pin).
+# Bug shape (commit 961dfe59): the watcher `( sleep N; kill -KILL $pid ) &`
+# inherits the command-substitution pipe's write-end. When the watched child
+# wins, we SIGKILL the watcher subshell — but its `sleep N` child is
+# orphaned to init AND still holds the pipe write-end until sleep expires.
+# `$( _js_run_bounded ... )` therefore blocks ~N s per call even on instant
+# commands. Measured: launcher suite 10s at base → 652s at HEAD (65×). Pin:
+# 5 instant `_js_run_bounded true` calls (timeout 3s) must complete in ≤5s.
+# Buggy path: 5 × ~3s = ~15s, comfortably above the 5s ceiling; fixed path:
+# sub-second on any sane host. The launcher suite's own wall-clock (10s
+# vs 652s) is the suite-level discriminator; this cell is the per-function
+# pin.
+INSTANT_OUT="$( . "$LAUNCHER" >/dev/null 2>&1
+    T0=$(date +%s)
+    for _ in 1 2 3 4 5; do
+        _js_run_bounded 3 -- true >/dev/null
+    done
+    echo "elapsed=$(( $(date +%s) - T0 ))" )"
+INSTANT_ELAPSED="${INSTANT_OUT#elapsed=}"
+case "$INSTANT_ELAPSED" in
+    ''|*[!0-9]*)
+        _fail "8b-c6 5 instant commands complete in ≤5s (no orphan-fd stall)" "<=5" "non-numeric elapsed: $INSTANT_OUT" ;;
+    *)
+        if [ "$INSTANT_ELAPSED" -le 5 ]; then
+            _pass "8b-c6 5 instant commands complete in ${INSTANT_ELAPSED}s ≤5s (no orphan-fd stall)"
+        else
+            _fail "8b-c6 5 instant commands complete in ≤5s (no orphan-fd stall)" "<=5" "elapsed=${INSTANT_ELAPSED}s — orphan-sleep holds capture pipe (commit 961dfe59 regression)"
+        fi ;;
+esac
+
+
 # ─── 9. resolve_binary preference order ─────────────────────────────────────
 section "resolve_binary"
 RB_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-rb.XXXXXX")"

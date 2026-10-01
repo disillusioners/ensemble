@@ -233,14 +233,17 @@ _js_now_iso() {
 # here = the boot sweep fails closed on every startup, an unfixable
 # orphan-txn wedge that nothing else recovers. Verified on macOS
 # date(1) and GNU coreutils 9.x (Linux).
+# Bounded 3s date parse (fix #4, v0.16.9): a wedged strftime / hung
+# gettimeofday on a clock anomaly could pin the sweep forever — the
+# 2026-10-01 attempt-1 sweep hang defense layer.
 _js_iso_to_epoch() {
     local ts="$1" epoch
     case "$(uname -s)" in
         Darwin|*BSD*|*bsd*)
-            epoch="$(date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null)" || return 1
+            epoch="$(_js_run_bounded 3 -- date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s)" || return 1
             ;;
         Linux|GNU*|*GNU*)
-            epoch="$(date -d "$ts" +%s 2>/dev/null)" || return 1
+            epoch="$(_js_run_bounded 3 -- date -d "$ts" +%s)" || return 1
             ;;
         *)
             echo "_js_iso_to_epoch: unrecognized platform '$(uname -s)' — refusing (fail-closed; BSD or Linux required)" >&2
@@ -319,10 +322,14 @@ _js_json_sub() {
 
 # _js_journal_read <path> — print journal JSON; nonzero on absent/unreadable/
 # EMPTY or BRACE-UNBALANCED (torn write — refuse to trust, D4 discipline).
+# Bounded 3s cat read (fix #4, v0.16.9): if the journal file is on a hung
+# NFS / FIFO / kernel wedge, the previous unbounded `cat` could pin the
+# sweep forever — the 2026-10-01 attempt-1 sweep hang. On timeout: sweep
+# returns nonzero; the txn is left OPEN for the next start.
 _js_journal_read() {
     local jp="$1" json
     [ -f "$jp" ] || return 1
-    json="$(cat "$jp" 2>/dev/null)" || return 1
+    json="$(_js_run_bounded 3 -- cat "$jp")" || return 1
     [ -z "$json" ] && return 1
     local ob=0 cb=0 os=0 cs=0 i c in_str=0 esc=0
     for ((i = 0; i < ${#json}; i++)); do
@@ -491,6 +498,63 @@ _js_lock_dir() {
     printf '%s/releases/rollback.lock.d' "$1"
 }
 
+# _js_run_bounded <timeout_s> [--] <cmd...> — run a subprocess with a
+# SIGKILL deadline; on wedge, log LOUD and return nonzero. Launcher's
+# sweep-hang timeouts (fix #4, v0.16.9): previously any blocking
+# subprocess (kill -0 on a foreign-D-state pid; cat on a hung FIFO/NFS;
+# date on a wedged strftime) could pin the boot sweep FOREVER
+# (2026-10-01 attempt-1 halt — recovery runbook commit 3dd8dc1
+# §Journal Sweep Hang Recovery). On timeout: subprocess is SIGKILLed,
+# helper returns 124 (the conventional GNU `timeout` "timed out" code,
+# used here for consistency with the rest of the project), JOURNAL
+# STATE UNTOUCHED — the sweep is a recovery backstop; never write fake
+# terminal states, the next start will retry.
+# PORTABILITY (fix/portable-atomic-flip-linux 47630be0 idiom): no GNU
+# `timeout` (BSD/macOS stock shells lack it); uname-agnostic; bash
+# 3.2-safe (no chained local declarations). Implementation: background
+# the command, race a `sleep` watchdog that SIGKILLs it on win. The
+# `sleep + kill` arm fires only if `wait` has not returned by the
+# deadline — never destroys a fast-finishing child.
+_js_run_bounded() {
+    local timeout_s="$1"; shift
+    if [ "${1:-}" = "--" ]; then shift; fi
+    local pid watcher rc=0
+    "$@" &
+    pid=$!
+    # Detach the watcher subshell from the command-substitution pipe so an
+    # orphan `sleep` (reparented to init when SIGKILLed on child-wins) cannot
+    # hold the pipe write-end and stall `$()` until sleep expires. The
+    # redirected fd is /dev/null — the watched child's fds (set up earlier)
+    # are unaffected. Without this, every instant bounded call stalls ~N s
+    # even though the wrapped command completed instantly (commit 961dfe59
+    # regression — see LESSONS/2026-10-01-js-run-bounded-orphaned-sleep-stall).
+    (
+        sleep "$timeout_s" 2>/dev/null
+        kill -KILL "$pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    watcher=$!
+    if wait "$pid" 2>/dev/null; then
+        rc=0
+    else
+        rc=$?
+    fi
+    # SIGKILL = 137 (128+9), SIGTERM = 143 (128+15). When the child is
+    # killed by a signal we did NOT send (i.e. our watchdog fired first),
+    # bash wedges with 128+SIGKILL = 137 → wedge → return 124 (conventional
+    # GNU `timeout` "timed out" code, used here for cross-tool consistency).
+    # If the child itself exits with rc 137 (no kill involved), we cannot
+    # distinguish, but in this codebase no sweep child does that — `kill -0`,
+    # `cat`, `date` all exit 0 or 1, never 137. The watcher is always
+    # SIGKILLed at the end; it has its own race window but bash builtin kill
+    # is a single syscall (no FS / IPC dependency), safe to ignore.
+    case "$rc" in
+        137|143) rc=124 ;;
+    esac
+    kill -KILL "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    return "$rc"
+}
+
 # _pid_alive <pid> — kill -0 liveness with EPERM=ALIVE semantics (B3.5
 # lib.sh _pid_alive twin, mirrored locally: the launcher is the BOOT path
 # and must stay self-contained — it never sources scripts/upgrade/lib.sh).
@@ -507,6 +571,42 @@ _pid_alive() {
     case "$err" in
         *"not permitted"*) return 0 ;;
         *) return 1 ;;
+    esac
+}
+
+# _js_pid_alive_bounded <pid> — sweep-only bounded liveness test (fix #4,
+# v0.16.9). Wraps kill -0 in a 3-second SIGKILL deadline so a foreign
+# D-state pid (or wedged kernel) cannot pin the boot sweep forever
+# (2026-10-01 attempt-1 halt — recovery runbook commit 3dd8dc1
+# §Journal Sweep Hang Recovery). Preserves the B3.5 EPERM=ALIVE contract
+# (kill -0 on a foreign-owned pid returns "not permitted" → alive).
+# Conservative on wedge: returns ALIVE (rc 0) — the lock is NEVER broken
+# on a wedged liveness check (we don't know the owner is dead, only
+# that we couldn't prove it alive within 3s; the operator removes a
+# stale lock manually if needed). sweep-scoped ONLY: callers outside
+# the sweep continue to use _pid_alive (the timeout would change
+# semantics elsewhere).
+_js_pid_alive_bounded() {
+    local out rc
+    out="$(_js_run_bounded 3 -- sh -c 'LC_ALL=C kill -0 "$1" 2>&1' -- "$1")"
+    rc=$?
+    # The "rc=N" suffix is the inner sh's exit code; kill -0 → 0 (alive),
+    # 1 (dead or EPERM); _js_run_bounded → 0, or 124 on wedge (rc of the
+    # inner sh is whatever it was when SIGKILL'd; we cannot trust it
+    # after a wedge, default to conservative-alive below).
+    case "$rc" in
+        0)
+            # inner rc=0 → permitted alive
+            return 0 ;;
+        124)
+            # _js_run_bounded timed out — wedge → conservative alive
+            return 0 ;;
+        *)
+            # inner rc≠0 — check stderr for the EPERM=alive contract
+            case "$out" in
+                *"not permitted"*) return 0 ;;
+                *) return 1 ;;
+            esac ;;
     esac
 }
 
@@ -547,7 +647,7 @@ _js_lock_acquire() {
             if [ "$age" -gt "$SWEEP_LOCK_STALE_S" ]; then
                 local owner_live=0
                 if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
-                   && _pid_alive "$owner_pid"; then
+                   && _js_pid_alive_bounded "$owner_pid"; then
                     owner_live=1
                 fi
                 if [ "$owner_live" -eq 0 ]; then
@@ -561,7 +661,7 @@ _js_lock_acquire() {
         fi
         # owner process dead? (crash left a fresh-heartbeat dir) — break too
         if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
-           && ! _pid_alive "$owner_pid"; then
+           && ! _js_pid_alive_bounded "$owner_pid"; then
             _log "journal sweep: pipeline lock owner pid $owner_pid is dead — breaking lock"
             mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
             continue
@@ -632,11 +732,13 @@ _js_flip_current() {
 # field. Same semantics as lib.sh manifest_field (the protocol, not the
 # code, is the shared contract): nonzero on missing/unreadable manifest or
 # absent key. Callers fail closed on EVERY unreadable shape (D-FA4.5).
+# Bounded 3s cat read (fix #4, v0.16.9): same sweep-hang defense as
+# _js_journal_read.
 _js_manifest_field() {
     local mp json
     mp="$1/releases/$2/manifest.json"
     [ -f "$mp" ] || return 1
-    json="$(cat "$mp" 2>/dev/null)" || return 1
+    json="$(_js_run_bounded 3 -- cat "$mp")" || return 1
     _js_json_field "$json" "$3"
 }
 
@@ -710,7 +812,7 @@ _journal_sweep() {
     fi
     owner_dead=1
     if [ -n "$owner" ] && printf '%s' "$owner" | grep -Eq '^[0-9]+$' \
-       && _pid_alive "$owner" 2>/dev/null; then
+       && _js_pid_alive_bounded "$owner" 2>/dev/null; then
         owner_dead=0
     fi
 

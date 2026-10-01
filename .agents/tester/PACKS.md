@@ -1,5 +1,31 @@
 # Test Packs
 
+## Completed commission — v0.16.9 FIX BUNDLE FULL GATES (frozen verification) (2026-10-01)
+
+Branch `feature/v0.16.9-fix-bundle` @ **`a52a0321`** (base `f87a397c`), report-only (no fixes, no commits). **VERDICT: PASS WITH ONE REPORT-BACK** — zero feature-caused reds anywhere; every red/skip A/B-verified base-identical; convergence drill 4/4; §8b 10/0. Sole finding: fix #4 `_js_run_bounded` orphaned-sleep pipe stall (feature-caused runtime regression — launcher suite 10 s at base → 652 s at HEAD; bounded-correct but ~25-45 s per stale-txn sweep call; council decision: ride fix into v0.16.9 or ticket). Commission premise "full-run hang pre-existing" FALSIFIED at this base (base completes 10 s; only 8c×2+8g pre-existing). Full report: `RESULTS/2026-10-01-v0.16.9-fix-bundle-verification.md`.
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `supervision_stop_handback` (standing) | `timeout 300 bash tests/test_supervision_stop_handback.sh` | full suite, WARN:-prefix needles | ✅ 152/0/0, exit 0 |
+| `launcher_full_ab` | HEAD + detached worktree @f87a397c, `timeout 300 bash tests/test_launcher.sh` | full suite + hang A/B | ⚠️ HEAD exit 124 @300 s (NEW-at-HEAD, feature-caused stall — see report); base exit 1 @10 s; reds 8c×2+8g base-identical (PRE-EXISTING); 900 s soak 202P/3F zero new reds |
+| `launcher_8b_gnu` | §8b extracted from HEAD lines 816-929, GNU date substitution disclosed ([SUBS-S1] `date -ju -v-700S` → `date -u -d '-700 seconds'`) | §8b journal sweep checks | ✅ 10/0, exit 0, 58 s |
+| `attestation_gate_bounds` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_attestation_gate_bounds.py -q` | 55 bounds tests incl. composed node+router regression | ✅ 55/0/0 in 1.27 s; composed regression RAN+PASSED (verified standalone) |
+| `attestation_sweep` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_attestation_*.py -q` | 28 files | ✅ 717/717 in 24.5 s; hang protocol not triggered |
+| `attestation_coupled_trio` | `timeout 300 .venv/bin/python -m pytest test_attestation_attest_first_contract.py test_attestation_scanner.py test_attestation_nudge_inject.py -q` | A1(22)+sentinel(21)+nudge(6) — resolved by exact-count + git lineage | ✅ 49/49 in 0.65 s |
+| `tools_half_a_unit` (full-dir ½) | `timeout 300 bash scripts/run_tests_scrubbed.sh tests/unit/tools/ --ignore=<4 HALF_B files> -q -rA` | full-dir-per-merge | ✅ 1594c/1580P/7F/5S in 213.9 s ≡ base |
+| `tools_half_b_unit` (full-dir ½) | same runner, 4 explicit files (prompt_section_reference_integrity, upgrade_tools, watch_job_mission_terminal, mission_watch_prompts) | full-dir-per-merge | ✅ 1570c/1568P/2F/0S in 15.0 s ≡ base; per-test diff EMPTY both halves (fresh-venv worktree leg, import verified in-worktree) |
+| `concurrency_atomic_unit_test` (standing) | `timeout 300 env -u POSTGRES_* … bash test/packs/concurrency_atomic_unit_test.sh` | ensure.md Core #2/#3 lane gate | ✅ 98P/0F/74S in 61.2 s, baseline-exact |
+| `ensure_statics` | grep dev.sh + call-site audit | ensure.md Core #4 + Important #1 | ✅ flag :102 present; 8/8 async call-sites awaited |
+| `v169_convergence_drill` (ad-hoc) | /tmp/sbx-v169-drill/ — real lib.sh+stop-ensemble.sh @HEAD, systemctl/date PATH shims, synthetic installs | hand-back pin rung: 4 assertions | ✅ 4/4 (pin→UNIT_MANAGED hand-back; stop→cgroup leaf un-retargeted; DEADLINE_ARM LIVEZ_BUDGET_S=180 + 240-override honesty probe; invalid pin→WARN+fallback); 7.74 s total; real systemctl untouched |
+
+**Re-gate @ `7957332e`** (finding adjudicated RIDE-INTO; fix = watcher detached from capture pipe + new pin 8b-c6; addendum in RESULTS doc):
+
+| Pack | Invocation | Scope | Result |
+|---|---|---|---|
+| `launcher_full_regate` | `timeout 300 bash tests/test_launcher.sh` @7957332e | stall-dead proof | ✅ 203P/3F exact (3 = pre-existing 8c×2+8g), exit 1, **12 s** (was 652 s/exit-124) — /tmp/regate1.log |
+| `launcher_8b_c6` | §8b from HEAD lines 816-961, GNU substitution disclosed, ×3 runs | 11 checks incl. c6 | ✅ 11/11 ×3 (~1.9 s each); **c6 = 0 s** vs ≤5 s bound (buggy ≈15 s); helpers diff-verified byte-identical — /tmp/gate1b-8b-2/ |
+| `supervision_stop_handback` (re-run) | `timeout 300 bash tests/test_supervision_stop_handback.sh` @7957332e | regression guard | ✅ 152/0/0, exit 0, 132 s — /tmp/regate3.log |
+
 ## Completed commission — SUPERVISOR WAR r3 FIX GATE (deploy-ownership r3, report-only) (2026-09-30)
 
 Branch `feature/deploy-ownership-r3-fix` @ **`3ad48b9a`** (base `fc285a27`). **VERDICT: GREEN — commit validated.** All 7 suites exact-match implementer counts; release_journal A/B re-derived at rebased base fc285a27: **0 new / 0 masked / 14 common** (stderr byte-identical after timing normalization; GNU-debt family quarantined); symptom simulation **4/4 cells + BASE A/B** (base `SCRIPT_NOHUP` → fix `UNIT_MANAGED` heal, hash-pinned to commit blobs); mock audit 14/14 stubs OK, **0 critical**, B1h1/B1h2 real-classifier verified; hygiene exactly 5 files +505/−4, scratch disjoint. ⚠️ Post-gate: external actor staged a third-state partial unwind at 19:31:02Z (tree ≠ 3ad48b9a ≠ fc285a27) — all gate evidence timeline/hash-pinned PRE-mutation; any r4 must re-gate. Full report: `RESULTS/2026-09-30-gate-3ad48b9a-supervision-war-r3.md`.

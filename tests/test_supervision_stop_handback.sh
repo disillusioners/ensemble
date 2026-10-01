@@ -888,6 +888,226 @@ STUB
     )"
     assert_contains "C11 classification CONSUMED, never re-derived at hand-back" "classify-calls=0" "$C11_OUT"
 
+    # C12 hand-back pin-rung (v0.16.9 lane-convergence fix): when a
+    # valid pin is present (env var OR .env), the hand-back declares
+    # the PINNED unit (not the cgroup leaf), enabling the
+    # ensemble-live.service → ensemble-main.service convergence.
+    # C12a env-var rung: ENSEMBLE_RESTART_UNIT=ensemble-c12a.service
+    # (with the unit file in SUPERVISION_UNIT_DIR) overrides the
+    # cgroup-derived SUPERVISION_UNIT (ensemble-c12a-other.service).
+    # C12b .env rung: same shape, but pin sourced from INSTALL_DIR/.env
+    # (the load-bearing path per the brief — the executor's env is
+    # stripped by EXECUTOR_ENV_ALLOWLIST, .env pin is the only
+    # resolution path that fires from the promote executor).
+    C12_UNITS="$(mktemp -d -t supstop-c12.XXXXXX)"
+    touch "$C12_UNITS/ensemble-c12a.service"
+    touch "$C12_UNITS/ensemble-c12b.service"
+    touch "$C12_UNITS/ensemble-c12b2.service"
+
+    # C12a: env-var rung — pin via ENSEMBLE_RESTART_UNIT; the cgroup
+    # leaf is intentionally a DIFFERENT name (the pre-convergence
+    # shape: cgroup says ensemble-live.service, pin says
+    # ensemble-main.service). Hand-back must declare the pin.
+    reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
+    SC_MAINPID=9999 SC_IS_ACTIVE=inactive SC_START_RC=0
+    export SC_MAINPID SC_IS_ACTIVE SC_START_RC
+    C12A_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
+            export INSTALL_DIR="'"$CFIX"'"
+            export SYSTEMCTL_BIN="'"$SC4"'"
+            export SC_LOG="'"$CFIX"'/sc4.log"
+            export PORT=19997
+            export LIVEZ_BUDGET_S=2
+            export ENSEMBLE_RESTART_UNIT=ensemble-c12a.service
+            unset ENSEMBLE_SUPERVISION 2>/dev/null || true
+            . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-c12a-other.service; SUPERVISION_PRESTOP_MAINPID=777
+            restart_via_launcher
+            echo "rvl-rc=$?"
+        ' 2>&1)"
+    assert_eq "C12a env-var pin: rc 0" "rvl-rc=0" "$(rvl_rc "$C12A_OUT")"
+    assert_contains "C12a env-var pin declares the PINNED unit (not cgroup leaf)" "returns to unit ensemble-c12a.service" "$C12A_OUT"
+    assert_not_contains "C12a cgroup-leaf is NEVER a unit hand-back target" "returns to unit ensemble-c12a-other.service" "$C12A_OUT"
+    assert_contains "C12a hand-back COMPLETE on the pin" "unit hand-back COMPLETE: ensemble-c12a.service" "$C12A_OUT"
+
+    # C12b: .env rung — pin sourced from INSTALL_DIR/.env (env-var
+    # unset). Same convergence contract: hand-back uses the .env pin.
+    reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
+    C12B_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
+            export INSTALL_DIR="'"$CFIX"'"
+            export SYSTEMCTL_BIN="'"$SC4"'"
+            export SC_LOG="'"$CFIX"'/sc4.log"
+            export PORT=19997
+            export LIVEZ_BUDGET_S=2
+            unset ENSEMBLE_RESTART_UNIT ENSEMBLE_SUPERVISION 2>/dev/null || true
+            . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+            printf "ENSEMBLE_RESTART_UNIT=ensemble-c12b.service\n" > "'"$CFIX"'/.env"
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-c12b-other.service; SUPERVISION_PRESTOP_MAINPID=777
+            restart_via_launcher
+            echo "rvl-rc=$?"
+        ' 2>&1)"
+    assert_eq "C12b .env pin: rc 0" "rvl-rc=0" "$(rvl_rc "$C12B_OUT")"
+    assert_contains "C12b .env pin declares the PINNED unit (not cgroup leaf)" "returns to unit ensemble-c12b.service" "$C12B_OUT"
+    assert_not_contains "C12b cgroup-leaf is NEVER a unit hand-back target" "returns to unit ensemble-c12b-other.service" "$C12B_OUT"
+    rm -f "$CFIX/.env"
+
+    # C12b2: .env rung with env-var cleared EXTERNALLY (simulating the
+    # promote executor's EXECUTOR_ENV_ALLOWLIST strip — the load-
+    # bearing case from the brief). The .env pin is the only rung
+    # that can fire from the executor; the env-var rung is unreachable.
+    # Hand-back must still declare the pin.
+    reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
+    C12B2_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
+            export INSTALL_DIR="'"$CFIX"'"
+            export SYSTEMCTL_BIN="'"$SC4"'"
+            export SC_LOG="'"$CFIX"'/sc4.log"
+            export PORT=19997
+            export LIVEZ_BUDGET_S=2
+            unset ENSEMBLE_RESTART_UNIT ENSEMBLE_SUPERVISION 2>/dev/null || true
+            . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+            printf "ENSEMBLE_RESTART_UNIT=ensemble-c12b2.service\n" > "'"$CFIX"'/.env"
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-c12b2-other.service; SUPERVISION_PRESTOP_MAINPID=777
+            restart_via_launcher
+            echo "rvl-rc=$?"
+        ' 2>&1)"
+    assert_eq "C12b2 .env pin only (env stripped): rc 0" "rvl-rc=0" "$(rvl_rc "$C12B2_OUT")"
+    assert_contains "C12b2 .env pin declares the PINNED unit when env stripped" "returns to unit ensemble-c12b2.service" "$C12B2_OUT"
+    rm -f "$CFIX/.env"
+
+    # C12b-pin hand-back validation (unit ran, ruling, verify fast)
+    rm -rf "$C12_UNITS"
+
+    # C12b (FALLBACK — note: legacy name reused for the inverse contract;
+    # test id "C12b" in the brief = "pin absent OR invalid → fallback to
+    # cgroup leaf; STOP path unchanged". The first C12b block above tests
+    # the .env-rung path; this C12b block tests the FALLBACK contract.
+    # Numbering preserved per brief for traceability.)
+    C12B_UNITS="$(mktemp -d -t supstop-c12b.XXXXXX)"
+    touch "$C12B_UNITS/ensemble-c12bfb.service"   # the cgroup-leaf unit, present
+    # No ensemble-c12bfb-pin.service — the pin unit is INTENTIONALLY absent
+
+    # C12b absent pin: NO ENSEMBLE_RESTART_UNIT, no .env pin → hand-back
+    # declares the cgroup leaf (fallback contract).
+    reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
+    C12B_ABSENT_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
+            export INSTALL_DIR="'"$CFIX"'"
+            export SYSTEMCTL_BIN="'"$SC4"'"
+            export SC_LOG="'"$CFIX"'/sc4.log"
+            export PORT=19997
+            export LIVEZ_BUDGET_S=2
+            unset ENSEMBLE_RESTART_UNIT ENSEMBLE_SUPERVISION 2>/dev/null || true
+            . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-c12bfb.service; SUPERVISION_PRESTOP_MAINPID=777
+            restart_via_launcher
+            echo "rvl-rc=$?"
+        ' 2>&1)"
+    assert_eq "C12b absent pin: rc 0" "rvl-rc=0" "$(rvl_rc "$C12B_ABSENT_OUT")"
+    assert_contains "C12b absent pin: hand-back falls back to cgroup leaf" "returns to unit ensemble-c12bfb.service" "$C12B_ABSENT_OUT"
+
+    # C12b invalid pin (non-conforming name): ENSEMBLE_RESTART_UNIT
+    # set but not ensemble-*.service → cgroup leaf (with WARN).
+    reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
+    C12B_INVALID_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
+            export INSTALL_DIR="'"$CFIX"'"
+            export SYSTEMCTL_BIN="'"$SC4"'"
+            export SC_LOG="'"$CFIX"'/sc4.log"
+            export PORT=19997
+            export LIVEZ_BUDGET_S=2
+            export ENSEMBLE_RESTART_UNIT=foo.service
+            unset ENSEMBLE_SUPERVISION 2>/dev/null || true
+            . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-c12bfb.service; SUPERVISION_PRESTOP_MAINPID=777
+            restart_via_launcher
+            echo "rvl-rc=$?"
+        ' 2>&1)"
+    assert_eq "C12b invalid pin (non-conforming): rc 0" "rvl-rc=0" "$(rvl_rc "$C12B_INVALID_OUT")"
+    assert_contains "C12b invalid pin: hand-back falls back to cgroup leaf" "returns to unit ensemble-c12bfb.service" "$C12B_INVALID_OUT"
+    assert_contains "C12b invalid pin: WARN logs non-conforming pin (WARN: prefix)" "WARN: hand-back: pin 'foo.service' not ensemble-*.service" "$C12B_INVALID_OUT"
+
+    # C12b invalid pin (unit file missing): ENSEMBLE_RESTART_UNIT
+    # set + conforming name + NO unit file → cgroup leaf (with WARN).
+    reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
+    C12B_NOF_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
+            export INSTALL_DIR="'"$CFIX"'"
+            export SYSTEMCTL_BIN="'"$SC4"'"
+            export SC_LOG="'"$CFIX"'/sc4.log"
+            export PORT=19997
+            export LIVEZ_BUDGET_S=2
+            export ENSEMBLE_RESTART_UNIT=ensemble-c12bfb-missing.service
+            unset ENSEMBLE_SUPERVISION 2>/dev/null || true
+            . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-c12bfb.service; SUPERVISION_PRESTOP_MAINPID=777
+            restart_via_launcher
+            echo "rvl-rc=$?"
+        ' 2>&1)"
+    assert_eq "C12b missing-unit-file: rc 0" "rvl-rc=0" "$(rvl_rc "$C12B_NOF_OUT")"
+    assert_contains "C12b missing-unit-file: hand-back falls back to cgroup leaf" "returns to unit ensemble-c12bfb.service" "$C12B_NOF_OUT"
+    assert_contains "C12b missing-unit-file: WARN logs absent file (WARN: prefix)" "WARN: hand-back: pin 'ensemble-c12bfb-missing.service' set but unit file absent at" "$C12B_NOF_OUT"
+
+    # C12b STOP PATH UNCHANGED (the hard constraint from the brief):
+    # the fix is HAND-BACK SCOPED ONLY — stop_via_stop_script must
+    # still adopt the cgroup leaf regardless of the pin. Pin the
+    # invariant by invoking the real stop-ensemble.sh with the cgroup-
+    # leaf unit handed over via ENSEMBLE_SUPERVISION_RESULT (P3 seam,
+    # stop-ensemble.sh:511-513) AND a SYSTEMCTL_BIN stub. Assert:
+    #   - stop-ensemble.sh's own stdout announces the cgroup-leaf unit
+    #     (NOT the pin) as the unit-owned stop target — the B1 pattern
+    #     (test stops via the real stop-ensemble.sh; the announced unit
+    #     is observable in the script's own output, no stub log needed)
+    #   - the SYSTEMCTL_BIN stub ALSO records the cgroup-leaf stop
+    #     (defense-in-depth pin; the assertion is independent of stub
+    #     log existence)
+    C12B_STOP_STUB_LOG="$(mktemp -t supstop-c12b-stop.XXXXXX)"
+    C12B_STOP_STUB_BIN="$(mktemp -d -t supstop-c12b-stub.XXXXXX)"
+    cat > "$C12B_STOP_STUB_BIN/systemctl" <<STUB
+#!/bin/bash
+echo "\$*" >> "\${SC_LOG:-/dev/null}"
+exit 0
+STUB
+    chmod +x "$C12B_STOP_STUB_BIN/systemctl"
+    rm -f "$C12B_STOP_STUB_LOG"
+    C12B_STOP_OUT="$(
+        (
+            export WAIT_S=2
+            export SYSTEMCTL_BIN="$C12B_STOP_STUB_BIN/systemctl"
+            export SC_LOG="$C12B_STOP_STUB_LOG"
+            export ENSEMBLE_SUPERVISION_RESULT="UNIT_MANAGED:ensemble-c12bfb.service"
+            export ENSEMBLE_RESTART_UNIT=ensemble-c12bfb-missing.service
+            unset ENSEMBLE_SUPERVISION 2>/dev/null || true
+            # STOP_FORCE=1 bypasses pipeline_settled / current-symlink
+            # refusal — the test exercises unit-selection, not the
+            # preflight gate (D-FA5.3); operator-emergency exit is fine.
+            export STOP_FORCE=1
+            # stop-ensemble.sh also needs a `current` symlink at the
+            # fixture root for the unit-path leg to render past the
+            # preflight; the C fixture has releases/state.json without
+            # a symlink by default (D-FA5.3 contract).
+            mkdir -p "$CFIX/releases"
+            ln -sfn "releases/v1" "$CFIX/current"
+            bash "$STOP_SCRIPT" "$CFIX" 19997
+        ) 2>&1 || true
+    )"
+    # Primary: stop-ensemble.sh's stdout announces the cgroup-leaf unit.
+    # Asserts the script leg's behavior (independent of stub log).
+    if printf '%s' "$C12B_STOP_OUT" | grep -q "systemctl stop ensemble-c12bfb.service"; then
+        _pass "C12b STOP path unchanged: stop-ensemble.sh announces cgroup-leaf unit"
+    else
+        _fail "C12b STOP path unchanged: stop-ensemble.sh announces cgroup-leaf unit" "systemctl stop ensemble-c12bfb.service" "$(printf '%s' "$C12B_STOP_OUT" | head -5)"
+    fi
+    if printf '%s' "$C12B_STOP_OUT" | grep -q "ensemble-c12bfb-missing"; then
+        _fail "C12b STOP path: NEVER retargeted to the pin (would pre-flip-abort)" "absent pin name" "present"
+    else
+        _pass "C12b STOP path: NEVER retargeted to the pin (would pre-flip-abort)"
+    fi
+    rm -f "$C12B_STOP_STUB_LOG"
+    rm -rf "$C12B_STOP_STUB_BIN"
+    rm -rf "$C12B_UNITS"
+
     rm -rf "$CFIX" "$STUBBIN4" "$LSOF_OK" "$LSOF_NO"
 else
     _skip "C hand-back matrix — FENCE: no /run/systemd/system on this host"
