@@ -41,12 +41,10 @@ import type {
  * page-level Debug expander (raw JSON). Stepper orientation is
  * viewport-conditional via `@if (isDesktop())` (BreakpointObserver:
  * ≥1024px → horizontal, below → vertical) — TWO source-level `<mat-stepper>`
- * instances (one per orientation branch), each rendering its four
- * `<mat-step>` children from the shared `ckStepContent` `<ng-template>`
- * (no duplication of step bodies). `[linear]="false" [selectedIndex]="activeStep()"`
- * on both branches. Step content blocks preserve every existing
- * `data-testid`; the per-card Raw JSON `<details>` blocks were
- * consolidated into the page-level Debug expander (AC-13).
+ * instances (one per orientation branch), each with FOUR byte-identical
+ * direct `<mat-step>` children (INLINE DUPLICATION, parity-guarded by the
+ * spec's [data-testid] parity spec at lines 2376+ — a future edit that
+ * diverges one branch fails the parity assertion immediately).
  *
  * Step 4 auto-renders post-execute via `lastExecuteResult()`; with
  * `[linear]="false"` a page refresh during execute lands the operator

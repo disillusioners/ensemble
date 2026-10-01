@@ -2037,6 +2037,48 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
       // the rest of the callback if unsubscribe ran first).
       expect(component.activeStep()).toBe(3);
     });
+
+    it('failed execute does NOT advance — activeStep stays 2 (Step 3)', () => {
+      // Override pollRun to emit a terminal `failed` row synchronously,
+      // mirroring the re-entry resume test's mock-overrides. Mirrors
+      // production's terminal branch: status === 'succeeded' is the
+      // ONLY trigger for activeStep.set(3); failed/interrupted stay
+      // put and render their failure / interrupted UI inline on
+      // Step 3.
+      component.activeStep.set(2);
+      service.lastDryRun.set(DRY_RUN);
+      mockDialog.nextResult = true;
+      service.pollRun = (
+        runId: string,
+        intervalMs?: number,
+        hintMs?: number | null,
+      ) => {
+        service.pollRunCalls.push({ runId, intervalMs, hintMs });
+        return of(RUN_FAILED_NEVER_PRUNED);
+      };
+      component.onExecute();
+      expect(component.activeStep()).toBe(2);
+    });
+
+    it('interrupted execute does NOT advance — activeStep stays 2 (Step 3)', () => {
+      // Same mock-override strategy as the failed case above; status
+      // === 'interrupted' is the AM-6 re-run affordance signal —
+      // the operator stays on Step 3 to see the inline interrupted UI
+      // and click "Run again to converge".
+      component.activeStep.set(2);
+      service.lastDryRun.set(DRY_RUN);
+      mockDialog.nextResult = true;
+      service.pollRun = (
+        runId: string,
+        intervalMs?: number,
+        hintMs?: number | null,
+      ) => {
+        service.pollRunCalls.push({ runId, intervalMs, hintMs });
+        return of(RUN_INTERRUPTED_NEVER_PRUNED);
+      };
+      component.onExecute();
+      expect(component.activeStep()).toBe(2);
+    });
   });
 
   describe('step gating — canContinueFromStep1 (AC-4)', () => {
@@ -2302,11 +2344,15 @@ describe('CheckpointCleanupComponent — orientation locator contract (spec amen
     }).compileComponents();
 
     fixture = TestBed.createComponent(CheckpointCleanupComponent);
-    // First detectChanges triggers ngOnInit → refreshStatus() → service
-    // fetchStatus subscription. Second detectChanges flushes the
-    // @if/@else orientation branch AFTER the BreakpointObserver emit
-    // synchronously sets isDesktop (the subscribe runs in the
-    // component's field initializer, before detectChanges returns).
+    // createComponent() runs the component's field initializers BEFORE
+    // returning — including the BreakpointObserver.subscribe(...)
+    // that pipes the stub's synchronous emit through to isDesktop,
+    // so isDesktop is already correct by the time we reach the
+    // detectChanges() call below. The single detectChanges() at the
+    // bottom of this function both triggers ngOnInit → refreshStatus()
+    // → service.fetchStatus subscription AND flushes the @if/@else
+    // orientation branch (which then renders the correct mat-stepper
+    // instance against the active value isDesktop set above).
     fixture.detectChanges();
   }
 
