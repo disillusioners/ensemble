@@ -2080,7 +2080,7 @@ _supervision_handback_unit() {
 restart_via_launcher() {
     mkdir -p "$INSTALL_DIR/data"
     local log="$INSTALL_DIR/data/launcher.log"
-    local hb_unit="" hb_mode="" hb_prestop="${SUPERVISION_PRESTOP_MAINPID:-}"
+    local hb_unit="" hb_mode="" hb_prestop="${SUPERVISION_PRESTOP_MAINPID:-}" _hb_pin=""
 
     # ── P3 mode selection (consume the PRE-STOP classification) ───────
     if _supervision_host_allows_unit && command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
