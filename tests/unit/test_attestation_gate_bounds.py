@@ -50,10 +50,13 @@ from daemon.graph import (
     ATTESTATION_CONSECUTIVE_IDENTICAL_KEY,
     ATTESTATION_DEGENERATE_STREAK_KEY,
     ATTESTATION_DENY_PROGRESS_KEY,
+    ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY,
     ATTESTATION_IDENTICAL_REPAIR_NUDGE_TEXT,
     ATTESTATION_LAST_BARE_AI_CONTENT_KEY,
     ATTESTATION_NUDGE_TEXT,
     ATTESTATION_REPAIR_NUDGE_SENT_KEY,
+    ATTESTATION_RUN_DENY_CAP,
+    ATTESTATION_RUN_DENY_COUNT_KEY,
     ATTESTATION_WITHHOLD_DENY_COUNT_KEY,
     CONSECUTIVE_IDENTICAL_THRESHOLD,
     DEGENERATE_STREAK_THRESHOLD,
@@ -62,6 +65,7 @@ from daemon.graph import (
     _is_degenerate_shape,
     _normalize_bare_content,
     create_attestation_gate_node,
+    should_end_attestation,
 )
 from daemon.services import (
     attestation_report_judge as judge_mod,
@@ -79,6 +83,8 @@ from daemon.services.attestation_judge_resolver import (
 from daemon.services.attestation_resolver import (
     reset_attestation_resolver_for_tests,
 )
+from daemon.config import LimitsConfig
+from langgraph.graph import END as GRAPH_END
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1285,3 +1291,626 @@ class TestNudgeTextBytePin:
         # via empty / None tricks.
         assert expected.startswith("[Attestation Gate — Repair Nudge]")
         assert expected.rstrip().endswith("gate escalated).")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (G) CEREMONY-ARM COVERAGE (2026-10-01, incident 6f961c43) + b3 RUN-DENY CAP
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The staged P1-P4 tests were authored against the MUTE arm
+# (34978dfc — bare-emoji repeats). The TWIN incident (6f961c43 —
+# leader 'Promote v0.16.8', job cb89e01d) is the CEREMONY arm: the
+# leader awaiting a user nonce echo sent SHORT-BUT-SUBSTANTIVE
+# replies ('In-hand (fresh) — unchanged… Holding…') interleaved with
+# legitimate child-status polls. The shape EVADES P2 (interleaved
+# tool calls reset the consecutive-identical streak) and P3
+# (4-5 words > DEGENERATE_WORD_THRESHOLD) — so the bound must come
+# from the P1 withhold budget (judge never spoke) and, behind it,
+# the b3 per-mission run-deny cap. These tests pin that.
+
+
+def _poll_ai_message(call_id: str) -> AIMessage:
+    """A legitimate child-status poll tool call (the incident's
+    poll accelerant — subtree_status)."""
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "subtree_status",
+                "args": {"instance_id": "child-x"},
+                "id": call_id,
+            }
+        ],
+    )
+
+
+def _drive_gate_loop(
+    node, state, *, reply_text: str, max_calls: int = 60
+) -> tuple[list[dict], dict]:
+    """Drive the gate node in a feedback loop — the incident shape.
+
+    Each deny result's channel writes are merged back into ``state``
+    (simulating checkpoint persistence — which in production works
+    via the SessionState channel declarations pinned by
+    ``TestGateChannelsDeclaredOnSessionState``), the nudge message is
+    appended, and the leader's next turn is appended as
+    ``[poll AI, ToolMessage, short reply AI]`` — the ceremony-arm
+    turn shape (poll child status, then hold).
+
+    Returns ``(deny_results, final_result)``.
+    """
+    from langchain_core.messages import ToolMessage
+
+    deny_results: list[dict] = []
+    for i in range(max_calls):
+        result = asyncio.run(
+            node(state, config={"configurable": {"thread_id": "loop-it"}})
+        )
+        if result.get("attestation_route") != "agent":
+            return deny_results, result
+        deny_results.append(result)
+        # Merge channel writes (checkpoint persistence simulation).
+        for key, value in result.items():
+            if key != "messages":
+                state[key] = value
+        state["messages"].extend(result.get("messages", []))
+        # The leader's next turn: poll child status, then hold.
+        state["messages"].append(_poll_ai_message(f"poll-{i}"))
+        state["messages"].append(
+            ToolMessage(content="children: idle", tool_call_id=f"poll-{i}")
+        )
+        state["messages"].append(AIMessage(content=reply_text))
+    raise AssertionError(
+        f"gate loop did not terminate within {max_calls} evaluations"
+    )
+
+
+class TestGateChannelsDeclaredOnSessionState:
+    """The compiled-graph channel-declaration pin (2026-10-01).
+
+    The staged fix/completion-gate-bounds branch wrote five gate
+    counter channels from the gate node WITHOUT declaring them on
+    ``SessionState`` — and langgraph 1.0.9 SILENTLY DROPS undeclared
+    keys from node updates, so every counter write was discarded at
+    the first channel merge and the P1 budget could never accumulate
+    in the compiled leader graph. Node-level unit tests (all the
+    classes above) invoke the node function directly and CANNOT see
+    this — hence this compiled-graph canary + the annotations pin.
+    """
+
+    def test_all_gate_counter_channels_declared(self, real_graph_module):
+        """Every channel the gate node writes is a declared
+        SessionState field (exact string match on the KEY constants).
+
+        Uses the ``real_graph_module`` fixture: the root test
+        conftest stubs langgraph with MagicMocks, so the REAL
+        SessionState (a real TypedDict subclass) is only
+        introspectable inside the eviction window.
+        """
+        for key in (
+            ATTESTATION_ANY_SUBSTANTIVE_KEY,
+            ATTESTATION_WITHHOLD_DENY_COUNT_KEY,
+            ATTESTATION_CONSECUTIVE_IDENTICAL_KEY,
+            ATTESTATION_LAST_BARE_AI_CONTENT_KEY,
+            ATTESTATION_REPAIR_NUDGE_SENT_KEY,
+            ATTESTATION_DEGENERATE_STREAK_KEY,
+            ATTESTATION_RUN_DENY_COUNT_KEY,
+            ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY,
+        ):
+            assert key in real_graph_module.SessionState.__annotations__, (
+                f"gate channel {key!r} is written by the gate node but "
+                "not declared on SessionState — langgraph would "
+                "silently drop every write"
+            )
+
+    def test_compiled_graph_preserves_counter_writes(
+        self, real_graph_module
+    ):
+        """Compiled-graph canary: a SessionState graph node writing
+        all gate counter keys merges them into the next state —
+        the silent-drop regression pin (reproduced against langgraph
+        1.0.9 before the declarations landed)."""
+        # Real langgraph imports INSIDE the eviction window.
+        from langgraph.graph import StateGraph
+        from langgraph.graph import END as REAL_END
+        from langgraph.graph import START as REAL_START
+
+        gs = real_graph_module.SessionState
+
+        def writer_node(state):
+            return {
+                ATTESTATION_WITHHOLD_DENY_COUNT_KEY: 7,
+                ATTESTATION_RUN_DENY_COUNT_KEY: 3,
+                ATTESTATION_CONSECUTIVE_IDENTICAL_KEY: 2,
+                ATTESTATION_DEGENERATE_STREAK_KEY: 1,
+                ATTESTATION_REPAIR_NUDGE_SENT_KEY: True,
+                ATTESTATION_LAST_BARE_AI_CONTENT_KEY: "🔇",
+                ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY: "msg-1",
+            }
+
+        graph = StateGraph(gs)
+        graph.add_node("writer", writer_node)
+        graph.add_edge(REAL_START, "writer")
+        graph.add_edge("writer", REAL_END)
+        app = graph.compile()
+
+        out = app.invoke({"messages": []})
+        assert out[ATTESTATION_WITHHOLD_DENY_COUNT_KEY] == 7
+        assert out[ATTESTATION_RUN_DENY_COUNT_KEY] == 3
+        assert out[ATTESTATION_CONSECUTIVE_IDENTICAL_KEY] == 2
+        assert out[ATTESTATION_DEGENERATE_STREAK_KEY] == 1
+        assert out[ATTESTATION_REPAIR_NUDGE_SENT_KEY] is True
+        assert out[ATTESTATION_LAST_BARE_AI_CONTENT_KEY] == "🔇"
+        assert out[ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY] == "msg-1"
+
+    def test_sentinel_consumption_is_one_shot(self):
+        """The fresh-episode sentinel PERSISTS in the checkpointed
+        history, so presence-based detection re-fired the channel
+        reset on EVERY evaluation — silently zeroing the counters
+        after each write (bounds could never accumulate
+        post-revival). The consumption marker makes it one-shot per
+        sentinel message id: the SECOND evaluation with the same
+        sentinel in history must NOT re-reset.
+
+        2026-10-01 ordering guarantee: the reset is applied to the
+        state the body READS (pre-body), so the first post-revival
+        evaluation's deny consumes slot 1 of the FRESH episode's
+        budget — not the stale one.
+        """
+        sentinel = HumanMessage(
+            content="resume the mission",
+            id="sentinel-msg-1",
+            additional_kwargs={"fresh_episode_attestation_reset": True},
+        )
+        state = _delegated_without_attest_messages("Still holding.")
+        state["messages"].insert(0, sentinel)
+        state[ATTESTATION_WITHHOLD_DENY_COUNT_KEY] = 5
+        state[ATTESTATION_RUN_DENY_COUNT_KEY] = 9
+
+        node, _manager, _ledger = _make_gate_node(
+            instance_id="sentinel-once-it",
+            denied_count_getter=lambda: 1,  # bound NOT exhausted — plain deny
+        )
+
+        # Evaluation 1 — the fresh-episode reset fired BEFORE the
+        # body read: stale withhold 5 / run 9 are invisible; the
+        # deny runs on the fresh counters (run 0 → 1) and the
+        # consumption marker is stamped.
+        result1 = asyncio.run(
+            node(
+                state,
+                config={
+                    "configurable": {"thread_id": "sentinel-once-it"}
+                },
+            )
+        )
+        assert result1["attestation_route"] == "agent"
+        assert result1[ATTESTATION_WITHHOLD_DENY_COUNT_KEY] == 0
+        assert result1[ATTESTATION_RUN_DENY_COUNT_KEY] == 1
+        assert (
+            result1[ATTESTATION_FRESH_EPISODE_CONSUMED_ID_KEY]
+            == "sentinel-msg-1"
+        )
+
+        # Evaluation 2 — same sentinel STILL in history, but already
+        # consumed: no re-reset, the deny increments the counters.
+        state.update(
+            {k: v for k, v in result1.items() if k != "messages"}
+        )
+        state["messages"].extend(result1.get("messages", []))
+        result2 = asyncio.run(
+            node(
+                state,
+                config={
+                    "configurable": {"thread_id": "sentinel-once-it"}
+                },
+            )
+        )
+        assert result2["attestation_route"] == "agent"
+        assert result2[ATTESTATION_RUN_DENY_COUNT_KEY] == 2
+
+
+class TestCeremonyArmCoverage:
+    """Commission cases (a) / (b) / (c) — the 6f961c43 ceremony arm.
+
+    (a) short-but-substantive replies denied in a bounded epoch —
+        the P1 withhold budget is the operative bound (P2/P3 are
+        evaded by construction); the loop terminates LOUD.
+    (b) budget exhaustion terminates WITHOUT a silent unattested
+        exit — the standard escalation machinery writes
+        COMPLETED-UNVERIFIED (gate escalated).
+    (c) recovery-commission restart semantics — per-dispatch budget
+        safety: fresh user-dispatched episode = fresh bounded budget;
+        mid-loop resume without a user message carries the budget.
+    """
+
+    CEREMONY_REPLY = "In-hand (fresh) — unchanged. Holding."
+
+    def _ceremony_state(self) -> dict:
+        return _delegated_without_attest_messages(self.CEREMONY_REPLY)
+
+    def test_shape_evades_p2_and_p3_guards(self, monkeypatch, caplog):
+        """PIN the evasion: the ceremony-arm turn shape (poll tool
+        call interleaved + 5-word reply) must NOT trip the
+        consecutive-identical or degenerate guards — proving the
+        bound in the following tests comes from the withhold
+        budget / run cap, not the content guards."""
+        monkeypatch.setattr(
+            judge_mod, "_invoke_judge_llm", _judge_never_called
+        )
+        node, _manager, _ledger = _make_gate_node(
+            instance_id="ceremony-evade-it",
+            denied_count_getter=lambda: 1,  # bound NOT exhausted — plain deny
+        )
+        state = self._ceremony_state()
+        state["messages"].append(_poll_ai_message("poll-0"))
+        from langchain_core.messages import ToolMessage
+
+        state["messages"].append(
+            ToolMessage(content="children: idle", tool_call_id="poll-0")
+        )
+        state["messages"].append(AIMessage(content=self.CEREMONY_REPLY))
+
+        with caplog.at_level("INFO", logger="daemon.graph"):
+            result = asyncio.run(
+                node(
+                    state,
+                    config={
+                        "configurable": {"thread_id": "ceremony-evade-it"}
+                    },
+                )
+            )
+        assert result["attestation_route"] == "agent"
+        # Content guards inert on this shape.
+        assert result[ATTESTATION_CONSECUTIVE_IDENTICAL_KEY] == 1  # restarts, no fire
+        assert result[ATTESTATION_DEGENERATE_STREAK_KEY] == 0
+        log_text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "consecutive_identical_nudge" not in log_text
+        assert "degenerate_retry" not in log_text
+        assert "consecutive_identical_terminal" not in log_text
+
+    def test_a_short_substantive_loop_bounded_by_withhold_budget(
+        self, monkeypatch, caplog
+    ):
+        """(a) The full ceremony-arm loop: short-but-substantive
+        replies + legit polls, judge never speaks, deny bound
+        exhausted every evaluation. The loop MUST terminate via the
+        P1 withhold budget at budget+1 evaluations — LOUD, with the
+        escalation machinery — not run to recursion_limit."""
+        monkeypatch.setattr(
+            judge_mod, "_invoke_judge_llm", _judge_never_called
+        )
+        node, _manager, ledger = _make_gate_node(
+            instance_id="ceremony-loop-it",
+            denied_count_getter=lambda: 3,  # bound exhausted every eval
+        )
+        state = self._ceremony_state()
+
+        with caplog.at_level("INFO", logger="daemon.graph"):
+            denies, final = _drive_gate_loop(
+                node, state, reply_text=self.CEREMONY_REPLY
+            )
+
+        # Bounded: exactly budget+1 evaluations (8 denies, 9th loud).
+        assert len(denies) == WITHHOLD_DENY_BUDGET
+        assert final["attestation_route"] is None
+        # The withhold counter climbed 0→8 across the denies.
+        assert (
+            denies[-1][ATTESTATION_WITHHOLD_DENY_COUNT_KEY]
+            == WITHHOLD_DENY_BUDGET
+        )
+        # Loud exit — the standard escalation machinery wrote.
+        ledger.set_escalated_and_reset.assert_called_once()
+        # Every deny in the arc carried a nudge (never a silent
+        # evaluation).
+        assert all("messages" in d for d in denies)
+        log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+        # P1's operative rows fired; the content guards stayed out.
+        assert (
+            "event=leader_completion_gate_bound_exhausted_never_spoke"
+            in log_text
+        )
+        assert "event=leader_completion_gate_withholding_exit" in log_text
+        assert "event=leader_completion_gate_terminal_after_bound" in log_text
+        assert "consecutive_identical_terminal" not in log_text
+        assert "degenerate_terminal" not in log_text
+
+    def test_b_budget_exhaustion_is_loud_not_silent(
+        self, monkeypatch, caplog
+    ):
+        """(b) At budget exhaustion the exit is LOUD: the escalation
+        write lands (COMPLETED-UNVERIFIED surface), the audit rows
+        fire, and — the not-silent pins — NO nudge is injected on
+        the exit path (no 'messages' key) and the counters RESET so
+        a fresh episode starts bounded-from-zero, not pre-poisoned."""
+        monkeypatch.setattr(
+            judge_mod, "_invoke_judge_llm", _judge_never_called
+        )
+        node, _manager, ledger = _make_gate_node(
+            instance_id="ceremony-loud-it",
+            denied_count_getter=lambda: 3,
+        )
+        state = self._ceremony_state()
+        state[ATTESTATION_WITHHOLD_DENY_COUNT_KEY] = (
+            WITHHOLD_DENY_BUDGET
+        )
+        state[ATTESTATION_RUN_DENY_COUNT_KEY] = 4
+
+        with caplog.at_level("INFO", logger="daemon.graph"):
+            result = asyncio.run(
+                node(
+                    state,
+                    config={
+                        "configurable": {"thread_id": "ceremony-loud-it"}
+                    },
+                )
+            )
+
+        assert result["attestation_route"] is None
+        # NOT silent: the loud write happened.
+        ledger.set_escalated_and_reset.assert_called_once()
+        # NOT a deny: nothing is injected on the exit path.
+        assert "messages" not in result
+        # A fresh episode starts from zero on every counter.
+        assert result[ATTESTATION_WITHHOLD_DENY_COUNT_KEY] == 0
+        assert result[ATTESTATION_RUN_DENY_COUNT_KEY] == 0
+        log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "event=leader_completion_gate_withholding_exit" in log_text
+        assert (
+            "completion_gate_escalated=true" in log_text
+        )
+
+    def test_c_recovery_restart_budget_semantics(
+        self, monkeypatch, caplog
+    ):
+        """(c) Per-dispatch budget safety under recovery restarts.
+
+        A recovery commission that re-dispatches the leader WITH a
+        fresh user message (sentinel) starts a NEW bounded episode:
+        counters reset once, then ACCUMULATE again within the new
+        episode (the one-shot consumption marker prevents the
+        per-evaluation wipe). A revival WITHOUT a fresh user message
+        (mid-loop resume) carries the budget — kill/revive loops
+        cannot launder it.
+
+        WHY per-dispatch is safe: each episode is independently
+        bounded (budget re-armed from zero AND enforced within the
+        episode); no path resets the budget mid-arc — the reset
+        channels are terminal / attested allow / fresh-episode
+        sentinel, all of which END or legitimately restart the arc.
+        """
+        monkeypatch.setattr(
+            judge_mod, "_invoke_judge_llm", _judge_never_called
+        )
+        # Arm 1 — revival WITH a fresh user message (recovery
+        # commission): the sentinel resets the stale budget once.
+        sentinel = HumanMessage(
+            content="recover and finish the promote",
+            id="recovery-msg-1",
+            additional_kwargs={"fresh_episode_attestation_reset": True},
+        )
+        state = self._ceremony_state()
+        state["messages"].insert(0, sentinel)
+        state[ATTESTATION_WITHHOLD_DENY_COUNT_KEY] = 8  # stale from prior arc
+        state[ATTESTATION_RUN_DENY_COUNT_KEY] = 99  # stale from prior arc
+        node, _manager, ledger = _make_gate_node(
+            instance_id="ceremony-restart-it",
+            denied_count_getter=lambda: 3,
+        )
+
+        result1 = asyncio.run(
+            node(
+                state,
+                config={
+                    "configurable": {"thread_id": "ceremony-restart-it"}
+                },
+            )
+        )
+        # The stale budget did NOT instantly loud-terminal the fresh
+        # episode: the sentinel reset fired BEFORE the body read
+        # (pre-body state rebuild), so the deny ran on the FRESH
+        # counters and consumed slot 1 of the new episode's own
+        # budget.
+        assert result1["attestation_route"] == "agent"
+        assert result1[ATTESTATION_WITHHOLD_DENY_COUNT_KEY] == 1
+        assert result1[ATTESTATION_RUN_DENY_COUNT_KEY] == 1
+
+        # Arm 2 — the fresh episode's own arc now accumulates: drive
+        # the never-spoke deny loop from withhold=1 to the budget.
+        # Total arc length across both arms is exactly the budget
+        # (1 slot consumed by Arm 1).
+        state.update(
+            {k: v for k, v in result1.items() if k != "messages"}
+        )
+        state["messages"].extend(result1.get("messages", []))
+        with caplog.at_level("INFO", logger="daemon.graph"):
+            denies, final = _drive_gate_loop(
+                node, state, reply_text=self.CEREMONY_REPLY
+            )
+        assert len(denies) == WITHHOLD_DENY_BUDGET - 1
+        assert final["attestation_route"] is None
+        ledger.set_escalated_and_reset.assert_called_once()
+
+        # Arm 3 — mid-loop resume WITHOUT a fresh user message: no
+        # sentinel in history, budget CARRIES (no laundering).
+        state2 = self._ceremony_state()  # no sentinel
+        state2[ATTESTATION_WITHHOLD_DENY_COUNT_KEY] = 5
+        node2, _manager2, _ledger2 = _make_gate_node(
+            instance_id="ceremony-resume-it",
+            denied_count_getter=lambda: 3,
+        )
+        result2 = asyncio.run(
+            node2(
+                state2,
+                config={
+                    "configurable": {"thread_id": "ceremony-resume-it"}
+                },
+            )
+        )
+        assert result2["attestation_route"] == "agent"
+        # 5 carried + 1 conversion = 6 (budget NOT reset).
+        assert result2[ATTESTATION_WITHHOLD_DENY_COUNT_KEY] == 6
+
+
+class TestRunDenyCap:
+    """b3 — the per-mission run-deny cap (belt-and-braces behind
+    P1/P2/P3). Independent of the deny epoch and of the P1 withhold
+    channel; trips BEFORE GRAPH_RECURSION_LIMIT and via the STANDARD
+    escalation machinery, never as a GraphRecursionError."""
+
+    def test_cap_defaults_pinned(self):
+        """Pin the default (100) across the module global AND the
+        config field — any change forces deliberate review of the
+        sizing argument (~12x the P1 budget; below the 300-step
+        recursion limit at 2 steps/cycle)."""
+        import daemon.graph as graph_mod
+
+        assert ATTESTATION_RUN_DENY_CAP == 100
+        assert LimitsConfig.model_fields["attestation_run_deny_cap"].default == 100
+        assert graph_mod.ATTESTATION_RUN_DENY_CAP == 100
+        assert ATTESTATION_RUN_DENY_COUNT_KEY == "attestation_run_deny_count"
+
+    def test_under_cap_denies_continue_and_increment(
+        self, monkeypatch
+    ):
+        """Below the cap, guard-surviving denies continue as today —
+        each consuming one slot of the backstop budget."""
+        monkeypatch.setattr(
+            judge_mod, "_invoke_judge_llm", _judge_never_called
+        )
+        node, _manager, _ledger = _make_gate_node(
+            instance_id="cap-under-it",
+            denied_count_getter=lambda: 3,
+        )
+        state = _delegated_without_attest_messages("Holding.")
+        state[ATTESTATION_RUN_DENY_COUNT_KEY] = 5
+
+        result = asyncio.run(
+            node(
+                state,
+                config={"configurable": {"thread_id": "cap-under-it"}},
+            )
+        )
+        assert result["attestation_route"] == "agent"
+        assert result[ATTESTATION_RUN_DENY_COUNT_KEY] == 6
+
+    def test_cap_exhausted_forces_loud_terminal(
+        self, monkeypatch, caplog
+    ):
+        """At the cap the deny continuation converts to the LOUD
+        terminal (standard escalation machinery + distinct audit
+        row) — and b3 fired, NOT P1 (the withhold channel was
+        inert)."""
+        monkeypatch.setattr(
+            judge_mod, "_invoke_judge_llm", _judge_never_called
+        )
+        node, _manager, ledger = _make_gate_node(
+            instance_id="cap-exhaust-it",
+            denied_count_getter=lambda: 3,
+        )
+        state = _delegated_without_attest_messages("Holding.")
+        state[ATTESTATION_RUN_DENY_COUNT_KEY] = ATTESTATION_RUN_DENY_CAP
+
+        with caplog.at_level("INFO", logger="daemon.graph"):
+            result = asyncio.run(
+                node(
+                    state,
+                    config={
+                        "configurable": {"thread_id": "cap-exhaust-it"}
+                    },
+                )
+            )
+
+        assert result["attestation_route"] is None
+        ledger.set_escalated_and_reset.assert_called_once()
+        assert "messages" not in result  # loud, not a deny
+        assert result[ATTESTATION_RUN_DENY_COUNT_KEY] == 0
+        log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "event=leader_completion_gate_run_cap_exit" in log_text
+        # P1 stayed out — the withhold channel was inert.
+        assert "event=leader_completion_gate_withholding_exit" not in log_text
+
+    def test_cap_independent_of_withhold_channel(
+        self, monkeypatch, caplog
+    ):
+        """Independence proof: with the P1 withhold channel held at 0
+        (as if lost/corrupted) and the cap lowered to 3, a
+        never-spoke deny loop STILL terminates — via b3, within
+        budget+1 evaluations. The bound survives a P1 channel loss."""
+        from daemon.graph import create_attestation_gate_node as _factory
+
+        monkeypatch.setattr(
+            judge_mod, "_invoke_judge_llm", _judge_never_called
+        )
+        # Patch the FACTORY'S globals (not ``sys.modules["daemon.graph"]``):
+        # the real-graph fixture tests fork the daemon.graph sys.modules
+        # entry, and a module-object monkeypatch would then bind to the
+        # fork while the node closure still reads the original namespace
+        # (the repo-documented stale-module-monkeypatch flake).
+        monkeypatch.setitem(
+            _factory.__globals__, "ATTESTATION_RUN_DENY_CAP", 3
+        )
+        node, _manager, ledger = _make_gate_node(
+            instance_id="cap-indep-it",
+            denied_count_getter=lambda: 3,
+        )
+        state = _delegated_without_attest_messages("Holding.")
+        state[ATTESTATION_WITHHOLD_DENY_COUNT_KEY] = 0  # P1 inert
+
+        # Non-degenerate, non-identical reply text: the content
+        # guards (P2/P3) must stay OUT of this test — b3 is the
+        # ONLY operative bound (P1 held at 0, P2 reset by the
+        # interleaved polls, P3 needs ≤3-word finals).
+        reply = "Status is unchanged for now. Holding steady."
+
+        with caplog.at_level("INFO", logger="daemon.graph"):
+            denies, final = _drive_gate_loop(node, state, reply_text=reply)
+
+        assert len(denies) == 3
+        assert final["attestation_route"] is None
+        ledger.set_escalated_and_reset.assert_called_once()
+        log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "event=leader_completion_gate_run_cap_exit" in log_text
+        assert "event=leader_completion_gate_withholding_exit" not in log_text
+        assert "degenerate_terminal" not in log_text
+        assert "consecutive_identical_terminal" not in log_text
+
+    def test_router_backstop_forces_end_at_cap(self, monkeypatch, caplog):
+        """The router backstop: route hint 'agent' at the cap forces
+        END with the ERROR row (unreachable in correct operation —
+        the node's substitution fires one evaluation earlier)."""
+        state = {
+            "attestation_route": "agent",
+            ATTESTATION_RUN_DENY_COUNT_KEY: ATTESTATION_RUN_DENY_CAP,
+        }
+        with caplog.at_level("ERROR", logger="daemon.graph"):
+            verdict = should_end_attestation(state)
+        assert verdict is GRAPH_END
+        log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert (
+            "event=leader_completion_gate_run_cap_router_backstop"
+            in log_text
+        )
+
+    def test_router_under_cap_routes_normally(self):
+        """Below the cap the router is byte-identical to the legacy
+        behavior: hint 'agent' routes to the agent, absent hint
+        ends."""
+        assert (
+            should_end_attestation(
+                {
+                    "attestation_route": "agent",
+                    ATTESTATION_RUN_DENY_COUNT_KEY: 5,
+                }
+            )
+            == "agent"
+        )
+        assert (
+            should_end_attestation(
+                {
+                    "attestation_route": None,
+                    ATTESTATION_RUN_DENY_COUNT_KEY: 500,
+                }
+            )
+            is GRAPH_END
+        )
+        assert should_end_attestation({}) is GRAPH_END
