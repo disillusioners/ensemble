@@ -6,7 +6,7 @@ phase: new
 author: designer
 created_at: 2026-10-01
 approved_at: 2026-10-01
-pinned_spec_sha: 647eb4bb518025856e2615fc48e0e6d7a4a91e72
+pinned_spec_sha: 4c6fe34aee85c9f82d56b7872c90c27c685ae492
 task_id: ck-redesign-2026q4
 plan_ref: .agents/shared/planning/maintenance-console/phase2-frontend.md
 advisory_fields:
@@ -285,11 +285,13 @@ These two banners are the only blocks that survive across all steps; everything 
 
 **A11y.** `<details>` is native; no extra ARIA needed.
 
-### 2.9 Sanctioned compaction levers (amend v3 — AC-15 budget reconciliation)
+### 2.9 Sanctioned compaction levers (amend v3 — AC-15 budget reconciliation; amend v4 — code-applied delta sanctions + canonical ledger)
 
 **Purpose.** Enumerate the density adjustments the implementation may apply to land within AC-15's ≤760px budget at Playwright viewport 1024×768 (768px content height with zero browser chrome; 760px = 768 − 8px safety margin). These levers are **spec-sanctioned**: applying them does not count as a deviation on re-review and does not require a new spec amendment. Anything outside this list requires a new amendment round.
 
-**Sanctioned levers** (cumulative budget recovery ≈ 80–115px):
+**Numbering is canonical.** §2.9 is the source of truth for lever identity. Code-side inline lever comments must use the same numbering convention as the table below. The implementation's inline comments are being corrected to match §2.9 in a parallel micro-round (post-amend v4); re-review must consult §2.9 when reading code-side references.
+
+**Sanctioned levers** (cumulative budget recovery ≈ 108–130px; renumbered per amend v4):
 
 | # | Lever | Component | Approx. reduction | Constraint |
 |---|---|---|---|---|
@@ -298,17 +300,42 @@ These two banners are the only blocks that survive across all steps; everything 
 | 3 | Step card padding: 1.5rem → 1rem vertical | §2.3 / §2.4 / §2.5 / §2.6 | ~16px | Card grid (`dl` 2×2 / 2×3, gap 0.5rem row / 1.5rem col) UNCHANGED; only outer card padding shrinks |
 | 4 | Footer `<h2>` removal (was echoing the step name above the buttons) | §2.2 footer | ~32px | Step name is already visible in the active `<mat-step>` header; footer becomes button-only `<div>` (Back / Continue / Cleanup now) |
 | 5 | Status Strip min-height tighten: 200px → 168px per tile | §2.1 | ~30px | Achieved via padding reduction only; min-width remains 200px (horizontal axis) |
-| 6 | Wizard container top margin reduced (1rem → 0.5rem above the wizard) | §2.2 wrapper | ~8px | Spacing token `$step-gap` UNCHANGED at 1.5rem (used between step content cards, not page chrome) |
+| 6 | `.maintenance-container` top padding: 2rem → 1rem (**supersedes** v3 lever-6's "1rem → 0.5rem" — code at `173e882f` applies 2rem→1rem, doubling the v3 budget recovery on this axis) | §2.2 wrapper | ~16px | Outer container top edge moves up by 16px; container max-width and `$step-gap` UNCHANGED |
+| 7 | Container inner gap: 1.5rem → 1rem (between sections within the wizard wrapper) | §2.2 wrapper | ~8px | Single direction (vertical); horizontal gaps unchanged |
+| 8 | Section gap (between Status Strip and stepper header row): 1rem → 0.5rem | §2.1 ↔ §2.2 | ~8px | Single direction (vertical); horizontal gaps unchanged |
 
-**Explicitly NOT sanctioned** (any of these requires amend v4+):
+**Layout-correctness addition — NOT a lever (pre-existing bug fix, applied during amend v3 implementation):**
+
+| Item | Component | Effect | Reason |
+|---|---|---|---|
+| `:host { display: flex; flex-direction: column; gap: 1rem }` | Component host element | +32px layout fix (was horizontal flex-row with broken section overlap) | Pre-existing layout bug — flex-row was producing horizontal layout where vertical was intended. Fixed during amend v3 implementation. **Not a compaction lever** — this addition restores correct vertical layout and adds 32px of content height; it is recorded here so re-review does not classify it as an off-list lever. |
+
+**Explicitly NOT sanctioned** (any of these requires amend v5+):
 
 - Changes to grid columns (2×2 / 2×3 / 1-col responsive) in §2.3 / §2.4 / §2.6
 - Changes to typography sizes (`<h2>` 1.125rem / `<h3>` 1.0625rem / `<dl>` rows 0.5rem / tile value 1rem 600 / tile label 0.6875rem)
 - Changes to color tokens, borders, or `$accent-*` semantics
 - Changes to `$step-gap`, `$wizard-max-width`, or `$status-strip-min-width` (horizontal min-width)
 - Removal or consolidation of any of the four element groups asserted by AC-15 (Status Strip, stepper header row, Step-1 card, Continue button)
+- Further reduction beyond lever-6 (i.e., `.maintenance-container` top padding 1rem → 0.5rem would require amend v5)
+- Further reduction beyond lever-7 (i.e., container inner gap 1rem → 0.5rem would require amend v5)
+- Further reduction beyond lever-8 (i.e., section gap 0.5rem → 0rem would require amend v5)
 
 **Verification.** Each applied lever must be visible in the commit's `git diff` for the relevant `ck-*.scss` / `checkpoint-cleanup.component.html` / `checkpoint-cleanup.component.ts` and must not affect any `data-testid` (AC-5/7/8), responsive breakpoint (AC-2), or section-registry invariant (AC-14).
+
+**Canonical ledger (post-amend v3 code at `173e882f`, re-review session `1502ae2c`):**
+
+| Line item | Static estimate | Source / authority |
+|---|---|---|
+| **AC-15 budget (asserted)** | **≤ 760px** full-page stack including global app-header | AC-15 — leader ruling amend v3; runtime Playwright `document.documentElement.scrollHeight ≤ 760` assertion is ground truth |
+| **Re-review canonical static estimate** | **~738px** | Re-review verdict MERGE-READY, session `1502ae2c` |
+| Developer's static claim (informational) | ~712px (optimistic) | Developer ledger; **superseded by reviewer canonical**; both fit ≤ 760px |
+| Lever-6 (`.maintenance-container` top padding 2rem→1rem) | ~16px reduction | Code at `173e882f` |
+| Lever-7 (container inner gap 1.5→1rem) | ~8px reduction | Code at `173e882f` |
+| Lever-8 (section gap 1→0.5rem) | ~8px reduction | Code at `173e882f` |
+| `:host { display: flex; flex-direction: column; gap: 1rem }` | **+32px** layout-correctness addition (not a lever) | Code at `173e882f` — pre-existing bug fix; recorded as ledger line item so re-review does not misclassify |
+
+**Boundary note.** Reviewer canonical ~738px and developer's optimistic ~712px both fit ≤ 760px (borderline but valid). The runtime Playwright `scrollHeight ≤ 760` assertion is **ground truth** for AC-15 conformance — if either static estimate diverges from runtime, runtime wins and the spec must be re-amended.
 
 ## 3. Tokens
 
@@ -463,7 +490,7 @@ Each AC packs to a `Validation:` block (the agent-searchable shape). Static grep
 
 - **Validation:** `static: grep -n 'data-testid=' checkpoint-cleanup.component.html`
 
-### AC-8 — Result step preserves `data-testid` ck-result, ck-interrupted-card, ck-rerun-btn, ck-run-again-banner, ck-run-again-btn, ck-last-skipped-summary
+### AC-8 — Result step preserves `data-testid` ck-result, ck-interrupted-card, ck-rerun-btn, ck-run-again-banner, ck-run-again-btn, ck-last-run-skipped-summary (Step-4 instance; Step-1 retains `ck-last-skipped-summary` per existing e2e anchor — the W2 review split the testid so the Step-4 run-summary element is uniquely addressable as `ck-last-run-skipped-summary`)
 
 - **Validation:** `pack e2e/maintenance-checkpoint-cleanup.spec.ts; static: grep -n 'data-testid=' checkpoint-cleanup.component.html`
 
