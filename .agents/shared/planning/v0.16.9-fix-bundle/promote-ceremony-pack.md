@@ -45,3 +45,17 @@
 - `dist/ensemble-prod` holds the fresh v0.16.9 binary — the stage.sh staleness trap is RE-ARMED for the NEXT release; pre-stage `rm -f dist/ensemble-prod` mandatory every stage.
 - stage.sh does not append journal history events; the stage record is `releases/<ver>/manifest.json`. Journal gains entries only at promote/rollback/halt/sweep/nonce paths.
 - Rollback of the stage itself (if promote is abandoned): `rm -rf ~/agents-ensemble/releases/v0.16.9` (additive-only, nothing points at it; current stays v0.16.8).
+
+---
+
+## EXECUTED — CLOSURE (2026-10-01)
+
+1. **EXECUTED:** run `r-20261001-173958-6e45` — journal commit "promote v0.16.9 committed (gate+soak green; previous=v0.16.8)" at 2026-10-01T17:55:29Z; sweep closed the pending_op cleanly.
+2. **Health:** `/livez` alive @ 0.16.9; `/readyz` ready; `current` → `releases/v0.16.9`.
+3. **CONVERGENCE ACHIEVED (arc terminal goal):** daemon pid 2890792 cgroup = `system.slice/ensemble-main.service`; `ensemble-main.service` active; `ensemble-live.service` inactive. The pin-rung fix was exercised live for the FIRST time and converged in one shot.
+4. **INCIDENT (attempt-1, run `r-20261001-161826-b9ac`, aborted pre-flip exit 78):** live-tree integrity drift — `releases/v0.16.8/agents/devops/workflow.md` rewritten 2026-10-01T16:11:09Z with perms 600 (norm 644), content differing from repo AND all releases: an unauthorized write straight into a staged release tree (suspected mis-routed agent self-edit; writer investigation running). Remediation: rogue copy preserved at `/tmp/rogue-devops-workflow-20261001T1611Z.md`; pristine manifest-verified bytes restored (hash `36dd4a9f559246bb…` == manifest); retry committed clean. Integrity refusal = correct behavior under tamper (pre-flip abort, zero exposure, no rollback needed).
+5. **Nonce echo lanes:** api-relay + direct-Discord both proven this arc.
+6. **Follow-ups:**
+   - (a) **BACKLOG** — release-tree write protection / agent self-edit routing + 16:11Z writer investigation (critical note logged).
+   - (b) **MANUAL OPS FLAG (do NOT execute from agent lane)** — retire `ensemble-live.service` unit file (remove/mask + daemon-reload); user/devops call only.
+7. **Pack status: CLOSED / EXECUTED.**
