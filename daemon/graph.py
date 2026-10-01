@@ -3989,6 +3989,16 @@ class SessionState(MessagesState):
     attestation_repair_nudge_sent: bool = False
     attestation_degenerate_streak: int = 0
 
+    # b3 — per-mission run-deny cap counter (2026-10-01, incident
+    # 6f961c43). Counts EVERY deny continuation that survives the
+    # P1/P2/P3 guards, regardless of cause; at
+    # ``ATTESTATION_RUN_DENY_CAP`` the gate force-terminalizes LOUD.
+    # Independent of the per-epoch ledger count and of the P1
+    # withhold counter (own channel — a P1 channel loss cannot
+    # disable this bound). Declared for the same silent-drop reason
+    # as the five channels above.
+    attestation_run_deny_count: int = 0
+
 
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end.
@@ -4930,6 +4940,50 @@ DEGENERATE_STREAK_THRESHOLD: int = 3
 # reply is not a gate-withhold event).
 DEGENERATE_WORD_THRESHOLD: int = 3
 
+# ─────────────────────────────────────────────────────────────────────────────
+# b3 — per-mission run-deny cap (2026-10-01, incident 6f961c43)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Belt-and-braces BEHIND the P1/P2/P3 guards: a per-mission cap on
+# deny CONTINUATIONS (gate evaluations that survive every guard and
+# still route back to the agent). Where P1 counts only never-spoke-
+# judge conversions (budget 8) and P2/P3 count content-shape
+# repeats, b3 counts EVERY deny continuation regardless of cause —
+# so a loop that evades the shape guards (short-but-substantive
+# replies like "In-hand (fresh) — unchanged. Holding." interleaved
+# with legitimate child-status polls while awaiting a user nonce
+# echo — the 6f961c43 ceremony-arm shape) is STILL bounded even if
+# the P1-P3 channels are lost or corrupted mid-mission.
+#
+# Independent of the deny epoch by construction:
+# ``attestation_denied_count`` lives in the LEDGER and resets at
+# terminal_after_bound (per-epoch); this counter lives in
+# checkpoint state and resets only at mission end / fresh episode
+# (per-mission). It also shares NO counter with P1 (never-spoke
+# conversions only) — a P1 channel loss cannot disable this bound.
+#
+# Sized ~12× the P1 budget so b3 is a backstop, never the primary
+# bound; 100 deny cycles ≈ 200+ graph steps (agent → gate per
+# cycle), still under the 300 GRAPH_RECURSION_LIMIT — b3 trips
+# BEFORE recursion_limit would, and trips LOUD (the standard
+# escalation machinery writes COMPLETED-UNVERIFIED), never as a
+# GraphRecursionError → instance 'error'.
+#
+# Configurable: module global installed ONCE at boot by the daemon
+# entry points from ``LimitsConfig.attestation_run_deny_cap``
+# (yaml ``limits.attestation_run_deny_cap`` / env
+# ``LIMITS_ATTESTATION_RUN_DENY_CAP``) — the S5 class-var install
+# pattern (``EMPTY_DEGENERATE_REINVOKE_CAP``). Restart-required.
+ATTESTATION_RUN_DENY_CAP: int = 100
+#: State channel key — per-mission deny-continuation counter.
+#: Increments on EVERY deny that survives the P1/P2/P3 guards and
+#: routes back to the agent; resets via the standard SessionState
+#: channel clearing rules (terminal / attested allow / HOLD cap
+#: fall-through / fresh-episode sentinel). Declared on
+#: ``SessionState`` — see the P1-P3 channel declaration block there
+#: for the silent-drop hazard this closes.
+ATTESTATION_RUN_DENY_COUNT_KEY: str = "attestation_run_deny_count"
+
 #: Repair nudge body — P2 consecutive-identical guard (CANONICAL
 #: VERBATIM, single source of truth). Embedded exactly as the
 #: incident-response team specified; the lead-in bracketed line
@@ -5286,12 +5340,43 @@ def should_end_attestation(state: Any) -> str:
     allowed_legitimate_pending_wakeup all end the graph — the nudge
     fires ONLY on ``denied``, never on terminal_after_bound, never on
     dry_log).
+
+    b3 router backstop (2026-10-01, incident 6f961c43): if the route
+    hint STILL says ``"agent"`` when the per-mission run-deny counter
+    is already at ``ATTESTATION_RUN_DENY_CAP``, END anyway. The gate
+    node's b3 substitution should have converted the decision to a
+    loud terminal one evaluation earlier (at count+1 > cap), so
+    reaching here means a double fault — the node's substitution was
+    skipped or the counter channel changed between the node write and
+    this read. The backstop converts a would-be GraphRecursionError
+    (instance 'error') into a bounded early END; the ERROR row carries
+    the loud failure signal (routers cannot write state, so the
+    terminal write + escalation machinery is impossible from here —
+    this path is unreachable in correct operation and exists purely
+    as the last-resort bound, belt-and-braces behind the node's b3).
     """
     if isinstance(state, dict):
         route = state.get("attestation_route")
+        raw_run_deny = state.get(ATTESTATION_RUN_DENY_COUNT_KEY, 0)
     else:
         route = getattr(state, "attestation_route", None)
+        raw_run_deny = getattr(state, ATTESTATION_RUN_DENY_COUNT_KEY, 0)
     if route == "agent":
+        try:
+            run_deny_count = int(raw_run_deny)
+        except (TypeError, ValueError):
+            run_deny_count = 0
+        if run_deny_count >= ATTESTATION_RUN_DENY_CAP:
+            logger.error(
+                "event=leader_completion_gate_run_cap_router_backstop "
+                "run_deny_count=%s cap=%s detail=b3 router backstop: "
+                "the gate node should have force-terminalized before "
+                "this evaluation — forcing END to keep the loop "
+                "bounded (loud signal: check for a gate-node fault)",
+                run_deny_count,
+                ATTESTATION_RUN_DENY_CAP,
+            )
+            return END
         return "agent"
     return END
 
@@ -5569,7 +5654,10 @@ def create_attestation_gate_node(
           ``repair_nudge_sent`` flag clear so a fresh episode's
           identical-reply arc starts from zero);
         * the P3 degenerate-streak counter resets (no carry-over
-          from a prior episode's gradient arc).
+          from a prior episode's gradient arc);
+        * the b3 run-deny cap counter resets (a fresh
+          user-dispatched episode gets its own bounded continuation
+          budget — see the deny-cap constant block).
         """
         sentinel_seen = any(
             isinstance(m, HumanMessage)
@@ -5595,6 +5683,14 @@ def create_attestation_gate_node(
             ATTESTATION_REPAIR_NUDGE_SENT_KEY: False,
             # P3 — degenerate-streak reset (2026-09-30).
             ATTESTATION_DEGENERATE_STREAK_KEY: 0,
+            # b3 — run-deny cap reset (2026-10-01). A recovery
+            # commission that re-dispatches the leader WITH a fresh
+            # user message legitimately starts a NEW bounded episode:
+            # the budget resets to 0 AND the new mission is itself
+            # bounded (cap enforced per-mission from zero). A revival
+            # WITHOUT a fresh user message carries the counter
+            # unchanged — no budget laundering via kill/revive loops.
+            ATTESTATION_RUN_DENY_COUNT_KEY: 0,
         }
 
     async def attestation_gate_node(
@@ -5679,6 +5775,23 @@ def create_attestation_gate_node(
             # it does NOT reset on a normal deny, only on
             # terminal / attested allow / fresh-episode).
             next_withhold_deny_count = withhold_deny_count
+
+            # b3 — read the per-mission run-deny counter (2026-10-01,
+            # incident 6f961c43 ceremony-arm). Counts EVERY deny
+            # continuation that survives the guards below, regardless
+            # of cause — the belt-and-braces bound behind P1/P2/P3.
+            # Channel-defaulting semantics mirror the withhold read
+            # above (missing key reads as 0; defensive int coercion).
+            if isinstance(state, dict):
+                _raw_run_deny = state.get(ATTESTATION_RUN_DENY_COUNT_KEY, 0)
+            else:
+                _raw_run_deny = getattr(
+                    state, ATTESTATION_RUN_DENY_COUNT_KEY, 0
+                ) or 0
+            try:
+                run_deny_count = int(_raw_run_deny)
+            except (TypeError, ValueError):
+                run_deny_count = 0
 
             # P2 — consecutive-identical-content guard (2026-09-30,
             # incident 34978dfc mute-wall). Read the prior turn's
@@ -6457,6 +6570,42 @@ def create_attestation_gate_node(
                     should_inject_nudge=False,
                 )
 
+        # ─── b3 — per-mission run-deny cap (2026-10-01, incident 6f961c43) ───
+        # Runs AFTER the P1/P2/P3 guards so their bounds keep priority
+        # (P1 fires at 8 never-spoke conversions, long before this cap
+        # could matter). Fires only when a deny continuation survives
+        # every guard AND the per-mission continuation count is at the
+        # cap — the loop shape that evades the content guards
+        # (short-but-substantive replies + legit child-status polls
+        # while awaiting a user nonce echo) is still bounded here.
+        # The check rides the ``deny_bound_exceeded`` predicate (same
+        # count+1>bound discipline as the normal epoch bound) with the
+        # run counter as its input — one predicate shape, three
+        # counters, each with a distinct lifetime. Loud exit via the
+        # STANDARD escalation machinery — never a silent END, never a
+        # GraphRecursionError.
+        if (
+            decision.decision is Decision.DENIED
+            and deny_bound_exceeded(run_deny_count, ATTESTATION_RUN_DENY_CAP)
+        ):
+            logger.warning(
+                "event=leader_completion_gate_run_cap_exit "
+                "instance_id=%s run_deny_count=%s cap=%s "
+                "decision=terminal_after_bound_forced "
+                "detail=b3 per-mission run-deny cap exhausted; loud "
+                "terminal writes COMPLETED-UNVERIFIED (gate escalated) "
+                "— recursion_limit must never be the only terminator",
+                effective_instance_id,
+                run_deny_count,
+                ATTESTATION_RUN_DENY_CAP,
+            )
+            decision = _replace(
+                decision,
+                decision=Decision.TERMINAL_AFTER_BOUND,
+                next_denied_count=0,
+                should_inject_nudge=False,
+            )
+
         # Phase 3 — ledger writes (C3 fail-open wrapper). NO writes on
         # the meta-conditions / dry / R2 un-attested allow paths. The
         # denial_epoch is DERIVED from the input state (review must-fix
@@ -6594,6 +6743,9 @@ def create_attestation_gate_node(
                 ATTESTATION_REPAIR_NUDGE_SENT_KEY: False,
                 # P3 — degenerate-streak reset.
                 ATTESTATION_DEGENERATE_STREAK_KEY: 0,
+                # b3 — run-deny cap reset (fresh mission episode
+                # starts from zero on the backstop bound too).
+                ATTESTATION_RUN_DENY_COUNT_KEY: 0,
             }
 
         if decision.decision is Decision.DENIED:
@@ -6775,6 +6927,12 @@ def create_attestation_gate_node(
                 # normal-deny path carries the streak unchanged so
                 # the next degenerate reply extends it.
                 ATTESTATION_DEGENERATE_STREAK_KEY: degenerate_streak,
+                # b3 — write the run-deny count so the NEXT
+                # evaluation sees the accumulated continuation
+                # count (per-mission; survives turns via
+                # checkpoint). Every guard-surviving deny consumes
+                # one slot of the backstop budget.
+                ATTESTATION_RUN_DENY_COUNT_KEY: run_deny_count + 1,
             }
 
         # ─────────────────────────────────────────────────────────────
@@ -6922,6 +7080,8 @@ def create_attestation_gate_node(
                 ATTESTATION_REPAIR_NUDGE_SENT_KEY: False,
                 # P3 — degenerate-streak reset.
                 ATTESTATION_DEGENERATE_STREAK_KEY: 0,
+                # b3 — run-deny cap reset.
+                ATTESTATION_RUN_DENY_COUNT_KEY: 0,
             }
         # Attested allow (Decision.ALLOWED with attestation_present=True)
         # — the leader delivered a proper standalone text report and
@@ -6944,6 +7104,8 @@ def create_attestation_gate_node(
                 ATTESTATION_LAST_BARE_AI_CONTENT_KEY: None,
                 ATTESTATION_REPAIR_NUDGE_SENT_KEY: False,
                 ATTESTATION_DEGENERATE_STREAK_KEY: 0,
+                # b3 — same reset contract.
+                ATTESTATION_RUN_DENY_COUNT_KEY: 0,
             }
         # 7d4a3bd9 reviewer-flagged A1 (2026-09-26, stale-flag leak):
         # every ALLOW / terminal branch that does NOT take the attested
@@ -6967,6 +7129,9 @@ def create_attestation_gate_node(
             ATTESTATION_LAST_BARE_AI_CONTENT_KEY: None,
             ATTESTATION_REPAIR_NUDGE_SENT_KEY: False,
             ATTESTATION_DEGENERATE_STREAK_KEY: 0,
+            # b3 — same reset contract (stale run-deny count must
+            # not leak into a fresh mission either).
+            ATTESTATION_RUN_DENY_COUNT_KEY: 0,
         }
 
     # O8 surface: the exact config the gate will run with, auditable in

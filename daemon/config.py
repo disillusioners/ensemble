@@ -591,6 +591,24 @@ class LimitsConfig(BaseSettings):
     # (the graph module global is installed once at startup).
     empty_degenerate_reinvoke_cap: int = Field(default=3, ge=1)
 
+    # ── b3 completion-gate run-deny cap (2026-10-01, incident 6f961c43) ─
+    # Max deny CONTINUATIONS per leader mission the attestation gate
+    # will route back to the agent before force-terminalizing LOUD
+    # (``ATTESTATION_RUN_DENY_CAP`` in daemon/graph.py — installed at
+    # boot by the daemon entry points, same class-var install pattern
+    # as the S5 cap above). Belt-and-braces BEHIND the gate's primary
+    # bounds — the P1 withhold budget (8, never-spoke conversions) and
+    # the P2/P3 content-shape guards — counting EVERY deny
+    # continuation regardless of cause, so a loop that evades the
+    # shape guards (short-but-substantive replies interleaved with
+    # legitimate child-status polls while awaiting a user nonce echo)
+    # is still bounded. 100 deny cycles ≈ 200+ graph steps, below the
+    # 300 GRAPH_RECURSION_LIMIT: the cap trips BEFORE recursion_limit
+    # and trips via the standard escalation machinery (loud
+    # COMPLETED-UNVERIFIED), never as a GraphRecursionError → instance
+    # 'error'. Restart-required (module global installed at boot).
+    attestation_run_deny_cap: int = Field(default=100, ge=1)
+
 
 class PersistenceConfig(BaseSettings):
     """Persistence and checkpoint configuration."""

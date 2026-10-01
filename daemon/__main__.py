@@ -284,6 +284,18 @@ def main(run_preflight: bool = True):
         f"(router stops re-invoking on reasoning-only/<think>-only empties at the cap)"
     )
 
+    # Wire the b3 completion-gate run-deny cap (2026-10-01, incident
+    # 6f961c43). The gate node + its router read this module global on
+    # every evaluation — installed ONCE at boot from LimitsConfig
+    # (yaml ``limits.attestation_run_deny_cap`` /
+    # env ``LIMITS_ATTESTATION_RUN_DENY_CAP``); restart-required.
+    _graph.ATTESTATION_RUN_DENY_CAP = int(config.limits.attestation_run_deny_cap)
+    logger.info(
+        f"[Config] attestation_run_deny_cap={_graph.ATTESTATION_RUN_DENY_CAP} "
+        f"(completion gate force-terminalizes LOUD at the per-mission "
+        f"deny-continuation cap — recursion_limit is never the only terminator)"
+    )
+
     # Warn-once if the removed allowlist env var is still set (no-op when
     # load_config already emitted it)
     warn_deprecated_reasoning_echo_env()
