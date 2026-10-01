@@ -92,6 +92,57 @@ Always prefer a single pack per AC; multiple `Validation:` lines mean
 - [ ] AC-A2: ...
 - [ ] AC-B1: ...
 
+## Design artifacts
+
+<!--
+Design artifacts (OD-first, graceful degradation):
+
+Each row maps a renderable artifact to its page and to the ACs it serves.
+The canonical repo-relative path under `.agents/shared/planning/<feature>/design/mockups/`
+is the developer deliverable — that copy is the contract of record.
+The OD-UI provenance (`od_url`) is recorded for reference only.
+
+`mockup_lane` declares the lane used:
+
+  - `opendesign`  — OD was capable; `od_generate_design` produced a self-contained
+    HTML document captured at generation time and written into the canonical
+    `mockups/` path. `od_save_artifact` / `od_save_project_file` recorded the
+    OD-UI URL/path for provenance. `lint` carries the `od_lint_artifact` result
+    for the AC and pages in scope (pass | fail-N | n/a).
+
+  - `text` — OD was unavailable (daemon down, BYOK unconfigured, tool error,
+    or page outside OD's per-call ceiling). The mockup at the canonical path
+    is the existing text-native form (`.asc` / `.mmd` / hand-authored `.html`
+    fragment per architecture §4.1). No `od_url`. `lint` = `n/a`.
+
+Either lane ships the same developer deliverable: a concrete file path under
+the canonical `mockups/` directory that developer reads directly. The lane
+marker + lint status inform the conformance quality bar — `text` mockups
+never claim pixel fidelity; `opendesign` mockups claim what the lint verdict
+supports.
+
+`render` rows are provenance-only — they carry an `od_url` (OD-UI reference)
+and no mockup path under `mockups/`. Use them when OD produced only an
+OD-UI-hosted render that the conformance loop reads from `od_url` rather
+than from a repo copy.
+-->
+
+| Page | Artifact path (canonical) | Kind | AC refs | OD-UI URL | Lint |
+|------|---------------------------|------|---------|-----------|------|
+| `<page>` | `.agents/shared/planning/<feature>/design/mockups/<page>.html` | `html-mockup` | AC-A1, AC-A2 | `<od_url or —>` | `pass` / `fail-N` / `n/a` |
+| `<page>` | `.agents/shared/planning/<feature>/design/mockups/<page>.asc` | `text-mockup` | AC-B1 | — | `n/a` |
+| `<page>` | — | `render` | AC-C1 | `<od_url>` | — |
+
+**Lane used:** `mockup_lane: opendesign` | `mockup_lane: text`
+
+<!--
+If a page has BOTH an OD-generated HTML AND a text-native mockup (lane hybrid
+during graceful degradation — OD was up for some pages, down for others),
+list each row under its own kind and repeat the page in two rows. The lane
+marker above is the aggregate verdict (any OD-capable page → `opendesign`);
+a per-page lane can live in the row's Kind column if needed.
+-->
+
 ## Token / style references (flow c — design-system maintenance)
 
 <!--

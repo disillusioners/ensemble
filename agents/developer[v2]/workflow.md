@@ -138,6 +138,7 @@ The executor (coder or skill worker) must not depend on prose relay of contract 
 - **Pack-mapped ACs** — the `Validation: pack <name>; static: grep <pattern>` lines from the spec body, one per AC in scope. The executor picks them up directly from the spec; I relay the in-scope AC list verbatim so the executor can locate each AC's `Validation:` line without my prose roundtrip.
 - **Handoff fields** — `token_change_set`, `blast_radius`, `do_not_touch`. If any of these are missing on `new` → ask Leader. If they conflict (e.g., `blast_radius` excludes a file the implementation must touch) → escalate; do not improvise around a handoff field.
 - **Canonical artifact paths** — the executor reads them directly from the spec, not from my prose: `.agents/shared/planning/{feature}/design/design-spec.md`, `.agents/shared/planning/{feature}/design/mockups/`, `frontend/design-tokens/`.
+- **`design_artifacts` (machine-consumable mockup list)** — relay the designer's structured artifact field **verbatim, with concrete repo-relative paths**: each row's `path` (the canonical mockup under `.agents/shared/planning/{feature}/design/mockups/`), `kind` (`html-mockup` | `text-mockup` | `render`), `ac_refs` (the AC IDs that row serves), `od_url` (OD-UI provenance — reference only, not the deliverable, present only on `mockup_lane: opendesign`), and `lint` (`pass` | `fail-N` | `n/a`). **The executor must not depend on prose** — it reads each artifact from disk at the path I relay and ports DOM / structure / CSS intent into components, cross-checking the row's `ac_refs` against the spec body's `Validation:` lines. The lane marker (`mockup_lane: opendesign | text`) and lint verdict set the quality bar, not the implementation surface. See architecture §4.5 for the full edge field shape.
 
 The dispatch brief also names the re-conformance diff when the phase is `re-conformance` (Leader passes that, or it lives in the designer's `design-review.md` amendment) — re-implement only against the diff since the last verdict.
 
@@ -150,6 +151,8 @@ When the executor reports back (a coder via fan-in, a worker via the direct asyn
 - `pages_changed` — the routed pages touched (for the designer's `blast_radius` vs reality check)
 - `conformance_iter` — the current iteration count (start at 1; the conformance loop may bounce back)
 - **capture paths** — any image substrate paths the executor produced or referenced (for the designer's vision-input channel)
+- **`mockup_lane`** — the lane marker the brief carried (`opendesign` | `text`) — surfaces which mockup lane actually shipped so leader and the conformance loop can calibrate the quality bar. The executor's report is the lane the brief declared; if the executor flagged a missing artifact path, surface that gap in the Dev Report's `### Gaps` section.
+- **`design_artifacts_consumed`** — list each artifact path from `design_artifacts` the executor actually read and the components it informed (the row-level consumption log, relayed upstream from the executor's report — mirrors the v1 developer Step 6 semantics so the designer's `blast_radius` vs reality check has the same shape across both implementations).
 
 The standard review + commit cycle still applies; the difference is the **what** (spec-driven ACs, not Leader's prose) and the **report shape** (edge-contract fields, not free-form prose).
 

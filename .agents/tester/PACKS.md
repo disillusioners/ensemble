@@ -1,5 +1,20 @@
 # Test Packs
 
+## Completed commission — OPENDESIGN DESIGN-WORKFLOW VERIFICATION (report-only) (2026-10-01)
+
+Branch `feature/opendesign-design-workflow` @ **`3b6ba8cd`** (base `b271e153`). **VERDICT: READY — 7/7 plan items PASS, 0 regressions, 3 🟢 non-blocking nits** (v2-only `render` kind enum; `text-mockup` literal only via template/§4.5 cross-ref; `My Rules` informal heading alias). Pre-existing `[designer]` scrutiny RED base-identical (1F/50P/18S both legs), not grown. Repo untouched (foreign dirty set constant ×6, verified pre/post by every worker). Full report: `RESULTS/2026-10-01-opendesign-design-workflow-verification.md`.
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `od_builtin_unit` (ad-hoc) | `timeout 300 .venv/bin/python -m pytest tests/unit/test_opendesign_builtin.py -v --tb=short -p no:cacheprovider` | 9 new BYOK/degradation tests + 18 prior | ✅ 27/27 in 0.60s, exit 0 |
+| `prompt_registry_ab` | HEAD + detached worktree @b271e153, `timeout 300 … -m pytest tests/unit/test_report_integrity_prompts.py --tb=short -q -p no:cacheprovider` | prompt-registry regression gate | ✅ both legs 1F/50P/18S, byte-identical failure set (known [designer] RED only); import resolved in-worktree both legs |
+| `spec_template_bytefreeze` | `git diff b271e153 3b6ba8cd -- …/templates/design-spec.md` | pinned_spec_sha freeze | ✅ 1 hunk `@@ -92,6 +92,51 @@` (+45/−0, `## Design artifacts` only); pinned_spec_sha@16 untouched |
+| `od_schema_functional` | /tmp script vs real `daemon/mcp/builtin_servers/opendesign.py`, `timeout 120` | 5 keys optional · KMS parity :218-230≡:191-203 · env maps + int coercion (base.py:307-323) · `build_config({})` → only OD_DAEMON_URL | ✅ (a)–(d) all PASS |
+| `degradation_walk` (static) | designer Phase-4 walk, OD daemon DOWN + BYOK unprovisioned injected at every od_* site | graceful degradation to text lane | ✅ all od_* wrapped (workflow.md:78), fallback unconditional (:76), degraded row fully specified (text-mockup/text/n-a/em-dash); no dead-end |
+| `handoff_dryrun` (mock) | /tmp HTML mockup + implement-brief fragment (repo untouched) | path convention · developer Step 4b :122-138 actionability · v2 relay :141 parity | ✅ (a)/(b)/(c) PASS — fields verbatim, AC greps executable |
+| `md_closure_grep` | operator regex per docs/agent-prompt-writing-guide.md:108 over the 5 changed prompt files | closure + See-section resolution | ✅ 14/14 hits operational; cross-refs 13/14 + 1 partial (`My Rules` alias) |
+| `ensure_statics` | grep dev.sh | ensure.md Core #4 | ✅ `--timeout-graceful-shutdown 10` @ dev.sh:102 (Core #2/#3 scoped out — no concurrency-lane code in change set; Release Gate N/A) |
+
 ## Completed commission — v0.16.9 FIX BUNDLE FULL GATES (frozen verification) (2026-10-01)
 
 Branch `feature/v0.16.9-fix-bundle` @ **`a52a0321`** (base `f87a397c`), report-only (no fixes, no commits). **VERDICT: PASS WITH ONE REPORT-BACK** — zero feature-caused reds anywhere; every red/skip A/B-verified base-identical; convergence drill 4/4; §8b 10/0. Sole finding: fix #4 `_js_run_bounded` orphaned-sleep pipe stall (feature-caused runtime regression — launcher suite 10 s at base → 652 s at HEAD; bounded-correct but ~25-45 s per stale-txn sweep call; council decision: ride fix into v0.16.9 or ticket). Commission premise "full-run hang pre-existing" FALSIFIED at this base (base completes 10 s; only 8c×2+8g pre-existing). Full report: `RESULTS/2026-10-01-v0.16.9-fix-bundle-verification.md`.
