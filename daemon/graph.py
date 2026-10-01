@@ -3966,6 +3966,29 @@ class SessionState(MessagesState):
     # evaluation remains visible across a crash/resume boundary.
     gate_exception_seen: bool = False
 
+    # P1-P4 completion-gate bounds (2026-09-30, incidents 34978dfc +
+    # 6f961c43) — SessionState channels for the gate's per-mission
+    # guard counters. DECLARED-BY-NECESSITY (2026-10-01): langgraph
+    # 1.0.9 StateGraph channel validation SILENTLY DROPS undeclared
+    # keys from a node's return dict (repro: a node returning an
+    # undeclared key merges fine — the key is simply absent from the
+    # next state, no error raised). The staged
+    # ``fix/completion-gate-bounds`` branch wrote these five keys from
+    # the gate node WITHOUT declaring them, so every counter write was
+    # discarded at the first channel merge — the withhold budget could
+    # never accumulate across evaluations and P1-P3 were inert in
+    # production. Node-level unit tests pass because they invoke the
+    # node function directly, bypassing channel validation — the
+    # compiled-graph regression pin lives in
+    # ``tests/unit/test_attestation_gate_bounds.py::
+    # TestGateChannelsDeclaredOnSessionState``. Declared additively
+    # with defaults — old checkpoints deserialize unchanged.
+    attestation_withhold_deny_count: int = 0
+    attestation_consecutive_identical: int = 0
+    attestation_last_bare_ai_content: str | None = None
+    attestation_repair_nudge_sent: bool = False
+    attestation_degenerate_streak: int = 0
+
 
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end.
