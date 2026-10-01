@@ -521,10 +521,17 @@ _js_run_bounded() {
     local pid watcher rc=0
     "$@" &
     pid=$!
+    # Detach the watcher subshell from the command-substitution pipe so an
+    # orphan `sleep` (reparented to init when SIGKILLed on child-wins) cannot
+    # hold the pipe write-end and stall `$()` until sleep expires. The
+    # redirected fd is /dev/null — the watched child's fds (set up earlier)
+    # are unaffected. Without this, every instant bounded call stalls ~N s
+    # even though the wrapped command completed instantly (commit 961dfe59
+    # regression — see LESSONS/2026-10-01-js-run-bounded-orphaned-sleep-stall).
     (
         sleep "$timeout_s" 2>/dev/null
         kill -KILL "$pid" 2>/dev/null
-    ) &
+    ) >/dev/null 2>&1 &
     watcher=$!
     if wait "$pid" 2>/dev/null; then
         rc=0

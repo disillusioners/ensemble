@@ -928,6 +928,36 @@ F4_RC=$?
 assert_eq "8b-c5 sweep survives bounded subprocess calls" "0" "$F4_RC"
 assert_eq "8b-c5 sweep-rollback repointed (bounded cat + date + kill -0)" "releases/v0.10.5" "$(readlink "$JS_F4/current")"
 
+# 8b-c6: _js_run_bounded — instant commands do not stall (regression pin).
+# Bug shape (commit 961dfe59): the watcher `( sleep N; kill -KILL $pid ) &`
+# inherits the command-substitution pipe's write-end. When the watched child
+# wins, we SIGKILL the watcher subshell — but its `sleep N` child is
+# orphaned to init AND still holds the pipe write-end until sleep expires.
+# `$( _js_run_bounded ... )` therefore blocks ~N s per call even on instant
+# commands. Measured: launcher suite 10s at base → 652s at HEAD (65×). Pin:
+# 5 instant `_js_run_bounded true` calls (timeout 3s) must complete in ≤5s.
+# Buggy path: 5 × ~3s = ~15s, comfortably above the 5s ceiling; fixed path:
+# sub-second on any sane host. The launcher suite's own wall-clock (10s
+# vs 652s) is the suite-level discriminator; this cell is the per-function
+# pin.
+INSTANT_OUT="$( . "$LAUNCHER" >/dev/null 2>&1
+    T0=$(date +%s)
+    for _ in 1 2 3 4 5; do
+        _js_run_bounded 3 -- true >/dev/null
+    done
+    echo "elapsed=$(( $(date +%s) - T0 ))" )"
+INSTANT_ELAPSED="${INSTANT_OUT#elapsed=}"
+case "$INSTANT_ELAPSED" in
+    ''|*[!0-9]*)
+        _fail "8b-c6 5 instant commands complete in ≤5s (no orphan-fd stall)" "<=5" "non-numeric elapsed: $INSTANT_OUT" ;;
+    *)
+        if [ "$INSTANT_ELAPSED" -le 5 ]; then
+            _pass "8b-c6 5 instant commands complete in ${INSTANT_ELAPSED}s ≤5s (no orphan-fd stall)"
+        else
+            _fail "8b-c6 5 instant commands complete in ≤5s (no orphan-fd stall)" "<=5" "elapsed=${INSTANT_ELAPSED}s — orphan-sleep holds capture pipe (commit 961dfe59 regression)"
+        fi ;;
+esac
+
 
 # ─── 9. resolve_binary preference order ─────────────────────────────────────
 section "resolve_binary"
