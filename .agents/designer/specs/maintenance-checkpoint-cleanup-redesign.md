@@ -6,7 +6,7 @@ phase: new
 author: designer
 created_at: 2026-10-01
 approved_at: 2026-10-01
-pinned_spec_sha: 9c25520a4709eab02b522cb1b6ddd08612290c0f
+pinned_spec_sha: 63a5ae5d9798ed985199bab6b7cba80822d33064
 task_id: ck-redesign-2026q4
 plan_ref: .agents/shared/planning/maintenance-console/phase2-frontend.md
 advisory_fields:
@@ -88,23 +88,57 @@ A persistent **Status Strip** above the stepper gives at-a-glance state so the o
 
 **Purpose.** 4-step wizard matching the existing workflow shape.
 
-**Component shape.** `<mat-stepper [orientation]="'vertical'" [linear]="false" [selectedIndex]="activeStep()">` with custom step labels and a custom footer (Material's default buttons are hidden; we render an `<h2>` footer with explicit Back / Continue / Cleanup now).
+**Component shape (responsive — AC-15 amendment).** Orientation is viewport-conditional to keep the no-scroll guarantee at 1024×768 (see AC-15):
+
+```html
+@if (isDesktop()) {  <!-- BreakpointObserver: (min-width: 1024px) -->
+  <mat-stepper [orientation]="'horizontal'" [linear]="false" [selectedIndex]="activeStep()">
+    <mat-step label="1. Review"> ... </mat-step>
+    <mat-step label="2. Dry-run"> ... </mat-step>
+    <mat-step label="3. Confirm & Execute"> ... </mat-step>
+    <mat-step label="4. Result"> ... </mat-step>
+  </mat-stepper>
+} @else {
+  <mat-stepper [orientation]="'vertical'" [linear]="false" [selectedIndex]="activeStep()">
+    <mat-step label="1. Review"> ... </mat-step>
+    <mat-step label="2. Dry-run"> ... </mat-step>
+    <mat-step label="3. Confirm & Execute"> ... </mat-step>
+    <mat-step label="4. Result"> ... </mat-step>
+  </mat-stepper>
+}
+```
+
+`isDesktop()` is a signal from `BreakpointObserver` matching `(min-width: 1024px)`. Both branches bind `activeStep()` and share the same custom footer (`Back` / `Continue` / `Cleanup now`); only the stepper's `orientation` input and the header layout differ. At ≥1024px the 4 headers sit in a single row (~72px stack height) — the math fits AC-15's 1024×768 budget. At <1024px headers stack vertically (checklist view) so labels never truncate.
 
 **Step labels.** `1. Review` · `2. Dry-run` · `3. Confirm & Execute` · `4. Result`
 
 **States.** `step-active` (current — Material handles), `step-completed` (✓ checkmark — derived from step gating state), `step-pending` (muted).
 
-**A11y.** Material stepper handles aria-current, focus management between steps, and keyboard nav (arrow keys move between steps; Tab cycles within step content).
+**A11y.** Material stepper handles aria-current, focus management between steps, and keyboard nav (arrow keys move between steps; Tab cycles within step content). Orientation switch does not change the keyboard contract — Material's `MatStepper` exposes the same keyboard API regardless of orientation.
 
-**Wireframe (vertical stepper with custom footer).**
+**Wireframe — desktop ≥1024px (horizontal, headers in one row).**
 
 ```
-┌─ Step 1: Review ──●── Step 2: Dry-run ──○── Step 3: Confirm ──○── Step 4: Result ──○─┐
+┌─ ① Step 1: Review ── ② Step 2: Dry-run ── ③ Step 3: Confirm & Execute ── ④ Step 4: Result ─┐
 │                                                                                       │
-│   [step content per active step]                                                      │
+│   [step content per active step — full wizard width, Continue button right-aligned]  │
 │                                                                                       │
 │                                              [ ← Back ]    [ Continue → ]             │
 └───────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Wireframe — narrow <1024px (vertical, checklist view).**
+
+```
+┌─ ① Step 1: Review ──●─┐
+│   [step content]      │
+├─ ② Step 2: Dry-run ─○─┤
+│   [step content]      │
+├─ ③ Step 3: Confirm ──┤
+│   [step content]      │
+├─ ④ Step 4: Result ──┤
+│   [step content]      │
+└───────────────────────┘
 ```
 
 ### 2.3 Step 1 — Review
@@ -117,6 +151,8 @@ A persistent **Status Strip** above the stepper gives at-a-glance state so the o
 - `[Continue →]` button (disabled when `!canDryRun() || isMaintenanceDisabled() || isRunInFlight()`)
 
 **A11y.** H3 sub-headings; `<dl>` is native; warning uses `role="alert"`.
+
+> **Implementation note (W6 — sign-off addendum).** Configuration and Last run may share a single `.ck-card` boundary with an internal 2-col grid at ≥1024px (1-col at <1024px). The wireframe above depicts two side-by-side sub-cards; the implementation collapses the outer boundary into one card while preserving the inner 2-col grid and the responsive single-column fallback. Visual semantics — config vs last-run, side-by-side on wide, stacked on narrow — are unchanged. Splitting the outer bounding is not a contract requirement.
 
 **Wireframe.**
 
@@ -148,6 +184,8 @@ A persistent **Status Strip** above the stepper gives at-a-glance state so the o
 - `[← Back] [Continue →]` (Continue gated on `lastDryRun()` existence AND `dry.would_delete_count > 0` OR explicit operator override; disabled state visible)
 
 **A11y.** All existing `data-testid` attributes preserved on inner elements.
+
+> **Implementation note (W3 — sign-off addendum).** The implementation gates Continue on `lastDryRun()` existence AND `dry.would_delete_count > 0` (strict arm). The spec's "explicit operator override" clause is implemented implicitly via the Step-4 run-again banner (`ck-run-again-banner`), which surfaces after any zero-delete execute and lets the operator re-attempt cleanup once state changes. Pre-execute, a zero-delete dry-run blocks Continue: the operator must return to Step 1 or wait for new state (no separate Step-2 override control is rendered). The strict arm is the right default — accidental cleanup of zero-pair dry-runs is exactly the failure mode the gate exists to prevent — and the run-again banner is the explicit override surface for the post-execute case.
 
 **Wireframe.**
 
@@ -258,7 +296,7 @@ These two banners are the only blocks that survive across all steps; everything 
 | `$border-color` | #334155 | Card borders |
 | `$text-primary` | #f1f5f9 | Body text |
 | `$text-secondary` | #94a3b8 | Labels |
-| `$text-muted` | #64748b | Footnotes |
+| `$text-muted` | #8b96a8 | Footnotes (4.89:1 on `$bg-card` — passes WCAG AA at 0.6875rem; was #64748b at 3.07:1, pre-decided W8) |
 | `$accent-cyan` | #10a7f7 | Info (skipped honesty, projection) |
 | `$accent-emerald` | #10b981 | Success (completed run) |
 | `$accent-rose` | #f43f5e | Destructive / error |
@@ -300,6 +338,8 @@ These two banners are the only blocks that survive across all steps; everything 
 
 ## 5. Wireframe (page-level, full)
 
+### 5.1 Desktop ≥1024px — horizontal stepper (satisfies AC-15)
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
 │  Maintenance                                                                          │
@@ -311,9 +351,9 @@ These two banners are the only blocks that survive across all steps; everything 
 │  │ 6          │  │ ✓ freed 12.4 GB · 2h     │  │ 1,204 pairs · expires 41m       │  │
 │  └────────────┘  └──────────────────────────┘  └──────────────────────────────────┘  │
 │                                                                                       │
-│  ┌── Step 1: Review ─●── Step 2: Dry-run ──○── Step 3: Confirm ──○── Step 4: Result ─○──┐
+│  ┌─ ① Step 1: Review ─●── ② Step 2: Dry-run ─○── ③ Step 3: Confirm ─○── ④ Step 4: Result ─○──┐
 │  │                                                                                    │
-│  │  [step content per active step]                                                    │
+│  │  [step content per active step — full wizard width, Continue button right-aligned]  │
 │  │                                                                                    │
 │  │                                            [ ← Back ]    [ Continue → ]           │
 │  └────────────────────────────────────────────────────────────────────────────────────┘
@@ -321,6 +361,10 @@ These two banners are the only blocks that survive across all steps; everything 
 │  ▾ Debug (collapsed by default — shows raw last response payloads for diagnostics)     │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### 5.2 Narrow <1024px — vertical stepper (checklist view)
+
+Same page chrome. Status Strip wraps to 1-col. The 4 step headers stack vertically as a checklist (`① Review` → `② Dry-run` → `③ Confirm & Execute` → `④ Result`); step content renders below the active header; footer (`← Back` / `Continue →`) sits below the content. Wizard container remains 1100px max but caps at viewport width.
 
 ## 6. Tradeoffs
 
@@ -330,7 +374,7 @@ These two banners are the only blocks that survive across all steps; everything 
 | **B. Tabs (Overview / Dry-run / Cleanup)** | Rejected | User picked C. Tabs hide context operators occasionally need (e.g., last-run timestamp while on the Cleanup tab). Stepper with persistent Status Strip solves the "peek at state without losing place" problem. |
 | **C. Wizard / stepper** | ✅ Chosen | Best match to the existing 4-card workflow shape. Material handles keyboard / focus / aria-current natively. Persistent Status Strip decouples monitoring from action. |
 | **Custom stepper (CdkStepper)** | Rejected | Material `<mat-stepper>` ships accessibility primitives (aria-current, focus management, header/footer roles) we'd otherwise re-implement. Cost: ~2 deps already in tree (`@angular/material`, `@angular/cdk`). |
-| **Horizontal stepper** | Rejected | At <720px width, horizontal stepper labels truncate; vertical reads as a checklist which fits the "review → confirm" mental model. |
+| **Horizontal stepper** | ✅ Chosen conditionally (≥1024px) | Original spec rejected horizontal-only on the grounds that labels truncate at narrow viewports. AC-15 (no-scroll at 1024×768) cannot be satisfied with a vertical-only orientation: stacked 4 headers (~192px) + page chrome + Step-1 card + footer = ~926px vs ~712px available. Resolution: responsive orientation — horizontal at ≥1024px (headers in one row, ~72px, fits), vertical at <1024px (checklist view, no truncation). See §2.2 / §5 / AC-15. |
 | **Linear stepper (`[linear]="true"`)** | Rejected | Step 4 (Result) should auto-render when execute succeeds even if operator never visited Step 3 in the active session (e.g. page refresh during execute → result returns from `lastExecuteResult` signal). Non-linear allows this; linear would block it. |
 | **Drop raw JSON `<details>` per card** | Rejected (collaborator: keep, but consolidated) | Useful for debugging; moving to a single page-level expander keeps diagnostic power without cluttering every step. |
 | **Widen container to 1100px** | ✅ Chosen | 820px cramped Status Strip (had to stack 3 tiles instead of row). 1100px max with 1-col narrow fallback respects modern operator displays without forcing horizontal scroll on mobile. |
@@ -350,12 +394,14 @@ Each AC packs to a `Validation:` block (the agent-searchable shape). Static grep
 - **And** the strip's `aria-live="polite"` region is reachable in the accessibility tree
 - **Validation:** `pack e2e/maintenance-checkpoint-cleanup.spec.ts; static: grep -n 'data-testid="ck-status-strip"' checkpoint-cleanup.component.html`
 
-### AC-2 — Stepper renders 4 steps with vertical orientation
+### AC-2 — Stepper renders 4 steps with responsive orientation
 
 - **Given** any daemon state
 - **When** the page renders
-- **Then** `<mat-stepper [orientation]="'vertical'">` contains exactly 4 `<mat-step>` children labelled `Review`, `Dry-run`, `Confirm & Execute`, `Result`
-- **Validation:** `pack e2e/maintenance-checkpoint-cleanup.spec.ts; static: grep -n '<mat-stepper' checkpoint-cleanup.component.html`
+- **Then** a `<mat-stepper>` renders with exactly 4 `<mat-step>` children labelled `Review`, `Dry-run`, `Confirm & Execute`, `Result`
+- **And** at viewport ≥1024px the stepper uses `[orientation]="'horizontal'"` (4 headers in a single row)
+- **And** at viewport <1024px the stepper uses `[orientation]="'vertical'"` (4 headers stacked as a checklist)
+- **Validation:** `pack e2e/maintenance-checkpoint-cleanup.spec.ts; static: grep -n '<mat-stepper' checkpoint-cleanup.component.html` — two `<mat-stepper>` instances must appear in the source (one per orientation branch), each containing 4 `<mat-step>` children.
 
 ### AC-3 — Step 1 (Review) shows config + last-run + in-flight warning when applicable
 
@@ -440,12 +486,18 @@ Each AC packs to a `Validation:` block (the agent-searchable shape). Static grep
 - **And** the existing `sections-registry-load-bearing` source-grep pin still passes
 - **Validation:** `pack unit/maintenance.component.spec.ts; static: grep -n 'sections-registry-load-bearing' maintenance.bindings.pins.spec.ts`
 
-### AC-15 — No scroll required for Status Strip + first Continue at 1024×768 viewport
+### AC-15 — No scroll required at 1024×768 (Status Strip + 4 step headers + Step-1 card + Continue button)
 
-- **Given** a healthy daemon state
-- **When** the operator opens `/maintenance/checkpoint-cleanup` at 1024×768
-- **Then** the Status Strip and Step 1 Continue button are both visible without scrolling
-- **Validation:** `pack e2e/maintenance-checkpoint-cleanup.spec.ts` (Playwright viewport assertion)
+- **Given** a healthy daemon returning `state: 'ready'`, `config.checkpoint_max_per_thread: 6`, and `last_run` data
+- **And** a viewport of 1024×768 (desktop breakpoint ≥1024px — horizontal stepper orientation active per §2.2)
+- **When** the operator opens `/maintenance/checkpoint-cleanup`
+- **Then** the following elements are all visible **without scrolling**:
+  1. The Status Strip (3 tiles: Keep N · Last run · Dry-run fresh)
+  2. All 4 step headers (in a single horizontal row: ① Review · ② Dry-run · ③ Confirm & Execute · ④ Result)
+  3. The Step-1 card content (Configuration sub-card + Last run sub-card, 2-col grid)
+  4. The Continue → button (right-aligned in the step footer)
+- **And** total page chrome + Status Strip + stepper header row + Step-1 card + footer height ≤ 640px (fits 768 − browser chrome)
+- **Validation:** `pack e2e/maintenance-checkpoint-cleanup.spec.ts` — Playwright viewport assertion: set viewport to 1024×768, navigate to `/maintenance/checkpoint-cleanup`, then assert `await expect(page.locator('[data-testid="ck-status-strip"]')).toBeInViewport()` AND `await expect(page.locator('mat-stepper[orientation="horizontal"]')).toBeVisible()` AND `await expect(page.locator('[data-testid="ck-continue-btn"]').first()).toBeInViewport()`. The `toBeInViewport()` matcher requires the element's bounding box to be fully inside the visible viewport without overflow.
 
 ### AC-16 — In-flight run state disables dry-run + execute buttons across all steps
 
@@ -472,7 +524,7 @@ Each AC packs to a `Validation:` block (the agent-searchable shape). Static grep
 |---|---|
 | `frontend/src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.html` | Major restructure: Status Strip + 4 mat-step blocks; remove per-card raw JSON; preserve all inner `data-testid`. |
 | `frontend/src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.scss` | New tokens (`$step-gap`, `$status-strip-min-width`, `$wizard-max-width`); dark-theme overrides for `mat-stepper`; Status Strip styles; responsive media query. |
-| `frontend/src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.ts` | New `activeStep` signal + `stepperNav()` helper; step gating logic (`canContinueFromStep1/2/3`); preserved signals, methods, and testids. |
+| `frontend/src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.ts` | New `activeStep` signal + `stepperNav()` helper + `isDesktop()` signal from `BreakpointObserver` (`(min-width: 1024px)`); step gating logic (`canContinueFromStep1/2/3`); preserved signals, methods, and testids. Orientation switches between horizontal (≥1024px) and vertical (<1024px) via `*ngIf` / `@if` on `isDesktop()`; see §2.2 amended component shape. |
 | `frontend/src/app/pages/maintenance/maintenance.component.scss` | Widen container from 820px to 1100px max (one-line change at `:22`). |
 
 ## 9. Files NOT in scope (out of bounds)
@@ -490,4 +542,4 @@ Each AC packs to a `Validation:` block (the agent-searchable shape). Static grep
 | Existing Jest unit `frontend/src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.spec.ts` | Needs new stepper nav specs + Status Strip spec; existing data-signal specs remain. |
 | Existing source-grep pin `sections-registry-load-bearing` | Must continue to pass (AC-14). |
 | New unit specs | Add `activeStep` initial-value, Continue/Back navigation, gating logic, in-flight handling. |
-| New E2E specs | Add Status Strip visibility, stepper navigation, viewport fit at 1024×768, debug-expander visibility. |
+| New E2E specs | Add Status Strip visibility, stepper orientation switching (horizontal at ≥1024px, vertical at <1024px), no-scroll at 1024×768 (per AC-15 amended wording: ck-status-strip + horizontal mat-stepper + ck-continue-btn all `toBeInViewport()`), debug-expander visibility. |
