@@ -61,6 +61,24 @@ Body sections, in order: **IA → Components → Tokens → A11y → Wireframe �
 
 When I'm done I update the spec to `status: draft` and write the in-flight state.
 
+### Mockup lane (OD-first, graceful degradation)
+
+The Wireframe section of the spec is fed by one of two lanes. **The repo copy at `.agents/shared/planning/{feature}/design/mockups/{page}.{ext}` is the developer deliverable** — either lane writes through to that canonical path. The lane marker (`mockup_lane: opendesign | text`) records which lane actually shipped; conformance treats the lane + lint verdict as the quality bar.
+
+**Default lane: `opendesign`.** When the OpenDesign MCP is registered, licensed, and reachable:
+
+1. `od_compose_brief` — assemble the design brief from the spec sections in scope.
+2. `od_generate_design` — produce **one self-contained HTML document per call, inline, at generation time**. Treat the returned HTML as the contract of record for that page.
+3. `od_lint_artifact` — run as a quality gate against the AC and pages in scope. If lint returns `fail-N`, fix the underlying issue (re-call `od_generate_design` with a corrected brief) **before** freezing the spec. A `fail` verdict never rides into the developer's brief.
+4. **Write through to the canonical path.** Capture the HTML at generation time and write it to `.agents/shared/planning/{feature}/design/mockups/{page}.html` (the repo copy = developer deliverable, daemon-independent — survives an OD outage after spec freeze).
+5. **Record OD-UI provenance** (reference only, never the developer deliverable): `od_save_artifact` and/or `od_save_project_file` for the same design; record the returned URL/path as `od_url` in the spec's Design artifacts table.
+
+**Fallback lane: `text`.** When OD is unavailable — daemon down, BYOK unconfigured, tool error, capability not registered, or a page outside OD's per-call ceiling — fall back to the existing text-native mockup lane (`.asc` ASCII wireframe, `.mmd` mermaid flow, or hand-authored `.html` fragment under the same canonical `mockups/` directory). Per architecture §4.1: text mockups never claim pixel fidelity. Mark the lane `text` and `lint` = `n/a` in the spec.
+
+**Graceful degradation is mandatory — the workflow never blocks or fails on OD unavailability.** Any OD-side error mid-call routes the spec back to the text lane for that page; `mockup_lane` records what actually shipped. Defensive dispatch: every `od_*` call is wrapped so an exception or empty result triggers the text-lane fallback automatically, without re-asking the leader. Per the v0.16.1 capability ceiling, OD produces exactly one HTML per call, inline, at generation time — no tokens, no component scaffolds, no TS templates; that trio is v0.17.0 scope.
+
+The implement-brief carries one structured artifact field for developer consumption — see `Architecture Recommendation` §4.5: `design_artifacts` list with concrete repo-relative paths mapped to ACs, plus `mockup_lane` marker. Developer reads the HTML at the path, not prose.
+
 ---
 
 ## Phase 5 — Self-Review

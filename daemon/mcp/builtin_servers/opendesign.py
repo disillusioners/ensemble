@@ -155,6 +155,24 @@ class OpenDesignMCP(BuiltinServerDefinition):
           installs leave it empty). When set with a secret, callers
           MUST pass a ``__KMS_REF__<handle>__`` marker value — never
           plaintext (KMS-Lite seam, arch §7.5).
+
+        Five optional BYOK / timeout keys enabling ``od_generate_design``
+        on third-party LLM providers (OD design-workflow integration):
+
+        - ``byok_base_url`` → ``BYOK_BASE_URL`` (optional; provider
+          endpoint, e.g. ``https://api.openai.com/v1``).
+        - ``byok_api_key`` → ``BYOK_API_KEY`` (optional; secret-bearing,
+          mirrors ``od_api_token`` — pass a ``__KMS_REF__<handle>__``
+          marker minted via ``kms_request`` + bound via ``kms_attach``,
+          NEVER plaintext).
+        - ``byok_model`` → ``BYOK_MODEL`` (optional; model identifier
+          the OD server should target for generation).
+        - ``byok_provider`` → ``BYOK_PROVIDER`` (optional; provider
+          hint the OD server uses to dispatch BYOK requests).
+        - ``od_generate_timeout_ms`` → ``OD_GENERATE_TIMEOUT_MS``
+          (optional; integer millisecond timeout for design
+          generation calls — ``type: number`` for int coercion
+          round-trip via ``parse_config``).
         """
         return [
             {
@@ -179,6 +197,71 @@ class OpenDesignMCP(BuiltinServerDefinition):
                     "Secret-bearing: pass a __KMS_REF__<handle>__ marker "
                     "minted via kms_request + bound via kms_attach — "
                     "NEVER plaintext."
+                ),
+                "default": None,
+                "required": False,
+            },
+            {
+                "key": "byok_base_url",
+                "label": "BYOK Base URL",
+                "type": "text",
+                "section": "env",
+                "description": (
+                    "Optional base URL for the BYOK LLM provider the "
+                    "OD daemon should call for od_generate_design "
+                    "(e.g. https://api.openai.com/v1)."
+                ),
+                "default": None,
+                "required": False,
+            },
+            {
+                "key": "byok_api_key",
+                "label": "BYOK API Key",
+                "type": "text",
+                "section": "env",
+                "description": (
+                    "Optional secret-bearing API key for the BYOK "
+                    "provider. Pass a __KMS_REF__<handle>__ marker "
+                    "minted via kms_request + bound via kms_attach — "
+                    "NEVER plaintext."
+                ),
+                "default": None,
+                "required": False,
+            },
+            {
+                "key": "byok_model",
+                "label": "BYOK Model",
+                "type": "text",
+                "section": "env",
+                "description": (
+                    "Optional model identifier the OD daemon should "
+                    "target for od_generate_design (e.g. "
+                    "gpt-4o, claude-sonnet-4-5)."
+                ),
+                "default": None,
+                "required": False,
+            },
+            {
+                "key": "byok_provider",
+                "label": "BYOK Provider",
+                "type": "text",
+                "section": "env",
+                "description": (
+                    "Optional provider hint the OD daemon uses to "
+                    "dispatch BYOK requests (e.g. openai, anthropic)."
+                ),
+                "default": None,
+                "required": False,
+            },
+            {
+                "key": "od_generate_timeout_ms",
+                "label": "OD Generate Timeout (ms)",
+                "type": "number",
+                "section": "env",
+                "description": (
+                    "Optional per-call timeout in milliseconds for "
+                    "od_generate_design. Integer-valued; coerced "
+                    "round-trip via parse_config."
                 ),
                 "default": None,
                 "required": False,

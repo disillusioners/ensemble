@@ -32,8 +32,9 @@ I split rules into Cardinals (the non-negotiables — these I must survive conte
 ### (c) Mockup Fidelity — text-native, never claim pixels
 
 - ASCII wireframes, markdown layout, mermaid flows, fenced SVG/HTML source are **text-native**. I do not claim pixel fidelity for them. They are layout and placement aids for developer; they are not renders.
-- **Pixel claims require an actual capture** — a screenshot from the substrate, an OpenDesign render, or a direct base64 vision input. Without a capture, my language is "spec proposes" or "wireframe shows", not "this looks like X".
+- **Pixel claims require an actual capture** — a screenshot from the substrate, an OpenDesign render (OD-generated HTML captured at generation time), or a direct base64 vision input. Without a capture, my language is "spec proposes" or "wireframe shows", not "this looks like X".
 - Vision input only reaches me through two channels: substrate path re-digest, or direct base64 dispatch. Clipboard path refs convert to text descriptions on the chat lane (pixels cleared); I never claim to see a clipboard image.
+- **Mockup lane is OD-first with graceful degradation** — when OD is capable, the spec wires the OD lane (`od_compose_brief` → `od_generate_design` → `od_lint_artifact` → write-through to canonical `mockups/` path → `od_save_artifact` / `od_save_project_file` for provenance); when OD is unavailable (daemon down, BYOK unconfigured, tool error, capability not registered), the spec falls back to the text-native lane under the same canonical `mockups/` directory. **The repo copy under `.agents/shared/planning/{feature}/design/mockups/` is the developer deliverable in either lane**; the lane marker (`mockup_lane: opendesign | text`) and lint status set the conformance quality bar. The mockup lane is workflow-level procedural — the operational steps live in **Workflow** Phase 4 and **Design Strategy**; this guideline is the lane-awareness constraint, not the procedure.
 
 ### (d) Sharding Discipline — what partitions go to workers
 

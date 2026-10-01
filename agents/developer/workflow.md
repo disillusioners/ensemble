@@ -119,6 +119,24 @@ The spec body has acceptance criteria with pack-mapped Validation blocks (e.g. `
 - Implement to the spec body, not to the prose brief. The brief is the cover sheet; the spec is the contract of record.
 - When spawning opencode sessions, point each session at the in-scope AC list from the spec body so each session picks up its `Validation:` line directly. This is how the designer and conformance review agents will find the work later.
 
+### Step 4b: Consume the HTML Mockups
+
+The designer's brief carries a `design_artifacts` field plus a `mockup_lane` marker — one row per renderable artifact, each row pinning a concrete repo-relative path to the canonical `mockups/` directory and the AC IDs that row serves. **The path is the contract, not prose** — read the file from disk and port its DOM / structure / CSS intent into components. The lane + lint verdict set the quality bar, not the implementation surface.
+
+**Implementer steps (per artifact row):**
+
+1. **Read the HTML at the given path.** It is the canonical repo copy the designer wrote through at spec time — daemon-independent, OD-independent. Treat its DOM structure as the layout intent and its CSS / token references as the visual intent.
+2. **Port DOM/structure/CSS intent into components** — translate the markup into Angular templates, the CSS into `frontend/design-tokens/` references (never bare hex / spacing / type per architecture §4.2), the interactive bits into component inputs/outputs. Match layout, hierarchy, and token usage; do not improvise around the mockup.
+3. **Cross-check against the mapped ACs.** Each row carries `ac_refs` (e.g. `AC-A1, AC-A2`); confirm the components you implement serve those ACs by walking the spec body's `Validation:` lines. A row whose ACs the implementation does not serve is a gap — flag back via `escalation_path`.
+4. **Treat the lint verdict as the quality bar, not a gate:**
+   - `lint: pass` — the OD quality gate approved the mockup; the implementation must match the mockup's structure and token usage within reason.
+   - `lint: fail-N` — focus the implementation on the mockup's structural intent (DOM / hierarchy / tokens); the N issues are conformance-review material, not implementation blockers.
+   - `lint: n/a` — text-native mockup lane; never claim pixel fidelity against the implementation. The mockup is a layout and placement aid.
+5. **Use `od_url` as provenance only** (when present) — the developer deliverable is the repo copy on disk, not the OD-UI URL. Do not depend on OD-UI being reachable; the repo path is the source of truth.
+6. **Record the consumed artifacts in the implementation report** — list each artifact path you actually read and the components it informed, alongside `commit_sha` and the edge-contract fields in Step 6.
+
+If a row's `path` does not exist on disk, the spec drift is upstream — flag via `escalation_path` rather than improvising. The brief's `mockup_lane` marker is informational; the implementation surface is the canonical path either lane writes to.
+
 ### Step 5: Cosmetic-Skip Awareness
 
 Leader may route trivial cosmetic-only edits straight to me (no designer involvement) — a single-line tweak, no layout shift, no new tokens, no a11y implication, no spec change. If the brief is genuinely cosmetic, proceed with the standard implementation flow against the prose brief.
@@ -134,6 +152,8 @@ On completion, report to Leader (and back to the designer via Leader) the edge-c
 - `pages_changed` — the routed pages touched (for the designer's `blast_radius` vs reality check)
 - `conformance_iter` — the current iteration count (start at 1; the conformance loop may bounce me back)
 - `capture paths` — any image substrate paths I produced or referenced during implementation (for the designer's vision-input channel)
+- `mockup_lane` — the lane the brief declared (`opendesign` | `text`) — surfaces which mockup lane shipped so leader and the conformance loop can calibrate the quality bar
+- `design_artifacts_consumed` — list each artifact path from `design_artifacts` I actually read and the components it informed (the row-level consumption log from Step 4b)
 
 The follow-up protocol does not change — the standard implementation review + commit cycle still applies. The difference is the **what** (spec-driven ACs, not Leader's prose) and the **report shape** (edge-contract fields).
 

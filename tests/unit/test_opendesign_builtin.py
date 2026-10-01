@@ -124,13 +124,84 @@ class TestBuildConfig:
         assert values["od_daemon_url"] == "http://127.0.0.1:7777"
         assert values["od_api_token"] == "m"
 
+    def test_byok_keys_uppercased_into_env(self):
+        """Each byok_* key maps to its UPPER env var via build_config."""
+        config = OpenDesignMCP().build_config(
+            {
+                "byok_base_url": "https://api.openai.com/v1",
+                "byok_model": "gpt-4o",
+                "byok_provider": "openai",
+            }
+        )
+        assert config["env"]["BYOK_BASE_URL"] == "https://api.openai.com/v1"
+        assert config["env"]["BYOK_MODEL"] == "gpt-4o"
+        assert config["env"]["BYOK_PROVIDER"] == "openai"
+        # No plaintext leakage from byok_api_key when unset.
+        assert "BYOK_API_KEY" not in config["env"]
+
+    def test_byok_api_key_marker_passes_through_verbatim(self):
+        """byok_api_key carries the same KMS-marker contract as od_api_token."""
+        marker = "__KMS_REF__KMS_HANDLE_byok456__"
+        config = OpenDesignMCP().build_config({"byok_api_key": marker})
+        assert config["env"]["BYOK_API_KEY"] == marker
+        # Plaintext hygiene: the ONLY secret-shaped datum is the marker.
+        assert "sk-" not in config["env"]["BYOK_API_KEY"]
+
+    def test_byok_keys_absent_when_omitted(self):
+        """byok_* keys are SKIPPED when omitted AND default is None — no env leakage."""
+        config = OpenDesignMCP().build_config({})
+        for env_key in (
+            "BYOK_BASE_URL",
+            "BYOK_API_KEY",
+            "BYOK_MODEL",
+            "BYOK_PROVIDER",
+            "OD_GENERATE_TIMEOUT_MS",
+        ):
+            assert env_key not in config["env"], f"{env_key} leaked despite no value"
+
+    def test_od_generate_timeout_ms_uppercased_and_stringified(self):
+        """od_generate_timeout_ms → OD_GENERATE_TIMEOUT_MS as a string (env contract)."""
+        config = OpenDesignMCP().build_config({"od_generate_timeout_ms": 120000})
+        assert config["env"]["OD_GENERATE_TIMEOUT_MS"] == "120000"
+
+    def test_parse_config_round_trip_with_byok_and_timeout(self):
+        """parse_config round-trips the new keys (timeout coerced to int)."""
+        definition = OpenDesignMCP()
+        built = definition.build_config(
+            {
+                "byok_base_url": "https://api.openai.com/v1",
+                "byok_api_key": "__KMS_REF__KMS_HANDLE_xyz__",
+                "byok_model": "gpt-4o",
+                "byok_provider": "openai",
+                "od_generate_timeout_ms": 60000,
+            }
+        )
+        values = definition.parse_config(built)
+        assert values["byok_base_url"] == "https://api.openai.com/v1"
+        assert values["byok_api_key"] == "__KMS_REF__KMS_HANDLE_xyz__"
+        assert values["byok_model"] == "gpt-4o"
+        assert values["byok_provider"] == "openai"
+        # type=number coerces back to int (float_val.is_integer() branch).
+        assert values["od_generate_timeout_ms"] == 60000
+        assert isinstance(values["od_generate_timeout_ms"], int)
+
 
 class TestConfigSchema:
     """Schema fields match the P2-WP4 §5.1 env contract."""
 
     def test_schema_keys_and_sections(self):
         schema = {f["key"]: f for f in OpenDesignMCP().get_config_schema()}
-        assert set(schema) == {"od_daemon_url", "od_api_token"}
+        # P2-WP4 §5.1 env contract + OD design-workflow BYOK/timeout
+        # extension (schema-gap enabler for od_generate_design).
+        assert set(schema) == {
+            "od_daemon_url",
+            "od_api_token",
+            "byok_base_url",
+            "byok_api_key",
+            "byok_model",
+            "byok_provider",
+            "od_generate_timeout_ms",
+        }
         assert all(f["section"] == "env" for f in schema.values())
 
     def test_daemon_url_default_present_token_optional(self):
@@ -141,6 +212,57 @@ class TestConfigSchema:
         # server's OD_DAEMON_URL requirement; loopback needs no token.
         assert schema["od_daemon_url"]["required"] is False
         assert schema["od_api_token"]["required"] is False
+
+    def test_existing_keys_schema_unchanged(self):
+        """P2-WP4 §5.1 fields stay byte-identical (type/section/default/required)."""
+        schema = {f["key"]: f for f in OpenDesignMCP().get_config_schema()}
+        # od_daemon_url — text env with default endpoint, optional.
+        assert schema["od_daemon_url"]["type"] == "text"
+        assert schema["od_daemon_url"]["section"] == "env"
+        assert schema["od_daemon_url"]["default"] == OD_DAEMON_URL_DEFAULT
+        assert schema["od_daemon_url"]["required"] is False
+        # od_api_token — text env with no default, optional, KMS-marker contract.
+        assert schema["od_api_token"]["type"] == "text"
+        assert schema["od_api_token"]["section"] == "env"
+        assert schema["od_api_token"]["default"] is None
+        assert schema["od_api_token"]["required"] is False
+
+    def test_byok_keys_optional_and_text_typed(self):
+        """New BYOK string fields are optional text env entries."""
+        schema = {f["key"]: f for f in OpenDesignMCP().get_config_schema()}
+        for key in ("byok_base_url", "byok_model", "byok_provider"):
+            assert schema[key]["type"] == "text"
+            assert schema[key]["section"] == "env"
+            assert schema[key]["default"] is None
+            assert schema[key]["required"] is False
+
+    def test_byok_api_key_mirrors_od_api_token_kms_marker_contract(self):
+        """byok_api_key follows the exact od_api_token pattern: text env,
+        default None, required False, description mandates the
+        __KMS_REF__<handle>__ marker contract."""
+        schema = {f["key"]: f for f in OpenDesignMCP().get_config_schema()}
+        byok = schema["byok_api_key"]
+        token = schema["od_api_token"]
+        # Same shape as od_api_token.
+        assert byok["type"] == token["type"] == "text"
+        assert byok["section"] == token["section"] == "env"
+        assert byok["default"] == token["default"] is None
+        assert byok["required"] == token["required"] is False
+        # Description carries the KMS-marker contract verbatim —
+        # secret-bearing, marker-only, never plaintext.
+        assert "__KMS_REF__" in byok["description"]
+        assert "NEVER plaintext" in byok["description"]
+        assert "kms_request" in byok["description"]
+        assert "kms_attach" in byok["description"]
+
+    def test_od_generate_timeout_ms_is_int_typed_number(self):
+        """od_generate_timeout_ms is type=number so parse_config coerces to int."""
+        schema = {f["key"]: f for f in OpenDesignMCP().get_config_schema()}
+        timeout = schema["od_generate_timeout_ms"]
+        assert timeout["type"] == "number"
+        assert timeout["section"] == "env"
+        assert timeout["default"] is None
+        assert timeout["required"] is False
 
 
 class TestProductionResolver:

@@ -187,6 +187,28 @@ owners: {spec: designer-*, implement: developer-*, check: tester-*}     # adviso
 - **Primary: `shared_meta_kv`** — keys `design.<task-id>.{phase, artifact_path, pinned_spec_sha, conformance_iter, heartbeat_at}`; phase transitions + ≤15 min heartbeat. Secondary: `decisions.md`.
 - **Per-edge handoff** (self-contained; inline slice = decision-relevant subset; paths by reference): leader→designer brief (task_id, phase, pinned_spec_sha on re-conformance, escalation_path); designer→developer (task_id, **pinned_spec_sha only on re-conformance** — absence on `new` / `amend` is not a mismatch, AC IDs in scope, token_change_set, blast_radius, do_not_touch); developer→designer (commit_sha, diff_stat, pages_changed, conformance_iter, capture paths); designer→tester (pack_list AC→PACKS.md, regression_pages); tester→designer (pack_name, page_url, capture path, failed AC ID).
 
+#### Designer→Developer implement-brief edge — `design_artifacts` (additive, v0.16.1)
+
+> **Status:** ADDITIVE — introduced by opendesign-design-workflow (Step 2, 2026-10-01). The fields above (task_id, pinned_spec_sha on re-conformance, AC IDs, token_change_set, blast_radius, do_not_touch) remain exactly as ratified. This section only **extends** the brief with one structured artifact field plus one lane marker. Do not rename or remove any pre-existing §4.5 field.
+
+The implement-brief carries one **structured artifact field** so the developer has machine-consumable design artifacts (HTML mockups above all) mapped to ACs — not just prose:
+
+- `design_artifacts`: list of renderable artifacts, each row:
+  - `path` (string, repo-relative canonical) — the path the developer reads directly. For OD-capable pages this is `.agents/shared/planning/<feature>/design/mockups/<page>.html`; for text fallback, `.asc` / `.mmd` / hand-authored `.html` under the same canonical `mockups/` directory. **The repo copy is the contract of record** — the developer reads from disk, not from OD-UI.
+  - `kind` (string enum) — `html-mockup` (OD-generated self-contained HTML captured at generation time) | `text-mockup` (ASCII / mermaid / hand-authored HTML source) | `render` (OD-UI URL — provenance only; not the deliverable).
+  - `ac_refs` (list of AC IDs) — which acceptance criteria this artifact serves. Reuses the existing AC ID convention (`AC-A1`, `AC-B1`, …).
+  - `od_url` (string, optional) — OD-UI provenance URL/path returned by `od_save_artifact` / `od_save_project_file`. **Reference only**, never the developer deliverable. Absent when `mockup_lane: text`.
+  - `lint` (string enum) — `pass` | `fail-N` | `n/a`. Carries the `od_lint_artifact` verdict for the AC and pages in scope; `n/a` when `mockup_lane: text`.
+- `mockup_lane` (string enum) — aggregate lane marker for the brief:
+  - `opendesign` — OD was capable for at least the in-scope pages; `od_generate_design` was invoked and the returned HTML was written through to the canonical `mockups/` directory; `od_save_artifact` / `od_save_project_file` recorded the OD-UI provenance; `od_lint_artifact` ran as a quality gate before spec freeze.
+  - `text` — OD was unavailable (daemon down, BYOK unconfigured, tool error, or page outside OD's per-call ceiling) and the spec fell back to the existing text-native mockup lane. No OD-UI provenance; lint = `n/a` for every row.
+
+**Graceful degradation is mandatory.** Any OD-side failure (tool error, daemon unreachable, license / BYOK unconfigured, capability-not-registered) routes the spec back to the text-native lane for that page. The lane marker records which lane actually shipped; the spec never blocks on OD availability. Per the v0.16.1 capability ceiling, OD produces **exactly one self-contained HTML document per design call, inline, at generation time**; tokens, component scaffolds, and TS templates remain a v0.17.0 capability and are out of scope.
+
+**Consumer contract.**
+- `developer` (v1, implementer): reads each `design_artifacts[].path` from disk; ports DOM/structure/CSS intent into Angular components; cross-checks each row's `ac_refs` against the spec body's `Validation:` lines; treats `lint: pass` as a quality bar and `lint: fail-N` as a focused review item (does not block implementation).
+- `developer[v2]` (v2, dispatcher): relays `design_artifacts` **verbatim with concrete paths** to the executor — the executor must not depend on prose relay. Collects `mockup_lane` in the edge-contract return so leader and the conformance loop can see which lane actually shipped.
+
 ---
 
 ## 5. Decision 3 — Visual Operating Mode + Image Substrate (RATIFIED: reuse + improve)
