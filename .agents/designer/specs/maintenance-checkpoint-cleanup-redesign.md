@@ -6,7 +6,7 @@ phase: new
 author: designer
 created_at: 2026-10-01
 approved_at: 2026-10-01
-pinned_spec_sha: 429c1e57a4d150f0cf4605c94431edc658a7b9c1
+pinned_spec_sha: 9c25520a4709eab02b522cb1b6ddd08612290c0f
 task_id: ck-redesign-2026q4
 plan_ref: .agents/shared/planning/maintenance-console/phase2-frontend.md
 advisory_fields:
