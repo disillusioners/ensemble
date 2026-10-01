@@ -2078,9 +2078,41 @@ restart_via_launcher() {
     if _supervision_host_allows_unit && command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
         case "${SUPERVISION_STATE:-}" in
             UNIT_MANAGED)
-                if [ -n "${SUPERVISION_UNIT:-}" ]; then
-                    hb_mode="unit"
+                # ── v0.16.9 hand-back pin rung (lane-convergence fix) ──
+                # Pre-convergence the daemon runs under ensemble-live.service
+                # (cgroup-derived SUPERVISION_UNIT); promoting to
+                # ensemble-main.service requires the hand-back to declare/
+                # verify the NEW unit so the promote completes instead of
+                # halting on declared≠verified. Precedence: env var > .env
+                # pin > cgroup leaf, with r3-style validation
+                # (ensemble-*.service conformance + unit-file existence,
+                # commit e56f2e85) — missing or non-conforming falls
+                # through to the cgroup leaf, BYTE-IDENTICAL to current
+                # behavior. HAND-BACK SCOPED ONLY: the stop path keeps
+                # the cgroup-leaf selection (pre-convergence stop aimed at
+                # the pinned unit would pre-flip-abort; a global override
+                # would leak into the stop seam).
+                _hb_pin="${ENSEMBLE_RESTART_UNIT:-}"
+                if [ -z "$_hb_pin" ]; then
+                    _hb_pin="$(_supervision_unit_from_dotenv 2>/dev/null)" || _hb_pin=""
+                fi
+                case "$_hb_pin" in
+                    ensemble-*.service)
+                        if [ -f "$SUPERVISION_UNIT_DIR/$_hb_pin" ]; then
+                            hb_unit="$_hb_pin"
+                        else
+                            _log "hand-back: pin '$_hb_pin' set but unit file absent at $SUPERVISION_UNIT_DIR — falling through to cgroup leaf ${SUPERVISION_UNIT:-<none>}"
+                        fi
+                        ;;
+                    *)
+                        [ -n "$_hb_pin" ] && _log "hand-back: pin '$_hb_pin' not ensemble-*.service — falling through to cgroup leaf ${SUPERVISION_UNIT:-<none>}"
+                        ;;
+                esac
+                if [ -z "$hb_unit" ] && [ -n "${SUPERVISION_UNIT:-}" ]; then
                     hb_unit="$SUPERVISION_UNIT"
+                fi
+                if [ -n "$hb_unit" ]; then
+                    hb_mode="unit"
                 fi
                 ;;
             SCOPE_SURVIVOR)
