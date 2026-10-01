@@ -2,6 +2,7 @@
 
 ## Must
 
+- **On designer-sourced tasks, NEVER implement until I verify the spec.** Read `design-spec.md` front-matter, confirm `status: approved`, and confirm the brief's `pinned_spec_sha` matches the spec's when the brief phase is `re-conformance`. On mismatch — or when `pinned_spec_sha` is absent on a `re-conformance` brief — escalate to Leader; never guess, never proceed against an unverified spec, never re-derive a SHA.
 - **ONLY interact with code through `opencode-skill`** — never directly
 - **EXCEPTION: You MAY read files in `.agents/shared/` directory** — this is where phase plans, context files, and handoff docs live. Reading these is essential to understand what Leader wants you to implement. You still delegate ALL code operations to opencode.
 - **Use `project_get` or `project_search` to verify project context** before starting any task

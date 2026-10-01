@@ -42,12 +42,12 @@ Staging rationale unchanged: conformance/self-provisioning are multi-turn conver
 
 ### 3.2 Craft-class identity (ratified)
 
-Designer is **CRAFT-class, like `coder`**: an expert who works directly AND shards load to skill-carrying workers (`coder` precedent: "implements directly, and opportunistically offloads clean bulk partitions to workers" — `agents/coder/meta.json`). Sub-team lead responsibilities (D5 bootstrap flow) ride on top. **No technical write fence**: write boundary is **C+ BROAD** — project files including docs dir, design dir, project files. "No app-code implementation" is a **soul-level convention enforced by judgment and the conformance-review social contract**, not a `tools.deny` entry — designer may touch any project file, and *chooses* not to implement app code (that is coder's lane), escalating genuine implementation needs instead.
+Designer is **CRAFT-class, like `coder`**: an expert who works directly AND shards load to skill-carrying workers (`coder` precedent: "implements directly, and opportunistically offloads clean bulk partitions to workers" — `agents/coder/meta.json`). Sub-team lead responsibilities (D5 bootstrap flow) ride on top. **No technical write fence**: write boundary is **C+ BROAD** — project files including docs dir, design dir, project files. "No app-code implementation" is a **soul-level convention enforced by judgment and the conformance-review social contract**, not a `tools.deny` entry — designer may touch any project file, and *chooses* not to implement app code (that is developer's lane), escalating genuine implementation needs instead.
 
 ```
 agents/designer/
 ├── meta.json        # mandatory — draft below
-├── soul.md          # ~80 lines: identity + THE judgment rule — "I design and review; implementation belongs to coder.
+├── soul.md          # ~80 lines: identity + THE judgment rule — "I design and review; implementation belongs to developer.
 │                    #   I may read/annotate any project file; I do not land app-code changes." (soul-level, not deny-list)
 ├── rule.md          # ~40 lines: validate spec vs brief acceptance criteria; NEEDS MORE INFO on thin briefs (charter/rule.md:12 precedent);
 │                    #   never claim pixel fidelity for text mockups; sharding discipline (what partitions go to workers)
@@ -118,8 +118,8 @@ agents/designer/
 |---|---|---|
 | Markdown spec + acceptance criteria | Contract of record | Agent-parsed both directions (universal in `planning/`) |
 | Mermaid via `generate_chart` → charter | Flows, states, navigation | Syntax-validated by charter; renders in chat UI |
-| ASCII wireframe (fenced block) | Layout, placement | Cheap; coder implements |
-| HTML/SVG fragment coder renders | Machine-verifiable visual form | Playwright capture → tmp_images substrate (D3) → comparator (D4) |
+| ASCII wireframe (fenced block) | Layout, placement | Cheap; developer implements |
+| HTML/SVG fragment developer renders | Machine-verifiable visual form | Playwright capture → tmp_images substrate (D3) → comparator (D4) |
 
 **Default rule:** markdown spec + ASCII wireframe + optional mermaid; HTML fragment when pixel-intent justifies the capture cost.
 
@@ -131,31 +131,31 @@ agents/designer/
 
 | Filename | Producer → Consumer | Purpose |
 |---|---|---|
-| `design-spec.md` | designer → coder + tester | component-by-component spec + pack-mapped ACs (§4.4) |
-| `mockups/` (text forms) | designer → coder | wireframes, mermaid source, HTML fragments |
+| `design-spec.md` | designer → developer + tester | component-by-component spec + pack-mapped ACs (§4.4) |
+| `mockups/` (text forms) | designer → developer | wireframes, mermaid source, HTML fragments |
 | `design-review.md` | designer (conformance) → leader | findings per component, `conformance_iter` tagged, **must cite `pinned_spec_sha` (D6 hard rule)** |
-| `ux-audit.md` | designer (flow b) → coder | P0/P1/P2 findings + token/page blast radius |
+| `ux-audit.md` | designer (flow b) → developer | P0/P1/P2 findings + token/page blast radius |
 | `decisions.md` | designer + leader → all | incremental amendment log |
 | `install-audit.jsonl` | installer/KMS actors → all | append-only environment-mutation audit (§7.4) |
 
 ### 4.3 The three workflows
 
 **(a) Feature flow — spec → implement → conform**
-- **Entry:** leader Implementation workflow routes "primary artifact is UI/UX" to designer before coder (`agents/leader/workflow.md:242-252`); trivial cosmetic edits skip designer (`:258-262`).
+- **Entry:** leader Implementation workflow routes "primary artifact is UI/UX" to designer before developer (`agents/leader/workflow.md:242-252`); trivial cosmetic edits skip designer (`:258-262`).
 - **Dispatch:** `spawn_instance("designer")` + `send_message(context={files, notes, plan_ref, conventions})`; enqueue lane (`instance.py:2946-2951`) — leader ends turn, report revives.
 - **Conformance review (dual channel):** (1) code reading — designer reads Angular components (read-only judgment per soul rule); (2) visual proof — captures land in the tmp_images substrate; designer inspects via `explain_image(path)` (text-out) or pixels-at-dispatch (`invoke_agent_and_wait(images=…)` → per-turn vision routing, `graph.py:7573-7595`; daemon-global `model_vision`, fail-fast 400 if unset). Day-1 comparator (D4) consumes the same substrate paths.
 - **Loop budget:** 3 conformance iterations (mirrors `leader/workflow.md:316-319`), then escalate to leader with remaining diffs.
 - **States:** `draft → approved(spec-frozen, pinned_spec_sha) → implemented → conformance{passed | fail-looped(n≤3)} → escalated`. **Every conformance verdict references the immutable `pinned_spec_sha` (D6).**
 
-**(b) UX-fix flow — complaint → audit → spec → coder**
+**(b) UX-fix flow — complaint → audit → spec → developer**
 - **Entry:** leader Debug workflow Phase 1.5 classifies UI/UX → designer (`leader/workflow.md:459-466`).
 - **Screenshot channel (two-channel gotcha — verified):** clipboard `tmpimg://` refs convert to **text descriptions** on the chat path (pixels cleared — `daemon/routers/messages.py:269`; `tmp_image_converter.py:128`); direct base64 `images=[data_uri]` reaches vision routing. Leader relays conversion text inline + the ref/path; designer re-digests via `explain_image`. `tmp_images` is public-by-obscurity (`conventions.md:16-19`).
-- **Skip rule:** unambiguous text-only fixes go straight to developer. **Output:** `ux-audit.md` → spec handoff → coder implements.
+- **Skip rule:** unambiguous text-only fixes go straight to developer. **Output:** `ux-audit.md` → spec handoff → developer implements.
 
 **(c) Design-system maintenance flow**
 - **Triggers:** tester visual-drift failure → leader conformance loop; designer-initiated audit at phase boundaries/on request (no daemon cron — noted gap); pre-release sweep before merge to `latest`.
 - **Propagation:** scoped change spec naming changed tokens + importing page files; regression expectations as pack-mapped requirements; styles ride the `styles.scss`/`app.scss` import chain.
-- **States:** `detect → token-spec → pages-impl(coder) → regression(tester) → shipped | rollback`.
+- **States:** `detect → token-spec → pages-impl(developer) → regression(tester) → shipped | rollback`.
 
 ### 4.4 Structured spec skeleton (D6: ONE hard rule)
 
@@ -185,7 +185,7 @@ owners: {spec: designer-*, implement: developer-*, check: tester-*}     # adviso
 ### 4.5 In-flight state exposure & handoff contract (agent-first)
 
 - **Primary: `shared_meta_kv`** — keys `design.<task-id>.{phase, artifact_path, pinned_spec_sha, conformance_iter, heartbeat_at}`; phase transitions + ≤15 min heartbeat. Secondary: `decisions.md`.
-- **Per-edge handoff** (self-contained; inline slice = decision-relevant subset; paths by reference): leader→designer brief (task_id, phase, pinned_spec_sha on re-conformance, escalation_path); designer→coder (task_id, pinned_spec_sha, AC IDs in scope, token_change_set, blast_radius, do_not_touch); coder→designer (commit_sha, diff_stat, pages_changed, conformance_iter, capture paths); designer→tester (pack_list AC→PACKS.md, regression_pages); tester→designer (pack_name, page_url, capture path, failed AC ID).
+- **Per-edge handoff** (self-contained; inline slice = decision-relevant subset; paths by reference): leader→designer brief (task_id, phase, pinned_spec_sha on re-conformance, escalation_path); designer→developer (task_id, **pinned_spec_sha only on re-conformance** — absence on `new` / `amend` is not a mismatch, AC IDs in scope, token_change_set, blast_radius, do_not_touch); developer→designer (commit_sha, diff_stat, pages_changed, conformance_iter, capture paths); designer→tester (pack_list AC→PACKS.md, regression_pages); tester→designer (pack_name, page_url, capture path, failed AC ID).
 
 ---
 

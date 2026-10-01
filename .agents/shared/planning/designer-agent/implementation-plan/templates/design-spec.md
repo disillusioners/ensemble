@@ -37,8 +37,8 @@ the spec's `pinned_spec_sha`.
 <!--
 For each UI component the feature introduces or modifies, include a
 subsection with the structure below. Components map to implementation
-files in the codebase (see `agents/coder/rule.md` for the canonical
-mapping convention).
+files in the codebase; the Traceability table below is the canonical
+mapping home.
 -->
 
 ### <Component>
@@ -134,7 +134,7 @@ templates/design-review.md and templates/lint-spec.md).
 - Transitions (state machine — enforced by the conformance workflow, not
   by lint):
   - `draft` → `approved` (spec frozen, `pinned_spec_sha` set)
-  - `approved` → `implemented` (coder lands the code)
+  - `approved` → `implemented` (developer lands the code)
   - `implemented` → `conforming-passed` OR `conforming-failed-loop<n>` (n ≤ 3)
   - `conforming-failed-loop<n>` → next loop iteration OR escalate to leader
 - Advisory — invalid transition → WARNING, not FAIL.
