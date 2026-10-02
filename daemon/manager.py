@@ -935,6 +935,12 @@ class InstanceManager:
         # Must be created before SourceRegistry
         self._source_repository = create_source_repository(engine=self._engine, create_tables=False)
 
+        # Scheduled-tasks (phase 2+4): the shared scheduling service module.
+        # Mounted LAZILY via the ``scheduling_service`` property — first
+        # access wires the source repo + registry deps. No daemon-restart
+        # semantics: phase-3 REST and the agent tools reach the same module.
+        self._scheduling_service = None
+
         # NEW: MCP Server repository for MCP server configuration storage
         self._mcp_server_repository = create_mcp_server_repository(engine=self._engine, create_tables=False)
 
@@ -12009,6 +12015,28 @@ class InstanceManager:
     def get_source_registry(self) -> SourceRegistry:
         """Get the source registry for adapter management."""
         return self.source_registry
+
+    @property
+    def scheduling_service(self):
+        """The shared scheduling service module (scheduled-tasks phase 2+4).
+
+        Lazy mount: first access wires the module's source repo +
+        registry deps from this manager and caches the module on
+        ``self._scheduling_service``. Agent tools (via
+        ``create_scheduling_tools_if_available``) and phase-3 REST
+        handlers (``manager.scheduling_service.create_schedule(...)``)
+        share this one seam. Idempotent — repeat access returns the
+        same configured module.
+        """
+        if self._scheduling_service is None:
+            from daemon.services import scheduling_service as _scheduling_service_module
+
+            _scheduling_service_module.configure(
+                source_repo=getattr(self, "_source_repository", None),
+                source_registry=getattr(self, "source_registry", None),
+            )
+            self._scheduling_service = _scheduling_service_module
+        return self._scheduling_service
 
     def find_near_instance(self, instance_id: str, max_distance: int = DEFAULT_FUZZY_MATCH_DISTANCE) -> list[str]:
         """Find all near-matching instance IDs from recent instances.

@@ -705,6 +705,13 @@ daemon/
 | POST | `/sources/{source_id}/start` | Start a stopped source | ✅ |
 | POST | `/sources/{source_id}/stop` | Stop a running source | ✅ |
 
+Scheduler adapters (`source_type="scheduler"`) also expose a higher-level
+scheduling surface — the agent tools `task_schedule` / `task_schedule_list` /
+`task_schedule_cancel` / `task_schedule_update` plus the `/api/schedules`
+create/fetch/cancel endpoints — backed by the same adapter and backed by the
+shared scheduling service (cancel is terminal, history preserved). See the
+[Scheduling Reference](scheduling.md) for the operator-facing reference.
+
 ### Session Mappings ✅ IMPLEMENTED
 
 | Method | Endpoint | Description | Status |

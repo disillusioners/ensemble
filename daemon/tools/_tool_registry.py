@@ -116,6 +116,15 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "service_status",
     "service_list",
     "service_logs",
+    # scheduling tools (scheduled-tasks phase 2+4) — created by
+    # create_scheduling_tools() factory (daemon/tools/scheduling.py).
+    # Non-privileged category — granted per-agent via tools.allow
+    # (agents/ari, agents/leader, agents/jober). Without these entries,
+    # startup validation of tools.allow would reject the category.
+    "task_schedule",
+    "task_schedule_list",
+    "task_schedule_cancel",
+    "task_schedule_update",
 })
 
 
@@ -529,6 +538,12 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "self": ["daemon.tools.inner_soul", "daemon.tools.access_memory"],
     "project": "daemon.tools.project",
     "job": "daemon.tools.job_queue",
+    # Scheduling (scheduled-tasks phase 2+4) — wall-clock schedule
+    # management over source_configs rows of source_type="scheduler".
+    # Non-privileged by design (grants via per-agent tools.allow;
+    # PRIVILEGED_TOOL_CATEGORIES untouched). Placed near "job" —
+    # scheduling is job-adjacent (the adapter fires JobItems).
+    "scheduling": "daemon.tools.scheduling",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -819,6 +834,13 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "system_health",
     "system_restart",
     "system_upgrade",
+    # scheduling tools (scheduled-tasks phase 2+4) — factory-created
+    # (create_scheduling_tools, daemon/tools/scheduling.py); regenerated
+    # via the discover_source_only_tool_names command above.
+    "task_schedule",
+    "task_schedule_cancel",
+    "task_schedule_list",
+    "task_schedule_update",
     "terminate_instance",
     "time",
     "todo_clear",
