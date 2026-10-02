@@ -1136,6 +1136,22 @@ def create_kms_tools(
                 if updated is None:
                     return f"ERROR: SERVER_NOT_FOUND: server_id={server_id!r} vanished mid-update; retry."
 
+                # ── Warmup-pool config refresh (mcp warmup-pool config
+                # starvation fix, 2026-10-02) — see mcp_set_env for the
+                # full rationale. Read the row fresh so the overlay
+                # carries the just-written marker plus every other
+                # pre-existing env key. kms_attach writes a marker (NOT
+                # plaintext) — the resolver at spawn time still expands
+                # it to the plaintext value the subprocess needs.
+                # ``getattr(row, "name", "")`` keeps test stubs (which
+                # sometimes omit ``.name``) from blowing up; production
+                # rows always have it (McpServer.name is a non-null str).
+                fresh_row = repo.get_mcp_server(server_id) if hasattr(repo, "get_mcp_server") else None
+                fresh_env = ((fresh_row.config or {}).get("env") if fresh_row is not None else None) or {}
+                server_name_for_pool = getattr(fresh_row, "name", "") if fresh_row is not None else ""
+                if server_name_for_pool:
+                    _refresh_pool_env(manager, server_name_for_pool, fresh_env)
+
                 # Result echoes marker + var NAME only — never a value.
                 return json.dumps(
                     {
@@ -1191,6 +1207,19 @@ def create_kms_tools(
             )
             if updated is None:
                 return f"ERROR: SERVER_NOT_FOUND: server_id={server_id!r}"
+
+            # ── Warmup-pool config refresh (mcp warmup-pool config
+            # starvation fix, 2026-10-02) — LANE-1 mirrors LANE-2
+            # above. Read fresh so the overlay carries the just-written
+            # handle marker alongside every other pre-existing env key.
+            # ``getattr(row, "name", "")`` keeps test stubs (which
+            # sometimes omit ``.name``) from blowing up; production
+            # rows always have it (McpServer.name is a non-null str).
+            fresh_row = repo.get_mcp_server(server_id) if hasattr(repo, "get_mcp_server") else None
+            fresh_env = ((fresh_row.config or {}).get("env") if fresh_row is not None else None) or {}
+            server_name_for_pool = getattr(fresh_row, "name", "") if fresh_row is not None else ""
+            if server_name_for_pool:
+                _refresh_pool_env(manager, server_name_for_pool, fresh_env)
 
             return json.dumps(
                 {
@@ -1399,6 +1428,79 @@ def _invalidate_mcp_schema_cache(manager: Any, server_name: str) -> None:
         mcp_service.invalidate_schema_cache(server_name)
 
 
+def _refresh_pool_env(manager: Any, server_name: str, new_env: dict[str, str]) -> None:
+    """Refresh the warmup-pool's stored env for ``server_name``.
+
+    Paired half of the MCP warmup-pool config starvation fix
+    (2026-10-02, defect pinned against
+    ``InstanceManager._init_warmup_pool`` at ``daemon/manager.py``).
+    The pre-fix code path invalidated ONLY the schema cache after an
+    env write; the pool's ``_configs[server_name]`` snapshot was
+    never refreshed, so every ``acquire()`` + ``_replenish`` cycle
+    spawned a fresh subprocess from the BUILTIN defaults rather than
+    the live row env. Live symptom: ``od_generate_design`` returned
+    "BYOK not configured" while the row held all 4 BYOK values.
+
+    This helper walks ``manager._mcp_service._warmup_pool`` (the same
+    singleton the manager wired at boot) and calls
+    :meth:`McpWarmupPool.update_server_env` to overlay ``new_env`` on
+    the stored config. Behavior on the various edge cases matches
+    ``_invalidate_mcp_schema_cache``:
+
+      * No ``_mcp_service`` on the manager (legacy test fixtures that
+        mock the manager bare) → no-op, no raise.
+      * No warmup pool attached (manager init never reached
+        ``_init_warmup_pool``) → no-op.
+      * Server not in the pool (e.g. a non-builtin user-created
+        server whose ``register_server`` was never called) → the pool
+        method returns ``False``; we don't surface that as an error
+        because non-pooled servers fall through to the cold-start
+        path in ``McpService._McpSessionProviderImpl`` which reads
+        the live row anyway (the row IS the source of truth there).
+      * The pool method is the one that does the safe ``McpStdioConfig``
+        replacement — see its docstring for the "no healthy
+        connections killed" guarantee.
+
+    Args:
+        manager: The :class:`InstanceManager` instance (typed ``Any``
+            to match the tool-factory call style + legacy mocks).
+        server_name: The MCP server name (NOT the row id — the pool
+            keys by definition name, which is the same key the row's
+            ``name`` column carries).
+        new_env: The full env dict to overlay on the pool's stored
+            config. The pool's helper merges over any prior env so
+            partial writes (single key) do not erase sibling keys.
+    """
+    mcp_service = getattr(manager, "_mcp_service", None)
+    if mcp_service is None:
+        return
+    pool = getattr(mcp_service, "_warmup_pool", None)
+    if pool is None:
+        return
+    # Lazy import — the warmup_pool module is loaded eagerly via the
+    # manager's import block, but a defensive import keeps this helper
+    # safe to call from any tool-factory context (including unit
+    # tests that mock the manager without the full module graph).
+    update = getattr(pool, "update_server_env", None)
+    if not callable(update):
+        return
+    try:
+        update(server_name, new_env)
+    except Exception:
+        # Pool refresh failure must NOT cascade into a tool result.
+        # The DB row is the source of truth — cold-start paths and
+        # the next ``_create_pooled_connection`` will still see the
+        # right env IF the operator restarts the daemon (the boot
+        # overlay in ``_init_warmup_pool`` runs then). Logged at
+        # WARNING so the operator can see why the pool didn't
+        # refresh.
+        logger.warning(
+            "[pool-refresh] update_server_env failed for %s; "
+            "pool will see fresh env only on next daemon restart",
+            server_name,
+        )
+
+
 def create_mcp_env_tools(
     manager: "InstanceManager",
     current_instance_id: str,
@@ -1537,6 +1639,22 @@ def create_mcp_env_tools(
 
             # ── Schema cache invalidation (routers analog) ──────────
             _invalidate_mcp_schema_cache(manager, server_name)
+
+            # ── Warmup-pool config refresh (mcp warmup-pool config
+            # starvation fix, 2026-10-02) — the pool's ``_configs``
+            # snapshot must reflect the new env so the next
+            # ``acquire()`` + ``_replenish`` cycle spawns a stdio
+            # subprocess with the new values. Without this, a pooled
+            # opendesign connection keeps the env it was spawned
+            # with (definition defaults + pre-write row state) and
+            # every new connection also does — the BYOK keys never
+            # reach the subprocess. Read the row FRESH here (NOT from
+            # the stale ``updated`` object whose ``config`` is a
+            # Python dict we already mutated) so the overlay uses the
+            # exact stored env.
+            fresh_row = repo.get_mcp_server(server_id) if hasattr(repo, "get_mcp_server") else None
+            fresh_env = ((fresh_row.config or {}).get("env") if fresh_row is not None else None) or {}
+            _refresh_pool_env(manager, server_name, fresh_env)
 
             # Audit: key NAMES + shape only — NEVER values.
             # M2 (reviewer fold-in): the preserved-marker count covers
