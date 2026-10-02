@@ -551,8 +551,9 @@ timezone and UTC.
 ### task_schedule
 
 **Purpose:** Create a new scheduled task. The trigger time is always interpreted
-in the supplied `timezone`; if I omit it, the configured default chain runs
-(explicit → configured default → host-local auto-detect → UTC with a loud
+in the supplied `timezone`; if I omit it, the resolution chain runs
+(explicit param → the user's configured timezone preference, when set →
+the configured default → host-local auto-detect → UTC with a loud
 warning). The warning is never suppressed — I read `tz_warning` in the response
 and surface it.
 
@@ -607,5 +608,5 @@ is **terminal** (different tool — see `task_schedule_cancel`). A pause followe
 a daemon restart stays paused; resume picks it back up.
 
 **Operational boundaries:** every schedule runs in the timezone I set (or the
-default chain when I omit it); cancel is permanent, pause is resumable; labels
+resolution chain when I omit it); cancel is permanent, pause is resumable; labels
 are unique — a duplicate label is rejected at create time.

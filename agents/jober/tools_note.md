@@ -617,9 +617,10 @@ the next run in BOTH the schedule's local timezone and UTC.
 ### task_schedule — wall-clock trigger
 
 **Purpose:** Schedule a one-shot or recurring task. The trigger time is
-interpreted in the supplied `timezone` (or the configured default chain:
-explicit → configured default → host-local auto-detect → UTC with a loud
-warning). The invoked agent defaults to me; pass the optional agent argument
+interpreted in the supplied `timezone` (or the resolution chain when I omit
+it: explicit param → the user's configured timezone preference, when set →
+the configured default → host-local auto-detect → UTC with a loud warning).
+The invoked agent defaults to me; pass the optional agent argument
 to schedule for a peer.
 
 Signature:

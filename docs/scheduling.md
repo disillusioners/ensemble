@@ -119,18 +119,47 @@ the rebuild gap.
 ## Timezone Rule (BOTH local + UTC, always)
 
 A user-stated time (`when`) is interpreted in the supplied `timezone`. The
-resolution chain, applied at every surface:
+resolution chain, applied at every surface (agent tools and REST alike —
+both call the same shared scheduling service):
 
-1. Caller-supplied `timezone` (IANA name) — wins outright.
-2. Daemon-wide default: `ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE` (unset = skip).
-3. Host-local timezone auto-detection (`/etc/localtime` symlink, then `TZ`).
-4. Terminal fallback: UTC — **with a loud warning**.
+1. **Explicit tool param** — the `task_schedule*` `timezone` argument
+   (`daemon/services/scheduling_service.py` `_resolve_schedule_timezone`) —
+   always wins.
+2. **User timezone setting** — the `user_timezone` preference row
+   (GLOBAL singleton; read in `daemon/services/scheduling_service.py`
+   `_resolve_schedule_timezone`). Set + valid **beats the env default with
+   NO warning**; unset/invalid falls through **silently**. See
+   [User Timezone Setting](#user-timezone-setting).
+3. **Daemon-wide default**: `ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE`
+   (`SchedulingConfig.default_timezone`; resolver `daemon/util/tz.py`
+   `resolve_timezone`; unset = skip).
+4. **Host-local timezone auto-detection** (`/etc/localtime` symlink, then `TZ`).
+5. **Terminal fallback**: stdlib UTC (`datetime.timezone.utc` — never
+   `ZoneInfo('UTC')`) — **with a loud warning**.
 
-The fallback warning is **never suppressed**. It is echoed in `tz_warning`
-on create/update responses (set
+The terminal-fallback warning is **never suppressed**. It is echoed in
+`tz_warning` on create/update responses (set
 `ENSEMBLE_SCHEDULING_TZ_WARNING_ECHO_TO_TOOL_OUTPUT=0` to keep it out of
-tool output; the log still carries it). Every response surfaces **both**
-`next_run_at_local` (in the resolved timezone) and `next_run_at_utc`.
+tool output; the log still carries it). Rung 2 never emits a warning — a
+valid user preference is a clean resolution. Every response surfaces
+**both** `next_run_at_local` (in the resolved timezone) and
+`next_run_at_utc`; when the user timezone is set, LOCAL defaults to it.
+
+### User Timezone Setting
+
+A GLOBAL operator preference stored as the raw IANA name under metadata key
+`user_timezone` (one row keyed on the system default project — same storage
+mechanism as the user language preference). It is the ensemble-wide "user's
+timezone" because there is no user/auth identity layer. When set, every
+surface that resolves a schedule timezone picks it up at rung 2, and the
+per-agent system prompt's "Current Time" section gains two lines
+(`User timezone:` / `User local time:`) so agents reason in the user's local
+wall clock. Unset, behavior is identical to the pre-feature chain.
+
+Manage it over REST (see [API Reference](api-reference.md) § Settings):
+`GET /api/settings/timezone` reads it (with a `utc_offset` convenience echo),
+`PUT /api/settings/timezone` writes it — `null`/empty clears, invalid IANA
+names are rejected.
 
 Detection caching: positive results cache for
 `ENSEMBLE_SCHEDULING_HOST_LOCAL_TZ_CACHE_SECONDS` (default 300s); negative
@@ -181,7 +210,7 @@ happened.
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE` | unset | Daemon-wide default IANA timezone for user-stated local times |
+| `ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE` | unset | Daemon-wide default IANA timezone for user-stated local times (rung 3 — loses to an explicit param and to the user timezone setting) |
 | `ENSEMBLE_SCHEDULING_ONE_SHOT_MAX_LATENESS_SECONDS` | unset (unlimited) | Skip one-shots past-due beyond this many seconds |
 | `ENSEMBLE_SCHEDULING_TZ_WARNING_ECHO_TO_TOOL_OUTPUT` | `true` | Include the UTC-fallback warning in tool/list/REST output |
 | `ENSEMBLE_SCHEDULING_HOST_LOCAL_TZ_CACHE_SECONDS` | `300` | Host-local tz detection cache |
