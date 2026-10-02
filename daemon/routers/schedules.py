@@ -330,7 +330,27 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
                 message=f"Source {schedule_id} is not a scheduler (type: {existing.source_type})"
             ).model_dump()
         )
-    
+
+    # Round-5 fix: cancel is TERMINAL (ADR-005/007). PUT /schedules/{id}
+    # must not mutate a cancelled row — cancel_schedule evicts the adapter
+    # (seam-2 invariant), but the DB row + name + config still linger.
+    # Without it the route silently re-writes the persisted config (so the
+    # row becomes re-cancellable / re-boot-startable), violating the
+    # "never fires again, not after a daemon restart" tools_note contract.
+    # Mirrors the landed POST /start 409 (commit 2e7c5288, schedules.py:516)
+    # — same error code, same HTTP status — and the DELETE cancel-already-
+    # cancelled mapping at :284. Gate sits AFTER the get-or-404 (unknown
+    # ids still 404 SOURCE_NOT_FOUND) and source_type check (non-scheduler
+    # rows still 400 INVALID_REQUEST).
+    if existing.status == SourceStatus.cancelled.value:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SCHEDULE_ALREADY_CANCELLED",
+                "message": f"Schedule {schedule_id} is cancelled and cannot be updated (cancel is terminal)",
+            },
+        )
+
     # Merge updates
     updated_name = schedule_update.name if schedule_update.name is not None else existing.name
     updated_config = schedule_update.config if schedule_update.config is not None else existing.config
@@ -427,6 +447,26 @@ async def trigger_schedule(schedule_id: str, request: Request):
                 code=ErrorCodes.INVALID_REQUEST,
                 message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
             ).model_dump()
+        )
+
+    # Round-5 fix: cancel is TERMINAL (ADR-005/007). POST /trigger must
+    # not fire on a cancelled row — cancel_schedule evicts the adapter
+    # (seam-2 invariant), so the registry.get() below would return None
+    # and the route would 503 (adapter-not-running) instead of the
+    # semantically correct 409. Make the gate explicit so callers
+    # (retry middleware, web-UI "run now" button hidden-state-survival
+    # check) treat trigger-of-cancelled identically to start-of-cancelled
+    # and cancel-of-cancelled. Mirrors the landed POST /start 409 (commit
+    # 2e7c5288, schedules.py:516) — same error code, same HTTP status.
+    # Gate sits AFTER get-or-404 (unknown ids still 404) and AFTER
+    # source_type check (non-scheduler rows still 400).
+    if source.status == SourceStatus.cancelled.value:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SCHEDULE_ALREADY_CANCELLED",
+                "message": f"Schedule {schedule_id} is cancelled and cannot be triggered (cancel is terminal)",
+            },
         )
 
     # Check if registry has the source
@@ -613,7 +653,26 @@ async def stop_schedule(schedule_id: str, request: Request):
                 message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
             ).model_dump()
         )
-    
+
+    # Round-5 fix: cancel is TERMINAL (ADR-005/007). POST /stop must
+    # not re-run on a cancelled row — cancel_schedule evicts the adapter
+    # (seam-2 invariant), so stop_adapter would be a registry-level
+    # no-op (or "unknown source" error) on a terminal row. Make the gate
+    # explicit so callers (retry middleware, web-UI pause/stop button)
+    # treat stop-of-cancelled identically to start-of-cancelled. Mirrors
+    # the landed POST /start 409 (commit 2e7c5288, schedules.py:516) —
+    # same error code, same HTTP status. Gate sits AFTER get-or-404
+    # (unknown ids still 404) and AFTER source_type check (non-scheduler
+    # rows still 400).
+    if source.status == SourceStatus.cancelled.value:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SCHEDULE_ALREADY_CANCELLED",
+                "message": f"Schedule {schedule_id} is cancelled and cannot be stopped (cancel is terminal)",
+            },
+        )
+
     # Stop the scheduler adapter
     try:
         await manager.source_registry.stop_adapter(schedule_id)

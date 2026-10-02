@@ -474,3 +474,78 @@ async def test_one_shot_beyond_cap_no_dispatch_with_reason(tmp_path, monkeypatch
             # Stop the retry loop (it re-records skips every ERROR_RETRY_S).
             await manager.source_registry.stop_adapter(created.source_id)
             await manager.source_registry.stop_all()
+
+
+async def test_d9_scheduling_tool_factory_wires_four_tools(tmp_path):
+    """D9: the per-instance tool factory wires the EXACTLY four scheduling
+    tools (``task_schedule`` / ``task_schedule_list`` /
+    ``task_schedule_cancel`` / ``task_schedule_update``) onto the
+    ``tools.extend`` call site at ``daemon/tools/instance.py``:5139-5142.
+
+    Purpose: catch a future refactor dropping the ``tools.extend`` line
+    (the third step of the three-step registration seam — decorator +
+    CATEGORY_MODULES entry + construction). Without the extend, the tools
+    are decorated and registered in the category but never appended to
+    the per-instance ``tools`` list, so agents silently lose the four
+    scheduling tools without any error from the factory itself.
+
+    Catches: deleting ``tools.extend(scheduling_tool_list)``, moving the
+    factory call outside the tool-list build, or renaming the four
+    tool functions in ``daemon/tools/scheduling.py`` without updating the
+    factory's return list.
+    """
+    engine = build_chat_source_engine(str(tmp_path / "e2e-d9-factory.db"))
+    with wire_manager_only(engine) as manager:
+        # Touch ``scheduling_service`` first so the lazy property mounts
+        # the module on the manager (the factory reads via the same
+        # property; the property's idempotence means this call does
+        # not double-configure).
+        svc = manager.scheduling_service
+        assert svc is not None
+
+        from daemon.tools.instance import create_scheduling_tools_if_available
+        from daemon.tools.scheduling import create_scheduling_tools
+
+        # Verify the if_available seam returns the same 4 tools the
+        # direct factory returns (it just threads ``manager`` through
+        # the lazy-property + decorator-seam).
+        tools_if_avail = create_scheduling_tools_if_available(
+            manager,
+            current_instance_id="integration-test-instance",
+            agent_id="ari",
+        )
+        tools_direct = create_scheduling_tools(
+            svc,
+            current_instance_id="integration-test-instance",
+            agent_id="ari",
+        )
+
+        # Same-length contract — if the factory's return list changes
+        # (e.g. someone drops ``task_schedule_update`` because the new
+        # task_schedule_let graph covers it), this guard fires BEFORE
+        # the names assertion.
+        assert len(tools_if_avail) == 4, (
+            f"expected exactly 4 scheduling tools from "
+            f"create_scheduling_tools_if_available, got {len(tools_if_avail)}"
+        )
+        assert len(tools_direct) == 4, (
+            f"expected exactly 4 scheduling tools from "
+            f"create_scheduling_tools, got {len(tools_direct)}"
+        )
+
+        # The names assertion is the load-bearing one — the factory's
+        # return list at scheduling.py:396-401 binds these four names
+        # by reference. A future refactor renaming any of them (or
+        # swapping one for a wrapper) trips this guard.
+        expected_names = {
+            "task_schedule",
+            "task_schedule_list",
+            "task_schedule_cancel",
+            "task_schedule_update",
+        }
+        actual_names = {getattr(t, "name", None) for t in tools_if_avail}
+        assert actual_names == expected_names, (
+            f"scheduling-tool names drifted from the contract: "
+            f"expected={expected_names}, got={actual_names}"
+        )
+        assert {getattr(t, "name", None) for t in tools_direct} == expected_names

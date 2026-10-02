@@ -378,23 +378,74 @@ class TestTriggerSchedule:
             "Test Schedule",
             {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
-        
+
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
-        
+
         # Create mock adapter that raises error
         mock_adapter = Mock()
         mock_adapter.manual_trigger = AsyncMock(side_effect=RuntimeError("Adapter error"))
-        
+
         mock_registry = Mock()
         mock_registry.get = Mock(return_value=mock_adapter)
         mock_manager.source_registry = mock_registry
-        
+
         response = await client.post("/schedules/scheduler-1/trigger")
-        
+
         assert response.status_code == 500
         data = response.json()
         assert data["detail"]["code"] == "INTERNAL_ERROR"
         assert "Failed to trigger schedule" in data["detail"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_trigger_schedule_409_when_cancelled_does_not_resurrect(self, client, mock_manager):
+        """Cancel is TERMINAL (ADR-005/007) — POST /trigger on a cancelled
+        row must 409 with SCHEDULE_ALREADY_CANCELLED, leave the DB row at
+        status='cancelled', and never call registry.get() (adapter
+        eviction invariant: cancelled rows have no live adapter). Mirrors
+        the landed POST /start 409 (commit 2e7c5288) and the cancelled-
+        mapping at :284 — same error code, same HTTP status — so callers
+        treat trigger-of-cancelled identically to start-of-cancelled and
+        double-cancel. Without the round-5 gate the registry.get() would
+        return None and the route would fall through to a 503
+        INTERNAL_ERROR ("adapter not running"), a misleading signal —
+        the row is NOT "adapter-not-running", it is TERMINAL.
+        """
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
+        )
+        scheduler_source.status = SourceStatus.cancelled.value
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+
+        # Registry is mocked for the explicit NOT-called assertion. The
+        # round-5 gate must fire BEFORE registry.get() / adapter.manual_trigger
+        # so the trigger branch is unreachable from a cancelled row.
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_registry._create_adapter_from_config = AsyncMock(return_value=Mock())
+        mock_registry.register = Mock()
+        mock_manager.source_registry = mock_registry
+
+        response = await client.post("/schedules/scheduler-1/trigger")
+
+        assert response.status_code == 409
+        data = response.json()
+        assert data["detail"]["code"] == "SCHEDULE_ALREADY_CANCELLED"
+        assert "cancelled" in data["detail"]["message"].lower()
+        assert "terminal" in data["detail"]["message"].lower()
+
+        # Row status MUST remain cancelled — gate sits BEFORE the trigger
+        # branch so no code path runs that could mutate the DB.
+        scheduler_source.status = SourceStatus.cancelled.value  # unchanged
+        mock_manager._source_repository.get_source_config.assert_called_once_with("scheduler-1")
+
+        # The trigger path MUST be inert: registry.get() (the seam that
+        # would 503 with "adapter not running") and any rebuild/register
+        # MUST NOT fire.
+        mock_registry.get.assert_not_called()
+        mock_registry._create_adapter_from_config.assert_not_called()
+        mock_registry.register.assert_not_called()
 
 
 # ==================== GET /schedules/{id}/executions Tests ====================
@@ -855,6 +906,58 @@ class TestUpdateSchedule:
         assert data["last_run_at"] is not None
         assert "2024-01-15" in data["last_run_at"]
 
+    @pytest.mark.asyncio
+    async def test_update_schedule_409_when_cancelled_does_not_mutate(self, client, mock_manager):
+        """Cancel is TERMINAL (ADR-005/007) — PUT /schedules/{id} on a
+        cancelled row must 409 with SCHEDULE_ALREADY_CANCELLED, leave the
+        DB row at status='cancelled', and never call update_source_config
+        or write any config merge. Mirrors the landed POST /start 409
+        (commit 2e7c5288) and the cancelled-mapping at :284 — same error
+        code, same HTTP status — so callers treat update-of-cancelled
+        identically to start-of-cancelled and double-cancel. Without the
+        round-5 gate the PUT route silently re-wrote the persisted config,
+        making the row re-cancellable / re-boot-startable and violating the
+        "never fires again, not after a daemon restart" tools_note contract.
+        """
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
+        )
+        scheduler_source.status = SourceStatus.cancelled.value
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        # update_source_config MUST NOT be called on a cancelled row —
+        # the gate sits BEFORE the merge path, so no code path runs that
+        # could mutate the persisted row.
+        mock_manager._source_repository.update_source_config = Mock(
+            return_value=scheduler_source
+        )
+
+        # Registry is mocked but unused on this gate path — assert it for
+        # parity with the start-409 test (start-supplements-branch).
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_manager.source_registry = mock_registry
+
+        response = await client.put(
+            "/schedules/scheduler-1",
+            json={"name": "Updated Name"},
+        )
+
+        assert response.status_code == 409
+        data = response.json()
+        assert data["detail"]["code"] == "SCHEDULE_ALREADY_CANCELLED"
+        assert "cancelled" in data["detail"]["message"].lower()
+        assert "terminal" in data["detail"]["message"].lower()
+
+        # Row status MUST remain cancelled — gate sits BEFORE merge so no
+        # code path runs that could mutate the DB.
+        scheduler_source.status = SourceStatus.cancelled.value  # unchanged
+        mock_manager._source_repository.get_source_config.assert_called_once_with("scheduler-1")
+        # The DB-write-then-display path is the exact failure mode this gate
+        # closes: update_source_config MUST NOT fire.
+        mock_manager._source_repository.update_source_config.assert_not_called()
+
 
 # ==================== POST /schedules/{id}/start Tests ====================
 
@@ -1112,19 +1215,71 @@ class TestStopSchedule:
         )
         scheduler_source.status = "stopped"
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
-        
+
         # Mock registry - stop_adapter succeeds even if already stopped
         mock_registry = Mock()
         mock_registry.stop_adapter = AsyncMock(return_value=True)
         mock_manager.source_registry = mock_registry
-        
+
         response = await client.post("/schedules/scheduler-1/stop")
-        
+
         assert response.status_code == 200
         data = response.json()
         assert data["source_id"] == "scheduler-1"
         assert data["status"] == "stopped"
         assert "stopped successfully" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_stop_schedule_409_when_cancelled_does_not_resurrect(self, client, mock_manager):
+        """Cancel is TERMINAL (ADR-005/007) — POST /stop on a cancelled row
+        must 409 with SCHEDULE_ALREADY_CANCELLED, leave the DB row at
+        status='cancelled', and never call registry.stop_adapter. Mirrors
+        the landed POST /start 409 (commit 2e7c5288) and the cancelled-
+        mapping at :284 — same error code, same HTTP status — so callers
+        treat stop-of-cancelled identically to start-of-cancelled and
+        double-cancel. Without the round-5 gate the route would call
+        stop_adapter on a registry that (per seam-2 invariant) has no
+        adapter for this id; the registry would log a "source not found"
+        warning and the route would fall through to its success branch,
+        returning 200 — a silent mutation of caller-visible state with no
+        DB change. The 409 makes the terminal contract load-bearing.
+        """
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
+        )
+        scheduler_source.status = SourceStatus.cancelled.value
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+
+        # Registry is mocked for the explicit NOT-called assertion. The
+        # round-5 gate must fire BEFORE stop_adapter so the stop branch is
+        # unreachable from a cancelled row.
+        mock_registry = Mock()
+        mock_registry.stop_adapter = AsyncMock(return_value=True)
+        mock_registry.get = Mock(return_value=None)
+        mock_registry._create_adapter_from_config = AsyncMock(return_value=Mock())
+        mock_registry.register = Mock()
+        mock_manager.source_registry = mock_registry
+
+        response = await client.post("/schedules/scheduler-1/stop")
+
+        assert response.status_code == 409
+        data = response.json()
+        assert data["detail"]["code"] == "SCHEDULE_ALREADY_CANCELLED"
+        assert "cancelled" in data["detail"]["message"].lower()
+        assert "terminal" in data["detail"]["message"].lower()
+
+        # Row status MUST remain cancelled — gate sits BEFORE the stop branch
+        # so no code path runs that could mutate the DB.
+        scheduler_source.status = SourceStatus.cancelled.value  # unchanged
+        mock_manager._source_repository.get_source_config.assert_called_once_with("scheduler-1")
+
+        # The stop path MUST be inert: stop_adapter MUST NOT fire.
+        mock_registry.stop_adapter.assert_not_called()
+        mock_registry.get.assert_not_called()
+        mock_registry._create_adapter_from_config.assert_not_called()
+        mock_registry.register.assert_not_called()
 
 
 # ==================== Phase-5: POST /schedules (create) ====================
