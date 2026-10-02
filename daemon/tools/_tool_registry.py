@@ -593,6 +593,19 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # the MODULE, so all three factory tools are picked up here
     # regardless of their per-tool category attribute.
     "snapshot": "daemon.tools.snapshot_tools",
+    # ens-env category (Stage 1 of the OpenDesign self-provisioning
+    # chain, feature/od-self-provisioning, 2026-10-02) — single-tool
+    # category exposing ``ens_env_read`` so the install-opendesign
+    # worker skill can self-read the ensemble's live LLM connection
+    # values for the BYOK reuse contract. NOT in
+    # ``PRIVILEGED_TOOL_CATEGORIES`` — every agent that opts in via
+    # ``tools.allow: ["ens-env"]`` gets it (mirrors the ``service``
+    # non-privilege precedent; the security model is "explicit opt-in
+    # only, no default grant"). See ``daemon/tools/ens_env_tools.py``
+    # module docstring for the full contract (source-of-truth = env,
+    # no redaction in result, audit-only log, PB-F1 checkpoint
+    # exposure scope).
+    "ens-env": "daemon.tools.ens_env_tools",
 }
 
 
@@ -664,6 +677,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "ens_db_pool_status",
     "ens_db_postgres_select",
     "ens_db_repair_execute",
+    "ens_env_read",
     "ens_system_log_list",
     "ens_system_log_read",
     "ens_system_log_search",

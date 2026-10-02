@@ -256,6 +256,7 @@ from .system_log_tools import create_system_log_tools
 from .upgrade_tools import create_upgrade_tools
 from .attestation import create_attestation_tools
 from .ens_db_tools import create_ens_db_tools
+from .ens_env_tools import create_ens_env_tools
 from .service_tools import create_service_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
@@ -5369,6 +5370,24 @@ Returns:
         manager, current_instance_id, agent_id, version_tag=version_tag
     )
     tools.extend(service_tool_list)
+
+    # ── ens-env tools (Stage 1 of the OpenDesign self-provisioning
+    # chain, feature/od-self-provisioning, 2026-10-02) — single-tool
+    # category exposing ``ens_env_read`` so the install-opendesign
+    # worker skill can self-read the ensemble's live LLM connection
+    # values for the BYOK reuse chain. The factory tolerates a None-stub
+    # manager for the loader warm-list — the tool reads ``os.environ``
+    # directly at call time and never dereferences the manager. Like
+    # ``service``, the category is NOT in PRIVILEGED_TOOL_CATEGORIES:
+    # agents that need it opt in via ``tools.allow: ["ens-env"]`` (the
+    # worker meta.json carries this entry; future install skills may
+    # add it to other agents as needed). Decorator-only registration
+    # is SILENTLY INVISIBLE — this list-extend is the third step of
+    # the three-step registration seam (decorator + CATEGORY_MODULES
+    # entry + KNOWN_TOOL_NAMES + this construction call — all
+    # required).
+    ens_env_tool_list = create_ens_env_tools(manager, current_instance_id)
+    tools.extend(ens_env_tool_list)
 
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation
