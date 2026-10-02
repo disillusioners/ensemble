@@ -41,8 +41,9 @@ not-yet-installed `opendesign` capability in front-matter would
 deadlock the loader (the capability only becomes true BY this skill).
 `infra` covers `mcp_set_env`, `kms_request`, `kms_attach`, and
 `kms_lookup_handle`. The skill ALSO needs the `ens-env` category
-(`ens_env_read`) — the agent's `tools.allow` MUST include
-`ens-env`; the canonical `agents/worker/meta.json` already lists
+(`ens_env_read`) — `ens-env` is required DIRECTLY (listed in
+`agents/worker/skill-set.yaml` requires.tools alongside `bash` and
+`infra`); the canonical `agents/worker/meta.json` already lists
 both `infra` and `ens-env`, so a worker spawn on a load no-override
 inherits both. The pre-flight below is the bootstrap loop: it runs
 before install and again as the body-final self-check.
@@ -193,26 +194,26 @@ v1.3.0 ships TWO marker lanes with DIFFERENT restart durability:
   verify-only fast path MUST detect a dead LANE-1 marker and
   self-heal (unchanged from v1.2.0):
 
-  1. After `capability_check("opendesign")` returns `present`, look
-     at the seam row's `instance_metadata.bound_handles` (the row
-     is read via the same `/api/mcp-servers/<id>` GET the v1.2.0
-     Stage 4 verification uses; the marker handle is recorded
-     there).
-  2. For each `bound_handles` entry, call
-     `kms_lookup_handle(handle=<handle>)`. A
-     `{"fingerprint": "..."}` response = marker is alive;
-     `ERROR: HANDLE_NOT_FOUND` = marker is dead (post-restart).
-  3. **For any dead LANE-1 marker, fall through to the install
-     path** even if `capability_check` says `present`. The install
-     path runs `kms_request` (mints a NEW handle) and `kms_attach`
-     (binds the new handle, removing the dead binding in the
-     collapse path) — the marker is restored. The fast path is
-     fast ONLY when both the row AND the LANE-1 KMS-Lite markers
-     are alive. (LANE-2 env-ref markers are NEVER dead — they are
-     re-resolved at spawn.)
-  4. Document the restart-drain behaviour in the final report so
-     operators understand why a "fast" fast-path exit did not
-     occur on a post-restart probe.
+  1. **Slot-presence check** for `BYOK_BASE_URL`, `BYOK_MODEL`, and
+     `BYOK_API_KEY` via the row GET (`/api/mcp-servers/<id>` — same
+     call as `capability_check`). Assert the three keys are present
+     in `config.env`. Values read back `[REDACTED]` for the
+     KEY/BASE-shaped slots (`BYOK_BASE_URL`, `BYOK_API_KEY` —
+     presentation-layer redaction via `redact_secrets` at
+     `daemon/routers/mcp_servers.py`); presence is the signal. The
+     marker shape at rest (`__KMS_ENV__` or `__KMS_REF__`) is NOT
+     observable through this read lane — see Stage 4's
+     `Read-back redaction reminder` for why.
+  2. **Cheap OD round-trip** as the functional proof: call
+     `od_list_projects` (the lightest tool endpoint). A 200 response
+     with a JSON list = the seam is alive end-to-end (LANE-2 env-ref
+     substitution, upstream auth, and the OD daemon all worked).
+  3. On slot-presence miss OR auth/connection failure → **fall
+     through to the full re-provision path** (self-heal — including
+     a fresh `kms_request` → `kms_attach` cycle that mints and binds
+     a new LANE-1 handle if one was previously bound and is now
+     drained). The fast path is fast ONLY when both checks above
+     pass.
 
 The `odendesign` install uses ONLY LANE-2 env-ref markers for
 BYOK_API_KEY today (the v1.3.0 contract), so the self-heal step
@@ -1128,8 +1129,8 @@ stays at `1.3.0` because this is pre-release completion of the
 - `requires:` body: `{tools: [bash, instance], env: []}` → `{tools:
   [bash, infra], env: []}`. `mcp_set_env` is the `infra` category;
   `instance` was never actually needed. `ens-env` is required
-  transitively via the agent's `tools.allow` (the canonical
-  `agents/worker/meta.json` lists both `infra` and `ens-env`).
+  DIRECTLY (listed in `requires.tools` alongside `bash` and
+  `infra`) — `ens_env_read` is the self-provisioning entry point.
 - `## Step 2 — Configure the builtin server` — added the
   marker-clobber-trap caveat: a later `configure-builtin` run
   drops env keys (including KMS markers); the install path runs
