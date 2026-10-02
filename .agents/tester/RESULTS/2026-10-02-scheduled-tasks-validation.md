@@ -138,3 +138,56 @@ BASE attribution leg: detached worktree `/tmp/schedval/base` @ 8cebe211, fresh `
 ## Evidence
 
 Worker reports (verbatim) in tester session; driver scripts + logs under `/tmp/schedval/` (pack_run{1,2}.log, core_{1..3}.log, rest_{1..8}.log, tz_spotproof.py, rest_gap_driver.py, happy_path_driver.py, base-leg logs).
+
+---
+
+# RE-GATE (fix round) — tip `34b4db96` (commits `95931aae` + `34b4db96` on `5408c98b`)
+
+- **Date:** 2026-10-02 · 4 dispatched workers (val-tz revived, val-pack2, val-suites2, val-regress revived); all at HEAD `34b4db96b7ce091a3d18ba65ba43e091fc3229ae`, daemon verified in-worktree on every leg.
+- **Fix under test:** F2 = croniter roundtrip phantom detector + literal reconstruct via `anchor_local_to_utc(fold_preference="post")` + monotonic guard (`daemon/util/tz.py:599-676`); F1 = gap-shift to first-existing local (`tz.py:439-474`); F3 = strengthened kwargs pin; ADR-008 amendment (cron=post / one-shot=pre) in `decisions.md:210`.
+
+## RE-GATE VERDICT: **FAIL — one blocking residual (F4); every other condition met**
+
+| Commission PASS condition | Result |
+|---|---|
+| F2 scenarios green vs independent expectations | ⚠️ 25/26 MATCH — F4 residual (missed fire) |
+| Zero phantoms | ✅ zero across ALL scenarios + adversarial 09:00Z window probes |
+| F1 verified (impl + tests, no weakening) | ✅ first-existing live-verified (02:30→03:00=07:00Z; 02:01→03:00); tests +38/−3, all removals superseded, net +35, no new skips |
+| F3 verified | ✅ pin GREEN, strengthened (`idempotency_key=None` + dated rationale) |
+| Fold decision ratified | ✅ **RATIFIED** (below, with rationale-correction note) |
+| Pack + suites exact | ✅ 164P/0F/0S ×3 deterministic; 9/9 suites exact (92/12/66/52/16/8/23/14/6) |
+| No new reds | ✅ red set = prior 36 − 1 (F3 green); zero new/changed-signature reds |
+
+## F2 verification detail (driver `/tmp/schedval/tz_reproof.py`, 26 scenarios, expectations computed from zoneinfo in-driver)
+
+- **Daily `0 6 * * *` NY:** Mar 7 11:00Z · **Mar 8 EXACTLY ONE 10:00Z** (old 09:00Z phantom dead — 3-call adversarial window probe all land 10:00Z, 0 warnings) · Mar 9 10:00Z · Oct 31 10:00Z · **Nov 1 EXACTLY ONE 11:00Z** (old 12:00Z drift dead) · Nov 2 11:00Z. Chain gaps 24h±DST correct; no duplicate dates.
+- **In-gap `30 2 * * *`:** Mar 7 07:30Z · **Mar 8 07:00Z (first-existing 03:00 EDT, +2 expected gap-shift WARNs)** · Mar 9 06:30Z. Monotonic guard does NOT skip the legitimate repair (probe from seed 07:30:01Z Mar 7).
+- **`30 3 * * *`:** Mar 8 07:30Z (post-gap valid, no shift). **Weekly `0 4 * * 3`:** Mar 4 09:00Z → Mar 11 08:00Z (23h DST gap) → Mar 18 08:00Z. **Fold-night `30 1`:** Oct 31 05:30Z · Nov 1 06:30Z (post) · Nov 2 06:30Z; one-shot unchanged 05:30Z (fold=0).
+- **No false-positive WARNINGs** on 12 benign non-transition points.
+- **Non-literal loud fallback ACTIVE:** `0 * * * *` fold-night call #8 emits the documented WARNING verbatim and returns the re-anchored 07:00Z; net fire sequence correct.
+
+### F4 🔴 (blocking) — missed fire on `0 23 * * *` across fall-back; reconstruct trusts croniter's wrong DATE
+`compute_next_cron_fire("0 23 * * *", after=2026-10-31T23:00 EDT, NY)` returns **Nov 2 23:00 EST (Nov 3 04:00Z)** — expected **Nov 1 23:00 EST (Nov 2 04:00Z)**. The Nov 1 fire is **skipped entirely** (missed dispatch for daily-23:00 schedules seeded in the post-fire window; reproduced twice incl. seed 2026-11-01T00:00 EDT).
+Root cause chain: (1) croniter 6.0.0 emits a wrong-hour+wrong-date fire (Nov 2 00:00 EST) for this shape when the tzinfo is `ZoneInfo` — see also the **croniter tz-object-identity bug** (same expression + same instant, fixed-offset tzinfo → correct fire; ZoneInfo → wrong fire; croniter appears to do `is`-identity checks); (2) the roundtrip detector correctly flags it; (3) the literal reconstruct uses `candidate_aware.astimezone(tz).replace(hour=23, minute=0)` — **inheriting croniter's wrong DATE**; (4) result re-anchors to the wrong day.
+**Fix path (small, test-code-adjacent production fix):** derive the reconstruct date from `after_aware` (advance from the cursor's local date), not from croniter's emission — e.g. `phantom_date = max(candidate_local_date, after_aware.astimezone(tz).date())` or day-advance from `after_aware` until roundtrip-clean. Add regression: `0 23` across fall-back from the post-fire seed (both legs), and pin the ZoneInfo-normalized seed (wrapper already normalizes — keep it).
+Note: Mar-side `0 23` legs (F1–F3) all MATCH; the falsified part of the round-1 claim is specifically the fall-back leg. "Zero phantoms" still holds everywhere — F4 is a *missed* fire, not a double fire (no dedupe safety net exists for cron by design, hence blocking).
+
+## Fold adjudication (item 2): **RATIFIED** — cron=`fold_preference="post"`, one-shot=`fold=0/pre`
+
+Empirical basis (H3 hourly fold-night enumeration + I-scenarios): wrapper fires exactly ONE pass of the ambiguous hour (post: 06:00Z, skipping 05:00Z); native croniter fires the pre pass; **neither fires both** — across the 25h night each leaves exactly one 2h UTC hole (04Z→06Z wrapper). Post is defensible: exactly one fire per wall-clock HH:MM, deterministic, conservative (later pass), fully pinned by tests, cleanly documented in the ADR-008 amendment with supersession trail. Cost of pre instead: one parameter + 2 test expectations — not warranted for a 1-hour/1-night/year difference on fold-window schedules.
+**Two documentation conditions (non-blocking, should land in a doc pass):**
+1. The stated rationale "hourly keeps exact 1h UTC spacing" is factually imprecise — no fold preference yields uniform spacing across a 25h night; the accurate properties are: exactly one fire per wall-clock HH:MM, exactly one 2h UTC hole for sub-daily schedules, post = later pass. decisions.md should be corrected to the accurate wording.
+2. Fold behavior is inconsistent between literal crons (post) and the non-literal fallback (native = pre pass, WARNING'd "DST-correct NOT guaranteed") — should be listed alongside the existing non-literal residual.
+
+## Pack + suites + regression (re-gate)
+
+- **Pack ×3:** 164P/0F/0S, exit 0 (hard-captured ×2), ~27s, node-ID sets identical. Growth 157→164 = exactly 5 `TestDstSemantics` + 2 `TestCatchUpSemantics` W1 pins (all brand-new defs in `95931aae`); def-set diffs vs `5408c98b`/`3a939a76`/`8ce2a788` = additions only, zero removals/renames/unparked-skips; 0 skips/deselects.
+- **Suites 9/9 exact:** 92/12/66/52/16/8/23/14/6 (+ the F3 pin solo GREEN; sibling router_forwards stays red as documented).
+- **Red set:** 35 = prior 36 − F3(now green); zero new, zero signature drift; scheduling-owned tests 231P; zero py3.13 collection errors. Concurrency pack 98P/0F/74S baseline-exact; `dev.sh:102` flag present.
+
+## Re-gate action needed
+
+1. **F4 fix** (date-source change in the reconstruct path + `0 23` fall-back regression from post-fire seed) → then a targeted re-drive of F4 + C/D/E/G scenarios (~5 min worker) clears the last blocker.
+2. Doc pass: fold rationale wording (condition 1) + literal/non-literal fold residual note (condition 2).
+
+Evidence: worker reports in session; `/tmp/schedval/tz_reproof.py`, `/tmp/schedval2/pack_run{1,2,2b}.log`, suite logs.
