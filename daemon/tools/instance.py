@@ -251,12 +251,13 @@ from .project_history import create_project_history_tools
 from .context_tools import create_context_tools
 from .shared_meta_kv_tools import create_shared_meta_kv_tools
 from .db_tools import create_db_tools
-from .infra import create_infra_tools, create_kms_tools
+from .infra import create_infra_tools, create_kms_tools, create_mcp_env_tools
 from .system import create_system_tools
 from .system_log_tools import create_system_log_tools
 from .upgrade_tools import create_upgrade_tools
 from .attestation import create_attestation_tools
 from .ens_db_tools import create_ens_db_tools
+from .ens_env_tools import create_ens_env_tools
 from .service_tools import create_service_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
@@ -5314,6 +5315,16 @@ Returns:
     kms_tool_list = create_kms_tools(manager, current_instance_id)
     tools.extend(kms_tool_list)
 
+    # ── MCP env-write tool (self-provisioning Stage 1, 2026-10-02) ──
+    # ``mcp_set_env`` — non-secret config.env writer, the complement of
+    # ``kms_attach`` (which owns the secret/marker lane). Registered
+    # under the ``infra`` category so agents opt in via the SAME
+    # ``tools.allow`` entry as the KMS trio — ``agents/worker/meta.json``
+    # already carries ``infra``, so the install-opendesign worker skill
+    # lane can call it with NO meta.json change (KMS-trio precedent).
+    mcp_env_tool_list = create_mcp_env_tools(manager, current_instance_id)
+    tools.extend(mcp_env_tool_list)
+
     # ── Context tools (list/read shared context directory) ──
     # Always available — internal agents need this to inspect accumulated context
     # without exposing the on-disk path. The hosted MCP server exposes the
@@ -5415,6 +5426,24 @@ Returns:
     )
     tools.extend(service_tool_list)
 
+    # ── ens-env tools (Stage 1 of the OpenDesign self-provisioning
+    # chain, feature/od-self-provisioning, 2026-10-02) — single-tool
+    # category exposing ``ens_env_read`` so the install-opendesign
+    # worker skill can self-read the ensemble's live LLM connection
+    # values for the BYOK reuse chain. The factory tolerates a None-stub
+    # manager for the loader warm-list — the tool reads ``os.environ``
+    # directly at call time and never dereferences the manager. Like
+    # ``service``, the category is NOT in PRIVILEGED_TOOL_CATEGORIES:
+    # agents that need it opt in via ``tools.allow: ["ens-env"]`` (the
+    # worker meta.json carries this entry; future install skills may
+    # add it to other agents as needed). Decorator-only registration
+    # is SILENTLY INVISIBLE — this list-extend is the third step of
+    # the three-step registration seam (decorator + CATEGORY_MODULES
+    # entry + KNOWN_TOOL_NAMES + this construction call — all
+    # required).
+    ens_env_tool_list = create_ens_env_tools(manager, current_instance_id)
+    tools.extend(ens_env_tool_list)
+
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation
     # because create_help_tool needs MCP tool names for category expansion.
@@ -5459,11 +5488,13 @@ Returns:
 def _strip_privileged_category_tools(tools: list[Any]) -> list[Any]:
     """Strip default-deny categories from a default-allow (unfiltered) list.
 
-    BEHAVIORAL criterion (trio as of override 2026-09-16;
-    see .agents/shared/planning/service-tool/decisions.md §D4 —
-    D4 Option A reversed, service REMOVED): categories in
+    BEHAVIORAL criterion (quartet as of the W4 leader decision,
+    reviewer council 2026-10-02; see .agents/shared/planning/
+    service-tool/decisions.md §D4 — D4 Option A reversed, service
+    REMOVED): categories in
     ``PRIVILEGED_TOOL_CATEGORIES`` (today: ``system_upgrade``,
-    ``system-log``, ``ens-db``) are never default-granted — an agent reaches them ONLY through an
+    ``system-log``, ``ens-db``, ``ens-env``) are never
+    default-granted — an agent reaches them ONLY through an
     explicit ``tools.allow`` entry naming the category or one of its
     tools. The default-allow paths below (no tools config at all, or an
     empty allow+deny pair — e.g. ``watcher``) would otherwise

@@ -43,18 +43,25 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+from daemon.services.env_key_policy import (
+    env_key_is_secret_shaped,
+    is_ascii_env_key,
+)
 from daemon.services.kms_lite import (
     KMSUnavailableError,
+    build_env_marker,
     build_marker,
     kms_fingerprint,
     kms_request,
     kms_resolve_handle,
 )
+from daemon.services.kms_resolver import is_marker
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -987,36 +994,82 @@ def create_kms_tools(
     @tool
     def kms_attach(
         server_id: str,
-        handle: str,
         env_key: str,
+        handle: str | None = None,
+        env_source: str | None = None,
     ) -> str:
-        """Bind a KMS handle to an MCP server's env key. Use tool_help("kms_attach") for details.
+        """Bind a KMS handle OR an env-ref to an MCP server's env key. Use tool_help("kms_attach") for details.
 
-        Reads the ``mcp_servers`` row fresh from the DB, then writes:
+        Two mutually-exclusive modes share this entry point. Exactly one
+        of ``handle`` / ``env_source`` MUST be supplied — passing both
+        or neither returns ``ERROR: INVALID_ARGUMENT``.
 
-        * ``config.env[<env_key>]`` ← ``__KMS_REF__<handle>__`` marker
-        * ``instance_metadata.bound_handles`` ← ``{handle, env_key,
-          fingerprint, actor}``
+        LANE-1 (handle mode — minted KMS handle):
 
-        The read-then-write pattern is load-bearing: any code path that
-        re-serialises ``mcp_servers.config`` MUST re-read the row to
-        avoid overwriting a stored marker with cached plaintext (R1).
-        Plaintext NEVER appears in the write — only the marker.
+            Reads the ``mcp_servers`` row fresh from the DB, then
+            writes:
+
+            * ``config.env[<env_key>]`` ← ``__KMS_REF__<handle>__`` marker
+            * ``instance_metadata.bound_handles`` ← ``{handle, env_key,
+              fingerprint, actor}``
+
+        LANE-2 (env-ref mode — daemon-process env var):
+
+            Validates that the named ``env_source`` var EXISTS in the
+            daemon's ``os.environ`` (presence check only — value is never
+            read or returned), then writes:
+
+            * ``config.env[<env_key>]`` ← ``__KMS_ENV__<env_source>__`` marker
+            * ``instance_metadata.env_refs`` ← ``{env_key, env_source,
+              actor}``
+
+            This is the bridge for the OpenDesign BYOK chain: the
+            daemon reuses the existing ``OPENAI_API_KEY`` from its own
+            ``.env`` (no new key material, per user directive
+            2026-10-02) by writing a pointer into the MCP server's
+            ``config.env``. The resolver at
+            ``daemon/services/kms_resolver.py`` substitutes the marker
+            to the plaintext value at spawn time — plaintext is in-RAM
+            ONLY and never stored.
+
+        The read-then-write pattern is load-bearing for both modes: any
+        code path that re-serialises ``mcp_servers.config`` MUST re-read
+        the row to avoid overwriting a stored marker with cached
+        plaintext (R1). Plaintext NEVER appears in any write — only
+        markers (``__KMS_REF__`` or ``__KMS_ENV__``).
+
+        This tool is the ONLY way a secret-shaped ``env_key`` gets
+        written going forward in the new flow (LANE-2 env-ref mode).
+        ``mcp_set_env`` stays UNCHANGED and keeps rejecting
+        secret-shaped keys — its regression is pinned by the existing
+        ``tests/unit/tools/test_mcp_set_env_tools.py`` pack.
+
+        LANE-2 env-ref markers are restart-DURABLE (resolved fresh
+        from the daemon env every spawn — no in-memory drain).
+        LANE-1 minted handles are NOT (the day-1 KMS-Lite store is
+        in-memory and drains on daemon restart; the install-opendesign
+        skill's restart-drain self-heal covers that lane).
         """
         try:
-            # Confirm the handle is known. We do NOT reveal plaintext
-            # at this layer; the attach is a marker-write only.
-            fp = kms_fingerprint(handle)
-            if fp is None:
+            # ── Mode arbitration (exactly one of handle/env_source) ──
+            if handle is not None and env_source is not None:
                 return (
-                    f"ERROR: HANDLE_NOT_FOUND: handle={handle!r} "
-                    "is not known to the KMS-Lite store. Re-mint via "
-                    "kms_request."
+                    "ERROR: INVALID_ARGUMENT: pass exactly one of "
+                    "'handle' (LANE-1, minted KMS handle) or "
+                    "'env_source' (LANE-2, daemon-process env var "
+                    "name) — not both."
                 )
+            if handle is None and env_source is None:
+                return (
+                    "ERROR: INVALID_ARGUMENT: must pass exactly one of "
+                    "'handle' (LANE-1) or 'env_source' (LANE-2). "
+                    "handle=<KMS_HANDLE_…> → __KMS_REF__<HANDLE>__ "
+                    "marker; env_source=<VARNAME> → __KMS_ENV__<VARNAME>__ "
+                    "marker."
+                )
+            use_env_ref_mode = env_source is not None
 
-            # R1 invariant: re-read the row fresh before writing. A
-            # cached+rewritten marker row would silently leak plaintext
-            # on the next spawn.
+            # ── R1: resolve + read the row FRESH at call time ──────
             repo = manager._mcp_server_repository
             server = repo.get_mcp_server(server_id)
             if server is None:
@@ -1024,8 +1077,92 @@ def create_kms_tools(
 
             existing_config = dict(server.config or {})
             env_block = dict(existing_config.get("env") or {})
-            env_block[env_key] = build_marker(handle)
-            existing_config["env"] = env_block
+
+            if use_env_ref_mode:
+                # ── LANE-2: env-ref mode ────────────────────────────
+                # build_env_marker validates the var name shape; the
+                # ``os.environ`` presence check is the spawn-time
+                # resolution guarantee (resolver fail-closed on
+                # missing). We do an EAGER presence check too so the
+                # caller learns the misconfiguration at attach time,
+                # not at next-spawn — but never echo the value.
+                try:
+                    marker = build_env_marker(env_source)
+                except ValueError as exc:
+                    return (
+                        f"ERROR: INVALID_ARGUMENT: env_source={env_source!r} "
+                        f"is not a valid env-var name ({exc})"
+                    )
+                if env_source not in os.environ:
+                    # Name only — never a value (the value never enters
+                    # this tool's frame; the var was simply not present
+                    # in the daemon's process env).
+                    return (
+                        f"ERROR: ENV_VAR_NOT_FOUND: env_source={env_source!r} "
+                        "is not set in the daemon's environment. "
+                        "Set the env var on the daemon process (or in "
+                        "the daemon's .env) and retry."
+                    )
+
+                # Idempotent collapse on (env_source, env_key) — same
+                # tuple collapses; the audit substrate keeps a fresh
+                # actor + is appended at the end.
+                existing_meta = dict(server.instance_metadata or {})
+                env_refs = list(existing_meta.get("env_refs") or [])
+                env_refs = [
+                    b for b in env_refs
+                    if not (
+                        b.get("env_source") == env_source
+                        and b.get("env_key") == env_key
+                    )
+                ]
+                env_refs.append(
+                    {
+                        "env_source": env_source,
+                        "env_key": env_key,
+                        "actor": current_instance_id,
+                    }
+                )
+                existing_meta["env_refs"] = env_refs
+
+                env_block[env_key] = marker
+                existing_config["env"] = env_block
+
+                updated = repo.update_mcp_server(
+                    server_id,
+                    config=existing_config,
+                    instance_metadata=existing_meta,
+                )
+                if updated is None:
+                    return f"ERROR: SERVER_NOT_FOUND: server_id={server_id!r} vanished mid-update; retry."
+
+                # Result echoes marker + var NAME only — never a value.
+                return json.dumps(
+                    {
+                        "server_id": server_id,
+                        "env_key": env_key,
+                        "env_source": env_source,
+                        "marker": marker,
+                        "note": (
+                            "LANE-2 env-ref attached. Resolved fresh "
+                            "from the daemon's os.environ at spawn time. "
+                            "Restart-durable (NOT drained by daemon "
+                            "restart — the var name is the binding, the "
+                            "value lives in the daemon env)."
+                        ),
+                    }
+                )
+
+            # ── LANE-1: handle mode (unchanged from v0.x) ──────────
+            # Confirm the handle is known. We do NOT reveal plaintext
+            # at this layer; the attach is a marker-write only.
+            fp = kms_fingerprint(handle)  # type: ignore[arg-type]
+            if fp is None:
+                return (
+                    f"ERROR: HANDLE_NOT_FOUND: handle={handle!r} "
+                    "is not known to the KMS-Lite store. Re-mint via "
+                    "kms_request."
+                )
 
             existing_meta = dict(server.instance_metadata or {})
             bindings = list(existing_meta.get("bound_handles") or [])
@@ -1044,6 +1181,9 @@ def create_kms_tools(
             )
             existing_meta["bound_handles"] = bindings
 
+            env_block[env_key] = build_marker(handle)  # type: ignore[arg-type]
+            existing_config["env"] = env_block
+
             updated = repo.update_mcp_server(
                 server_id,
                 config=existing_config,
@@ -1058,7 +1198,7 @@ def create_kms_tools(
                     "handle": handle,
                     "env_key": env_key,
                     "fingerprint": fp,
-                    "marker": build_marker(handle),
+                    "marker": build_marker(handle),  # type: ignore[arg-type]
                 }
             )
         except Exception as exc:  # noqa: BLE001 — N9 contract
@@ -1100,8 +1240,433 @@ def create_kms_tools(
     # -------------------------------------------------------------------------
     # Return
     # -------------------------------------------------------------------------
+
+    kms_attach._full_doc_ = """Bind a secret-shaped env key on an MCP server — two mutually-exclusive modes share the entry point.
+
+This tool is the SINGLE legitimate secret-shaped env-write surface for
+the agent lane (the ``mcp_set_env`` companion tool rejects
+secret-shaped names; this one carries the env-ref path that bypasses
+that gate in a controlled way).
+
+Args:
+    server_id: The MCP server ID (UUID4). Resolved fresh from the DB
+        at call time — name resolution is ``mcp_set_env``'s lane, not
+        this tool's.
+    env_key: The ``config.env[<key>]`` slot to populate.
+    handle: LANE-1 mode — the ``KMS_HANDLE_<uuid>`` to bind. The
+        marker ``__KMS_REF__<HANDLE>__`` is written into
+        ``config.env[env_key]``; the binding is recorded in
+        ``instance_metadata.bound_handles``. Use after ``kms_request``.
+        **Restart-fragile** — KMS-Lite is in-memory and drains on
+        daemon restart.
+    env_source: LANE-2 mode — the name of a daemon-process env var
+        (e.g. ``OPENAI_API_KEY``). The marker
+        ``__KMS_ENV__<VARNAME>__`` is written into
+        ``config.env[env_key]``; the binding is recorded in
+        ``instance_metadata.env_refs``. **Restart-durable** — the
+        resolver reads ``os.environ[<VARNAME>]`` fresh on every spawn,
+        so the binding survives daemon restart as long as the env var
+        is still set.
+
+Mode arbitration:
+    Exactly one of ``handle`` / ``env_source`` MUST be passed. Both
+    or neither → ``ERROR: INVALID_ARGUMENT``.
+
+Returns (success, LANE-1)::
+
+    {
+        "server_id": "<uuid>",
+        "handle": "KMS_HANDLE_<uuid>",
+        "env_key": "...",
+        "fingerprint": "<sha256[:16]>",
+        "marker": "__KMS_REF__KMS_HANDLE_<uuid>__"
+    }
+
+Returns (success, LANE-2)::
+
+    {
+        "server_id": "<uuid>",
+        "env_key": "...",
+        "env_source": "OPENAI_API_KEY",
+        "marker": "__KMS_ENV__OPENAI_API_KEY__",
+        "note": "LANE-2 env-ref attached. …"
+    }
+
+Values NEVER appear in any return (LANE-1 marker carries the handle,
+not the plaintext; LANE-2 marker carries the var name, not the
+value). Tool results land in LangGraph checkpoints (PB-F1 family).
+
+Reads the row FRESH at call time (R1 invariant — ``config`` is
+co-owned by configure-builtin, mcp_set_env, and this tool; a cached
+row would clobber markers with stale plaintext).
+
+Rejections:
+    * ``ERROR: INVALID_ARGUMENT`` — both or neither of
+      ``handle``/``env_source`` passed, OR ``env_source`` is not a
+      valid env-var name (the name validator at
+      ``kms_lite.build_env_marker``).
+    * ``ERROR: ENV_VAR_NOT_FOUND`` — LANE-2 mode and ``env_source``
+      names a var absent from ``os.environ``. The var name is echoed;
+      the value (if it had been present) is never read, never
+      returned, never logged. Eager check so the caller learns the
+      misconfiguration at attach time, not at next-spawn.
+    * ``ERROR: HANDLE_NOT_FOUND`` — LANE-1 mode and the handle is
+      unknown to the KMS-Lite store (typically a post-restart probe
+      where the day-1 in-memory store drained). Re-mint via
+      ``kms_request``.
+    * ``ERROR: SERVER_NOT_FOUND`` — server_id does not resolve.
+    * ``ERROR: KMS_UNAVAILABLE`` — KMS key absent / invalid; only
+      surfaced on LANE-1 path. LANE-2 does NOT need the KMS store to
+      be initialised.
+    * Other failures → ``ERROR: <exc-class-name>`` (N9 contract —
+      never raises; never leaks values).
+
+Co-ownership contract (load-bearing):
+
+    ``mcp_servers.config`` is co-owned by ``configure-builtin`` (HTTP
+    lane), ``mcp_set_env`` (non-secret agent lane), and this tool. All
+    three MUST re-read fresh at call time and merge — a stale cached
+    row would silently replace stored markers with plaintext from an
+    older snapshot. The marker-clobber trap is documented at the
+    ``mcp_set_env`` long doc — agent-lane writers must re-apply env
+    (and re-attach handles / re-bind env-refs) after a reconfigure.
+"""
+
     return [
         kms_request,
         kms_attach,
         kms_lookup_handle,
     ]
+
+
+# ---------------------------------------------------------------------------
+# mcp_set_env — MCP config.env writer for NON-SECRET env values
+# (Stage 1 of the self-provisioning chain, feature/od-self-provisioning,
+# 2026-10-02)
+#
+# Complement of ``kms_attach``: that tool owns the SECRET-shaped lane
+# (writes ``__KMS_REF__<handle>__`` markers into ``config.env`` via the
+# KMS-Lite store); this tool owns the NON-SECRET lane (``BYOK_BASE_URL``,
+# ``BYOK_MODEL``, log levels, URLs, model names). The split is the
+# leader policy decision: this tool MUST NOT accept plaintext for
+# secret-shaped key names — it rejects them with an error that points
+# the caller at ``kms_request`` / ``kms_attach``.
+#
+# Why a separate factory (vs. folding into ``create_kms_tools``):
+#   * Same rationale as the infra-asset / KMS split above — different
+#     concerns (non-secret env writes vs. secret-bearing handle
+#     pointers), disjoint audit trails.
+#   * Still registered under ``infra`` so ``tools.allow`` opt-in is
+#     unchanged (the worker lane already carries ``infra``).
+#
+# CO-OWNERSHIP / R1 (load-bearing): ``mcp_servers.config`` is co-owned
+# by ``configure-builtin`` (HTTP lane), ``kms_attach`` (marker lane) and
+# this tool. Any writer MUST re-read the row fresh at call time and
+# merge — never re-serialise a cached row object. A stale cached row
+# would silently replace stored ``__KMS_REF__`` markers with plaintext
+# from an older snapshot (the R1 invariant ``kms_attach`` documents).
+#
+# Known trap (documented, NOT fixed here): a later ``configure-builtin``
+# run regenerates ``config`` from the builtin schema payload and can
+# drop env keys written by this tool (and any KMS markers). Idempotency
+# rails + install audit are the HTTP lane's protection; agent-lane
+# writers must re-apply after a reconfigure. Callers see this caution
+# in the tool's long doc.
+# ---------------------------------------------------------------------------
+
+
+# Secret-shape classification lives in ONE place now:
+# ``daemon/services/env_key_policy.py`` (W2, reviewer council
+# 2026-10-02) — the same conservative word list the routers
+# ``redact_secrets`` helper applies on the read side. This module
+# imports :func:`env_key_is_secret_shaped` / :func:`is_ascii_env_key`
+# from there; ``BASE`` / ``HEADERS`` remain deliberately write-legal
+# (a base URL is a non-secret value this tool is ALLOWED to write —
+# see the policy module docstring for the write-vs-redact split).
+
+
+def _invalidate_mcp_schema_cache(manager: Any, server_name: str) -> None:
+    """Invalidate the MCP service's schema cache for ``server_name``.
+
+    Tool-layer analog of ``daemon/routers/mcp_servers.py::
+    _invalidate_mcp_schema_cache`` (same getattr guard, same no-op
+    semantics): config mutations force schema re-discovery on the next
+    instance preload. No-op when the manager has no MCP service
+    attached (legacy test fixtures that mock the manager bare).
+    """
+    mcp_service = getattr(manager, "_mcp_service", None)
+    if mcp_service is not None and hasattr(mcp_service, "invalidate_schema_cache"):
+        mcp_service.invalidate_schema_cache(server_name)
+
+
+def create_mcp_env_tools(
+    manager: "InstanceManager",
+    current_instance_id: str,
+) -> list:
+    """Create the MCP ``config.env`` write tool for NON-SECRET values.
+
+    Args:
+        manager: The :class:`InstanceManager` instance. Provides
+            ``manager._mcp_server_repository`` (the write path — same
+            repository ``kms_attach`` uses, so both lanes co-own the
+            row through the same engine) and optionally
+            ``manager._mcp_service`` (schema-cache invalidation).
+        current_instance_id: The current instance ID — audit-log
+            attribution only.
+
+    Returns:
+        A list containing exactly one tool: [``mcp_set_env``].
+    """
+    logger = logging.getLogger(__name__)
+    caller_instance_id: str = current_instance_id or ""
+
+    @register_tool_category("infra")
+    @tool
+    def mcp_set_env(
+        server: str,
+        env: dict[str, str],
+    ) -> str:
+        """Set non-secret env vars on an MCP server's config. Use tool_help("mcp_set_env") for details.
+
+        Merges ``env`` (a dict of env-var name to value) into the named
+        MCP server's ``config.env``, preserving every existing key —
+        including ``__KMS_REF__``/``__KMS_ENV__`` markers written by
+        ``kms_attach``. Rejects secret-shaped key names (the shared
+        word list at ``daemon/services/env_key_policy.py``: KEY /
+        TOKEN / SECRET / PASSWORD / CREDENTIAL / PRIVATE / PWD /
+        AUTH), non-ASCII key names, and marker-shaped VALUES (markers
+        are ``kms_attach``-only) — bind secrets via ``kms_request`` +
+        ``kms_attach`` instead. Open sessions keep the old env until
+        they reconnect.
+        """
+        try:
+            # ── Input validation (before any DB touch) ──────────────
+            if not isinstance(server, str) or not server.strip():
+                return "ERROR: INVALID_ARGUMENT: 'server' must be a non-empty server name (or server id)."
+            if not isinstance(env, dict) or not env:
+                return (
+                    "ERROR: INVALID_ARGUMENT: 'env' must be a non-empty dict of "
+                    "{env_var_name: value} — e.g. {\"BYOK_BASE_URL\": \"https://...\"}."
+                )
+
+            bad_types = sorted(
+                k for k, v in env.items()
+                if not isinstance(k, str) or not isinstance(v, str)
+            )
+            if bad_types:
+                return (
+                    "ERROR: INVALID_ARGUMENT: 'env' entries must be string→string. "
+                    f"Rejected key(s): {', '.join(bad_types[:10])}."
+                )
+
+            non_ascii_keys = sorted(k for k in env if not is_ascii_env_key(k))
+            if non_ascii_keys:
+                return (
+                    "ERROR: INVALID_ENV_KEY: env key(s) "
+                    f"{', '.join(non_ascii_keys[:10])} must be ASCII "
+                    "identifiers ([A-Za-z_][A-Za-z0-9_]*). Non-ASCII or "
+                    "homoglyph key names cannot be classified by the "
+                    "secret-shape gate or redacted reliably — use plain "
+                    "POSIX-style variable names."
+                )
+
+            secret_keys = sorted(k for k in env if env_key_is_secret_shaped(k))
+            if secret_keys:
+                return (
+                    "ERROR: SECRET_SHAPED_KEY: env key(s) "
+                    f"{', '.join(secret_keys)} look secret-shaped (contain "
+                    "KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL/PRIVATE/PWD/AUTH — "
+                    "the shared policy at daemon/services/env_key_policy.py). "
+                    "NEVER pass plaintext credentials through mcp_set_env. "
+                    "Mint a handle via kms_request(service=..., reason=...), "
+                    "then bind it via kms_attach(server_id=<id>, "
+                    "handle=<handle>, env_key=<key>); for an env-ref bind "
+                    "use kms_attach(server_id=<id>, env_key=<key>, "
+                    "env_source=<VAR>). mcp_set_env's success result "
+                    "includes the server_id for exactly this chained flow."
+                )
+
+            marker_valued = sorted(
+                k for k, v in env.items()
+                if isinstance(v, str) and is_marker(v)
+            )
+            if marker_valued:
+                return (
+                    "ERROR: MARKER_VALUE_FORBIDDEN: env value(s) for "
+                    f"key(s) {', '.join(marker_valued[:10])} are KMS "
+                    "markers (__KMS_REF__<handle>__ / __KMS_ENV__<var>__). "
+                    "Markers are written ONLY by kms_attach — mcp_set_env "
+                    "writes non-secret plaintext config. Passing a marker "
+                    "here would bypass the attach lane's binding/audit "
+                    "rails (the spawn-time resolver's fail-closed presence "
+                    "check remains the backstop)."
+                )
+
+            # ── R1: resolve + read the row FRESH at call time ───────
+            # Agents know the server NAME; kms_attach historically
+            # takes the server_id. Resolve by name first, fall back to
+            # id so a caller that only has the id (e.g. from a previous
+            # mcp_set_env result) still lands.
+            repo = manager._mcp_server_repository
+            resolved = repo.get_mcp_server_by_name(server) if hasattr(
+                repo, "get_mcp_server_by_name"
+            ) else None
+            if resolved is None:
+                resolved = repo.get_mcp_server(server)
+            if resolved is None:
+                return (
+                    f"ERROR: SERVER_NOT_FOUND: no MCP server matches "
+                    f"name-or-id={server!r}. Check the server name (e.g. "
+                    "'opendesign') and retry."
+                )
+
+            server_id = resolved.id
+            server_name = resolved.name
+
+            existing_config = dict(resolved.config or {})
+            env_block = dict(existing_config.get("env") or {})
+            env_block.update(env)
+            existing_config["env"] = env_block
+
+            # instance_metadata is KMS-owned (bound_handles) — this
+            # tool deliberately does NOT touch it; update_mcp_server
+            # leaves absent fields unmodified.
+            updated = repo.update_mcp_server(server_id, config=existing_config)
+            if updated is None:
+                return f"ERROR: SERVER_NOT_FOUND: server_id={server_id!r} vanished mid-update; retry."
+
+            # ── Schema cache invalidation (routers analog) ──────────
+            _invalidate_mcp_schema_cache(manager, server_name)
+
+            # Audit: key NAMES + shape only — NEVER values.
+            # M2 (reviewer fold-in): the preserved-marker count covers
+            # BOTH marker shapes (LANE-1 ``__KMS_REF__`` AND LANE-2
+            # ``__KMS_ENV__``) via the resolver's ``is_marker``.
+            logger.info(
+                "[mcp_set_env] actor=%s server=%s keys=%d marker_keys_preserved=%d",
+                caller_instance_id,
+                server_name,
+                len(env),
+                sum(
+                    1 for v in env_block.values()
+                    if isinstance(v, str) and is_marker(v)
+                ),
+            )
+
+            return json.dumps(
+                {
+                    "ok": True,
+                    "server_id": server_id,
+                    "server_name": server_name,
+                    "env_keys_set": sorted(env.keys()),
+                    "note": (
+                        "Merged into config.env; existing keys and "
+                        "__KMS_REF__ markers preserved. Open sessions keep "
+                        "the OLD env until they reconnect — call "
+                        f"close_server('{server_name}') (or spawn a new "
+                        "instance) to pick up the new values. Caution: a "
+                        "later configure-builtin run regenerates config and "
+                        "may drop these keys — re-apply after reconfiguring."
+                    ),
+                },
+                indent=2,
+            )
+        except Exception as exc:  # noqa: BLE001 — N9 contract (infra family)
+            logger.exception(
+                "mcp_set_env unexpected error: actor=%s server=%s",
+                caller_instance_id,
+                server if isinstance(server, str) else "<non-string>",
+            )
+            return f"ERROR: {type(exc).__name__}"
+
+    mcp_set_env._full_doc_ = """Merge non-secret env vars into an MCP server's stored ``config.env``.
+
+The NON-SECRET half of the env-write surface (``kms_attach`` is the
+secret half). Purpose-built for the OpenDesign self-provisioning
+chain: after ``ens_env_read`` captures the daemon's LLM connection
+values, this tool writes ``BYOK_BASE_URL`` and ``BYOK_MODEL`` into the
+``opendesign`` server's ``config.env``. ``BYOK_API_KEY`` must NOT go
+through this tool — see the secret-shaped rejection below.
+
+Args:
+    server: The MCP server NAME (e.g. ``"opendesign"``). As a
+        convenience the server ID is also accepted — name is resolved
+        first, id is the fallback (``kms_attach`` only takes the id;
+        this tool's success result echoes ``server_id`` so a chained
+        ``kms_attach`` call needs no second lookup).
+    env: A dict of ``{env_var_name: value}`` to MERGE into
+        ``config.env``. Multiple keys in one call are applied in a
+        single read-fresh→merge→write cycle (one round trip, one
+        window). All keys and values must be strings.
+
+Returns (success):
+    JSON object::
+
+        {
+          "ok": true,
+          "server_id": "<uuid>",          // for the chained kms_attach flow
+          "server_name": "opendesign",
+          "env_keys_set": ["BYOK_BASE_URL", "BYOK_MODEL"],
+          "note": "…reconnect semantics + reconfigure caution…"
+        }
+
+    Values are NEVER echoed back — the caller just supplied them, and
+    tool results land in LangGraph checkpoints (PB-F1 family).
+    ``BYOK_BASE_URL`` additionally reads back ``[REDACTED]`` through
+    the HTTP API (presentation-layer redaction) — that is EXPECTED,
+    not a write failure.
+
+Semantics:
+    * MERGE, not replace: every existing ``config.env`` key survives,
+      including ``__KMS_REF__<handle>__`` markers written by
+      ``kms_attach``. The row is re-read FRESH at call time (R1
+      invariant — ``config`` is co-owned by configure-builtin,
+      kms_attach, and this tool; a cached row would clobber markers
+      with stale plaintext).
+    * ``instance_metadata`` (``bound_handles``, install snapshots) is
+      KMS/HTTP-lane-owned and deliberately untouched.
+    * Schema cache for the server is invalidated — new instances
+      preload the updated config on their next MCP session creation.
+    * OPEN SESSIONS: a running MCP session captured its env at spawn
+      time (``resolve_env`` runs once per session creation). New env
+      values apply only after ``close_server(server_name)`` or a fresh
+      instance spawn. The KMS marker lane resolves at the same seam.
+
+Rejections:
+    * Secret-shaped KEY NAMES — any key whose name contains one of
+      the shared policy words ``KEY``, ``TOKEN``, ``SECRET``,
+      ``PASSWORD``, ``CREDENTIAL``, ``PRIVATE``, ``PWD``, or ``AUTH``
+      (case-insensitive; ``daemon/services/env_key_policy.py`` — W2
+      single-sourced with the read-side ``redact_secrets``) is
+      REFUSED with ``ERROR: SECRET_SHAPED_KEY`` pointing at
+      ``kms_request`` → ``kms_attach``. This is the leader policy:
+      plaintext credentials must never transit this tool. (``BASE``
+      is read-side redaction only — ``BYOK_BASE_URL`` is writable
+      here.)
+    * Non-ASCII env KEY NAMES — keys must be ASCII identifiers
+      (``[A-Za-z_][A-Za-z0-9_]*``); anything else is REFUSED with
+      ``ERROR: INVALID_ENV_KEY``. Homoglyph/unicode names could dodge
+      substring classification while still landing in ``config.env``
+      (W2).
+    * Marker-shaped VALUES — a value matching a full KMS marker
+      (``__KMS_REF__<handle>__`` / ``__KMS_ENV__<var>__``) is REFUSED
+      with ``ERROR: MARKER_VALUE_FORBIDDEN``. Markers are written
+      ONLY by ``kms_attach``; a marker routed through this tool would
+      bypass the attach lane's binding/audit rails (M1 — the
+      resolver's fail-closed presence check remains the backstop).
+    * Unknown server → ``ERROR: SERVER_NOT_FOUND`` (name-or-id echoed).
+    * Empty/ill-typed ``env`` → ``ERROR: INVALID_ARGUMENT``.
+
+Caution (documented trap, by design): a later ``configure-builtin``
+run for the same builtin regenerates ``config`` from its schema
+payload and can DROP env keys written by this tool — including KMS
+markers. The HTTP lane's idempotency rails + install audit are
+load-bearing and are NOT bypassed here; agent-lane writers must
+re-apply env (and re-attach handles) after any reconfigure.
+
+Errors never raise (N9 contract): every failure returns an
+``ERROR: ...`` string. Unexpected exceptions surface the exception
+CLASS NAME only — values and messages never ride into the result.
+"""
+
+    return [mcp_set_env]

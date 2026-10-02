@@ -34,6 +34,10 @@ from daemon.mcp.builtin_servers import get_registry
 from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
 from daemon.mcp.builtin_servers.validation import validate_config_values, McpConfigValidationError as BuiltinConfigValidationError
 from daemon.services.install_audit import EVENT_MCP_INSTALL, append_install_audit
+from daemon.services.env_key_policy import (
+    REDACT_ONLY_MARKER_WORDS,
+    SECRET_MARKER_WORDS,
+)
 from daemon.services.kms_lite import KMS_MARKER_RE
 from daemon.utils import parse_utc_datetime
 
@@ -183,9 +187,18 @@ def redact_secrets(config: dict) -> dict:
     Two surfaces are scrubbed:
 
     1. ``env`` sub-dict (if present and dict-like): keys whose name
-       contains any of ``KEY``, ``TOKEN``, ``SECRET``, ``PASSWORD``,
-       ``BASE``, or ``HEADERS`` (case-insensitive substring match)
-       have their values replaced with ``"[REDACTED]"``.
+       contains any of the shared policy words ``KEY``, ``TOKEN``,
+       ``SECRET``, ``PASSWORD``, ``CREDENTIAL``, ``PRIVATE``, ``PWD``,
+       or ``AUTH`` (case-insensitive substring match; single-sourced
+       at ``daemon/services/env_key_policy.py`` — W2, reviewer council
+       2026-10-02) have their values replaced with ``"[REDACTED]"``.
+       On top of the shared list, the presentation-only extras
+       ``BASE`` and ``HEADERS`` (:data:`REDACT_ONLY_MARKER_WORDS`)
+       are ALSO redacted here — ``*_API_BASE`` pins internal
+       endpoints and ``*_EXTRA_HEADERS`` typically carries
+       ``Authorization`` tokens — but they are deliberately NOT
+       write-gate words (``BYOK_BASE_URL`` is a legal non-secret
+       write via ``mcp_set_env``).
        Non-sensitive env keys such as ``MY_MCP_LOG_LEVEL`` and
        ``MY_MCP_TRANSPORT`` are preserved intact.
 
@@ -212,13 +225,18 @@ def redact_secrets(config: dict) -> dict:
             if not isinstance(env_key, str):
                 continue
             upper_key = env_key.upper()
-            # ``BASE`` covers ``*_API_BASE`` (endpoint URL);
-            # ``HEADERS`` covers ``*_EXTRA_HEADERS`` (HTTP headers dict that
-            # typically carries Authorization tokens). Trade-off: ``BASE`` may
-            # over-redact future vars like ``DATABASE_BASE_PATH`` — acceptable
-            # for now since no such env vars exist in any registered builtin
-            # or user-defined MCP server.
-            if any(marker in upper_key for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD", "BASE", "HEADERS")):
+            # Shared policy words (W2) + the two presentation-only
+            # extras. ``BASE`` covers ``*_API_BASE`` (endpoint URL);
+            # ``HEADERS`` covers ``*_EXTRA_HEADERS`` (HTTP headers dict
+            # that typically carries Authorization tokens). Trade-off:
+            # ``BASE`` may over-redact future vars like
+            # ``DATABASE_BASE_PATH`` — acceptable for now since no such
+            # env vars exist in any registered builtin or user-defined
+            # MCP server.
+            if any(
+                marker in upper_key
+                for marker in (*SECRET_MARKER_WORDS, *REDACT_ONLY_MARKER_WORDS)
+            ):
                 env[env_key] = "[REDACTED]"
 
     # Defense-in-depth: strip userinfo from ``config["url"]`` if present.

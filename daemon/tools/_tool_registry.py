@@ -162,8 +162,9 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # bash/proc-capable agent gain process-group authority by default; the
 # global kill-switch ``ENSEMBLE_SERVICE_TOOL_ENABLED=0`` remains the
 # unconditional off. ``service`` no longer qualifies as
-# daemon-internal authority and was moved out of this UNION; the trio
-# is still triple-pinned below.
+# daemon-internal authority and was moved out of this UNION; the set
+# is still exact-pinned below (now a quartet: ``ens-env`` joined per
+# the W4 leader decision, reviewer council 2026-10-02).
 #
 # SAME-PR RULE (D18/A14): the set is TRIPLE-pinned by exact-equality
 # asserts. Adding or removing a category REQUIRES updating ALL THREE
@@ -171,12 +172,21 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # ``tests/unit/tools/test_upgrade_registration.py``,
 # ``tests/unit/tools/test_attestation_registration.py``, and
 # ``tests/integration/test_maintenancer_spawn_resolves_tools.py``.
+# (Plus the integration sanity pin in
+# ``tests/integration/test_service_tool_flag_off_byte_identical.py``.)
 # Silent additions and silent removals (fail-open regressions) both
 # trip the pins.
 PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
     "ens-db",
+    # W4 (leader decision, reviewer council 2026-10-02): ``ens-env``
+    # is a KEY-RETURNING tool (``ens_env_read`` returns live env
+    # values) — the empty-allow inherit universe must NOT auto-grant
+    # it. Explicit ``tools.allow: ["ens-env"]`` opt-in (worker's
+    # meta.json entry) remains the only access path; privileged
+    # default-deny makes that structural instead of conventional.
+    "ens-env",
 })
 
 
@@ -608,6 +618,20 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # the MODULE, so all three factory tools are picked up here
     # regardless of their per-tool category attribute.
     "snapshot": "daemon.tools.snapshot_tools",
+    # ens-env category (Stage 1 of the OpenDesign self-provisioning
+    # chain, feature/od-self-provisioning, 2026-10-02) — single-tool
+    # category exposing ``ens_env_read`` so the install-opendesign
+    # worker skill can self-read the ensemble's live LLM connection
+    # values for the BYOK reuse contract. IN
+    # ``PRIVILEGED_TOOL_CATEGORIES`` since the W4 leader decision
+    # (reviewer council 2026-10-02): ``ens_env_read`` is
+    # key-returning, so the empty-allow inherit universe must NOT
+    # grant it — access requires an explicit ``tools.allow:
+    # ["ens-env"]`` entry (worker carries it). See
+    # ``daemon/tools/ens_env_tools.py`` module docstring for the full
+    # contract (source-of-truth = env, no redaction in result,
+    # audit-only log, PB-F1 checkpoint exposure scope).
+    "ens-env": "daemon.tools.ens_env_tools",
 }
 
 
@@ -679,6 +703,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "ens_db_pool_status",
     "ens_db_postgres_select",
     "ens_db_repair_execute",
+    "ens_env_read",
     "ens_system_log_list",
     "ens_system_log_read",
     "ens_system_log_search",
@@ -741,6 +766,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "list_instances",
     "list_missions",
     "list_watched_jobs",
+    "mcp_set_env",
     "mid_flight_report",
     "pause_instance",
     "plane_sync_project",

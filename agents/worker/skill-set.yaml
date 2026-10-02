@@ -1,14 +1,15 @@
 agent_id: worker
 skills:
   - name: install-opendesign
-    version: "1.2.0"
+    version: "1.3.0"
     auto_load: false
     category: execution
-    description: "Provision the OpenDesign MCP server via the daemon configure-builtin route (P3-WP5 §7 bootstrap) — pre-flight capability_check, KMS-marker-only secrets, [resume]-convention consumer; v1.2.0 adds 5-stage end-to-end verification contract (daemon health → seam → tool surface → credentials readiness → od_generate_design smoke) with idempotent verify-only fast path"
+    description: "Provision the OpenDesign MCP server via the daemon configure-builtin route (P3-WP5 §7 bootstrap) — pre-flight capability_check, KMS-marker-only secrets, [resume]-convention consumer; v1.3.0 adds fully self-provisioning agent tools (ens_env_read → mcp_set_env → kms_attach(env_source=...) env-ref bridge for BYOK_API_KEY → od_generate_design smoke), 5-stage end-to-end verification contract (daemon health → seam → tool surface → credentials readiness → smoke) with idempotent fast path + restart-durability tracking (LANE-2 env-ref markers restart-durable; LANE-1 KMS-Lite handles still restart-drained with self-heal)"
     requires:
       tools:
         - bash
-        - instance
+        - infra
+        - ens-env
       env: []
   - name: opendesign-verify
     version: "1.0.0"
