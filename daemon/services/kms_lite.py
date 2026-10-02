@@ -74,14 +74,29 @@ logger = logging.getLogger(__name__)
 #: byte-match the regex below.
 KMS_MARKER_PREFIX = "__KMS_REF__"
 
+#: Prefix for the ENV-REF sentinel marker — the LANE-2 marker type used
+#: by ``kms_attach(env_source=...)`` to record "resolve this slot from
+#: the daemon's ``os.environ[<VAR>]`` at spawn time". Visually and
+#: lexically distinct from :data:`KMS_MARKER_PREFIX` (``__KMS_REF__`` vs
+#: ``__KMS_ENV__``) so the two lanes are greppably separable. Carries
+#: NO secret material at rest (only the var name); plaintext exists
+#: ONLY in the daemon's environment and surfaces ONLY in the spawn-time
+#: subprocess env (mirroring the LANE-1 ``__KMS_REF__`` invariant).
+KMS_ENV_MARKER_PREFIX = "__KMS_ENV__"
+
 #: Suffix closing a marker. Symmetric to :data:`KMS_MARKER_PREFIX`.
 KMS_MARKER_SUFFIX = "__"
+
+#: Suffix closing an env-ref marker. Same ``__`` closer as
+#: :data:`KMS_MARKER_SUFFIX` for consistency; the prefixes
+#: differentiate the two lanes unambiguously.
+KMS_ENV_MARKER_SUFFIX = "__"
 
 #: Handle namespace — emitted by :func:`kms_request` and embedded in
 #: :data:`KMS_MARKER_PREFIX` + handle + :data:`KMS_MARKER_SUFFIX` markers.
 KMS_HANDLE_PREFIX = "KMS_HANDLE_"
 
-#: Regex matching a full marker value. Used by
+#: Regex matching a full KMS handle marker value. Used by
 #: :func:`daemon.services.kms_resolver.resolve_env` to split marker
 #: payloads from non-marker plaintext values.
 KMS_MARKER_RE = (
@@ -89,6 +104,20 @@ KMS_MARKER_RE = (
     + __import__("re").escape(KMS_MARKER_PREFIX)
     + r"(" + __import__("re").escape(KMS_HANDLE_PREFIX) + r"[A-Za-z0-9_-]+)"
     + __import__("re").escape(KMS_MARKER_SUFFIX)
+    + "$"
+)
+
+#: Regex matching a full ENV-REF marker value (``__KMS_ENV__<VAR>__``).
+#: Variable name must be a plain env-var identifier
+#: (uppercase letters / digits / underscore, must start with a letter
+#: or underscore) — the same shape ``os.environ`` keys take on POSIX.
+#: Used by :func:`daemon.services.kms_resolver.resolve_env` to split
+#: env-ref payloads from plaintext and from LANE-1 handle markers.
+KMS_ENV_MARKER_RE = (
+    "^"
+    + __import__("re").escape(KMS_ENV_MARKER_PREFIX)
+    + r"([A-Za-z_][A-Za-z0-9_]*)"
+    + __import__("re").escape(KMS_ENV_MARKER_SUFFIX)
     + "$"
 )
 
@@ -491,3 +520,41 @@ def build_marker(handle: str) -> str:
             f"build_marker: handle must start with {KMS_HANDLE_PREFIX!r}"
         )
     return f"{KMS_MARKER_PREFIX}{handle}{KMS_MARKER_SUFFIX}"
+
+
+def build_env_marker(var_name: str) -> str:
+    """Build the ENV-REF sentinel marker for a given env-var name.
+
+    The marker is the value stored in ``mcp_servers.config.env[<KEY>]``
+    by ``kms_attach(env_source=<var_name>, ...)``. The resolver at
+    :func:`daemon.services.kms_resolver.resolve_env` substitutes the
+    marker to ``os.environ[<var_name>]`` at spawn time. Plaintext is
+    NEVER carried in the stored marker — only the var name.
+
+    Args:
+        var_name: The name of the daemon-process env var to resolve at
+            spawn time. Must be a valid POSIX env-var identifier
+            (uppercase letters / digits / underscore, leading
+            letter-or-underscore). Empty / whitespace / malformed
+            identifiers raise :class:`ValueError` — this is the
+            CALLER-side gate; the resolver performs a presence check at
+            spawn time and fail-closed on a missing var.
+
+    Returns:
+        The env-ref marker string ``"__KMS_ENV__<VAR>__"``.
+    """
+    if not isinstance(var_name, str) or not var_name:
+        raise ValueError(
+            "build_env_marker: var_name must be a non-empty string"
+        )
+    if not var_name[0].isalpha() and var_name[0] != "_":
+        raise ValueError(
+            f"build_env_marker: var_name must start with a letter or "
+            f"underscore (got {var_name!r})"
+        )
+    if not all(c.isalnum() or c == "_" for c in var_name):
+        raise ValueError(
+            f"build_env_marker: var_name must contain only letters, "
+            f"digits, or underscores (got {var_name!r})"
+        )
+    return f"{KMS_ENV_MARKER_PREFIX}{var_name}{KMS_ENV_MARKER_SUFFIX}"

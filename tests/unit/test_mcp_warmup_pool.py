@@ -668,6 +668,140 @@ class TestKMSEnvResolution:
         assert kms_resolver.is_marker(forwarded_env["OPENDESIGN_TOKEN"]) is False
 
 
+# ---------------------------------------------------------------------------
+# v1.3.0-bridge LANE-2 env-ref marker — stdio spawn-time resolution
+# (feature/od-self-provisioning)
+#
+# Same spawn seam as TestKMSEnvResolution above, but for the env-ref
+# marker type ``__KMS_ENV__<VAR>__`` which points at the daemon
+# process's ``os.environ[<VAR>]``. The plaintext exists ONLY in the
+# daemon's process env (not in any KMS store) and surfaces ONLY in
+# the subprocess env at spawn time. The fixture pins a test env var
+# via ``monkeypatch.setenv`` — the resolver reads ``os.environ``
+# FRESH per call.
+# ---------------------------------------------------------------------------
+
+
+class TestEnvRefMarkerStdioResolution:
+    @pytest.mark.asyncio
+    async def test_env_ref_marker_resolves_at_spawn_time(
+        self, pool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A LANE-2 env-ref marker (``__KMS_ENV__OPENAI_API_KEY__``)
+        stored in ``config.env`` resolves to ``os.environ["OPENAI_API_KEY"]``
+        at the spawn seam and is forwarded to ``StdioServerParameters``
+        as the plaintext — never as the literal marker string."""
+        from daemon.services import kms_resolver
+        from daemon.services.kms_lite import build_env_marker
+
+        # Pin the var the resolver reads at spawn time.
+        plaintext = "sk-test-plaintext-DO-NOT-LEAK"
+        monkeypatch.setenv("OPENAI_API_KEY", plaintext)
+
+        marker = build_env_marker("OPENAI_API_KEY")
+
+        config = McpStdioConfig(
+            transport="stdio",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            env={"BYOK_API_KEY": marker},
+        )
+        pool.register_server("opendesign", config)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=None)
+        mock_session.send_ping = AsyncMock()
+
+        with patch(
+            "daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=mock_cm
+        ), patch(
+            "daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session
+        ), patch(
+            "daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock
+        ) as mock_tools, patch(
+            "daemon.mcp.warmup_pool.adapt_mcp_tools"
+        ) as mock_adapt, patch(
+            "daemon.mcp.warmup_pool.resolve_env",
+            side_effect=kms_resolver.resolve_env,
+        ) as mock_resolve_env, patch(
+            "daemon.mcp.warmup_pool.StdioServerParameters",
+            wraps=__import__("mcp").StdioServerParameters,
+        ) as mock_params:
+            mock_tools.return_value = [MagicMock()]
+            mock_adapt.return_value = [MagicMock()]
+
+            await pool._create_pooled_connection("opendesign")
+
+        # resolve_env was called with the stored marker dict.
+        mock_resolve_env.assert_called_once_with({"BYOK_API_KEY": marker})
+
+        # StdioServerParameters received the RESOLVED env — the literal
+        # marker was substituted with ``os.environ[<VAR>]``.
+        mock_params.assert_called_once()
+        forwarded_env = mock_params.call_args.kwargs.get("env")
+        assert forwarded_env is not None
+        assert forwarded_env["BYOK_API_KEY"] == plaintext
+        # The marker is gone — the plaintext was forwarded.
+        assert kms_resolver.is_marker(forwarded_env["BYOK_API_KEY"]) is False
+        assert kms_resolver.is_env_marker(forwarded_env["BYOK_API_KEY"]) is False
+
+    @pytest.mark.asyncio
+    async def test_env_ref_marker_missing_var_fails_at_spawn_time(
+        self, pool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fail-closed invariant: a LANE-2 marker whose named var
+        is absent from ``os.environ`` raises ``KMSMarkerResolutionError``
+        at spawn time. The literal marker MUST NOT reach the subprocess
+        env. ``_create_pooled_connection`` propagates the error."""
+        from daemon.services.kms_lite import build_env_marker
+        from daemon.services.kms_resolver import KMSMarkerResolutionError
+
+        monkeypatch.delenv("MISSING_AT_SPAWN", raising=False)
+
+        marker = build_env_marker("MISSING_AT_SPAWN")
+
+        config = McpStdioConfig(
+            transport="stdio",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            env={"BYOK_API_KEY": marker},
+        )
+        pool.register_server("opendesign", config)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=None)
+        mock_session.send_ping = AsyncMock()
+
+        with patch(
+            "daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=mock_cm
+        ), patch(
+            "daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session
+        ), patch(
+            "daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock
+        ) as mock_tools, patch(
+            "daemon.mcp.warmup_pool.adapt_mcp_tools"
+        ) as mock_adapt:
+            mock_tools.return_value = [MagicMock()]
+            mock_adapt.return_value = [MagicMock()]
+
+            with pytest.raises(KMSMarkerResolutionError) as excinfo:
+                await pool._create_pooled_connection("opendesign")
+
+        # The error names the VAR — never the literal marker.
+        assert "MISSING_AT_SPAWN" in str(excinfo.value)
+        assert marker not in str(excinfo.value)
+
+
 class TestWarmup:
     """Tests for warmup method."""
 

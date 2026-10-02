@@ -18,10 +18,14 @@ v1.3.0 REPLACES v1.2.0's two-step ceremony (observe the marker, ask
 the user, follow up) with **fully self-provisioning agent tools**:
 the skill reads the daemon's live LLM connection values via
 `ens_env_read` and writes the OpenDesign MCP BYOK fields via
-`mcp_set_env` + `kms_request` + `kms_attach`. No user prompt for
+`mcp_set_env` + `kms_attach(env_source=...)`. No user prompt for
 credentials — the keys are already there (per user directive
 2026-10-02: "BYOK values come from the system .env; no new key
-material").
+material"). The `kms_request` + `kms_attach(handle=...)` flow
+remains the right tool for self-minted opaque credentials (e.g.
+`OD_API_TOKEN` for non-loopback OD installs); the v1.3.0-bridge
+completion replaces ONLY the `BYOK_API_KEY` lane with the env-ref
+mode.
 
 The end-to-end verification contract (daemon health → seam → tool
 surface → credentials readiness → `od_generate_design` smoke) is
@@ -56,7 +60,7 @@ audit trail logs `keys_requested=N result_size=N missing=N` only).
 |----------------|---------------------------|-----------------------------|-------------------|------------------------------------|
 | `BYOK_BASE_URL`| `OPENAI_BASE_URL`         | `OPENAI_BASE_URL` ✓         | YES (`OPENAI_BASE_URL`) | `mcp_set_env` (plaintext)     |
 | `BYOK_MODEL`   | `OPENAI_MODEL_VISION` if concrete, else literal `"vision"` | `OPENAI_MODEL_VISION` ✓     | (not present)     | `mcp_set_env` (plaintext)          |
-| `BYOK_API_KEY` | `OPENAI_API_KEY`          | `OPENAI_API_KEY` ✓          | YES (`OPENAI_API_KEY`)  | `kms_request` → `kms_attach` (MARKER) — see §"Known gap" |
+| `BYOK_API_KEY` | `OPENAI_API_KEY`          | `OPENAI_API_KEY` ✓          | YES (`OPENAI_API_KEY`)  | `kms_attach(env_source=...)` (ENV-REF) — see §"BYOK_API_KEY — env-ref attach" |
 | `BYOK_PROVIDER`| derived (`"openai"` if BYOK_BASE_URL contains `/v1`) | n/a                  | n/a               | `mcp_set_env` (plaintext, optional) |
 | `OD_DAEMON_URL`| default `http://127.0.0.1:7456` | n/a                    | n/a               | `configure-builtin` default (no write needed) |
 
@@ -80,42 +84,78 @@ the install report, the journal, or the user-visible message.
 report. The single legitimate plaintext surface for the resolver is
 the MCP subprocess env at spawn time (`kms_resolver.resolve_env`).
 
-### Known gap — `BYOK_API_KEY` does NOT carry `OPENAI_API_KEY` plaintext
+### BYOK_API_KEY — env-ref attach (v1.3.0 bridge, RESOLVED)
 
-**This is the most important paragraph in this skill.** The user
-directive says "BYOK_API_KEY ← OPENAI_API_KEY (via KMS marker,
-never plaintext)" — but the **current `kms_request(service, reason)`
-implementation mints a fresh random token internally**
-(`daemon/services/kms_lite.py:219`: `plaintext =
-secrets.token_urlsafe(32)`). The tool's signature does NOT accept
-an external plaintext parameter; the caller never sees the
-plaintext. Consequently, **a `kms_request` → `kms_attach` flow for
-`BYOK_API_KEY` produces a marker that resolves to a KMS-minted
-opaque token — NOT to the live install's `OPENAI_API_KEY` value.**
+The v1.3.0 SKILL ships the env-ref bridge for `BYOK_API_KEY`: the
+minted-handle lane (`kms_request` → `kms_attach(handle=...)`) is
+PRESERVED for its original purpose (per-credential minting with
+random opaque tokens — e.g. `OD_API_TOKEN` for non-loopback OD
+installs), but `BYOK_API_KEY` no longer needs a fresh random token.
+The skill uses the env-ref mode of `kms_attach` instead:
 
-**Therefore `Stage 5` `od_generate_design` smoke is expected to fail
-with HTTP 401/403 (`invalid API key`) from the BYOK upstream** —
-this is the v1.3.0 contract; the failure is the correct signal that
-the bridging commission has not yet landed. The skill does NOT
-fall back to plaintext; it emits the standard BLOCKED-ON-CREDENTIALS
-envelope and names the follow-up commission owed.
+```
+kms_attach(server_id=<id from 3c>, env_key="BYOK_API_KEY",
+            env_source="OPENAI_API_KEY")
+# → {"server_id": ..., "env_key": "BYOK_API_KEY",
+#    "env_source": "OPENAI_API_KEY",
+#    "marker": "__KMS_ENV__OPENAI_API_KEY__"}
+```
 
-**Follow-up owed (separate commission — NOT in scope of this skill
-type):** either (a) extend `kms_request` to accept an optional
-external plaintext (`kms_request(service, reason, plaintext=None)`
-— mint-and-store or ingest-and-store), OR (b) add an env-passthrough
-mode where a sentinel handle (`__KMS_REF__OPENAI_API_KEY__`) is
-recognised by the resolver as "look up OPENAI_API_KEY in
-`os.environ` at spawn time", OR (c) add a `mcp_set_env_secret` lane
-(parallel to `mcp_set_env` but for secrets) that bypasses the
-secret-shape rejection. The skill author here picks (a) as the
-smallest-diff option; the project owner chooses.
+The marker `__KMS_ENV__OPENAI_API_KEY__` is written into
+`config.env["BYOK_API_KEY"]`. The binding entry is appended to
+`instance_metadata.env_refs` (new list, mirroring `bound_handles`'s
+audit-substrate semantics at `infra.py:998-1050`). The plaintext
+`OPENAI_API_KEY` value is NEVER read or returned by the tool — the
+caller passes only the var NAME. `kms_attach` performs an eager
+presence check on the named var (`os.environ` membership) and refuses
+with `ERROR: ENV_VAR_NOT_FOUND` if the var is absent (so the
+caller learns the misconfiguration at attach time, not at next
+spawn). The resolver at `daemon/services/kms_resolver.py`
+substitutes the marker to `os.environ["OPENAI_API_KEY"]` at spawn
+time (mirroring the LANE-1 `__KMS_REF__<HANDLE>__` substitution).
+Plaintext lives in the subprocess env only — in-RAM, never stored.
 
-The KMS-Lite marker mechanism, the resolver seam, the audit
-discipline, and the redaction filter (PB-F1) all remain intact —
-only the ingest path for an external plaintext is missing. The
-BYOK_BASE_URL + BYOK_MODEL halves of the mapping work end-to-end
-today (this is the part the v1.3.0 skill verifies successfully).
+**Why env-ref instead of mint-and-store:** the user directive
+(2026-10-02) explicitly says "BYOK values come from the system
+.env; no new key material" — and `kms_request` cannot ingest an
+external plaintext today (it mints a fresh `secrets.token_urlsafe(32)`
+internally). Env-ref reuses the existing daemon env without
+modifying the input.
+
+**Why env-ref instead of `mcp_set_env` for the plaintext:** the
+leader policy keeps `mcp_set_env` rejecting secret-shaped KEY NAMES
+(any value containing KEY/TOKEN/SECRET/PASSWORD — see the
+`_env_key_is_secret_shaped` gate at `infra.py:1146-1158`). That
+rejection is the load-bearing fence against plaintext credentials
+crossing the agent tool boundary in tool-results and LangGraph
+checkpoints (PB-F1 family). Env-ref bypasses that gate in a
+CONTROLLED way — the marker carries the var NAME, not the value, so
+the plaintext only materialises at the spawn seam (the same seam the
+LANE-1 marker path uses).
+
+**Restart durability:** env-ref markers are restart-DURABLE. The
+binding is the var name (`__KMS_ENV__OPENAI_API_KEY__`); the
+resolver reads `os.environ["OPENAI_API_KEY"]` fresh on every spawn.
+A daemon restart does NOT drain the binding — as long as the env
+var is still set in the daemon's process env, the next spawn
+resolves it to the (current) plaintext. **This is the key
+durability difference vs. the minted-handle lane** — see §"Fast-path
+KMS-Lite restart-drain check" below for the (still preserved)
+restart-drain semantics on the minted-handle lane.
+
+**Marker-clobber trap (still applies):** a later `configure-builtin`
+run regenerates the row's `config` from the builtin schema payload
+and can drop env keys — including env-ref markers, exactly like
+LANE-1 KMS markers. The install path runs `configure-builtin` FIRST
+and `mcp_set_env` / `kms_attach` SECOND so a subsequent reconfigure
+triggers a re-apply. The agent-lane re-apply discipline is
+identical for both lanes.
+
+The KMS-Lite marker mechanism, the LANE-1 secret-shape rejection,
+the resolver seam, the audit discipline, and the redaction filter
+(PB-F1) all remain intact. The single addition is the env-ref lane
+(parallel to LANE-1, not replacing it) and the corresponding
+`__KMS_ENV__<VAR>__` marker shape in the resolver.
 
 ## Idempotency contract (v1.2.0 preserved)
 
@@ -136,29 +176,49 @@ The fast path exists because every mutation here writes to a row
 the host may already have configured — re-writing on every probe
 would race with concurrent installers and could clobber a marker.
 
-### Fast-path KMS-Lite restart-drain check (v1.3.0 NEW)
+### Fast-path restart-drain check (v1.3.0 env-ref durable, LANE-1 drained)
 
-KMS-Lite is **IN-MEMORY**: every daemon restart drains every
-handle. The verify-only fast path MUST detect a dead marker and
-self-heal rather than fail:
+v1.3.0 ships TWO marker lanes with DIFFERENT restart durability:
 
-1. After `capability_check("opendesign")` returns `present`, look
-   at the seam row's `instance_metadata.bound_handles` (the row
-   is read via the same `/api/mcp-servers/<id>` GET the v1.2.0
-   Stage 4 verification uses; the marker handle is recorded there).
-2. For each `bound_handles` entry, call
-   `kms_lookup_handle(handle=<handle>)`. A
-   `{"fingerprint": "..."}` response = marker is alive;
-   `ERROR: HANDLE_NOT_FOUND` = marker is dead (post-restart).
-3. **For any dead marker, fall through to the install path** even if
-   `capability_check` says `present`. The install path runs
-   `kms_request` (mints a NEW handle) and `kms_attach` (binds the
-   new handle, removing the dead binding in the collapse path) —
-   the marker is restored. The fast path is fast ONLY when both the
-   row AND the KMS-Lite marker are alive.
-4. Document the restart-drain behaviour in the final report so
-   operators understand why a "fast" fast-path exit did not occur on
-   a post-restart probe.
+* **LANE-2 env-ref markers (`__KMS_ENV__<VAR>__`)** — restart-DURABLE.
+  The binding is the var name; the resolver reads
+  `os.environ[<VAR>]` fresh on every spawn. A daemon restart does
+  NOT drain the binding — as long as the env var is still set in
+  the daemon process env, the next spawn resolves it to the current
+  plaintext. The fast path DOES NOT need to self-heal env-ref
+  markers.
+
+* **LANE-1 KMS-Lite handles (`__KMS_REF__<HANDLE>__`)** — KMS-Lite is
+  **IN-MEMORY**: every daemon restart drains every handle. The
+  verify-only fast path MUST detect a dead LANE-1 marker and
+  self-heal (unchanged from v1.2.0):
+
+  1. After `capability_check("opendesign")` returns `present`, look
+     at the seam row's `instance_metadata.bound_handles` (the row
+     is read via the same `/api/mcp-servers/<id>` GET the v1.2.0
+     Stage 4 verification uses; the marker handle is recorded
+     there).
+  2. For each `bound_handles` entry, call
+     `kms_lookup_handle(handle=<handle>)`. A
+     `{"fingerprint": "..."}` response = marker is alive;
+     `ERROR: HANDLE_NOT_FOUND` = marker is dead (post-restart).
+  3. **For any dead LANE-1 marker, fall through to the install
+     path** even if `capability_check` says `present`. The install
+     path runs `kms_request` (mints a NEW handle) and `kms_attach`
+     (binds the new handle, removing the dead binding in the
+     collapse path) — the marker is restored. The fast path is
+     fast ONLY when both the row AND the LANE-1 KMS-Lite markers
+     are alive. (LANE-2 env-ref markers are NEVER dead — they are
+     re-resolved at spawn.)
+  4. Document the restart-drain behaviour in the final report so
+     operators understand why a "fast" fast-path exit did not
+     occur on a post-restart probe.
+
+The `odendesign` install uses ONLY LANE-2 env-ref markers for
+BYOK_API_KEY today (the v1.3.0 contract), so the self-heal step
+in (3) rarely fires for the BYOK seam. It is preserved here
+verbatim because the LANE-1 lane still exists and other installs
+(e.g. non-loopback OD with `OD_API_TOKEN`) use it.
 
 ## End-to-end verification — five stages (v1.2.0 preserved, adapted)
 
@@ -286,23 +346,26 @@ Per-field checks:
 | `OD_DAEMON_URL` | yes  | plaintext URL                                          |
 | `BYOK_BASE_URL` | yes  | plaintext URL                                          |
 | `BYOK_MODEL`    | yes  | plaintext model identifier                             |
-| `BYOK_API_KEY`  | yes  | `__KMS_REF__KMS_HANDLE_<uuid>__` marker ONLY — never plaintext |
+| `BYOK_API_KEY`  | yes  | `__KMS_ENV__OPENAI_API_KEY__` env-ref marker ONLY (v1.3.0 LANE-2) — never plaintext |
 
 If ANY field is missing or malformed, the skill must COLLECT/GUIDE — not
 fail silently. The skill reports EXACTLY which fields are missing and
 the EXACT provisioning command (from the install path's Step 3 below).
-`BYOK_API_KEY` must be provisioned via KMS attach (the
-`__KMS_REF__<handle>__` marker) — plaintext is FORBIDDEN anywhere
-in the stored config, in logs, in tool-results, in checkpoints
-(P3-WP10 redaction covers KMS-registered plaintexts only — see §Fences).
+`BYOK_API_KEY` must be provisioned via `kms_attach(env_source=...)`
+(the `__KMS_ENV__<VAR>__` env-ref marker) — plaintext is FORBIDDEN
+anywhere in the stored config, in logs, in tool-results, in checkpoints
+(P3-WP10 redaction covers KMS-registered plaintexts only — see
+§Fences; LANE-2 env-ref markers carry no secret material at rest, so
+the redaction filter is unnecessary on this lane).
 
 **Marker-clobber trap (documented, v1.3.0 explicit caveat):** a later
 `configure-builtin` run regenerates the row's `config` from the
-builtin schema payload and can drop env keys — including KMS
+builtin schema payload and can drop env keys — including BOTH
+`__KMS_REF__<HANDLE>__` (LANE-1) AND `__KMS_ENV__<VAR>__` (LANE-2)
 markers. Agent-lane writers must re-apply env (and re-attach
-handles) after any reconfigure. The HTTP lane's install-audit and
-idempotency rails protect the HTTP lane; the agent lane owns its
-own re-apply.
+handles / re-bind env-refs) after any reconfigure. The HTTP lane's
+install-audit and idempotency rails protect the HTTP lane; the
+agent lane owns its own re-apply.
 
 **Read-back redaction reminder:** `BYOK_BASE_URL` reads back
 `[REDACTED]` through the HTTP API (presentation-layer redaction —
@@ -310,17 +373,21 @@ own re-apply.
 `redact_secrets` helper at `daemon/routers/mcp_servers.py`). This
 is EXPECTED — verify the key IS present (its slot is non-empty);
 verify the value via the Stage 5 round-trip, not by reading the
-field. `BYOK_API_KEY` reads back as a marker (`__KMS_REF__…__`)
-which is the correct evidence that the KMS attach landed.
+field. `BYOK_API_KEY` reads back as an env-ref marker
+(`__KMS_ENV__<VAR>__`) which is the correct evidence that the
+`kms_attach(env_source=...)` call landed. (Older installs may
+carry a `__KMS_REF__<HANDLE>__` LANE-1 marker in this slot —
+that path is preserved as a back-compat read.)
 
 ### Stage 5 — `od_generate_design` end-to-end smoke
 
 A real generation call against the daemon with the BYOK seam
-populated. With the v1.3.0 self-provisioning flow, BYOK_BASE_URL and
-BYOK_MODEL are bridged directly; for `BYOK_API_KEY` the
-bridging-gape behaviour is **expected and documented** (see §"Known
-gap" above). Stage 5 PASS criterion differs by which path the
-flow took:
+populated. The v1.3.0 env-ref bridge resolves `BYOK_API_KEY` from
+`os.environ["OPENAI_API_KEY"]` at spawn time — the upstream
+should authenticate and return a real HTML payload. Stage 5 PASS
+criterion is the same regardless of which marker lane carried the
+seam (LANE-2 env-ref for `BYOK_API_KEY`, LANE-1 KMS marker for
+`OD_API_TOKEN` if the non-loopback case is exercised):
 
 ```bash
 OD_DAEMON_URL="${OD_DAEMON_URL:-http://127.0.0.1:7456}" \
@@ -342,13 +409,15 @@ EOF
 **Smoke FAIL — report the exact error verbatim:**
 
 - HTTP 401/403 / `"invalid API key"` from the upstream byok →
-  **EXPECTED** when the live install's `OPENAI_API_KEY` is not
-  bridged into the KMS marker (see §"Known gap"). Emit
-  `BLOCKED-ON-CREDENTIALS` with
-  `detection_evidence="byok_api_key_marker_resolves_to_opaque_token_not_openai_api_key"`
-  and `resume_hint="commission_kms_register_or_oidc_passthrough"`.
-  This is NOT a skill failure — the mechanism completed; the
-  bridging is owed to a separate commission.
+  genuine configuration error. The most likely cause is that
+  `OPENAI_API_KEY` is unset in the daemon's process env (an
+  eager `ERROR: ENV_VAR_NOT_FOUND` would have surfaced at attach
+  time too). Verify via the daemon's `ps` env (e.g.
+  `cat /proc/<pid>/environ | tr '\0' '\n' | grep OPENAI_API_KEY` —
+  present as the `KEY_NAME=…` tuple, not the value). If the var
+  is set but still 401s, the issue is upstream-side (key revoked,
+  wrong account, quota exhausted) — diagnose via the upstream
+  portal, not via this skill.
 - `"BYOK not configured: missing BYOK_BASE_URL/BYOK_API_KEY/BYOK_MODEL"`
   → Stage 4 not met; honest-stop, NOT a skill failure.
 - Tool timeout or daemon-side error → FAIL. Report the JSON-RPC error
@@ -366,11 +435,6 @@ Result: opendesign capability present — 5/5 verification stages PASS
   Stage 4 (credentials):         PASS (4/4 fields populated; BYOK_API_KEY marker)
   Stage 5 (generate smoke):      PASS (HTML payload produced, N bytes)
 ```
-
-If Stages 1-4 PASS and Stage 5 returns the expected `invalid API
-key` from the upstream byok (the KMS marker-bridging limitation),
-emit the standard `BLOCKED-ON-CREDENTIALS` envelope (Step 6) with
-`detection_evidence` naming the follow-up commission owed.
 
 Any FAIL → emit the `installed_but_unconfigured` envelope (Step 6)
 with the failed stage's `detection_evidence`.
@@ -537,8 +601,8 @@ Important behavioral notes:
 - The tool accepts server NAME (resolves first) or server ID
   (id fallback). The first call uses the name `"opendesign"`.
 - The tool MERGES env into existing `config.env` — never
-  replaces. `__KMS_REF__` markers written by `kms_attach`
-  are preserved.
+  replaces. `__KMS_REF__` and `__KMS_ENV__` markers written by
+  `kms_attach` are preserved.
 - The tool REJECTS secret-shaped KEY NAMES (any key whose name
   has KEY/TOKEN/SECRET/PASSWORD as a substring). It will return
   `ERROR: SECRET_SHAPED_KEY` for `BYOK_API_KEY` — that is the
@@ -564,57 +628,70 @@ round-trip). If the schema refuses `BYOK_PROVIDER`, drop it
 silently (the field is optional; `od_generate_design` works
 without it).
 
-### 3d — Mint + attach `BYOK_KEY` via `kms_request` → `kms_attach`
+### 3d — Attach `BYOK_API_KEY` via `kms_attach(env_source=...)` (v1.3.0 env-ref lane)
 
-This is the BYOK_API_KEY lane. **Critical (documented §"Known
-gap" above):** `kms_request` mints a fresh random plaintext
-internally — the marker produced resolves to an opaque token,
-NOT to the live install's `OPENAI_API_KEY`. The v1.3.0 contract
-runs this anyway so the plumbing is verifiable; Stage 5 is expected
-to `invalid API key` from the upstream byok for that reason.
-The skill DOES NOT FALL BACK TO PLAINTEXT.
+The BYOK_API_KEY env-ref lane. The minted-handle lane
+(`kms_request` → `kms_attach(handle=...)`) is documented in
+§"BYOK_API_KEY — env-ref attach" above and remains the right tool
+for self-minted opaque credentials (e.g. `OD_API_TOKEN` on a
+non-loopback OD install). For `BYOK_API_KEY` the env-ref mode
+reuses the existing daemon env without minting new key material
+(per user directive 2026-10-02).
 
 Call sequence:
 
 ```
-kms_request(service="opendesign", reason="BYOK_API_KEY for opendesign MCP self-provisioning (v1.3.0)")
-# → {"handle": "KMS_HANDLE_<uuid>", "fingerprint": "<sha256[:16]>"}
+kms_attach(server_id=<id from 3c>, env_key="BYOK_API_KEY",
+            env_source="OPENAI_API_KEY")
+# → {"server_id": ..., "env_key": "BYOK_API_KEY",
+#    "env_source": "OPENAI_API_KEY",
+#    "marker": "__KMS_ENV__OPENAI_API_KEY__"}
 ```
 
-The tool returns the handle + fingerprint; the plaintext never
-crosses the tool boundary. Audit lane logs the key name only.
+The tool accepts exactly one of `handle` / `env_source` (passing
+both or neither returns `ERROR: INVALID_ARGUMENT` — read the
+kms_attach full doc at `infra.py` for the contract). For
+env-ref mode:
 
-```
-kms_attach(server_id=<id from 3c>, handle=<handle>,
-            env_key="BYOK_API_KEY")
-# → {"server_id": ..., "handle": ..., "env_key":
-#  "BYOK_API_KEY", "fingerprint": ..., "marker":
-#  "__KMS_REF__KMS_HANDLE_<uuid>__"}
-```
+- The marker `__KMS_ENV__OPENAI_API_KEY__` is written into
+  `config.env["BYOK_API_KEY"]`. Existing keys + any prior
+  `__KMS_REF__` markers (LANE-1, from a prior install run) are
+  preserved by the read-fresh→merge→write pattern (R1 invariant,
+  same as `mcp_set_env`).
+- The binding entry `{env_key: "BYOK_API_KEY", env_source:
+  "OPENAI_API_KEY", actor: <current_instance_id>}` is appended
+  to `instance_metadata.env_refs` (new list, mirroring
+  `bound_handles`'s audit-substrate semantics). Idempotent:
+  same `(env_source, env_key)` tuple collapses — the existing
+  binding is removed and re-appended with the fresh actor
+  (the binding collapse path mirrors `kms_attach` LANE-1 at
+  `infra.py:1033`).
+- The success result echoes `server_id`, `env_key`,
+  `env_source`, and `marker` only — NEVER a value. The
+  plaintext `OPENAI_API_KEY` is not read by the tool (presence
+  check only, via `os.environ` membership); the resolver at
+  `daemon/services/kms_resolver.py` substitutes it at spawn
+  time.
 
-The marker is written into `config.env["BYOK_API_KEY"]`. The
-binding entry is appended to `instance_metadata.bound_handles`.
-Idempotency: same `(handle, env_key)` tuple collapses — the
-existing binding is removed and re-appended with the fresh
-actor + timestamp (the binding collapse path,
-`kms_attach:1033`). This is the right behaviour for a
-post-restart re-apply (see §"Fast-path KMS-Lite restart-drain
-check" above).
+Failure modes (typed errors, no value echo):
 
-If `kms_request` returns `ERROR: KMS_UNAVAILABLE` the store is
-fail-closed (no `SYSTEM_ENCRYPTION_KEY`). DO NOT fall back to
-plaintext. Report the install as complete-but-unbound: re-run
-`capability_check("opendesign")` — it will return `unconfigured`
-— and emit the envelope in Step 6 with
-`kind="installed_but_unconfigured"`,
-`detection_evidence="kms_key_absent"`,
-`resume_hint="step_after_kms_bind"`.
+- `ERROR: ENV_VAR_NOT_FOUND` — the named var is absent from the
+  daemon's `os.environ`. The var NAME is in the error; the
+  value (if it had been present) is never read. Verify the
+  daemon's `ps` env or `.env`, set the var, and retry.
+- `ERROR: INVALID_ARGUMENT` — `env_source` is not a valid env-var
+  name (the validator at `kms_lite.build_env_marker` — must match
+  `[A-Za-z_][A-Za-z0-9_]*`). Common typos: hyphens, leading
+  digits.
+- `ERROR: INVALID_ARGUMENT` — both `handle` AND `env_source`
+  passed (or neither). The tool does NOT route ambiguity to the
+  wrong lane silently.
+- `ERROR: SERVER_NOT_FOUND` — `server_id` does not resolve.
 
-If `kms_attach` returns `ERROR: HANDLE_NOT_FOUND` the stored
-handle is unknown to the KMS store (e.g. daemon restarted and
-the day-1 in-memory store was drained — see §"Fast-path
-KMS-Lite restart-drain check"). Re-mint via `kms_request` and
-re-attach. Do NOT fall back to plaintext.
+**Do NOT fall back to plaintext** if env-ref fails. The
+fall-back would cross the same PB-F1 boundary the leader
+policy exists to prevent. Honest-stop with the typed error and
+let the operator diagnose.
 
 ### 3e — Verify the seam
 
@@ -648,13 +725,13 @@ does not, treat the install as failed per the tri-state you got:
   `kind="capability_missing"` with the HTTP evidence.
 
 Run the five-stage end-to-end verification one more time. Stages
-1-4 PASS → the BYOK seam is wired correctly. Stage 5 — if
-"invalid API key" from the upstream byok, that is the EXPECTED
-v1.3.0 signal (the bridging gap; see §"Known gap"); emit
-`BLOCKED-ON-CREDENTIALS` with the follow-up commission named.
-Any OTHER Stage 5 failure → emit the envelope with the failed
-stage's `detection_evidence` (see §"End-to-end verification — five
-stages" for the per-stage evidence shape).
+1-4 PASS → the BYOK seam is wired correctly. Stage 5 should PASS
+on a healthy install — the env-ref bridge carries the live
+`OPENAI_API_KEY` value to the upstream byok, and
+`od_generate_design` returns a real HTML payload. Any FAIL → emit
+the envelope with the failed stage's `detection_evidence` (see
+§"End-to-end verification — five stages" for the per-stage
+evidence shape).
 
 ## Step 6 — Report via the child-report lane
 
@@ -670,13 +747,15 @@ Result: {"kind": "...", "capability": "opendesign",
 ```
 
 Day-1 kinds you may emit: `capability_missing` (install did not land;
-escalate to spawn/retry the installer),
-`installed_but_unconfigured` (installed; a minted key is not yet
-attached — mint + resume), `blocked_on_credentials` (BYOK_API_KEY
-bridging gap; see §"Known gap" — the bridging commission is owed
-to a separate ticket). `policy_denied` is schema-only and MUST NOT
-be emitted (no policy layer day-1). On FULL success report the
-five-stage verification summary line — the designer reads the
+escalate to spawn/retry the installer), `installed_but_unconfigured`
+(installed; a binding is missing — re-attach env-ref or mint+attach
+and resume). `policy_denied` is schema-only and MUST NOT be emitted
+(no policy layer day-1). `blocked_on_credentials` is preserved in the
+envelope schema for back-compat (older skill versions emitted it for
+the v1.3.0 bridging gap); the v1.3.0-bridge install does NOT emit it
+because the bridge now lands. On FULL success report the five-stage
+verification summary line — the designer reads the capability state
+plus the verification trail, not just the envelope.
 capability state plus the verification trail, not just the envelope.
 
 The daemon writes the §7.4 audit line
@@ -908,6 +987,86 @@ Consumer contract (ANY worker skill consuming a resume):
    `job_continue`).
 
 ## Changelog
+
+### v1.3.0-bridge — env-ref attach for `BYOK_API_KEY` (2026-10-02, pre-release completion, no version bump)
+
+The bridging gap (v1.3.0's "Known gap — `BYOK_API_KEY` does NOT carry
+`OPENAI_API_KEY` plaintext") is resolved in-place. The skill version
+stays at `1.3.0` because this is pre-release completion of the
+1.3.0 contract, not a new feature surface.
+
+**Added (NEW lane documented):**
+
+- `## BYOK_API_KEY — env-ref attach` — the bridge section replacing
+  the "Known gap" section. Documents the new
+  `kms_attach(env_source=...)` mode (LANE-2 env-ref) for the
+  `BYOK_API_KEY` slot. The minted-handle lane (`kms_request` →
+  `kms_attach(handle=...)`, LANE-1) is preserved for its original
+  purpose (per-credential minting for `OD_API_TOKEN` etc.) but no
+  longer used for `BYOK_API_KEY`. Eager `ERROR: ENV_VAR_NOT_FOUND`
+  at attach time catches misconfiguration immediately. Restart-
+  durable (the binding is the var name; the resolver reads
+  `os.environ[<VAR>]` fresh on every spawn).
+
+**Changed:**
+
+- `## BYOK mapping` — `BYOK_API_KEY` row mechanism changed from
+  "kms_request → kms_attach (MARKER)" to "kms_attach(env_source=...)
+  (ENV-REF) — see §'BYOK_API_KEY — env-ref attach'".
+- `## Fast-path KMS-Lite restart-drain check` — clarified to a
+  "restart-drain check" covering BOTH lanes: LANE-2 env-ref markers
+  are restart-DURABLE (no self-heal needed); LANE-1 KMS-Lite
+  handles are restart-fragile and the existing self-heal still
+  applies for non-BYOK_API_KEY slots.
+- `## Step 3 — BYOK self-provisioning via agent tools` — Step 3d
+  rewritten: `kms_attach(env_source=...)` replaces
+  `kms_request` → `kms_attach(handle=...)` for `BYOK_API_KEY`. The
+  `kms_request` + `kms_attach(handle=...)` flow is documented as
+  the right tool for non-loopback `OD_API_TOKEN` minting.
+- `## Stage 5 — od_generate_design smoke` — the
+  "expected HTTP 401/403 invalid API key" split is REMOVED. v1.3.0
+  is the bridged flow; a 401/403 is now a genuine configuration
+  error (most often `OPENAI_API_KEY` not set in the daemon env).
+  The follow-up commission (env-passthrough handle,
+  `kms_register`, or `mcp_set_env_secret`) is RESOLVED.
+- `## Step 5 — Post-install self-check` — the BLOCKED-ON-CREDENTIALS
+  fallback for the bridging gap is removed; Stages 1-5 must all PASS
+  for a healthy install.
+- `## Verification summary line` — the "Stages 1-4 PASS / Stage 5
+  expected to fail" split is removed.
+- `## Step 6 — Report` — `blocked_on_credentials` is preserved in the
+  envelope schema for back-compat but the v1.3.0-bridge install does
+  not emit it.
+- `## Step 3c` — marker-preservation note updated from
+  "`__KMS_REF__` markers preserved" to "`__KMS_REF__` and
+  `__KMS_ENV__` markers preserved" — both lanes are co-owned.
+
+**Removed:**
+
+- `## Known gap — BYOK_API_KEY does NOT carry OPENAI_API_KEY
+  plaintext` — the bridging gap section. The bridging is RESOLVED.
+  The follow-up commission (`kms_register` ingest, env-passthrough
+  handle, or `mcp_set_env_secret`) is owed to this branch and is
+  merged.
+
+**Preserved (v1.3.0):**
+
+- `## BYOK mapping` precedence rule (`OPENAI_MODEL_VISION` concrete
+  wins else literal `"vision"`).
+- PB-F1 discipline (no plaintext in any report, log, tool-result, or
+  checkpoint; `ens_env_read` values stay in the LLM's working
+  context only).
+- The full `## End-to-end verification — five stages` framework —
+  only Stage 5's PASS criteria changed.
+- The full `## Idempotency contract` — the verify-only fast path is
+  unchanged.
+- The marker-clobber trap caveat (a later `configure-builtin` run
+  drops env keys including markers — applies to BOTH lanes).
+- All fences intact: no Docker, no apt/system packages, no plaintext
+  secrets anywhere, no env-var values in any report.
+- The full `## Daemon source-build install (Linux, user-space, no
+  Docker)` section verbatim (no changes — the self-install
+  procedure for the OD daemon itself).
 
 ### v1.3.0 — Self-provisioning via agent tools (2026-10-02)
 
