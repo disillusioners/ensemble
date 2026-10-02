@@ -207,6 +207,8 @@ Phase-5 tests `TestDstSemantics` (phase-5 §Task 1.2) **parameterize over BOTH p
 - (+) Terminal fallback uses `datetime.timezone.utc` (cannot fail on stripped containers).
 - (-) Operators wanting different semantics (e.g., fire twice on fall-back, or fire at the post-DST 01:30) cannot get them without forking croniter or adding a wrapper. Documented as a non-goal; one-shot anchor helper is the explicit extension point.
 
+**Amendment (2026-10-02, post-review on `95931aae`):** The original premise of this ADR — "delegate DST handling to `croniter>=3.0.0` for the cron path" — was invalidated by the empirical F2 evidence recorded in `.agents/tester/RESULTS/2026-10-02-scheduled-tasks-independent-validation-RESULTS.md`: croniter 6.0.0 emits a phantom 05:00 EDT double-fire on the 2026-03-08 spring-forward day and silently skips/late-fires on the 2026-11-01 fall-back day. The landed semantic (post-review, commit 10) is: **cron path** = OUR re-anchoring via `daemon.util.tz.anchor_local_to_utc` with `fold_preference="post"` (UTC-continuity rationale: one fire per local wall-clock HH:MM, monotonic in UTC); **one-shot path** unchanged (`fold=0 / "pre"`). Deviation authorized under the tester's escape clause ("document whichever behavior you land"); the phrase "delegate to croniter default" in this ADR is hereby superseded for the cron path. Post-hardening guard: a monotonic check in `compute_next_cron_fire` skips-and-advances when re-anchoring produces a phantom on/before `after_aware` — closes the hypothetical broken-croniter same-date loop.
+
 ---
 
 ## ADR-009: Registration Correctness Proven by Tests; No Daemon Restart (D7, D9)

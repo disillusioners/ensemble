@@ -545,13 +545,30 @@ def compute_next_cron_fire(
         after_aware: tz-aware datetime (typically ``datetime.now(tz)``).
         tz: IANA timezone of the schedule.
 
+    Note:
+        ``after_aware`` is re-anchored into ``tz`` via ``astimezone``
+        before the croniter call. A UTC-aware start with a non-UTC
+        ``tz`` would otherwise let croniter preserve the input's
+        tzinfo and produce self-consistent garbage on fold/gap days
+        (post-review hardening, 2026-10-02).
+
     Returns:
-        The next fire's tz-aware datetime in ``tz``, or ``None``.
+        The next fire's tz-aware datetime in ``tz``, or ``None`` on
+        miss/advance (croniter parse failure, phantom not strictly
+        later than ``after_aware``, etc. — caller falls back to a
+        fresh from-now computation).
     """
     try:
         from croniter import croniter as _croniter
     except ImportError:
         return None
+
+    # Post-review hardening (Finding 4, 2026-10-02): normalize
+    # ``after_aware`` into ``tz`` so croniter sees a start whose
+    # tzinfo matches the schedule's intent. Without this, a UTC-aware
+    # start with a NY tz is preserved verbatim by croniter and the
+    # roundtrip phantom check operates in a different frame.
+    after_aware = after_aware.astimezone(tz)
 
     try:
         cron = _croniter(cron_expr, after_aware)
@@ -605,15 +622,20 @@ def compute_next_cron_fire(
     # literal hour/minute on the phantom's date (post-DST).
     parsed = _parse_cron_hour_minute(cron_expr)
     if parsed is None:
-        # Non-literal cron expression — fall back to the croniter
+        # Non-literal cron expression — fall back to the re-anchored
         # emission (loud, not silent — operator-visible regression risk).
+        # Note (Finding 3, 2026-10-02): log the RETURNED value, not
+        # ``candidate_aware`` — the function actually returns
+        # ``anchored`` here, which differs from the croniter emission
+        # on fold/gap days. Misleading the operator about what was
+        # dispatched is a fold-day triage hazard.
         logger.warning(
             "tz.compute_next_cron_fire: phantom detected but cron "
             "expression %r is not literal-int-parseable (uses lists, "
-            "ranges, or steps in hour/minute); returning croniter "
+            "ranges, or steps in hour/minute); returning re-anchored "
             "emission %s as best-effort. DST-correct fires on this "
             "expression are NOT guaranteed.",
-            cron_expr, candidate_aware.isoformat(),
+            cron_expr, anchored.isoformat(),
         )
         return anchored
 
@@ -635,4 +657,20 @@ def compute_next_cron_fire(
             phantom_naive, tz, exc,
         )
         return anchored
+    # Post-review monotonic guard (Finding 1, 2026-10-02): the
+    # recovered phantom must be STRICTLY later than ``after_aware``.
+    # A hypothetical broken-croniter same-date emission that the
+    # re-anchor maps back to an instant on/before the start would
+    # otherwise dispatch a tight loop (next fire in the past → caller
+    # schedules "now" → next fire still in the past → loop). Follow
+    # the function's existing miss/advance convention (return None
+    # per lines 554/564 — caller falls back to a fresh from-now
+    # computation).
+    if recovered <= after_aware:
+        logger.warning(
+            "tz.compute_next_cron_fire: recovered %s is not strictly "
+            "after after_aware=%s; advancing past phantom fire",
+            recovered.isoformat(), after_aware.isoformat(),
+        )
+        return None
     return recovered

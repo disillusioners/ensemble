@@ -193,3 +193,82 @@ class TestResolveTimeZoneChain:
         assert isinstance(zone, dt_timezone)
         assert not isinstance(zone, ZoneInfo)
         assert "UTC" in warning
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestComputeNextCronFireMonotonicGuard:
+    """Post-review monotonic guard for ``compute_next_cron_fire`` (commit 10).
+
+    The guard skips-and-advances when re-anchoring recovers a phantom
+    on/before ``after_aware`` — closes the hypothetical broken-croniter
+    same-date tight-loop (a phantom past instant would cause the caller
+    to schedule "now", which still lands in the past, ad infinitum).
+    Pins the function's miss/advance signal: ``None`` return per the
+    existing convention (croniter parse failure at line 564) so the
+    caller falls back to a fresh from-now computation.
+    """
+
+    def test_same_date_phantom_advances_and_logs_warning(
+        self, monkeypatch, caplog,
+    ):
+        """Force the phantom path: first croniter() emits a same-date
+        phantom, roundtrip emits a different time, the recovery path
+        re-anchors back to 06:00 (BEFORE the 07:00 start) → guard fires.
+        """
+        import logging
+
+        import croniter as _croniter_module
+
+        from daemon.util.tz import compute_next_cron_fire
+
+        ny = ZoneInfo("America/New_York")
+        call_count = {"i": 0}
+
+        class _PhantomCroniterFake:
+            """Stand-in for ``croniter.croniter`` that emits the
+            same-date phantom on the first ``get_next`` and a
+            different instant on the roundtrip — driving the recovery
+            path that the guard sits at the end of.
+
+            The unit under test is OUR guard against a hypothetical
+            broken croniter; patching ``croniter`` HERE is legitimate.
+            """
+
+            def __init__(self, expr, start):
+                call_count["i"] += 1
+                self._index = call_count["i"]
+
+            def get_next(self, ret_type):
+                if self._index == 1:
+                    # Phantom: 06:00 EST on Feb 15, 2026 = 11:00 UTC.
+                    return datetime(2026, 2, 15, 6, 0, tzinfo=ny)
+                # Roundtrip (from candidate - 1s): different time
+                # → roundtrip_emit != candidate_aware → phantom path.
+                return datetime(2026, 2, 15, 14, 0, tzinfo=ny)
+
+        monkeypatch.setattr(_croniter_module, "croniter", _PhantomCroniterFake)
+
+        # 07:00 EST on Feb 15, 2026 = 12:00 UTC — AFTER the phantom's
+        # 06:00. Recovery re-anchors the literal cron HH:MM 06:00 on
+        # the phantom's date → 06:00 EST = 11:00 UTC, which is BEFORE
+        # this start → guard must fire.
+        after_aware = datetime(2026, 2, 15, 7, 0, tzinfo=ny)
+
+        with caplog.at_level(logging.WARNING, logger="daemon.util.tz"):
+            result = compute_next_cron_fire("0 6 * * *", after_aware, ny)
+
+        # 1. Function signals miss/advance via None (existing convention).
+        assert result is None
+        # 2. Both croniter() invocations happened (main + roundtrip).
+        assert call_count["i"] == 2
+        # 3. Guard log token — phrased so incident triage can grep.
+        guard_warnings = [
+            r for r in caplog.records
+            if "advancing past phantom fire" in r.getMessage()
+        ]
+        assert guard_warnings, (
+            f"expected monotonic-guard warning, got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
