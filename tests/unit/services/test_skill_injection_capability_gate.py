@@ -214,7 +214,7 @@ def make_capability_service(
             raise mcp_lookup_side_effect
         return mcp_lookup_return
 
-    def tools_allow_fn():
+    def tools_allow_fn(instance_id: str | None = None):
         return list(tools_allow) if tools_allow is not None else []
 
     def env_lookup_fn():
@@ -455,7 +455,7 @@ class TestNoGateWhenNoRequirement:
         with_gate_service.set_capability_gate(
             requirement_lookup=lambda _s: None,
             mcp_lookup=lambda _c: None,
-            tools_allow=lambda: [],
+            tools_allow=lambda _instance_id: [],
             env_lookup=lambda: {},
         )
 
@@ -658,7 +658,7 @@ class TestMultiCapabilityOrdering:
                 mcp=["opendesign", "jira"]
             ),
             mcp_lookup=mcp_lookup,
-            tools_allow=lambda: [],
+            tools_allow=lambda _instance_id: [],
             env_lookup=lambda: {},
         )
 

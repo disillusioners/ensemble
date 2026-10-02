@@ -99,7 +99,9 @@ def _mcp_row(name: str = "opendesign", **kwargs) -> McpLookupResult:
 
 
 def _make_tools_allow(*names: str):
-    def lookup() -> list[str]:
+    def lookup(instance_id: str | None = None) -> list[str]:
+        # instance_id is ignored — tests don't care about the
+        # receiving instance; the helper just returns a fixed list.
         return list(names)
     return lookup
 
@@ -340,7 +342,7 @@ class TestCapabilityCheckMissing:
         assert result.state == "missing"
         assert "unset" in result.detection_evidence
 
-    def test_aggregate_no_present_returns_mcp_miss(self):
+    def test_aggregate_empty_tools_allow_returns_tools_present(self):
         # F1 fix (2026-10-02): empty tools.allow now means "inherit/default
         # universe" — matches resolve_tool_filter empty-allow+empty-deny
         # semantics (instance.py:322-327). The aggregate therefore sees the

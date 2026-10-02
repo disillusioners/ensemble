@@ -3756,52 +3756,84 @@ class InstanceManager:
             )
 
         # ── tools_allow / env_lookup ──────────────────────────────
-        # Both are simple snapshots. ``tools_allow`` defaults to an
-        # empty list when agent meta isn't loaded (the resolver treats
-        # that as ``missing`` for every tool); ``env_lookup`` snapshots
-        # ``os.environ`` at lookup time (the resolver never mutates it).
-        def _tools_allow() -> list[str]:
-            """Return the agent's effective ``tools.allow`` list.
+        # ``tools_allow`` resolves the active instance's effective
+        # ``tools.allow`` list. The closure accepts an ``instance_id``
+        # so it can look up the right agent meta via ``get_registry``
+        # (project pattern: ALL meta lookups MUST use ``get_version``
+        # w/ fallback ``get_resolved`` — affects tools.allow).
+        #
+        # F1a wire completion (2026-10-02): the previous hand-wave
+        # (``self.get_agent_meta() if hasattr(self, "get_agent_meta")
+        # else None``) was dead at startup AND at base because
+        # ``get_agent_meta`` does not exist on ``InstanceManager``
+        # (repo-wide grep = 0 hits outside this closure). ``hasattr``
+        # is always False → ``meta`` is always ``None`` → ``[]`` is
+        # returned for every call. The closure therefore ALWAYS
+        # returned ``[]`` regardless of meta load state — exactly the
+        # same broken behavior as before the fix. The skill-injection
+        # pre-flight then mis-translated ``[]`` to "every tool
+        # missing" (the F1b semantics-fix flips that to "inherit
+        # /default universe"), but the empty-list return was still
+        # masking any chance of reading the real agent config.
+        #
+        # This corrected wire looks up the instance's ``agent_id``
+        # via ``_instance_repository`` (the canonical source at
+        # spawn time), then resolves the meta via ``get_version``
+        # (with ``get_resolved`` fallback) — the same pattern every
+        # other meta consumer in the codebase uses (loader.py,
+        # instance.py:_apply_tool_filter, help.py:_get_allowed_tools,
+        # persistence.py, etc.). Per the F1b semantic change, an
+        # empty ``tools.allow`` returns ``state=present`` for every
+        # tool — the empty-list fallback is now a legitimate
+        # "inherit/default universe" signal, not a deny-all bug.
+        def _tools_allow(instance_id: str | None = None) -> list[str]:
+            """Resolve the active agent's ``tools.allow`` list.
 
-            Reads the meta from the resolver's expected interface
-            (duck-typed). Returns an empty list when meta isn't
-            loaded — that's a valid "inherit/default universe" state
-            (the resolver's ``check_tool_capability`` returns
-            ``present`` for every requested tool when the allowlist is
-            empty, matching :func:`daemon.tools.instance.resolve_tool_filter`'s
-            empty-allow + empty-deny semantics — see F1 fix 2026-10-02).
+            Looks up the instance's ``agent_id`` (via
+            ``_instance_repository`` — canonical source at spawn
+            time), then reads ``meta.tools.allow`` via
+            ``get_registry().get_version(agent_id, ...)`` with
+            ``get_resolved`` fallback. Returns ``[]`` when:
 
-            F1 fix (2026-10-02): the previous implementation used
-            ``getattr(meta, "tools_allow", None)`` — a non-existent
-            attribute on ``AgentMetadata``. ``AgentMetadata`` exposes
-            the agent's allowlist as ``meta.tools`` (``ToolFilter | None``)
-            with the list at ``meta.tools.allow``. Reading the wrong
-            attribute made the gate ALWAYS return ``[]``, which the
-            pre-flight then mis-translated to "every tool missing"
-            (the original empty-deny-all defect). Both halves of the
-            defect must land together: this wiring fix retrieves the
-            real list, and ``check_tool_capability``'s new empty-allow
-            = inherit/universe branch handles the empty case.
+            * no ``instance_id`` is in scope (skip registry lookup),
+            * the instance row has no ``agent_id`` (corrupt row),
+            * the registry cannot resolve the agent id (unknown),
+            * the agent meta has no ``tools`` field (no filter
+              configured → all tools allowed under F1b),
+            * the meta's ``tools.allow`` is None (treated as
+              "no restriction" under F1b; not deny-all).
+
+            Returns the actual ``tools.allow`` list (possibly empty)
+            when the agent meta IS resolved. The F1b semantic change
+            in :func:`daemon.services.capability_resolver.check_tool_capability`
+            interprets an empty list as the inherit/default universe
+            — so an empty list here is safe, not the F1 deny-all
+            bug it would have been pre-fix.
             """
             try:
-                # Read the current agent's meta lazily — the
-                # injector already holds an ``instance_id`` /
-                # ``message_id`` at call time, but those aren't
-                # threaded into the capability gate; we read the
-                # global agent_meta fallback (the manager's
-                # ``get_agent_meta`` accessor) so the gate works
-                # for the common case where one agent is the
-                # current scope. Per-instance meta can be wired in
-                # later (P3 backlog) — the surface is callable
-                # and replaceable.
-                meta = self.get_agent_meta() if hasattr(
-                    self, "get_agent_meta"
-                ) else None
+                if not instance_id:
+                    return []
+                instance_repo = getattr(
+                    self, "_instance_repository", None
+                )
+                if instance_repo is None:
+                    return []
+                row = instance_repo.get(instance_id)
+                if row is None:
+                    return []
+                agent_id = getattr(row, "agent_id", None)
+                if not agent_id:
+                    return []
+                # Project pattern: ALL meta lookups MUST use
+                # ``get_version`` w/ fallback ``get_resolved``
+                # (registry.py header docstring).
+                from .registry import get_registry
+                registry = get_registry()
+                meta = registry.get_version(agent_id) or registry.get_resolved(
+                    agent_id
+                )
                 if meta is None:
                     return []
-                # AgentMetadata exposes allow/deny under ``tools``
-                # (a ToolFilter pydantic model), NOT as
-                # ``tools_allow`` directly. Read the real path.
                 tools_filter = getattr(meta, "tools", None)
                 if tools_filter is None:
                     return []

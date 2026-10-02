@@ -116,7 +116,7 @@ RequirementLookupFn = Callable[[Any], "object | None"]
 # avoid an import cycle (capability_resolver does NOT depend on this
 # module; this module depends on it lazily).
 McpLookupFn = Callable[[str], "object | None"]
-ToolsAllowFn = Callable[[], list[str]]
+ToolsAllowFn = Callable[[str | None], list[str]]
 EnvLookupFn = Callable[[], dict[str, str]]
 
 
@@ -379,7 +379,7 @@ class SkillInjectionService:
             # block and log a warning; never block injection on a
             # resolver fault.
             preflight_block = await self._capability_preflight_block(
-                selected
+                selected, instance_id=instance_id
             )
             routed_injected.append({
                 "skill": selected,
@@ -514,7 +514,9 @@ class SkillInjectionService:
         # BEFORE the formatter; missing/unconfigured → prepend the
         # pre-flight block; resolver failure → log + inject without
         # the block (never block injection on a resolver fault).
-        preflight_block = await self._capability_preflight_block(selected)
+        preflight_block = await self._capability_preflight_block(
+            selected, instance_id=instance_id
+        )
 
         # Stage 3 — format. Explicit injection forces a 1.0
         # score since relevance is presumed (caller asked by
@@ -719,6 +721,7 @@ class SkillInjectionService:
     async def _capability_preflight_block(
         self,
         skill: Any,
+        instance_id: str | None = None,
     ) -> str:
         """Run ``capability_check`` for a skill's declared requirements.
 
@@ -805,6 +808,7 @@ class SkillInjectionService:
                     tools_allow=self._tools_allow,
                     env_lookup=self._env_lookup,
                     capability_kind="mcp",
+                    instance_id=instance_id,
                 )
             except Exception as e:
                 logger.warning(
@@ -822,6 +826,7 @@ class SkillInjectionService:
                     tools_allow=self._tools_allow,
                     env_lookup=self._env_lookup,
                     capability_kind="tools",
+                    instance_id=instance_id,
                 )
             except Exception as e:
                 logger.warning(
@@ -839,6 +844,7 @@ class SkillInjectionService:
                     tools_allow=self._tools_allow,
                     env_lookup=self._env_lookup,
                     capability_kind="env",
+                    instance_id=instance_id,
                 )
             except Exception as e:
                 logger.warning(
