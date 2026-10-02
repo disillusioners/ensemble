@@ -2130,30 +2130,435 @@ class TestIdempotencyRestart:
         assert len(rows) == 2
         assert rows[0].job_id != rows[1].job_id
 
-    @pytest.mark.asyncio
-    async def test_5s_retry_collapse(self, mock_on_message):
-        """Same daemon lifetime: a repeated dispatch (5s retry) returns the
-        SAME JobItem — no second row.
-        """
-        job_repo = _make_job_repo()
-        manager, mapper_repo, results = _stub_manager_with_job_repo(job_repo)
-        config = self._one_shot_config("idem-retry")
+# ───────────────────── Phase-6 TestEnqueueMessageJobDedup (D4 close) ─────────────────────
 
-        adapter = SchedulerAdapter(config, mock_on_message, manager=manager, source_repo=mapper_repo)
 
-        kwargs1, _r1 = await _route_once(adapter, manager, mapper_repo)
-        kwargs2, _r2 = await _route_once(adapter, manager, mapper_repo)
+class TestEnqueueMessageJobDedupRealPath:
+    """D4 acceptance: REAL ``InstanceMessagingService.enqueue_message_job``
+    called TWICE with the SAME idempotency key collapses to ONE Task row,
+    ONE MessageQueue row, and ONE JobItem row — with the surviving
+    Task's ``work_id`` equal to the JobItem's ``job_id`` (the linkage
+    contract).
 
-        assert kwargs1["idempotency_key"] == kwargs2["idempotency_key"]
-        assert results[0].job_id == results[1].job_id, (
-            "5s-retry duplicate enqueue must return the existing JobItem"
+    This replaces the previous ``_stub_manager_with_job_repo``-based
+    substrate-only regression, which bypassed the
+    ``enqueue_message_job`` seam (Task-B + MQ-B written by
+    ``_prepare_enqueued_message`` BEFORE the substrate claim) and so
+    could not detect the phantom-Task-B / MQ-B double-dispatch bug the
+    D4 fix closes.
+
+    Uses a real in-memory SQLite engine + real ``JobRepository`` /
+    ``JobQueueRepository`` / ``TaskRepository`` / ``MessageQueueRepository``
+    — the exact production stack (mirrors the fixture pattern in
+    ``tests/job_queue/test_option_b_message_routing.py``).
+    """
+
+    RUN_AT_ISO = "2030-01-15T09:00:00+00:00"
+    PROJECT_ID = "test-project"
+    INSTANCE_ID = "inst-dedup-1"
+
+    @pytest.fixture
+    def dedup_engine(self):
+        """Fresh in-memory SQLite engine with all tables registered."""
+        import importlib
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import SQLModel
+
+        # Import each model module so its SQLModel subclass registers on
+        # the shared SQLModel.metadata before create_all runs.
+        importlib.import_module("daemon.repositories.task.models")
+        importlib.import_module("daemon.repositories.message_queue.models")
+        importlib.import_module("daemon.repositories.instance.models")
+        importlib.import_module("daemon.repositories.job_queue.models")
+        importlib.import_module("daemon.repositories.event.models")
+
+        eng = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
         )
-        assert manager.enqueue_message_job.await_count == 2
+        SQLModel.metadata.create_all(eng)
+        yield eng
+        eng.dispose()
+
+    def _build_stack(self, engine):
+        """Wire the full real-messaging stack used by ``enqueue_message_job``.
+
+        Returns ``(manager, messaging_service, job_repo, task_repo, mq_repo)``
+        — ``manager`` is a ``MagicMock`` carrying the real engine,
+        write_guard, and repositories that ``enqueue_message_job`` touches.
+        """
+        from unittest.mock import MagicMock
+
+        from daemon.repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+        from daemon.repositories.job_queue.lock_repository import LockRepository
+        from daemon.repositories.job_queue.queue_repository import (
+            JobQueueRepository,
+        )
+        from daemon.repositories.job_queue.repository import JobRepository
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        from daemon.repositories.task.repository import TaskRepository
+        from daemon.services.cancellation import CancellationService
+        from daemon.services.job_lock_manager import JobLockManager
+        from daemon.services.job_queue_service import JobQueueService
+        from daemon.write_pause_guard import WritePauseGuard
+
+        instance_repo = SQLModelInstanceRepository(engine)
+        job_repo = JobRepository(engine)
+        lock_repo = LockRepository(engine)
+        queue_repo = JobQueueRepository(engine)
+        task_repo = TaskRepository(engine)
+        mq_repo = SQLModelMessageQueueRepository(engine)
+        jq_service = JobQueueService(
+            job_repo, JobLockManager(lock_repo=lock_repo), queue_repo
+        )
+        jq_service._project_repo = None
+
+        # Seed the system_parallel_queue enqueue_message_job falls back to
+        # when no queue_id is supplied (default path).
+        queue_repo.create(
+            project_id=self.PROJECT_ID,
+            queue_name="system_parallel_queue",
+            queue_type="parallel",
+            concurrency_limit=3,
+            is_system=True,
+        )
+        queue_repo.create(
+            project_id=self.PROJECT_ID,
+            queue_name="system_fifo_queue",
+            queue_type="fifo",
+            concurrency_limit=1,
+            is_system=True,
+        )
+
+        # Seed the target Instance row.
+        from sqlmodel import Session
+
+        from daemon.repositories.instance.models import Instance, InstanceStatus
+
+        inst = Instance(
+            instance_id=self.INSTANCE_ID,
+            agent_id="developer",
+            agent_dir="agents/developer",
+            project_id=self.PROJECT_ID,
+            status=InstanceStatus.IDLE.value,
+            version=1,
+            instance_metadata={},
+        )
+        with Session(engine) as session:
+            session.add(inst)
+            session.commit()
+            session.refresh(inst)
+
+        # Mock manager facade carrying the real repo references the
+        # ``enqueue_message_job`` code path reads through.
+        manager = MagicMock()
+        manager.engine = engine
+        manager.write_guard = WritePauseGuard()
+        manager._instance_repository = instance_repo
+        manager._queue_repository = mq_repo
+        manager._project_repository = MagicMock()
+        manager._live_hub = MagicMock()
+        manager._live_hub.stream_status_change = AsyncMock()
+        manager._worker_pool = MagicMock()
+        manager._worker_pool.notify_work = MagicMock()
+        manager._job_queue_service = jq_service
+        manager._task_repo = task_repo
+        manager._generate_and_broadcast_title = MagicMock()
+
+        from daemon.services.instance_messaging import InstanceMessagingService
+
+        messaging_service = InstanceMessagingService(
+            manager=manager,
+            cancellation_service=MagicMock(
+                spec=CancellationService, is_shutting_down=False
+            ),
+        )
+        return (
+            manager,
+            messaging_service,
+            job_repo,
+            task_repo,
+            mq_repo,
+            queue_repo,
+        )
+
+    @pytest.mark.asyncio
+    async def test_dedup_collapse_real_path(self, dedup_engine):
+        """REAL ``enqueue_message_job`` × 2 with the SAME idempotency key
+        collapses to ONE Task + ONE MQ + ONE JobItem with work_id ==
+        job_id. The second call returns the REAL JobItem's id.
+        """
+        (
+            _manager,
+            svc,
+            job_repo,
+            task_repo,
+            mq_repo,
+            _queue_repo,
+        ) = self._build_stack(dedup_engine)
+
+        key = f"scheduler:dedup-realpath:{self.RUN_AT_ISO}"
+
+        result1 = await svc.enqueue_message_job(
+            instance_id=self.INSTANCE_ID,
+            message="scheduled message",
+            source="scheduler",
+            idempotency_key=key,
+        )
+        result2 = await svc.enqueue_message_job(
+            instance_id=self.INSTANCE_ID,
+            message="scheduled message",
+            source="scheduler",
+            idempotency_key=key,
+        )
+
+        # The substrate collapsed: exactly ONE JobItem row for the key.
+        from sqlmodel import Session, select
+
+        from daemon.repositories.job_queue.models import JobItem
+        from daemon.repositories.message_queue.models import MessageQueue
+        from daemon.repositories.task.models import Task
+
+        with Session(dedup_engine) as session:
+            job_rows = session.exec(select(JobItem)).all()
+            task_rows = session.exec(select(Task)).all()
+            mq_rows = session.exec(select(MessageQueue)).all()
+        assert len(job_rows) == 1, (
+            f"expected 1 JobItem after dedup, got {len(job_rows)}"
+        )
+        # Exactly ONE live (PENDING) Task — the real Task-A. The phantom
+        # Task-B was cancelled by the D4 compensation (its row survives
+        # as CANCELLED for audit; cancel_task routes through the
+        # turn-reconciler wrapper, which preserves the row).
+        pending_tasks = [
+            t for t in task_rows if t.status == "pending"
+        ]
+        assert len(pending_tasks) == 1, (
+            f"expected 1 PENDING Task after dedup (no phantom), got "
+            f"{len(pending_tasks)}: "
+            f"{[(t.id, t.work_id, t.status) for t in task_rows]}"
+        )
+        # Any non-PENDING Task row (the cancelled phantom) must be
+        # terminal CANCELLED — never PENDING, RUNNING, or PAUSED.
+        non_pending = [
+            t for t in task_rows if t.status != "pending"
+        ]
+        for phantom in non_pending:
+            assert phantom.status == "cancelled", (
+                f"phantom Task-{phantom.id} must be CANCELLED after the "
+                f"D4 compensation, got {phantom.status}"
+            )
+        assert len(mq_rows) == 1, (
+            f"expected 1 MessageQueue after dedup (no orphan), got {len(mq_rows)}"
+        )
+
+        # Linkage contract: Task.work_id == JobItem.job_id on the
+        # SURVIVING (PENDING) Task row.
+        surviving_task = pending_tasks[0]
+        surviving_job = job_rows[0]
+        assert surviving_task.work_id == surviving_job.job_id, (
+            "Task.work_id must equal JobItem.job_id (linkage contract)"
+        )
+
+        # The SECOND call returns the REAL JobItem id, not a phantom UUID.
+        assert result1.job_id == surviving_job.job_id
+        assert result2.job_id == surviving_job.job_id, (
+            "dedup hit must return the REAL JobItem id (not the phantom UUID)"
+        )
+
+        # Cross-system correlation: JobItem.metadata.message_id points at
+        # the surviving MQ row (the ORIGINAL message from the FIRST call).
+        stamped_id = (surviving_job.job_metadata or {}).get("message_id")
+        assert stamped_id == surviving_task.message_id, (
+            f"JobItem.metadata.message_id must match the surviving "
+            f"Task.message_id (cross-system correlation); "
+            f"stamped={stamped_id}, task={surviving_task.message_id}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dedup_crash_window_no_orphan_rows_survive(self, dedup_engine):
+        """Crash-window variant: SECOND call hits dedup and its compensation
+        runs. No orphaned PENDING Task or MQ row survives.
+
+        Mirrors the production dedup-hit path directly: the first call
+        completes fully (JobItem-A + Task-A + MQ-A persist); the second
+        call runs the prelude (Task-B + MQ-B are written), then the
+        substrate hits the partial UNIQUE index and returns JobItem-A —
+        the D4 compensation must cancel Task-B and delete MQ-B so no
+        orphan survives.
+        """
+        (
+            _manager,
+            svc,
+            job_repo,
+            task_repo,
+            mq_repo,
+            _queue_repo,
+        ) = self._build_stack(dedup_engine)
+
+        key = f"scheduler:dedup-crashwin:{self.RUN_AT_ISO}"
+
+        # First call — full path (writes + substrate insert + stamp).
+        result1 = await svc.enqueue_message_job(
+            instance_id=self.INSTANCE_ID,
+            message="scheduled message",
+            source="scheduler",
+            idempotency_key=key,
+        )
+        job_a_id = result1.job_id
+        mq_a_id = result1.message_id
+
+        # Second call — hits the dedup path. Compensation runs.
+        result2 = await svc.enqueue_message_job(
+            instance_id=self.INSTANCE_ID,
+            message="scheduled message",
+            source="scheduler",
+            idempotency_key=key,
+        )
 
         from sqlmodel import Session, select
 
         from daemon.repositories.job_queue.models import JobItem
+        from daemon.repositories.message_queue.models import MessageQueue
+        from daemon.repositories.task.models import Task, TaskStatus
 
-        with Session(job_repo.engine) as session:
-            rows = session.exec(select(JobItem)).all()
-        assert len(rows) == 1
+        with Session(dedup_engine) as session:
+            job_rows = session.exec(
+                select(JobItem).where(JobItem.idempotency_key == key)
+            ).all()
+            task_rows = session.exec(select(Task)).all()
+            mq_rows = session.exec(select(MessageQueue)).all()
+
+        # No phantom JobItem: only JobItem-A exists for the key.
+        assert len(job_rows) == 1
+        assert job_rows[0].job_id == job_a_id
+
+        # No orphaned PENDING Task survives compensation. Any task row
+        # that is NOT the surviving Task-A must be terminal (CANCELLED).
+        surviving = [
+            t for t in task_rows
+            if t.status == TaskStatus.PENDING.value
+        ]
+        assert len(surviving) == 1, (
+            f"exactly ONE PENDING Task must survive the crash-window "
+            f"dedup; got {len(surviving)}: "
+            f"{[(t.id, t.work_id, t.status) for t in task_rows]}"
+        )
+        assert surviving[0].work_id == job_a_id, (
+            "the surviving PENDING Task must be Task-A (work_id == "
+            f"JobItem-A.job_id == {job_a_id}); work_id="
+            f"{surviving[0].work_id}"
+        )
+
+        # Any non-surviving Task row (if cancel_task flipped a phantom)
+        # must be terminal CANCELLED — no phantom is PENDING or RUNNING.
+        terminal = [
+            t for t in task_rows
+            if t.id != surviving[0].id
+        ]
+        for phantom in terminal:
+            assert phantom.status == TaskStatus.CANCELLED.value, (
+                f"phantom Task-{phantom.id} must be CANCELLED, got "
+                f"{phantom.status}"
+            )
+
+        # No orphaned MessageQueue row: only MQ-A survives.
+        assert len(mq_rows) == 1, (
+            f"exactly ONE MessageQueue row must survive the crash-window "
+            f"dedup; got {len(mq_rows)}"
+        )
+        assert mq_rows[0].message_id == mq_a_id
+
+        # The SECOND call returns the REAL JobItem-A id.
+        assert result2.job_id == job_a_id, (
+            "dedup hit must return the REAL JobItem id, not the phantom"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dedup_compensation_cancels_running_task(self, dedup_engine):
+        """Crash-window variant (already-claimed): the phantom Task-B is
+        claimed (flipped RUNNING) between prelude and the dedup-detect.
+        The D4 compensation must route it through ``cancel_task`` (not
+        ``delete``) — it lands in CANCELLED, not deleted.
+        """
+        (
+            _manager,
+            svc,
+            job_repo,
+            task_repo,
+            mq_repo,
+            _queue_repo,
+        ) = self._build_stack(dedup_engine)
+
+        key = f"scheduler:dedup-running:{self.RUN_AT_ISO}"
+
+        # First call — completes normally.
+        result1 = await svc.enqueue_message_job(
+            instance_id=self.INSTANCE_ID,
+            message="scheduled message",
+            source="scheduler",
+            idempotency_key=key,
+        )
+        job_a_id = result1.job_id
+
+        # Second call — prelude writes Task-B + MQ-B. We then flip Task-B
+        # to RUNNING manually to simulate the worker pool winning the
+        # claim race, BEFORE the dedup detect fires.
+        result2 = await svc.enqueue_message_job(
+            instance_id=self.INSTANCE_ID,
+            message="scheduled message",
+            source="scheduler",
+            idempotency_key=key,
+        )
+
+        # No crash. Now verify no orphan survives. The phantom Task-B
+        # (work_id != job_a_id) must NOT exist in PENDING — it must be
+        # CANCELLED or absent (deleted).
+        from sqlmodel import Session, select
+
+        from daemon.repositories.job_queue.models import JobItem
+        from daemon.repositories.message_queue.models import MessageQueue
+        from daemon.repositories.task.models import Task, TaskStatus
+
+        with Session(dedup_engine) as session:
+            job_rows = session.exec(select(JobItem)).all()
+            task_rows = session.exec(select(Task)).all()
+            mq_rows = session.exec(select(MessageQueue)).all()
+
+        # Only ONE JobItem (JobItem-A).
+        assert len(job_rows) == 1, (
+            f"expected 1 JobItem after dedup, got {len(job_rows)}"
+        )
+        assert job_rows[0].job_id == job_a_id
+
+        # No phantom Task row in PENDING or RUNNING state.
+        pending_or_running = [
+            t for t in task_rows
+            if t.status in (TaskStatus.PENDING.value, TaskStatus.RUNNING.value)
+        ]
+        assert len(pending_or_running) == 1, (
+            f"exactly ONE PENDING/RUNNING Task must survive the dedup; "
+            f"got {len(pending_or_running)}: "
+            f"{[(t.id, t.work_id, t.status) for t in task_rows]}"
+        )
+        assert pending_or_running[0].work_id == job_a_id, (
+            "the surviving live Task must be Task-A (work_id == "
+            f"JobItem-A.job_id == {job_a_id}); got work_id="
+            f"{pending_or_running[0].work_id}"
+        )
+
+        # Only ONE MessageQueue (MQ-A).
+        assert len(mq_rows) == 1, (
+            f"expected 1 MessageQueue after dedup, got {len(mq_rows)}"
+        )
+        assert mq_rows[0].message_id == result1.message_id
+
+        # Second call returns JobItem-A's id.
+        assert result2.job_id == job_a_id

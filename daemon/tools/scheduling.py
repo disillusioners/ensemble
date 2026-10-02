@@ -22,6 +22,7 @@ CALLING agent via the factory closure (precedent:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Annotated, Any
 
@@ -201,7 +202,17 @@ def create_scheduling_tools(
             if label is not None:
                 if source_repo is None:
                     return _error("label resolution unavailable: source repository not wired")
-                row = source_repo.get_source_config_by_name(label)
+                # MINOR c (review-2026-10-02): the SQLModel sync call
+                # ``get_source_config_by_name`` blocks the event loop for
+                # the duration of the SQLite/PG round-trip. Wrap in
+                # ``asyncio.to_thread`` so the cancel tool's I/O does not
+                # stall the agent's turn. One-liner — mirrors the
+                # ``to_thread`` discipline in ``daemon/tools/blueprint.py``
+                # and elsewhere; this is the only sync call in the
+                # async cancel tool, hence the targeted scope.
+                row = await asyncio.to_thread(
+                    source_repo.get_source_config_by_name, label
+                )
                 if row is None:
                     return _error(f"No schedule found with label {label!r}")
                 resolved_id = row.source_id

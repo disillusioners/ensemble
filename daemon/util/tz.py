@@ -379,10 +379,21 @@ def anchor_local_to_utc(
         shifted = shifted_naive.replace(tzinfo=tz, fold=1)
         # Verify the shifted instant's wall-clock in tz equals shifted_naive.
         shifted_check = shifted.astimezone(tz).replace(tzinfo=None)
-        assert shifted_check == shifted_naive, (
-            f"tz.anchor_local_to_utc: shifted verification failed "
-            f"(naive={shifted_naive}, tz-roundtrip={shifted_check})"
-        )
+        # MINOR e (review-2026-10-02): the previous ``assert`` here was
+        # silently elided under ``python -O`` (which strips all
+        # assertions), so a DST gap-side math regression would have
+        # produced a wrong fire-time in production without tripping the
+        # verification. Raise ValueError instead — the call site is
+        # already inside a try-shaped caller in ``anchor_local_to_utc``
+        # and the helper is one-shot-only (every wrong call surfaces,
+        # not just optimized builds).
+        if shifted_check != shifted_naive:
+            raise ValueError(
+                f"tz.anchor_local_to_utc: shifted verification failed "
+                f"(naive={shifted_naive}, tz-roundtrip={shifted_check}) "
+                "— DST-gap shift math regression; refusing to anchor an "
+                "unverified wall-clock instant."
+            )
         warning = (
             f"shifted-forward from nonexistent local time "
             f"{naive_local.isoformat()} (gap of {gap_seconds}s) to "
