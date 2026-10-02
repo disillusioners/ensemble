@@ -102,9 +102,20 @@ async def mock_manager():
     mock_repo.get_latest_execution = Mock(return_value=None)
     manager._source_repository = mock_repo
     
-    # Mock source_registry
+    # Mock source registry
     manager.source_registry = None
-    
+
+    # Phase 5 (scheduled-tasks): the phase-3 REST routes reach the shared
+    # scheduling service through ``manager.scheduling_service``. Default the
+    # async seams to None-returning AsyncMocks so the fixture stays INERT for
+    # every pre-existing test (Risk #6, phase5-plan.md); the new classes below
+    # override per-test. (Lazy property on the real manager — a plain
+    # attribute on the Mock is the faithful stand-in.)
+    manager.scheduling_service = MagicMock()
+    manager.scheduling_service.create_schedule = AsyncMock(return_value=None)
+    manager.scheduling_service.cancel_schedule = AsyncMock(return_value=None)
+    manager.scheduling_service.get_schedule = AsyncMock(return_value=None)
+
     yield manager
     
     # Cleanup
@@ -1066,3 +1077,474 @@ class TestStopSchedule:
         assert data["source_id"] == "scheduler-1"
         assert data["status"] == "stopped"
         assert "stopped successfully" in data["message"]
+
+
+# ==================== Phase-5: POST /schedules (create) ====================
+
+
+class TestCreateSchedule:
+    """Tests for POST /api/schedules (phase-3 contract — FLAT REST response, no detail wrapping).
+
+    SKELETON ADAPTATION (binding approver correction (d)): the frozen
+    phase5-plan §Task 2.1 skeleton named this class ``ScheduleCreateSchedule``
+    — missing the ``Test`` prefix pytest requires for collection. Renamed to
+    ``TestCreateSchedule`` and the whole skeleton was swept for the same
+    defect (no other skeleton class name carries it).
+    """
+
+    _BODY = {
+        "source_id": "morning-briefing",
+        "name": "Morning Briefing",
+        "agent_id": "ari",
+        "message": "Give me a morning briefing",
+        "project_id": "default",
+        "recurrence": "daily",
+        "local_time": "06:00",
+        "timezone": "America/New_York",
+    }
+
+    @staticmethod
+    def _service_create_response(**overrides):
+        """Canonical phase-2 ScheduleCreateResponse (the service's return shape)."""
+        from daemon.services.scheduling_service import ScheduleCreateResponse
+
+        values = dict(
+            source_id="morning-briefing",
+            label="Morning Briefing",
+            status="running",
+            next_run_at_local="2026-10-02T06:00:00-04:00",
+            next_run_at_utc="2026-10-02T10:00:00+00:00",
+            tz_warning="",
+        )
+        values.update(overrides)
+        return ScheduleCreateResponse(**values)
+
+    @pytest.mark.asyncio
+    async def test_create_returns_201_with_both_timezones(self, client, mock_manager):
+        mock_manager.scheduling_service.create_schedule = AsyncMock(
+            return_value=self._service_create_response()
+        )
+        response = await client.post("/schedules", json=dict(self._BODY))
+        assert response.status_code == 201
+        data = response.json()
+        # FLAT response — BOTH timezone echoes present.
+        assert data["next_run_at_local"] == "2026-10-02T06:00:00-04:00"
+        assert data["next_run_at_utc"] == "2026-10-02T10:00:00+00:00"
+        assert data["source_id"] == "morning-briefing"
+        assert data["id"] == "morning-briefing"
+        assert data["label"] == "Morning Briefing"
+        assert data["status"] == "running"
+        assert data["tz_warning"] == ""
+
+    @pytest.mark.asyncio
+    async def test_create_maps_rest_names_to_canonical_payload(self, client, mock_manager):
+        """The router builds a FULLY-TYPED canonical payload (ADR-013 F1):
+        label = name or source_id, agent = agent_id, when = local_time."""
+        from daemon.services.scheduling_service import ScheduleCreatePayload
+
+        mock_manager.scheduling_service.create_schedule = AsyncMock(
+            return_value=self._service_create_response()
+        )
+        response = await client.post("/schedules", json=dict(self._BODY))
+        assert response.status_code == 201
+        payload = mock_manager.scheduling_service.create_schedule.await_args.args[0]
+        assert isinstance(payload, ScheduleCreatePayload)
+        assert payload.label == "Morning Briefing"  # name wins over source_id
+        assert payload.agent == "ari"
+        assert payload.when == "06:00"
+        assert payload.timezone == "America/New_York"
+        assert payload.recurrence == "daily"
+        # Caller ids: REST has no calling instance — the audit marker.
+        assert mock_manager.scheduling_service.create_schedule.await_args.kwargs[
+            "caller_instance_id"
+        ] == "rest-api"
+
+    @pytest.mark.asyncio
+    async def test_create_503_when_write_paused(self, client, mock_manager):
+        mock_manager.is_write_paused = True
+        response = await client.post("/schedules", json={
+            "source_id": "x", "agent_id": "ari", "message": "x",
+            "project_id": "default", "recurrence": "once", "run_at": "2026-10-15T06:00:00",
+        })
+        assert response.status_code == 503
+        assert "Writes are paused" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_create_409_on_duplicate_label(self, client, mock_manager):
+        """Phase-2 uniqueness check on the resolved label raises
+        ValueError("label already exists"); handler maps to 409 Conflict."""
+        mock_manager.scheduling_service.create_schedule = AsyncMock(
+            side_effect=ValueError("label already exists: morning-briefing")
+        )
+        response = await client.post("/schedules", json=dict(self._BODY))
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "SCHEDULE_LABEL_CONFLICT"
+
+    @pytest.mark.asyncio
+    async def test_create_422_on_invalid_instance_mode(self, client, mock_manager):
+        """``instance_mode`` is a Literal on the REST model → Pydantic 422."""
+        body = dict(self._BODY, instance_mode="bogus_mode")
+        response = await client.post("/schedules", json=body)
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_create_422_on_missing_cron_expression(self, client, mock_manager):
+        """recurrence=cron without cron_expression → model-validator 422."""
+        body = {
+            "source_id": "cron-missing", "agent_id": "ari", "message": "x",
+            "project_id": "default", "recurrence": "cron",
+        }
+        response = await client.post("/schedules", json=body)
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_create_400_on_other_value_errors(self, client, mock_manager):
+        """Non-label ValueErrors from the service are client input errors → 400."""
+        mock_manager.scheduling_service.create_schedule = AsyncMock(
+            side_effect=ValueError("agent_id ghost does not exist")
+        )
+        response = await client.post("/schedules", json=dict(self._BODY))
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "INVALID_REQUEST"
+
+
+# ==================== Phase-5: GET /schedules/{id} ====================
+
+
+class TestGetScheduleById:
+    """Tests for GET /api/schedules/{schedule_id} (phase-3 contract).
+
+    SKELETON ADAPTATION vs phase5-plan §Task 2.2 case (c): the plan said
+    "400 on non-scheduler source_type", but the LANDED handler delegates to
+    ``scheduling_service.get_schedule``, which resolves ONLY scheduler rows
+    (``_scheduler_row_or_none``) and returns None for everything else — so
+    unknown refs AND non-scheduler rows are both 404 (route docstring pins
+    this). The test asserts the LANDED 404 contract.
+    """
+
+    @staticmethod
+    def _service_detail(**overrides):
+        from daemon.services.scheduling_service import ScheduleDetail
+
+        values = dict(
+            source_id="sched-1",
+            label="sched-1",
+            status="running",
+            recurrence="daily",
+            local_time="06:00",
+            timezone="America/New_York",
+            weekday=None,
+            cron_expression=None,
+            instance_mode="new_instance",
+            next_run_at_local="2026-10-02T06:00:00-04:00",
+            next_run_at_utc="2026-10-02T10:00:00+00:00",
+            agent="ari",
+            project_id="default",
+            last_run_at=None,
+            cancelled_at=None,
+            tz_warning="",
+        )
+        values.update(overrides)
+        return ScheduleDetail(**values)
+
+    @pytest.mark.asyncio
+    async def test_get_returns_200_with_flat_detail(self, client, mock_manager):
+        mock_manager.scheduling_service.get_schedule = AsyncMock(
+            return_value=self._service_detail()
+        )
+        response = await client.get("/schedules/sched-1")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "sched-1"
+        assert data["source_id"] == "sched-1"
+        assert data["label"] == "sched-1"
+        assert data["status"] == "running"
+        assert data["recurrence"] == "daily"
+        assert data["agent_id"] == "ari"
+
+    @pytest.mark.asyncio
+    async def test_get_404_on_missing(self, client, mock_manager):
+        mock_manager.scheduling_service.get_schedule = AsyncMock(return_value=None)
+        response = await client.get("/schedules/ghost")
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "SOURCE_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_get_non_scheduler_row_is_404(self, client, mock_manager):
+        """LANDED contract: the service resolves only scheduler rows — a
+        telegram row (or any unknown ref) is 404, not 400 (see class doc)."""
+        mock_manager.scheduling_service.get_schedule = AsyncMock(return_value=None)
+        response = await client.get("/schedules/telegram-1")
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_get_returns_both_timezone_echoes(self, client, mock_manager):
+        """Both next_run_at_local AND next_run_at_utc — never only one."""
+        mock_manager.scheduling_service.get_schedule = AsyncMock(
+            return_value=self._service_detail()
+        )
+        response = await client.get("/schedules/sched-1")
+        data = response.json()
+        assert data["next_run_at_local"] is not None
+        assert data["next_run_at_utc"] is not None
+
+    @pytest.mark.asyncio
+    async def test_get_cancelled_row_has_cancelled_at_string(self, client, mock_manager):
+        """GET-by-id returns cancelled rows (the "did I actually cancel X?" path,
+        architecture §3.4); ``cancelled_at`` is an ISO string when cancelled."""
+        mock_manager.scheduling_service.get_schedule = AsyncMock(
+            return_value=self._service_detail(
+                status="cancelled", cancelled_at="2026-10-01T20:00:00+00:00",
+                next_run_at_local=None, next_run_at_utc=None,
+            )
+        )
+        response = await client.get("/schedules/sched-1")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "cancelled"
+        assert data["cancelled_at"] == "2026-10-01T20:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_get_running_row_has_null_cancelled_at(self, client, mock_manager):
+        mock_manager.scheduling_service.get_schedule = AsyncMock(
+            return_value=self._service_detail()
+        )
+        response = await client.get("/schedules/sched-1")
+        assert response.json()["cancelled_at"] is None
+
+
+# ==================== Phase-5: DELETE /schedules/{id} (cancel) ====================
+
+
+class TestCancelSchedule:
+    """Tests for DELETE /api/schedules/{schedule_id} — terminal cancel, history preserved.
+
+    SKELETON ADAPTATIONS vs the frozen phase5-plan §Task 2.3 skeleton:
+      * The landed route delegates to the shared service's ATOMIC
+        ``cancel_schedule`` (which itself writes via the atomic repository
+        ``cancel_source_config``); the route never calls the two-call
+        stop-sequence. Assertions pin delegation + history preservation at
+        the route boundary.
+      * Plan case (d) "400 on non-scheduler source_type" → LANDED service
+        resolves only scheduler rows → 404 (same adaptation as
+        TestGetScheduleById).
+    """
+
+    @staticmethod
+    def _service_cancel_response(**overrides):
+        from daemon.services.scheduling_service import ScheduleCancelResponse
+
+        values = dict(
+            source_id="morning-briefing",
+            status="cancelled",
+            cancelled_at="2026-10-01T20:00:00+00:00",
+            last_execution_id=None,
+        )
+        values.update(overrides)
+        return ScheduleCancelResponse(**values)
+
+    @pytest.mark.asyncio
+    async def test_cancel_calls_cancel_schedule_NOT_delete_source_config(self, client, mock_manager):
+        mock_manager.scheduling_service.cancel_schedule = AsyncMock(
+            return_value=self._service_cancel_response()
+        )
+        response = await client.delete("/schedules/morning-briefing")
+        assert response.status_code == 200
+        assert mock_manager.scheduling_service.cancel_schedule.await_count == 1
+        mock_manager._source_repository.delete_source_config.assert_not_called()
+        data = response.json()
+        assert data["source_id"] == "morning-briefing"
+        assert data["status"] == "cancelled"
+        assert data["cancelled_at"] == "2026-10-01T20:00:00+00:00"
+        assert data["last_execution_id"] is None  # §5.3 echo
+        assert "history retained" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_cancel_echoes_last_execution_id(self, client, mock_manager):
+        """Architecture §5.3: the in-flight JobItem is NOT cancellable via
+        schedule-cancel — the response echoes the last execution id so the
+        operator can cancel it directly."""
+        mock_manager.scheduling_service.cancel_schedule = AsyncMock(
+            return_value=self._service_cancel_response(
+                last_execution_id="exec-42"
+            )
+        )
+        response = await client.delete("/schedules/morning-briefing")
+        assert response.status_code == 200
+        assert response.json()["last_execution_id"] == "exec-42"
+
+    @pytest.mark.asyncio
+    async def test_cancel_503_when_write_paused(self, client, mock_manager):
+        mock_manager.is_write_paused = True
+        response = await client.delete("/schedules/morning-briefing")
+        assert response.status_code == 503
+        assert "Writes are paused" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_cancel_404_on_missing(self, client, mock_manager):
+        mock_manager.scheduling_service.cancel_schedule = AsyncMock(
+            side_effect=ValueError("Schedule not found: ghost")
+        )
+        response = await client.delete("/schedules/ghost")
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "SOURCE_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_cancel_409_when_already_cancelled(self, client, mock_manager):
+        """Cancel is TERMINAL — a second cancel is 409 SCHEDULE_ALREADY_CANCELLED."""
+        mock_manager.scheduling_service.cancel_schedule = AsyncMock(
+            side_effect=ValueError("Schedule already cancelled: morning-briefing")
+        )
+        response = await client.delete("/schedules/morning-briefing")
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "SCHEDULE_ALREADY_CANCELLED"
+
+    @pytest.mark.asyncio
+    async def test_cancel_non_scheduler_row_is_404(self, client, mock_manager):
+        """LANDED contract (see TestGetScheduleById): non-scheduler refs → 404."""
+        mock_manager.scheduling_service.cancel_schedule = AsyncMock(
+            side_effect=ValueError("Schedule not found: telegram-1")
+        )
+        response = await client.delete("/schedules/telegram-1")
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_cancel_accepts_label_reference(self, client, mock_manager):
+        """The URL accepts id OR label — the route passes the reference
+        verbatim; the service resolves label→row (phase-3 §1.5)."""
+        mock_manager.scheduling_service.cancel_schedule = AsyncMock(
+            return_value=self._service_cancel_response(source_id="resolved-id-1")
+        )
+        response = await client.delete("/schedules/Morning%20Briefing")
+        assert response.status_code == 200
+        assert (
+            mock_manager.scheduling_service.cancel_schedule.await_args.args[0]
+            == "Morning Briefing"
+        )
+        data = response.json()
+        assert data["id"] == "resolved-id-1"
+
+    @pytest.mark.asyncio
+    async def test_cancel_route_never_touches_repository_writers(self, client, mock_manager):
+        """The route delegates ALL writes to the atomic service — it must not
+        call the repository's status/config writers itself (single-writer
+        seam, architecture §5.4)."""
+        mock_manager.scheduling_service.cancel_schedule = AsyncMock(
+            return_value=self._service_cancel_response()
+        )
+        await client.delete("/schedules/morning-briefing")
+        mock_manager._source_repository.cancel_source_config.assert_not_called()
+        mock_manager._source_repository.update_source_status.assert_not_called()
+        mock_manager._source_repository.update_source_config.assert_not_called()
+
+
+# ==================== Phase-5: GET /schedules list filter ====================
+
+
+class TestScheduleListFilter:
+    """GET /api/schedules cancelled-row visibility (architecture §3.4 / ADR-005).
+
+    SKELETON ADAPTATION vs phase5-plan §Task 2.4: the plan asked to "assert
+    the SQL filter is applied server-side"; the LANDED filter is applied
+    server-side in the ROUTE handler (Python-level skip before
+    serialization), not as a SQL predicate — the observable contract is
+    identical (cancelled rows never appear in the default response payload),
+    so the tests pin the HTTP-observable behavior.
+    """
+
+    @staticmethod
+    def _source(source_id: str, source_type: str, status: str):
+        source = create_scheduler_source(source_id, f"Test {source_id}", {"interval_seconds": 3600})
+        source.source_type = source_type
+        source.status = status
+        return source
+
+    @pytest.mark.asyncio
+    async def test_default_excludes_cancelled(self, client, mock_manager):
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[
+            self._source("s-running", "scheduler", "running"),
+            self._source("s-cancelled", "scheduler", "cancelled"),
+            self._source("t-1", "telegram", "running"),
+        ])
+        response = await client.get("/schedules")
+        assert response.status_code == 200
+        ids = [s["id"] for s in response.json()["schedules"]]
+        assert "s-running" in ids
+        assert "s-cancelled" not in ids
+        assert "t-1" not in ids  # scheduler-only listing
+
+    @pytest.mark.asyncio
+    async def test_include_cancelled_true_returns_cancelled(self, client, mock_manager):
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[
+            self._source("s-running", "scheduler", "running"),
+            self._source("s-cancelled", "scheduler", "cancelled"),
+        ])
+        response = await client.get("/schedules", params={"include_cancelled": "true"})
+        assert response.status_code == 200
+        ids = [s["id"] for s in response.json()["schedules"]]
+        assert "s-running" in ids
+        assert "s-cancelled" in ids
+
+    @pytest.mark.asyncio
+    async def test_include_cancelled_false_excludes_cancelled(self, client, mock_manager):
+        mock_manager._source_repository.list_source_configs = Mock(return_value=[
+            self._source("s-cancelled", "scheduler", "cancelled"),
+        ])
+        response = await client.get("/schedules", params={"include_cancelled": "false"})
+        assert response.status_code == 200
+        ids = [s["id"] for s in response.json()["schedules"]]
+        assert "s-cancelled" not in ids
+
+
+# ==================== Phase-5: /api/sources DELETE guard placement ====================
+
+
+class TestDeleteGuardPlacement:
+    """Phase-3 §Task 4.3 (deferred to this unit) — the /api/sources DELETE
+    cancel-confusion guard (ADR-012, architecture §2 OD-5).
+
+    Placement contract: the scheduler-row guard sits AFTER the get-or-404
+    (unknown ids still 404, NOT 400) and BEFORE any adapter stop / row delete
+    (/api/sources DELETE purges schedule_executions history — scheduler rows
+    must never reach it).
+    """
+
+    @pytest.mark.asyncio
+    async def test_delete_unknown_source_is_404_not_400(self, client, mock_manager):
+        """Guard is AFTER the get-or-404: an unknown id must stay 404."""
+        mock_manager._source_repository.get_source_config = Mock(return_value=None)
+        response = await client.delete("/sources/ghost-source")
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "SOURCE_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_delete_scheduler_source_is_400_with_pointer(self, client, mock_manager):
+        """Scheduler rows are 400 SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED with a
+        pointer at DELETE /api/schedules/{id}; the row is NOT deleted."""
+        scheduler_source = create_scheduler_source(
+            "sched-1", "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"},
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+
+        response = await client.delete("/sources/sched-1")
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["code"] == "SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED"
+        assert "/api/schedules" in data["detail"]["message"]
+        # History preservation: the purge path was never reached.
+        mock_manager._source_repository.delete_source_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_non_scheduler_source_unaffected(self, client, mock_manager):
+        """Non-scheduler rows still delete normally (guard is scheduler-only)."""
+        telegram_source = create_scheduler_source("telegram-1", "Test", {})
+        telegram_source.source_type = "telegram"
+        mock_manager._source_repository.get_source_config = Mock(return_value=telegram_source)
+        mock_manager._source_repository.delete_source_config = Mock(return_value=True)
+        mock_manager.source_registry = None  # no live adapter to stop
+
+        response = await client.delete("/sources/telegram-1")
+        assert response.status_code == 200
+        assert response.json()["deleted"] is True
+        mock_manager._source_repository.delete_source_config.assert_called_once()

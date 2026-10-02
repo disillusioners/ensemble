@@ -1596,3 +1596,564 @@ class TestErrorPaths:
         # After stop, health check should return False
         is_healthy = await adapter.health_check()
         assert is_healthy is False
+
+
+# ==================== Phase-5 TestTzResolution (D2 chain) ====================
+
+
+class TestTzResolution:
+    """D2 default tz chain through the adapter (ADR-002 / architecture §4.3).
+
+    Resolution order: explicit ``config.timezone`` →
+    ``ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE`` (SchedulingConfig.default_timezone)
+    → host-local detection → terminal ``datetime.timezone.utc`` fallback
+    with a loud warning.
+
+    SKELETON ADAPTATIONS vs phase5-plan.md §Task 1 (frozen skeleton):
+      * ``adapter._resolved_tz`` → LANDED attribute is ``adapter._timezone``.
+      * ``ENSEMBLE_SCHEDULING_DEFAULT_TZ`` → LANDED env var is
+        ``ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE`` (field ``default_timezone``
+        + pydantic ``env_prefix="ENSEMBLE_SCHEDULING_"``).
+      * An explicit host-local stub is used so the test is deterministic on
+        any CI host (Risk #8); the module cache is bypassed via
+        ``ENSEMBLE_SCHEDULING_HOST_LOCAL_TZ_CACHE_SECONDS=0`` +
+        ``_cache_clear_for_tests()``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_tz_chain(self, monkeypatch):
+        """Deterministic tz environment: no env default, no TZ, no host cache."""
+        monkeypatch.setenv("ENSEMBLE_SCHEDULING_HOST_LOCAL_TZ_CACHE_SECONDS", "0")
+        monkeypatch.delenv("ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE", raising=False)
+        monkeypatch.delenv("TZ", raising=False)
+        from daemon.util import tz as tz_module
+
+        tz_module._cache_clear_for_tests()
+        yield
+        tz_module._cache_clear_for_tests()
+
+    def test_explicit_tz_wins(self, mock_on_message, monkeypatch):
+        """Step 1: an explicit config ``timezone`` beats the daemon default."""
+        monkeypatch.setenv("ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE", "UTC")
+        config = make_config("tz-explicit", {
+            "schedule": "0 6 * * *",
+            "timezone": "Asia/Tokyo",
+            "agent": "./agents/developer",
+            "message": "x",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+        assert adapter._timezone.key == "Asia/Tokyo"
+
+    def test_env_default_used_when_param_absent(self, mock_on_message, monkeypatch):
+        """Step 2: ``ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE`` applies when the config has no timezone."""
+        monkeypatch.setenv("ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE", "Europe/Berlin")
+        config = make_config("tz-env-default", {
+            "schedule": "0 6 * * *",
+            "agent": "./agents/developer",
+            "message": "x",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+        assert adapter._timezone.key == "Europe/Berlin"
+
+    def test_host_local_used_when_env_absent(self, mock_on_message, monkeypatch):
+        """Step 3: host-local detection applies when neither explicit nor env default is set."""
+        from daemon.util import tz as tz_module
+
+        monkeypatch.setattr(
+            tz_module, "_read_etc_localtime_target", lambda: "Australia/Sydney"
+        )
+        config = make_config("tz-host-local", {
+            "schedule": "0 6 * * *",
+            "agent": "./agents/developer",
+            "message": "x",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+        assert adapter._timezone.key == "Australia/Sydney"
+
+    def test_utc_fallback_warns_loudly(self, mock_on_message, monkeypatch, caplog):
+        """Step 4 (terminal): nothing resolvable → ``datetime.timezone.utc`` + LOUD warning."""
+        import logging
+        from datetime import timezone as _stdlib_tz
+
+        from daemon.util import tz as tz_module
+
+        monkeypatch.setattr(tz_module, "_read_etc_localtime_target", lambda: None)
+        config = make_config("tz-utc-fallback", {
+            "schedule": "0 6 * * *",
+            "agent": "./agents/developer",
+            "message": "x",
+        })
+        with caplog.at_level(logging.WARNING, logger="daemon.util.tz"):
+            adapter = SchedulerAdapter(config, mock_on_message)
+        # Terminal fallback is the stdlib constant, NOT ZoneInfo("UTC").
+        assert adapter._timezone == _stdlib_tz.utc
+        assert any("fell back to UTC" in r.getMessage() for r in caplog.records), (
+            f"expected a loud UTC-fallback warning, got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+
+# ==================== Phase-5 TestDstSemantics (D8, both paths) ====================
+
+
+class _FrozenDatetime(datetime):
+    """``datetime`` subclass with a class-level frozen ``now()``.
+
+    Used to pin the cron path's evaluation instant: the adapter calls
+    ``datetime.now(self._timezone)`` (module-global ``datetime``), so
+    patching ``daemon.sources.adapters.scheduler.datetime`` with this
+    subclass freezes the croniter "now" without touching any other
+    machinery. All inherited arithmetic/comparison semantics are intact.
+    """
+
+    _frozen: datetime | None = None
+
+    @classmethod
+    def now(cls, tz=None):  # noqa: ANN001 — mirrors datetime.now signature
+        if tz is not None:
+            return cls._frozen.astimezone(tz)
+        return cls._frozen
+
+
+class TestDstSemantics:
+    """D8 DST semantics — pinned on BOTH paths (architecture §4.2 / ADR-008):
+
+    (a) cron path: aware datetimes flow into ``croniter>=3.0.0`` with NO
+        manual DST arithmetic; the pinned semantics are croniter's
+        documented defaults — skip-the-gap on spring-forward,
+        FIRST occurrence on fall-back ambiguity.
+    (b) one-shot path: naive local times anchor via
+        ``daemon.util.tz.anchor_local_to_utc`` — fold=0 on ambiguity,
+        shift-forward + loud warning in the gap.
+
+    The 4 tests below are the phase5-plan §Task 1.2 named set; all assert
+    documented behavior — NO ``pytest.skip`` (the pack is the merge gate).
+
+    SKELETON ADAPTATION: the frozen skeleton cites
+    ``daemon.utils.tz.anchor_local_to_utc``; the landed module is
+    ``daemon.util.tz`` (verified: ``daemon/util/tz.py``).
+    """
+
+    NY = "America/New_York"
+
+    def test_dst_spring_forward_gap_cron(self, mock_on_message, monkeypatch):
+        """2026-03-08 02:30 America/New_York does NOT exist.
+
+        Croniter default: skip-the-gap → the daily 02:30 cron fires at
+        03:30 EDT (UTC-4) that day. See phase1-plan.md §Task 8.1 + ADR-008.
+        """
+        import daemon.sources.adapters.scheduler as scheduler_module
+
+        ny = ZoneInfo(self.NY)
+        _FrozenDatetime._frozen = datetime(2026, 3, 8, 1, 0, tzinfo=ny)  # pre-transition EST
+        monkeypatch.setattr(scheduler_module, "datetime", _FrozenDatetime)
+
+        config = make_config("dst-gap-cron", {
+            "schedule": "30 2 * * *",
+            "timezone": self.NY,
+            "agent": "./agents/developer",
+            "message": "x",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+        assert adapter._schedule_type == SchedulerAdapter.SCHEDULE_TYPE_CRON
+
+        next_trigger = adapter._get_next_trigger_time()
+        expected = datetime(2026, 3, 8, 3, 30, tzinfo=ny)
+        assert next_trigger == expected, (
+            f"expected skip-the-gap → {expected.isoformat()}, got {next_trigger}"
+        )
+        # 03:30 EDT = UTC-4 on the post-transition side.
+        assert next_trigger.utcoffset().total_seconds() == -4 * 3600
+
+    def test_dst_fall_back_ambiguity_cron(self, mock_on_message, monkeypatch):
+        """2026-11-01 01:30 America/New_York exists TWICE.
+
+        Croniter default: FIRST occurrence (EDT, UTC-4) — the pre-transition
+        instant, matching the one-shot anchor's fold=0 rule. See ADR-008.
+        """
+        import daemon.sources.adapters.scheduler as scheduler_module
+
+        ny = ZoneInfo(self.NY)
+        _FrozenDatetime._frozen = datetime(2026, 11, 1, 0, 0, tzinfo=ny)  # still EDT
+        monkeypatch.setattr(scheduler_module, "datetime", _FrozenDatetime)
+
+        config = make_config("dst-fold-cron", {
+            "schedule": "30 1 * * *",
+            "timezone": self.NY,
+            "agent": "./agents/developer",
+            "message": "x",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+
+        next_trigger = adapter._get_next_trigger_time()
+        expected = datetime(2026, 11, 1, 1, 30, tzinfo=ny)
+        assert next_trigger == expected, (
+            f"expected first occurrence {expected.isoformat()}, got {next_trigger}"
+        )
+        # First occurrence = EDT = UTC-4 (the fold=1 second occurrence is UTC-5).
+        assert next_trigger.utcoffset().total_seconds() == -4 * 3600
+
+    def test_dst_spring_forward_gap_one_shot_anchor(self):
+        """Nonexistent local time → anchor shifts forward + warns ``shifted-forward``.
+
+        Helper: ``daemon.util.tz.anchor_local_to_utc`` (architecture §4.2;
+        phase1-plan.md §Task 9 + ADR-008).
+        """
+        from daemon.util.tz import anchor_local_to_utc
+
+        ny = ZoneInfo(self.NY)
+        naive = datetime(2026, 3, 8, 2, 30)
+        anchored, warning = anchor_local_to_utc(naive, ny)
+        # Shifted forward by the 1-hour gap to the first valid local time.
+        assert anchored.replace(tzinfo=None) == datetime(2026, 3, 8, 3, 30)
+        assert anchored.utcoffset().total_seconds() == -4 * 3600
+        assert "shifted-forward" in warning
+
+    def test_dst_fall_back_ambiguity_one_shot_anchor(self):
+        """Ambiguous local time → fold=0 (first occurrence, EDT), NO warning."""
+        from daemon.util.tz import anchor_local_to_utc
+
+        ny = ZoneInfo(self.NY)
+        naive = datetime(2026, 11, 1, 1, 30)
+        anchored, warning = anchor_local_to_utc(naive, ny)
+        assert anchored.replace(tzinfo=None) == datetime(2026, 11, 1, 1, 30)
+        # fold=0 → pre-transition offset (EDT, UTC-4), NOT the second -05:00 pass.
+        assert anchored.utcoffset().total_seconds() == -4 * 3600
+        assert anchored.fold == 0
+        assert warning == ""
+
+
+# ==================== Phase-5 TestCatchUpSemantics (D3) ====================
+
+
+class TestCatchUpSemantics:
+    """D3 catch-up rules (ADR-003).
+
+    Landed mechanism: ``_get_next_trigger_time`` returns the
+    ``PAST_LATENESS_CAP`` sentinel for a one-shot past-due beyond
+    ``SchedulingConfig.one_shot_max_lateness_seconds``; the ``_run_schedule``
+    loop branches on it, calls ``_record_skipped_execution`` (a SKIPPED
+    ``schedule_executions`` row) and does NOT dispatch. The schedule stays
+    ARMED (never disabled) so the operator can re-schedule. Cap ``None``
+    (the default) = unlimited = always fire (legacy behavior preserved).
+
+    SKELETON ADAPTATION vs the frozen §Task 1.3 skeleton: the skeleton's
+    "fires on next wake via mock_on_message callback" phrasing assumed a
+    DB-backed loop; the landed adapter-direct seam is the
+    ``_get_next_trigger_time`` return contract + ``_record_skipped_execution``
+    (the same seam the plan's own §Task 1.2 slots target). The DB-backed
+    beyond-cap case runs as the Task 3.3 integration test per the plan.
+    """
+
+    CAP_ENV = "ENSEMBLE_SCHEDULING_ONE_SHOT_MAX_LATENESS_SECONDS"
+
+    def _one_shot_config(self, source_id: str, run_at: datetime):
+        return make_config(source_id, {
+            "run_at": run_at.astimezone(timezone.utc).isoformat(),
+            "agent": "./agents/developer",
+            "message": "x",
+        })
+
+    def test_one_shot_within_cap_fires_late(self, mock_on_message, monkeypatch):
+        """Past-due by 60s with cap=3600 → fires immediately (returns ~now)."""
+        monkeypatch.setenv(self.CAP_ENV, "3600")
+        now = datetime.now(timezone.utc)
+        config = self._one_shot_config("catchup-within", now - timedelta(seconds=60))
+        adapter = SchedulerAdapter(config, mock_on_message)
+        assert adapter._schedule_type == SchedulerAdapter.SCHEDULE_TYPE_ONE_TIME
+
+        next_trigger = adapter._get_next_trigger_time()
+        assert next_trigger is not None
+        assert next_trigger is not SchedulerAdapter.PAST_LATENESS_CAP
+        # Fires NOW (legacy past-due behavior), not at the stale run_at.
+        fire_lag = (next_trigger - now).total_seconds()
+        assert -5.0 <= fire_lag <= 5.0, f"expected an immediate fire, lag={fire_lag}s"
+
+    def test_one_shot_beyond_cap_no_dispatch_with_reason_marker(
+        self, mock_on_message, monkeypatch
+    ):
+        """Past-due by 2h with cap=60s → PAST_LATENESS_CAP sentinel + SKIPPED row + stays armed."""
+        monkeypatch.setenv(self.CAP_ENV, "60")
+        now = datetime.now(timezone.utc)
+        config = self._one_shot_config("catchup-beyond", now - timedelta(seconds=7200))
+        source_repo = MagicMock()
+        adapter = SchedulerAdapter(
+            config, mock_on_message, source_repo=source_repo,
+        )
+
+        next_trigger = adapter._get_next_trigger_time()
+        assert next_trigger is SchedulerAdapter.PAST_LATENESS_CAP
+        # The stash the loop consumes for the skip record.
+        assert adapter._pending_skip_lateness >= 7100
+        assert adapter._pending_skip_cap == 60
+
+        # The loop's skip branch: write the SKIPPED audit row (2-call pattern).
+        adapter._record_skipped_execution(
+            lateness=adapter._pending_skip_lateness, cap=adapter._pending_skip_cap
+        )
+        start_call = source_repo.record_execution_start.call_args
+        assert start_call.kwargs["schedule_id"] == "catchup-beyond"
+        assert start_call.kwargs["instance_id"] is None
+        assert start_call.kwargs["execution_id"].startswith("skipped-")
+        complete_call = source_repo.record_execution_complete.call_args
+        assert complete_call.kwargs["status"] == "skipped"
+        error_message = complete_call.kwargs["error_message"]
+        assert "past_lateness_cap" in error_message
+        assert "cap=60" in error_message
+
+        # Schedule stays ARMED: no disable/status write happened (ADR-003).
+        source_repo.update_source_status.assert_not_called()
+        source_repo.update_source_config.assert_not_called()
+
+    def test_one_shot_default_no_cap_always_fires(self, mock_on_message, monkeypatch):
+        """Cap default ``None`` = unlimited → past-due one-shot fires (legacy behavior)."""
+        monkeypatch.delenv(self.CAP_ENV, raising=False)
+        now = datetime.now(timezone.utc)
+        config = self._one_shot_config("catchup-nocap", now - timedelta(seconds=7200))
+        adapter = SchedulerAdapter(config, mock_on_message)
+
+        next_trigger = adapter._get_next_trigger_time()
+        assert next_trigger is not None
+        assert next_trigger is not SchedulerAdapter.PAST_LATENESS_CAP
+        fire_lag = (next_trigger - datetime.now(timezone.utc)).total_seconds()
+        assert -5.0 <= fire_lag <= 5.0
+
+    def test_cron_skips_missed(self, mock_on_message, monkeypatch):
+        """Cron past-due by hours → NO catch-up fire; the next OCCURRENCE only."""
+        import daemon.sources.adapters.scheduler as scheduler_module
+
+        ny = ZoneInfo("America/New_York")
+        # Today's 02:30 already passed (it's noon); a fire-now would be a catch-up.
+        _FrozenDatetime._frozen = datetime(2026, 3, 8, 12, 0, tzinfo=ny)
+        monkeypatch.setattr(scheduler_module, "datetime", _FrozenDatetime)
+
+        config = make_config("catchup-cron", {
+            "schedule": "30 2 * * *",
+            "timezone": "America/New_York",
+            "agent": "./agents/developer",
+            "message": "x",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+
+        next_trigger = adapter._get_next_trigger_time()
+        assert next_trigger is not None
+        # The missed 02:30 today is NOT re-fired: next occurrence is TOMORROW.
+        assert next_trigger > _FrozenDatetime._frozen
+        assert (next_trigger.date(), next_trigger.hour, next_trigger.minute) == (
+            datetime(2026, 3, 9).date(), 2, 30
+        )
+
+
+# ==================== Phase-5 TestIdempotencyRestart (D4) ====================
+
+
+def _make_job_repo():
+    """A real in-memory ``JobRepository`` over just the ``job_queue_items`` table.
+
+    Used as the atomic D4 substrate: ``JobQueueService.enqueue`` claims a key
+    via ``JobRepository.create_or_get_by_idempotency_key`` (the partial UNIQUE
+    index ``idx_job_idempotency``); funneling the adapter's emitted key through
+    the SAME repository method proves the at-most-one-row guarantee without
+    booting the full service stack.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+
+    from daemon.repositories.job_queue.models import JobItem
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    JobItem.__table__.create(engine, checkfirst=True)
+    from daemon.repositories.job_queue import JobRepository
+
+    return JobRepository(engine)
+
+
+def _stub_manager_with_job_repo(job_repo):
+    """Manager stub whose ``enqueue_message_job`` funnels into the REAL
+    ``create_or_get_by_idempotency_key`` (the exact atomic claim the
+    production ``JobQueueService.enqueue`` path makes for keyed enqueues).
+    Returns ``(manager, mapper_repo, results)`` — ``results`` collects the
+    stub's return objects (each carries the substrate-assigned ``job_id``).
+    """
+    import uuid
+
+    manager = MagicMock()
+    mapper_repo = MagicMock()
+    mapper_repo.get_instance_mapping = MagicMock(return_value=None)
+    manager.spawn_instance_with_mcp = AsyncMock(return_value="inst-idem-1")
+    results: list = []
+
+    async def _enqueue(**kwargs):
+        key = kwargs.get("idempotency_key")
+        job, _created = job_repo.create_or_get_by_idempotency_key(
+            agent_id="developer",
+            agent_dir="/agents/developer",
+            message=kwargs.get("message", "x"),
+            source="scheduler",
+            project_id="p",
+            priority=5,
+            # Cron path passes NO key — mint a fresh unique key so the row
+            # never collapses (mirrors production: unkeyed enqueues always
+            # create fresh rows).
+            idempotency_key=key if key else f"unkeyed-{uuid.uuid4()}",
+        )
+        result = MagicMock(job_id=job.job_id, message_id="m-1", instance_id="inst-idem-1", status="queued")
+        results.append(result)
+        return result
+
+    manager.enqueue_message_job = AsyncMock(side_effect=_enqueue)
+    return manager, mapper_repo, results
+
+
+async def _route_once(adapter, manager, mapper_repo) -> tuple[dict, object]:
+    """Drive the adapter's real inline dispatch path once.
+
+    Returns ``(enqueue_kwargs, result)`` — the result carries the
+    substrate-assigned ``job_id``.
+    """
+    adapter._manager = manager
+    adapter._source_repo = mapper_repo
+    result = await adapter._route_via_job_queue("exec-1", "scheduled message", {"agent": "./agents/developer"})
+    return manager.enqueue_message_job.await_args.kwargs, result
+
+
+class TestIdempotencyRestart:
+    """D4 no-double-dispatch (architecture §1.2/§1.3, ADR-004).
+
+    Pins: (a) the key is derived from ``self._run_at.isoformat()`` — stable
+    across adapter re-instantiation (simulated restart) — NOT from
+    ``next_trigger`` (which returns ``now`` for past-due one-shots and would
+    mutate the key every cycle/boot); (b) the cron path emits NO key so
+    recurring fires keep minting fresh JobItems; (c) a 5s-retry duplicate
+    enqueue collapses onto the SAME JobItem row (real
+    ``create_or_get_by_idempotency_key`` substrate). No ``pytest.skip`` —
+    the pack is the merge gate.
+
+    SKELETON ADAPTATION vs the frozen §Task 1.4 skeleton: the skeleton
+    asserted "at-most-one JobItem lands in job_queue_items" inside this
+    DB-free adapter file; the landed split is — the adapter OWNS the key
+    derivation (asserted byte-for-byte here) and the queue substrate owns
+    the collapse, so the duplicate-dispatch leg is proven by funneling the
+    adapter's real key through the production atomic claim
+    (``JobRepository.create_or_get_by_idempotency_key`` — the exact call
+    ``JobQueueService.enqueue`` makes) instead of a hand-rolled stub.
+    """
+
+    RUN_AT_ISO = "2030-01-15T09:00:00+00:00"
+
+    def _one_shot_config(self, source_id: str):
+        return make_config(source_id, {
+            "run_at": self.RUN_AT_ISO,
+            "agent": "./agents/developer",
+            "message": "x",
+            "project_id": "p",
+        })
+
+    @pytest.mark.asyncio
+    async def test_no_double_dispatch_after_restart(
+        self, mock_on_message
+    ):
+        """Simulated restart: two adapters from the SAME config emit the SAME
+        key (byte-for-byte ``scheduler:{source_id}:{run_at.isoformat()}``),
+        and the substrate holds exactly ONE JobItem row.
+        """
+        job_repo = _make_job_repo()
+        config = self._one_shot_config("idem-restart")
+
+        # Two adapter instantiations from the identical persisted config —
+        # exactly what a daemon restart does (config re-parsed in __init__).
+        manager1, mapper_repo1, results1 = _stub_manager_with_job_repo(job_repo)
+        adapter1 = SchedulerAdapter(config, mock_on_message, manager=manager1, source_repo=mapper_repo1)
+        manager2, mapper_repo2, results2 = _stub_manager_with_job_repo(job_repo)
+        adapter2 = SchedulerAdapter(config, mock_on_message, manager=manager2, source_repo=mapper_repo2)
+
+        kwargs1, _r1 = await _route_once(adapter1, manager1, mapper_repo1)
+        kwargs2, _r2 = await _route_once(adapter2, manager2, mapper_repo2)
+
+        expected_key = f"scheduler:idem-restart:{self.RUN_AT_ISO}"
+        assert kwargs1["idempotency_key"] == expected_key
+        assert kwargs2["idempotency_key"] == expected_key
+
+        # At-most-one JobItem landed for the key across the "restart".
+        from sqlmodel import Session, select
+
+        from daemon.repositories.job_queue.models import JobItem
+
+        with Session(job_repo.engine) as session:
+            rows = session.exec(select(JobItem)).all()
+        assert len(rows) == 1, f"expected 1 JobItem after restart, got {len(rows)}"
+        assert rows[0].idempotency_key == expected_key
+        # Both attempts were handed the SAME (single) JobItem.
+        assert results1[0].job_id == results2[0].job_id == rows[0].job_id
+
+    @pytest.mark.asyncio
+    async def test_cron_not_affected_by_idempotency_key(self, mock_on_message):
+        """Architecture §1.3: cron fires emit NO key — two fires → TWO rows.
+
+        Emitting the key unconditionally on the shared ``_route_via_job_queue``
+        path would collapse every future cron fire into one JobItem → silent
+        schedule death.
+        """
+        job_repo = _make_job_repo()
+        manager, mapper_repo, _results = _stub_manager_with_job_repo(job_repo)
+        config = make_config("idem-cron", {
+            "schedule": "0 6 * * *",
+            "agent": "./agents/developer",
+            "message": "x",
+            "project_id": "p",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message, manager=manager, source_repo=mapper_repo)
+        assert adapter._schedule_type == SchedulerAdapter.SCHEDULE_TYPE_CRON
+
+        kwargs1 = await _route_once(adapter, manager, mapper_repo)
+        # Two distinct cron cycles (distinct next_trigger values) — the second fire.
+        adapter._manager = manager
+        adapter._source_repo = mapper_repo
+        await adapter._route_via_job_queue("exec-2", "scheduled message", {"agent": "./agents/developer"})
+        kwargs2 = manager.enqueue_message_job.await_args.kwargs
+
+        # THE gate: the cron path must not emit the key at all.
+        assert "idempotency_key" not in kwargs1
+        assert "idempotency_key" not in kwargs2
+
+        # No collapse: two fires → two distinct JobItems.
+        from sqlmodel import Session, select
+
+        from daemon.repositories.job_queue.models import JobItem
+
+        with Session(job_repo.engine) as session:
+            rows = session.exec(select(JobItem)).all()
+        assert len(rows) == 2
+        assert rows[0].job_id != rows[1].job_id
+
+    @pytest.mark.asyncio
+    async def test_5s_retry_collapse(self, mock_on_message):
+        """Same daemon lifetime: a repeated dispatch (5s retry) returns the
+        SAME JobItem — no second row.
+        """
+        job_repo = _make_job_repo()
+        manager, mapper_repo, results = _stub_manager_with_job_repo(job_repo)
+        config = self._one_shot_config("idem-retry")
+
+        adapter = SchedulerAdapter(config, mock_on_message, manager=manager, source_repo=mapper_repo)
+
+        kwargs1, _r1 = await _route_once(adapter, manager, mapper_repo)
+        kwargs2, _r2 = await _route_once(adapter, manager, mapper_repo)
+
+        assert kwargs1["idempotency_key"] == kwargs2["idempotency_key"]
+        assert results[0].job_id == results[1].job_id, (
+            "5s-retry duplicate enqueue must return the existing JobItem"
+        )
+        assert manager.enqueue_message_job.await_count == 2
+
+        from sqlmodel import Session, select
+
+        from daemon.repositories.job_queue.models import JobItem
+
+        with Session(job_repo.engine) as session:
+            rows = session.exec(select(JobItem)).all()
+        assert len(rows) == 1

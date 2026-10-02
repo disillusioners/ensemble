@@ -1,5 +1,13 @@
 # Test Packs
 
+## In-flight commission — SCHEDULED TASKS phase-5 acceptance (unit 4, test surface + pack)
+
+Branch `feature/scheduled-tasks` @ unit-4 commit (test-only + one-line enum fix; phases 1–4 landed at `f9c6799e`, plan base `8cebe211`). **VERDICT: GREEN — pack run 149P/0F/0S, exit 0 (19.6 s), worktree `/home/nea/ensemble-src-wt-scheduled-tasks`, `ENSEMBLE_SELF_ENV=dev` exported by the pack.** Surfaces: adapter unit (TZ chain, DST both paths, catch-up cap, D4 idempotency incl. real `create_or_get_by_idempotency_key` collapse), phase-3 REST contract (create/get/cancel/list-filter/delete-guard), and 5 integration tests over a real InstanceManager (D4 single-uuid `JobItem.job_id == Task.work_id` identity, cancel-terminal, stop-doesn't-clobber-cancelled, cancelled-never-boot-starts, catch-up SKIPPED row). Held baselines: scheduler trio 154P, registration 16P, phase3-contract 8P. NOTE: phase-5 tests exposed a phase-1 landed-code defect — `SourceStatus` in `daemon/sources/base.py` lacked `CANCELLED`, crashing every `start_all()`/`stop_adapter(persist)` with AttributeError (boot filter `registry.py:298` + clobber guard `:677` reference it); fixed in this commit (one enum member, third-site lockstep with the two model enums).
+
+| Pack | Invocation | Scope | Result |
+|---|---|---|---|
+| `scheduled_tasks_acceptance` | `timeout 600 bash tests/packs/scheduled_tasks_acceptance.sh` | adapter unit (82) + REST API (62) + integration (5) — TZ, DST both paths, catch-up, idempotency, REST contract, single-uuid happy path, cancel-prevent-dispatch | ✅ 149P/0F/0S, exit 0, 19.6 s |
+
 ## Completed commission — v0.16.9 FIX BUNDLE FULL GATES (frozen verification) (2026-10-01)
 
 Branch `feature/v0.16.9-fix-bundle` @ **`a52a0321`** (base `f87a397c`), report-only (no fixes, no commits). **VERDICT: PASS WITH ONE REPORT-BACK** — zero feature-caused reds anywhere; every red/skip A/B-verified base-identical; convergence drill 4/4; §8b 10/0. Sole finding: fix #4 `_js_run_bounded` orphaned-sleep pipe stall (feature-caused runtime regression — launcher suite 10 s at base → 652 s at HEAD; bounded-correct but ~25-45 s per stale-txn sweep call; council decision: ride fix into v0.16.9 or ticket). Commission premise "full-run hang pre-existing" FALSIFIED at this base (base completes 10 s; only 8c×2+8g pre-existing). Full report: `RESULTS/2026-10-01-v0.16.9-fix-bundle-verification.md`.
