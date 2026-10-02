@@ -143,10 +143,10 @@ async def create_schedule(req: ScheduleCreate, request: Request):
 
     The body mirrors the scheduling tool category's `task_schedule`
     semantics. User-stated `local_time` is ALWAYS interpreted in the
-    supplied `timezone` (or the configured default chain: explicit →
-    ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE → host-local → UTC with a loud
-    warning). The response echoes BOTH local and UTC for `next_run_at_*`
-    so external callers never have to re-derive timezone.
+    supplied `timezone` (or the default chain: explicit → user timezone
+    setting → ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE → host-local → UTC
+    with a loud warning). The response echoes BOTH local and UTC for
+    `next_run_at_*` so external callers never have to re-derive timezone.
 
     Schedules are created enabled+autostart; lifecycle via update/pause/
     cancel (POST /schedules/{id}/stop|start, DELETE /schedules/{id}).

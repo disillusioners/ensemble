@@ -1135,6 +1135,39 @@ class LanguagePreferenceUpdate(BaseModel):
     )
 
 
+class TimezonePreferenceResponse(BaseModel):
+    """Response for the current user timezone preference.
+
+    ``utc_offset`` is the zone's CURRENT offset (DST-correct at read time),
+    e.g. ``"+07:00"`` — display-only, recomputed on every GET. Both fields
+    are ``null`` when the preference is unset.
+    """
+
+    timezone: str | None = Field(
+        default=None, description="Current IANA timezone preference, or null when unset"
+    )
+    utc_offset: str | None = Field(
+        default=None,
+        description="The zone's current UTC offset (e.g. '+07:00'); null when unset",
+    )
+
+
+class TimezonePreferenceUpdate(BaseModel):
+    """Request body for updating the user timezone preference.
+
+    ``null`` OR an empty string CLEARS the setting (falls back through the
+    tz resolution chain). A non-empty value must be a valid IANA timezone
+    name — validated by the router via ``daemon.util.tz._validate_iana``
+    (a regex cannot express the IANA grammar; the tzdb is the authority).
+    """
+
+    timezone: str | None = Field(
+        ...,
+        max_length=100,
+        description="IANA timezone name (e.g. 'Asia/Bangkok'); null or empty clears the preference",
+    )
+
+
 # ==================== Editor Preference Schemas ====================
 
 

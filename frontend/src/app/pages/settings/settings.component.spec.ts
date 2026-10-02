@@ -2,7 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { signal } from '@angular/core';
-import { of, throwError } from 'rxjs';
+import { of, throwError, Subject } from 'rxjs';
 import type { VSCodeStatusState } from '../../models';
 import { SettingsComponent } from './settings.component';
 import { SettingsService } from '../../services/settings.service';
@@ -105,6 +105,8 @@ class MockSettingsService {
   getVscodeStatus = jest.fn();
   startVscodeServer = jest.fn();
   stopVscodeServer = jest.fn();
+  getTimezonePreference = jest.fn();
+  setTimezonePreference = jest.fn();
 }
 
 class MockWorkspaceService {
@@ -1370,6 +1372,12 @@ class TestBedMockSettingsService {
   getSnapshotUsageMetrics = jest
     .fn()
     .mockReturnValue(of({ capture_counts: {}, spawn_counts_per_snapshot: [] }));
+  getTimezonePreference = jest
+    .fn()
+    .mockReturnValue(of({ timezone: null, utc_offset: null }));
+  setTimezonePreference = jest
+    .fn()
+    .mockReturnValue(of({ timezone: null, utc_offset: null }));
 }
 
 class TestBedMockWorkspaceService {
@@ -1518,5 +1526,344 @@ describe('Agent Snapshots settings toggle (R15)', () => {
     component.saveSnapshotCreateEnabled();
     expect(component.savedSnapshotCreateEnabled()).toBe(false); // unchanged
     expect(component.savingSnapshotCreate()).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Timezone preference (user-timezone-setting feature)
+//
+// Mirrors the language preference flow:
+//   (a) picker renders zones with offsets; Auto option is the unset sentinel
+//   (b) save flow — optimistic update + revert-on-failure
+//   (c) Auto selection clears the preference (sends null)
+//   (d) hint line is visible when unset
+//   (e) fallback text input renders when Intl.supportedValuesOf is missing
+//
+// `Intl.supportedValuesOf` is monkey-patched per test for the picker scenarios;
+// we restore the original implementation in afterEach so other specs aren't
+// affected.
+// ═══════════════════════════════════════════════════════════════════
+
+const TZ_AUTO_VALUE = '__tz_auto__';
+const TZ_STORAGE_KEY = 'settings-timezone-preference';
+
+type SupportedValuesOfFn = (kind: string) => string[] | number[];
+
+class TimezoneTestBedService {
+  getLanguagePreference = jest.fn().mockReturnValue(of({ language: 'Auto' }));
+  setLanguagePreference = jest.fn();
+  getEditorPreference = jest.fn().mockReturnValue(of({ editor: 'builtin' }));
+  setEditorPreference = jest.fn().mockReturnValue(of({ editor: 'builtin' }));
+  getVscodeStatus = jest.fn().mockReturnValue(of({ status: 'starting' }));
+  startVscodeServer = jest.fn();
+  stopVscodeServer = jest.fn();
+  getBlueprintPeakHours = jest
+    .fn()
+    .mockReturnValue(of({ start: 12, end: 20, tz_offset: 7 }));
+  setBlueprintPeakHours = jest.fn();
+  getSnapshotCreateEnabled = jest.fn().mockReturnValue(of({ enabled: false }));
+  setSnapshotCreateEnabled = jest.fn().mockReturnValue(of({ enabled: false }));
+  getSnapshotUsageMetrics = jest
+    .fn()
+    .mockReturnValue(of({ capture_counts: {}, spawn_counts_per_snapshot: [] }));
+  getTimezonePreference = jest
+    .fn()
+    .mockReturnValue(of({ timezone: null, utc_offset: null }));
+  setTimezonePreference = jest
+    .fn()
+    .mockReturnValue(of({ timezone: null, utc_offset: null }));
+}
+
+class TimezoneTestBedWorkspaceService {
+  setEditorMode = jest.fn();
+}
+
+const TIMEZONE_ZONES = ['Asia/Bangkok', 'America/New_York', 'UTC'];
+
+function patchIntlSupportedValuesOf(zones: readonly string[] | null): jest.Mock | null {
+  const intlAny = Intl as unknown as { supportedValuesOf?: SupportedValuesOfFn };
+  const original = intlAny.supportedValuesOf;
+  if (zones === null) {
+    delete intlAny.supportedValuesOf;
+    return null;
+  }
+  const mock = jest.fn((kind: string) => {
+    if (kind === 'timeZone') {
+      return [...zones];
+    }
+    return original ? original(kind) : [];
+  }) as unknown as jest.Mock;
+  intlAny.supportedValuesOf = mock;
+  return mock;
+}
+
+function restoreIntlSupportedValuesOf(mock: jest.Mock | null): void {
+  const intlAny = Intl as unknown as { supportedValuesOf?: SupportedValuesOfFn };
+  if (mock === null) {
+    delete intlAny.supportedValuesOf;
+    return;
+  }
+  intlAny.supportedValuesOf = mock as unknown as SupportedValuesOfFn;
+}
+
+describe('Timezone preference (user-timezone-setting)', () => {
+  let service: TimezoneTestBedService;
+  let workspaceService: TimezoneTestBedWorkspaceService;
+  let fixture: ComponentFixture<SettingsComponent>;
+  let component: SettingsComponent;
+  let supportedMock: jest.Mock | null;
+
+  const timezoneSection = (): HTMLElement | undefined => {
+    const sections = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll('section'),
+    );
+    return sections.find((s) =>
+      s.querySelector('h2')?.textContent?.includes('Timezone'),
+    );
+  };
+
+  beforeEach(async () => {
+    service = new TimezoneTestBedService();
+    workspaceService = new TimezoneTestBedWorkspaceService();
+    // Each test seeds a deterministic IANA list; per-test override available.
+    supportedMock = patchIntlSupportedValuesOf(TIMEZONE_ZONES);
+    await TestBed.configureTestingModule({
+      imports: [SettingsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: SettingsService, useValue: service },
+        { provide: WorkspaceService, useValue: workspaceService },
+        { provide: MatSnackBar, useValue: { open: jest.fn() } },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(SettingsComponent);
+    component = fixture.componentInstance;
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+    restoreIntlSupportedValuesOf(supportedMock);
+  });
+
+  // ── (a) picker renders zones with offsets ─────────────────────────
+  it('renders the timezone section with the native picker when Intl.supportedValuesOf is available', () => {
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    fixture.detectChanges();
+
+    const section = timezoneSection();
+    expect(section).toBeDefined();
+
+    const labels: string[] = component
+      .timezoneOptions()
+      .map((o) => o.label);
+    // Auto / not set is the sentinel entry.
+    expect(labels).toContain('Auto / not set');
+    // Each zone is rendered with a UTC offset suffix. Node 22 produces
+    // `GMT+7` / `GMT-4` / `GMT+0` for shortOffset which the component
+    // normalizes to ±HH:MM. Verify the labels include both the IANA name
+    // and a non-empty offset.
+    expect(labels).toContain('Asia/Bangkok (UTC+07:00)');
+    expect(labels).toContain('America/New_York (UTC-04:00)');
+    expect(labels).toContain('UTC (UTC+00:00)');
+
+    // The Auto sentinel is the first option in the list.
+    expect(component.timezoneOptions()[0].value).toBe(TZ_AUTO_VALUE);
+  });
+
+  it('falls back to a plain text input when Intl.supportedValuesOf is missing', () => {
+    // Override per-test — the beforeEach seeded it.
+    restoreIntlSupportedValuesOf(supportedMock);
+    supportedMock = patchIntlSupportedValuesOf(null);
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    fixture.detectChanges();
+
+    // No options are exposed — the picker has no labels to feed the
+    // component with.
+    expect(component.timezoneOptions()).toEqual([]);
+    expect(component.isTzNativeSupported()).toBe(false);
+
+    const section = timezoneSection();
+    expect(section).toBeDefined();
+    // The fallback row is the only input affordance in the template.
+    expect(section!.querySelector('.custom-tz-row')).not.toBeNull();
+    // No <app-searchable-select> rendered for the timezone section.
+    expect(
+      section!.querySelector('app-searchable-select'),
+    ).toBeNull();
+  });
+
+  // ── (b) save flow — optimistic + revert-on-failure ───────────────
+  it('saveTimezone persists the chosen zone and updates the selected signal optimistically', () => {
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    service.setTimezonePreference.mockReturnValue(
+      of({ timezone: 'Asia/Bangkok', utc_offset: '+07:00' }),
+    );
+    fixture.detectChanges();
+
+    expect(component.selectedTimezone()).toBe(TZ_AUTO_VALUE);
+
+    component.onTimezoneChange('Asia/Bangkok');
+    // Optimistic: signal flips immediately, even before the response lands.
+    expect(component.selectedTimezone()).toBe('Asia/Bangkok');
+
+    expect(service.setTimezonePreference).toHaveBeenCalledTimes(1);
+    expect(service.setTimezonePreference).toHaveBeenCalledWith('Asia/Bangkok');
+
+    // After the response, the signal still reflects the chosen zone.
+    expect(component.selectedTimezone()).toBe('Asia/Bangkok');
+    expect(component.savingTimezone()).toBe(false);
+    // localStorage cache is written with the raw IANA name.
+    expect(localStorageData[TZ_STORAGE_KEY]).toBe('Asia/Bangkok');
+  });
+
+  it('saveTimezone reverts the selected signal when the server rejects the value', () => {
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    // Use a Subject so the optimistic state is observable BEFORE the
+    // error fires. A synchronous `throwError` collapses both set + revert
+    // into a single tick, defeating the assertion.
+    const subject = new Subject<{ timezone: string | null; utc_offset: string | null }>();
+    service.setTimezonePreference.mockReturnValue(subject.asObservable());
+    fixture.detectChanges();
+
+    component.onTimezoneChange('Asia/Bangkok');
+    // Optimistic state landed — selectedTimezone flipped before the API
+    // response, while the saving flag is still true.
+    expect(component.selectedTimezone()).toBe('Asia/Bangkok');
+    expect(component.savingTimezone()).toBe(true);
+
+    // Fire the error after the optimistic state is captured.
+    subject.error({ status: 422 });
+
+    // The error path reverts the signal back to the previous selection.
+    expect(component.selectedTimezone()).toBe(TZ_AUTO_VALUE);
+    expect(component.savingTimezone()).toBe(false);
+    // localStorage is NOT updated with a failed-save value.
+    expect(localStorageData[TZ_STORAGE_KEY]).toBeUndefined();
+  });
+
+  // ── (c) Auto option clears (sends null) ───────────────────────────
+  it('selecting the Auto option clears the preference (sends null to the API)', () => {
+    // Seed the picker with a stored zone so the Auto selection is a
+    // genuine transition rather than a no-op.
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: 'Asia/Bangkok', utc_offset: '+07:00' }),
+    );
+    service.setTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    fixture.detectChanges();
+    expect(component.selectedTimezone()).toBe('Asia/Bangkok');
+
+    component.onTimezoneChange(TZ_AUTO_VALUE);
+
+    expect(service.setTimezonePreference).toHaveBeenCalledTimes(1);
+    expect(service.setTimezonePreference).toHaveBeenCalledWith(null);
+    // After the response, the signal flips back to the Auto sentinel.
+    expect(component.selectedTimezone()).toBe(TZ_AUTO_VALUE);
+    expect(component.isTimezoneUnset()).toBe(true);
+    // localStorage is cleared on Auto.
+    expect(localStorageData[TZ_STORAGE_KEY]).toBeUndefined();
+  });
+
+  // ── (d) hint line is visible when unset ───────────────────────────
+  it('shows the unset hint line when the preference is null/Auto', () => {
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    fixture.detectChanges();
+
+    const section = timezoneSection();
+    expect(section).toBeDefined();
+    const hint = section!.querySelector('.setting-hint');
+    expect(hint).not.toBeNull();
+    expect(hint!.textContent).toContain('Without a timezone set');
+  });
+
+  it('hides the unset hint line when a zone is saved', () => {
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: 'Asia/Bangkok', utc_offset: '+07:00' }),
+    );
+    fixture.detectChanges();
+
+    const hint = timezoneSection()!.querySelector('.setting-hint');
+    expect(hint).toBeNull();
+  });
+
+  // ── (e) initialization loads the cached/stored value ─────────────
+  it('loads a stored timezone from the API on init and updates the selected signal', () => {
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: 'Asia/Bangkok', utc_offset: '+07:00' }),
+    );
+    fixture.detectChanges();
+
+    expect(service.getTimezonePreference).toHaveBeenCalledTimes(1);
+    expect(component.selectedTimezone()).toBe('Asia/Bangkok');
+    expect(component.isTimezoneUnset()).toBe(false);
+    expect(localStorageData[TZ_STORAGE_KEY]).toBe('Asia/Bangkok');
+  });
+
+  it('falls back to the Auto sentinel when the API errors and no cached value exists', () => {
+    service.getTimezonePreference.mockReturnValue(
+      throwError(() => new Error('boom')),
+    );
+    fixture.detectChanges();
+
+    expect(component.selectedTimezone()).toBe(TZ_AUTO_VALUE);
+    expect(component.isTimezoneUnset()).toBe(true);
+  });
+
+  it('preserves the localStorage-cached zone when the API errors', () => {
+    localStorageData[TZ_STORAGE_KEY] = 'Asia/Bangkok';
+    service.getTimezonePreference.mockReturnValue(
+      throwError(() => new Error('boom')),
+    );
+    fixture.detectChanges();
+
+    expect(component.selectedTimezone()).toBe('Asia/Bangkok');
+  });
+
+  // ── (f) fallback text input save + clear ─────────────────────────
+  it('fallback saveCustomTimezone sends the typed IANA name to the API', () => {
+    restoreIntlSupportedValuesOf(supportedMock);
+    supportedMock = patchIntlSupportedValuesOf(null);
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    service.setTimezonePreference.mockReturnValue(
+      of({ timezone: 'Asia/Bangkok', utc_offset: '+07:00' }),
+    );
+    fixture.detectChanges();
+
+    component.onCustomTimezoneChange({
+      target: { value: 'Asia/Bangkok' },
+    } as unknown as Event);
+    component.saveCustomTimezone();
+
+    expect(service.setTimezonePreference).toHaveBeenCalledWith('Asia/Bangkok');
+  });
+
+  it('fallback saveCustomTimezone ignores empty / whitespace-only input', () => {
+    restoreIntlSupportedValuesOf(supportedMock);
+    supportedMock = patchIntlSupportedValuesOf(null);
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    fixture.detectChanges();
+
+    component.onCustomTimezoneChange({
+      target: { value: '   ' },
+    } as unknown as Event);
+    component.saveCustomTimezone();
+
+    expect(service.setTimezonePreference).not.toHaveBeenCalled();
   });
 });

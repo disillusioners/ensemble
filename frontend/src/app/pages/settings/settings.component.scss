@@ -88,6 +88,33 @@ $accent-cyan: #10a7f7;
   font-weight: 500;
 }
 
+// Timezone section — the fallback text input + buttons share the
+// language picker's `.custom-language-row` shape; we add a class
+// of our own so future timezone-only tweaks don't bleed into language.
+.custom-tz-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+
+  .custom-input {
+    flex: 1 1 240px;
+    min-width: 0;
+  }
+
+  button {
+    flex: 0 0 auto;
+    margin-top: 0.25rem;
+  }
+}
+
+.setting-hint {
+  margin: 0;
+  color: $text-secondary;
+  font-size: 0.8125rem;
+  font-style: italic;
+}
+
 // Material form-field tweaks — match the dark theme palette
 ::ng-deep .language-select .mat-mdc-text-field-wrapper,
 ::ng-deep .custom-input .mat-mdc-text-field-wrapper {

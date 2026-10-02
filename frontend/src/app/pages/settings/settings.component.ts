@@ -40,6 +40,48 @@ const EDITOR_STORAGE_KEY = 'settings-editor-preference';
 const STATUS_POLL_INTERVAL_MS = 2000;
 const DEFAULT_EDITOR: EditorType = 'builtin';
 
+/**
+ * Timezone preference — UI-internal sentinel that maps to the
+ * API's "null" representation. Mirrors the language handler's
+ * pattern of using a string sentinel in the dropdown so the
+ * generic `SearchableSelectOption<string>` binding keeps working;
+ * the value is translated to `null` only at the API boundary.
+ */
+const TZ_AUTO_VALUE = '__tz_auto__';
+const TZ_STORAGE_KEY = 'settings-timezone-preference';
+
+/**
+ * Compute the current UTC offset string for an IANA zone, e.g.
+ * `+07:00` for `Asia/Bangkok` or `-05:00` for `America/New_York`.
+ * Uses `Intl.DateTimeFormat#formatToParts` with `shortOffset` and
+ * normalizes browser output (`GMT+7`, `GMT-05:00`, `GMT`) into a
+ * stable `±HH:MM` shape for the dropdown label.
+ */
+function formatTimezoneOffset(zone: string): string {
+  try {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      timeZoneName: 'shortOffset',
+    });
+    const parts = fmt.formatToParts(new Date());
+    const raw = parts.find((p) => p.type === 'timeZoneName')?.value ?? '';
+    return normalizeOffsetValue(raw);
+  } catch {
+    return '';
+  }
+}
+
+function normalizeOffsetValue(raw: string): string {
+  if (!raw) return '';
+  if (raw === 'GMT' || raw === 'UTC' || raw === 'Z') return '+00:00';
+  const match = raw.match(/^(?:GMT|UTC)([+-])(\d{1,2})(?::?(\d{0,2}))?$/);
+  if (!match) return raw;
+  const [, sign, hh, mm] = match;
+  const hhPadded = hh.padStart(2, '0');
+  const mmPadded = (mm ?? '00').padStart(2, '0');
+  return `${sign}${hhPadded}:${mmPadded}`;
+}
+
 @Component({
   selector: 'app-settings',
   standalone: true,
@@ -127,6 +169,55 @@ export class SettingsComponent implements OnInit, OnDestroy {
       );
   });
 
+  // ── Timezone preference (user-timezone-setting feature) ───────────
+  //
+  // Mirrors the language preference flow (loadFromStorage → API seed
+  // → optimistic save → revert-on-failure), with two quirks:
+  //
+  //   * The "Auto / not set" option is rendered as a string sentinel
+  //     (`TZ_AUTO_VALUE`) so the generic SearchableSelectOption<string>
+  //     binding works exactly like the language picker. The sentinel
+  //     is translated to API `null` at the save boundary only.
+  //   * The picker is fed by `Intl.supportedValuesOf('timeZone')`
+  //     (browser-native IANA list). If that API is not available we
+  //     hide the picker and fall back to a plain text input that
+  //     accepts any IANA name — server-side validation handles
+  //     invalid values.
+
+  readonly selectedTimezone = signal<string>(TZ_AUTO_VALUE);
+  readonly customTimezone = signal<string>('');
+  readonly savingTimezone = signal<boolean>(false);
+  /** True when `Intl.supportedValuesOf('timeZone')` is callable. */
+  readonly isTzNativeSupported = signal<boolean>(true);
+
+  /**
+   * Browser-native IANA option list. Empty when the host doesn't
+   * expose `Intl.supportedValuesOf` so the template hides the
+   * picker and surfaces the text-input fallback instead.
+   */
+  readonly timezoneOptions = computed<SearchableSelectOption<string>[]>(() => {
+    if (!this.isTzNativeSupported()) {
+      return [];
+    }
+    const intlAny = Intl as unknown as {
+      supportedValuesOf?: (kind: string) => number | string[];
+    };
+    const values = intlAny.supportedValuesOf?.('timeZone') ?? [];
+    const zones = Array.isArray(values) ? (values as string[]) : [];
+    return [
+      { value: TZ_AUTO_VALUE, label: 'Auto / not set' },
+      ...zones.map((zone) => ({
+        value: zone,
+        label: `${zone} (UTC${formatTimezoneOffset(zone)})`,
+      })),
+    ];
+  });
+
+  /** True when the user has not picked a zone — drives the hint line. */
+  readonly isTimezoneUnset = computed(
+    () => this.selectedTimezone() === TZ_AUTO_VALUE,
+  );
+
   private statusPollTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
@@ -149,6 +240,9 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.loadPeakHours();
     this.loadSnapshotCreateEnabled();
     this.loadSnapshotMetrics();
+    this.initTimezoneSupport();
+    this.loadTimezoneFromStorage();
+    this.loadTimezoneFromApi();
   }
 
   ngOnDestroy(): void {
@@ -676,5 +770,208 @@ export class SettingsComponent implements OnInit, OnDestroy {
         );
       },
     });
+  }
+
+  // ──────── Timezone preference (user-timezone-setting) ────────
+
+  /**
+   * Probe `Intl.supportedValuesOf` at startup so the template can
+   * hide the picker and surface the text-input fallback in
+   * environments that lack the API. We resolve once and remember
+   * the verdict — the result doesn't change during the page's
+   * lifetime.
+   */
+  private initTimezoneSupport(): void {
+    const intlAny = Intl as unknown as {
+      supportedValuesOf?: (kind: string) => unknown;
+    };
+    this.isTzNativeSupported.set(typeof intlAny.supportedValuesOf === 'function');
+  }
+
+  /**
+   * Synchronous cache restore (mirrors language `loadFromStorage`).
+   * Only seeds when we actually have a stored zone — `null`
+   * storage leaves the signal at the Auto sentinel so the picker
+   * opens in the unset state.
+   */
+  private loadTimezoneFromStorage(): void {
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem(TZ_STORAGE_KEY);
+    } catch {
+      // silently ignore
+    }
+    if (!saved) {
+      return;
+    }
+    this.applyTimezonePreference(saved);
+  }
+
+  /**
+   * Fetch the canonical preference from the backend. The cached
+   * value is kept on API failure so the user doesn't see the
+   * picker flicker; an error toast surfaces the failure but does
+   * not blow away the user's previous selection.
+   */
+  private loadTimezoneFromApi(): void {
+    let hadCachedValue = false;
+    try {
+      hadCachedValue = localStorage.getItem(TZ_STORAGE_KEY) !== null;
+    } catch {
+      hadCachedValue = false;
+    }
+
+    this.settingsService.getTimezonePreference().subscribe({
+      next: (pref) => {
+        // Accept `null` as the "Auto / not set" verdict — the API
+        // contract explicitly says both `timezone` and `utc_offset`
+        // are `null` when unset.
+        const tz = pref?.timezone ?? null;
+        this.applyTimezonePreference(tz);
+        if (tz !== null) {
+          this.persistTimezoneToStorage(tz);
+        } else {
+          this.clearTimezoneFromStorage();
+        }
+      },
+      error: () => {
+        if (!hadCachedValue) {
+          this.selectedTimezone.set(TZ_AUTO_VALUE);
+        }
+        this.snackBar.open('Failed to load timezone preference', 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar',
+        });
+      },
+    });
+  }
+
+  /**
+   * Apply a backend/stored value to the view. `null` (or
+   * `undefined` from a malformed response) renders as Auto / not
+   * set; any other string is treated as the literal IANA name.
+   */
+  private applyTimezonePreference(tz: string | null | undefined): void {
+    if (tz === null || tz === undefined || tz === '') {
+      this.selectedTimezone.set(TZ_AUTO_VALUE);
+    } else {
+      this.selectedTimezone.set(tz);
+    }
+  }
+
+  /**
+   * Picker change handler — receives the option's `value` (a
+   * string: the IANA name, or the Auto sentinel). Translates the
+   * sentinel to `null` at the API boundary and persists.
+   */
+  onTimezoneChange(value: string): void {
+    this.saveTimezone(value);
+  }
+
+  /** Mirror of `onCustomLanguageChange` for the fallback text input. */
+  onCustomTimezoneChange(event: Event): void {
+    const target = event.target as HTMLInputElement;
+    this.customTimezone.set(target.value);
+  }
+
+  /**
+   * Fallback-mode save (no native IANA list available). The client
+   * only enforces a non-empty trim — the server does the actual
+   * IANA validation and surfaces 4xx for bad names.
+   */
+  saveCustomTimezone(): void {
+    const tz = this.customTimezone().trim();
+    if (!tz) {
+      return;
+    }
+    this.saveTimezone(tz);
+  }
+
+  /**
+   * Fallback-mode clear: clears the stored timezone preference by
+   * sending the API sentinel `null`. Visible only when the native
+   * picker is unavailable AND the user has a stored zone to
+   * clear.
+   */
+  clearCustomTimezone(): void {
+    this.saveTimezone(TZ_AUTO_VALUE);
+  }
+
+  /**
+   * Persist the chosen timezone. Mirrors the language handler's
+   * optimistic-save + revert-on-failure flow: capture previous
+   * state, flip it immediately for snappy UI, then either confirm
+   * the server's response or roll back. The signal stores the
+   * UI representation (real IANA name or the Auto sentinel);
+   * the wire payload uses `null` for the Auto sentinel.
+   */
+  private saveTimezone(value: string): void {
+    const previousSelected = this.selectedTimezone();
+    const previousCustom = this.customTimezone();
+
+    const apiValue = value === TZ_AUTO_VALUE ? null : value;
+
+    // Optimistic: flip the visible state before the round-trip so
+    // the picker reflects intent immediately. The authoritative
+    // value lands in the `next` callback and re-applies via
+    // applyTimezonePreference.
+    this.selectedTimezone.set(value);
+    if (apiValue !== null) {
+      this.customTimezone.set(apiValue);
+    }
+    this.savingTimezone.set(true);
+
+    this.settingsService.setTimezonePreference(apiValue).subscribe({
+      next: (resp) => {
+        // Re-apply the server-confirmed stored value to the
+        // component state. The PUT persists the cleaned string
+        // as-is (no server-side canonicalization), so the echo
+        // normally matches what was sent — re-applying it keeps
+        // the picker in lockstep with the stored record.
+        const confirmed = resp?.timezone ?? apiValue;
+        this.applyTimezonePreference(confirmed);
+        this.savingTimezone.set(false);
+        if (confirmed === null) {
+          this.clearTimezoneFromStorage();
+          this.snackBar.open('Timezone preference cleared', 'Close', {
+            duration: 3000,
+            panelClass: 'success-snackbar',
+          });
+        } else {
+          this.persistTimezoneToStorage(confirmed);
+          this.snackBar.open(
+            `Timezone preference set to ${confirmed}`,
+            'Close',
+            { duration: 3000, panelClass: 'success-snackbar' },
+          );
+        }
+      },
+      error: () => {
+        // Revert UI to the last known good state.
+        this.selectedTimezone.set(previousSelected);
+        this.customTimezone.set(previousCustom);
+        this.savingTimezone.set(false);
+        this.snackBar.open('Failed to save timezone preference', 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar',
+        });
+      },
+    });
+  }
+
+  private persistTimezoneToStorage(timezone: string): void {
+    try {
+      localStorage.setItem(TZ_STORAGE_KEY, timezone);
+    } catch {
+      // silently ignore
+    }
+  }
+
+  private clearTimezoneFromStorage(): void {
+    try {
+      localStorage.removeItem(TZ_STORAGE_KEY);
+    } catch {
+      // silently ignore
+    }
   }
 }

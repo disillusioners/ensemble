@@ -13,6 +13,10 @@ from sqlmodel import Session
 from daemon.repositories import SQLModelProjectRepository
 from daemon.registry import get_registry
 from daemon.services.language_utils import get_language_preference, LANGUAGE_METADATA_KEY, DEFAULT_LANGUAGE
+from daemon.services.user_timezone_utils import (
+    current_utc_offset,
+    get_user_timezone_preference,
+)
 from daemon.services.editor_utils import get_editor_preference, set_editor_preference
 from daemon.services.vscode_server_manager import (
     VSCodeServerNotInstalledError,
@@ -21,9 +25,12 @@ from daemon.services.vscode_server_manager import (
     VSCodeServerError,
 )
 from daemon import constants
+from daemon.util.tz import _validate_iana
 from .schemas import (
     LanguagePreferenceResponse,
     LanguagePreferenceUpdate,
+    TimezonePreferenceResponse,
+    TimezonePreferenceUpdate,
     EditorPreferenceResponse,
     EditorPreferenceUpdate,
     VSCodeStatus,
@@ -156,6 +163,58 @@ async def set_language(request: LanguagePreferenceUpdate):
         repo.set_metadata, constants.SYSTEM_DEFAULT_PROJECT_ID, LANGUAGE_METADATA_KEY, cleaned_language
     )
     return LanguagePreferenceResponse(language=cleaned_language)
+
+
+@router.get("/timezone", response_model=TimezonePreferenceResponse)
+async def get_timezone():
+    """Get the current user timezone preference (+ its current UTC offset).
+
+    Both fields are ``null`` when the preference is unset.
+    """
+    stored = await asyncio.to_thread(get_user_timezone_preference, _project_repo)
+    if not stored:
+        return TimezonePreferenceResponse(timezone=None, utc_offset=None)
+    # Display-only: the zone's CURRENT offset, DST-correct at read time.
+    offset = await asyncio.to_thread(current_utc_offset, stored)
+    return TimezonePreferenceResponse(timezone=stored, utc_offset=offset)
+
+
+@router.put("/timezone", response_model=TimezonePreferenceResponse)
+async def set_timezone(request: TimezonePreferenceUpdate):
+    """Set (or clear) the user timezone preference.
+
+    ``null`` or an empty string CLEARS the setting (falls back through the
+    tz resolution chain); a non-empty value must resolve to a real IANA
+    timezone via ``daemon.util.tz._validate_iana`` — anything else is a 422.
+    """
+    raw = (request.timezone or "").strip()
+    repo = get_project_repository()  # raises 503 if not initialized
+    if constants.SYSTEM_DEFAULT_PROJECT_ID is None:
+        raise HTTPException(status_code=503, detail="System default project not initialized")
+    if not raw:
+        # null / empty → clear the row entirely (unset = fall through the chain).
+        await asyncio.to_thread(
+            repo.delete_metadata, constants.SYSTEM_DEFAULT_PROJECT_ID, constants.USER_TIMEZONE_METADATA_KEY
+        )
+        return TimezonePreferenceResponse(timezone=None, utc_offset=None)
+    # Defense-in-depth: strip control characters (newlines, tabs, etc.) so that
+    # any payload that slips past schema length bounds cannot inject text into
+    # downstream system prompts (parity with the language pref's C1 fix).
+    cleaned = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", raw).strip()
+    if not cleaned:
+        raise HTTPException(
+            status_code=422,
+            detail="timezone must contain at least one non-whitespace character",
+        )
+    if not _validate_iana(cleaned):
+        raise HTTPException(status_code=422, detail=f"Invalid IANA timezone: '{cleaned}'")
+    # ``repo.set_metadata`` opens a sync SQLAlchemy session and commits; off the
+    # event loop so it cannot block other in-flight requests.
+    await asyncio.to_thread(
+        repo.set_metadata, constants.SYSTEM_DEFAULT_PROJECT_ID, constants.USER_TIMEZONE_METADATA_KEY, cleaned
+    )
+    offset = await asyncio.to_thread(current_utc_offset, cleaned)
+    return TimezonePreferenceResponse(timezone=cleaned, utc_offset=offset)
 
 
 # ==================== Editor Settings Endpoints ====================

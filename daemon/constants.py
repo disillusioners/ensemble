@@ -225,6 +225,13 @@ SYSTEM_DEFAULT_PROJECT_ID: str | None = None  # Set at startup by ensure_system_
 # the blueprint system. Both gates must be true for any automated activity.
 BLUEPRINT_ACTIVE_METADATA_KEY = "blueprint_active"
 
+# ── User Timezone Preference ─────────────────────────────────────────────────────
+# Global user-preference singleton (mirrors the "user language" preference shape):
+# one row in ``project_metadata_records`` keyed (SYSTEM_DEFAULT_PROJECT_ID, key).
+# Stores the raw IANA timezone name (e.g. "Asia/Bangkok"); an absent row means
+# "unset — fall through the tz resolution chain" (no default baked in).
+USER_TIMEZONE_METADATA_KEY = "user_timezone"
+
 # ============================================================
 # Scheduler
 # ============================================================

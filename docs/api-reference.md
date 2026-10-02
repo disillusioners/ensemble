@@ -1236,3 +1236,79 @@ Global SSE stream for notification events.
 }
 ```
 
+---
+
+## Settings
+
+Global operator preferences. The ensemble has no user/auth identity layer,
+so these are deployment-wide singletons — one value per setting, shared by
+every lane (REST, agent tools, prompt assembly). Both preferences below are
+stored under the system default project's metadata records and follow the
+same GET/PUT contract.
+
+### Language Preference
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/api/settings/language` | Get the language preference | None |
+| PUT | `/api/settings/language` | Set the language preference | None |
+
+**GET /api/settings/language — Response:**
+```json
+{
+  "language": "English"
+}
+```
+
+Returns the special value `"Auto"` when no preference is stored (agents
+reply in whatever language matches the user's input).
+
+**PUT /api/settings/language — Request:**
+```json
+{
+  "language": "Spanish"
+}
+```
+
+Non-empty string; control characters are stripped. Empty/blank input is
+rejected with `422`. The response echoes the stored value.
+
+### Timezone Preference
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/api/settings/timezone` | Get the timezone preference | None |
+| PUT | `/api/settings/timezone` | Set (or clear) the timezone preference | None |
+
+The stored value is a raw IANA timezone name (e.g. `Asia/Bangkok`). When
+set, it becomes rung 2 of the scheduling timezone resolution chain (see the
+[Scheduling Reference](scheduling.md) Timezone Rule) and is injected into
+every agent's system prompt "Current Time" section.
+
+**GET /api/settings/timezone — Response:**
+```json
+{
+  "timezone": "Asia/Bangkok",
+  "utc_offset": "+07:00"
+}
+```
+
+Both fields are `null` when no preference is stored. `utc_offset` is a
+read-time convenience echo computed from the stored IANA name — it is not
+stored.
+
+**PUT /api/settings/timezone — Request:**
+```json
+{
+  "timezone": "Asia/Bangkok"
+}
+```
+
+Passing `null`, an empty string, or a whitespace-only value **clears** the
+preference (falls back through the scheduling resolution chain). The value
+is trimmed of surrounding whitespace and control characters are stripped;
+the cleaned string is stored as-is (no canonicalization) — maximum length
+is 100 characters, anything longer is rejected with `422`. An invalid IANA
+name is rejected with a `4xx` response — validation happens at write time,
+so an invalid value is never stored. The response echoes the new state
+(same shape as GET).

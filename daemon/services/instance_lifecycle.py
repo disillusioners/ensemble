@@ -47,6 +47,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from zoneinfo import ZoneInfo
 
 from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy import Integer, bindparam, select, text
@@ -74,6 +75,7 @@ from .language_utils import get_language_preference, is_auto_language
 from .llm_load_balancer import _select_weighted_model
 from .project_normalizer import normalize_project_id
 from .turn_transitions import ResumeTurn, SuspendTurn, TransitionResult
+from .user_timezone_utils import get_user_timezone_preference
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -772,13 +774,24 @@ def append_context_key(
     return system_prompt + context_section
 
 
-def append_current_time(system_prompt: str, now: datetime | None = None) -> str:
+def append_current_time(
+    system_prompt: str,
+    now: datetime | None = None,
+    user_timezone: str | None = None,
+) -> str:
     """Append current time information to a system prompt.
 
     Args:
         system_prompt: The base system prompt to append to.
         now: Optional datetime to use (defaults to current UTC time).
             Provide a fixed value for deterministic tests.
+        user_timezone: Optional stored user timezone preference (raw IANA
+            name, resolved ONCE by the caller — this appender is DB-free).
+            When set AND a valid IANA name, two extra lines are inserted
+            between the ``Human:`` line and the ``time`` tool line (local
+            render + UTC-offset display, DST-correct at render time).
+            ``None`` / unset / invalid-at-read → output is byte-identical
+            to the pre-timezone format.
 
     Returns:
         The system prompt with a Current Time section appended.
@@ -788,10 +801,30 @@ def append_current_time(system_prompt: str, now: datetime | None = None) -> str:
     iso_time = now.isoformat()
     weekday = now.strftime("%A")
     human_time = now.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+    # User-timezone lines: only when a valid zone is supplied. Any failure
+    # here degrades to the legacy shape (byte-identical), never a crash.
+    user_tz_lines = ""
+    if user_timezone:
+        zone: ZoneInfo | None = None
+        try:
+            zone = ZoneInfo(user_timezone)
+        except Exception:  # noqa: BLE001 — invalid-at-read → treat as unset
+            zone = None
+        if zone is not None:
+            local_now = now.astimezone(zone)
+            offset = local_now.strftime("%z")
+            offset_colon = f"{offset[:-2]}:{offset[-2:]}" if offset else "+00:00"
+            user_tz_lines = (
+                f"User timezone: {user_timezone} (UTC{offset_colon})\n"
+                f"User local time: {local_now.strftime('%A')}, "
+                f"{local_now.strftime('%Y-%m-%d %H:%M:%S')} UTC{offset_colon} "
+                f"({user_timezone})\n"
+            )
     time_section = (
         f"\n---\n\n## Current Time\n\n"
         f"ISO: {iso_time}\n"
         f"Human: {weekday}, {human_time}\n"
+        f"{user_tz_lines}"
         f"Use the `time` tool for fresh time information when needed."
     )
     return system_prompt + time_section
@@ -1135,7 +1168,10 @@ def _apply_post_cache_appends(
         instance_repository,
         parent_id=parent_id,
     )
-    system_prompt = append_current_time(system_prompt)
+    # One metadata read for the user timezone (same cost class as the
+    # language read below) — the appender itself stays DB-free.
+    user_timezone = get_user_timezone_preference(project_repository)
+    system_prompt = append_current_time(system_prompt, user_timezone=user_timezone)
     system_prompt = append_allowed_models(system_prompt, agent_meta, manager)
     user_language = get_language_preference(project_repository)
     system_prompt = append_user_language(system_prompt, user_language)

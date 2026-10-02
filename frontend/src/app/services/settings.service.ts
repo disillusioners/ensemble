@@ -7,6 +7,19 @@ export interface LanguagePreference {
   language: string;
 }
 
+/**
+ * Mirror of the user timezone API contract:
+ *   GET /api/settings/timezone → { timezone, utc_offset }
+ *   PUT /api/settings/timezone body { timezone } → same response shape
+ *
+ * Both fields are `null` when the preference is unset. Sending
+ * `timezone: null` (or "") clears the setting server-side.
+ */
+export interface TimezonePreference {
+  timezone: string | null;
+  utc_offset: string | null;
+}
+
 export interface BlueprintPeakHours {
   start: number;
   end: number;
@@ -39,6 +52,27 @@ export class SettingsService {
    */
   setLanguagePreference(language: string): Observable<LanguagePreference> {
     return this.http.put<LanguagePreference>(this.API_BASE, { language });
+  }
+
+  /**
+   * GET /api/settings/timezone
+   * Returns the user's IANA timezone preference plus a convenience
+   * UTC offset echo (e.g. `+07:00`). Both fields are `null` when
+   * the preference is unset.
+   */
+  getTimezonePreference(): Observable<TimezonePreference> {
+    return this.http.get<TimezonePreference>('/api/settings/timezone');
+  }
+
+  /**
+   * PUT /api/settings/timezone
+   * Persists the IANA name. `null` (or empty string) clears the
+   * preference; the server validates the IANA name and returns
+   * 4xx for invalid input. The response echoes the stored value
+   * alongside the `utc_offset`.
+   */
+  setTimezonePreference(timezone: string | null): Observable<TimezonePreference> {
+    return this.http.put<TimezonePreference>('/api/settings/timezone', { timezone });
   }
 
   /**

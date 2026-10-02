@@ -44,6 +44,66 @@
     }
   </section>
 
+  <section class="setting-section">
+    <h2>Timezone</h2>
+    <p class="setting-description">
+      Choose your local timezone (IANA name, e.g. <code>Asia/Bangkok</code>).
+      Scheduled tasks and time interpretation use this zone when set; when
+      unset they fall back to the configured default. Choose
+      <strong>Auto / not set</strong> to use the default.
+    </p>
+
+    @if (isTzNativeSupported()) {
+      <app-searchable-select
+        label="Timezone"
+        [options]="timezoneOptions()"
+        [ngModel]="selectedTimezone()"
+        [ngModelOptions]="{standalone: true}"
+        (ngModelChange)="onTimezoneChange($event)"
+      ></app-searchable-select>
+    } @else {
+      <div class="custom-tz-row">
+        <mat-form-field appearance="outline" class="custom-input">
+          <mat-label>Timezone (IANA name)</mat-label>
+          <input
+            matInput
+            [value]="customTimezone()"
+            (input)="onCustomTimezoneChange($event)"
+            placeholder="e.g., Asia/Bangkok"
+          />
+        </mat-form-field>
+        <button
+          mat-raised-button
+          color="primary"
+          (click)="saveCustomTimezone()"
+          [disabled]="savingTimezone() || !customTimezone().trim()"
+        >
+          Save
+        </button>
+        @if (!isTimezoneUnset()) {
+          <button
+            mat-stroked-button
+            (click)="clearCustomTimezone()"
+            [disabled]="savingTimezone()"
+          >
+            Reset to Auto
+          </button>
+        }
+      </div>
+    }
+
+    @if (isTimezoneUnset()) {
+      <p class="setting-hint">
+        Without a timezone set, scheduled tasks and time interpretation fall
+        back to the configured default.
+      </p>
+    }
+
+    @if (savingTimezone()) {
+      <span class="saving-indicator">Saving...</span>
+    }
+  </section>
+
   <section class="setting-section editor-section">
     <h2>Editor</h2>
     <p class="setting-description">
