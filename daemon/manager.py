@@ -3765,9 +3765,23 @@ class InstanceManager:
 
             Reads the meta from the resolver's expected interface
             (duck-typed). Returns an empty list when meta isn't
-            loaded — that's a valid "no tools allowed" state, and
-            the resolver's ``check_tool_capability`` returns
-            ``missing`` for every requested tool.
+            loaded — that's a valid "inherit/default universe" state
+            (the resolver's ``check_tool_capability`` returns
+            ``present`` for every requested tool when the allowlist is
+            empty, matching :func:`daemon.tools.instance.resolve_tool_filter`'s
+            empty-allow + empty-deny semantics — see F1 fix 2026-10-02).
+
+            F1 fix (2026-10-02): the previous implementation used
+            ``getattr(meta, "tools_allow", None)`` — a non-existent
+            attribute on ``AgentMetadata``. ``AgentMetadata`` exposes
+            the agent's allowlist as ``meta.tools`` (``ToolFilter | None``)
+            with the list at ``meta.tools.allow``. Reading the wrong
+            attribute made the gate ALWAYS return ``[]``, which the
+            pre-flight then mis-translated to "every tool missing"
+            (the original empty-deny-all defect). Both halves of the
+            defect must land together: this wiring fix retrieves the
+            real list, and ``check_tool_capability``'s new empty-allow
+            = inherit/universe branch handles the empty case.
             """
             try:
                 # Read the current agent's meta lazily — the
@@ -3785,7 +3799,13 @@ class InstanceManager:
                 ) else None
                 if meta is None:
                     return []
-                allow = getattr(meta, "tools_allow", None)
+                # AgentMetadata exposes allow/deny under ``tools``
+                # (a ToolFilter pydantic model), NOT as
+                # ``tools_allow`` directly. Read the real path.
+                tools_filter = getattr(meta, "tools", None)
+                if tools_filter is None:
+                    return []
+                allow = getattr(tools_filter, "allow", None)
                 if allow is None:
                     return []
                 return list(allow)

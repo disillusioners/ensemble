@@ -417,7 +417,19 @@ def check_mcp_capability(
 def check_tool_capability(
     capability_id: str, *, tools_allow: ToolsAllowFn | None = None
 ) -> CapabilityCheckResult:
-    """Check that ``capability_id`` (a tool name) is in ``tools.allow``."""
+    """Check that ``capability_id`` (a tool name) is in ``tools.allow``.
+
+    Empty-allow semantics (F1 fix, 2026-10-02): an empty ``tools.allow``
+    list is treated as the **inherit/default universe** (no restriction),
+    matching :func:`daemon.tools.instance.resolve_tool_filter` which
+    returns ``None`` (= "all tools allowed") when allow AND deny are both
+    empty (instance.py:322-327). Day-1 defect F1 had this gate treating
+    empty allow as deny-all, which blocked ``load_skill`` from running
+    against worker instances whose pre-flight snapshot of ``tools.allow``
+    was ``[]`` (the actual allow list lives on ``meta.tools.allow`` and
+    the resolver's accessor was reading a non-existent attribute — see
+    the manager-side wiring fix that ships with this change).
+    """
     evidence_base = f"pre_flight: tools.allow.contains({capability_id!r})"
     if tools_allow is None:
         return CapabilityCheckResult(
@@ -427,6 +439,20 @@ def check_tool_capability(
             detection_evidence=f"{evidence_base} -> <no tools_allow injected>",
         )
     allowed = tools_allow()
+    # Empty allow = inherit/default universe (matches resolve_tool_filter
+    # empty-allow + empty-deny branch → "all tools allowed"). Cannot
+    # legitimately return "missing" — there is no restriction declared
+    # to be missing from.
+    if not allowed:
+        return CapabilityCheckResult(
+            state="present",
+            capability_id=capability_id,
+            capability_kind="tools",
+            detection_evidence=(
+                f"{evidence_base} -> empty allowlist "
+                f"(inherit/default universe, matches resolve_tool_filter)"
+            ),
+        )
     if capability_id in allowed:
         return CapabilityCheckResult(
             state="present",

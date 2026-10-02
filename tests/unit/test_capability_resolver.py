@@ -312,6 +312,27 @@ class TestCapabilityCheckMissing:
         assert result.state == "missing"
         assert "not in" in result.detection_evidence
 
+    def test_tools_empty_allowlist_is_present(self):
+        """F1 fix (2026-10-02): empty tools.allow = inherit/default universe.
+
+        Pinned regression for the day-1 load_skill pre-flight defect
+        (capability_missing: bash on workers). Before the fix, an empty
+        allowlist returned state="missing" (deny-all), which blocked
+        load_skill against any agent whose pre-flight saw the allow list
+        as empty. Now per the codebase convention
+        (resolve_tool_filter empty-allow+empty-deny branch at
+        instance.py:322-327 → "all tools allowed"), an empty allowlist
+        returns state="present" with explicit "empty allowlist
+        (inherit/default universe)" evidence so an operator can
+        distinguish the two branches.
+        """
+        result = check_tool_capability(
+            "bash", tools_allow=_make_tools_allow()
+        )
+        assert result.state == "present"
+        assert "empty allowlist" in result.detection_evidence
+        assert "inherit/default universe" in result.detection_evidence
+
     def test_env_missing(self):
         result = check_env_capability(
             "OPENAI_API_KEY", env_lookup=_make_env_lookup()
@@ -320,10 +341,29 @@ class TestCapabilityCheckMissing:
         assert "unset" in result.detection_evidence
 
     def test_aggregate_no_present_returns_mcp_miss(self):
+        # F1 fix (2026-10-02): empty tools.allow now means "inherit/default
+        # universe" — matches resolve_tool_filter empty-allow+empty-deny
+        # semantics (instance.py:322-327). The aggregate therefore sees the
+        # tool axis as "present" when mcp+env miss, and returns tools (not
+        # the mcp miss). Pin the new behavior here:
         result = capability_check(
             "opendesign",
             mcp_lookup=lambda n: None,
             tools_allow=_make_tools_allow(),
+            env_lookup=_make_env_lookup(),
+        )
+        assert result.state == "present"
+        # Tool axis (empty allowlist → inherit/default universe) wins.
+        assert result.capability_kind == "tools"
+
+    def test_aggregate_nonempty_tools_deny_returns_mcp_miss(self):
+        # F1 fix corollary: when tools.allow is non-empty AND the skill's
+        # tool is not in it, the aggregate STILL falls through to mcp/env.
+        # This is the pre-F1 behavior for the non-empty deny case (preserve).
+        result = capability_check(
+            "opendesign",
+            mcp_lookup=lambda n: None,
+            tools_allow=_make_tools_allow("read"),
             env_lookup=_make_env_lookup(),
         )
         assert result.state == "missing"

@@ -427,3 +427,192 @@ class TestMcpToolNamingPattern:
         assert is_mcp_tool("mcp_github_issues") is True
         assert is_mcp_tool("mcp_github") is False
         assert is_mcp_tool("mcp_test") is False
+
+
+# ═════════════════════════════════════════════════════════════════════
+# F2 fix (2026-10-02): MCP tools bind correctly on non-leader instances
+# ═════════════════════════════════════════════════════════════════════
+# Day-1 defect F2: "mcp_opendesign_* tools documented-but-unbound at runtime
+# on fresh non-leader instances" — `mcp` entry in agent ``tools.allow``
+# would not surface the underlying MCP tool surface (``mcp_opendesign_od_*``)
+# because the ``resolve_tool_filter`` allow-expansion branch would treat
+# the entry as a literal tool name (no first-party category metadata
+# registered under lowercase ``"mcp"`` at the time of expansion).
+#
+# Pinned regression: with proper MCP tool population in the universe,
+# a configured agent (worker/designer/developer) MUST see its MCP tools
+# bound to the runtime tool surface. Test exercises the full
+# ``_apply_tool_filter`` path that the day-1 repro missed.
+
+
+class TestF2McpToolBindingOnNonLeader:
+    """F2 fix: MCP tools bind to non-leader agents whose allowlist
+    references the "mcp" category."""
+
+    def _build_opendesign_universe(self):
+        """Build a representative mcp_opendesign_* tool universe."""
+        names = [
+            "od_list_projects", "od_get_project", "od_create_project",
+            "od_update_project", "od_delete_project", "od_save_artifact",
+            "od_lint_artifact", "od_compose_brief", "od_generate_design",
+            "od_save_project_file",
+        ]
+        return [f"mcp_opendesign_{n}" for n in names]
+
+    def _make_tool(self, name):
+        from langchain_core.tools import StructuredTool
+
+        async def _coro(*args, **kwargs):
+            return "fake"
+
+        return StructuredTool(
+            name=name,
+            description=f"[MCP:opendesign] {name}",
+            args_schema={"type": "object", "properties": {}},
+            coroutine=_coro,
+        )
+
+    def test_worker_with_mcp_in_allow_binds_opendesign_tools(self):
+        """worker.tools.allow contains 'mcp' → mcp_opendesign_* must bind.
+
+        Day-1 repro: fresh non-leader worker instance had "mcp" in its
+        ``tools.allow`` but the runtime tool list did NOT include any
+        ``mcp_opendesign_*`` tools (the LLM prompt advertised them but
+        the bound tool list did not include them).
+
+        F2 fix: with the existing ``resolve_tool_filter`` MCP-expansion
+        contract honored (and the F1 empty-allow semantic fix), a
+        properly populated MCP universe MUST surface for a worker instance.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from daemon.tools.instance import _apply_tool_filter
+        from daemon.tools._tool_registry import scan_tools_for_full_docs
+
+        mcp_tool_names = self._build_opendesign_universe()
+        mcp_tools = [self._make_tool(n) for n in mcp_tool_names]
+
+        # Pre-populate _tool_metadata (mirrors the production flow where
+        # create_instance_tools scans BEFORE _apply_tool_filter).
+        scan_tools_for_full_docs(mcp_tools)
+
+        mock_meta = MagicMock()
+        mock_meta.tools = MagicMock()
+        mock_meta.tools.allow = [
+            "bash", "proc", "filesystem", "time", "self", "help",
+            "image", "knowledge", "mcp", "context", "shared_meta_kv",
+        ]
+        mock_meta.tools.deny = None
+        mock_meta.innate_skills = []
+
+        with patch("daemon.tools.instance.list_tools_by_category") as mock_lc:
+            # Mimic what production sees after scan_tools_for_full_docs:
+            # "mcp" category is populated by the MCP tools just added.
+            from daemon.tools._tool_registry import list_tools_by_category
+            mock_lc.return_value = list_tools_by_category()
+            with patch("daemon.registry.get_registry") as mock_get_reg:
+                mock_get_reg.return_value.get_version.return_value = mock_meta
+                mock_get_reg.return_value.get_resolved.return_value = mock_meta
+                filtered = _apply_tool_filter(
+                    mcp_tools, "worker", mcp_tool_names=mcp_tool_names
+                )
+
+        bound_names = {t.name for t in filtered}
+        # All 10 mcp_opendesign_* tools must be bound for worker.
+        missing = [
+            n for n in mcp_tool_names if n not in bound_names
+        ]
+        assert not missing, (
+            f"F2 fix: worker.tools.allow contains 'mcp' but these MCP "
+            f"tools were NOT bound (day-1 defect regression): {missing}"
+        )
+
+    def test_designer_with_mcp_in_allow_binds_opendesign_tools(self):
+        """designer.tools.allow contains 'mcp' → mcp_opendesign_* must bind.
+
+        Same defect repro for designer (one of the agents configured
+        for the OpenDesign e2e contract).
+        """
+        from unittest.mock import MagicMock, patch
+
+        from daemon.tools.instance import _apply_tool_filter
+        from daemon.tools._tool_registry import (
+            list_tools_by_category, scan_tools_for_full_docs,
+        )
+
+        mcp_tool_names = self._build_opendesign_universe()
+        mcp_tools = [self._make_tool(n) for n in mcp_tool_names]
+        scan_tools_for_full_docs(mcp_tools)
+
+        mock_meta = MagicMock()
+        mock_meta.tools = MagicMock()
+        mock_meta.tools.allow = [
+            "bash", "proc", "filesystem", "time", "self", "help",
+            "image", "knowledge", "mcp", "context", "shared_meta_kv",
+            "instance", "service", "midflight", "dynamic-skill", "design",
+        ]
+        mock_meta.tools.deny = None
+        mock_meta.innate_skills = []
+
+        with patch("daemon.tools.instance.list_tools_by_category") as mock_lc:
+            mock_lc.return_value = list_tools_by_category()
+            with patch("daemon.registry.get_registry") as mock_get_reg:
+                mock_get_reg.return_value.get_version.return_value = mock_meta
+                mock_get_reg.return_value.get_resolved.return_value = mock_meta
+                filtered = _apply_tool_filter(
+                    mcp_tools, "designer", mcp_tool_names=mcp_tool_names
+                )
+
+        bound_names = {t.name for t in filtered}
+        missing = [
+            n for n in mcp_tool_names if n not in bound_names
+        ]
+        assert not missing, (
+            f"F2 fix: designer.tools.allow contains 'mcp' but these MCP "
+            f"tools were NOT bound: {missing}"
+        )
+
+    def test_developer_with_mcp_in_allow_binds_opendesign_tools(self):
+        """developer.tools.allow contains 'mcp' → mcp_opendesign_* must bind.
+
+        Same defect repro for developer (the other OpenDesign e2e
+        contract agent).
+        """
+        from unittest.mock import MagicMock, patch
+
+        from daemon.tools.instance import _apply_tool_filter
+        from daemon.tools._tool_registry import (
+            list_tools_by_category, scan_tools_for_full_docs,
+        )
+
+        mcp_tool_names = self._build_opendesign_universe()
+        mcp_tools = [self._make_tool(n) for n in mcp_tool_names]
+        scan_tools_for_full_docs(mcp_tools)
+
+        mock_meta = MagicMock()
+        mock_meta.tools = MagicMock()
+        mock_meta.tools.allow = [
+            "instance", "bash", "proc", "filesystem", "time", "self",
+            "help", "image", "knowledge", "mcp", "context",
+            "shared_meta_kv", "db", "blueprint", "service", "midflight",
+        ]
+        mock_meta.tools.deny = None
+        mock_meta.innate_skills = []
+
+        with patch("daemon.tools.instance.list_tools_by_category") as mock_lc:
+            mock_lc.return_value = list_tools_by_category()
+            with patch("daemon.registry.get_registry") as mock_get_reg:
+                mock_get_reg.return_value.get_version.return_value = mock_meta
+                mock_get_reg.return_value.get_resolved.return_value = mock_meta
+                filtered = _apply_tool_filter(
+                    mcp_tools, "developer", mcp_tool_names=mcp_tool_names
+                )
+
+        bound_names = {t.name for t in filtered}
+        missing = [
+            n for n in mcp_tool_names if n not in bound_names
+        ]
+        assert not missing, (
+            f"F2 fix: developer.tools.allow contains 'mcp' but these MCP "
+            f"tools were NOT bound: {missing}"
+        )
