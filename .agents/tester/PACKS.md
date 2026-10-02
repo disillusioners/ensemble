@@ -1694,4 +1694,3 @@ Branch `feature/lca-false-complete` @ `d5c50994` (base `316a849b`; 1 commit, 32 
 | Origin-sync | throwaway @2aae9b42 + cherry-pick d5c50994 | ✅ clean apply, 215/215 delta-touched green, FE literal propagates, cleanup verified |
 
 Quarantine expectation (2026-09-23 row, base-proven @6bf7bed7): `lcan_childlie_e2e::test_s1`, `lcan_legacy_checkpoint::test_s1`, `lcau_incident_e2e::test_scenario_b` may fire as latent reds — adjudicate base-identical, never branch-caused without A/B proof. One ruled pin update allowed: `test_attestation_judge_wiring.py::test_judge_not_called_on_terminal_after_bound_path` (requirements.md 2026-09-26 ruling).
-ing.py::test_judge_not_called_on_terminal_after_bound_path` (requirements.md 2026-09-26 ruling).
