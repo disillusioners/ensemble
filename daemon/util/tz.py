@@ -508,6 +508,24 @@ def _parse_cron_hour_minute(cron_expr: str) -> tuple[int, int] | None:
     return (minute, hour)
 
 
+def _cron_dow_is_wildcard(cron_expr: str) -> bool:
+    """Return True iff the 5th field of ``cron_expr`` is the literal ``*``.
+
+    The F4 fix (2026-10-02) builds the reconstruct DATE from
+    ``after_aware`` for daily cron expressions (DOW unrestricted);
+    DOW-restricted expressions keep using croniter's emission date
+    because croniter's DOW-match arithmetic is correct (only the HH:MM
+    offset is wrong in the phantom). Returns False for any non-``*``
+    DOW field — including lists/ranges/steps which fail earlier in
+    :func:`_parse_cron_hour_minute` so the F4 path is unreachable for
+    those shapes (the loud WARNING fallback at line 622 handles them).
+    """
+    parts = cron_expr.split()
+    if len(parts) != 5:
+        return False
+    return parts[4] == "*"
+
+
 def compute_next_cron_fire(
     cron_expr: str,
     after_aware: datetime,
@@ -532,9 +550,13 @@ def compute_next_cron_fire(
     re-called from ``candidate - 1s`` must emit ``candidate`` back);
     non-matching = phantom. Recovery uses
     :func:`anchor_local_to_utc` with ``fold_preference="post"`` applied
-    to the cron expression's literal hour/minute on the phantom's date.
-    Falls back to the croniter emission (with a loud WARNING) when the
-    cron expression is not literal-int-parsable.
+    to the cron expression's literal hour/minute on the cursor's local
+    date (NOT on the phantom's date — croniter 6.0.0's tz-object-
+    identity defect can return a wrong calendar date in the phantom
+    emission, e.g. ``0 23 * * *`` across the fall-back). When the literal
+    HH:MM has already passed on the cursor's date, the recovery advances
+    one calendar day. Falls back to the croniter emission (with a loud
+    WARNING) when the cron expression is not literal-int-parsable.
 
     The returned datetime is always tz-aware in ``tz``. Returns ``None``
     on croniter parse failure or when the schedule has no next
@@ -619,7 +641,7 @@ def compute_next_cron_fire(
         return anchored
 
     # Phantom detected. Recover by re-anchoring the cron expression's
-    # literal hour/minute on the phantom's date (post-DST).
+    # literal hour/minute on the cursor's date (post-DST).
     parsed = _parse_cron_hour_minute(cron_expr)
     if parsed is None:
         # Non-literal cron expression — fall back to the re-anchored
@@ -640,14 +662,57 @@ def compute_next_cron_fire(
         return anchored
 
     minute, hour = parsed
-    phantom_date = candidate_aware.astimezone(tz).replace(
-        hour=hour, minute=minute, second=0, microsecond=0,
-    )
-    # ``phantom_date`` is still tz-aware after the ``.replace`` (Python
-    # preserves tzinfo across ``replace(hour=...)``). anchor_local_to_
-    # utc's Rule 1 returns aware inputs unchanged, so strip the tzinfo
-    # to force the gap/fold detection path.
-    phantom_naive = phantom_date.replace(tzinfo=None)
+    # F4 fix (2026-10-02, post-review follow-up): for DOW=``*`` (daily)
+    # expressions, derive the reconstruct DATE from ``after_aware`` (the
+    # cycle's start/after instant — already normalized to ``tz`` by the
+    # entry hardening at line 571), NOT from ``candidate_aware``.
+    # Croniter 6.0.0 has a tz-object-identity defect that emits the
+    # WRONG DATE in the phantom emission (reproduced on ``0 23 * * *``
+    # across 2026-11-01 fall-back: candidate = Nov 2 00:00 EST when the
+    # cursor is just past Oct 31 23:00 EDT; the real fire is Nov 1
+    # 23:00 EST). The cron's literal HH:MM from
+    # ``_parse_cron_hour_minute`` still comes from the expression; the
+    # reconstructed fire's calendar DATE is built from ``after_aware``'s
+    # local date, advancing a day when the literal HH:MM has already
+    # passed on the cursor's date (otherwise the literal on the same
+    # date would dispatch in the past / at the cursor instant, which
+    # the monotonic guard then eats — a silent skip of the next
+    # legitimate fire). For DOW-restricted expressions (e.g.
+    # ``0 4 * * 3``), croniter's DOW-match arithmetic is correct (only
+    # the HH:MM is wrong) so the candidate's calendar DATE is retained
+    # — the day-of-week/match arithmetic still uses croniter's
+    # sequence semantics (tester-ratified wording, see ``decisions.md``
+    # ADR-008 amendment).
+    is_daily = _cron_dow_is_wildcard(cron_expr)
+    if is_daily:
+        after_local = after_aware.astimezone(tz)
+        phantom_local = after_local.replace(
+            hour=hour, minute=minute, second=0, microsecond=0,
+        )
+        if phantom_local <= after_local:
+            # Literal HH:MM has already passed (or equals) on the
+            # cursor's date — advance one day so the reconstruction
+            # is strictly later than ``after_aware``.
+            # ``+ timedelta(days=1)`` on a tz-aware datetime preserves
+            # tzinfo; on a fold day the offset may flip from EDT
+            # (-04:00) to EST (-05:00) across midnight, which is the
+            # correct semantic for the schedule's wall-clock.
+            phantom_local = phantom_local + timedelta(days=1)
+    else:
+        # DOW-restricted: trust croniter's date (correct DOW-match) —
+        # only the HH:MM is wrong in the phantom. Replicates the
+        # pre-F4 reconstruct shape on the date axis so DOW arithmetic
+        # still uses croniter's sequence semantics (tester-ratified
+        # wording, see ``decisions.md`` ADR-008 amendment).
+        phantom_local = candidate_aware.astimezone(tz).replace(
+            hour=hour, minute=minute, second=0, microsecond=0,
+        )
+    # ``phantom_local`` is still tz-aware after ``+ timedelta(days=1)``.
+    # anchor_local_to_utc's Rule 1 returns aware inputs unchanged, so
+    # strip the tzinfo to force the gap/fold detection path (the
+    # function then re-applies the post-fold preference on fold days
+    # and shifts forward to the first-existing local on gap days).
+    phantom_naive = phantom_local.replace(tzinfo=None)
     try:
         recovered, _w = anchor_local_to_utc(phantom_naive, tz, fold_preference="post")
     except ValueError as exc:
@@ -665,7 +730,12 @@ def compute_next_cron_fire(
     # schedules "now" → next fire still in the past → loop). Follow
     # the function's existing miss/advance convention (return None
     # per lines 554/564 — caller falls back to a fresh from-now
-    # computation).
+    # computation). The F4 date-source fix means a legitimate
+    # ``after_aware`` seeded in the post-fire window advances past the
+    # cursor's date, so the guard should now simply never eat a
+    # legitimate fire (verified against the ``0 23`` fall-back scenario
+    # and the ``30 2`` spring-forward gap scenario in the regression
+    # tests).
     if recovered <= after_aware:
         logger.warning(
             "tz.compute_next_cron_fire: recovered %s is not strictly "

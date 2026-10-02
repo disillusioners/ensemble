@@ -2061,6 +2061,119 @@ class TestDstSemantics:
             == "2026-11-01T11:00:00+00:00"
         )
 
+    def test_dst_cron_daily_23_ny_across_fall_back_post_fire_seed(self):
+        """F4 regression: ``0 23 * * *`` America/New_York across the
+        2026-11-01 fall-back from the post-fire seed produces EXACTLY
+        ONE fire on Nov 1 at 23:00 EST = 04:00Z Nov 2 — no Oct 31 nor
+        Nov 2 fire on the same wall-clock.
+
+        Pre-F4 (tester-reproduced ×2): croniter 6.0.0's tz-object-
+        identity defect emits the WRONG DATE in the phantom emission
+        for ``0 23 * * *`` across the fall-back — the function returned
+        Nov 2 23:00 EST (Nov 3 04:00Z), silently skipping the Nov 1
+        23:00 EST fire. The reconstruct path inherited croniter's wrong
+        date.
+
+        Post-F4 (date source = ``after_aware`` for DOW=``*``): the
+        seed-anchor is Oct 31 23:00:01 EDT (just past the prior 23:00
+        fire); the literal HH:MM has already passed on the cursor's
+        date so the F4 day-advance rule produces Nov 1 23:00 EST =
+        04:00Z Nov 2 — the expected fire.
+
+        Pin (zoneinfo-computed, exact UTC) across the fold and a post-
+        fire seed:
+            Oct 31 23:00 EDT = 03:00Z Nov 1   (from Oct 31 00:00 EDT seed)
+            Nov 1  23:00 EST = 04:00Z Nov 2   (the F4 fix — was missed pre-fix)
+            Nov 2  23:00 EST = 04:00Z Nov 3
+        """
+        from datetime import timezone as _stdlib_tz
+
+        from daemon.util.tz import compute_next_cron_fire
+
+        ny = ZoneInfo(self.NY)
+
+        # Leg 1: full sequence across the fold from Oct 31 00:00 NY.
+        cursor = datetime(2026, 10, 31, 0, 0, tzinfo=ny)
+        fires = []
+        for _ in range(4):
+            nxt = compute_next_cron_fire("0 23 * * *", cursor, ny)
+            if nxt is None or nxt >= datetime(2026, 11, 3, 0, 0, tzinfo=ny):
+                break
+            fires.append(nxt)
+            cursor = nxt + __import__("datetime").timedelta(seconds=1)
+        utc_fires = [f.astimezone(_stdlib_tz.utc).isoformat() for f in fires]
+        assert utc_fires == [
+            "2026-11-01T03:00:00+00:00",  # Oct 31 23:00 EDT = 03:00Z Nov 1
+            "2026-11-02T04:00:00+00:00",  # Nov 1 23:00 EST — F4 fix, was missed
+            "2026-11-03T04:00:00+00:00",  # Nov 2 23:00 EST
+        ], f"unexpected 0 23 fall-back fire sequence: {utc_fires}"
+
+        # Leg 2 (the exact F4 post-fire-seed shape): cursor = Oct 31
+        # 23:00:01 EDT just past the prior fire → next fire must be
+        # Nov 1 23:00 EST = 04:00Z Nov 2 (not Nov 2 23:00).
+        after_aware = datetime(2026, 10, 31, 23, 0, 1, tzinfo=ny)
+        nxt = compute_next_cron_fire("0 23 * * *", after_aware, ny)
+        assert nxt is not None, "F4 regression — must return a fire"
+        assert nxt == datetime(2026, 11, 1, 23, 0, tzinfo=ny), (
+            f"F4 regression — expected Nov 1 23:00 EST, got {nxt.isoformat()}"
+        )
+        assert (
+            nxt.astimezone(_stdlib_tz.utc).isoformat()
+            == "2026-11-02T04:00:00+00:00"
+        )
+        # Post-DST fold offset — the second occurrence (EST).
+        assert nxt.utcoffset().total_seconds() == -5 * 3600
+        # Specifically NOT the pre-fix wrong-date fire (Nov 2 23:00).
+        assert nxt.astimezone(_stdlib_tz.utc).isoformat() != (
+            "2026-11-03T04:00:00+00:00"
+        )
+
+    def test_dst_cron_daily_0_ny_across_spring_forward(self):
+        """F4 mirror: ``0 0 * * *`` America/New_York across the
+        2026-03-08 spring-forward gap produces EXACTLY ONE fire on
+        Mar 8 at 00:00 EST = 05:00Z Mar 8 (pre-gap), no Mar 8 mid-gap
+        fire on the same wall-clock.
+
+        Spring-forward gap (02:00–03:00 Mar 8) does not contain 00:00,
+        so the literal HH:MM is not gap-affected — the F4 fix's
+        day-advance rule is exercised but the gap-shift path is not
+        (the literal 00:00 lands on Mar 8 00:00 EST = 05:00Z, no shift
+        needed). Pins that the F4 fix is symmetry-correct on the
+        spring-forward side as well.
+
+        Pin (zoneinfo-computed, exact UTC):
+            Mar 7 00:00 EST = 05:00Z Mar 7
+            Mar 8 00:00 EST = 05:00Z Mar 8   (single fire on gap day)
+            Mar 9 00:00 EDT = 04:00Z Mar 9
+            Mar 10 00:00 EDT = 04:00Z Mar 10
+        """
+        from datetime import timezone as _stdlib_tz
+
+        from daemon.util.tz import compute_next_cron_fire
+
+        ny = ZoneInfo(self.NY)
+
+        # Cursor = Mar 6 23:59:59 NY so the first fire is Mar 7 00:00
+        # (croniter's get_next is strict-after; the cursor must be
+        # strictly before the literal HH:MM to land on Mar 7).
+        cursor = datetime(2026, 3, 6, 23, 59, 59, tzinfo=ny)
+        fires = []
+        for _ in range(4):
+            nxt = compute_next_cron_fire("0 0 * * *", cursor, ny)
+            if nxt is None or nxt >= datetime(2026, 3, 11, 0, 0, tzinfo=ny):
+                break
+            fires.append(nxt)
+            cursor = nxt + __import__("datetime").timedelta(seconds=1)
+        utc_fires = [f.astimezone(_stdlib_tz.utc).isoformat() for f in fires]
+        assert utc_fires == [
+            "2026-03-07T05:00:00+00:00",  # Mar 7 00:00 EST
+            "2026-03-08T05:00:00+00:00",  # Mar 8 00:00 EST (pre-gap, single fire)
+            "2026-03-09T04:00:00+00:00",  # Mar 9 00:00 EDT
+            "2026-03-10T04:00:00+00:00",  # Mar 10 00:00 EDT
+        ], f"unexpected 0 0 spring-forward fire sequence: {utc_fires}"
+        # Specifically no in-gap phantom (00:00 Mar 8 is pre-gap).
+        assert "2026-03-08T06:00:00+00:00" not in utc_fires
+
 
 # ==================== Phase-5 TestCatchUpSemantics (D3) ====================
 

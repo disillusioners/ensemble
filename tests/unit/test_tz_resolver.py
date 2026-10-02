@@ -199,41 +199,71 @@ class TestResolveTimeZoneChain:
 
 
 class TestComputeNextCronFireMonotonicGuard:
-    """Post-review monotonic guard for ``compute_next_cron_fire`` (commit 10).
+    """Post-review monotonic guard for ``compute_next_cron_fire``.
 
-    The guard skips-and-advances when re-anchoring recovers a phantom
-    on/before ``after_aware`` — closes the hypothetical broken-croniter
-    same-date tight-loop (a phantom past instant would cause the caller
-    to schedule "now", which still lands in the past, ad infinitum).
-    Pins the function's miss/advance signal: ``None`` return per the
-    existing convention (croniter parse failure at line 564) so the
-    caller falls back to a fresh from-now computation.
+    Two scenarios live here, both exercising the F4 fix (date source =
+    ``after_aware`` for DOW=``*``) and the residual guard at the bottom
+    of the reconstruct path:
+
+    * F4 day-advance: a same-date phantom (literal HH:MM has already
+      passed on the cursor's date) advances to the NEXT calendar day
+      instead of dispatching in the past / being eaten by the guard.
+      Closes the post-fire-seed miss reproduced on ``0 23 * * *``
+      across 2026-11-01 (Nov 1 23:00 EST fire silently skipped before
+      the fix; verified green after).
+
+    * Residual guard (defense-in-depth): when ``anchor_local_to_utc``
+      itself returns a non-strictly-later value (theoretical edge —
+      not triggered on the F4-fix path in production), the guard still
+      signals miss/advance via ``None`` per the function's existing
+      convention (``compute_next_cron_fire`` docstring). Pinned via
+      a croniter patch that emits a candidate whose date + literal
+      HH:MM still lands on/before ``after_aware`` even after the F4
+      day-advance (the patch's date math forces the literal back onto
+      ``after_aware``'s exact date AFTER the +1d advance).
     """
 
-    def test_same_date_phantom_advances_and_logs_warning(
-        self, monkeypatch, caplog,
+    def test_same_date_phantom_advances_to_next_day_via_f4_fix(
+        self, monkeypatch,
     ):
-        """Force the phantom path: first croniter() emits a same-date
-        phantom, roundtrip emits a different time, the recovery path
-        re-anchors back to 06:00 (BEFORE the 07:00 start) → guard fires.
+        """F4 fix: a same-date phantom on a DOW=``*`` expression advances
+        to the NEXT calendar day instead of dispatching in the past.
+
+        Repro before F4: ``post-fire-seed`` (cursor = Feb 15 07:00 NY
+        just past the prior 06:00 fire) → croniter emitted a same-
+        date phantom (Feb 15 06:00 NY = 11:00 UTC) → pre-F4
+        reconstruct re-anchored to Feb 15 06:00 EST = 11:00Z (BEFORE
+        cursor at 12:00Z) → guard fired → returned ``None`` → next
+        cycle compute_next_cron_fire call from ``null`` → cast as
+        wall-clock-now → still landed in the past → tight loop (or
+        silent skip if the caller treats ``None`` as a miss).
+
+        Post-F4 fix: reconstruct uses ``after_aware``'s local date,
+        so a phantom whose literal HH:MM has already passed on the
+        cursor's date advances +1 day. The cursor's next fire lands
+        on Feb 16 06:00 NY = 11:00 EST = 16:00Z — strictly later
+        than the cursor (07:00 EST = 12:00Z), so the monotonic guard
+        does NOT fire. The function returns the legitimate next fire
+        rather than ``None``.
         """
-        import logging
-
-        import croniter as _croniter_module
-
         from daemon.util.tz import compute_next_cron_fire
 
         ny = ZoneInfo("America/New_York")
+
+        import croniter as _croniter_module
+
         call_count = {"i": 0}
 
         class _PhantomCroniterFake:
-            """Stand-in for ``croniter.croniter`` that emits the
-            same-date phantom on the first ``get_next`` and a
-            different instant on the roundtrip — driving the recovery
-            path that the guard sits at the end of.
+            """Same-date phantom that mimics the pre-F4 croniter 6.0.0
+            tz-object-identity defect (emits the wrong hour AND the
+            wrong date on certain shapes; here we force the same-date
+            shape to exercise the F4 day-advance rule).
 
-            The unit under test is OUR guard against a hypothetical
-            broken croniter; patching ``croniter`` HERE is legitimate.
+            First ``get_next`` returns Feb 15 06:00 NY (the phantom
+            — wrong hour); roundtrip (call #2) returns Feb 15 14:00 NY
+            (different instant → roundtrip != candidate → phantom path
+            is taken in the production code).
             """
 
             def __init__(self, expr, start):
@@ -242,28 +272,89 @@ class TestComputeNextCronFireMonotonicGuard:
 
             def get_next(self, ret_type):
                 if self._index == 1:
-                    # Phantom: 06:00 EST on Feb 15, 2026 = 11:00 UTC.
                     return datetime(2026, 2, 15, 6, 0, tzinfo=ny)
-                # Roundtrip (from candidate - 1s): different time
-                # → roundtrip_emit != candidate_aware → phantom path.
                 return datetime(2026, 2, 15, 14, 0, tzinfo=ny)
 
         monkeypatch.setattr(_croniter_module, "croniter", _PhantomCroniterFake)
 
-        # 07:00 EST on Feb 15, 2026 = 12:00 UTC — AFTER the phantom's
-        # 06:00. Recovery re-anchors the literal cron HH:MM 06:00 on
-        # the phantom's date → 06:00 EST = 11:00 UTC, which is BEFORE
-        # this start → guard must fire.
+        # 07:00 EST on Feb 15 — just past the prior 06:00 fire.
         after_aware = datetime(2026, 2, 15, 7, 0, tzinfo=ny)
 
-        with caplog.at_level(logging.WARNING, logger="daemon.util.tz"):
-            result = compute_next_cron_fire("0 6 * * *", after_aware, ny)
+        result = compute_next_cron_fire("0 6 * * *", after_aware, ny)
 
-        # 1. Function signals miss/advance via None (existing convention).
-        assert result is None
-        # 2. Both croniter() invocations happened (main + roundtrip).
+        # F4 fix: phantom advances +1 day → Feb 16 06:00 NY = 16:00Z.
+        # Pre-F4: this returned None (guard fired).
+        assert result is not None, (
+            "F4 fix regression — same-date phantom on DOW=* must "
+            "advance to next-day fire, not None (guard)"
+        )
+        assert result == datetime(2026, 2, 16, 6, 0, tzinfo=ny), (
+            f"expected Feb 16 06:00 NY = 11:00Z (F4 next-day advance), "
+            f"got {result.isoformat()}"
+        )
+        assert result.utcoffset().total_seconds() == -5 * 3600
+        # Both croniter() invocations happened (main + roundtrip).
         assert call_count["i"] == 2
-        # 3. Guard log token — phrased so incident triage can grep.
+
+    def test_residual_guard_fires_when_anchor_returns_non_strictly_later(
+        self, monkeypatch, caplog,
+    ):
+        """Residual guard (defense-in-depth): the monotonic guard at
+        the bottom of the reconstruct path still fires when the anchor
+        helper itself returns a non-strictly-later value.
+
+        In production the F4 day-advance rule eliminates the scenarios
+        which the guard was added to catch (same-date phantom on
+        DOW=``*`` no longer lands on/before ``after_aware``). The guard
+        remains as defense-in-depth — this test pins that a
+        ``recovered <= after_aware`` condition still produces ``None`` +
+        a guard warning, by patching ``anchor_local_to_utc`` to return
+        the cursor instant (synthetic edge the production flow cannot
+        reach but the guard must still handle).
+        """
+        import logging
+
+        from daemon.util.tz import compute_next_cron_fire
+
+        ny = ZoneInfo("America/New_York")
+
+        import croniter as _croniter_module
+
+        # Force croniter roundtrip-detect a phantom (call #1 != call #2)
+        # so the reconstruct path runs.
+        call_count = {"i": 0}
+
+        class _PhantomCroniterFake:
+            def __init__(self, expr, start):
+                call_count["i"] += 1
+                self._index = call_count["i"]
+
+            def get_next(self, ret_type):
+                if self._index == 1:
+                    return datetime(2026, 2, 15, 6, 0, tzinfo=ny)
+                return datetime(2026, 2, 15, 14, 0, tzinfo=ny)
+
+        monkeypatch.setattr(_croniter_module, "croniter", _PhantomCroniterFake)
+
+        # Patch anchor_local_to_utc to return exactly ``after_aware`` —
+        # F4 advance rule still triggers (Feb 15 06:00 <= Feb 15 07:00
+        # → +1 day → Feb 16 06:00 NY), the anchor helper then ignores
+        # the input and returns the cursor → recovered <= after_aware
+        # → guard fires.
+        _anchor_holder = {"after": datetime(2026, 2, 15, 7, 0, tzinfo=ny)}
+
+        def _patched_anchor(naive, tz, **kwargs):
+            return _anchor_holder["after"], ""
+
+        monkeypatch.setattr(tz_module, "anchor_local_to_utc", _patched_anchor)
+
+        with caplog.at_level(logging.WARNING, logger="daemon.util.tz"):
+            result = compute_next_cron_fire(
+                "0 6 * * *", _anchor_holder["after"], ny,
+            )
+
+        # Guard fires — returns None (miss/advance signal).
+        assert result is None
         guard_warnings = [
             r for r in caplog.records
             if "advancing past phantom fire" in r.getMessage()
