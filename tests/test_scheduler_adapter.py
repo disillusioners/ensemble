@@ -2484,9 +2484,180 @@ class TestEnqueueMessageJobDedupRealPath:
     @pytest.mark.asyncio
     async def test_dedup_compensation_cancels_running_task(self, dedup_engine):
         """Crash-window variant (already-claimed): the phantom Task-B is
-        claimed (flipped RUNNING) between prelude and the dedup-detect.
-        The D4 compensation must route it through ``cancel_task`` (not
-        ``delete``) — it lands in CANCELLED, not deleted.
+        claimed (flipped RUNNING) between the prelude commit and the
+        dedup-detect — the exact production race window the
+        compensation's own comment names ("worker-pool claim between
+        prelude and enqueue"). The D4 compensation must route Task-B
+        through ``cancel_task``'s RUNNING/AbortTurn branch (not the
+        PENDING legacy-shape UPDATE, not ``delete``) — it lands in
+        CANCELLED with its row preserved.
+
+        Mechanism (reviewer option b — real flip, no rename): the
+        substrate ``enqueue`` call is wrapped by a passive observer —
+        the REAL substrate still runs (the partial-UNIQUE-index dedup
+        hit is real). After the real enqueue returns (prelude long
+        since committed), the wrapper flips the ONE PENDING Task whose
+        ``work_id != JobItem-A.job_id`` to RUNNING via a direct session
+        write, before the dedup-detect reads the status. In this
+        fixture that wrapper IS the worker-pool stand-in (no real
+        worker pool exists to win the claim race), and the phantom
+        singleton is asserted BEFORE the flip so the test stays honest.
+        """
+        (
+            manager,
+            svc,
+            job_repo,
+            task_repo,
+            mq_repo,
+            _queue_repo,
+        ) = self._build_stack(dedup_engine)
+
+        key = f"scheduler:dedup-running:{self.RUN_AT_ISO}"
+
+        # First call — completes normally (JobItem-A + Task-A + MQ-A).
+        result1 = await svc.enqueue_message_job(
+            instance_id=self.INSTANCE_ID,
+            message="scheduled message",
+            source="scheduler",
+            idempotency_key=key,
+        )
+        job_a_id = result1.job_id
+
+        from sqlmodel import Session, col, select
+
+        from daemon.repositories.task.models import Task
+
+        # Worker-pool stand-in: wrap the REAL substrate enqueue (no
+        # stubbing — the dedup hit below is the real partial UNIQUE
+        # index collision). The flip lands inside the production race
+        # window: after the substrate claim returns, BEFORE the
+        # dedup-detect reads Task-B's status.
+        jq_service = manager._job_queue_service
+        real_enqueue = jq_service.enqueue
+        flip_observations: dict = {}
+
+        async def claim_race_flip(*args, **kwargs):
+            result = await real_enqueue(*args, **kwargs)
+            with Session(dedup_engine) as session:
+                # The phantom set: PENDING tasks NOT linked to
+                # JobItem-A. In this fixture it must be exactly
+                # {Task-B} — assert the singleton BEFORE flipping so
+                # the test cannot silently flip an unexpected row.
+                phantoms = session.exec(
+                    select(Task).where(
+                        col(Task.status) == "pending",
+                        col(Task.work_id) != job_a_id,
+                    )
+                ).all()
+                assert len(phantoms) == 1, (
+                    "expected exactly ONE phantom PENDING Task (Task-B) "
+                    f"before the claim-race flip, got {len(phantoms)}: "
+                    f"{[(t.id, t.work_id, t.status) for t in phantoms]}"
+                )
+                task_b = phantoms[0]
+                flip_observations["task_b_id"] = task_b.id
+                flip_observations["task_b_work_id"] = task_b.work_id
+                # The claim race fires: PENDING → RUNNING — the same
+                # direct status write the worker pool's
+                # claim_pending_task commits.
+                task_b.status = "running"
+                session.add(task_b)
+                session.commit()
+                # Prove the flip landed BEFORE the compensation runs —
+                # this is what forces cancel_task down the
+                # RUNNING/AbortTurn branch (not the PENDING fallback).
+                session.refresh(task_b)
+                assert task_b.status == "running", (
+                    "Task-B must be RUNNING before the dedup-detect "
+                    f"reads it; got {task_b.status}"
+                )
+            return result
+
+        jq_service.enqueue = claim_race_flip
+
+        # Second call — the prelude writes Task-B + MQ-B, the REAL
+        # substrate hits the partial UNIQUE index and returns JobItem-A,
+        # the wrapper flips Task-B RUNNING, then the dedup-detect fires
+        # and the compensation routes through the RUNNING/AbortTurn
+        # branch.
+        result2 = await svc.enqueue_message_job(
+            instance_id=self.INSTANCE_ID,
+            message="scheduled message",
+            source="scheduler",
+            idempotency_key=key,
+        )
+
+        from daemon.repositories.job_queue.models import JobItem
+        from daemon.repositories.message_queue.models import MessageQueue
+        from daemon.repositories.task.models import TaskStatus
+
+        task_b_id = flip_observations["task_b_id"]
+        task_b_work_id = flip_observations["task_b_work_id"]
+
+        with Session(dedup_engine) as session:
+            job_rows = session.exec(select(JobItem)).all()
+            task_rows = session.exec(select(Task)).all()
+            mq_rows = session.exec(select(MessageQueue)).all()
+
+        # Only ONE JobItem (JobItem-A) — no phantom JobItem survives.
+        assert len(job_rows) == 1, (
+            f"expected 1 JobItem after dedup, got {len(job_rows)}"
+        )
+        assert job_rows[0].job_id == job_a_id
+
+        # RUNNING-branch contract: the already-claimed phantom Task-B
+        # was CANCELLED — NOT deleted. cancel_task preserves the row
+        # (the AbortTurn hot path that the RUNNING prior-status
+        # selects), so the compensation's audit trail survives.
+        task_b_row = next(t for t in task_rows if t.id == task_b_id)
+        assert task_b_row.status == TaskStatus.CANCELLED.value, (
+            "the RUNNING phantom Task-B must land CANCELLED via the "
+            "cancel_task RUNNING/AbortTurn branch (row preserved, not "
+            f"deleted); got {task_b_row.status}"
+        )
+        assert task_b_row.work_id == task_b_work_id
+
+        # Exactly 2 Task rows: Task-A + the cancelled Task-B.
+        assert len(task_rows) == 2, (
+            "expected exactly 2 Task rows (Task-A + cancelled Task-B), "
+            f"got {len(task_rows)}: "
+            f"{[(t.id, t.work_id, t.status) for t in task_rows]}"
+        )
+
+        # Task-A untouched: still PENDING, still linked to JobItem-A
+        # (linkage contract work_id == job_id on the surviving task).
+        task_a_row = next(t for t in task_rows if t.work_id == job_a_id)
+        assert task_a_row.status == TaskStatus.PENDING.value, (
+            "Task-A must be untouched by the compensation; got "
+            f"{task_a_row.status}"
+        )
+        assert task_a_row.work_id == job_rows[0].job_id, (
+            "Task.work_id must equal JobItem.job_id (linkage contract)"
+        )
+
+        # MQ-B deleted by the compensation: only MQ-A survives.
+        assert len(mq_rows) == 1, (
+            f"expected 1 MessageQueue after dedup (MQ-B deleted), got "
+            f"{len(mq_rows)}"
+        )
+        assert mq_rows[0].message_id == result1.message_id
+
+        # Second call returns JobItem-A's id.
+        assert result2.job_id == job_a_id
+
+    @pytest.mark.asyncio
+    async def test_no_idempotency_key_two_calls_create_two_jobs(self, dedup_engine):
+        """No-key guard: two ``enqueue_message_job`` calls WITHOUT an
+        idempotency key are fully independent — exactly 2 JobItems, 2
+        Tasks (both PENDING, distinct work_ids each linked to its own
+        JobItem), and 2 MessageQueue rows — and NO compensation fires
+        (zero cancelled tasks, both MQ rows intact).
+
+        Pins the dedup-hit gate's no-key branch: the gate requires
+        ``idempotency_key is not None``. A future refactor that drops
+        that guard would route no-key second calls into the
+        phantom-compensation path — cancelling the second Task and
+        deleting the second MQ row — and trip this test.
         """
         (
             _manager,
@@ -2497,30 +2668,19 @@ class TestEnqueueMessageJobDedupRealPath:
             _queue_repo,
         ) = self._build_stack(dedup_engine)
 
-        key = f"scheduler:dedup-running:{self.RUN_AT_ISO}"
-
-        # First call — completes normally.
         result1 = await svc.enqueue_message_job(
             instance_id=self.INSTANCE_ID,
             message="scheduled message",
             source="scheduler",
-            idempotency_key=key,
+            idempotency_key=None,
         )
-        job_a_id = result1.job_id
-
-        # Second call — prelude writes Task-B + MQ-B. We then flip Task-B
-        # to RUNNING manually to simulate the worker pool winning the
-        # claim race, BEFORE the dedup detect fires.
         result2 = await svc.enqueue_message_job(
             instance_id=self.INSTANCE_ID,
             message="scheduled message",
             source="scheduler",
-            idempotency_key=key,
+            idempotency_key=None,
         )
 
-        # No crash. Now verify no orphan survives. The phantom Task-B
-        # (work_id != job_a_id) must NOT exist in PENDING — it must be
-        # CANCELLED or absent (deleted).
         from sqlmodel import Session, select
 
         from daemon.repositories.job_queue.models import JobItem
@@ -2532,33 +2692,45 @@ class TestEnqueueMessageJobDedupRealPath:
             task_rows = session.exec(select(Task)).all()
             mq_rows = session.exec(select(MessageQueue)).all()
 
-        # Only ONE JobItem (JobItem-A).
-        assert len(job_rows) == 1, (
-            f"expected 1 JobItem after dedup, got {len(job_rows)}"
+        # Exactly 2 independent JobItems — no dedup collapse.
+        assert len(job_rows) == 2, (
+            f"expected 2 JobItems without an idempotency key, got "
+            f"{len(job_rows)}"
         )
-        assert job_rows[0].job_id == job_a_id
+        job_ids = {j.job_id for j in job_rows}
+        assert result1.job_id != result2.job_id, (
+            "two no-key calls must mint distinct work_ids"
+        )
+        assert job_ids == {result1.job_id, result2.job_id}
 
-        # No phantom Task row in PENDING or RUNNING state.
-        pending_or_running = [
-            t for t in task_rows
-            if t.status in (TaskStatus.PENDING.value, TaskStatus.RUNNING.value)
-        ]
-        assert len(pending_or_running) == 1, (
-            f"exactly ONE PENDING/RUNNING Task must survive the dedup; "
-            f"got {len(pending_or_running)}: "
+        # Exactly 2 Tasks, both still PENDING — NO compensation fired.
+        assert len(task_rows) == 2, (
+            f"expected 2 Task rows without an idempotency key, got "
+            f"{len(task_rows)}: "
             f"{[(t.id, t.work_id, t.status) for t in task_rows]}"
         )
-        assert pending_or_running[0].work_id == job_a_id, (
-            "the surviving live Task must be Task-A (work_id == "
-            f"JobItem-A.job_id == {job_a_id}); got work_id="
-            f"{pending_or_running[0].work_id}"
+        for t in task_rows:
+            assert t.status == TaskStatus.PENDING.value, (
+                "no compensation may fire without an idempotency key; "
+                f"Task-{t.id} is {t.status}"
+            )
+
+        # Distinct work_ids, each linked to its own JobItem (linkage
+        # contract on BOTH rows).
+        task_work_ids = {t.work_id for t in task_rows}
+        assert len(task_work_ids) == 2, "work_ids must be distinct"
+        assert task_work_ids == job_ids, (
+            "each Task.work_id must equal its JobItem.job_id (linkage "
+            "contract on both rows)"
         )
 
-        # Only ONE MessageQueue (MQ-A).
-        assert len(mq_rows) == 1, (
-            f"expected 1 MessageQueue after dedup, got {len(mq_rows)}"
+        # Exactly 2 MessageQueue rows — the second MQ row was NOT
+        # deleted by any compensation.
+        assert len(mq_rows) == 2, (
+            f"expected 2 MessageQueue rows without an idempotency key, "
+            f"got {len(mq_rows)}"
         )
-        assert mq_rows[0].message_id == result1.message_id
-
-        # Second call returns JobItem-A's id.
-        assert result2.job_id == job_a_id
+        assert {m.message_id for m in mq_rows} == {
+            result1.message_id,
+            result2.message_id,
+        }
