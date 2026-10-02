@@ -923,9 +923,11 @@ export class SettingsComponent implements OnInit, OnDestroy {
 
     this.settingsService.setTimezonePreference(apiValue).subscribe({
       next: (resp) => {
-        // Re-apply from the server-confirmed response so a
-        // server-side `NZ` normalization (e.g., canonicalizing
-        // the casing of the zone) propagates to the picker.
+        // Re-apply the server-confirmed stored value to the
+        // component state. The PUT persists the cleaned string
+        // as-is (no server-side canonicalization), so the echo
+        // normally matches what was sent — re-applying it keeps
+        // the picker in lockstep with the stored record.
         const confirmed = resp?.timezone ?? apiValue;
         this.applyTimezonePreference(confirmed);
         this.savingTimezone.set(false);

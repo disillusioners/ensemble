@@ -609,4 +609,6 @@ a daemon restart stays paused; resume picks it back up.
 
 **Operational boundaries:** every schedule runs in the timezone I set (or the
 resolution chain when I omit it); cancel is permanent, pause is resumable; labels
-are unique — a duplicate label is rejected at create time.
+are unique — a duplicate label is rejected at create time. Omitting `timezone`
+on an update keeps that schedule's existing timezone; the user's timezone
+setting never silently re-zones stored schedules.

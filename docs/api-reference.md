@@ -1304,8 +1304,11 @@ stored.
 }
 ```
 
-Passing `null` or an empty string **clears** the preference (falls back
-through the scheduling resolution chain). An invalid IANA name is rejected
-with a `4xx` response — validation happens at write time, so an invalid
-value is never stored. The response echoes the new state (same shape as
-GET).
+Passing `null`, an empty string, or a whitespace-only value **clears** the
+preference (falls back through the scheduling resolution chain). The value
+is trimmed of surrounding whitespace and control characters are stripped;
+the cleaned string is stored as-is (no canonicalization) — maximum length
+is 100 characters, anything longer is rejected with `422`. An invalid IANA
+name is rejected with a `4xx` response — validation happens at write time,
+so an invalid value is never stored. The response echoes the new state
+(same shape as GET).

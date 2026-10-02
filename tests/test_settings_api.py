@@ -465,6 +465,22 @@ class TestPutTimezone:
         assert get_response.json() == {"timezone": None, "utc_offset": None}
 
     @pytest.mark.asyncio
+    async def test_whitespace_only_clears_the_setting(self, client):
+        """PIN (intended verdict): a whitespace-only PUT (e.g. ``"   "``)
+        is treated as CLEAR — 200 + nulls — mirroring the empty-string path.
+        Deliberately diverges from the language sibling, which 422s on blank.
+        The reviewer judged the divergence correct (matches the documented
+        expectation that blank input drops the preference)."""
+        await client.put("/api/settings/timezone", json={"timezone": "Asia/Bangkok"})
+
+        clear_response = await client.put("/api/settings/timezone", json={"timezone": "   "})
+        assert clear_response.status_code == 200
+        assert clear_response.json() == {"timezone": None, "utc_offset": None}
+
+        get_response = await client.get("/api/settings/timezone")
+        assert get_response.json() == {"timezone": None, "utc_offset": None}
+
+    @pytest.mark.asyncio
     async def test_put_updates_value_not_sticky(self, client):
         """Second PUT overrides the first."""
         await client.put("/api/settings/timezone", json={"timezone": "Asia/Bangkok"})
@@ -508,6 +524,37 @@ class TestPutTimezone:
             "/api/settings/timezone", json={"timezone": "Mars/Olympus_Mons"}
         )
         assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_path_traversal_shaped_inputs_rejected_422(self, client):
+        """PIN (intended verdict): path-traversal-shaped payloads get no
+        special handling — they simply fail the tzdb check → 422. ZoneInfo
+        refuses relative (``..``-prefixed) and absolute path keys outright,
+        so there is no traversal surface through this endpoint."""
+        for payload in ("../etc/passwd", "/etc/passwd"):
+            response = await client.put(
+                "/api/settings/timezone", json={"timezone": payload}
+            )
+            assert response.status_code == 422, payload
+
+            get_response = await client.get("/api/settings/timezone")
+            assert get_response.json() == {"timezone": None, "utc_offset": None}
+
+    @pytest.mark.asyncio
+    async def test_factory_is_a_real_tzdb_zone_accepted_deliberately(self, client):
+        """PIN (intended verdict): ``Factory`` IS a real (legacy) tzdb zone,
+        so the tzdb check accepts it and the PUT stores it as-is. This
+        acceptance is DELIBERATE — the validator defers to tzdb rather than
+        layering its own allowlist on top of it."""
+        put_response = await client.put(
+            "/api/settings/timezone", json={"timezone": "Factory"}
+        )
+        assert put_response.status_code == 200
+        assert put_response.json()["timezone"] == "Factory"
+
+        get_response = await client.get("/api/settings/timezone")
+        assert get_response.status_code == 200
+        assert get_response.json()["timezone"] == "Factory"
 
     @pytest.mark.asyncio
     async def test_control_characters_stripped_defense_parity(self, client):

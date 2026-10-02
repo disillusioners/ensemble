@@ -657,4 +657,6 @@ job so I can cancel it directly.
 ### task_schedule_update
 
 **Purpose:** Reschedule, change the message, or pause/resume. Pause is
-resumable; cancel is terminal (different tool).
+resumable; cancel is terminal (different tool). Omitting `timezone` keeps
+that schedule's existing timezone; the user's timezone setting never
+silently re-zones stored schedules.
