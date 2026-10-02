@@ -1739,8 +1739,13 @@ class TestDstSemantics:
     def test_dst_spring_forward_gap_cron(self, mock_on_message, monkeypatch):
         """2026-03-08 02:30 America/New_York does NOT exist.
 
-        Croniter default: skip-the-gap → the daily 02:30 cron fires at
-        03:30 EDT (UTC-4) that day. See phase1-plan.md §Task 8.1 + ADR-008.
+        F2 / D8 croniter 6.0.0 defect fix. croniter's broken pre-gap
+        math emits a phantom ``03:30 EDT = 07:30Z`` from PRE-DST ``now``;
+        the production cron path now goes through
+        ``daemon.util.tz.compute_next_cron_fire`` which detects the
+        phantom via croniter roundtrip + recovers via the cron
+        expression's literal hour/minute (``02:30`` on Mar 8 → shifted
+        to the first valid local time = ``03:00 EDT`` = ``07:00Z``).
         """
         import daemon.sources.adapters.scheduler as scheduler_module
 
@@ -1758,18 +1763,26 @@ class TestDstSemantics:
         assert adapter._schedule_type == SchedulerAdapter.SCHEDULE_TYPE_CRON
 
         next_trigger = adapter._get_next_trigger_time()
-        expected = datetime(2026, 3, 8, 3, 30, tzinfo=ny)
+        # Next-valid local time after 02:30 in the 1h gap = 03:00 EDT = 07:00Z.
+        # NOT croniter's pre-fix phantom 03:30 EDT = 07:30Z.
+        expected = datetime(2026, 3, 8, 3, 0, tzinfo=ny)
         assert next_trigger == expected, (
-            f"expected skip-the-gap → {expected.isoformat()}, got {next_trigger}"
+            f"expected next-valid {expected.isoformat()}, got {next_trigger}"
         )
-        # 03:30 EDT = UTC-4 on the post-transition side.
+        # 03:00 EDT = UTC-4 on the post-transition side.
         assert next_trigger.utcoffset().total_seconds() == -4 * 3600
+        assert next_trigger.astimezone(__import__("datetime").timezone.utc).isoformat() == "2026-03-08T07:00:00+00:00"
 
     def test_dst_fall_back_ambiguity_cron(self, mock_on_message, monkeypatch):
         """2026-11-01 01:30 America/New_York exists TWICE.
 
-        Croniter default: FIRST occurrence (EDT, UTC-4) — the pre-transition
-        instant, matching the one-shot anchor's fold=0 rule. See ADR-008.
+        F2 / D8 croniter 6.0.0 defect fix. The production cron path
+        uses ``fold_preference="post"`` (later-occurrence / post-DST)
+        so cron fires stay continuous in UTC across the fall-back
+        (01:30 NY on Nov 1 → 01:30 EST = 06:30Z; continuous with
+        01:30 EST on Nov 2 = 06:30Z rather than the fold=0 01:30 EDT
+        = 05:30Z which would create a 25h UTC fire vs the next-day
+        24h fire).
         """
         import daemon.sources.adapters.scheduler as scheduler_module
 
@@ -1786,17 +1799,23 @@ class TestDstSemantics:
         adapter = SchedulerAdapter(config, mock_on_message)
 
         next_trigger = adapter._get_next_trigger_time()
+        # Cron-path post-DST semantic: fold=1 (second occurrence / EST).
         expected = datetime(2026, 11, 1, 1, 30, tzinfo=ny)
         assert next_trigger == expected, (
-            f"expected first occurrence {expected.isoformat()}, got {next_trigger}"
+            f"expected post-DST {expected.isoformat()}, got {next_trigger}"
         )
-        # First occurrence = EDT = UTC-4 (the fold=1 second occurrence is UTC-5).
-        assert next_trigger.utcoffset().total_seconds() == -4 * 3600
+        # Second occurrence = EST = UTC-5 (the fold=0 first occurrence
+        # is UTC-4 EDT — kept by the one-shot anchor via the default
+        # ``fold_preference="pre"``).
+        assert next_trigger.utcoffset().total_seconds() == -5 * 3600
 
     def test_dst_spring_forward_gap_one_shot_anchor(self):
-        """Nonexistent local time → anchor shifts forward + warns ``shifted-forward``.
+        """Nonexistent local time → anchor shifts forward to first valid local + warns.
 
-        Helper: ``daemon.util.tz.anchor_local_to_utc`` (architecture §4.2;
+        F1 fix (next-valid, 2026-10-02): the canonical anchor shifts
+        02:30 → 03:00 EDT (the gap-end instant), NOT the pre-F1
+        ``naive + gap_seconds`` → 03:30 EDT. Helper:
+        ``daemon.util.tz.anchor_local_to_utc`` (architecture §4.2;
         phase1-plan.md §Task 9 + ADR-008).
         """
         from daemon.util.tz import anchor_local_to_utc
@@ -1804,13 +1823,20 @@ class TestDstSemantics:
         ny = ZoneInfo(self.NY)
         naive = datetime(2026, 3, 8, 2, 30)
         anchored, warning = anchor_local_to_utc(naive, ny)
-        # Shifted forward by the 1-hour gap to the first valid local time.
-        assert anchored.replace(tzinfo=None) == datetime(2026, 3, 8, 3, 30)
+        # Next-valid local = 03:00 EDT = 07:00Z.
+        assert anchored.replace(tzinfo=None) == datetime(2026, 3, 8, 3, 0)
         assert anchored.utcoffset().total_seconds() == -4 * 3600
         assert "shifted-forward" in warning
 
     def test_dst_fall_back_ambiguity_one_shot_anchor(self):
-        """Ambiguous local time → fold=0 (first occurrence, EDT), NO warning."""
+        """Ambiguous local time → fold=0 (first occurrence, EDT), NO warning.
+
+        The one-shot anchor's default ``fold_preference="pre"`` (ADR-008)
+        keeps the pre-DST / first-occurrence semantic on FOLD days.
+        01:30 NY on Nov 1 → 01:30 EDT = 05:30Z. The cron path passes
+        ``fold_preference="post"`` for its later-occurrence continuity
+        (see ``test_dst_fall_back_ambiguity_cron`` above).
+        """
         from daemon.util.tz import anchor_local_to_utc
 
         ny = ZoneInfo(self.NY)
@@ -1821,6 +1847,219 @@ class TestDstSemantics:
         assert anchored.utcoffset().total_seconds() == -4 * 3600
         assert anchored.fold == 0
         assert warning == ""
+
+    def test_dst_cron_continuous_fires_daily_0600_ny_across_both_transitions(
+        self, mock_on_message, monkeypatch
+    ):
+        """F2 regression: daily 06:00 America/New_York fires ONCE on each
+        2026 transition day at the post-DST wall-clock instant.
+
+        Drives the production ``_compute_next_cron_fire`` path (the same
+        seam the adapter loop and the REST ``next_run_at`` surface
+        consume) and enumerates every fire across a 5-day window
+        spanning the spring-forward (Mar 7–11) and fall-back
+        (Oct 30–Nov 3) transitions. Pinned to zoneinfo-computed UTC
+        instants — ZERO phantom fires, ZERO missed fires.
+
+        Pin (zoneinfo-computed, exact UTC):
+
+            Mar 7  06:00 EST = 11:00Z  (pre-spring-forward)
+            Mar 8  06:00 EDT = 10:00Z  (spring-forward day, post-gap)
+            Mar 9  06:00 EDT = 10:00Z  (post-spring-forward)
+            Mar 10 06:00 EDT = 10:00Z
+            Mar 11 06:00 EDT = 10:00Z
+            Oct 30 06:00 EDT = 10:00Z  (pre-fall-back)
+            Oct 31 06:00 EDT = 10:00Z
+            Nov 1  06:00 EST = 11:00Z  (fall-back day, post-fold)
+            Nov 2  06:00 EST = 11:00Z  (post-fall-back)
+            Nov 3  06:00 EST = 11:00Z
+        """
+        from datetime import timezone as _stdlib_tz
+
+        from daemon.util.tz import compute_next_cron_fire
+
+        ny = ZoneInfo(self.NY)
+
+        # Spring-forward window: pin every fire from Mar 7 00:00 NY to Mar 12 00:00 NY
+        start = datetime(2026, 3, 7, 0, 0, tzinfo=ny)
+        fires = []
+        cursor = start
+        max_iters = 10
+        for _ in range(max_iters):
+            nxt = compute_next_cron_fire("0 6 * * *", cursor, ny)
+            if nxt is None or nxt >= datetime(2026, 3, 12, 0, 0, tzinfo=ny):
+                break
+            fires.append(nxt)
+            cursor = nxt + __import__("datetime").timedelta(seconds=1)
+
+        utc_fires = [f.astimezone(_stdlib_tz.utc).isoformat() for f in fires]
+        assert utc_fires == [
+            "2026-03-07T11:00:00+00:00",  # 06:00 EST
+            "2026-03-08T10:00:00+00:00",  # 06:00 EDT (gap day — single fire, no 05:00 phantom)
+            "2026-03-09T10:00:00+00:00",
+            "2026-03-10T10:00:00+00:00",
+            "2026-03-11T10:00:00+00:00",
+        ], f"unexpected spring-forward fire sequence: {utc_fires}"
+        # Specifically no phantom at 05:00 EDT = 09:00Z on Mar 8.
+        assert "2026-03-08T09:00:00+00:00" not in utc_fires
+
+        # Fall-back window: pin every fire from Oct 30 00:00 NY to Nov 4 00:00 NY
+        start = datetime(2026, 10, 30, 0, 0, tzinfo=ny)
+        fires = []
+        cursor = start
+        for _ in range(max_iters):
+            nxt = compute_next_cron_fire("0 6 * * *", cursor, ny)
+            if nxt is None or nxt >= datetime(2026, 11, 4, 0, 0, tzinfo=ny):
+                break
+            fires.append(nxt)
+            cursor = nxt + __import__("datetime").timedelta(seconds=1)
+
+        utc_fires = [f.astimezone(_stdlib_tz.utc).isoformat() for f in fires]
+        assert utc_fires == [
+            "2026-10-30T10:00:00+00:00",  # 06:00 EDT
+            "2026-10-31T10:00:00+00:00",  # 06:00 EDT (pre-fall-back)
+            "2026-11-01T11:00:00+00:00",  # 06:00 EST (fall-back day, post-DST)
+            "2026-11-02T11:00:00+00:00",  # 06:00 EST (post-fall-back)
+            "2026-11-03T11:00:00+00:00",
+        ], f"unexpected fall-back fire sequence: {utc_fires}"
+        # Specifically no late fire at 07:00 EST = 12:00Z on Nov 1.
+        assert "2026-11-01T12:00:00+00:00" not in utc_fires
+
+    def test_dst_cron_non_dst_zone_control_asia_hcm(self):
+        """F2 regression control: a non-DST zone (Asia/Ho_Chi_Minh) is
+        unaffected by the cron-path DST fix.
+
+        Daily 06:00 HCM across both 2026 transitions: every fire
+        lands on 06:00 local (+07:00) → 23:00Z the previous day.
+        One fire per local day, no phantom, no offset drift.
+        """
+        from datetime import timezone as _stdlib_tz
+
+        from daemon.util.tz import compute_next_cron_fire
+
+        hcm = ZoneInfo("Asia/Ho_Chi_Minh")
+
+        # Mar 7 → Mar 9 NY == Mar 7 → Mar 9 HCM (UTC+7 vs UTC-5)
+        cursor = datetime(2026, 3, 7, 0, 0, tzinfo=hcm)
+        fires = []
+        for _ in range(5):
+            nxt = compute_next_cron_fire("0 6 * * *", cursor, hcm)
+            if nxt is None:
+                break
+            fires.append(nxt)
+            cursor = nxt + __import__("datetime").timedelta(seconds=1)
+        utc_fires = [f.astimezone(_stdlib_tz.utc).isoformat() for f in fires]
+        assert utc_fires == [
+            "2026-03-06T23:00:00+00:00",
+            "2026-03-07T23:00:00+00:00",
+            "2026-03-08T23:00:00+00:00",
+            "2026-03-09T23:00:00+00:00",
+            "2026-03-10T23:00:00+00:00",
+        ], f"unexpected HCM fire sequence: {utc_fires}"
+
+    def test_dst_cron_weekly_wed_0400_ny_across_spring_forward(self):
+        """F2 regression: weekly Wed 04:00 America/New_York across
+        2026-03-11 (the Wednesday following Mar 8 spring-forward)
+        lands on Mar 11 04:00 EDT = 08:00Z with NO phantom 03:00 fire.
+
+        Pin (zoneinfo-computed): the only fire in the
+        [Mar 7, Mar 25] window is Mar 11 04:00 EDT = 08:00Z; the
+        next-week fire is Mar 18 04:00 EDT = 08:00Z.
+        """
+        from datetime import timezone as _stdlib_tz
+
+        from daemon.util.tz import compute_next_cron_fire
+
+        ny = ZoneInfo(self.NY)
+        cursor = datetime(2026, 3, 7, 0, 0, tzinfo=ny)
+        fires = []
+        for _ in range(4):
+            nxt = compute_next_cron_fire("0 4 * * 3", cursor, ny)
+            if nxt is None:
+                break
+            fires.append(nxt)
+            cursor = nxt + __import__("datetime").timedelta(seconds=1)
+        utc_fires = [f.astimezone(_stdlib_tz.utc).isoformat() for f in fires]
+        assert utc_fires == [
+            "2026-03-11T08:00:00+00:00",  # Wed 04:00 EDT — no Mar 11 07:00Z phantom
+            "2026-03-18T08:00:00+00:00",
+            "2026-03-25T08:00:00+00:00",
+            "2026-04-01T08:00:00+00:00",  # Apr 1 still EDT (fall-back is Nov)
+        ], f"unexpected weekly Wed 04:00 fire sequence: {utc_fires}"
+        # Specifically no phantom at 03:00 EDT = 07:00Z on Mar 11.
+        assert "2026-03-11T07:00:00+00:00" not in utc_fires
+
+    def test_dst_cron_adapter_loop_daily_0600_ny_across_spring_forward(
+        self, mock_on_message, monkeypatch
+    ):
+        """F2 regression: the SCHEDULER ADAPTER loop path
+        (``_get_next_trigger_time``) also returns Mar 8 06:00 EDT
+        = 10:00Z (not croniter's pre-fix 05:00 EDT phantom).
+
+        The adapter's cron branch routes through the same
+        ``compute_next_cron_fire`` helper — this test pins the
+        end-to-end seam from PRE-DST ``now`` to the fixed fire,
+        covering any future code regression that bypasses the
+        helper in the adapter loop.
+        """
+        import daemon.sources.adapters.scheduler as scheduler_module
+
+        from datetime import timezone as _stdlib_tz
+
+        ny = ZoneInfo(self.NY)
+        _FrozenDatetime._frozen = datetime(2026, 3, 7, 12, 0, tzinfo=ny)  # pre-DST
+        monkeypatch.setattr(scheduler_module, "datetime", _FrozenDatetime)
+
+        config = make_config("dst-cron-loop-mar-8", {
+            "schedule": "0 6 * * *",
+            "timezone": self.NY,
+            "agent": "./agents/developer",
+            "message": "x",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+        assert adapter._schedule_type == SchedulerAdapter.SCHEDULE_TYPE_CRON
+
+        next_trigger = adapter._get_next_trigger_time()
+        assert next_trigger == datetime(2026, 3, 8, 6, 0, tzinfo=ny), (
+            f"expected Mar 8 06:00 EDT (10:00Z); got {next_trigger}"
+        )
+        assert (
+            next_trigger.astimezone(_stdlib_tz.utc).isoformat()
+            == "2026-03-08T10:00:00+00:00"
+        )
+
+    def test_dst_cron_adapter_loop_daily_0600_ny_across_fall_back(
+        self, mock_on_message, monkeypatch
+    ):
+        """F2 regression: the adapter loop path on the FALL-BACK side
+        returns Nov 1 06:00 EST = 11:00Z (not croniter's pre-fix
+        07:00 EST phantom that drops the real fire).
+        """
+        import daemon.sources.adapters.scheduler as scheduler_module
+
+        from datetime import timezone as _stdlib_tz
+
+        ny = ZoneInfo(self.NY)
+        _FrozenDatetime._frozen = datetime(2026, 10, 31, 12, 0, tzinfo=ny)  # pre-fold EDT
+        monkeypatch.setattr(scheduler_module, "datetime", _FrozenDatetime)
+
+        config = make_config("dst-cron-loop-nov-1", {
+            "schedule": "0 6 * * *",
+            "timezone": self.NY,
+            "agent": "./agents/developer",
+            "message": "x",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+        assert adapter._schedule_type == SchedulerAdapter.SCHEDULE_TYPE_CRON
+
+        next_trigger = adapter._get_next_trigger_time()
+        assert next_trigger == datetime(2026, 11, 1, 6, 0, tzinfo=ny), (
+            f"expected Nov 1 06:00 EST (11:00Z); got {next_trigger}"
+        )
+        assert (
+            next_trigger.astimezone(_stdlib_tz.utc).isoformat()
+            == "2026-11-01T11:00:00+00:00"
+        )
 
 
 # ==================== Phase-5 TestCatchUpSemantics (D3) ====================
@@ -1917,6 +2156,110 @@ class TestCatchUpSemantics:
         assert next_trigger is not SchedulerAdapter.PAST_LATENESS_CAP
         fire_lag = (next_trigger - datetime.now(timezone.utc)).total_seconds()
         assert -5.0 <= fire_lag <= 5.0
+
+    @pytest.mark.asyncio
+    async def test_w1_guard_same_run_at_re_skip_emits_one_skipped_row(
+        self, mock_on_message, monkeypatch
+    ):
+        """W1 (once-per-run_at) guard pin: same ``run_at`` re-evaluated across
+        two loop iterations → exactly ONE SKIPPED ``schedule_executions`` row.
+
+        Adapter loop behavior (D3 + W1): a past-due one-shot beyond
+        ``one_shot_max_lateness_seconds`` writes ONE SKIPPED row per
+        ``run_at`` value. Re-iterating the loop with the SAME ``run_at``
+        (operator hasn't updated yet) MUST NOT spam a new SKIPPED row per
+        iteration — the guard ``self._last_skipped_run_at == self._run_at``
+        short-circuits the record-write. Future spam-guard regression
+        protection (behavioral pin only; no production code change).
+
+        Drives the production ``_run_schedule`` loop with ``asyncio.sleep``
+        patched to a no-op and ``stop_event`` triggered after the second
+        iteration, then asserts ``record_execution_start.call_count == 1``.
+        """
+        monkeypatch.setenv(self.CAP_ENV, "60")
+        now = datetime.now(timezone.utc)
+        config = self._one_shot_config("w1-same", now - timedelta(seconds=7200))
+        source_repo = MagicMock()
+        adapter = SchedulerAdapter(
+            config, mock_on_message, source_repo=source_repo,
+        )
+        # Patch the sleep in the adapter's loop to a no-op so iterations
+        # don't block 5s each (avoids hanging the test wall-clock).
+        sleep_calls = []
+        async def _fake_sleep(_seconds):  # noqa: ANN001
+            sleep_calls.append(_seconds)
+            # Trigger the stop event after the second sleep (i.e. after
+            # the second skip-iteration's W1 guard sleep) so we exit the
+            # loop without infinite-running.
+            if len(sleep_calls) >= 2:
+                adapter._stop_event.set()
+        monkeypatch.setattr(
+            "daemon.sources.adapters.scheduler.asyncio.sleep",
+            _fake_sleep,
+        )
+
+        await adapter._run_schedule()
+
+        # Exactly ONE SKIPPED row across two iterations (first iteration
+        # writes the row, second is guard-skipped).
+        assert source_repo.record_execution_start.call_count == 1, (
+            f"W1 guard failed: expected 1 SKIPPED row for unchanged "
+            f"run_at, got {source_repo.record_execution_start.call_count}"
+        )
+        # Schedule still ARMED — no disable/status/config write happened.
+        source_repo.update_source_status.assert_not_called()
+        source_repo.update_source_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_w1_guard_changed_run_at_emits_second_skipped_row(
+        self, mock_on_message, monkeypatch
+    ):
+        """W1 guard pin: when ``run_at`` CHANGES mid-loop (operator
+        update simulated via ``adapter._run_at = new_run_at``), the
+        second SKIPPED row is written for the NEW ``run_at`` — the
+        guard resets on run_at change and lets a fresh row through.
+
+        Drives two iterations: initial ``run_at`` → first SKIPPED row;
+        then operator changes ``run_at`` to a different past-due
+        timestamp; second iteration writes the second SKIPPED row.
+        Pinned to ``record_execution_start.call_count == 2``.
+        """
+        monkeypatch.setenv(self.CAP_ENV, "60")
+        now = datetime.now(timezone.utc)
+        config = self._one_shot_config("w1-changed", now - timedelta(seconds=7200))
+        source_repo = MagicMock()
+        adapter = SchedulerAdapter(
+            config, mock_on_message, source_repo=source_repo,
+        )
+
+        iteration_count = {"n": 0}
+        async def _fake_sleep(_seconds):  # noqa: ANN001
+            iteration_count["n"] += 1
+            # After the FIRST sleep (the first SKIPPED-row path), swap
+            # run_at to a different past-due value so the guard sees a
+            # change and lets the second row through. Then trigger stop
+            # after the SECOND sleep.
+            if iteration_count["n"] == 1:
+                adapter._run_at = (
+                    datetime.now(timezone.utc) - timedelta(seconds=3600)
+                )
+            elif iteration_count["n"] >= 2:
+                adapter._stop_event.set()
+        monkeypatch.setattr(
+            "daemon.sources.adapters.scheduler.asyncio.sleep",
+            _fake_sleep,
+        )
+
+        await adapter._run_schedule()
+
+        # Two SKIPPED rows: one per distinct run_at value.
+        assert source_repo.record_execution_start.call_count == 2, (
+            f"W1 guard mis-handled run_at change: expected 2 SKIPPED "
+            f"rows (one per distinct run_at), got "
+            f"{source_repo.record_execution_start.call_count}"
+        )
+        source_repo.update_source_status.assert_not_called()
+        source_repo.update_source_config.assert_not_called()
 
     def test_cron_skips_missed(self, mock_on_message, monkeypatch):
         """Cron past-due by hours → NO catch-up fire; the next OCCURRENCE only."""

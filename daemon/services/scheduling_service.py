@@ -413,8 +413,24 @@ def _compute_next_run(config: dict[str, Any]) -> tuple[str | None, str | None, s
         if run_at > now:
             next_dt = run_at
     elif cron_expr:
+        # F2 / D8 (DST fix, 2026-10-02): wrap croniter with the
+        # canonical tz layer (re-anchoring + roundtrip phantom
+        # detection + cron-expression-literal recovery). See
+        # ``daemon.util.tz.compute_next_cron_fire`` for the
+        # empirical croniter 6.0.0 trace; the cron path now
+        # consistently picks the post-DST / later-occurrence
+        # semantics so fires stay continuous in UTC across DST
+        # (e.g. daily 06:00 NY on Nov 1 → 11:00Z EST).
         try:
-            next_dt = croniter(cron_expr, now).get_next(datetime)
+            from daemon.util.tz import compute_next_cron_fire as _next_cron_fire
+            cron_fire = _next_cron_fire(cron_expr, now, zone)
+            if cron_fire is not None:
+                next_dt = cron_fire
+            else:
+                try:
+                    next_dt = croniter(cron_expr, now).get_next(datetime)
+                except (CroniterBadCronError, ValueError):
+                    return None, None, ""
         except (CroniterBadCronError, ValueError):
             return None, None, ""
 

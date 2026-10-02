@@ -636,6 +636,35 @@ class SchedulerAdapter(MessageSourceAdapter):
         if self._schedule_type == self.SCHEDULE_TYPE_CRON:
             if not self._cron_expression:
                 return None
+            # F2 / D8 (DST fix, 2026-10-02): croniter 6.0.0 has a defect
+            # family on the recurring-cron path that emits phantom
+            # fires (or silently drops real fires) around DST
+            # transitions. ``daemon.util.tz.compute_next_cron_fire``
+            # wraps croniter with re-anchoring + roundtrip phantom
+            # detection + cron-expression-literal recovery; the
+            # canonical DST rule (architecture §4.2 / ADR-008) lives
+            # in ``daemon.util.tz.anchor_local_to_utc`` and is shared
+            # by one-shot + cron paths. See the helper's docstring
+            # for the empirical croniter-6.0.0 trace.
+            try:
+                from daemon.util.tz import compute_next_cron_fire as _next_cron_fire
+                cron_fire = _next_cron_fire(
+                    self._cron_expression, now, self._timezone,
+                )
+                if cron_fire is not None:
+                    return cron_fire
+            except Exception as cron_exc:  # noqa: BLE001 — fallback
+                # Fall back to direct croniter on any unexpected
+                # failure (e.g. tz helper import error, downstream
+                # regression). Croniter's broken DST behavior is the
+                # known-bad shape — we'd rather emit a degraded fire
+                # than no fire at all (legacy behavior).
+                logger.warning(
+                    "scheduler._get_next_trigger_time: cron-path DST "
+                    "fix failed (expr=%r, tz=%s): %s; falling back "
+                    "to direct croniter",
+                    self._cron_expression, self._timezone, cron_exc,
+                )
             try:
                 cron = croniter(self._cron_expression, now)
                 return cron.get_next(datetime)

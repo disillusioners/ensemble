@@ -62,17 +62,74 @@ class TestAnchorLocalToUtc:
         """Rule 3: nonexistent spring-forward local time shifts forward + warns.
 
         2026-03-08 02:30 America/New_York does NOT exist (clocks jump
-        02:00→03:00). The anchor shifts to 03:30 EDT and emits a warning
+        02:00→03:00). The anchor shifts to the FIRST EXISTING post-
+        transition local time (per F1, the canonical ``next-valid``
+        semantics — NOT naive + gap_seconds) and emits a warning
         containing ``shifted-forward`` (the pinned token callers grep).
         """
         naive = datetime(2026, 3, 8, 2, 30)
         ny = ZoneInfo("America/New_York")
         anchored, warning = anchor_local_to_utc(naive, ny)
-        # Shifted to the first valid post-transition local time: 03:30 EDT.
-        assert anchored.replace(tzinfo=None).isoformat() == "2026-03-08T03:30:00"
+        # Shifted to the first valid post-transition local time: 03:00 EDT.
+        assert anchored.replace(tzinfo=None).isoformat() == "2026-03-08T03:00:00"
         assert anchored.utcoffset().total_seconds() == -4 * 3600
         assert "shifted-forward" in warning
         assert "nonexistent local time" in warning
+
+    def test_gap_shifts_to_first_valid_local_one_minute_past(self):
+        """F1 pin: 02:01 (1 min into the gap) shifts to 03:00 (gap end), not 03:01.
+
+        Regression for the old ``+gap_seconds`` impl that would have
+        landed at 03:01 = 07:01Z. The next-valid semantic lands at the
+        gap-end instant (03:00 EDT = 07:00Z) regardless of where the
+        naive is inside the gap.
+        """
+        naive = datetime(2026, 3, 8, 2, 1)
+        ny = ZoneInfo("America/New_York")
+        anchored, warning = anchor_local_to_utc(naive, ny)
+        assert anchored.replace(tzinfo=None).isoformat() == "2026-03-08T03:00:00"
+        assert anchored.utcoffset().total_seconds() == -4 * 3600
+        assert "shifted-forward" in warning
+
+    def test_fold_preference_pre_uses_first_occurrence(self):
+        """F1 fold pin: ``fold_preference="pre"`` (default, ADR-008) → fold=0 / pre-DST.
+
+        Same input as ``test_fold_uses_first_occurrence_no_warning``
+        but exercises the new keyword explicitly. 01:30 NY on Nov 1 →
+        EDT (-4h) = 05:30Z.
+        """
+        naive = datetime(2026, 11, 1, 1, 30)
+        ny = ZoneInfo("America/New_York")
+        anchored, warning = anchor_local_to_utc(naive, ny, fold_preference="pre")
+        assert anchored.utcoffset().total_seconds() == -4 * 3600
+        assert anchored.fold == 0
+        assert anchored.replace(tzinfo=None).isoformat() == "2026-11-01T01:30:00"
+        assert warning == ""
+
+    def test_fold_preference_post_uses_second_occurrence(self):
+        """F2 cron-path pin: ``fold_preference="post"`` → fold=1 / post-DST.
+
+        Same input as above but with the cron path's preference. 01:30
+        NY on Nov 1 → EST (-5h) = 06:30Z. The LATER UTC instant keeps
+        cron fires continuous across the fall-back (e.g. 06:00 daily
+        on Nov 1 → 06:00 EST = 11:00Z, continuous with 11:00Z on Nov 2).
+        """
+        naive = datetime(2026, 11, 1, 1, 30)
+        ny = ZoneInfo("America/New_York")
+        anchored, warning = anchor_local_to_utc(naive, ny, fold_preference="post")
+        assert anchored.utcoffset().total_seconds() == -5 * 3600
+        assert anchored.fold == 1
+        assert anchored.replace(tzinfo=None).isoformat() == "2026-11-01T01:30:00"
+        assert warning == ""
+
+    def test_fold_preference_invalid_raises_value_error(self):
+        """F1 guard pin: ``fold_preference`` outside the closed set raises."""
+        with __import__("pytest").raises(ValueError, match="fold_preference"):
+            anchor_local_to_utc(
+                datetime(2026, 11, 1, 1, 30),
+                ZoneInfo("America/New_York"),
+                fold_preference="bogus",
+            )
 
     def test_utc_zone_anchor_is_identity(self):
         """UTC has no transitions — naive time anchors 1:1 with no warning."""

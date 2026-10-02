@@ -708,6 +708,15 @@ class TestEnqueueMessageJobQueueIdResolution:
             # The facade-forwarding contract requires the kwarg to be present
             # on the forwarded call, so we pin it explicitly here.
             image_refs=None,
+            # Phase 9 / F3 (scheduled-tasks, 2026-10-02): the
+            # scheduler-adapter thread of idempotency_key was added in
+            # phase 1 (D4) and the kwarg threading through this wrapper
+            # is the additive additive extension point per ADR-011 —
+            # existing callers pass everything before ``metadata``
+            # unaffected. The pin is updated to include ``idempotency_key=None``
+            # so a future regression in the threading order fails loudly
+            # instead of silently dropping the scheduler's atomic-claim key.
+            idempotency_key=None,
         )
 
 
