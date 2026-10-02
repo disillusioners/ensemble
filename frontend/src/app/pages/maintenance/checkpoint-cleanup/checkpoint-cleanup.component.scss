@@ -5,20 +5,48 @@ $bg-card-hover: #334155;
 $border-color: #334155;
 $text-primary: #f1f5f9;
 $text-secondary: #94a3b8;
-$text-muted: #64748b;
+$text-muted: #8b96a8;
 
 // Accent colors
 $accent-cyan: #10a7f7;
 $accent-emerald: #10b981;
-$accent-rose: #f43f5e;
+// §3 amend v5 axe triage — `$accent-rose` recolored from `#f43f5e` (3.98:1 on $bg-card, fails AA-text)
+// to `#ff5c7a` (4.92:1 on $bg-card, passes WCAG AA-text). Drives `.ck-warning-text` (Step 3 echo).
+$accent-rose: #ff5c7a;
 $accent-amber: #f59e0b;
-$accent-blue: #3b82f6;
+// §3 amend v5 axe triage — `$accent-blue` recolored from `#3b82f6` (3.98:1 on $bg-card, fails AA-text)
+// to `#5b9bf5` (5.19:1 on $bg-card, passes WCAG AA-text). Drives `.ck-run-again-banner strong` (Step 4 result).
+$accent-blue: #5b9bf5;
+
+// New tokens — stepper-specific (spec §3, AC-12, AC-1)
+$step-gap: 1.5rem;
+$status-strip-min-width: 200px;
+$wizard-max-width: 1100px;
+
+// Status Strip tile typography (spec §3)
+$strip-value-size: 1rem;
+$strip-value-weight: 600;
+$strip-label-size: 0.6875rem;
 
 :host {
   display: flex;
   flex: 1;
   min-width: 0;
   width: 100%;
+  // CRITICAL-1 — host was a row-flex (no flex-direction → default row),
+  // laying the status strip / wizard / debug expander side-by-side and
+  // breaking the §5.1 vertical wireframe (horizontal overflow at 1024px).
+  // Force column flow + a modest inter-child gap so the three top-level
+  // children (kill-switch / origin-guard banners → Status Strip →
+  // stepper → Debug expander) stack vertically with visible separation.
+  // Gap value `1rem` matches the in-card child spacing convention used
+  // elsewhere in this file (.ck-card / .ck-banner / .ck-interrupted-card
+  // all use `gap: 1rem`). Logged in AC-15 ledger as a layout-budget
+  // line item. **NOT a lever** — this is the §2.9 v4
+  // layout-correctness addition (pre-existing bug fix); re-review does
+  // NOT classify it as an off-list lever.
+  flex-direction: column;
+  gap: 1rem;
   background: $bg-primary;
   color: $text-primary;
 }
@@ -27,7 +55,7 @@ $accent-blue: #3b82f6;
   background: $bg-card;
   border: 1px solid $border-color;
   border-radius: 8px;
-  padding: 1.5rem;
+  padding: 1rem; /* AC-15 lever 3: 1.5rem→1rem — Step card padding (v4 §2.9) */
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -45,18 +73,6 @@ $accent-blue: #3b82f6;
   font-size: 0.875rem;
   margin: 0;
   line-height: 1.5;
-}
-
-.ck-warning {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: rgba($accent-amber, 0.1);
-  border: 1px solid $accent-amber;
-  border-radius: 4px;
-  padding: 0.75rem 1rem;
-  color: $accent-amber;
-  font-size: 0.875rem;
 }
 
 .ck-warning-text {
@@ -394,4 +410,300 @@ $accent-blue: #3b82f6;
 // Execute button: progress bar spacing
 mat-progress-bar {
   margin-top: 0.5rem;
+}
+
+// ── Wizard (Material stepper) container — caps at 1100px (spec §3, AC-12)
+.ck-wizard {
+  max-width: $wizard-max-width;
+  display: flex;
+  flex-direction: column;
+  gap: $step-gap;
+}
+
+// ── Status Strip (spec §2.1) — 3-tile summary, persistent, always visible
+// §4.1 axe dlitem remediation: `<dt>` / `<dd>` are DIRECT children of
+// this `<dl>` (no per-tile wrapper element). Layout is positioned via
+// CSS grid on the parent: each tile occupies one column × two rows
+// (label on row 1, value on row 2). Gaps preserve the previous tile
+// padding rhythm — column-gap matches the old grid gap between tiles,
+// row-gap matches the old `.ck-status-strip-tile` flex gap between
+// the label and the value within a tile.
+.ck-status-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax($status-strip-min-width, 1fr));
+  column-gap: 0.75rem;
+  row-gap: 0.25rem;
+  background: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: 8px;
+  padding: 0.5rem 1.25rem; /* AC-15 lever 1: vertical 1rem→0.5rem — Status Strip tile padding (v4 §2.9) */
+  margin: 0;
+
+  dt {
+    grid-row: 1;
+    margin: 0;
+    color: $text-muted;
+    font-size: $strip-label-size;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  dd {
+    grid-row: 2;
+    margin: 0;
+    color: $text-primary;
+    font-size: $strip-value-size;
+    font-weight: $strip-value-weight;
+    font-family: 'Menlo', 'Monaco', monospace;
+    line-height: 1.3;
+  }
+
+  // Source order: dt1, dd1, dt2, dd2, dt3, dd3 → columns 1 / 1 / 2 / 2 / 3 / 3.
+  // nth-of-type covers both dt and dd pairs in source order.
+  > :nth-of-type(1),
+  > :nth-of-type(2) {
+    grid-column: 1;
+  }
+  > :nth-of-type(3),
+  > :nth-of-type(4) {
+    grid-column: 2;
+  }
+  > :nth-of-type(5),
+  > :nth-of-type(6) {
+    grid-column: 3;
+  }
+}
+
+.ck-status-strip-muted {
+  dd {
+    color: $text-muted;
+  }
+}
+
+// ── Material stepper dark-theme overrides (spec §3) ─────────────────────
+// The M3 stepper defaults assume a light surface; override the
+// semantic colors so the wizard reads against $bg-card / $border-color.
+
+.ck-wizard {
+  ::ng-deep {
+    .mat-stepper-vertical {
+      background: transparent;
+    }
+
+    .mat-step-header {
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+    }
+
+    .mat-step-header.cdk-program-focused,
+    .mat-step-header.cdk-keyboard-focused,
+    .mat-step-header:hover {
+      background: rgba($bg-card-hover, 0.5);
+    }
+
+    .mat-step-header .mat-step-icon {
+      background-color: rgba($text-muted, 0.35);
+      color: $text-primary;
+    }
+
+    .mat-step-header .mat-step-icon-selected,
+    .mat-step-header .mat-step-icon-state-edit {
+      background-color: $accent-blue;
+      color: $bg-primary;
+    }
+
+    .mat-step-header .mat-step-icon-state-done {
+      background-color: $accent-emerald;
+      color: $bg-primary;
+    }
+
+    .mat-step-header .mat-step-label {
+      color: $text-secondary;
+      font-weight: 500;
+    }
+
+    .mat-step-header .mat-step-label.mat-step-label-active {
+      color: $text-primary;
+      font-weight: 600;
+    }
+
+    .mat-step-header .mat-step-label.mat-step-label-selected {
+      color: $text-primary;
+    }
+
+    .mat-step-header .mat-step-optional {
+      color: $text-muted;
+    }
+
+    .mat-stepper-vertical-line::before {
+      border-left-color: $border-color;
+    }
+
+    .mat-vertical-content-container {
+      padding: 0 0 0.75rem 1.5rem;
+    }
+
+    // C1 — horizontal stepper (>=1024px per BreakpointObserver).
+    // The Material M3 horizontal stepper defaults to a 4-column
+    // grid that already keeps the headers in one row. The ~72px
+    // stack height comes from the default M3 header (number circle
+    // + label, ~64-72px). We tune the row gap + ensure the header
+    // row does not wrap (which would push the math past the 1024x768
+    // budget).
+    .mat-stepper-horizontal {
+      background: transparent;
+    }
+
+    .mat-stepper-horizontal-header-container {
+      white-space: nowrap;
+    }
+
+    .mat-horizontal-stepper-header-container .mat-step-header {
+      padding: 0.5rem 0.75rem;
+    }
+
+    .mat-horizontal-content-container {
+      padding: 0.75rem 0 0.5rem 0;
+    }
+  }
+}
+
+// ── Custom stepper footer (spec §2.2) — Back/Continue/Cleanup now
+.ck-stepper-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem; /* ORIGINAL restored (was AC-15 lever 2 micro-lever 0.5rem→1rem; v4 §2.9 sanctioned lever 2 is WIZARD CONTAINER padding and lever 3 is STEP CARD padding — neither covers the stepper footer; this reduction is unsanctioned; reverted) */
+  background: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: 6px;
+}
+
+.ck-stepper-buttons {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+// ── Step content card — wraps each mat-step body so the inner dl grids
+// can apply the 2x2 / 2x3 grids without leaking outside the stepper.
+.ck-step-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.ck-step-grid-config {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.5rem 1.5rem;
+  margin: 0;
+}
+
+.ck-step-grid-lastrun {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.5rem 1.5rem;
+  margin: 0;
+}
+
+@media (min-width: 1024px) {
+  .ck-step-grid-config {
+    grid-template-columns: max-content 1fr max-content 1fr;
+  }
+
+  .ck-step-grid-lastrun {
+    grid-template-columns: max-content 1fr max-content 1fr;
+  }
+}
+
+// ── Result-step banner variants (spec §2.4 / §2.6) ─────────────────────
+.ck-result-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.875rem 1rem;
+  border-radius: 6px;
+  font-weight: 600;
+
+  mat-icon {
+    font-size: 1.5rem;
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+}
+
+.ck-result-banner-completed {
+  background: rgba($accent-emerald, 0.08);
+  border: 1px solid rgba($accent-emerald, 0.4);
+  color: $accent-emerald;
+}
+
+.ck-result-banner-interrupted {
+  background: rgba($accent-amber, 0.08);
+  border: 1px solid rgba($accent-amber, 0.4);
+  color: $accent-amber;
+}
+
+.ck-result-banner-failed {
+  background: rgba($accent-rose, 0.08);
+  border: 1px solid rgba($accent-rose, 0.4);
+  color: $accent-rose;
+}
+
+// ── Step 1 inline in-flight notice (rendered ONLY on Step 1 per AC-16)
+.ck-step-inflight-notice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba($accent-amber, 0.08);
+  border: 1px solid rgba($accent-amber, 0.4);
+  border-radius: 4px;
+  padding: 0.75rem 1rem;
+  color: $accent-amber;
+  font-size: 0.875rem;
+}
+
+// ── Debug expander (spec §2.8) — page-level consolidated raw JSON
+.ck-debug-expander {
+  background: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+
+  summary {
+    cursor: pointer;
+    color: $text-secondary;
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+
+  pre {
+    margin: 0.75rem 0 0;
+    padding: 0.75rem;
+    background: $bg-primary;
+    border: 1px solid $border-color;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 0.75rem;
+    color: $text-secondary;
+  }
+}
+
+// ── Responsive: <720px → Status Strip stacks 1-col (spec §2.1, AC-12)
+// §4.1 axe dlitem remediation note: on the 1-col fallback the explicit
+// desktop `grid-column` / `grid-row` assignments are reset so each
+// term/def pair auto-flows into adjacent rows (dt1/dd1, then dt2/dd2,
+// then dt3/dd3) — preserving the §2.1 "pairs adjacent" invariant.
+@media (max-width: 719.98px) {
+  .ck-status-strip {
+    grid-template-columns: 1fr;
+  }
+  .ck-status-strip dt,
+  .ck-status-strip dd {
+    grid-column: auto;
+    grid-row: auto;
+  }
 }

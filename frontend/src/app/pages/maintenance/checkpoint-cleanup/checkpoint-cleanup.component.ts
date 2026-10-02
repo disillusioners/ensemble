@@ -15,6 +15,9 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatStepperModule, MatStepper } from '@angular/material/stepper';
+import { BreakpointObserver } from '@angular/cdk/layout';
+import { map } from 'rxjs/operators';
 import { Subscription } from 'rxjs';
 import { CheckpointCleanupService } from './checkpoint-cleanup.service';
 import { ConfirmDialogComponent } from '../../../components/confirm-dialog/confirm-dialog.component';
@@ -32,9 +35,27 @@ import type {
 /**
  * Checkpoint Cleanup section — full UI.
  *
- * Renders 4 cards (status, dry-run, execute, error) + a result panel
- * after execute completes. Subscribes to the colocated service
- * (`CheckpointCleanupService`) and forwards user actions back.
+ * ck-redesign-2026q4 — 4-step Material wizard + persistent Status Strip.
+ * DOM order: kill-switch / origin-guard banners → Status Strip → mat-stepper
+ * → custom footer (Back / Back to start / Continue / Cleanup now per step) →
+ * page-level Debug expander (raw JSON). Stepper orientation is
+ * viewport-conditional via `@if (isDesktop())` (BreakpointObserver:
+ * ≥1024px → horizontal, below → vertical) — TWO source-level `<mat-stepper>`
+ * instances (one per orientation branch), each with FOUR byte-identical
+ * direct `<mat-step>` children (INLINE DUPLICATION, parity-guarded by the
+ * spec's [data-testid] parity spec at lines 2376+ — a future edit that
+ * diverges one branch fails the parity assertion immediately).
+ *
+ * Step 4 auto-renders post-execute via `lastExecuteResult()`; with
+ * `[linear]="false"` a page refresh during execute lands the operator
+ * on Step 4 with the actual result (the BE's `status.last_run` is
+ * the persistence source — see `seedBannerFromStatus()`). Status
+ * Strip decouples monitoring from the wizard (AC-1, AC-11).
+ *
+ * AC-4 / AC-16 — Continue is gated on `canContinueFromStep1()` /
+ * `canContinueFromStep2()` / `canContinueFromStep3()`; in-flight
+ * disables dry-run + execute on all steps, with an inline notice
+ * rendered ONLY in Step 1 (the spec's narrow landing).
  *
  * AM-14 — 409-adoption: on 409 from `service.execute()`, adopt
  * `details.run_id` and resume polling (no error toast).
@@ -66,6 +87,10 @@ import type {
  *   - Post-run convergence banner ("Run cleanup again to reclaim ~X
  *     more" — a NEW dry-run, never a silent execute); hides when a
  *     fresh dry-run reports `now == 0` (convergence reached)
+ *
+ * Size rationale — deliberate density: wizard-state + AM-contract display helpers
+ * live beside their pins for reviewability. Extraction candidates if size becomes a
+ * burden: the ~:201-243 gating-signal cluster and the ~:653-861 format/label helper cluster.
  */
 @Component({
   selector: 'app-checkpoint-cleanup',
@@ -78,6 +103,7 @@ import type {
     MatProgressSpinnerModule,
     MatSnackBarModule,
     MatDialogModule,
+    MatStepperModule,
   ],
   templateUrl: './checkpoint-cleanup.component.html',
   styleUrl: './checkpoint-cleanup.component.scss',
@@ -87,6 +113,18 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly breakpoints = inject(BreakpointObserver);
+
+  /** Stepper orientation breakpoint (spec §2.2 amendment, AC-2 / AC-15).
+   *  `isDesktop()` is `true` when the viewport is ≥1024px wide (the
+   *  horizontal-orientation arm). BreakpointObserver emits synchronously
+   *  on subscribe so the signal seeds correctly on initial render —
+   *  no orientation flash on first paint. */
+  readonly isDesktop = signal(false);
+  private readonly bpSub: Subscription = this.breakpoints
+    .observe(['(min-width: 1024px)'])
+    .pipe(map((r) => r.matches))
+    .subscribe((matches) => this.isDesktop.set(matches));
 
   // ── Service signals re-exposed for the template ───────────────────────
   readonly status = this.service.status;
@@ -126,6 +164,117 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     this.service.isDryRunStale(this.lastDryRun()),
   );
 
+  // ── Wizard state (spec ck-redesign-2026q4 §2.2 / AC-9) ─────────────────
+  /** Index of the currently visible step (0..3). Backs `<mat-stepper [selectedIndex]>`. */
+  readonly activeStep = signal(0);
+
+  /**
+   * Stepper navigation facade — the template binds to these
+   * helpers via `stepperNav().next()` / `.back()` / `.backToStart()`.
+   * Centralizes the index math so a future insertion of a new step
+   * requires only the boundary checks here, not template-side edits.
+   */
+  readonly stepperNav = () => ({
+    next: () => this.activeStep.update((i) => Math.min(i + 1, 3)),
+    back: () => this.activeStep.update((i) => Math.max(i - 1, 0)),
+    backToStart: () => this.activeStep.set(0),
+  });
+
+  /**
+   * W1 — sync `activeStep()` with Material's `<mat-stepper>` selection.
+   * Bound to `(selectionChange)` on BOTH orientation branches in the
+   * template. Without this, header-driven step jumps leave the custom
+   * footer rendering the WRONG active-step buttons (per-step branch
+   * in the template reads `activeStep()`, but the stepper's internal
+   * `selectedIndex` would diverge). The handler clamps to the valid
+   * 0..3 range as a defensive belt — the stepper already clamps.
+   */
+  onStepperSelectionChange(stepper: MatStepper | undefined): void {
+    if (!stepper) {
+      return;
+    }
+    const idx = stepper.selectedIndex;
+    if (idx < 0 || idx > 3) {
+      return;
+    }
+    if (idx !== this.activeStep()) {
+      this.activeStep.set(idx);
+    }
+  }
+
+  // ── Status Strip render helpers (spec §2.1) ────────────────────────────
+  /** Keep N — first tile of the Status Strip. "—" when disabled/killed. */
+  statusStripKeepN(): string {
+    if (this.isMaintenanceDisabled() || !this.status()) {
+      return '—';
+    }
+    const v = this.status()?.config?.checkpoint_max_per_thread;
+    return typeof v === 'number' ? String(v) : '—';
+  }
+
+  /**
+   * Last-run summary line — second tile. Format: "{status} · {freed} · {completed_at}"
+   * (destructive uses bytes_freed; dry-flavor would_free_bytes). "Never run"
+   * when status is missing or no prior row.
+   */
+  statusStripLastRun(): string {
+    if (this.isMaintenanceDisabled() || !this.status()) {
+      return '—';
+    }
+    const last = this.status()?.last_run;
+    if (!last) {
+      return 'Never run';
+    }
+    const bytes =
+      last.summary?.blobs?.bytes_freed ?? last.summary?.blobs?.would_free_bytes ?? 0;
+    const statusLabel = last.status ?? 'unknown';
+    const time = this.formatTimestamp(last.completed_at);
+    return `${statusLabel} · ${this.formatBytes(bytes)} · ${time}`;
+  }
+
+  /**
+   * Dry-run fresh — third tile. Format: "{scanned} pairs · expires in {fresh_until}".
+   * "Stale — run dry-check" when no dry-run on record.
+   */
+  statusStripDryRunFresh(): string {
+    if (this.isMaintenanceDisabled() || !this.lastDryRun()) {
+      return 'Stale — run dry-check';
+    }
+    const dry = this.lastDryRun()!;
+    const scanned = dry.scanned?.thread_ns_pairs ?? 0;
+    const time = this.formatTimestamp(dry.fresh_until);
+    return `${scanned} pairs · expires in ${time}`;
+  }
+
+  // ── Step gating (spec §2.3–§2.5) ───────────────────────────────────────
+  /** Step 1 → Step 2. Disabled on kill-switch / in-flight / no-dry-run gate. */
+  canContinueFromStep1(): boolean {
+    return this.canDryRun() && !this.isMaintenanceDisabled() && !this.isRunInFlight();
+  }
+
+  /**
+   * Step 2 → Step 3. Gated on a fresh dry-run that promises something
+   * to delete. The spec's "OR explicit operator override" arm is
+   * satisfied by `dry.would_delete_count > 0` OR a successful prior
+   * execute (the run-again banner path); for the wizard gating path
+   * we use the strict arm — the banner already offers the override.
+   */
+  canContinueFromStep2(): boolean {
+    const dry = this.lastDryRun();
+    if (!dry) {
+      return false;
+    }
+    if (this.dryRunning() || this.executing() || this.isRunInFlight()) {
+      return false;
+    }
+    return (dry.would_delete_count ?? 0) > 0;
+  }
+
+  /** Step 3 action — gated on dry-run AND not already executing / in-flight. */
+  canContinueFromStep3(): boolean {
+    return !!this.lastDryRun() && !this.executing() && !this.isRunInFlight();
+  }
+
   // Polling subscription — track so OnDestroy can tear down
   private pollSub: Subscription | null = null;
 
@@ -135,6 +284,7 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.pollSub?.unsubscribe();
+    this.bpSub.unsubscribe();
   }
 
   // ── Actions ───────────────────────────────────────────────────────────
@@ -450,7 +600,19 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
           this.pollSub = null;
           // Re-fetch status so `last_run` reflects the new row.
           this.refreshStatus();
+          // W1 — auto-advance to Step 4 (Result) on successful execute.
+          // The result panel is rendered from `lastExecuteResult()`, which
+          // is set above; this `activeStep.set(3)` flips the stepper's
+          // selectedIndex so the operator lands on the Result step
+          // without a manual navigation. `succeeded` only — `failed`
+          // surfaces inline on Step 3, `interrupted` surfaces inline on
+          // Step 3 (the rerun card); both stay on the Confirm step.
+          // The header `(selectionChange)` handler is the read-side
+          // back-pressure: any stepper-side jump propagates back into
+          // `activeStep()` so the footer always renders the active
+          // step's buttons.
           if (run.status === 'succeeded') {
+            this.activeStep.set(3);
             this.snackBar.open('Cleanup succeeded.', 'Dismiss', {
               duration: 4000,
               panelClass: 'success-snackbar',

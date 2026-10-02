@@ -37,7 +37,12 @@
 //   - `expected_duration_ms_hint` display (AM-12)
 //   - Destroy tears down poll
 
-import { signal } from '@angular/core';
+import { CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA, signal, computed } from '@angular/core';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { BreakpointObserver } from '@angular/cdk/layout';
+import { MatDialog } from '@angular/material/dialog';
+import { MatSnackBar } from '@angular/material/snack-bar';
+import { MatStepperModule } from '@angular/material/stepper';
 import { Observable, of, throwError } from 'rxjs';
 import type {
   CheckpointCleanupDryRun,
@@ -49,6 +54,7 @@ import type {
   MaintenanceErrorBody,
 } from '../../../models';
 import { CheckpointCleanupService } from './checkpoint-cleanup.service';
+import { CheckpointCleanupComponent } from './checkpoint-cleanup.component';
 import { ConfirmDialogComponent } from '../../../components/confirm-dialog/confirm-dialog.component';
 import {
   DRY_RUN,
@@ -252,6 +258,36 @@ class TestableCheckpointCleanupComponent {
   // showRunAgainBanner() in the production class for the rationale.
   readonly executedDryRunId = signal<string | null>(null);
   readonly dryRunIsStale = signal(false);
+
+  // ── Wizard state (ck-redesign-2026q4) — mirror production verbatim. ──
+  readonly activeStep = signal(0);
+  readonly stepperNav = () => ({
+    next: () => this.activeStep.update((i) => Math.min(i + 1, 3)),
+    back: () => this.activeStep.update((i) => Math.max(i - 1, 0)),
+    backToStart: () => this.activeStep.set(0),
+  });
+  // C1 — `isDesktop` signal drives the @if/@else orientation switch
+  // in the template. Production wires this to BreakpointObserver;
+  // the mirror's default is `false` (vertical orientation, narrow).
+  // Spec calls test via direct mutation of this signal.
+  readonly isDesktop = signal(false);
+  /**
+   * W1 — selectionChange handler. Mirrors production: clamps to the
+   * 0..3 valid step range and updates `activeStep()` from the
+   * stepper's `selectedIndex`. Header-driven jumps propagate here;
+   * the footer's `activeStep()` branch reads pick up the new index
+   * and render the right buttons.
+   */
+  onStepperSelectionChange(stepper: { selectedIndex: number } | undefined): void {
+    if (!stepper) return;
+    const idx = stepper.selectedIndex;
+    if (idx < 0 || idx > 3) return;
+    if (idx !== this.activeStep()) {
+      this.activeStep.set(idx);
+    }
+  }
+  // canContinueFromStep1 / Step2 / Step3 are pure functions of the
+  // service-exposed signals + local UI state. Mirror production.
 
   private pollSub: { unsubscribe: () => void; closed: boolean } | null = null;
   private destroyed = false;
@@ -477,20 +513,30 @@ class TestableCheckpointCleanupComponent {
         ) {
           this.executing.set(false);
           this.activeRunId.set(null);
-          // Mirror production: unsubscribe the polled sub THEN call
-          // refreshStatus. NOTE: the production component unsubscribes
-          // via `this.pollSub?.unsubscribe(); this.pollSub = null;`
-          // and the refreshStatus chain runs correctly. The testable
-          // mirror uses the local `sub` closure variable; calling
-          // `sub.unsubscribe()` BEFORE `this.refreshStatus()` causes
-          // an RxJS subscription-closed-during-emission edge case
-          // that aborts the remaining lines of the next callback
-          // (verified empirically — moving unsubscribe AFTER
-          // refreshStatus makes refreshStatus fire). For the test
-          // mirror we therefore unsubscribe AFTER refreshStatus.
-          // Production is unchanged (verified live — the live chain
-          // works because it uses the member-reference unsubscribe
-          // pattern that doesn't trigger the edge case).
+          // Mirror-vs-production ordering note (test-mirror only):
+          // Production (member-ref `pollSub`) executes, in order:
+          //   pollSub.unsubscribe() → pollSub = null → refreshStatus()
+          //   → activeStep.set(3) (on `succeeded`)
+          //   — see ts:608-624.
+          // The mirror uses a local `sub` closure reference. A
+          // synchronous `sub.unsubscribe()` during the next handler
+          // closes the subscription mid-emission and aborts the
+          // statements that follow in the same callback (RxJS
+          // closed-during-emission edge case). To avoid that, the
+          // mirror intentionally runs `activeStep.set(3)` BEFORE
+          // `sub.unsubscribe()`. The mirror's local-ref ordering is
+          // therefore: activeStep.set(3) → refreshStatus() →
+          // sub.unsubscribe() — NOT identical to production's
+          // member-ref ordering. Assertions in this file are
+          // order-independent (no test asserts the relative order
+          // of these three calls), so the divergence is safe.
+          //
+          // W1 — auto-advance to Step 4 (Result) on successful
+          // execute. Mirrors production: succeeded only — failed
+          // and interrupted stay on Step 3 with inline UI affordances.
+          if (run.status === 'succeeded') {
+            this.activeStep.set(3);
+          }
           this.refreshStatus();
           sub.unsubscribe();
           sub.closed = true;
@@ -553,6 +599,51 @@ class TestableCheckpointCleanupComponent {
 
   canRerunInterrupted(run: CheckpointCleanupRun): boolean {
     return run.status === 'interrupted';
+  }
+
+  // ── Wizard helpers (ck-redesign-2026q4) — mirror production verbatim.
+
+  /** Step 1 → Step 2 gate (spec §2.3, AC-4). */
+  canContinueFromStep1(): boolean {
+    return this.canDryRun() && !this.isMaintenanceDisabled() && !this.isRunInFlight();
+  }
+
+  /** Step 2 → Step 3 gate (spec §2.4). */
+  canContinueFromStep2(): boolean {
+    const dry = this.lastDryRun();
+    if (!dry) return false;
+    if (this.dryRunning() || this.executing() || this.isRunInFlight()) return false;
+    return (dry.would_delete_count ?? 0) > 0;
+  }
+
+  /** Step 3 action gate (spec §2.5). */
+  canContinueFromStep3(): boolean {
+    return !!this.lastDryRun() && !this.executing() && !this.isRunInFlight();
+  }
+
+  // Status Strip render helpers (spec §2.1).
+  statusStripKeepN(): string {
+    if (this.isMaintenanceDisabled() || !this.status()) return '—';
+    const v = this.status()?.config?.checkpoint_max_per_thread;
+    return typeof v === 'number' ? String(v) : '—';
+  }
+  statusStripLastRun(): string {
+    if (this.isMaintenanceDisabled() || !this.status()) return '—';
+    const last = this.status()?.last_run;
+    if (!last) return 'Never run';
+    const bytes =
+      last.summary?.blobs?.bytes_freed ?? last.summary?.blobs?.would_free_bytes ?? 0;
+    const time = this.formatTimestamp(last.completed_at);
+    return `${last.status} · ${this.formatBytes(bytes)} · ${time}`;
+  }
+  statusStripDryRunFresh(): string {
+    if (this.isMaintenanceDisabled() || !this.lastDryRun()) {
+      return 'Stale — run dry-check';
+    }
+    const dry = this.lastDryRun()!;
+    const scanned = dry.scanned?.thread_ns_pairs ?? 0;
+    const time = this.formatTimestamp(dry.fresh_until);
+    return `${scanned} pairs · expires in ${time}`;
   }
 
   // ── v3.2 — dry-run projection helpers ─────────────────────────────────
@@ -1121,6 +1212,31 @@ describe('CheckpointCleanupComponent', () => {
     // terminal-stop semantics (those are covered by the existing
     // 9-test "execute confirm flow — polls to terminal" e2e +
     // the service spec's terminal-stop describe block).
+    //
+    // Test fixture helper — overrides `fetchStatus` + `pollRun` so both
+    // return the same non-terminal `statusWithInFlight` for the duration
+    // of the test. Without this, the mock's default immediate-SUCCEEDED
+    // poll response fires the terminal handler before assertions can
+    // verify the re-entry kick-off. Identical stubbing semantics across
+    // every re-entry test below; do not diverge per-site.
+    const stubNonTerminalPoll = (statusWithInFlight: CheckpointCleanupStatus) => {
+      service.fetchStatus = () => {
+        service.fetchStatusCalls++;
+        return of(statusWithInFlight);
+      };
+      service.pollRun = (runId: string, intervalMs?: number, hintMs?: number | null) => {
+        service.pollRunCalls.push({ runId, intervalMs, hintMs });
+        return of({
+          run_id: runId,
+          kind: 'manual_execute' as const,
+          status: 'running' as const,
+          started_at: new Date().toISOString(),
+          completed_at: null,
+          summary: null,
+          error: null,
+        });
+      };
+    };
 
     it('refreshStatus() resumes polling against status.in_flight.run_id', () => {
       const inFlightRunId = 'ckpt-refreshed-mid-poll-1';
@@ -1139,22 +1255,7 @@ describe('CheckpointCleanupComponent', () => {
       // responses — sidesteps the mock's auto-succeed that would
       // otherwise trigger the post-terminal refreshStatus loop.
       service.status.set(statusWithInFlight);
-      service.fetchStatus = () => {
-        service.fetchStatusCalls++;
-        return of(statusWithInFlight);
-      };
-      service.pollRun = (runId: string, intervalMs?: number, hintMs?: number | null) => {
-        service.pollRunCalls.push({ runId, intervalMs, hintMs });
-        return of({
-          run_id: runId,
-          kind: 'manual_execute' as const,
-          status: 'running' as const,
-          started_at: new Date().toISOString(),
-          completed_at: null,
-          summary: null,
-          error: null,
-        });
-      };
+      stubNonTerminalPoll(statusWithInFlight);
       component.refreshStatus();
       expect(service.pollRunCalls).toHaveLength(1);
       expect(service.pollRunCalls[0].runId).toBe(inFlightRunId);
@@ -1178,22 +1279,7 @@ describe('CheckpointCleanupComponent', () => {
         },
       };
       service.status.set(statusWithInFlight);
-      service.fetchStatus = () => {
-        service.fetchStatusCalls++;
-        return of(statusWithInFlight);
-      };
-      service.pollRun = (runId: string, intervalMs?: number, hintMs?: number | null) => {
-        service.pollRunCalls.push({ runId, intervalMs, hintMs });
-        return of({
-          run_id: runId,
-          kind: 'manual_execute' as const,
-          status: 'running' as const,
-          started_at: new Date().toISOString(),
-          completed_at: null,
-          summary: null,
-          error: null,
-        });
-      };
+      stubNonTerminalPoll(statusWithInFlight);
       component.refreshStatus();
       component.refreshStatus();
       // Exactly one poll subscription, not two — the idempotency
@@ -1283,22 +1369,7 @@ describe('CheckpointCleanupComponent', () => {
         },
       };
       service.status.set(statusWithInFlight);
-      service.fetchStatus = () => {
-        service.fetchStatusCalls++;
-        return of(statusWithInFlight);
-      };
-      service.pollRun = (runId: string, intervalMs?: number, hintMs?: number | null) => {
-        service.pollRunCalls.push({ runId, intervalMs, hintMs });
-        return of({
-          run_id: runId,
-          kind: 'manual_execute' as const,
-          status: 'running' as const,
-          started_at: new Date().toISOString(),
-          completed_at: null,
-          summary: null,
-          error: null,
-        });
-      };
+      stubNonTerminalPoll(statusWithInFlight);
       component.lastExecuteResult.set({
         run_id: previousRunId,
         kind: 'manual_execute' as const,
@@ -1340,22 +1411,7 @@ describe('CheckpointCleanupComponent', () => {
         },
       };
       service.status.set(statusWithInFlight);
-      service.fetchStatus = () => {
-        service.fetchStatusCalls++;
-        return of(statusWithInFlight);
-      };
-      service.pollRun = (runId: string, intervalMs?: number, hintMs?: number | null) => {
-        service.pollRunCalls.push({ runId, intervalMs, hintMs });
-        return of({
-          run_id: runId,
-          kind: 'manual_execute' as const,
-          status: 'running' as const,
-          started_at: new Date().toISOString(),
-          completed_at: null,
-          summary: null,
-          error: null,
-        });
-      };
+      stubNonTerminalPoll(statusWithInFlight);
       component.lastExecuteResult.set({
         run_id: inFlightRunId,
         kind: 'manual_execute' as const,
@@ -1815,5 +1871,537 @@ describe('CheckpointCleanupComponent', () => {
       component.executedDryRunId.set(null);
       expect(component.showRunAgainBanner()).toBe(false);
     });
+  });
+});
+
+// ── ck-redesign-2026q4 — wizard navigation, gating, Status Strip ───────
+
+describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
+  let service: MockCheckpointCleanupService;
+  let snackBar: MockSnackBar;
+  let component: TestableCheckpointCleanupComponent;
+
+  beforeEach(() => {
+    mockDialog.reset();
+    MockSnackBarRef.reset();
+    service = new MockCheckpointCleanupService();
+    snackBar = new MockSnackBar();
+    component = new TestableCheckpointCleanupComponent(service, mockDialog, snackBar);
+  });
+
+  describe('activeStep initial value (AC-9)', () => {
+    it('starts at 0 (Review)', () => {
+      expect(component.activeStep()).toBe(0);
+    });
+  });
+
+  describe('stepperNav helpers (AC-9)', () => {
+    it('next() advances activeStep by 1, clamped at 3', () => {
+      component.stepperNav().next();
+      expect(component.activeStep()).toBe(1);
+      component.stepperNav().next();
+      component.stepperNav().next();
+      component.stepperNav().next();
+      expect(component.activeStep()).toBe(3);
+      // Clamped at 3 — no rollover past Result.
+      component.stepperNav().next();
+      expect(component.activeStep()).toBe(3);
+    });
+
+    it('back() decrements activeStep by 1, clamped at 0', () => {
+      component.activeStep.set(3);
+      component.stepperNav().back();
+      expect(component.activeStep()).toBe(2);
+      component.stepperNav().back();
+      component.stepperNav().back();
+      component.stepperNav().back();
+      expect(component.activeStep()).toBe(0);
+      // Clamped at 0 — no negative roll.
+      component.stepperNav().back();
+      expect(component.activeStep()).toBe(0);
+    });
+
+    it('backToStart() resets activeStep to 0', () => {
+      component.activeStep.set(3);
+      component.stepperNav().backToStart();
+      expect(component.activeStep()).toBe(0);
+    });
+  });
+
+  describe('isDesktop signal (C1 — responsive orientation, AC-2)', () => {
+    it('defaults to false (vertical orientation; matches narrow <1024px branch)', () => {
+      expect(component.isDesktop()).toBe(false);
+    });
+
+    it('can be flipped to true to model the horizontal-orientation branch', () => {
+      component.isDesktop.set(true);
+      expect(component.isDesktop()).toBe(true);
+    });
+  });
+
+  describe('onStepperSelectionChange (W1 — stepper navigation desync)', () => {
+    it('updates activeStep() from the stepper selectedIndex (header-driven jump)', () => {
+      // Simulate the operator clicking the "Result" step header
+      // (index 3). The custom footer reads `activeStep()` to
+      // render the right per-step buttons; without this sync the
+      // footer would stay stuck on the previous step's buttons.
+      component.onStepperSelectionChange({ selectedIndex: 3 });
+      expect(component.activeStep()).toBe(3);
+    });
+
+    it('updates activeStep() from an arbitrary valid index', () => {
+      component.onStepperSelectionChange({ selectedIndex: 1 });
+      expect(component.activeStep()).toBe(1);
+      component.onStepperSelectionChange({ selectedIndex: 2 });
+      expect(component.activeStep()).toBe(2);
+      component.onStepperSelectionChange({ selectedIndex: 0 });
+      expect(component.activeStep()).toBe(0);
+    });
+
+    it('is a no-op when the stepper arg is undefined', () => {
+      component.activeStep.set(2);
+      component.onStepperSelectionChange(undefined);
+      expect(component.activeStep()).toBe(2);
+    });
+
+    it('clamps out-of-range selectedIndex (does not write activeStep)', () => {
+      component.activeStep.set(1);
+      // Negative or >3 should be ignored — Material stepper already
+      // clamps, but the handler defends defensively.
+      component.onStepperSelectionChange({ selectedIndex: -1 });
+      expect(component.activeStep()).toBe(1);
+      component.onStepperSelectionChange({ selectedIndex: 4 });
+      expect(component.activeStep()).toBe(1);
+    });
+
+    it('is idempotent when selectedIndex === activeStep()', () => {
+      component.activeStep.set(2);
+      // No-op signal.set call — just verifying no spurious write
+      // (signal-equality dedupes on its own; this asserts the
+      // short-circuit guard is explicit).
+      component.onStepperSelectionChange({ selectedIndex: 2 });
+      expect(component.activeStep()).toBe(2);
+    });
+  });
+
+  describe('W1 — auto-advance to Step 4 on successful execute', () => {
+    // The terminal-poll handler flips `activeStep` to 3 (Result)
+    // on a `succeeded` run. `failed` and `interrupted` runs stay
+    // on Step 3 (the operator is already looking at the destructive
+    // affordances; the failure / interrupted state renders inline
+    // there). The mirror's `startPolling` is private, so we exercise
+    // the path via `onExecute()` → confirm-true → poll-terminal.
+    it('flips activeStep to 3 after a succeeded run', () => {
+      component.activeStep.set(2);
+      service.lastDryRun.set(DRY_RUN);
+      mockDialog.nextResult = true;
+      component.onExecute();
+      // pollRun emits a single succeeded row synchronously; the
+      // terminal branch (mirror of production) calls set(3) BEFORE
+      // refreshStatus + unsubscribe (local-ref `sub` would abort
+      // the rest of the callback if unsubscribe ran first).
+      expect(component.activeStep()).toBe(3);
+    });
+
+    it('failed execute does NOT advance — activeStep stays 2 (Step 3)', () => {
+      // Override pollRun to emit a terminal `failed` row synchronously,
+      // mirroring the re-entry resume test's mock-overrides. Mirrors
+      // production's terminal branch: status === 'succeeded' is the
+      // ONLY trigger for activeStep.set(3); failed/interrupted stay
+      // put and render their failure / interrupted UI inline on
+      // Step 3.
+      component.activeStep.set(2);
+      service.lastDryRun.set(DRY_RUN);
+      mockDialog.nextResult = true;
+      service.pollRun = (
+        runId: string,
+        intervalMs?: number,
+        hintMs?: number | null,
+      ) => {
+        service.pollRunCalls.push({ runId, intervalMs, hintMs });
+        return of(RUN_FAILED_NEVER_PRUNED);
+      };
+      component.onExecute();
+      expect(component.activeStep()).toBe(2);
+    });
+
+    it('interrupted execute does NOT advance — activeStep stays 2 (Step 3)', () => {
+      // Same mock-override strategy as the failed case above; status
+      // === 'interrupted' is the AM-6 re-run affordance signal —
+      // the operator stays on Step 3 to see the inline interrupted UI
+      // and click "Run again to converge".
+      component.activeStep.set(2);
+      service.lastDryRun.set(DRY_RUN);
+      mockDialog.nextResult = true;
+      service.pollRun = (
+        runId: string,
+        intervalMs?: number,
+        hintMs?: number | null,
+      ) => {
+        service.pollRunCalls.push({ runId, intervalMs, hintMs });
+        return of(RUN_INTERRUPTED_NEVER_PRUNED);
+      };
+      component.onExecute();
+      expect(component.activeStep()).toBe(2);
+    });
+  });
+
+  describe('step gating — canContinueFromStep1 (AC-4)', () => {
+    it('is true when canDryRun && !maintenanceDisabled && !isRunInFlight', () => {
+      service.canDryRun.set(true);
+      service.isRunInFlight.set(false);
+      service.lastError.set(null);
+      expect(component.canContinueFromStep1()).toBe(true);
+    });
+
+    it('is false when canDryRun() is false', () => {
+      service.canDryRun.set(false);
+      expect(component.canContinueFromStep1()).toBe(false);
+    });
+
+    it('is false when maintenance is disabled (kill-switch)', () => {
+      service.canDryRun.set(true);
+      service.lastError.set({ error: 'maintenance_disabled', message: 'kill' });
+      expect(component.isMaintenanceDisabled()).toBe(true);
+      expect(component.canContinueFromStep1()).toBe(false);
+    });
+
+    it('is false when a daemon run is in flight (AC-16)', () => {
+      service.canDryRun.set(true);
+      service.isRunInFlight.set(true);
+      expect(component.canContinueFromStep1()).toBe(false);
+    });
+  });
+
+  describe('step gating — canContinueFromStep2 (spec §2.4)', () => {
+    it('is true when lastDryRun exists with would_delete_count > 0 AND not in flight', () => {
+      service.lastDryRun.set(DRY_RUN);
+      service.canDryRun.set(true);
+      service.isRunInFlight.set(false);
+      expect(component.canContinueFromStep2()).toBe(true);
+    });
+
+    it('is false when no dry-run is on record', () => {
+      service.lastDryRun.set(null);
+      expect(component.canContinueFromStep2()).toBe(false);
+    });
+
+    it('is false when dry-run reports would_delete_count == 0', () => {
+      const zero: CheckpointCleanupDryRun = {
+        ...DRY_RUN,
+        would_delete_count: 0,
+      };
+      service.lastDryRun.set(zero);
+      expect(component.canContinueFromStep2()).toBe(false);
+    });
+
+    it('is false during dry-run / execute / isRunInFlight (AC-16)', () => {
+      service.lastDryRun.set(DRY_RUN);
+      component.dryRunning.set(true);
+      expect(component.canContinueFromStep2()).toBe(false);
+      component.dryRunning.set(false);
+      component.executing.set(true);
+      expect(component.canContinueFromStep2()).toBe(false);
+      component.executing.set(false);
+      service.isRunInFlight.set(true);
+      expect(component.canContinueFromStep2()).toBe(false);
+    });
+  });
+
+  describe('step gating — canContinueFromStep3 (spec §2.5)', () => {
+    it('is true when dry-run exists AND not executing AND not in-flight', () => {
+      service.lastDryRun.set(DRY_RUN);
+      expect(component.canContinueFromStep3()).toBe(true);
+    });
+
+    it('is false when no dry-run on record', () => {
+      service.lastDryRun.set(null);
+      expect(component.canContinueFromStep3()).toBe(false);
+    });
+
+    it('is false during executing (AC-16)', () => {
+      service.lastDryRun.set(DRY_RUN);
+      component.executing.set(true);
+      expect(component.canContinueFromStep3()).toBe(false);
+    });
+
+    it('is false when daemon-reported in-flight (AC-16)', () => {
+      service.lastDryRun.set(DRY_RUN);
+      service.isRunInFlight.set(true);
+      expect(component.canContinueFromStep3()).toBe(false);
+    });
+  });
+
+  describe('in-flight handling (AC-16)', () => {
+    it('dry-run and execute gates both lock when isRunInFlight is true', () => {
+      service.lastDryRun.set(DRY_RUN);
+      service.isRunInFlight.set(true);
+      expect(component.canContinueFromStep1()).toBe(false);
+      expect(component.canContinueFromStep3()).toBe(false);
+    });
+
+    it('dry-run gate stays locked when local dryRunning() is true', () => {
+      service.lastDryRun.set(DRY_RUN);
+      component.dryRunning.set(true);
+      expect(component.canContinueFromStep2()).toBe(false);
+    });
+  });
+
+  describe('Status Strip render (spec §2.1)', () => {
+    it('keepN renders the configured max_per_thread', () => {
+      service.status.set({
+        ...STATUS,
+        config: {
+          checkpoint_max_per_thread: 6,
+          cleanup_interval_hours: 6,
+          blob_prune_dry_run_env_default: '1',
+          blob_prune_destructive_armed: false,
+        },
+      });
+      expect(component.statusStripKeepN()).toBe('6');
+    });
+
+    it('keepN renders "—" when status is missing', () => {
+      service.status.set(null);
+      expect(component.statusStripKeepN()).toBe('—');
+    });
+
+    it('keepN renders "—" when maintenance is disabled', () => {
+      service.lastError.set({ error: 'maintenance_disabled', message: 'off' });
+      service.status.set({
+        ...STATUS,
+        config: {
+          checkpoint_max_per_thread: 6,
+          cleanup_interval_hours: 6,
+          blob_prune_dry_run_env_default: '1',
+          blob_prune_destructive_armed: false,
+        },
+      });
+      expect(component.statusStripKeepN()).toBe('—');
+    });
+
+    it('lastRun renders "Never run" when status().last_run is null', () => {
+      service.status.set({ ...STATUS, last_run: null });
+      expect(component.statusStripLastRun()).toBe('Never run');
+    });
+
+    it('lastRun renders "{status} · {bytes} · {time}" when a row exists', () => {
+      service.status.set({
+        ...STATUS,
+        last_run: {
+          run_id: 'ckpt-1',
+          kind: 'manual_execute',
+          started_at: '2026-10-01T02:14:00.000Z',
+          completed_at: '2026-10-01T02:21:00.000Z',
+          status: 'succeeded',
+          summary: {
+            checkpoint_rows: { scanned_pairs: 12, deleted: 4, excess_pairs: 4 },
+            writes: { deleted: 0 },
+            blobs: {
+              scanned_pairs: 12,
+              would_delete_count: 0,
+              would_free_bytes: 0,
+              would_delete: 0,
+              bytes: 0,
+              destructive: true,
+              deleted: 4,
+              bytes_freed: 268435456,
+              skipped: [],
+              skipped_truncated: false,
+            },
+            duration_ms: 192000,
+          },
+        },
+      });
+      const out = component.statusStripLastRun();
+      expect(out).toContain('succeeded');
+      expect(out).toContain('256 MB');
+    });
+
+    it('dryRunFresh renders "Stale — run dry-check" when no dry-run', () => {
+      service.lastDryRun.set(null);
+      expect(component.statusStripDryRunFresh()).toBe('Stale — run dry-check');
+    });
+
+    it('dryRunFresh renders "{scanned} pairs · expires in {time}" when present', () => {
+      service.lastDryRun.set(DRY_RUN);
+      const out = component.statusStripDryRunFresh();
+      expect(out).toMatch(/^\d+ pairs · expires in /);
+    });
+  });
+});
+
+// ── Orientation locator contract (spec amend v3 validation clause) ────────
+//
+// Spec amend v3 pins a Playwright e2e locator:
+//   `mat-stepper[orientation="horizontal"]`
+// against the rendered DOM when isDesktop() is true (and the vertical
+// variant when isDesktop() is false). The production template now places
+// the four `<mat-step>` blocks as DIRECT children of each
+// `<mat-stepper>` (CRITICAL-3 Option A restructure — the previous
+// `<ng-container *ngTemplateOutlet>` indirection broke the
+// ContentChildren contract and rendered an empty stepper, empirically
+// verified). Static `orientation="horizontal"` / `orientation="vertical"`
+// attributes land on the rendered host element regardless of structural
+// context; these tests pin that contract at the rendered-DOM level.
+//
+// The rest of this file uses a logic-mirror pattern with no TestBed (a
+// deliberate design choice — see file header). These two tests use a
+// minimal TestBed harness in an isolated describe block so the contract
+// is verified at the rendered-DOM level without perturbing the other
+// tests. NO_ERRORS_SCHEMA skips Angular Material element validation
+// (`<mat-stepper>`, `<mat-step>`, etc.) — the static `orientation="..."`
+// attribute lands on the rendered host element regardless.
+//
+// BREAKPOINT STUB NOTE — the previous `NG0201: No provider found for
+// _CdkStepper` failure was caused by the `*ngTemplateOutlet`
+// indirection: outlet-stamped `<mat-step>` elements never registered
+// with the parent `<mat-stepper>`'s ContentChildren query, so the
+// stepper rendered empty (and any harness that surfaced the DI chain
+// surfaced NG0201 instead). The restructure (direct mat-step children)
+// lets the production template render under TestBed without an
+// override — this describe no longer defines an `orientationPinTemplate`.
+//
+// If either of the locator tests fails (attribute absent from the
+// rendered DOM), the production fix is to add `[attr.orientation]="..."`
+// alongside the existing inputs on both `<mat-stepper>` tags in the
+// template — attr bindings guarantee the literal DOM attribute.
+//
+// Parity guard (added in this restructure) — the set of
+// `[data-testid]` attributes rendered in desktop mode MUST equal the
+// set rendered in narrow mode; this catches any drift between the two
+// duplicated `<mat-step>` block copies. If a future edit diverges one
+// branch, the parity assertion fails immediately.
+describe('CheckpointCleanupComponent — orientation locator contract (spec amend v3 validation clause)', () => {
+  let fixture: ComponentFixture<CheckpointCleanupComponent>;
+
+  async function renderWithMatches(matches: boolean): Promise<void> {
+    // Stub BreakpointObserver — synchronous emit of the requested
+    // `matches` value, identical shape to the production ObserveResult
+    // (BreakpointObserver emits { matches, breakpoints }).
+    const stubBPO = {
+      observe: jest.fn().mockReturnValue(
+        of({ matches, breakpoints: { '(min-width: 1024px)': matches } }),
+      ),
+    };
+
+    // Fresh service mock per test so signal state doesn't leak across
+    // tests (the existing `MockCheckpointCleanupService` mirrors
+    // production surface — full method coverage is not required here,
+    // only fetchStatus() because ngOnInit calls refreshStatus()).
+    const serviceStub = new MockCheckpointCleanupService();
+    // STATUS fixture has no last_run and no in_flight — ngOnInit's
+    // refreshStatus() subscription handlers will no-op cleanly.
+    serviceStub.status.set(STATUS);
+
+    // Compile the REAL component (no template override) with the
+    // BreakpointObserver stub. MatDialog / MatSnackBar / service are
+    // provided as test doubles — same shape as the existing tests.
+    await TestBed.configureTestingModule({
+      imports: [CheckpointCleanupComponent, MatStepperModule],
+      providers: [
+        { provide: BreakpointObserver, useValue: stubBPO },
+        { provide: CheckpointCleanupService, useValue: serviceStub },
+        { provide: MatDialog, useValue: mockDialog },
+        { provide: MatSnackBar, useValue: new MockSnackBar() },
+      ],
+      schemas: [CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(CheckpointCleanupComponent);
+    // createComponent() runs the component's field initializers BEFORE
+    // returning — including the BreakpointObserver.subscribe(...)
+    // that pipes the stub's synchronous emit through to isDesktop,
+    // so isDesktop is already correct by the time we reach the
+    // detectChanges() call below. The single detectChanges() at the
+    // bottom of this function both triggers ngOnInit → refreshStatus()
+    // → service.fetchStatus subscription AND flushes the @if/@else
+    // orientation branch (which then renders the correct mat-stepper
+    // instance against the active value isDesktop set above).
+    fixture.detectChanges();
+  }
+
+  afterEach(() => {
+    fixture?.destroy();
+    TestBed.resetTestingModule();
+    mockDialog.reset();
+    MockSnackBarRef.reset();
+  });
+
+  /**
+   * Extract the set of `[data-testid]` attribute values rendered in the
+   * current fixture DOM. Used by the parity guard — both orientation
+   * branches MUST render the same set of testids.
+   */
+  function renderedTestIds(): Set<string> {
+    const nodes = fixture.nativeElement.querySelectorAll('[data-testid]');
+    const ids = new Set<string>();
+    nodes.forEach((el: Element) => {
+      const v = el.getAttribute('data-testid');
+      if (v) ids.add(v);
+    });
+    return ids;
+  }
+
+  it('renders the 4 mat-step blocks and the horizontal mat-stepper when isDesktop=true', async () => {
+    await renderWithMatches(true);
+
+    // (a) exactly 4 mat-step-header elements render
+    const headers = fixture.nativeElement.querySelectorAll('mat-step-header');
+    expect(headers.length).toBe(4);
+
+    // (b) mat-stepper[orientation="horizontal"] matches 1 / vertical 0 (desktop)
+    const horizontal = fixture.nativeElement.querySelectorAll(
+      'mat-stepper[orientation="horizontal"]',
+    );
+    const vertical = fixture.nativeElement.querySelectorAll(
+      'mat-stepper[orientation="vertical"]',
+    );
+    expect(horizontal.length).toBe(1);
+    expect(vertical.length).toBe(0);
+  });
+
+  it('renders the 4 mat-step blocks and the vertical mat-stepper when isDesktop=false', async () => {
+    await renderWithMatches(false);
+
+    // (a) exactly 4 mat-step-header elements render
+    const headers = fixture.nativeElement.querySelectorAll('mat-step-header');
+    expect(headers.length).toBe(4);
+
+    // (b) inverse of desktop: mat-stepper[orientation="vertical"] matches 1 / horizontal 0
+    const horizontal = fixture.nativeElement.querySelectorAll(
+      'mat-stepper[orientation="horizontal"]',
+    );
+    const vertical = fixture.nativeElement.querySelectorAll(
+      'mat-stepper[orientation="vertical"]',
+    );
+    expect(horizontal.length).toBe(0);
+    expect(vertical.length).toBe(1);
+  });
+
+  // (c) PARITY: the set of [data-testid] attributes rendered in
+  // desktop mode MUST equal the set rendered in narrow mode. This
+  // guards the duplicated <mat-step> blocks against drift forever —
+  // a future edit that diverges one branch fails this assertion
+  // immediately, surfacing the divergence before it can ship.
+  it('renders the same set of [data-testid] attributes in desktop and narrow modes (parity guard)', async () => {
+    await renderWithMatches(true);
+    const desktopTestIds = renderedTestIds();
+
+    // Reset TestBed between renders — `renderWithMatches` calls
+    // `TestBed.configureTestingModule` which throws if the test
+    // module is already instantiated. The describe-level `afterEach`
+    // runs once per test, not per render, so we reset explicitly
+    // between the two renders.
+    fixture.destroy();
+    TestBed.resetTestingModule();
+    mockDialog.reset();
+    MockSnackBarRef.reset();
+
+    await renderWithMatches(false);
+    const narrowTestIds = renderedTestIds();
+
+    expect(narrowTestIds.size).toBeGreaterThan(0);
+    expect(desktopTestIds).toEqual(narrowTestIds);
   });
 });

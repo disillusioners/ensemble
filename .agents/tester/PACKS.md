@@ -1,5 +1,27 @@
 # Test Packs
 
+## Completed commission — ck-redesign-2026q4 E2E WIZARD + AC-15 RUNTIME (STOP) + A11Y (2026-10-02)
+
+Branch `feature/checkpoint-cleanup-ui-redesign` @ **`b56e290a`** (base `f469dccf`, worktree `ck-ui-test`, no push). **VERDICT: 19/20 e2e PASS + 142/142 unit — AC-15 RUNTIME BREACH: scrollHeight 768px vs ≤760px at 1024×768 (8px over; §2.9 levers 6/7/8 all applied; static estimates 712–738 diverged from runtime). STOP RULE honored — zero production edits; escalated for spec re-amend round.** w2 left as standing red budget gate. Isolation: 4299/8099/15432 disposable PG, venv isolation proven, leak checks clean. Full report: `RESULTS/2026-10-02-ck-redesign-e2e-ac15.md`.
+
+| Pack | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| `maintenance_ck_e2e` (updated) | `cd frontend && timeout 300 npx playwright test -c playwright.maintenance.config.ts maintenance-checkpoint-cleanup.spec.ts --project maintenance` — env: `ENSEMBLE_SELF_ENV=dev`, `ENSEMBLE_DB_DSN=postgresql://$USER@127.0.0.1:15432/ensemble_e2e_maint` (guard-only), `OPENAI_API_KEY=<placeholder>`, `PATH=/usr/lib/postgresql/16/bin:$HOME/.local/bin:$PATH`; file filter BEFORE `--project` | 15 legacy tests updated to wizard nav (`ck-continue-btn`, `mat-step-header` clicks; anchors preserved; amend-v4 testids) | ✅ 15/15 |
+| `maintenance_ck_wizard_e2e` (new) | same config/filter on `maintenance-checkpoint-cleanup-wizard.spec.ts` | w1 Status Strip DOM order · w2 AC-15 runtime 1024×768 · w3 1023px flip · w4 axe · w5 happy path (4 evidence PNGs) | ⚠️ 4/5 — **w2 FAIL: 768 > 760** (STOP; spec re-amend round) · w4 soft: axe 3 classes/9 nodes |
+| `maintenance_unit` (regression gate) | `cd frontend && timeout 120 node_modules/.bin/jest src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.spec.ts src/app/pages/maintenance/maintenance.component.spec.ts src/app/pages/maintenance/maintenance.bindings.pins.spec.ts` (npm test script broken: `--testPathPattern` rejected by Jest 30) | 3 suites: 96 + 4 + 42 | ✅ 142/142 in ~6 s (4th spec ck.service 51 it out of scope) |
+
+**Re-gate @ `d8ee196e` (2026-10-02, v5 no-overflow + remediation `6d79bc2d`; spec amend `b5fa06db` pin `c74a6db9`):**
+
+| Pack | Result |
+|---|---|
+| `maintenance_ck_e2e` + `maintenance_ck_wizard_e2e` (single invocation, both specs) | ✅ **20/20 in 2.8 m** — w2 now v5 no-overflow gate (scrollHeight=768 = clientHeight=768 PASS); baseline regen BLESSED (1.13% delta, bbox-confined, 0 px outside bbox; 358 px blue-token, strip antialiasing only) |
+| `maintenance_unit` @ `6d79bc2d` | ✅ **142/142** in 5.8 s — remediation validated, zero pin churn |
+| axe re-scan (w4, soft) | ⚠ 1/2/6 persist — 2 classes migrated to pre-existing app-header nodes (out of scope); **dlitem ×6 unresolved in-scope** (`<dl role="status">` ARIA override orphans dt/dd; fix = outer div[role=status] + inner dl) — leader decision |
+
+**Re-confirm @ `40536f57` (2026-10-02, v6 closure on spec amend `bcf6a37d`; role/dl separation +10/−10 template-only):** ✅ full pack **20/20** (2.7 m) · **baseline PASSED AS-IS** (d8ee196e PNG md5-unchanged — zero visual delta holds) · **axe dlitem ×0 in-section (v6 confirmed)**; remaining 3 nodes = app-header pre-existing (follow-up ticket) · unit **142/142**. NO file changes, NO commit. **LANE COMPLETE @ `40536f57` — merge-gate ready.**
+
+---
+
 ## Completed commission — OPENDESIGN DESIGN-WORKFLOW VERIFICATION (report-only) (2026-10-01)
 
 Branch `feature/opendesign-design-workflow` @ **`3b6ba8cd`** (base `b271e153`). **VERDICT: READY — 7/7 plan items PASS, 0 regressions, 3 🟢 non-blocking nits** (v2-only `render` kind enum; `text-mockup` literal only via template/§4.5 cross-ref; `My Rules` informal heading alias). Pre-existing `[designer]` scrutiny RED base-identical (1F/50P/18S both legs), not grown. Repo untouched (foreign dirty set constant ×6, verified pre/post by every worker). Full report: `RESULTS/2026-10-01-opendesign-design-workflow-verification.md`.
