@@ -41,7 +41,7 @@ def _get_credential_manager(request: Request) -> Any:
     return request.app.state.credential_manager
 
 
-async def _reject_scheduler_lifecycle(source_id: str, manager: Any) -> None:
+async def _reject_scheduler_lifecycle(source_id: str, manager: Any, hint: str | None = None) -> None:
     """Raise error if source is a scheduler type.
     
     Scheduler sources manage their own lifecycle automatically and cannot be
@@ -51,17 +51,23 @@ async def _reject_scheduler_lifecycle(source_id: str, manager: Any) -> None:
     Args:
         source_id: The source ID to check.
         manager: The InstanceManager instance.
+        hint: Optional extra sentence appended to the message pointing at
+            the correct route (ADR-012 — used by the DELETE guard to point
+            at ``DELETE /api/schedules/{id}``; start/stop omit it).
         
     Raises:
         HTTPException: If the source is a scheduler type.
     """
     source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if source and source.source_type == "scheduler":
+        message = "Scheduler sources manage their own lifecycle and cannot be controlled via API."
+        if hint:
+            message = f"{message} {hint}"
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED",
-                "message": "Scheduler sources manage their own lifecycle and cannot be controlled via API."
+                "message": message
             }
         )
 
@@ -388,6 +394,16 @@ async def delete_source(source_id: str, request: Request):
                 message=f"Source not found: {source_id}"
             ).model_dump()
         )
+
+    # ADR-012 (architecture §2 OD-5) cancel-confusion guard: scheduler rows
+    # must NOT be deleted here — /api/sources DELETE purges schedule_executions
+    # history. Placed AFTER the get-or-404 (unknown ids still 404, not 400)
+    # and BEFORE any adapter stop / row delete.
+    await _reject_scheduler_lifecycle(
+        source_id,
+        manager,
+        hint="To cancel this schedule (history preserved), use DELETE /api/schedules/{id} instead.",
+    )
 
     # Stop and unregister adapter if running
     try:
