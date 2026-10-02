@@ -250,7 +250,7 @@ from .project_history import create_project_history_tools
 from .context_tools import create_context_tools
 from .shared_meta_kv_tools import create_shared_meta_kv_tools
 from .db_tools import create_db_tools
-from .infra import create_infra_tools, create_kms_tools
+from .infra import create_infra_tools, create_kms_tools, create_mcp_env_tools
 from .system import create_system_tools
 from .system_log_tools import create_system_log_tools
 from .upgrade_tools import create_upgrade_tools
@@ -5269,6 +5269,16 @@ Returns:
     # today — see P3-WP7 finding. Sibling WPs own agent allowlist edits.
     kms_tool_list = create_kms_tools(manager, current_instance_id)
     tools.extend(kms_tool_list)
+
+    # ── MCP env-write tool (self-provisioning Stage 1, 2026-10-02) ──
+    # ``mcp_set_env`` — non-secret config.env writer, the complement of
+    # ``kms_attach`` (which owns the secret/marker lane). Registered
+    # under the ``infra`` category so agents opt in via the SAME
+    # ``tools.allow`` entry as the KMS trio — ``agents/worker/meta.json``
+    # already carries ``infra``, so the install-opendesign worker skill
+    # lane can call it with NO meta.json change (KMS-trio precedent).
+    mcp_env_tool_list = create_mcp_env_tools(manager, current_instance_id)
+    tools.extend(mcp_env_tool_list)
 
     # ── Context tools (list/read shared context directory) ──
     # Always available — internal agents need this to inspect accumulated context
