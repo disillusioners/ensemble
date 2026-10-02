@@ -191,3 +191,47 @@ Empirical basis (H3 hourly fold-night enumeration + I-scenarios): wrapper fires 
 2. Doc pass: fold rationale wording (condition 1) + literal/non-literal fold residual note (condition 2).
 
 Evidence: worker reports in session; `/tmp/schedval/tz_reproof.py`, `/tmp/schedval2/pack_run{1,2,2b}.log`, suite logs.
+
+---
+
+# CLOSING GATE — F4 fix at tip `0cf56de0` (commit 11, on `41752298`)
+
+- **Date:** 2026-10-02 · 2 workers (val-tz revived, val-pack2 revived) · HEAD `0cf56de0a9ed0da915e8358daedecf654f212c6c`, daemon in-worktree verified.
+- Diff `34b4db96..0cf56de0` = 7 files = my 3 re-gate artifacts (`41752298`) + dev's 4 commit-11 files (`decisions.md`, `daemon/util/tz.py`, `tests/test_scheduler_adapter.py`, `tests/unit/test_tz_resolver.py`).
+
+## FINAL VERDICT: **PASS — empirically merge-ready** (one pre-merge doc correction, text provided below; no code change)
+
+| Closing-gate condition | Result |
+|---|---|
+| F4 dead vs independent expectations | ✅ all 4 legs + exactly-once window + spring mirror `0 0` — exact instants, 0 warnings |
+| Date-from-`after_aware` branch verified | ✅ DOW-wildcard reconstruct derives date from `after_aware` (quoted, driver-verified routing); DOW-restricted keeps candidate date (correct DOW-match arithmetic) |
+| No regression in C/D/E/G/B/I + probes | ✅ 22/22 MATCH; 09:00Z adversarial window clean; monotonic guard preserves in-gap repair; 0 false-positive warnings on 6 benign points |
+| Pack + suites exact | ✅ 166P/0F/0S ×2 deterministic (growth 164→166 = exactly 2 F4 regressions, additions-only); suites 9/9 (94/13/66/52/16/8/23/14/6); F3 pin green; concurrency 98P/0F/74S; dev.sh flag |
+| Doc conditions verbatim (item 4) | ⚠️ **(a) NOT landed — self-contradictory wording; (b) partial** → pre-merge doc correction (below), non-gating |
+
+## F4 verification detail (driver `/tmp/schedval/tz_f4.py`, 31 scenarios)
+
+`0 23 * * *` NY: Oct 30 seed → Oct 31 23:00 EDT (03:00Z) · **Oct 31 23:00 EDT post-fire seed → Nov 1 23:00 EST = 04:00Z Nov 2 (the F4 leg — was Nov 3 04:00Z)** · Nov 1 00:00 EDT seed → same Nov 1 23:00 EST · Nov 1 23:00 EST post-fire seed → Nov 2 23:00 EST (04:00Z Nov 3). Exactly-once window walk: 1 unique fire, no Oct 31 duplicate, no Nov 2 skip, 0 warnings. Spring mirror `0 0 * * *`: Mar 8 00:00 EST = 05:00Z single fire (no phantom/skip); Mar 9 → 04:00Z.
+
+Branch behavior (`_cron_dow_is_wildcard`, tz.py:511-526 + reconstruct :664-709): DOW-`*` → date from `after_aware` local date (+1 day advance if literal HH:MM already passed — prevents the monotonic guard eating a same-date past fire); DOW-restricted (e.g. `0 4 * * 3`) → croniter's candidate date retained (DOW-match arithmetic trusted; legs G Mar 4/11/18 all exact). **Accepted design residual (documented in code):** the roundtrip detector catches HH:MM mismatches, not DATE mismatches within the same DOW — if croniter ever emits a wrong DATE on a DOW-restricted expression, the reconstruct would inherit it. Low exposure; noted, not gating.
+
+tz-suite rename adjudicated: `test_same_date_phantom_advances_and_logs_warning` → `…_advances_to_next_day_via_f4_fix` is a legitimate contract update (the old pin encoded pre-F4 guard-trip behavior; post-F4 the same-date phantom advances +1 day via the after_aware date), with a NEW defense-in-depth pin for the retained guard. Outside the pack; not test-debt.
+
+## Doc conditions (item 4) — confirmation FAILED for (a), partial (b); corrective text supplied
+
+- **(a) decisions.md:210** still reads "UTC-continuity across the fold (exact 1h UTC spacing; fold=0 opens a 2h UTC hole)" — internally contradictory, and none of the three tester-required properties are stated. **Replace with:** "Fold rationale (tester-ratified accurate wording): across the 25-hour fall-back night, NO fold preference yields uniform UTC spacing for sub-daily schedules — both `post` and `pre` leave exactly one 2h UTC hole (mirrored positions). The ratifiable properties are: exactly ONE fire per wall-clock HH:MM, monotonic in UTC, deterministic pass choice — `post` = the later (second) pass, the conservative choice; one-shot stays fold=0/pre per ADR-008."
+- **(b) decisions.md:212** documents the non-literal loud fallback but does not contrast the fold behavior. **Append:** "Fold-inconsistency residual (documented): literal crons reconstruct with fold_preference='post' (later pass), while non-literal crons fall back to croniter's raw emission, which on fold nights resolves the ambiguous hour to the EARLIER (pre-fold) pass — the two families fire differently on the fold night. DST correctness on non-literal shapes is NOT guaranteed (WARNING emitted)."
+
+## Findings ledger (all rounds)
+
+| ID | Finding | Status |
+|---|---|---|
+| F1 | anchor gap-shift docstring/impl divergence | ✅ DEAD @ 34b4db96 (first-existing; re-verified @ 0cf56de0) |
+| F2 | croniter DST phantom/double-fire + fall-back drift | ✅ DEAD @ 34b4db96 (re-verified: zero phantoms, 09:00Z window clean) |
+| F3 | stale exact-kwargs pin | ✅ DEAD @ 34b4db96 (strengthened; green through 0cf56de0) |
+| F4 | reconstruct inherited croniter wrong DATE → missed fire | ✅ DEAD @ 0cf56de0 (all legs + exactly-once + spring mirror) |
+| DOC-1/2 | fold rationale wording + literal/non-literal residual note | ⚠️ pre-merge doc correction (text above) — non-gating |
+
+Gate history: round 1 FAIL (F1+F2+F3) @ 3a939a76 → re-gate FAIL (F4) @ 34b4db96 → **closing gate PASS** @ 0cf56de0. Feature is empirically merge-ready pending the 2-minute decisions.md doc correction.
+
+Evidence: worker reports in session; `/tmp/schedval/tz_f4.py`, `/tmp/schedval3/pack_run{1,2}.log`, suite logs.
