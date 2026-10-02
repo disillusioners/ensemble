@@ -250,7 +250,7 @@ test.describe('Maintenance — Checkpoint Cleanup WIZARD (ck-redesign-2026q4, 5 
   });
 
   // ── w2. AC-15 runtime budget at 1024×768 ──────────────────────────────
-  test('w2. AC-15 runtime budget at 1024×768: status strip + horizontal stepper + Continue all in-viewport; scrollHeight ≤ 760 (amend v3 GROUND TRUTH)', async ({ page }) => {
+  test('w2. AC-15 no-overflow gate at 1024×768 (amend v5 GROUND TRUTH): status strip + horizontal stepper + Continue all in-viewport; scrollHeight ≤ clientHeight', async ({ page }) => {
     await page.route('**/api/maintenance/checkpoint-cleanup/availability', (route) =>
       route.fulfill({ json: AVAILABILITY_READY, status: 200 }),
     );
@@ -258,9 +258,14 @@ test.describe('Maintenance — Checkpoint Cleanup WIZARD (ck-redesign-2026q4, 5 
       route.fulfill({ json: STATUS_LAST_RUN_DRY, status: 200 }),
     );
 
-    // AC-15 amend v3 — asserted viewport is 1024×768 with zero chrome
-    // (768px content height; 8px safety margin lands the asserted
-    // budget at ≤ 760px). Per the commission's verbatim STOP RULE.
+    // AC-15 amend v5 — viewport is 1024×768 (zero browser chrome → 768px
+    // clientHeight). The runtime no-overflow gate is the
+    // `scrollHeight <= clientHeight` assertion: DOM invariant
+    // `scrollHeight = max(clientHeight, contentHeight)` makes this fail
+    // IFF content actually overflows (the v3 `scrollHeight ≤ 760` was
+    // structurally unsatisfiable since 760 < 768 = clientHeight).
+    // The 760px figure is retained as an informational static design
+    // target for §2.9 lever budgeting — NOT a runtime assertion.
     await page.setViewportSize({ width: 1024, height: 768 });
     await navigateToMaintenance(page);
 
@@ -273,34 +278,41 @@ test.describe('Maintenance — Checkpoint Cleanup WIZARD (ck-redesign-2026q4, 5 
     // across the dual-orientation @if/@else branches).
     await expect(page.locator('[data-testid="ck-continue-btn"]').first()).toBeInViewport();
 
-    // AC-15 (d) — runtime scrollHeight assertion. This is the GROUND
-    // TRUTH for the budget (per spec amend v3 §2.9: "runtime
-    // Playwright `scrollHeight ≤ 760` assertion is ground truth").
-    // We measure documentElement.scrollHeight which includes the global
-    // app-header per spec AC-15 wording.
-    const { scrollHeight, budgetMargin } = await page.evaluate(() => {
-      const sh = document.documentElement.scrollHeight;
-      return { scrollHeight: sh, budgetMargin: 760 - sh };
-    });
+    // AC-15 (d) — runtime no-overflow gate (GROUND TRUTH per amend v5).
+    // `expect.poll` polls until either scrollHeight ≤ clientHeight or the
+    // poll timeout (default 5s; full transition is ~225ms — Material
+    // stepper ease). The assertion fails iff content actually overflows.
+    // NOTE: `expect.poll` callbacks execute in the Node test context —
+    // NOT the browser — so DOM access must go through `page.evaluate`.
+    await expect
+      .poll(
+        async () => {
+          const sh = await page.evaluate(
+            () => document.documentElement.scrollHeight,
+          );
+          const ch = await page.evaluate(
+            () => document.documentElement.clientHeight,
+          );
+          return { sh, ch, ok: sh <= ch };
+        },
+        {
+          timeout: 5000,
+          message:
+            'AC-15 no-overflow gate — measured scrollHeight should not exceed clientHeight at 1024×768',
+        },
+      )
+      .toMatchObject({ ok: true });
 
-    // Report both the measured value and the budget margin regardless
-    // of pass/fail so a reviewer can correlate with §2.9 levers.
+    // Report measured runtime numbers (scrollHeight + clientHeight) so
+    // the reviewer can correlate against the static §2.9 ledger and
+    // verify the gate actually passed (not just polled).
+    const { scrollHeight, clientHeight } = await page.evaluate(() => ({
+      scrollHeight: document.documentElement.scrollHeight,
+      clientHeight: document.documentElement.clientHeight,
+    }));
     console.log(
-      `[AC-15] viewport=1024x768 scrollHeight=${scrollHeight} marginVsBudget=${budgetMargin}px`,
+      `[AC-15] viewport=1024x768 scrollHeight=${scrollHeight} clientHeight=${clientHeight} noOverflow=${scrollHeight <= clientHeight ? 'PASS' : 'FAIL'}`,
     );
-
-    // STOP RULE (verbatim from the commission):
-    //   "if scrollHeight lands > 760 → STOP. Report the measured value
-    //    + per-element height breakdown. Do NOT tweak component code,
-    //    template, or SCSS to force a pass — that is a designer/
-    //    developer decision round. Test-code changes are fine;
-    //    production changes are FORBIDDEN, including 'small' ones."
-    //
-    // The Playwright assertion below is `.soft()` so the screenshot
-    // baseline + orientation flip test (w3) still runs to completion
-    // and reports — a hard FAIL here would short-circuit the suite
-    // and hide downstream data the operator needs to make a decision.
-    expect.soft(scrollHeight, 'AC-15 budget ≤ 760px at 1024×768').toBeLessThanOrEqual(760);
 
     // AC-15 (e) — screenshot regression baseline catches
     // compaction-lever over-rotation. MaxDiffPixelRatio ≤ 0.02 per spec
