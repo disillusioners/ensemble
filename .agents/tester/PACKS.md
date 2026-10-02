@@ -1,5 +1,24 @@
 # Test Packs
 
+## OD-SELF-PROVISIONING STAGE-1 GATE (2026-10-02, IN FLIGHT — results pending)
+
+Branch `feature/od-self-provisioning` @ `480b4485` (base `8b520d54`), 23-file change set. Gate pack scripts committed `ab0be5e1` (LOCAL only, no push). Change set is BROADER than the mission's 10-file list — includes `daemon/tools/_tool_registry.py`, `daemon/tools/instance.py`, `agents/worker/skill-set.yaml`, and 5 additional test files (attestation/upgrade registration, mcp_warmup_pool, mcp_server_crud, 2 integration).
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `ens_env_tools_unit_test` | `test/packs/ens_env_tools_unit_test.sh` | tests/unit/tools/test_ens_env_tools.py + test_ens_env_registration.py (32) — privileged ens-env visibility stripping, read-side redaction, secret-shape write rejection | <2 min | 2026-10-02 | PENDING |
+| `mcp_set_env_unit_test` | `test/packs/mcp_set_env_unit_test.sh` | tests/unit/tools/test_mcp_set_env_tools.py (44) — non-secret config.env write surface + trailing-newline pins (:576) | <2 min | 2026-10-02 | PENDING |
+| `env_key_kms_unit_test` | `test/packs/env_key_kms_unit_test.sh` | tests/unit/services/test_env_key_policy.py + tests/unit/tools/test_kms_attach_env_ref.py + tests/unit/services/test_kms_resolver.py (83) — forbidden-name set {KEY,TOKEN,SECRET,PASSWORD,CREDENTIAL,PRIVATE,PWD,AUTH}, MARKER_VALUE_FORBIDDEN both shapes, resolver fail-closed, ASCII identifier validation | <2 min | 2026-10-02 | PENDING |
+| `kms_lane1_regression_unit_test` | `test/packs/kms_lane1_regression_unit_test.sh` | 7 pre-branch KMS files (151): kms_lite, kms_resolver, kms_raw_row_migration, opendesign_builtin, configure_builtin_idempotency, log_redaction_filter, p3_e2e_cycle — minted-handle `__KMS_REF__` byte-identity + regex disjointness (LANE-1 unchanged) | 110s internal — SIZE RISK, split recipe in header | 2026-10-02 | PENDING |
+| `odsp_changed_files_unit_test` | `test/packs/odsp_changed_files_unit_test.sh` | tests/unit/tools/test_attestation_registration.py + test_upgrade_registration.py + tests/unit/test_mcp_warmup_pool.py (114) — non-leader agent resolution (pinned trio), single-tool deny + docs default-deny, MCP warmup pool + KMS env-ref resolution (P3 review F3 — cross-checks KMS LANE-1 gate via `__KMS_REF__` at test_mcp_warmup_pool.py:556) | <2 min | 2026-10-02 | PASS (114/114 in 78.56s) |
+| `odsp_changed_files_integration_test` | `test/packs/odsp_changed_files_integration_test.sh` | tests/integration/test_maintenancer_spawn_resolves_tools.py + test_service_tool_flag_off_byte_identical.py (22) — maintenancer spawn resolves tools (pure AST/inspect on _tool_registry + agents/{developer,worker}/meta.json), service-tool flag-OFF zero-side-effect pins (in-memory SQLite, no live daemon). Uses `--override-ini="addopts="` to surface `@pytest.mark.integration` cases. | <1 min | 2026-10-02 | PASS (22/22 in 6.37s) |
+| `frozen_tool_name_discovery_unit_test` (standing) | `test/packs/frozen_tool_name_discovery_unit_test.sh` | KNOWN_TOOL_NAMES parity drift test — gate-critical: `_tool_registry.py` changed on branch | <1 min | 2026-10-02 | PENDING |
+| `concurrency_atomic_unit_test` (standing) | `test/packs/concurrency_atomic_unit_test.sh` | ensure.md Core #2/#3 lane insurance (baseline 2026-10-01: 98P/0F/74S in 61.2s) | ~61s | 2026-10-02 | PENDING |
+
+Non-pack gate legs: (a) A/B base proof `tests/unit/test_mcp_server_crud.py` @ 8b520d54 detached worktree (.env-parity protocol) vs HEAD — 16 claimed pre-existing reds; prior adjudication `RESULTS/2026-09-27-dry-run-projection-v32-verification.md` §G1 attributes the family to a main-checkout `.env` confound (80/80 env-clean both legs). (b) Boot smoke: dev-boot :8079 under ENV-POISON 3-GUARD (discovery pre-cleared GUARD-PASS: `localhost:5432/ensemble_dev`, port 8079; wrapper MUST `export ENSEMBLE_SELF_ENV=dev` — dev.sh does NOT set it), tool registration (ens_env_read + mcp_set_env), one mcp_set_env round-trip on dev DB, optional od_generate_design lane (SKIPPED-BLOCKED fallback).
+
+---
+
 ## Completed commission — ck-redesign-2026q4 E2E WIZARD + AC-15 RUNTIME (STOP) + A11Y (2026-10-02)
 
 Branch `feature/checkpoint-cleanup-ui-redesign` @ **`b56e290a`** (base `f469dccf`, worktree `ck-ui-test`, no push). **VERDICT: 19/20 e2e PASS + 142/142 unit — AC-15 RUNTIME BREACH: scrollHeight 768px vs ≤760px at 1024×768 (8px over; §2.9 levers 6/7/8 all applied; static estimates 712–738 diverged from runtime). STOP RULE honored — zero production edits; escalated for spec re-amend round.** w2 left as standing red budget gate. Isolation: 4299/8099/15432 disposable PG, venv isolation proven, leak checks clean. Full report: `RESULTS/2026-10-02-ck-redesign-e2e-ac15.md`.
