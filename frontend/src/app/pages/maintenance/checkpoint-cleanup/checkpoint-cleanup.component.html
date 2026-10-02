@@ -48,18 +48,17 @@
 }
 
 <!-- Status Strip (spec §2.1) — 3-tile always-visible summary.
-     aria-live="polite" so screen readers announce changes; tiles are
-     semantic `<dl>` so each term/definition pair is reachable.
-     §4.1 axe dlitem remediation: each term/def pair is a DIRECT child
-     of the `<dl>` (the previous div-tile wrapper interfered with axe-core's
-     strict dlitem rule). Screen readers continue to announce term/def
-     pairs natively per the §2.1 a11y contract. Layout is driven by CSS
-     grid on `.ck-status-strip` (see scss). -->
+     Live-region semantics live on a structural WRAPPER (v6 amend:
+     dlitem closure). The wrapper carries `role="status"` and
+     `aria-live="polite"` so screen readers announce tile updates,
+     while the inner `<dl>` stays a plain semantic term/def list —
+     each `<dt>`/`<dd>` pair is a DIRECT child (axe-core dlitem
+     rule satisfied; no `<div>` tiles wrapped inside). Layout is
+     driven by CSS grid on `.ck-status-strip` (see scss); the wrapper
+     is structural-only — no class, no styles — so zero visual delta. -->
+<div role="status" aria-live="polite" data-testid="ck-status-strip">
 <dl
   class="ck-status-strip"
-  data-testid="ck-status-strip"
-  role="status"
-  aria-live="polite"
   [class.ck-status-strip-muted]="isMaintenanceDisabled() || !status()"
 >
   <dt>Keep N</dt>
@@ -69,6 +68,7 @@
   <dt>Dry-run fresh</dt>
   <dd>{{ statusStripDryRunFresh() }}</dd>
 </dl>
+</div>
 
 <!-- Wizard container -- caps at 1100px (spec §3, AC-12). -->
 <div class="ck-wizard">
