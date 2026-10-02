@@ -477,22 +477,31 @@ async def test_one_shot_beyond_cap_no_dispatch_with_reason(tmp_path, monkeypatch
 
 
 async def test_d9_scheduling_tool_factory_wires_four_tools(tmp_path):
-    """D9: the per-instance tool factory wires the EXACTLY four scheduling
-    tools (``task_schedule`` / ``task_schedule_list`` /
-    ``task_schedule_cancel`` / ``task_schedule_update``) onto the
-    ``tools.extend`` call site at ``daemon/tools/instance.py``:5139-5142.
+    """D9: the per-instance tool factory must produce EXACTLY four
+    scheduling tools (``task_schedule`` / ``task_schedule_list`` /
+    ``task_schedule_cancel`` / ``task_schedule_update``).
 
-    Purpose: catch a future refactor dropping the ``tools.extend`` line
-    (the third step of the three-step registration seam — decorator +
-    CATEGORY_MODULES entry + construction). Without the extend, the tools
-    are decorated and registered in the category but never appended to
-    the per-instance ``tools`` list, so agents silently lose the four
-    scheduling tools without any error from the factory itself.
+    Scope: this test drives the factories directly —
+    ``create_scheduling_tools_if_available`` and
+    ``create_scheduling_tools`` — to verify the FOUR-tool contract at
+    the factory level (the ``daemon.tools.scheduling.create_scheduling_tools``
+    return list binds the four names by reference). The factory is
+    the third step of the three-step registration seam; the FIRST
+    TWO steps (decorator registration + ``CATEGORY_MODULES`` entry)
+    are pinned by separate registration tests, and the THIRD step
+    (``tools.extend(scheduling_tool_list)`` at
+    ``daemon/tools/instance.py``:5139-5142 in ``create_instance
+    tools``) is NOT covered by this one (that line is in the main
+    ``create_instance_tools`` factory, which this test does not
+    exercise). A regression that drops or moves the
+    ``tools.extend(scheduling_tool_list)`` line would NOT trip this
+    test — pin that separately if it is load-bearing.
 
-    Catches: deleting ``tools.extend(scheduling_tool_list)``, moving the
-    factory call outside the tool-list build, or renaming the four
-    tool functions in ``daemon/tools/scheduling.py`` without updating the
-    factory's return list.
+    Catches: deleting or renaming a tool function in
+    ``daemon/tools/scheduling.py`` without updating the factory's
+    return list, or silently dropping a tool from the return tuple.
+    The factory's return list (the source of truth for the four
+    names) is what this test pins.
     """
     engine = build_chat_source_engine(str(tmp_path / "e2e-d9-factory.db"))
     with wire_manager_only(engine) as manager:

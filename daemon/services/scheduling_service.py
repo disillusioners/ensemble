@@ -237,6 +237,12 @@ class _Deps:
         self.source_registry: Any = None
 
 
+# Single-manager assumption (intentional, do NOT restructure): this
+# module-level ``_deps`` singleton assumes exactly ONE ``InstanceManager``
+# mounts the scheduling service per the standard production deploy shape
+# (one daemon = one manager). Multi-manager per process is not supported
+# here and would require per-manager dep threading (out of scope; future
+# refactor only if multi-manager per process becomes a real deploy shape).
 _deps = _Deps()
 
 # Per-source serialization (see module docstring "Concurrency model").
@@ -529,8 +535,16 @@ def _last_run_at(schedule_id: str) -> str | None:
     return latest.triggered_at if latest is not None else None
 
 
-def _row_to_detail(row: Any, *, tz_warning: str = "") -> ScheduleDetail:
-    """Map a SourceConfig scheduler row onto the canonical ScheduleDetail."""
+def _row_to_detail(row: Any, *, tz_warning: str = "", last_run_at: str | None = None) -> ScheduleDetail:
+    """Map a SourceConfig scheduler row onto the canonical ScheduleDetail.
+
+    ``last_run_at`` is computed by the async caller via
+    ``asyncio.to_thread(_last_run_at, row.source_id)`` so the DB read
+    does not block the event loop; when omitted (e.g. tests calling
+    ``_row_to_detail`` directly) the value is ``None`` and the
+    ``last_run_at`` echo is suppressed — tests that need the echo
+    must compute it themselves and pass it in.
+    """
     config = row.config or {}
     next_local, next_utc, next_warning = _compute_next_run(config)
     warning = tz_warning or next_warning
@@ -551,7 +565,7 @@ def _row_to_detail(row: Any, *, tz_warning: str = "") -> ScheduleDetail:
         next_run_at_utc=next_utc,
         agent=config.get("agent"),
         project_id=config.get("project_id"),
-        last_run_at=_last_run_at(row.source_id),
+        last_run_at=last_run_at,
         cancelled_at=cancelled_at,
         tz_warning=warning,
     )
@@ -743,7 +757,7 @@ async def cancel_schedule(schedule_id: str) -> ScheduleCancelResponse:
             raise ValueError(f"Schedule not found: {schedule_id}")
 
     cancelled_at = datetime.now(_stdlib_timezone.utc).isoformat()
-    execution_id = _last_execution_id(row.source_id)
+    execution_id = await asyncio.to_thread(_last_execution_id, row.source_id)
     logger.info(
         "scheduling_service: cancelled schedule %s (label=%r, last_execution_id=%s)",
         row.source_id,
@@ -768,7 +782,11 @@ async def get_schedule(schedule_id: str) -> ScheduleDetail | None:
     row, _repo = await _resolve_schedule_ref(schedule_id)
     if row is None:
         return None
-    return _row_to_detail(row)
+    # W3: compute last_run_at on a worker — the helper does a sync
+    # DB read (repo.get_latest_execution) and would otherwise block
+    # the event loop on every get_schedule call.
+    last_run_at = await asyncio.to_thread(_last_run_at, row.source_id)
+    return _row_to_detail(row, last_run_at=last_run_at)
 
 
 async def list_schedules(
@@ -799,7 +817,12 @@ async def list_schedules(
             continue
         if caller_agent_id is not None and config.get("agent") != caller_agent_id:
             continue
-        detail = _row_to_detail(row)
+        # W3: compute last_run_at on a worker — same loop-blocking
+        # concern as get_schedule. Per-row to_thread is the simplest
+        # fix; a future refactor could batch the lookup into a single
+        # ``list_latest_executions_by_source`` repository call.
+        last_run_at = await asyncio.to_thread(_last_run_at, row.source_id)
+        detail = _row_to_detail(row, last_run_at=last_run_at)
         items.append(ScheduleListItem(**detail.model_dump()))
     return items
 
@@ -850,6 +873,20 @@ async def update_schedule(
             if not when_text:
                 raise ValueError("when must be a non-empty string")
             if recurrence == _RECURRENCE_ONCE:
+                # Legacy naive-run_at handling: the full 4-step resolver
+                # chain (callers: explicit → ``SchedulingConfig
+                # .default_timezone`` → host-local → UTC + warning,
+                # ``daemon.util.tz.resolve_timezone``) is NOT wired here.
+                # ``update_schedule`` accepts ``when`` (the user-supplied
+                # local time string) and the row's stored ``timezone`` —
+                # we anchor the naive ISO to ``ZoneInfo(timezone)`` when
+                # the row has a stored tz, or leave the value untouched
+                # if no zone. The full chain (with default + host-local +
+                # loud-warning UTC fallback) is the create-side path;
+                # ``update_schedule`` does not re-run it on the existing
+                # row. Future refactor candidate — wire ``resolve_timezone``
+                # here when the update surface wants the same fallback
+                # contract as create.
                 try:
                     parsed_when = datetime.fromisoformat(when_text.replace("Z", "+00:00"))
                 except ValueError as exc:

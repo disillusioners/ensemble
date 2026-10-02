@@ -230,7 +230,7 @@ def create_scheduling_tools(
         source_id: Annotated[str, Field(description="Schedule ID to update")]
         label: Annotated[str | None, Field(default=None, description="Rename the schedule (must stay unique)")]
         message: Annotated[str | None, Field(default=None, description="Replace the fired message")]
-        when: Annotated[str, Field(default=None, description="New trigger time (ISO 8601 for once; 'HH:MM' for daily/weekly)")]
+        when: Annotated[str | None, Field(default=None, description="New trigger time (ISO 8601 for once; 'HH:MM' for daily/weekly)")]
         timezone: Annotated[str | None, Field(default=None, description="IANA timezone; re-interprets wall-clock times in this timezone")]
         paused: Annotated[bool | None, Field(default=None, description="true = pause (resumable); false = resume")]
         priority: Annotated[int | None, Field(default=None, ge=1, le=10, description="Job priority 1-10")]
@@ -241,7 +241,7 @@ def create_scheduling_tools(
         source_id: Annotated[str, Field(description="Schedule ID to update")],
         label: Annotated[str | None, Field(default=None, description="Rename the schedule (must stay unique)")] = None,
         message: Annotated[str | None, Field(default=None, description="Replace the fired message")] = None,
-        when: Annotated[str, Field(default=None, description="New trigger time (ISO 8601 for once; 'HH:MM' for daily/weekly)")] = None,
+        when: Annotated[str | None, Field(default=None, description="New trigger time (ISO 8601 for once; 'HH:MM' for daily/weekly)")] = None,
         timezone: Annotated[str | None, Field(default=None, description="IANA timezone; re-interprets wall-clock times in this timezone")] = None,
         paused: Annotated[bool | None, Field(default=None, description="true = pause (resumable); false = resume")] = None,
         priority: Annotated[int | None, Field(default=None, ge=1, le=10, description="Job priority 1-10")] = None,

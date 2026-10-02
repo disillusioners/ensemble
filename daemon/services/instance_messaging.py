@@ -2709,8 +2709,14 @@ class InstanceMessagingService:
             #     attached).
             #   * prior_status RUNNING → ``AbortTurn._write`` transitions
             #     RUNNING → CANCELLED, ``reconcile_turn_mirror`` updates the
-            #     8 mirror tables (worker may have an LLM call in flight;
-            #     it observes the transition on its next check).
+            #     8 mirror tables. Cancellation is at-least-once for the
+            #     LLM call: an in-flight LLM call is NOT actively aborted
+            #     mid-turn — the worker observes the CANCELLED status on
+            #     its next status check (pre-LLM or post-stream) and
+            #     discards any result it had already produced. The
+            #     downstream effect is at-most-once DISPATCH (Task-B is
+            #     dead) but the LLM call itself may complete and have
+            #     its result discarded by the worker.
             #   * prior_status already terminal → wrapper returns None,
             #     no-op (worker already finished).
             #
@@ -2739,8 +2745,15 @@ class InstanceMessagingService:
                     "enqueue_message_job: manager._task_repo unavailable; "
                     "skipping phantom Task-B cancel on dedup hit "
                     f"(Task-B={phantom_task_id}). JobItem-A remains "
-                    "authoritative — phantom row will not be claimed by "
-                    "the worker pool because its work_id has no JobItem."
+                    "authoritative — but WITHOUT this cancel, Task-B "
+                    "could still be claimed by the worker pool (claim "
+                    "keys on task_id; work_id↔JobItem linkage is not "
+                    "a claim precondition). The subsequent MQ-B "
+                    "delete below still removes the audit row; the "
+                    "operational risk is one wasted dispatch if a "
+                    "worker claims Task-B before any operator "
+                    "intervenes. Restoring the cancel path is the "
+                    "fix for the unavailable repo."
                 )
 
             # Delete the orphan MessageQueue-B audit row. ``MQ-A`` from

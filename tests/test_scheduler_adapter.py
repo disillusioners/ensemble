@@ -2487,10 +2487,10 @@ class TestEnqueueMessageJobDedupRealPath:
         claimed (flipped RUNNING) between the prelude commit and the
         dedup-detect — the exact production race window the
         compensation's own comment names ("worker-pool claim between
-        prelude and enqueue"). The D4 compensation must route Task-B
-        through ``cancel_task``'s RUNNING/AbortTurn branch (not the
-        PENDING legacy-shape UPDATE, not ``delete``) — it lands in
-        CANCELLED with its row preserved.
+        prelude and enqueue"). The fixture forces RUNNING as the
+        prior-status to model that production race; the assertion then
+        pins the OUTCOME (Task-B lands CANCELLED, row preserved) rather
+        than the specific cancel_task branch selection.
 
         Mechanism (reviewer option b — real flip, no rename): the
         substrate ``enqueue`` call is wrapped by a passive observer —
@@ -2564,8 +2564,10 @@ class TestEnqueueMessageJobDedupRealPath:
                 session.add(task_b)
                 session.commit()
                 # Prove the flip landed BEFORE the compensation runs —
-                # this is what forces cancel_task down the
-                # RUNNING/AbortTurn branch (not the PENDING fallback).
+                # Task-B is now RUNNING so the compensation observes
+                # the production race window's prior-status (the test
+                # only pins the OUTCOME, not the specific cancel
+                # branch).
                 session.refresh(task_b)
                 assert task_b.status == "running", (
                     "Task-B must be RUNNING before the dedup-detect "
@@ -2578,8 +2580,7 @@ class TestEnqueueMessageJobDedupRealPath:
         # Second call — the prelude writes Task-B + MQ-B, the REAL
         # substrate hits the partial UNIQUE index and returns JobItem-A,
         # the wrapper flips Task-B RUNNING, then the dedup-detect fires
-        # and the compensation routes through the RUNNING/AbortTurn
-        # branch.
+        # and the compensation cancels Task-B.
         result2 = await svc.enqueue_message_job(
             instance_id=self.INSTANCE_ID,
             message="scheduled message",
@@ -2606,14 +2607,16 @@ class TestEnqueueMessageJobDedupRealPath:
         assert job_rows[0].job_id == job_a_id
 
         # RUNNING-branch contract: the already-claimed phantom Task-B
-        # was CANCELLED — NOT deleted. cancel_task preserves the row
-        # (the AbortTurn hot path that the RUNNING prior-status
-        # selects), so the compensation's audit trail survives.
+        # must land CANCELLED — NOT deleted. cancel_task preserves
+        # the row (its hot path on a RUNNING prior-status selects the
+        # row-preserving UPDATE, not DELETE); the assertion below
+        # pins the OUTCOME (CANCELLED status, row preserved), not
+        # the specific branch path.
         task_b_row = next(t for t in task_rows if t.id == task_b_id)
         assert task_b_row.status == TaskStatus.CANCELLED.value, (
-            "the RUNNING phantom Task-B must land CANCELLED via the "
-            "cancel_task RUNNING/AbortTurn branch (row preserved, not "
-            f"deleted); got {task_b_row.status}"
+            "the RUNNING phantom Task-B must land CANCELLED — row "
+            "preserved, not deleted; got "
+            f"{task_b_row.status}"
         )
         assert task_b_row.work_id == task_b_work_id
 

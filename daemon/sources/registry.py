@@ -682,6 +682,16 @@ class SourceRegistry:
                 # Still evict so the registry doesn't hold a stale adapter.
                 self._adapters.pop(source_id, None)
                 logger.info(f"Stopped adapter (cancelled): {source_id}")
+                # NOTE: this is a fail-OPEN guard — when config.status
+                # resolves to CANCELLED the stop path returns True WITHOUT
+                # calling ``update_source_status``. The earlier
+                # ``except Exception as cfg_lookup_exc`` branch above
+                # ALSO fails open: a config-lookup failure logs a warning
+                # and proceeds with the normal STOPPED persist. Both are
+                # intentional (the registry has the authoritative
+                # cancel gate at :697; the config lookup is informational).
+                # A future change that wanted to fail-CLOSED on a missing
+                # config lookup would need to gate on both branches.
                 return True
             # Evict from _adapters BEFORE awaiting the status persist. A
             # concurrent /sources/{id}/start in the (now-zero) window

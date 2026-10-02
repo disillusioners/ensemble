@@ -108,7 +108,11 @@ Existing schedule routes are unchanged: `GET /api/schedules` (list),
 `PUT /api/schedules/{id}`, `POST /api/schedules/{id}/start|stop|trigger`,
 `GET /api/schedules/{id}/executions`. Note that `DELETE /api/sources/{id}`
 is a different operation — it **purges** execution history; the schedule
-cancel endpoints never do.
+cancel endpoints never do. `PUT /api/schedules/{id}` is currently a
+DB-only write (the adapter-rebuild on update is a known latency window
+— see R6 in `.agents/shared/planning/scheduled-tasks/decisions.md`);
+operator concurrent updates can see stale read-then-write drift inside
+the rebuild gap.
 
 ---
 

@@ -42,7 +42,9 @@ Conventions (mandatory)
   ``host_local_tz_cache_seconds`` (default 300s); negative results cache
   for ``negative_cache_seconds`` (default 60s, capped at the positive TTL)
   so an operator fixing ``/etc/localtime`` mid-process isn't hidden for
-  5 minutes.
+  5 minutes. The cache is pruned on every store (entries outside a
+  2× max-window window are dropped) so the cache size stays bounded
+  for long-lived daemons.
 
 Loud-warning posture
 --------------------
@@ -134,16 +136,46 @@ def _validate_iana(name: str) -> bool:
 #   kind = "negative" → value is None (no detection)
 # ``cache_window`` is the TTL used for THIS cache entry; positive and
 # negative windows may differ.
+#
+# Pruning (architecture §4.4 footnote): on each store the cache drops
+# any entry whose bucket is older than ``max(2 * pos_seconds,
+# 2 * neg_seconds)`` of monotonic time — bounded by O(1) since each
+# detection produces at most two new buckets and the prune drops
+# everything outside a 2–3 window window. Pre-prune behavior leaked one
+# row per TTL window over the daemon's lifetime (unbounded growth).
 _cache: dict[int, tuple[str, str | None]] = {}
-# Last cache window key so we can detect changes without losing history.
-_last_cache_key: int | None = None
 
 
 def _cache_clear_for_tests() -> None:
     """Reset the module-level cache. For tests only."""
-    global _cache, _last_cache_key
+    global _cache
     _cache = {}
-    _last_cache_key = None
+
+
+def _cache_prune(*, now_monotonic: float, pos_seconds: int, neg_seconds: int) -> None:
+    """Drop entries whose bucket is older than the active window.
+
+    Keeps the cache size bounded: at most ``pos_seconds`` + ``neg_seconds``
+    bucket slots are retained (a few entries per active TTL window). No-op
+    when the cache is empty.
+    """
+    if not _cache:
+        return
+    # ``max_window`` covers both positive and negative bucket keys
+    # (the 2× factor leaves a one-window buffer for late lookups).
+    max_window = max(2 * pos_seconds, 2 * neg_seconds if neg_seconds > 0 else 2 * pos_seconds)
+    cutoff_monotonic = now_monotonic - max_window
+    # Bucket key → pos bucket mapping (inverse of ``pos_key = bucket*2+0``
+    # / ``neg_key = bucket*2+1``). Even keys → positive; odd → negative.
+    stale_keys = []
+    for key in _cache.keys():
+        bucket_idx = key // 2
+        window = pos_seconds if (key % 2 == 0) else (neg_seconds if neg_seconds > 0 else pos_seconds)
+        bucket_monotonic = bucket_idx * window
+        if bucket_monotonic < cutoff_monotonic:
+            stale_keys.append(key)
+    for key in stale_keys:
+        _cache.pop(key, None)
 
 
 def detect_host_local_timezone() -> str | None:
@@ -206,6 +238,14 @@ def detect_host_local_timezone() -> str | None:
 
     # Cache miss — resolve fresh.
     result = _resolve_host_local_uncached()
+
+    # Prune stale entries before the new store (keeps the cache
+    # size bounded — see module docstring footnote).
+    _cache_prune(
+        now_monotonic=now_monotonic,
+        pos_seconds=pos_seconds,
+        neg_seconds=neg_seconds,
+    )
 
     # Store under the appropriate key.
     if result is None:

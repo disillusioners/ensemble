@@ -218,9 +218,11 @@ class SchedulerAdapter(MessageSourceAdapter):
         if _tz_warning:
             # for_tool=False normally returns "" on clean resolution; this
             # branch is reachable only if a future caller switches the
-            # adapter to for_tool=True. Logged for forward-compat.
-            logger.debug(
-                f"SchedulerAdapter tz resolution warning for {self.source_id}: {_tz_warning}"
+            # adapter to for_tool=True. Logged at WARNING because tz
+            # resolution failure is operator-actionable (host tzdb gap or
+            # bad ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE).
+            logger.warning(
+                f"SchedulerAdapter tz resolution invalid for {self.source_id}: {_tz_warning}"
             )
         
         # Concurrency control
@@ -251,6 +253,13 @@ class SchedulerAdapter(MessageSourceAdapter):
         # the ``_run_schedule`` loop's skip branch.
         self._pending_skip_lateness: float | None = None
         self._pending_skip_cap: int | None = None
+        # W1: once-per-run_at skip guard. Tracks the run_at value for
+        # which the SKIPPED row was last written so we don't emit a new
+        # SKIPPED row on every loop iteration while the operator hasn't
+        # updated run_at. Cleared on operator update (when ``_run_at``
+        # changes) so a fresh future run_at produces its own SKIPPED
+        # audit row.
+        self._last_skipped_run_at: datetime | None = None
         
         logger.info(
             f"SchedulerAdapter initialized: type={self._schedule_type}, "
@@ -505,10 +514,31 @@ class SchedulerAdapter(MessageSourceAdapter):
                     # the operator updates run_at) starts fresh.
                     self._pending_skip_lateness = None
                     self._pending_skip_cap = None
-                    self._record_skipped_execution(lateness=lateness, cap=cap)
+                    # W1 once-per-run_at guard: skip the audit row +
+                    # callback when this run_at has already produced a
+                    # SKIPPED row in this adapter lifetime. The adapter
+                    # is reconstructed on schedule update, so a fresh
+                    # future run_at produces its own SKIPPED row.
+                    if self._last_skipped_run_at == self._run_at:
+                        logger.debug(
+                            "Skipping repeated SKIPPED for unchanged "
+                            f"run_at={self._run_at}; last skip was for "
+                            "this same run_at — no new audit row."
+                        )
+                        await asyncio.sleep(SCHEDULER_ERROR_RETRY_S)
+                        continue
+                    skip_exec_id = self._record_skipped_execution(
+                        lateness=lateness, cap=cap
+                    )
+                    self._last_skipped_run_at = self._run_at
                     # Notify the execution_callback path with status=SKIPPED
-                    # so external observers see the skip event.
-                    skip_exec_id = str(uuid.uuid4())
+                    # so external observers see the skip event. Reuse the
+                    # SAME execution_id the audit row carries so observers
+                    # can correlate; on row-write failure ``skip_exec_id``
+                    # is ``None`` and we mint a phantom id so the callback
+                    # still fires (no skip event would otherwise surface).
+                    if skip_exec_id is None:
+                        skip_exec_id = f"skipped-phantom-{uuid.uuid4()}"
                     if self._execution_callback:
                         try:
                             self._execution_callback(
@@ -622,26 +652,20 @@ class SchedulerAdapter(MessageSourceAdapter):
         elif self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
             if self._is_one_time_executed:
                 return None
-            # If run_at is in the past, trigger now
-            run_at = self._run_at
-            # DEAD CODE (dead-code annotation, phase-1 §Task 5.1):
-            # ``run_at`` is parsed once in ``_parse_schedule_config``
-            # (line ~228-240) where naive ISO inputs are anchored to
-            # ``self._timezone`` (or assumed-UTC if tzinfo is None and
-            # timezone is ``UTC``). After that point, ``run_at`` is
-            # ALWAYS tz-aware when ``__init__`` was the construction path
-            # (the only production path — adapter is constructed via
-            # ``SourceRegistry._create_adapter_from_config``). The
-            # ``if run_at.tzinfo is None: ...`` re-anchor below is
-            # therefore unreachable in production.
+            # If run_at is in the past, trigger now.
             #
-            # Recommend deletion in a fast-follow. The phase-5 test
-            # worker pins the aware-only contract; the helper
+            # ``run_at`` is parsed once in ``_parse_schedule_config`` where
+            # naive ISO inputs are anchored to ``self._timezone`` (or
+            # assumed-UTC if tzinfo is None and timezone is ``UTC``).
+            # After that point, ``run_at`` is ALWAYS tz-aware when
+            # ``__init__`` was the construction path (the only production
+            # path — adapter is constructed via
+            # ``SourceRegistry._create_adapter_from_config``); no
+            # ``as tz-aware`` re-anchor is reachable here. The helper
             # ``daemon.util.tz.anchor_local_to_utc`` (architecture §4.2)
             # is the canonical anchor for any NEW one-shot surface
             # (phase-2 tools/REST/service).
-            if run_at.tzinfo is None:
-                run_at = run_at.replace(tzinfo=self._timezone)
+            run_at = self._run_at
 
             if run_at <= now:
                 # Past-due. Check the D3 lateness cap (ADR-003) before
@@ -681,7 +705,7 @@ class SchedulerAdapter(MessageSourceAdapter):
 
         return None
     
-    def _record_skipped_execution(self, *, lateness: float | None, cap: int | None) -> None:
+    def _record_skipped_execution(self, *, lateness: float | None, cap: int | None) -> str | None:
         """Write a SKIPPED ``schedule_executions`` row for a past-lateness-cap one-shot (D3).
 
         ADR-003 — schedule remains armed (NOT disabled); operator can update
@@ -700,13 +724,20 @@ class SchedulerAdapter(MessageSourceAdapter):
         to call from the async loop (it blocks the loop briefly; mirrors the
         existing fire-and-forget ``execution_callback`` pattern at
         ``registry.py:490-496``).
+
+        Returns the ``execution_id`` written to the row (or ``None`` when
+        no row was written). Callers use this to echo the SAME id into
+        ``_execution_callback`` so observers can correlate the SKIPPED
+        event with the audit row (previously a separate ``uuid.uuid4()``
+        was minted for the callback, leaving observers looking at a
+        phantom id that never appears in the row).
         """
         if self._source_repo is None:
             logger.warning(
                 f"Scheduler {self.source_id}: cannot record SKIPPED execution "
                 f"(no source_repo); cap_skipped_row missing for lateness={lateness}s"
             )
-            return
+            return None
 
         execution_id = f"skipped-{uuid.uuid4()}"
         error_message = f"past_lateness_cap: lateness={lateness}s, cap={cap}s"
@@ -727,6 +758,7 @@ class SchedulerAdapter(MessageSourceAdapter):
                 f"Scheduler {self.source_id}: recorded SKIPPED execution "
                 f"{execution_id[:16]}... ({error_message})"
             )
+            return execution_id
         except Exception as exc:
             # Logging-only — a failed audit row is preferable to silently
             # dispatching the JobItem the cap was meant to suppress.
@@ -735,6 +767,7 @@ class SchedulerAdapter(MessageSourceAdapter):
                 f"execution (lateness={lateness}s, cap={cap}s): {exc}",
                 exc_info=True,
             )
+            return None
 
     def _format_continuation_message(self, original_message: str, run_number: int) -> str:
         """Format a continuation message with #N prefix for reuse_instance mode.
