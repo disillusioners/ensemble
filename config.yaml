@@ -351,6 +351,23 @@ services:
 job_system:
   job_retry_scheduler_enabled: null  # null/empty = disabled. Set to true to enable background retry polling.
 
+# Scheduled Tasks Settings (Phase 1 foundation).
+# Field names mirror daemon/config.py:SchedulingConfig exactly.
+# Env vars override these via the ENSEMBLE_SCHEDULING_* prefix (auto-covered
+# by tests/conftest.py::_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")).
+scheduling:
+  # Default IANA timezone for user-stated local times (e.g. "America/New_York").
+  # null = use host-local tz detector, UTC fallback with loud warning.
+  default_timezone: null
+  # Max lateness (seconds) for one-shot schedules past run_at. null = unlimited.
+  one_shot_max_lateness_seconds: null
+  # When tz resolves to UTC fallback, include the warning in tool/list/REST output.
+  tz_warning_echo_to_tool_output: true
+  # Cache duration (seconds) for host-local tz detector. 0 disables cache.
+  host_local_tz_cache_seconds: 300
+  # Cache duration (seconds) for NEGATIVE host-local tz results. min(60, host_local_tz_cache_seconds) applied.
+  negative_cache_seconds: 60
+
 # Skill Evolution System Settings
 # Field names mirror daemon/config.py:SkillEvolutionConfig exactly.
 # Any env var listed in .env.example (SKILL_EVOLUTION_*) overrides these.

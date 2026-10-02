@@ -227,6 +227,7 @@ from .access_memory import create_access_memory_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
 from .job_queue import create_job_tools, create_mission_watch_tools
+from .scheduling import create_scheduling_tools
 from .missions import create_mission_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
@@ -1951,6 +1952,38 @@ def create_mission_watch_tools_if_available(manager, current_instance_id: str) -
         task_repo=getattr(manager, '_task_repo', None),
         watcher_repo=getattr(manager, '_watcher_repo', None),
         current_instance_id=current_instance_id,
+    )
+
+
+def create_scheduling_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
+    """Create the four scheduling tools when the scheduling service is
+    mounted on the manager.
+
+    Scheduled-tasks phase 2+4 — the tools wrap the shared
+    ``daemon.services.scheduling_service`` module, which the manager
+    mounts lazily via the ``scheduling_service`` property (first access
+    configures the source repo + registry deps; no daemon restart
+    semantics). Same wiring-check posture as the sibling
+    ``*_if_available`` factories: when the manager is a test double
+    without the property, this returns an EMPTY tool list instead of
+    raising. Per-agent visibility is scoped afterwards by
+    ``_apply_tool_filter`` via the non-privileged ``scheduling`` category
+    (granted via ``tools.allow`` — PRIVILEGED_TOOL_CATEGORIES untouched).
+
+    Decorator-only registration is SILENTLY INVISIBLE — the extend of
+    this factory's return list inside ``create_instance_tools`` is the
+    third step of the three-step registration seam (decorator + registry
+    entry + construction).
+    """
+    scheduling_service = getattr(manager, "scheduling_service", None)
+    if scheduling_service is None:
+        return []
+    return create_scheduling_tools(
+        scheduling_service,
+        source_repo=getattr(manager, "_source_repository", None),
+        current_instance_id=current_instance_id,
+        agent_id=agent_id,
+        agent_tag=agent_tag,
     )
 
 
@@ -5095,6 +5128,18 @@ Returns:
     # ``job_create`` tool resolves jobs to the correct versioned ``agent_dir``.
     job_tools = create_job_tools_if_available(manager, current_instance_id, agent_id, agent_tag=version_tag)
     tools.extend(job_tools)
+
+    # ── Scheduling tools (scheduled-tasks phase 2+4) — wall-clock schedule
+    # management over the shared scheduling_service. Same critical
+    # list-append pattern as job_tools above: decorator-only registration
+    # is SILENTLY INVISIBLE — this extend is the third step of the
+    # three-step registration seam (decorator + CATEGORY_MODULES entry +
+    # construction). Non-privileged category — per-agent visibility is
+    # scoped by _apply_tool_filter via tools.allow ["scheduling"].
+    scheduling_tool_list = create_scheduling_tools_if_available(
+        manager, current_instance_id, agent_id, agent_tag=version_tag
+    )
+    tools.extend(scheduling_tool_list)
 
     # Mission tools (M2 of mission-class, 2026-09-02,
     # ``feature/mission-class``) — additive READ-ONLY tools that

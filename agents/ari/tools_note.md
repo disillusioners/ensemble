@@ -539,3 +539,73 @@ target in another project is refused unless I run unscoped (the
 front-door tier).
 
 ---
+
+## Scheduling
+
+I schedule wall-clock tasks — recurring or one-shot triggers that fire a message
+to an agent at a specific local time. There are four tools; they share one
+service and one set of records (a cancelled schedule never fires again, but its
+history stays). Every response echoes the next run in BOTH the schedule's local
+timezone and UTC.
+
+### task_schedule
+
+**Purpose:** Create a new scheduled task. The trigger time is always interpreted
+in the supplied `timezone`; if I omit it, the configured default chain runs
+(explicit → configured default → host-local auto-detect → UTC with a loud
+warning). The warning is never suppressed — I read `tz_warning` in the response
+and surface it.
+
+Signature:
+
+```raw
+task_schedule(
+    message="Give me a morning briefing",
+    label="morning-briefing",
+    when="2026-10-02T06:00:00",  # local; tz-aware ISO is also accepted
+    timezone="America/New_York",  # optional
+    recurrence="daily",    # once | daily | weekly | cron
+    cron_expression=None,  # required iff recurrence="cron"
+    project_id="default",
+    priority=5,
+)
+```
+
+The invoked agent defaults to me; pass the optional agent argument to schedule
+for a peer instead.
+
+**Returns:** `{id, status, next_run_at_local, next_run_at_utc}` — both timezones
+are always present (both null if no upcoming run).
+
+**Use for:** anything wall-clock that needs to land at a human-local time of day.
+
+**Don't use for:** immediate dispatch — that's `job_create`.
+
+### task_schedule_list
+
+**Purpose:** List my scheduled tasks. Returns `label`, `agent`, `next_run_local`,
+`next_run_utc`, `status`. Cancelled and paused tasks are hidden by default;
+pass a `status` filter to see them.
+
+### task_schedule_cancel
+
+**Purpose:** Cancel a scheduled task. **Terminal** — the task never fires again,
+not after a daemon restart, not after a re-list. History (what it DID fire
+before cancel) is preserved.
+
+Pass either `source_id` (the schedule row id) or `label` (the human-readable
+name). Cancellation is permanent; to pause-and-resume instead, use
+`task_schedule_update`. If a trigger already dispatched its job just before the
+cancel landed, the response's `last_execution_id` identifies that in-flight job
+so I can cancel it directly.
+
+### task_schedule_update
+
+**Purpose:** Reschedule, change the message, or pause/resume an existing
+scheduled task. Pause is **resumable** (the row stays, the trigger stops); cancel
+is **terminal** (different tool — see `task_schedule_cancel`). A pause followed by
+a daemon restart stays paused; resume picks it back up.
+
+**Operational boundaries:** every schedule runs in the timezone I set (or the
+default chain when I omit it); cancel is permanent, pause is resumable; labels
+are unique — a duplicate label is rejected at create time.

@@ -1,4 +1,56 @@
-"""Scheduler adapter for triggering agents on schedule."""
+"""Scheduler adapter for triggering agents on schedule.
+
+## DST semantics (ADR-008, pinned by phase-1 §Task 8)
+
+The scheduler delegates DST handling to ``croniter>=3.0.0`` (pinned in
+``pyproject.toml:25``) for the **cron path**. For the **one-shot path**,
+naive local times are anchored via the canonical
+:func:`daemon.util.tz.anchor_local_to_utc` helper (architecture §4.2;
+phase-1 §Task 9) — aware→trust, fold→0 (first occurrence), gap→shift
+forward + warning. One DST rule for the whole feature: croniter's
+documented default (skip-the-gap on spring-forward, first-occurrence on
+fall-back ambiguity).
+
+For daily/weekly cron schedules, the schedule key is interpreted in the
+schedule's ``timezone`` (existing config key, read at ``__init__``
+lines ~121–126); croniter returns the next fire as an aware datetime.
+
+**Spring-forward gap** (e.g. America/New_York 02:30 on the day DST
+starts): croniter skips the gap and fires at the next valid local time
+(e.g. 03:30 EDT). Naive one-shot anchor: shifts forward by the gap and
+emits a loud ``shifted-forward from nonexistent local time ... (gap)``
+warning at the adapter boundary.
+
+**Fall-back ambiguity** (e.g. America/New_York 01:30 on the day DST
+ends): croniter picks the first occurrence (EDT, UTC-4). Naive one-shot
+anchor: uses ``fold=0`` — the pre-DST offset, matching croniter's
+default; one semantic across both paths.
+
+Phase-5 tests ``TestDstSemantics`` parameterize over BOTH paths (cron
++ one-shot anchor) and assert this documented behavior. No
+``pytest.skip``.
+
+See ``.agents/shared/planning/scheduled-tasks/decisions.md`` ADR-008 and
+``architecture-recommendation.md`` §4 for the full rationale.
+
+## Phase-1 D4 idempotency contract (ADR-004)
+
+One-time schedules emit ``idempotency_key=f"scheduler:{source_id}:{self._run_at.isoformat()}"``
+to ``enqueue_message_job`` (gated to ``SCHEDULE_TYPE_ONE_TIME`` so cron
+fires keep minting fresh JobItems). The key MUST be derived from
+``self._run_at`` (the configured run_at parsed once in ``__init__``),
+NOT from ``next_trigger`` — the latter returns ``now`` for past-due
+one-shots and would mutate the key on every cycle.
+
+## Phase-1 D3 lateness cap (ADR-003)
+
+When a one-shot's ``run_at`` is past-due beyond
+``SchedulingConfig.one_shot_max_lateness_seconds``, the adapter writes a
+``schedule_executions`` row with ``status='skipped'`` and
+``error_message='past_lateness_cap: lateness={X}s, cap={Y}s'`` and does
+NOT dispatch a JobItem. The schedule remains armed (NOT disabled) so the
+operator can update ``run_at`` and re-fire.
+"""
 
 from __future__ import annotations
 
@@ -54,6 +106,14 @@ class SchedulerAdapter(MessageSourceAdapter):
     SCHEDULE_TYPE_CRON = "cron"
     SCHEDULE_TYPE_INTERVAL = "interval"
     SCHEDULE_TYPE_ONE_TIME = "one_time"
+
+    # Sentinel return value from ``_get_next_trigger_time`` when a one-shot
+    # schedule's ``run_at`` is past-due beyond ``SchedulingConfig.one_shot_max_lateness_seconds``
+    # (D3 lateness cap, ADR-003). The ``_run_schedule`` loop branches on
+    # this sentinel to call ``_record_skipped_execution`` and NOT dispatch
+    # a JobItem. Chosen as a module-level constant (NOT a per-instance
+    # singleton) so a plain ``is`` identity check is correct.
+    PAST_LATENESS_CAP = "__PAST_LATENESS_CAP__"
     
     def __init__(
         self,
@@ -117,13 +177,53 @@ class SchedulerAdapter(MessageSourceAdapter):
         self._agent: str | None = scheduler_config.get("agent")
         self._message_content: str = scheduler_config.get("message", "")
         
-        # Timezone configuration
-        timezone_str = scheduler_config.get("timezone", "UTC")
+        # Timezone configuration (Phase 1 / Task 2.4 / ADR-002): wire the
+        # canonical D2 resolution chain — explicit ``config.timezone`` (when
+        # present) wins over ``SchedulingConfig.default_timezone`` over
+        # host-local detection over ``datetime.timezone.utc`` (the resolver
+        # implements the four-step chain via the ``explicit`` vs ``default``
+        # args). Per-config precedence is preserved: an operator who sets
+        # ``timezone`` on a schedule row keeps that tz; only schedules
+        # WITHOUT an explicit ``timezone`` pick up the daemon-wide default
+        # → host-local → UTC chain.
+        #
+        # NOTE: do NOT default ``scheduler_config.get("timezone", "UTC")``
+        # the way the legacy block did — that would inject "UTC" as
+        # ``explicit`` and short-circuit step 1 of the resolver chain
+        # (ZoneInfo("UTC") resolves cleanly), so the
+        # ``SchedulingConfig.default_timezone`` (step 2) and host-local
+        # detection (step 3) would never run. ``None`` is the correct
+        # sentinel that lets the resolver fall through to step 2 / 3 / 4.
+        # The previous default of "UTC" was a legacy safety net that the
+        # resolver chain obsoletes.
+        timezone_str = scheduler_config.get("timezone")
         try:
-            self._timezone = ZoneInfo(timezone_str)
-        except KeyError:
-            logger.warning(f"Unknown timezone '{timezone_str}', defaulting to UTC")
-            self._timezone = ZoneInfo("UTC")
+            from daemon.config import SchedulingConfig
+            _default_tz = SchedulingConfig().default_timezone
+        except Exception as cfg_exc:  # noqa: BLE001 — bootstrap-safety
+            # Config not yet importable (boot ordering); default to None so
+            # the resolver's chain falls through to host-local → UTC.
+            logger.debug(
+                "SchedulerAdapter.__init__: SchedulingConfig unavailable (%s); "
+                "tz chain falls through to host-local detection",
+                cfg_exc,
+            )
+            _default_tz = None
+        from daemon.util.tz import resolve_timezone
+        self._timezone, _tz_warning = resolve_timezone(
+            timezone_str,
+            default=_default_tz,
+            for_tool=False,
+        )
+        if _tz_warning:
+            # for_tool=False normally returns "" on clean resolution; this
+            # branch is reachable only if a future caller switches the
+            # adapter to for_tool=True. Logged at WARNING because tz
+            # resolution failure is operator-actionable (host tzdb gap or
+            # bad ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE).
+            logger.warning(
+                f"SchedulerAdapter tz resolution invalid for {self.source_id}: {_tz_warning}"
+            )
         
         # Concurrency control
         self._max_concurrent: int = scheduler_config.get("max_concurrent", SCHEDULER_DEFAULT_MAX_CONCURRENT)
@@ -148,6 +248,18 @@ class SchedulerAdapter(MessageSourceAdapter):
         self._scheduler_task: asyncio.Task | None = None
         self._stop_event: asyncio.Event = asyncio.Event()
         self._is_one_time_executed: bool = False
+        # D3 lateness cap (ADR-003): stashed by ``_get_next_trigger_time``
+        # when it returns the ``PAST_LATENESS_CAP`` sentinel, consumed by
+        # the ``_run_schedule`` loop's skip branch.
+        self._pending_skip_lateness: float | None = None
+        self._pending_skip_cap: int | None = None
+        # W1: once-per-run_at skip guard. Tracks the run_at value for
+        # which the SKIPPED row was last written so we don't emit a new
+        # SKIPPED row on every loop iteration while the operator hasn't
+        # updated run_at. Cleared on operator update (when ``_run_at``
+        # changes) so a fresh future run_at produces its own SKIPPED
+        # audit row.
+        self._last_skipped_run_at: datetime | None = None
         
         logger.info(
             f"SchedulerAdapter initialized: type={self._schedule_type}, "
@@ -385,12 +497,68 @@ class SchedulerAdapter(MessageSourceAdapter):
     async def _run_schedule(self) -> None:
         """Main scheduler loop that triggers messages at scheduled times."""
         logger.info(f"Starting scheduler loop: {self.source_id}")
-        
+
         while not self._stop_event.is_set():
             try:
                 # Check if we should trigger now
                 next_trigger = self._get_next_trigger_time()
-                
+
+                # D3 lateness cap (ADR-003): if the past-due one-shot is
+                # beyond ``one_shot_max_lateness_seconds``, write a SKIPPED
+                # schedule_executions row and DO NOT dispatch a JobItem.
+                # Schedule remains armed so the operator can re-schedule.
+                if next_trigger is self.PAST_LATENESS_CAP:
+                    lateness = self._pending_skip_lateness
+                    cap = self._pending_skip_cap
+                    # Clear pending state so the next iteration (e.g. after
+                    # the operator updates run_at) starts fresh.
+                    self._pending_skip_lateness = None
+                    self._pending_skip_cap = None
+                    # W1 once-per-run_at guard: skip the audit row +
+                    # callback when this run_at has already produced a
+                    # SKIPPED row in this adapter lifetime. The adapter
+                    # is reconstructed on schedule update, so a fresh
+                    # future run_at produces its own SKIPPED row.
+                    if self._last_skipped_run_at == self._run_at:
+                        logger.debug(
+                            "Skipping repeated SKIPPED for unchanged "
+                            f"run_at={self._run_at}; last skip was for "
+                            "this same run_at — no new audit row."
+                        )
+                        await asyncio.sleep(SCHEDULER_ERROR_RETRY_S)
+                        continue
+                    skip_exec_id = self._record_skipped_execution(
+                        lateness=lateness, cap=cap
+                    )
+                    self._last_skipped_run_at = self._run_at
+                    # Notify the execution_callback path with status=SKIPPED
+                    # so external observers see the skip event. Reuse the
+                    # SAME execution_id the audit row carries so observers
+                    # can correlate; on row-write failure ``skip_exec_id``
+                    # is ``None`` and we mint a phantom id so the callback
+                    # still fires (no skip event would otherwise surface).
+                    if skip_exec_id is None:
+                        skip_exec_id = f"skipped-phantom-{uuid.uuid4()}"
+                    if self._execution_callback:
+                        try:
+                            self._execution_callback(
+                                execution_id=skip_exec_id,
+                                schedule_id=self.source_id,
+                                status=ExecutionStatus.SKIPPED.value,
+                                instance_id=None,
+                                error_message=(
+                                    f"past_lateness_cap: lateness={lateness}s, cap={cap}s"
+                                ),
+                            )
+                        except Exception as cb_exc:
+                            logger.warning(f"Execution callback error (skip): {cb_exc}")
+                    # Brief pause to avoid a tight loop if the cap is hit
+                    # repeatedly with the same run_at (operator hasn't
+                    # updated). Matches the existing SCHEDULER_ERROR_RETRY_S
+                    # retry-loop convention.
+                    await asyncio.sleep(SCHEDULER_ERROR_RETRY_S)
+                    continue
+
                 if next_trigger is None:
                     # One-time trigger already executed
                     if self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
@@ -398,21 +566,21 @@ class SchedulerAdapter(MessageSourceAdapter):
                         break
                     logger.error(f"Could not determine next trigger time: {self.source_id}")
                     break
-                
+
                 # Calculate wait time
                 now = datetime.now(self._timezone)
                 if next_trigger.tzinfo is None:
                     next_trigger = next_trigger.replace(tzinfo=self._timezone)
-                
+
                 wait_seconds = (next_trigger - now).total_seconds()
-                
+
                 if wait_seconds > 0:
                     # Wait until next trigger time
                     logger.debug(
                         f"Next trigger for {self.source_id} in {wait_seconds:.1f}s "
                         f"(at {next_trigger.isoformat()})"
                     )
-                    
+
                     # Use wait_for with stop event to allow graceful shutdown
                     try:
                         await asyncio.wait_for(
@@ -425,10 +593,10 @@ class SchedulerAdapter(MessageSourceAdapter):
                     except asyncio.TimeoutError:
                         # Timeout means we reached the trigger time
                         pass
-                
+
                 # Trigger the scheduled message
                 await self._emit_scheduled_message()
-                
+
                 # For one-time schedules, exit after execution
                 if self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
                     self._is_one_time_executed = True
@@ -440,7 +608,7 @@ class SchedulerAdapter(MessageSourceAdapter):
                         except Exception as e:
                             logger.warning(f"on_complete_callback failed: {e}")
                     break
-                    
+
             except asyncio.CancelledError:
                 # Scheduler was cancelled
                 break
@@ -448,47 +616,188 @@ class SchedulerAdapter(MessageSourceAdapter):
                 logger.error(f"Scheduler error for {self.source_id}: {e}", exc_info=True)
                 # Brief pause before retry to avoid tight loop on errors
                 await asyncio.sleep(SCHEDULER_ERROR_RETRY_S)
-        
+
         logger.info(f"Scheduler loop ended: {self.source_id}")
     
-    def _get_next_trigger_time(self) -> datetime | None:
+    def _get_next_trigger_time(self):
         """Calculate next trigger time based on schedule type.
-        
+
         Returns:
-            datetime of next trigger, or None if no more triggers
+            - ``datetime`` of next trigger (for cron / interval / valid one-shot)
+            - ``None`` if no more triggers (one-shot already executed, or
+              cron / interval has no future time)
+            - ``PAST_LATENESS_CAP`` sentinel (one-shot past-due beyond
+              ``SchedulingConfig.one_shot_max_lateness_seconds``) — the
+              ``_run_schedule`` loop branches on this to write a SKIPPED
+              ``schedule_executions`` row and NOT dispatch a JobItem.
         """
         now = datetime.now(self._timezone)
-        
+
         if self._schedule_type == self.SCHEDULE_TYPE_CRON:
             if not self._cron_expression:
                 return None
+            # F2 / D8 (DST fix, 2026-10-02): croniter 6.0.0 has a defect
+            # family on the recurring-cron path that emits phantom
+            # fires (or silently drops real fires) around DST
+            # transitions. ``daemon.util.tz.compute_next_cron_fire``
+            # wraps croniter with re-anchoring + roundtrip phantom
+            # detection + cron-expression-literal recovery; the
+            # canonical DST rule (architecture §4.2 / ADR-008) lives
+            # in ``daemon.util.tz.anchor_local_to_utc`` and is shared
+            # by one-shot + cron paths. See the helper's docstring
+            # for the empirical croniter-6.0.0 trace.
+            try:
+                from daemon.util.tz import compute_next_cron_fire as _next_cron_fire
+                cron_fire = _next_cron_fire(
+                    self._cron_expression, now, self._timezone,
+                )
+                if cron_fire is not None:
+                    return cron_fire
+            except Exception as cron_exc:  # noqa: BLE001 — fallback
+                # Fall back to direct croniter on any unexpected
+                # failure (e.g. tz helper import error, downstream
+                # regression). Croniter's broken DST behavior is the
+                # known-bad shape — we'd rather emit a degraded fire
+                # than no fire at all (legacy behavior).
+                logger.warning(
+                    "scheduler._get_next_trigger_time: cron-path DST "
+                    "fix failed (expr=%r, tz=%s): %s; falling back "
+                    "to direct croniter",
+                    self._cron_expression, self._timezone, cron_exc,
+                )
             try:
                 cron = croniter(self._cron_expression, now)
                 return cron.get_next(datetime)
             except CroniterBadCronError as e:
                 logger.error(f"Cron parsing error: {e}")
                 return None
-                
+
         elif self._schedule_type == self.SCHEDULE_TYPE_INTERVAL:
             if not self._interval_seconds:
                 return None
             # For interval, next trigger is now + interval
             return now + timedelta(seconds=self._interval_seconds)
-            
+
         elif self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
             if self._is_one_time_executed:
                 return None
-            # If run_at is in the past, trigger now
+            # If run_at is in the past, trigger now.
+            #
+            # ``run_at`` is parsed once in ``_parse_schedule_config`` where
+            # naive ISO inputs are anchored to ``self._timezone`` (or
+            # assumed-UTC if tzinfo is None and timezone is ``UTC``).
+            # After that point, ``run_at`` is ALWAYS tz-aware when
+            # ``__init__`` was the construction path (the only production
+            # path — adapter is constructed via
+            # ``SourceRegistry._create_adapter_from_config``); no
+            # ``as tz-aware`` re-anchor is reachable here. The helper
+            # ``daemon.util.tz.anchor_local_to_utc`` (architecture §4.2)
+            # is the canonical anchor for any NEW one-shot surface
+            # (phase-2 tools/REST/service).
             run_at = self._run_at
-            if run_at.tzinfo is None:
-                run_at = run_at.replace(tzinfo=self._timezone)
-            
+
             if run_at <= now:
-                return now  # Trigger now
+                # Past-due. Check the D3 lateness cap (ADR-003) before
+                # firing. Cap is opt-in via SchedulingConfig; ``None`` means
+                # unlimited (legacy behavior preserved).
+                try:
+                    from daemon.config import SchedulingConfig
+                    cap = SchedulingConfig().one_shot_max_lateness_seconds
+                except Exception as cfg_exc:  # noqa: BLE001 — bootstrap-safety
+                    logger.debug(
+                        "scheduler: SchedulingConfig unavailable (%s); "
+                        "treating cap as None (unlimited)",
+                        cfg_exc,
+                    )
+                    cap = None
+                if cap is not None:
+                    lateness = (now - run_at).total_seconds()
+                    if lateness > cap:
+                        # Beyond cap — write a SKIPPED row, do NOT dispatch.
+                        # Signal the loop via the PAST_LATENESS_CAP sentinel.
+                        logger.info(
+                            f"Scheduler {self.source_id}: past-due one-shot "
+                            f"lateness={lateness:.0f}s exceeds cap={cap}s; "
+                            f"recording SKIPPED, no dispatch"
+                        )
+                        # Stash the lateness/cap values for the loop to pick
+                        # up via ``_pending_skip_*`` (no return-value tuple
+                        # because the signature must stay compatible with
+                        # callers that use ``is None`` / ``is PAST_LATENESS_CAP``
+                        # identity checks).
+                        self._pending_skip_lateness = lateness
+                        self._pending_skip_cap = cap
+                        return self.PAST_LATENESS_CAP
+                return now  # Trigger now (legacy behavior preserved when cap is None)
+
             return run_at
-        
+
         return None
     
+    def _record_skipped_execution(self, *, lateness: float | None, cap: int | None) -> str | None:
+        """Write a SKIPPED ``schedule_executions`` row for a past-lateness-cap one-shot (D3).
+
+        ADR-003 — schedule remains armed (NOT disabled); operator can update
+        ``run_at`` to a future time and re-fire. The execution_id prefix
+        ``skipped-`` distinguishes cap-skips from real runs in list output.
+
+        Uses the 2-call pattern (correction (a), architecture §8):
+        ``record_execution_start(...)`` THEN ``record_execution_complete(...)``.
+        ``record_execution_complete`` does NOT accept a ``schedule_id`` kwarg
+        — verified by grep against ``daemon/repositories/source/repository.py:570``.
+        We do NOT invent one (would diverge from the substrate).
+
+        Synchronous helper — called from the async ``_run_schedule`` loop; the
+        ``source_repo`` is the SQLModelSourceRepository (SQLite/Postgres) and
+        both methods open their own sessions internally, so this is safe
+        to call from the async loop (it blocks the loop briefly; mirrors the
+        existing fire-and-forget ``execution_callback`` pattern at
+        ``registry.py:490-496``).
+
+        Returns the ``execution_id`` written to the row (or ``None`` when
+        no row was written). Callers use this to echo the SAME id into
+        ``_execution_callback`` so observers can correlate the SKIPPED
+        event with the audit row (previously a separate ``uuid.uuid4()``
+        was minted for the callback, leaving observers looking at a
+        phantom id that never appears in the row).
+        """
+        if self._source_repo is None:
+            logger.warning(
+                f"Scheduler {self.source_id}: cannot record SKIPPED execution "
+                f"(no source_repo); cap_skipped_row missing for lateness={lateness}s"
+            )
+            return None
+
+        execution_id = f"skipped-{uuid.uuid4()}"
+        error_message = f"past_lateness_cap: lateness={lateness}s, cap={cap}s"
+        try:
+            # Call 1: open the row in TRIGGERED state (status default for record_execution_start).
+            self._source_repo.record_execution_start(
+                schedule_id=self.source_id,
+                instance_id=None,
+                execution_id=execution_id,
+            )
+            # Call 2: immediately transition to SKIPPED with the error message.
+            self._source_repo.record_execution_complete(
+                execution_id=execution_id,
+                status=ExecutionStatus.SKIPPED.value,
+                error_message=error_message,
+            )
+            logger.info(
+                f"Scheduler {self.source_id}: recorded SKIPPED execution "
+                f"{execution_id[:16]}... ({error_message})"
+            )
+            return execution_id
+        except Exception as exc:
+            # Logging-only — a failed audit row is preferable to silently
+            # dispatching the JobItem the cap was meant to suppress.
+            logger.error(
+                f"Scheduler {self.source_id}: failed to record SKIPPED "
+                f"execution (lateness={lateness}s, cap={cap}s): {exc}",
+                exc_info=True,
+            )
+            return None
+
     def _format_continuation_message(self, original_message: str, run_number: int) -> str:
         """Format a continuation message with #N prefix for reuse_instance mode.
         
@@ -759,6 +1068,31 @@ Original scheduled task:
                 force_new=force_new,
             )
 
+            # D4 idempotency (architecture §1.2/§1.3): derive a deterministic
+            # key from ``self._run_at`` (the configured run_at parsed once in
+            # ``__init__`` and re-parsed identically every boot at
+            # ``_parse_schedule_config``), and pass it through to
+            # ``enqueue_message_job`` so the JobQueueService's partial UNIQUE
+            # index collapses any cross-restart or 5s-retry duplicate
+            # enqueues into one JobItem. The key MUST be derived from
+            # ``self._run_at``, NOT from ``next_trigger`` — the latter
+            # returns ``now`` for past-due one-shots
+            # (``_get_next_trigger_time`` line ~486–487), which would mutate
+            # the key on every adapter cycle AND every boot, defeating the
+            # at-most-once guarantee.
+            #
+            # Cron-path guard: ``_route_via_job_queue`` is shared by cron
+            # AND one-shot paths (only gated by ``trigger_type ==
+            # "scheduled"``). Recurring fires intentionally mint fresh
+            # JobItems — emitting the key unconditionally would collapse
+            # all future cron fires into one JobItem → silent schedule
+            # death. Gate to one-time only (architecture §1.3).
+            enqueue_kwargs: dict = {}
+            if self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME and self._run_at is not None:
+                enqueue_kwargs["idempotency_key"] = (
+                    f"scheduler:{self.source_id}:{self._run_at.isoformat()}"
+                )
+
             result = await self._manager.enqueue_message_job(
                 instance_id=instance_id,
                 message=formatted_message,
@@ -766,6 +1100,7 @@ Original scheduled task:
                 priority=self._priority,
                 images=None,  # scheduler does not currently pass images
                 metadata=metadata,
+                **enqueue_kwargs,
             )
 
             logger.info(

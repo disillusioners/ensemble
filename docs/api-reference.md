@@ -485,6 +485,13 @@ Scheduler source management (special type of source).
 | POST | `/api/schedules/{schedule_id}/stop` | Stop scheduler | None |
 | GET | `/api/schedules/{schedule_id}/executions` | Get execution history | None |
 
+The higher-level scheduling surface (`POST /api/schedules` create,
+`GET /api/schedules/{id}` fetch, `DELETE /api/schedules/{id}` cancel) and the
+agent-facing `task_schedule*` tools are documented in the
+[Scheduling Reference](scheduling.md) — both call the same shared scheduling
+service (cancel is terminal, history preserved; every echo carries both local
+and UTC times).
+
 ### List Schedules
 
 **Response:**

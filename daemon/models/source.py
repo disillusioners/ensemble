@@ -12,6 +12,12 @@ class SourceStatus(str, Enum):
     starting = "starting"
     running = "running"
     error = "error"
+    # Phase 1 / ADR-007: terminal state distinct from resumable pause.
+    # Once ``cancelled``, the row cannot be ``start``-ed back to ``running``
+    # — operators must DELETE / recreate the schedule to re-fire. History
+    # (``schedule_executions``) is preserved (cancel NEVER routes through
+    # ``delete_source_config``).
+    cancelled = "cancelled"
 
 
 class SourceType(str, Enum):

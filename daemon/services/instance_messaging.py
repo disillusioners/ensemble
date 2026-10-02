@@ -2294,6 +2294,7 @@ class InstanceMessagingService:
         is_background: bool = False,
         queue_id: str | None = None,
         image_refs: list[str] | None = None,
+        idempotency_key: str | None = None,
     ) -> "AsyncMessageResult":
         """Submit a message to the queue as a JobItem (Option B).
 
@@ -2353,6 +2354,15 @@ class InstanceMessagingService:
             queue_id: Optional queue override. Validated against the
                 target project; falls back to ``system_parallel_queue``
                 on mismatch.
+            idempotency_key: Optional deterministic key for at-most-once
+                JobItem creation. When non-None, the underlying
+                ``JobQueueService.enqueue`` consults the partial UNIQUE
+                index on ``job_items.idempotency_key`` and returns the
+                existing JobItem on collision. Phase 1 D4 — only the
+                scheduler adapter passes a real key (gated to one-time
+                schedules); other callers pass ``None``. Additive kwarg
+                placed AFTER ``metadata`` per ADR-011; existing positional
+                callers are unaffected.
 
         Returns:
             ``AsyncMessageResult`` with the real ``message_id`` (Task
@@ -2609,7 +2619,33 @@ class InstanceMessagingService:
         # JobQueueService.enqueue emits the dispatch-bus notification only
         # after this call returns, so the JobProcessor can never observe a
         # message JobItem before its Task + MessageQueue rows exist.
-        await self._manager._job_queue_service.enqueue(
+        #
+        # D4 FIX (close dedup-compensation gap, 2026-10-02):
+        # ``enqueue`` is the at-most-once row claim, but ``enqueue_message_job``
+        # is at-least-once for the prelude (Task + MessageQueue are written
+        # BEFORE the JobItem claim, so the response can carry a real
+        # ``message_id`` immediately). On a dedup HIT the substrate returns
+        # the existing JobItem-A (job_id == JobItem-A.job_id, NOT the
+        # locally-minted UUID-B); the phantom JobItem-A + Task-B + MQ-B
+        # survive and the worker pool's claim path would execute the
+        # scheduler trigger TWICE.
+        #
+        # Code-evidence verdict that DELETE (not re-target) is the only
+        # correct compensation:
+        #   * On the FIRST ``enqueue_message_job`` call, ``_prepare_enqueued_message``
+        #     unconditionally writes Task-A (work_id=UUID-A) + MQ-A before
+        #     the substrate claim (``enqueue_message_job``:2554-2571); the
+        #     substrate then creates JobItem-A (job_id=UUID-A).
+        #   * On the SECOND call with the same idempotency_key, the same
+        #     prelude writes Task-B (work_id=UUID-B) + MQ-B; the substrate
+        #     hits the partial UNIQUE index ``idx_job_idempotency`` and
+        #     returns JobItem-A — its job_id is UUID-A, not UUID-B.
+        # So Task-A + MQ-A ALWAYS exist on a dedup hit; the phantom rows
+        # Task-B + MQ-B are pure duplicates. Re-targeting Task-B →
+        # JobItem-A would create TWO live Tasks on ONE JobItem
+        # (double execution); DELETE-only is the sole correct strategy.
+        # See ADR-004 (at-most-once DISPATCH, not just at-most-once-row).
+        enqueue_returned_job = await self._manager._job_queue_service.enqueue(
             agent_id=agent_id_for_job,
             message=message,
             source=source,
@@ -2626,7 +2662,124 @@ class InstanceMessagingService:
             instance_id=instance_id,
             agent_tag=agent_tag_for_job,
             job_id=job_id,
+            idempotency_key=idempotency_key,
         )
+
+        # D4 compensation: detect a dedup hit. A dedup is meaningful when
+        # an ``idempotency_key`` was supplied (the substrate only routes
+        # through the atomic claim in that branch — see
+        # ``JobQueueService.enqueue``:1121-1194) AND the returned JobItem's
+        # ``job_id`` differs from the locally-minted UUID-B. Without the
+        # ``idempotency_key`` gate the substrate mints a new row whose
+        # ``job_id`` is the caller-supplied UUID by construction; tests
+        # that mock the substrate with a hardcoded ``job_id`` would
+        # otherwise trip a phantom-dedup branch (no idempotency_key was
+        # passed, so there is no real dedup to compensate).
+        dedup_hit: bool = (
+            idempotency_key is not None
+            and enqueue_returned_job is not None
+            and getattr(enqueue_returned_job, "job_id", None) != job_id
+        )
+        if dedup_hit:
+            real_job_id: str = enqueue_returned_job.job_id
+            phantom_task_id: int | None = ctx.task_id
+            phantom_message_id: str = ctx.message_id
+
+            logger.info(
+                f"enqueue_message_job: idempotency-key dedup hit — "
+                f"phantom UUID-B={job_id[:8]}... (Task-B={phantom_task_id}, "
+                f"MQ-B={phantom_message_id[:8]}...) reconciled onto "
+                f"real JobItem-A={real_job_id[:8]}...; "
+                "compensating via cancel_task + MessageQueue.delete"
+            )
+
+            # Cancel the phantom Task-B through the D8 wrapper
+            # (``TaskRepository.cancel_task``) — it routes via ``AbortTurn`` /
+            # ``reconcile_turn_mirror`` to update the 8 mirror tables in a
+            # post-commit transaction, the only mutation the
+            # ``turn_reconciler`` contract allows.
+            #
+            # Race reasoning (worker-pool claim between prelude and enqueue):
+            # the worker pool's ``claim_pending_task`` can flip Task-B
+            # PENDING → RUNNING between ``_prepare_enqueued_message`` and
+            # the dedup-detect above. ``cancel_task`` handles BOTH branches:
+            #
+            #   * prior_status PENDING → atomic UPDATE pending/paused/running
+            #     → CANCELLED, mirrors reconciled (zero-cost; no worker was
+            #     attached).
+            #   * prior_status RUNNING → ``AbortTurn._write`` transitions
+            #     RUNNING → CANCELLED, ``reconcile_turn_mirror`` updates the
+            #     8 mirror tables. Cancellation is at-least-once for the
+            #     LLM call: an in-flight LLM call is NOT actively aborted
+            #     mid-turn — the worker observes the CANCELLED status on
+            #     its next status check (pre-LLM or post-stream) and
+            #     discards any result it had already produced. The
+            #     downstream effect is at-most-once DISPATCH (Task-B is
+            #     dead) but the LLM call itself may complete and have
+            #     its result discarded by the worker.
+            #   * prior_status already terminal → wrapper returns None,
+            #     no-op (worker already finished).
+            #
+            # ``delete`` is deliberately rejected because it bypasses the
+            # mirror contract and would lose the bookkeeping on a Task that
+            # the worker may have already promoted to RUNNING.
+            task_repo = getattr(self._manager, "_task_repo", None)
+            if task_repo is not None and phantom_task_id is not None:
+                try:
+                    await asyncio.to_thread(
+                        task_repo.cancel_task,
+                        phantom_task_id,
+                        "dedup_compensation: enqueue_message_job "
+                        "idempotency-key collision; original Task-A is "
+                        "the authoritative work.",
+                    )
+                except Exception as cancel_err:
+                    logger.warning(
+                        f"enqueue_message_job: cancel_task failed for "
+                        f"phantom Task-B={phantom_task_id} on dedup hit "
+                        f"(will continue — MQ-B cleanup still proceeds): "
+                        f"{type(cancel_err).__name__}: {cancel_err}"
+                    )
+            elif task_repo is None:
+                logger.warning(
+                    "enqueue_message_job: manager._task_repo unavailable; "
+                    "skipping phantom Task-B cancel on dedup hit "
+                    f"(Task-B={phantom_task_id}). JobItem-A remains "
+                    "authoritative — but WITHOUT this cancel, Task-B "
+                    "could still be claimed by the worker pool (claim "
+                    "keys on task_id; work_id↔JobItem linkage is not "
+                    "a claim precondition). The subsequent MQ-B "
+                    "delete below still removes the audit row; the "
+                    "operational risk is one wasted dispatch if a "
+                    "worker claims Task-B before any operator "
+                    "intervenes. Restoring the cancel path is the "
+                    "fix for the unavailable repo."
+                )
+
+            # Delete the orphan MessageQueue-B audit row. ``MQ-A`` from
+            # the original call already records the user message; ``MQ-B``
+            # would be a duplicate audit row attached to no JobItem.
+            # ``SQLModelMessageQueueRepository.delete`` is the documented
+            # API; on systems where it is not available (file-backed SQLite
+            # fall-through) we log and continue.
+            try:
+                await asyncio.to_thread(
+                    self._queue_repository.delete,
+                    phantom_message_id,
+                )
+            except Exception as mq_delete_err:
+                logger.warning(
+                    f"enqueue_message_job: orphan MQ-B delete failed on "
+                    f"dedup hit (continuing — JobItem-A stamping + return "
+                    f"still proceeds): "
+                    f"{type(mq_delete_err).__name__}: {mq_delete_err}"
+                )
+
+            # Rebind local ``job_id`` so the downstream snapshot /
+            # stamp_message_id / AsyncMessageResult operate on the REAL
+            # JobItem-A, NOT the phantom UUID-B. From here on, every
+            # stamp + return uses JobItem-A.
+            job_id = real_job_id
 
         # Snapshot queue capacity synchronously after the JobItem exists. The
         # newly-created item is still in the ``queued`` admission bucket, so it
@@ -2676,18 +2829,72 @@ class InstanceMessagingService:
         # Stamp the message_id onto the JobItem for cross-system correlation.
         # This remains best-effort for compatibility with the historical path:
         # Task + MessageQueue creation and queue admission have already succeeded.
-        try:
-            await asyncio.to_thread(
-                self._manager._job_queue_service._repository.stamp_message_id,
-                job_id,
-                ctx.message_id,
-            )
-        except Exception:
-            logger.debug(
-                f"enqueue_message_job: stamp_message_id failed for job "
-                f"{job_id[:8]}...",
-                exc_info=True,
-            )
+        #
+        # D4 dedup path: SKIP the stamp. The FIRST ``enqueue_message_job``
+        # call already stamped ``JobItem-A.metadata.message_id`` with
+        # ``message_id-A``. Overwriting with the SECOND call's
+        # ``ctx.message_id`` (a DIFFERENT UUID4) would break the
+        # cross-system correlation — ``MessageQueue.message_id`` row
+        # ``MQ-A`` (preserved by the FIRST call) would no longer match
+        # ``JobItem-A.metadata.message_id``. We return the ORIGINAL
+        # stamped message_id below.
+        if not dedup_hit:
+            try:
+                await asyncio.to_thread(
+                    self._manager._job_queue_service._repository.stamp_message_id,
+                    job_id,
+                    ctx.message_id,
+                )
+            except Exception:
+                logger.debug(
+                    f"enqueue_message_job: stamp_message_id failed for job "
+                    f"{job_id[:8]}...",
+                    exc_info=True,
+                )
+
+        # Resolve the message_id we hand back to the caller. On a
+        # dedup hit the FIRST call's stamp is the source of truth for
+        # cross-system correlation (``JobItem-A.metadata.message_id``
+        # ↔ ``MessageQueue-A.message_id``); the SECOND call's UUID
+        # ``ctx.message_id`` would point at the deleted ``MQ-B`` row
+        # after compensation.
+        if dedup_hit:
+            original_message_id: str | None = None
+            try:
+                original_metadata = getattr(
+                    enqueue_returned_job, "job_metadata", None
+                ) or {}
+                original_message_id = original_metadata.get("message_id")
+            except Exception:
+                original_message_id = None
+            if not original_message_id:
+                # Belt-and-suspenders: the FIRST call's stamp could
+                # have failed (best-effort path); fall back to the
+                # current stamp so the caller still gets a usable id.
+                logger.warning(
+                    f"enqueue_message_job: dedup hit but JobItem-A "
+                    f"{job_id[:8]}... has no stamped message_id "
+                    "(first call's stamp_message_id may have failed); "
+                    "stamping now with the second call's message_id "
+                    "and returning it as a best-effort fallback"
+                )
+                try:
+                    await asyncio.to_thread(
+                        self._manager._job_queue_service._repository.stamp_message_id,
+                        job_id,
+                        ctx.message_id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "enqueue_message_job: best-effort stamp on "
+                        "dedup hit failed; returning ctx.message_id "
+                        "without cross-system correlation",
+                        exc_info=True,
+                    )
+                original_message_id = ctx.message_id
+            returned_message_id: str = original_message_id
+        else:
+            returned_message_id = ctx.message_id
 
         # Do not notify the WorkerPool here. The JobProcessor's message
         # branch is the wake-only handoff after queue slot admission;
@@ -2714,7 +2921,7 @@ class InstanceMessagingService:
                         f"{type(bus_err).__name__}: {bus_err}"
                     )
         return AsyncMessageResult(
-            message_id=ctx.message_id,
+            message_id=returned_message_id,
             instance_id=instance_id,
             status="queued",
             job_id=job_id,

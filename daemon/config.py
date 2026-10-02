@@ -1992,6 +1992,53 @@ class JobSystemConfig(BaseSettings):
     # flag.
 
 
+class SchedulingConfig(BaseSettings):
+    """Configuration for the scheduled-tasks feature.
+
+    Scheduling is layered on top of the existing scheduler adapter
+    (``daemon/sources/adapters/scheduler.py``) — this class only adds
+    daemon-wide knobs. Per-schedule settings (cron expression, run_at,
+    agent, message, etc.) live in ``source_configs.config``.
+
+    Environment prefix ``ENSEMBLE_SCHEDULING_`` — auto-covered by the
+    tests' ``_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")`` prefix
+    match in ``tests/conftest.py`` (no conftest edits required for new
+    keys under this prefix).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_SCHEDULING_")
+
+    default_timezone: str | None = Field(
+        default=None,
+        description="Default IANA timezone for user-stated local times. "
+                    "None = use host-local tz detector, UTC fallback with loud warning. "
+                    "Env (auto-derived from field name): ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE.",
+    )
+    one_shot_max_lateness_seconds: int | None = Field(
+        default=None,
+        description="Max lateness (seconds) for one-shot schedules past run_at. "
+                    "None = unlimited (current behavior preserved). "
+                    "Beyond cap = no dispatch, write SKIPPED schedule_executions row. "
+                    "Env: ENSEMBLE_SCHEDULING_ONE_SHOT_MAX_LATENESS_SECONDS.",
+    )
+    tz_warning_echo_to_tool_output: bool = Field(
+        default=True,
+        description="When tz resolves to UTC fallback, include the warning in tool/list/REST output. "
+                    "Env: ENSEMBLE_SCHEDULING_TZ_WARNING_ECHO_TO_TOOL_OUTPUT.",
+    )
+    host_local_tz_cache_seconds: int = Field(
+        default=300,
+        description="Cache duration (seconds) for host-local tz detector. 0 disables cache. "
+                    "Env: ENSEMBLE_SCHEDULING_HOST_LOCAL_TZ_CACHE_SECONDS.",
+    )
+    negative_cache_seconds: int = Field(
+        default=60,
+        description="Cache duration (seconds) for NEGATIVE host-local tz results (no detection). "
+                    "min(60, host_local_tz_cache_seconds) applied. Architecture §4.4. "
+                    "Env: ENSEMBLE_SCHEDULING_NEGATIVE_CACHE_SECONDS.",
+    )
+
+
 class McpPoolConfig(BaseSettings):
     """MCP warm-up connection pool configuration."""
 
@@ -2752,6 +2799,7 @@ class Config(BaseSettings):
     slash_commands: SlashCommandConfig = Field(default_factory=SlashCommandConfig)
     services: ServicesConfig = Field(default_factory=ServicesConfig)
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
+    scheduling: SchedulingConfig = Field(default_factory=SchedulingConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
@@ -4417,6 +4465,12 @@ def load_config(config_path: str | None = None) -> Config:
     config_dict["services"] = services_config
     if "job_system" in processed_config:
         config_dict["job_system"] = processed_config["job_system"]
+    if "scheduling" in processed_config:
+        # Scheduling knobs default from env (ENSEMBLE_SCHEDULING_*); mirror
+        # the job_system / mcp_pool pattern — only pass through when the
+        # yaml carries the section so pydantic-settings' env source stays
+        # the canonical resolver for absent keys.
+        config_dict["scheduling"] = processed_config["scheduling"]
     if "mcp_pool" in processed_config:
         config_dict["mcp_pool"] = processed_config["mcp_pool"]
     if "skill_evolution" in processed_config:

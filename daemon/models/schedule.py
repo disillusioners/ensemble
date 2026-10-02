@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from daemon.models.source import SourceStatus
 
@@ -155,6 +155,138 @@ class ScheduleListResponse(BaseModel):
     )
 
 
+# ==================== Phase 3: REST surface ====================
+# Canonical create/response models live in daemon.services.scheduling_service
+# (ScheduleCreatePayload / ScheduleCreateResponse / ScheduleDetail /
+# ScheduleCancelResponse). The models below are the THIN REST surface only —
+# they never redefine a canonical model; routers map REST ↔ canonical via
+# _schedule_create_to_payload (daemon/routers/schedules.py).
+
+
+class ScheduleCreate(BaseModel):
+    """REST request body for POST /schedules.
+
+    REST-conventional field names (`source_id` / `agent_id` /
+    `local_time` + `run_at`) differ from the canonical
+    ``ScheduleCreatePayload`` (`label` / `agent` / `when`) — the router
+    maps at its boundary (ADR-013 F1 rewrite). NO `enabled` / `autostart`
+    fields: schedules are always created enabled+autostart; lifecycle
+    flows through update / pause / cancel (POST /schedules/{id}/stop|start,
+    DELETE /schedules/{id}).
+    """
+
+    source_id: str = Field(
+        ...,
+        pattern=r"^[a-zA-Z0-9_-]+$",
+        min_length=1,
+        max_length=64,
+        description="URL-stable id; used as label for create (uniqueness)",
+    )
+    name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="Human-readable display name; defaults to source_id",
+    )
+    agent_id: str = Field(..., min_length=1, max_length=64)
+    message: str = Field(..., min_length=1)
+    project_id: str = Field(..., min_length=1)
+    priority: int = Field(default=5, ge=1, le=10)
+    instance_mode: Literal["new_instance", "reuse_instance"] = "new_instance"
+    recurrence: Literal["once", "daily", "weekly", "cron"]
+    local_time: str | None = Field(
+        default=None,
+        description="HH:MM for daily/weekly; full ISO for once (alternative to run_at)",
+    )
+    timezone: str | None = Field(
+        default=None,
+        description="IANA name; service resolves default chain",
+    )
+    cron_expression: str | None = Field(default=None)
+    weekday: int | None = Field(
+        default=None,
+        ge=0,
+        le=6,
+        description="0=Sun..6=Sat (matches phase-2 / cron DOW)",
+    )
+    run_at: datetime | None = Field(
+        default=None,
+        description="tz-aware preferred; naive → treated as local per resolved tz",
+    )
+
+    @model_validator(mode="after")
+    def _validate_recurrence_requirements(self):
+        if self.recurrence == "cron" and not self.cron_expression:
+            raise ValueError("cron_expression required when recurrence == 'cron'")
+        if self.recurrence == "weekly" and self.weekday is None:
+            raise ValueError("weekday required when recurrence == 'weekly'")
+        if self.recurrence == "once" and not (self.run_at or self.local_time):
+            raise ValueError("either run_at or local_time required when recurrence == 'once'")
+        if self.recurrence in {"daily", "weekly"} and not self.local_time:
+            raise ValueError("local_time required when recurrence in {'daily', 'weekly'}")
+        return self
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "source_id": "morning-briefing",
+                "name": "Morning Briefing",
+                "agent_id": "ari",
+                "message": "Give me a morning briefing",
+                "project_id": "default",
+                "recurrence": "daily",
+                "local_time": "06:00",
+                "timezone": "America/New_York",
+            }
+        }
+    )
+
+
+class ScheduleCreateRestResponse(BaseModel):
+    """Wraps phase-2 ScheduleCreateResponse; adds REST-conventional field names."""
+
+    id: str  # = phase-2 source_id
+    source_id: str
+    label: str
+    status: str
+    next_run_at_local: str | None
+    next_run_at_utc: str | None
+    tz_warning: str = ""
+
+
+class ScheduleDetailRestResponse(BaseModel):
+    """Wraps phase-2 ScheduleDetail; adds 'id' field for REST URL consistency."""
+
+    id: str  # = source_id (= label for REST creates)
+    source_id: str
+    label: str
+    status: str
+    recurrence: str | None
+    local_time: str | None
+    timezone: str | None
+    cron_expression: str | None
+    weekday: int | None
+    next_run_at_local: str | None
+    next_run_at_utc: str | None
+    last_run_at: str | None
+    agent_id: str | None  # = phase-2 agent
+    project_id: str | None
+    instance_mode: str | None
+    cancelled_at: str | None
+    tz_warning: str = ""
+
+
+class ScheduleCancelRestResponse(BaseModel):
+    """Wraps phase-2 ScheduleCancelResponse; adds last_execution_id echo (§5.3) + message."""
+
+    id: str
+    source_id: str
+    status: str
+    cancelled_at: str
+    last_execution_id: str | None  # §5.3 echo — cancel the in-flight JobItem with this
+    message: str  # e.g. "Schedule {id} cancelled (history retained)"
+
+
 __all__ = [
     "SchedulerInstanceMode",
     "ScheduleExecutionInfo",
@@ -163,4 +295,8 @@ __all__ = [
     "ScheduleInfo",
     "ScheduleUpdate",
     "ScheduleListResponse",
+    "ScheduleCreate",
+    "ScheduleCreateRestResponse",
+    "ScheduleDetailRestResponse",
+    "ScheduleCancelRestResponse",
 ]

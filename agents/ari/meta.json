@@ -27,7 +27,8 @@
       "resume_instance",
       "system_upgrade",
       "mission",
-      "service"
+      "service",
+      "scheduling"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

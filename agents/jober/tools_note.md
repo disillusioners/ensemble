@@ -605,3 +605,55 @@ instead of marking the job complete.
   by the root instance and will report back when ready
 - ❌ Report to parent that "the job is complete" on `in_progress`
 
+
+## Scheduling
+
+Wall-clock triggers that fire a message to an agent at a specific local time.
+This is a peer capability to Creating Jobs (`job_create` is for immediate
+dispatch; `task_schedule` is for triggers that should fire at a specific
+time-of-day). One service, four tools, terminal cancel. Every response echoes
+the next run in BOTH the schedule's local timezone and UTC.
+
+### task_schedule — wall-clock trigger
+
+**Purpose:** Schedule a one-shot or recurring task. The trigger time is
+interpreted in the supplied `timezone` (or the configured default chain:
+explicit → configured default → host-local auto-detect → UTC with a loud
+warning). The invoked agent defaults to me; pass the optional agent argument
+to schedule for a peer.
+
+Signature:
+
+```raw
+task_schedule(
+    message="Re-run nightly rollup",
+    label="nightly-rollup",
+    when="02:30",       # HH:MM for daily/weekly
+    timezone="UTC",     # optional
+    recurrence="daily", # once | daily | weekly | cron
+    project_id="default",
+    priority=5,
+)
+```
+
+**Returns:** `{id, status, next_run_at_local, next_run_at_utc}`.
+
+**Don't use for:** immediate dispatch — see `Creating Jobs` for `job_create`.
+
+### task_schedule_list
+
+**Purpose:** List scheduled tasks. Returns `label`, `agent`, `next_run_local`,
+`next_run_utc`, `status`. Cancelled and paused are hidden by default; pass a
+`status` filter to see them.
+
+### task_schedule_cancel
+
+**Purpose:** Cancel a scheduled task. Terminal — the task never fires again.
+History is preserved. If a trigger already dispatched its job just before the
+cancel landed, the response's `last_execution_id` identifies that in-flight
+job so I can cancel it directly.
+
+### task_schedule_update
+
+**Purpose:** Reschedule, change the message, or pause/resume. Pause is
+resumable; cancel is terminal (different tool).
