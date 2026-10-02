@@ -2294,6 +2294,7 @@ class InstanceMessagingService:
         is_background: bool = False,
         queue_id: str | None = None,
         image_refs: list[str] | None = None,
+        idempotency_key: str | None = None,
     ) -> "AsyncMessageResult":
         """Submit a message to the queue as a JobItem (Option B).
 
@@ -2353,6 +2354,15 @@ class InstanceMessagingService:
             queue_id: Optional queue override. Validated against the
                 target project; falls back to ``system_parallel_queue``
                 on mismatch.
+            idempotency_key: Optional deterministic key for at-most-once
+                JobItem creation. When non-None, the underlying
+                ``JobQueueService.enqueue`` consults the partial UNIQUE
+                index on ``job_items.idempotency_key`` and returns the
+                existing JobItem on collision. Phase 1 D4 — only the
+                scheduler adapter passes a real key (gated to one-time
+                schedules); other callers pass ``None``. Additive kwarg
+                placed AFTER ``metadata`` per ADR-011; existing positional
+                callers are unaffected.
 
         Returns:
             ``AsyncMessageResult`` with the real ``message_id`` (Task
@@ -2626,6 +2636,7 @@ class InstanceMessagingService:
             instance_id=instance_id,
             agent_tag=agent_tag_for_job,
             job_id=job_id,
+            idempotency_key=idempotency_key,
         )
 
         # Snapshot queue capacity synchronously after the JobItem exists. The

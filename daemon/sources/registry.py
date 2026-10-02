@@ -288,9 +288,15 @@ class SourceRegistry:
                 continue
             
             # Skip sources that were explicitly stopped (manual stop persists
-            # across reboots regardless of the autostart flag)
-            if config.status == SourceStatus.STOPPED.value:
-                logger.debug(f"Skipping stopped source: {config.source_id}")
+            # across reboots regardless of the autostart flag) or that were
+            # cancelled (ADR-007 / Phase 1: cancelled rows are TERMINAL —
+            # they must never auto-start on boot). The single equality at
+            # line :292 was previously extensible only to one value; the
+            # rewrite below preserves the three sequential `continue`s
+            # above and treats CANCELLED as a peer of STOPPED for the
+            # auto-start skip clause.
+            if config.status in {SourceStatus.STOPPED.value, SourceStatus.CANCELLED.value}:
+                logger.debug(f"Skipping stopped/cancelled source: {config.source_id}")
                 continue
             
             source_id = config.source_id
@@ -646,11 +652,37 @@ class SourceRegistry:
             await adapter.stop()
         except Exception as e:
             logger.error(f"Error stopping adapter {source_id}: {e}")
-        
+
         # Update status (skipped during bulk shutdown so running sources stay
         # runnable across restarts; only explicit user stops persist 'stopped')
         adapter._status = SourceStatus.STOPPED
         if persist_status:
+            # Clobber guard (Phase 1 / ADR-007, architecture §3.3): if the
+            # config row is already in CANCELLED state, skip the unconditional
+            # ``update_source_status(STOPPED)`` write at :662 below. Without
+            # this, a later stop touching a cancelled row would resurrect it
+            # to STOPPED — making it resumable via /start (the bug class
+            # the boot-filter extension at :292 + cancel atomic method
+            # collectively close). The row is already terminal — eviction
+            # below still runs so a fresh start_adapter finds no adapter.
+            try:
+                config = await asyncio.to_thread(self._source_repo.get_source_config, source_id)
+            except Exception as cfg_lookup_exc:
+                logger.warning(
+                    f"stop_adapter: config lookup failed for {source_id} "
+                    f"({type(cfg_lookup_exc).__name__}: {cfg_lookup_exc}); "
+                    f"proceeding with normal stop persist"
+                )
+                config = None
+            if config is not None and config.status == SourceStatus.CANCELLED.value:
+                logger.info(
+                    f"stop_adapter: skipping STOPPED persist for cancelled row "
+                    f"{source_id} (clobber guard, architecture §3.3)"
+                )
+                # Still evict so the registry doesn't hold a stale adapter.
+                self._adapters.pop(source_id, None)
+                logger.info(f"Stopped adapter (cancelled): {source_id}")
+                return True
             # Evict from _adapters BEFORE awaiting the status persist. A
             # concurrent /sources/{id}/start in the (now-zero) window
             # between the persist await and the pop would otherwise see

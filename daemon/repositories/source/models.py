@@ -23,6 +23,14 @@ class SourceStatus(str, enum.Enum):
     STARTING = "starting"
     RUNNING = "running"
     ERROR = "error"
+    # Phase 1 / ADR-007: terminal state distinct from resumable pause.
+    # Added to BOTH this uppercase SQLModel enum AND the lowercase
+    # Pydantic/REST enum at ``daemon/models/source.py``; ``is_valid()``
+    # gates the write path at ``repository.py:250`` so both must gain the
+    # value before any service code writes ``'cancelled'``. Boot filter
+    # at ``daemon/sources/registry.py:292`` was extended to skip
+    # ``status in {STOPPED.value, CANCELLED.value}``.
+    CANCELLED = "cancelled"
 
     @classmethod
     def is_valid(cls, status: str) -> bool:

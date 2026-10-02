@@ -14,6 +14,15 @@ class SourceStatus(Enum):
     STARTING = "starting"
     RUNNING = "running"
     ERROR = "error"
+    # Scheduled-tasks phase 1 / ADR-007: terminal state — the boot filter
+    # (registry.py:298) and the stop_adapter clobber guard (registry.py:677)
+    # reference ``SourceStatus.CANCELLED`` from THIS import. The phase-1
+    # commit extended the two model enums (``daemon/models/source.py``
+    # lowercase ``cancelled`` + ``daemon/repositories/source/models.py``
+    # uppercase ``CANCELLED``) but missed this adapter-base third site,
+    # which made every ``start_all()`` raise AttributeError. Kept in lockstep
+    # with the other two sites — extend all three together.
+    CANCELLED = "cancelled"
 
 
 @dataclass

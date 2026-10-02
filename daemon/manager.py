@@ -7864,6 +7864,7 @@ class InstanceManager:
         is_background: bool = False,
         queue_id: str | None = None,
         image_refs: list[str] | None = None,
+        idempotency_key: str | None = None,
     ) -> AsyncMessageResult:
         """POC variant of :meth:`enqueue_message` that also creates a JobItem mirror.
 
@@ -7872,6 +7873,17 @@ class InstanceManager:
         to ``InstanceMessagingService.enqueue_message_job`` and
         ultimately to ``_prepare_enqueued_message``. See the
         ``enqueue_message`` docstring for the contract.
+
+        ``idempotency_key`` (Phase 1, D4): keyword-only kwarg forwarded to
+        ``InstanceMessagingService.enqueue_message_job`` and ultimately to
+        ``_job_queue_service.enqueue(..., idempotency_key=...)``. The
+        partial UNIQUE index on ``job_items.idempotency_key`` collapses
+        cross-restart and 5s-retry duplicates into a single JobItem.
+        Currently ONLY the scheduler adapter passes a real key; all other
+        callers pass ``None`` (default). Placement AFTER ``metadata`` is
+        the additive extension point per ADR-011 — existing positional
+        callers (e.g. ``daemon/routers/messages.py``, ``daemon/tools/job_queue.py``)
+        that pass everything before ``metadata`` are unaffected.
         """
         return await self._messaging_service.enqueue_message_job(
             instance_id=instance_id,
@@ -7884,6 +7896,7 @@ class InstanceManager:
             is_background=is_background,
             queue_id=queue_id,
             image_refs=image_refs,
+            idempotency_key=idempotency_key,
         )
 
     async def _process_message_with_tracking(

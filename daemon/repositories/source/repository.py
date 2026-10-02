@@ -246,18 +246,66 @@ class SQLModelSourceRepository:
             if source_config is None:
                 logger.warning(f"Source not found for status update: source_id={source_id}")
                 return None
-            
+
             if not SourceStatus.is_valid(status):
                 raise ValueError(f"Invalid status: {status}")
-            
+
             source_config.status = status
             source_config.error_message = error_message
             source_config.updated_at = datetime.now(timezone.utc).isoformat()
-            
+
             session.commit()
             session.refresh(source_config)
-            
+
             logger.info(f"Updated source status: source_id={source_id}, status={status}")
+            return source_config
+
+    def cancel_source_config(self, source_id: str) -> SourceConfig | None:
+        """Atomically transition a source to terminal CANCELLED state (ADR-007).
+
+        Writes ``enabled=False`` AND ``status='cancelled'`` in ONE session /
+        commit. Replaces the previous plan's two-call sequence
+        (``update_source_config`` + ``update_source_status`` were independent
+        sessions, see architecture §3.2) — the atomic method honors the
+        plan's own "same transaction" contract honestly.
+
+        Cancel is terminal — the row cannot be re-armed via ``start`` (the
+        boot filter at ``registry.py:292`` skips ``status in {STOPPED,
+        CANCELLED}``). Cancel NEVER routes through ``delete_source_config``
+        (which would purge ``schedule_executions`` history at
+        ``repository.py:281-284``).
+
+        Returns:
+            The updated SourceConfig row, or ``None`` if the source_id
+            does not exist.
+        """
+        if not SourceStatus.is_valid(SourceStatus.CANCELLED.value):
+            # Defensive: invariant guard so a future rename of the enum
+            # value fails loud at the cancel site rather than silently
+            # writing an invalid status.
+            raise RuntimeError(
+                "SourceStatus.CANCELLED is not a valid enum value; "
+                "the cancel path is broken (architecture §3.2 invariant)."
+            )
+        with Session(self.engine) as session:
+            source_config = session.get(SourceConfig, source_id)
+            if source_config is None:
+                logger.warning(
+                    f"Source not found for cancel: source_id={source_id}"
+                )
+                return None
+
+            source_config.enabled = False
+            source_config.status = SourceStatus.CANCELLED.value
+            source_config.updated_at = datetime.now(timezone.utc).isoformat()
+
+            session.commit()
+            session.refresh(source_config)
+
+            logger.info(
+                f"Atomically cancelled source: source_id={source_id}, "
+                f"status={source_config.status}, enabled={source_config.enabled}"
+            )
             return source_config
 
     def delete_source_config(self, source_id: str) -> dict[str, Any]:

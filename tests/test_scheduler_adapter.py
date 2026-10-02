@@ -250,16 +250,36 @@ class TestTimezoneHandling:
     """Tests for timezone configuration."""
 
     def test_default_timezone_utc(self, mock_on_message):
-        """Test that default timezone is UTC."""
+        """Test that default timezone follows the D2 resolution chain.
+
+        Phase 1 / Task 2.4 / ADR-002: with no explicit ``config.timezone``
+        and no ``SchedulingConfig.default_timezone`` env override, the
+        resolver falls through to host-local detection (``step 3``), then
+        to ``datetime.timezone.utc`` (``step 4``) if host detection finds
+        nothing. On the test host (``/etc/localtime → /usr/share/zoneinfo/Etc/UTC``),
+        the chain resolves to ``Etc/UTC`` — same UTC instant as ``UTC``,
+        different ``ZoneInfo`` key. The legacy assertion of literal
+        ``ZoneInfo("UTC")`` no longer holds because the chain reaches
+        step 3 first on this host.
+        """
         config = make_config("test-tz-default", {
             "schedule": "0 9 * * *",
             "agent": "./agents/developer",
             "message": "Test",
         })
-        
+
         adapter = SchedulerAdapter(config, mock_on_message)
-        
-        assert adapter._timezone == ZoneInfo("UTC")
+
+        # Resolution chain result is UTC-like (offset zero) regardless of
+        # which rung the chain stopped at — accept either host-local
+        # ``Etc/UTC`` or terminal ``UTC``.
+        from datetime import timezone as _stdlib_tz
+        from zoneinfo import ZoneInfo as _ZI
+        assert adapter._timezone in (
+            _ZI("Etc/UTC"),
+            _ZI("UTC"),
+            _stdlib_tz.utc,
+        ), f"unexpected tz chain result: {adapter._timezone!r}"
 
     def test_timezone_america_new_york(self, mock_on_message):
         """Test America/New_York timezone."""
@@ -301,18 +321,32 @@ class TestTimezoneHandling:
         assert adapter._timezone == ZoneInfo("Europe/London")
 
     def test_timezone_unknown_falls_back_to_utc(self, mock_on_message):
-        """Test that unknown timezone falls back to UTC."""
+        """Test that unknown timezone falls back to UTC.
+
+        Phase 1 / Task 2.4 / architecture §4.3: the resolver's terminal
+        fallback is ``datetime.timezone.utc`` (NOT ``ZoneInfo("UTC")``).
+        ``ZoneInfo("UTC")`` raises ``ZoneInfoNotFoundError`` on a stripped
+        container with no system tzdb and no pip tzdata — the C-level
+        ``datetime.timezone.utc`` cannot fail. The previous literal
+        ``ZoneInfo("UTC")`` assertion encoded the legacy hardcoded fallback
+        that phase-1 explicitly obsoletes.
+        """
         config = make_config("test-tz-unknown", {
             "schedule": "0 9 * * *",
             "timezone": "Invalid/Timezone",
             "agent": "./agents/developer",
             "message": "Test",
         })
-        
+
         adapter = SchedulerAdapter(config, mock_on_message)
-        
-        # Should fall back to UTC with a warning
-        assert adapter._timezone == ZoneInfo("UTC")
+
+        # Should fall back to UTC (the resolver's terminal rung) with a
+        # warning logged. Accept the C-level datetime.timezone.utc OR
+        # a ZoneInfo("UTC") if a future change re-introduces it.
+        from datetime import timezone as _stdlib_tz
+        assert adapter._timezone in (_stdlib_tz.utc, ZoneInfo("UTC")), (
+            f"unexpected tz fallback: {adapter._timezone!r}"
+        )
 
     def test_timezone_affects_next_trigger_calculation(self, mock_on_message):
         """Test that timezone affects when the next trigger is calculated."""
