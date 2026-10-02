@@ -789,9 +789,10 @@ def test_manager_logs_disabled_when_off(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Sanity — PRIVILEGED_TOOL_CATEGORIES is back to the trio
-# (system_upgrade + system-log + ens-db) after override 2026-09-16.
-# The 3-site pin lives in tests/unit/tools/test_upgrade_registration.py,
+# Sanity — PRIVILEGED_TOOL_CATEGORIES is the post-override trio
+# (system_upgrade + system-log + ens-db) plus ``ens-env`` (W4 leader
+# decision 2026-10-02). The 3-site pin lives in
+# tests/unit/tools/test_upgrade_registration.py,
 # tests/unit/tools/test_attestation_registration.py, and
 # tests/integration/test_maintenancer_spawn_resolves_tools.py.
 # ─────────────────────────────────────────────────────────────────────
@@ -813,8 +814,8 @@ def test_privileged_category_set_is_pinned() -> None:
     a category universe where the trio is the canonical set.
     """
     assert PRIVILEGED_TOOL_CATEGORIES == frozenset(
-        {"system_upgrade", "system-log", "ens-db"}
+        {"system_upgrade", "system-log", "ens-db", "ens-env"}
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
-        f"trio; got {PRIVILEGED_TOOL_CATEGORIES}"
+        f"trio + W4 ens-env; got {PRIVILEGED_TOOL_CATEGORIES}"
     )

@@ -1118,6 +1118,31 @@ class TestRedactSecretsUtility:
         assert result["env"]["CUSTOM_LLM_EXTRA_HEADERS"] == "[REDACTED]"
         assert result["env"]["CUSTOM_MCP_TRANSPORT"] == "stdio"
 
+    def test_redacts_broadened_shared_policy_words(self):
+        """W2 (reviewer council 2026-10-02): the read side redacts the
+        SHARED conservative word list from
+        ``daemon/services/env_key_policy.py`` — the four broadened
+        words (CREDENTIAL/PRIVATE/PWD/AUTH) redact here too, as the
+        backstop for HTTP-lane config dicts that bypass the agent
+        write gate. ``BASE``/``HEADERS`` remain redact-only extras.
+        """
+        config = {
+            "env": {
+                "SERVICE_CREDENTIAL": "cred-plaintext",
+                "PRIVATE_KEY_PATH": "/home/nea/.ssh/id_rsa",
+                "DB_PWD": "hunter2",
+                "OD_AUTH": "Bearer sk-token",
+                "CUSTOM_MODEL": "vision",
+            }
+        }
+        result = redact_secrets(config)
+
+        assert result["env"]["SERVICE_CREDENTIAL"] == "[REDACTED]"
+        assert result["env"]["PRIVATE_KEY_PATH"] == "[REDACTED]"
+        assert result["env"]["DB_PWD"] == "[REDACTED]"
+        assert result["env"]["OD_AUTH"] == "[REDACTED]"
+        assert result["env"]["CUSTOM_MODEL"] == "vision"
+
     def test_preserves_non_sensitive_env_keys(self):
         """Non-sensitive env keys (CUSTOM_MODEL, CUSTOM_MCP_TRANSPORT)
         keep their values intact.

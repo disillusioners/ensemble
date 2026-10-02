@@ -49,6 +49,10 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+from daemon.services.env_key_policy import (
+    env_key_is_secret_shaped,
+    is_ascii_env_key,
+)
 from daemon.services.kms_lite import (
     KMSUnavailableError,
     build_env_marker,
@@ -57,6 +61,7 @@ from daemon.services.kms_lite import (
     kms_request,
     kms_resolve_handle,
 )
+from daemon.services.kms_resolver import is_marker
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -1370,19 +1375,14 @@ Co-ownership contract (load-bearing):
 # ---------------------------------------------------------------------------
 
 
-def _env_key_is_secret_shaped(env_key: str) -> bool:
-    """True when ``env_key`` looks like it carries a credential.
-
-    Same four markers the presentation layer treats as secret-shaped
-    (``KEY`` / ``TOKEN`` / ``SECRET`` / ``PASSWORD`` — see
-    ``daemon/routers/mcp_servers.py::redact_secrets``), matched as
-    case-insensitive substrings. Deliberately NOT ``BASE`` /
-    ``HEADERS``: those are READ-side redaction markers (``BYOK_BASE_URL``
-    reads back ``[REDACTED]`` through the API) but a base URL is a
-    non-secret value this tool is ALLOWED to write.
-    """
-    upper = env_key.upper()
-    return any(m in upper for m in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
+# Secret-shape classification lives in ONE place now:
+# ``daemon/services/env_key_policy.py`` (W2, reviewer council
+# 2026-10-02) — the same conservative word list the routers
+# ``redact_secrets`` helper applies on the read side. This module
+# imports :func:`env_key_is_secret_shaped` / :func:`is_ascii_env_key`
+# from there; ``BASE`` / ``HEADERS`` remain deliberately write-legal
+# (a base URL is a non-secret value this tool is ALLOWED to write —
+# see the policy module docstring for the write-vs-redact split).
 
 
 def _invalidate_mcp_schema_cache(manager: Any, server_name: str) -> None:
@@ -1430,9 +1430,12 @@ def create_mcp_env_tools(
 
         Merges ``env`` (a dict of env-var name to value) into the named
         MCP server's ``config.env``, preserving every existing key —
-        including ``__KMS_REF__`` markers written by ``kms_attach``.
-        Rejects secret-shaped key names (containing KEY / TOKEN /
-        SECRET / PASSWORD) — bind those via ``kms_request`` +
+        including ``__KMS_REF__``/``__KMS_ENV__`` markers written by
+        ``kms_attach``. Rejects secret-shaped key names (the shared
+        word list at ``daemon/services/env_key_policy.py``: KEY /
+        TOKEN / SECRET / PASSWORD / CREDENTIAL / PRIVATE / PWD /
+        AUTH), non-ASCII key names, and marker-shaped VALUES (markers
+        are ``kms_attach``-only) — bind secrets via ``kms_request`` +
         ``kms_attach`` instead. Open sessions keep the old env until
         they reconnect.
         """
@@ -1456,17 +1459,47 @@ def create_mcp_env_tools(
                     f"Rejected key(s): {', '.join(bad_types[:10])}."
                 )
 
-            secret_keys = sorted(k for k in env if _env_key_is_secret_shaped(k))
+            non_ascii_keys = sorted(k for k in env if not is_ascii_env_key(k))
+            if non_ascii_keys:
+                return (
+                    "ERROR: INVALID_ENV_KEY: env key(s) "
+                    f"{', '.join(non_ascii_keys[:10])} must be ASCII "
+                    "identifiers ([A-Za-z_][A-Za-z0-9_]*). Non-ASCII or "
+                    "homoglyph key names cannot be classified by the "
+                    "secret-shape gate or redacted reliably — use plain "
+                    "POSIX-style variable names."
+                )
+
+            secret_keys = sorted(k for k in env if env_key_is_secret_shaped(k))
             if secret_keys:
                 return (
                     "ERROR: SECRET_SHAPED_KEY: env key(s) "
                     f"{', '.join(secret_keys)} look secret-shaped (contain "
-                    "KEY/TOKEN/SECRET/PASSWORD). NEVER pass plaintext "
-                    "credentials through mcp_set_env. Mint a handle via "
-                    "kms_request(service=..., reason=...), then bind it via "
-                    "kms_attach(server_id=<id>, handle=<handle>, "
-                    "env_key=<key>). mcp_set_env's success result includes "
-                    "the server_id for exactly this chained flow."
+                    "KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL/PRIVATE/PWD/AUTH — "
+                    "the shared policy at daemon/services/env_key_policy.py). "
+                    "NEVER pass plaintext credentials through mcp_set_env. "
+                    "Mint a handle via kms_request(service=..., reason=...), "
+                    "then bind it via kms_attach(server_id=<id>, "
+                    "handle=<handle>, env_key=<key>); for an env-ref bind "
+                    "use kms_attach(server_id=<id>, env_key=<key>, "
+                    "env_source=<VAR>). mcp_set_env's success result "
+                    "includes the server_id for exactly this chained flow."
+                )
+
+            marker_valued = sorted(
+                k for k, v in env.items()
+                if isinstance(v, str) and is_marker(v)
+            )
+            if marker_valued:
+                return (
+                    "ERROR: MARKER_VALUE_FORBIDDEN: env value(s) for "
+                    f"key(s) {', '.join(marker_valued[:10])} are KMS "
+                    "markers (__KMS_REF__<handle>__ / __KMS_ENV__<var>__). "
+                    "Markers are written ONLY by kms_attach — mcp_set_env "
+                    "writes non-secret plaintext config. Passing a marker "
+                    "here would bypass the attach lane's binding/audit "
+                    "rails (the spawn-time resolver's fail-closed presence "
+                    "check remains the backstop)."
                 )
 
             # ── R1: resolve + read the row FRESH at call time ───────
@@ -1506,6 +1539,9 @@ def create_mcp_env_tools(
             _invalidate_mcp_schema_cache(manager, server_name)
 
             # Audit: key NAMES + shape only — NEVER values.
+            # M2 (reviewer fold-in): the preserved-marker count covers
+            # BOTH marker shapes (LANE-1 ``__KMS_REF__`` AND LANE-2
+            # ``__KMS_ENV__``) via the resolver's ``is_marker``.
             logger.info(
                 "[mcp_set_env] actor=%s server=%s keys=%d marker_keys_preserved=%d",
                 caller_instance_id,
@@ -1513,7 +1549,7 @@ def create_mcp_env_tools(
                 len(env),
                 sum(
                     1 for v in env_block.values()
-                    if isinstance(v, str) and v.startswith("__KMS_REF__")
+                    if isinstance(v, str) and is_marker(v)
                 ),
             )
 
@@ -1597,13 +1633,27 @@ Semantics:
       instance spawn. The KMS marker lane resolves at the same seam.
 
 Rejections:
-    * Secret-shaped KEY NAMES — any key whose name contains ``KEY``,
-      ``TOKEN``, ``SECRET``, or ``PASSWORD`` (case-insensitive) is
+    * Secret-shaped KEY NAMES — any key whose name contains one of
+      the shared policy words ``KEY``, ``TOKEN``, ``SECRET``,
+      ``PASSWORD``, ``CREDENTIAL``, ``PRIVATE``, ``PWD``, or ``AUTH``
+      (case-insensitive; ``daemon/services/env_key_policy.py`` — W2
+      single-sourced with the read-side ``redact_secrets``) is
       REFUSED with ``ERROR: SECRET_SHAPED_KEY`` pointing at
       ``kms_request`` → ``kms_attach``. This is the leader policy:
       plaintext credentials must never transit this tool. (``BASE``
       is read-side redaction only — ``BYOK_BASE_URL`` is writable
       here.)
+    * Non-ASCII env KEY NAMES — keys must be ASCII identifiers
+      (``[A-Za-z_][A-Za-z0-9_]*``); anything else is REFUSED with
+      ``ERROR: INVALID_ENV_KEY``. Homoglyph/unicode names could dodge
+      substring classification while still landing in ``config.env``
+      (W2).
+    * Marker-shaped VALUES — a value matching a full KMS marker
+      (``__KMS_REF__<handle>__`` / ``__KMS_ENV__<var>__``) is REFUSED
+      with ``ERROR: MARKER_VALUE_FORBIDDEN``. Markers are written
+      ONLY by ``kms_attach``; a marker routed through this tool would
+      bypass the attach lane's binding/audit rails (M1 — the
+      resolver's fail-closed presence check remains the backstop).
     * Unknown server → ``ERROR: SERVER_NOT_FOUND`` (name-or-id echoed).
     * Empty/ill-typed ``env`` → ``ERROR: INVALID_ARGUMENT``.
 

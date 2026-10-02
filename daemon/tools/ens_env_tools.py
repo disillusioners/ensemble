@@ -57,9 +57,12 @@ Category / visibility
 Single-tool category, opted into by listing ``"ens-env"`` in
 ``agents/<id>/meta.json`` ``tools.allow``. Worker opt-in lives in
 ``agents/worker/meta.json`` (the install-opendesign consumer lane).
-The category is NOT in ``PRIVILEGED_TOOL_CATEGORIES`` — every agent
-that opts in gets it, mirroring the (non-privileged) ``service``
-category precedent.
+The category IS in ``PRIVILEGED_TOOL_CATEGORIES`` since the W4
+leader decision (reviewer council 2026-10-02): ``ens_env_read`` is
+a key-returning tool, so the empty-allow inherit universe must NOT
+auto-grant it — privileged default-deny makes the opt-in structural
+(an agent reaches this category ONLY through an explicit
+``tools.allow`` entry naming the category or its tool).
 
 The ``open tools.allow``/metadata lookup path was rewritten in 2026-10
 Stage 0 (commits 954e06cb + a1a05c24) — the ``_tools_allow`` closure
@@ -68,7 +71,9 @@ in ``daemon/manager.py`` MUST resolve via ``get_version(id)`` with
 list extended here (``ens-env`` for the worker agent) follows that
 resolution path through ``daemon/tools/instance.py:resolve_tool_filter``.
 Empty ``tools.allow`` continues to mean "inherit/default universe"
-(F1b semantics) — this tool inherits that contract.
+(F1b semantics) — this tool is EXCLUDED from that universe via the
+privileged set (W4), so inherit never grants it; only an explicit
+allow entry does.
 
 Frozen-binary / ``KNOWN_TOOL_NAMES`` discipline: the name
 ``ens_env_read`` is also added to ``KNOWN_TOOL_NAMES`` (the

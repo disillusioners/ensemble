@@ -34,8 +34,10 @@ Plus the worker opt-in:
 Also pinned: the Stage-0 ``_tools_allow`` wire (954e06cb + a1a05c24)
 is NOT regressed by this change — the new category follows the same
 ``tools.allow`` resolution path through
-``daemon/tools/instance.py:resolve_tool_filter`` and the F1b
-empty-allow=inherit contract holds.
+``daemon/tools/instance.py:resolve_tool_filter``; since the W4
+leader decision (2026-10-02) the F1b empty-allow=inherit universe
+EXCLUDES ``ens-env`` via ``PRIVILEGED_TOOL_CATEGORIES`` (explicit
+opt-in only).
 """
 
 from __future__ import annotations
@@ -150,26 +152,35 @@ class TestStaticRegistrationChecklist:
 
 
 class TestSecurityBoundary:
-    def test_not_in_privileged_tool_categories(self) -> None:
-        """``ens-env`` is NOT in ``PRIVILEGED_TOOL_CATEGORIES``.
+    def test_in_privileged_tool_categories(self) -> None:
+        """``ens-env`` IS in ``PRIVILEGED_TOOL_CATEGORIES`` (W4).
 
-        Why: the category is opt-in (only ``tools.allow: ["ens-env"]``
-        holders can call it), but it is NOT daemon-internal authority
-        like ``system_upgrade`` / ``system-log`` / ``ens-db``. Putting
-        it in PRIVILEGED would change the empty-allow semantics
-        (F1b inherit universe would NOT auto-grant it to agents
-        without an explicit allow-list). Mirrors the ``service``
-        non-privilege precedent: opt-in by allow-list, not by global
-        deny.
+        Why: ``ens_env_read`` is a KEY-RETURNING tool — it returns
+        live env values. Task-A's design intent was explicit opt-in:
+        the empty-allow inherit universe must NOT auto-grant a
+        key-returning tool to every agent. Privileged default-deny
+        (R-SR16) makes that structural: an agent reaches the category
+        ONLY through an explicit ``tools.allow`` entry naming
+        ``ens-env`` (or the tool name). The worker keeps access via
+        its explicit ``agents/worker/meta.json`` entry
+        (``TestWorkerOptIn``).
 
-        Pin this so a future maintainer cannot accidentally promote
-        the category.
+        History: the v1 pin asserted the OPPOSITE (NOT privileged);
+        the reviewer council flipped it (leader decision W4,
+        2026-10-02) and this fix pass rewrote the pin to the TRUE
+        semantics. The exact-equality pins of the full set live in
+        test_upgrade_registration.py / test_attestation_registration.py
+        / test_maintenancer_spawn_resolves_tools.py (+ the
+        integration sanity pin in
+        test_service_tool_flag_off_byte_identical.py) — all updated
+        in the same commit per D18/A14.
         """
-        assert ENS_ENV_CATEGORY not in set(PRIVILEGED_TOOL_CATEGORIES), (
-            f"{ENS_ENV_CATEGORY} was added to PRIVILEGED_TOOL_CATEGORIES — "
-            "this changes the empty-allow default grant semantics. If "
-            "this change is intentional, update this test AND the "
-            "D18/A14 triple-pin contract in _tool_registry.py."
+        assert ENS_ENV_CATEGORY in set(PRIVILEGED_TOOL_CATEGORIES), (
+            f"{ENS_ENV_CATEGORY} was removed from PRIVILEGED_TOOL_CATEGORIES — "
+            "that would return the category to empty-allow inherit-grant, "
+            "auto-granting a key-returning tool to every agent. If this "
+            "reversion is intentional, update this test AND the D18/A14 "
+            "exact-equality pins in _tool_registry.py."
         )
 
 
@@ -278,24 +289,64 @@ class TestStage0NonRegression:
         )
 
     def test_empty_allow_does_not_grant_ens_env(self) -> None:
-        """F1b semantics: empty allow + empty deny → None (inherit/
-        default universe). The new ``ens-env`` category follows the
-        F1b contract: NO default grant on empty allow. This is the
-        reason ``ens-env`` is NOT in PRIVILEGED_TOOL_CATEGORIES (see
-        ``TestSecurityBoundary.test_not_in_privileged_tool_categories``).
+        """W4 (leader decision 2026-10-02): ``ens-env`` IS in
+        ``PRIVILEGED_TOOL_CATEGORIES`` — Task-A design intent was
+        explicit opt-in, and the empty-allow inherit universe must
+        NOT grant a key-returning tool (``ens_env_read`` returns live
+        env values).
 
-        Pin: ``resolve_tool_filter`` on empty inputs returns ``None``
-        (= inherit = everything), NOT a list specifically including
-        ``ens_env_read`` (which would mean the category was promoted
-        to default-grant).
+        Two-layer pin of the TRUE (privileged) semantics — the v1
+        version of this test pinned the opposite (non-privileged
+        inherit-grant) and was rewritten by the fix pass:
+
+        (a) ``resolve_tool_filter`` empty-allow + non-empty-deny
+            branch builds the default universe EXCLUDING privileged
+            categories (R-SR16);
+        (b) ``_strip_privileged_category_tools`` strips
+            privileged-category tools on the return-all paths (no
+            tools config, or empty allow+deny → ``None`` inherit).
+
+        Worker access is via its EXPLICIT ``tools.allow`` entry
+        (``TestWorkerOptIn``), not via inherit.
         """
-        from daemon.tools.instance import resolve_tool_filter
+        from types import SimpleNamespace
 
-        result = resolve_tool_filter(allow=[], deny=())
-        # F1b: None = inherit. If this ever returns a set/list, the
-        # empty-allow semantics have flipped and downstream agents
-        # would auto-grant every category.
-        assert result is None, (
-            f"F1b empty-allow semantics regressed: resolve_tool_filter "
-            f"returned {result!r} instead of None"
+        from daemon.tools.instance import (
+            _strip_privileged_category_tools,
+            resolve_tool_filter,
         )
+
+        categories = {
+            ENS_ENV_CATEGORY: [ENS_ENV_TOOL_NAME],
+            "bash": ["bash"],  # non-privileged control
+        }
+        # (a) Empty-allow universe construction. A non-empty deny is
+        # required to reach this branch (empty allow + empty deny
+        # short-circuits to ``None`` at the F1b layer).
+        result = resolve_tool_filter(
+            allow=[], deny=["unrelated-name"], tool_categories=categories
+        )
+        assert result is not None
+        assert ENS_ENV_TOOL_NAME not in result, (
+            f"W4 violation: empty-allow default universe granted the "
+            f"privileged {ENS_ENV_CATEGORY!r} tool "
+            f"{ENS_ENV_TOOL_NAME!r}: {sorted(result)}"
+        )
+        assert "bash" in result, (
+            "the fence must not break legitimate categories — the "
+            "non-privileged control should still resolve"
+        )
+
+        # (b) Return-all path strip (no tools config / empty pair).
+        fake_privileged = SimpleNamespace(
+            _tool_category=ENS_ENV_CATEGORY, name=ENS_ENV_TOOL_NAME
+        )
+        fake_control = SimpleNamespace(_tool_category="bash", name="bash")
+        kept = {
+            getattr(t, "name", None)
+            for t in _strip_privileged_category_tools(
+                [fake_privileged, fake_control]
+            )
+        }
+        assert ENS_ENV_TOOL_NAME not in kept
+        assert "bash" in kept

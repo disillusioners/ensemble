@@ -285,19 +285,25 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly three categories
-    (the daemon-internal authority trio: ``system_upgrade``,
-    ``system-log``, ``ens-db``). The ``service`` category was
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly four categories
+    (the daemon-internal authority trio ``system_upgrade``,
+    ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
+    decision 2026-10-02). The ``service`` category was
     REMOVED from this set by user override 2026-09-16 (D4 reversed;
     see ``.agents/shared/planning/service-tool/decisions.md`` §D4
     override note) — R-SR16 silent additions are visible by pin;
     this is pin file 3 of 3 per the A14 triple-pin discovery."""
 
     def test_privileged_categories_contains_three_entries(self) -> None:
+        # W4 (leader decision 2026-10-02): the set is now a quartet —
+        # ``ens-env`` joined (key-returning tool, explicit opt-in
+        # only). Method name kept for grep-stability; the count moved
+        # 3 → 4 with the same-PR pin update (D18/A14).
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
             "ens-db",
+            "ens-env",
         })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

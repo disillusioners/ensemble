@@ -9,6 +9,7 @@ skills:
       tools:
         - bash
         - infra
+        - ens-env
       env: []
   - name: opendesign-verify
     version: "1.0.0"

@@ -323,7 +323,9 @@ verification path the skill actually used.
 ### Stage 4 — Credentials readiness
 
 The seam row's `config.env` must carry `BYOK_BASE_URL`, `BYOK_API_KEY`
-(only as a `__KMS_REF__<handle>__` marker — NEVER plaintext),
+(only as a marker — LANE-2 `__KMS_ENV__<VAR>__` env-ref (v1.3.0), or
+legacy LANE-1 `__KMS_REF__<handle>__` on older installs — NEVER
+plaintext),
 `BYOK_MODEL`, and `OD_DAEMON_URL`. Read the row:
 
 ```bash
@@ -335,8 +337,7 @@ curl -fsS "$BASE/api/mcp-servers/$ROW_ID" | python3 -c \
    print(json.dumps({'OD_DAEMON_URL': env.get('OD_DAEMON_URL'), \
                      'BYOK_BASE_URL': env.get('BYOK_BASE_URL'), \
                      'BYOK_MODEL': env.get('BYOK_MODEL'), \
-                     'BYOK_API_KEY': env.get('BYOK_API_KEY'), \
-                     'bound_handles_count': len((r.get('instance_metadata') or {}).get('bound_handles') or [])}))"
+                     'BYOK_API_KEY': env.get('BYOK_API_KEY')}))"
 ```
 
 Per-field checks:
@@ -344,9 +345,9 @@ Per-field checks:
 | Field        | Required | Form                                                  |
 |--------------|----------|-------------------------------------------------------|
 | `OD_DAEMON_URL` | yes  | plaintext URL                                          |
-| `BYOK_BASE_URL` | yes  | plaintext URL                                          |
+| `BYOK_BASE_URL` | yes  | plaintext URL (reads back `[REDACTED]`)                |
 | `BYOK_MODEL`    | yes  | plaintext model identifier                             |
-| `BYOK_API_KEY`  | yes  | `__KMS_ENV__OPENAI_API_KEY__` env-ref marker ONLY (v1.3.0 LANE-2) — never plaintext |
+| `BYOK_API_KEY`  | yes  | marker at rest — LANE-2 `__KMS_ENV__<VAR>__` env-ref (v1.3.0) or legacy LANE-1 `__KMS_REF__<HANDLE>__` — never plaintext; reads back `[REDACTED]` (see the redaction reminder below) |
 
 If ANY field is missing or malformed, the skill must COLLECT/GUIDE — not
 fail silently. The skill reports EXACTLY which fields are missing and
@@ -367,17 +368,22 @@ handles / re-bind env-refs) after any reconfigure. The HTTP lane's
 install-audit and idempotency rails protect the HTTP lane; the
 agent lane owns its own re-apply.
 
-**Read-back redaction reminder:** `BYOK_BASE_URL` reads back
-`[REDACTED]` through the HTTP API (presentation-layer redaction —
-`KEY/TOKEN/SECRET/PASSWORD/BASE/HEADERS` are all redacted by the
-`redact_secrets` helper at `daemon/routers/mcp_servers.py`). This
-is EXPECTED — verify the key IS present (its slot is non-empty);
-verify the value via the Stage 5 round-trip, not by reading the
-field. `BYOK_API_KEY` reads back as an env-ref marker
-(`__KMS_ENV__<VAR>__`) which is the correct evidence that the
-`kms_attach(env_source=...)` call landed. (Older installs may
-carry a `__KMS_REF__<HANDLE>__` LANE-1 marker in this slot —
-that path is preserved as a back-compat read.)
+**Read-back redaction reminder (C2, corrected v1.3.0 fix pass):**
+BOTH `BYOK_BASE_URL` AND `BYOK_API_KEY` read back `[REDACTED]`
+through the HTTP API (presentation-layer redaction — the
+`redact_secrets` helper at `daemon/routers/mcp_servers.py`
+`[REDACTED]`s ANY secret-shaped env name, `*KEY*` included). The
+marker shape at rest is therefore NOT observable through this read
+lane, and a `bound_handles` count over the API is not available as
+evidence either (`McpServerInfo` carries no `instance_metadata` —
+that read lane does not exist). Stage-4 verification evidence is
+exactly: (1) the `BYOK_API_KEY` slot is NON-EMPTY in the read-back
+(its value shows `[REDACTED]`), (2) the `kms_attach` call earlier in
+this flow returned success (the tool result echoed the marker —
+names only, never values), and (3) the Stage 5 smoke round-trip
+passes. (Older installs may carry a LANE-1 `__KMS_REF__<HANDLE>__`
+marker at rest in this slot — a valid back-compat shape; same
+evidence applies.)
 
 ### Stage 5 — `od_generate_design` end-to-end smoke
 
@@ -412,9 +418,12 @@ EOF
   genuine configuration error. The most likely cause is that
   `OPENAI_API_KEY` is unset in the daemon's process env (an
   eager `ERROR: ENV_VAR_NOT_FOUND` would have surfaced at attach
-  time too). Verify via the daemon's `ps` env (e.g.
-  `cat /proc/<pid>/environ | tr '\0' '\n' | grep OPENAI_API_KEY` —
-  present as the `KEY_NAME=…` tuple, not the value). If the var
+  time too). Verify via a NON-ECHOING presence check on the
+  daemon's `ps` env — COUNT ONLY, never the value (PB-F1: a
+  value echoed into a bash tool-result lands in checkpoints):
+  `tr '\0' '\n' < /proc/<pid>/environ | grep -c '^OPENAI_API_KEY='`
+  → `1` means present (name-only evidence; a value is never
+  printed), `0` means unset. If the var
   is set but still 401s, the issue is upstream-side (key revoked,
   wrong account, quota exhausted) — diagnose via the upstream
   portal, not via this skill.
@@ -562,9 +571,14 @@ never cross the tool boundary in plaintext (PB-F1).
 
 ### 3b — Read live env via `ens_env_read`
 
-Call `ens_env_read(keys=None)` (default-curated BYOK set). The
-result is the canonical mapping-table payload — see §"BYOK
-mapping" above.
+Call `ens_env_read(keys=["OPENAI_BASE_URL", "OPENAI_MODEL_VISION"])`
+(explicit-keys form; W3 fix pass 2026-10-02). The env-ref lane needs
+only the var NAME of the API key (passed as
+`env_source="OPENAI_API_KEY"` to `kms_attach` in Step 3d) — the
+provisioning flow must NEVER read the API key VALUE at all, so the
+key is deliberately absent from the request set. The result is the
+canonical mapping-table payload for the two requested keys — see
+§"BYOK mapping" above.
 
 Audited-only response handling: the result JSON carries the
 values; the skill extracts the value into a working variable
@@ -578,12 +592,14 @@ If the response carries `{"error": "ens_env_read failed:
 daemon may have lost access to its `.env`, which is a daemon-side
 concern.
 
-Check `_missing`: any required key in `["OPENAI_BASE_URL",
-"OPENAI_API_KEY"]` listed in `_missing` is a real blocker
-(BYOK_BASE_URL/BYOK_API_KEY cannot be derived from empty
-values). Emit
+Check `_missing`: `OPENAI_BASE_URL` listed in `_missing` is a real
+blocker (BYOK_BASE_URL cannot be derived from an empty value). Emit
 `BLOCKED-ON-CREDENTIALS` with
 `detection_evidence="missing_required_env_keys:<keys>"`.
+(`OPENAI_API_KEY` absence is a blocker too, but it is detected at
+Step 3d attach time as the tool's eager
+`ERROR: ENV_VAR_NOT_FOUND` — the flow treats that as the same
+`BLOCKED-ON-CREDENTIALS` outcome; it is never read via this tool.)
 
 For `OPENAI_MODEL_VISION`: if absent/empty, fall back to
 literal `"vision"` per the precedence rule in §"BYOK mapping".
@@ -604,7 +620,12 @@ Important behavioral notes:
   replaces. `__KMS_REF__` and `__KMS_ENV__` markers written by
   `kms_attach` are preserved.
 - The tool REJECTS secret-shaped KEY NAMES (any key whose name
-  has KEY/TOKEN/SECRET/PASSWORD as a substring). It will return
+  has KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL/PRIVATE/PWD/AUTH as a
+  substring — the shared policy at `daemon/services/
+  env_key_policy.py`), non-ASCII key names
+  (`ERROR: INVALID_ENV_KEY`), and marker-shaped VALUES
+  (`ERROR: MARKER_VALUE_FORBIDDEN` — markers go through
+  `kms_attach` only). It returns
   `ERROR: SECRET_SHAPED_KEY` for `BYOK_API_KEY` — that is the
   EXPECTED response if you accidentally try it; `BYOK_API_KEY`
   goes through `kms_attach`, NOT this write.
@@ -657,7 +678,14 @@ env-ref mode:
   `config.env["BYOK_API_KEY"]`. Existing keys + any prior
   `__KMS_REF__` markers (LANE-1, from a prior install run) are
   preserved by the read-fresh→merge→write pattern (R1 invariant,
-  same as `mcp_set_env`).
+  same as `mcp_set_env`). ONE deliberate exception (M5 note): a
+  LANE-2 attach targeting a slot that already holds a v1.2-era
+  LANE-1 `__KMS_REF__` marker SILENTLY OVERWRITES that slot's
+  marker (same env_key → the new marker replaces the old) — an
+  intentional upgrade path (the restart-durable env-ref binding
+  supersedes the restart-drained KMS-Lite handle); the stale
+  `bound_handles` entry remains until re-attach/cleanup and is
+  harmless.
 - The binding entry `{env_key: "BYOK_API_KEY", env_source:
   "OPENAI_API_KEY", actor: <current_instance_id>}` is appended
   to `instance_metadata.env_refs` (new list, mirroring

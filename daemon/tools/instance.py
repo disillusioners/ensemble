@@ -5443,11 +5443,13 @@ Returns:
 def _strip_privileged_category_tools(tools: list[Any]) -> list[Any]:
     """Strip default-deny categories from a default-allow (unfiltered) list.
 
-    BEHAVIORAL criterion (trio as of override 2026-09-16;
-    see .agents/shared/planning/service-tool/decisions.md §D4 —
-    D4 Option A reversed, service REMOVED): categories in
+    BEHAVIORAL criterion (quartet as of the W4 leader decision,
+    reviewer council 2026-10-02; see .agents/shared/planning/
+    service-tool/decisions.md §D4 — D4 Option A reversed, service
+    REMOVED): categories in
     ``PRIVILEGED_TOOL_CATEGORIES`` (today: ``system_upgrade``,
-    ``system-log``, ``ens-db``) are never default-granted — an agent reaches them ONLY through an
+    ``system-log``, ``ens-db``, ``ens-env``) are never
+    default-granted — an agent reaches them ONLY through an
     explicit ``tools.allow`` entry naming the category or one of its
     tools. The default-allow paths below (no tools config at all, or an
     empty allow+deny pair — e.g. ``watcher``) would otherwise

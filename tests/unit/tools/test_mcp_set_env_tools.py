@@ -44,15 +44,16 @@ from daemon.repositories.mcp_server import (
     McpServer,
     SQLModelMcpServerRepository,
 )
+from daemon.services.env_key_policy import (
+    SECRET_MARKER_WORDS,
+    env_key_is_secret_shaped,
+)
 from daemon.tools._tool_registry import (
     CATEGORY_MODULES,
     KNOWN_TOOL_NAMES,
     discover_source_only_tool_names,
 )
-from daemon.tools.infra import (
-    _env_key_is_secret_shaped,
-    create_mcp_env_tools,
-)
+from daemon.tools.infra import create_mcp_env_tools
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -264,12 +265,133 @@ class TestSecretShapedRejection:
             == BASE_URL_VALUE
         )
 
-    def test_marker_classifier(self) -> None:
-        assert _env_key_is_secret_shaped("BYOK_API_KEY")
-        assert _env_key_is_secret_shaped("api_token")
-        assert not _env_key_is_secret_shaped("BYOK_BASE_URL")
-        assert not _env_key_is_secret_shaped("BYOK_MODEL")
-        assert not _env_key_is_secret_shaped("OD_DAEMON_URL")
+    def test_marker_classifier_shared_policy(self) -> None:
+        """W2: classification is single-sourced at
+        ``daemon/services/env_key_policy.py`` — the broadened
+        conservative word list (8 words), same helper both the write
+        gate and ``redact_secrets`` consume."""
+        assert env_key_is_secret_shaped("BYOK_API_KEY")
+        assert env_key_is_secret_shaped("api_token")
+        # Broadened words (W2 leader decision) — each must classify.
+        assert env_key_is_secret_shaped("MY_AUTH_HEADER")
+        assert env_key_is_secret_shaped("DB_PWD")
+        assert env_key_is_secret_shaped("SERVICE_CREDENTIAL")
+        assert env_key_is_secret_shaped("PRIVATE_KEY_PATH")
+        assert not env_key_is_secret_shaped("BYOK_BASE_URL")
+        assert not env_key_is_secret_shaped("BYOK_MODEL")
+        assert not env_key_is_secret_shaped("OD_DAEMON_URL")
+        # Exactly the reviewer's 8 words — no beyond-reviewer creep.
+        assert SECRET_MARKER_WORDS == (
+            "KEY",
+            "TOKEN",
+            "SECRET",
+            "PASSWORD",
+            "CREDENTIAL",
+            "PRIVATE",
+            "PWD",
+            "AUTH",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 3b. W2 ASCII-identifier gate + M1 marker-value rejection
+# ---------------------------------------------------------------------------
+
+
+class TestAsciiKeyGate:
+    """W2: write-path env keys must be ASCII identifiers —
+    non-ASCII / homoglyph names could dodge substring classification."""
+
+    @pytest.mark.parametrize(
+        "key",
+        ["КЕY", "KEY\u200b", "すし_KEY", "a-b_c", "1_KEY", "KEY NAME", ""],
+    )
+    def test_non_ascii_or_non_identifier_key_rejected(
+        self, mcp_set_env, repository, seed_server, key
+    ) -> None:
+        raw = mcp_set_env.invoke({"server": SERVER_NAME, "env": {key: "val"}})
+        assert raw.startswith("ERROR: INVALID_ENV_KEY"), raw
+        # Row untouched.
+        row = _read_row(repository, seed_server.id)
+        assert key not in row.config["env"]
+
+    def test_valid_posix_style_key_passes(
+        self, mcp_set_env, repository, seed_server
+    ) -> None:
+        raw = mcp_set_env.invoke(
+            {"server": SERVER_NAME, "env": {"MY_LOG_LEVEL_2": "debug"}}
+        )
+        assert raw.startswith("{")
+        assert (
+            _read_row(repository, seed_server.id).config["env"]["MY_LOG_LEVEL_2"]
+            == "debug"
+        )
+
+
+class TestBroadenedSecretWords:
+    """W2 leader decision: the shared 8-word list gates the write path
+    (previously 4 words). BASE stays write-legal."""
+
+    @pytest.mark.parametrize(
+        "key",
+        ["OD_AUTH", "DB_PWD", "SERVICE_CREDENTIAL", "PRIVATE_KEY_PATH"],
+    )
+    def test_new_secret_words_rejected(
+        self, mcp_set_env, repository, seed_server, key
+    ) -> None:
+        raw = mcp_set_env.invoke(
+            {"server": SERVER_NAME, "env": {key: "plaintext-value"}}
+        )
+        assert raw.startswith("ERROR: SECRET_SHAPED_KEY"), raw
+        assert "plaintext-value" not in str(_read_row(repository, seed_server.id).config)
+
+    def test_base_url_still_writable(self, mcp_set_env, seed_server) -> None:
+        raw = mcp_set_env.invoke(
+            {"server": SERVER_NAME, "env": {"BYOK_BASE_URL": BASE_URL_VALUE}}
+        )
+        assert raw.startswith("{")
+
+
+class TestMarkerValueRejection:
+    """M1 fold-in: marker-shaped VALUES are rejected — markers are
+    ``kms_attach``-only; routing one through ``mcp_set_env`` would
+    bypass the attach lane's binding/audit rails (resolver
+    fail-closed remains the backstop)."""
+
+    @pytest.mark.parametrize(
+        "marker_value",
+        [
+            "__KMS_REF__KMS_HANDLE_abc123__",
+            "__KMS_ENV__OPENAI_API_KEY__",
+        ],
+    )
+    def test_marker_shaped_value_rejected(
+        self, mcp_set_env, repository, seed_server, marker_value
+    ) -> None:
+        raw = mcp_set_env.invoke(
+            {"server": SERVER_NAME, "env": {"BYOK_BASE_URL": marker_value}}
+        )
+        assert raw.startswith("ERROR: MARKER_VALUE_FORBIDDEN"), raw
+        assert "kms_attach" in raw
+        # Row untouched — the audit-bypass write never landed.
+        row = _read_row(repository, seed_server.id)
+        assert row.config["env"].get("BYOK_BASE_URL") != marker_value
+
+    def test_plain_values_still_pass(
+        self, mcp_set_env, repository, seed_server
+    ) -> None:
+        raw = mcp_set_env.invoke(
+            {
+                "server": SERVER_NAME,
+                "env": {
+                    "BYOK_BASE_URL": "__not_a_marker__",
+                    "BYOK_MODEL": MODEL_VALUE,
+                },
+            }
+        )
+        assert raw.startswith("{")
+        env = _read_row(repository, seed_server.id).config["env"]
+        assert env["BYOK_BASE_URL"] == "__not_a_marker__"
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +511,29 @@ class TestNoKeyMaterialInLogs:
         assert "sk-plaintext-xyz" not in caplog.text
         assert "sk-plaintext-xyz" not in raw
 
+    def test_audit_counts_both_marker_prefixes(
+        self, mcp_set_env, repository, seed_server, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """M2 fold-in: ``marker_keys_preserved`` counts BOTH marker
+        shapes — LANE-1 ``__KMS_REF__`` AND LANE-2 ``__KMS_ENV__`` —
+        via the resolver's ``is_marker`` (previously LANE-1-only
+        ``startswith``)."""
+        # Pre-seed a LANE-2 marker alongside the seeded LANE-1 marker.
+        fresh = _read_row(repository, seed_server.id)
+        env = dict(fresh.config["env"])
+        env["OD_API_TOKEN"] = "__KMS_ENV__OD_API_TOKEN__"
+        repository.update_mcp_server(seed_server.id, config={**fresh.config, "env": env})
+
+        with caplog.at_level(logging.INFO, logger="daemon.tools.infra"):
+            raw = mcp_set_env.invoke(
+                {"server": SERVER_NAME, "env": {"BYOK_MODEL": MODEL_VALUE}}
+            )
+        assert json.loads(raw)["ok"] is True
+        preserved_line = next(
+            line for line in caplog.text.splitlines() if "marker_keys_preserved" in line
+        )
+        assert "marker_keys_preserved=2" in preserved_line, preserved_line
+
 
 # ---------------------------------------------------------------------------
 # Registration seam (4-step discipline, Task A precedent)
@@ -429,11 +574,30 @@ class TestRegistrationSeam:
         assert "infra" in meta["tools"]["allow"]
 
     def test_trailing_newline_task_a_files(self) -> None:
-        """MINOR-1 fold-in: the three Task-A files must end with \\n."""
+        """MINOR-1 fold-in + W5: every file touched by the 4 commits of
+        feature/od-self-provisioning (bb465174 ens_env_read →
+        d4af89b3 mcp_set_env → a0100b0e skill v1.3.0 → 878928e9
+        env-ref bridge) must end with \\n."""
         for rel in (
+            # bb465174 — ens_env_read
+            "agents/worker/meta.json",
+            "daemon/tools/_tool_registry.py",
             "daemon/tools/ens_env_tools.py",
-            "tests/unit/tools/test_ens_env_tools.py",
+            "daemon/tools/instance.py",
             "tests/unit/tools/test_ens_env_registration.py",
+            "tests/unit/tools/test_ens_env_tools.py",
+            # d4af89b3 — mcp_set_env
+            "daemon/tools/infra.py",
+            "tests/unit/tools/test_mcp_set_env_tools.py",
+            # a0100b0e — skill v1.3.0
+            "agents/worker/skill-set.yaml",
+            "agents/worker/skills-template/install-opendesign.md",
+            # 878928e9 — env-ref bridge
+            "daemon/services/kms_lite.py",
+            "daemon/services/kms_resolver.py",
+            "tests/unit/services/test_kms_resolver.py",
+            "tests/unit/test_mcp_warmup_pool.py",
+            "tests/unit/tools/test_kms_attach_env_ref.py",
         ):
             data = (REPO_ROOT / rel).read_bytes()
             assert data.endswith(b"\n"), f"{rel} missing trailing newline"
