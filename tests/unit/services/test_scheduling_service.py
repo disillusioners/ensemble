@@ -161,6 +161,7 @@ def service_env(monkeypatch):
     yield repo, registry
     svc._deps.source_repo = None
     svc._deps.source_registry = None
+    svc._deps.project_repository = None
     svc._source_locks.clear()
 
 
@@ -515,3 +516,235 @@ class TestTzWarningSurface:
             caller_instance_id="t", caller_agent_id="t",
         )
         assert result.tz_warning == ""
+
+
+# ---------------------------------------------------------------------------
+# User timezone setting rung (tz chain priority)
+# ---------------------------------------------------------------------------
+
+
+def _wire_user_tz(monkeypatch, stored_value) -> MagicMock:
+    """Stub the user-timezone preference read at the repo seam.
+
+    Patches ``Session`` on the *user_timezone_utils* module (the same
+    technique as ``tests/test_settings_api.py``'s helper tests) and wires
+    a project-repo double through ``svc.configure`` so the service
+    wrapper's metadata read resolves to ``stored_value``.
+    """
+    from daemon.services import user_timezone_utils as utz
+
+    class _DummySession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(utz, "Session", lambda *_a, **_kw: _DummySession())
+    project_repo = MagicMock()
+    record = None if stored_value is None else SimpleNamespace(meta_value=stored_value)
+    project_repo.get_metadata_record.return_value = record
+    svc.configure(project_repository=project_repo)
+    return project_repo
+
+
+async def _create_daily(repo, monkeypatch_env_done=True, **payload_overrides):
+    """Create a 06:00 daily schedule with the given payload, return the result."""
+    payload = {
+        "label": "tz-rung", "agent": "ari", "message": "m",
+        "when": "06:00", "recurrence": "daily", "timezone": None,
+    }
+    payload.update(payload_overrides)
+    return await svc.create_schedule(payload, caller_instance_id="t", caller_agent_id="t")
+
+
+class TestUserTimezoneRung:
+    """Chain priority: explicit → user-setting → env default → host-local → UTC.
+
+    The user-setting rung is implemented at THIS service wrapper (repo
+    access lives here); ``daemon.util.tz.resolve_timezone`` stays pure and
+    receives the preference as the preferred ``default``. Pins:
+
+    * a SET + VALID user tz beats the env default and resolves CLEAN
+      (no warning — deliberate user choice, never a fallback);
+    * an explicit param ALWAYS wins (and skips the metadata read);
+    * an unset / invalid stored value falls through SILENTLY to the env
+      default (no warning when the env rung resolves);
+    * the UTC terminal warning is unchanged (nothing set anywhere).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_tz_chain(self, monkeypatch):
+        """Kill host-local detection + env default so every rung is observable.
+
+        Mirrors ``tests/unit/test_tz_resolver.py::_isolate_host_detection``:
+        cache-seconds=0 keeps ``detect_host_local_timezone`` fresh; with
+        /etc/localtime + TZ + env default all neutralized, the terminal
+        rung (UTC + warning) is the only thing left when the earlier
+        rungs are absent.
+        """
+        from daemon.util import tz as tz_module
+
+        monkeypatch.setenv("ENSEMBLE_SCHEDULING_HOST_LOCAL_TZ_CACHE_SECONDS", "0")
+        monkeypatch.delenv("ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE", raising=False)
+        monkeypatch.delenv("TZ", raising=False)
+        monkeypatch.setattr(tz_module, "_read_etc_localtime_target", lambda: None)
+        tz_module._cache_clear_for_tests()
+        yield
+        tz_module._cache_clear_for_tests()
+
+    @pytest.mark.asyncio
+    async def test_set_user_tz_beats_env_default_with_no_warning(self, service_env, monkeypatch):
+        """SET + VALID user tz wins over the env default; resolves CLEAN."""
+        repo, _registry = service_env
+        monkeypatch.setenv("ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE", "America/New_York")
+        _wire_user_tz(monkeypatch, "Asia/Bangkok")
+
+        result = await _create_daily(repo)
+        assert repo.rows["tz-rung"].config["timezone"] == "Asia/Bangkok"
+        assert result.tz_warning == ""
+
+    @pytest.mark.asyncio
+    async def test_set_user_tz_resolves_local_echo_in_user_zone(self, service_env, monkeypatch):
+        """The LOCAL echo is rendered in the user tz when it wins the chain."""
+        repo, _registry = service_env
+        _wire_user_tz(monkeypatch, "Asia/Bangkok")
+
+        result = await _create_daily(repo)
+        assert result.next_run_at_local is not None
+        assert result.next_run_at_local.endswith("+07:00")
+        assert result.next_run_at_utc is not None
+
+    @pytest.mark.asyncio
+    async def test_explicit_wins_over_user_setting(self, service_env, monkeypatch):
+        repo, _registry = service_env
+        _wire_user_tz(monkeypatch, "Asia/Bangkok")
+
+        result = await _create_daily(repo, timezone="America/New_York")
+        assert repo.rows["tz-rung"].config["timezone"] == "America/New_York"
+        assert result.tz_warning == ""
+
+    @pytest.mark.asyncio
+    async def test_explicit_skips_the_metadata_read(self, service_env, monkeypatch):
+        """Cost pin: zero metadata reads when the caller pinned a tz."""
+        repo, _registry = service_env
+        project_repo = _wire_user_tz(monkeypatch, "Asia/Bangkok")
+
+        await _create_daily(repo, timezone="America/New_York")
+        project_repo.get_metadata_record.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unset_stored_value_falls_to_env_silently(self, service_env, monkeypatch):
+        """No stored row → env default applies, still no warning."""
+        repo, _registry = service_env
+        monkeypatch.setenv("ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE", "America/New_York")
+        project_repo = _wire_user_tz(monkeypatch, None)
+
+        result = await _create_daily(repo)
+        assert repo.rows["tz-rung"].config["timezone"] == "America/New_York"
+        assert result.tz_warning == ""
+        project_repo.get_metadata_record.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_invalid_stored_value_falls_to_env_silently(self, service_env, monkeypatch):
+        """Invalid-at-read stored value → treated as unset, SILENT fall-through."""
+        repo, _registry = service_env
+        monkeypatch.setenv("ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE", "America/New_York")
+        _wire_user_tz(monkeypatch, "Not/ARealZone")
+
+        result = await _create_daily(repo)
+        assert repo.rows["tz-rung"].config["timezone"] == "America/New_York"
+        assert result.tz_warning == ""
+
+    @pytest.mark.asyncio
+    async def test_set_user_tz_used_when_env_absent(self, service_env, monkeypatch):
+        """User tz is the preferred default even with no env default configured."""
+        repo, _registry = service_env
+        _wire_user_tz(monkeypatch, "Asia/Bangkok")
+
+        result = await _create_daily(repo)
+        assert repo.rows["tz-rung"].config["timezone"] == "Asia/Bangkok"
+        assert result.tz_warning == ""
+
+    @pytest.mark.asyncio
+    async def test_nothing_set_terminal_utc_warning_unchanged(self, service_env, monkeypatch):
+        """Full matrix floor: no explicit, no user tz, no env → UTC + loud warning."""
+        repo, _registry = service_env
+        _wire_user_tz(monkeypatch, None)
+
+        result = await _create_daily(repo)
+        assert repo.rows["tz-rung"].config["timezone"] == "UTC"
+        assert result.tz_warning != ""
+        assert "UTC" in result.tz_warning
+
+    @pytest.mark.asyncio
+    async def test_explicit_invalid_still_warns_utc_despite_user_setting(
+        self, service_env, monkeypatch
+    ):
+        """Explicit beats user-setting even when explicit is INVALID (D2 step-1
+        contract): UTC + 'Invalid tz' warning — the user-setting rung is
+        never consulted after an explicit param."""
+        repo, _registry = service_env
+        _wire_user_tz(monkeypatch, "Asia/Bangkok")
+
+        result = await _create_daily(repo, timezone="Not/ARealZone")
+        assert repo.rows["tz-rung"].config["timezone"] == "UTC"
+        assert "Invalid tz" in result.tz_warning
+
+    @pytest.mark.asyncio
+    async def test_user_setting_rung_covers_cron_probe_site(self, service_env, monkeypatch):
+        """The cron-validation call site (:687) rides the same chain."""
+        repo, _registry = service_env
+        _wire_user_tz(monkeypatch, "Asia/Bangkok")
+
+        result = await _create_daily(
+            repo, recurrence="cron", when="ignored", cron_expression="0 6 * * *"
+        )
+        assert repo.rows["tz-rung"].config["timezone"] == "Asia/Bangkok"
+        assert result.tz_warning == ""
+
+    @pytest.mark.asyncio
+    async def test_user_setting_rung_covers_once_anchor_site(self, service_env, monkeypatch):
+        """The once-anchor call site (:706) rides the same chain — naive ISO
+        anchors in the USER tz when it wins."""
+        repo, _registry = service_env
+        _wire_user_tz(monkeypatch, "Asia/Bangkok")
+
+        result = await _create_daily(
+            repo, recurrence="once", when="2026-10-05T06:00:00"
+        )
+        assert repo.rows["tz-rung"].config["timezone"] == "Asia/Bangkok"
+        # 06:00 Bangkok = 23:00Z the previous day.
+        assert result.next_run_at_utc == "2026-10-04T23:00:00+00:00"
+        assert result.tz_warning == ""
+
+    @pytest.mark.asyncio
+    async def test_update_explicit_tz_change_flows_through_wrapper(
+        self, service_env, monkeypatch
+    ):
+        """Update-path call site (:931): an explicit tz CHANGE re-resolves via
+        the (now async) wrapper — guards the awaited signature end-to-end."""
+        repo, registry = service_env
+        repo.rows["u1"] = _row("u1", config={"recurrence": "daily", "local_time": "06:00",
+                                             "timezone": "UTC", "schedule": "0 6 * * *"})
+        _wire_user_tz(monkeypatch, "Asia/Bangkok")
+
+        result = await svc.update_schedule("u1", {"timezone": "America/New_York"})
+        assert repo.rows["u1"].config["timezone"] == "America/New_York"
+        assert result.tz_warning == ""
+
+    @pytest.mark.asyncio
+    async def test_update_without_explicit_tz_does_not_consult_user_setting(
+        self, service_env, monkeypatch
+    ):
+        """Update only re-resolves on an explicit tz change (pre-existing
+        semantics) — the stored row's tz is NOT silently re-zoned by the
+        user preference."""
+        repo, _registry = service_env
+        repo.rows["u1"] = _row("u1", config={"recurrence": "daily", "local_time": "06:00",
+                                             "timezone": "UTC", "schedule": "0 6 * * *"})
+        project_repo = _wire_user_tz(monkeypatch, "Asia/Bangkok")
+
+        await svc.update_schedule("u1", {"message": "new text"})
+        assert repo.rows["u1"].config["timezone"] == "UTC"
+        project_repo.get_metadata_record.assert_not_called()

@@ -363,3 +363,51 @@ class TestComputeNextCronFireMonotonicGuard:
             f"expected monotonic-guard warning, got: "
             f"{[r.getMessage() for r in caplog.records]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# User-timezone-setting rung contract (user-timezone-setting feature)
+# ---------------------------------------------------------------------------
+
+
+class TestUserTimezoneRungContract:
+    """The user-setting rung is fed in as ``default`` — resolver stays pure.
+
+    The service wrapper (``daemon.services.scheduling_service
+    ._resolve_schedule_timezone``) reads the user timezone preference and
+    passes it as the preferred ``default``; ``resolve_timezone`` itself
+    gains no logic. These pins document the wrapper↔resolver contract:
+    a valid ``default`` resolves CLEAN (no warning — deliberate user
+    choice, never a fallback), and an explicit param still short-circuits.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_host_detection(self, monkeypatch):
+        """Same isolation as ``TestResolveTimeZoneChain`` (deterministic host)."""
+        monkeypatch.setenv("ENSEMBLE_SCHEDULING_HOST_LOCAL_TZ_CACHE_SECONDS", "0")
+        monkeypatch.delenv("ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE", raising=False)
+        monkeypatch.delenv("TZ", raising=False)
+        monkeypatch.setattr(tz_module, "_read_etc_localtime_target", lambda: None)
+        tz_module._cache_clear_for_tests()
+        yield
+        tz_module._cache_clear_for_tests()
+
+    def test_user_setting_as_default_resolves_clean_no_warning(self):
+        """SET + VALID user tz fed as ``default`` → ZoneInfo + EMPTY warning."""
+        zone, warning = resolve_timezone(None, default="Asia/Bangkok", for_tool=True)
+        assert zone == ZoneInfo("Asia/Bangkok")
+        assert warning == ""
+
+    def test_explicit_still_wins_over_user_setting_default(self):
+        zone, warning = resolve_timezone(
+            "America/New_York", default="Asia/Bangkok", for_tool=True
+        )
+        assert zone == ZoneInfo("America/New_York")
+        assert warning == ""
+
+    def test_invalid_user_setting_default_falls_to_host_then_utc(self):
+        """A default that stopped validating between read and use falls
+        through the pure chain (host-local is neutralized here → UTC)."""
+        zone, warning = resolve_timezone(None, default="Not/ARealZone", for_tool=True)
+        assert zone == dt_timezone.utc
+        assert "Invalid tz" in warning

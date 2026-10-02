@@ -141,7 +141,8 @@ class ScheduleCreatePayload(BaseModel):
     timezone: str | None = Field(
         default=None,
         description=(
-            "IANA timezone (e.g. 'America/New_York'); None = "
+            "IANA timezone (e.g. 'America/New_York'); None = the user "
+            "timezone setting (when set), then "
             "SchedulingConfig.default_timezone, then host-local, then UTC "
             "with a loud warning echoed in the response."
         ),
@@ -235,6 +236,7 @@ class _Deps:
     def __init__(self) -> None:
         self.source_repo: Any = None
         self.source_registry: Any = None
+        self.project_repository: Any = None
 
 
 # Single-manager assumption (intentional, do NOT restructure): this
@@ -260,18 +262,26 @@ async def _get_source_lock(source_id: str) -> asyncio.Lock:
         return lock
 
 
-def configure(source_repo: Any = None, source_registry: Any = None) -> None:
+def configure(
+    source_repo: Any = None,
+    source_registry: Any = None,
+    project_repository: Any = None,
+) -> None:
     """Wire the repository / registry dependencies (idempotent).
 
     Called by ``InstanceManager.scheduling_service`` on first access and
     safe to call again with richer deps. Passing ``None`` leaves the
     existing value untouched so partial test doubles do not clobber a
-    previously-configured dep.
+    previously-configured dep. ``project_repository`` backs the user
+    timezone preference rung of the tz resolution chain (best-effort —
+    the chain falls through silently when it is absent).
     """
     if source_repo is not None:
         _deps.source_repo = source_repo
     if source_registry is not None:
         _deps.source_registry = source_registry
+    if project_repository is not None:
+        _deps.project_repository = project_repository
 
 
 def _require_repo() -> Any:
@@ -329,17 +339,57 @@ def _parse_hhmm(when: str) -> tuple[int, int]:
     )
 
 
-def _resolve_schedule_timezone(payload_tz: str | None) -> tuple[Any, str, str]:
-    """Resolve the payload timezone through the D2 chain.
+async def _user_timezone_setting() -> str | None:
+    """Read the user timezone preference off the configured project repo.
+
+    Best-effort bootstrap-safety (mirrors ``_default_scheduling_timezone``):
+    ``None`` — never a raise — whenever the repo is unconfigured or the
+    read fails. The underlying helper already treats unset / invalid-at-
+    read rows as ``None`` (fall through the chain silently).
+    """
+    project_repo = _deps.project_repository
+    if project_repo is None:
+        return None
+    from daemon.services.user_timezone_utils import get_user_timezone_preference
+
+    try:
+        return await asyncio.to_thread(get_user_timezone_preference, project_repo)
+    except Exception as exc:  # noqa: BLE001 — bootstrap-safety (mirrors adapter)
+        logger.debug("scheduling_service: user tz preference unavailable (%s)", exc)
+        return None
+
+
+async def _resolve_schedule_timezone(payload_tz: str | None) -> tuple[Any, str, str]:
+    """Resolve the payload timezone through the D2 chain (user-setting aware).
+
+    Chain (ordered): explicit ``payload_tz`` → user timezone setting
+    (``project_metadata_records`` singleton, when set + valid) →
+    ``SchedulingConfig.default_timezone`` (env) → host-local → UTC + loud
+    warning. The resolver itself (``daemon.util.tz.resolve_timezone``)
+    stays pure — the user-setting rung is fed in as the preferred
+    ``default`` here at the service-wrapper layer, where repo access lives.
+
+    Semantics: an explicit param ALWAYS wins (and skips the metadata read);
+    a SET + VALID user tz beats the env default and resolves cleanly (no
+    warning — deliberate user choice); an unset / invalid stored value
+    falls through SILENTLY to the env rung; the UTC terminal warning is
+    unchanged.
 
     Returns ``(zone, zone_name, tz_warning)``. The warning is NEVER
     suppressed (OD-4) — callers echo it into every response surface.
     """
     from daemon.util.tz import resolve_timezone
 
+    default = _default_scheduling_timezone()
+    if not payload_tz:
+        # Only spend the metadata read when the explicit param is absent
+        # (one read per create/update, zero when the caller pinned a tz).
+        user_tz = await _user_timezone_setting()
+        if user_tz:
+            default = user_tz
     zone, warning = resolve_timezone(
         payload_tz,
-        default=_default_scheduling_timezone(),
+        default=default,
         for_tool=True,
     )
     return zone, _zone_name(zone), (warning or "")
@@ -635,7 +685,7 @@ async def create_schedule(
         if not payload.cron_expression:
             raise ValueError("cron_expression is required when recurrence='cron'")
         try:
-            zone_probe, zone_name, tz_warning = _resolve_schedule_timezone(payload.timezone)
+            zone_probe, zone_name, tz_warning = await _resolve_schedule_timezone(payload.timezone)
             now_probe = datetime.now(zone_probe)
             croniter(payload.cron_expression, now_probe)
         except (CroniterBadCronError, ValueError) as exc:
@@ -654,7 +704,7 @@ async def create_schedule(
             raise ValueError(
                 f"Invalid when '{payload.when}' for recurrence='once': expected ISO 8601"
             ) from exc
-        zone, zone_name, tz_warning = _resolve_schedule_timezone(payload.timezone)
+        zone, zone_name, tz_warning = await _resolve_schedule_timezone(payload.timezone)
         anchored, anchor_warning = (parsed_when, "")
         if parsed_when.tzinfo is None:
             from daemon.util.tz import anchor_local_to_utc
@@ -668,7 +718,7 @@ async def create_schedule(
         if payload.cron_expression:
             raise ValueError("cron_expression is only valid when recurrence='cron'")
         hour, minute = _parse_hhmm(payload.when)
-        zone, zone_name, tz_warning = _resolve_schedule_timezone(payload.timezone)
+        zone, zone_name, tz_warning = await _resolve_schedule_timezone(payload.timezone)
         if recurrence == _RECURRENCE_DAILY:
             if payload.weekday is not None:
                 raise ValueError("weekday is only valid when recurrence='weekly'")
@@ -879,7 +929,7 @@ async def update_schedule(
         tz_warning = ""
 
         if payload.timezone is not None and payload.timezone != config.get("timezone"):
-            _, zone_name, tz_warning = _resolve_schedule_timezone(payload.timezone)
+            _, zone_name, tz_warning = await _resolve_schedule_timezone(payload.timezone)
             config["timezone"] = zone_name
 
         when_changed = False

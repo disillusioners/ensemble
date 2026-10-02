@@ -12086,6 +12086,7 @@ class InstanceManager:
             _scheduling_service_module.configure(
                 source_repo=getattr(self, "_source_repository", None),
                 source_registry=getattr(self, "source_registry", None),
+                project_repository=getattr(self, "_project_repository", None),
             )
             self._scheduling_service = _scheduling_service_module
         return self._scheduling_service

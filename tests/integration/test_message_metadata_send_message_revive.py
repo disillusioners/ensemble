@@ -410,8 +410,10 @@ class TestSendMessageRevive:
         monkeypatch.setattr(
             lifecycle_mod,
             "append_current_time",
-            lambda prompt, now=None: real_append_current_time(
-                prompt, now=_FIXED_NOW
+            # **kwargs forwards the user_timezone param (user-timezone-setting
+            # feature) so the freeze wrapper stays signature-transparent.
+            lambda prompt, now=None, **kwargs: real_append_current_time(
+                prompt, now=_FIXED_NOW, **kwargs
             ),
         )
 

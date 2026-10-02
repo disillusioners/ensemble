@@ -45,11 +45,12 @@ Tools in this category:
 - ``task_schedule_update`` — update a scheduled task (reschedule, pause, resume)
 
 Timezone rule: a user-stated time (``when``) is interpreted in the
-supplied ``timezone``; when omitted, the daemon-wide default
-(``ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE``) applies, then the host-local
-timezone, then UTC — with a loud warning echoed in the response. Every
-response surfaces BOTH ``next_run_at_local`` (in the resolved timezone)
-AND ``next_run_at_utc``.
+supplied ``timezone``; when omitted, the user timezone setting (the
+``/api/settings/timezone`` preference) applies when set, then the
+daemon-wide default (``ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE``), then the
+host-local timezone, then UTC — with a loud warning echoed in the
+response. Every response surfaces BOTH ``next_run_at_local`` (in the
+resolved timezone) AND ``next_run_at_utc``.
 """
 
 
@@ -98,7 +99,7 @@ def create_scheduling_tools(
         message: Annotated[str, Field(description="The message sent to the agent when the schedule fires")]
         when: Annotated[str, Field(description="User-stated local time: ISO 8601 ('2026-10-15 06:00' or '2026-10-15T06:00:00+07:00') for recurrence=once; 'HH:MM' for daily/weekly")]
         recurrence: Annotated[str, Field(description="once | daily | weekly | cron")]
-        timezone: Annotated[str | None, Field(default=None, description="IANA timezone for `when` (e.g. 'Asia/Ho_Chi_Minh'); omit for the daemon default chain (default -> host-local -> UTC with a warning)")]
+        timezone: Annotated[str | None, Field(default=None, description="IANA timezone for `when` (e.g. 'Asia/Ho_Chi_Minh'); omit for the tz chain (user timezone setting -> default -> host-local -> UTC with a warning)")]
         weekday: Annotated[int | None, Field(default=None, ge=0, le=6, description="Day of week for recurrence=weekly: 0=Sunday..6=Saturday")]
         cron_expression: Annotated[str | None, Field(default=None, description="Raw cron expression; required when recurrence='cron'")]
         agent_id: Annotated[str | None, Field(default=None, description="Agent to invoke when the schedule fires; omit for yourself (the calling agent)")]
@@ -113,7 +114,7 @@ def create_scheduling_tools(
         message: Annotated[str, Field(description="The message sent to the agent when the schedule fires")],
         when: Annotated[str, Field(description="User-stated local time: ISO 8601 for recurrence=once; 'HH:MM' for daily/weekly")],
         recurrence: Annotated[str, Field(description="once | daily | weekly | cron")],
-        timezone: Annotated[str | None, Field(default=None, description="IANA timezone for `when`; omit for the daemon default chain")] = None,
+        timezone: Annotated[str | None, Field(default=None, description="IANA timezone for `when`; omit for the tz chain (user setting -> default -> host-local -> UTC)")] = None,
         weekday: Annotated[int | None, Field(default=None, ge=0, le=6, description="0=Sunday..6=Saturday (weekly only)")] = None,
         cron_expression: Annotated[str | None, Field(default=None, description="Raw cron expression; required when recurrence='cron'")] = None,
         agent_id: Annotated[str | None, Field(default=None, description="Agent to invoke; omit for yourself (the calling agent)")] = None,
@@ -266,9 +267,10 @@ def create_scheduling_tools(
     task_schedule._full_doc_ = """Create a new scheduled task (wall-clock trigger).
 
 The trigger time is interpreted in the supplied timezone; when the
-timezone is omitted the daemon default chain applies (configured
-default, then host-local detection, then UTC with a loud warning). The
-warning is never suppressed — read `tz_warning` in the response.
+timezone is omitted the tz chain applies (user timezone setting when
+set, then the configured default, then host-local detection, then UTC
+with a loud warning). The warning is never suppressed — read
+`tz_warning` in the response.
 
 Args:
     label: Unique human-readable name (1-128 chars). Duplicate labels are

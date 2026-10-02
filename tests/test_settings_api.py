@@ -1,7 +1,11 @@
-"""Tests for the User Language Preference feature (Phase 1).
+"""Tests for the User Language Preference + User Timezone Setting features.
 
 Covers the GET/PUT ``/api/settings/language`` endpoints plus the underlying
-``get_language_preference`` helper in :mod:`daemon.services.language_utils`.
+``get_language_preference`` helper in :mod:`daemon.services.language_utils`,
+and — mirroring the same singleton shape — the GET/PUT
+``/api/settings/timezone`` endpoints plus the
+``get_user_timezone_preference`` helper in
+:mod:`daemon.services.user_timezone_utils`.
 
 Tests run against a live PostgreSQL database (``ensemble_test`` on
 ``localhost:5432`` by default) so the upsert path through
@@ -55,6 +59,7 @@ from daemon.services.language_utils import (
     LANGUAGE_METADATA_KEY,
     get_language_preference,
 )
+from daemon.services.user_timezone_utils import get_user_timezone_preference
 from daemon.routers.settings import set_project_repository
 
 
@@ -393,3 +398,209 @@ class TestGetLanguagePreferenceHelper:
 
         project_repo.set_metadata(project_id, LANGUAGE_METADATA_KEY, "Japanese")
         assert get_language_preference(project_repo) == "Japanese"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# User Timezone Setting (mirrors the language preference singleton shape)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetTimezone:
+    """GET /api/settings/timezone — read current preference + display offset."""
+
+    @pytest.mark.asyncio
+    async def test_returns_nulls_when_unset(self, client):
+        """With no preference stored, GET returns null timezone + null offset."""
+        response = await client.get("/api/settings/timezone")
+
+        assert response.status_code == 200
+        assert response.json() == {"timezone": None, "utc_offset": None}
+
+    @pytest.mark.asyncio
+    async def test_returns_stored_value_with_current_offset(self, client):
+        """Round-trip: PUT then GET returns the IANA name + its CURRENT offset."""
+        put_response = await client.put(
+            "/api/settings/timezone", json={"timezone": "Asia/Bangkok"}
+        )
+        assert put_response.status_code == 200
+        assert put_response.json() == {"timezone": "Asia/Bangkok", "utc_offset": "+07:00"}
+
+        get_response = await client.get("/api/settings/timezone")
+        assert get_response.status_code == 200
+        assert get_response.json() == {"timezone": "Asia/Bangkok", "utc_offset": "+07:00"}
+
+
+class TestPutTimezone:
+    """PUT /api/settings/timezone — write / update / CLEAR preference."""
+
+    @pytest.mark.asyncio
+    async def test_set_get_clear_get_round_trip(self, client):
+        """The commissioned lifecycle: set → get → clear → get(null)."""
+        put_response = await client.put(
+            "/api/settings/timezone", json={"timezone": "Asia/Bangkok"}
+        )
+        assert put_response.status_code == 200
+        assert put_response.json()["timezone"] == "Asia/Bangkok"
+
+        get_response = await client.get("/api/settings/timezone")
+        assert get_response.json() == {"timezone": "Asia/Bangkok", "utc_offset": "+07:00"}
+
+        clear_response = await client.put("/api/settings/timezone", json={"timezone": None})
+        assert clear_response.status_code == 200
+        assert clear_response.json() == {"timezone": None, "utc_offset": None}
+
+        get_after_clear = await client.get("/api/settings/timezone")
+        assert get_after_clear.status_code == 200
+        assert get_after_clear.json() == {"timezone": None, "utc_offset": None}
+
+    @pytest.mark.asyncio
+    async def test_empty_string_clears_the_setting(self, client):
+        """``""`` is the string form of CLEAR (parity with explicit null)."""
+        await client.put("/api/settings/timezone", json={"timezone": "Asia/Bangkok"})
+        clear_response = await client.put("/api/settings/timezone", json={"timezone": ""})
+        assert clear_response.status_code == 200
+        assert clear_response.json() == {"timezone": None, "utc_offset": None}
+
+        get_response = await client.get("/api/settings/timezone")
+        assert get_response.json() == {"timezone": None, "utc_offset": None}
+
+    @pytest.mark.asyncio
+    async def test_put_updates_value_not_sticky(self, client):
+        """Second PUT overrides the first."""
+        await client.put("/api/settings/timezone", json={"timezone": "Asia/Bangkok"})
+        put_response = await client.put(
+            "/api/settings/timezone", json={"timezone": "Asia/Tokyo"}
+        )
+        assert put_response.status_code == 200
+        assert put_response.json() == {"timezone": "Asia/Tokyo", "utc_offset": "+09:00"}
+
+        get_response = await client.get("/api/settings/timezone")
+        assert get_response.json()["timezone"] == "Asia/Tokyo"
+
+    @pytest.mark.asyncio
+    async def test_put_strips_surrounding_whitespace(self, client):
+        """The router strips the value before validating / storing / echoing."""
+        put_response = await client.put(
+            "/api/settings/timezone", json={"timezone": "  Asia/Bangkok  "}
+        )
+        assert put_response.status_code == 200
+        assert put_response.json()["timezone"] == "Asia/Bangkok"
+
+        get_response = await client.get("/api/settings/timezone")
+        assert get_response.json()["timezone"] == "Asia/Bangkok"
+
+    @pytest.mark.asyncio
+    async def test_invalid_iana_name_rejected_422(self, client):
+        """A non-IANA string is rejected with 422 and NOT stored."""
+        response = await client.put(
+            "/api/settings/timezone", json={"timezone": "Not/ARealZone"}
+        )
+        assert response.status_code == 422
+        assert "Invalid IANA timezone" in response.json()["detail"]
+
+        get_response = await client.get("/api/settings/timezone")
+        assert get_response.json() == {"timezone": None, "utc_offset": None}
+
+    @pytest.mark.asyncio
+    async def test_plausible_but_fake_iana_name_rejected_422(self, client):
+        """Syntactically plausible garbage fails the tzdb check too."""
+        response = await client.put(
+            "/api/settings/timezone", json={"timezone": "Mars/Olympus_Mons"}
+        )
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_control_characters_stripped_defense_parity(self, client):
+        """Defense-in-depth parity with the language pref: control characters
+        are stripped so nothing can inject into downstream system prompts."""
+        response = await client.put(
+            "/api/settings/timezone", json={"timezone": "Asia/Bangkok\x00\n"}
+        )
+        assert response.status_code == 200
+        assert response.json()["timezone"] == "Asia/Bangkok"
+
+        get_response = await client.get("/api/settings/timezone")
+        assert get_response.json()["timezone"] == "Asia/Bangkok"
+
+    @pytest.mark.asyncio
+    async def test_pure_control_character_payload_rejected_422(self, client):
+        """A payload that is ONLY control characters cannot validate."""
+        response = await client.put("/api/settings/timezone", json={"timezone": "\x00\x07"})
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_string_over_100_chars_returns_422(self, client):
+        """A 101-char string trips the schema's ``max_length=100`` → 422."""
+        too_long = "A" * 101
+        response = await client.put("/api/settings/timezone", json={"timezone": too_long})
+        assert response.status_code == 422
+        assert "detail" in response.json()
+
+    @pytest.mark.asyncio
+    async def test_string_at_100_chars_rejected_as_invalid_iana(self, client):
+        """A 100-char string passes the schema bound, then fails the tzdb
+        check → 422 (Invalid IANA), proving BOTH validation layers run."""
+        boundary = "A" * 100
+        response = await client.put("/api/settings/timezone", json={"timezone": boundary})
+        assert response.status_code == 422
+        assert "Invalid IANA timezone" in response.json()["detail"]
+
+
+class TestGetUserTimezonePreferenceHelper:
+    """Unit tests for ``get_user_timezone_preference`` — live PG repo paths."""
+
+    def test_returns_none_when_repo_is_none(self):
+        """``None`` repo is handled — unset (NOT a baked-in default)."""
+        assert get_user_timezone_preference(None) is None
+
+    def test_returns_none_when_metadata_record_missing(
+        self, project_repo: SQLModelProjectRepository
+    ):
+        """A live repo with no stored record returns ``None``."""
+        assert get_user_timezone_preference(project_repo) is None
+
+    def test_returns_stored_value_from_live_repo(
+        self,
+        project_repo: SQLModelProjectRepository,
+        system_default_project: str,
+    ):
+        """Round-trip via the helper on a real PG-backed repo."""
+        from daemon import constants
+
+        project_id = constants.SYSTEM_DEFAULT_PROJECT_ID
+        assert project_id is not None
+
+        project_repo.set_metadata(project_id, constants.USER_TIMEZONE_METADATA_KEY, "Asia/Bangkok")
+        assert get_user_timezone_preference(project_repo) == "Asia/Bangkok"
+
+    def test_invalid_stored_value_treated_as_unset(
+        self,
+        project_repo: SQLModelProjectRepository,
+        system_default_project: str,
+    ):
+        """A stored value that fails IANA validation at read time reads as
+        ``None`` — no crash, callers fall through the tz chain."""
+        from daemon import constants
+
+        project_id = constants.SYSTEM_DEFAULT_PROJECT_ID
+        assert project_id is not None
+
+        project_repo.set_metadata(project_id, constants.USER_TIMEZONE_METADATA_KEY, "Not/ARealZone")
+        assert get_user_timezone_preference(project_repo) is None
+
+    def test_cleared_row_reads_as_none(
+        self,
+        project_repo: SQLModelProjectRepository,
+        system_default_project: str,
+    ):
+        """After ``delete_metadata`` the helper reads ``None`` (the CLEAR path)."""
+        from daemon import constants
+
+        project_id = constants.SYSTEM_DEFAULT_PROJECT_ID
+        assert project_id is not None
+
+        project_repo.set_metadata(project_id, constants.USER_TIMEZONE_METADATA_KEY, "Asia/Bangkok")
+        assert get_user_timezone_preference(project_repo) == "Asia/Bangkok"
+
+        project_repo.delete_metadata(project_id, constants.USER_TIMEZONE_METADATA_KEY)
+        assert get_user_timezone_preference(project_repo) is None
