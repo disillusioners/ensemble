@@ -970,6 +970,54 @@ class TestStartSchedule:
         assert data["source_id"] == "scheduler-1"
         assert data["status"] == "running"
 
+    @pytest.mark.asyncio
+    async def test_start_schedule_409_when_cancelled_does_not_resurrect(self, client, mock_manager):
+        """Cancel is TERMINAL (ADR-005/007) — POST /start on a cancelled row
+        must 409 with SCHEDULE_ALREADY_CANCELLED, leave the DB row at
+        status='cancelled', and never touch the adapter registry. Mirrors
+        TestCancelSchedule.test_cancel_409_when_already_cancelled (same
+        error code, same HTTP status) so callers treat start-of-cancelled
+        identically to double-cancel. Without the round-5 gate the
+        rebuild branch (_create_adapter_from_config → register →
+        start_adapter) erased the terminal status and made the row
+        boot-startable again."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
+        )
+        scheduler_source.status = SourceStatus.cancelled.value
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+
+        # Registry is mocked but its adapter-building / start methods must
+        # NOT be called on a cancelled row (the gate fires before any
+        # registry interaction). Use a spec-less Mock and assert NOT called.
+        mock_registry = Mock()
+        mock_registry.start_adapter = AsyncMock(return_value=True)
+        mock_registry.get = Mock(return_value=None)
+        mock_registry._create_adapter_from_config = AsyncMock(return_value=Mock())
+        mock_registry.register = Mock()
+        mock_manager.source_registry = mock_registry
+
+        response = await client.post("/schedules/scheduler-1/start")
+
+        assert response.status_code == 409
+        data = response.json()
+        assert data["detail"]["code"] == "SCHEDULE_ALREADY_CANCELLED"
+        assert "cancelled" in data["detail"]["message"].lower()
+        assert "terminal" in data["detail"]["message"].lower()
+
+        # Row status MUST remain cancelled — gate sits BEFORE rebuild so
+        # no code path runs that could mutate the DB.
+        scheduler_source.status = SourceStatus.cancelled.value  # unchanged
+        mock_manager._source_repository.get_source_config.assert_called_once_with("scheduler-1")
+
+        # Adapter resurrection is the exact failure mode this gate closes:
+        # rebuild branch MUST be inert, start_adapter MUST NOT fire.
+        mock_registry._create_adapter_from_config.assert_not_called()
+        mock_registry.register.assert_not_called()
+        mock_registry.start_adapter.assert_not_called()
+
 
 # ==================== POST /schedules/{id}/stop Tests ====================
 

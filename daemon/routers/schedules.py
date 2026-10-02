@@ -499,7 +499,29 @@ async def start_schedule(schedule_id: str, request: Request):
                 message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
             ).model_dump()
         )
-    
+
+    # Round-5 fix: cancel is TERMINAL (ADR-005/007). POST /start must not
+    # resurrect a cancelled row — cancel_schedule evicts the adapter
+    # (seam-2 invariant), so without this gate the rebuild branch below
+    # always fires: _create_adapter_from_config (ignores status) → register
+    # → start_adapter persists STARTING→RUNNING, erasing the terminal
+    # 'cancelled' status in the DB (the row becomes boot-startable again,
+    # violating the "never fires again, not after a daemon restart" tools_note
+    # contract). Mirrors DELETE /schedules/{id} cancel-already-cancelled
+    # mapping at :284 — same error code, same HTTP status, so callers
+    # (web-UI "start" button hidden-state-survival check, retry middleware)
+    # treat start-of-cancelled identically to double-cancel. Gate sits
+    # AFTER the get-or-404 (unknown ids still 404) and source_type check
+    # (non-scheduler rows still 400 INVALID_REQUEST).
+    if source.status == SourceStatus.cancelled.value:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SCHEDULE_ALREADY_CANCELLED",
+                "message": f"Schedule {schedule_id} is cancelled and cannot be started (cancel is terminal)",
+            },
+        )
+
     # Start the scheduler adapter
     try:
         # Round-2 fix: scheduler adapters are constructed ONLY at boot
