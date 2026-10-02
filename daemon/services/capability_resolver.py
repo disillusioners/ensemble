@@ -317,7 +317,14 @@ class CapabilityCheckResult:
 
 # Type aliases for the injectable lookup callables.
 McpLookupFn = Callable[[str], "McpLookupResult | None"]
-ToolsAllowFn = Callable[[], list[str]]
+# F1-fix (F1a wire completion, 2026-10-02): the production closure
+# resolves the receiving instance's agent_id via ``_instance_repository``
+# (so the manager-side ``_tools_allow`` can read the real ``meta.tools.allow``).
+# The callable signature is ``Callable[[str | None], list[str]]`` —
+# the parameter is the instance_id (None when no instance context is
+# available, e.g. test fixtures). Tests that don't care about the
+# instance context should accept the kwarg and ignore it.
+ToolsAllowFn = Callable[[str | None], list[str]]
 EnvLookupFn = Callable[[], dict[str, str]]
 
 
@@ -415,9 +422,34 @@ def check_mcp_capability(
 
 
 def check_tool_capability(
-    capability_id: str, *, tools_allow: ToolsAllowFn | None = None
+    capability_id: str,
+    *,
+    tools_allow: ToolsAllowFn | None = None,
+    instance_id: str | None = None,
 ) -> CapabilityCheckResult:
-    """Check that ``capability_id`` (a tool name) is in ``tools.allow``."""
+    """Check that ``capability_id`` (a tool name) is in ``tools.allow``.
+
+    Empty-allow semantics (F1 fix, 2026-10-02): an empty ``tools.allow``
+    list is treated as the **inherit/default universe** (no restriction),
+    matching :func:`daemon.tools.instance.resolve_tool_filter` which
+    returns ``None`` (= "all tools allowed") when allow AND deny are both
+    empty (instance.py:322-327). Day-1 defect F1 had this gate treating
+    empty allow as deny-all, which blocked ``load_skill`` from running
+    against worker instances whose pre-flight snapshot of ``tools.allow``
+    was ``[]`` (the actual allow list lives on ``meta.tools.allow`` and
+    the resolver's accessor was reading a non-existent attribute — see
+    the manager-side wiring fix that ships with this change).
+
+    Args:
+        capability_id: The tool name to check.
+        tools_allow: Closure resolving the active instance's
+            ``tools.allow`` list. Receives ``instance_id`` so it can
+            look up the right agent meta via ``get_registry`` — see
+            manager.py:_wire_skill_injection_capability_gate.
+        instance_id: Optional receiving instance id forwarded to
+            ``tools_allow``. ``None`` when no instance is in scope
+            (test fixtures).
+    """
     evidence_base = f"pre_flight: tools.allow.contains({capability_id!r})"
     if tools_allow is None:
         return CapabilityCheckResult(
@@ -426,7 +458,21 @@ def check_tool_capability(
             capability_kind="tools",
             detection_evidence=f"{evidence_base} -> <no tools_allow injected>",
         )
-    allowed = tools_allow()
+    allowed = tools_allow(instance_id)
+    # Empty allow = inherit/default universe (matches resolve_tool_filter
+    # empty-allow + empty-deny branch → "all tools allowed"). Cannot
+    # legitimately return "missing" — there is no restriction declared
+    # to be missing from.
+    if not allowed:
+        return CapabilityCheckResult(
+            state="present",
+            capability_id=capability_id,
+            capability_kind="tools",
+            detection_evidence=(
+                f"{evidence_base} -> empty allowlist "
+                f"(inherit/default universe, matches resolve_tool_filter)"
+            ),
+        )
     if capability_id in allowed:
         return CapabilityCheckResult(
             state="present",
@@ -478,6 +524,7 @@ def capability_check(
     tools_allow: ToolsAllowFn | None = None,
     env_lookup: EnvLookupFn | None = None,
     capability_kind: Literal["mcp", "tools", "env"] | None = None,
+    instance_id: str | None = None,
 ) -> CapabilityCheckResult:
     """Synchronous tri-state capability check.
 
@@ -490,7 +537,9 @@ def capability_check(
             SQLModel projection of ``mcp_servers`` filtered by
             ``is_active=True``.
         tools_allow: Injectable accessor for the agent's effective
-            ``tools.allow`` list.
+            ``tools.allow`` list. Receives ``instance_id`` so it can
+            resolve the active agent's meta via ``get_version`` /
+            ``get_resolved`` (F1a wire completion, 2026-10-02).
         env_lookup: Injectable accessor for the merged environment
             mapping (system + project-scoped).
         capability_kind: When set, dispatch directly to the matching
@@ -499,6 +548,8 @@ def capability_check(
             MCP-first, then tool, then env, returning on the first
             ``present`` — the dispatch order matches the plan's
             priority for surfacing the most informative evidence.
+        instance_id: Optional receiving instance id forwarded to
+            ``tools_allow``. ``None`` when no instance is in scope.
 
     Returns:
         :class:`CapabilityCheckResult`. ``state`` is one of
@@ -516,13 +567,17 @@ def capability_check(
 
         Targeted (single-kind)::
 
-            >>> capability_check("bash", tools_allow=lambda: ["bash","read"], capability_kind="tools")
+            >>> capability_check("bash", tools_allow=lambda _: ["bash","read"], capability_kind="tools")
             CapabilityCheckResult(state='present', ...)
     """
     if capability_kind == "mcp":
         return check_mcp_capability(capability_id, mcp_lookup=mcp_lookup)
     if capability_kind == "tools":
-        return check_tool_capability(capability_id, tools_allow=tools_allow)
+        return check_tool_capability(
+            capability_id,
+            tools_allow=tools_allow,
+            instance_id=instance_id,
+        )
     if capability_kind == "env":
         return check_env_capability(capability_id, env_lookup=env_lookup)
 
@@ -534,7 +589,9 @@ def capability_check(
     if mcp_result.state == "unconfigured":
         return mcp_result
     tool_result = check_tool_capability(
-        capability_id, tools_allow=tools_allow
+        capability_id,
+        tools_allow=tools_allow,
+        instance_id=instance_id,
     )
     if tool_result.state == "present":
         return tool_result
