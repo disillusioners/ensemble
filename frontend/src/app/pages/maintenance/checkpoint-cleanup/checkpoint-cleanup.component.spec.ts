@@ -1212,6 +1212,31 @@ describe('CheckpointCleanupComponent', () => {
     // terminal-stop semantics (those are covered by the existing
     // 9-test "execute confirm flow — polls to terminal" e2e +
     // the service spec's terminal-stop describe block).
+    //
+    // Test fixture helper — overrides `fetchStatus` + `pollRun` so both
+    // return the same non-terminal `statusWithInFlight` for the duration
+    // of the test. Without this, the mock's default immediate-SUCCEEDED
+    // poll response fires the terminal handler before assertions can
+    // verify the re-entry kick-off. Identical stubbing semantics across
+    // every re-entry test below; do not diverge per-site.
+    const stubNonTerminalPoll = (statusWithInFlight: CheckpointCleanupStatus) => {
+      service.fetchStatus = () => {
+        service.fetchStatusCalls++;
+        return of(statusWithInFlight);
+      };
+      service.pollRun = (runId: string, intervalMs?: number, hintMs?: number | null) => {
+        service.pollRunCalls.push({ runId, intervalMs, hintMs });
+        return of({
+          run_id: runId,
+          kind: 'manual_execute' as const,
+          status: 'running' as const,
+          started_at: new Date().toISOString(),
+          completed_at: null,
+          summary: null,
+          error: null,
+        });
+      };
+    };
 
     it('refreshStatus() resumes polling against status.in_flight.run_id', () => {
       const inFlightRunId = 'ckpt-refreshed-mid-poll-1';
@@ -1230,22 +1255,7 @@ describe('CheckpointCleanupComponent', () => {
       // responses — sidesteps the mock's auto-succeed that would
       // otherwise trigger the post-terminal refreshStatus loop.
       service.status.set(statusWithInFlight);
-      service.fetchStatus = () => {
-        service.fetchStatusCalls++;
-        return of(statusWithInFlight);
-      };
-      service.pollRun = (runId: string, intervalMs?: number, hintMs?: number | null) => {
-        service.pollRunCalls.push({ runId, intervalMs, hintMs });
-        return of({
-          run_id: runId,
-          kind: 'manual_execute' as const,
-          status: 'running' as const,
-          started_at: new Date().toISOString(),
-          completed_at: null,
-          summary: null,
-          error: null,
-        });
-      };
+      stubNonTerminalPoll(statusWithInFlight);
       component.refreshStatus();
       expect(service.pollRunCalls).toHaveLength(1);
       expect(service.pollRunCalls[0].runId).toBe(inFlightRunId);
@@ -1269,22 +1279,7 @@ describe('CheckpointCleanupComponent', () => {
         },
       };
       service.status.set(statusWithInFlight);
-      service.fetchStatus = () => {
-        service.fetchStatusCalls++;
-        return of(statusWithInFlight);
-      };
-      service.pollRun = (runId: string, intervalMs?: number, hintMs?: number | null) => {
-        service.pollRunCalls.push({ runId, intervalMs, hintMs });
-        return of({
-          run_id: runId,
-          kind: 'manual_execute' as const,
-          status: 'running' as const,
-          started_at: new Date().toISOString(),
-          completed_at: null,
-          summary: null,
-          error: null,
-        });
-      };
+      stubNonTerminalPoll(statusWithInFlight);
       component.refreshStatus();
       component.refreshStatus();
       // Exactly one poll subscription, not two — the idempotency
@@ -1374,22 +1369,7 @@ describe('CheckpointCleanupComponent', () => {
         },
       };
       service.status.set(statusWithInFlight);
-      service.fetchStatus = () => {
-        service.fetchStatusCalls++;
-        return of(statusWithInFlight);
-      };
-      service.pollRun = (runId: string, intervalMs?: number, hintMs?: number | null) => {
-        service.pollRunCalls.push({ runId, intervalMs, hintMs });
-        return of({
-          run_id: runId,
-          kind: 'manual_execute' as const,
-          status: 'running' as const,
-          started_at: new Date().toISOString(),
-          completed_at: null,
-          summary: null,
-          error: null,
-        });
-      };
+      stubNonTerminalPoll(statusWithInFlight);
       component.lastExecuteResult.set({
         run_id: previousRunId,
         kind: 'manual_execute' as const,
@@ -1431,22 +1411,7 @@ describe('CheckpointCleanupComponent', () => {
         },
       };
       service.status.set(statusWithInFlight);
-      service.fetchStatus = () => {
-        service.fetchStatusCalls++;
-        return of(statusWithInFlight);
-      };
-      service.pollRun = (runId: string, intervalMs?: number, hintMs?: number | null) => {
-        service.pollRunCalls.push({ runId, intervalMs, hintMs });
-        return of({
-          run_id: runId,
-          kind: 'manual_execute' as const,
-          status: 'running' as const,
-          started_at: new Date().toISOString(),
-          completed_at: null,
-          summary: null,
-          error: null,
-        });
-      };
+      stubNonTerminalPoll(statusWithInFlight);
       component.lastExecuteResult.set({
         run_id: inFlightRunId,
         kind: 'manual_execute' as const,

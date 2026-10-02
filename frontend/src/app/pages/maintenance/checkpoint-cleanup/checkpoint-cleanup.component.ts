@@ -87,6 +87,10 @@ import type {
  *   - Post-run convergence banner ("Run cleanup again to reclaim ~X
  *     more" — a NEW dry-run, never a silent execute); hides when a
  *     fresh dry-run reports `now == 0` (convergence reached)
+ *
+ * Size rationale — deliberate density: wizard-state + AM-contract display helpers
+ * live beside their pins for reviewability. Extraction candidates if size becomes a
+ * burden: the ~:201-243 gating-signal cluster and the ~:653-861 format/label helper cluster.
  */
 @Component({
   selector: 'app-checkpoint-cleanup',

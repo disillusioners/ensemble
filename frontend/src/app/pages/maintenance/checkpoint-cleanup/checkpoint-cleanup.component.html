@@ -49,7 +49,12 @@
 
 <!-- Status Strip (spec §2.1) — 3-tile always-visible summary.
      aria-live="polite" so screen readers announce changes; tiles are
-     semantic `<dl>` so each term/definition pair is reachable. -->
+     semantic `<dl>` so each term/definition pair is reachable.
+     §4.1 axe dlitem remediation: each term/def pair is a DIRECT child
+     of the `<dl>` (the previous div-tile wrapper interfered with axe-core's
+     strict dlitem rule). Screen readers continue to announce term/def
+     pairs natively per the §2.1 a11y contract. Layout is driven by CSS
+     grid on `.ck-status-strip` (see scss). -->
 <dl
   class="ck-status-strip"
   data-testid="ck-status-strip"
@@ -57,18 +62,12 @@
   aria-live="polite"
   [class.ck-status-strip-muted]="isMaintenanceDisabled() || !status()"
 >
-  <div class="ck-status-strip-tile">
-    <dt>Keep N</dt>
-    <dd>{{ statusStripKeepN() }}</dd>
-  </div>
-  <div class="ck-status-strip-tile">
-    <dt>Last run</dt>
-    <dd>{{ statusStripLastRun() }}</dd>
-  </div>
-  <div class="ck-status-strip-tile">
-    <dt>Dry-run fresh</dt>
-    <dd>{{ statusStripDryRunFresh() }}</dd>
-  </div>
+  <dt>Keep N</dt>
+  <dd>{{ statusStripKeepN() }}</dd>
+  <dt>Last run</dt>
+  <dd>{{ statusStripLastRun() }}</dd>
+  <dt>Dry-run fresh</dt>
+  <dd>{{ statusStripDryRunFresh() }}</dd>
 </dl>
 
 <!-- Wizard container -- caps at 1100px (spec §3, AC-12). -->
@@ -107,6 +106,7 @@
       [linear]="false"
       [selectedIndex]="activeStep()"
       (selectionChange)="onStepperSelectionChange(desktopStepper)"
+      editable="false"
     >
       <!-- -- Step 1: Review (spec §2.3) ----------------------------------- -->
       <mat-step label="1. Review">
@@ -494,6 +494,7 @@
       [linear]="false"
       [selectedIndex]="activeStep()"
       (selectionChange)="onStepperSelectionChange(mobileStepper)"
+      editable="false"
     >
       <!-- -- Step 1: Review (spec §2.3) ----------------------------------- -->
       <mat-step label="1. Review">
