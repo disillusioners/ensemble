@@ -265,8 +265,10 @@ export class SettingsComponent implements OnInit, OnDestroy {
    * True when BOTH the API list AND ``Intl.supportedValuesOf`` are
    * unavailable — drives the text-input fallback render. A loaded
    * (possibly empty) API list does NOT trigger the fallback as long
-   * as the browser-native list can be probed; an API list of 0 zones
-   * falls through to Intl.
+   * as the browser-native list yields at least one zone. A
+   * callable-but-empty Intl probe DOES trigger the fallback — an
+   * empty dropdown (Auto sentinel only) is a dead end with no way
+   * to enter a custom zone.
    */
   readonly isTzNativeSupported = computed<boolean>(() => {
     const api = this.apiTimezones();
@@ -276,7 +278,8 @@ export class SettingsComponent implements OnInit, OnDestroy {
     const intlAny = Intl as unknown as {
       supportedValuesOf?: (kind: string) => number | string[];
     };
-    return typeof intlAny.supportedValuesOf === 'function';
+    const values = intlAny.supportedValuesOf?.('timeZone') ?? [];
+    return Array.isArray(values) && values.length > 0;
   });
 
   /** True when the user has not picked a zone — drives the hint line. */
