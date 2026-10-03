@@ -1336,6 +1336,68 @@ def consume_pending_action(
 _TERMINAL_EVENTS = ("commit", "rollback", "halt", "sweep_rollback", "sweep", "quarantine")
 
 
+# ── Wake terminal event-set + wake-owned reader (Phase 2 T13, ADR-042) ─────────
+#
+# The PROMOTE-only reconcile (``reconcile_pending_op``) depends on the
+# strict 6-member ``_TERMINAL_EVENTS`` (a restart event MUST NEVER close a
+# promote pending_op — the intent-driven pipeline says so). The wake
+# sweep's terminal reader, by contrast, MUST fire for intentional
+# restarts (``restart.sh:262`` journals ``"restart"``); without
+# ``"restart"`` in the predicate the dominant wake case would never fire.
+#
+# Architecture delta #1: SIBLING constant — NOT a mutation of the shared
+# 6-member set. The reconcile's semantics at ``:1016`` depend on the
+# 6-member tuple; mutating it would silently change PROMOTE reconcile
+# behavior. Phase 3 T4.8 (mutation guard) pins BOTH directions:
+# ``"restart" in WAKE_TERMINAL_EVENTS`` AND ``"restart" not in
+# _TERMINAL_EVENTS`` with the 6-member set intact.
+#
+# Ride-along #2 (approve): single home — the constant is lifted into
+# ``upgrade_journal.py`` (the journal-protocol home). The old
+# ``upgrade_tools.py`` alias ``_TERMINAL_OUTCOME_EVENTS = _TERMINAL_EVENTS
+# + ("restart",)`` is a DIFFERENT surface (status-view terminal
+# vocabulary, P1 Item 5 — NOT the wake sweep's). Both surfaces derive
+# from ``_TERMINAL_EVENTS`` by tuple concat; the wake constant is the
+# authoritative one for the wake sweep.
+WAKE_TERMINAL_EVENTS: tuple[str, ...] = _TERMINAL_EVENTS + ("restart",)
+
+
+def wake_terminal_event_after(
+    journal: dict[str, Any], armed_at: str
+) -> str | None:
+    """Wake-owned terminal reader (Phase 2 T13, ADR-042 addendum r4 fold
+    C1/r5 fold N2). Mirrors ``_terminal_event_after`` exactly: TS-scope
+    (``entry.ts >= armed_at``) + event-class membership over
+    ``WAKE_TERMINAL_EVENTS``, NOTHING MORE — the reader is lane-agnostic
+    and has NO ``run_id`` knowledge.
+
+    Returns the LATEST matching event name (or ``None``). The journal's
+    history entries are FLAT ``{"ts": <iso>, "event": <name>, "detail":
+    <prose>}`` records (``upgrade_journal.py:326`` and ``lib.sh:663,666``)
+    — NO ``run_id`` field on history entries; promote-lane terminal
+    events carry NO ``run_id`` at all (``promote.sh:366``;
+    ``rollback.sh:203,209,211``); only the RESTART lane embeds a
+    ``run_id=<id>`` substring inside the ``detail`` PROSE
+    (``restart.sh:252,262``), used as an OPTIONAL tie-breaker on the
+    RESTART lane only (applied caller-side in
+    ``UpgradeJournalSweepService._resolve_wake_targets``, NOT here).
+
+    The RESTART-lane tie-break NEVER blocks base event-class matching
+    (r5 fold N3): a restart terminal whose detail prose mismatches (or
+    omits) the run_id still fires the wake — the tie-break only
+    disambiguates when MULTIPLE same-class candidates exist in scope.
+
+    ``JournalTorn`` or malformed history → ``None`` (best-effort; the
+    sweep's caller logs and continues).
+    """
+    return latest_matching_event(
+        journal,
+        run_id="<wake-reader-lane-agnostic>",  # accepted, NOT used
+        armed_at=armed_at,
+        events=WAKE_TERMINAL_EVENTS,
+    )
+
+
 def _terminal_event_after(journal: dict[str, Any], armed_at: str) -> tuple[str, dict[str, Any]] | None:
     armed = parse_iso_utc(armed_at)
     history = journal.get("history")
