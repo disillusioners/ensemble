@@ -2,7 +2,7 @@
 
 ## Active commission — POST-RESTART ARM-NOTIFY PHASE 3 (edge cases + structural AC6 + pack registration) (2026-10-03)
 
-Branch `feature/post-restart-arm-notify` @ phase 3 commit (base `f3380aaa` = phases 1+2 tip `24ad2f28`-line; planning commits only). **VERDICT: 🟢 ALL FIVE PACKS PASS — phase 3 test-only, no source changes.** Adds the long-tail edge cases (long-downtime double-arm coalesce, paused-instance defer, terminal-instance revival, kill-switch re-enable-no-stale-flood) and the AC6 structural non-regression pins (no new journal file, no new HTTP endpoint, no new SQLModel table, arm_pending_wake lock-position pin, wired helper pin, sweep method pin, real-journal-shape fixture pin). Extends the Phase 2 routing pack with T3.5 Site 1 progressive dispatch tests. No daemon source touched; no live contact. Full report: `RESULTS/2026-10-03-post-restart-arm-notify-phase3.md`.
+Branch `feature/post-restart-arm-notify` @ phase 3 commit (base `f3380aaa` = phases 1+2 tip `24ad2f28`-line; planning commits only). **VERDICT: 🟢 ALL FIVE PACKS PASS — phase 3 test-only, no source changes.** Adds the long-tail edge cases (long-downtime double-arm coalesce, paused-instance defer, terminal-instance revival, kill-switch re-enable-no-stale-flood) and the AC6 structural non-regression pins (no new journal file, no new HTTP endpoint, no new SQLModel table, arm_pending_wake lock-position pin, wired helper pin, sweep method pin, real-journal-shape fixture pin). Extends the Phase 2 routing pack with T3.5 Site 1 progressive dispatch tests. No daemon source touched; no live contact. The pack table below is the record.
 
 | Pack | Location | Scope | Est. | Last Run | Status |
 |---|---|---|---|---|---|
@@ -14,9 +14,6 @@ Branch `feature/post-restart-arm-notify` @ phase 3 commit (base `f3380aaa` = pha
 
 **Gate totals: 82P / 0F / 0S across all five packs — phase 3 test-only deliverable fully green.**
 
-## Completed commission — MCP WARMUP-POOL ENV FIX INDEPENDENT GATE (2026-10-02)
-
-Branch `fix/mcp-warmup-pool-env` @ `97b7e665` (base `24705dc4` = latest), main checkout `/home/nea/ensemble-src`. **VERDICT: 🟢 READY for merge.** All 5 commissioned gates PASS by independent execution (base-FAIL proof incl. import-location proofs; seam-reality 0 tautologies with mocked-boundary closed by real-object probe; claims (a)-(c) PROVEN / (d) probe-PROVEN with suite gap noted; regression 4312P/80S with every red/error base-attributed pre-existing in isolated worktree legs). Registered `tools_suite` pack found chronically over-scoped (TIMEOUT @ own 110s cap, 3284-test scope) → full tools-dir coverage delivered via 4 disjoint ad-hoc shards instead; Test Architecture Fix owed. Zero daemon boots / zero DB contact / port 8088 untouched throughout. Full report: `RESULTS/2026-10-02-mcp-warmup-pool-env-gate-97b7e665.md`.
 ## Completed commission — MCP WARMUP-POOL ENV FIX INDEPENDENT GATE (2026-10-02)
 
 Branch `fix/mcp-warmup-pool-env` @ `97b7e665` (base `24705dc4` = latest), main checkout `/home/nea/ensemble-src`. **VERDICT: 🟢 READY for merge.** All 5 commissioned gates PASS by independent execution (base-FAIL proof incl. import-location proofs; seam-reality 0 tautologies with mocked-boundary closed by real-object probe; claims (a)-(c) PROVEN / (d) probe-PROVEN with suite gap noted; regression 4312P/80S with every red/error base-attributed pre-existing in isolated worktree legs). Registered `tools_suite` pack found chronically over-scoped (TIMEOUT @ own 110s cap, 3284-test scope) → full tools-dir coverage delivered via 4 disjoint ad-hoc shards instead; Test Architecture Fix owed. Zero daemon boots / zero DB contact / port 8088 untouched throughout. Full report: `RESULTS/2026-10-02-mcp-warmup-pool-env-gate-97b7e665.md`.
