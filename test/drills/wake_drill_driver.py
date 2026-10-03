@@ -159,7 +159,24 @@ def _tool_fn(tools: list, name: str):
 
 
 def arm_restart(manager: DrillManager, tools: list) -> tuple[str, str]:
-    """REAL system_restart arm (dry_run=false). Returns (run_id, banner)."""
+    """REAL system_restart arm (dry_run=false). Returns (run_id, banner).
+
+    F4 review-round discipline (drill-only): the arm tool's success
+    path does NOT release the journal lock (the executor
+    restart.sh does, at restart.sh:265). In real life, the daemon
+    dies between the arm and the executor's lock release, so the
+    sweep never races the arm's lock. In the drill, the drill
+    process is the same pid across the whole scenario, so the
+    arm's lock WOULD stay held if we did not release it here —
+    and the sweep's lock-wrapped mark_wake_* helpers (F4 fix)
+    would then block for wait_s=30s on every tick. The
+    drill-only lock_release below matches the pre-F4 behavior
+    (the sweep was lock-free; the drill helper already modeled
+    the executor's release via complete_restart_lane). The
+    scenarios that need the lock to stay held (e.g. D4's
+    arm_upgrade after arm_restart) are unaffected because
+    complete_restart_lane already releases the lock too.
+    """
     banner = asyncio.run(
         _tool_fn(tools, "system_restart")(
             target_env=os.environ["ENSEMBLE_SELF_ENV"],
@@ -170,11 +187,19 @@ def arm_restart(manager: DrillManager, tools: list) -> tuple[str, str]:
     )
     pending = uj.read_pending_op(_inst())
     run_id = pending.run_id if pending is not None else ""
+    # F4 drill discipline — see docstring above.
+    uj.lock_release(_inst())
     return run_id, banner
 
 
 def arm_upgrade(manager: DrillManager, tools: list, version: str) -> tuple[str, str]:
-    """REAL system_upgrade arm (dry_run=false). Returns (run_id, banner)."""
+    """REAL system_upgrade arm (dry_run=false). Returns (run_id, banner).
+
+    F4 review-round discipline: same lock-release rationale as
+    arm_restart above. The promote.sh's commit path also releases
+    the lock (promote.sh:392), so the drill-only release here
+    matches that contract for the sweep's mark_wake_* helpers.
+    """
     banner = asyncio.run(
         _tool_fn(tools, "system_upgrade")(
             target_env=os.environ["ENSEMBLE_SELF_ENV"],
@@ -184,6 +209,8 @@ def arm_upgrade(manager: DrillManager, tools: list, version: str) -> tuple[str, 
     )
     pending = uj.read_pending_op(_inst())
     run_id = pending.run_id if pending is not None else ""
+    # F4 drill discipline — see docstring above.
+    uj.lock_release(_inst())
     return run_id, banner
 
 

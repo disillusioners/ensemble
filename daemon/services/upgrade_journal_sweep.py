@@ -659,6 +659,32 @@ class UpgradeJournalSweepService:
                     project_id,
                 )
                 return None
+            # F5(ii) — non-terminal filter (review round). The repo's
+            # ``get_by_agent_id`` returns ALL instances for the agent,
+            # including terminal rows (COMPLETED / TERMINATED / ERROR
+            # / FAILED). The fall-back is meant to deliver a wake to a
+            # LIVE ari; a terminal row is the wrong target (the
+            # enqueue path's auto-revive machinery is reserved for the
+            # primary arming-instance path, not for the fall-back's
+            # "front door" choice). Filter to non-terminal here so the
+            # fall-back stays on a status that is actually ari-active.
+            # PAUSED is intentionally NOT filtered out — the enqueue
+            # path's PAUSED-exempt claim gate holds the wake Task
+            # PENDING until resume (R-15 accepted behavior).
+            _TERMINAL_STATUSES = frozenset(
+                {"completed", "terminated", "error", "failed"}
+            )
+            instances = [
+                i for i in instances
+                if getattr(i, "status", None) not in _TERMINAL_STATUSES
+            ]
+            if not instances:
+                logger.warning(
+                    "UpgradeJournalSweepService: ari fall-back: zero "
+                    "non-terminal ari instances for project=%s — returning None",
+                    project_id,
+                )
+                return None
             # Filter by project_id when the field is set (project-
             # scoping the ari look-up keeps the fall-back on-target).
             if project_id is not None:
@@ -835,19 +861,41 @@ class UpgradeJournalSweepService:
         install_dir: Path,
         result: "UpgradeJournalSweepService.WakeSweepResult",
     ) -> "UpgradeJournalSweepService.WakeSweepResult":
-        """Phase 2 T14 grace-abandonment (D-FA1.2, ADR-042 — review MUST-FIX).
+        """Phase 2 T14 grace-abandonment (D-FA1.2, ADR-042 — review MUST-FIX,
+        F2 hardened).
 
         Iterates ``pending_wakes``; for any record whose ``abandon_after``
-        is ``<= now``, calls ``uj.mark_wake_abandoned(install_dir,
+        is ``<= now`` AND for which ``wake_terminal_event_after(journal,
+        armed_at)`` is ``None`` (no terminal event yet → NOT
+        deliverable), calls ``uj.mark_wake_abandoned(install_dir,
         run_id, "grace_expired")`` (structural removal + ONE
         ``wake_abandoned`` history event for forensics).
 
+        F2 hardening (review round): the pre-F2 grace pass abandoned
+        every past-grace record unconditionally. This contradicted the
+        feature's core promise — a wake whose terminal event fired
+        during a long downtime (e.g. ``restart`` journaled at +30min
+        with arm+40min = past grace) would be abandoned and the user
+        would receive NO notification, exactly the scenario the
+        feature exists for. The fix: the grace pass now reads the
+        journal once at the top of the pass and uses
+        ``wake_terminal_event_after(journal, wake.armed_at)`` to
+        decide. When the predicate is non-None (deliverable NOW), the
+        wake is HELD — the deliver pass on this same tick (or the
+        next, if the deliver pass is skipped) will pick it up via
+        the normal terminal-gating path. When the predicate is None
+        (no terminal event, no chance of delivery), the wake is
+        abandoned with ``reason=grace_expired`` exactly as before.
+        The reading of the journal is itself wrapped (torn or
+        OSError → ``errors += 1`` and the pass yields no
+        abandonments); a single bad read does not poison the tick.
+
         Runs BEFORE the kill-switch OFF branch so the OFF pass only
-        sees not-yet-graced records: a past-grace record gets the
-        more-specific ``reason="grace_expired"`` (the OFF pass would
-        have wrongly labeled it ``kill_switch_off``). Records still
-        within grace are HELD pending (this method does not touch
-        them).
+        sees not-yet-graced records: a past-grace-and-not-deliverable
+        record gets the more-specific ``reason="grace_expired"``
+        (the OFF pass would have wrongly labeled it
+        ``kill_switch_off``). Records still within grace are HELD
+        pending (this method does not touch them).
 
         Per-wake isolation: each ``mark_wake_abandoned`` is wrapped
         individually — a single failure logs WARNING and bumps
@@ -888,6 +936,44 @@ class UpgradeJournalSweepService:
                 errors=result.errors + 1,
                 coalesce_overflows=result.coalesce_overflows,
             )
+        # F2: read the journal ONCE so we can run
+        # ``wake_terminal_event_after`` per wake. A torn / OSError
+        # read surfaces as ``errors += 1`` and the pass yields no
+        # abandonments (a missing journal must not cause a
+        # wholesale abandon — the next tick retries with a clean
+        # read).
+        try:
+            grace_journal = uj.journal_read(install_dir)
+        except uj.JournalTorn as torn_exc:
+            logger.warning(
+                "UpgradeJournalSweepService: grace pass "
+                "journal_read FAILED (torn): %s — continuing (no "
+                "abandons on this tick)",
+                torn_exc,
+            )
+            return self.WakeSweepResult(
+                pending_at_start=result.pending_at_start,
+                pending_at_end=result.pending_at_end,
+                delivered=result.delivered,
+                abandoned=result.abandoned,
+                errors=result.errors + 1,
+                coalesce_overflows=result.coalesce_overflows,
+            )
+        except OSError as os_exc:
+            logger.warning(
+                "UpgradeJournalSweepService: grace pass "
+                "journal_read FAILED (OSError): %s — continuing (no "
+                "abandons on this tick)",
+                os_exc,
+            )
+            return self.WakeSweepResult(
+                pending_at_start=result.pending_at_start,
+                pending_at_end=result.pending_at_end,
+                delivered=result.delivered,
+                abandoned=result.abandoned,
+                errors=result.errors + 1,
+                coalesce_overflows=result.coalesce_overflows,
+            )
         now_dt = uj.parse_iso_utc(uj.now_iso())
         if now_dt is None:
             # now_iso() is always parseable; defensive only.
@@ -910,6 +996,39 @@ class UpgradeJournalSweepService:
                 continue
             if now_dt < abandon_dt:
                 continue  # within grace — held pending
+            # F2 deliverability check: if a terminal event exists in
+            # the journal AT/AFTER the wake's ``armed_at``, the wake
+            # is deliverable now — the deliver pass on this tick (or
+            # the next) will handle it. HELD here so the user
+            # actually receives the notification.
+            try:
+                deliverable = (
+                    uj.wake_terminal_event_after(
+                        grace_journal, wake.armed_at
+                    )
+                    is not None
+                )
+            except Exception as deliv_exc:  # noqa: BLE001
+                # A torn / malformed history is already handled by
+                # the read above; this catch is purely defensive
+                # against an unexpected reader error. On reader
+                # failure, fall back to the pre-F2 behavior (treat
+                # as not deliverable → abandon) — losing the wake is
+                # the worse outcome than a false-abandon, but this
+                # is a last-resort branch and the next tick's read
+                # will likely succeed.
+                logger.warning(
+                    "UpgradeJournalSweepService: grace pass — "
+                    "wake_terminal_event_after FAILED for "
+                    "run_id=%s: %s — falling back to pre-F2 "
+                    "abandon (deliverability unknown)",
+                    wake.run_id, deliv_exc,
+                )
+                deliverable = False
+            if deliverable:
+                # Past grace but DELIVERABLE — the deliver pass
+                # handles it. Skip the abandon (the F2 fix).
+                continue
             try:
                 uj.mark_wake_abandoned(
                     install_dir, wake.run_id, "grace_expired"
@@ -1225,14 +1344,44 @@ class UpgradeJournalSweepService:
                                     )
                             delivered_count += len(wakes)
                         else:
-                            # No message_id — hold the wakes (do not mark
-                            # abandoned yet; wait for the next tick).
+                            # No message_id — F1 review round: the wake
+                            # is currently ``delivering`` (the CAS at
+                            # the top of this branch already flipped it)
+                            # and the old "hold next tick" comment was
+                            # a lie — the CAS gate on
+                            # ``mark_wake_delivering`` requires
+                            # ``status == "pending"``, so a
+                            # ``delivering`` record was stranded
+                            # forever. Roll the status back to
+                            # ``pending`` so the next tick can re-claim
+                            # and re-deliver. Safe per the atomicity
+                            # verification in
+                            # ``mark_wake_pending``'s docstring:
+                            # ``enqueue_message`` either raised
+                            # (no row written) or returned a
+                            # ``message_id``; the no-message_id path
+                            # here is the result-malformed defensive
+                            # branch, never a partial write.
                             logger.warning(
                                 "UpgradeJournalSweepService: enqueue_message "
                                 "returned no message_id for run_id=%s — "
-                                "wake held pending next tick",
+                                "rolling wake back to pending for next tick",
                                 head.run_id,
                             )
+                            for w in wakes:
+                                try:
+                                    uj.mark_wake_pending(
+                                        install_dir, w.run_id
+                                    )
+                                except Exception as rb_exc:  # noqa: BLE001
+                                    logger.warning(
+                                        "UpgradeJournalSweepService: "
+                                        "mark_wake_pending (F1 rollback) "
+                                        "FAILED for run_id=%s: %s — "
+                                        "record stays delivering (next "
+                                        "tick will retry via re-claim)",
+                                        w.run_id, rb_exc,
+                                    )
                     except KeyError:
                         # Instance gone mid-tick — single-wake fall-back
                         # path: T19 ari fall-back for the head wake.
@@ -1272,13 +1421,36 @@ class UpgradeJournalSweepService:
                                     pass
                             delivered_count += len(wakes)
                     except Exception as enq_exc:  # noqa: BLE001
+                        # F1 review round: a transient (non-KeyError)
+                        # ``enqueue_message`` failure stranded the wake
+                        # in ``delivering`` forever — the CAS gate on
+                        # ``mark_wake_delivering`` requires
+                        # ``status == "pending"``. Roll the status
+                        # back so the next tick can re-claim. Safe per
+                        # the atomicity verification in
+                        # ``mark_wake_pending``'s docstring:
+                        # ``enqueue_message`` either raised (no row
+                        # written) or returned a ``message_id``; a
+                        # raised exception = no row written = safe
+                        # to retry.
                         logger.warning(
                             "UpgradeJournalSweepService: enqueue_message "
-                            "FAILED for run_id=%s: %s — per-wake "
-                            "try/except continues; wakes held pending "
-                            "next tick",
+                            "FAILED for run_id=%s: %s — rolling wake "
+                            "back to pending for next tick",
                             head.run_id, enq_exc,
                         )
+                        for w in wakes:
+                            try:
+                                uj.mark_wake_pending(install_dir, w.run_id)
+                            except Exception as rb_exc:  # noqa: BLE001
+                                logger.warning(
+                                    "UpgradeJournalSweepService: "
+                                    "mark_wake_pending (F1 rollback) "
+                                    "FAILED for run_id=%s: %s — "
+                                    "record stays delivering (next "
+                                    "tick will retry via re-claim)",
+                                    w.run_id, rb_exc,
+                                )
                         result = self.WakeSweepResult(
                             pending_at_start=result.pending_at_start,
                             pending_at_end=result.pending_at_end,

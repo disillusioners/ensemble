@@ -501,6 +501,73 @@ class TestBootNeverWedges:
         assert result.delivered == 0
         # No crash — boot proceeds.
 
+    @pytest.mark.asyncio
+    async def test_enqueue_failure_recovers_on_next_tick_via_pending_rollback(
+        self, install: Path
+    ) -> None:
+        """F1 review round: a transient ``enqueue_message`` failure on
+        tick-1 must NOT strand the wake in ``delivering`` — the F1 fix
+        rolls the status back to ``pending`` so tick-2 can re-claim
+        via ``mark_wake_delivering``'s CAS gate and deliver. This
+        test proves the full recovery loop: failing tick → status
+        rolled back to ``pending`` (NOT stuck in ``delivering``) →
+        healthy tick → delivered = 1 → record structurally removed.
+
+        Pre-F1 behavior: the wake stayed in ``delivering`` after a
+        failed enqueue, and the next tick's ``mark_wake_delivering``
+        CAS returned ``None`` (status != "pending"), so the wake was
+        stranded FOREVER. This test would have FAILED on pre-F1 code.
+        """
+        _make_wake(install, run_id="r-f1-recover")
+        _append_history(install, "commit", "promote to 1.2.3")
+        manager = _mock_manager()
+
+        # Call sequence: tick-1 fails, tick-2 succeeds. The F1 fix
+        # needs tick-1's failure to roll the status back to ``pending``
+        # so tick-2's CAS gate can re-claim. We use a counter to
+        # switch the side_effect mid-test.
+        call_count = {"n": 0}
+
+        async def enqueue_then_succeed(instance_id, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated transient enqueue failure")
+            return _msg_result("m-f1-recover")
+
+        manager.enqueue_message = AsyncMock(side_effect=enqueue_then_succeed)
+        service = UpgradeJournalSweepService(install, manager=manager)
+
+        # Tick-1: enqueue fails → no delivery, errors=1, status
+        # rolled back to ``pending`` (NOT stuck in ``delivering``).
+        result1 = await service.sweep_wake_records()
+        assert result1.delivered == 0
+        assert result1.errors >= 1
+        # The wake is still in the dict (NOT structurally removed).
+        records_after_tick1 = uj.list_pending_wakes(install)
+        assert len(records_after_tick1) == 1
+        assert records_after_tick1[0].run_id == "r-f1-recover"
+        # The wake's status is ``pending`` (F1 fix: NOT ``delivering``).
+        data = journal_read(install)
+        raw = data.get("pending_wakes", {}).get("r-f1-recover")
+        assert raw is not None
+        assert raw.get("status") == "pending", (
+            "F1 fix: after a failed enqueue, the wake's status must be "
+            "rolled back to 'pending' (NOT left in 'delivering', which "
+            "would strand the wake forever — the CAS gate on "
+            "mark_wake_delivering requires status == 'pending')"
+        )
+
+        # Tick-2: enqueue succeeds → delivered, structurally removed.
+        result2 = await service.sweep_wake_records()
+        assert result2.delivered == 1
+        assert result2.errors == 0
+        records_after_tick2 = uj.list_pending_wakes(install)
+        assert records_after_tick2 == [], (
+            "tick-2 must deliver and structurally remove the record"
+        )
+        # Two enqueue calls total (one failed, one succeeded).
+        assert manager.enqueue_message.await_count == 2
+
 
 # ── Group 7 — kill-switch (T5.11) + abandon-on-switch-off (T5.16) ────────────
 
@@ -581,21 +648,59 @@ class TestManagerWiringAndInstallDirNone:
     a constructor kwarg; ``install_dir=None`` (dev mode) is a clean no-op."""
 
     def test_manager_wired_via_constructor(self) -> None:
-        """T5.18 (r4 fold C2): the manager attribute is set after
-        construction AND ``_deliver_wake`` references ``self._manager``
-        (NOT a module-level ``manager``)."""
-        manager = MagicMock()
-        service = UpgradeJournalSweepService(None, manager=manager)
-        assert service._manager is manager
-        # The _deliver_wake body references self._manager.
-        from daemon.services import upgrade_journal_sweep as mod
-        src = (Path(mod.__file__)).read_text()
-        # Look in the _deliver_wake method's body for self._manager usage.
-        # The reference must be present (we cannot trivially slice the
-        # method body out, but the source scan confirms the field).
-        assert "self._manager" in src, (
-            "UpgradeJournalSweepService source must reference self._manager"
+        """T5.18 (r4 fold C2): the manager kwarg is bound to
+        ``self._manager`` AND a real sweep tick (with a deliverable
+        wake) routes through the wired manager. The pre-bundle version
+        of this test was vacuous (text-scanned for ``self._manager``
+        in the source file, which matched anything); the bundle
+        review round replaced the text-scan with a real behavioral
+        assertion: a sweep that has a deliverable wake on disk +
+        a wired manager must call ``manager.enqueue_message`` with
+        the documented args (the proof the seam is load-bearing,
+        not a dangling attribute)."""
+        # Wire a real install with an armed wake + a terminal event so
+        # the sweep has something to deliver.
+        import tempfile
+        from daemon.tools.upgrade_journal import (
+            journal_init, ensure_extensions as _ensure_ext,
         )
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = Path(tmp) / "install"
+            (inst / "releases").mkdir(parents=True)
+            journal_init(inst)
+            _ensure_ext(inst)
+            _make_wake(inst, run_id="r-t5-18")
+            _append_history(inst, "commit", "promote to 1.2.3")
+            # Use ``_mock_manager()`` so ``enqueue_message`` is an
+            # AsyncMock returning a valid ``AsyncMessageResult``
+            # (a bare ``MagicMock()`` here would not be awaitable
+            # and the sweep's ``await self._manager.enqueue_message``
+            # would raise — masking the very wiring contract this
+            # test is supposed to prove).
+            manager = _mock_manager()
+            service = UpgradeJournalSweepService(inst, manager=manager)
+            # Attribute-level: the kwarg is bound to ``self._manager``.
+            assert service._manager is manager, (
+                "manager= kwarg must be bound to self._manager "
+                "(T5.18 wiring contract)"
+            )
+            # Behavioral: a sweep with a deliverable wake calls the
+            # wired manager's ``enqueue_message`` exactly once with the
+            # documented args. The pre-bundle text-scan could not
+            # detect a misrouted manager reference; this can.
+            result = asyncio.run(service.sweep_wake_records())
+            assert result.delivered == 1, (
+                "sweep with wired manager + deliverable wake must "
+                "deliver (1) — proves the manager is actually used, "
+                "not just stored"
+            )
+            assert manager.enqueue_message.await_count == 1, (
+                "wired manager must be called exactly once (the "
+                "behavioral proof the manager seam is load-bearing)"
+            )
+            kwargs = manager.enqueue_message.await_args.kwargs
+            assert kwargs["instance_id"] == "i-arm-1"
+            assert kwargs["priority"] == 2
 
     @pytest.mark.asyncio
     async def test_install_dir_none_is_clean_noop(self) -> None:
@@ -949,3 +1054,283 @@ class TestGraceAbandonment:
         assert len(abandoned_after) == len(abandoned_before)
         # Zero enqueue calls across both ticks.
         assert manager.enqueue_message.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_grace_pass_skips_deliverable_wake_past_grace(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F2 review round: a past-grace wake with a terminal event in
+        the journal is DELIVERABLE — the grace pass must NOT abandon
+        it. The deliver pass on the same tick fires the wake via the
+        normal terminal-gating path. The pre-F2 grace pass abandoned
+        every past-grace record unconditionally, stranding the wake
+        in the abandoned state and losing the user notification —
+        exactly the scenario the feature exists for (long downtime
+        > arm+40min on the restart lane, or > arm+20min on the
+        promote lane, with a terminal event journaled during the
+        downtime).
+
+        Proven shape: ``armed_at=00:00``, ``abandon_after=00:20``,
+        ``now=00:30`` (past grace) + ``commit`` event at ``00:15``
+        (in scope) → ``delivered=1``, ``abandoned=0``, the wake
+        record is structurally removed (NOT abandoned).
+        """
+        # Arm a wake (default armed_at=00:00, abandon_after=00:20).
+        _make_wake(install, run_id="r-f2-deliverable")
+        # Journal a commit event at 00:15 — well after armed_at, well
+        # before now=00:30 (past grace).
+        _append_history(
+            install, "commit", "promote to 1.2.3",
+            ts="2026-10-04T00:15:00Z",
+        )
+        # Freeze time at 00:30 — past grace (00:20).
+        monkeypatch.setattr(
+            uj, "now_iso", lambda: "2026-10-04T00:30:00Z"
+        )
+        manager = _mock_manager()
+        service = UpgradeJournalSweepService(install, manager=manager)
+
+        result = await service.sweep_wake_records()
+
+        # F2 fix: past-grace + deliverable → delivered, NOT abandoned.
+        assert result.delivered == 1, (
+            "F2 fix: a past-grace wake with a terminal event in scope "
+            "must be DELIVERED (the grace pass must NOT abandon a "
+            "deliverable wake — the user would lose the notification, "
+            "exactly the scenario the feature exists for)"
+        )
+        assert result.abandoned == 0, (
+            "F2 fix: a deliverable wake must NOT be abandoned even "
+            "when its abandon_after is in the past"
+        )
+        # The wake is structurally removed (delivered, not abandoned).
+        records = uj.list_pending_wakes(install)
+        assert records == []
+        # The enqueue was called exactly once.
+        assert manager.enqueue_message.await_count == 1
+        # No wake_abandoned history event journaled (the wake was
+        # delivered, not abandoned — pre-F2 this would have a
+        # reason=grace_expired event).
+        history = journal_read(install).get("history", [])
+        abandoned = [
+            e for e in history
+            if isinstance(e, dict) and e.get("event") == "wake_abandoned"
+        ]
+        assert abandoned == [], (
+            "F2 fix: a deliverable wake must NOT journal a "
+            "wake_abandoned event (pre-F2 this test would find a "
+            "reason=grace_expired event here)"
+        )
+
+
+# ── Group 12 — F5 review round (ari fall-back determinism) ───────────────────
+
+
+class TestAriFallbackDeterminismAndStatusFilter:
+    """F5 review round: the ari fall-back target picker must be
+    deterministic AND must skip terminal instances. Pre-F5 the repo
+    call ``get_by_agent_id("ari")`` returned all rows (including
+    terminal), the tie-break used
+    ``(last_activity_at, max(instance_id))`` in Python's native sort
+    + max, and KeyError vs transient ``enqueue_message`` exceptions
+    were already distinguished (KeyError → ari fall-back, transient
+    → hold). The hardening pins the determinism with a real
+    tie-break test and adds the non-terminal status filter."""
+
+    @pytest.mark.asyncio
+    async def test_non_terminal_ari_filter_drops_completed_instances(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F5(ii): a repo that returns a terminal ari (status=completed)
+        + a non-terminal ari (status=running) → the fall-back must
+        pick the NON-TERMINAL one. Pre-F5 the terminal row would
+        win the tie-break and the wake would target a dead instance
+        (the enqueue path's auto-revive machinery is reserved for
+        the primary arming-instance path, not the fall-back)."""
+        _make_wake(install, run_id="r-f5", arming_instance_id="i-missing")
+        _append_history(install, "commit", "promote to 1.2.3")
+
+        # enqueue_message raises KeyError on the first call (arming
+        # instance gone), then succeeds on the ari-fallback call.
+        manager = _mock_manager()
+        call_count = {"n": 0}
+
+        async def enqueue(instance_id, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise KeyError("Instance not found: i-missing")
+            return _msg_result("m-f5")
+
+        manager.enqueue_message = AsyncMock(side_effect=enqueue)
+        # Repo returns TWO ari instances: one terminal (status=completed),
+        # one non-terminal (status=running). Pre-F5 the helper would
+        # pick the terminal one (or whichever won the tie-break) —
+        # post-F5 the terminal one is filtered out and the running
+        # one wins.
+        terminal_ari = MagicMock()
+        terminal_ari.instance_id = "i-ari-terminal"
+        terminal_ari.last_activity_at = "2026-10-04T00:00:00Z"
+        terminal_ari.status = "completed"  # F5(ii): terminal → filtered
+        running_ari = MagicMock()
+        running_ari.instance_id = "i-ari-running"
+        running_ari.last_activity_at = "2026-10-04T00:00:00Z"
+        running_ari.status = "running"
+        repo = MagicMock()
+        # The repo returns the rows in INVERSE order so a buggy
+        # "first wins" implementation would also pick the terminal
+        # one — proves the filter is the active mechanism, not
+        # accidental order.
+        repo.get_by_agent_id = MagicMock(
+            return_value=[terminal_ari, running_ari]
+        )
+        repo.get = MagicMock(return_value=None)  # arming instance gone
+        manager._instance_repository = repo
+        service = UpgradeJournalSweepService(install, manager=manager)
+
+        result = await service.sweep_wake_records()
+        # The fall-back delivered to the RUNNING ari (F5 filter
+        # dropped the terminal one).
+        assert result.delivered == 1
+        assert result.errors == 0
+        # The enqueue target must be the non-terminal ari.
+        assert manager.enqueue_message.await_count == 2
+        # The second call (ari fallback) targeted i-ari-running.
+        fb_kwargs = manager.enqueue_message.await_args_list[1].kwargs
+        assert fb_kwargs["instance_id"] == "i-ari-running", (
+            "F5(ii): ari fall-back must skip terminal rows and pick "
+            "a non-terminal ari (the running one in this fixture)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tie_break_picks_newer_last_activity_at(
+        self, install: Path
+    ) -> None:
+        """F5(iii) leg A: two non-terminal ari instances with
+        DISTINCT ``last_activity_at`` → the newer ISO-lex wins. The
+        input order is OLD-then-NEW so a buggy "first wins"
+        implementation would also pick the older one — this test
+        pins the sort + max behavior, not the iteration order."""
+        _make_wake(
+            install, run_id="r-f5a", arming_instance_id="i-missing"
+        )
+        _append_history(install, "commit", "promote to 1.2.3")
+        manager = _mock_manager()
+        call_count = {"n": 0}
+
+        async def enqueue(instance_id, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise KeyError("Instance not found: i-missing")
+            return _msg_result("m-f5a")
+
+        manager.enqueue_message = AsyncMock(side_effect=enqueue)
+        older = MagicMock()
+        older.instance_id = "i-ari-old"
+        older.last_activity_at = "2026-10-03T23:00:00Z"
+        older.status = "running"
+        newer = MagicMock()
+        newer.instance_id = "i-ari-new"
+        newer.last_activity_at = "2026-10-04T00:00:00Z"
+        newer.status = "running"
+        repo = MagicMock()
+        repo.get_by_agent_id = MagicMock(return_value=[older, newer])
+        repo.get = MagicMock(return_value=None)
+        manager._instance_repository = repo
+        service = UpgradeJournalSweepService(install, manager=manager)
+        result = await service.sweep_wake_records()
+        assert result.delivered == 1
+        fb_kwargs = manager.enqueue_message.await_args_list[1].kwargs
+        assert fb_kwargs["instance_id"] == "i-ari-new", (
+            "F5(iii) leg A: the NEWER last_activity_at must win "
+            "(ISO-lexicographic ordering pins the determinism)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tie_break_picks_max_instance_id_on_equal_timestamp(
+        self, install: Path
+    ) -> None:
+        """F5(iii) leg B: two non-terminal ari instances with the
+        SAME ``last_activity_at`` → the lexicographically MAX
+        ``instance_id`` wins (the stable tie-break). Input order is
+        LOW-then-HIGH so a buggy "first wins" implementation would
+        also pick the LOW one — this test pins the (ts, max(iid))
+        sort+max behavior."""
+        _make_wake(
+            install, run_id="r-f5b", arming_instance_id="i-missing"
+        )
+        _append_history(install, "commit", "promote to 1.2.3")
+        manager = _mock_manager()
+        call_count = {"n": 0}
+
+        async def enqueue(instance_id, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise KeyError("Instance not found: i-missing")
+            return _msg_result("m-f5b")
+
+        manager.enqueue_message = AsyncMock(side_effect=enqueue)
+        a_low = MagicMock()
+        a_low.instance_id = "i-ari-A"  # lex smaller than B
+        a_low.last_activity_at = "2026-10-04T00:00:00Z"
+        a_low.status = "running"
+        a_high = MagicMock()
+        a_high.instance_id = "i-ari-B"  # lex greater than A
+        a_high.last_activity_at = "2026-10-04T00:00:00Z"
+        a_high.status = "running"
+        repo = MagicMock()
+        repo.get_by_agent_id = MagicMock(return_value=[a_low, a_high])
+        repo.get = MagicMock(return_value=None)
+        manager._instance_repository = repo
+        service = UpgradeJournalSweepService(install, manager=manager)
+        result = await service.sweep_wake_records()
+        assert result.delivered == 1
+        fb_kwargs = manager.enqueue_message.await_args_list[1].kwargs
+        assert fb_kwargs["instance_id"] == "i-ari-B", (
+            "F5(iii) leg B: on EQUAL last_activity_at, the "
+            "lexicographically MAX instance_id must win (the stable "
+            "tie-break; ISO-lexicographic ordering pins the "
+            "determinism)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_zero_non_terminal_ari_returns_none_and_abandons(
+        self, install: Path
+    ) -> None:
+        """F5(ii) edge: a repo that returns ONLY a terminal ari →
+        filter yields an empty list → fall-back returns ``None`` →
+        the head wake is abandoned with ``reason=instance_missing``
+        (the same path as "no ari at all" — F5 is honest: a
+        terminal ari is NOT a viable fall-back target)."""
+        _make_wake(install, run_id="r-f5-edge", arming_instance_id="i-missing")
+        _append_history(install, "commit", "promote to 1.2.3")
+
+        manager = _mock_manager()
+
+        async def enqueue_raise(*args, **kwargs):
+            raise KeyError("Instance not found: i-missing")
+
+        manager.enqueue_message = AsyncMock(side_effect=enqueue_raise)
+        # Repo returns ONE terminal ari (no non-terminal rows).
+        terminal_ari = MagicMock()
+        terminal_ari.instance_id = "i-ari-done"
+        terminal_ari.last_activity_at = "2026-10-04T00:00:00Z"
+        terminal_ari.status = "terminated"
+        repo = MagicMock()
+        repo.get_by_agent_id = MagicMock(return_value=[terminal_ari])
+        repo.get = MagicMock(return_value=None)
+        manager._instance_repository = repo
+        service = UpgradeJournalSweepService(install, manager=manager)
+
+        result = await service.sweep_wake_records()
+        # Filter dropped the only ari → head wake abandoned.
+        assert result.delivered == 0
+        assert result.abandoned == 1
+        # The wake_abandoned event carries reason=instance_missing
+        # (F5: terminal ari = no ari, structurally).
+        history = journal_read(install).get("history", [])
+        abandoned = [
+            e for e in history
+            if isinstance(e, dict) and e.get("event") == "wake_abandoned"
+        ]
+        assert len(abandoned) == 1
+        assert "reason=instance_missing" in abandoned[0].get("detail", "")

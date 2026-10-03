@@ -901,7 +901,7 @@ def arm_pending_wake(install_dir: Path, wake: PendingWake) -> None:
     atomic envelope (Phase 1 T2, ADR-039).
 
     Must be called INSIDE the caller-acquired journal lock at the arm
-    sites (``upgrade_tools.py:2167``/``:2719``); ``journal_write``
+    sites (``upgrade_tools.py:2287``/``:2848``); ``journal_write``
     itself has no internal lock (architecture delta #3 — atomicity is
     BY the caller's lock, not the journal's). Per-arm semantics: a
     re-arm of the same ``run_id`` OVERWRITES — same record, same
@@ -927,22 +927,93 @@ def arm_pending_wake(install_dir: Path, wake: PendingWake) -> None:
     journal_write(install_dir, data)
 
 
+def mark_wake_pending(
+    install_dir: Path, run_id: str
+) -> PendingWake | None:
+    """Reverse the ``delivering → pending`` transition (F1 review round).
+
+    Sets ``status = "pending"`` on the record (does NOT touch the dict
+    membership). Used by the sweep when ``enqueue_message`` either
+    raises a transient exception or returns a result without a
+    ``message_id`` — the wake MUST be made re-claimable on the next
+    tick (otherwise it strands in ``delivering`` forever, since
+    ``mark_wake_delivering``'s CAS gate at F1 review requires
+    ``status == "pending"``).
+
+    Atomicity-safety note (F1 review precondition): this helper is
+    safe ONLY because ``enqueue_message`` (sweep's primary path) is
+    atomic — verified at
+    ``daemon/services/instance_messaging._prepare_enqueued_message``
+    via the ``WriteGuardSession + session.commit()`` envelope: a
+    raised exception rolls the entire transaction back (no
+    MessageQueue row, no Task row written), and a returned
+    ``message_id`` corresponds to a committed row. The rollback can
+    therefore never cause a double-deliver — the wake either
+    enqueued (and the next tick will see an empty dict via
+    ``mark_wake_delivered``'s structural removal) or it didn't (and
+    the rollback puts the record back in ``pending`` for the next
+    tick to retry).
+
+    Acquires the journal pipeline lock with ``wait_s=30.0`` (F4
+    hardening — same envelope as the other ``mark_wake_*`` helpers).
+    Returns the new ``PendingWake`` on success, ``None`` on
+    lock-not-acquired or absent/already-pending record.
+    """
+    acquired, _busy = lock_acquire(install_dir, run_id, wait_s=30.0)
+    if not acquired:
+        logger.warning(
+            "upgrade_journal: mark_wake_pending lock NOT acquired "
+            "run_id=%s — skip (record stays delivering; next tick retries)",
+            run_id,
+        )
+        return None
+    try:
+        data = ensure_extensions(install_dir)
+        pending = data.get("pending_wakes")
+        if not isinstance(pending, dict) or run_id not in pending:
+            return None
+        raw = pending[run_id]
+        if not isinstance(raw, dict):
+            return None
+        if raw.get("status") == _WAKE_STATUS_PENDING:
+            # Already pending — no-op (idempotent).
+            return PendingWake.from_json(raw)
+        if raw.get("status") != _WAKE_STATUS_DELIVERING:
+            # Not in delivering state (abandoned, delivered, or other)
+            # — leave it alone (the record is on a terminal path).
+            return None
+        raw["status"] = _WAKE_STATUS_PENDING
+        pending[run_id] = raw
+        data["pending_wakes"] = pending
+        journal_write(install_dir, data)
+        return PendingWake.from_json(raw)
+    finally:
+        lock_release(install_dir)
+
+
 def mark_wake_delivering(
     install_dir: Path, run_id: str
 ) -> PendingWake | None:
-    """CAS-style transition ``pending → delivering`` (Phase 1 T3, ADR-039).
+    """CAS-style transition ``pending → delivering`` (Phase 1 T3, ADR-039,
+    F3 hardened).
 
-    Acquires the journal's per-env pipeline lock; on success, sets
-    ``status = "delivering"`` and persists via ``journal_write``.
-    Returns the new ``PendingWake``. On lock-not-acquired, returns
-    ``None`` and logs a WARNING — the caller (Phase 2 T7) skips this
-    tick (the next tick retries).
+    Acquires the journal's per-env pipeline lock with ``wait_s=30.0``
+    (review round F3): the CAS MUST wait for any concurrent shell
+    writer to release, since shell writers (restart.sh:262 + promote.sh
+    + rollback.sh) hold the lock across their ``journal_history_append``
+    terminal-event writes and the sweep is the natural follow-up
+    reader. The pre-F3 ``wait_s=0.0`` short-circuited the wait, leaving
+    the CAS-loser path exposed to shell-writer clobber (F4's race). On
+    successful acquire, sets ``status = "delivering"`` and persists via
+    ``journal_write``. Returns the new ``PendingWake``. On
+    lock-not-acquired-after-30s, returns ``None`` and logs a WARNING —
+    the caller (Phase 2 T7) skips this tick (the next tick retries).
 
     The lock is the existing ``journal_lock_acquire`` (same primitive
     ``pending_op`` uses); on contention the sweep blocks until the
     holder releases (mirroring the other journal-protocol CAS sites).
     """
-    acquired, busy = lock_acquire(install_dir, run_id, wait_s=0.0)
+    acquired, busy = lock_acquire(install_dir, run_id, wait_s=30.0)
     if not acquired:
         logger.warning(
             "upgrade_journal: mark_wake_delivering lock NOT acquired "
@@ -973,28 +1044,49 @@ def mark_wake_delivered(
     install_dir: Path, run_id: str, message_id: str
 ) -> None:
     """Unconditional ``delivering → delivered`` write + structural removal
-    (Phase 1 T4, ADR-039).
+    (Phase 1 T4, ADR-039, F4 hardened).
 
     Sets ``status = "delivered"``, ``delivered_at = now_iso()``,
     ``delivered_message_id = message_id`` then REMOVES the record from
     the ``pending_wakes`` dict. The structural removal is the
     idempotency key (invariant 7 — invariant 5 — no second surface to
     forget). The dict shrinks on every ``journal_write`` that follows.
+
+    F4 lock hygiene (review round): the read-modify-write envelope
+    acquires the journal pipeline lock with ``wait_s=30.0`` (same as
+    the CAS at ``mark_wake_delivering``) so the sweep-side write
+    cannot clobber a concurrent shell writer's terminal-event append
+    (restart.sh:262 holds the lock across ``journal_history_append
+    restart ...``; promote.sh/rollback.sh do the same). The pre-F4
+    lock-free RMW was a real race at boot when a shell-writer had
+    just journaled the terminal event that the wake needs to read on
+    the next tick. UNCONDITIONAL: even if the record is absent we
+    no-op silently — the structural removal makes this the common
+    case (idempotency by construction). We do not log a WARNING —
+    absence is normal.
     """
-    data = ensure_extensions(install_dir)
-    pending = data.get("pending_wakes")
-    if not isinstance(pending, dict):
-        pending = {}
-    # UNCONDITIONAL: even if the record is absent we no-op silently —
-    # the structural removal makes this the common case (idempotency
-    # by construction). We do not log a WARNING — absence is normal.
-    if run_id in pending:
-        pending.pop(run_id, None)
-        data["pending_wakes"] = pending
-        journal_write(install_dir, data)
-    # Note: ``delivered_at`` and ``delivered_message_id`` are recorded
-    # only on the row that *was* present at arm time; the wake record
-    # lives in MessageQueue (audit on the message itself), not here.
+    acquired, _busy = lock_acquire(install_dir, run_id, wait_s=30.0)
+    if not acquired:
+        logger.warning(
+            "upgrade_journal: mark_wake_delivered lock NOT acquired "
+            "run_id=%s — skip (record stays pending; next tick retries)",
+            run_id,
+        )
+        return
+    try:
+        data = ensure_extensions(install_dir)
+        pending = data.get("pending_wakes")
+        if not isinstance(pending, dict):
+            pending = {}
+        if run_id in pending:
+            pending.pop(run_id, None)
+            data["pending_wakes"] = pending
+            journal_write(install_dir, data)
+        # Note: ``delivered_at`` and ``delivered_message_id`` are recorded
+        # only on the row that *was* present at arm time; the wake record
+        # lives in MessageQueue (audit on the message itself), not here.
+    finally:
+        lock_release(install_dir)
 
 
 def mark_wake_abandoned(
@@ -1002,7 +1094,7 @@ def mark_wake_abandoned(
 ) -> None:
     """Terminal-cleanup transition + ``wake_abandoned`` history event
     (Phase 1 T5, ADR-039 + ADR-042 grace-abandonment + ADR-044
-    abandon-on-switch-off).
+    abandon-on-switch-off, F4 hardened).
 
     Sets ``status = "abandoned"``, removes from dict, then calls
     ``journal_history_append(install_dir, "wake_abandoned", ...)`` for
@@ -1010,15 +1102,39 @@ def mark_wake_abandoned(
     reason). Uses the same ``journal_history_append`` helper as the
     existing pipeline events.
 
+    F4 lock hygiene (review round): the dict-pop write acquires the
+    journal pipeline lock with ``wait_s=30.0`` so the abandonment
+    cannot clobber a concurrent shell writer's terminal-event append
+    (restart.sh:262 etc.). The history-event append also runs under
+    the same lock for the same reason — the wake's history entry
+    must NOT race the shell's terminal-event append. The
+    history-append is best-effort (a torn journal surfaces the
+    failure as a log line, never raises); the dict-pop write's
+    lock-acquire-refusal path also returns silently (the dict may
+    have been concurrently removed by a prior pass; idempotency by
+    construction).
+
     UNCONDITIONAL on absence — the structural removal makes this the
     common case (idempotency by construction).
     """
-    data = ensure_extensions(install_dir)
-    pending = data.get("pending_wakes")
-    if isinstance(pending, dict) and run_id in pending:
-        pending.pop(run_id, None)
-        data["pending_wakes"] = pending
-        journal_write(install_dir, data)
+    acquired, _busy = lock_acquire(install_dir, run_id, wait_s=30.0)
+    if not acquired:
+        logger.warning(
+            "upgrade_journal: mark_wake_abandoned lock NOT acquired "
+            "run_id=%s — skip dict-pop (history-append also deferred; "
+            "next tick retries)",
+            run_id,
+        )
+        return
+    try:
+        data = ensure_extensions(install_dir)
+        pending = data.get("pending_wakes")
+        if isinstance(pending, dict) and run_id in pending:
+            pending.pop(run_id, None)
+            data["pending_wakes"] = pending
+            journal_write(install_dir, data)
+    finally:
+        lock_release(install_dir)
     journal_history_append(
         install_dir,
         "wake_abandoned",
