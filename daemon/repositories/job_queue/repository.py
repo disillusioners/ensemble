@@ -44,6 +44,18 @@ _LEGACY_TO_ADMISSION: dict[str, str] = {
     # carry no ``terminal_reason`` discriminator) — dead-letter
     # receipts leaked into ``?status=settled`` (3 vs 2 live).
     "settled": AdmissionState.DONE.value,
+    # M3 (2026-10-03, report-delivery-bug-family) —
+    # ``orphaned_no_task`` is the FP3 system-level orphan stamp
+    # written by ``reconcile_turn_mirror`` when the driving Task
+    # row is GONE and the mission is no longer live (occurrence
+    # #5, job ``fb0cf25c``). As a FILTER token it must pin the
+    # admission IN-clause to ``done`` so prod rows carrying
+    # ``terminal_reason='orphaned_no_task'`` (an ``admission_state=
+    # 'done'`` row) surface under ``?status=orphaned_no_task``;
+    # without this entry the filter would drop the token at the
+    # ``_statuses_to_admission`` gate and the per-kind branch
+    # would never run.
+    "orphaned_no_task": AdmissionState.DONE.value,
 }
 
 
@@ -1105,6 +1117,22 @@ class JobRepository:
             has_failed_token = "failed" in (statuses or [])
             has_cancelled_token = "cancelled" in (statuses or [])
             has_dead_letter_token = "dead_letter" in (statuses or [])
+            # M3 (2026-10-03, report-delivery-bug-family) — the
+            # FP3 orphan stamp ``orphaned_no_task`` is a done-cluster
+            # token (see ``_LEGACY_TO_ADMISSION`` mapping above);
+            # include the per-kind detection so the per-kind branch
+            # below fires and prod rows carrying
+            # ``terminal_reason='orphaned_no_task'`` (e.g. job
+            # ``fb0cf25c``) surface under
+            # ``?status=orphaned_no_task``. The branch is shape-
+            # parallel to ``cancelled`` (no job_type constraint,
+            # map-derived IN-list via
+            # ``_terminal_reason_variants`` so a future alias
+            # added to ``_STATUS_CANONICAL_MAP`` flows through
+            # automatically).
+            has_orphaned_no_task_token = (
+                "orphaned_no_task" in (statuses or [])
+            )
 
             # Build count query
             count_stmt = select(func.count()).select_from(JobItem)
@@ -1226,6 +1254,20 @@ class JobRepository:
                             _terminal_reason_variants("cancelled")
                         )
                     )
+                if has_orphaned_no_task_token:
+                    # M3 (2026-10-03, report-delivery-bug-family) —
+                    # ``orphaned_no_task`` per-kind branch. Shape-
+                    # parallel to ``cancelled`` (no job_type
+                    # constraint; the orphan stamp is a system-
+                    # level terminal that's kind-agnostic). The
+                    # IN-list is map-derived so a future alias
+                    # added to ``_STATUS_CANONICAL_MAP`` flows
+                    # through without a hand-edit here.
+                    per_kind_branches.append(
+                        JobItem.terminal_reason.in_(
+                            _terminal_reason_variants("orphaned_no_task")
+                        )
+                    )
                 # Gap B (tester-live round, 2026-09-11) — the
                 # ``dead_letter`` union branch. When a done-cluster
                 # token is also requested, this OR-list AND-combines
@@ -1334,6 +1376,17 @@ class JobRepository:
                     per_kind_branches.append(
                         JobItem.terminal_reason.in_(
                             _terminal_reason_variants("cancelled")
+                        )
+                    )
+                if has_orphaned_no_task_token:
+                    # M3 (2026-10-03, report-delivery-bug-family) —
+                    # list-query mirror of the count-query branch
+                    # above so the page and the total stay
+                    # consistent. Same shape-parallel rationale as
+                    # the count site.
+                    per_kind_branches.append(
+                        JobItem.terminal_reason.in_(
+                            _terminal_reason_variants("orphaned_no_task")
                         )
                     )
                 # Gap B union branch — mirrors the count query above:
