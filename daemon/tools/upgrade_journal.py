@@ -335,6 +335,11 @@ def ensure_extensions(install_dir: Path) -> dict[str, Any]:
     Only ADDS — never removes, never rewrites an existing value. Existing
     P2.1 fields are untouched, so every lib.sh ``journal_update`` keeps
     working against the extended document.
+
+    Post-Restart Arm-Notify (ADR-039): also ensures the
+    ``pending_wakes`` key (default ``{}``) is present. The wake record
+    rides this same helper so every consumer (Phase 2 sweep, future
+    forensic tools) sees a structurally stable top-level shape.
     """
     data = journal_read(install_dir)
     changed = False
@@ -346,6 +351,9 @@ def ensure_extensions(install_dir: Path) -> dict[str, Any]:
         changed = True
     if "pending_actions" not in data:
         data["pending_actions"] = {}
+        changed = True
+    if "pending_wakes" not in data:
+        data["pending_wakes"] = {}
         changed = True
     if changed:
         journal_write(install_dir, data)
@@ -764,6 +772,351 @@ def clear_pending_op(install_dir: Path, *, clear_restart_marker: bool = True) ->
     if clear_restart_marker:
         data["pending_restart"] = None
     journal_write(install_dir, data)
+
+
+# ── pending_wakes (Post-Restart Arm-Notify — ADR-039) ─────────────────────────
+#
+# The wake record is the durable carrier of the post-restart arm-notify
+# deliverable: at arm time we capture the routing context (source, message_id,
+# agent_id, etc.) which is in-memory-only on the manager and wiped at boot;
+# after a daemon restart the boot sweep reads pending_wakes + a terminal-class
+# journal event and delivers a self-describing wake to the arming instance
+# (Phase 2, ADR-040 + ADR-041 + ADR-042).
+#
+# Persistence home: a new top-level key ``pending_wakes`` on
+# ``releases/state.json`` keyed by ``run_id``. Lives on the same atomic
+# surface as ``pending_op`` and ``pending_restart`` — written by the SAME
+# ``journal_write`` envelope UNDER the caller-acquired journal lock
+# (``journal_write`` itself acquires no lock; serialization is the arm
+# site's ``journal_lock_acquire`` at ``upgrade_tools.py:2167``/``:2719``).
+# Crash-safety: arm + wake ride one ``journal_write`` so a crash between
+# leaves EITHER the pre-arm state OR the post-arm state — never a half.
+#
+# Lifecycle state machine (ADR-039):
+#     pending → delivering → delivered | abandoned
+# * pending  : newly armed; the sweep gates on the wake-owned terminal reader
+#              (Phase 2) and holds the record pending a terminal event.
+# * delivering : CAS-set by ``mark_wake_delivering`` (lock-holders succeed,
+#              losers return ``None``); the sweep is in flight.
+# * delivered : unconditional; record is STRUCTURALLY REMOVED from the dict
+#              (the structural removal is the idempotency key — invariant 7;
+#              invariant 5 — no second surface to forget).
+# * abandoned : unconditional; record is removed AND a ``wake_abandoned``
+#              history event is journaled for forensics (D-FA5.2 +
+#              ADR-042 grace-abandonment).
+#
+# ``from_json`` filter discipline (``upgrade_journal.py:738``): known
+# fields preserved, unknown fields dropped silently. Missing required
+# fields raise ``ValueError`` — same discipline as the other records.
+#
+# Live-outright-refusal inheritance (D-FA5.5 / ADR-044): the arm-side
+# write is INSIDE the try block that follows the live-outright-refusal
+# return (``upgrade_tools.py:2051-2058``). A live arm returns BEFORE
+# any journal write; the wake write is unreachable on live.
+
+# Lifecycle state constants (Phase 1 T1)
+_WAKE_STATUS_PENDING = "pending"
+_WAKE_STATUS_DELIVERING = "delivering"
+_WAKE_STATUS_DELIVERED = "delivered"
+_WAKE_STATUS_ABANDONED = "abandoned"
+
+# Wake abandonment grace (PENDING_WAKE_GRACE_S, Phase 2 T14, ADR-042).
+# Default-on, env-overridable; the sweep marks the wake ``abandoned`` with
+# ``reason=kill_switch_off`` if the kill-switch is OFF when the sweep runs
+# (one-time pass), or after ``expires_at + grace`` if the pipeline never
+# journaled a terminal event.
+PENDING_WAKE_GRACE_S: int = 600
+
+# Coalesce cap (D-FA5.2 / ADR-043): the sweep coalesces by ``arming_instance_id``
+# and caps each group at 16 — the dropper journals a ``wake_coalesce_overflow``
+# history event and the user can query the rest interactively. 16 wakes ×
+# ~80 chars per entry ≈ 1.3KB body, well under the 64KB MessageQueue cap.
+PENDING_WAKE_COALESCE_MAX: int = 16
+
+
+@dataclass
+class PendingWake:
+    """The Post-Restart Arm-Notify durable record (ADR-039).
+
+    Captured at arm time from the manager's in-memory user-origin window
+    (RAM-only; wiped at boot — see ADR-041). The wake sweep (Phase 2)
+    re-stamps the window from this record for the wake turn.
+    """
+
+    run_id: str
+    kind: str                    # "restart" | "promote"
+    env: str
+    arming_instance_id: str = ""
+    arming_agent_id: str | None = None
+    source: str = ""             # "" sentinel = no user-origin at arm time
+    message_id: str | None = None
+    message_metadata: dict[str, Any] = field(default_factory=dict)
+    target_version: str | None = None
+    mode: str | None = None      # restart-only
+    armed_at: str = field(default_factory=now_iso)
+    expires_at: str = field(default_factory=now_iso)
+    abandon_after: str = ""
+    status: str = _WAKE_STATUS_PENDING
+    delivered_at: str | None = None
+    delivered_message_id: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_json(cls, data: Any) -> PendingWake | None:
+        if not isinstance(data, dict) or not data.get("run_id"):
+            return None
+        kwargs = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        # ``abandon_after`` defaults to ``expires_at + PENDING_WAKE_GRACE_S``;
+        # callers may override. If a record predates the field (legacy
+        # defensive case) we backfill from expires_at + grace at use time.
+        if not kwargs.get("abandon_after"):
+            exp = kwargs.get("expires_at")
+            if exp:
+                kwargs["abandon_after"] = iso_plus(exp, PENDING_WAKE_GRACE_S)
+        try:
+            return cls(**kwargs)
+        except (TypeError, ValueError):
+            return None
+
+
+# Kill-switch name (shared Phase 1 + Phase 2). The arm-side and sweep-side
+# both gate on the same env; default ON.
+ARM_NOTIFY_KILL_SWITCH_ENV = "ENSEMBLE_POST_RESTART_ARM_NOTIFY"
+
+
+def _arm_notify_enabled() -> bool:
+    """Operator kill-switch: ``ENSEMBLE_POST_RESTART_ARM_NOTIFY=0`` disables.
+
+    Default ON — the deliverable is zero-user-action; the kill-switch exists
+    for operator opt-out, not default-off (ADR-044). Read per call (NOT
+    cached) so an operator flip takes effect on the next arm / sweep.
+    """
+    return os.environ.get(ARM_NOTIFY_KILL_SWITCH_ENV, "1") != "0"
+
+
+def arm_pending_wake(install_dir: Path, wake: PendingWake) -> None:
+    """Write the ``pending_wakes`` record under the journal's existing
+    atomic envelope (Phase 1 T2, ADR-039).
+
+    Must be called INSIDE the caller-acquired journal lock at the arm
+    sites (``upgrade_tools.py:2167``/``:2719``); ``journal_write``
+    itself has no internal lock (architecture delta #3 — atomicity is
+    BY the caller's lock, not the journal's). Per-arm semantics: a
+    re-arm of the same ``run_id`` OVERWRITES — same record, same
+    identity (the wake's identity is the run_id).
+
+    The kill-switch check is the first line; when OFF the function is a
+    no-op (no exception, no write — ADR-044 + D-FA6.2).
+    """
+    if not _arm_notify_enabled():
+        return
+    data = ensure_extensions(install_dir)
+    pending = data.get("pending_wakes")
+    if not isinstance(pending, dict):
+        pending = {}
+    # Backfill abandon_after if the caller left it empty (sentinel).
+    payload = wake.to_json()
+    if not payload.get("abandon_after") and payload.get("expires_at"):
+        payload["abandon_after"] = iso_plus(
+            payload["expires_at"], PENDING_WAKE_GRACE_S
+        )
+    pending[wake.run_id] = payload
+    data["pending_wakes"] = pending
+    journal_write(install_dir, data)
+
+
+def mark_wake_delivering(
+    install_dir: Path, run_id: str
+) -> PendingWake | None:
+    """CAS-style transition ``pending → delivering`` (Phase 1 T3, ADR-039).
+
+    Acquires the journal's per-env pipeline lock; on success, sets
+    ``status = "delivering"`` and persists via ``journal_write``.
+    Returns the new ``PendingWake``. On lock-not-acquired, returns
+    ``None`` and logs a WARNING — the caller (Phase 2 T7) skips this
+    tick (the next tick retries).
+
+    The lock is the existing ``journal_lock_acquire`` (same primitive
+    ``pending_op`` uses); on contention the sweep blocks until the
+    holder releases (mirroring the other journal-protocol CAS sites).
+    """
+    acquired, busy = lock_acquire(install_dir, run_id, wait_s=0.0)
+    if not acquired:
+        logger.warning(
+            "upgrade_journal: mark_wake_delivering lock NOT acquired "
+            "run_id=%s busy=%s — skip",
+            run_id, busy,
+        )
+        return None
+    try:
+        data = ensure_extensions(install_dir)
+        pending = data.get("pending_wakes")
+        if not isinstance(pending, dict) or run_id not in pending:
+            return None
+        raw = pending[run_id]
+        if not isinstance(raw, dict):
+            return None
+        if raw.get("status") != _WAKE_STATUS_PENDING:
+            return None  # not in pending state — CAS-loser or already done
+        raw["status"] = _WAKE_STATUS_DELIVERING
+        pending[run_id] = raw
+        data["pending_wakes"] = pending
+        journal_write(install_dir, data)
+        return PendingWake.from_json(raw)
+    finally:
+        lock_release(install_dir)
+
+
+def mark_wake_delivered(
+    install_dir: Path, run_id: str, message_id: str
+) -> None:
+    """Unconditional ``delivering → delivered`` write + structural removal
+    (Phase 1 T4, ADR-039).
+
+    Sets ``status = "delivered"``, ``delivered_at = now_iso()``,
+    ``delivered_message_id = message_id`` then REMOVES the record from
+    the ``pending_wakes`` dict. The structural removal is the
+    idempotency key (invariant 7 — invariant 5 — no second surface to
+    forget). The dict shrinks on every ``journal_write`` that follows.
+    """
+    data = ensure_extensions(install_dir)
+    pending = data.get("pending_wakes")
+    if not isinstance(pending, dict):
+        pending = {}
+    # UNCONDITIONAL: even if the record is absent we no-op silently —
+    # the structural removal makes this the common case (idempotency
+    # by construction). We do not log a WARNING — absence is normal.
+    if run_id in pending:
+        pending.pop(run_id, None)
+        data["pending_wakes"] = pending
+        journal_write(install_dir, data)
+    # Note: ``delivered_at`` and ``delivered_message_id`` are recorded
+    # only on the row that *was* present at arm time; the wake record
+    # lives in MessageQueue (audit on the message itself), not here.
+
+
+def mark_wake_abandoned(
+    install_dir: Path, run_id: str, reason: str
+) -> None:
+    """Terminal-cleanup transition + ``wake_abandoned`` history event
+    (Phase 1 T5, ADR-039 + ADR-042 grace-abandonment + ADR-044
+    abandon-on-switch-off).
+
+    Sets ``status = "abandoned"``, removes from dict, then calls
+    ``journal_history_append(install_dir, "wake_abandoned", ...)`` for
+    forensics (the operator can grep the journal for the abandonment
+    reason). Uses the same ``journal_history_append`` helper as the
+    existing pipeline events.
+
+    UNCONDITIONAL on absence — the structural removal makes this the
+    common case (idempotency by construction).
+    """
+    data = ensure_extensions(install_dir)
+    pending = data.get("pending_wakes")
+    if isinstance(pending, dict) and run_id in pending:
+        pending.pop(run_id, None)
+        data["pending_wakes"] = pending
+        journal_write(install_dir, data)
+    journal_history_append(
+        install_dir,
+        "wake_abandoned",
+        f"run_id={run_id} reason={reason}",
+    )
+
+
+def list_pending_wakes(install_dir: Path) -> list[PendingWake]:
+    """Defensive reader for the ``pending_wakes`` dict (Phase 1 T6, ADR-039).
+
+    Returns ``[]`` on ``JournalTorn``. On any ``pending_wakes`` value
+    that is not a dict (``null``, ``[]``, ``"<str>"``, ``123``) returns
+    ``[]`` — the empty-list sentinel. Mirrors ``PendingOp.from_json``
+    garbage tolerance (R-20). Each value validated via
+    ``PendingWake.from_json`` (which itself drops unknown fields and
+    returns ``None`` on missing required); malformed records are logged
+    + skipped so a single bad row does NOT block the others.
+    """
+    try:
+        data = journal_read(install_dir)
+    except JournalTorn:
+        return []
+    pending = data.get("pending_wakes")
+    if not isinstance(pending, dict):
+        return []
+    out: list[PendingWake] = []
+    for run_id, raw in pending.items():
+        if not isinstance(raw, dict):
+            logger.warning(
+                "upgrade_journal: pending_wakes[%r] not a dict (got %s); skipping",
+                run_id, type(raw).__name__,
+            )
+            continue
+        record = PendingWake.from_json(raw)
+        if record is None:
+            logger.warning(
+                "upgrade_journal: pending_wakes[%r] from_json returned None "
+                "(missing run_id or schema mismatch); skipping",
+                run_id,
+            )
+            continue
+        out.append(record)
+    return out
+
+
+def latest_matching_event(
+    journal: dict[str, Any],
+    run_id: str,
+    armed_at: str,
+    events: tuple[str, ...],
+) -> str | None:
+    """Parameterized history walker (Phase 1 T7, ADR-042).
+
+    Reads the journal dict's ``history`` (FLAT ``{"ts": <iso>, "event":
+    <name>, "detail": <prose>}`` records — NO ``run_id`` field at
+    ``upgrade_journal.py:326`` and ``lib.sh:663,666``). Walks the
+    history; returns the event name of the LATEST entry whose
+    ``event`` field is a member of the passed ``events`` tuple AND
+    whose ``ts`` is ``>= armed_at``.
+
+    ``JournalTorn`` or malformed history → ``None`` (best-effort; the
+    sweep's caller logs and continues).
+
+    The ``run_id`` parameter is accepted (the walker's signature) but
+    NOT used for the event-class match on the promote lane — promote
+    terminal events carry NO ``run_id`` at all. Phase 2 wraps this
+    walker with the wake-owned reader (mirroring
+    ``_terminal_event_after`` ``upgrade_journal.py:986``) and applies
+    the RESTART-lane detail-substring tie-break on the CALLER side
+    (r5 fold N2).
+
+    NOTE: returns the FIRST match whose ``ts >= armed_at`` (oldest
+    matching entry); the original ``_terminal_event_after`` returns
+    the NEWEST. We deliberately return the LATEST match here so the
+    caller can rely on a stable ordering. Re-validating:
+    ``_terminal_event_after`` walks history left-to-right and returns
+    the LAST matching entry (newest by position). The wake sweep
+    wants the FIRST event-class match in the ``armed_at`` window
+    (newest by ts); in practice the journal appends are monotonic
+    (newest last), so position-order == ts-order. We mirror
+    ``_terminal_event_after``'s "return the latest" semantics — see
+    the test assertion in T4.1.
+    """
+    history = journal.get("history")
+    if not isinstance(history, list):
+        return None
+    armed = parse_iso_utc(armed_at)
+    if armed is None:
+        return None
+    found: str | None = None
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("event", "")) in events:
+            ts = parse_iso_utc(entry.get("ts"))
+            if ts is not None and ts >= armed:
+                found = str(entry["event"])
+    return found
 
 
 # ── Verified-arm predicate + passthrough extras (v0.15.3 P1 Item 1) ─────────
