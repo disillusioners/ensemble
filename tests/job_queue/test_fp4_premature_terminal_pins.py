@@ -535,7 +535,7 @@ class TestR1PrematureTerminalAwaitingChildren:
             },
         ]
         with _patch_get_instance_messages(history):
-            allowed, reason = (
+            allowed, reason, declared_wait = (
                 await fp4_harness.service._root_completion_gate(
                     None, parent_id,
                 )
@@ -553,6 +553,12 @@ class TestR1PrematureTerminalAwaitingChildren:
         assert "tree_liveness" in reason or "non-terminal" in reason, (
             f"Block reason must name the tree-liveness leg; got "
             f"{reason!r}"
+        )
+        # Tree-liveness block is a non-L2b leg — the declared-wait
+        # verdict is False here (P1-2 thread-the-verdict contract).
+        assert declared_wait is False, (
+            "L2 tree-liveness block is not an L2b discharge — the "
+            "declared-wait verdict MUST be False."
         )
 
 
@@ -709,9 +715,14 @@ class TestR2DeclaredWaitHold:
             kind=EventKind.CHILD_COMPLETED.value,
             when=T_CHILD_COMPLETED,
         )
-        # Seed the first denial epoch OLDER than the bind
-        # (6h + 1s) so the L6 RELEASE branch fires.
-        old_epoch = (
+        # Seed the L6 anchor (P1-1) OLDER than the bind
+        # (6h + 1s) so the L6 RELEASE branch fires. The anchor
+        # lives at the dedicated ``attestation:l6_anchor`` key
+        # owned by L6 alone — the previous ``attestation:denial_
+        # epochs[0]`` source was polluted by the attestation
+        # gate's non-L6 epoch appends and could prematurely
+        # release the bind.
+        old_anchor = (
             datetime.now(timezone.utc).replace(tzinfo=None)
             - timedelta(seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 1)
         ).isoformat()
@@ -720,7 +731,7 @@ class TestR2DeclaredWaitHold:
             instance_id=parent_id,  # UPDATE the existing row
             status=InstanceStatus.RUNNING.value,
             instance_metadata={
-                "attestation:denial_epochs": [old_epoch],
+                "attestation:l6_anchor": old_anchor,
             },
         )
         history = [
@@ -897,9 +908,9 @@ class TestR5LostDispatch:
             instance_id="parent-r5",
             status=InstanceStatus.WAITING_CHILDREN.value,
             instance_metadata={
-                "attestation:denial_epochs": [
+                # P1-1 — dedicated L6 anchor (was attestation:denial_epochs[0]).
+                "attestation:l6_anchor":
                     datetime.now(timezone.utc).isoformat(),
-                ],
             },
         )
         child_id = _seed_instance(

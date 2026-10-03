@@ -611,7 +611,8 @@ class TestRootCompletionGate:
              patch.object(
                  service, "_root_completion_gate",
                  new_callable=AsyncMock,
-                 return_value=(False, "waiting_for=2"),
+                 # P1-2 — 3-tuple return: (allowed, reason, declared_wait_outstanding).
+                 return_value=(False, "waiting_for=2", False),
              ):
             await service._process_child_completion_and_notify_parent(
                 "root-instance-1", "root-turn-1"
@@ -734,7 +735,8 @@ class TestCascadeCompletionGate:
         )
 
         # Decision gate passes; emission-time re-check fails (simulated race)
-        gate_effects = [(True, None), (False, "pending_count=1")]
+        # P1-2 — 3-tuple side_effects (allowed, reason, declared_wait_outstanding).
+        gate_effects = [(True, None, False), (False, "pending_count=1", False)]
         with patcher, \
              patch("daemon.services.child_reports.MainLoopBridge.run_async_no_wait"), \
              patch.object(
@@ -918,7 +920,7 @@ class TestRootCompletionGateBusPendingHold:
         # bus.count_pending_for_target_sync. Real gate over real bus
         # over real DB count.
 
-        allowed, reason = await service._root_completion_gate(
+        allowed, reason, declared_wait = await service._root_completion_gate(
             None, "root-instance-1"
         )
 
@@ -939,6 +941,12 @@ class TestRootCompletionGateBusPendingHold:
         assert "bus_pending=1" in reason, (
             f"Block reason MUST report the count. Got: {reason!r}"
         )
+        # Bus-pending block is not an L2b discharge — the declared-wait
+        # verdict is False (P1-2 thread-the-verdict contract).
+        assert declared_wait is False, (
+            "Bus-pending block is not an L2b discharge — the "
+            "declared-wait verdict MUST be False."
+        )
 
         # ─── TURN 2: remove the watcher → gate releases ─────────────
         # Delete the watcher row directly. The gate then sees zero
@@ -950,7 +958,7 @@ class TestRootCompletionGateBusPendingHold:
             session.delete(row)
             session.commit()
 
-        allowed_2, reason_2 = await service._root_completion_gate(
+        allowed_2, reason_2, declared_wait_2 = await service._root_completion_gate(
             None, "root-instance-1"
         )
 
@@ -961,4 +969,9 @@ class TestRootCompletionGateBusPendingHold:
         assert reason_2 is None, (
             f"Release reason MUST be None when gate passes. "
             f"Got: {reason_2!r}"
+        )
+        # Freshness passes (no events), no L2b discharge here.
+        assert declared_wait_2 is False, (
+            "Freshness-pass path is not an L2b discharge — the "
+            "declared-wait verdict MUST be False."
         )

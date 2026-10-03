@@ -515,7 +515,9 @@ class TestRootMirrorGate:
              patch("daemon.services.child_reports.MainLoopBridge.run_async_no_wait"), \
              patch.object(
                  service, "_root_completion_gate",
-                 new_callable=AsyncMock, return_value=(False, "pending_count=1"),
+                 # P1-2 — 3-tuple (allowed, reason, declared_wait_outstanding).
+                 new_callable=AsyncMock,
+                 return_value=(False, "pending_count=1", False),
              ) as gate_mock:
             await service._process_child_completion_and_notify_parent(
                 "root-instance-1", "root-turn-1"
@@ -651,7 +653,8 @@ class TestWedgeResolverStaleReadable:
              patch.object(
                  service, "_root_completion_gate",
                  new_callable=AsyncMock,
-                 return_value=(False, "wedge_unresolved"),
+                 # P1-2 — 3-tuple (allowed, reason, declared_wait_outstanding).
+                 return_value=(False, "wedge_unresolved", False),
              ):
             await service._process_child_completion_and_notify_parent(
                 "root-instance-1", "root-turn-1"

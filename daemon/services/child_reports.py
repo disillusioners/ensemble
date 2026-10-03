@@ -1875,7 +1875,7 @@ Provide a concise summary:"""
         self,
         session,
         instance_id: str,
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[bool, str | None, bool]:
         """Wedge resolver: close the stale-readable / dead-letter wedge paths.
 
         Wedge paths occur when ``_assistant_message_fresh`` returns False (the
@@ -1914,12 +1914,23 @@ Provide a concise summary:"""
             instance_id: The instance to evaluate.
 
         Returns:
-            (allowed, reason): True (no reason) when the wedge is closed;
-            False + reason when neither freshness nor terminal-state apply.
+            ``(allowed, reason, declared_wait_outstanding)``:
+            ``allowed`` (bool) — True when the wedge is closed; False +
+            ``reason`` (str | None) when neither freshness nor
+            terminal-state apply;
+            ``declared_wait_outstanding`` (bool) — the L2b verdict (True
+            iff the declared-waiting predicate flagged this instance as
+            carrying an outstanding declared-wait obligation). Threaded
+            through the return contract (P1-2 fix) so concurrent
+            ``_gate_wedge_resolver`` calls for different instances no
+            longer race over the service-singleton
+            ``_declared_wait_outstanding`` flag — each gate call now
+            returns its own verdict atomically with its decision.
         """
         is_fresh, reason = await self._assistant_message_fresh(session, instance_id)
         if is_fresh:
-            return True, None
+            # Freshness passed — no L2b discharge path consulted.
+            return True, None, False
 
         # ── FP4 (2026-10-03) — L2b: declared-wait discharge.
         # ── A parent that DECLARED waiting and received its interim
@@ -1941,18 +1952,11 @@ Provide a concise summary:"""
         # declared-wait obligation, the resolver does NOT block —
         # the gate transitions to the L6 escalate-and-HOLD path
         # (the caller at line 4145+ dispatches L6 on this signal).
-        # The L2b return is ``(True, None)`` so the gate's "allowed"
-        # verdict is preserved; the declared-wait discharge is
-        # surfaced via the side-band (the L6 path is invoked by the
-        # emission-time handler via the
-        # ``_declared_wait_outstanding`` flag below).
-        #
-        # Side-band: store the predicate result on the service
-        # instance so the L6 caller can read it without a re-eval.
-        # This is additive-only — the existing return contract is
-        # unchanged (``(True, None)`` for allowed). The flag is
-        # overwritten on every call; L6's caller reads the LATEST
-        # value, which is the most recent evaluation.
+        # The L2b return is ``(True, None, True)`` so the gate's
+        # "allowed" verdict is preserved AND the L6 caller can pick
+        # up the declared-wait verdict via the return tuple (P1-2
+        # — the verdict flows with the decision; concurrent
+        # resolvers for different instances no longer share state).
         try:
             from .report_integrity_guard import (
                 evaluate_declared_waiting_violations,
@@ -1960,16 +1964,6 @@ Provide a concise summary:"""
             _b_report = evaluate_declared_waiting_violations(
                 session, instance_id, engine=self._manager.engine,
             )
-            # Persist on the service for the L6 caller (the
-            # emission-time handler reads this after the gate).
-            # ``getattr`` default keeps the L2b path self-contained
-            # if the attribute hasn't been initialized.
-            try:
-                self._declared_wait_outstanding = bool(
-                    _b_report.is_violation
-                ) if _b_report is not None else False
-            except AttributeError:
-                self._declared_wait_outstanding = False
             if (
                 _b_report is not None
                 and _b_report.is_violation
@@ -1982,7 +1976,9 @@ Provide a concise summary:"""
                     instance_id[:8], _b_report.count,
                 )
                 # Allow the stamp; L6 is the next stop.
-                return True, None
+                # Third element carries the L2b verdict for the
+                # L6 caller (no singleton state).
+                return True, None, True
         except Exception as _b_exc:  # noqa: BLE001 — fail-OPEN
             # The (b) predicate is itself fail-OPEN (D2.6 LOCKED).
             # A predicate failure here must not block the gate —
@@ -1992,10 +1988,6 @@ Provide a concise summary:"""
                 "%s... (%s); fail-OPEN, wedge-resolver continues",
                 instance_id[:8], _b_exc,
             )
-            try:
-                self._declared_wait_outstanding = False
-            except AttributeError:
-                pass
 
         # Wedge detected: freshness failed but pending_count is already 0
         # (gate's pending_count leg already passed). Check the most recent
@@ -2013,9 +2005,10 @@ Provide a concise summary:"""
                 last_terminal_msg.message_id[:8],
                 last_terminal_msg.status,
             )
-            return True, None
+            # Terminal-message wedge close — no L2b discharge.
+            return True, None, False
 
-        return False, reason
+        return False, reason, False
 
     @staticmethod
     def _latest_terminal_message(session, instance_id: str) -> MessageQueue | None:
@@ -2056,9 +2049,13 @@ Provide a concise summary:"""
         1. Increment the attestation ledger via ``safe_increment`` (C3
            fail-OPEN: a DB error degrades the increment to None and
            the L6 path proceeds).
-        2. Read the FIRST denial epoch in
-           ``instance_metadata["attestation:denial_epochs"]`` — this
-           is the hold-start anchor.
+        2. Read the dedicated ``attestation:l6_anchor`` key in
+           ``instance_metadata`` — this is the hold-start anchor. The
+           first L6 invocation writes the anchor; subsequent
+           invocations re-use it as the bind anchor (P1-1 fix —
+           the previous ``attestation:denial_epochs[0]`` source was
+           polluted by the attestation gate's non-L6 epoch appends
+           and could prematurely release the bind).
         3. Compare the anchor + ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``
            to ``now``:
            * within bound: downgrade to WAITING_CHILDREN + suppress
@@ -2089,7 +2086,7 @@ Provide a concise summary:"""
             safe_set_escalated_and_reset,
         )
         from .mission_live_guard import MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS
-        from daemon.services.timestamps import now_utc_naive
+        from daemon.services.timestamps import now_utc_iso, now_utc_naive
         from ..repositories.instance.repository import (
             SQLModelInstanceRepository,
         )
@@ -2125,28 +2122,50 @@ Provide a concise summary:"""
             # until a real repo is wired (fail-OPEN at this seam).
             _denied_count = None
 
-        # (2) Bind anchor: read the FIRST denial epoch in the
-        # instance metadata. If absent, this is the FIRST L6
-        # invocation — write the epoch NOW so subsequent calls
-        # can read it as the bind anchor.
+        # (2) Bind anchor — read-or-set the dedicated ``attestation:l6_anchor``
+        # metadata key owned by L6 alone.
+        #
+        # P1-1 fix: the previous code used ``attestation:denial_epochs[0]``
+        # as the bind anchor. That list is ALSO appended to by the
+        # attestation gate (with non-L6 epochs like ``fp4.l5.*``); a
+        # stale non-L6 epoch >6h old let the bind RELEASEs on the first
+        # L6 invocation (premature release = the commissioned settle
+        # contract broken). The dedicated ``attestation:l6_anchor`` key
+        # is written only here and read only here — the bind math
+        # consults a single, L6-owned source of truth.
+        #
+        # P1-3 consolidation: the read-or-set is one canonical path
+        # (no dead ``elif denial_epoch not in _epochs`` branch —
+        # ``safe_increment`` runs FIRST above and populates the
+        # shared list with the denial_epoch regardless, so the old
+        # elif was unreachable on first invocation). The first L6
+        # invocation writes the anchor NOW; subsequent invocations
+        # read the anchor as the bind math. C3 fail-OPEN posture
+        # preserved.
         bind_anchor_iso: str | None = None
         try:
             with _SqlmodelSession(self._manager._engine) as _sess:
                 _inst = _sess.get(Instance, instance_id)
                 if _inst is not None:
                     _meta = _inst.instance_metadata or {}
-                    _epochs = _meta.get("attestation:denial_epochs") or []
-                    if isinstance(_epochs, list) and _epochs:
-                        # Use the FIRST epoch as the bind anchor.
-                        bind_anchor_iso = str(_epochs[0])
-                    elif denial_epoch not in _epochs:
-                        # First L6 invocation: write the epoch.
-                        _epochs.append(denial_epoch)
-                        _meta["attestation:denial_epochs"] = _epochs
-                        _inst.instance_metadata = _meta
+                    _existing_anchor = _meta.get("attestation:l6_anchor")
+                    if _existing_anchor:
+                        bind_anchor_iso = str(_existing_anchor)
+                    else:
+                        # First L6 invocation: write the anchor NOW.
+                        # The ORM write REASSIGNS instance_metadata
+                        # (the JSONB column is not mutable-tracked —
+                        # the same pattern the ledger.increment uses
+                        # in ``daemon/repositories/instance/
+                        # repository.py:1401-1408" — see the
+                        # ``new_metadata = dict(...)`` rebind).
+                        _now_anchor = now_utc_iso()
+                        _new_meta = dict(_meta)
+                        _new_meta["attestation:l6_anchor"] = _now_anchor
+                        _inst.instance_metadata = _new_meta
                         _sess.add(_inst)
                         _sess.commit()
-                        bind_anchor_iso = denial_epoch
+                        bind_anchor_iso = _now_anchor
         except Exception as _anchor_exc:  # noqa: BLE001 — fail-OPEN
             logger.warning(
                 "FP4 L6: bind-anchor read/write raised for %s... "
@@ -2285,7 +2304,7 @@ Provide a concise summary:"""
         self,
         session,
         instance_id: str,
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[bool, str | None, bool]:
         """Full emission predicate for marking a root/parent's job terminal.
 
         A terminal "completed" lifecycle event (which JobFeedbackObserver maps
@@ -2324,7 +2343,11 @@ Provide a concise summary:"""
             instance_id: The instance to evaluate.
 
         Returns:
-            (allowed, block_reason): block_reason is a diagnostic when blocked.
+            ``(allowed, block_reason, declared_wait_outstanding)``: the
+            third element is the L2b declared-wait verdict, threaded
+            through from ``_gate_wedge_resolver`` (P1-2). The early-leg
+            blocks (bus / tree-liveness / pending_count) carry ``False``
+            for the third element — those legs are not L2b-relevant.
         """
         owns_session = session is None
         if owns_session:
@@ -2341,7 +2364,7 @@ Provide a concise summary:"""
             # bus or DB hiccup cannot block the publish permanently.
             bus_pending = self._bus_count_pending_for_target_sync(instance_id)
             if bus_pending > 0:
-                return False, f"bus_pending={bus_pending}"
+                return False, f"bus_pending={bus_pending}", False
 
             # ── FP4 (2026-10-03) — L2: tree-liveness leg.
             # ── The bus-pending leg above is FAIL-OPEN (a missing bus
@@ -2388,7 +2411,7 @@ Provide a concise summary:"""
                 if _mission_verdict.live:
                     return False, (
                         f"tree_liveness: {_mission_verdict.reason}"
-                    )
+                    ), False
                 # live=False (all-terminal tree OR timed-out zombie)
                 # — proceed to the remaining legs.
             except Exception as _tree_exc:  # noqa: BLE001 — fail-OPEN
@@ -2417,11 +2440,14 @@ Provide a concise summary:"""
             ).scalar_one()
 
             if pending_count > 0:
-                return False, f"pending_count={pending_count}"
+                return False, f"pending_count={pending_count}", False
 
             # DEADLOCK GUARD: route the freshness leg through the wedge resolver
             # so dead-letter / empty-final-turn / stale-readable wedge paths
-            # close event-driven (no polling).
+            # close event-driven (no polling). The wedge resolver's 3-tuple
+            # return threads the declared-wait verdict; this gate forwards
+            # all three elements unchanged (P1-2 — verdict flows with the
+            # decision, no singleton state).
             return await self._gate_wedge_resolver(session, instance_id)
         finally:
             if owns_session:
@@ -4625,6 +4651,7 @@ Provide a concise summary:"""
             # fail-OPEN, warning loud.
             _gate_pass = None
             _gate_block_reason: str | None = None
+            _declared_wait_outstanding: bool = False
             try:
                 _gate_pass = await self._root_completion_gate(
                     None, instance_id
@@ -4644,7 +4671,19 @@ Provide a concise summary:"""
                     "see 39607e12 C1 seam for the production contract)",
                     instance_id[:8], _gate_exc,
                 )
-                _gate_pass = (True, None)
+                # Fail-OPEN: the gate did not actually run, so no L2b
+                # verdict — third element is False (no declared-wait
+                # discharge to honour).
+                _gate_pass = (True, None, False)
+
+            # Thread the L2b declared-wait verdict from the gate's
+            # 3-tuple return into the local variable the L6 read
+            # site consults (P1-2). The flag no longer lives on
+            # ``self`` — concurrent gate calls for different
+            # instances no longer race over a service-singleton
+            # mutation; each verdict flows atomically with its
+            # decision.
+            _declared_wait_outstanding = bool(_gate_pass[2])
 
             if not _gate_pass[0]:
                 _gate_block_reason = _gate_pass[1]
@@ -4704,17 +4743,21 @@ Provide a concise summary:"""
             #      proceeds; the at-least-once contract holds).
             #   2. Check the settle bound (6h — reuses
             #      ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` from
-            #      ``mission_live_guard.py:110``). The first denial
-            #      epoch in ``attestation:denial_epochs`` is the
-            #      hold-start anchor (the first L6 invocation writes
-            #      the FIRST epoch; subsequent L6 invocations
-            #      re-use it as the bind anchor).
-            #   3. Within bound (first_epoch + 6h > now): HOLD — set
+            #      ``mission_live_guard.py:110``). The bind math reads
+            #      the dedicated ``attestation:l6_anchor`` key in the
+            #      instance metadata — the first L6 invocation writes
+            #      the anchor; subsequent L6 invocations re-use it as
+            #      the bind anchor (P1-1 fix — the previous code used
+            #      ``attestation:denial_epochs[0]``, which the
+            #      attestation gate ALSO appends to with non-L6 epochs
+            #      like ``fp4.l5.*``; a stale non-L6 epoch >6h old let
+            #      the bind release on the first L6 invocation).
+            #   3. Within bound (anchor + 6h > now): HOLD — set
             #      WAITING_CHILDREN, suppress publish, JobItem stays
             #      ACTIVE (the done+retry-0/0 wedge is the bug; the
             #      ACTIVE state is what makes retry/continue paths
             #      still admit on the next message-completed signal).
-            #   4. Bound reached (first_epoch + 6h ≤ now): terminal
+            #   4. Bound reached (anchor + 6h ≤ now): terminal
             #      fires ONCE — set completion_gate_escalated=True via
             #      the canonical ledger atomic op, let the publish
             #      proceed; the work_notifier.py layer renders the
@@ -4732,9 +4775,12 @@ Provide a concise summary:"""
             # ``log_declared_waiting_violations``. Flipping the (b)
             # kill-switch globally is the operator's call, not this
             # commission's.
-            _declared_wait_outstanding = bool(
-                getattr(self, "_declared_wait_outstanding", False)
-            )
+            #
+            # The verdict is read from the local variable populated
+            # above (P1-2 — the ``_root_completion_gate`` 3-tuple
+            # return threaded the L2b verdict; reading
+            # ``self._declared_wait_outstanding`` here would race
+            # against concurrent gate calls for different instances).
             if _declared_wait_outstanding:
                 _l6_decision = await self._fp4_l6_check_and_apply(
                     instance_id=instance_id,
