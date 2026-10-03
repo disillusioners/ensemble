@@ -356,9 +356,14 @@ class UpgradeJournalSweepService:
 
         ``delivered`` counts successfully enqueued wakes; ``abandoned``
         counts records transitioned to ``abandoned`` (kill-switch
-        abandon-on-switch-off + grace expiry — see T14); ``errors``
-        increments on every catchable failure (the boot-never-wedge
-        contract — never raises; never aborts boot).
+        abandon-on-switch-off with ``reason=kill_switch_off`` + grace
+        expiry with ``reason=grace_expired`` — see T14 / D-FA1.2 /
+        ADR-042); ``errors`` increments on every catchable failure
+        (the boot-never-wedge contract — never raises; never aborts
+        boot). The two abandonment reasons are distinct and the
+        grace pass runs BEFORE the kill-switch OFF pass so a
+        past-grace record never gets a ``kill_switch_off`` label
+        (the grace reason is more specific).
         """
 
         pending_at_start: int = 0
@@ -704,100 +709,6 @@ class UpgradeJournalSweepService:
             )
             return None
 
-    async def _deliver_wake(
-        self,
-        install_dir: Path,
-        wake: uj.PendingWake,
-        terminal_outcome: str,
-    ) -> str | None:
-        """Phase 2 T6 — the inner delivery method.
-
-        Step 1: re-stamp the user-origin window (DEFENSIVE/REDUNDANT —
-        the natural ``manager.py:8112`` stamp is binding; double-
-        stamping is structural, ADR-041 addendum).
-        Step 2: format the body.
-        Step 3: ``await self._manager.enqueue_message(...)`` with the
-            recorded ``source`` (or ``"api"`` sentinel on empty).
-        Step 4: return ``result.message_id`` on success; on
-            ``KeyError`` (instance row absent / InstanceNotFound analogue)
-            or any other exception, invoke the ari fall-back (T19):
-            deliver to ari (annotated body), OR journal
-            ``arm_notify_no_instance`` + mark the wake abandoned.
-
-        Returns the ``message_id`` of the delivered wake (success path)
-        OR ``None`` (failure / fall-back-no-ari — caller marks the
-        record delivered with a structural removal to keep the dict
-        clean).
-        """
-        if self._manager is None:
-            logger.warning(
-                "UpgradeJournalSweepService: _deliver_wake called with "
-                "manager=None (unwired seam) — wake delivery skipped for "
-                "run_id=%s (the wake stays pending; the next tick "
-                "retries once the manager is wired)",
-                wake.run_id,
-            )
-            return None
-        # Step 1: re-stamp (defensive/redundant — the natural stamp at
-        # manager.py:8112 is binding; ADR-041 addendum).
-        if wake.source:
-            try:
-                self._manager.stamp_user_origin_window(
-                    wake.arming_instance_id,
-                    source=wake.source,
-                    message_id=wake.message_id,
-                )
-            except Exception as stamp_exc:  # noqa: BLE001
-                logger.warning(
-                    "UpgradeJournalSweepService: stamp_user_origin_window "
-                    "FAILED for run_id=%s: %s — proceeding without re-stamp",
-                    wake.run_id, stamp_exc,
-                )
-        # Step 2: format body.
-        body = self._format_wake_body(wake, terminal_outcome)
-        # Step 3: enqueue. Build metadata.
-        try:
-            metadata = {
-                "system_context": {
-                    "kind": "post_restart_arm_notify",
-                    "run_id": wake.run_id,
-                    "arm_kind": wake.kind,
-                    "terminal_outcome": terminal_outcome,
-                    "target_version": wake.target_version,
-                    "armed_at": wake.armed_at,
-                    "wake_at": uj.now_iso(),
-                },
-                "delivery": {"channel": "post_restart_arm_notify"},
-            }
-            result = await self._manager.enqueue_message(
-                instance_id=wake.arming_instance_id,
-                message=body,
-                source=wake.source or "api",
-                priority=2,
-                metadata=metadata,
-            )
-            return getattr(result, "message_id", None) or None, 0
-        except KeyError as inst_missing:
-            # Phase 2 T19: InstanceNotFound analogue (the manager raises
-            # KeyError on a missing instance row — see
-            # ``instance_lifecycle.get_instance``:4153).
-            logger.warning(
-                "UpgradeJournalSweepService: enqueue_message KeyError for "
-                "run_id=%s arming_instance_id=%s — invoking ari fall-back",
-                wake.run_id, wake.arming_instance_id,
-            )
-            return await self._deliver_wake_ari_fallback(
-                install_dir, wake, terminal_outcome, body
-            )
-        except Exception as exc:  # noqa: BLE001 — never wedge
-            logger.warning(
-                "UpgradeJournalSweepService: enqueue_message FAILED for "
-                "run_id=%s: %s — per-wake try/except continues; "
-                "wake held pending next tick",
-                wake.run_id, exc,
-            )
-            return None
-
     async def _deliver_wake_ari_fallback(
         self,
         install_dir: Path,
@@ -919,10 +830,122 @@ class UpgradeJournalSweepService:
                 pass
             return None, 1
 
+    def _grace_pass(
+        self,
+        install_dir: Path,
+        result: "UpgradeJournalSweepService.WakeSweepResult",
+    ) -> "UpgradeJournalSweepService.WakeSweepResult":
+        """Phase 2 T14 grace-abandonment (D-FA1.2, ADR-042 — review MUST-FIX).
+
+        Iterates ``pending_wakes``; for any record whose ``abandon_after``
+        is ``<= now``, calls ``uj.mark_wake_abandoned(install_dir,
+        run_id, "grace_expired")`` (structural removal + ONE
+        ``wake_abandoned`` history event for forensics).
+
+        Runs BEFORE the kill-switch OFF branch so the OFF pass only
+        sees not-yet-graced records: a past-grace record gets the
+        more-specific ``reason="grace_expired"`` (the OFF pass would
+        have wrongly labeled it ``kill_switch_off``). Records still
+        within grace are HELD pending (this method does not touch
+        them).
+
+        Per-wake isolation: each ``mark_wake_abandoned`` is wrapped
+        individually — a single failure logs WARNING and bumps
+        ``errors += 1``, the loop continues (sweep-never-wedge
+        discipline, consistent with the existing three-level error
+        isolation: per-wake / per-group / sweep-level). The
+        ``list_pending_wakes`` read is itself wrapped — a torn or
+        unreadable journal surfaces as ``errors += 1`` and the
+        grace pass yields no abandonments for that tick.
+
+        ``mark_wake_abandoned`` is idempotent-on-missing (Phase 1 T5):
+        if a record is concurrently removed (e.g. kill-switch OFF
+        pass, or a delivery) the grace call is a structural no-op
+        minus the ``wake_abandoned`` history event. Ordering note:
+        a past-grace record can therefore appear in BOTH a grace
+        abandon and a kill-switch-off abandon only if the OFF pass
+        ran first and the grace pass finds the record already gone
+        (no double-abandon is possible because the dict is the
+        structural idempotency key).
+
+        Returns the updated ``result`` with ``abandoned`` (and
+        optionally ``errors``) incremented. Pure / sync (no
+        asyncio — journal writes are in-process and bounded).
+        """
+        try:
+            pending_for_grace = uj.list_pending_wakes(install_dir)
+        except Exception as read_exc:  # noqa: BLE001 — never wedge
+            logger.warning(
+                "UpgradeJournalSweepService: grace pass "
+                "list_pending_wakes FAILED: %s — continuing",
+                read_exc,
+            )
+            return self.WakeSweepResult(
+                pending_at_start=result.pending_at_start,
+                pending_at_end=result.pending_at_end,
+                delivered=result.delivered,
+                abandoned=result.abandoned,
+                errors=result.errors + 1,
+                coalesce_overflows=result.coalesce_overflows,
+            )
+        now_dt = uj.parse_iso_utc(uj.now_iso())
+        if now_dt is None:
+            # now_iso() is always parseable; defensive only.
+            return result
+        abandoned_count = 0
+        errors_count = 0
+        for wake in pending_for_grace:
+            abandon_dt = uj.parse_iso_utc(wake.abandon_after)
+            if abandon_dt is None:
+                # No ``abandon_after`` (defensive — from_json backfills
+                # to ``expires_at + PENDING_WAKE_GRACE_S``; a record
+                # that predates the field would land here if the
+                # backfill also failed). Held pending — log + skip.
+                logger.warning(
+                    "UpgradeJournalSweepService: grace pass — "
+                    "wake run_id=%s abandon_after unparseable; "
+                    "held pending",
+                    wake.run_id,
+                )
+                continue
+            if now_dt < abandon_dt:
+                continue  # within grace — held pending
+            try:
+                uj.mark_wake_abandoned(
+                    install_dir, wake.run_id, "grace_expired"
+                )
+                abandoned_count += 1
+            except Exception as ab_exc:  # noqa: BLE001 — per-wake
+                logger.warning(
+                    "UpgradeJournalSweepService: grace-abandon "
+                    "FAILED run_id=%s: %s — continuing",
+                    wake.run_id, ab_exc,
+                )
+                errors_count += 1
+        if abandoned_count or errors_count:
+            return self.WakeSweepResult(
+                pending_at_start=result.pending_at_start + abandoned_count,
+                pending_at_end=result.pending_at_end,
+                delivered=result.delivered,
+                abandoned=result.abandoned + abandoned_count,
+                errors=result.errors + errors_count,
+                coalesce_overflows=result.coalesce_overflows,
+            )
+        return result
+
     async def sweep_wake_records(self) -> "UpgradeJournalSweepService.WakeSweepResult":
         """Phase 2 T7 — the boot + periodic entry point.
 
         Order of operations:
+          (g0) GRACE PASS — iterate ``pending_wakes`` and abandon any
+              record whose ``abandon_after <= now`` with
+              ``reason="grace_expired"`` (Phase 2 T14, D-FA1.2,
+              ADR-042). Runs BEFORE (a) so the kill-switch OFF pass
+              only sees not-yet-graced records. A past-grace record
+              therefore gets the more-specific ``grace_expired`` reason
+              (never ``kill_switch_off``). Per-wake try/except — a
+              single failure bumps ``errors += 1`` and the loop
+              continues (sweep-never-wedge).
           (a) _is_enabled → if OFF, run abandon-on-switch-off pass then
               return (Phase 2 T14 — the persisted-record × kill-switch
               semantics). Records present + kill-switch OFF → mark each
@@ -943,8 +966,17 @@ class UpgradeJournalSweepService:
                   (CAS, one per group; the others in the group are
                   marked delivered in the same call's structural sweep
                   after delivery).
-                - ``message_id = await self._deliver_wake(install_dir,
-                  wakes[0], outcomes[0])``.
+                - re-stamp the user-origin window for any wake in the
+                  group with a recorded ``source`` (defensive/redundant
+                  per ADR-041 — the natural ``manager.py`` stamp is
+                  binding for the wake turn that follows the CAS).
+                - ``message_id = await
+                  self._manager.enqueue_message(instance_id, body,
+                  source, priority, metadata)`` (DIRECT call — NOT
+                  through the deleted ``_deliver_wake`` helper; the
+                  coalesced-body formatter and the group-level
+                  structural removal are the parent helper's
+                  responsibility).
                 - on success, ``mark_wake_delivered(install_dir,
                   wakes[0].run_id, message_id)`` for ALL wakes in the
                   group (single dict-removal pass).
@@ -958,6 +990,16 @@ class UpgradeJournalSweepService:
         """
         result = self.WakeSweepResult()
         try:
+            # (g0) Grace pass — runs BEFORE the kill-switch OFF branch
+            # so the OFF pass only sees not-yet-graced records. A
+            # past-grace record therefore gets the more-specific
+            # ``grace_expired`` reason (never ``kill_switch_off``).
+            # Per-wake isolation; structural removal is the
+            # idempotency key (Phase 1 T5 — ``mark_wake_abandoned`` is
+            # idempotent-on-missing, so no double-abandon is
+            # possible across concurrent ticks).
+            if self._install_dir is not None:
+                result = self._grace_pass(self._install_dir, result)
             # (a) kill-switch gate.
             if not self._is_enabled():
                 # Phase 2 T14: abandon-on-switch-off one-time pass.
@@ -982,10 +1024,17 @@ class UpgradeJournalSweepService:
                             "abandon FAILED run_id=%s: %s",
                             w.run_id, ab_exc,
                         )
+                # Preserve the (g0) grace-pass counters — past-grace
+                # records were abandoned with ``reason="grace_expired"``
+                # BEFORE the OFF pass and the OFF pass must ADD to that
+                # total (not overwrite it with the post-grace count).
                 result = self.WakeSweepResult(
-                    pending_at_start=len(pending_off),
+                    pending_at_start=len(pending_off)
+                    + result.abandoned,  # past-grace records already
+                                         # counted in the (g0) pass
                     pending_at_end=0,
-                    abandoned=abandoned_off,
+                    abandoned=result.abandoned + abandoned_off,
+                    errors=result.errors,
                 )
                 return result
             # (b) install_dir seam.
@@ -1019,20 +1068,33 @@ class UpgradeJournalSweepService:
                     pend_exc,
                 )
                 return self.WakeSweepResult(errors=1)
-            # (e) record start.
-            result = self.WakeSweepResult(pending_at_start=len(pending))
+            # (e) record start. Preserve the grace-pass counters
+            # (the (g0) step may have abandoned records with
+            # ``reason="grace_expired"`` already; a fresh
+            # ``WakeSweepResult`` here would lose that accounting).
+            result = self.WakeSweepResult(
+                pending_at_start=len(pending),
+                abandoned=result.abandoned,
+                errors=result.errors,
+            )
             if not pending:
                 return result
             # (f) terminal-state gating.
             terminal_wakes = self._resolve_wake_targets(pending, journal)
             if not terminal_wakes:
                 # No terminal events yet — record end-state and return.
+                # Preserve the (g0) grace-pass counters (a past-grace
+                # record may already have been abandoned with
+                # ``reason="grace_expired"``; a fresh
+                # ``WakeSweepResult`` here would drop that accounting).
                 try:
                     result = self.WakeSweepResult(
                         pending_at_start=result.pending_at_start,
                         pending_at_end=len(
                             uj.list_pending_wakes(install_dir)
                         ),
+                        abandoned=result.abandoned,
+                        errors=result.errors,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -1100,10 +1162,9 @@ class UpgradeJournalSweepService:
                         else self._format_wake_body(head, outcomes[0])
                     )
                     # Coalesced delivery path: we directly call
-                    # enqueue_message (not _deliver_wake) because
-                    # coalesced bodies use a different formatter and the
-                    # group-level structural removal is the parent
-                    # helper's responsibility.
+                    # enqueue_message because the coalesced body
+                    # formatter and the group-level structural removal
+                    # are this helper's responsibility.
                     try:
                         if self._manager is None:
                             logger.warning(

@@ -730,3 +730,222 @@ class TestWakeTerminalEventAfter:
         assert "restart" not in uj._TERMINAL_EVENTS
         assert len(uj._TERMINAL_EVENTS) == 6
         assert set(WAKE_TERMINAL_EVENTS) == set(uj._TERMINAL_EVENTS) | {"restart"}
+
+
+# ── Group 12 — grace-based wake abandonment (Phase 2 T14, ADR-042) ──────────
+
+
+class TestGraceAbandonment:
+    """Review MUST-FIX #1: pending wakes with no terminal event past
+    ``abandon_after`` are abandoned with ``reason="grace_expired"``;
+    wakes still within grace are HELD pending.
+
+    The ``abandon_after`` field is written at arm time
+    (``upgrade_tools.py:1191`` + ``upgrade_journal.py:921-923``) but
+    the sweep was the only consumer that never read it. Per-wake
+    isolation: a single ``mark_wake_abandoned`` failure bumps
+    ``errors += 1`` and the loop continues (sweep-never-wedge).
+
+    The grace pass runs BEFORE the kill-switch OFF pass so a
+    past-grace record gets ``reason="grace_expired"`` (more specific
+    than ``kill_switch_off``).
+    """
+
+    @pytest.mark.asyncio
+    async def test_grace_expired_wake_is_abandoned_with_grace_expired_reason(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T14 + review MUST-FIX #1 (positive): a wake whose
+        ``abandon_after`` is in the past is abandoned with
+        ``reason="grace_expired"``; ``delivered=0``; ``errors=0``; the
+        journal carries exactly ONE ``wake_abandoned`` history event;
+        the ``pending_wakes`` dict is empty after the sweep."""
+        # Arm a wake (defaults: expires_at=00:10, abandon_after=00:20).
+        _make_wake(install, run_id="r-grace-a")
+        # Freeze time well past abandon_after (00:20 → use 00:30).
+        monkeypatch.setattr(
+            uj, "now_iso", lambda: "2026-10-04T00:30:00Z"
+        )
+        manager = _mock_manager()
+        service = UpgradeJournalSweepService(
+            install, manager=manager
+        )
+        result = await service.sweep_wake_records()
+        # Abandonment counter bumped; no delivery attempted; no errors.
+        assert result.abandoned == 1
+        assert result.delivered == 0
+        assert result.errors == 0
+        # No enqueue_message call (the grace pass is a pure journal
+        # write — no manager interaction).
+        assert manager.enqueue_message.await_count == 0
+        # The pending_wakes dict is empty.
+        records = uj.list_pending_wakes(install)
+        assert records == []
+        # Exactly one wake_abandoned history event with reason grace_expired.
+        history = journal_read(install).get("history", [])
+        abandoned = [
+            e for e in history
+            if isinstance(e, dict) and e.get("event") == "wake_abandoned"
+        ]
+        assert len(abandoned) == 1
+        assert "reason=grace_expired" in abandoned[0].get("detail", "")
+        assert "run_id=r-grace-a" in abandoned[0].get("detail", "")
+
+    @pytest.mark.asyncio
+    async def test_wake_within_grace_is_held_pending(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T14 negative: a wake still within grace (now < abandon_after)
+        is HELD pending; no ``wake_abandoned`` event; the record stays
+        in the dict; ``abandoned=0``."""
+        # Arm a wake (defaults: expires_at=00:10, abandon_after=00:20).
+        _make_wake(install, run_id="r-fresh")
+        # Freeze time at 00:05 — well within grace (00:20).
+        monkeypatch.setattr(
+            uj, "now_iso", lambda: "2026-10-04T00:05:00Z"
+        )
+        # No terminal event appended; the record is held pending.
+        manager = _mock_manager()
+        service = UpgradeJournalSweepService(
+            install, manager=manager
+        )
+        result = await service.sweep_wake_records()
+        # Held — no abandonment, no delivery, no errors.
+        assert result.abandoned == 0
+        assert result.delivered == 0
+        assert result.errors == 0
+        # No enqueue_message call.
+        assert manager.enqueue_message.await_count == 0
+        # The record is still pending.
+        records = uj.list_pending_wakes(install)
+        assert len(records) == 1
+        assert records[0].run_id == "r-fresh"
+        # No wake_abandoned history event.
+        history = journal_read(install).get("history", [])
+        abandoned = [
+            e for e in history
+            if isinstance(e, dict) and e.get("event") == "wake_abandoned"
+        ]
+        assert abandoned == []
+
+    @pytest.mark.asyncio
+    async def test_grace_pass_abandons_only_past_grace_records(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T14 mixed: two records — one past grace, one within grace —
+        → only the past-grace one is abandoned; the within-grace one
+        stays pending; exactly one ``wake_abandoned`` event with
+        ``reason=grace_expired``."""
+        # r-old has the default abandon_after (00:20) — past grace at 00:30.
+        _make_wake(install, run_id="r-old")
+        # r-fresh has a far-future abandon_after (03:00) — within grace.
+        _make_wake(
+            install,
+            run_id="r-fresh",
+            expires_at="2026-10-04T03:00:00Z",
+        )
+        # Freeze time at 00:30 — r-old past grace, r-fresh within grace.
+        monkeypatch.setattr(
+            uj, "now_iso", lambda: "2026-10-04T00:30:00Z"
+        )
+        manager = _mock_manager()
+        service = UpgradeJournalSweepService(
+            install, manager=manager
+        )
+        result = await service.sweep_wake_records()
+        # Only the past-grace record is abandoned.
+        assert result.abandoned == 1
+        assert result.delivered == 0
+        assert result.errors == 0
+        records = uj.list_pending_wakes(install)
+        assert len(records) == 1
+        assert records[0].run_id == "r-fresh"
+        # Exactly one wake_abandoned event, for r-old.
+        history = journal_read(install).get("history", [])
+        abandoned = [
+            e for e in history
+            if isinstance(e, dict) and e.get("event") == "wake_abandoned"
+        ]
+        assert len(abandoned) == 1
+        assert "run_id=r-old" in abandoned[0].get("detail", "")
+        assert "reason=grace_expired" in abandoned[0].get("detail", "")
+
+    @pytest.mark.asyncio
+    async def test_grace_pass_runs_before_kill_switch_off_pass(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T14 ordering: a past-grace record with the kill-switch OFF
+        gets ``reason=grace_expired"`` (the more-specific grace label)
+        — NOT ``kill_switch_off``. The grace pass must run BEFORE the
+        kill-switch OFF pass so the OFF pass never sees the past-grace
+        record (it's already gone)."""
+        # Arm a wake (default abandon_after=00:20).
+        _make_wake(install, run_id="r-past")
+        # Freeze time at 00:30 — past grace.
+        monkeypatch.setattr(
+            uj, "now_iso", lambda: "2026-10-04T00:30:00Z"
+        )
+        # Flip the kill-switch to OFF — would normally label records
+        # with reason=kill_switch_off. The grace pass runs FIRST, so
+        # the past-grace record gets reason=grace_expired instead.
+        monkeypatch.setenv(ARM_NOTIFY_KILL_SWITCH_ENV, "0")
+        manager = _mock_manager()
+        service = UpgradeJournalSweepService(
+            install, manager=manager
+        )
+        result = await service.sweep_wake_records()
+        # Exactly one abandonment — the grace pass marks it; the
+        # kill-switch OFF pass then finds an empty dict.
+        assert result.abandoned == 1
+        # The wake_abandoned event must carry reason=grace_expired.
+        history = journal_read(install).get("history", [])
+        abandoned = [
+            e for e in history
+            if isinstance(e, dict) and e.get("event") == "wake_abandoned"
+        ]
+        assert len(abandoned) == 1
+        assert "reason=grace_expired" in abandoned[0].get("detail", ""), (
+            "Past-grace record must get reason=grace_expired even when "
+            "the kill-switch is OFF (the grace pass runs first)"
+        )
+        assert "kill_switch_off" not in abandoned[0].get("detail", "")
+        # No enqueue_message call.
+        assert manager.enqueue_message.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_grace_pass_does_not_double_abandon_on_repeated_ticks(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T14 idempotency: a second tick with the time still past
+        grace finds an empty dict (the first tick already removed the
+        record); no second ``wake_abandoned`` event is journaled
+        (``mark_wake_abandoned`` is idempotent-on-missing + the dict
+        is the structural idempotency key)."""
+        _make_wake(install, run_id="r-once")
+        monkeypatch.setattr(
+            uj, "now_iso", lambda: "2026-10-04T00:30:00Z"
+        )
+        manager = _mock_manager()
+        service = UpgradeJournalSweepService(
+            install, manager=manager
+        )
+        # First tick: abandons.
+        result1 = await service.sweep_wake_records()
+        assert result1.abandoned == 1
+        # Second tick: empty dict — no new wake_abandoned event.
+        history_before = journal_read(install).get("history", [])
+        abandoned_before = [
+            e for e in history_before
+            if isinstance(e, dict) and e.get("event") == "wake_abandoned"
+        ]
+        result2 = await service.sweep_wake_records()
+        history_after = journal_read(install).get("history", [])
+        abandoned_after = [
+            e for e in history_after
+            if isinstance(e, dict) and e.get("event") == "wake_abandoned"
+        ]
+        assert result2.abandoned == 0
+        # No NEW wake_abandoned event journaled on the second tick.
+        assert len(abandoned_after) == len(abandoned_before)
+        # Zero enqueue calls across both ticks.
+        assert manager.enqueue_message.await_count == 0

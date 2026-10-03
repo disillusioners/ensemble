@@ -77,7 +77,7 @@ Durable journal history events (in `<install_dir>/releases/state.json`
 
 | Event | Meaning |
 |---|---|
-| `wake_abandoned` (detail carries `reason=kill_switch_off` or `reason=instance_missing`) | record transitioned to abandoned; removed from `pending_wakes` |
+| `wake_abandoned` (detail carries `reason=kill_switch_off`, `reason=grace_expired`, or `reason=instance_missing`) | record transitioned to abandoned; removed from `pending_wakes`. `grace_expired` is the automatic grace-window sweep (R-5 / R-21); `kill_switch_off` is the operator kill-switch one-time pass; `instance_missing` is the ari fall-back failure. |
 | `arm_notify_no_instance` | wake could not be delivered anywhere (no arming instance, no ari) |
 | `wake_coalesce_overflow` | wakes past the coalesce cap (16) were dropped — pull model covers them |
 
@@ -115,16 +115,20 @@ record is already gone from `pending_wakes`.
 
 **4.4 Executor-never-ran / launcher burst-abort (R-21).** If the pipeline
 never journals a terminal event (executor never spawned, launcher abort
-exit-1, daemon died mid-write before the record existed), the wake never
-fires: with no terminal-class event the sweep holds the record pending
-indefinitely (records are ~300 B; the coalesce cap bounds the surface).
-**Recovery:** the 4.1 pull query for the armed `run_id`; daemon-down itself
-is watchdog territory (ADR-025(b), complementary). Operator cleanup of a
-stuck record: flip the kill-switch OFF → one restart → the
-abandon-on-switch-off pass clears it (`reason=kill_switch_off`) → flip
-back. Note (as-built): `abandon_after` (expiry + 600 s grace) is recorded
-on every wake but grace-expiry abandonment is not yet enforced by the
-sweep — treat 4.4 records as pending-until-terminal, not auto-abandoned.
+exit-1, daemon died mid-write before the record existed), the wake
+**abandons automatically at the grace window**: the sweep compares
+the wake's ``abandon_after`` (= ``expires_at + PENDING_WAKE_GRACE_S``,
+default ``expires_at + 600s``) against the current time on every
+tick; past the grace the record is removed and a ``wake_abandoned``
+history event is journaled with ``reason="grace_expired"``. The grace
+pass runs BEFORE the kill-switch OFF pass so a past-grace record
+gets the more-specific ``grace_expired`` label (never
+``kill_switch_off``). Records within grace remain pending
+indefinitely. **Recovery:** the 4.1 pull query for the armed
+``run_id``; daemon-down itself is watchdog territory (ADR-025(b),
+complementary). Operator cleanup of a still-pending record: flip
+the kill-switch OFF → one restart → the abandon-on-switch-off pass
+clears it (``reason=kill_switch_off``) → flip back.
 
 **4.5 Missing arming instance.** Terminated/expired arming instance → the
 wake falls back to the project's front-door `ari` (annotated body);
