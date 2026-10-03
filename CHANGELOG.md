@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 2026-09-26
 
+### Added
+
+- **Post-restart arm-notify** (`feature/post-restart-arm-notify`): armed `system_restart` / `system_upgrade` runs are now auto-delivered to the arming instance after a daemon restart, in the same chat where the arm was confirmed — zero user action; operator kill-switch `ENSEMBLE_POST_RESTART_ARM_NOTIFY=0` (default ON). See `docs/runbooks/post-restart-arm-notify.md`.
+
 ### Changed
 
 - **Default `persistence.checkpoint_max_per_thread` lowered 50 → 3** (`feature/checkpoint-retention-keep-3`, merge pending). The per-thread retention cap on the Op D checkpoint-prune pass (`daemon/services/maintenance.py::_prune_per_thread_checkpoints`) is now operator-tunable via the `CHECKPOINT_MAX_PER_THREAD` env var (floor 1, enforced by `PersistenceConfig.checkpoint_max_per_thread` `ge=1` — pydantic raises `ValidationError` at config load on 0 / negative rather than silently mass-pruning the latest checkpoint). Long-running instances no longer accumulate a multi-week checkpoint tail they never resume against; the constant `daemon.constants.CHECKPOINT_MAX_PER_THREAD = 50` is removed (the source of truth moved to config). Default `persistence.checkpoint_cleanup_interval` (24h, unchanged) bounds how often the prune pass runs; the new default retention cap bounds per-pass disk growth. Override per-installation via `CHECKPOINT_MAX_PER_THREAD=N` (YAML key `persistence.checkpoint_max_per_thread` mirrors the env).

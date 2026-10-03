@@ -2384,7 +2384,7 @@ Returns:
                     "executes: after this turn (deferred post-turn trigger; the "
                     "fallback is restart.sh's bounded waiter / boot sweep)",
                     "expected downtime 15-90s (SINGLE-TERM + launcher re-exec + boot preflight)",
-                    f"post-restart: ask me to run upgrade_status(run_id=\"{run_id}\") or release_info(section=current)",
+                    f"post-restart: the arm is recorded (run_id=\"{run_id}\"); on daemon restart an auto-wake will be delivered to this instance to report the outcome — no user action required; kill-switch: ENSEMBLE_POST_RESTART_ARM_NOTIFY=0 in <install_dir>/.env",
                     f"journal: releases/state.json pending-op opened (kind=restart, started_at={op.armed_at}, owner=exec-pending)",
                     f"trigger: {'post-turn-callback armed' if marker_ok else 'post-turn callback unavailable — fallback (bounded waiter/boot sweep)'}",
                     busy,
@@ -3006,7 +3006,7 @@ never decides go/rollback).
                 [
                     f"UPGRADE ARMED — run_id={run_id} env={self_env} target={version} mode=promote",
                     "executes: after this turn completes (deferred — daemonized promote.sh)",
-                    f"watch: upgrade_status(run_id=\"{run_id}\") for phase transitions; terminal state readable post-restart",
+                    f"post-restart: the arm is recorded (run_id=\"{run_id}\"); on daemon restart an auto-wake will be delivered to this instance to report the outcome — no user action required; kill-switch: ENSEMBLE_POST_RESTART_ARM_NOTIFY=0 in <install_dir>/.env",
                     f"journal: releases/state.json txn opened (started_at={op.armed_at}, owner=exec-pending)",
                     (
                         f"live-confirmation: nonce consumed (confirmed_source={confirmed_source})"

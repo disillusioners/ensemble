@@ -1,5 +1,15 @@
 # Test Packs
 
+## Completed commission — POST-RESTART ARM-NOTIFY PHASE 4 (banner + runbook + drill + release notes + banner pack) (2026-10-04)
+
+Branch `feature/post-restart-arm-notify` @ phase 4 commit (base `85fbf709` = phases 1–3 tip). **VERDICT: 🟢 BANNER PACK PASS — phase 4 closes the operator-facing surface.** Arm-time banner in `daemon/tools/upgrade_tools.py` swapped to the auto-wake prose in BOTH arm-return branches (D-FA1.2 supersession close-out — the obsolete pull-model "ask me to run `upgrade_status`" instruction is gone, regression-pinned); operator runbook `docs/runbooks/post-restart-arm-notify.md` (kill-switch, structured log lines, Recovery Flow covering R-21/R-24/R-25, all six ADRs referenced); bash drill `test/drills/post_restart_arm_notify_drill.sh` + driver `test/drills/wake_drill_driver.py` (six sandbox scenarios D1–D6, P2.2 tool-interlock technique, 9/9 checks exit-0 GREEN); drill smoke `tests/test_post_restart_arm_notify_drill_smoke.py`; release-notes line in `CHANGELOG.md` [Unreleased]. The banner pack is the SIXTH arm-notify pack (r4 fold W3 complete). No live contact (fake homes, in-process driver, live-pid checkpoint unchanged).
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `post_restart_arm_notify_banner_unit_test` (NEW phase 4) | `test/packs/post_restart_arm_notify_banner_unit_test.sh` | tests/unit/tools/test_post_restart_arm_notify_banner.py (5) — T4.7 regression pin: obsolete pull-model phrase absent (loud line-numbered failure on re-introduction), auto-wake prose in BOTH arm-return branches (system_restart + system_upgrade), no-user-action + run_id binding per banner, kill-switch env + `<install_dir>/.env` location on every banner line, single-element banner structure | <1 min | 2026-10-04 | ✅ PASS 5/5 (0.33 s) |
+
+**Banner pack 5P / 0F; companion drill 9/9 GREEN (exit 0) — phase 4 operator surface fully green.**
+
 ## Active commission — POST-RESTART ARM-NOTIFY PHASE 3 (edge cases + structural AC6 + pack registration) (2026-10-03)
 
 Branch `feature/post-restart-arm-notify` @ phase 3 commit (base `f3380aaa` = phases 1+2 tip `24ad2f28`-line; planning commits only). **VERDICT: 🟢 ALL FIVE PACKS PASS — phase 3 test-only, no source changes.** Adds the long-tail edge cases (long-downtime double-arm coalesce, paused-instance defer, terminal-instance revival, kill-switch re-enable-no-stale-flood) and the AC6 structural non-regression pins (no new journal file, no new HTTP endpoint, no new SQLModel table, arm_pending_wake lock-position pin, wired helper pin, sweep method pin, real-journal-shape fixture pin). Extends the Phase 2 routing pack with T3.5 Site 1 progressive dispatch tests. No daemon source touched; no live contact. The pack table below is the record.
