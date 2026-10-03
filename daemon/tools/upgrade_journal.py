@@ -788,7 +788,7 @@ def clear_pending_op(install_dir: Path, *, clear_restart_marker: bool = True) ->
 # surface as ``pending_op`` and ``pending_restart`` — written by the SAME
 # ``journal_write`` envelope UNDER the caller-acquired journal lock
 # (``journal_write`` itself acquires no lock; serialization is the arm
-# site's ``journal_lock_acquire`` at ``upgrade_tools.py:2167``/``:2719``).
+# site's ``journal_lock_acquire`` at ``upgrade_tools.py:2287``/``:2848``).
 # Crash-safety: arm + wake ride one ``journal_write`` so a crash between
 # leaves EITHER the pre-arm state OR the post-arm state — never a half.
 #
@@ -1133,13 +1133,13 @@ def mark_wake_abandoned(
             pending.pop(run_id, None)
             data["pending_wakes"] = pending
             journal_write(install_dir, data)
+        journal_history_append(
+            install_dir,
+            "wake_abandoned",
+            f"run_id={run_id} reason={reason}",
+        )
     finally:
         lock_release(install_dir)
-    journal_history_append(
-        install_dir,
-        "wake_abandoned",
-        f"run_id={run_id} reason={reason}",
-    )
 
 
 def list_pending_wakes(install_dir: Path) -> list[PendingWake]:

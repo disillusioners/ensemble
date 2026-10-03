@@ -56,6 +56,7 @@ from daemon.tools.upgrade_journal import (
     mark_wake_abandoned,
     mark_wake_delivered,
     mark_wake_delivering,
+    mark_wake_pending,
     now_iso,
 )
 
@@ -358,6 +359,117 @@ class TestMarkWakeHelpers:
             e for e in history if isinstance(e, dict) and e.get("event") == "wake_abandoned"
         ]
         assert len(abandoned_events) == 2
+
+    def test_mark_wake_pending_idempotent_on_pending(
+        self, install: Path
+    ) -> None:
+        """T1.4: ``mark_wake_pending`` on an already-``pending`` record is
+        an idempotent no-op — returns the existing ``PendingWake``,
+        leaves ``status`` unchanged, and does NOT rewrite the journal.
+
+        The delivering→pending flip branch is covered indirectly by the
+        sweep test (test_enqueue_failure_recovers_on_next_tick_via_pending_rollback).
+        This unit test pins the OTHER branch the helper has: when the
+        record is already in ``pending`` (CAS-loser semantics — nothing
+        to roll back), the helper must NOT clobber the record or trigger
+        a journal_write.
+        """
+        wake = _make_wake()
+        arm_pending_wake(install, wake)
+        # Capture the on-disk state so we can prove NO journal_write.
+        before_raw = journal_read(install)
+        before_status = before_raw["pending_wakes"][wake.run_id]["status"]
+        assert before_status == _WAKE_STATUS_PENDING
+
+        result = mark_wake_pending(install, wake.run_id)
+
+        # Returns the existing record; status unchanged.
+        assert result is not None
+        assert result.status == _WAKE_STATUS_PENDING
+        assert result.run_id == wake.run_id
+        # On-disk state unchanged (no journal_write — the idempotent
+        # branch returns before the write site).
+        after_raw = journal_read(install)
+        assert after_raw["pending_wakes"][wake.run_id]["status"] == _WAKE_STATUS_PENDING
+        # The dict still holds exactly one record (no clobber, no drop).
+        records = list_pending_wakes(install)
+        assert len(records) == 1
+        assert records[0].status == _WAKE_STATUS_PENDING
+
+    def test_mark_wake_pending_no_op_for_structurally_removed_delivered(
+        self, install: Path
+    ) -> None:
+        """T1.5: ``mark_wake_pending`` MUST NOT resurrect a structurally
+        removed ``delivered`` record (D-FA1.2 — delivered is the
+        idempotency key, invariant 7; the record is GONE from the dict,
+        not just status-flagged). The helper's contract is silent
+        no-op on absence — ``None`` returned, no recreation, no
+        journal write, no history event.
+        """
+        wake = _make_wake()
+        arm_pending_wake(install, wake)
+        mark_wake_delivered(install, wake.run_id, "m-delivered-1")
+        # Pre-condition: the record is structurally absent.
+        pre = journal_read(install)
+        assert wake.run_id not in pre.get("pending_wakes", {})
+
+        result = mark_wake_pending(install, wake.run_id)
+
+        # Returns None (absent → no-op).
+        assert result is None
+        # The dict is STILL structurally empty — no resurrection.
+        records = list_pending_wakes(install)
+        assert records == []
+        post = journal_read(install)
+        assert wake.run_id not in post.get("pending_wakes", {}), (
+            "mark_wake_pending must NOT recreate a delivered record "
+            "(D-FA1.2 — delivered is structural removal, the "
+            "idempotency key for invariant 7)"
+        )
+
+    def test_mark_wake_pending_no_op_for_structurally_removed_abandoned(
+        self, install: Path
+    ) -> None:
+        """T1.6: ``mark_wake_pending`` MUST NOT resurrect a structurally
+        removed ``abandoned`` record either (same D-FA1.2 contract).
+        Critically, the call must NOT journal a second ``wake_abandoned``
+        event — only ``mark_wake_abandoned`` is allowed to journal that
+        event; ``mark_wake_pending`` is silent on absent records.
+        """
+        wake = _make_wake()
+        arm_pending_wake(install, wake)
+        mark_wake_abandoned(install, wake.run_id, "kill_switch_off")
+        # Capture history-event count after the abandonment (which DOES journal).
+        history_before = journal_read(install).get("history", [])
+        abandoned_before = [
+            e for e in history_before
+            if isinstance(e, dict) and e.get("event") == "wake_abandoned"
+        ]
+        assert len(abandoned_before) == 1
+        # Pre-condition: record is structurally absent.
+        pre = journal_read(install)
+        assert wake.run_id not in pre.get("pending_wakes", {})
+
+        result = mark_wake_pending(install, wake.run_id)
+
+        # Returns None — silent no-op.
+        assert result is None
+        # The dict is STILL empty — no resurrection.
+        records = list_pending_wakes(install)
+        assert records == []
+        # Crucially: NO additional ``wake_abandoned`` history event —
+        # mark_wake_pending is silent on absence (only
+        # mark_wake_abandoned is allowed to journal wake_abandoned).
+        history_after = journal_read(install).get("history", [])
+        abandoned_after = [
+            e for e in history_after
+            if isinstance(e, dict) and e.get("event") == "wake_abandoned"
+        ]
+        assert len(abandoned_after) == 1, (
+            "mark_wake_pending must NOT journal wake_abandoned events "
+            "(that is mark_wake_abandoned's contract; mark_wake_pending "
+            "is silent on absent records)"
+        )
 
 
 # ── Group 3b — list_pending_wakes (T1.6 garbage tolerance) ────────────────────
