@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 from pathlib import Path
 
 _logger = logging.getLogger(__name__)
@@ -277,6 +278,26 @@ def _is_serialization_dict(node: ast.Dict, parents: dict[int, ast.AST]) -> bool:
     return False
 
 
+# Recognises ``SET admission_state = ...`` as a SQL UPDATE target, with
+# an optional ``-- comment\n`` block between ``SET`` and the assignment.
+# Two observed shapes:
+#
+#   * Legacy (pre-FP2): ``UPDATE job_queue_items SET admission_state = 'done'``
+#   * FP2 (2026-10-03, report-delivery-bug-family): the
+#     ``reconcile_turn_mirror`` rewrite places a multi-line ``--`` comment
+#     block between ``SET`` and the ``admission_state`` assignment so all
+#     three SET-target columns (admission_state / terminal_reason /
+#     failed_at) carry their per-column rationale inline. The scanner
+#     must therefore match ``SET`` followed by zero-or-more comment lines
+#     followed by ``admission_state =`` — a SELECT predicate
+#     ``(admission_state = 'active')`` does NOT match because it lacks
+#     the leading ``SET`` keyword.
+_SET_ADMISSION_TARGET = re.compile(
+    r"\bSET\b\s*(?:--[^\n]*\n\s*)*\s*admission_state\s*=",
+    re.MULTILINE,
+)
+
+
 def _find_write_line_numbers(tree: ast.AST) -> set[int]:
     """Return every line number where an admission-state write happens.
 
@@ -289,11 +310,15 @@ def _find_write_line_numbers(tree: ast.AST) -> set[int]:
     doc_lns = _collect_docstring_line_ranges(tree)
     parents = _parent_map(tree)
     for node in ast.walk(tree):
-        # SQL UPDATE strings — raw ``SET admission_state = ...``
+        # SQL UPDATE strings — ``SET admission_state = ...`` (with an
+        # optional ``-- comment\n`` block between ``SET`` and the
+        # assignment; see :data:`_SET_ADMISSION_TARGET`). The leading
+        # ``SET`` keyword disambiguates from SELECT predicates of the
+        # form ``(admission_state = 'active')`` — those do NOT match.
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if node.lineno in doc_lns:
                 continue
-            if "SET admission_state" in node.value:
+            if _SET_ADMISSION_TARGET.search(node.value):
                 lines.add(node.lineno)
                 continue
         # ORM .values(admission_state=...) — keyword arg on .values()

@@ -12,6 +12,7 @@ from typing import Any, Callable
 from sqlalchemy import (
     case,
     delete as sql_delete,
+    exists,
     func,
     literal,
     text,
