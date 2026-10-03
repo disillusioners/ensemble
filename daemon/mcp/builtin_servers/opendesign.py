@@ -130,6 +130,20 @@ class OpenDesignMCP(BuiltinServerDefinition):
         """
         return "0.16.1"
 
+    @property
+    def tool_call_timeout(self) -> int:
+        """Per-server tool-call timeout override: 600s (vs 120s global).
+
+        ``od_generate_design`` routinely runs 130–170s against the OD
+        daemon — past the pool-wide ``McpPoolConfig.tool_call_timeout``
+        default of 120s — so opendesign is the one builtin that opts
+        into a longer budget (ODSP saga closure, 2026-10-03). Every
+        other builtin inherits the base class ``None`` and keeps the
+        global default; the dev-boot ``MCP_POOL_TOOL_CALL_TIMEOUT=600``
+        line stays as belt-and-suspenders only.
+        """
+        return 600
+
     def get_base_config(self) -> dict[str, Any]:
         """Return base configuration for open-design-mcp (stdio).
 

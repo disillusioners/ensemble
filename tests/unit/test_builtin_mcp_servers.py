@@ -628,6 +628,50 @@ class TestBuiltinServerDefinitionParseConfig:
 
 
 # =============================================================================
+# Group 2.5: Per-server tool_call_timeout definition pins
+# =============================================================================
+
+
+class TestPerServerToolCallTimeoutOverride:
+    """Pins for the per-server ``tool_call_timeout`` definition field.
+
+    Contract (ODSP closure, 2026-10-03): ONLY opendesign opts into the
+    600s budget; every other builtin inherits the base-class ``None``
+    and keeps the pool-wide ``McpPoolConfig.tool_call_timeout`` default.
+    """
+
+    def test_opendesign_carries_600s_override(self):
+        """OpenDesign's definition declares ``tool_call_timeout == 600``.
+
+        ``od_generate_design`` routinely runs 130–170s against the OD
+        daemon — past the 120s global default — so the definition is
+        the single source of the longer budget.
+        """
+        from daemon.mcp.builtin_servers.opendesign import OpenDesignMCP
+
+        assert OpenDesignMCP().tool_call_timeout == 600
+
+    def test_other_builtins_have_no_override(self):
+        """context7 / plane / webfetch do NOT carry the override.
+
+        They must return ``None`` (base-class default) so the pool and
+        preload layers fall back to the global default for them — the
+        600s budget must stay scoped to the opendesign lane.
+        """
+        from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
+        from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
+        from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
+
+        assert Context7ServerDefinition().tool_call_timeout is None
+        assert PlaneServerDefinition().tool_call_timeout is None
+        assert WebFetchServerDefinition().tool_call_timeout is None
+
+    def test_base_class_default_is_none(self):
+        """The ABC's default stays ``None`` — future builtins are global by default."""
+        assert TestBuiltinServerDefinition().tool_call_timeout is None
+
+
+# =============================================================================
 # Group 3: validate_config_values Tests
 # =============================================================================
 

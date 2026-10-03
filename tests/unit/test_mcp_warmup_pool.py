@@ -159,16 +159,76 @@ class TestPerServerTimeout:
     def test_webfetch_context7_have_none_timeout(self):
         """WebFetch and Context7 return ``None`` for ``tool_call_timeout``.
 
-        They inherit the base class default — none of the current builtins
-        override the pool-wide default, so the override plumbing is
+        They inherit the base class default — the only production
+        builtin with an override is opendesign (600s, tested below), so
+        these two keep the pool-wide default. The override plumbing is
         exercised by the explicit ``tool_call_timeout=...`` calls above
-        rather than by real production definitions.
+        plus the real-opendesign test that follows.
         """
         from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
         from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
 
         assert WebFetchServerDefinition().tool_call_timeout is None
         assert Context7ServerDefinition().tool_call_timeout is None
+
+    def test_opendesign_definition_carries_600s_override(self):
+        """OpenDesign is the one production builtin overriding the timeout.
+
+        ODSP closure (2026-10-03): ``od_generate_design`` runs 130–170s
+        against the OD daemon — past the 120s pool default — so the
+        definition carries 600s and every other builtin keeps ``None``.
+        """
+        from daemon.mcp.builtin_servers.opendesign import OpenDesignMCP
+
+        assert OpenDesignMCP().tool_call_timeout == 600
+
+    @pytest.mark.asyncio
+    async def test_create_pooled_connection_opendesign_real_definition_uses_600(self):
+        """Real opendesign override wins over the pool default end-to-end.
+
+        Mirrors the ``InstanceManager._init_warmup_pool`` wiring exactly:
+        pool built with the 120s global, server registered with the
+        definition's ``tool_call_timeout`` — the pooled connection must
+        adapt its tools with 600s, not the pool default.
+        """
+        from daemon.mcp.builtin_servers.opendesign import OpenDesignMCP
+
+        pool = McpWarmupPool(tool_call_timeout=120)
+        pool.register_server(
+            "opendesign",
+            _make_config(command="open-design-mcp", args=[]),
+            tool_call_timeout=getattr(OpenDesignMCP(), "tool_call_timeout", None),
+        )
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+        mock_session.initialize = AsyncMock(return_value=None)
+        mock_session.send_ping = AsyncMock()
+
+        with patch(
+            "daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=mock_cm
+        ), patch(
+            "daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session
+        ), patch(
+            "daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock
+        ) as mock_tools, patch(
+            "daemon.mcp.warmup_pool.adapt_mcp_tools"
+        ) as mock_adapt:
+            mock_tools.return_value = [MagicMock()]
+            mock_adapt.return_value = [MagicMock()]
+
+            await pool._create_pooled_connection("opendesign")
+
+        mock_adapt.assert_called_once()
+        # opendesign per-server override (600) must win over pool default (120)
+        assert mock_adapt.call_args.kwargs.get("tool_call_timeout") == 600, (
+            f"Expected tool_call_timeout=600 (opendesign per-server override), "
+            f"got {mock_adapt.call_args.kwargs.get('tool_call_timeout')}"
+        )
 
     # --- _create_pooled_connection integration ------------------------------
     #
