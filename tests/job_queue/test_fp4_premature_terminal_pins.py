@@ -113,6 +113,12 @@ from daemon.repositories.job_queue.watcher_models import JobWatcher
 from daemon.repositories.job_queue.watcher_repository import (
     JobWatcherRepository,
 )
+# m4 (2026-10-03, report-delivery-bug-family) — the R4 pin
+# adds a direct ``admission_state='active'`` assertion on the
+# JobItem mirror of the held parent. Import JobItem so the
+# test-side ``_seed_job_item`` helper can build a row and the
+# R4 assertion can read it back.
+from daemon.repositories.job_queue.models import JobItem
 from daemon.repositories.message_queue.models import (
     MessageQueue,
     MessageStatus,
@@ -398,6 +404,61 @@ def _add_watch(
             )
         )
         session.commit()
+
+
+def _seed_job_item(
+    engine,
+    *,
+    job_id: str,
+    instance_id: str | None,
+    admission_state: str = "active",
+    job_type: str = "task",
+) -> None:
+    """Insert a ``JobItem`` row for the R4 wedge pin.
+
+    m4 (2026-10-03, report-delivery-bug-family) — the R4 pin
+    adds a direct ``admission_state='active'`` assertion on the
+    JobItem mirror of the held parent (the continuable/retryable
+    property). A bare Instance-level WAITING_CHILDREN retention
+    pin is necessary but not sufficient — a JobItem that the
+    writer marked ``done`` while the Instance is still
+    ``WAITING_CHILDREN`` would wedge the next message-completed
+    re-fire (the done+retry-0/0 wedge class). The R4 test seeds
+    a JobItem linked to the held parent so the assertion can
+    verify the queue side stays ``active`` across re-fires.
+
+    Mirrors the same shape as
+    ``tests.job_queue.test_report_delivery_bug_family_pins._seed_job_item``
+    but kept inline here to keep this file self-contained (the
+    sibling test is a separate package and a cross-test import
+    would couple their future evolution).
+    """
+    from sqlmodel import insert as sqlmodel_insert
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with engine.begin() as conn:
+        conn.execute(
+            sqlmodel_insert(JobItem).values(
+                job_id=job_id,
+                agent_id="developer",
+                agent_dir="agents/developer",
+                message="r4 wedge pin: held parent's job mirror",
+                source="api",
+                project_id="test-project",
+                queue_id=None,
+                priority=5,
+                admission_state=admission_state,
+                created_at=now_iso,
+                instance_id=instance_id,
+                job_type=job_type,
+                retry_count=0,
+                max_retries=None,
+                terminal_reason=None,
+                failed_at=None,
+                version=1,
+                deleted_at=None,
+            )
+        )
 
 
 def _patch_get_instance_messages(history: list[dict] | None) -> object:
@@ -838,6 +899,22 @@ class TestR4WedgeRegression:
                 "created_at": "2026-09-20T17:00:00+00:00",
             },
         ]
+        # m4 (2026-10-03, report-delivery-bug-family) — seed a
+        # JobItem mirror of the held parent so the R4 pin can
+        # assert the queue side stays ``active`` across re-fires.
+        # A bare WAITING_CHILDREN retention pin is necessary but
+        # not sufficient — a JobItem marked ``done`` while the
+        # Instance is still ``WAITING_CHILDREN`` would wedge the
+        # next message-completed re-fire (the done+retry-0/0
+        # wedge class). The ACTIVE state is the
+        # continuable/retryable property.
+        r4_job_id = f"job-r4-{uuid.uuid4()}"
+        _seed_job_item(
+            fp4_harness.engine,
+            job_id=r4_job_id,
+            instance_id=parent_id,
+            admission_state="active",
+        )
 
         # First pass: HOLD (declared-wait within bind).
         with _patch_get_instance_messages(history), \
@@ -850,6 +927,19 @@ class TestR4WedgeRegression:
             row = session.get(Instance, parent_id)
             assert row.status == InstanceStatus.WAITING_CHILDREN.value
             first_count = int(row.attestation_denied_count or 0)
+            # m4 — direct JobItem ACTIVE assertion. The
+            # held parent's queue mirror must stay in the
+            # ``active`` admission bucket so the next
+            # message-completed signal re-fires the L6 path
+            # and admit fresh work. A drop to ``done`` would
+            # wedge the re-fire (the done+retry-0/0 class).
+            job_row = session.get(JobItem, r4_job_id)
+            assert job_row is not None
+            assert job_row.admission_state == "active", (
+                "m4 R4 pin: held parent's JobItem must stay "
+                "in 'active' admission across the first HOLD "
+                "pass — the done+retry-0/0 wedge is the bug."
+            )
 
         # Second pass: re-fire via a fresh message-completed signal.
         # The L6 path is event-driven; the second pass increments
@@ -875,6 +965,19 @@ class TestR4WedgeRegression:
             assert second_count == first_count, (
                 "O4 dedup: same denial_epoch across re-fires "
                 "must NOT double-increment the ledger."
+            )
+            # m4 — direct JobItem ACTIVE assertion across the
+            # second re-fire. The continuable/retryable property
+            # must hold across BOTH passes; an interim flip to
+            # ``done`` between the two passes is the wedge.
+            job_row = session.get(JobItem, r4_job_id)
+            assert job_row is not None
+            assert job_row.admission_state == "active", (
+                "m4 R4 pin: held parent's JobItem must stay "
+                "in 'active' admission across the second re-fire "
+                "— the done+retry-0/0 wedge would re-emerge if "
+                "the second pass decremented the retry budget "
+                "without holding the admission."
             )
 
 
