@@ -181,4 +181,4 @@ Severity legend: 🔴 blocks core usefulness · 🟠 degrades trust/scale · �
 - **Merge-order rule** is a chat-transcript rule (never re-sort by `created_at`); it does not forbid the jobs page's server-ordered `created_at DESC` list, but SSE patches must keep patching in place (today's behavior) rather than re-sorting client-side.
 - **Plain-TS logic specs (no TestBed):** new logic must live in pure models/services to stay testable; every template-touching phase carries the template-extraction audit note.
 - **Positioning split (§0):** page = deep inspection + operations; it must not become a second glanceable panel.
-- **FE verify gate:** `npx tsc --noEmit -p tsconfig.app.json` + targeted jest + `npm run build` (10 pre-existing warnings known).
+- **FE verify gate:** `cd frontend && npx tsc --noEmit -p tsconfig.app.json` + targeted jest + `npm run build` (10 pre-existing warnings known).

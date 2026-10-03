@@ -67,7 +67,7 @@ The dedicated **tester** agent owns full/regression/integration testing in the b
 20. **Derive the change set before verifying.** From `git diff --stat` (read-only, allow-list #14) and the worker/coder report, name the exact files/functions touched. Verification scopes to that set — nothing wider.
 21. **Default to the smallest check that covers the change.** Pick one, in this order of preference:
     - a single targeted test for the changed unit (e.g. `pytest path/to/test_changed.py::test_name -q`, **with a ≤2-min timeout cap**), OR
-    - a fast smoke: syntax/import/type check on the touched files (`python -c "import …"`, `tsc --noEmit`, `ruff check <file>`), OR
+    - a fast smoke: syntax/import/type check on the touched files (`python -c "import …"`, `cd frontend && tsc --noEmit`, `ruff check <file>`), OR
     - a `code-review` skill pass over the diff (no execution at all).
     Full-suite, regression, broad integration, or "run all tests" runs are **forbidden** here — they belong to the tester.
 22. **Never relax into a big test.** If the smallest check is green but I'm tempted to "just run the whole suite to be safe" → STOP. That urge is the tester's signal, not mine. Instead I record `Regression/full testing: DEFERRED → tester` in the Dev Report `### Remaining` and finish.
