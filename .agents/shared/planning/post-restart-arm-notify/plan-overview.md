@@ -120,7 +120,7 @@ fold):
 | **S1** — derive `WAKE_TERMINAL_EVENTS` from `_TERMINAL_OUTCOME_EVENTS` to avoid duplication | 🟢 | `phase2-plan.md` (T13 wording) | T13 (derive by alias; NEVER mutate base) |
 | **S2** — explicit entry for executor-never-ran silent abandon | 🟢 | `risk-register.md` | R-21 (existing burst-abort risk; executor-never-ran is the same abandon+grace path with a separate trigger) — wording extended to enumerate the trigger |
 | **S3** — ADR-042 wall-clock monotonicity caveat | 🟢 | `decisions.md` (ADR-042 amendment) | ADR-042 addendum: ts-scope compares journal wall-clock ISO strings; clock skew bounds scope accuracy (accepted) |
-| **S4** — confirm phase-4 in-scope explicitly | 🟢 | `plan-overview.md` (§2 Non-Goals reversal note + §4 row confirmation) | Phase 4 is the operator-facing surface (banner + runbook + drill + release notes); explicitly sanctioned |
+| **S4** — confirm phase-4 in-scope explicitly | 🟢 | `plan-overview.md` (§4 Phase-4 sanction note) | Phase 4 is the operator-facing surface (banner + runbook + drill + release notes); explicitly sanctioned |
 
 **PINNED decisions (stated verbatim for downstream consumers):**
 

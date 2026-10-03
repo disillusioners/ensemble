@@ -398,6 +398,25 @@ still-rolling-back pipeline.
 > the boot pass is caught by the next tick (the clock is
 > steady-state by then). **Pinned in `plan-overview.md`
 > Review round r4, PINNED DECISIONS §1.**
+>
+> **Tie-break placement (r5 fold N2):** the RESTART-lane
+> `run_id` detail-substring tie-breaker is CALLER-SIDE —
+> applied in `_resolve_wake_targets` (phase2-plan.md T3),
+> which holds the `PendingWake` record and therefore its
+> lane (`kind`) — NOT inside the reader. The reader
+> `wake_terminal_event_after(journal, armed_at)` carries no
+> lane knowledge and remains a **pure mirror** of the
+> verified helper `_terminal_event_after`
+> (`upgrade_journal.py:986-999`): TS-scope + event-class
+> membership over `WAKE_TERMINAL_EVENTS`, nothing more.
+>
+> **Never-blocking fall-through (r5 fold N3):** the
+> substring-miss fall-through NEVER blocks base event-class
+> matching — a restart terminal event whose detail prose
+> mismatches (or omits) the run_id still fires the wake; the
+> tie-break only disambiguates when multiple same-class
+> candidates exist in scope (fixture T13.2, sweep pack, pins
+> the mismatch case).
 
 ---
 

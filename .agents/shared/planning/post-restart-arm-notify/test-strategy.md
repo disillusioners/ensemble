@@ -59,7 +59,7 @@
 | **T5.12** | (same — the kill-switch arm-side test rides the journal pack) | (same) | (same) |
 | **T2.1, T2.2, T2.3, T2.4** | `test/packs/post_restart_arm_notify_sweep_unit_test.sh` | `tests/unit/services/test_post_restart_arm_notify_sweep.py` | `timeout 300 bash test/packs/post_restart_arm_notify_sweep_unit_test.sh` |
 | **T5.1, T5.2, T5.3, T5.4, T5.5, T5.6, T5.7, T5.8, T5.9, T5.10, T5.11, T5.16** | (same) | (same) | (same) |
-| **T13.1, T5.18, T6.6, T6.7** (new — promote-lane fire test, kill-switch sweep wiring test, manager-wiring test, install_dir no-op test) | (same) | (same) | (same) |
+| **T13.1, T13.2, T5.18, T6.6, T6.7** (new — promote-lane fire test, restart-lane run_id-mismatch still-fires fixture (r5 fold N3), kill-switch sweep wiring test, manager-wiring test, install_dir no-op test) | (same) | (same) | (same) |
 | **T3.1, T3.2, T3.3, T3.4, T3.5** | `test/packs/post_restart_arm_notify_routing_unit_test.sh` | `tests/job_queue/test_post_restart_arm_notify_routing.py` | `timeout 300 bash test/packs/post_restart_arm_notify_routing_unit_test.sh` |
 | **T5.13, T5.14, T5.15, T5.17** | `test/packs/post_restart_arm_notify_edge_cases_unit_test.sh` | `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` | `timeout 300 bash test/packs/post_restart_arm_notify_edge_cases_unit_test.sh` |
 | **T5.18, T6.5, T5.19** (r4 fold W1+W3 — ari-fallback implementation, manager-wiring structural, install_dir no-op) | (same) | (same) | (same) |
