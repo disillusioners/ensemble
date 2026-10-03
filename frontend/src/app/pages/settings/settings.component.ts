@@ -203,7 +203,6 @@ export class SettingsComponent implements OnInit, OnDestroy {
    * drift the spec fixes.)
    */
   readonly apiTimezones = signal<string[] | null>(null);
-  readonly apiTimezonesLoaded = signal<boolean>(false);
 
   /**
    * Browser-native IANA option list, derived from the BEST AVAILABLE
@@ -860,12 +859,10 @@ export class SettingsComponent implements OnInit, OnDestroy {
       next: (resp) => {
         const zones = resp?.timezones ?? [];
         this.apiTimezones.set(zones);
-        this.apiTimezonesLoaded.set(true);
       },
       error: () => {
         // Leave apiTimezones as null so the computed falls through to
         // the Intl list / text-input fallback path.
-        this.apiTimezonesLoaded.set(true);
       },
     });
   }

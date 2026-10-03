@@ -2,10 +2,11 @@
  * Ad-hoc E2E smoke — settings-page timezone picker (web automation).
  *
  * Feature under test: user-timezone-setting @ 4ac8fd4a
- *   settings page timezone picker (app-searchable-select fed by
- *   Intl.supportedValuesOf('timeZone'), labels carry UTC offsets,
- *   'Auto / not set' sentinel → API null) wired to
- *   GET/PUT /api/settings/timezone.
+ *   settings page timezone picker (app-searchable-select fed by the
+ *   API list from GET /api/settings/timezones, falling back to
+ *   Intl.supportedValuesOf('timeZone'), then to a plain text-input
+ *   row; labels carry UTC offsets, 'Auto / not set' sentinel → API
+ *   null) wired to GET/PUT /api/settings/timezone.
  *
  * Scenarios:
  *   S1  picker renders with zone list showing offsets
