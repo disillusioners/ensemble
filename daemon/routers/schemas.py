@@ -1168,6 +1168,25 @@ class TimezonePreferenceUpdate(BaseModel):
     )
 
 
+class TimezoneOptionsResponse(BaseModel):
+    """Response for ``GET /api/settings/timezones`` — the canonical IANA
+    picker list.
+
+    Sourced from :func:`zoneinfo.available_timezones` so the picker can
+    never drift from the validator. Every entry is a key that
+    :class:`zoneinfo.ZoneInfo` resolves on the host (the backend
+    validator uses the same ZoneInfo, so the invariant
+    ``list ⊆ keys the validator accepts`` holds by construction)."""
+
+    timezones: list[str] = Field(
+        ...,
+        description=(
+            "Sorted IANA timezone keys (canonical + non-aliased) that "
+            "resolve via ZoneInfo on this host — the picker's source of truth"
+        ),
+    )
+
+
 # ==================== Editor Preference Schemas ====================
 
 

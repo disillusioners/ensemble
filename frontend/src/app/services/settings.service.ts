@@ -20,6 +20,19 @@ export interface TimezonePreference {
   utc_offset: string | null;
 }
 
+/**
+ * Mirror of the GET /api/settings/timezones contract — the canonical
+ * IANA picker list. The backend derives the list from
+ * ``zoneinfo.available_timezones()`` so the picker and the validator
+ * (``/api/settings/timezone`` PUT) share a single source of truth and
+ * cannot drift apart (older browsers' ``Intl.supportedValuesOf`` ships
+ * deprecated aliases like ``Asia/Saigon`` but lacks canonical
+ * ``Asia/Ho_Chi_Minh`` — exactly the drift the spec fixes).
+ */
+export interface TimezoneOptions {
+  timezones: string[];
+}
+
 export interface BlueprintPeakHours {
   start: number;
   end: number;
@@ -62,6 +75,20 @@ export class SettingsService {
    */
   getTimezonePreference(): Observable<TimezonePreference> {
     return this.http.get<TimezonePreference>('/api/settings/timezone');
+  }
+
+  /**
+   * GET /api/settings/timezones
+   * Returns the canonical IANA zone list for the Settings picker.
+   * Backend derives from ``zoneinfo.available_timezones()`` so the
+   * picker and the validator share a single source of truth — the
+   * browser-native ``Intl.supportedValuesOf('timeZone')`` list drifts
+   * (older ICU returns deprecated aliases like ``Asia/Saigon`` but
+   * not canonical ``Asia/Ho_Chi_Minh``), so the UI no longer relies
+   * on it. The list is sorted ASCII for stable render order.
+   */
+  getTimezoneOptions(): Observable<TimezoneOptions> {
+    return this.http.get<TimezoneOptions>('/api/settings/timezones');
   }
 
   /**
