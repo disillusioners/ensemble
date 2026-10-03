@@ -236,7 +236,8 @@ def terminal_reason_variants_for(canonical_token: str) -> tuple[str, ...]:
     Args:
         canonical_token: A canonical status string (one of
             ``pending`` / ``processing`` / ``paused`` / ``completed``
-            / ``failed`` / ``cancelled`` / ``dead_letter``).
+            / ``failed`` / ``cancelled`` / ``dead_letter`` /
+            ``orphaned_no_task``).
 
     Returns:
         Tuple of accepted ``terminal_reason`` source values for the
