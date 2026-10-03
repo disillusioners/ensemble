@@ -184,7 +184,8 @@ actual live install.
 
 | File | What changes | Mandate |
 |---|---|---|
-| `tests/unit/tools/test_post_restart_arm_notify_banner.py` (NEW) | Banner text regression test: asserts the arm-return branch in `upgrade_tools.py` does NOT contain the obsolete "ask me to run `upgrade_status`" instruction. The obsolete phrase is captured as a constant `OBSOLETE_PHRASE`. The test reads the file, greps for the constant, and fails loudly if found. | Phase 4 D5; release-blocker regression pin |
+| `tests/unit/tools/test_post_restart_arm_notify_banner.py` (NEW) | Banner text regression test: asserts the arm-return branch in `upgrade_tools.py` does NOT contain the obsolete "ask me to run `upgrade_status`" instruction. The obsolete phrase is captured as a constant `OBSOLETE_PHRASE`. The test reads the file, greps for the constant, and fails loudly if found. **r4 fold W3: this test is wrapped in `test/packs/post_restart_arm_notify_banner_unit_test.sh` (the sixth pack)** | Phase 4 D5; release-blocker regression pin |
+| `test/packs/post_restart_arm_notify_banner_unit_test.sh` (NEW) | **r4 fold W3:** the sixth pack — transparent wrapper for the banner regression test, following `test/packs/release_journal_unit_test.sh` precedent. Registered in `.agents/tester/PACKS.md` by the implementation-lane commit (NOT in this planning commit) | Phase 4 T11; r4 fold W3 acceptance gate |
 
 ### Files NOT touched (explicit non-modification)
 
@@ -218,6 +219,7 @@ actual live install.
 | **T8** | **Unskip the Phase 3 drill smoke placeholder** — the `pytest.mark.skip` added in Phase 3 T8 is removed; the smoke now invokes the bash drill (T6) and asserts the bash exit code is `0`. The smoke is registered in `conftest.py` per the Phase 2 drill convention | T6, T7 | `pytest tests/job_queue/test_post_restart_arm_notify_edge_cases.py::test_drill_smoke -v` exits 0 with the bash drill's exit code asserted |
 | **T9** | **Non-regression check: full Phase 1 + Phase 2 + Phase 3 packs remain green** — Phase 4 changes the banner text in `upgrade_tools.py` (T2, T3) and adds three new files (T4, T5, T6) + one new test (T7). The banner text change is a string literal swap; it does not touch the arm's logic, the refusal matrix, or the wake record. The new files are docs and drill — no source-code change to the daemon | T1–T8 | Full unit + job-queue packs exit 0; the existing 30/30 `test_upgrade_journal.py` + 135/135 `test_upgrade_tools.py` + 243/243 `test_release_journal.sh` all pass byte-exact; the Phase 2 + Phase 3 packs (T1.* + T2.* + T3.* + T4.1–T4.6 + T5.1–T5.15 + T6.1–T6.3) all pass |
 | **T10** | **Live untouched check** — every acceptance step on demo is preceded by a live-pid checkpoint (the existing Phase 2 §5 precedent). The drill runs against a sandbox install dir; the live install is never touched. The release-notes line is a documentation change with zero code-path impact | T1–T9 | Live pids verified unchanged at every checkpoint (the drill's bash log records the checkpoint) |
+| **T11** | **(r4 fold W3) Author the banner-regression pack + register all six new packs (Phase 4) in `.agents/tester/PACKS.md`** — the banner regression test at `tests/unit/tools/test_post_restart_arm_notify_banner.py` (T7) is wrapped in a sixth pack: `test/packs/post_restart_arm_notify_banner_unit_test.sh` (transparent wrapper per `test/packs/release_journal_unit_test.sh` precedent). **The drill is NOT a `tests/packs/` pack** — it is a `test/drills/` bash script, run manually as the operator's v0.17.x acceptance check (per Phase 2 §3.2). The six pack entries (`post_restart_arm_notify_{journal,sweep,routing,edge_cases,structural,banner}_unit_test.sh`) are listed in `.agents/tester/PACKS.md` per the existing entry format in the implementation-lane commit. **The Phase 4 implementation-lane commit's tester-lane addendum adds the six pack entries; this planning commit does NOT edit `.agents/tester/PACKS.md`** (tester-owned with unrelated uncommitted state per the r4 dispatch). Acceptance: `grep -E "post_restart_arm_notify_(journal\|sweep\|routing\|edge_cases\|structural\|banner)_unit_test" .agents/tester/PACKS.md` returns 6 hits after the implementation-lane commit lands. **The drill reference** (`test/drills/post_restart_arm_notify_drill.sh`) is distinct from the six packs — the drill is documented in the runbook's Drill section, NOT in `PACKS.md` | T7, T8 | Pack invocation: `bash test/packs/post_restart_arm_notify_banner_unit_test.sh` exits 0; after the implementation-lane commit: the 6-hit grep on `PACKS.md` returns success |
 
 ---
 
@@ -261,8 +263,9 @@ actual live install.
 
 | Test ID | Description | Where | Verifies |
 |---|---|---|---|
-| **T4.7** | Banner text regression — `upgrade_tools.py` does NOT contain the obsolete phrase; new auto-wake prose IS present | `tests/unit/tools/test_post_restart_arm_notify_banner.py` | D-FA1.2 supersession close-out; release-blocker regression pin |
+| **T4.7** | Banner text regression — `upgrade_tools.py` does NOT contain the obsolete phrase; new auto-wake prose IS present | `tests/unit/tools/test_post_restart_arm_notify_banner.py` → `test/packs/post_restart_arm_notify_banner_unit_test.sh` | D-FA1.2 supersession close-out; release-blocker regression pin |
 | **T8 (drill smoke)** | Drill smoke — `test/drills/post_restart_arm_notify_drill.sh` exits `0` against a sandbox install | `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` (unskipped from Phase 3) | All six scenarios (D1–D6) reachable end-to-end; D6 (live-outright-refusal) is a refusal-test only via FAKE-live marker |
+| **T11 (r4 fold W3)** | Pack registration — six new packs registered in `.agents/tester/PACKS.md` | `.agents/tester/PACKS.md` (Phase 4 implementation-lane commit) | r4 fold W3 acceptance gate; the 6-hit grep returns success |
 | **D1** | arm + kill + restart + observe wake delivered | `test/drills/post_restart_arm_notify_drill.sh` | AC1 + AC2 end-to-end on sandbox |
 | **D2** | arm + kill + restart + observe `terminal_outcome=committed` | same | AC2 + AC4 (terminal-state) end-to-end |
 | **D3** | sandbox `discord:user123` source + arm + kill + restart + observe source preserved | same | AC3 (routing) end-to-end |
@@ -354,9 +357,22 @@ the banner).
 8. **Live untouched:** T10 done; live pids verified unchanged
    at every checkpoint (the drill's bash log records the
    checkpoint).
+9. **r4 fold acceptance gates:**
+   - **T4.7 banner regression (Phase 4 D5) GREEN.**
+   - **T11 (r4 fold W3):** the six-pack registration entry
+     is in `.agents/tester/PACKS.md` (the planning
+     commit does NOT edit that file — the
+     implementation-lane commit does). The drill
+     reference (`test/drills/post_restart_arm_notify_drill.sh`)
+     is **distinct** from the six packs (the drill is
+     a `test/drills/` bash script, run manually, NOT
+     a `test/packs/` pack). The runbook's Drill
+     section documents the drill; the
+     `.agents/tester/PACKS.md` entry documents the
+     six packs.
 
 The Phase 4 commit is the **feature-complete** commit. The
-feature is shippable on demo when 1–8 are green. The
+feature is shippable on demo when 1–9 are green. The
 **release cut** (a follow-up PR that bumps the version
 and pushes the tag) is the deploy-side concern; this feature
 is the dev-side completion.

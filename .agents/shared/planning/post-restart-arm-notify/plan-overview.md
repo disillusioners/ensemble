@@ -1,8 +1,8 @@
 # Post-Restart Arm-Notify — Plan Overview (synthesized entry point)
 
-- **Date:** 2026-10-03 · **Author:** architect (controller) — feature analysis; per-phase plans authored by planner worker
-- **Status:** Draft — Ready for Review (per-phase plans complete; awaiting sign-off)
-- **Base:** branch `feature/post-restart-arm-notify` (the planning-authoritative tip)
+- **Date:** 2026-10-03 · **Author:** architect (controller) — feature analysis; per-phase plans authored by planner worker; r4 fold applied by plan-creation worker
+- **Status:** Ready for Review (r4 fold applied — 2 critical + 3 warnings + 4 suggestions folded; see `## Review round r4` below)
+- **Base:** branch `feature/post-restart-arm-notify` (the planning-authoritative tip, `2ddb9683`)
 - **Parent initiative:** `.agents/shared/planning/self-restart-upgrade-phase2/` (Phase 2 = arm-restart-upgrade surface; this feature is its **zero-user-action outcome-reporting** complement — see `supersession-record.md`)
 - **Reuse / no-parallel-machinery constraint (AC6):** the wake is the **existing `enqueue_message` primitive** (manager.py:7935-7996 → instance_messaging.py:2108); no parallel messaging subsystem. The durable record reuses the existing `releases/state.json` atomic surface (single-writer, tmp+fsync+os.replace) — see `architecture-recommendation.md` §FA1.
 
@@ -77,6 +77,103 @@ pre-enqueue stamp note, #9 burst-abort risk R-21, #10 sweep
 hardening) and NICE items (#11–#14, recorded in `decisions.md`
 "Deferred (NICE) items") are likewise applied. This revision did
 NOT modify `architecture-recommendation.md`.
+
+---
+
+## 0c. Review round r4 (2026-10-03, fold applied)
+
+The reviewer REJECTED the suite @ `2ddb9683` for implementation
+readiness with **2 critical + 3 warnings + 4 suggestions**. The
+architecture is **VALIDATED** (`architecture-recommendation.md` is
+READ-ONLY and remains the source of truth); this fold is a
+bounded revision, NOT a redesign. Every finding is mapped to a
+specific edit, and the verified wins are NOT disturbed (the
+**VERIFIED WINS** list below was preserved verbatim across the
+fold):
+
+* `manager.enqueue_message` boot-reachable semantics
+  (re-stamp is defensive; natural stamp at `manager.py:8112` is
+  binding — ADR-041 addendum stands)
+* **AC3** riding the DB-persistent
+  `instance_metadata.original_source` (T6 in-memory re-stamp
+  stays defensive/redundant)
+* `WAKE_TERMINAL_EVENTS` 7-member predicate
+  (architecture delta #1, MUST — sits alongside the 6-member
+  `_TERMINAL_EVENTS`, never mutates it)
+* `restart.sh:250-262` `pending_op` clearing (test T4.5
+  asserts the wake record survives)
+* Caller-lock rewording (architecture delta #3 — atomicity is
+  by the caller-acquired journal lock, not `journal_write`
+  self-locking)
+* Live-env refusal → no record (live-outright-refusal
+  pre-empts the journal write; D-FA5.5 stands)
+
+**Findings → edits mapping:**
+
+| Finding | Severity | Artifact(s) edited | Task / Test / Risk ID(s) |
+|---|---|---|---|
+| **C1** — wake-reader built on fictional `{"name", "run_id"}` journal shape | 🔴 | `phase1-plan.md` (T7 + T10 fixtures), `phase2-plan.md` (T13 + T13.1) | T7, T13, new T13.1 (promote-lane fire test) |
+| **C2** — `UpgradeJournalSweepService` has no `manager` seam; T6/T10 are unreachable | 🔴 | `phase2-plan.md` (T6, T10), new T18 | T6, T10, T18 (manager-wiring task — api.py:1489-1496) |
+| **W1** — AC5 front-door ari fallback has tests but no implementation task | 🟡 | `phase2-plan.md` (new T19) | T5.1, T5.2 + new T19 (ari lookup + body variant + `arm_notify_no_instance` journal branch) |
+| **W2** — risk-register misses 4 probed failure modes | 🟡 | `risk-register.md`, `decisions.md` (ADR-040 amendment), `phase2-plan.md` (T16 wording) | R-22, R-23, R-24, R-25; ADR-040 amendment pins the **deferred delivered-mark** choice |
+| **W3** — no test-pack registration | 🟡 | `test-strategy.md` (case→pack table + 5 pack filenames), `phase1-4-plan.md` (per-phase verification → pack invocations), `phase3-plan.md` (new T13), `phase4-plan.md` (new T11) | T1.7, T3.6, T4.9, T5.18, T6.5 — five pack files: `test/packs/post_restart_arm_notify_{journal,sweep,routing,edge_cases,structural}_unit_test.sh` |
+| **S1** — derive `WAKE_TERMINAL_EVENTS` from `_TERMINAL_OUTCOME_EVENTS` to avoid duplication | 🟢 | `phase2-plan.md` (T13 wording) | T13 (derive by alias; NEVER mutate base) |
+| **S2** — explicit entry for executor-never-ran silent abandon | 🟢 | `risk-register.md` | R-21 (existing burst-abort risk; executor-never-ran is the same abandon+grace path with a separate trigger) — wording extended to enumerate the trigger |
+| **S3** — ADR-042 wall-clock monotonicity caveat | 🟢 | `decisions.md` (ADR-042 amendment) | ADR-042 addendum: ts-scope compares journal wall-clock ISO strings; clock skew bounds scope accuracy (accepted) |
+| **S4** — confirm phase-4 in-scope explicitly | 🟢 | `plan-overview.md` (§2 Non-Goals reversal note + §4 row confirmation) | Phase 4 is the operator-facing surface (banner + runbook + drill + release notes); explicitly sanctioned |
+
+**PINNED decisions (stated verbatim for downstream consumers):**
+
+1. **Ts-scope reader rationale (ADR-042 amendment, fold C1):**
+   "The wake reader is `wake_terminal_event_after` over the
+   SIBLING constant `WAKE_TERMINAL_EVENTS = _TERMINAL_EVENTS +
+   ('restart',)`, scoped by `armed_at` TS, with no `run_id`
+   matching — because the journal's `history` entries are flat
+   `{ts, event, detail}` records (real shape at
+   `upgrade_journal.py:326` and `lib.sh:663,666`) with NO
+   `run_id` field. Promote-lane terminal events carry NO
+   `run_id` at all (`promote.sh:366`; `rollback.sh:203,209,211`);
+   only `restart.sh:252,262` embeds a `run_id=…` substring
+   inside the `detail` PROSE, used as an OPTIONAL tie-breaker
+   on the RESTART lane only. Choosing a structured `run_id`
+   schema would cross the lib.sh/launcher boundary (out of
+   scope per the reviewer). **Accepted cross-run ts-scope edge:**
+   an `armed_at`-scoped event-class match can attribute a
+   sibling concurrent run's terminal event to the wrong wake
+   when two arms fire within the same second — bounded by the
+   1-second `journal_history_append` timestamp resolution, and
+   the user-visible consequence is one extra `upgrade_status`
+   call (idempotent; not a wrong answer)."
+2. **Delivered-mark semantics choice (ADR-040 amendment, fold
+   W2):** "The wake's `mark_wake_delivered` is called AFTER
+   `enqueue_message` returns a `message_id` (synchronous write
+   path), NOT deferred to first dispatch attempt. The one-shot
+   loss window is **ACCEPTED** — if a chat adapter is disabled
+   or fails at wake time, the `MessageQueue` row exists but
+   dispatch is dropped (`dispatcher.py:158-165` silent-drop for
+   `system:*`, or adapter-level error), and the user's recovery
+   is the unchanged pull-model `upgrade_status` query
+   (D-FA1.2 fall-back, `supersession-record.md` §4). The
+   alternative — defer the delivered-mark to first dispatch
+   attempt — would require holding the wake record in
+   `delivering` for the full chat-adapter timeout window
+   (typically 30s) plus a retry round, which is structurally
+   racy with the 90s tick AND requires a new dispatch-success
+   callback surface (parallel-machinery violation, AC6). The
+   pull-model recovery path is the documented recovery; the
+   drill's D5 (kill-switch) and the runbook's Recovery Flow
+   section enumerate the operator path."
+
+**§FA anchors and ADR numbering 039–044 are STABLE** across the
+fold. ADR amendments are **addendum blocks inside the existing
+ADR** (not new top-level ADR numbers).
+
+**Commit follow-up:** the implementation-lane commit lands on
+the same branch after this planning commit. The implementation
+commit MUST add a verification step that runs each registered
+pack and asserts GREEN — the per-phase acceptance criteria in
+each `phaseN-plan.md` cite the pack by path, not by bare
+`pytest` invocation.
 
 ---
 
@@ -199,6 +296,17 @@ boundary). The phases build on each other; later phases
 | **2** | Boot Sweep + Wake Delivery | Extend `UpgradeJournalSweepService` with `sweep_wake_records`; wire it into the existing boot pass and the 90s tick. Wake = `manager.enqueue_message` with re-stamped source. Terminal gating via `WAKE_TERMINAL_EVENTS` + wake-owned reader (delta #1). Kill-switch abandon-on-switch-off (delta #2). CAS `wait_s≈30` + delivered-mark retry semantics + sweep hardening (deltas #4/#5/#10). Idempotency via `status` lifecycle. Best-effort, never wedges. | 17 | `daemon/services/upgrade_journal_sweep.py` (new `WakeSweepResult` + new `sweep_wake_records` + helpers); `daemon/api.py` (one new wrapped call in boot pass); `tests/unit/services/test_post_restart_arm_notify_sweep.py` (NEW); `tests/job_queue/test_post_restart_arm_notify_routing.py` (NEW) | pending |
 | **3** | Terminal-State Gating + Edge Cases + Structural AC6 | Close long-downtime double-arm coalesce (T5.13), paused-instance defer (T5.14), terminal-instance revival (T5.15), kill-switch re-enable-no-stale (T5.17). Add the load-bearing structural tests (T6.1–T6.4 — T6.4 = delta #3 lock-position pin) + the mutation guard (T4.8, delta #1) + the Site 1 dispatch test (T3.5, delta #6). | 12 | `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` (NEW); `tests/unit/test_post_restart_arm_notify_no_parallel.py` (NEW); zero source changes | pending |
 | **4** | Banner Updates + Runbook + Drill + Release Notes | Update the obsolete banner text in `upgrade_tools.py`; author the operator runbook; author the bash drill; append the release-notes line. | 10 | `daemon/tools/upgrade_tools.py` (string literal swap in two arm-return branches); `docs/runbooks/post-restart-arm-notify.md` (NEW); `test/drills/post_restart_arm_notify_drill.sh` (NEW); `RELEASE_NOTES.md` (APPEND); `tests/unit/tools/test_post_restart_arm_notify_banner.py` (NEW) | pending |
+
+**Phase 4 is SANCTIONED IN-SCOPE (r4 fold S4 clarification).**
+Phase 4 closes the operator-facing surface: banner text update
+in `upgrade_tools.py` (the obsolete "ask me to run
+`upgrade_status`" instruction, replaced by the auto-wake
+prose), the runbook at
+`docs/runbooks/post-restart-arm-notify.md`, the bash drill at
+`test/drills/post_restart_arm_notify_drill.sh` (six scenarios
+D1–D6), the release-notes line, AND the regression test
+(T4.7). Phase 4 is the **feature-complete** commit; the
+release cut is a follow-up PR.
 
 **Phase ordering rationale:** Phase 1 establishes the durable
 record (the surface Phase 2 consumes); Phase 2 establishes the

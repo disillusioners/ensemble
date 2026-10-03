@@ -14,16 +14,75 @@
 | AC | Test case(s) | Where |
 |---|---|---|
 | **AC1** arm-time durable record (transactional with arm) | T1.1–T1.6 | `tests/unit/tools/test_post_restart_arm_notify_journal.py` |
-| **AC2** boot delivery (detect pending records, enqueue wake) | T2.1–T2.4 | `tests/unit/services/test_post_restart_arm_notify_sweep.py` |
+| **AC2** boot delivery (detect pending records, enqueue wake) | T2.1–T2.4 + T13.1 (promote-lane fire test, r4 fold C1) | `tests/unit/services/test_post_restart_arm_notify_sweep.py` |
 | **AC3** ROUTING (wake's report → confirming chat) | T3.1–T3.5 (T3.5 = Site 1 progressive dispatch, architecture delta #6) | `tests/job_queue/test_post_restart_arm_notify_routing.py` |
 | **AC4** terminal-state gating (no wake while pipeline could roll back) | T4.1–T4.6 + T4.8 (mutation guard, delta #1) | `tests/unit/tools/test_post_restart_arm_notify_journal.py` (continuation) |
-| **AC5** edge cases (missing instance, multiple records, idempotency, never-wedge, live refusal, kill-switch abandon-on-off) | T5.1–T5.12 + T5.16 (abandon-on-switch-off, delta #2) + T5.17 (re-enable-no-stale, delta #2) | `tests/unit/services/test_post_restart_arm_notify_sweep.py` (continuation) + `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` |
-| **AC6** reuse existing machinery (no parallel messaging subsystem) | T6.1–T6.4 (T6.4 = `arm_pending_wake` lock-position pin, delta #3) | structural test (see §4.2) |
+| **AC5** edge cases (missing instance, multiple records, idempotency, never-wedge, live refusal, kill-switch abandon-on-off) | T5.1–T5.12 + T5.16 (abandon-on-switch-off, delta #2) + T5.17 (re-enable-no-stale, delta #2) + T5.18 (manager-wired, r4 fold C2) + T5.19 (install_dir None no-op) | `tests/unit/services/test_post_restart_arm_notify_sweep.py` (continuation) + `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` |
+| **AC6** reuse existing machinery (no parallel messaging subsystem) | T6.1–T6.4 (T6.4 = `arm_pending_wake` lock-position pin, delta #3) + T6.5 (manager-wired structural pin, r4 fold C2) + T6.6 (sweep-method structural pin, r4 fold C2) + T6.7 (real-journal-shape fixture pin, r4 fold C1) | structural test (see §4.2) |
 | **AC7** tests following `tests/unit/` + `tests/job_queue/` conventions | THIS FILE | — |
 
 ---
 
 ## 2. Test Packs (file-by-file)
+
+> **Pack-mapped validation (r4 fold W3):** every test in this
+> file belongs to a registered pack under `test/packs/`. The
+> convention is `test/packs/<feature>_<scope>_unit_test.sh`
+> (the existing `tests/packs/release_journal_unit_test.sh`
+> shape). Per `.agents/tester/rules/ensure.md` Core #1,
+> "PACK-MAPPED validation, never bare pytest". The Phase 3
+> implementation task **T13 (phase3-plan.md)** registers the
+> five new packs in `.agents/tester/PACKS.md`; the per-phase
+> verification in each `phaseN-plan.md` cites the pack by
+> path, not by a bare `pytest` invocation.
+>
+> **r4 fold C1 note (test fixture shape):** all wake-reader
+> tests use the REAL journal history entry shape:
+> `{"ts": <iso>, "event": <event_name>, "detail": <prose>}` —
+> NOT a fictional `{"name": ..., "run_id": ...}` shape. The
+> real shape is at `upgrade_journal.py:326` (Python
+> `journal_history_append`) and `lib.sh:663,666` (shell
+> counterpart). Promote-lane terminal events carry NO
+> `run_id` field at all (`promote.sh:366`; `rollback.sh:
+> 203,209,211`); only the RESTART lane embeds a
+> `run_id=<id>` substring inside the `detail` PROSE
+> (`restart.sh:252,262`), used as an OPTIONAL tie-breaker on
+> the RESTART lane only. See `decisions.md` ADR-042
+> addendum (r4 fold C1) for the rationale.
+
+### 2.0 Test-case → Pack Map (the r4 fold W3 deliverable)
+
+| Test ID | Pack (file) | Pytest source file | Pack invocation |
+|---|---|---|---|
+| **T1.1, T1.2, T1.3, T1.4, T1.5, T1.6** | `test/packs/post_restart_arm_notify_journal_unit_test.sh` | `tests/unit/tools/test_post_restart_arm_notify_journal.py` | `timeout 300 bash test/packs/post_restart_arm_notify_journal_unit_test.sh` |
+| **T4.1, T4.2, T4.3, T4.4, T4.5, T4.6, T4.8** | (same) | (same) | (same) |
+| **T5.12** | (same — the kill-switch arm-side test rides the journal pack) | (same) | (same) |
+| **T2.1, T2.2, T2.3, T2.4** | `test/packs/post_restart_arm_notify_sweep_unit_test.sh` | `tests/unit/services/test_post_restart_arm_notify_sweep.py` | `timeout 300 bash test/packs/post_restart_arm_notify_sweep_unit_test.sh` |
+| **T5.1, T5.2, T5.3, T5.4, T5.5, T5.6, T5.7, T5.8, T5.9, T5.10, T5.11, T5.16** | (same) | (same) | (same) |
+| **T13.1, T5.18, T6.6, T6.7** (new — promote-lane fire test, kill-switch sweep wiring test, manager-wiring test, install_dir no-op test) | (same) | (same) | (same) |
+| **T3.1, T3.2, T3.3, T3.4, T3.5** | `test/packs/post_restart_arm_notify_routing_unit_test.sh` | `tests/job_queue/test_post_restart_arm_notify_routing.py` | `timeout 300 bash test/packs/post_restart_arm_notify_routing_unit_test.sh` |
+| **T5.13, T5.14, T5.15, T5.17** | `test/packs/post_restart_arm_notify_edge_cases_unit_test.sh` | `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` | `timeout 300 bash test/packs/post_restart_arm_notify_edge_cases_unit_test.sh` |
+| **T5.18, T6.5, T5.19** (r4 fold W1+W3 — ari-fallback implementation, manager-wiring structural, install_dir no-op) | (same) | (same) | (same) |
+| **T6.1, T6.2, T6.3, T6.4** | `test/packs/post_restart_arm_notify_structural_unit_test.sh` | `tests/unit/test_post_restart_arm_notify_no_parallel.py` | `timeout 300 bash test/packs/post_restart_arm_notify_structural_unit_test.sh` |
+| **D1, D2, D3, D4, D5, D6** (drill — Phase 4) | `test/drills/post_restart_arm_notify_drill.sh` (NOT a `tests/packs/` pack; this is a bash drill, run manually) | (drill) | `bash test/drills/post_restart_arm_notify_drill.sh` |
+| **T4.7** (banner regression) | `test/packs/post_restart_arm_notify_banner_unit_test.sh` (Phase 4 registers a new pack — distinct from the five) | `tests/unit/tools/test_post_restart_arm_notify_banner.py` | `timeout 300 bash test/packs/post_restart_arm_notify_banner_unit_test.sh` |
+
+**Pack registration (planning-side ONLY — the implementation-lane
+commit adds the entry to `.agents/tester/PACKS.md`):** the five
+unit packs above are listed in the per-phase acceptance
+sections of `phase1-plan.md`, `phase2-plan.md`, `phase3-plan.md`,
+`phase4-plan.md` by their path; the per-phase verification
+sections in each phase plan cite the pack by path (not bare
+`pytest`). The implementation-lane commit
+(`phase3-plan.md` T13 + `phase4-plan.md` T11) registers the
+five packs in `.agents/tester/PACKS.md` per the existing entry
+format. **The Phase 3 + Phase 4 commits MUST NOT edit
+`.agents/tester/PACKS.md`** (tester-owned file with unrelated
+uncommitted state per the r4 dispatch); the registration
+happens in a follow-up commit after the planning commit
+lands, OR the test-author uses the dispatcher's tester lane
+to register the packs (the dispatcher's choice per its
+lanes-not-mine rule).
 
 ### 2.1 `tests/unit/tools/test_post_restart_arm_notify_journal.py` (AC1 + AC4)
 
@@ -31,6 +90,12 @@
 (file-backed fixtures, `tmp_path`, journal + lib.sh interop where
 relevant; sync + asyncio helpers; the existing `PendingOp` test
 group as a direct precedent).
+
+**Pack:** `test/packs/post_restart_arm_notify_journal_unit_test.sh`
+(transparent wrapper following the
+`test/packs/release_journal_unit_test.sh` precedent: `set -u`,
+120s internal watchdog, outer `timeout 300` wrap, exit-code
+propagated, `RESULT: PASS/FAIL` tail line).
 
 **Coverage groups:**
 
@@ -93,14 +158,18 @@ group as a direct precedent).
 #### Group 4 — terminal-state predicate (T4.1, T4.2, T4.3) + mutation guard (T4.8)
 
 * **T4.1** `test_wake_terminal_walker_returns_event_name` —
-  a journal with history `[..., {"name": "commit",
-  "run_id": "r-..."}]` returns `"commit"` for that
-  `run_id` from the parameterized walker
+  a journal with history `[..., {"ts": <iso>,
+  "event": "commit", "detail": "..."}]` returns `"commit"`
+  for that `run_id` from the parameterized walker
   (`latest_matching_event`, Phase 1 T7 — called with an
   inline event tuple; the WAKE event-set is owned by
   Phase 2, delta #1). Mirrors the existing
   `_terminal_outcome` semantics at
   `upgrade_tools.py:1022-1075` (terminal-class-FILTERED).
+  **Real journal shape — `{ts, event, detail}` per
+  `upgrade_journal.py:326`; the `run_id` parameter is
+  accepted by the walker but is NOT used for the
+  event-class match on the promote lane (r4 fold C1).**
 * **T4.2** `test_wake_terminal_walker_returns_none_when_pending` —
   a journal with no matching history event returns
   `None` — the wake is held `pending`. Mirrors the
@@ -133,8 +202,11 @@ group as a direct precedent).
   journal key.
 * **T4.5** `test_restart_sh_journal_simulated_does_not_touch_pending_wakes` —
   the same, but the test simulates the restart.sh
-  terminal event (`{"name": "restart", ...}`) AND
-  the `pending_op` clear (the call sequence
+  terminal event (`{"ts": <iso>, "event": "restart",
+  "detail": "run_id=<id> ..."}` — the real shape at
+  `restart.sh:262`; the `run_id=<id>` substring in the
+  `detail` is the OPTIONAL restart-lane tie-breaker)
+  AND the `pending_op` clear (the call sequence
   `journal_update_field(in_flight, None);
   clear_pending_op`). The wake record is preserved.
 * **T4.6** `test_reconcile_pending_op_does_not_touch_pending_wakes` —
@@ -150,14 +222,29 @@ group as a direct precedent).
 file-backed SQLite; `tmp_path`; `unittest.mock.AsyncMock` /
 `MagicMock` for the manager seam; `pytest-asyncio`).
 
+**Pack:** `test/packs/post_restart_arm_notify_sweep_unit_test.sh`
+(transparent wrapper per §2.1's pattern).
+
+**r4 fold C2 note (manager wiring):** the `InstanceManager` is
+a constructor param OR a setter on the service (decided in
+`phase2-plan.md` T18 — wiring at `api.py:1489-1496`); the
+tests' `AsyncMock` seam is the wired attribute, NOT a
+module-level mock. The test in T5.18 (new) asserts the wiring
+path is reachable — i.e. the service attribute is set after
+construction AND the sweep's `_deliver_wake` calls
+`self._manager.enqueue_message(...)` (NOT
+`manager.enqueue_message(...)` at module scope).
+
 **Coverage groups:**
 
 #### Group 1 — boot pass (T2.1, T2.2)
 
 * **T2.1** `test_sweep_wake_records_boot_pass_enqueues_wake` —
   with a journal containing one `pending` wake for
-  `run_id=r-aaa`, a history event `{"name": "commit",
-  "run_id": "r-aaa"}`, and an `InstanceManager` mock
+  `run_id=r-aaa`, a history event `{"ts": <iso>,
+  "event": "commit", "detail": "..."}` (the real
+  `promote.sh:366` shape — no `run_id` field on the
+  history entry), and an `InstanceManager` mock
   whose `enqueue_message` is an `AsyncMock`, calling
   `sweep_wake_records()` on the service results in
   exactly one `enqueue_message` call with
@@ -298,12 +385,63 @@ file-backed SQLite; `tmp_path`; `unittest.mock.AsyncMock` /
   new assertion is that the wake record is also
   absent — no second surface to forget).
 
+#### Group 9 — r4 fold additions (C1, C2, W1, W3)
+
+* **T5.18** (r4 fold C2) `test_sweep_manager_wired_via_constructor`
+  — assert the `UpgradeJournalSweepService` exposes a
+  `manager` attribute (constructor param OR setter, per
+  `phase2-plan.md` T18) AND the sweep's `_deliver_wake`
+  calls `self._manager.enqueue_message(...)` (NOT
+  `manager.enqueue_message(...)` at module scope). The
+  assertion is structural: a test that fails to find
+  the wired attribute is a fail-loud, not a NameError.
+* **T5.19** (r4 fold W1) `test_sweep_install_dir_none_is_noop`
+  — `install_dir=None` → `WakeSweepResult()` all-zeros,
+  zero journal reads attempted. Precedent
+  `UpgradeJournalSweepService.__init__ :99-103`. Asserts
+  the no-op seam is preserved (the manager wiring in T18
+  is a no-op when `install_dir` is None).
+* **T6.5** (r4 fold C2) `test_arm_pending_wake_call_site_is_reachable`
+  — the `arm_pending_wake` call site uses the wired
+  helper, not a module-level seam. AST-level inspection
+  + the wired `arm_pending_wake` callable. This is a
+  structural pin (complements T6.4's lock-position pin).
+* **T6.6** (r4 fold W3) `test_sweep_sweep_wake_records_is_method_on_service`
+  — the `sweep_wake_records` method is reachable as a
+  bound method on `UpgradeJournalSweepService` (i.e. it
+  is NOT a module-level function that requires a
+  hidden global). Mirrors the manager-wiring structural
+  pin (T5.18).
+* **T6.7** (r4 fold C1) `test_wake_terminal_walker_uses_real_journal_shape`
+  — the wake reader's fixtures are the REAL journal
+  history shape `{"ts": <iso>, "event": <name>,
+  "detail": <prose>}` (per `upgrade_journal.py:326`),
+  NOT a fictional `{"name": ..., "run_id": ...}` shape.
+  A test that imports a fixture with the fictional shape
+  is a fail-loud (the fixture import itself raises on a
+  schema check).
+* **T13.1** (r4 fold C1, MUST) `test_wake_fires_on_promote_lane_no_run_id`
+  — a journal with one `pending` wake + a history
+  ending `{"ts": <iso>, "event": "commit", "detail":
+  "..."}` (no `run_id` field at all, as is the
+  real `promote.sh:366` shape) — the sweep observes
+  the terminal event via the `armed_at` TS-scope
+  reader (no `run_id` matching needed) and delivers
+  the wake. **This test is the r4 fold C1 acceptance
+  gate** — without it, the system_upgrade wake would
+  never fire (the original planning's strict `run_id`
+  matching returned `None` for every promote-lane
+  entry, breaking AC2/AC4 on the promote lane).
+
 ### 2.3 `tests/job_queue/test_post_restart_arm_notify_routing.py` (AC3)
 
 **Convention precedent:** `tests/job_queue/test_a2_autopromote_notify.py`
 (autopromote end-to-end, MessageQueue + worker_pool + source
 adapter seam) and `tests/job_queue/test_idempotent_enqueue.py`
 (idempotency on the enqueue path).
+
+**Pack:** `test/packs/post_restart_arm_notify_routing_unit_test.sh`
+(transparent wrapper per §2.1's pattern).
 
 **Coverage groups:**
 
@@ -372,6 +510,25 @@ adapter seam) and `tests/job_queue/test_idempotent_enqueue.py`
 `tests/job_queue/test_dead_letter_*` (dead-letter
 recovery path).
 
+**Pack:** `test/packs/post_restart_arm_notify_edge_cases_unit_test.sh`
+(transparent wrapper per §2.1's pattern).
+
+**r4 fold W1 note (ari fall-back + body variant + journal
+branch):** the r4 fold surfaced that T5.1 + T5.2 cover the
+two branches of the missing-instance case but had NO
+implementation task. The implementation task is `phase2-plan.md`
+T19 (NEW), and the test body annotations are updated:
+
+* **T5.1** body annotation: "(arm-notice: original arming
+  instance not found; reporting via ari fall-back) —
+  run_id=<recorded> upgrade_status pointer — the
+  arming instance row is gone, this is the project's
+  front-door ari. **No user action required.**"
+* **T5.2** body annotation: the `arm_notify_no_instance`
+  history event carries the recorded `run_id` + the
+  recorded `arming_instance_id` + the project id + a
+  "no ari available" reason.
+
 **Coverage groups:**
 
 #### Group 1 — long-downtime double-arm (T5.13)
@@ -429,6 +586,10 @@ recovery path).
   never flood the user with stale wakes.
 
 ### 2.5 Structural Test (AC6) — `tests/unit/test_post_restart_arm_notify_no_parallel.py` (incl. delta #3 lock pin)
+
+**Pack:** `test/packs/post_restart_arm_notify_structural_unit_test.sh`
+(transparent wrapper per §2.1's pattern; runs against the
+merged code, not the per-commit diff).
 
 **Coverage groups:**
 

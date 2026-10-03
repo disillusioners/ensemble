@@ -162,6 +162,30 @@ fast path. **Recommended default:** (b). **If declined:**
 AC2 (boot delivery) and AC6 (no parallel messaging
 subsystem) cannot be simultaneously met.
 
+> **Addendum (2026-10-03, r4 fold W2, MUST — delivered-mark
+> semantics):** the `mark_wake_delivered` call is fired
+> AFTER `manager.enqueue_message` returns a `message_id`
+> (synchronous write path, `daemon/services/upgrade_journal_sweep.py`
+> Phase 2 T7 step (h)), NOT deferred to first dispatch
+> attempt. The one-shot loss window is **ACCEPTED**: if a
+> chat adapter is disabled or fails at wake time, the
+> `MessageQueue` row exists but dispatch is dropped
+> (`dispatcher.py:158-165` silent-drop for `system:*`, or
+> adapter-level transport error), and the user's recovery
+> is the unchanged pull-model `upgrade_status` query
+> (D-FA1.2 fall-back, `supersession-record.md` §4). The
+> alternative — defer the delivered-mark to first dispatch
+> attempt — would require holding the wake record in
+> `delivering` for the full chat-adapter timeout window
+> (typically 30s) plus a retry round, which is structurally
+> racy with the 90s tick AND requires a new
+> dispatch-success callback surface (parallel-machinery
+> violation, AC6). **The pull-model recovery path is the
+> documented recovery**; the drill's D5 (kill-switch) and
+> the runbook's Recovery Flow section enumerate the
+> operator path. **Pinned in `plan-overview.md` Review
+> round r4, PINNED DECISIONS §2.**
+
 ---
 
 ## ADR-041: Routing preservation — re-stamp the user-origin window for the wake turn; the wake's `source` is the recorded arm-time source
@@ -328,6 +352,52 @@ grace bounds the wake surface. **Recommended default:**
 (a). **If declined:** the AC4 guarantee is racy; an
 abort-then-rollback path could wake the agent on a
 still-rolling-back pipeline.
+
+> **Addendum (2026-10-03, r4 fold C1, MUST — wake-reader
+> schema + wall-clock monotonicity):** the wake reader is
+> `wake_terminal_event_after` over the SIBLING constant
+> `WAKE_TERMINAL_EVENTS = _TERMINAL_EVENTS + ("restart",)`,
+> scoped by `armed_at` TS, with **NO `run_id` field
+> matching** (the journal's `history` entries are flat
+> `{ts, event, detail}` records at `upgrade_journal.py:326`
+> and `lib.sh:663,666` — NO `run_id` key exists). Promote-
+> lane terminal events carry NO `run_id` at all
+> (`promote.sh:366`; `rollback.sh:203,209,211`); only
+> `restart.sh:252,262` embeds a `run_id=…` substring
+> inside the `detail` PROSE, used as an OPTIONAL
+> tie-breaker on the RESTART lane only
+> (`detail_substring_contains(detail, f"run_id={wake.run_id}")`).
+> **Choosing a structured `run_id` schema** (e.g. upgrading
+> the history entry shape to `{ts, event, run_id, detail}`)
+> would cross the lib.sh/launcher boundary — out of scope
+> per the r4 reviewer (the journal history shape is
+> shared with the shell-side scripts, and changing it
+> requires a coordinated lib.sh + launcher + Python
+> migration outside this feature's blast radius). **PINNED
+> DECISION:** the ts-scope reader is chosen over a
+> structured `run_id` schema for this reason. **Accepted
+> cross-run ts-scope edge:** an `armed_at`-scoped
+> event-class match can attribute a sibling concurrent
+> run's terminal event to the wrong wake when two arms
+> fire within the same second — bounded by the
+> `journal_history_append` 1-second timestamp resolution
+> (Python `now_iso()` precision) and the user-visible
+> consequence is one extra `upgrade_status` call
+> (idempotent; not a wrong answer — the LLM in the agent's
+> wake turn re-validates `run_id` against the recorded
+> arm's `run_id` and silently drops mismatches). **Wall-
+> clock monotonicity caveat (S3):** ts-scope compares
+> journal wall-clock ISO strings (`ts` field) against the
+> recorded `armed_at` ISO. Clock skew across daemon
+> restarts bounds scope accuracy — a daemon whose clock
+> jumped backwards between arm time and boot time
+> (e.g. NTP correction during downtime) may scope-out a
+> terminal event whose `ts` is now < `armed_at`. The
+> accepted trade-off: the boot pass is the fast path, the
+> 90s tick is the recovery path; a clock-skewed miss on
+> the boot pass is caught by the next tick (the clock is
+> steady-state by then). **Pinned in `plan-overview.md`
+> Review round r4, PINNED DECISIONS §1.**
 
 ---
 
