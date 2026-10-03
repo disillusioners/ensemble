@@ -425,6 +425,30 @@ async def notify_work_watchers(
             watcher_repo.get_watchers_for_job, work_id
         )
         if not watchers:
+            # PP1 (2026-10-03, report-delivery-bug-family) — on a
+            # TERMINAL event with ZERO watchers, the early return is
+            # silent under the pre-fix behaviour. The watcher missed
+            # the event but the operator has no log line to correlate
+            # the dropped report. For terminal statuses, emit a WARN
+            # carrying the job_id, the terminal status, and a pointer
+            # to the durable ``job_completed`` event row (where the
+            # ``result_summary`` / ``error`` lives) so recovery is
+            # trivial: re-fire from the event row, or surface the
+            # event payload directly. Non-terminal statuses (e.g.
+            # ``in_progress``) stay claim-free by design (see
+            # :data:`site 3 below <claim-site>`) and are NOT warned
+            # here — only the terminal case is a delivery gap.
+            if _is_terminal(status):
+                logger.warning(
+                    "PP1 zero-watcher terminal fire: work_id=%s "
+                    "status=%s — no watchers found, the terminal "
+                    "report is NOT being delivered. The durable "
+                    "job_completed event row carries the "
+                    "result_summary / error payload and can be "
+                    "re-fired from the events table for recovery.",
+                    work_id[:8] if work_id else "<none>",
+                    status,
+                )
             return 0
 
         agent_id = work_record.agent_id or "unknown"
@@ -741,6 +765,36 @@ async def notify_work_watchers(
                     work_id,
                     [w.instance_id for w in matching_claimable],
                 )
+                # PP1 (2026-10-03, report-delivery-bug-family) —
+                # terminal event with CAS claim returning ZERO.
+                # The pre-fix path was silent (DEBUG-only at
+                # best); for terminal events the loss is a
+                # delivery gap, not an arbitration detail. WARN
+                # carrying the job_id, status, claimable count
+                # vs claimed count, and a pointer to the durable
+                # ``job_completed`` event row for recovery.
+                # The companion DEBUG log below stays for the
+                # exactly-once arbitration audit (caller chain
+                # / kwarg shape); the WARN is the delivery-gap
+                # signal.
+                if not claimed:
+                    logger.warning(
+                        "PP1 zero-claimed terminal fire: work_id=%s "
+                        "status=%s — CAS claim returned 0 rows "
+                        "(claimable=%d). The terminal report is NOT "
+                        "being delivered to the %d claimable "
+                        "watcher(s). The durable job_completed event "
+                        "row carries the result_summary / error "
+                        "payload and can be re-fired from the events "
+                        "table for recovery. NOTE: re-delivery is NOT "
+                        "auto-compensated here (duplicate-delivery "
+                        "risk) — the WARN is the observability arm "
+                        "and a follow-up commission owns re-arm.",
+                        work_id[:8] if work_id else "<none>",
+                        status,
+                        len(matching_claimable),
+                        len(matching_claimable),
+                    )
                 # DEFECT-1 round-3 arbitration instrumentation (2026-09-24,
                 # fix/watch-notify-delivery-gaps): permanent structured DEBUG
                 # log at the CAS claim chokepoint. Emits for BOTH outcomes —
@@ -792,6 +846,19 @@ async def notify_work_watchers(
             # watchers on every status, which broke progress tracking
             # by silently dropping the watch before the terminal
             # event fired. Read-only notify on BOTH buckets.
+            #
+            # PP1 (2026-10-03, report-delivery-bug-family) — the
+            # non-terminal case stays CLAIM-FREE by design. The PP1
+            # zero-watcher WARN at the early-return site above (and
+            # the zero-claimed WARN at the CAS site) is ONLY emitted
+            # for terminal statuses. A non-terminal fire with zero
+            # watchers is the expected state (no terminal event has
+            # fired yet; ``mission_terminal`` rows wait for the
+            # mission-class finalization, ``in_progress`` rows
+            # simply have no observers). Logging at WARN would
+            # flood the operator log for every progress tick — the
+            # contract is documented here so future maintainers do
+            # not "fix" the non-terminal zero-watcher case.
             notify_list = list(matching_claimable) + list(matching_readonly)
             logger.debug(
                 "notify_work_watchers: non-terminal status=%s for "

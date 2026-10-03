@@ -2218,14 +2218,51 @@ class JobFeedbackObserver:
                     # 2026-09-23: one shared assistant text on every
                     # duplicate receipt; every task.error NULL).
                     if _per_kind_status == "failed":
-                        await self._job_queue_service.notify_watchers(
+                        _notified_count = await self._job_queue_service.notify_watchers(
                             _work_id, _per_kind_status,
                             error=_per_kind_extra,
                         )
                     else:
-                        await self._job_queue_service.notify_watchers(
+                        _notified_count = await self._job_queue_service.notify_watchers(
                             _work_id, _per_kind_status,
                             result_summary=_per_kind_extra,
+                        )
+                    # PP1 (2026-10-03, report-delivery-bug-family) —
+                    # observer outbox fire site: terminal event with
+                    # zero watchers notified. The pre-fix path was
+                    # silent (the ``notify_watchers`` call returns
+                    # the count and the observer discarded it). For
+                    # terminal events a zero count is a delivery
+                    # gap — the watcher missed the event but the
+                    # operator has no log line. WARN carrying the
+                    # job_id, status, and a pointer to the durable
+                    # ``job_completed`` event row (the
+                    # ``_db_event`` produced upstream — see the
+                    # ``_emit_terminal_via_bus`` / bus producer
+                    # site) where the ``result_summary`` / ``error``
+                    # lives. Re-delivery / re-arm compensation is
+                    # NOT implemented here (duplicate-delivery risk
+                    # needs its own review) — the WARN is the
+                    # observability arm.
+                    if _notified_count == 0 and _per_kind_status in (
+                        "completed", "settled", "failed", "cancelled",
+                        "dead_letter", "orphaned_no_task",
+                    ):
+                        logger.warning(
+                            "PP1 zero-watcher terminal fire (observer "
+                            "outbox): work_id=%s status=%s "
+                            "terminal_status=%s — notify_watchers "
+                            "returned 0, the terminal report is NOT "
+                            "being delivered. The durable job_completed "
+                            "event row carries the result_summary / "
+                            "error payload and can be re-fired from "
+                            "the events table for recovery. NOTE: "
+                            "re-delivery is NOT auto-compensated "
+                            "(duplicate-delivery risk) — follow-up "
+                            "commission owns re-arm.",
+                            _work_id[:8] if _work_id else "<none>",
+                            _per_kind_status,
+                            db_result.terminal_status,
                         )
                 except Exception as e:
                     logger.warning(
