@@ -158,6 +158,7 @@ from typing import Any
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.services.report_integrity_guard import parent_has_active_b_notice
+from daemon.services.attestation_ledger import L6_ANCHOR_META_KEY
 from daemon.services.pool_orchestrator import safe_notify_all_pools
 
 logger = logging.getLogger(__name__)
@@ -1527,7 +1528,7 @@ class WaitingChildrenWatchdog:
                 #
                 # M2 (2026-10-03, report-delivery-bug-family) —
                 # FP4 L6-anchor exemption: when a parent carries the
-                # dedicated ``attestation:l6_anchor`` key in its
+                # dedicated ``L6_ANCHOR_META_KEY`` key in its
                 # instance_metadata (FP4 L6 settle-bound in flight,
                 # declared-wait outstanding), the B.S.5 skip would
                 # silently strand the worst-case backstop. The 6h
@@ -1550,7 +1551,7 @@ class WaitingChildrenWatchdog:
                 if parent_has_active_b_notice(parent_id):
                     _l6_anchor = (
                         (parent_row.instance_metadata or {}).get(
-                            "attestation:l6_anchor"
+                            L6_ANCHOR_META_KEY
                         )
                         if parent_row is not None
                         else None

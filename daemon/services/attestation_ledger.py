@@ -78,9 +78,24 @@ calls.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Final, Protocol
 
 logger = logging.getLogger(__name__)
+
+
+# polish(...): m3 — single source of truth for the L6 bind-anchor
+# metadata key. The L6 escalation path (occurrence #5's amplifier
+# closure, 2026-10-03 report-delivery-bug-family) reads-or-writes a
+# dedicated anchor timestamp on ``instance_metadata`` so the
+# ``completion_gate`` can distinguish "first denial epoch > 6h old"
+# (L6 RELEASE) from "recent denial" (still within bind). The key
+# was previously a magic literal hardcoded at the writer
+# (``child_reports.py``) AND the reader
+# (``waiting_children_watchdog.py``); divergence between the two
+# sites would silently re-open the bind-release wedge. Hoist to a
+# single ``Final`` constant so the reader/writer contract is
+# structurally locked.
+L6_ANCHOR_META_KEY: Final[str] = "attestation:l6_anchor"
 
 
 class AttestationLedger(Protocol):

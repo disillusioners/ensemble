@@ -165,6 +165,46 @@ def _capped_doomed_id_repr(ids: list[str]) -> str:
     )
 
 
+# polish(...): m3 — hoist the 5-copy ``_live_instance NOT EXISTS``
+# guard (FP2b) to ONE module-level constant. The guard is the
+# alive-lineage / ACTIVE-job predicate the reconcile_turn_mirror
+# folds into the CASE branches (admission_state, terminal_reason,
+# failed_at) AND the DELETE arms (job_locks, job_watchers) so a
+# finalize→reconcile race cannot stamp ``orphaned_no_task`` over a
+# just-set ``terminal_reason='completed'`` (occurrence #5,
+# job ``fb0cf25c``). The 5 sites previously carried the same
+# ~17-line CTE block inline; divergence between the 5 copies was
+# the AMPLIFIER for occurrence #5 (the pre-fix predicate missed
+# the alive-lineage check on the job_watchers arm). Hoisting
+# makes drift structurally impossible: a fix touches one place,
+# not five.
+#
+# Indent: 32 spaces (matches the f-string CASE-branch sites; the
+# 2 text()-site uses at :1642 and :1891 have a 6-space-shallower
+# surrounding context, so the rendered inner content is 6 spaces
+# DEEPER than the surrounding opening paren — semantically
+# identical SQL, whitespace-only render diff at those 2 sites
+# only). The DB engine normalizes SQL whitespace; the audit-trail
+# bytecode is the WHERE-clause semantics, not the literal indent.
+_LIVE_INSTANCE_NOT_EXISTS_GUARD: str = """\
+                                WITH _live_instance AS (
+                                    SELECT 1 FROM instances i
+                                    WHERE (
+                                        (CAST(:task_instance_id AS TEXT) IS NOT NULL
+                                         AND i.instance_id = CAST(:task_instance_id AS TEXT))
+                                        OR
+                                        (CAST(:job_instance_id AS TEXT) IS NOT NULL
+                                         AND i.instance_id = CAST(:job_instance_id AS TEXT))
+                                    )
+                                      AND i.status IN (
+                                          :status_waiting_children,
+                                          :instance_status_paused,
+                                          :instance_status_running
+                                      )
+                                )
+                                SELECT 1 FROM _live_instance\
+"""
+
 
 class DirectWriteError(RuntimeError):
     """Raised when a direct ``UPDATE task SET status=`` is attempted
@@ -1538,44 +1578,14 @@ class TaskRepository:
                         -- the JobItem's own ``instance_id`` linkage.
                         admission_state = CASE
                             WHEN :terminal AND NOT EXISTS (
-                                WITH _live_instance AS (
-                                    SELECT 1 FROM instances i
-                                    WHERE (
-                                        (CAST(:task_instance_id AS TEXT) IS NOT NULL
-                                         AND i.instance_id = CAST(:task_instance_id AS TEXT))
-                                        OR
-                                        (CAST(:job_instance_id AS TEXT) IS NOT NULL
-                                         AND i.instance_id = CAST(:job_instance_id AS TEXT))
-                                    )
-                                      AND i.status IN (
-                                          :status_waiting_children,
-                                          :instance_status_paused,
-                                          :instance_status_running
-                                      )
-                                )
-                                SELECT 1 FROM _live_instance
+                                {_LIVE_INSTANCE_NOT_EXISTS_GUARD}
                             ) THEN 'done'
                             ELSE admission_state
                         END,
                         terminal_reason = CASE
                             WHEN :terminal AND terminal_reason IS NULL
                                  AND NOT EXISTS (
-                                WITH _live_instance AS (
-                                    SELECT 1 FROM instances i
-                                    WHERE (
-                                        (CAST(:task_instance_id AS TEXT) IS NOT NULL
-                                         AND i.instance_id = CAST(:task_instance_id AS TEXT))
-                                        OR
-                                        (CAST(:job_instance_id AS TEXT) IS NOT NULL
-                                         AND i.instance_id = CAST(:job_instance_id AS TEXT))
-                                    )
-                                      AND i.status IN (
-                                          :status_waiting_children,
-                                          :instance_status_paused,
-                                          :instance_status_running
-                                      )
-                                )
-                                SELECT 1 FROM _live_instance
+                                {_LIVE_INSTANCE_NOT_EXISTS_GUARD}
                             ) THEN :terminal_reason
                             ELSE terminal_reason
                         END,
@@ -1583,22 +1593,7 @@ class TaskRepository:
                             WHEN :task_status IN ('failed', 'cancelled')
                                  AND terminal_reason IS NULL
                                  AND NOT EXISTS (
-                                WITH _live_instance AS (
-                                    SELECT 1 FROM instances i
-                                    WHERE (
-                                        (CAST(:task_instance_id AS TEXT) IS NOT NULL
-                                         AND i.instance_id = CAST(:task_instance_id AS TEXT))
-                                        OR
-                                        (CAST(:job_instance_id AS TEXT) IS NOT NULL
-                                         AND i.instance_id = CAST(:job_instance_id AS TEXT))
-                                    )
-                                      AND i.status IN (
-                                          :status_waiting_children,
-                                          :instance_status_paused,
-                                          :instance_status_running
-                                      )
-                                )
-                                SELECT 1 FROM _live_instance
+                                {_LIVE_INSTANCE_NOT_EXISTS_GUARD}
                             ) THEN COALESCE(failed_at, :now_failed_at_iso)
                             ELSE failed_at
                         END,
@@ -1640,22 +1635,7 @@ class TaskRepository:
                       AND :terminal
                       AND {snapshot_guard}
                       AND NOT EXISTS (
-                          WITH _live_instance AS (
-                              SELECT 1 FROM instances i
-                              WHERE (
-                                  (CAST(:task_instance_id AS TEXT) IS NOT NULL
-                                   AND i.instance_id = CAST(:task_instance_id AS TEXT))
-                                  OR
-                                  (CAST(:job_instance_id AS TEXT) IS NOT NULL
-                                   AND i.instance_id = CAST(:job_instance_id AS TEXT))
-                              )
-                                AND i.status IN (
-                                    :status_waiting_children,
-                                    :instance_status_paused,
-                                    :instance_status_running
-                                )
-                          )
-                          SELECT 1 FROM _live_instance
+                          {_LIVE_INSTANCE_NOT_EXISTS_GUARD}
                       )
                 """),
                 params,
@@ -1882,30 +1862,31 @@ class TaskRepository:
             # correctly suppressed for fb0cf25c; the watcher
             # arm was the missing piece.
             updated_counts["job_watchers"] = conn.execute(
-                text("""
+                text(f"""
                     DELETE FROM job_watchers
                     WHERE job_id = :work_id
                       AND NOT EXISTS (
                           SELECT 1 FROM task WHERE work_id = :work_id
                       )
                       AND NOT EXISTS (
-                          WITH _live_instance AS (
-                              SELECT 1 FROM instances i
-                              WHERE (
-                                  (CAST(:task_instance_id AS TEXT) IS NOT NULL
-                                   AND i.instance_id = CAST(:task_instance_id AS TEXT))
-                                  OR
-                                  (CAST(:job_instance_id AS TEXT) IS NOT NULL
-                                   AND i.instance_id = CAST(:job_instance_id AS TEXT))
-                              )
-                                AND i.status IN (
-                                    :status_waiting_children,
-                                    :instance_status_paused,
-                                    :instance_status_running
-                                )
-                          )
-                          SELECT 1 FROM _live_instance
+                          {_LIVE_INSTANCE_NOT_EXISTS_GUARD}
                       )
+                      -- polish(...): m6 — ``admission_state IN
+                      -- ('queued', 'active')`` here is
+                      -- VOCABULARY-IDENTICAL to the canonical
+                      -- helper ``active_admission_states_sql()``
+                      -- (defined in
+                      -- ``daemon/repositories/job_queue/models.py``
+                      -- over the ``ACTIVE_ADMISSION_STATES``
+                      -- frozenset = ``{'queued', 'active'}``).
+                      -- If the canonical set ever gains a
+                      -- member, BOTH this hardcode AND the
+                      -- frozenset must be updated in lockstep;
+                      -- the preserved-predicate arm in
+                      -- ``clear_all`` (line 4153) already routes
+                      -- through the helper, so a drift here
+                      -- would re-open ``force_finalize`` for
+                      -- the missed admission state.
                       AND NOT EXISTS (
                           SELECT 1 FROM job_queue_items jqi
                           WHERE jqi.job_id = :work_id

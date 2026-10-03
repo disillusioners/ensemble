@@ -31,9 +31,10 @@ class (the agent-lane tool seam is disjoint from the
    escalated-unverified display + watchers delivered once.
 
    L2b discharge: the wedge resolver detects declared-wait outstanding
-   and returns ``(True, None)`` so the gate's allow verdict is
-   preserved. L6 takes over at the emission-time handler: increments
-   the ledger, checks the settle bound
+   and returns ``(True, None, True)`` so the gate's allow verdict is
+   preserved (P1-2: 3-tuple contract — the third element is the
+   L2b declared-wait verdict). L6 takes over at the emission-time
+   handler: increments the ledger, checks the settle bound
    (``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` = 6h), and either HOLDS
    (set WAITING_CHILDREN, suppress publish) or RELEASES (set
    ``completion_gate_escalated=True``, proceed with publish; the
@@ -130,6 +131,7 @@ from daemon.repositories.report_injection.models import (
 )
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.repositories.task.repository import TaskRepository
+from daemon.services.attestation_ledger import L6_ANCHOR_META_KEY
 from daemon.services.child_reports import ChildReportsService
 from daemon.services.completion_registry import _completion_registry
 from daemon.services.dependency_bus import set_dependency_bus
@@ -587,7 +589,9 @@ class TestR1PrematureTerminalAwaitingChildren:
             status=InstanceStatus.RUNNING.value,
         )
         # Fresh assistant (so freshness is True; the wedge resolver
-        # would return (True, None) on its own).
+        # would return (True, None, False) on its own — the
+        # declared-wait leg is False because no PENDING
+        # report_injection was seeded).
         history = [
             {
                 "role": "assistant",
@@ -637,9 +641,12 @@ class TestR2DeclaredWaitHold:
     COMPLETED on the next turn — the done+retry-0/0 wedge.
 
     FP4 L2b discharges: the wedge resolver detects the declared-wait
-    violation via the (b) predicate and returns ``(True, None)`` so
-    the gate's allow verdict is preserved. L6 takes over at the
-    emission-time handler with the HOLD / RELEASE decision.
+    violation via the (b) predicate and returns
+    ``(True, None, True)`` so the gate's allow verdict is preserved
+    (P1-2: 3-tuple contract — the third element threads the L2b
+    declared-wait verdict to the L6 emission-time handler). L6
+    takes over at the emission-time handler with the HOLD /
+    RELEASE decision.
 
     Test setup: the freshness leg must FAIL (stale assistant
     timestamp before the child_completed event) so the wedge
@@ -657,7 +664,8 @@ class TestR2DeclaredWaitHold:
         child is terminal), no fresh response → assert HOLD +
         ledger increment.
 
-        The L2b path returns ``(True, None)`` (the gate allows);
+        The L2b path returns ``(True, None, True)`` (the gate
+        allows; the third element is the declared-wait verdict);
         the L6 path at the emission-time handler detects
         ``_declared_wait_outstanding`` and routes to HOLD because
         the bind has not been reached.
@@ -717,10 +725,11 @@ class TestR2DeclaredWaitHold:
             )
 
         # The L2b path discharges: the wedge resolver returns
-        # (True, None) (gate allows). The L6 path then routes to
-        # HOLD because the bind is far in the future — the parent
-        # is downgraded back to WAITING_CHILDREN, no lifecycle
-        # "completed" event.
+        # (True, None, True) (gate allows; the third element
+        # is the declared-wait verdict). The L6 path then routes
+        # to HOLD because the bind is far in the future — the
+        # parent is downgraded back to WAITING_CHILDREN, no
+        # lifecycle "completed" event.
         with Session(fp4_harness.engine) as session:
             row = session.get(Instance, parent_id)
             assert row.status == InstanceStatus.WAITING_CHILDREN.value, (
@@ -778,7 +787,7 @@ class TestR2DeclaredWaitHold:
         )
         # Seed the L6 anchor (P1-1) OLDER than the bind
         # (6h + 1s) so the L6 RELEASE branch fires. The anchor
-        # lives at the dedicated ``attestation:l6_anchor`` key
+        # lives at the dedicated ``L6_ANCHOR_META_KEY`` key
         # owned by L6 alone — the previous ``attestation:denial_
         # epochs[0]`` source was polluted by the attestation
         # gate's non-L6 epoch appends and could prematurely
@@ -792,7 +801,7 @@ class TestR2DeclaredWaitHold:
             instance_id=parent_id,  # UPDATE the existing row
             status=InstanceStatus.RUNNING.value,
             instance_metadata={
-                "attestation:l6_anchor": old_anchor,
+                L6_ANCHOR_META_KEY: old_anchor,
             },
         )
         history = [
@@ -1012,7 +1021,7 @@ class TestR5LostDispatch:
             status=InstanceStatus.WAITING_CHILDREN.value,
             instance_metadata={
                 # P1-1 — dedicated L6 anchor (was attestation:denial_epochs[0]).
-                "attestation:l6_anchor":
+                L6_ANCHOR_META_KEY:
                     datetime.now(timezone.utc).isoformat(),
             },
         )

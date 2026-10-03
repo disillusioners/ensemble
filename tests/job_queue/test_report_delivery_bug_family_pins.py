@@ -34,12 +34,15 @@ Four fixes, four tests:
   stamps the orphan to ``failed`` (it falls through to
   ``completed`` — least-misleading available).
 
-All tests use the ``tests/job_queue/conftest.py`` ``engine``
-fixture (session-scoped, in-memory SQLite) and the per-test
-seed helpers. No external DB. No daemon boot. No env-poison
-risk. The tests pin the FOUR commits the fix pack adds
-(``fix(report-bug): FP2 …`` etc.) and the occ5/R3 repros the
-report-delivery-bug family closed.
+All tests use the file-local ``bug_engine`` fixture (per-test
+file-backed SQLite engine; see the fixture at :95) and the
+per-test seed helpers. NOT the ``tests/job_queue/conftest.py``
+``engine`` fixture — that one is session-scoped in-memory SQLite
+used by the sibling pinned test files; this file intentionally
+opts out for bulletproof per-test DB isolation. No external DB.
+No daemon boot. No env-poison risk. The tests pin the FOUR
+commits the fix pack adds (``fix(report-bug): FP2 …`` etc.) and
+the occ5/R3 repros the report-delivery-bug family closed.
 """
 
 from __future__ import annotations

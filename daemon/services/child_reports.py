@@ -2049,7 +2049,7 @@ Provide a concise summary:"""
         1. Increment the attestation ledger via ``safe_increment`` (C3
            fail-OPEN: a DB error degrades the increment to None and
            the L6 path proceeds).
-        2. Read the dedicated ``attestation:l6_anchor`` key in
+        2. Read the dedicated ``L6_ANCHOR_META_KEY`` key in
            ``instance_metadata`` — this is the hold-start anchor. The
            first L6 invocation writes the anchor; subsequent
            invocations re-use it as the bind anchor (P1-1 fix —
@@ -2082,6 +2082,7 @@ Provide a concise summary:"""
             caller proceeds with the publish + escalated display).
         """
         from .attestation_ledger import (
+            L6_ANCHOR_META_KEY,
             safe_increment,
             safe_set_escalated_and_reset,
         )
@@ -2122,7 +2123,7 @@ Provide a concise summary:"""
             # until a real repo is wired (fail-OPEN at this seam).
             _denied_count = None
 
-        # (2) Bind anchor — read-or-set the dedicated ``attestation:l6_anchor``
+        # (2) Bind anchor — read-or-set the dedicated ``L6_ANCHOR_META_KEY``
         # metadata key owned by L6 alone.
         #
         # P1-1 fix: the previous code used ``attestation:denial_epochs[0]``
@@ -2130,7 +2131,7 @@ Provide a concise summary:"""
         # attestation gate (with non-L6 epochs like ``fp4.l5.*``); a
         # stale non-L6 epoch >6h old let the bind RELEASEs on the first
         # L6 invocation (premature release = the commissioned settle
-        # contract broken). The dedicated ``attestation:l6_anchor`` key
+        # contract broken). The dedicated ``L6_ANCHOR_META_KEY`` key
         # is written only here and read only here — the bind math
         # consults a single, L6-owned source of truth.
         #
@@ -2148,7 +2149,7 @@ Provide a concise summary:"""
                 _inst = _sess.get(Instance, instance_id)
                 if _inst is not None:
                     _meta = _inst.instance_metadata or {}
-                    _existing_anchor = _meta.get("attestation:l6_anchor")
+                    _existing_anchor = _meta.get(L6_ANCHOR_META_KEY)
                     if _existing_anchor:
                         bind_anchor_iso = str(_existing_anchor)
                     else:
@@ -2161,7 +2162,7 @@ Provide a concise summary:"""
                         # ``new_metadata = dict(...)`` rebind).
                         _now_anchor = now_utc_iso()
                         _new_meta = dict(_meta)
-                        _new_meta["attestation:l6_anchor"] = _now_anchor
+                        _new_meta[L6_ANCHOR_META_KEY] = _now_anchor
                         _inst.instance_metadata = _new_meta
                         _sess.add(_inst)
                         _sess.commit()
@@ -4758,7 +4759,7 @@ Provide a concise summary:"""
             #   2. Check the settle bound (6h — reuses
             #      ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` from
             #      ``mission_live_guard.py:110``). The bind math reads
-            #      the dedicated ``attestation:l6_anchor`` key in the
+            #      the dedicated ``L6_ANCHOR_META_KEY`` key in the
             #      instance metadata — the first L6 invocation writes
             #      the anchor; subsequent L6 invocations re-use it as
             #      the bind anchor (P1-1 fix — the previous code used

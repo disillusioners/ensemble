@@ -61,6 +61,7 @@ from .repositories import (
 )
 from .repositories.task.repository import (
     TaskRepository,
+    _capped_doomed_id_repr,
 )
 # The ``set_chat_lane_active`` setter / ``is_chat_lane_active`` getter
 # are reached ONLY through ``daemon/services/pool_orchestrator.py`` now
@@ -854,7 +855,16 @@ class InstanceManager:
                     f"preserve predicate keeps these rows so the "
                     f"wipe does NOT strand the JobItem, but the "
                     f"underlying inconsistency needs operator "
-                    f"investigation: {completed_active_work_ids}"
+                    # polish(...): m2 — cap the doomed-id list via
+                    # the same ``_capped_doomed_id_repr`` helper the
+                    # wipe JOURNAL log uses (m1). Re-introducing an
+                    # uncapped list here would recreate the m1 log-
+                    # flood class (180-400KB single log line on a
+                    # 5k-row integrity smell). Small lists render
+                    # identically (``repr`` of a short list is
+                    # byte-identical to the raw interpolation); large
+                    # lists get the ``[+ N more truncated]`` marker.
+                    f"investigation: {_capped_doomed_id_repr(completed_active_work_ids)}"
                 )
             task_count = task_repo.clear_all(preserve_in_flight=True)
             logger.info(
