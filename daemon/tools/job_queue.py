@@ -1214,7 +1214,7 @@ def create_job_tools(
         idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")]
         metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")]
         source: Annotated[str, Field(default="api", description="DEPRECATED and IGNORED (NIT-7, P2.3 review cycle 1): the server derives source UNCONDITIONALLY since B3.5 (agent:<caller> for agent callers, internal_agent:unknown otherwise) — any value passed here has no effect. Param retained purely for schema compat; removal deferred.")]
-        watch: Annotated[bool, Field(default=False, description="Watch the job for lifecycle events")]
+        watch: Annotated[bool, Field(default=True, description="Watch the job for lifecycle events. Default: True (FP4-PP2 2026-10-03 user-approved flip — agent-lane auto-watches so completions are never lost). Explicit watch=False still wins.")]
 
     @register_tool_category("job")
     @tool(args_schema=JobCreateInput)
@@ -1227,7 +1227,7 @@ def create_job_tools(
         idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")] = None,
         metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")] = None,
         source: Annotated[str, Field(default="api", description="DEPRECATED and IGNORED: server derives source unconditionally (B3.5); retained for schema compat, removal deferred")] = "api",
-        watch: Annotated[bool, Field(default=False, description="Watch the job for lifecycle events")] = False,
+        watch: Annotated[bool, Field(default=True, description="Watch the job for lifecycle events. Default: True (FP4-PP2 user-approved flip). Explicit False still wins.")] = True,
     ) -> dict:
         """Submit a new job to the queue. Use tool_help("job_create") for details.
 

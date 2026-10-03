@@ -1875,7 +1875,7 @@ Provide a concise summary:"""
         self,
         session,
         instance_id: str,
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[bool, str | None, bool]:
         """Wedge resolver: close the stale-readable / dead-letter wedge paths.
 
         Wedge paths occur when ``_assistant_message_fresh`` returns False (the
@@ -1914,12 +1914,80 @@ Provide a concise summary:"""
             instance_id: The instance to evaluate.
 
         Returns:
-            (allowed, reason): True (no reason) when the wedge is closed;
-            False + reason when neither freshness nor terminal-state apply.
+            ``(allowed, reason, declared_wait_outstanding)``:
+            ``allowed`` (bool) — True when the wedge is closed; False +
+            ``reason`` (str | None) when neither freshness nor
+            terminal-state apply;
+            ``declared_wait_outstanding`` (bool) — the L2b verdict (True
+            iff the declared-waiting predicate flagged this instance as
+            carrying an outstanding declared-wait obligation). Threaded
+            through the return contract (P1-2 fix) so concurrent
+            ``_gate_wedge_resolver`` calls for different instances no
+            longer race over the service-singleton
+            ``_declared_wait_outstanding`` flag — each gate call now
+            returns its own verdict atomically with its decision.
         """
         is_fresh, reason = await self._assistant_message_fresh(session, instance_id)
         if is_fresh:
-            return True, None
+            # Freshness passed — no L2b discharge path consulted.
+            return True, None, False
+
+        # ── FP4 (2026-10-03) — L2b: declared-wait discharge.
+        # ── A parent that DECLARED waiting and received its interim
+        # report DELIVERED must NOT be classified as "wedged" — the
+        # declared-wait obligation is a legitimate hold reason, and
+        # collapsing it to "wedged" would re-create the 3826ab28
+        # eternal-block class (the incident: a parent's declared-wait
+        # obligation held the parent in WAITING_CHILDREN; the wedge
+        # resolver's old behavior was to escalate-to-annotate via the
+        # (b) log-only helper, but the parent had no way to be
+        # resolved; the job stayed stuck and the retry budget was
+        # never spent — the done+retry-0/0 wedge).
+        #
+        # Discharge: when the freshness check fails AND no terminal
+        # message exists, the resolver consults the (b) declared-
+        # waiting predicate (``evaluate_declared_waiting_violations``)
+        # on the SAME session (same-tx, fail-OPEN at the predicate
+        # library layer). When the predicate reports an outstanding
+        # declared-wait obligation, the resolver does NOT block —
+        # the gate transitions to the L6 escalate-and-HOLD path
+        # (the caller at line 4145+ dispatches L6 on this signal).
+        # The L2b return is ``(True, None, True)`` so the gate's
+        # "allowed" verdict is preserved AND the L6 caller can pick
+        # up the declared-wait verdict via the return tuple (P1-2
+        # — the verdict flows with the decision; concurrent
+        # resolvers for different instances no longer share state).
+        try:
+            from .report_integrity_guard import (
+                evaluate_declared_waiting_violations,
+            )
+            _b_report = evaluate_declared_waiting_violations(
+                session, instance_id, engine=self._manager.engine,
+            )
+            if (
+                _b_report is not None
+                and _b_report.is_violation
+            ):
+                logger.info(
+                    "FP4 L2b: instance %s... wedge-resolver "
+                    "discharge — declared-wait violation "
+                    "outstanding (count=%d); gate allows the "
+                    "stamp and L6 escalate-and-hold takes over",
+                    instance_id[:8], _b_report.count,
+                )
+                # Allow the stamp; L6 is the next stop.
+                # Third element carries the L2b verdict for the
+                # L6 caller (no singleton state).
+                return True, None, True
+        except Exception as _b_exc:  # noqa: BLE001 — fail-OPEN
+            # The (b) predicate is itself fail-OPEN (D2.6 LOCKED).
+            # A predicate failure here must not block the gate —
+            # the at-least-once contract holds.
+            logger.warning(
+                "FP4 L2b: declared-wait predicate raised for "
+                "%s... (%s); fail-OPEN, wedge-resolver continues",
+                instance_id[:8], _b_exc,
+            )
 
         # Wedge detected: freshness failed but pending_count is already 0
         # (gate's pending_count leg already passed). Check the most recent
@@ -1937,9 +2005,10 @@ Provide a concise summary:"""
                 last_terminal_msg.message_id[:8],
                 last_terminal_msg.status,
             )
-            return True, None
+            # Terminal-message wedge close — no L2b discharge.
+            return True, None, False
 
-        return False, reason
+        return False, reason, False
 
     @staticmethod
     def _latest_terminal_message(session, instance_id: str) -> MessageQueue | None:
@@ -1965,11 +2034,278 @@ Provide a concise summary:"""
             .limit(1)
         ).first()
 
+    async def _fp4_l6_check_and_apply(
+        self,
+        *,
+        instance_id: str,
+        agent_id: str,
+    ) -> str:
+        """FP4 (2026-10-03) — L6 escalate-and-hold implementation.
+
+        Called by the root-completion emission-time handler when the
+        L2b discharge flag (``_declared_wait_outstanding``) is True.
+        Implements the three-step L6 flow described at the call site:
+
+        1. Increment the attestation ledger via ``safe_increment`` (C3
+           fail-OPEN: a DB error degrades the increment to None and
+           the L6 path proceeds).
+        2. Read the dedicated ``L6_ANCHOR_META_KEY`` key in
+           ``instance_metadata`` — this is the hold-start anchor. The
+           first L6 invocation writes the anchor; subsequent
+           invocations re-use it as the bind anchor (P1-1 fix —
+           the previous ``attestation:denial_epochs[0]`` source was
+           polluted by the attestation gate's non-L6 epoch appends
+           and could prematurely release the bind).
+        3. Compare the anchor + ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``
+           to ``now``:
+           * within bound: downgrade to WAITING_CHILDREN + suppress
+             publish (return ``"hold"``);
+           * bound reached: set ``completion_gate_escalated=True`` via
+             the ledger atomic op + let the publish proceed (return
+             ``"release"``).
+
+        The instance is stamped COMPLETED by the sync helper BEFORE
+        this method runs (the L1 stamp guard sees the gate-passing
+        pre-discharge; the discharge fires after the stamp). The
+        downgrade to WAITING_CHILDREN in the HOLD branch is the same
+        pattern as the gate-block downgrade at the call site
+        (COMPLETED → WAITING_CHILDREN via a single session).
+
+        Args:
+            instance_id: The root instance under evaluation.
+            agent_id: The instance's agent id (for SSE stream metadata).
+
+        Returns:
+            ``"hold"`` when the declared-wait is still within the
+            settle bound (the caller suppresses the publish and
+            returns); ``"release"`` when the bound is reached (the
+            caller proceeds with the publish + escalated display).
+        """
+        from .attestation_ledger import (
+            L6_ANCHOR_META_KEY,
+            safe_increment,
+            safe_set_escalated_and_reset,
+        )
+        from .mission_live_guard import MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS
+        from daemon.services.timestamps import now_utc_iso, now_utc_naive
+        from ..repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+        from sqlmodel import Session as _SqlmodelSession
+
+        # (1) Increment the ledger — the "escalate" action.
+        # denial_epoch is the SAME key for every L6 invocation on
+        # the same stamp episode (the gate evaluation / message
+        # completion). O4 idempotency on the ledger means a replay
+        # of the same epoch is a no-op.
+        denial_epoch = f"fp4.l6.{instance_id}"
+        ledger = getattr(self._manager, "_instance_repository", None)
+        if isinstance(ledger, SQLModelInstanceRepository):
+            try:
+                _denied_count = safe_increment(
+                    ledger,
+                    instance_id,
+                    denial_epoch,
+                    log_context={"path": "fp4_l6"},
+                )
+            except Exception as _inc_exc:  # noqa: BLE001
+                # C3 fail-OPEN (widens W4).
+                logger.warning(
+                    "FP4 L6: safe_increment raised for %s... "
+                    "(%s); fail-OPEN, escalate action skipped",
+                    instance_id[:8], _inc_exc,
+                )
+                _denied_count = None
+        else:
+            # No instance repo wired (test double / partial init).
+            # Proceed with the bind check using the in-memory
+            # epoch anchor; the actual ledger write is a no-op
+            # until a real repo is wired (fail-OPEN at this seam).
+            _denied_count = None
+
+        # (2) Bind anchor — read-or-set the dedicated ``L6_ANCHOR_META_KEY``
+        # metadata key owned by L6 alone.
+        #
+        # P1-1 fix: the previous code used ``attestation:denial_epochs[0]``
+        # as the bind anchor. That list is ALSO appended to by the
+        # attestation gate (with non-L6 epochs like ``fp4.l5.*``); a
+        # stale non-L6 epoch >6h old let the bind RELEASEs on the first
+        # L6 invocation (premature release = the commissioned settle
+        # contract broken). The dedicated ``L6_ANCHOR_META_KEY`` key
+        # is written only here and read only here — the bind math
+        # consults a single, L6-owned source of truth.
+        #
+        # P1-3 consolidation: the read-or-set is one canonical path
+        # (no dead ``elif denial_epoch not in _epochs`` branch —
+        # ``safe_increment`` runs FIRST above and populates the
+        # shared list with the denial_epoch regardless, so the old
+        # elif was unreachable on first invocation). The first L6
+        # invocation writes the anchor NOW; subsequent invocations
+        # read the anchor as the bind math. C3 fail-OPEN posture
+        # preserved.
+        bind_anchor_iso: str | None = None
+        try:
+            with _SqlmodelSession(self._manager._engine) as _sess:
+                _inst = _sess.get(Instance, instance_id)
+                if _inst is not None:
+                    _meta = _inst.instance_metadata or {}
+                    _existing_anchor = _meta.get(L6_ANCHOR_META_KEY)
+                    if _existing_anchor:
+                        bind_anchor_iso = str(_existing_anchor)
+                    else:
+                        # First L6 invocation: write the anchor NOW.
+                        # The ORM write REASSIGNS instance_metadata
+                        # (the JSONB column is not mutable-tracked —
+                        # the same pattern the ledger.increment uses
+                        # in ``daemon/repositories/instance/
+                        # repository.py:1401-1408" — see the
+                        # ``new_metadata = dict(...)`` rebind).
+                        _now_anchor = now_utc_iso()
+                        _new_meta = dict(_meta)
+                        _new_meta[L6_ANCHOR_META_KEY] = _now_anchor
+                        _inst.instance_metadata = _new_meta
+                        _sess.add(_inst)
+                        _sess.commit()
+                        bind_anchor_iso = _now_anchor
+        except Exception as _anchor_exc:  # noqa: BLE001 — fail-OPEN
+            logger.warning(
+                "FP4 L6: bind-anchor read/write raised for %s... "
+                "(%s); fail-OPEN, treat as first-invocation",
+                instance_id[:8], _anchor_exc,
+            )
+            bind_anchor_iso = None
+
+        # (3) Bind check.
+        if bind_anchor_iso is None:
+            # No anchor (anchor was never written; first-invocation
+            # write failed; or repo not wired). Treat as
+            # first-invocation: HOLD until the next call.
+            logger.info(
+                "FP4 L6: instance %s... no bind anchor; "
+                "HOLD (first-invocation default)",
+                instance_id[:8],
+            )
+            await self._fp4_l6_downgrade_to_waiting(
+                instance_id, agent_id,
+            )
+            return "hold"
+
+        # Parse the anchor (ISO-8601 string) and compare to now.
+        from .mission_live_guard import parse_completed_at_naive
+        anchor_dt = parse_completed_at_naive(bind_anchor_iso)
+        if anchor_dt is None:
+            # Unparseable anchor — treat as first-invocation.
+            logger.warning(
+                "FP4 L6: instance %s... unparseable bind "
+                "anchor %r; HOLD (defensive)",
+                instance_id[:8], bind_anchor_iso,
+            )
+            await self._fp4_l6_downgrade_to_waiting(
+                instance_id, agent_id,
+            )
+            return "hold"
+
+        age_seconds = (
+            now_utc_naive() - anchor_dt
+        ).total_seconds()
+        if age_seconds < MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS:
+            # Within the settle bound: HOLD.
+            logger.info(
+                "FP4 L6: instance %s... declared-wait "
+                "outstanding for %ds (within %ds bound); "
+                "HOLD (WAITING_CHILDREN, publish suppressed)",
+                instance_id[:8],
+                int(age_seconds),
+                MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            )
+            await self._fp4_l6_downgrade_to_waiting(
+                instance_id, agent_id,
+            )
+            return "hold"
+
+        # (4) Bound reached: release — terminal fires ONCE.
+        # Set completion_gate_escalated=True via the ledger atomic
+        # op; the work_notifier.py layer renders the escalated
+        # display (COMPLETION_GATE_ESCALATED_DISPLAY) instead of
+        # plain "completed" because the
+        # ``completion_gate_escalated`` flag is on the work
+        # record. fail-OPEN: a DB error does NOT block the
+        # publish (the at-least-once contract holds).
+        logger.warning(
+            "FP4 L6: instance %s... declared-wait outstanding "
+            "for %ds (>= %ds bound); RELEASE — terminal fires "
+            "ONCE with escalated display (unverified)",
+            instance_id[:8],
+            int(age_seconds),
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+        )
+        if isinstance(ledger, SQLModelInstanceRepository):
+            try:
+                safe_set_escalated_and_reset(
+                    ledger,
+                    instance_id,
+                    log_context={"path": "fp4_l6_release"},
+                )
+            except Exception as _esc_exc:  # noqa: BLE001
+                logger.warning(
+                    "FP4 L6: safe_set_escalated_and_reset raised "
+                    "for %s... (%s); fail-OPEN, terminal "
+                    "proceeds (escalated display may render "
+                    "without the flag)",
+                    instance_id[:8], _esc_exc,
+                )
+        return "release"
+
+    async def _fp4_l6_downgrade_to_waiting(
+        self,
+        instance_id: str,
+        agent_id: str,
+    ) -> None:
+        """FP4 L6 helper — downgrade COMPLETED → WAITING_CHILDREN.
+
+        Mirrors the gate-block downgrade pattern at the emission-
+        time call site (single session, defensive against None /
+        status mismatch). Used by the L6 HOLD branch.
+        """
+        try:
+            with Session(self._manager._engine) as _session:
+                _inst = _session.get(Instance, instance_id)
+                if (
+                    _inst is not None
+                    and _inst.status == InstanceStatus.COMPLETED.value
+                ):
+                    _inst.status = InstanceStatus.WAITING_CHILDREN.value
+                    _inst.updated_at = datetime.now(timezone.utc).isoformat()
+                    _inst.version = (_inst.version or 1) + 1
+                    _session.add(_inst)
+                    _session.commit()
+                    logger.info(
+                        "FP4 L6: instance %s... downgraded "
+                        "COMPLETED → WAITING_CHILDREN (HOLD)",
+                        instance_id[:8],
+                    )
+        except Exception as _dg_exc:
+            logger.error(
+                f"FP4 L6: downgrade failed for "
+                f"{instance_id[:8]}...: {_dg_exc}"
+            )
+        if self._manager._live_hub:
+            try:
+                await self._manager._live_hub.stream_status_change(
+                    instance_id, "waiting_children",
+                    agent_id=agent_id,
+                )
+            except Exception as _sse_exc:
+                logger.warning(
+                    f"FP4 L6: downgrade SSE failed for "
+                    f"{instance_id[:8]}...: {_sse_exc}"
+                )
+
     async def _root_completion_gate(
         self,
         session,
         instance_id: str,
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[bool, str | None, bool]:
         """Full emission predicate for marking a root/parent's job terminal.
 
         A terminal "completed" lifecycle event (which JobFeedbackObserver maps
@@ -2008,7 +2344,11 @@ Provide a concise summary:"""
             instance_id: The instance to evaluate.
 
         Returns:
-            (allowed, block_reason): block_reason is a diagnostic when blocked.
+            ``(allowed, block_reason, declared_wait_outstanding)``: the
+            third element is the L2b declared-wait verdict, threaded
+            through from ``_gate_wedge_resolver`` (P1-2). The early-leg
+            blocks (bus / tree-liveness / pending_count) carry ``False``
+            for the third element — those legs are not L2b-relevant.
         """
         owns_session = session is None
         if owns_session:
@@ -2025,7 +2365,70 @@ Provide a concise summary:"""
             # bus or DB hiccup cannot block the publish permanently.
             bus_pending = self._bus_count_pending_for_target_sync(instance_id)
             if bus_pending > 0:
-                return False, f"bus_pending={bus_pending}"
+                return False, f"bus_pending={bus_pending}", False
+
+            # ── FP4 (2026-10-03) — L2: tree-liveness leg.
+            # ── The bus-pending leg above is FAIL-OPEN (a missing bus
+            # singleton or a transient DB error returns 0 — see
+            # ``_bus_count_pending_for_target_sync``). A child
+            # whose watcher row was never INSERTed in the first place
+            # (orphan-watch class — dispatch failure, cold-load
+            # ``None``-read, unattributed cache eviction) cannot
+            # surface through the bus count: the bus's PENDING
+            # ``dependency_watchers`` row is simply absent, the count
+            # is 0, and the gate sees a fake quiescence.
+            #
+            # The mitigation is a parallel tree-liveness leg
+            # (canonical ``evaluate_mission_live`` leg-b/c via
+            # ``get_tree_ids_permanent``): walk the permanent
+            # ``instances.parent_id`` record, classify each member
+            # against ``TERMINAL_INSTANCE_STATUSES``, and BLOCK the
+            # gate when ANY non-terminal member is present. The
+            # ``bus_pending_count`` argument passes the bus count
+            # we already obtained (``bus_pending`` — a real int, or
+            # 0 when no watcher was reported) to the guard's
+            # leg (a) so the two legs agree at the same seam;
+            # the tree walk (b/c) is the orphan safety net.
+            #
+            # Leg-direction: ``live=True`` ⇒ BLOCK (the mission is
+            # plausibly alive — children may still be running even
+            # if no bus row exists). ``live=False`` (all-terminal
+            # tree OR timeout-elapsed zombie) ⇒ PROCEED. The
+            # guard's internal error path returns ``live=False,
+            # error=True`` — fail-OPEN for the at-least-once
+            # guarantee (mirrors the U7 contract). On any guard
+            # call failure we proceed; a missing terminal is worse
+            # than an extra premature one.
+            try:
+                from .mission_live_guard import (
+                    evaluate_mission_live,
+                    MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+                )
+                _mission_verdict = await evaluate_mission_live(
+                    instance_repository=self._instance_repository,
+                    instance_id=instance_id,
+                    bus_pending_count=bus_pending if bus_pending > 0 else 0,
+                    timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+                )
+                if _mission_verdict.live:
+                    return False, (
+                        f"tree_liveness: {_mission_verdict.reason}"
+                    ), False
+                # live=False (all-terminal tree OR timed-out zombie)
+                # — proceed to the remaining legs.
+            except Exception as _tree_exc:  # noqa: BLE001 — fail-OPEN
+                # C3 fail-OPEN (widens W4): a guard exception must
+                # NOT block the publish; the at-least-once contract
+                # holds. Log at WARNING so the operator sees the
+                # regression. The existing caller wrap at
+                # child_reports.py:4133-4143 also catches this and
+                # fails the gate open.
+                logger.warning(
+                    "root_completion_gate: tree-liveness leg "
+                    "raised for %s... (%s); fail-OPEN, gate "
+                    "proceeds (per C3 fail-OPEN contract)",
+                    instance_id[:8], _tree_exc,
+                )
 
             pending_count = session.exec(
                 select(func.count())
@@ -2039,11 +2442,14 @@ Provide a concise summary:"""
             ).scalar_one()
 
             if pending_count > 0:
-                return False, f"pending_count={pending_count}"
+                return False, f"pending_count={pending_count}", False
 
             # DEADLOCK GUARD: route the freshness leg through the wedge resolver
             # so dead-letter / empty-final-turn / stale-readable wedge paths
-            # close event-driven (no polling).
+            # close event-driven (no polling). The wedge resolver's 3-tuple
+            # return threads the declared-wait verdict; this gate forwards
+            # all three elements unchanged (P1-2 — verdict flows with the
+            # decision, no singleton state).
             return await self._gate_wedge_resolver(session, instance_id)
         finally:
             if owns_session:
@@ -2838,12 +3244,93 @@ Provide a concise summary:"""
                     context_tag="child_reports.root_completion",
                 )
                 _clear_b_notice_if_clean(instance_id, _b_violation_report)
+                # ── FP4 (2026-10-03) — L1: root COMPLETED stamp guard
+                # ── WAITING_CHILDREN inclusion + discharge escape.
+                #
+                # Before this fix the where-not-in set was the canonical
+                # {PAUSED, COMPLETED, ERROR} terminal-and-paused set, but
+                # ``WAITING_CHILDREN`` was NOT in the set. Two failure
+                # modes:
+                #
+                #   (a) Premature terminal: a parent in WAITING_CHILDREN
+                #       whose children are still running could be
+                #       silently over-stamped to COMPLETED because the
+                #       ``UPDATE ... SET status='completed' WHERE status
+                #       NOT IN (paused, completed, error)`` matched rows
+                #       in WAITING_CHILDREN (the incident class for
+                #       c264aa8a + 3826ab28).
+                #
+                #   (b) Eternal-waiting wedge: a parent that reached the
+                #       stamp with status=WAITING_CHILDREN but where the
+                #       sync gates (bus, pending_count, pending_tasks,
+                #       live_children) have ALL passed must still be
+                #       allowed to terminal — the gate-cleared
+                #       WAITING_CHILDREN is a true terminal candidate.
+                #
+                # The fix: add ``WAITING_CHILDREN`` to the where-not-in
+                # set (closes the (a) hole) AND add an explicit
+                # WAITING_CHILDREN → RUNNING discharge UPDATE before the
+                # stamp (the "discharge escape" that closes the (b)
+                # wedge). The discharge is gated on the sync gates
+                # having passed — the only path that reaches this point
+                # is the post-gate-cleanup line, so the discharge only
+                # fires for legitimate terminal-cleared WAITING_CHILDREN
+                # instances.
+                #
+                # Race discipline (CAS): both the discharge UPDATE and
+                # the stamp UPDATE are guarded by where-clauses on the
+                # expected prior status. A concurrent pause cascade
+                # that commits PAUSED between the discharge and the
+                # stamp makes the stamp's where-not-in false, the
+                # stamp's rowcount=0, and the stamp returns
+                # ``idempotency_skip`` (the eternal-waiting wedge class
+                # is preserved as a defensive default). The L2 / L2b
+                # legs below are the re-evaluation triggers that
+                # re-fire the sync helper on the next message-completed
+                # signal — the discharge runs again on the next pass.
+                _now = now_utc()
+                now_iso = _now.isoformat()
+                now_dt = _now.replace(tzinfo=None)
+                # FP4 L1 discharge: WAITING_CHILDREN → RUNNING, gated on
+                # the instance being IN WAITING_CHILDREN at the time of
+                # the discharge UPDATE. Atomic CAS via where-clause;
+                # rowcount==0 means the instance was concurrently
+                # transitioned elsewhere (e.g. PAUSED by a question()
+                # cascade) and we must NOT proceed with the stamp.
+                if instance.status == InstanceStatus.WAITING_CHILDREN.value:
+                    _discharge_result = session.execute(
+                        sa_update(Instance)
+                        .where(Instance.instance_id == instance_id)
+                        .where(Instance.status == InstanceStatus.WAITING_CHILDREN.value)
+                        .values(
+                            status=InstanceStatus.RUNNING.value,
+                            updated_at=now_iso,
+                            last_activity_at=now_dt,
+                            version=Instance.version + 1,
+                        )
+                    )
+                    if _discharge_result.rowcount > 0:
+                        logger.info(
+                            "FP4 L1 discharge: instance %s... "
+                            "WAITING_CHILDREN → RUNNING (sync gates "
+                            "cleared, root-completion stamp proceeds)",
+                            instance_id[:8],
+                        )
+                        # Bump in-memory version so the stamp's
+                        # ``version + 1`` reflects the post-discharge
+                        # baseline.
+                        instance.version = (instance.version or 1) + 1
+                    # If rowcount==0, a concurrent writer moved the
+                    # row out of WAITING_CHILDREN; fall through to the
+                    # stamp which will skip via where-not-in (TOCTOU
+                    # defense — same as PAUSED/COMPLETED/ERROR).
+
                 # Defense-in-depth atomic guard: use SQLAlchemy Core
                 # ``UPDATE ... WHERE status NOT IN (...)`` so a pause
                 # cascade that commits PAUSED between the ``session.get``
                 # above and this write cannot be silently overwritten.
                 # The where-not-in set is the canonical {PAUSED, COMPLETED,
-                # ERROR} terminal-and-paused set; rowcount == 0 means
+                # ERROR, WAITING_CHILDREN} terminal-and-paused set; rowcount == 0 means
                 # another writer (e.g. question() pause cascade) already
                 # finalized the row and we must skip the rest of the
                 # completion logic for this path.
@@ -2852,9 +3339,6 @@ Provide a concise summary:"""
                 # twin carries naive-UTC digits of the SAME instant
                 # (the µs-match between the twins is a D7 backfill
                 # detection heuristic and must survive).
-                _now = now_utc()
-                now_iso = _now.isoformat()
-                now_dt = _now.replace(tzinfo=None)
                 update_result = session.execute(
                     sa_update(Instance)
                     .where(Instance.instance_id == instance_id)
@@ -2863,12 +3347,26 @@ Provide a concise summary:"""
                             InstanceStatus.PAUSED.value,
                             InstanceStatus.COMPLETED.value,
                             InstanceStatus.ERROR.value,
+                            InstanceStatus.WAITING_CHILDREN.value,
                         ])
                     )
                     .values(
                         status=InstanceStatus.COMPLETED.value,
                         updated_at=now_iso,
                         last_activity_at=now_dt,
+                        # M1b (2026-10-03, report-delivery-bug-family):
+                        # restore SQL-side ``Instance.version + 1`` —
+                        # this site was regressed to a Python-side
+                        # constant ``instance.version + 1`` (lowercase
+                        # ``i``), which evaluates the in-memory ORM
+                        # attribute and stamps the LITERAL value into
+                        # the SET clause (``SET version = 42`` for
+                        # example). The capital-``I`` ``Instance.version``
+                        # form is a SQLAlchemy column expression that
+                        # compiles to ``SET version = version + 1`` —
+                        # the correct post-discharge, race-safe
+                        # increment. Do NOT add a 5th occurrence of
+                        # the python-side pattern.
                         version=Instance.version + 1,
                     )
                 )
@@ -2877,8 +3375,8 @@ Provide a concise summary:"""
                     logger.warning(
                         f"Instance {instance_id[:8]}... root-completion "
                         f"UPDATE matched 0 rows (status already in "
-                        f"{{paused,completed,error}}); skipping "
-                        f"completion side effects (TOCTOU defense)"
+                        f"{{paused,completed,error,waiting_children}}); "
+                        f"skipping completion side effects (TOCTOU defense)"
                     )
                     return _ChildCompletionDbResult(
                         outcome="idempotency_skip",
@@ -4142,8 +4640,33 @@ Provide a concise summary:"""
             # adapts the assertion). Fail-open wrap: a gate exception must
             # never block the publish — the production fail-open contract
             # is mirrored from the cascade emission-time block.
+            #
+            # ── FP4 (2026-10-03) — L5: fail-OPEN decision rationale.
+            # The emission-time gate at this site uses fail-OPEN (an
+            # exception → ``(True, None)`` → publish proceeds). This
+            # is the EXISTING production contract — the cascade
+            # emission-time block at ``child_reports.py:~950`` (see
+            # ``TestCascadeEmissionGateFailOpen``) uses the same
+            # fail-OPEN shape, and the 39607e12 commission
+            # (mission-terminal watcher blind + report publication
+            # gap, 2026-09-25) C1 seam mandated fail-OPEN at the
+            # gate-emit boundary because the gate's purpose is
+            # DEFENSIVE (catch regressions between the helper stamp
+            # and the publish), not load-bearing (the load-bearing
+            # completion is owned by the bus + sync helper).
+            #
+            # Decision (FP4-L5): KEEP fail-OPEN with a loud WARNING
+            # on exception. The reviewer-pending choice is between
+            # this and fail-CLOSED. Fail-CLOSED would risk
+            # permanent stranded publishes on any transient gate
+            # error (DB hiccup, repo wiring gap, etc.); fail-OPEN
+            # risks a false-publish on a regression but the at-least-
+            # once terminal delivery guarantee (the bound on this
+            # site's blast radius) is preserved. Net direction:
+            # fail-OPEN, warning loud.
             _gate_pass = None
             _gate_block_reason: str | None = None
+            _declared_wait_outstanding: bool = False
             try:
                 _gate_pass = await self._root_completion_gate(
                     None, instance_id
@@ -4152,13 +4675,30 @@ Provide a concise summary:"""
                 # Fail-open: a gate exception must NOT block the publish
                 # (mirrors the cascade emission-time wrap at the production
                 # fail-open contract). Log at WARNING so the operator sees
-                # the regression.
+                # the regression. FP4-L5 decision (see the block above):
+                # the production contract is fail-OPEN; a fail-CLOSED
+                # flip is deferred to a future commission (would
+                # require a separate kill-switch with its own blast-
+                # radius audit).
                 logger.warning(
                     "root_completion: gate raised for %s... (%s); "
-                    "treating as passed (fail-open)",
+                    "treating as passed (fail-open per FP4-L5; "
+                    "see 39607e12 C1 seam for the production contract)",
                     instance_id[:8], _gate_exc,
                 )
-                _gate_pass = (True, None)
+                # Fail-OPEN: the gate did not actually run, so no L2b
+                # verdict — third element is False (no declared-wait
+                # discharge to honour).
+                _gate_pass = (True, None, False)
+
+            # Thread the L2b declared-wait verdict from the gate's
+            # 3-tuple return into the local variable the L6 read
+            # site consults (P1-2). The flag no longer lives on
+            # ``self`` — concurrent gate calls for different
+            # instances no longer race over a service-singleton
+            # mutation; each verdict flows atomically with its
+            # decision.
+            _declared_wait_outstanding = bool(_gate_pass[2])
 
             if not _gate_pass[0]:
                 _gate_block_reason = _gate_pass[1]
@@ -4199,6 +4739,88 @@ Provide a concise summary:"""
                             f"{instance_id[:8]}...: {_sse_exc}"
                         )
                 return
+
+            # ── FP4 (2026-10-03) — L6: escalate-and-HOLD not annotate.
+            # ── When the L2b discharge flag (``_declared_wait_outstanding``)
+            # is True, the gate passed but the declared-wait obligation
+            # is unresolved (3826ab28 mechanism: parent declared waiting
+            # and the interim report was delivered, but the obligation
+            # is still open). The spec: do NOT silently flip the
+            # (b) kill-switch globally (the existing chassis gates ALL
+            # stamp sites — root + non-root + observer — broader blast
+            # radius). Instead, scope the L6 path at THIS call site.
+            #
+            # L6 logic:
+            #   1. Increment the attestation ledger (the "escalate" part).
+            #      Uses the canonical safe_increment from
+            #      ``attestation_ledger.py`` (C3 fail-OPEN — a DB error
+            #      degrades the increment to None and the L6 path
+            #      proceeds; the at-least-once contract holds).
+            #   2. Check the settle bound (6h — reuses
+            #      ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` from
+            #      ``mission_live_guard.py:110``). The bind math reads
+            #      the dedicated ``L6_ANCHOR_META_KEY`` key in the
+            #      instance metadata — the first L6 invocation writes
+            #      the anchor; subsequent L6 invocations re-use it as
+            #      the bind anchor (P1-1 fix — the previous code used
+            #      ``attestation:denial_epochs[0]``, which the
+            #      attestation gate ALSO appends to with non-L6 epochs
+            #      like ``fp4.l5.*``; a stale non-L6 epoch >6h old let
+            #      the bind release on the first L6 invocation).
+            #   3. Within bound (anchor + 6h > now): HOLD — set
+            #      WAITING_CHILDREN, suppress publish, JobItem stays
+            #      ACTIVE (the done+retry-0/0 wedge is the bug; the
+            #      ACTIVE state is what makes retry/continue paths
+            #      still admit on the next message-completed signal).
+            #   4. Bound reached (anchor + 6h ≤ now): terminal
+            #      fires ONCE — set completion_gate_escalated=True via
+            #      the canonical ledger atomic op, let the publish
+            #      proceed; the work_notifier.py layer renders the
+            #      escalated display (COMPLETION_GATE_ESCALATED_DISPLAY)
+            #      instead of plain "completed" because the
+            #      ``completion_gate_escalated`` flag is on the work
+            #      record (see work_notifier.py:460-467).
+            #
+            # Scope discipline (mirrors the spec's blast-radius note):
+            # the L6 call here is local to the ROOT stamp site. Other
+            # stamp sites (non-root in this file, observer finalize in
+            # ``job_feedback_observer.py``, reconcile in
+            # ``job_recovery_service.py``) are UNTOUCHED — they keep
+            # the existing log-only annotation via
+            # ``log_declared_waiting_violations``. Flipping the (b)
+            # kill-switch globally is the operator's call, not this
+            # commission's.
+            #
+            # The verdict is read from the local variable populated
+            # above (P1-2 — the ``_root_completion_gate`` 3-tuple
+            # return threaded the L2b verdict; reading
+            # ``self._declared_wait_outstanding`` here would race
+            # against concurrent gate calls for different instances).
+            if _declared_wait_outstanding:
+                _l6_decision = await self._fp4_l6_check_and_apply(
+                    instance_id=instance_id,
+                    agent_id=agent_id,
+                )
+                if _l6_decision == "hold":
+                    # Within the settle bound: HOLD. The instance
+                    # was stamped COMPLETED by the sync helper; the
+                    # L6 path downgrades to WAITING_CHILDREN to
+                    # preserve the active-mission semantics, then
+                    # returns (skip the publish). The next
+                    # message-completed signal re-evaluates the
+                    # gate; the L6 path re-runs and either HOLDs
+                    # again or releases at the bind.
+                    return
+                # _l6_decision == "release": bind reached, escalate
+                # + proceed with the publish below. The
+                # ``_publish_status`` variable is the standard
+                # "completed" — the escalated display is rendered
+                # at the work_notifier layer via the
+                # ``completion_gate_escalated`` flag on the
+                # instance (already set by
+                # ``reset_attestation_ledger_with_escalation`` in
+                # the ledger call).
+                # Continue to the publish block below.
 
             # ── Terminal-status determination: branch on the latest
             # terminal message for this instance. FAILED → "failed" with

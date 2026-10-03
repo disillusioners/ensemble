@@ -36,7 +36,12 @@ from daemon.services.turn_transitions import (
 )
 
 from ..instance.models import Instance, InstanceStatus
-from ..job_queue.models import AdmissionState, JobItem, active_admission_states_sql
+from ..job_queue.models import (
+    ACTIVE_ADMISSION_STATES,
+    AdmissionState,
+    JobItem,
+    active_admission_states_sql,
+)
 from .models import SuspensionReason, Task, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
@@ -130,6 +135,75 @@ def is_chat_lane_active() -> bool:
     """Read the shared chat-lane-active flag (per-claim read)."""
     return _chat_lane_active
 
+
+# m1 (2026-10-03, report-delivery-bug-family) — cap on the
+# doomed-id list rendered into the wipe JOURNAL log so a 5k-row
+# wipe does not emit a 180-400KB single log line. The cap emits
+# the first N ids verbatim (the operator can correlate the most-
+# recent wipe by sample), the TOTAL count, and a truncation
+# marker so the post-mortem is honest about what was logged. Both
+# the task and message_queue wipe sites use the same constant so
+# the audit-trail cardinality is consistent across repos.
+_DOOMED_ID_LOG_CAP: int = 500
+
+
+def _capped_doomed_id_repr(ids: list[str]) -> str:
+    """Render a doomed-id list for the wipe JOURNAL log, capped.
+
+    Returns a string of the form
+    ``"<first 500 ids>"[+ N more truncated]``
+    so the operator sees the first sample verbatim AND the
+    truthful total count. The cap is the same constant for both
+    wipe sites so the audit-trail cardinality is consistent.
+    """
+    total = len(ids)
+    if total <= _DOOMED_ID_LOG_CAP:
+        return f"{ids!r}"
+    return (
+        f"{ids[:_DOOMED_ID_LOG_CAP]!r}"
+        f"[+ {total - _DOOMED_ID_LOG_CAP} more truncated]"
+    )
+
+
+# polish(...): m3 — hoist the 5-copy ``_live_instance NOT EXISTS``
+# guard (FP2b) to ONE module-level constant. The guard is the
+# alive-lineage / ACTIVE-job predicate the reconcile_turn_mirror
+# folds into the CASE branches (admission_state, terminal_reason,
+# failed_at) AND the DELETE arms (job_locks, job_watchers) so a
+# finalize→reconcile race cannot stamp ``orphaned_no_task`` over a
+# just-set ``terminal_reason='completed'`` (occurrence #5,
+# job ``fb0cf25c``). The 5 sites previously carried the same
+# ~17-line CTE block inline; divergence between the 5 copies was
+# the AMPLIFIER for occurrence #5 (the pre-fix predicate missed
+# the alive-lineage check on the job_watchers arm). Hoisting
+# makes drift structurally impossible: a fix touches one place,
+# not five.
+#
+# Indent: 32 spaces (matches the f-string CASE-branch sites; the
+# 2 text()-site uses at :1642 and :1891 have a 6-space-shallower
+# surrounding context, so the rendered inner content is 6 spaces
+# DEEPER than the surrounding opening paren — semantically
+# identical SQL, whitespace-only render diff at those 2 sites
+# only). The DB engine normalizes SQL whitespace; the audit-trail
+# bytecode is the WHERE-clause semantics, not the literal indent.
+_LIVE_INSTANCE_NOT_EXISTS_GUARD: str = """\
+                                WITH _live_instance AS (
+                                    SELECT 1 FROM instances i
+                                    WHERE (
+                                        (CAST(:task_instance_id AS TEXT) IS NOT NULL
+                                         AND i.instance_id = CAST(:task_instance_id AS TEXT))
+                                        OR
+                                        (CAST(:job_instance_id AS TEXT) IS NOT NULL
+                                         AND i.instance_id = CAST(:job_instance_id AS TEXT))
+                                    )
+                                      AND i.status IN (
+                                          :status_waiting_children,
+                                          :instance_status_paused,
+                                          :instance_status_running
+                                      )
+                                )
+                                SELECT 1 FROM _live_instance\
+"""
 
 
 class DirectWriteError(RuntimeError):
@@ -1073,6 +1147,48 @@ class TaskRepository:
             )
             return list(db_session.exec(stmt).all())
 
+    def find_completed_tasks_on_active_jobs(self) -> list[str]:
+        """Work_ids whose COMPLETED Task rows anchor ACTIVE JobItems.
+
+        FP1 observability probe (2026-10-03,
+        report-delivery-bug-family): a Task row in terminal state
+        (``completed``) paired with a JobItem in non-terminal
+        admission state (``active`` or ``queued``) is a data
+        integrity issue — the Task is finished, the JobItem is
+        not, and the system is mid-mission. The new
+        ``clear_all(preserve_in_flight=True)`` predicate (FP1)
+        PRESERVES these rows by virtue of the ``EXISTS ... non-
+        terminal JobItem`` clause, so the wipe itself is safe —
+        but the condition itself is a smell the operator needs
+        to see. The boot-wipe logs a joined WARNING naming the
+        affected work_ids so the integrity issue is observable
+        even though the wipe does not strand the JobItem.
+
+        Returns:
+            Deduplicated list of work_ids (== job ids) whose
+            COMPLETED Task row anchors a non-terminal JobItem.
+            Sorted for stable WARN output.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task.work_id)
+                .join(
+                    JobItem,
+                    JobItem.job_id == Task.work_id,
+                )
+                .where(
+                    Task.work_id.isnot(None),
+                    Task.status == TaskStatus.COMPLETED.value,
+                    JobItem.admission_state.in_(
+                        list(ACTIVE_ADMISSION_STATES)
+                    ),
+                    JobItem.deleted_at.is_(None),
+                )
+                .distinct()
+                .order_by(Task.work_id)
+            )
+            return [str(w) for w in db_session.exec(stmt).all() if w]
+
     def list_running_tasks(self) -> list[Task]:
         """Return every RUNNING ``task`` row.
 
@@ -1346,6 +1462,39 @@ class TaskRepository:
                     f"Unknown Task status for turn mirror reconciliation: {snapshot_status}"
                 )
             terminal_reason = snapshot_status if found else "orphaned_no_task"
+            # FP2 (2026-10-03, report-delivery-bug-family) — when
+            # ``found=False`` the Task row is GONE; the JobItem is the
+            # only remaining source of authority. The
+            # ``NOT EXISTS (instances i WHERE i.instance_id =
+            # :task_instance_id ...)`` liveness guard was VACUOUSLY TRUE
+            # for the ``task_instance_id IS NULL`` case (no row can
+            # match NULL on equality), so a finalized JobItem
+            # (``terminal_reason='completed'``) was silently overwritten
+            # with ``orphaned_no_task`` by the post-finalize reconciler
+            # pass — the occurrence-#5 root cause
+            # (job ``fb0cf25c``).
+            #
+            # The corrected liveness consults the JobItem's own
+            # ``instance_id`` (the job that owns the Task) when the
+            # Task-side ``instance_id`` is NULL. A live JobItem-side
+            # instance (RUNNING / WAITING_CHILDREN / PAUSED) holds the
+            # mission — the orphan stamp MUST be deferred until the
+            # instance reaches a terminal state, NOT the first
+            # ``Task.missing`` instant. This single lookup closes both
+            # occurrence #5 (finalize→reconcile overwrite) and the
+            # c264aa8a R3 force-finalize arm (active JobItem + zero
+            # Task rows + mission live).
+            job_instance_id_row = conn.execute(
+                text("""
+                    SELECT instance_id FROM job_queue_items
+                    WHERE job_id = :work_id
+                    LIMIT 1
+                """),
+                {"work_id": work_id},
+            ).first()
+            job_instance_id = (
+                job_instance_id_row[0] if job_instance_id_row else None
+            )
             params = {
                 "work_id": work_id,
                 "task_exists": found,
@@ -1356,6 +1505,13 @@ class TaskRepository:
                 "task_id": snapshot["id"] if snapshot else None,
                 "task_message_id": snapshot["message_id"] if snapshot else None,
                 "task_instance_id": snapshot["instance_id"] if snapshot else None,
+                # FP2 — JobItem-side instance linkage for the liveness
+                # guard fallback. ``job_instance_id`` is fetched above
+                # in the same transaction; NULL when the JobItem has
+                # never started (no instance linkage yet). The
+                # liveness guard below OR's both linkages so the
+                # vacuous-true bug at occurrence #5 cannot recur.
+                "job_instance_id": job_instance_id,
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
                 "status_paused": TaskStatus.PAUSED.value,
@@ -1395,45 +1551,79 @@ class TaskRepository:
             updated_counts["job_queue_items"] = conn.execute(
                 text(f"""
                     UPDATE job_queue_items
-                    SET admission_state = CASE
+                    SET -- FP2 (2026-10-03, report-delivery-bug-family):
+                        -- (a) non-destructive terminal_reason write —
+                        -- only stamp when the current terminal_reason
+                        -- IS NULL, so a finalize-then-reconcile race
+                        -- (occurrence #5) cannot overwrite
+                        -- 'completed' / 'failed' / 'cancelled' with
+                        -- 'orphaned_no_task';
+                        -- (b) version bump on terminal writes — the
+                        -- previous text said "on every write" but the
+                        -- M1a narrow (see the WHERE below) restricts
+                        -- the UPDATE to non-settled rows under
+                        -- terminal intent, so a no-op pass (no
+                        -- terminal intent, or the row already
+                        -- admission_state='done' with a non-null
+                        -- terminal_reason) does NOT bump the
+                        -- version. The occ5 pin still holds: the
+                        -- CASE branches resolve to the row's current
+                        -- value when the narrow excludes the row, so
+                        -- an existing 'completed' terminal_reason
+                        -- cannot be silently overwritten by a later
+                        -- 'orphaned_no_task' stamp;
+                        -- (c) the ``_live_instance_or_job_instance``
+                        -- CTEs below close the vacuous-true bug
+                        -- (task_instance_id NULL) by falling back to
+                        -- the JobItem's own ``instance_id`` linkage.
+                        admission_state = CASE
                             WHEN :terminal AND NOT EXISTS (
-                                SELECT 1 FROM instances i
-                                WHERE i.instance_id = :task_instance_id
-                                  AND i.status IN (
-                                      :status_waiting_children,
-                                      :instance_status_paused,
-                                      :instance_status_running
-                                  )
+                                {_LIVE_INSTANCE_NOT_EXISTS_GUARD}
                             ) THEN 'done'
                             ELSE admission_state
                         END,
                         terminal_reason = CASE
-                            WHEN :terminal AND NOT EXISTS (
-                                SELECT 1 FROM instances i
-                                WHERE i.instance_id = :task_instance_id
-                                  AND i.status IN (
-                                      :status_waiting_children,
-                                      :instance_status_paused,
-                                      :instance_status_running
-                                  )
+                            WHEN :terminal AND terminal_reason IS NULL
+                                 AND NOT EXISTS (
+                                {_LIVE_INSTANCE_NOT_EXISTS_GUARD}
                             ) THEN :terminal_reason
                             ELSE terminal_reason
                         END,
                         failed_at = CASE
                             WHEN :task_status IN ('failed', 'cancelled')
+                                 AND terminal_reason IS NULL
                                  AND NOT EXISTS (
-                                     SELECT 1 FROM instances i
-                                     WHERE i.instance_id = :task_instance_id
-                                       AND i.status IN (
-                                           :status_waiting_children,
-                                           :instance_status_paused,
-                                           :instance_status_running
-                                       )
-                                 )
-                            THEN COALESCE(failed_at, :now_failed_at_iso)
+                                {_LIVE_INSTANCE_NOT_EXISTS_GUARD}
+                            ) THEN COALESCE(failed_at, :now_failed_at_iso)
                             ELSE failed_at
-                        END
-                    WHERE job_id = :work_id AND {snapshot_guard}
+                        END,
+                        version = version + 1
+                    -- M1a (2026-10-03, report-delivery-bug-family):
+                    -- narrow the WHERE so no-op passes (terminal
+                    -- intent False, or row already fully-settled to
+                    -- our intent) do NOT bump the version. The
+                    -- CASE statements in the SET clause resolve to
+                    -- the row's current value when (a) the terminal
+                    -- bind is false (no terminal intent), or (b) the
+                    -- row is already admission_state='done' with a
+                    -- non-null terminal_reason (the CASE writes are
+                    -- guarded on terminal_reason IS NULL / no-live-
+                    -- instance so they wouldn't change anything
+                    -- anyway). The pre-narrow UPDATE bumped version
+                    -- on every pass — a 100% no-op cost on the
+                    -- reconcile hot path. The narrow preserves the
+                    -- occ5 pin: a 'completed' terminal_reason
+                    -- already on the row still wins because the
+                    -- terminal-true arm is the only one that
+                    -- actually writes, and a row already 'done' is
+                    -- excluded by the second conjunct.
+                    WHERE job_id = :work_id
+                      AND {snapshot_guard}
+                      AND :terminal = true
+                      AND (
+                          admission_state != 'done'
+                          OR terminal_reason IS NULL
+                      )
                 """),
                 params,
             ).rowcount
@@ -1445,13 +1635,7 @@ class TaskRepository:
                       AND :terminal
                       AND {snapshot_guard}
                       AND NOT EXISTS (
-                          SELECT 1 FROM instances i
-                          WHERE i.instance_id = :task_instance_id
-                            AND i.status IN (
-                                :status_waiting_children,
-                                :instance_status_paused,
-                                :instance_status_running
-                            )
+                          {_LIVE_INSTANCE_NOT_EXISTS_GUARD}
                       )
                 """),
                 params,
@@ -1472,6 +1656,21 @@ class TaskRepository:
             # excludes 'completed') but is kept as an explicit
             # protection so future changes to the IN-list cannot
             # regress this race.
+            #
+            # FP3 (2026-10-03, report-delivery-bug-family) — the
+            # previous ``orphaned_no_task → 'failed'`` branch
+            # mislabeled the system-level orphan stamp as a worker
+            # failure. The orphan case (Task row gone, JobItem being
+            # finalized as a system-side data loss) is not a worker
+            # error; the message_queue vocabulary has no dedicated
+            # "orphaned" status, so the CASE falls through to ELSE
+            # ``'completed'`` — the least-misleading terminal
+            # available. (For the orphan case the WHERE clause's
+            # ``message_id = :task_message_id`` is NULL when
+            # ``task_message_id`` is NULL — the message-queue row is
+            # never reached in practice; the branch removal is a
+            # vocabulary-correctness fix, not a behaviour change for
+            # the live orphan path.)
             updated_counts["message_queue"] = conn.execute(
                 text(f"""
                     UPDATE message_queue
@@ -1479,7 +1678,6 @@ class TaskRepository:
                             WHEN :terminal_reason = 'completed' THEN 'completed'
                             WHEN :terminal_reason = 'failed' THEN 'failed'
                             WHEN :terminal_reason = 'cancelled' THEN 'failed'
-                            WHEN :terminal_reason = 'orphaned_no_task' THEN 'failed'
                             ELSE 'completed'
                         END,
                         processing_task_id = NULL,
@@ -1638,12 +1836,64 @@ class TaskRepository:
                         work_id,
                     )
 
+            # FP2b (2026-10-03, report-delivery-bug-family) — guard
+            # the job_watchers DELETE arm with the same alive-
+            # lineage / ACTIVE-job condition the sibling arms
+            # (job_queue_items, job_locks) already use. The pre-fix
+            # predicate (``AND NOT EXISTS (SELECT 1 FROM task
+            # WHERE work_id = :work_id)``) deleted the watcher as
+            # soon as the Task row vanished — the amplifier for
+            # occurrence #5 (job ``fb0cf25c``): the
+            # dev-boot-on-prod wipe deleted the COMPLETED Task
+            # row, the post-wipe reconcile_turn_mirror fired this
+            # UNGUARDED arm and removed the job_watchers row
+            # mid-mission, the finalize then notified
+            # ``job_watchers == 0`` → silent no-op, and the
+            # Site-2 additive pass stamped ``orphaned_no_task`` over
+            # the just-set ``terminal_reason='completed'``.
+            #
+            # The corrected predicate folds in BOTH the
+            # taskless-already check AND the alive-lineage /
+            # ACTIVE-job condition: a taskless-but-live job KEEPS
+            # its watcher (the mission is still in flight, the
+            # watcher must stay registered for the eventual
+            # terminal fire). The arms the same condition is
+            # applied to above (job_queue_items, job_locks) were
+            # correctly suppressed for fb0cf25c; the watcher
+            # arm was the missing piece.
             updated_counts["job_watchers"] = conn.execute(
-                text("""
+                text(f"""
                     DELETE FROM job_watchers
                     WHERE job_id = :work_id
                       AND NOT EXISTS (
                           SELECT 1 FROM task WHERE work_id = :work_id
+                      )
+                      AND NOT EXISTS (
+                          {_LIVE_INSTANCE_NOT_EXISTS_GUARD}
+                      )
+                      -- polish(...): m6 — ``admission_state IN
+                      -- ('queued', 'active')`` here is
+                      -- VOCABULARY-IDENTICAL to the canonical
+                      -- helper ``active_admission_states_sql()``
+                      -- (defined in
+                      -- ``daemon/repositories/job_queue/models.py``
+                      -- over the ``ACTIVE_ADMISSION_STATES``
+                      -- frozenset = ``{'queued', 'active'}``).
+                      -- If the canonical set ever gains a
+                      -- member, BOTH this hardcode AND the
+                      -- frozenset must be updated in lockstep;
+                      -- the preserved-predicate arm in
+                      -- ``clear_all`` (line 4153) already routes
+                      -- through the helper, so a drift here
+                      -- would re-open ``force_finalize`` for
+                      -- the missed admission state.
+                      AND NOT EXISTS (
+                          SELECT 1 FROM job_queue_items jqi
+                          WHERE jqi.job_id = :work_id
+                            AND jqi.admission_state IN (
+                                'queued', 'active'
+                            )
+                            AND jqi.deleted_at IS NULL
                       )
                 """),
                 params,
@@ -3823,14 +4073,23 @@ class TaskRepository:
                 deleted — the legacy "nuclear wipe" used outside the
                 startup path. When ``True``, only **backlog** work is
                 discarded: tasks whose status is neither ``running`` nor
-                ``paused``. RUNNING tasks (in-flight, recovered by
-                StaleTaskRecovery after restart) and PAUSED tasks
-                (suspended-but-resumable) are kept so that:
+                ``paused``, AND whose ``work_id`` is not anchoring a
+                non-terminal ``JobItem`` (admission_state IN
+                ``'queued' / 'active'``). RUNNING tasks (in-flight,
+                recovered by StaleTaskRecovery after restart), PAUSED
+                tasks (suspended-but-resumable), and PENDING tasks that
+                anchor a live JobItem are kept so that:
 
                   * the defer-queue idle gate
                     (``has_active_non_deferred_work``) still sees a
                     paused instance's task and blocks ``system_defer_queue``;
-                  * a paused instance can still be resumed after restart.
+                  * a paused instance can still be resumed after restart;
+                  * an ACTIVE JobItem whose driving Task is PENDING is
+                    not orphaned by the boot-wipe (FP1 — occurrence
+                    family: dev-boot-on-prod wipe was stranding live
+                    JobItems whose only Task was PENDING; the legacy
+                    preserve predicate missed the non-RUNNING / non-PAUSED
+                    live anchor case).
 
                 This is the mode the ``discard_on_startup`` startup hook
                 uses: a clean backlog slate without orphaning resumable
@@ -3839,15 +4098,99 @@ class TaskRepository:
         Returns:
             Number of tasks deleted.
         """
+        # PP1-adjacent (2026-10-03, report-delivery-bug-family) —
+        # JOURNAL the doomed-id list BEFORE the wipe so the
+        # env-poison dev-boot-on-prod incident family
+        # (occurrence #5 producer-deleter) leaves an audit trail
+        # even though the underlying rows are gone. Pure
+        # observability, zero behavior change. The doomed set is
+        # the preserve-complement of the keep-set keying
+        # (linked TASK status ∈ (running, paused) AND not
+        # anchoring an ACTIVE JobItem — survivor task 5803
+        # lived because it was RUNNING). Logging BEFORE the
+        # DELETE means a wipe that crashes mid-flight still
+        # has the audit line; the post-delete rowcount alone
+        # is not enough to reconstruct the impact.
+        #
+        # m1 (2026-10-03, report-delivery-bug-family) — cap the
+        # doomed-id list in the JOURNAL log so a 5k-row wipe does
+        # not emit a 180-400KB single log line. The cap emits the
+        # first ~500 ids verbatim (the operator can correlate the
+        # most-recent wipe by sample), the TOTAL count, and a
+        # truncation marker so the post-mortem is honest about
+        # what was logged. Behaviour preserved on the wipe path;
+        # only the audit-trail cardinality is bounded.
         with SQLModelSession(self.engine) as db_session:
             if preserve_in_flight:
+                # Capture doomed work_ids BEFORE the wipe. The
+                # doomed set is the preserve-complement: every
+                # task row that the preserve predicate would
+                # NOT save (not RUNNING/PAUSED AND not
+                # anchoring a non-terminal JobItem).
+                doomed_rows = db_session.exec(
+                    text(
+                        "SELECT work_id FROM task "
+                        "WHERE status NOT IN ('running', 'paused') "
+                        "AND NOT EXISTS ("
+                        "SELECT 1 FROM job_queue_items jqi "
+                        "WHERE jqi.job_id = task.work_id "
+                        f"AND jqi.admission_state IN {active_admission_states_sql()} "
+                        "AND jqi.deleted_at IS NULL"
+                        ")"
+                    )
+                ).all()
+                doomed_work_ids = [r[0] for r in doomed_rows if r[0] is not None]
+                logger.warning(
+                    "JOURNAL: TaskRepository.clear_all "
+                    "preserve_in_flight=True about to DELETE "
+                    "%d task row(s) (env-poison family audit). "
+                    "doomed_work_ids=%s",
+                    len(doomed_work_ids),
+                    _capped_doomed_id_repr(doomed_work_ids),
+                )
+                # FP1 (2026-10-03, report-delivery-bug-family) — extend
+                # the preserve predicate to cover PENDING tasks that
+                # anchor a non-terminal JobItem. The legacy predicate
+                # only preserved RUNNING/PAUSED rows, so a PENDING
+                # driving task was wiped by the boot-wipe while the
+                # JobItem survived, stranding the JobItem with no
+                # driver (the env-poison dev-boot-on-prod incident
+                # family).
+                #
+                # Cross-dialect preservation: the ``admission_state``
+                # check uses the canonical ``ACTIVE_ADMISSION_STATES``
+                # SQL IN-list (``'active','queued'``) so the predicate
+                # stays in lockstep with the queue-side admission
+                # vocabulary. Both SQLite and PostgreSQL accept the
+                # same IN-list literal (no dialect shim required).
                 stmt = sql_delete(Task).where(
                     Task.status.notin_([
                         TaskStatus.RUNNING.value,
                         TaskStatus.PAUSED.value,
                     ])
+                ).where(
+                    text(
+                        "NOT EXISTS ("
+                        "SELECT 1 FROM job_queue_items jqi "
+                        "WHERE jqi.job_id = task.work_id "
+                        f"AND jqi.admission_state IN {active_admission_states_sql()} "
+                        "AND jqi.deleted_at IS NULL"
+                        ")"
+                    )
                 )
             else:
+                doomed_rows = db_session.exec(
+                    text("SELECT work_id FROM task")
+                ).all()
+                doomed_work_ids = [r[0] for r in doomed_rows if r[0] is not None]
+                logger.warning(
+                    "JOURNAL: TaskRepository.clear_all "
+                    "preserve_in_flight=False about to DELETE "
+                    "%d task row(s) (nuclear wipe — env-poison "
+                    "family audit). doomed_work_ids=%s",
+                    len(doomed_work_ids),
+                    _capped_doomed_id_repr(doomed_work_ids),
+                )
                 stmt = sql_delete(Task)
             result = db_session.exec(stmt)
             db_session.commit()

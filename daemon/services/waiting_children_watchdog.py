@@ -158,6 +158,7 @@ from typing import Any
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.services.report_integrity_guard import parent_has_active_b_notice
+from daemon.services.attestation_ledger import L6_ANCHOR_META_KEY
 from daemon.services.pool_orchestrator import safe_notify_all_pools
 
 logger = logging.getLogger(__name__)
@@ -1524,8 +1525,39 @@ class WaitingChildrenWatchdog:
                 # re-notice the same episode from a stale WC snapshot.
                 # Cheap in-memory read (module-level ledger in
                 # ``daemon/services/report_integrity_guard``).
+                #
+                # M2 (2026-10-03, report-delivery-bug-family) —
+                # FP4 L6-anchor exemption: when a parent carries the
+                # dedicated ``L6_ANCHOR_META_KEY`` key in its
+                # instance_metadata (FP4 L6 settle-bound in flight,
+                # declared-wait outstanding), the B.S.5 skip would
+                # silently strand the worst-case backstop. The 6h
+                # settle-bound contract requires terminal to fire
+                # ONCE WITH the escalated-unverified display at the
+                # bound, not a log-only annotation — the wedge pass is
+                # the periodic re-trigger that wakes a parked
+                # L6-anchor parent, whose next message-completed
+                # signal re-runs the L6 release (set
+                # completion_gate_escalated=True, proceed with
+                # publish). Skipping the wedge for an l6_anchor
+                # parent (because (b) is concurrently active on a
+                # different episode) would defer the L6 release until
+                # the (b) episode closes — possibly long past the
+                # 6h bound. The narrow exemption only affects the
+                # B.S.5 gate; every other wedge-condition leg
+                # (children gate, live-carrier gate, anti-spam
+                # cooldown) still applies, so an l6_anchor parent
+                # with live children or a live carrier stays silent.
                 if parent_has_active_b_notice(parent_id):
-                    continue
+                    _l6_anchor = (
+                        (parent_row.instance_metadata or {}).get(
+                            L6_ANCHOR_META_KEY
+                        )
+                        if parent_row is not None
+                        else None
+                    )
+                    if not _l6_anchor:
+                        continue
                 # Wedge condition part 3: zero non-terminal children.
                 # A HEALTHY WC parent waiting on live children has no
                 # carrier yet (carriers are created at child

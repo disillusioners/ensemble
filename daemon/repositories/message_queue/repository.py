@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -14,9 +15,20 @@ from sqlmodel import Session, select, col
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc, now_utc_naive
 
 from .models import MessageQueue, MessageStatus
+# m1 (2026-10-03, report-delivery-bug-family) — shared helper for
+# capping the doomed-id list in the wipe JOURNAL log. Imported
+# lazily inside :meth:`clear_all` (a top-level import would create
+# a circular dependency via ``daemon.services.task_processor`` ↔
+# ``daemon.repositories.message_queue.__init__`` ↔ this module ↔
+# ``daemon.repositories.task.repository`` — the import would fire
+# while ``task.repository`` is still mid-initialization). The
+# helper is a pure function with no DB dependencies so the
+# late-bound import is safe.
 
 # Configuration constants
 MESSAGE_TIMEOUT_SECONDS = 3600  # 1 hour
+
+logger = logging.getLogger(__name__)
 
 
 def _coerce_datetime(value: Any) -> datetime | None:
@@ -938,14 +950,54 @@ class SQLModelMessageQueueRepository:
         Returns:
             Number of messages deleted.
         """
+        # m1 (2026-10-03, report-delivery-bug-family) — lazy
+        # import to break the circular dependency on
+        # ``daemon.repositories.task.repository`` (see the
+        # module-level note above). The helper is a pure
+        # function and safe to import here.
+        from daemon.repositories.task.repository import (
+            _capped_doomed_id_repr as _capped_doomed_id_repr_fn,
+        )
+
+        # PP1-adjacent (2026-10-03, report-delivery-bug-family) —
+        # JOURNAL the doomed-id list BEFORE the wipe so the
+        # env-poison dev-boot-on-prod incident family
+        # (occurrence #5 producer-deleter) leaves an audit trail
+        # even though the underlying rows are gone. Pure
+        # observability, zero behavior change. The doomed set is
+        # the preserve-complement of the keep-set keying
+        # (linked TASK status ∈ (running, paused) — survivor
+        # message 06b9f41f lived because its task 5803 was
+        # running). Logging BEFORE the DELETE means a wipe that
+        # crashes mid-flight still has the audit line; the
+        # post-delete rowcount alone is not enough to
+        # reconstruct the impact.
         with Session(self.engine) as session:
             if preserve_in_flight:
+                # Capture doomed ids BEFORE the wipe.
+                doomed_rows = session.exec(
+                    text(
+                        "SELECT message_id FROM message_queue "
+                        "WHERE message_id NOT IN "
+                        "(SELECT message_id FROM task "
+                        "WHERE status IN ('running', 'paused'))"
+                    )
+                ).all()
+                doomed_ids = [r[0] for r in doomed_rows]
+                logger.warning(
+                    "JOURNAL: MessageQueueRepository.clear_all "
+                    "preserve_in_flight=True about to DELETE "
+                    "%d message_queue row(s) (env-poison family "
+                    "audit). doomed_message_ids=%s",
+                    len(doomed_ids),
+                    _capped_doomed_id_repr_fn(doomed_ids),
+                )
                 # Keep messages backing a RUNNING (in-flight) or PAUSED
                 # (resumable) task; discard the rest (backlog + messages
                 # whose task is pending/terminal). The task table is
                 # intact when this runs (the startup hook clears messages
                 # before tasks), so the correlated subquery is valid.
-                # Status literals mirror ``TaskStatus.RUNNING/PaUSED``;
+                # Status literals mirror ``TaskStatus.RUNNING/Paused``;
                 # hardcoded here to avoid a cross-repo import cycle.
                 result = session.exec(
                     text(
@@ -955,6 +1007,18 @@ class SQLModelMessageQueueRepository:
                     )
                 )
             else:
+                doomed_rows = session.exec(
+                    text("SELECT message_id FROM message_queue")
+                ).all()
+                doomed_ids = [r[0] for r in doomed_rows]
+                logger.warning(
+                    "JOURNAL: MessageQueueRepository.clear_all "
+                    "preserve_in_flight=False about to DELETE "
+                    "%d message_queue row(s) (nuclear wipe — "
+                    "env-poison family audit). doomed_message_ids=%s",
+                    len(doomed_ids),
+                    _capped_doomed_id_repr_fn(doomed_ids),
+                )
                 stmt = sql_delete(MessageQueue)
                 result = session.exec(stmt)
             session.commit()

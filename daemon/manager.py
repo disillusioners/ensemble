@@ -61,6 +61,7 @@ from .repositories import (
 )
 from .repositories.task.repository import (
     TaskRepository,
+    _capped_doomed_id_repr,
 )
 # The ``set_chat_lane_active`` setter / ``is_chat_lane_active`` getter
 # are reached ONLY through ``daemon/services/pool_orchestrator.py`` now
@@ -785,6 +786,18 @@ class InstanceManager:
             # count PENDING work, while RUNNING/PAUSED (the live
             # classes) are already preserved. The joined WARNING
             # gives the operator the exact job-id audit trail.
+            #
+            # FP1 (2026-10-03, report-delivery-bug-family) — the
+            # ``clear_all(preserve_in_flight=True)`` predicate was
+            # EXTENDED to also preserve PENDING tasks that anchor a
+            # non-terminal JobItem (the env-poison dev-boot-on-prod
+            # incident family stranding ACTIVE JobItems with their
+            # PENDING driving tasks deleted). The PRESERVATION is in
+            # the predicate; the OBSERVABILITY arm below warns when
+            # the integrity smell "COMPLETED task + ACTIVE JobItem"
+            # is detected — a data inconsistency the operator needs
+            # to see even though the wipe itself is now safe for
+            # this class.
             task_repo = TaskRepository(
                 engine=self._engine,
                 on_pending_task=lambda: self._notify_all_pools()
@@ -813,6 +826,45 @@ class InstanceManager:
                     f"JobItems will be stranded (no driving Task) "
                     f"until Pattern-f1 or manual cleanup: "
                     f"{sorted(stranded_work_ids)}"
+                )
+            # FP1 observability arm — the COMPLETED-task / ACTIVE-
+            # JobItem integrity smell. The new preserve predicate
+            # keeps these rows (so the wipe is safe for this class),
+            # but the operator needs to see the inconsistency. Probe
+            # runs in a separate try/except so a probe failure does
+            # not abort the wipe itself.
+            try:
+                completed_active_work_ids = (
+                    task_repo.find_completed_tasks_on_active_jobs()
+                )
+            except Exception as probe_err:
+                logger.warning(
+                    f"discard_on_startup: completed-task / active-"
+                    f"job integrity probe failed ({probe_err}) — "
+                    f"proceeding with the wipe without the integrity "
+                    f"WARNING."
+                )
+                completed_active_work_ids = []
+            if completed_active_work_ids:
+                logger.warning(
+                    f"discard_on_startup: detected "
+                    f"{len(completed_active_work_ids)} work_id(s) "
+                    f"with a COMPLETED Task row anchoring an ACTIVE "
+                    f"JobItem (data integrity smell — Task is "
+                    f"terminal, JobItem is not). The new FP1 "
+                    f"preserve predicate keeps these rows so the "
+                    f"wipe does NOT strand the JobItem, but the "
+                    f"underlying inconsistency needs operator "
+                    # polish(...): m2 — cap the doomed-id list via
+                    # the same ``_capped_doomed_id_repr`` helper the
+                    # wipe JOURNAL log uses (m1). Re-introducing an
+                    # uncapped list here would recreate the m1 log-
+                    # flood class (180-400KB single log line on a
+                    # 5k-row integrity smell). Small lists render
+                    # identically (``repr`` of a short list is
+                    # byte-identical to the raw interpolation); large
+                    # lists get the ``[+ N more truncated]`` marker.
+                    f"investigation: {_capped_doomed_id_repr(completed_active_work_ids)}"
                 )
             task_count = task_repo.clear_all(preserve_in_flight=True)
             logger.info(

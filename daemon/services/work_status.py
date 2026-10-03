@@ -125,6 +125,21 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
     # Without this mapping ``canonicalize_status()`` would leak the
     # raw ``"watchover_terminated"`` string through to API responses.
     "watchover_terminated": "cancelled",
+    # FP3 (2026-10-03, report-delivery-bug-family) — the
+    # ``reconcile_turn_mirror`` orphan arm stamps
+    # ``terminal_reason='orphaned_no_task'`` on a JobItem whose
+    # driving Task row is GONE and whose mission is no longer live
+    # (occurrence #5, job ``fb0cf25c``). This is a SYSTEM-LEVEL
+    # terminal state distinct from any worker outcome (not a
+    # completion, not a failure, not a cancellation): the work
+    # was never delivered to a worker, the Task row vanished, and
+    # the JobItem is finalized to clean up the queue slot. Mapped
+    # to itself (a new canonical token) so the API surface can
+    # distinguish the orphan case from the worker-side failure
+    # case (``failed``) and the cancel case (``cancelled``).
+    # ``is_terminal()`` below returns True for this token (added
+    # to ``_TERMINAL_STATUSES``).
+    "orphaned_no_task": "orphaned_no_task",
 }
 
 
@@ -142,8 +157,23 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
 # and the SSE terminal-state detection). Task rows still carry
 # ``completed``; mirror rows carry ``settled``. Both are terminal;
 # the set is the union of all wire-level terminal values.
+#
+# FP3 (2026-10-03, report-delivery-bug-family) — ``orphaned_no_task``
+# joins the terminal set. The system-level orphan stamp is final: the
+# driving Task row is gone, the mission is no longer live, and the
+# JobItem is finalized to release the queue slot. Consumers that
+# filter on ``is_terminal`` (e.g. the watcher-notify path's terminal
+# branch) must recognize the new token or the orphan stamp will be
+# silently dropped on the read side.
 _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
-    {"completed", "settled", "failed", "cancelled", "dead_letter"}
+    {
+        "completed",
+        "settled",
+        "failed",
+        "cancelled",
+        "dead_letter",
+        "orphaned_no_task",
+    }
 )
 
 
@@ -206,7 +236,8 @@ def terminal_reason_variants_for(canonical_token: str) -> tuple[str, ...]:
     Args:
         canonical_token: A canonical status string (one of
             ``pending`` / ``processing`` / ``paused`` / ``completed``
-            / ``failed`` / ``cancelled`` / ``dead_letter``).
+            / ``failed`` / ``cancelled`` / ``dead_letter`` /
+            ``orphaned_no_task``).
 
     Returns:
         Tuple of accepted ``terminal_reason`` source values for the
@@ -256,9 +287,12 @@ def is_terminal(status: str) -> bool:
     Terminal statuses are: ``completed`` (work-outcome terminal —
     task rows), ``settled`` (transport-receipt terminal — mirror
     rows per ADR-MISSION-01 §6.6 I3 amendment), ``failed``,
-    ``cancelled``, ``dead_letter``. ``paused`` is **not** terminal —
-    a paused work unit can be resumed back to ``processing``.
-    ``pending`` and ``processing`` are also non-terminal.
+    ``cancelled``, ``dead_letter``, and ``orphaned_no_task``
+    (FP3 — system-level orphan stamp: driving Task row is gone
+    and the mission is no longer live). ``paused`` is **not**
+    terminal — a paused work unit can be resumed back to
+    ``processing``. ``pending`` and ``processing`` are also
+    non-terminal.
 
     The check operates on the canonical vocabulary. Callers that
     receive raw Task/JobItem status strings should first run them
