@@ -5,24 +5,13 @@ import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/materia
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { ApiService } from '../../services/api.service';
 import { SchedulerService, ValidationResponse } from '../../services/scheduler.service';
+import { SettingsService } from '../../services/settings.service';
 import { Agent } from '../../models';
-import { SearchableSelectComponent } from '../../components';
-
-// Common timezones
-const TIMEZONES = [
-  { value: 'UTC', label: 'UTC' },
-  { value: 'America/New_York', label: 'Eastern Time (US)' },
-  { value: 'America/Chicago', label: 'Central Time (US)' },
-  { value: 'America/Denver', label: 'Mountain Time (US)' },
-  { value: 'America/Los_Angeles', label: 'Pacific Time (US)' },
-  { value: 'Europe/London', label: 'London' },
-  { value: 'Europe/Paris', label: 'Paris' },
-  { value: 'Europe/Berlin', label: 'Berlin' },
-  { value: 'Asia/Tokyo', label: 'Tokyo' },
-  { value: 'Asia/Shanghai', label: 'Shanghai' },
-  { value: 'Asia/Singapore', label: 'Singapore' },
-  { value: 'Australia/Sydney', label: 'Sydney' },
-];
+import { SearchableSelectComponent, SearchableSelectOption } from '../../components';
+import {
+  formatTimezoneOffset,
+  getBrowserNativeTimezones,
+} from '../../utils/timezone-format';
 
 // Standalone validator function (defined before class to avoid initialization order issues)
 function scheduleValidator(control: AbstractControl): ValidationErrors | null {
@@ -85,8 +74,9 @@ export class ScheduleCreateDialogComponent implements OnInit {
   private readonly fb = inject(FormBuilder);
   private readonly api = inject(ApiService);
   private readonly schedulerService = inject(SchedulerService);
+  private readonly settingsService = inject(SettingsService);
   private readonly snackBar = inject(MatSnackBar);
-  
+
   protected readonly dialogRef = inject(MatDialogRef<ScheduleCreateDialogComponent>);
   protected readonly data = inject<ScheduleCreateDialogData>(MAT_DIALOG_DATA);
 
@@ -97,7 +87,63 @@ export class ScheduleCreateDialogComponent implements OnInit {
   protected readonly isValid = signal<boolean | null>(null);
   protected readonly validationError = signal<string | null>(null);
 
-  protected readonly timezones = TIMEZONES;
+  // ── Timezone picker (single source of truth = settings service) ─────
+  //
+  // Mirrors the Settings page's picker. The canonical IANA list comes
+  // from ``GET /api/settings/timezones`` (zoneinfo-backed on the
+  // server); ``Intl.supportedValuesOf`` is the secondary fallback when
+  // the endpoint is briefly unavailable; both sources empty → the
+  // picker hides and a plain text input renders (server validates the
+  // IANA name). The dialog has its own default ('UTC') — there is no
+  // "Auto / not set" sentinel because the schedule MUST have a zone.
+  //
+  // Public read-only signals/computed so the template can bind to
+  // them directly under Angular's strictTemplates, matching the
+  // settings page's surface.
+  protected readonly apiTimezones = signal<string[] | null>(null);
+  protected readonly customTimezone = signal<string>('');
+
+  /**
+   * Resolved option list for the searchable picker. Source priority:
+   *   1. server-sourced list (non-empty) — authoritative; same
+   *      tzdata the validator reads
+   *   2. ``Intl.supportedValuesOf('timeZone')`` (non-empty) —
+   *      browser-native fallback when the endpoint is unavailable
+   *   3. empty array — both sources gone; the picker hides via
+   *      ``isTzNativeSupported()`` and the text-input row renders
+   */
+  protected readonly timezoneOptions = computed<SearchableSelectOption<string>[]>(() => {
+    const api = this.apiTimezones();
+    if (api !== null && api.length > 0) {
+      return api.map((zone) => ({
+        value: zone,
+        label: `${zone} (UTC${formatTimezoneOffset(zone)})`,
+      }));
+    }
+    const intlZones = getBrowserNativeTimezones();
+    if (intlZones.length > 0) {
+      return intlZones.map((zone) => ({
+        value: zone,
+        label: `${zone} (UTC${formatTimezoneOffset(zone)})`,
+      }));
+    }
+    return [];
+  });
+
+  /**
+   * Drives the picker-vs-text-input render. Both the server list and
+   * the browser-native list must be unavailable (or empty) before
+   * the picker hides — a non-empty Intl list keeps the picker
+   * usable when the endpoint is briefly broken.
+   */
+  protected readonly isTzNativeSupported = computed<boolean>(() => {
+    const api = this.apiTimezones();
+    if (api !== null && api.length > 0) {
+      return true;
+    }
+    return getBrowserNativeTimezones().length > 0;
+  });
+
   protected readonly scheduleTypes = [
     { value: 'cron', label: 'Cron Expression' },
     { value: 'interval', label: 'Interval (seconds)' },
@@ -132,7 +178,8 @@ export class ScheduleCreateDialogComponent implements OnInit {
   ngOnInit(): void {
     this.loadAgents();
     this.setupTypeChangeListener();
-    
+    this.loadTimezoneOptionsFromApi();
+
     // Pre-fill form if editing
     if (this.data?.editMode) {
       this.form.patchValue({
@@ -144,6 +191,40 @@ export class ScheduleCreateDialogComponent implements OnInit {
         session_mode: this.data.session_mode || 'new_session'
       });
     }
+  }
+
+  /**
+   * Fetch the canonical IANA list from ``GET /api/settings/timezones``.
+   * On success the picker renders from this list; on failure the
+   * signal stays at ``null`` so the computed falls back to
+   * ``Intl.supportedValuesOf`` and ultimately the text-input row.
+   * The dialog never persists the zone itself — the schedule-create
+   * API validates the IANA name at submit time — so a stale list is
+   * no worse than the pre-fix experience.
+   */
+  private loadTimezoneOptionsFromApi(): void {
+    this.settingsService.getTimezoneOptions().subscribe({
+      next: (resp) => {
+        const zones = Array.isArray(resp?.timezones) ? resp.timezones : [];
+        this.apiTimezones.set(zones);
+      },
+      error: () => {
+        // Leave apiTimezones at null so the computed falls through to
+        // the Intl list / text-input fallback path.
+      },
+    });
+  }
+
+  /**
+   * Fallback-mode input handler. Writes the typed IANA name into the
+   * form's `timezone` control so submit picks it up — the server
+   * validator is the only truth on whether the name resolves.
+   */
+  protected onCustomTimezoneChange(event: Event): void {
+    const target = event.target as HTMLInputElement;
+    const value = target.value;
+    this.customTimezone.set(value);
+    this.form.get('timezone')?.setValue(value);
   }
 
   private loadAgents(): void {

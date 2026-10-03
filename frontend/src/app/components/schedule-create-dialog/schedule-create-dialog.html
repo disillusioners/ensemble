@@ -193,10 +193,25 @@
       <!-- Timezone -->
       <div class="form-group">
         <label class="form-label">Timezone</label>
-        <app-searchable-select
-          formControlName="timezone"
-          [options]="timezones"
-        />
+        @if (isTzNativeSupported()) {
+          <app-searchable-select
+            formControlName="timezone"
+            [options]="timezoneOptions()"
+            placeholder="Select a timezone"
+          />
+        } @else {
+          <input
+            type="text"
+            [value]="customTimezone()"
+            (input)="onCustomTimezoneChange($event)"
+            placeholder="e.g., Asia/Bangkok"
+            class="form-input"
+          />
+          <p class="form-hint">
+            Timezone list unavailable — enter an IANA name (e.g. <code>Asia/Bangkok</code>).
+            Server validates the name on save.
+          </p>
+        }
       </div>
 
       <!-- Project -->
