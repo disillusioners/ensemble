@@ -364,6 +364,59 @@ class TestPreloadMcpTools:
         assert call_kwargs["tool_call_timeout"] == 0
         assert call_kwargs["tool_call_timeout"] is not None
 
+    @pytest.mark.asyncio
+    async def test_opendesign_per_server_timeout_wins_over_global(self, service, manager):
+        """Real opendesign builtin: 600s per-server value WINS over the 120s global.
+
+        End-to-end through the REAL registry (no patching): the server
+        row is named ``opendesign``, ``McpPoolConfig.tool_call_timeout``
+        stays 120, and the resolution ternary must pick the definition's
+        600s for ``create_lazy_mcp_tools``.
+        """
+        server = _make_server(name="opendesign", is_builtin=True)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+        service.get_schemas_for_server = AsyncMock(
+            return_value=[_make_schema("od_generate_design", "opendesign")]
+        )
+
+        with patch(
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[_make_tool(name="mcp_opendesign_od_generate_design")],
+        ) as mock_create:
+            await service.preload_mcp_tools("inst-1")
+
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["tool_call_timeout"] == 600, (
+            f"Expected opendesign per-server override (600), "
+            f"got {call_kwargs['tool_call_timeout']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_real_builtin_without_override_falls_back_to_global(self, service, manager):
+        """Real builtin WITHOUT an override (context7) falls back to the global 120s.
+
+        Pins the flip side of the opendesign contract: only the
+        opendesign lane gets 600s — context7 resolves ``None`` and keeps
+        the pool-wide default.
+        """
+        server = _make_server(name="context7", is_builtin=True)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+        service.get_schemas_for_server = AsyncMock(
+            return_value=[_make_schema("resolve-library-id", "context7")]
+        )
+
+        with patch(
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[_make_tool(name="mcp_context7_resolve_library_id")],
+        ) as mock_create:
+            await service.preload_mcp_tools("inst-1")
+
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["tool_call_timeout"] == 120, (
+            f"Expected global default (120) for a builtin without override, "
+            f"got {call_kwargs['tool_call_timeout']}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestGetMcpTools — sync cache read (unchanged)
@@ -1682,3 +1735,24 @@ class TestSessionProviderHelpers:
             result = service._get_per_server_timeout("future-builtin")
 
         assert result is None
+
+    # ------------------------------------------------------------------
+    # _get_per_server_timeout — REAL registry pins (opendesign contract)
+    # ------------------------------------------------------------------
+
+    def test_get_per_server_timeout_opendesign_returns_600(self, service):
+        """Real registry: opendesign's definition carries the 600s override.
+
+        Pins the production definition through the production registry —
+        the value both the warmup pool and the preload layer consume.
+        """
+        assert service._get_per_server_timeout("opendesign") == 600
+
+    def test_get_per_server_timeout_plane_returns_none(self, service):
+        """Real registry: plane has NO ``tool_call_timeout`` override.
+
+        plane overrides ``tool_name_prefix`` / ``read_only_tools`` /
+        ``resilience_config`` but inherits the base-class ``None``
+        timeout, so it keeps the global default.
+        """
+        assert service._get_per_server_timeout("plane") is None
