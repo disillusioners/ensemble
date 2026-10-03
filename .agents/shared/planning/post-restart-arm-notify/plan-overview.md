@@ -20,7 +20,7 @@ research-findings doc the Phase 2 plan used).
 | # | File | One-line purpose | Size |
 |---|------|------------------|------|
 | 1 | `plan-overview.md` (THIS FILE) | Synthesized entry point — the developer reads this first. Goal, ACs, non-goals, phase table, hard constraints, open questions, ADR range | ~210 lines |
-| 2 | `architecture-recommendation.md` | The technical analysis — FA1–FA6 (six focus areas) + 12 cross-cutting invariants. Cite this for "what" + "why"; D-FA1.x for sub-decisions | 1028 lines |
+| 2 | `architecture-recommendation.md` | The technical analysis — REWRITTEN by the validation round (c77c5ff1): FA1–FA6 verification verdicts + consolidated plan deltas (:136-156). Cite this for "what" + "why"; D-FA1.x for sub-decisions | 178 lines |
 | 3 | `decisions.md` | The ADR-style extraction (ADR-039–ADR-044). Six ADRs in Context → Options → Decision → Consequence format. Cite this for "the ruling" | 389 lines |
 | 4 | `test-strategy.md` | The AC → test-case map (T1.1–T6.3, D1–D6) + per-pack conventions + the regression matrix. Cite this for "how we verify" | 563 lines |
 | 5 | `risk-register.md` | The risk inventory (R-1..R-20) + the Live-Outright-Refusal Invariant cardinal rule + risk → test-case matrix. Cite this for "what could go wrong" | 284 lines |
@@ -33,6 +33,50 @@ research-findings doc the Phase 2 plan used).
 **Total: ~3,830 lines of planning. The plan-overview (this file)
 is the only required read; the rest is on-demand per the matrix
 in §4 below.**
+
+---
+
+## 0b. Architecture Validation Round (c77c5ff1) — deltas applied
+
+The architect (controller) validated this plan against actual code
+at post-`dac38fd8` HEAD and committed a REWRITTEN
+`architecture-recommendation.md` (178 lines, authoritative,
+READ-ONLY). **Verdict: the architecture is VALIDATED on all six
+focus areas** — `pending_wakes` on `releases/state.json` (ADR-039,
+with atomicity reword), boot + 90s-tick sweep delivery (ADR-040),
+terminal-class-event gating (ADR-042, with one CRITICAL predicate
+fix), re-stamp routing for AC3 (ADR-041 — proven end-to-end, no
+dispatch-logic change), bounded supersession, and the env
+kill-switch (ADR-044, with the abandon-on-switch-off gap closed).
+All six ADR numbers (ADR-039–ADR-044) are UNCHANGED.
+
+Three MUST findings forced plan deltas (consolidated list at
+`architecture-recommendation.md:136-156`; all 3 MUST + 7 SHOULD +
+4 NICE deltas are now folded into the sibling artifacts):
+
+1. **Wake predicate defect (MUST):** `_TERMINAL_EVENTS`
+   (`upgrade_journal.py:983`) has NO `"restart"` member and the
+   only existing terminal reader is PROMOTE-only (`:1016`) — as
+   planned, the wake would NEVER fire for intentional restarts.
+   Fixed: sibling `WAKE_TERMINAL_EVENTS` + wake-owned reader
+   (Phase 2 T13); mutation guard T4.8 (Phase 3).
+2. **Kill-switch × persisted records (MUST):** abandon-on-switch-off
+   semantics (`reason=kill_switch_off` + one history event,
+   one-time pass) — Phase 2 T14 / T5.16; re-enable-no-stale pin
+   T5.17 (Phase 3).
+3. **Arm-time atomicity reword (MUST):** the original claim that
+   the arm+wake write is self-atomic was misleading — atomicity
+   is BY THE CALLER-ACQUIRED journal lock (`journal_write` has no
+   internal lock); `arm_pending_wake` pinned INSIDE the
+   lock-holding `try` (Phase 1 T12 placement + Phase 3 T6.4
+   structural pin).
+
+The SHOULD deltas (#4 CAS `wait_s≈30`, #5 delivered-mark retry
+semantics, #6 Site 1 test T3.5, #7 T3.3 reword, #8 defensive
+pre-enqueue stamp note, #9 burst-abort risk R-21, #10 sweep
+hardening) and NICE items (#11–#14, recorded in `decisions.md`
+"Deferred (NICE) items") are likewise applied. This revision did
+NOT modify `architecture-recommendation.md`.
 
 ---
 
@@ -62,11 +106,11 @@ at manager.py:7984).
 |---|---|---|---|---|
 | **AC1** | Arm-time durable record (run_id, arming instance_id + agent_id, originating source routing context, pending state; written transactionally with the arm) | `architecture-recommendation.md` §FA1, §FA2 | ADR-039 | **Phase 1** |
 | **AC2** | Boot delivery (detect pending records at startup, enqueue self-describing wake to the recorded instance) | §FA3 | ADR-040 | **Phase 2** |
-| **AC3** | ROUTING (wake turn's outcome report flows back to the confirming chat — non-negotiable) | §FA3.3 | ADR-041 | **Phase 2** (test) + **Phase 3** (structural) |
-| **AC4** | Terminal-state gating (no wake while pipeline could still roll back, OR race harmless by design) | §FA4 | ADR-042 | **Phase 2** (predicate) + **Phase 3** (edge cases) |
-| **AC5** | Edge cases (missing instance → front-door ari fallback or surfaced notice; multiple records → coalesce sensibly; idempotent delivery crash-safely — unrelated later restart must not re-deliver; boot must never wedge on delivery failure; live-env refused restarts → structurally no record) | §FA5 | ADR-043 + ADR-044 | **Phase 2** (core + T5.1–T5.11) + **Phase 3** (T5.13–T5.15) |
-| **AC6** | Reuse existing machinery (no parallel messaging subsystem) | §FA3.1, §FA6 | (cross-cutting; ADR-039/040/043/044 all assert) | **Phase 3** (structural tests T6.1–T6.3) |
-| **AC7** | Tests following `tests/unit/` + `tests/job_queue/` conventions | `test-strategy.md` | (cross-cutting) | **Phase 1** (T1.* + T4.1–T4.6 + T5.12) + **Phase 2** (T2.* + T3.* + T5.1–T5.11) + **Phase 3** (T5.13–T5.15 + T6.*) + **Phase 4** (T4.7 banner regression + D1–D6 drill) |
+| **AC3** | ROUTING (wake turn's outcome report flows back to the confirming chat — non-negotiable) | §FA3.3 | ADR-041 | **Phase 2** (tests T3.1–T3.4) + **Phase 3** (T3.5 Site 1 + structural) |
+| **AC4** | Terminal-state gating (no wake while pipeline could still roll back, OR race harmless by design) | §FA4 | ADR-042 | **Phase 2** (`WAKE_TERMINAL_EVENTS` predicate, T13) + **Phase 3** (edge cases + T4.8 mutation guard) |
+| **AC5** | Edge cases (missing instance → front-door ari fallback or surfaced notice; multiple records → coalesce sensibly; idempotent delivery crash-safely — unrelated later restart must not re-deliver; boot must never wedge on delivery failure; live-env refused restarts → structurally no record; kill-switch off → abandon, re-enable → no stale flood) | §FA5 | ADR-043 + ADR-044 | **Phase 2** (core + T5.1–T5.11 + T5.16) + **Phase 3** (T5.13–T5.15 + T5.17) |
+| **AC6** | Reuse existing machinery (no parallel messaging subsystem) | §FA3.1, §FA6 | (cross-cutting; ADR-039/040/043/044 all assert) | **Phase 3** (structural tests T6.1–T6.4) |
+| **AC7** | Tests following `tests/unit/` + `tests/job_queue/` conventions | `test-strategy.md` | (cross-cutting) | **Phase 1** (T1.* + T4.1–T4.6 + T5.12) + **Phase 2** (T2.* + T3.1–T3.4 + T5.1–T5.11 + T5.16) + **Phase 3** (T3.5 + T4.8 + T5.13–T5.15 + T5.17 + T6.1–T6.4) + **Phase 4** (T4.7 banner regression + D1–D6 drill) |
 
 ---
 
@@ -151,9 +195,9 @@ boundary). The phases build on each other; later phases
 
 | Phase | Name | Objective | Tasks | Key files touched | Status |
 |-------|------|-----------|-------|-------------------|--------|
-| **1** | Arm-Side Record | Add the durable `pending_wakes` JSON key to `releases/state.json`; mint `PendingWake` dataclass + lifecycle helpers (`arm_pending_wake`, `mark_wake_delivering`, `mark_wake_delivered`, `mark_wake_abandoned`, `list_pending_wakes`, `is_pipeline_terminal`); wire the arm-side capture helpers into both arm paths. Atomic with the existing arm write. | 11 | `daemon/tools/upgrade_journal.py` (six new helpers + new dataclass); `daemon/tools/upgrade_tools.py` (three new capture helpers + two `arm_pending_wake` calls in existing `try` blocks); `tests/unit/tools/test_post_restart_arm_notify_journal.py` (NEW) | pending |
-| **2** | Boot Sweep + Wake Delivery | Extend `UpgradeJournalSweepService` with `sweep_wake_records`; wire it into the existing boot pass and the 90s tick. Wake = `manager.enqueue_message` with re-stamped source. Idempotency via `status` lifecycle. Best-effort, never wedges. | 12 | `daemon/services/upgrade_journal_sweep.py` (new `WakeSweepResult` + new `sweep_wake_records` + helpers); `daemon/api.py` (one new wrapped call in boot pass); `tests/unit/services/test_post_restart_arm_notify_sweep.py` (NEW); `tests/job_queue/test_post_restart_arm_notify_routing.py` (NEW) | pending |
-| **3** | Terminal-State Gating + Edge Cases + Structural AC6 | Close long-downtime double-arm coalesce (T5.13), paused-instance defer (T5.14), terminal-instance revival (T5.15). Add the load-bearing structural tests (T6.1–T6.3) that enforce AC6 (no new file / endpoint / table) at the integration level. | 8 | `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` (NEW); `tests/unit/test_post_restart_arm_notify_no_parallel.py` (NEW); zero source changes | pending |
+| **1** | Arm-Side Record | Add the durable `pending_wakes` JSON key to `releases/state.json`; mint `PendingWake` dataclass + lifecycle helpers (`arm_pending_wake`, `mark_wake_delivering`, `mark_wake_delivered`, `mark_wake_abandoned`, `list_pending_wakes` + the parameterized terminal walker); wire the arm-side capture helpers into both arm paths INSIDE the lock-holding `try` (delta #3). Atomic with the existing arm write under the caller-acquired journal lock. | 12 | `daemon/tools/upgrade_journal.py` (six new helpers + new dataclass); `daemon/tools/upgrade_tools.py` (three new capture helpers + two `arm_pending_wake` calls in existing `try` blocks); `tests/unit/tools/test_post_restart_arm_notify_journal.py` (NEW) | pending |
+| **2** | Boot Sweep + Wake Delivery | Extend `UpgradeJournalSweepService` with `sweep_wake_records`; wire it into the existing boot pass and the 90s tick. Wake = `manager.enqueue_message` with re-stamped source. Terminal gating via `WAKE_TERMINAL_EVENTS` + wake-owned reader (delta #1). Kill-switch abandon-on-switch-off (delta #2). CAS `wait_s≈30` + delivered-mark retry semantics + sweep hardening (deltas #4/#5/#10). Idempotency via `status` lifecycle. Best-effort, never wedges. | 17 | `daemon/services/upgrade_journal_sweep.py` (new `WakeSweepResult` + new `sweep_wake_records` + helpers); `daemon/api.py` (one new wrapped call in boot pass); `tests/unit/services/test_post_restart_arm_notify_sweep.py` (NEW); `tests/job_queue/test_post_restart_arm_notify_routing.py` (NEW) | pending |
+| **3** | Terminal-State Gating + Edge Cases + Structural AC6 | Close long-downtime double-arm coalesce (T5.13), paused-instance defer (T5.14), terminal-instance revival (T5.15), kill-switch re-enable-no-stale (T5.17). Add the load-bearing structural tests (T6.1–T6.4 — T6.4 = delta #3 lock-position pin) + the mutation guard (T4.8, delta #1) + the Site 1 dispatch test (T3.5, delta #6). | 12 | `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` (NEW); `tests/unit/test_post_restart_arm_notify_no_parallel.py` (NEW); zero source changes | pending |
 | **4** | Banner Updates + Runbook + Drill + Release Notes | Update the obsolete banner text in `upgrade_tools.py`; author the operator runbook; author the bash drill; append the release-notes line. | 10 | `daemon/tools/upgrade_tools.py` (string literal swap in two arm-return branches); `docs/runbooks/post-restart-arm-notify.md` (NEW); `test/drills/post_restart_arm_notify_drill.sh` (NEW); `RELEASE_NOTES.md` (APPEND); `tests/unit/tools/test_post_restart_arm_notify_banner.py` (NEW) | pending |
 
 **Phase ordering rationale:** Phase 1 establishes the durable
@@ -169,7 +213,7 @@ packs are non-regressed.
 
 | | Phase 1 | Phase 2 | Phase 3 | Phase 4 |
 |---|---|---|---|---|
-| **Phase 1** | — | tight (Phase 2 consumes Phase 1 helpers: `list_pending_wakes`, `mark_wake_*`, `is_pipeline_terminal`, `PendingWake`) | tight (Phase 3 tests ride the Phase 1 surface) | loose (Phase 4 docs reference Phase 1 by ADR) |
+| **Phase 1** | — | tight (Phase 2 consumes Phase 1 helpers: `list_pending_wakes`, `mark_wake_*`, `latest_matching_event` + defines `WAKE_TERMINAL_EVENTS` on top, `PendingWake`) | tight (Phase 3 tests ride the Phase 1 surface) | loose (Phase 4 docs reference Phase 1 by ADR) |
 | **Phase 2** | tight | — | tight (Phase 3 long-downtime + paused + revival tests ride the Phase 2 sweep) | loose (Phase 4 drill exercises the Phase 2 wake branch) |
 | **Phase 3** | tight | tight | — | loose (Phase 4 unskips the Phase 3 drill smoke) |
 | **Phase 4** | loose | loose | loose | — |
@@ -287,6 +331,27 @@ to; the corresponding risks are in `risk-register.md`.
    of `decisions.md` and that no `ADR-03[3-8]` reference is
    minted by any file in this directory (the Phase 1 +
    Phase 2 + Phase 3 + Phase 4 plans all use the new range).
+6. **R-21 (medium severity) — launcher burst-abort gap
+   (architecture delta #9):** the launcher's plain exit-1 path
+   (`launcher.sh:902-939`) journals NO terminal event, so the
+   wake abandons at grace (600s) and the user receives NO
+   notification of the burst-abort itself. The stays-down story
+   remains watchdog ADR-025(b) — complementary, not superseded.
+   **The reviewer should confirm the acknowledgment (not a fix)
+   is the intended scope for this feature.**
+7. **Known limitation (architecture delta #13, NICE — flagged,
+   out of scope):** `_progressive_sent_sources` is keyed by
+   source_id (channel id, e.g. `"discord"`), not full source —
+   multi-user concurrent arms on ONE instance could
+   cross-suppress each other's progressive chunks (single-user
+   arming verified safe); telegram/slack ride the identical
+   dispatcher path but were not exercised by the validation
+   analysis. Recorded in `decisions.md` Deferred-NICE #13.
+8. **R-10 CLOSED** — the boot-ordering risk is resolved by the
+   architect's post-`dac38fd8` verification (discard wipe runs
+   before sweep construction; workers ready via
+   `setup_worker_pool`). Kept in the register (marked CLOSED)
+   so the T2.1 pin's rationale stays discoverable.
 
 ---
 

@@ -24,7 +24,15 @@ for an instance in `COMPLETED` / `TERMINATED` / `ERROR` /
 `FAILED`). Also add the **structural tests** that enforce AC6
 (no new file, no new HTTP endpoint, no new SQLModel table) at
 the integration level — these are the load-bearing "we did
-not silently add a parallel subsystem" assertions.
+not silently add a parallel subsystem" assertions — PLUS the
+four architect-validation pins (architecture deltas #1, #2,
+#3, #6): the `WAKE_TERMINAL_EVENTS` mutation guard (T4.8 —
+contains `"restart"` AND `_TERMINAL_EVENTS` does not), the
+`arm_pending_wake` call-site pin inside the lock-holding
+`try` (T6.4 — a future refactor pulling it out is a silent
+torn-write risk), the kill-switch re-enable-no-stale-flood
+test (T5.17), and the Site 1 progressive-dispatch test
+(T3.5).
 
 **Exit in one sentence:** on demo, two arms in a single daemon
 lifecycle coalesce to ONE wake with a run-list; a wake for a
@@ -33,9 +41,13 @@ the `Task` until resume; a wake for a `COMPLETED` instance
 revives the instance to `RUNNING` and delivers; and the
 integration-level structural tests assert the journal file
 list, the HTTP router URL list, and the SQLModel metadata
-table list are all UNCHANGED by this feature — all proven by
-the new test pack (T5.13, T5.14, T5.15, T6.1, T6.2, T6.3) at
-100% green.
+table list are all UNCHANGED by this feature; and the
+architect-validation pins are GREEN — the `WAKE_TERMINAL_EVENTS`
+mutation guard (T4.8), the `arm_pending_wake` lock-holding-try
+structural pin (T6.4), the kill-switch re-enable-no-stale-flood
+test (T5.17), and the Site 1 progressive-dispatch test (T3.5) —
+all proven by the test packs (T5.13, T5.14, T5.15, T5.17, T6.1,
+T6.2, T6.3, T6.4, T3.5, T4.8) at 100% green.
 
 ---
 
@@ -119,7 +131,7 @@ swap is not a wake concern (R-19 mitigation).**
 
 **D4 — AC6 structural tests assert "no parallel machinery" at
 the integration level (D-FA6.1, invariants 1/2/3/4).** Three
-tests:
+tests (plus the architect-delta T6.4 lock-position pin):
 
 - **T6.1** enumerates `<install_dir>/releases/` after a
   `system_restart` arm + a boot sweep, and asserts the file
@@ -131,6 +143,11 @@ tests:
 - **T6.3** enumerates the SQLModel metadata's table list and
   asserts the list does NOT include `arm_wake_records` or any
   new table for the wake.
+- **T6.4** (architecture delta #3) pins the `arm_pending_wake`
+  call-site position INSIDE the lock-holding `try` at both arm
+  sites (restart ~`:2209` / upgrade ~`:2850`, both after
+  `write_pending_op`) — a future refactor pulling it out is a
+  silent torn-write risk.
 
 These tests are the load-bearing "the architect did not slip a
 parallel subsystem in" assertions. A regression in any of them
@@ -138,9 +155,12 @@ is a release blocker — the AC6 guarantee is structural, not
 behavioral.
 
 **D5 — The edge-case tests are test-strategy.md T5.13, T5.14,
-T5.15 (AC5 — additional); the structural tests are T6.1, T6.2,
-T6.3 (AC6).** No new code in Phase 3; the tests ride the
-existing Phase 1 + Phase 2 surface. The "additional" edge cases
+T5.15 (+ T5.17, the delta #2 re-enable-no-stale-flood test) (AC5
+— additional); the structural tests are T6.1–T6.4 (AC6, T6.4 =
+delta #3 lock pin); the delta pins T4.8 (mutation guard) and
+T3.5 (Site 1 dispatch) extend the Phase 1 journal pack and the
+Phase 2 routing pack respectively.** No new code in Phase 3;
+the tests ride the existing Phase 1 + Phase 2 surface. The "additional" edge cases
 (long-downtime, paused, revival) are not in Phase 2 because
 they require multi-record journal state and instance-state
 transitions that are best exercised in a dedicated test pack
@@ -177,8 +197,10 @@ modifying any source.
 
 | File | What it covers | Test-strategy case IDs |
 |---|---|---|
-| `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` | Long-downtime double-arm (two arms in a single daemon lifecycle coalesce to ONE wake); paused-instance defer (wake delivered, `Task` held `PENDING` until resume); terminal-instance revival (wake's `enqueue_message` revives `COMPLETED` / `TERMINATED` / `ERROR` / `FAILED` to `RUNNING` and delivers). Convention precedent: `tests/job_queue/test_a4_f14_orphan_detection.py` and `tests/job_queue/test_dead_letter_*` | T5.13, T5.14, T5.15 |
-| `tests/unit/test_post_restart_arm_notify_no_parallel.py` | Structural AC6: no new file in `<install_dir>/releases/`; no new HTTP endpoint; no new SQLModel table. The tests enumerate the respective surfaces and assert the pre-feature baseline. Convention precedent: the existing `tests/unit/test_p21_release_journal_no_extra_files.py` shape (the Phase 2 file-list assertion) — adapt the same pattern | T6.1, T6.2, T6.3 |
+| `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` | Long-downtime double-arm (two arms in a single daemon lifecycle coalesce to ONE wake); paused-instance defer (wake delivered, `Task` held `PENDING` until resume); terminal-instance revival (wake's `enqueue_message` revives `COMPLETED` / `TERMINATED` / `ERROR` / `FAILED` to `RUNNING` and delivers); kill-switch re-enable-no-stale-flood (T5.17 — after an OFF period that abandoned records, re-enabling delivers nothing stale). Convention precedent: `tests/job_queue/test_a4_f14_orphan_detection.py` and `tests/job_queue/test_dead_letter_*` | T5.13, T5.14, T5.15, T5.17 |
+| `tests/unit/test_post_restart_arm_notify_no_parallel.py` | Structural AC6: no new file in `<install_dir>/releases/`; no new HTTP endpoint; no new SQLModel table; PLUS the T6.4 structural lock pin (`arm_pending_wake` call-site position INSIDE the lock-holding `try` at both arm sites — architecture delta #3). The tests enumerate the respective surfaces and assert the pre-feature baseline. Convention precedent: the existing `tests/unit/test_p21_release_journal_no_extra_files.py` shape (the Phase 2 file-list assertion) — adapt the same pattern | T6.1, T6.2, T6.3, T6.4 |
+| `tests/unit/tools/test_post_restart_arm_notify_journal.py` (EXTENDED by Phase 3 — created in Phase 1) | T4.8 mutation guard (architecture delta #1): `WAKE_TERMINAL_EVENTS` contains `"restart"` AND `_TERMINAL_EVENTS` does NOT | T4.8 |
+| `tests/job_queue/test_post_restart_arm_notify_routing.py` (EXTENDED by Phase 3 — created in Phase 2) | T3.5 Site 1 progressive-dispatch test (architecture delta #6): `instance_messaging.py:3053-3128` with `message_source="discord:user123"` → `dispatch_source` used verbatim; the routing stub captures BOTH `dispatch_message` AND `dispatch_completed` | T3.5 |
 
 ### Files NOT touched (explicit non-modification)
 
@@ -211,8 +233,12 @@ modifying any source.
 | **T4** | **Add no-new-file structural test (T6.1) to `tests/unit/test_post_restart_arm_notify_no_parallel.py`** — at the integration level, enumerate the `<install_dir>/releases/` directory after a `system_restart` arm + a boot sweep (the integration harness uses a `tmp_path` install dir; no live contact). Assert the file list is exactly the pre-feature baseline: `current` (symlink) + `previous` (symlink) + `state.json` + (optional) `manifest.json` for the staged release. The wake's `pending_wakes` is a JSON key on `state.json`, not a new file. The test imports the pre-feature baseline from a constant (captured at PR-time — the test runner reads the pre-PR tree, not the working tree, to avoid self-reference) | Phase 1 + Phase 2 GREEN | Test GREEN; a regression that adds a new file (e.g. a leaked `wake_records.json`) FAILS the test loudly |
 | **T5** | **Add no-new-endpoint structural test (T6.2) to the same file** — at the integration level, enumerate the HTTP router's URL prefixes (the union of all `APIRouter` includes in `daemon/api.py`). Assert the list does NOT include any `/post-restart-arm-notify`, `/wake`, `/arm-notify`, or `/pending-wakes` prefix. The test imports the router list dynamically (the api.py lifespan imports the routers) and compares to a pre-feature baseline. The pre-feature baseline is the union at the pre-PR tip — captured at PR-time by `git show origin/HEAD:daemon/api.py | grep -E "@.*router\."` (or the equivalent static scan) | Phase 1 + Phase 2 GREEN | Test GREEN; a regression that adds a new endpoint (e.g. a leaked `/wake` route) FAILS the test loudly |
 | **T6** | **Add no-new-table structural test (T6.3) to the same file** — at the integration level, enumerate the SQLModel metadata's table list (`SQLModel.metadata.tables.keys()`). Assert the list does NOT include `arm_wake_records`, `pending_wake`, `wake`, or any new table for the wake. The pre-feature baseline is the table list at the pre-PR tip — captured at PR-time by `git show origin/HEAD:daemon/persistence.py | grep -E "class.*Table"` (or the equivalent static scan). The test uses a sandbox DB (the test's `conftest` provides a `tmp_path` SQLite fixture) | Phase 1 + Phase 2 GREEN | Test GREEN; a regression that adds a new table (e.g. a leaked `arm_wake_records`) FAILS the test loudly |
-| **T7** | **Non-regression check: full Phase 1 + Phase 2 packs remain green** — Phase 3 adds tests but does not modify any source. The new test files (T1, T2, T3) use the same `tmp_path` + `monkeypatch` + `AsyncMock` fixture pattern as Phase 1 + Phase 2. The structural tests (T4, T5, T6) use the same `tmp_path` + sandbox-DB fixture pattern. None of the new tests touch the source files | T1–T6 | `pytest tests/unit/tools/test_post_restart_arm_notify_journal.py tests/unit/services/test_post_restart_arm_notify_sweep.py tests/job_queue/test_post_restart_arm_notify_routing.py tests/job_queue/test_post_restart_arm_notify_edge_cases.py tests/unit/test_post_restart_arm_notify_no_parallel.py -v` exits 0 with all T1.* + T2.* + T3.* + T4.* + T5.1–T5.15 + T6.1–T6.3 GREEN |
+| **T7** | **Non-regression check: full Phase 1 + Phase 2 packs remain green** — Phase 3 adds tests but does not modify any source. The new test files (T1, T2, T3) use the same `tmp_path` + `monkeypatch` + `AsyncMock` fixture pattern as Phase 1 + Phase 2. The structural tests (T4, T5, T6) use the same `tmp_path` + sandbox-DB fixture pattern. None of the new tests touch the source files | T1–T6 | `pytest tests/unit/tools/test_post_restart_arm_notify_journal.py tests/unit/services/test_post_restart_arm_notify_sweep.py tests/job_queue/test_post_restart_arm_notify_routing.py tests/job_queue/test_post_restart_arm_notify_edge_cases.py tests/unit/test_post_restart_arm_notify_no_parallel.py -v` exits 0 with all T1.* + T2.* + T3.1–T3.5 + T4.1–T4.8 + T5.1–T5.17 + T6.1–T6.4 GREEN |
 | **T8** | **Drill integration (test-only) — add a fixture-only invocation in `test/drills/post_restart_arm_notify_drill.sh` SKETCH** — the drill is authored in Phase 4 (the runbook is a docs + runbook concern); Phase 3 only adds a `pytest`-level drill smoke that the bash drill's contract is reachable. The smoke invokes the bash drill in a sandbox install dir and asserts the bash exit code is `0` (per the Phase 2 drill convention in `test-strategy.md` §3.2). The drill body is a Phase 4 deliverable; Phase 3's smoke is a placeholder that exits SKIPPED until Phase 4 lands | T1–T6 | Smoke is registered (the `conftest` sees the path); on Phase 4 land, the smoke becomes GREEN |
+| **T9** | **Add the `WAKE_TERMINAL_EVENTS` mutation-guard test (T4.8, architecture delta #1/MUST) to `tests/unit/tools/test_post_restart_arm_notify_journal.py`** — pin BOTH directions: (a) `"restart" in WAKE_TERMINAL_EVENTS` (the wake fires for intentional restarts — the dominant case, `restart.sh:262`); (b) `"restart" not in _TERMINAL_EVENTS` AND `set(_TERMINAL_EVENTS) == {"commit", "rollback", "halt", "sweep_rollback", "sweep", "quarantine"}` (the PROMOTE-only reconcile at `:1016` depends on the 6-member set — a mutation here silently changes PROMOTE reconcile semantics). Also assert `set(WAKE_TERMINAL_EVENTS) == set(_TERMINAL_EVENTS) \| {"restart"}` (sibling-derivation shape). A future "cleanup" that mutates the shared constant or drops the sibling FAILS loudly | Phase 1 + Phase 2 GREEN | Test GREEN; a regression that mutates `_TERMINAL_EVENTS` (adding or removing `"restart"`) or deletes `WAKE_TERMINAL_EVENTS` FAILS the test with the ADR-042 reference in the assertion message |
+| **T10** | **Add the structural lock-position pin (T6.4, architecture delta #3/MUST) to `tests/unit/test_post_restart_arm_notify_no_parallel.py`** — source-inspection test (static, same shape as the Phase 4 banner regression test) asserting the `arm_pending_wake(` call site is INSIDE the lock-holding `try` block at BOTH arm sites: `system_restart` (lock acquired `upgrade_tools.py:2167`, call ~`:2209`, after `write_pending_op`) and `system_upgrade` (lock `:2719`, call ~`:2850`, after `write_pending_op`). Method: parse the enclosing `try:` block (AST or indentation-aware scan) and assert the `arm_pending_wake` call's line sits within it AND after the `write_pending_op` call line. Rationale: `journal_write` has NO internal lock — a future refactor pulling the call outside the `try` (or before `write_pending_op`) is a SILENT TORN-WRITE risk (arm recorded without wake, or wake without arm under crash) | Phase 1 T12 GREEN | Test GREEN for both arm sites; a refactor that moves the call outside the lock-holding `try` FAILS with the delta #3 rationale in the assertion message |
+| **T11** | **Add the kill-switch re-enable-no-stale-flood test (T5.17, architecture delta #2/MUST) to `tests/job_queue/test_post_restart_arm_notify_edge_cases.py`** — temporal scenario: (1) arm → record present; (2) env OFF for a period covering the record's terminal transition → the sweep's abandon-pass marks it `abandoned` with `reason=kill_switch_off` (Phase 2 T14/T5.16 behavior); (3) env re-enabled → the sweep runs, finds NO `pending` records, delivers NOTHING (zero `enqueue_message` calls). Asserts the late-deliver alternative is structurally impossible: a re-enable after an off-period can never flood the user with stale wakes — the OFF-period abandonment already drained the dict | Phase 2 T14 GREEN | Test GREEN; after re-enable: `pending_at_start=0`, zero `enqueue_message` calls, zero new `wake_abandoned` history events beyond the one-time OFF pass |
+| **T12** | **Add the Site 1 progressive-dispatch test (T3.5, architecture delta #6/SHOULD) to `tests/job_queue/test_post_restart_arm_notify_routing.py`** — unit-level: exercise the in-graph progressive dispatch site (`instance_messaging.py:3053-3128`) with `message_source="discord:user123"`; assert `dispatch_source` is used VERBATIM (the `else` branch — neither `internal_report:`/`internal_error_report:` nor `system:`). The routing stub MUST capture BOTH `dispatch_message` (progressive chunks, `dispatcher.py:189-266`) AND `dispatch_completed` (final completion, `dispatcher.py:124-128` duplicate-skip) — existing T3.1–T3.4 cover Site 2 (`message_processing_pipeline.py:720-795`) only. Assert the progressive chunk's outgoing `OutgoingMessage` carries `external_user_id="user123"` via the `discord` adapter (the arming chat receives the report) | Phase 2 T11 GREEN | Test GREEN; `dispatch_source == "discord:user123"` verbatim at Site 1; both stub capture points asserted; assertion messages reference AC3 + delta #6 |
 
 ---
 
@@ -265,13 +291,17 @@ modifying any source.
 | **T6.1** | No new file: `<install_dir>/releases/` file list is the pre-feature baseline after a wake arm + boot sweep | `tests/unit/test_post_restart_arm_notify_no_parallel.py` | AC6 + D-FA1.1 / D-FA1.3 + invariant 1; release-blocker regression pin |
 | **T6.2** | No new HTTP endpoint: router URL prefix list is the pre-feature baseline (no `/post-restart-arm-notify`, `/wake`, `/arm-notify`, `/pending-wakes`) | same | AC6 + D-FA3.1 + invariant 3; release-blocker regression pin |
 | **T6.3** | No new SQLModel table: metadata table list is the pre-feature baseline (no `arm_wake_records`, `pending_wake`, `wake`) | same | AC6 + D-FA1.1 + invariant 4; release-blocker regression pin |
+| **T6.4** | Structural lock-position pin (delta #3): `arm_pending_wake` call INSIDE the lock-holding `try` after `write_pending_op` at BOTH arm sites (restart ~`:2209`, upgrade ~`:2850`) | `tests/unit/test_post_restart_arm_notify_no_parallel.py` | MUST delta #3 + ADR-039 revision; silent-torn-write regression pin |
+| **T4.8** | Mutation guard (delta #1): `WAKE_TERMINAL_EVENTS` contains `"restart"`; `_TERMINAL_EVENTS` does NOT (6-member set intact for the PROMOTE-only reconcile) | `tests/unit/tools/test_post_restart_arm_notify_journal.py` (extended) | MUST delta #1 + ADR-042 predicate fix; release-blocker regression pin |
+| **T5.17** | Kill-switch re-enable-no-stale-flood (delta #2): OFF period abandons records (`reason=kill_switch_off`); re-enable delivers NOTHING stale | `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` | MUST delta #2 + ADR-044 persisted-record semantics |
+| **T3.5** | Site 1 progressive dispatch (delta #6): `instance_messaging.py:3053-3128` with `message_source="discord:user123"` → `dispatch_source` verbatim; stub captures `dispatch_message` AND `dispatch_completed` | `tests/job_queue/test_post_restart_arm_notify_routing.py` (extended) | SHOULD delta #6 + AC3 (Site 1 previously untested; T3.1–T3.4 cover Site 2 only) |
 
 **Pre-Phase-3 baseline:** the Phase 1 pack at
 `tests/unit/tools/test_post_restart_arm_notify_journal.py` (T1.* +
 T4.1–T4.6 + T5.12) + the Phase 2 packs at
 `tests/unit/services/test_post_restart_arm_notify_sweep.py` (T2.*
-+ T5.1–T5.11) + `tests/job_queue/test_post_restart_arm_notify_routing.py`
-(T3.*) remain green (T7).
++ T5.1–T5.11 + T5.16) + `tests/job_queue/test_post_restart_arm_notify_routing.py`
+(T3.1–T3.4) remain green (T7).
 **Post-Phase-3 invariant:** every new test docstring carries the
 AC + ADR-042/043/044 reference (test-strategy.md §4.5).
 
@@ -337,10 +367,19 @@ code revert (or a fix-forward commit).
 4. **AC6 structural assertions:** T6.1, T6.2, T6.3 GREEN;
    the file list, the URL prefix list, and the table list
    are all UNCHANGED by this feature.
-5. **Drill smoke placeholder:** T8 registered; the smoke
+5. **Architect-validation pins (delta #1/#2/#3/#6):** T4.8
+   GREEN (`WAKE_TERMINAL_EVENTS` contains `"restart"` AND
+   `_TERMINAL_EVENTS` does not — 6-member set intact);
+   T6.4 GREEN (`arm_pending_wake` inside the lock-holding
+   `try` at both arm sites, after `write_pending_op`);
+   T5.17 GREEN (re-enable after OFF delivers nothing
+   stale); T3.5 GREEN (Site 1 `dispatch_source` verbatim;
+   stub captures `dispatch_message` AND
+   `dispatch_completed`).
+6. **Drill smoke placeholder:** T8 registered; the smoke
    is SKIPPED with a clear reason until Phase 4 lands.
-6. **Non-regression:** T7 GREEN; the full Phase 1 + Phase 2
-   packs pass byte-exact; the existing
+7. **Non-regression:** T7 GREEN; the full Phase 1 + Phase 2
+   packs (incl. T5.16) pass byte-exact; the existing
    `tests/unit/tools/test_upgrade_journal.py` +
    `tests/unit/tools/test_upgrade_tools.py` +
    `tests/test_release_journal.sh` all pass.

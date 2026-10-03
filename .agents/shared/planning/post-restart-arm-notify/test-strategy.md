@@ -15,10 +15,10 @@
 |---|---|---|
 | **AC1** arm-time durable record (transactional with arm) | T1.1–T1.6 | `tests/unit/tools/test_post_restart_arm_notify_journal.py` |
 | **AC2** boot delivery (detect pending records, enqueue wake) | T2.1–T2.4 | `tests/unit/services/test_post_restart_arm_notify_sweep.py` |
-| **AC3** ROUTING (wake's report → confirming chat) | T3.1–T3.4 | `tests/job_queue/test_post_restart_arm_notify_routing.py` |
-| **AC4** terminal-state gating (no wake while pipeline could roll back) | T4.1–T4.6 | `tests/unit/tools/test_post_restart_arm_notify_journal.py` (continuation) |
-| **AC5** edge cases (missing instance, multiple records, idempotency, never-wedge, live refusal) | T5.1–T5.12 | `tests/unit/services/test_post_restart_arm_notify_sweep.py` (continuation) + `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` |
-| **AC6** reuse existing machinery (no parallel messaging subsystem) | T6.1–T6.3 | structural test (see §4.2) |
+| **AC3** ROUTING (wake's report → confirming chat) | T3.1–T3.5 (T3.5 = Site 1 progressive dispatch, architecture delta #6) | `tests/job_queue/test_post_restart_arm_notify_routing.py` |
+| **AC4** terminal-state gating (no wake while pipeline could roll back) | T4.1–T4.6 + T4.8 (mutation guard, delta #1) | `tests/unit/tools/test_post_restart_arm_notify_journal.py` (continuation) |
+| **AC5** edge cases (missing instance, multiple records, idempotency, never-wedge, live refusal, kill-switch abandon-on-off) | T5.1–T5.12 + T5.16 (abandon-on-switch-off, delta #2) + T5.17 (re-enable-no-stale, delta #2) | `tests/unit/services/test_post_restart_arm_notify_sweep.py` (continuation) + `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` |
+| **AC6** reuse existing machinery (no parallel messaging subsystem) | T6.1–T6.4 (T6.4 = `arm_pending_wake` lock-position pin, delta #3) | structural test (see §4.2) |
 | **AC7** tests following `tests/unit/` + `tests/job_queue/` conventions | THIS FILE | — |
 
 ---
@@ -59,8 +59,14 @@ group as a direct precedent).
   (kill -9 in a child writer thread, bounded < 2s) leaves
   EITHER the pre-arm state OR the post-arm state — never
   a half-state. The atomic guarantee is structural (the
-  same `journal_write` call), not behavioral (no
-  double-write logic).
+  same `journal_write` call UNDER the caller-acquired
+  journal lock — `journal_write`
+  (`upgrade_journal.py:254-294`) has no internal lock;
+  serialization is the arm site's `journal_lock_acquire`
+  at `upgrade_tools.py:2167`/`:2719`; architecture delta
+  #3 reword of the original (incorrect) self-atomic
+  journal_write claim; placement pinned by Phase 1 T12 +
+  Phase 3 T6.4), not behavioral (no double-write logic).
 
 #### Group 3 — helpers (T1.4, T1.5)
 
@@ -84,22 +90,38 @@ group as a direct precedent).
   `journal_history_append` helper as the existing
   pipeline events.
 
-#### Group 4 — terminal-state predicate (T4.1, T4.2, T4.3)
+#### Group 4 — terminal-state predicate (T4.1, T4.2, T4.3) + mutation guard (T4.8)
 
-* **T4.1** `test_is_pipeline_terminal_returns_event_name` —
+* **T4.1** `test_wake_terminal_walker_returns_event_name` —
   a journal with history `[..., {"name": "commit",
   "run_id": "r-..."}]` returns `"commit"` for that
-  `run_id`. Mirrors the existing
+  `run_id` from the parameterized walker
+  (`latest_matching_event`, Phase 1 T7 — called with an
+  inline event tuple; the WAKE event-set is owned by
+  Phase 2, delta #1). Mirrors the existing
   `_terminal_outcome` semantics at
   `upgrade_tools.py:1022-1075` (terminal-class-FILTERED).
-* **T4.2** `test_is_pipeline_terminal_returns_none_when_pending` —
+* **T4.2** `test_wake_terminal_walker_returns_none_when_pending` —
   a journal with no matching history event returns
   `None` — the wake is held `pending`. Mirrors the
   `PENDING` return of `_terminal_outcome`.
-* **T4.3** `test_is_pipeline_terminal_tolerates_torn_journal` —
+* **T4.3** `test_wake_terminal_walker_tolerates_torn_journal` —
   a `JournalTorn` from `journal_read` returns `None`
   (best-effort; the sweep's caller logs and continues
   to the next tick).
+* **T4.8** `test_wake_terminal_events_mutation_guard` —
+  (architecture delta #1, MUST) pins BOTH directions:
+  `"restart" in WAKE_TERMINAL_EVENTS` (the wake fires for
+  intentional restarts — the dominant case;
+  `restart.sh:262` journals `"restart"` which
+  `_TERMINAL_EVENTS` rejects) AND
+  `"restart" not in _TERMINAL_EVENTS` with the 6-member
+  set intact (the PROMOTE-only reconcile at
+  `upgrade_journal.py:1016` depends on it). Also asserts
+  the sibling-derivation shape
+  `set(WAKE_TERMINAL_EVENTS) == set(_TERMINAL_EVENTS) |
+  {"restart"}`. A mutation of the shared constant or a
+  deletion of the sibling FAILS loudly.
 
 #### Group 5 — non-interference with the existing journal (T4.4, T4.5, T4.6)
 
@@ -245,14 +267,24 @@ file-backed SQLite; `tmp_path`; `unittest.mock.AsyncMock` /
   continues to the next wake. The boot is not
   aborted.
 
-#### Group 7 — kill-switch (T5.11)
+#### Group 7 — kill-switch (T5.11) + abandon-on-switch-off (T5.16)
 
 * **T5.11** `test_sweep_wake_records_disabled_by_env` —
   with `ENSEMBLE_POST_RESTART_ARM_NOTIFY=0`, the
-  sweep's `_is_enabled()` returns `False`; the sweep
-  is a no-op. The arm-side write is also a no-op
+  sweep's `_is_enabled()` returns `False`; the DELIVERY
+  branch is a no-op. The arm-side write is also a no-op
   (separate test in the tools test pack — see T1.7
   in §3.1 below).
+* **T5.16** `test_sweep_abandons_records_when_kill_switch_off` —
+  (architecture delta #2, MUST) with the env OFF AND
+  `pending_wakes` records present, the sweep's one-time
+  abandon-pass marks each record `abandoned` with
+  `reason=kill_switch_off` and journals exactly ONE
+  `wake_abandoned` history event per record; a second
+  tick with the drained dict journals NOTHING new; zero
+  `enqueue_message` calls are ever made while OFF.
+  This is the sweep-side half of ADR-044's
+  abandon-on-switch-off semantics (Phase 2 T14).
 
 #### Group 8 — live-outright-refusal inheritance (T5.12)
 
@@ -275,7 +307,7 @@ adapter seam) and `tests/job_queue/test_idempotent_enqueue.py`
 
 **Coverage groups:**
 
-#### Group 1 — source routing (T3.1, T3.2, T3.3)
+#### Group 1 — source routing (T3.1–T3.3) + Site 1 dispatch (T3.5)
 
 * **T3.1** `test_wake_message_source_equals_recorded_source` —
   end-to-end: arm with `source=discord:user123`; the
@@ -295,14 +327,32 @@ adapter seam) and `tests/job_queue/test_idempotent_enqueue.py`
   stub captures the call). AC3 enforcement at the
   full path.
 
-* **T3.3** `test_wake_message_user_origin_window_re_stamped` —
-  after the wake is delivered, the
-  `manager._user_origin_windows[arming_instance_id]`
+* **T3.3** `test_wake_message_user_origin_window_set_after_delivery` —
+  (REWORDED per architecture delta #7) after the wake is
+  delivered, the `manager._user_origin_windows[arming_instance_id]`
   dict has an entry with `source="discord:user123"`
   and `expires_at` set. A follow-up `upgrade_status`
   call within the same wake turn passes the
   3-factor gate's factor-2 (the user-origin window
-  is set). AC3 + ADR-041 enforcement.
+  is set). The assertion is "window is SET after wake
+  delivery" — NEVER "exactly one stamp call":
+  double-stamping (the defensive pre-enqueue stamp +
+  the natural `manager.py:8112` stamp) is STRUCTURAL.
+  AC3 + ADR-041 (+ addendum) enforcement.
+* **T3.5** `test_site1_progressive_dispatch_source_verbatim` —
+  (architecture delta #6) unit-level Site 1 test: the
+  in-graph progressive dispatch at
+  `instance_messaging.py:3053-3128` with
+  `message_source="discord:user123"` → the `else`
+  branch sets `dispatch_source = message_source` and
+  uses it VERBATIM; the progressive chunk goes out via
+  `source_dispatcher.dispatch_message`
+  (`dispatcher.py:189-266`) with
+  `external_user_id="user123"` on the `discord`
+  adapter. The routing stub captures BOTH
+  `dispatch_message` AND `dispatch_completed`
+  (existing T3.1–T3.4 cover Site 2 —
+  `message_processing_pipeline.py:720-795` — only).
 
 #### Group 2 — empty source fall-back (T3.4)
 
@@ -315,7 +365,7 @@ adapter seam) and `tests/job_queue/test_idempotent_enqueue.py`
   the default chat (the API path). The user
   receives the report (best-effort routing).
 
-### 2.4 `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` (AC5 — additional)
+### 2.4 `tests/job_queue/test_post_restart_arm_notify_edge_cases.py` (AC5 — additional + delta #2 re-enable)
 
 **Convention precedent:** `tests/job_queue/test_a4_f14_orphan_detection.py`
 (orphan detection on the worker-pool path) and
@@ -363,7 +413,22 @@ recovery path).
   distinct) — terminal is revive-able, missing
   is fall-back.
 
-### 2.5 Structural Test (AC6) — `tests/unit/test_post_restart_arm_notify_no_parallel.py`
+#### Group 4 — kill-switch re-enable (T5.17)
+
+* **T5.17** `test_re_enable_after_off_delivers_nothing_stale` —
+  (architecture delta #2, MUST) temporal scenario: (1)
+  arm → record present; (2) env OFF for a period
+  covering the record's terminal transition → the
+  sweep's one-time abandon-pass marks it `abandoned`
+  with `reason=kill_switch_off` (Phase 2 T14 / T5.16);
+  (3) env re-enabled → the sweep runs, finds NO
+  `pending` records, delivers NOTHING (zero
+  `enqueue_message` calls). Proves the late-deliver
+  alternative (rejected in ADR-044) is structurally
+  impossible — a re-enable after an off-period can
+  never flood the user with stale wakes.
+
+### 2.5 Structural Test (AC6) — `tests/unit/test_post_restart_arm_notify_no_parallel.py` (incl. delta #3 lock pin)
 
 **Coverage groups:**
 
@@ -391,6 +456,23 @@ recovery path).
   the SQLModel metadata's table list does NOT
   include `arm_wake_records` or any new table
   for the wake. Structural AC6 enforcement.
+
+#### Group 4 — `arm_pending_wake` lock-position pin (T6.4)
+
+* **T6.4** `test_arm_pending_wake_inside_lock_holding_try` —
+  (architecture delta #3, MUST) static source-inspection
+  test (same shape as the Phase 4 banner regression
+  test): the `arm_pending_wake(` call site sits INSIDE
+  the lock-holding `try` block at BOTH arm sites —
+  `system_restart` (lock acquired
+  `upgrade_tools.py:2167`, call ~`:2209`, AFTER
+  `write_pending_op`) and `system_upgrade` (lock
+  `:2719`, call ~`:2850`, AFTER `write_pending_op`).
+  `journal_write` has NO internal lock — a future
+  refactor pulling the call outside the `try` is a
+  SILENT TORN-WRITE risk (arm without wake or wake
+  without arm under crash). A regression FAILS with the
+  delta #3 rationale in the assertion message.
 
 ### 2.6 Drill Coverage — `test/drills/post_restart_arm_notify_drill.sh`
 

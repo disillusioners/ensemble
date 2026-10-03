@@ -87,12 +87,30 @@ check; one `journal_read` is cheaper than two file reads
 **Consequence.** The journal schema gains one new key.
 Existing readers of the journal ignore it (Python `dict.get`
 returns `{}` if absent). The arm-side write acquires
-`journal_lock_acquire` once; the wake write is in the
-same `journal_write` envelope — atomic by construction.
+`journal_lock_acquire` once (`upgrade_tools.py:2167` restart,
+`:2719` upgrade) and the wake write rides the SAME
+`journal_write` envelope — **atomic under the
+caller-acquired journal lock**. Note: `journal_write`
+(`upgrade_journal.py:254-294`) has NO internal lock — the
+serialization comes entirely from the lock the caller
+acquired at the arm site. `arm_pending_wake` MUST therefore
+be called INSIDE the same lock-holding `try` block as
+`write_pending_op` (restart ~`:2209`, upgrade ~`:2850`,
+both after the `pending_op` write); a structural test
+(Phase 3 T6.4, extending the T6.x series) pins that
+call-site position.
 **Recommended default:** (c). **If declined:** the
 zero-user-action guarantee (AC1) cannot be met without
 introducing a new atomicity surface, which D-FA1.1
 unanimously rejected.
+
+> **Revision (2026-10-03, architect validation c77c5ff1):**
+> the ORIGINAL atomicity wording was REFUTED — it implied
+> `journal_write` is self-locking, which it is not
+> (`upgrade_journal.py:254-294` acquires no internal lock).
+> Reworded per architecture delta #3 to "atomic under the
+> caller-acquired journal lock"; see
+> `architecture-recommendation.md` §FA1 deltas.
 
 ---
 
@@ -201,6 +219,29 @@ run. **Recommended default:** (a). **If declined:** AC3
 (routing) cannot be met without a new messaging
 primitive, which AC6 forbids.
 
+> **Addendum (2026-10-03, architect validation c77c5ff1,
+> architecture delta #8):** the plan's pre-enqueue
+> `stamp_user_origin_window` is **defensive/redundant** —
+> the BINDING stamp for the wake turn is the natural one
+> at `manager.py:8112` (`_process_message_with_tracking`
+> stamps every processed message with its own source),
+> which fires for the wake turn even if the daemon
+> restarts between enqueue and processing. Supporting
+> facts (verified): window lifetime is `NONCE_TTL_S =
+> 3600s` (`manager.py:4220`), NOT turn-bound — an
+> `upgrade_status` call mid-wake-turn passes 3-factor
+> factor-2 (`upgrade_tools.py:2540-2554`, fail-closed on
+> expiry/unparseable); `discord` is whitelisted via
+> `USER_ORIGIN_CHAT_SOURCE_TYPES` (`upgrade_journal.py:
+> 1944-1946`); the window clear on the next
+> non-user-origin dispatch (`manager.py:4247`) does not
+> endanger the wake turn (the stamp happens at wake-turn
+> processing time, after any pre-wake clears). The
+> pre-enqueue stamp is retained as belt-and-braces, NOT
+> as the load-bearing mechanism; T3.3 asserts "window is
+> set after wake delivery" (never "exactly one stamp
+> call" — double-stamping is structural).
+
 ---
 
 ## ADR-042: Terminal-state gating & abandonment policy — wake only on terminal-class history event; grace = 600s post-`expires_at`
@@ -212,7 +253,20 @@ history event for the wake's `run_id`. The
 `_TERMINAL_EVENTS` constant is at
 `upgrade_journal.py:983`:
 `(commit, rollback, halt, sweep_rollback, sweep,
-quarantine, restart)`. The grace = 600s post-`expires_at`
+quarantine)` — **six members, NO `"restart"`**. The
+exclusion is deliberate for the PROMOTE-only reconcile
+(`reconcile_pending_op` at `:1016` returns `None` for
+restart-kind; the comment at `:980-981` assigns
+restart-kind convergence to "the boot sweep"). The only
+existing terminal reader `_terminal_event_after(journal,
+armed_at)` at `:986` is scoped to that reconcile — the
+wake sweep needs its own reader. As originally drafted
+this ADR claimed `restart` was already a member; the
+architect's validation round (c77c5ff1) REFUTED that —
+as drafted, the wake would never fire for intentional
+restarts (`restart.sh:262` journals `"restart"`, which
+the constant rejects), and intentional restarts are the
+DOMINANT case. The grace = 600s post-`expires_at`
 prevents infinite retention of un-deliverable wakes
 (e.g. a torn journal that never journaled a terminal
 event).
@@ -224,11 +278,30 @@ is wrong — `pending_op` is cleared BEFORE the terminal
 event is journaled in some paths).
 
 **Decision.** **(a).** The wake is delivered only when
-`_is_pipeline_terminal(install_dir, run_id)` returns a
-non-None terminal event name. The grace is
-`PENDING_WAKE_GRACE_S = 600` (default), tunable. Past
-the grace, the wake is marked `abandoned` and a
-`history` event is journaled for forensics. The
+the wake-sweep-owned terminal predicate returns a
+non-None terminal event name. Because
+`_TERMINAL_EVENTS` does NOT contain `"restart"` and the
+PROMOTE-only reconcile depends on that exclusion, Phase 2
+adds a **sibling constant** (architecture delta #1):
+
+* `WAKE_TERMINAL_EVENTS = _TERMINAL_EVENTS + ("restart",)`
+  in `upgrade_journal.py` — consumed by a wake-sweep-owned
+  helper mirroring `_terminal_event_after(journal,
+  armed_at)` (`:986`) but **armed_at-scoped**,
+  **run_id-matched**, and **restart-kind aware**.
+* **MUST NOT mutate `_TERMINAL_EVENTS` itself** — the
+  reconcile's PROMOTE-only semantics (`:1016` returns
+  `None` for restart-kind) depend on the 6-member set.
+  Mutation would silently change PROMOTE reconcile
+  behavior.
+
+A Phase 3 mutation-guard test (T4.8) pins both directions:
+`WAKE_TERMINAL_EVENTS` contains `"restart"` AND
+`_TERMINAL_EVENTS` does NOT.
+
+The grace is `PENDING_WAKE_GRACE_S = 600` (default),
+tunable. Past the grace, the wake is marked `abandoned`
+and a `history` event is journaled for forensics. The
 abandoned record is removed from the dict.
 
 **Why not (b):** `in_flight` is cleared on the
@@ -337,6 +410,26 @@ sweep logs and continues; the api.py call site wraps
 the sweep in `try/except Exception` and never aborts
 boot.
 
+**Persisted-record × kill-switch semantics (architecture
+delta #2, abandon-on-switch-off):** when the sweep
+observes the env OFF with `pending_wakes` records
+present, it marks each such record `abandoned` with
+`reason=kill_switch_off` and journals ONE `history`
+event (`wake_abandoned reason=kill_switch_off`) — a
+one-time pass, not a repeated tick action. The arm-side
+short-circuit (no NEW records while OFF) is already
+correct. Rejected alternatives (recorded here per the
+ADR contract):
+
+* **hold** — records linger indefinitely; operator
+  footgun requiring a manual journal purge after
+  re-enable.
+* **late-deliver** — records persist and deliver on the
+  next re-enable → a stale-wake flood of
+  long-expired outcomes. Must be IMPOSSIBLE; a Phase 3
+  test (T5.17) asserts re-enable-after-off delivers
+  nothing stale.
+
 **Why not (b):** default-OFF with opt-in defeats the
 zero-user-action deliverable. The user must remember
 to enable the feature for the deliverable to be in
@@ -353,6 +446,50 @@ The boot pass is never blocked by the wake sweep.
 **Recommended default:** (a). **If declined:** the
 operator has no opt-out lever; a bug in the wake
 delivery is a hard outage.
+
+---
+
+## Deferred (NICE) items (architecture deltas #11–#14, recorded NOT tasked)
+
+Per the architect's consolidated delta list
+(`architecture-recommendation.md:136-156`), these four items are
+explicitly **excluded from the phase task lists**; they are
+recorded here so the deferred scope is discoverable. Each may be
+picked up by a future follow-up if it ever earns priority.
+
+* **#11 — GC bound citation** (`~300 B/record; 10K records ≈ 3 MB
+  worst case`): deferring GC is SAFE because the surface is
+  bounded and watchdog-blind; the one-line bound is ALSO recorded
+  in `risk-register.md` R-9 (trivial edit, done in this revision).
+  Rationale: no requirement today for DB queryability or
+  multi-month audit retention over wake records (the one
+  assumption that would flip FA1); grace-abandonment already
+  removes un-deliverable records.
+* **#12 — supersession polish** (parent §D-FA1.2 SUPERSEDED
+  banner + a CHANGELOG/RELEASE_NOTES line): the supersession
+  record (`supersession-record.md` §8) is sufficient per project
+  convention that historical ADRs stay as-written. The
+  CHANGELOG/RELEASE_NOTES line MAY ride Phase 4's release-notes
+  task (optional; flagged in `phase4-plan.md`). Rationale: polish,
+  not correctness; the banner in-code artifact (Phase 4 D1) already
+  closes the user-visible supersession surface.
+* **#13 — `_progressive_sent_sources` source_id-keying** is a
+  known multi-user limitation (keyed by channel id `"discord"`,
+  not full source — multiple users arming on ONE instance could
+  cross-suppress each other's progressive chunks; single-user
+  verified safe) + telegram/slack ride the identical unexercised
+  dispatcher path. Recorded as a known limitation in
+  plan-overview §8 (item 7); out of scope for this feature. Rationale: single-operator deployment today;
+  fixing means a dispatcher-key change, which is a
+  report-delivery-surface change outside this feature's blast
+  radius.
+* **#14 — optional `original_source` stamp on wake metadata:**
+  would harden R-14 (non-chat source delivery) by making the
+  original human-visible channel recoverable from the wake row
+  alone. NOT required for AC3 (routing is delivered by the
+  recorded `source` field as-is). Rationale: additive metadata
+  with no current consumer; revisit only if R-14's operator-
+  forensic path proves insufficient in practice.
 
 ---
 
