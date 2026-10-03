@@ -2383,10 +2383,11 @@ Provide a concise summary:"""
             # ``instances.parent_id`` record, classify each member
             # against ``TERMINAL_INSTANCE_STATUSES``, and BLOCK the
             # gate when ANY non-terminal member is present. The
-            # ``bus_pending_count=None`` passes our own bus count
-            # to the guard's leg (a) so the two legs agree at the
-            # same seam; the tree walk (b/c) is the orphan safety
-            # net.
+            # ``bus_pending_count`` argument passes the bus count
+            # we already obtained (``bus_pending`` — a real int, or
+            # 0 when no watcher was reported) to the guard's
+            # leg (a) so the two legs agree at the same seam;
+            # the tree walk (b/c) is the orphan safety net.
             #
             # Leg-direction: ``live=True`` ⇒ BLOCK (the mission is
             # plausibly alive — children may still be running even

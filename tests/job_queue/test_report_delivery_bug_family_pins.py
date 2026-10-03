@@ -49,7 +49,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine, event, text
@@ -59,9 +59,15 @@ from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
 )
+from daemon.repositories.instance.repository import (
+    SQLModelInstanceRepository,
+)
 from daemon.repositories.job_queue.models import (
     AdmissionState,
     JobItem,
+)
+from daemon.repositories.job_queue.watcher_repository import (
+    JobWatcherRepository,
 )
 from daemon.repositories.message_queue.models import (
     MessageQueue,
@@ -69,6 +75,11 @@ from daemon.repositories.message_queue.models import (
 )
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.repositories.task.repository import TaskRepository
+from daemon.services.work_notifier import notify_work_watchers
+from daemon.services.work_resolver import (
+    WorkRecord,
+    WorkResolverService,
+)
 from daemon.services.work_status import (
     _STATUS_CANONICAL_MAP,
     _TERMINAL_STATUSES,
@@ -363,6 +374,17 @@ def _read_admission_state(engine, job_id: str) -> str | None:
                 "WHERE job_id = :job_id"
             ),
             {"job_id": job_id},
+        ).first()
+    return row[0] if row else None
+
+
+def _read_message_queue_status(engine, message_id: str) -> str | None:
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                "SELECT status FROM message_queue WHERE message_id = :mid"
+            ),
+            {"mid": message_id},
         ).first()
     return row[0] if row else None
 
@@ -959,6 +981,104 @@ class TestFP3Vocabulary:
             "branch was supposed to be removed."
         )
 
+    def test_message_queue_arm_orphan_not_mislabeled_failed(
+        self, bug_engine
+    ) -> None:
+        """Behavioral companion to ``test_message_queue_arm_no_
+        longer_stamps_failed`` (P1-4).
+
+        Seed the c264aa8a DEAD-mission setup (terminal instance
+        linkage, ACTIVE JobItem, NO Task row) plus a message_queue
+        row with a known processing status. Invoke
+        ``reconcile_turn_mirror``. Assert:
+
+          * the JobItem's terminal_reason is stamped to
+            ``orphaned_no_task`` (the orphan stamp fires on a
+            dead mission — c264aa8a mechanism);
+          * the message_queue row's status is NOT touched — the
+            WHERE clause ``message_id = :task_message_id``
+            evaluates against a NULL ``task_message_id`` (the
+            Task is missing, so snapshot is None), the row is
+            never reached, and the pre-FP3 ``orphaned_no_task →
+            'failed'`` mislabeling branch is gone.
+
+        The behavioral pin is: the message_queue row status
+        stays at its seeded ``processing`` value — neither
+        ``failed`` (the pre-FP3 mislabel) nor ``completed``
+        (a fresh-claimed value). This is the runtime consequence
+        of the FP3 dead-branch removal at the message_queue
+        UPDATE site.
+        """
+        wid = "c264aa8a-msg-queue-orphan"
+        inst = "inst-c264-msgq"
+        msg_id = "msg-c264-orphan"
+
+        # Dead-mission setup: instance TERMINAL, JobItem ACTIVE,
+        # NO Task row. The Task is missing — found=False in
+        # reconcile_turn_mirror; ``task_message_id`` is NULL.
+        _seed_instance(
+            bug_engine, instance_id=inst,
+            status=InstanceStatus.TERMINATED.value,
+        )
+        _seed_job_item(
+            bug_engine, job_id=wid, instance_id=inst,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+        _seed_job_lock(bug_engine, job_id=wid)
+
+        # Seed the message_queue row with a known non-terminal
+        # status. The reconcile arm must NOT touch it (orphan
+        # case — the WHERE clause is NULL on task_message_id).
+        _seed_message_queue(
+            bug_engine, message_id=msg_id,
+            status=MessageStatus.PROCESSING.value,
+        )
+
+        # Sanity: pre-reconcile state.
+        assert _read_terminal_reason(bug_engine, wid) is None
+        assert _read_admission_state(bug_engine, wid) == "active"
+        assert _read_message_queue_status(bug_engine, msg_id) == \
+            MessageStatus.PROCESSING.value
+
+        # Run reconcile. The orphan stamp fires (dead mission),
+        # the message_queue arm is silent (WHERE clause NULL).
+        repo = TaskRepository(engine=bug_engine)
+        repo.reconcile_turn_mirror(wid)
+
+        # The JobItem was finalized to 'orphaned_no_task' (the
+        # c264aa8a orphan stamp on dead mission).
+        assert _read_terminal_reason(bug_engine, wid) == "orphaned_no_task", (
+            "Behavioral companion setup: JobItem terminal_reason "
+            "should be stamped to 'orphaned_no_task' on a dead "
+            f"mission; got {_read_terminal_reason(bug_engine, wid)!r}."
+        )
+        assert _read_admission_state(bug_engine, wid) == "done", (
+            "Behavioral companion setup: admission_state should "
+            "be 'done' on a dead mission; got "
+            f"{_read_admission_state(bug_engine, wid)!r}."
+        )
+
+        # The KEY behavioral assertion: the message_queue row is
+        # NOT mislabeled 'failed' (the pre-FP3 dead-branch
+        # behavior). It stays at its seeded 'processing' value
+        # — the WHERE clause ``message_id = :task_message_id``
+        # evaluated against NULL never matches, so the row is
+        # never reached by the UPDATE.
+        post_status = _read_message_queue_status(bug_engine, msg_id)
+        assert post_status != MessageStatus.FAILED.value, (
+            f"FP3 REGRESSION (behavioral): message_queue row was "
+            f"mislabeled 'failed' (the pre-fix dead-branch "
+            f"behavior); the FP3 fix removed the "
+            f"'orphaned_no_task' -> 'failed' branch and the row "
+            f"is no longer reached. Got: {post_status!r}"
+        )
+        assert post_status == MessageStatus.PROCESSING.value, (
+            f"FP3 message_queue arm should be silent in the "
+            f"orphan case (WHERE clause NULL on task_message_id) "
+            f"— the row stays at its seeded 'processing' value. "
+            f"Got: {post_status!r}"
+        )
+
     def test_vocab_round_trip_no_other_terminal_regressed(
         self,
     ) -> None:
@@ -980,3 +1100,210 @@ class TestFP3Vocabulary:
         assert is_terminal("settled") is True
         # Unknown token → non-terminal (conservative).
         assert is_terminal("no-such-token") is False
+
+
+# ── P1-5 / P1-4 — behavioral companions (P1-5: PP1 zero-watcher WARN) ──
+
+
+class _NoOpJobRepo:
+    """Minimal stand-in for ``JobRepository`` (the message-kind
+    side) — ``WorkResolverService`` only consults this when the
+    task side returns None. The PP1 test patches
+    ``resolver.resolve_work`` directly so this fallback path is
+    not exercised, but the resolver constructor still requires
+    the argument.
+    """
+
+    def get(self, _job_id):
+        return None
+
+    def __getattr__(self, _name):
+        return lambda *_a, **_kw: None
+
+
+class TestPP1ZeroWatcherWarn:
+    """P1-5 — behavioral companion to the PP1 zero-watcher WARN
+    (the source-grep-only pin in
+    ``test_occ5_repro_terminal_reason_preserved``).
+
+    The PP1 fix adds a WARN at
+    ``daemon/services/work_notifier.py:428-451`` that fires when
+    a TERMINAL ``notify_work_watchers`` call finds ZERO claimed
+    watchers — the silent-dropped-report class (operator had no
+    log line to correlate the dropped delivery). The behavioural
+    pin: invoke ``notify_work_watchers`` with a terminal status
+    on a job with NO watchers and assert the WARN carries the
+    ``work_id[:8]``, the ``status``, and points at the durable
+    ``job_completed`` event row (recovery hint).
+
+    One notifier site is covered behaviourally here. The
+    observer-outbox site at
+    ``daemon/services/job_feedback_observer.py:PP1`` remains a
+    source-grep-only pin in the same suite (the outbox threading
+    requires the full child-reports stack + events service —
+    impractical to invoke in isolation without rebuilding the
+    fixtures used by the larger
+    ``test_work_notifier_defect1_pins`` suite). The single-
+    notifier behavioural pin closes the spec'd path; the
+    observer pin is documented as a sibling structural pin.
+    """
+
+    @pytest.fixture
+    def pp1_components(self, bug_engine):
+        """Real ``JobWatcherRepository`` + ``TaskRepository`` +
+        ``SQLModelInstanceRepository``; resolver ``MagicMock``'d
+        to return a synthetic ``WorkRecord`` so the resolve-first
+        step does not require a fully-seeded Task row (the PP1
+        WARN fires AFTER resolve_work, on the empty-watchers
+        branch — the Task is irrelevant to this code path)."""
+        engine = bug_engine
+        watcher_repo = JobWatcherRepository(engine)
+        task_repo = TaskRepository(engine)
+        instance_repo = SQLModelInstanceRepository(engine)
+        resolver = WorkResolverService(
+            task_repo, _NoOpJobRepo(), instance_repo,
+        )
+        instance_manager = MagicMock()
+        instance_manager.enqueue_message = AsyncMock(
+            return_value=MagicMock(message_id="msg-pp1-test"),
+        )
+        # C1 (2026-09-25): expose the instance repository on the
+        # manager so any internal ``evaluate_mission_live`` guard
+        # consults the real DB (the default MagicMock would
+        # force the guard to fail-OPEN — out of scope for this
+        # pin but consistent with the work_notifier fixture
+        # convention).
+        instance_manager._instance_repository = instance_repo
+        return {
+            "engine": engine,
+            "watcher_repo": watcher_repo,
+            "task_repo": task_repo,
+            "resolver": resolver,
+            "instance_manager": instance_manager,
+        }
+
+    @pytest.mark.asyncio
+    async def test_pp1_warn_fires_on_terminal_with_zero_watchers(
+        self, pp1_components, caplog,
+    ) -> None:
+        """Behavioural: invoke ``notify_work_watchers`` with a
+        terminal status on a work_id that has ZERO watchers.
+        Assert via caplog that the PP1 WARN fires carrying
+        ``work_id[:8]`` and the terminal ``status``, with the
+        durable ``job_completed`` event-row pointer in the
+        message body.
+
+        Coverage decision: this is the SINGLE notifier site
+        that is practical to invoke in isolation here (the
+        observer-outbox site at
+        ``daemon/services/job_feedback_observer.py:PP1`` is
+        pinned structurally in
+        ``test_occ5_repro_terminal_reason_preserved`` — its
+        outbox-threading is exercised end-to-end by
+        ``tests/job_queue/test_work_notifier_defect1_pins``
+        and ``test_job_feedback_observer`` and would
+        duplicate substantial fixtures if mirrored here).
+        """
+        wid = "pp1-test-zero-watchers"
+        wid_short = wid[:8]
+        # Synthesize a task-kind WorkRecord so ``resolve_work``
+        # returns non-None and the code path proceeds to the
+        # watcher fetch. The PP1 WARN fires regardless of the
+        # task-kind details — only the watchers-list emptiness
+        # matters.
+        resolver = pp1_components["resolver"]
+        record = WorkRecord(
+            work_id=wid, kind="report", status="completed",
+            instance_id="inst-pp1-test", project_id="test-project",
+            agent_id="worker", result_summary="ok",
+            error=None, created_at=datetime.now(timezone.utc),
+            job_type=None, mission_liveness=None,
+        )
+        resolver.resolve_work = MagicMock(return_value=record)
+        # Sanity: NO watchers seeded for this work_id — the
+        # empty-fetch branch is the path under test.
+        watchers = pp1_components["watcher_repo"].get_watchers_for_job(wid)
+        assert watchers == [], (
+            f"PP1 setup contamination: expected zero watchers for "
+            f"{wid!r}, got {watchers!r}"
+        )
+
+        with caplog.at_level(logging.WARNING, logger="daemon.services.work_notifier"):
+            notified = await notify_work_watchers(
+                wid, "completed",
+                instance_manager=pp1_components["instance_manager"],
+                work_resolver=resolver,
+                watcher_repo=pp1_components["watcher_repo"],
+            )
+
+        # Behavioural contract: zero-watcher terminal fire
+        # returns 0 (no one to notify) AND emits the PP1 WARN
+        # with work_id[:8] + status pointer.
+        assert notified == 0, (
+            "PP1 zero-watcher terminal fire MUST return 0 — "
+            "no watchers to notify."
+        )
+        # Find the PP1 line in caplog.
+        pp1_records = [
+            r for r in caplog.records
+            if "PP1 zero-watcher terminal fire" in r.getMessage()
+        ]
+        assert len(pp1_records) == 1, (
+            f"PP1 REGRESSION (behavioural): expected exactly 1 "
+            f"PP1 zero-watcher WARN, got {len(pp1_records)}: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        msg = pp1_records[0].getMessage()
+        assert wid_short in msg, (
+            f"PP1 WARN missing the work_id[:8] pointer "
+            f"({wid_short!r}): {msg!r}"
+        )
+        assert "status=completed" in msg, (
+            f"PP1 WARN missing the terminal status pointer: "
+            f"{msg!r}"
+        )
+        assert "job_completed" in msg, (
+            f"PP1 WARN must carry the durable job_completed "
+            f"event-row pointer for recovery (re-fire from "
+            f"the events table); got: {msg!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_pp1_warn_does_not_fire_for_non_terminal_status(
+        self, pp1_components, caplog,
+    ) -> None:
+        """Negative pin: a non-terminal status (``in_progress``)
+        with zero watchers does NOT fire the PP1 WARN — the
+        spec carves out the non-terminal case (zero watchers
+        for an in-progress notification is a normal wait, not a
+        delivery gap). The notifier returns 0 either way.
+        """
+        wid = "pp1-test-in-progress"
+        resolver = pp1_components["resolver"]
+        record = WorkRecord(
+            work_id=wid, kind="report", status="in_progress",
+            instance_id="inst-pp1-test", project_id="test-project",
+            agent_id="worker", result_summary=None,
+            error=None, created_at=datetime.now(timezone.utc),
+            job_type=None, mission_liveness=None,
+        )
+        resolver.resolve_work = MagicMock(return_value=record)
+
+        with caplog.at_level(logging.WARNING, logger="daemon.services.work_notifier"):
+            notified = await notify_work_watchers(
+                wid, "in_progress",
+                instance_manager=pp1_components["instance_manager"],
+                work_resolver=resolver,
+                watcher_repo=pp1_components["watcher_repo"],
+            )
+
+        assert notified == 0
+        pp1_records = [
+            r for r in caplog.records
+            if "PP1 zero-watcher terminal fire" in r.getMessage()
+        ]
+        assert pp1_records == [], (
+            f"PP1 REGRESSION (behavioural): the WARN must NOT "
+            f"fire for non-terminal statuses; got "
+            f"{[r.getMessage() for r in pp1_records]}"
+        )
