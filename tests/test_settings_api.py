@@ -593,6 +593,104 @@ class TestPutTimezone:
         assert "Invalid IANA timezone" in response.json()["detail"]
 
 
+class TestGetTimezoneOptions:
+    """GET /api/settings/timezones — canonical IANA picker list.
+
+    The endpoint is the single source of truth for the Settings UI
+    picker (the frontend no longer relies on
+    ``Intl.supportedValuesOf('timeZone')``, which drifts on older
+    ICU — e.g. ``Asia/Saigon`` (deprecated alias) is present but
+    canonical ``Asia/Ho_Chi_Minh`` is not).
+
+    Invariants the endpoint MUST satisfy (the whole reason this
+    endpoint exists):
+
+    * every entry is a key that ``zoneinfo.ZoneInfo`` resolves on the
+      host — by construction, since the list comes from
+      ``zoneinfo.available_timezones()`` (the same tzdb the validator
+      reads)
+    * ``Asia/Ho_Chi_Minh`` is present (the canonical case the
+      commission fixes)
+    * the list is sorted ASCII for stable render order across deploys
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_non_empty_list(self, client):
+        """The endpoint always returns at least a few zones (no empty
+        response — even a stripped tzdb has UTC + a regional zone)."""
+        response = await client.get("/api/settings/timezones")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "timezones" in body
+        assert isinstance(body["timezones"], list)
+        assert len(body["timezones"]) > 50, (
+            "tzdb has hundreds of zones; < 50 would mean the source "
+            "list is broken (regression guard against hand-maintained "
+            "or hardcoded subsets)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_is_sorted(self, client):
+        """ASCII-sort for stable render order across deploys."""
+        response = await client.get("/api/settings/timezones")
+        zones = response.json()["timezones"]
+        assert zones == sorted(zones), (
+            "zone list must be sorted (stable render order across deploys)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_includes_canonical_asia_ho_chi_minh(self, client):
+        """PIN: ``Asia/Ho_Chi_Minh`` (the canonical case the spec
+        fixes) MUST be in the list. Older ICU's
+        ``Intl.supportedValuesOf('timeZone')`` returns ``Asia/Saigon``
+        (deprecated alias, validator rejects) but not this one — the
+        backend list is the authoritative source."""
+        response = await client.get("/api/settings/timezones")
+        zones = response.json()["timezones"]
+        assert "Asia/Ho_Chi_Minh" in zones
+
+    @pytest.mark.asyncio
+    async def test_every_entry_is_a_valid_iana_zoneinfo_key(self, client):
+        """PIN invariant: every entry in the picker must pass the same
+        ``ZoneInfo`` check the PUT validator runs. If this fails, the
+        picker would offer zones the server rejects — exactly the
+        drift the spec fixes."""
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        response = await client.get("/api/settings/timezones")
+        zones = response.json()["timezones"]
+        invalid: list[str] = []
+        for zone in zones:
+            try:
+                ZoneInfo(zone)
+            except (ZoneInfoNotFoundError, ValueError):
+                invalid.append(zone)
+        assert invalid == [], (
+            f"the picker would surface zones the validator rejects: "
+            f"{invalid[:5]}{'...' if len(invalid) > 5 else ''}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_known_canonical_zones_present(self, client):
+        """Spot-check a handful of canonical zones the picker must
+        surface. Catches regressions if the source is replaced with
+        a hand-maintained subset."""
+        response = await client.get("/api/settings/timezones")
+        zones = set(response.json()["timezones"])
+        expected = {
+            "Asia/Bangkok",
+            "Asia/Tokyo",
+            "America/New_York",
+            "America/Los_Angeles",
+            "Europe/London",
+            "Europe/Berlin",
+            "UTC",
+        }
+        missing = expected - zones
+        assert not missing, f"expected canonical zones missing from list: {missing}"
+
+
 class TestGetUserTimezonePreferenceHelper:
     """Unit tests for ``get_user_timezone_preference`` — live PG repo paths."""
 

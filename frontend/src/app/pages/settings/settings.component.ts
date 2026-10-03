@@ -187,23 +187,72 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly selectedTimezone = signal<string>(TZ_AUTO_VALUE);
   readonly customTimezone = signal<string>('');
   readonly savingTimezone = signal<boolean>(false);
-  /** True when `Intl.supportedValuesOf('timeZone')` is callable. */
-  readonly isTzNativeSupported = signal<boolean>(true);
+  /**
+   * Server-sourced IANA zone list. Populated by
+   * ``loadTimezoneOptionsFromApi()`` — `null` means not yet loaded
+   * (or the request failed), in which case the template falls back
+   * to either ``Intl.supportedValuesOf`` or the plain text input.
+   *
+   * Source priority: backend ``GET /api/settings/timezones`` →
+   * ``Intl.supportedValuesOf('timeZone')`` → text-input fallback.
+   * The backend list is the authoritative source — it is derived from
+   * the same ``zoneinfo`` tzdata the PUT validator uses, so the picker
+   * and validator cannot disagree. (Older browsers'
+   * ``Intl.supportedValuesOf`` returns deprecated aliases like
+   * ``Asia/Saigon`` but lacks canonical ``Asia/Ho_Chi_Minh`` — the
+   * drift the spec fixes.)
+   */
+  readonly apiTimezones = signal<string[] | null>(null);
+  readonly apiTimezonesLoaded = signal<boolean>(false);
 
   /**
-   * Browser-native IANA option list. Empty when the host doesn't
-   * expose `Intl.supportedValuesOf` so the template hides the
-   * picker and surfaces the text-input fallback instead.
+   * Browser-native IANA option list, derived from the BEST AVAILABLE
+   * source:
+   *
+   *   1. server-sourced list (`GET /api/settings/timezones`) — the
+   *      authoritative source; same tzdata the validator uses, so
+   *      picker and validator cannot disagree
+   *   2. ``Intl.supportedValuesOf('timeZone')`` — browser-native; may
+   *      drift on older ICU (deprecated aliases present, canonical
+   *      names absent — e.g. ``Asia/Saigon`` is in but ``Asia/Ho_Chi_Minh``
+   *      is not)
+   *   3. empty list — both sources unavailable; the template hides
+   *      the picker and surfaces the text-input fallback
+   *
+   * Empty when neither the server list nor the browser-native list
+   * could be resolved so the template can surface the text-input
+   * fallback.
    */
   readonly timezoneOptions = computed<SearchableSelectOption<string>[]>(() => {
-    if (!this.isTzNativeSupported()) {
-      return [];
+    // 1. Server-sourced list — preferred. Prefer a NON-EMPTY list;
+    //    an empty response (or null when not yet loaded) is the same
+    //    as "not available" from the user's POV, and falling back to
+    //    Intl keeps the picker usable when the endpoint is briefly
+    //    broken.
+    const api = this.apiTimezones();
+    let zones: string[] | null = null;
+    if (api !== null && api.length > 0) {
+      zones = api;
+    } else {
+      // 2. Browser-native list — best effort. Probe only when we
+      //    actually have the function on this runtime; older browsers
+      //    without it are handled by the empty-list fallback below.
+      const intlAny = Intl as unknown as {
+        supportedValuesOf?: (kind: string) => number | string[];
+      };
+      const values = intlAny.supportedValuesOf?.('timeZone') ?? [];
+      const intlZones = Array.isArray(values) ? (values as string[]) : [];
+      if (intlZones.length > 0) {
+        zones = intlZones;
+      }
     }
-    const intlAny = Intl as unknown as {
-      supportedValuesOf?: (kind: string) => number | string[];
-    };
-    const values = intlAny.supportedValuesOf?.('timeZone') ?? [];
-    const zones = Array.isArray(values) ? (values as string[]) : [];
+    if (zones === null) {
+      // 3. Both sources unavailable — picker is hidden via
+      //    ``isTzNativeSupported()`` and the template surfaces the
+      //    text-input row. Return only the Auto sentinel so the
+      //    computed never lies about availability.
+      return [{ value: TZ_AUTO_VALUE, label: 'Auto / not set' }];
+    }
     return [
       { value: TZ_AUTO_VALUE, label: 'Auto / not set' },
       ...zones.map((zone) => ({
@@ -211,6 +260,24 @@ export class SettingsComponent implements OnInit, OnDestroy {
         label: `${zone} (UTC${formatTimezoneOffset(zone)})`,
       })),
     ];
+  });
+
+  /**
+   * True when BOTH the API list AND ``Intl.supportedValuesOf`` are
+   * unavailable — drives the text-input fallback render. A loaded
+   * (possibly empty) API list does NOT trigger the fallback as long
+   * as the browser-native list can be probed; an API list of 0 zones
+   * falls through to Intl.
+   */
+  readonly isTzNativeSupported = computed<boolean>(() => {
+    const api = this.apiTimezones();
+    if (api !== null && api.length > 0) {
+      return true;
+    }
+    const intlAny = Intl as unknown as {
+      supportedValuesOf?: (kind: string) => number | string[];
+    };
+    return typeof intlAny.supportedValuesOf === 'function';
   });
 
   /** True when the user has not picked a zone — drives the hint line. */
@@ -240,9 +307,9 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.loadPeakHours();
     this.loadSnapshotCreateEnabled();
     this.loadSnapshotMetrics();
-    this.initTimezoneSupport();
     this.loadTimezoneFromStorage();
     this.loadTimezoneFromApi();
+    this.loadTimezoneOptionsFromApi();
   }
 
   ngOnDestroy(): void {
@@ -775,17 +842,32 @@ export class SettingsComponent implements OnInit, OnDestroy {
   // ──────── Timezone preference (user-timezone-setting) ────────
 
   /**
-   * Probe `Intl.supportedValuesOf` at startup so the template can
-   * hide the picker and surface the text-input fallback in
-   * environments that lack the API. We resolve once and remember
-   * the verdict — the result doesn't change during the page's
-   * lifetime.
+   * Fetch the canonical IANA list from ``GET /api/settings/timezones``
+   * (the authoritative source — derived from Python's
+   * ``zoneinfo.available_timezones()``). On success the picker
+   * renders from this list; on failure we leave ``apiTimezones``
+   * ``null`` so the ``timezoneOptions`` computed falls back to
+   * ``Intl.supportedValuesOf`` and ultimately to the text-input row.
+   *
+   * Failure is silent here (no toast) — the picker degrades
+   * gracefully to Intl, and a stale Intl list is no worse than the
+   * pre-fix experience (the user can still type a custom IANA name
+   * in the fallback row). Toast noise on every endpoint hiccup
+   * would be more annoying than helpful for a low-stakes pref.
    */
-  private initTimezoneSupport(): void {
-    const intlAny = Intl as unknown as {
-      supportedValuesOf?: (kind: string) => unknown;
-    };
-    this.isTzNativeSupported.set(typeof intlAny.supportedValuesOf === 'function');
+  private loadTimezoneOptionsFromApi(): void {
+    this.settingsService.getTimezoneOptions().subscribe({
+      next: (resp) => {
+        const zones = resp?.timezones ?? [];
+        this.apiTimezones.set(zones);
+        this.apiTimezonesLoaded.set(true);
+      },
+      error: () => {
+        // Leave apiTimezones as null so the computed falls through to
+        // the Intl list / text-input fallback path.
+        this.apiTimezonesLoaded.set(true);
+      },
+    });
   }
 
   /**

@@ -218,4 +218,42 @@ describe('SettingsService', () => {
       });
     });
   });
+
+  describe('getTimezoneOptions', () => {
+    it('should send GET to /api/settings/timezones and return the response', (done) => {
+      // Spot-check that the canonical Asia/Ho_Chi_Minh (missing on
+      // older Intl.supportedValuesOf) reaches the caller — the whole
+      // reason the endpoint exists.
+      const mockResponse = {
+        timezones: ['Asia/Ho_Chi_Minh', 'Asia/Bangkok', 'UTC'],
+      };
+
+      service.getTimezoneOptions().subscribe({
+        next: (result) => {
+          expect(result).toEqual(mockResponse);
+          expect(result.timezones).toContain('Asia/Ho_Chi_Minh');
+          done();
+        },
+        error: done.fail,
+      });
+
+      const req = httpTesting.expectOne('/api/settings/timezones');
+      expect(req.request.method).toBe('GET');
+      expect(req.request.body).toBeNull();
+      req.flush(mockResponse);
+    });
+
+    it('should propagate backend errors (the picker falls back to Intl)', (done) => {
+      service.getTimezoneOptions().subscribe({
+        next: () => done.fail('expected error'),
+        error: (err) => {
+          expect(err.status).toBe(500);
+          done();
+        },
+      });
+
+      const req = httpTesting.expectOne('/api/settings/timezones');
+      req.flush('Server error', { status: 500, statusText: 'Server Error' });
+    });
+  });
 });

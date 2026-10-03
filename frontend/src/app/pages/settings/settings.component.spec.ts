@@ -107,6 +107,7 @@ class MockSettingsService {
   stopVscodeServer = jest.fn();
   getTimezonePreference = jest.fn();
   setTimezonePreference = jest.fn();
+  getTimezoneOptions = jest.fn().mockReturnValue(of({ timezones: [] }));
 }
 
 class MockWorkspaceService {
@@ -1378,6 +1379,7 @@ class TestBedMockSettingsService {
   setTimezonePreference = jest
     .fn()
     .mockReturnValue(of({ timezone: null, utc_offset: null }));
+  getTimezoneOptions = jest.fn().mockReturnValue(of({ timezones: [] }));
 }
 
 class TestBedMockWorkspaceService {
@@ -1572,6 +1574,7 @@ class TimezoneTestBedService {
   setTimezonePreference = jest
     .fn()
     .mockReturnValue(of({ timezone: null, utc_offset: null }));
+  getTimezoneOptions = jest.fn().mockReturnValue(of({ timezones: [] }));
 }
 
 class TimezoneTestBedWorkspaceService {
@@ -1677,14 +1680,18 @@ describe('Timezone preference (user-timezone-setting)', () => {
     // Override per-test — the beforeEach seeded it.
     restoreIntlSupportedValuesOf(supportedMock);
     supportedMock = patchIntlSupportedValuesOf(null);
+    // API list is the default empty mock — both sources gone.
     service.getTimezonePreference.mockReturnValue(
       of({ timezone: null, utc_offset: null }),
     );
     fixture.detectChanges();
 
-    // No options are exposed — the picker has no labels to feed the
-    // component with.
-    expect(component.timezoneOptions()).toEqual([]);
+    // No IANA zones from either source — only the Auto sentinel is
+    // present in the computed (the picker hides via
+    // isTzNativeSupported() so the Auto sentinel is moot; the
+    // text-input row renders instead).
+    const values = component.timezoneOptions().map((o) => o.value);
+    expect(values).toEqual([TZ_AUTO_VALUE]);
     expect(component.isTzNativeSupported()).toBe(false);
 
     const section = timezoneSection();
@@ -1865,5 +1872,96 @@ describe('Timezone preference (user-timezone-setting)', () => {
     component.saveCustomTimezone();
 
     expect(service.setTimezonePreference).not.toHaveBeenCalled();
+  });
+
+  // ── (g) server-sourced IANA list (preferred source) ───────────────
+  // The picker's authoritative source is the backend's GET /api/settings/timezones
+  // (derived from zoneinfo.available_timezones()). These tests cover the new path:
+  // the API list is preferred over Intl, and the canonical Asia/Ho_Chi_Minh zone
+  // (missing from older Intl.supportedValuesOf) reaches the picker.
+  it('uses the API list when the GET /api/settings/timezones response is non-empty', () => {
+    // Seed a list that Intl does NOT include — simulates the drift
+    // (Asia/Ho_Chi_Minh missing on older ICU) the spec fixes.
+    service.getTimezoneOptions.mockReturnValue(
+      of({
+        timezones: [
+          'Asia/Ho_Chi_Minh',
+          'Asia/Bangkok',
+          'America/New_York',
+          'UTC',
+        ],
+      }),
+    );
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    fixture.detectChanges();
+
+    const labels: string[] = component
+      .timezoneOptions()
+      .map((o) => o.label);
+    // The API list drives the picker — every zone from the API is
+    // rendered with the standard "<zone> (UTC±HH:MM)" label.
+    expect(labels).toContain('Asia/Ho_Chi_Minh (UTC+07:00)');
+    expect(labels).toContain('Asia/Bangkok (UTC+07:00)');
+    expect(labels).toContain('America/New_York (UTC-04:00)');
+    expect(labels).toContain('UTC (UTC+00:00)');
+    // Picker is shown (the API list was non-empty).
+    expect(component.isTzNativeSupported()).toBe(true);
+  });
+
+  it('falls back to Intl.supportedValuesOf when the GET /api/settings/timezones response is empty', () => {
+    // API returned an empty list — degrade gracefully to Intl.
+    service.getTimezoneOptions.mockReturnValue(of({ timezones: [] }));
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    fixture.detectChanges();
+
+    const labels: string[] = component
+      .timezoneOptions()
+      .map((o) => o.label);
+    // Intl list is still rendered when the API list is empty.
+    expect(labels).toContain('Asia/Bangkok (UTC+07:00)');
+    expect(component.isTzNativeSupported()).toBe(true);
+  });
+
+  it('falls back to Intl.supportedValuesOf when the GET /api/settings/timezones call errors', () => {
+    service.getTimezoneOptions.mockReturnValue(
+      throwError(() => new Error('boom')),
+    );
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    fixture.detectChanges();
+
+    const labels: string[] = component
+      .timezoneOptions()
+      .map((o) => o.label);
+    // Intl list takes over — picker is still shown, no text-input row.
+    expect(labels).toContain('Asia/Bangkok (UTC+07:00)');
+    expect(component.isTzNativeSupported()).toBe(true);
+  });
+
+  it('surfaces the text-input row only when both API and Intl are unavailable', () => {
+    // Both sources gone: API errors, Intl returns null.
+    service.getTimezoneOptions.mockReturnValue(
+      throwError(() => new Error('boom')),
+    );
+    restoreIntlSupportedValuesOf(supportedMock);
+    supportedMock = patchIntlSupportedValuesOf(null);
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    fixture.detectChanges();
+
+    // Only the Auto sentinel — the picker hides, the text-input row renders.
+    expect(component.timezoneOptions().map((o) => o.value)).toEqual([
+      TZ_AUTO_VALUE,
+    ]);
+    expect(component.isTzNativeSupported()).toBe(false);
+    const section = timezoneSection();
+    expect(section!.querySelector('.custom-tz-row')).not.toBeNull();
+    expect(section!.querySelector('app-searchable-select')).toBeNull();
   });
 });

@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from sqlmodel import Session
+from zoneinfo import available_timezones
 
 from daemon.repositories import SQLModelProjectRepository
 from daemon.registry import get_registry
@@ -29,6 +30,7 @@ from daemon.util.tz import _validate_iana
 from .schemas import (
     LanguagePreferenceResponse,
     LanguagePreferenceUpdate,
+    TimezoneOptionsResponse,
     TimezonePreferenceResponse,
     TimezonePreferenceUpdate,
     EditorPreferenceResponse,
@@ -64,6 +66,28 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 _default_versions_lock = asyncio.Lock()
 _project_repo: SQLModelProjectRepository | None = None
+
+
+def _build_iana_timezone_options() -> list[str]:
+    """Return the sorted list of IANA keys the validator accepts.
+
+    :func:`zoneinfo.available_timezones` returns the canonical tzdb
+    keyset (the alias / deprecated links are not present on modern
+    tzdata — e.g. ``Asia/Saigon`` was retired when it merged into
+    ``Asia/Ho_Chi_Minh`` in tzdata 2020b, so it is NOT in the list).
+    Every entry is by construction a key that :class:`zoneinfo.ZoneInfo`
+    resolves cleanly on this host, which is the same check the
+    validator (``daemon.util.tz._validate_iana``) runs — invariant
+    ``list ⊆ keys the validator accepts`` holds by construction.
+
+    The result is computed once at import time and cached in
+    ``_IANA_TIMEZONE_OPTIONS``; the tzdb is fixed for the process
+    lifetime, so per-request work would be wasteful.
+    """
+    return sorted(available_timezones())
+
+
+_IANA_TIMEZONE_OPTIONS: list[str] = _build_iana_timezone_options()
 
 
 def get_project_repository() -> SQLModelProjectRepository:
@@ -215,6 +239,26 @@ async def set_timezone(request: TimezonePreferenceUpdate):
     )
     offset = await asyncio.to_thread(current_utc_offset, cleaned)
     return TimezonePreferenceResponse(timezone=cleaned, utc_offset=offset)
+
+
+@router.get("/timezones", response_model=TimezoneOptionsResponse)
+async def list_timezone_options():
+    """Return the canonical IANA timezone list for the Settings picker.
+
+    Sourced from :func:`zoneinfo.available_timezones` — the SAME tzdata
+    the validator (``_validate_iana``) uses — so the picker list and the
+    validator cannot drift apart. Every entry in the response is, by
+    construction, a key that :class:`zoneinfo.ZoneInfo` resolves on the
+    host (the deprecated / alias keys are not present in modern tzdata
+    — e.g. ``Asia/Saigon`` was retired in tzdata 2020b when it merged
+    into ``Asia/Ho_Chi_Minh``). Nothing here is hand-maintained, so
+    invariant ``list ⊆ keys the validator accepts`` holds.
+
+    The list is computed once at import time and cached for the
+    process lifetime — the underlying tzdb does not change without a
+    process restart.
+    """
+    return TimezoneOptionsResponse(timezones=_IANA_TIMEZONE_OPTIONS)
 
 
 # ==================== Editor Settings Endpoints ====================
