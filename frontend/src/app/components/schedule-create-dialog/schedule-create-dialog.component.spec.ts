@@ -319,7 +319,7 @@ describe('schedule-create-dialog — timezone picker source chain', () => {
     expect(dialog.isTzNativeSupported()).toBe(false);
   });
 
-  it('does NOT call the endpoint twice — load is a one-shot on init', () => {
+  it('REAL ngOnInit one-shot load ordering — mirror invoked 2× here, REAL source pins single call', () => {
     service.getTimezoneOptions.mockReturnValue(of({ timezones: CANONICAL_IANA_FIXTURE }));
     dialog.loadTimezoneOptionsFromApi();
     dialog.loadTimezoneOptionsFromApi();
@@ -426,6 +426,10 @@ describe('schedule-create-dialog — default timezone + editMode prefill', () =>
 
   it('REAL source: the form timezone default is "UTC" (no Auto sentinel like the Settings page)', () => {
     expect(dialogTsSrc).toMatch(/timezone:\s*\['UTC'\]/);
+  });
+
+  it('REAL source: editMode prefill pins `this.data.timezone || \'UTC\'` at the patchValue call', () => {
+    expect(dialogTsSrc).toMatch(/timezone:\s*this\.data\.timezone\s*\|\|\s*'UTC'/);
   });
 
   it('editMode prefill preserves a stored zone and falls back to "UTC" when unset', () => {
