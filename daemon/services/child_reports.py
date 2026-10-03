@@ -3353,7 +3353,20 @@ Provide a concise summary:"""
                         status=InstanceStatus.COMPLETED.value,
                         updated_at=now_iso,
                         last_activity_at=now_dt,
-                        version=instance.version + 1,
+                        # M1b (2026-10-03, report-delivery-bug-family):
+                        # restore SQL-side ``Instance.version + 1`` —
+                        # this site was regressed to a Python-side
+                        # constant ``instance.version + 1`` (lowercase
+                        # ``i``), which evaluates the in-memory ORM
+                        # attribute and stamps the LITERAL value into
+                        # the SET clause (``SET version = 42`` for
+                        # example). The capital-``I`` ``Instance.version``
+                        # form is a SQLAlchemy column expression that
+                        # compiles to ``SET version = version + 1`` —
+                        # the correct post-discharge, race-safe
+                        # increment. Do NOT add a 5th occurrence of
+                        # the python-side pattern.
+                        version=Instance.version + 1,
                     )
                 )
                 session.commit()
