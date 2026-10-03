@@ -71,7 +71,7 @@ from .repositories.task.repository import (
 # writes propagate to every claim without a second truth.
 from .registry import get_registry
 from .mcp.builtin_servers import get_registry as get_mcp_registry, is_builtin_disabled
-from .mcp.warmup_pool import McpWarmupPool, get_mcp_warmup_pool
+from .mcp.warmup_pool import McpWarmupPool, get_mcp_warmup_pool, build_pooled_stdio_config
 from .mcp import warmup_pool as _warmup_pool_module
 from .mcp.config import McpStdioConfig
 from .opencode import OpenCodeSessionRegistry, create_opencode_session_repository
@@ -2275,20 +2275,54 @@ class InstanceManager:
                 )
                 continue
 
-            config_dict = definition.build_config({})
-            if config_dict.get("transport") != "stdio":
-                continue
-
-            # Skip inactive servers (disabled via env var or manually deactivated)
+            # Fix for MCP warmup-pool config starvation (2026-10-02, defect
+            # pinned here): the pre-fix code passed ``build_config({})``
+            # to ``McpStdioConfig`` directly, ignoring any env the row
+            # had accumulated via ``mcp_set_env`` / ``kms_attach`` after
+            # bootstrap. The pool's first ``_create_pooled_connection``
+            # therefore spawned a stdio subprocess with NO BYOK / KMS
+            # marker env, even when the DB row held all 4 BYOK values
+            # (live symptom: ``od_generate_design`` returned
+            # "BYOK not configured" with the row holding the right env).
+            #
+            # The fix routes the merged config through
+            # ``build_pooled_stdio_config`` which overlays the row's
+            # ``config.env`` on the definition defaults. The **PRECEDENCE
+            # (PINNED)**: row env wins on every key — see the helper
+            # docstring for the full rationale. The row is the live
+            # state; the definition is only the default-fallback when the
+            # row has no env entries of its own (e.g. plane on a fresh
+            # install).
             existing = self._mcp_server_repository.get_mcp_server_by_name(name)
             if existing is not None and not existing.is_active:
                 logger.debug(f"Skipping warmup for inactive MCP server: {name}")
                 continue
 
+            row_config = (existing.config if existing is not None else None) or None
+            try:
+                stdio_config = build_pooled_stdio_config(definition, row_config)
+            except Exception as build_err:
+                # Defensive: a malformed row config (e.g. env value is
+                # not a string after a botched migration) must not crash
+                # the entire pool init. Fall back to the pre-fix
+                # definition-only config so the server still starts;
+                # the row's bad env is then a separate operator-visible
+                # issue, not a daemon-boot blocker. Logged at WARNING
+                # so it shows up in the journal.
+                logger.warning(
+                    "MCP server '%s' row config invalid for warmup pool: %s. "
+                    "Falling back to definition defaults.",
+                    name,
+                    build_err,
+                )
+                config_dict = definition.build_config({})
+                if config_dict.get("transport") != "stdio":
+                    continue
+                stdio_config = McpStdioConfig(**config_dict)
+
             pool_size = self.config.mcp_pool.servers.get(
                 name, self.config.mcp_pool.default_pool_size
             )
-            stdio_config = McpStdioConfig(**config_dict)
             # Per-server timeout override. Built-in servers that run
             # long-running tools (e.g. an agent-execution tool that may
             # run for several minutes) opt in by overriding

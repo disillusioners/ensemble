@@ -313,6 +313,81 @@ class McpWarmupPool:
         self._start_tracked_replenish(server_name)
         return conn
 
+    def update_server_env(self, server_name: str, new_env: dict[str, str]) -> bool:
+        """Refresh the stored env for a pooled server WITHOUT touching healthy connections.
+
+        Fix for MCP warmup-pool config starvation (2026-10-02, defect
+        pinned against ``definition.build_config({})`` in
+        ``InstanceManager._init_warmup_pool``). The pool registered
+        each server's config from the BUILTIN definition's defaults at
+        boot; ``mcp_set_env`` and ``kms_attach`` writes land ONLY in
+        the DB row. A subsequent ``acquire()`` + ``_replenish`` would
+        re-spawn a subprocess from the stale ``_configs[server].env``,
+        so BYOK / KMS marker env never reached the pool's stdio
+        subprocesses (live symptom: ``od_generate_design`` failed with
+        "BYOK not configured" while the DB row held all 4 values).
+
+        The fix has two halves (see ``_init_warmup_pool`` in
+        ``daemon/manager.py`` for the other half — the boot-time row
+        overlay):
+
+          * This method keeps the stored config fresh. The next
+            ``_create_pooled_connection`` reads the updated env, so
+            ``acquire()`` + replenish cycles serve fresh env to new
+            subprocesses.
+          * Existing HEALTHY pooled connections keep the env they were
+            spawned with (subprocess env is captured at fork time, the
+            daemon cannot retroactively rewrite it). They drain
+            naturally through the normal acquire/release cycle and are
+            replaced by connections spawned with the new env. We
+            deliberately do NOT kill healthy connections — that would
+            negate the whole point of the warmup pool. Unrelated
+            pooled servers are untouched.
+
+        KMS markers (LANE-1 ``__KMS_REF__<handle>__`` and LANE-2
+        ``__KMS_ENV__<var>__``) flow through unchanged — the resolver
+        at ``daemon/services/kms_resolver.resolve_env`` still runs at
+        spawn time on the refreshed env.
+
+        Args:
+            server_name: The pooled server whose env changed.
+            new_env: The new env dict to store. Merged over any prior
+                env so a partial write (e.g. mcp_set_env only setting
+                ``BYOK_BASE_URL`` + ``BYOK_MODEL``) lands atomically
+                alongside the pre-existing keys (incl. KMS markers).
+
+        Returns:
+            True iff the server was registered and its stored env was
+            refreshed. False if the server is not in this pool (no-op,
+            matching the bootstrap "skip if not registered" pattern).
+        """
+        if server_name not in self._configs:
+            return False
+
+        # Defensive copy — callers (mcp_set_env, kms_attach) may have
+        # kept a reference and reuse it; we don't want a later mutation
+        # to silently corrupt the pool's view.
+        stored = self._configs[server_name]
+        merged_env: dict[str, str] = dict(stored.env or {})
+        if new_env:
+            merged_env.update(new_env)
+
+        # Replace the stored entry. Command/args/timeout do not change
+        # at runtime (env is the only mutable axis for stdio servers),
+        # so a shallow copy of the existing McpStdioConfig with the
+        # updated env is the correct semantics. We re-construct the
+        # model rather than mutating in place so the change is atomic
+        # and trivially observable to concurrent _create_pooled_connection
+        # readers (the next replenishment sees the new env).
+        self._configs[server_name] = McpStdioConfig(
+            transport=stored.transport,
+            command=stored.command,
+            args=list(stored.args),
+            env=merged_env,
+            timeout=stored.timeout,
+        )
+        return True
+
     def is_pooled_server(self, server_name: str) -> bool:
         """Return True if this server is registered with the warmup pool.
 
@@ -627,3 +702,92 @@ def get_mcp_warmup_pool() -> McpWarmupPool:
     if _mcp_warmup_pool is None:
         _mcp_warmup_pool = McpWarmupPool()
     return _mcp_warmup_pool
+
+
+def build_pooled_stdio_config(
+    definition: "BuiltinServerDefinition",
+    row_config: dict | None,
+) -> McpStdioConfig:
+    """Build a pooled ``McpStdioConfig`` from a builtin definition + live row.
+
+    Fix for MCP warmup-pool config starvation (2026-10-02, paired with
+    :meth:`McpWarmupPool.update_server_env`): the pre-fix pool was
+    registered with ``definition.build_config({})`` only, ignoring the
+    DB row's ``config.env``. After any ``mcp_set_env`` / ``kms_attach``
+    write the row carried the live env but the pool did not. This
+    helper is the boot-time half of the fix: it overlays the row's
+    ``config.env`` over the definition defaults so the very first
+    ``_create_pooled_connection`` already spawns with the live env.
+
+    **PRECEDENCE (PINNED, do not change without an explicit ticket):**
+    row ``config.env`` wins over ``definition.build_config({})`` env on
+    every key. Rationale:
+
+    * The DB row is the SOURCE OF TRUTH for runtime env. The
+      bootstrap-time ``config`` written by
+      ``InstanceManager._bootstrap_builtin_servers`` IS
+      ``build_config({})``, but every subsequent ``mcp_set_env`` /
+      ``kms_attach`` write merges into the row. A stale definition
+      would silently drop those keys.
+    * The definition defaults are the FALLBACK for the case where
+      the row has no env (e.g. mid-bootstrap before the row is
+      written, or a user-wiped row). Falling back to the definition
+      matches pre-fix behavior on the "empty / missing" path so
+      unrelated servers (e.g. ``plane``) keep working when their row
+      has no env entries of its own.
+    * On key conflict, the row wins — by the same argument, the row
+      is the live state. Operators who want to reset a key must do it
+      via the explicit writers (``mcp_set_env`` / ``kms_attach``);
+      silently re-introducing a definition default on daemon restart
+      would break the OpenDesign BYOK self-provisioning chain
+      (markers in the row would be replaced by definition defaults
+      that have no value).
+
+    Command / args / timeout come from the definition (unchanged at
+    runtime — env is the only mutable axis for stdio servers). The
+    row's ``config`` may carry user-set ``args`` too in principle,
+    but the bootstrap path always regenerates the row's
+    ``transport / command / args`` from the definition; the row's
+    contributions to pooled state are the env (and any future runtime
+    additions). This helper therefore overlays ONLY env, keeping
+    command / args / timeout on the definition's source-of-truth
+    output.
+
+    Args:
+        definition: A built-in server definition (e.g. ``OpenDesignMCP``).
+            Used for ``build_config({})`` and the schema-derived env
+            defaults.
+        row_config: The live ``mcp_servers.config`` dict from the DB
+            (may be ``None`` or empty if the row has never been
+            written). When present, ``row_config["env"]`` is overlaid
+            on the definition defaults.
+
+    Returns:
+        A ``McpStdioConfig`` ready to hand to
+        :meth:`McpWarmupPool.register_server`. The transport
+        check (``stdio``) is the caller's responsibility — the pool
+        only registers stdio servers; non-stdio is filtered out
+        upstream in ``_init_warmup_pool``.
+    """
+    config_dict = definition.build_config({})
+    if config_dict.get("transport") != "stdio":
+        # Callers should not pass non-stdio definitions here, but be
+        # explicit: any non-stdio path is forwarded to the McpStdioConfig
+        # constructor (which will fail with a clean pydantic ValidationError
+        # on a transport mismatch — better than silent string coercion).
+        pass
+
+    row_env: dict[str, str] = {}
+    if row_config:
+        candidate = row_config.get("env")
+        if isinstance(candidate, dict):
+            # Filter to string→string — pydantic will ValidationError
+            # otherwise. KMS markers are str values and pass through.
+            row_env = {k: v for k, v in candidate.items() if isinstance(k, str) and isinstance(v, str)}
+
+    if row_env:
+        merged_env: dict[str, str] = {**(config_dict.get("env") or {})}
+        merged_env.update(row_env)
+        config_dict["env"] = merged_env
+
+    return McpStdioConfig(**config_dict)
