@@ -33,6 +33,32 @@ if getattr(sys, 'frozen', False):
 # Now import and run the main function
 import daemon.__main__
 
+# PP1-adjacent (2026-10-03, report-delivery-bug-family) — the
+# 5th env-poison incident (occurrence #5 producer-deleter) came
+# from a DevOps ``--version`` probe that BOOTED THE FULL STACK
+# against ``ensemble_prod`` because the entry had no early-exit
+# on the probe flag. The boot triggered ``_boot_db_preflight()``
+# (DB connect under the live env) and the operator's
+# ``QUEUE_DISCARD_ON_STARTUP`` armed config, so the probe alone
+# wiped live task/message rows. The 4-line check below
+# short-circuits the probe BEFORE the DB preflight — the import
+# of ``daemon.__main__`` above is a module init (no DB connect),
+# but ``_boot_db_preflight()`` is the dangerous step. ``-V`` and
+# ``--version`` are the conventional probe flags; the check is
+# ``in sys.argv`` (not argparse) because the entry does not own
+# an arg parser and adding one is out of scope. The early-exit
+# reads ``daemon.__version__`` (baked at ``daemon/__init__.py``)
+# — no DB, no config load, no env side effects beyond what the
+# .env block above already did. The follow-up commission owns
+# the root fix: heartbeat/boot-epoch-gated refusal of
+# ``discard_on_startup`` when a foreign live daemon exists
+# (explicitly out of scope per the 2026-10-03 mid-flight
+# direction).
+if "--version" in sys.argv or "-V" in sys.argv:
+    from daemon import __version__ as _ensemble_version
+    print(f"Ensemble v{_ensemble_version}")
+    sys.exit(0)
+
 # Boot DB preflight (F-DR1-1, P2.3 B5.6): the FROZEN entry runs it HERE —
 # before main() loads config or starts uvicorn — so the launcher's
 # tempfail contract (exit 75 unreachable / 78 auth-refused, ADR-011) is
