@@ -14,6 +14,10 @@ import {
   SearchableSelectComponent,
   SearchableSelectOption,
 } from '../../components/searchable-select/searchable-select.component';
+import {
+  formatTimezoneOffset,
+  getBrowserNativeTimezones,
+} from '../../utils/timezone-format';
 
 const PREDEFINED_LANGUAGES = [
   'Auto',
@@ -49,38 +53,6 @@ const DEFAULT_EDITOR: EditorType = 'builtin';
  */
 const TZ_AUTO_VALUE = '__tz_auto__';
 const TZ_STORAGE_KEY = 'settings-timezone-preference';
-
-/**
- * Compute the current UTC offset string for an IANA zone, e.g.
- * `+07:00` for `Asia/Bangkok` or `-05:00` for `America/New_York`.
- * Uses `Intl.DateTimeFormat#formatToParts` with `shortOffset` and
- * normalizes browser output (`GMT+7`, `GMT-05:00`, `GMT`) into a
- * stable `±HH:MM` shape for the dropdown label.
- */
-function formatTimezoneOffset(zone: string): string {
-  try {
-    const fmt = new Intl.DateTimeFormat('en-US', {
-      timeZone: zone,
-      timeZoneName: 'shortOffset',
-    });
-    const parts = fmt.formatToParts(new Date());
-    const raw = parts.find((p) => p.type === 'timeZoneName')?.value ?? '';
-    return normalizeOffsetValue(raw);
-  } catch {
-    return '';
-  }
-}
-
-function normalizeOffsetValue(raw: string): string {
-  if (!raw) return '';
-  if (raw === 'GMT' || raw === 'UTC' || raw === 'Z') return '+00:00';
-  const match = raw.match(/^(?:GMT|UTC)([+-])(\d{1,2})(?::?(\d{0,2}))?$/);
-  if (!match) return raw;
-  const [, sign, hh, mm] = match;
-  const hhPadded = hh.padStart(2, '0');
-  const mmPadded = (mm ?? '00').padStart(2, '0');
-  return `${sign}${hhPadded}:${mmPadded}`;
-}
 
 @Component({
   selector: 'app-settings',
@@ -235,14 +207,12 @@ export class SettingsComponent implements OnInit, OnDestroy {
     if (api !== null && api.length > 0) {
       zones = api;
     } else {
-      // 2. Browser-native list — best effort. Probe only when we
-      //    actually have the function on this runtime; older browsers
-      //    without it are handled by the empty-list fallback below.
-      const intlAny = Intl as unknown as {
-        supportedValuesOf?: (kind: string) => number | string[];
-      };
-      const values = intlAny.supportedValuesOf?.('timeZone') ?? [];
-      const intlZones = Array.isArray(values) ? (values as string[]) : [];
+      // 2. Browser-native list — best effort. ``getBrowserNativeTimezones``
+      //    returns an empty array both when the runtime lacks
+      //    ``supportedValuesOf`` and when it is callable but returns
+      //    nothing — the empty-Intl fallback (745afb13) is part of
+      //    the shared helper, not the component.
+      const intlZones = getBrowserNativeTimezones();
       if (intlZones.length > 0) {
         zones = intlZones;
       }
@@ -277,11 +247,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
     if (api !== null && api.length > 0) {
       return true;
     }
-    const intlAny = Intl as unknown as {
-      supportedValuesOf?: (kind: string) => number | string[];
-    };
-    const values = intlAny.supportedValuesOf?.('timeZone') ?? [];
-    return Array.isArray(values) && values.length > 0;
+    return getBrowserNativeTimezones().length > 0;
   });
 
   /** True when the user has not picked a zone — drives the hint line. */
