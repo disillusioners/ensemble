@@ -49,7 +49,7 @@ Companion: `plan-overview.md` + `research-findings.md` (same directory)
 
 ## Task Breakdown (aligns to plan-overview.md §Phase 2, splits where useful)
 
-7 parent tasks (T1–T7), each with sub-tasks, file paths, acceptance criteria, dependencies, and suggested commit slicing. Each sub-task is independently completable, builds in a worktree, and passes its own `tsc --noEmit` + Jest subset.
+7 parent tasks (T1–T7), each with sub-tasks, file paths, acceptance criteria, dependencies, and suggested commit slicing. Each sub-task is independently completable, builds in a worktree, and passes its own `cd frontend && tsc --noEmit` + Jest subset.
 
 ### T1. Service Layer — `checkpoint-cleanup.service.ts`
 
@@ -111,7 +111,7 @@ export function isKnownErrorCode(v: unknown): v is MaintenanceErrorCode {
 }
 ```
 
-**Acceptance**: `tsc --noEmit -p tsconfig.app.json` passes with all new types exported. No `@Injectable` or service-level logic in this sub-task. **[CF-6 doc-repair, v3.1]** `MAINTENANCE_ERROR_CODES` has exactly **11** entries; `MaintenanceErrorCode` is derived from it (no hand-written duplicate union); `isKnownErrorCode('internal_error')` is `true`.
+**Acceptance**: `cd frontend && tsc --noEmit -p tsconfig.app.json` passes with all new types exported. No `@Injectable` or service-level logic in this sub-task. **[CF-6 doc-repair, v3.1]** `MAINTENANCE_ERROR_CODES` has exactly **11** entries; `MaintenanceErrorCode` is derived from it (no hand-written duplicate union); `isKnownErrorCode('internal_error')` is `true`.
 
 **Commit slice**: `feat(checkpoint-cleanup): add typed models for maintenance API contract v3`.
 
@@ -187,7 +187,7 @@ Notes:
 - **AM-1 note (Origin):** the FE sends **no special headers**. Same-origin SPA + localhost-family dev origins are auto-trusted by the BE's `require_trusted_origin` guard. Do NOT attempt no-cors/`fetch-mode: 'no-cors'` tricks — that hides the response body and breaks `details.run_id` adoption.
 
 **Acceptance**:
-- `tsc --noEmit -p tsconfig.app.json` passes.
+- `cd frontend && tsc --noEmit -p tsconfig.app.json` passes.
 - The service file is < 220 LOC (signal + 5 methods + poll helper + adoption helper + error-mapping helper).
 - A standalone Jest spec (added in T6) proves all five HTTP methods map to the right path + verb, that `pollRun` terminates on each terminal status (including `interrupted`), and that `adoptRunIdFromError` returns the `details.run_id` on a 409 `run_in_flight` body and `null` otherwise.
 
@@ -239,7 +239,7 @@ Import the new type at the top of `app.ts`: `import type { MaintenanceAvailabili
 [OQ-§6.2 RESOLVED, AM-13] Per overview §6.2, the menu MUST hide when `MAINTENANCE_ENDPOINTS_ENABLED=0` is set on the BE. The BE side owns the kill-switch and reports `state: "kill_switched"` from `/availability` — no FE-side env check needed, no FE-side `localStorage` flag. **AM-13 default**: `MAINTENANCE_ENDPOINTS_ENABLED=1`; OFF flips availability to `kill_switched`, gear menu hides cleanly. Phase 3 activation call-out: operators flipping the kill-switch need only a daemon restart.
 
 **Acceptance**:
-- `tsc --noEmit -p tsconfig.app.json` passes.
+- `cd frontend && tsc --noEmit -p tsconfig.app.json` passes.
 - Manual check: open `http://localhost:4199` against a PG-eligible dev daemon → gear menu shows "Maintenance". Switch to a SQLite-only daemon → `/availability` returns `state: "backend_unsupported"` → gear menu does NOT show "Maintenance". Daemon unreachable → `error:` branch runs → gear menu does NOT show "Maintenance". Restart daemon with `MAINTENANCE_ENDPOINTS_ENABLED=0` → `/availability` returns `state: "kill_switched"` → gear menu does NOT show "Maintenance".
 - The probe is a no-op on retry: calling `checkMaintenanceAvailability()` twice does NOT append the item twice (the `!this.settingsMenuItems().some(...)` guard).
 - The branch is on `state === 'ready'` — the legacy `eligible` boolean is tolerated by the type but NOT used by the probe (T6.3 source-grep pin).
@@ -302,7 +302,7 @@ Notes:
 - **The guard does its OWN `/availability` probe.** This duplicates the probe in `app.ts`, but the duplication is intentional: the gear-menu probe runs at app boot, the route guard runs at navigation time (which may be minutes later, e.g. deep-link from bookmark, or after a state flip). The probe is cheap (one SELECT per AM-1/Focus-Area-3; same indexed single-row read pattern). T6.3 source-grep pin: the guard body contains `state === 'ready'`.
 
 **Acceptance**:
-- `tsc --noEmit -p tsconfig.app.json` passes.
+- `cd frontend && tsc --noEmit -p tsconfig.app.json` passes.
 - Manual check: navigating to `/maintenance/checkpoint-cleanup` against a PG-eligible dev daemon renders the page shell (T4). Navigating to `/maintenance/checkpoint-cleanup` against a SQLite-only daemon (returns `state: "backend_unsupported"`) routes to `/` (the `parseUrl('/')` fallback) — gear menu is also empty, so the deep-link path stays consistent. Navigating to `/maintenance` (no sub-path) still 404s (acceptable — we don't yet have a section index page).
 - The guard's `state === 'ready'` check is pinned by T6.3 source-grep.
 
@@ -746,7 +746,7 @@ Scaffold after `frontend/src/app/components/migration/migration.component.scss`.
 - All **11** `MaintenanceErrorCode` values from the v3 error table map to a visible UI affordance (snack-bar OR inline banner) [CF-6 doc-repair, v3.1]; `run_in_flight` is silently absorbed by 409-adoption (no error toast); `maintenance_disabled` gets a global banner above all cards; `internal_error` gets the generic retry affordance.
 - Skipped pairs render with summary line + per-entry reason badge (known codes + `ERROR:*` fallback) + truncated notice when applicable.
 - Interrupted-state result renders the "daemon restarted mid-run — re-run to converge" affordance card with a re-run button. No cancel button anywhere.
-- `tsc --noEmit -p tsconfig.app.json` passes.
+- `cd frontend && tsc --noEmit -p tsconfig.app.json` passes.
 - `npm run build` (production) passes WITHOUT any budget warning.
 
 **Commit slice**: `feat(checkpoint-cleanup): add checkpoint cleanup section component`.
@@ -825,7 +825,7 @@ Pattern from `frontend/src/app/pages/jobs/jobs-page.bindings.pins.spec.ts:380-40
 Run BEFORE every commit that touches `frontend/`:
 
 ```bash
-cd /Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble/frontend
+cd frontend
 npx tsc --noEmit -p tsconfig.app.json    # compile check
 npx jest src/app/pages/maintenance/     # the new specs
 npm run build                            # full prod build — proves budget headroom
@@ -1093,7 +1093,7 @@ The Phase 2 work is **complete** when ALL of the following hold:
 - [ ] T5 component renders 4 cards + result panel + error banner + global maintenance_disabled banner; dry-run → confirm → poll → result works end-to-end. **AM-14:** 409-adoption adopts `details.run_id` and resumes polling (no error toast). **AM-10:** skipped[] renders with summary line + reason badge map + `ERROR:*` fallback + `skipped_truncated` notice. **AM-11:** status + result panels branch on `destructive:bool`. **AM-12:** executing card shows `Expected duration: ~X` from the 202 body's `expected_duration_ms_hint`. **AM-6:** interrupted-state result renders the "re-run to converge" affordance card. **AM-16:** honest-duration copy ("May take several minutes on large databases") in dry-run muted text + dialog message.
 - [ ] T6.1 service spec, T6.2 component spec, T6.3 source-grep pins all pass under `npx jest src/app/pages/maintenance/`. **AM-16:** spec includes 409-adoption, skipped-render, state-enum gating, 11-code error rendering *(10→11 [CF-6 doc-repair, v3.1])* , interrupted-state render. **AM-17:** `no-idempotency-key` source-grep pin replaces `idempotency-key-present`. **[R-2 + R-addition, v3 fix pass]:** pin table total = **15** (incl. `sections-registry-load-bearing`) *(15 at v3/v3.1; **18 at v3.2** [v3.2, A+C ratified] — +3 projection pins)*.
 - [ ] T7 Playwright spec refuses to run against `ensemble_prod` and passes all non-destructive tests on a disposable-PG dev daemon. **AM-16:** spec includes cross-origin 403 case (403 BODY asserted via `context.request.post` [R-12]), kill-switch hide case (`state: 'kill_switched'` → menu hidden), interrupted-state render case, 409-adoption case (no error toast). **[R-2/R-11, v3 fix pass]:** spec total = **14 cases**, run on a dedicated port with `reuseExistingServer: false` + daemon canary.
-- [ ] `npx tsc --noEmit -p tsconfig.app.json` passes.
+- [ ] `cd frontend && npx tsc --noEmit -p tsconfig.app.json` passes.
 - [ ] `npm run build` (production) passes with NO budget warnings (initial ≤ 1MB warning, anyComponentStyle ≤ 8kB warning).
 - [ ] `npm test` passes for the entire FE suite (no regression to existing specs).
 - [ ] **All 11 `MaintenanceErrorCode` values are handled in the component (count pin verified)** *(10→11 [CF-6 doc-repair, v3.1])* — `run_in_flight` is silently absorbed by 409-adoption (the count pin still asserts the switch arm exists, even if it doesn't show a banner). `origin_not_trusted` and `maintenance_disabled` were added (AM-1, AM-13).

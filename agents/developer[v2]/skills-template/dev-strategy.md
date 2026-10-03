@@ -110,7 +110,7 @@ From `git diff --stat` (read-only, #14) and the worker/coder report, name the ex
 | Quick worker work (SMALL/MEDIUM) | `git diff` directly, OR spawn a review worker with `code-review` | diff / review |
 | Commit only (no code change) | `git log -p -1` to inspect the resulting commit | — |
 
-The "one targeted test" = a single test for the changed unit, e.g. `pytest path/to/test_changed.py::test_name -q`. **Bounded.** Fallbacks when no targeted test fits: a fast smoke (`python -c "import …"`, `tsc --noEmit`, `ruff check <file>`) or a `code-review` pass with **no execution**.
+The "one targeted test" = a single test for the changed unit, e.g. `pytest path/to/test_changed.py::test_name -q`. **Bounded.** Fallbacks when no targeted test fits: a fast smoke (`python -c "import …"`, `cd frontend && tsc --noEmit`, `ruff check <file>`) or a `code-review` pass with **no execution**.
 
 ### Step 3 — Timeout cap every run
 Unit ≤2 min; smoke ≤1 min. A verify worker never "discovers and run" extra tests. If the targeted test won't finish in cap → it's the wrong (too big) check: narrow further, or record `DEFERRED → tester` (the caller escalates — I do not spawn it; `tester` is not in my `team_members`).

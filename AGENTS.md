@@ -196,3 +196,20 @@ async def test_example():
 2. **Frontend**: Print width 100, single quotes, Angular HTML parser.
 3. **Databases**: Two SQLite DBs (persistence + checkpoints) using aiosqlite.
 4. **SSE**: Real-time streaming via SSE. Don't wait for network idle.
+
+---
+
+## Security: `npx tsc` typosquat (`tsc@2.0.4` incident 2026-10-03)
+
+**Rule.** TypeScript compilation runs ONLY through `frontend/`'s local devDependency. Never invoke a bare `tsc` or bare `npx tsc` from the repo root or any non-frontend directory.
+
+**Why.** The npm package `tsc` is NOT TypeScript — `tsc@2.0.4` is an unrelated typosquat. A bare `npx tsc` outside a package directory fetches and executes whatever the npm registry serves. **2026-10-03 08:40Z:** bare `npx tsc` from repo root fetched `tsc@2.0.4` and ran it (payload benign, mechanism is the vulnerability).
+
+**Safe idiom (canonical):**
+
+```bash
+cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.app.json
+```
+
+When `npx` phrasing must stay: `cd frontend && npx tsc …`. Outside any package dir, the mandated probe form is `npx --no-install <tool>` (fails safely instead of fetching).
+

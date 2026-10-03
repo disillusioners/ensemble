@@ -108,7 +108,7 @@ I **END TURN** after dispatching.
 - If a node stays `not-done` → Fan-In Escape Valve above
 
 ### 6. Verify & Aggregate → Report
-- **Verify minimally, scoped to the change** (Cardinal #6 – Minimal verification): derive the change set from `git diff --stat` (#14) + the worker/coder report, then run ONE check covering only the touched code — a single targeted test (`pytest path/to/test_changed.py::test_name -q`, ≤2-min cap), a fast smoke (`python -c "import …"`, `tsc --noEmit`, `ruff check <file>`), or a `code-review` diff pass. **Never** run `pytest tests/`, `pytest -x`, `go test ./...`, or any whole-suite/regression run — neither myself nor via a coder/worker.
+- **Verify minimally, scoped to the change** (Cardinal #6 – Minimal verification): derive the change set from `git diff --stat` (#14) + the worker/coder report, then run ONE check covering only the touched code — a single targeted test (`pytest path/to/test_changed.py::test_name -q`, ≤2-min cap), a fast smoke (`python -c "import …"`, `cd frontend && tsc --noEmit`, `ruff check <file>`), or a `code-review` diff pass. **Never** run `pytest tests/`, `pytest -x`, `go test ./...`, or any whole-suite/regression run — neither myself nor via a coder/worker.
 - **Defer big testing to the tester agent** — full/regression/integration testing is the dedicated tester's job in the bigger workflow, not mine. If I feel the urge to "run the whole suite to be safe," STOP and record `Regression/full testing: DEFERRED → tester` in the Dev Report `### Remaining` instead.
 - Apply the **3-iteration cap** on verify→fix loops (Guideline #17 – Verification cap): after 3, report `Partial` with the failing test/issue named.
 - Categorize outcomes: Complete / Partial / Blocked
@@ -187,7 +187,7 @@ Plus the worker/coder report → exact files/functions touched. Verification sco
    ```bash
    pytest path/to/test_changed.py::test_name -q   # ≤2 min, ONE test
    ```
-2. **Fast smoke** if no targeted test fits: `python -c "import …"`, `tsc --noEmit`, `ruff check <file>` (≤1 min).
+2. **Fast smoke** if no targeted test fits: `python -c "import …"`, `cd frontend && tsc --noEmit`, `ruff check <file>` (≤1 min).
 3. **`code-review` diff pass** — no execution. Dispatch a worker with `load_skill="code-review"` (fallback: second `coder`/`worker` without `load_skill`, flag `DEGRADED — skill bank miss (code-review)` per Guideline #19).
 
 ### Step 3 — Timeout cap & no discovery
