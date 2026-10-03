@@ -178,11 +178,13 @@ export class SettingsComponent implements OnInit, OnDestroy {
   //     (`TZ_AUTO_VALUE`) so the generic SearchableSelectOption<string>
   //     binding works exactly like the language picker. The sentinel
   //     is translated to API `null` at the save boundary only.
-  //   * The picker is fed by `Intl.supportedValuesOf('timeZone')`
-  //     (browser-native IANA list). If that API is not available we
-  //     hide the picker and fall back to a plain text input that
-  //     accepts any IANA name — server-side validation handles
-  //     invalid values.
+  //   * The picker is fed by the API list (`GET /api/settings/timezones`,
+  //     canonical IANA from the backend tzdata), with `Intl.supportedValuesOf`
+  //     as the fallback. An empty Intl list (callable but returning [])
+  //     is treated as unsupported so the picker does not render a zone-less
+  //     dead-end dropdown. When neither source yields zones we hide the
+  //     picker and fall back to a plain text input that accepts any IANA
+  //     name — server-side validation handles invalid values.
 
   readonly selectedTimezone = signal<string>(TZ_AUTO_VALUE);
   readonly customTimezone = signal<string>('');
@@ -860,7 +862,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
   private loadTimezoneOptionsFromApi(): void {
     this.settingsService.getTimezoneOptions().subscribe({
       next: (resp) => {
-        const zones = resp?.timezones ?? [];
+        const zones = Array.isArray(resp?.timezones) ? resp.timezones : [];
         this.apiTimezones.set(zones);
       },
       error: () => {

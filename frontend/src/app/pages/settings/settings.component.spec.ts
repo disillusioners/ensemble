@@ -1964,4 +1964,33 @@ describe('Timezone preference (user-timezone-setting)', () => {
     expect(section!.querySelector('.custom-tz-row')).not.toBeNull();
     expect(section!.querySelector('app-searchable-select')).toBeNull();
   });
+
+  // Regression pin for 745afb13: an Intl probe that IS callable but
+  // returns [] must be treated the same as "Intl missing" — the picker
+  // would otherwise render a zone-less dropdown with the text-input row
+  // hidden (a dead end with no way to enter a custom zone).
+  it('shows the plain text input when the API errors and Intl returns an empty list', () => {
+    // API errors (leaves apiTimezones = null); Intl IS callable but
+    // yields [] — this is the new failure mode the 745afb13 fix targets.
+    service.getTimezoneOptions.mockReturnValue(
+      throwError(() => new Error('boom')),
+    );
+    restoreIntlSupportedValuesOf(supportedMock);
+    supportedMock = patchIntlSupportedValuesOf([]);
+    service.getTimezonePreference.mockReturnValue(
+      of({ timezone: null, utc_offset: null }),
+    );
+    fixture.detectChanges();
+
+    // Same observable result as the both-unavailable case: only the
+    // Auto sentinel, picker hides, text-input row renders.
+    expect(component.timezoneOptions().map((o) => o.value)).toEqual([
+      TZ_AUTO_VALUE,
+    ]);
+    expect(component.isTzNativeSupported()).toBe(false);
+    const section = timezoneSection();
+    expect(section).toBeDefined();
+    expect(section!.querySelector('.custom-tz-row')).not.toBeNull();
+    expect(section!.querySelector('app-searchable-select')).toBeNull();
+  });
 });
