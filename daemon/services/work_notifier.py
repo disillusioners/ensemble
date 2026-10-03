@@ -442,10 +442,15 @@ async def notify_work_watchers(
                 logger.warning(
                     "PP1 zero-watcher terminal fire: work_id=%s "
                     "status=%s — no watchers found, the terminal "
-                    "report is NOT being delivered. The durable "
-                    "job_completed event row carries the "
-                    "result_summary / error payload and can be "
-                    "re-fired from the events table for recovery.",
+                    "report is NOT being delivered. The producer of "
+                    "this terminal is expected to publish a "
+                    "job_completed event row carrying the "
+                    "result_summary / error payload (it has not been "
+                    "verified at this layer; this WARN never queries "
+                    "the events table). For recovery, look up the "
+                    "instance's events in the events table by "
+                    "instance_id, or consult the producer-side log "
+                    "for the published event id.",
                     work_id[:8] if work_id else "<none>",
                     status,
                 )
@@ -778,15 +783,29 @@ async def notify_work_watchers(
                 # / kwarg shape); the WARN is the delivery-gap
                 # signal.
                 if not claimed:
+                    # m3 (2026-10-03, report-delivery-bug-family) —
+                    # soften the wording to not claim a specific
+                    # event-row id has been verified at this layer.
+                    # The CAS-claim chokepoint never queries the
+                    # events table; the JOB_COMPLETED row is
+                    # published by the producer (the
+                    # ``job_feedback_observer`` Item-3b publish at
+                    # ``job_feedback_observer.py:~2375``) AFTER the
+                    # notify path returns. The WARN is the
+                    # delivery-gap signal; recovery is the
+                    # operator's job to correlate via the
+                    # instance's events table.
                     logger.warning(
                         "PP1 zero-claimed terminal fire: work_id=%s "
                         "status=%s — CAS claim returned 0 rows "
                         "(claimable=%d). The terminal report is NOT "
                         "being delivered to the %d claimable "
-                        "watcher(s). The durable job_completed event "
-                        "row carries the result_summary / error "
-                        "payload and can be re-fired from the events "
-                        "table for recovery. NOTE: re-delivery is NOT "
+                        "watcher(s). The producer-side log should "
+                        "carry the JOB_COMPLETED event id once it "
+                        "is published; the durable event row carries "
+                        "the result_summary / error payload and can "
+                        "be re-fired from the events table for "
+                        "recovery. NOTE: re-delivery is NOT "
                         "auto-compensated here (duplicate-delivery "
                         "risk) — the WARN is the observability arm "
                         "and a follow-up commission owns re-arm.",
