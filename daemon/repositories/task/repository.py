@@ -136,6 +136,35 @@ def is_chat_lane_active() -> bool:
     return _chat_lane_active
 
 
+# m1 (2026-10-03, report-delivery-bug-family) — cap on the
+# doomed-id list rendered into the wipe JOURNAL log so a 5k-row
+# wipe does not emit a 180-400KB single log line. The cap emits
+# the first N ids verbatim (the operator can correlate the most-
+# recent wipe by sample), the TOTAL count, and a truncation
+# marker so the post-mortem is honest about what was logged. Both
+# the task and message_queue wipe sites use the same constant so
+# the audit-trail cardinality is consistent across repos.
+_DOOMED_ID_LOG_CAP: int = 500
+
+
+def _capped_doomed_id_repr(ids: list[str]) -> str:
+    """Render a doomed-id list for the wipe JOURNAL log, capped.
+
+    Returns a string of the form
+    ``"<first 500 ids>"[+ N more truncated]``
+    so the operator sees the first sample verbatim AND the
+    truthful total count. The cap is the same constant for both
+    wipe sites so the audit-trail cardinality is consistent.
+    """
+    total = len(ids)
+    if total <= _DOOMED_ID_LOG_CAP:
+        return f"{ids!r}"
+    return (
+        f"{ids[:_DOOMED_ID_LOG_CAP]!r}"
+        f"[+ {total - _DOOMED_ID_LOG_CAP} more truncated]"
+    )
+
+
 
 class DirectWriteError(RuntimeError):
     """Raised when a direct ``UPDATE task SET status=`` is attempted
@@ -1489,10 +1518,20 @@ class TaskRepository:
                         -- (occurrence #5) cannot overwrite
                         -- 'completed' / 'failed' / 'cancelled' with
                         -- 'orphaned_no_task';
-                        -- (b) version bump on every write — occurrence
-                        -- showed two writers racing with no version
-                        -- change, leaving a stale terminal_reason
-                        -- visible to the next reader;
+                        -- (b) version bump on terminal writes — the
+                        -- previous text said "on every write" but the
+                        -- M1a narrow (see the WHERE below) restricts
+                        -- the UPDATE to non-settled rows under
+                        -- terminal intent, so a no-op pass (no
+                        -- terminal intent, or the row already
+                        -- admission_state='done' with a non-null
+                        -- terminal_reason) does NOT bump the
+                        -- version. The occ5 pin still holds: the
+                        -- CASE branches resolve to the row's current
+                        -- value when the narrow excludes the row, so
+                        -- an existing 'completed' terminal_reason
+                        -- cannot be silently overwritten by a later
+                        -- 'orphaned_no_task' stamp;
                         -- (c) the ``_live_instance_or_job_instance``
                         -- CTEs below close the vacuous-true bug
                         -- (task_instance_id NULL) by falling back to
@@ -1564,7 +1603,32 @@ class TaskRepository:
                             ELSE failed_at
                         END,
                         version = version + 1
-                    WHERE job_id = :work_id AND {snapshot_guard}
+                    -- M1a (2026-10-03, report-delivery-bug-family):
+                    -- narrow the WHERE so no-op passes (terminal
+                    -- intent False, or row already fully-settled to
+                    -- our intent) do NOT bump the version. The
+                    -- CASE statements in the SET clause resolve to
+                    -- the row's current value when (a) the terminal
+                    -- bind is false (no terminal intent), or (b) the
+                    -- row is already admission_state='done' with a
+                    -- non-null terminal_reason (the CASE writes are
+                    -- guarded on terminal_reason IS NULL / no-live-
+                    -- instance so they wouldn't change anything
+                    -- anyway). The pre-narrow UPDATE bumped version
+                    -- on every pass — a 100% no-op cost on the
+                    -- reconcile hot path. The narrow preserves the
+                    -- occ5 pin: a 'completed' terminal_reason
+                    -- already on the row still wins because the
+                    -- terminal-true arm is the only one that
+                    -- actually writes, and a row already 'done' is
+                    -- excluded by the second conjunct.
+                    WHERE job_id = :work_id
+                      AND {snapshot_guard}
+                      AND :terminal = true
+                      AND (
+                          admission_state != 'done'
+                          OR terminal_reason IS NULL
+                      )
                 """),
                 params,
             ).rowcount
@@ -4066,6 +4130,15 @@ class TaskRepository:
         # DELETE means a wipe that crashes mid-flight still
         # has the audit line; the post-delete rowcount alone
         # is not enough to reconstruct the impact.
+        #
+        # m1 (2026-10-03, report-delivery-bug-family) — cap the
+        # doomed-id list in the JOURNAL log so a 5k-row wipe does
+        # not emit a 180-400KB single log line. The cap emits the
+        # first ~500 ids verbatim (the operator can correlate the
+        # most-recent wipe by sample), the TOTAL count, and a
+        # truncation marker so the post-mortem is honest about
+        # what was logged. Behaviour preserved on the wipe path;
+        # only the audit-trail cardinality is bounded.
         with SQLModelSession(self.engine) as db_session:
             if preserve_in_flight:
                 # Capture doomed work_ids BEFORE the wipe. The
@@ -4092,7 +4165,7 @@ class TaskRepository:
                     "%d task row(s) (env-poison family audit). "
                     "doomed_work_ids=%s",
                     len(doomed_work_ids),
-                    doomed_work_ids,
+                    _capped_doomed_id_repr(doomed_work_ids),
                 )
                 # FP1 (2026-10-03, report-delivery-bug-family) — extend
                 # the preserve predicate to cover PENDING tasks that
@@ -4135,7 +4208,7 @@ class TaskRepository:
                     "%d task row(s) (nuclear wipe — env-poison "
                     "family audit). doomed_work_ids=%s",
                     len(doomed_work_ids),
-                    doomed_work_ids,
+                    _capped_doomed_id_repr(doomed_work_ids),
                 )
                 stmt = sql_delete(Task)
             result = db_session.exec(stmt)
