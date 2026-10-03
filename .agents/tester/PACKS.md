@@ -1,5 +1,29 @@
 # Test Packs
 
+## Completed commission — MCP WARMUP-POOL ENV FIX INDEPENDENT GATE (2026-10-02)
+
+Branch `fix/mcp-warmup-pool-env` @ `97b7e665` (base `24705dc4` = latest), main checkout `/home/nea/ensemble-src`. **VERDICT: 🟢 READY for merge.** All 5 commissioned gates PASS by independent execution (base-FAIL proof incl. import-location proofs; seam-reality 0 tautologies with mocked-boundary closed by real-object probe; claims (a)-(c) PROVEN / (d) probe-PROVEN with suite gap noted; regression 4312P/80S with every red/error base-attributed pre-existing in isolated worktree legs). Registered `tools_suite` pack found chronically over-scoped (TIMEOUT @ own 110s cap, 3284-test scope) → full tools-dir coverage delivered via 4 disjoint ad-hoc shards instead; Test Architecture Fix owed. Zero daemon boots / zero DB contact / port 8088 untouched throughout. Full report: `RESULTS/2026-10-02-mcp-warmup-pool-env-gate-97b7e665.md`.
+
+| Pack / Suite | Invocation (essentials) | Scope | Result |
+|---|---|---|---|
+| new pinning suite (ad-hoc) | `timeout 300 .venv/bin/python -m pytest --override-ini="addopts=" --timeout=240 tests/unit/test_mcp_warmup_pool_env_refresh.py` | 17 tests / 6 classes; base-FAIL proven (collection ImportError + API AttributeError on pure base) | ✅ 17/17 (13 s) |
+| warmup_pool suite (ad-hoc) | same pattern, `tests/unit/test_mcp_warmup_pool.py` | pre-existing pool suite | ✅ 69/69 (61.5 s) |
+| `mcp_set_env_unit_test.sh` (registered) | `timeout 300 bash test/packs/mcp_set_env_unit_test.sh` | 44 | ✅ 44/44 (40.6 s) |
+| `kms_lane1_regression_unit_test.sh` (registered) | `timeout 300 bash test/packs/kms_lane1_regression_unit_test.sh` | 7 files / 151 | ✅ 151/151 (25.7 s) |
+| `concurrency_atomic_unit_test.sh` (registered) | `timeout 300 bash test/packs/concurrency_atomic_unit_test.sh` | ensure.md Core #2/#3 | ✅ 98P/0F/74S baseline-exact (58.9 s) |
+| `frozen_tool_name_discovery_unit_test.sh` (registered) | `timeout 300 bash test/packs/frozen_tool_name_discovery_unit_test.sh` | KNOWN_TOOL_NAMES drift (daemon/tools changed) | ✅ 7/7 (1.2 s) |
+| MCP-wide A1/A2/B1/C/D/E (ad-hoc, 6 packs) | same pytest pattern, explicit file lists | 191/114/152/70/58/13 | ✅ all PASS (57P/1S in D; e2e-file safety-gated self-contained) |
+| MCP-wide B2 (ad-hoc) | plane + builtin files | 154 | ⚠️ 137P + 17E → base-attributed PRE-EXISTING (identical 69P/17E @ base worktree) |
+| KMS family (ad-hoc, 6 files) | same pytest pattern | 139 (superset of dev's 161 grouping) | ✅ 139/139 (28.2 s) |
+| `tools_suite_unit_test.sh` (registered) | `timeout 300 bash test/packs/tools_suite_unit_test.sh` | whole tools dir, 3284 collected | ⚠️ TIMEOUT @ internal 110s cap (~761 ran, 0F) — chronic scope defect; superseded by shards below |
+| tools shard A (ad-hoc) | `test_prompt_section_reference_integrity.py` | 1377 | ⚠️ 1374P/3F → base-attributed PRE-EXISTING (byte-identical @ base) |
+| tools shard B (ad-hoc, 9 files) | lifecycle/upgrade/instance cluster | 685 | ✅ 685/685 (89 s) |
+| tools shard C (ad-hoc, 16 files) | memory/critical/inner-soul cluster | 759−4 deselected | ⚠️ 752P/3F → attribution per RESULTS §5.3 |
+| tools shard D (ad-hoc, 28 files) | jobs/db/service/watch cluster | 386 | ⚠️ 379P/5S/2F → base-attributed PRE-EXISTING (byte-identical @ base) |
+| basecmp legs ×4 (ad-hoc) | pinned base `24705dc4` detached worktrees, `PYTHONPATH`+cwd import-proof | base-FAIL + builtin-17 + shard-A 3F + shard-D 2F | ✅ all IDENTICAL-ON-BASE (verdict: pre-existing) |
+
+**Gate totals: 4312P / 80S / 8F / 17E — 0 fix-caused reds.**
+
 ## Completed commission — USER-TIMEZONE INDEPENDENT GATE (2026-10-02)
 
 Branch `feature/user-timezone-setting` @ `4ac8fd4a` (base `e73ae6ff`), worktree `/home/nea/ensemble-worktrees/user-timezone-setting`. **VERDICT: 🟢 GREEN — merge-ready.** All 5 commissioned gates PASS by independent execution (settings persistence, injection+mock-fidelity, scheduling priority matrix, FE Jest, e2e smoke); sibling `scheduled_tasks_acceptance` re-run green under the new tz chain; 2 regression reds PROVEN pre-existing at base via temp-worktree A/B and QUARANTINED; 4 known reds confirmed only-reds + diff-disjoint; ensure.md Core #1–#4 PASS (Release Gate not triggered). Ambient live-DB env leak (`POSTGRES_HOST=10.44.0.2`) observed and overridden in the e2e lane — guardrail held. Full report: `RESULTS/2026-10-02-user-timezone-gate-4ac8fd4a.md`.
