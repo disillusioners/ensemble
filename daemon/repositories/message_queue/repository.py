@@ -15,6 +15,15 @@ from sqlmodel import Session, select, col
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc, now_utc_naive
 
 from .models import MessageQueue, MessageStatus
+# m1 (2026-10-03, report-delivery-bug-family) — shared helper for
+# capping the doomed-id list in the wipe JOURNAL log. Imported
+# lazily inside :meth:`clear_all` (a top-level import would create
+# a circular dependency via ``daemon.services.task_processor`` ↔
+# ``daemon.repositories.message_queue.__init__`` ↔ this module ↔
+# ``daemon.repositories.task.repository`` — the import would fire
+# while ``task.repository`` is still mid-initialization). The
+# helper is a pure function with no DB dependencies so the
+# late-bound import is safe.
 
 # Configuration constants
 MESSAGE_TIMEOUT_SECONDS = 3600  # 1 hour
@@ -941,6 +950,15 @@ class SQLModelMessageQueueRepository:
         Returns:
             Number of messages deleted.
         """
+        # m1 (2026-10-03, report-delivery-bug-family) — lazy
+        # import to break the circular dependency on
+        # ``daemon.repositories.task.repository`` (see the
+        # module-level note above). The helper is a pure
+        # function and safe to import here.
+        from daemon.repositories.task.repository import (
+            _capped_doomed_id_repr as _capped_doomed_id_repr_fn,
+        )
+
         # PP1-adjacent (2026-10-03, report-delivery-bug-family) —
         # JOURNAL the doomed-id list BEFORE the wipe so the
         # env-poison dev-boot-on-prod incident family
@@ -972,7 +990,7 @@ class SQLModelMessageQueueRepository:
                     "%d message_queue row(s) (env-poison family "
                     "audit). doomed_message_ids=%s",
                     len(doomed_ids),
-                    doomed_ids,
+                    _capped_doomed_id_repr_fn(doomed_ids),
                 )
                 # Keep messages backing a RUNNING (in-flight) or PAUSED
                 # (resumable) task; discard the rest (backlog + messages
@@ -999,7 +1017,7 @@ class SQLModelMessageQueueRepository:
                     "%d message_queue row(s) (nuclear wipe — "
                     "env-poison family audit). doomed_message_ids=%s",
                     len(doomed_ids),
-                    doomed_ids,
+                    _capped_doomed_id_repr_fn(doomed_ids),
                 )
                 stmt = sql_delete(MessageQueue)
                 result = session.exec(stmt)
