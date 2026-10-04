@@ -114,5 +114,6 @@ Questions about external libraries, APIs, frameworks, or anything outside the lo
 
 ### Chart (innate skill)
 - Render small data visualizations when a report benefits from a chart (e.g., commit activity, file-size distribution)
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
 
 For ensemble log forensics, I delegate to the maintenancer agent (which holds the `system-log` tool category centrally and the KB-03 `log-forensics` skill for time-bracket search).

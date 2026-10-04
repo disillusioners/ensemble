@@ -8,17 +8,187 @@ per-user ordering locks for guaranteed delivery ordering.
 from __future__ import annotations
 
 import asyncio
+import base64 as _base64
 import logging
 import re
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
-from .base import OutgoingMessage
+from .base import ImageAttachment, OutgoingMessage
+
+from daemon.constants import CHART_IMAGE_MIME_WHITELIST
 
 if TYPE_CHECKING:
     from .registry import SourceRegistry
 
 logger = logging.getLogger(__name__)
+
+
+# Phase B: chart-image marker extraction (LOCKED regex from decisions.md §marker).
+# Byte-stable — DO NOT modify without an R5 architectural review.
+_MARKER_RE = re.compile(
+    r"^<!-- ens-img:chart-render:([a-f0-9]{32}) -->$",
+    re.MULTILINE,
+)
+
+# Near-miss strip-only sweeper (architecture-recommendation.md §3 amendment #14).
+# Secondary pattern that STRIPS but NEVER EXTRACTS and never matches the locked
+# form. Fixes the cosmetic junk-line failure mode where HTML comments render
+# literally on Discord / Telegram / Slack (decisions.md §phase-b-r2-addendum-2).
+# The LOCKED marker regex above stays byte-stable — no relaxation in v1.
+#
+# INVARIANT (F12 — drift-proof prose form, no specific line numbers):
+#   ``extract_chart_images`` runs the LOCKED extraction pass FIRST
+#   (adds to ``image_ids``, deduped + first-occurrence order), and only
+#   THEN applies this near-miss sweeper to the LINES the locked pass did
+#   NOT match. The sweeper therefore can only STRIP junk; it can NEVER
+#   mint a new ``image_ids`` entry — the locked pass would already have
+#   claimed any real marker. If a future contributor re-orders the two
+#   passes or runs the sweeper over the raw input, the cosmetic-strip
+#   purpose is preserved but a real marker might get stripped-and-not-
+#   extracted (silent chart loss). Keep the order.
+_NEAR_MISS_RE = re.compile(
+    r"^\s*<!--\s*ens-img:chart-render:[^>\n]{0,64}-->\s*$",
+    re.MULTILINE,
+)
+
+
+def _log_image_metadata(image_id: str, size_bytes: int | None, content_type: str | None) -> None:
+    """Standardized image metadata log — bytes never included.
+
+    (architecture-recommendation.md §3 amendment #12). Logs
+    ``image_id[:8]`` + ``size_bytes`` + ``content_type`` at the
+    dispatcher AND mirrored helpers in all three chat adapters. The
+    base64 bytes payload is NEVER in any log line.
+    """
+    short = image_id[:8]
+    if size_bytes is not None and content_type is not None:
+        logger.debug(
+            f"chart-image resolved: image_id={short}... size={size_bytes} "
+            f"content_type={content_type}"
+        )
+    else:
+        logger.debug(f"chart-image reference: image_id={short}...")
+
+
+def extract_chart_images(content: str) -> tuple[str, list[str]]:
+    """Strip marker lines; return ``(stripped_content, [image_id, ...])``.
+
+    Per decisions.md §marker + architecture-recommendation.md §3 amendments
+    #2 / #3 / #14:
+
+    * LOCKED regex matches → extract (de-dupe, first-occurrence order).
+    * Near-miss sweeper pattern → strip only (never extract).
+    * Other content → preserved untouched.
+    * Malformed markers (typo, extra whitespace, invented id) NOT matched
+      by the LOCKED regex are caught by the near-miss sweeper for
+      strip-only cosmetic cleanup.
+
+    The dispatcher calls this in ``dispatch_message`` AND
+    ``dispatch_completed`` as the LAST content transformation before
+    ``OutgoingMessage`` construction — see architecture-recommendation.md §1
+    pin, verbatim.
+    """
+    image_ids: list[str] = []
+    seen: set[str] = set()  # amendment #2: per-id dedupe
+    # First pass: extract via LOCKED regex. Subsequent occurrences of the same
+    # id are stripped but not re-added (amendment #2).
+    pending_lines: list[str] = []
+    for line in content.splitlines():
+        m = _MARKER_RE.match(line)
+        if m:
+            image_id = m.group(1)
+            if image_id not in seen:
+                seen.add(image_id)
+                image_ids.append(image_id)
+            continue
+        pending_lines.append(line)
+
+    # Second pass: near-miss sweeper strips only — does NOT add to image_ids.
+    # (The pattern can textually overlap the locked form at the regex level;
+    # safe ONLY because the locked-regex extraction pass ran FIRST — swept
+    # lines are exactly those the locked regex did not match.)
+    swept: list[str] = []
+    for line in pending_lines:
+        if _NEAR_MISS_RE.match(line):
+            continue
+        swept.append(line)
+
+    return "\n".join(swept), image_ids
+
+
+async def _resolve_chart_images(
+    image_ids: list[str],
+    store: "TmpImageStore | None",
+) -> list[ImageAttachment]:
+    """Resolve ``image_ids`` → ``list[ImageAttachment]`` via in-process store.
+
+    Per-id isolation (architecture-recommendation.md §3 amendment #3):
+    one bad id → WARN + continue; siblings still deliver.
+
+    Provenance gate (architecture-recommendation.md §3 amendment #13):
+    ``record.provenance.feature`` MUST == ``"chart-render"``; mismatch →
+    drop the image (text fallback), WARN. Kills cross-namespace id
+    confusion (a forged clipboard/designer id forged as chart-render
+    cannot upload).
+
+    The record is read via ``store.open_full`` (provenance + metadata
+    only — verified TmpImageRecord has no ``.blob`` field), and the
+    bytes are read via the sibling ``store.open_with_meta`` accessor.
+    Both reads run on a worker thread (``asyncio.to_thread``) so the
+    event loop is not blocked by the disk read.
+    """
+    if not image_ids or store is None:
+        return []
+    resolved: list[ImageAttachment] = []
+    for image_id in image_ids:
+        try:
+            record = await asyncio.to_thread(store.open_full, image_id)
+            # Provenance gate (amendment #13) — default-deny: missing provenance
+            # or wrong feature → drop + WARN.
+            provenance = record.provenance or {}
+            if provenance.get("feature") != "chart-render":
+                _log_image_metadata(image_id, record.size_bytes, record.content_type)
+                logger.warning(
+                    f"chart-image provenance mismatch: image_id={image_id[:8]}... "
+                    f"feature={provenance.get('feature')!r} (expected 'chart-render'); "
+                    f"skipping (text fallback)"
+                )
+                continue
+            blob_bytes, _ctype_read, _sha = await asyncio.to_thread(
+                store.open_with_meta, image_id
+            )
+            # Source-agnostic MIME gate (architecture-recommendation.md §3
+            # amendment #3 — dispatcher owns MIME whitelist; the per-adapter
+            # ladder enforces platform-specific limits separately). A MIME
+            # mismatch here is a STORE/PROVENANCE defect, not a chat-source
+            # concern — drop + WARN, deliver text fallback for siblings.
+            stored_content_type = record.content_type or "image/png"
+            if stored_content_type not in CHART_IMAGE_MIME_WHITELIST:
+                _log_image_metadata(image_id, record.size_bytes, stored_content_type)
+                logger.warning(
+                    f"chart-image MIME mismatch: image_id={image_id[:8]}... "
+                    f"content_type={stored_content_type!r} not in "
+                    f"{sorted(CHART_IMAGE_MIME_WHITELIST)}; skipping "
+                    f"(text fallback)"
+                )
+                continue
+            ext = (record.content_type or "image/png").split("/")[-1] or "bin"
+            resolved.append(ImageAttachment(
+                image_id=image_id,
+                content_type=record.content_type or "image/png",
+                filename=f"chart-{image_id[:8]}.{ext}",
+                size_bytes=record.size_bytes,
+                bytes_b64=_base64.b64encode(blob_bytes).decode("ascii"),
+            ))
+            _log_image_metadata(image_id, record.size_bytes, record.content_type)
+        except Exception as e:
+            # Per-id isolation: bad id → WARN, siblings continue.
+            logger.warning(
+                f"chart-image resolve failed image_id={image_id[:8]}...: {e}; "
+                f"continuing with siblings"
+            )
+    return resolved
 
 
 class ResponseDispatcher:
@@ -165,24 +335,77 @@ class ResponseDispatcher:
             return
 
         logger.debug(f"[DISPATCH] sending to adapter: source={source}, adapter_type={type(adapter).__name__}")
-        
-        # Create OutgoingMessage
+
+        # Phase B: chart-image extraction + in-process bytes resolution.
+        # arch-rec §1 pin (verbatim): LAST content transformation before
+        # OutgoingMessage, AFTER adapter lookup. API-origin (no-colon)
+        # returned at the no-colon skip and never reaches here. Internal
+        # colon-sources (internal_report / internal_error_report) returned
+        # at the internal-report skip; internal_agent:* returned at the
+        # adapter-lookup miss. Both seams (progressive + completed) carry
+        # the same transformation — once-only is preserved structurally
+        # by `_progressive_sent_sources`.
+        stripped_content, image_ids = extract_chart_images(content)
+        images: list[ImageAttachment] | None = None
+        if image_ids:
+            manager = getattr(self._registry, "manager", None)
+            store = getattr(manager, "tmp_image_store", None) if manager else None
+            images = await _resolve_chart_images(image_ids, store)
+        content = stripped_content  # markers always stripped from chat-bound text
+
+        # Create OutgoingMessage (populates images at THIS construction site)
         outgoing = OutgoingMessage(
             external_user_id=external_user_id,
             content=content,
             source_id=source_id,
             metadata=metadata or {},
             message_type=message_type,
-            reply_to_id=reply_to_id
+            reply_to_id=reply_to_id,
+            images=images,
         )
-        
+
         # Send with per-user lock for ordering
         send_lock = await self._get_send_lock(external_user_id)
-        
+
         async with send_lock:
             success = await adapter.send(outgoing)
             if success:
                 logger.debug(f"Sent response to user {external_user_id} via {source_id}")
+                # Phase B amendment #22: chat-delivered → 0-day GET window.
+                # API-origin (no-colon) keeps the 30-day GET per Phase A
+                # §http-api. Mutually-exclusive lanes make double-delete
+                # impossible (progressive delivered → completed discards via
+                # `_progressive_sent_sources`; progressive adapter-False →
+                # completed delivers + deletes here).
+                #
+                # F5 (council-review): only delete images the adapter
+                # actually delivered. Adapters that don't populate
+                # ``outgoing.delivered_image_ids`` (None) fall back to
+                # deleting every input image — backward-compat. Adapters
+                # that DO populate it delete only the delivered subset;
+                # decode-failed / oversize / MIME-miss / capability-
+                # short-circuit images stay in the store for retry.
+                if images:
+                    delivered = getattr(outgoing, "delivered_image_ids", None)
+                    if delivered is None:
+                        ids_to_delete = [img.image_id for img in images]
+                    else:
+                        ids_to_delete = [
+                            img.image_id for img in images
+                            if img.image_id in delivered
+                        ]
+                    for img_id in ids_to_delete:
+                        try:
+                            await asyncio.to_thread(store.delete, img_id)
+                            logger.debug(
+                                f"chart-image deleted after chat delivery: "
+                                f"image_id={img_id[:8]}..."
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"chart-image post-delivery delete failed: "
+                                f"image_id={img_id[:8]}...: {e}"
+                            )
             else:
                 logger.warning(f"Failed to send response to user {external_user_id} via {source_id}")
     
@@ -238,20 +461,36 @@ class ResponseDispatcher:
             else:
                 logger.debug(f"No adapter found for source_id={source_id}")
             return
-        
-        # Create OutgoingMessage
+
+        # Phase B: chart-image extraction + in-process bytes resolution.
+        # arch-rec §1 pin (verbatim): BOTH seams extract. The progressive
+        # lane is the normal chat-final lane for external sources; without
+        # extraction here, the marker leaks as literal text (HTML comments
+        # render literally on Discord / Telegram / Slack) and the image
+        # never delivers — the feature is dead-on-arrival for the exact
+        # user story it exists to serve.
+        stripped_content, image_ids = extract_chart_images(content)
+        images: list[ImageAttachment] | None = None
+        if image_ids:
+            manager = getattr(self._registry, "manager", None)
+            store = getattr(manager, "tmp_image_store", None) if manager else None
+            images = await _resolve_chart_images(image_ids, store)
+        content = stripped_content
+
+        # Create OutgoingMessage (populates images at THIS construction site)
         outgoing = OutgoingMessage(
             external_user_id=external_user_id,
             content=content,
             source_id=source_id,
             metadata={},
             message_type="text",
-            reply_to_id=None
+            reply_to_id=None,
+            images=images,
         )
-        
+
         # Send with per-user lock for ordering
         send_lock = await self._get_send_lock(external_user_id)
-        
+
         async with send_lock:
             try:
                 success = await adapter.send(outgoing)
@@ -260,6 +499,33 @@ class ResponseDispatcher:
                 return
             if success:
                 logger.debug(f"Sent progressive message to user {external_user_id} via {source_id}")
+                # Phase B amendment #22: chat-delivered → 0-day GET window.
+                # F5 (council-review): only delete images the adapter
+                # actually delivered. ``outgoing.delivered_image_ids`` is
+                # populated by the adapter during ``send()`` on successful
+                # per-image delivery; ``None`` → backward-compat fallback
+                # to deleting every input image.
+                if images:
+                    delivered = getattr(outgoing, "delivered_image_ids", None)
+                    if delivered is None:
+                        ids_to_delete = [img.image_id for img in images]
+                    else:
+                        ids_to_delete = [
+                            img.image_id for img in images
+                            if img.image_id in delivered
+                        ]
+                    for img_id in ids_to_delete:
+                        try:
+                            await asyncio.to_thread(store.delete, img_id)
+                            logger.debug(
+                                f"chart-image deleted after progressive delivery: "
+                                f"image_id={img_id[:8]}..."
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"chart-image post-delivery delete failed: "
+                                f"image_id={img_id[:8]}...: {e}"
+                            )
                 # Track this source so dispatch_completed won't send again
                 self._progressive_sent_sources.add(source)
             else:

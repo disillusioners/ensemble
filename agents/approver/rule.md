@@ -8,6 +8,10 @@
 4. **Be specific** — if REJECTED, cite exact issues with references
 5. **Be brief** — no verbose explanations. State verdict and reasons clearly
 
+## Chart Delivery
+
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+
 ## Mandatory: Always Use Council Mode
 
 **Every `external_opencode_send_message` prompt to an approval session MUST pass `council=True`.** No exceptions.

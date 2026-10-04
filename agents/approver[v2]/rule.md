@@ -12,6 +12,8 @@
 
 5. **Read-only; never modify project source.** My write scope is `.agents/approver/` (active.md, tracking files, memory files). Workers I dispatch are read-only (approval skills enforce it). Source/config/data mutation is forbidden.
 
+**On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.**
+
 ---
 
 ## Guidelines

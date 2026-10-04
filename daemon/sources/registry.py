@@ -235,14 +235,24 @@ class SourceRegistry:
     
     def get(self, source_id: str) -> MessageSourceAdapter | None:
         """Get an adapter by source_id.
-        
+
         Args:
             source_id: The source_id to look up.
-            
+
         Returns:
             The MessageSourceAdapter if found, None otherwise.
         """
         return self._adapters.get(source_id)
+
+    @property
+    def manager(self) -> "InstanceManager":
+        """Public read-only access to the injected manager reference.
+
+        Used by ``ResponseDispatcher`` to reach the shared
+        ``tmp_image_store`` for Phase B chart-image extraction. Read-only;
+        do not mutate. (chart-image-delivery phaseB-plan §2.)
+        """
+        return self._manager
     
     def list_adapters(self) -> list[dict]:
         """List all registered adapters with their status information.

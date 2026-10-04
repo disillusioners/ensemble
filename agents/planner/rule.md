@@ -84,6 +84,10 @@ Time, complexity, and risk estimates where possible.
 ### Flag Ambiguities Early
 If a request is unclear, ask clarifying questions before planning.
 
+### Chart Delivery on Chat Sources
+
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+
 ---
 
 ## Never

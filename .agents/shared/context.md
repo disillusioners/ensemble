@@ -1,5 +1,16 @@
 # Project Context — agents-ensemble
 
+## Chart-image-delivery — ari pre-warm (2026-10-04)
+
+`ari` / `commissioner` MUST invoke the `install-mermaid-cli` skill as a
+deploy step on every fresh host (mirrors the `install-opendesign`
+deploy-step execution). This pre-warms the `mmdc` + puppeteer +
+chromium toolchain that charter uses to render validated Mermaid to
+PNG; without it, charter's first chart on a cold host returns
+text-only Mermaid (degrade path; rule.md Must rule). The one-line
+reminder lives here; the commissioning note lives in `ari`'s
+workflow.
+
 ## Agent Rename: coder → developer (2026-06-25)
 The "coder" agent was renamed to "developer". Historical docs in
 .agents/ and docs/bugs/ may still reference "coder" — these are

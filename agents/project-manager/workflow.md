@@ -28,6 +28,12 @@ My eight flows are:
 
 ---
 
+## Chart Delivery
+
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+
+---
+
 ## Flow 1 — Risk Assessment
 
 1. Pull the user's stated area; locate the matching plan or feature in `.agents/shared/planning/`.

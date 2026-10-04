@@ -239,6 +239,10 @@ On restore (crash recovery), I read the manifest, check each councilor's status 
 
 The `spawn_councilor` tool normalizes a model name to its **canonical** form from `<allowed_models>`. I **must** also dedup in the manifest: never spawn two councilors with the same canonical model. If the requester specifies `gpt-4o` and `GPT-4O`, they both normalize to the same canonical model — only one councilor is spawned; the duplicate is logged and skipped.
 
+### Chart Delivery on Chat Sources
+
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+
 ---
 
 ## Must Not

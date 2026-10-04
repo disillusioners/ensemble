@@ -23,6 +23,22 @@ MAX_CREDENTIALS_SIZE: int = 4096  # Max bytes for credentials JSON
 MAX_ERROR_LEN: int = 500  # Max length for error messages (prevents HTML flooding)
 MAX_CHAT_LOCKS: int = 1000  # LRU eviction limit for per-chat locks in Telegram adapter
 
+# Phase B: chart-image delivery platform limits (chart-image-delivery phaseB-plan §4 / §9).
+# Verified at impl per architecture-recommendation.md §7 doc-verification:
+#   - Discord bot upload limit: 8 MB for non-boosted tier; 25 MB with level 2+ boost.
+#     Plan asserts the 8 MB conservative bound (50–300 KB payload typical — well within).
+#   - Telegram sendPhoto: 10 MB, image/png+jpeg; sendDocument: 50 MB, all MIME.
+#   - Slack files.uploadV2: 1 GB per file (workspace-scoped, generous ceiling).
+#   - Slack initial_comment: 4000-char soft limit (verified via Slack API docs).
+DISCORD_FILE_MAX_BYTES: int = 8 * 1024 * 1024   # 8 MB (Discord bot upload, conservative)
+TELEGRAM_PHOTO_MAX_BYTES: int = 10 * 1024 * 1024  # 10 MB (Telegram sendPhoto)
+TELEGRAM_DOCUMENT_MAX_BYTES: int = 50 * 1024 * 1024  # 50 MB (Telegram sendDocument)
+SLACK_FILE_MAX_BYTES: int = 1024 * 1024 * 1024  # 1 GB (Slack file upload ceiling)
+INITIAL_COMMENT_MAX: int = 4000  # Slack initial_comment soft limit (chat.postMessage text max)
+CHART_IMAGE_MIME_WHITELIST: frozenset[str] = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+})
+
 # ── SSE & Streaming ───────────────────────────────────────────────────────────────
 SSE_TIMEOUT_S: int = 30  # SSE event timeout (seconds)
 SSE_PING_INTERVAL: int = 30  # SSE keepalive ping interval (seconds)

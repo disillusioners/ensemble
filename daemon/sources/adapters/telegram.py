@@ -7,6 +7,7 @@ modes for receiving messages from Telegram.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import secrets
@@ -15,6 +16,12 @@ from typing import Any
 
 import aiohttp
 
+from daemon.constants import (
+    CHART_IMAGE_MIME_WHITELIST,
+    INITIAL_COMMENT_MAX,
+    TELEGRAM_DOCUMENT_MAX_BYTES,
+    TELEGRAM_PHOTO_MAX_BYTES,
+)
 from ..base import (
     IncomingMessage,
     MessageSourceAdapter,
@@ -32,6 +39,23 @@ MAX_RETRIES = 3
 POLLING_TIMEOUT = 30  # seconds
 RETRY_BASE_DELAY = 1.0  # seconds
 MAX_CHAT_LOCKS = 1000  # LRU eviction limit for per-chat locks
+
+
+def _log_image_metadata(image_id: str, size_bytes: int | None, content_type: str | None) -> None:
+    """Standardized image metadata line — bytes never included.
+
+    (architecture-recommendation.md §3 amendment #12.) Mirrored across
+    the Discord / Telegram / Slack adapters + dispatcher. Logs
+    ``image_id[:8]`` + ``size_bytes`` + ``content_type`` only.
+    """
+    short = image_id[:8]
+    if size_bytes is not None and content_type is not None:
+        logger.debug(
+            f"telegram chart-image: image_id={short}... size={size_bytes} "
+            f"content_type={content_type}"
+        )
+    else:
+        logger.debug(f"telegram chart-image: image_id={short}...")
 
 
 def _strip_llm_artifact_tags(content: str) -> str:
@@ -198,7 +222,132 @@ class TelegramAdapter(MessageSourceAdapter):
         
         # All retries exhausted
         raise TelegramAPIError(f"Failed after {MAX_RETRIES} attempts: {last_error}")
-    
+
+    async def _api_call_multipart(
+        self,
+        method: str,
+        *,
+        file_bytes: bytes,
+        filename: str,
+        file_field: str = "photo",
+        content_type: str = "image/png",
+        **params,
+    ) -> dict:
+        """Make a Telegram Bot API call with multipart file upload.
+
+        Phase B chart-image upload (sendPhoto / sendDocument). Mirrors
+        ``_api_call``'s 3-retry + exponential backoff + circuit-breaker
+        discipline for TRANSPORT errors (network / 5xx) but treats
+        multipart 4xx as NON-TRANSIENT — no ``record_failure`` (mirror
+        of Discord ``adapter.py:1537-1547`` per architecture-
+        recommendation.md §3 amendment #5). Systematically-rejected
+        images (e.g., ``Bad Request: photo_invalid_dimensions``) exert
+        zero breaker pressure; a real outage (transport / 5xx) DOES
+        trip the breaker.
+
+        ``parse_mode`` is intentionally NOT passed in the default caption
+        (set on caller side) — Mermaid fences contain ``<`` characters
+        which break HTML parse_mode. ``parse_mode=None`` keeps the
+        caption as plain text — safe for Mermaid fences, no
+        user-visible encoding artifacts.
+
+        Raises:
+            TelegramAPIError: On 4xx (non-transient, no breaker record).
+            CircuitOpenError: When circuit breaker is open.
+            RuntimeError: When adapter is not started (no HTTP session).
+        """
+        if not await self._circuit_breaker.can_execute():
+            raise CircuitOpenError(f"Circuit open for Telegram API, method={method}")
+
+        if not self._session:
+            raise RuntimeError("Adapter not started - no HTTP session")
+
+        url = self._get_api_url(method)
+
+        last_error: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            form = aiohttp.FormData()
+            # Multipart upload: photo/document bytes (filename hint).
+            # F8 (council-review): ``content_type`` is passed in from the
+            # caller (``ImageAttachment.content_type``), defaulting to
+            # ``image/png`` for callers that don't override — preserving
+            # the prior behavior for any non-image MIME we'd add later.
+            form.add_field(file_field, file_bytes, filename=filename, content_type=content_type)
+            for k, v in params.items():
+                if v is not None:
+                    form.add_field(k, str(v))
+
+            try:
+                async with self._session.post(
+                    url, data=form, timeout=aiohttp.ClientTimeout(total=60)
+                ) as resp:
+                    data = await resp.json()
+
+                    if not data.get("ok"):
+                        error_desc = data.get("description", "Unknown error")
+                        error_code = data.get("error_code", 0)
+                        # Multipart 4xx is NON-TRANSIENT — do NOT call
+                        # record_failure; raise a distinct subclass so the
+                        # caller can skip the image and deliver text
+                        # without polluting breaker state. Mirrors Discord
+                        # adapter.py:1537-1547 (architecture-recommendation.md
+                        # §3 amendment #5).
+                        if 400 <= error_code < 500:
+                            raise _TelegramNonTransientAPIError(
+                                f"Telegram API {error_code} "
+                                f"(non-transient, no breaker): {error_desc}"
+                            )
+                        raise TelegramAPIError(
+                            f"Telegram API error {error_code}: {error_desc}"
+                        )
+
+                    await self._circuit_breaker.record_success()
+                    return data.get("result", {})
+
+            except aiohttp.ClientError as e:
+                last_error = e
+                logger.warning(
+                    f"Telegram multipart call failed (attempt {attempt + 1}/{MAX_RETRIES}): {e}"
+                )
+                # Transport error — DOES trip the breaker (3× exponential backoff).
+                await self._circuit_breaker.record_failure()
+                if attempt < MAX_RETRIES - 1:
+                    delay = RETRY_BASE_DELAY * (2 ** attempt)
+                    await asyncio.sleep(delay)
+            except _TelegramNonTransientAPIError:
+                # 4xx — non-transient, NEVER record_failure.
+                raise
+            except TelegramAPIError:
+                # 5xx — IS transient (transport-class), record_failure then raise.
+                await self._circuit_breaker.record_failure()
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("unreachable")
+
+    async def _send_text_only(self, reply_chat_id: str, content: str) -> None:
+        """Send a text-only message via ``sendMessage`` (Phase B extraction).
+
+        Phase B: text fallback path for caption follow-up (>1024) and
+        for the ``delivered_count == 0`` text floor when ALL image
+        uploads failed (architecture-recommendation.md §3 amendment #8
+        + iter-002 blocking #1). Preserves the existing LLM artifact
+        sanitization from the legacy ``send()`` body.
+        """
+        # Sanitize content to remove LLM artifact tags that Telegram's HTML parser can't handle
+        sanitized_content = _strip_llm_artifact_tags(content)
+        params = {
+            "chat_id": reply_chat_id,
+            "text": sanitized_content,
+            "parse_mode": "HTML",
+        }
+        try:
+            await self._api_call("sendMessage", **params)
+        except TelegramAPIError as e:
+            logger.warning(f"Telegram text send failed: {e}")
+            raise
+
     async def start(self) -> None:
         """Start the adapter."""
         if self._status == SourceStatus.RUNNING:
@@ -260,63 +409,200 @@ class TelegramAdapter(MessageSourceAdapter):
         logger.info(f"Telegram adapter stopped: {self.source_id}")
     
     async def send(self, message: OutgoingMessage) -> bool:
-        """Send a message to Telegram.
-        
-        Args:
-            message: Outgoing message to send
-            
+        """Send an OutgoingMessage to Telegram.
+
+        Phase B restructure: image upload (sendPhoto / sendDocument) +
+        text-send BOTH execute inside the per-chat LRU lock
+        (architecture-recommendation.md §3 amendment #10 — ordering
+        hazard). The lock is acquired BEFORE any image processing so
+        that chat-A image-A → chat-A text-A ordering is preserved
+        (no interleaving from another concurrent send).
+
+        Image handling:
+        * No images → legacy text-send path (unchanged semantics).
+        * With images → each image uploads via ``_api_call_multipart``
+          (sendPhoto ≤10 MB / sendDocument >10 MB). All failures
+          (4xx non-transient, transport 3× backoff, >50 MB skip,
+          MIME-miss) WARN-log + skip; the FULL content is STILL delivered
+          as text (text floor invariant) — either via caption on the
+          image (≤1024) or via the follow-up ``sendMessage`` for
+          caption_remaining.
+
         Returns:
-            True if sent successfully, False otherwise.
+            True if any delivery (image or text) succeeded; False only
+            when both image upload and text fallback fail.
         """
         if self._status != SourceStatus.RUNNING:
             logger.warning(f"Cannot send: adapter not running (status={self._status})")
             return False
-        
+
         # Determine where to send the message
         # For group chats: reply_chat_id = group ID (from metadata)
         # For private chats: reply_chat_id = user ID (same as external_user_id)
         reply_chat_id = message.metadata.get("reply_chat_id") if message.metadata else None
         if not reply_chat_id:
             reply_chat_id = message.external_user_id
-        
+
         # Stop typing indicator before sending (use the same chat_id we send to)
         self.stop_typing(reply_chat_id)
-        
+
         # Validate chat_id format
         if not self._validate_chat_id(reply_chat_id):
             logger.error(f"Invalid Telegram chat_id: {reply_chat_id}")
             return False
-        
+
         # Check circuit breaker BEFORE acquiring rate limit token to avoid waste
-        if not await self._circuit_breaker.can_execute():
+        if not self._circuit_breaker or not await self._circuit_breaker.can_execute():
             logger.warning(f"Circuit open, cannot send to {reply_chat_id}")
             return False
-        
-        # Wait for rate limit token
+
+        # Wait for rate limit token (Phase B: token bucket preserved per
+        # adapter-semantics contract).
         if not await self._rate_limiter.wait_and_acquire(max_wait=10.0):
             logger.warning(f"Rate limit exceeded, dropping message to {reply_chat_id}")
             return False
-        
-        # Use per-chat lock for ordering
+
+        # Per-chat lock — acquired ONCE; image upload + text both happen
+        # inside (architecture-recommendation.md §3 amendment #10). The lock
+        # is the SINGLE serialization point for chat-A → ordered image-then-text.
         lock = await self._get_chat_lock(reply_chat_id)
         async with lock:
+            # Re-check circuit breaker under the lock — it may have opened
+            # while we waited for the rate-limiter.
+            if not self._circuit_breaker or not await self._circuit_breaker.can_execute():
+                logger.warning(f"Circuit open under lock, cannot send to {reply_chat_id}")
+                return False
+
+            images = getattr(message, "images", None)
+            if images:
+                # parse_mode=None firm decision (Mermaid ``<`` breaks HTML mode).
+                full_caption = message.content if message.content else ""
+                # Telegram sendPhoto/sendDocument caption limit is 1024 chars.
+                # Truncate on the image + follow-up sendMessage for the
+                # remainder (architecture-recommendation.md §3 amendment #8).
+                if len(full_caption) > 1024:
+                    caption_truncated = full_caption[:1024]
+                    caption_remaining = full_caption[1024:]
+                else:
+                    caption_truncated = full_caption
+                    caption_remaining = ""
+
+                delivered_count = 0
+                chat_id = reply_chat_id
+                # F5 (council-review): mutable list captured on the message
+                # by-reference; the dispatcher reads ``message.delivered_image_ids``
+                # AFTER ``send()`` to decide which images to ``store.delete``.
+                # ``None`` → backward-compat: dispatcher deletes all images.
+                if message.delivered_image_ids is None:
+                    message.delivered_image_ids = []
+                for img in images:
+                    _log_image_metadata(img.image_id, img.size_bytes, img.content_type)
+                    try:
+                        file_bytes = base64.b64decode(img.bytes_b64)
+                    except Exception as e:
+                        logger.warning(
+                            f"telegram image decode failed image_id={img.image_id[:8]}...: {e}; "
+                            f"skipping (continuing with text/siblings)"
+                        )
+                        continue
+
+                    # >50 MB / MIME-miss skip (defense + telegram hard-limit).
+                    if len(file_bytes) > TELEGRAM_DOCUMENT_MAX_BYTES:
+                        logger.warning(
+                            f"telegram image too large: image_id={img.image_id[:8]}... "
+                            f"size={len(file_bytes)} > {TELEGRAM_DOCUMENT_MAX_BYTES}; skipping"
+                        )
+                        continue
+                    if img.content_type not in CHART_IMAGE_MIME_WHITELIST:
+                        logger.warning(
+                            f"telegram image MIME miss: image_id={img.image_id[:8]}... "
+                            f"content_type={img.content_type!r}; skipping"
+                        )
+                        continue
+
+                    # sendPhoto ≤10 MB / sendDocument >10 MB.
+                    if len(file_bytes) <= TELEGRAM_PHOTO_MAX_BYTES:
+                        method = "sendPhoto"
+                        file_field = "photo"
+                    else:
+                        method = "sendDocument"
+                        file_field = "document"
+
+                    try:
+                        await self._api_call_multipart(
+                            method,
+                            file_bytes=file_bytes,
+                            filename=img.filename,
+                            file_field=file_field,
+                            # F8: pass through the actual stored MIME so
+                            # jpeg/gif/webp uploads carry the correct
+                            # content_type (preserved when stored by the
+                            # charter render, not hardcoded to png).
+                            content_type=img.content_type,
+                            chat_id=chat_id,
+                            caption=caption_truncated,
+                            # parse_mode=None (default) — Mermaid `<` safety
+                        )
+                        delivered_count += 1
+                        # F5: track the id so the dispatcher can delete
+                        # only images the adapter confirmed delivered.
+                        message.delivered_image_ids.append(img.image_id)
+                    except _TelegramNonTransientAPIError as e:
+                        # 4xx non-transient — skip this image (no breaker).
+                        logger.warning(f"Telegram {method} non-transient: {e}; skipping image")
+                        continue
+                    except CircuitOpenError:
+                        logger.warning(f"Telegram circuit opened mid-send to {reply_chat_id}")
+                        return False
+                    except TelegramAPIError as e:
+                        # 5xx — recorded by helper, surface as skip.
+                        logger.warning(f"Telegram {method} failed: {e}; skipping image")
+                        continue
+                    except Exception as e:
+                        logger.warning(f"Telegram image upload unexpected error: {e}; skipping image")
+                        continue
+
+                # TEXT FLOOR GUARD (iter-002 blocking #1): if ALL image
+                # uploads failed, the FULL content MUST still be delivered
+                # as text — including the content <= 1024 case
+                # (caption_remaining == "") where neither caption branch
+                # fires. Without this guard nothing is sent, return True
+                # lies about success, and amendment-#22 store.delete
+                # would delete the never-delivered image.
+                if delivered_count == 0:
+                    try:
+                        await self._send_text_only(reply_chat_id, message.content)
+                    except Exception as e:
+                        logger.warning(f"Telegram text-floor send failed: {e}")
+                        return False
+
+                # Caption >1024: full-text follow-up sendMessage (text floor).
+                if caption_remaining and delivered_count > 0:
+                    try:
+                        await self._send_text_only(reply_chat_id, caption_remaining)
+                    except Exception as e:
+                        logger.warning(f"telegram caption-follow-up text send failed: {e}")
+
+                return True
+
+            # No images — legacy text-send code path (unchanged semantics).
             try:
                 # Sanitize content to remove LLM artifact tags that Telegram's HTML parser can't handle
                 sanitized_content = _strip_llm_artifact_tags(message.content)
-                
+
                 params = {
                     "chat_id": reply_chat_id,
                     "text": sanitized_content,
                     "parse_mode": message.metadata.get("parse_mode", "HTML"),
                 }
-                
+
                 if message.reply_to_id:
                     params["reply_to_message_id"] = message.reply_to_id
-                
+
                 await self._api_call("sendMessage", **params)
                 logger.debug(f"Sent message to Telegram chat {reply_chat_id}")
                 return True
-                
+
             except TelegramAPIError as e:
                 logger.error(f"Failed to send to Telegram {reply_chat_id}: {e}")
                 return False
@@ -616,6 +902,17 @@ class TelegramAdapter(MessageSourceAdapter):
 class TelegramAPIError(Exception):
     """Telegram Bot API error."""
     pass
+
+
+class _TelegramNonTransientAPIError(TelegramAPIError):
+    """Telegram API error that should NOT count against the circuit breaker.
+
+    Raised by ``_api_call_multipart`` for 4xx responses (systematically
+    rejected images). Subclasses TelegramAPIError so existing
+    ``except TelegramAPIError`` callers still catch it — but the
+    ``_api_call_multipart`` call site has its own dedicated handler
+    that re-raises without calling ``record_failure``.
+    """
 
 
 class CircuitOpenError(Exception):

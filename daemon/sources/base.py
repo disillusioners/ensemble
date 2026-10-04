@@ -49,15 +49,78 @@ class IncomingMessage:
     reply_to_id: str | None = None
 
 
+@dataclass(frozen=True)
+class ImageAttachment:
+    """Resolved image bytes for native chat-source delivery.
+
+    Transport-only — NEVER persisted, NEVER logged whole (chart-image-delivery
+    architecture-recommendation.md §3 amendment #12). The base64 bytes payload
+    is excluded from repr/dataclasses-asdict via ``field(repr=False)`` plus a
+    redacting ``__repr__``. Logging is ``image_id[:8]`` + ``size_bytes`` +
+    ``content_type`` only at dispatcher AND all three adapters (helper:
+    ``_log_image_metadata``).
+
+    Bytes encoding rationale: no BytesIO across the adapter boundary —
+    pickling + cross-task handoff is simpler with a string. Adapters decode
+    per their platform's upload API.
+    """
+    image_id: str            # 32-hex (regex-validated at extraction)
+    content_type: str        # e.g. "image/png"
+    filename: str            # e.g. "chart-abc12345.png"
+    size_bytes: int          # captured at resolution; logs use this
+    bytes_b64: str = field(repr=False)  # base64 of the PNG bytes — NEVER LOGGED
+
+    def __repr__(self) -> str:  # redacting — bytes payload never in repr
+        return (
+            f"ImageAttachment(image_id={self.image_id[:8]}..., "
+            f"content_type={self.content_type!r}, "
+            f"size_bytes={self.size_bytes}, "
+            f"filename={self.filename!r}, "
+            f"bytes_b64=<redacted>)"
+        )
+
+
 @dataclass
 class OutgoingMessage:
-    """Normalized outgoing message to any source."""
+    """Normalized outgoing message to any source.
+
+    ``images`` is transport-only: NEVER persisted, NEVER logged whole
+    (chart-image-delivery architecture-recommendation.md §3 amendment #12).
+    The dispatcher populates this field at the BOTH chat-bound construction
+    sites (progressive lane + completed lane); HTTP-API sources (``api`` and
+    similar no-colon identifiers) skip the dispatch path entirely and
+    never populate ``images``. The /new confirmation construction site
+    (``daemon/sources/registry.py``) is also NEVER populated — /new
+    confirmation messages never carry markers.
+
+    ``delivered_image_ids`` (F5 / chart-image-delivery council-review): the
+    adapter MAY populate this during ``send()`` with the subset of
+    ``images`` actually delivered to the platform (excludes per-id drops
+    from decode failure, oversize guard, MIME-miss, capability-short-circuit,
+    transport error). The dispatcher then deletes only the delivered subset
+    from the tmp-images store; non-delivered ids stay queryable. The field
+    defaults to ``None`` — adapters that don't populate it fall back to
+    "delete all images" for backward compatibility.
+    """
     external_user_id: str
     content: str
     source_id: str
     metadata: dict = field(default_factory=dict)
     message_type: str = "text"
     reply_to_id: str | None = None
+    images: list[ImageAttachment] | None = None  # NEW — defaulted, backward-compat
+    delivered_image_ids: list[str] | None = None  # F5 — adapters set on success
+
+    def __post_init__(self) -> None:
+        # Lightweight invariant: ``images`` MUST be either ``None`` or a list.
+        # Other callers construct ``OutgoingMessage`` everywhere; this guard
+        # only catches accidental misuse (a string, a dict) at construction
+        # time instead of much later when the dispatcher iterates ``images``.
+        if self.images is not None and not isinstance(self.images, list):
+            raise TypeError(
+                f"OutgoingMessage.images must be a list or None, "
+                f"got {type(self.images).__name__}"
+            )
 
 
 @dataclass

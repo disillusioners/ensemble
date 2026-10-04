@@ -34,6 +34,8 @@ The adapter:
 from __future__ import annotations
 
 import asyncio
+import base64 as _base64
+import io as _io
 import logging
 import re
 import time
@@ -42,6 +44,9 @@ from typing import Any, Awaitable, Callable, ClassVar
 
 import aiohttp
 
+from daemon.constants import (
+    DISCORD_FILE_MAX_BYTES,
+)
 from daemon.sources.base import (
     IncomingMessage,
     MessageSourceAdapter,
@@ -77,6 +82,23 @@ logger = logging.getLogger(__name__)
 
 class DiscordAPIError(Exception):
     """Raised when the Discord REST API rejects a request."""
+
+
+def _log_image_metadata(image_id: str, size_bytes: int | None, content_type: str | None) -> None:
+    """Standardized image metadata line — bytes never included.
+
+    (architecture-recommendation.md §3 amendment #12.) Mirrored across
+    the Discord / Telegram / Slack adapters + dispatcher. Logs
+    ``image_id[:8]`` + ``size_bytes`` + ``content_type`` only.
+    """
+    short = image_id[:8]
+    if size_bytes is not None and content_type is not None:
+        logger.debug(
+            f"discord chart-image: image_id={short}... size={size_bytes} "
+            f"content_type={content_type}"
+        )
+    else:
+        logger.debug(f"discord chart-image: image_id={short}...")
 
 
 # Module-level compiled regex for ID parsing. Anchored and case-sensitive.
@@ -1505,19 +1527,31 @@ class DiscordAdapter(MessageSourceAdapter):
         *,
         reference: Any | None,
         allowed_mentions: Any,
+        file: Any | None = None,
+        files: list[Any] | None = None,
     ) -> bool:
         """Send a single chunk to a resolved Discord target.
+
+        Phase B: ``file`` and ``files`` are mutually exclusive
+        (discord-py 2.7.1 forbids passing both — the framework raises
+        ValueError). For N-image sends, pass ``files=[...]``; for a
+        single-image send, pass ``file=<discord.File>``.
 
         Returns True on success. Records circuit-breaker success/failure
         and translates discord.py's rate-limit handling into the agreed
         429-exclusion rule (no failure count for SDK-backoff signals).
         """
         try:
-            await target.send(
-                content,
-                reference=reference,
-                allowed_mentions=allowed_mentions,
-            )
+            kwargs: dict[str, Any] = {
+                "content": content,
+                "reference": reference,
+                "allowed_mentions": allowed_mentions,
+            }
+            if files is not None:
+                kwargs["files"] = files   # multi-image path (discord-py forbids file= + files=)
+            elif file is not None:
+                kwargs["file"] = file     # single-image path
+            await target.send(**kwargs)
             await self._circuit_breaker.record_success()
             return True
         except Exception as e:  # noqa: BLE001
@@ -1572,7 +1606,13 @@ class DiscordAdapter(MessageSourceAdapter):
         content = message.content
         if self._strip_llm_artifact_tags_enabled:
             content = _strip_llm_artifact_tags(content)
-        if not content:
+        # Phase B (amendment #11): empty-content-with-images is valid — the
+        # chart-image extraction can leave content="" once markers are
+        # stripped, with images still attached. Without this guard the
+        # adapter would early-return without ever sending. (``content``
+        # here is post-strip; ``message.content`` already had the markers
+        # removed upstream by ``ResponseDispatcher``.)
+        if not content and not message.images:
             logger.warning("Discord send: empty content after stripping")
             return False
 
@@ -1642,17 +1682,132 @@ class DiscordAdapter(MessageSourceAdapter):
         except ImportError:  # pragma: no cover
             allowed_mentions = None
 
+        # Phase B: chart-image native upload (discord.File for single-image /
+        # files=[...] for N-image; file/files are mutually exclusive in
+        # discord-py 2.7.1). File/files are constructed OUTSIDE the chunked
+        # loop and attached ONLY to chunk 1 (atomic first unit — amendment #6).
+        # Per-image discipline (amendment #7): missing/corrupt bytes → WARN
+        # + drop from the list, NEVER silently.
+        file_obj: Any | None = None
+        files_objs: list[Any] | None = None
+        images = getattr(message, "images", None)
+        # F5 (council-review): mutable list captured on the message
+        # by-reference; the dispatcher reads ``message.delivered_image_ids``
+        # AFTER ``send()`` to decide which images to ``store.delete``.
+        # ``None`` → backward-compat: dispatcher deletes all images.
+        if message.delivered_image_ids is None:
+            message.delivered_image_ids = []
+        if images:
+            try:
+                import discord as _discord_mod
+                decoded: list[bytes] = []
+                for img in images:
+                    try:
+                        decoded.append(_base64.b64decode(img.bytes_b64))
+                    except Exception as e:
+                        logger.warning(
+                            f"discord image decode failed image_id={img.image_id[:8]}...: {e}; "
+                            f"dropping from files=[...]"
+                        )
+                        decoded.append(b"")  # placeholder; filtered below
+                # Filter placeholder entries (decode failures) but keep order
+                # for the remaining images (amendment #7 — no silent drops;
+                # order preserved).
+                paired = [
+                    (b, img) for b, img in zip(decoded, images) if b
+                ]
+                # >DISCORD_FILE_MAX_BYTES skip (defense + Discord 8 MB bot-upload
+                # hard limit). Per-image oversize → WARN + drop; survivors retain
+                # order. Mirror the decode-fail drop discipline above. If ALL
+                # images drop, the existing empty-content guard handles it.
+                size_filtered: list[tuple[bytes, Any]] = []
+                for _b, _img in paired:
+                    if len(_b) > DISCORD_FILE_MAX_BYTES:
+                        logger.warning(
+                            f"discord image too large: image_id={_img.image_id[:8]}... "
+                            f"size={len(_b)} > {DISCORD_FILE_MAX_BYTES}; dropping from files=[...]"
+                        )
+                        continue
+                    size_filtered.append((_b, _img))
+                paired = size_filtered
+                for img in images:
+                    _log_image_metadata(img.image_id, img.size_bytes, img.content_type)
+                if len(paired) == 1:
+                    _bytes, img = paired[0]
+                    file_obj = _discord_mod.File(
+                        fp=_io.BytesIO(_bytes),
+                        filename=img.filename,
+                    )
+                elif len(paired) > 1:
+                    files_objs = [
+                        _discord_mod.File(fp=_io.BytesIO(b), filename=img.filename)
+                        for b, img in paired
+                    ]
+            except ImportError:
+                # discord-py not installed — degrade to text-only path.
+                logger.warning(
+                    "discord chart-image: discord.py not installed; "
+                    "text-only delivery"
+                )
+                file_obj = None
+                files_objs = None
+            except Exception as e:
+                logger.warning(
+                    f"discord.File(s) construction failed: {e}; text only"
+                )
+                file_obj = None
+                files_objs = None
+
         chunks = self._split_message(content)
         async with lock:
             async with self._send_semaphore:
                 sent_count = 0
                 for chunk in chunks:
+                    kwargs = {
+                        "reference": reference,
+                        "allowed_mentions": allowed_mentions,
+                    }
+                    # Chunk 1 (atomic first unit — amendment #6): attach
+                    # file/files if present. Chunks 2..N: text-only — file
+                    # is NEVER re-attempted on later chunks (a partial file
+                    # failure = full message failure, don't double-invoke).
+                    if sent_count == 0:
+                        if files_objs is not None:
+                            kwargs["files"] = files_objs
+                        elif file_obj is not None:
+                            kwargs["file"] = file_obj
                     ok = await self._send_single_chunk(
                         target,
                         chunk,
-                        reference=reference,
-                        allowed_mentions=allowed_mentions,
+                        **kwargs,
                     )
+                    # F5: when chunk-1 with file/files succeeds, every
+                    # image in ``paired`` was delivered. Mark each id so
+                    # the dispatcher can delete only the delivered subset.
+                    # We use ``paired`` (post decode/oversize filtering)
+                    # so decode-failed/oversize images never reach this
+                    # path. The atomic-first-unit retry below is text-only
+                    # — if it succeeds, the images were NOT delivered and
+                    # ``delivered_image_ids`` correctly stays empty.
+                    if (
+                        ok
+                        and sent_count == 0
+                        and (file_obj is not None or files_objs is not None)
+                    ):
+                        for _b, _img in paired:
+                            message.delivered_image_ids.append(_img.image_id)
+                    if not ok and sent_count == 0 and (file_obj is not None or files_objs is not None):
+                        # Phase B amendment #6: ONE text-only retry of the
+                        # atomic first unit. File/files NEVER re-attempted
+                        # on later chunks — chunk 2 fails for any reason
+                        # → return False (today's total-failure semantics).
+                        logger.warning(
+                            f"discord chunk-1 with file failed; retrying "
+                            f"text-only for external_user_id={message.external_user_id}"
+                        )
+                        kwargs.pop("file", None)
+                        kwargs.pop("files", None)
+                        ok = await self._send_single_chunk(target, chunk, **kwargs)
                     if not ok:
                         logger.warning(
                             f"Discord send: chunk {sent_count + 1}/{len(chunks)} "
