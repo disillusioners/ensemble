@@ -37,6 +37,16 @@ fail-closed default.
 R14 fail-soft contract: ``spawn_hot_instance`` NEVER raises on a
 snapshot miss — expired/stale/no-hit/verify-failed all spawn cold.
 Errors are reserved for authorization failure or system fault.
+
+**Authorization outcomes are NOT cold fallbacks** (silent-failure fix,
+2026-10-04). When the team-membership check or the missing-caller
+wiring branch refuses a spawn, the result is a BLOCKED outcome:
+``started: "blocked"`` (NEW third value, alongside ``"warm"`` /
+``"cold"``), ``instance_id: None``, ``hint`` names the permission
+problem and how to resolve it. Callers can then separate "spawned
+cold" from "spawn refused" without parsing the ``error`` string.
+Genuine snapshot misses / verify-fails / expired fallbacks keep
+returning ``started: "cold"`` with the existing R14 hint shape.
 """
 
 from __future__ import annotations
@@ -85,7 +95,11 @@ A snapshot is a distilled digest of one instance's working experience
   context). Falls back to a normal cold spawn when no snapshot is
   found, expired, or verification fails — the result's
   "started": "warm"|"cold" line says which happened; cite it in
-  your dispatch/report. Pass `allow_cross_project=True` to consume
+  your dispatch/report. **Authorization failures** (e.g. the
+  caller's `team_members` does not include the requested agent)
+  return `"started": "blocked"` instead — distinct from a cold
+  fallback so callers can separate "spawned cold" from "spawn
+  refused" without parsing `error`. Pass `allow_cross_project=True` to consume
   a cross-project snapshot explicitly (off by default — fail-closed
   D8 isolation). Project-less callers (e.g. an instance whose
   project is unknown) always get a cold spawn — the internal search
@@ -410,6 +424,52 @@ def _cold_result(
         "hint": (
             f"No matching snapshot — spawned cold ({searched_part}"
             f"reason: {reason})"
+        ),
+        "error": error,
+    }
+
+
+def _denied_result(
+    *,
+    error: str,
+    reason: str = "permission-denied",
+) -> dict[str, Any]:
+    """Assemble the R14 result contract for a BLOCKED spawn.
+
+    Distinct from :func:`_cold_result`: nothing was spawned
+    (correct), but the refusal was an authorization gate — a
+    team-membership denial or a missing-caller wiring bug — not a
+    snapshot miss / verify-failed / expired. Returning the cold
+    shape here was a silent-failure class bug (2026-10-04 E2E
+    finding #1): callers saw ``started: "cold"`` + ``instance_id:
+    None`` + the misleading ``reason: verify-failed`` hint and
+    could not distinguish "spawned cold" from "spawn refused"
+    without parsing ``error``.
+
+    Same 6-key contract as the R14 cold result
+    (``instance_id`` / ``started`` / ``snapshot_id`` / ``staleness``
+    / ``hint`` / ``error``). ``started`` is the NEW third value
+    ``"blocked"`` — equality checks against ``"cold"`` / ``"warm"``
+    on real cold/warm paths continue to hold; the blocker-flag is
+    reserved for this authorization outcome. The ``hint`` names
+    the refusal, the action (resolve the authorization), and the
+    underlying error so the caller can self-correct.
+
+    Per the repo convention (authorization helpers fail closed for
+    agent-backed operations) the helper never relaxes the gate;
+    it only changes how the refusal is surfaced.
+    """
+    return {
+        "instance_id": None,
+        "started": "blocked",
+        "snapshot_id": None,
+        "staleness": {},
+        "hint": (
+            f"Permission denied — spawn blocked (reason: {reason}). "
+            "Nothing was spawned. Resolve the authorization problem "
+            "(e.g. add the requested agent to the caller's "
+            "team_members) and retry. "
+            f"Detail: {error}"
         ),
         "error": error,
     }
@@ -800,10 +860,12 @@ def create_snapshot_tools(
     ) -> dict:
         """Spawn an instance warm-started from the best matching snapshot; cold fallback on any miss. Use tool_help("spawn_hot_instance") for details."""
         # ── Auth: team membership (same gate as spawn_instance) ───────
+        # Per the repo convention (authorization helpers fail closed for
+        # agent-backed operations) the membership gate here is the SAME
+        # chokepoint spawn_instance uses; the difference is only the
+        # RESULT SHAPE on denial — see _denied_result docstring.
         if not caller_agent_id:
-            return _cold_result(
-                reason="verify-failed",
-                searched=None,
+            return _denied_result(
                 error=(
                     "ERROR: spawn_hot_instance invoked without a caller "
                     "agent_id — wiring/configuration bug, spawn denied."
@@ -815,9 +877,7 @@ def create_snapshot_tools(
             caller_agent_id, agent_id, caller_version_tag
         )
         if membership_error is not None:
-            return _cold_result(
-                reason="verify-failed",
-                searched=None,
+            return _denied_result(
                 error=f"ERROR: {membership_error}",
             )
 
