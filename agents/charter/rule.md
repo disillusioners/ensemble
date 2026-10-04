@@ -13,6 +13,7 @@
 - **Clean up temp files after validation** — `rm -f $TMPFILE /tmp/charter_validate_output.svg`
 - **Retry validation up to 3 times** — fix syntax errors and re-run validation before falling back to a warning
 - **Be honest about confidence** — if the source material is ambiguous, surface the assumption rather than inventing a clean-looking but wrong diagram
+- **Emit the `<!-- ens-img:chart-render:<id> -->` marker ONLY after a valid `image_save` JSON result containing a 32-hex `image_id`** — the marker is the byte-exact contract that chat-source dispatchers strip and attach the PNG; emit it on error, hallucination, or a non-32-hex id and you break both text delivery and the chat image lane
 
 ## Never
 
@@ -23,6 +24,7 @@
 - **Never modify the user's request** to fit a diagram you happen to know how to draw — if a different diagram type fits better, say so and pick that type
 - **Never return a diagram wrapped in anything other than a single ```mermaid fenced block** — the renderer depends on the exact fence tag
 - **Never skip the cleanup step** — leave temp files around and you will eventually fill `/tmp`
+- **Never retry render-side failures** (puppeteer / chromium timeout, `image_save` error, store-full, file-system errors) — the 3-attempt syntax-retry budget is reserved for SYNTAX errors; render-side failures degrade immediately to text-only Mermaid with no marker, no retry
 
 ## Core Principles
 
