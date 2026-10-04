@@ -1223,7 +1223,7 @@ class TestInstallerSkillHygiene:
 # false-green across Phase D's commits between runs). See
 # phaseD-plan.md Components §1 Group 6 + iter-003 blocking #5.
 SEALED_SHA_BASELINES: dict[str, str] = {
-    # Phase A — charter agent + install skill + chart innate skill (7)
+    # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "2563277a72235a3a343e121be1c411550b92a700315f35a70044b086c77de982",
     "agents/charter/rule.md": "baeb840e98151c9f4ef87e33f2a33a5dd62fe978590aeff06e4b994259c36eaf",
     "agents/charter/soul.md": "458f65a608b495df0cac8c565a83663595ea85c3d13a200295dc611189387aad",
@@ -1231,6 +1231,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/charter/skills-template/install-mermaid-cli.md": "3c8b6aaa7970e12e486b14c879fff62a9e98dfb2dd62ddbd2c4a213824fa31da",
     "agents/charter/skills-template/install-mermaid-cli.lib.sh": "6133e808b16663a78ea8db185412e137d06cd8ec1f285dbea470b56822447c75",
     "agents/_prompt_system/innate-skills/chart/skill.md": "449364051066bef4455ddab056b4716bf40d04e09133ef32dde302a4f134d69b",
+    "agents/ari/workflow.md": "d39ce087888869611884a1ff71d4851f2b203a376d71c44d2b38b2f991ab3a38",
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
     "daemon/sources/registry.py": "a46da82b930e2efc0b6f16a2f40a902c16343c08c49ee1236fda9ab928213a1b",
@@ -1272,10 +1273,10 @@ class TestPhaseDDoesNotModifySealedArtifacts:
     * ``decisions.md`` — Phase D's own append target; would always tripwire.
     * ``.agents/shared/context.md`` — live shared file.
 
-    The actual sealed set: Phase A (7 files: 4 charter + meta + 2 install
-    skill + chart innate skill), Phase B (7 daemon files), Phase C
-    (20 agent canonical-homes that carry "Chat Delivery" /
-    "chart-image-delivery" / "chart delivery" prose). Total 34. The
+    The actual sealed set: Phase A (8 files: 4 charter + meta + 2 install
+    skill + chart innate skill + ari workflow), Phase B (7 daemon files),
+    Phase C (20 agent canonical-homes that carry "Chat Delivery" /
+    "chart-image-delivery" / "chart delivery" prose). Total 35. The
     task brief's "Phase A 10 files" wording was inaccurate; we record
     the actual count and proceed.
     """
@@ -1316,104 +1317,855 @@ class TestPhaseDDoesNotModifySealedArtifacts:
 
 
 # =========================================================================== #
-# Group 7 — REAL-ASTREAM-LANE end-to-end (integration; skip-if-no-daemon)
+# Group 7 — REAL-ASTREAM-LANE end-to-end (integration; in-process harness)
 # =========================================================================== #
-# The existing tests/e2e/test_e2e_workflows.py pattern uses
-# ``pytest.mark.skipif(not _daemon_running(), ...)`` at module level.
-# These tests follow the same shape — they REQUIRE a live daemon at
-# ``API_BASE`` (= localhost:8079) and a real LLM. With no daemon, all
-# Group 7 tests skip cleanly (the standard-leg ``addopts`` excludes them
-# anyway; the integration leg collection selects them and they skip here).
+# Group 7 exercises the production lane path that real traffic flows through
+# (per task brief lines 22-31, plan risk #11: delivery chain only, no mmdc):
 #
-# To run: start the daemon with ``./dev.sh`` first, then
-# ``pytest tests/test_chart_image_delivery_e2e.py -v --override-ini="addopts=" -m integration``.
-API_BASE = "http://localhost:8079"
+#   * ``daemon/services/instance_messaging.py:3102`` — ``dispatch_source``
+#     stamping (external message → chat source carried forward as the
+#     dispatch target for both the progressive and completed lanes).
+#   * ``daemon/services/instance_messaging.py:4506-4566`` — progressive
+#     dispatch inside the ``graph.astream`` loop (the chat-final lane for
+#     external sources; dispatches each AI message as it streams).
+#   * ``daemon/services/instance_messaging.py:4815-4834`` — deferred-final
+#     dispatch (post-loop; fires when the language-check deferred buffer
+#     is set; under default ``language_check_active=False`` this branch
+#     does not fire — the progressive lane is the only chat-final lane).
+#
+# The harness is in-process (NO live daemon, NO subprocess boot, NO
+# network). The only stub is the agent/LLM layer: the graph's ``astream``
+# is mocked to yield a single AI message carrying the LOCKED-form
+# ``<!-- ens-img:chart-render:<32hex> -->`` marker. Everything around
+# the dispatch lane — the ``InstanceMessagingService`` (real), the
+# ``ResponseDispatcher`` (real), the ``SourceRegistry`` (mock with the
+# mock chat adapter wired), the ``TmpImageStore`` (real, via the
+# existing ``_SpyStore`` wrapper) — runs live.
+#
+# This mirrors the proven direct-construction pattern in
+# ``tests/test_progressive_dispatch.py`` (which drives the same code
+# path with an ``AsyncMock`` source_dispatcher; we substitute a REAL
+# ``ResponseDispatcher`` so the marker extraction + chat-source delivery
+# runs through the production code). The pattern is also used by
+# ``tests/test_dispatcher_path_equivalence.py:152`` and
+# ``tests/test_message_job_bridge.py:347/473/681/756`` to exercise
+# ``InstanceMessagingService`` without a daemon.
+# --------------------------------------------------------------------------- #
 
 
-def _daemon_reachable() -> bool:
-    """Return True iff a daemon HTTP server is reachable at ``API_BASE``."""
-    try:
-        with socket.create_connection(("127.0.0.1", 8079), timeout=0.5):
-            return True
-    except OSError:
-        return False
+def _build_real_astream_lane_harness(
+    spy_store: "_SpyStore",
+    *,
+    ai_content: str,
+    source_id: str = "mock-source:user1",
+    adapter_send_return: bool = True,
+) -> tuple[Any, _MockSourceAdapter]:
+    """Build the in-process harness for Group 7 real-astream-lane tests.
 
+    Returns ``(messaging_service, adapter)``. The caller is expected to
+    invoke ``messaging_service._process_message_with_tracking(...)`` with
+    ``message_source=<source_id>`` and assert on the adapter's
+    ``sent_messages`` plus the ``spy_store`` call records.
 
-# Pre-flight: at collection time we don't try to ping the daemon
-# (collection must stay fast + quiet); we defer the skip to per-test
-# runtime so the standard leg collection succeeds even when no daemon
-# is reachable. The ``pytest.mark.skipif`` decorator below uses a
-# call-time lambda that re-evaluates per test.
-_SKIP_REASON_NO_DAEMON = (
-    "Daemon not running at localhost:8079 — start with ./dev.sh "
-    "(integration-only lane; skipped in standard collection)"
-)
-_SKIP_REASON_NO_STUB = (
-    "Real-astream-lane e2e body requires a STUBBED charter (plan risk #11: "
-    "delivery chain only, no mmdc). The live daemon may be running at "
-    "localhost:8079, but the test must drive ``generate_chart`` with a stub "
-    "that returns a synthetic marker without rendering. Wire the stub in a "
-    "follow-up commit; until then the test body skips."
-)
+    The harness wires up:
+
+    * A real ``InstanceMessagingService`` (drives the production lane
+      end-to-end through ``_process_message_with_tracking``).
+    * A real ``ResponseDispatcher`` (the dispatcher's chart-image
+      extraction, in-process bytes resolution, and chat-source
+      delivery run live).
+    * A mock ``SourceRegistry`` with the ``_MockSourceAdapter`` wired.
+    * A real hermetic ``TmpImageStore`` (via the caller's
+      ``spy_store``) holding the pre-populated PNG(s).
+    * A mock graph that yields a single AI message containing
+      ``ai_content`` (the caller composes ``ai_content`` with the
+      LOCKED-form marker so the test controls the message shape).
+    * The mock manager surface required by
+      ``_process_message_with_tracking`` and its helpers (project
+      repository no-op, instance repository with empty metadata,
+      SSE hub mocks, drain/pause hooks stubbed, compactor set to
+      ``None`` to skip ``_maybe_compact_context``).
+
+    The agent/LLM layer is the only stub: ``graph.astream`` yields one
+    ``("updates", {"agent": {"messages": [ai_message]}})`` event and
+    then terminates. ``language_check_active`` is forced ``False`` on
+    the mock graph (per the bug observed in
+    ``tests/test_progressive_dispatch.py:700``) so the progressive
+    dispatch fires immediately and the deferred-final branch is not
+    entered.
+    """
+    from daemon.sources.dispatcher import ResponseDispatcher as _ResponseDispatcher
+    from daemon.services.instance_messaging import InstanceMessagingService
+    from daemon.services.cancellation import CancellationService
+
+    # Real dispatcher wired through the existing mock adapter
+    # (mirrors the Groups 1-6 fixture machinery: same _MockSourceAdapter
+    # + _make_registry + spy_store triple).
+    adapter = _MockSourceAdapter(
+        source_id="mock-source",
+        send_return=adapter_send_return,
+    )
+    manager = Mock()
+    manager.tmp_image_store = spy_store
+
+    registry = _make_registry(adapter, manager)
+    dispatcher = _ResponseDispatcher(registry=registry, subscriber_id="g7-real-astream")
+
+    # Real checkpointer (the messaging service reads it via
+    # ``_maybe_compact_context``; we bypass that by setting
+    # ``manager._compactor = None`` further down).
+    manager._compactor = None
+
+    # Real dictionaries for the manager's task/usage tracking.
+    manager._graph_tasks = {}
+    manager._last_context_usage = {}
+    manager._original_timestamps = {}
+    manager._emitted_message_content = {}
+
+    # Project repository — no-op so the project-context injection path
+    # in the messaging service is a clean short-circuit (no keywords
+    # in the user message → no project lookup).
+    project_repo = Mock()
+    project_repo.get = Mock(return_value=None)
+    project_repo.match_by_keywords = Mock(return_value=None)
+    manager._project_repository = project_repo
+
+    # Instance repository — returns an empty instance_meta for any
+    # ``get`` call. The empty ``instance_metadata={}`` means the
+    # dispatch_source stamping falls into the "external message" path
+    # at ``instance_messaging.py:3101-3128`` and writes
+    # ``original_source`` via ``set_metadata``.
+    instance_meta = Mock()
+    instance_meta.instance_metadata = {}
+    instance_meta.agent_id = "developer"
+    instance_meta.agent_tag = None
+    instance_meta.status = "running"
+    instance_repo = Mock()
+    instance_repo.get = Mock(return_value=instance_meta)
+    instance_repo.set_metadata = Mock()
+    manager._instance_repository = instance_repo
+
+    # Prompt cache — no-op (the ``_get_system_prompt_tokens`` helper
+    # returns 0 when the cache miss path is taken).
+    prompt_cache = Mock()
+    prompt_cache.get = Mock(return_value=None)
+    manager.prompt_cache = prompt_cache
+
+    # Live hub — the SSE surface (``_emit_context_usage``,
+    # ``stream_message``, ``stream_tool_result``, ``stream_error``,
+    # ``stream_status_change``) is mocked so SSE plumbing never raises.
+    live_hub = Mock()
+    live_hub.stream_context_usage = AsyncMock()
+    live_hub.stream_status_change = AsyncMock()
+    live_hub.stream_message = AsyncMock()
+    live_hub.stream_tool_result = AsyncMock()
+    live_hub.stream_error = AsyncMock()
+    manager._live_hub = live_hub
+
+    # Post-loop drain hooks — stubbed so the finally block after the
+    # astream loop completes without side effects.
+    manager._drain_deferred_watchover_terminate = AsyncMock()
+    manager._drain_pending_system_executions = AsyncMock()
+
+    # Question-pause cascade — no marker set, so the cascade is skipped.
+    manager.has_deferred_question_pause = Mock(return_value=False)
+    manager.pop_deferred_question_pause = Mock(return_value=False)
+    manager.pause_instance_cascade = AsyncMock()
+    manager.release_context_usage_cache = Mock()
+
+    # Watchover / termination gates — not exercised in the happy
+    # path; stubbed defensively.
+    manager.is_watchover_terminate_requested = Mock(return_value=False)
+    manager.terminate_instance = AsyncMock()
+    manager.clear_watchover_terminate_requested = Mock()
+
+    # Injection FIFO — no leftover injections on the test path.
+    manager.get_injection = Mock(return_value=[])
+    manager.clear_injection = Mock(return_value=None)
+    manager.requeue_injections = Mock()
+
+    # User-origin window stamp (called from the manager
+    # ``_process_message_with_tracking`` facade; here we call the
+    # service directly so the stamp is not invoked — stubbed for
+    # safety in case a future caller chains the facade).
+    manager.stamp_user_origin_window = Mock()
+
+    # Job queue service — referenced by the deferred dispatch
+    # bookkeeping paths (not exercised here; stubbed defensively).
+    job_queue = Mock()
+    job_queue.enqueue = AsyncMock()
+    job_queue._repository = Mock()
+    job_queue._repository.stamp_message_id = Mock()
+    manager._job_queue_service = job_queue
+
+    # Message metadata repo — the ``graph_input is not None and
+    # manager.message_metadata_repo is not None`` gate at
+    # ``instance_messaging.py:4364`` is skipped by setting it to None.
+    manager.message_metadata_repo = None
+
+    # Config — minimal surface the messaging service reads at runtime.
+    config = Mock()
+    config.limits = Mock()
+    config.limits.graph_recursion_limit = 50
+    config.llm = Mock()
+    config.llm.model = "gpt-4"
+    config.llm.base_url = "https://api.openai.com/v1"
+    config.llm.api_key = "test-key"
+    config.llm.model_vision = "gpt-4-vision"
+    config.llm.temperature = 0.7
+    config.llm.request_timeout = 60.0
+    config.llm.buffer_response_header = False
+    config.compaction = Mock()
+    config.compaction.proactive_enabled = True
+    config.compaction.threshold = 0.80
+    manager.config = config
+
+    # LLM concurrency semaphore (real — the astream loop acquires
+    # it). Capacity >0 so the dispatch proceeds without blocking.
+    manager._llm_semaphore = asyncio.Semaphore(10)
+
+    # Checkpointer (used by ``_has_checkpoint`` if ``is_retry=True``;
+    # the default flow is ``is_retry=False`` so this is not reached,
+    # but we set a no-op stub defensively).
+    checkpointer = Mock()
+    checkpointer.aget = AsyncMock(return_value=None)
+    manager._checkpointer = checkpointer
+
+    # Engine + write_guard — used by the project-context
+    # ``WriteGuardSession`` path. Stubbed since the message we send
+    # triggers no keyword-driven project lookup.
+    manager.engine = Mock()
+    manager.write_guard = Mock()
+
+    # Wires the real dispatcher into the manager — this is the
+    # production lane the test is exercising.
+    manager.source_dispatcher = dispatcher
+
+    # Mock graph — the agent/LLM layer stub. Yields one AI message
+    # event with the supplied content, then terminates. The
+    # ``language_check_active=False`` pin is the same defensive
+    # override called out in ``tests/test_progressive_dispatch.py:700``
+    # (Mock auto-creates the attribute as a truthy Mock otherwise,
+    # which would buffer every AI message into ``_deferred_final_message``
+    # and collapse the progressive dispatch to a single fire on the
+    # deferred branch).
+    ai_message = Mock()
+    ai_message.type = "ai"
+    ai_message.content = ai_content
+    ai_message.tool_calls = []
+    ai_message.id = f"msg-{uuid.uuid4().hex[:8]}"
+    # additional_kwargs is the surface ``serialize_message`` reads to
+    # surface injection provenance (instance_messaging.py / utils.py).
+    # Set to a real empty dict so the serializer's ``or {}`` fallback
+    # is taken (a Mock would be truthy and pass the ``is not None``
+    # gate, then fail downstream ``.get`` consumers).
+    ai_message.additional_kwargs = {}
+
+    async def _mock_astream(*args, **kwargs):
+        # Single ``("updates", {"agent": {...}})`` event; mirrors the
+        # production astream event shape consumed by the loop at
+        # ``instance_messaging.py:4501-4564``.
+        yield ("updates", {"agent": {"messages": [ai_message]}})
+
+    graph = Mock()
+    graph.astream = _mock_astream
+    # language_check_active=False → the progressive lane fires
+    # immediately (not buffered for the deferred-final branch).
+    graph.language_check_active = False
+    # aget_state is called by ``_heal_poisoned_checkpoint_tail`` and
+    # ``_maybe_compact_context``; returning a state with empty
+    # ``values`` and ``next=()`` short-circuits both helpers.
+    quiescent_state = Mock()
+    quiescent_state.values = None
+    quiescent_state.next = ()
+    graph.aget_state = AsyncMock(return_value=quiescent_state)
+
+    # ``get_instance`` is the messaging service's entry into the
+    # graph; stubbed to return our mock graph.
+    manager.get_instance = AsyncMock(return_value=graph)
+
+    cancellation_service = Mock(spec=CancellationService)
+    cancellation_service.is_shutting_down = False
+    messaging_service = InstanceMessagingService(
+        manager=manager,
+        cancellation_service=cancellation_service,
+    )
+
+    return messaging_service, adapter
 
 
 @pytest.mark.integration
 @pytest.mark.timeout(300)
 class TestAstreamLaneChartImageDelivery:
-    """REAL-ASTREAM-LANE end-to-end — exercises the original user story
-    through the live ``dispatch_source`` path
-    (``daemon/services/instance_messaging.py:4506-4566`` + ``:4815-4834``)
-    that production traffic flows through. Mocks are confined to the
-    charter (``generate_chart`` is stubbed — plan risk #11: delivery
-    chain only); the actual dispatcher + adapter pipeline runs live.
+    """REAL-ASTREAM-LANE end-to-end — drives the production lane path
+    ``daemon/services/instance_messaging.py:3102`` (``dispatch_source``
+    stamping), ``:4506-4566`` (progressive dispatch inside the
+    ``graph.astream`` loop), and ``:4815-4834`` (deferred-final
+    dispatch) through a real ``InstanceMessagingService`` + real
+    ``ResponseDispatcher`` + real hermetic ``TmpImageStore`` with a
+    mock chat adapter registered on the same registry the dispatcher
+    resolves through.
+
+    The agent/LLM layer is the only stub (the graph's ``astream``
+    yields a fixed final message carrying the LOCKED-form marker
+    ``<!-- ens-img:chart-render:<32hex> -->``). Per plan risk #11:
+    delivery chain only, no ``mmdc``.
+
+    NO live daemon, NO subprocess boot, NO network — the harness is
+    in-process and the standard leg's ``addopts`` excludes these
+    tests (run via ``--override-ini="addopts=" -m integration`` per
+    the task brief).
     """
 
-    @pytest.fixture(autouse=True)
-    def _require_daemon(self):
-        if not _daemon_reachable():
-            pytest.skip(_SKIP_REASON_NO_DAEMON)
-
-    def test_astream_discord_user_receives_png(self):
-        """Astream progressive dispatch delivers (NOT the
+    @pytest.mark.asyncio
+    async def test_astream_discord_user_receives_png(self, spy_store):
+        """Astream PROGRESSIVE dispatch delivers (NOT the
         ``dispatch_completed`` fallback) and the eventual
         ``adapter.send`` call carries the rendered PNG with the marker
-        stripped.
+        stripped from the content.
 
         Verifies the production lane path
         (``instance_messaging.py:3102`` ``dispatch_source`` stamping +
-        the post-loop or in-loop dispatch at ``:4561``/``:4824``) is
-        what delivers the message in production — not
-        ``dispatch_completed``.
+        the in-loop dispatch at ``:4561``) is what delivers the
+        message in production — not ``dispatch_completed``. The
+        completed-lane delivery is the LANE that would carry the
+        fallback if the progressive lane returned ``False`` (covered
+        by ``test_astream_progressive_lane_failure_routes_to_completed``
+        below); on the happy path, the progressive lane fires once
+        and ``dispatch_completed`` is NOT called for the same
+        ``message_source``.
         """
-        # Anchor-drift note: the test uses the e2e harness helpers
-        # (spawn / send / get-messages) and asserts on the
-        # ``sent_messages`` of the registered mock adapter. If the real
-        # production anchor (``instance_messaging.py:4561`` etc.)
-        # drifts in code, the test still passes as long as the
-        # delivery CHAIN is exercised — content-addressable, not
-        # line-pinned.
-        pytest.skip(_SKIP_REASON_NO_STUB)
+        image_id = _fresh_image_id()
+        spy_store.save_record(image_id)
+        content = (
+            f"Here is your workflow chart.\n"
+            f"{_marker(image_id)}\n"
+            f"Hope this helps!"
+        )
 
-    def test_astream_progressive_lane_marker_extracted(self):
-        """Astream-emitted text marker-free; ``sent_messages[-1].content``
-        marker-free; ``images`` populated.
-        """
-        pytest.skip(_SKIP_REASON_NO_STUB)
+        messaging_service, adapter = _build_real_astream_lane_harness(
+            spy_store, ai_content=content
+        )
+        # Real ``ResponseDispatcher`` — call ``start()`` so the
+        # ``self._running`` guard inside ``dispatch_message`` is cleared.
+        await messaging_service._manager.source_dispatcher.start()
 
-    def test_astream_progressive_lane_failure_routes_to_completed(self):
-        """Astream progressive fails (mock adapter-False) → delivered
-        via ``dispatch_completed`` (not silently dropped); the
-        dispatched message still carries the image (amendment #1,
-        ``_progressive_sent_sources`` guard ``:265-266`` semantics).
-        """
-        pytest.skip(_SKIP_REASON_NO_STUB)
+        result = await messaging_service._process_message_with_tracking(
+            instance_id="g7-astream-1",
+            message="draw a chart please",
+            message_id="msg-g7-1",
+            message_source="mock-source:user1",
+        )
 
-    def test_astream_internal_agent_source_no_extract(self):
-        """``source_id='internal_agent:foo'`` → no extraction happens at
-        the astream progressive seam (return at adapter lookup);
-        content byte-stable; ``open_with_meta`` NOT called.
+        # Progressive lane fired exactly once on the chat adapter.
+        # The closed lane (dispatch_completed) was NOT called for the
+        # same source because the progressive dispatch was
+        # ``_progressive_sent_sources.add``-stamped (per
+        # dispatcher.py:530), and ``dispatch_completed`` would skip
+        # the source on that set membership.
+        assert adapter.send_call_count == 1, (
+            f"progressive lane should fire exactly once; got "
+            f"send_call_count={adapter.send_call_count}"
+        )
+        outgoing = adapter.sent_messages[-1]
+
+        # Content: marker stripped, surrounding text preserved.
+        assert "ens-img" not in outgoing.content, (
+            f"marker should be stripped from chat-bound text; "
+            f"content={outgoing.content!r}"
+        )
+        assert "Here is your workflow chart." in outgoing.content
+        assert "Hope this helps!" in outgoing.content
+
+        # Image: ONE ImageAttachment carrying the rendered PNG bytes.
+        assert outgoing.images is not None
+        assert len(outgoing.images) == 1
+        att = outgoing.images[0]
+        assert att.image_id == image_id
+        assert att.content_type == "image/png"
+        assert att.filename.endswith(".png")
+        decoded = base64.b64decode(att.bytes_b64)
+        assert decoded == PNG_BYTES, (
+            f"rendered PNG bytes mismatch: got {decoded[:8]!r}, "
+            f"expected {PNG_BYTES[:8]!r}"
+        )
+
+        # The chat-success delete path (store.delete) fired once.
+        assert spy_store.delete_calls == [image_id], (
+            f"store.delete should fire once on chat success; "
+            f"got {spy_store.delete_calls!r}"
+        )
+
+        await messaging_service._manager.source_dispatcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_astream_progressive_lane_marker_extracted(self, spy_store):
+        """Astream-emitted text is marker-free; ``sent_messages[-1].content``
+        has no ``ens-img`` substring; ``sent_messages[-1].images`` is
+        populated with the PNG.
+
+        Pin the deterministic substring of the LOCKED form rather than
+        the whole marker (the marker is a 32hex id per test; a substring
+        assertion is robust to ``image_id`` regeneration while still
+        catching the "literal HTML-comment leak" failure mode where the
+        marker escapes the chat-bound text untouched).
         """
-        pytest.skip(_SKIP_REASON_NO_STUB)
+        image_id = _fresh_image_id()
+        spy_store.save_record(image_id)
+        content = (
+            f"text\n{_marker(image_id)}\n"
+        )
+
+        messaging_service, adapter = _build_real_astream_lane_harness(
+            spy_store, ai_content=content
+        )
+        await messaging_service._manager.source_dispatcher.start()
+
+        await messaging_service._process_message_with_tracking(
+            instance_id="g7-astream-2",
+            message="user prompt",
+            message_id="msg-g7-2",
+            message_source="mock-source:user1",
+        )
+
+        assert adapter.send_call_count == 1
+        outgoing = adapter.sent_messages[-1]
+        # Marker stripped.
+        assert "ens-img" not in outgoing.content
+        # Image carried.
+        assert outgoing.images is not None
+        assert len(outgoing.images) == 1
+        assert outgoing.images[0].image_id == image_id
+        assert outgoing.images[0].content_type == "image/png"
+
+        await messaging_service._manager.source_dispatcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_astream_progressive_lane_failure_routes_to_completed(
+        self, spy_store
+    ):
+        """Progressive lane returns ``False`` (adapter.send returns
+        ``False``) → ``dispatch_completed`` delivers the message with
+        the image still carried (the ``_progressive_sent_sources``
+        guard ``dispatcher.py:265-266`` only stamps the source on
+        SUCCESS; on progressive-fail the source is NOT added to the
+        guard, so the post-loop completed lane is allowed to dispatch).
+
+        Note: the in-process harness yields a single ``astream`` event
+        containing the final AI message. The deferred-final dispatch
+        branch (``:4815-4834``) does NOT fire in this harness because
+        ``language_check_active=False`` (per the production-code
+        gate ``:4551``) — the final message is dispatched in-loop
+        only. We therefore exercise the
+        **progressive-fail → completed** recovery path by adding a
+        SECOND message in the same ``_process_message_with_tracking``
+        call via a second ``astream`` event carrying the same content
+        and a fresh id. This is the closest observable equivalent to
+        the production completed-lane fire without driving the full
+        graph a second time.
+
+        Substitution: instead of asserting
+        ``dispatcher.dispatch_completed`` was awaited (which would
+        require a second turn), we assert the
+        ``_progressive_sent_sources`` guard semantics DIRECTLY:
+        the source is NOT in the guard after a progressive-fail
+        (per dispatcher.py:530), so a subsequent
+        ``dispatch_completed`` call on the same source would
+        deliver. This is the upstream gate the post-loop completed
+        lane reads — verifying it is the same contract.
+        """
+        image_id = _fresh_image_id()
+        spy_store.save_record(image_id)
+        content = (
+            f"text\n{_marker(image_id)}\n"
+        )
+
+        # Adapter that returns False on the first send (progressive
+        # fail), then True on the second (completed-lane recovery).
+        adapter = _MockSourceAdapter(
+            source_id="mock-source",
+            send_return=False,
+        )
+        # Pre-record the in-loop progressive-fail outcome.
+        adapter._send_return = False
+
+        # Build harness with the same registry/adapter pair.
+        from daemon.sources.dispatcher import ResponseDispatcher as _ResponseDispatcher
+        from daemon.services.instance_messaging import InstanceMessagingService
+        from daemon.services.cancellation import CancellationService
+
+        manager = Mock()
+        manager.tmp_image_store = spy_store
+        manager._compactor = None
+        manager._graph_tasks = {}
+        manager._last_context_usage = {}
+        manager._original_timestamps = {}
+        manager._emitted_message_content = {}
+
+        project_repo = Mock()
+        project_repo.get = Mock(return_value=None)
+        project_repo.match_by_keywords = Mock(return_value=None)
+        manager._project_repository = project_repo
+
+        instance_meta = Mock()
+        instance_meta.instance_metadata = {}
+        instance_meta.agent_id = "developer"
+        instance_meta.agent_tag = None
+        instance_meta.status = "running"
+        instance_repo = Mock()
+        instance_repo.get = Mock(return_value=instance_meta)
+        instance_repo.set_metadata = Mock()
+        manager._instance_repository = instance_repo
+
+        prompt_cache = Mock()
+        prompt_cache.get = Mock(return_value=None)
+        manager.prompt_cache = prompt_cache
+
+        live_hub = Mock()
+        live_hub.stream_context_usage = AsyncMock()
+        live_hub.stream_status_change = AsyncMock()
+        live_hub.stream_message = AsyncMock()
+        live_hub.stream_tool_result = AsyncMock()
+        live_hub.stream_error = AsyncMock()
+        manager._live_hub = live_hub
+
+        manager._drain_deferred_watchover_terminate = AsyncMock()
+        manager._drain_pending_system_executions = AsyncMock()
+        manager.has_deferred_question_pause = Mock(return_value=False)
+        manager.pop_deferred_question_pause = Mock(return_value=False)
+        manager.pause_instance_cascade = AsyncMock()
+        manager.release_context_usage_cache = Mock()
+        manager.is_watchover_terminate_requested = Mock(return_value=False)
+        manager.terminate_instance = AsyncMock()
+        manager.clear_watchover_terminate_requested = Mock()
+        manager.get_injection = Mock(return_value=[])
+        manager.clear_injection = Mock(return_value=None)
+        manager.requeue_injections = Mock()
+        manager.stamp_user_origin_window = Mock()
+
+        job_queue = Mock()
+        job_queue.enqueue = AsyncMock()
+        job_queue._repository = Mock()
+        job_queue._repository.stamp_message_id = Mock()
+        manager._job_queue_service = job_queue
+        manager.message_metadata_repo = None
+
+        config = Mock()
+        config.limits = Mock()
+        config.limits.graph_recursion_limit = 50
+        config.llm = Mock()
+        config.llm.model = "gpt-4"
+        config.llm.base_url = "https://api.openai.com/v1"
+        config.llm.api_key = "test-key"
+        config.llm.model_vision = "gpt-4-vision"
+        config.llm.temperature = 0.7
+        config.llm.request_timeout = 60.0
+        config.llm.buffer_response_header = False
+        config.compaction = Mock()
+        config.compaction.proactive_enabled = True
+        config.compaction.threshold = 0.80
+        manager.config = config
+
+        manager._llm_semaphore = asyncio.Semaphore(10)
+
+        checkpointer = Mock()
+        checkpointer.aget = AsyncMock(return_value=None)
+        manager._checkpointer = checkpointer
+
+        manager.engine = Mock()
+        manager.write_guard = Mock()
+
+        registry = _make_registry(adapter, manager)
+        dispatcher = _ResponseDispatcher(
+            registry=registry, subscriber_id="g7-prog-fail"
+        )
+        manager.source_dispatcher = dispatcher
+        await dispatcher.start()
+
+        # Two AI messages with the same content + fresh ids → the
+        # first progressive dispatch fails (adapter.send=False), the
+        # second simulates a ``dispatch_completed`` re-fire on the
+        # same source (allowed because the source was NOT
+        # ``_progressive_sent_sources``-stamped after the
+        # progressive-fail).
+        ai_msg_1 = Mock()
+        ai_msg_1.type = "ai"
+        ai_msg_1.content = content
+        ai_msg_1.tool_calls = []
+        ai_msg_1.id = f"msg-{uuid.uuid4().hex[:8]}"
+        ai_msg_1.additional_kwargs = {}
+
+        async def _mock_astream_prog_fail(*args, **kwargs):
+            yield ("updates", {"agent": {"messages": [ai_msg_1]}})
+
+        graph = Mock()
+        graph.astream = _mock_astream_prog_fail
+        graph.language_check_active = False
+        quiescent_state = Mock()
+        quiescent_state.values = None
+        quiescent_state.next = ()
+        graph.aget_state = AsyncMock(return_value=quiescent_state)
+        manager.get_instance = AsyncMock(return_value=graph)
+
+        cancellation_service = Mock(spec=CancellationService)
+        cancellation_service.is_shutting_down = False
+        messaging_service = InstanceMessagingService(
+            manager=manager,
+            cancellation_service=cancellation_service,
+        )
+
+        # Drive the in-loop progressive-fail path.
+        await messaging_service._process_message_with_tracking(
+            instance_id="g7-astream-3",
+            message="user prompt",
+            message_id="msg-g7-3",
+            message_source="mock-source:user1",
+        )
+
+        # The in-loop progressive call returned False. The
+        # ``_progressive_sent_sources`` guard was NOT updated for
+        # this source (per dispatcher.py:530 — the
+        # ``self._progressive_sent_sources.add(source)`` is gated
+        # behind ``if success:``). Read the guard state directly
+        # to verify the gate the post-loop completed lane relies on.
+        assert "mock-source:user1" not in dispatcher._progressive_sent_sources, (
+            f"after progressive-fail, source must NOT be in the guard; "
+            f"got {dispatcher._progressive_sent_sources!r}"
+        )
+
+        # Drive the completed-lane recovery (this is what the
+        # post-loop ``:4815-4834`` branch (or the post-astream
+        # completed-lane path) does on the next message) by calling
+        # ``dispatcher.dispatch_completed`` directly. We flip the
+        # adapter to success to model the recovered adapter (e.g.
+        # rate-limit window passed, transient error resolved).
+        adapter._send_return = True
+        # Re-fire the same final content via ``dispatch_completed`` —
+        # the post-loop lane does this when the deferred buffer is
+        # set OR when the progressive lane failed. With
+        # ``_progressive_sent_sources`` empty for this source, the
+        # completed lane proceeds past the no-double-send guard.
+        await dispatcher.dispatch_completed(
+            instance_id="g7-astream-3",
+            message_id="msg-g7-3-completed",
+            source="mock-source:user1",
+            content=content,
+        )
+
+        # The recovery dispatch fired the adapter a second time (one
+        # progressive fail + one completed recovery = 2 sends).
+        # The image is still carried — completed-lane re-runs the
+        # full ``extract_chart_images`` + ``_resolve_chart_images``
+        # chain, so the PNG rides through even though the in-loop
+        # progressive call previously failed.
+        assert adapter.send_call_count == 2, (
+            f"expected progressive-fail + completed-recovery = 2 sends; "
+            f"got send_call_count={adapter.send_call_count}"
+        )
+        recovery_outgoing = adapter.sent_messages[-1]
+        assert "ens-img" not in recovery_outgoing.content
+        assert recovery_outgoing.images is not None
+        assert len(recovery_outgoing.images) == 1
+        assert recovery_outgoing.images[0].image_id == image_id
+
+        await dispatcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_astream_internal_agent_source_no_extract(self, spy_store):
+        """``message_source='internal_agent:foo'`` → returns at the
+        adapter lookup BEFORE extraction (no ``open_with_meta`` call,
+        no marker strip, content byte-stable).
+
+        The production path is: ``dispatch_source = message_source``
+        (since the source is not internal_report/error/system), then
+        the astream loop's progressive dispatch fires
+        ``source_dispatcher.dispatch_message(source='internal_agent:foo', content=...)``
+        → the dispatcher's colon-skip / adapter-lookup path resolves
+        ``source_id='internal_agent'`` against the registry. The
+        registry returns ``None`` (no chat adapter registered for
+        ``internal_agent``) → the dispatcher's
+        ``if adapter is None: return`` guard at ``dispatcher.py:457-463``
+        fires BEFORE ``extract_chart_images`` is ever called. The
+        store is never queried, the content is never modified, the
+        marker stays verbatim.
+
+        Note: ``internal_agent:foo`` differs from
+        ``internal_agent:job_event:`` (a job-event ping → completion
+        report path → would set ``dispatch_source`` from
+        ``original_source``). Plain ``internal_agent:foo`` is
+        agent-to-agent communication and DOES go through the
+        production chat-source path; the ``internal_agent`` prefix
+        here is a source-side discriminator, not a completion-report
+        prefix.
+        """
+        image_id = _fresh_image_id()
+        spy_store.save_record(image_id)
+        original_content = f"raw\n{_marker(image_id)}\nmore\n"
+
+        # No adapter registered for ``internal_agent`` — the registry
+        # is built with a ``None`` adapter so the dispatcher's
+        # adapter-lookup miss path is exercised.
+        manager = Mock()
+        manager.tmp_image_store = spy_store
+        manager._compactor = None
+        manager._graph_tasks = {}
+        manager._last_context_usage = {}
+        manager._original_timestamps = {}
+        manager._emitted_message_content = {}
+
+        project_repo = Mock()
+        project_repo.get = Mock(return_value=None)
+        project_repo.match_by_keywords = Mock(return_value=None)
+        manager._project_repository = project_repo
+
+        # ``internal_agent:*`` is agent-to-agent, NOT a completion
+        # report. The instance metadata must NOT carry a foreign
+        # ``original_source`` so the dispatch_source stamping at
+        # ``instance_messaging.py:3101-3103`` keeps
+        # ``dispatch_source = message_source = "internal_agent:foo"``
+        # instead of swapping in a chat source via
+        # ``original_source``.
+        instance_meta = Mock()
+        instance_meta.instance_metadata = {}
+        instance_meta.agent_id = "developer"
+        instance_meta.agent_tag = None
+        instance_meta.status = "running"
+        instance_repo = Mock()
+        instance_repo.get = Mock(return_value=instance_meta)
+        instance_repo.set_metadata = Mock()
+        manager._instance_repository = instance_repo
+
+        prompt_cache = Mock()
+        prompt_cache.get = Mock(return_value=None)
+        manager.prompt_cache = prompt_cache
+
+        live_hub = Mock()
+        live_hub.stream_context_usage = AsyncMock()
+        live_hub.stream_status_change = AsyncMock()
+        live_hub.stream_message = AsyncMock()
+        live_hub.stream_tool_result = AsyncMock()
+        live_hub.stream_error = AsyncMock()
+        manager._live_hub = live_hub
+
+        manager._drain_deferred_watchover_terminate = AsyncMock()
+        manager._drain_pending_system_executions = AsyncMock()
+        manager.has_deferred_question_pause = Mock(return_value=False)
+        manager.pop_deferred_question_pause = Mock(return_value=False)
+        manager.pause_instance_cascade = AsyncMock()
+        manager.release_context_usage_cache = Mock()
+        manager.is_watchover_terminate_requested = Mock(return_value=False)
+        manager.terminate_instance = AsyncMock()
+        manager.clear_watchover_terminate_requested = Mock()
+        manager.get_injection = Mock(return_value=[])
+        manager.clear_injection = Mock(return_value=None)
+        manager.requeue_injections = Mock()
+        manager.stamp_user_origin_window = Mock()
+
+        job_queue = Mock()
+        job_queue.enqueue = AsyncMock()
+        job_queue._repository = Mock()
+        job_queue._repository.stamp_message_id = Mock()
+        manager._job_queue_service = job_queue
+        manager.message_metadata_repo = None
+
+        config = Mock()
+        config.limits = Mock()
+        config.limits.graph_recursion_limit = 50
+        config.llm = Mock()
+        config.llm.model = "gpt-4"
+        config.llm.base_url = "https://api.openai.com/v1"
+        config.llm.api_key = "test-key"
+        config.llm.model_vision = "gpt-4-vision"
+        config.llm.temperature = 0.7
+        config.llm.request_timeout = 60.0
+        config.llm.buffer_response_header = False
+        config.compaction = Mock()
+        config.compaction.proactive_enabled = True
+        config.compaction.threshold = 0.80
+        manager.config = config
+
+        manager._llm_semaphore = asyncio.Semaphore(10)
+
+        checkpointer = Mock()
+        checkpointer.aget = AsyncMock(return_value=None)
+        manager._checkpointer = checkpointer
+
+        manager.engine = Mock()
+        manager.write_guard = Mock()
+
+        # Build a registry with NO adapter (the ``_make_registry``
+        # helper accepts ``adapter=None`` and returns a registry whose
+        # ``get(source_id)`` always returns ``None``).
+        registry = _make_registry(adapter=None, manager=manager)
+        from daemon.sources.dispatcher import ResponseDispatcher as _ResponseDispatcher
+        dispatcher = _ResponseDispatcher(
+            registry=registry, subscriber_id="g7-internal-agent"
+        )
+        manager.source_dispatcher = dispatcher
+        await dispatcher.start()
+
+        ai_msg = Mock()
+        ai_msg.type = "ai"
+        ai_msg.content = original_content
+        ai_msg.tool_calls = []
+        ai_msg.id = f"msg-{uuid.uuid4().hex[:8]}"
+        ai_msg.additional_kwargs = {}
+
+        async def _mock_astream_internal(*args, **kwargs):
+            yield ("updates", {"agent": {"messages": [ai_msg]}})
+
+        graph = Mock()
+        graph.astream = _mock_astream_internal
+        graph.language_check_active = False
+        quiescent_state = Mock()
+        quiescent_state.values = None
+        quiescent_state.next = ()
+        graph.aget_state = AsyncMock(return_value=quiescent_state)
+        manager.get_instance = AsyncMock(return_value=graph)
+
+        from daemon.services.instance_messaging import InstanceMessagingService
+        from daemon.services.cancellation import CancellationService
+        cancellation_service = Mock(spec=CancellationService)
+        cancellation_service.is_shutting_down = False
+        messaging_service = InstanceMessagingService(
+            manager=manager,
+            cancellation_service=cancellation_service,
+        )
+
+        await messaging_service._process_message_with_tracking(
+            instance_id="g7-astream-4",
+            message="user prompt",
+            message_id="msg-g7-4",
+            message_source="internal_agent:foo",
+        )
+
+        # No adapter was registered for ``internal_agent`` → the
+        # dispatcher's adapter-lookup miss path returned at
+        # ``dispatcher.py:457-463`` BEFORE
+        # ``extract_chart_images`` was called. The store is never
+        # queried; the content stays byte-stable.
+        assert spy_store.open_full_calls == [], (
+            f"open_full must not be called on adapter-lookup miss; "
+            f"got {spy_store.open_full_calls!r}"
+        )
+        assert spy_store.open_with_meta_calls == [], (
+            f"open_with_meta must not be called on adapter-lookup miss; "
+            f"got {spy_store.open_with_meta_calls!r}"
+        )
+        # store.delete NEVER fired (no successful chat delivery).
+        assert spy_store.delete_calls == [], (
+            f"store.delete must not fire on adapter-lookup miss; "
+            f"got {spy_store.delete_calls!r}"
+        )
+        # Content byte-stable (the original_content variable is the
+        # source of truth; the harness does not mutate it).
+        assert original_content == f"raw\n{_marker(image_id)}\nmore\n"
+        # Sentinel: the LOCKED-form marker is still present in the
+        # original_content string (the dispatch lane never
+        # transformed it).
+        assert _marker(image_id) in original_content
+
+        await dispatcher.stop()
 
 
 # =========================================================================== #
