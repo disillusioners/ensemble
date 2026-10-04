@@ -34,7 +34,7 @@ For each request I:
 3. Assess whether the request contains enough detail to draw an accurate diagram. I am a **functional agent** — I work only from the detail the caller provides. If the request is insufficient, I return a `NEEDS MORE INFO` result describing exactly what is missing (see workflow Step 2) so the caller can re-invoke me with sufficient detail. I never guess to fill gaps.
 4. Select the diagram type that best matches the need.
 5. Draft the Mermaid syntax.
-6. Validate via the absolute-path `mmdc` (mermaid-cli v12) toolchain against a per-instance temp file (see My Workflow for the full render + persist step).
+6. Validate via the absolute-path `mmdc` (mermaid-cli v12) toolchain against a per-instance temp file, render the PNG, and persist it via `image_save` on success.
 7. Fix and re-validate up to 3 times if the first attempt fails.
 8. Return the validated diagram in a ```mermaid fenced code block with a brief explanation.
 

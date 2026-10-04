@@ -13,10 +13,22 @@ Use this skill whenever the artifact is **structural** rather than purely textua
 | ER / state / class / Gantt with non-trivial structure | Use `generate_chart()` |
 | User says your self-generated chart is broken/wrong | Use `generate_chart()` |
 | You're unsure the Mermaid syntax is valid | Use `generate_chart()` |
+| User is on a chat source OR asks for an image/visual | Use `generate_chart()` (override the simple-vs-not-simple decision — chat source wins) |
 
 **Self-generate** only when the diagram is clearly simple and you're confident the syntax is valid. **When in doubt, delegate** — `generate_chart()` validates its output, which costs less than a broken diagram.
 
 **Never iterate on a broken self-generated diagram.** If a chart you wrote doesn't render, don't patch it by hand — call `generate_chart()` instead.
+
+## Chat Delivery
+
+When the user is on a chat source (Discord, Slack, Telegram, or any external chat adapter) OR asks for an image / diagram / chart visual, you MUST call `generate_chart()` — never hand-write a ` ```mermaid ` block in your response. The user receives the rendered image directly in the channel; a code block is the failure mode.
+
+- Use `generate_chart()` even for diagrams you could self-generate (the simple ones) when the source is a chat adapter or the user asked for a visual.
+- Pure-text contexts (internal planning, HTTP-API callers, no user-visible chat surface) may still self-generate trivial diagrams.
+- When in doubt about the source, prefer `generate_chart()` — over-delivering an image is safer than shipping a code block the user cannot render.
+- The result is a single ` ```mermaid ` block, already validated, followed by a `<!-- ens-img:chart-render:<id> -->` marker. Paste both into your response verbatim — do not re-wrap, re-tag, or strip the fence. **Do NOT strip the trailing marker** — the dispatcher reads it to extract the image id and upload the PNG to your channel; stripping it silently downgrades the user to a wall of Mermaid code.
+- Charter renders the PNG and saves it under `provenance.feature="chart-render"`; the dispatcher extracts the marker and resolves the image bytes; the chat adapter uploads the PNG natively. Pasted-by-you, extracted-by-dispatcher, uploaded-by-adapter — three different components, the marker is the handoff.
+- Existing rules apply unchanged: self-generation for trivial cases in pure-text contexts, busy/paused error handling, and the Wedged-Charter Recovery ladder.
 
 ## How to use `generate_chart()`
 
@@ -54,9 +66,7 @@ A good `description` specifies:
 - **Which relationships / edges / messages** connect them
 - **Context** if it's about a specific codebase or file (naming modules/files upfront saves a round-trip)
 
-`generate_chart()` returns a single ```mermaid block, already validated. Paste it directly into your response — don't re-wrap, re-tag, or strip the fence. If a validation warning is returned, decide whether it's good enough, or simplify the description and call `generate_chart()` again. The result may include a 1–2 sentence explanation; treat that as part of the deliverable.
-
-**Chat Delivery — preserve the trailing image-reference marker.** When the render to PNG succeeds, `generate_chart()`'s result includes a single trailing line of the form `<!-- ens-img:chart-render:<32-hex-id> -->`. **Do not strip that line**; pass the result through verbatim into your final response so the chat-source dispatcher can extract the marker, strip it from the visible text, and attach the rendered PNG to the same message via the platform's native API (Discord / Slack / Telegram). Treat the marker as a byte-stable contract — no reformatting, no wrapping in code fences, no comment-out, no manual edits. The marker is conditional: it is only present when the render and persist succeeded; on any failure path, the result is text-only Mermaid with no marker.
+`generate_chart()` returns a single ```mermaid block, already validated. Paste it directly into your response — don't re-wrap, re-tag, or strip the fence. If a validation warning is returned, decide whether it's good enough, or simplify the description and call `generate_chart()` again. The result may include a 1–2 sentence explanation; treat that as part of the deliverable. On chat delivery the result also carries a trailing `<!-- ens-img:chart-render:<id> -->` marker — see Chat Delivery above for the never-strip rule.
 
 ## Best Practices
 

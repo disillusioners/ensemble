@@ -78,7 +78,7 @@ markers = [
     "no_xdist: tests that cannot run under pytest-xdist parallelism (skipped automatically when PYTEST_XDIST_WORKER is set; run them serially with `pytest -m no_xdist`)",
     "slow: opt-in tests that download large artifacts (~200MB) or take minutes to run; not executed by default",
 ]
-addopts = "-m 'not integration and not postgres'"
+addopts = "-m 'not integration and not postgres and not slow'"
 asyncio_mode = "auto"
 timeout = 30
 timeout_method = "thread"

@@ -18,6 +18,11 @@
 #   charter_readiness_probe  — returns 0 (warm), 1 (cold), 2 (install-in-progress-other)
 #   MMDC_BIN                  — absolute path to mmdc (set on success/rc=0)
 #   PUPPETEER_EXECUTABLE_PATH — absolute path to chromium (set on success/rc=0)
+#   charter_verify_toolchain  — evidence-gate for the install skill: renders a
+#                               minimal diagram under the exact render contract
+#                               (sanitizer + ulimit -v + timeout 60 + security
+#                               pin + sandboxed-first launch); returns 0 only on
+#                               real non-empty SVG+PNG evidence
 #
 # Author: Phase A implementation, chart-image-delivery commission
 # Companion: install-mermaid-cli.md (same dir)
@@ -91,18 +96,35 @@ charter_readiness_probe() {
 #
 # Lock file: $HOME/.cache/charter/mermaid-install.lock
 #   - if absent → no lock held
-#   - if present → another process holds it (we don't try to read or
-#     own the lock from the probe; we just report it's there)
+#   - if present AND fresh (younger than the staleness window) → another
+#     process holds it (we don't try to read or own the lock from the
+#     probe; we just report it's there)
+#   - if present AND STALE → a crashed install left it behind. Treat as
+#     not held and remove it. Without this check a mid-install crash
+#     wedges every future probe into rc=2 — a permanent warm-host
+#     degrade (text-only forever, self-heal never re-fires).
+#
+# Staleness window: CHARTER_LOCK_STALE_SECS, default 1800s (30 min) —
+# it MUST comfortably exceed the worst-case cold-install duration
+# (nvm + Node + ~150 MB chromium) so a LIVE install is never stolen;
+# lower it only with that in mind. `find -mmin` is GNU+BSD portable.
 #
 # The acquire function (charter_acquire_install_lock) is the place that
 # actually claims the lock. The probe is just a "is someone else in
 # the install path right now?" check.
+CHARTER_LOCK_STALE_SECS="${CHARTER_LOCK_STALE_SECS:-1800}"
 _charter_lock_held() {
     local lockfile="$HOME/.cache/charter/mermaid-install.lock"
-    if [ -e "$lockfile" ]; then
-        return 0
+    if [ ! -e "$lockfile" ]; then
+        return 1
     fi
-    return 1
+    local stale_min=$(( (CHARTER_LOCK_STALE_SECS + 59) / 60 ))
+    if [ -n "$(find "$lockfile" -mmin +"$stale_min" 2>/dev/null)" ]; then
+        echo "WARN: stale install lock (older than ${CHARTER_LOCK_STALE_SECS}s) — treating as abandoned"
+        rm -f "$lockfile" 2>/dev/null || true
+        return 1
+    fi
+    return 0
 }
 
 # --- charter_acquire_install_lock ---------------------------------------
@@ -143,7 +165,11 @@ charter_clear_pending_install_marker() {
 
 # --- charter_read_install_session_state ---------------------------------
 # Reads $HOME/.cache/charter/mermaid-session-state.json (cold_misses_in_session
-# counter used by inline-install gating — arch-rec §3 amendment #18).
+# counter — the amendment #18 self-heal attempt cap). The counter is bumped
+# on every cold-detect self-heal and cleared on a successful install; once
+# it passes the cap, the cold path stops attempting installs for the
+# session (write async marker + degrade) instead of flailing on a host
+# where the install can never succeed.
 # Returns the int cold_misses count, or 0 on miss.
 charter_read_install_session_state() {
     local statefile="$HOME/.cache/charter/mermaid-session-state.json"
@@ -167,4 +193,103 @@ charter_bump_install_session_state() {
 
 charter_clear_install_session_state() {
     rm -f "$HOME/.cache/charter/mermaid-session-state.json" 2>/dev/null || true
+}
+
+# --- _charter_mmdc_render ------------------------------------------------
+# Single home of the VERIFY render contract (mirrors workflow.md Step 5.5
+# byte-for-byte — when one changes, the other must change with it):
+#   - sanitized .mmd input (the caller sanitizes; see workflow.md Step 5.3)
+#   - ( ulimit -v 2097152; timeout 60 ... ) memory + wall-clock bounds
+#   - -c security pin strict + htmlLabels:false
+#   - sandboxed launch is the DEFAULT; --no-sandbox is applied ONLY as a
+#     logged single fallback when the sandboxed launch fails with the
+#     chromium sandbox signature (arch-rec §3 amendment #15)
+#
+# usage: _charter_mmdc_render <mmdc_bin> <cfg_file> <in.mmd> <out_file>
+# Prints the render log; returns the render rc.
+_charter_mmdc_render() {
+    local mmdc_bin="$1" cfg="$2" in_mmd="$3" out_file="$4"
+    local log rc cfg_fb
+    log=$( ( ulimit -v 2097152 2>/dev/null; timeout 60 "$mmdc_bin" \
+        -i "$in_mmd" \
+        -o "$out_file" \
+        -t default -b white -w 1200 -s 2 \
+        -c '{"securityLevel":"strict","htmlLabels":false}' \
+        --puppeteerConfigFile "$cfg" \
+        --quiet \
+    ) 2>&1 )
+    rc=$?
+    printf '%s\n' "$log"
+    [ "$rc" -eq 0 ] && return 0
+
+    # Sandbox launch-failure fallback — ONE retry with --no-sandbox,
+    # logged. This is the ONLY sanctioned render-side retry (launch
+    # failure ≠ syntax/render failure; the Never rule is untouched).
+    if printf '%s' "$log" | grep -qi \
+        "no usable sandbox\|sandbox was unable\|running as root without --no-sandbox"; then
+        echo "WARN: sandboxed launch failed — retrying once WITH --no-sandbox (logged fallback, amendment #15)"
+        cfg_fb=$(mktemp "${TMPDIR:-/tmp}/charter-verify-cfg.XXXXXX") || return "$rc"
+        jq '.puppeteerConfig.args = ["--no-sandbox"]' "$cfg" > "$cfg_fb" 2>/dev/null
+        ( ulimit -v 2097152 2>/dev/null; timeout 60 "$mmdc_bin" \
+            -i "$in_mmd" \
+            -o "$out_file" \
+            -t default -b white -w 1200 -s 2 \
+            -c '{"securityLevel":"strict","htmlLabels":false}' \
+            --puppeteerConfigFile "$cfg_fb" \
+            --quiet \
+        ) 2>&1
+        rc=$?
+        rm -f "$cfg_fb" 2>/dev/null || true
+    fi
+    return "$rc"
+}
+
+# --- charter_verify_toolchain --------------------------------------------
+# Evidence, not claims: render a minimal flowchart to BOTH out.svg and
+# out.png under the exact render contract, then require non-empty
+# artifacts and a real PNG (file(1) magic check). Returns 0 only on
+# real evidence.
+#
+# usage: charter_verify_toolchain <mmdc_bin> <cfg_file>
+#   <cfg_file> carries puppeteerConfig.executablePath (chromium path).
+#   On a sandbox launch failure the function flips that config's args to
+#   ["--no-sandbox"] for the single logged fallback attempt (amendment #15).
+#
+# The install skill gates config promotion on this function: a broken or
+# partial install NEVER reaches the probe-visible config file, so the
+# 4-signal probe stays cold and the next render re-fires the install.
+charter_verify_toolchain() {
+    local mmdc_bin="$1" cfg="$2"
+    [ -x "$mmdc_bin" ] || return 1
+    [ -f "$cfg" ] || return 1
+    local chrome_bin
+    chrome_bin=$(jq -r '.puppeteerConfig.executablePath // ""' "$cfg" 2>/dev/null)
+    [ -n "$chrome_bin" ] && [ -x "$chrome_bin" ] || return 1
+
+    local vdir
+    vdir=$(mktemp -d) || return 1
+    printf 'flowchart TD\n    A-->B\n' > "$vdir/test.mmd"
+
+    # Sanitize — same pass as the render path (workflow.md Step 5.3).
+    sed -E \
+        -e '/^%%\{init\}%%$/,/^%%\{init\}%%$/d' \
+        -e '/^[[:space:]]*securityLevel:[[:space:]]*/d' \
+        "$vdir/test.mmd" > "$vdir/test.san.mmd" \
+        && mv "$vdir/test.san.mmd" "$vdir/test.mmd"
+
+    _charter_mmdc_render "$mmdc_bin" "$cfg" "$vdir/test.mmd" "$vdir/out.svg" \
+        || { rm -rf "$vdir"; return 1; }
+    _charter_mmdc_render "$mmdc_bin" "$cfg" "$vdir/test.mmd" "$vdir/out.png" \
+        || { rm -rf "$vdir"; return 1; }
+
+    if [ ! -s "$vdir/out.svg" ] || [ ! -s "$vdir/out.png" ]; then
+        rm -rf "$vdir"
+        return 1
+    fi
+    if command -v file >/dev/null 2>&1; then
+        file "$vdir/out.png" 2>/dev/null | grep -q "PNG image data" \
+            || { rm -rf "$vdir"; return 1; }
+    fi
+    rm -rf "$vdir"
+    return 0
 }

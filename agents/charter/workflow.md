@@ -93,18 +93,20 @@ attached to the chat response. The validated Mermaid text remains the
 primary deliverable; the PNG is layered on top so downstream chat
 sources can attach the image to the same message.
 
-### Step 0 — READINESS_PROBE (4-signal config-file probe)
+### Step 5.0 — READINESS_PROBE (4-signal config-file probe)
 
 Source the pure-bash + jq library that lives next to the install skill
-(single source of truth for the probe). Non-interactive bash never
-sources `~/.bashrc` (verified: `~/.bashrc:121-123` interactive-only),
-so `command -v mmdc` gives a permanent false-cold — the probe reads
-the install's own config file instead. Three exit codes drive the
-render path:
+(single source of truth for the probe), using the repo-root-relative
+path (the render runs from the repository root). Non-interactive bash
+never sources `~/.bashrc` (verified: `~/.bashrc:121-123`
+interactive-only), so `command -v mmdc` gives a permanent false-cold —
+the probe reads the install's own config file instead. Exit codes drive
+the render path:
 
 - `0` warm — `MMDC_BIN` and `PUPPETEER_EXECUTABLE_PATH` exported, proceed to render
 - `1` cold — invoke the `install-mermaid-cli` skill behind an advisory lock
 - `2` install-in-progress-other — another charter holds the lock; log it, write the async queue marker, degrade this turn (text-only Mermaid, no marker)
+- any OTHER probe failure (jq missing, config unreadable, lib error) — the wired skip path: `⚠️ Validation skipped`, text-only, no marker. NEVER render with an unresolved toolchain.
 
 ```bash
 # 0. READINESS_PROBE — single source of truth lives in
@@ -112,49 +114,71 @@ render path:
 #    bash + jq library). 4-signal probe replaces `command -v mmdc` (that
 #    probe gives a PERMANENT false-cold in non-interactive bash because
 #    ~/.bashrc is interactive-only and is never sourced).
-. ./skills-template/install-mermaid-cli.lib.sh
+. agents/charter/skills-template/install-mermaid-cli.lib.sh
 
 probe_rc=0
 charter_readiness_probe || probe_rc=$?
 
 if [ $probe_rc -eq 1 ]; then
-    # COLD — advisory lock + async queue marker
+    # COLD — self-heal path. Acquire the advisory install lock and HOLD
+    # it across the install: the held lock is what makes rc=2 reachable
+    # for concurrent charters while a real install runs (no concurrent
+    # global package installs, no interleaved downloads). The install
+    # skill releases the lock — on success (its record step) and on
+    # every failure exit.
     if charter_acquire_install_lock; then
-        # Bump the session cold-miss counter (drives inline-install gate)
+        # Self-heal attempt cap (arch-rec §3 amendment #18, as wired):
+        # at most 2 install attempts per session; the counter is cleared
+        # by the install skill on success. Beyond the cap, stop
+        # attempting — a host with a permanent blocker must not flail
+        # the install skill on every cold render.
         charter_bump_install_session_state
-        cold_misses=$(charter_readiness_probe >/dev/null 2>&1; \
-                      charter_readiness_probe; \
-                      echo "$(charter_readiness_probe)")
-        # We own the lock — invoke the install skill (handled by the
-        # outer charter turn, NOT inside this bash block). After the
-        # skill completes, fall through to the re-probe + render
-        # below. If inline install not appropriate (60s cap, chromium
-        # partial, cold_misses < 2), the OUTER turn's install skill
-        # handles it.
-        # NOTE: the install skill itself runs in the agent's tool-call
-        # lane; the bash block stays focused on the render. The
-        # self-heal call lives in the outer LLM step ("invoke the
-        # install-mermaid-cli skill" prose instruction).
-        charter_release_install_lock
+        cold_misses="$(charter_read_install_session_state 2>/dev/null)"
+        cold_misses="${cold_misses:-0}"
+        if [ "$cold_misses" -le 2 ]; then
+            echo "COLD — self-heal: the outer turn now invokes the"
+            echo "install-mermaid-cli skill while this lock stays held."
+            echo "After it completes, the re-probe below decides warm vs degrade."
+        else
+            charter_release_install_lock
+            charter_write_pending_install_marker
+            echo "install_self_heal_capped — degrading, no marker"
+        fi
     else
         # Lock-contended — log + async marker + degrade
         charter_write_pending_install_marker
         echo "install_in_progress_other — degrading, no marker"
-        # Fall through to text-only return (existing Step 6)
+        # Fall through to text-only return (Step 6)
     fi
 elif [ $probe_rc -eq 2 ]; then
     charter_write_pending_install_marker
     echo "install_in_progress_other — degrading, no marker"
     # Fall through to text-only return
+else
+    # rc not in {0,1,2} — the probe itself failed (jq missing, config
+    # unreadable, lib error). Degrade on the wired skip path.
+    echo "⚠️ Validation skipped, text-only, no marker."
+    # Fall through to text-only return
 fi
 
-# Re-probe after the install (lock released, config file written
-# by the install skill). On success, MMDC_BIN + PUPPETEER_EXECUTABLE_PATH
-# are exported for the render below.
-charter_readiness_probe || true
+# Re-probe after the cold path (the install skill released the lock and
+# promoted its verify-passed config). A re-probe that is not warm must
+# NOT reach the render with an empty MMDC_BIN — degrade on the same
+# wired skip path.
+reprobe_rc=0
+charter_readiness_probe || reprobe_rc=$?
+if [ "$reprobe_rc" -ne 0 ]; then
+    echo "⚠️ Validation skipped, text-only, no marker."
+fi
 ```
 
-### Step 1 — Mktemp hygiene (4 temp files, defensive trap)
+**Gate rule for both skip messages** (`⚠️ Validation skipped`,
+`install_in_progress_other`, `install_self_heal_capped`): this turn
+STOPS here. Return the text-only shape from Step 6d with the
+`⚠️ Validation skipped` prefix and NO marker — never proceed to
+Step 5.4 or Step 5.5.
+
+### Step 5.1 — Mktemp hygiene (4 temp files, defensive trap)
 
 ```bash
 # 1. Per-instance temp files (.mmd input, .png persisted target,
@@ -167,7 +191,7 @@ TMPCFG=$(mktemp /tmp/charter_XXXXXX.cfg)   # puppeteer config
 trap 'rm -f "$TMPFILE" "$TMPPNG" "$TMPSVG" "$TMPCFG"' EXIT
 ```
 
-### Step 2 — Write the Mermaid content
+### Step 5.2 — Write the Mermaid content
 
 ```bash
 # 2. Write the Mermaid content to the temp .mmd
@@ -180,7 +204,7 @@ flowchart TD
 EOF
 ```
 
-### Step 3 — Pre-render sanitizer (strip init directives + frontmatter securityLevel)
+### Step 5.3 — Pre-render sanitizer (strip init directives + frontmatter securityLevel)
 
 mmdc reads `%%{init}%%` directives and frontmatter `securityLevel:` keys
 from inside the `.mmd` body, OVERRIDING the CLI-side `-c` security pin.
@@ -200,43 +224,88 @@ sed -E \
 mv "$TMPFILE_SANITIZED" "$TMPFILE"
 ```
 
-### Step 4 — Write puppeteer config (re-probed chromium path)
+**Byte-identity rule.** After this step, `$TMPFILE` IS the diagram —
+the block I return in Step 6 must be byte-identical to the SANITIZED
+content, not my original draft. If the sanitizer stripped anything (an
+`%%{init}%%` directive, a `securityLevel:` key), the stripped version
+is what I deliver: the returned block must be exactly what `mmdc`
+rendered and validated. Never re-draft, re-expand, or restore stripped
+directives in the returned block.
+
+### Step 5.4 — Write puppeteer config (sandboxed default, re-probed chromium path)
 
 ```bash
 # 4. Puppeteer config — executablePath re-probed at probe time
 #    (NOT trusted from config-write time; survives cache evict).
+#    Sandbox policy (arch-rec §3 amendment #15): the chromium sandbox
+#    is ON by default — args start EMPTY. --no-sandbox is added ONLY
+#    as the logged single fallback in step 5 after a sandbox launch
+#    failure. Never render as root: under root the sandbox cannot
+#    engage, so a root render is REFUSED (degrade to text-only), never
+#    downgraded to a sandbox-less launch by default.
+if [ "$(id -u)" -eq 0 ]; then
+    echo "REFUSED: rendering as root is unsupported (sandbox cannot engage) — text-only, no marker"
+fi
 cat > "$TMPCFG" <<EOF
-{"executablePath": "$PUPPETEER_EXECUTABLE_PATH", "args": ["--no-sandbox"]}
+{"executablePath": "$PUPPETEER_EXECUTABLE_PATH", "args": []}
 EOF
 ```
 
-### Step 5 — Render (mmdc by absolute path, security pin, ulimit + timeout)
+The `REFUSED` line is a skip signal: stop this turn, return the
+text-only shape (Step 6d `⚠️ Validation skipped` prefix, no marker).
+
+### Step 5.5 — Render (mmdc by absolute path, security pin, ulimit + timeout)
 
 ```bash
 # 5. Render PNG. INVOCATION DETAILS (arch-rec §3 amendment #15 + #16):
-#    - absolute-path mmdc (retired the older `npx -y <fetch>` pattern;
-#      that pattern unpinned remote-fetch-and-execute on every render)
+#    - absolute-path mmdc (the retired pattern — a remote
+#      fetch-and-execute runner — re-fetched and re-executed on every
+#      render; the toolchain now comes from the install skill only)
 #    - ulimit -v 2097152 KB (~2 GB) — memory bound. Wall-clock timeout
 #      does NOT bound memory; puppeteer can OOM.
 #    - timeout 60 — wall-clock budget. Puppeteer cold start is
 #      ~5-10s on warm cache; 60s leaves headroom.
 #    - -c pins securityLevel:strict + htmlLabels:false from the CLI
-#      (the .mmd-side override is sanitized in step 3).
-#    - sandbox policy: never root; --no-sandbox only on launch
-#      failure (logged). Single-user host residual.
-( ulimit -v 2097152; timeout 60 "$MMDC_BIN" \
+#      (the .mmd-side override is sanitized in step 5.3).
+#    - sandbox policy (amendment #15): FIRST attempt is sandboxed
+#      (args start empty per step 5.4). --no-sandbox is applied ONLY
+#      as the logged single fallback below when the sandboxed launch
+#      fails with the chromium sandbox signature. That fallback is the
+#      ONLY sanctioned render-side retry; the Never rule for
+#      render-side failures is otherwise untouched.
+RENDER_LOG=$( ( ulimit -v 2097152; timeout 60 "$MMDC_BIN" \
     -i "$TMPFILE" \
     -o "$TMPPNG" \
     -t default -b white -w 1200 -s 2 \
     -c '{"securityLevel":"strict","htmlLabels":false}' \
     --puppeteerConfigFile "$TMPCFG" \
     --quiet \
-) 2>&1
-
+) 2>&1 )
 RENDER_EXIT=$?
+echo "$RENDER_LOG"
+
+# 5b. Sandbox launch-failure fallback — ONE retry WITH --no-sandbox,
+#     logged (arch-rec §3 amendment #15). Matches the lib's
+#     _charter_mmdc_render contract byte-for-byte.
+if [ "$RENDER_EXIT" -ne 0 ] && printf '%s' "$RENDER_LOG" | grep -qi \
+    "no usable sandbox\|sandbox was unable\|running as root without --no-sandbox"; then
+    echo "WARN: sandboxed launch failed — retrying once WITH --no-sandbox (logged fallback, amendment #15)"
+    cat > "$TMPCFG" <<EOF
+{"executablePath": "$PUPPETEER_EXECUTABLE_PATH", "args": ["--no-sandbox"]}
+EOF
+    ( ulimit -v 2097152; timeout 60 "$MMDC_BIN" \
+        -i "$TMPFILE" \
+        -o "$TMPPNG" \
+        -t default -b white -w 1200 -s 2 \
+        -c '{"securityLevel":"strict","htmlLabels":false}' \
+        --puppeteerConfigFile "$TMPCFG" \
+        --quiet \
+    ) 2>&1
+    RENDER_EXIT=$?
+fi
 ```
 
-### Step 6 — Inspect the result; preserve syntax-retry budget
+### Step 5.6 — Inspect the result; preserve syntax-retry budget
 
 ```bash
 # 6. Inspect the result. SYNTAX failures keep the 3-attempt retry
@@ -263,6 +332,8 @@ fi
 | `timeout` 124                 | NO retry. Degrade — text-only, no marker.                                                       |
 | READINESS_PROBE `rc=1` cold   | Self-heal path: invoke `install-mermaid-cli` skill behind advisory lock.                       |
 | READINESS_PROBE `rc=2`        | Lock held; write `mermaid-pending-install` marker; degrade this turn.                           |
+| READINESS_PROBE rc ∉ {0,1,2} (or re-probe not warm) | Tooling unavailable — `⚠️ Validation skipped`; return text-only, no marker.     |
+| Render as root                | REFUSED (sandbox cannot engage) — text-only, no marker.                                         |
 | `image_save` returns `Error:` | NO retry. Degrade — text-only, no marker.                                                       |
 | `image_save` returns valid JSON, missing `image_id` | Log anomaly, degrade — text-only, no marker.                                       |
 
@@ -299,7 +370,7 @@ def image_store_chart_render_usage_under_threshold():
     """True if chart-render footprint is under 80% of the cap.
     Implementation: list image_list(feature="chart-render") rows
     and sum size_bytes; compare against the configured cap
-    (default 1 GiB, services.tmp_image_store_max_bytes override).
+    (default 1 GiB; a per-project override may raise or lower it).
     Returns True on store-not-initialized (proceed — fail-open).
     """
     rows_json = image_list(feature="chart-render", retention_class="normal")
@@ -308,18 +379,20 @@ def image_store_chart_render_usage_under_threshold():
     import json as _json
     rows = _json.loads(rows_json)
     used = sum(r.get("size_bytes", 0) for r in rows)
-    cap = 1 << 30  # 1 GiB default; per-project override via ServicesConfig
+    cap = 1 << 30  # 1 GiB default; a per-project override may raise or lower it
     return used < int(0.8 * cap)
 ```
 
 ### Step 6b — Persist via `image_save` (text-bridged LangChain tool call)
 
 ```python
-# image_save is a LangChain tool (charter holds the `image` tool
-# category via tools.allow). base64-encode the PNG bytes inline.
+# image_save is a LangChain tool (the image tool category is part of my
+# toolset). base64-encode the PNG bytes inline.
 import base64
 
-with open("$TMPPNG", "rb") as _f:
+# TMPPNG_PATH is the persisted-target mktemp path from Step 5.1
+# (bash's $TMPPNG, carried into this step's context).
+with open(TMPPNG_PATH, "rb") as _f:
     png_b64 = base64.b64encode(_f.read()).decode("ascii")
 
 # Optional pre-check guards the persist. If the cap is full,
@@ -330,8 +403,8 @@ if image_store_chart_render_usage_under_threshold():
         content_type="image/png",
         feature="chart-render",
         retention_class="normal",
-        # source_agent auto-stamped by the tool (image_tools.py auto-stamps
-        # from the active instance — agents do not need their own id)
+        # source_agent is auto-stamped from my active instance — I do
+        # not pass an agent id myself
     )
 else:
     save_result = "image_store_full"
@@ -351,17 +424,25 @@ if save_result and not save_result.startswith("Error:") \
         and save_result != "image_store_full":
     try:
         rec = _json_save.loads(save_result)
-        candidate = rec.get("image_id", "")
-        if _re_save.fullmatch(r"[a-f0-9]{32}", candidate):
+        candidate = rec.get("image_id", "") if isinstance(rec, dict) else ""
+        if isinstance(candidate, str) and \
+                _re_save.fullmatch(r"[a-f0-9]{32}", candidate):
             image_id = candidate
     except _json_save.JSONDecodeError:
         # Malformed save result — fall through to text-only.
         pass
 
 # Marker is emitted ONLY when image_save produced a valid 32-hex
-# image_id. Must rule: never on failure, never on a
-# hallucinated id. Byte-exact form (Phase B pin):
+# image_id. Must rule: never on failure, never on a hallucinated id,
+# never on a non-string id. Byte-exact form (Phase B pin):
 #   <!-- ens-img:chart-render:<image_id> -->
+#
+# ANCHORED (Phase B extraction contract): the marker is a COMPLETE
+# line — it starts at column 0 and ends at the final '>', with NO
+# leading or trailing whitespace. Do not indent it, do not append
+# text or spaces after it, do not merge it with another line, do not
+# wrap it in code fences. The most common extraction failure is
+# whitespace drift around an otherwise-correct marker.
 marker = ""
 if image_id:
     marker = f"<!-- ens-img:chart-render:{image_id} -->"
@@ -370,7 +451,9 @@ if image_id:
 ### Step 6d — Return shape
 
 Return the diagram in this exact form (the `marker` line is empty
-when image_save failed or was skipped):
+when image_save failed or was skipped). The Mermaid block is the
+SANITIZED content of `$TMPFILE` (Step 5.3) — byte-identical to what
+`mmdc` actually rendered and validated, never my original draft:
 
 ````markdown
 Here's a flowchart of the authentication flow:
@@ -391,7 +474,9 @@ The `{marker}` placeholder expands to:
 
 - The full `<!-- ens-img:chart-render:<image_id> -->` line on its own
   line AFTER the explanation, when `image_save` succeeded and produced
-  a valid `image_id`.
+  a valid `image_id`. The line is ANCHORED: column 0, nothing before
+  or after it on the line, no leading or trailing whitespace, never
+  inside a code fence.
 - Empty (no line at all) on any failure path: render failure,
   `image_save` error, store-full, marker-validation miss. Text-only
   delivery — the Mermaid block is the entire deliverable.
@@ -423,7 +508,8 @@ The fenced block must use ` ```mermaid ` (no extra language tags, no
 extra wrappers). Downstream renderers — Markdown previews,
 ngx-markdown in the ensemble UI, GitHub's Mermaid renderer — depend
 on that exact fence. The `<!-- ens-img:chart-render:<id> -->` line is
-a byte-exact HTML comment; chat-source dispatchers strip it before
+a byte-exact, ANCHORED HTML comment (column 0, own line, no
+surrounding whitespace); chat-source dispatchers strip it before
 adapter delivery and attach the PNG via per-platform native APIs.
 
 ---
