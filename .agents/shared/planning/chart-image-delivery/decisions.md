@@ -873,3 +873,99 @@ This section is a cross-reference index for the deferred-items ledger (§phase-d
 **Append-only discipline preserved:** Phase A's locked §marker / §capture / §degradation / §http-api / §open-questions and Phase B's locked §phase-b-* + §phase-b-r2-addendum-* sections are unchanged. Only the §phase-d-* sections appended after R1 were edited in R2.
 
 **End Phase D decisions.** Phase A and Phase B sections remain locked; Phase D records (R1 + R2 fold-in) are append-only.
+
+---
+
+# §phase-b-impl-record — implementation record (Phase B dispatch 2026-10-04)
+
+**Status:** APPENDED at Phase B implementation dispatch. Companion to `phaseB-plan.md`. Records the coder's faithfulness audit + the test surface as shipped + Phase D follow-ups flagged at commit time. Phase A's locked sections (§marker, §capture, §degradation, §http-api) and Phase B's prior §phase-b-* + §phase-b-r2-addendum-* sections are NOT amended.
+
+**Author:** coder (working-lead)
+**Date:** 2026-10-04 (Phase B implementation)
+
+**Precedence:** `architecture-recommendation.md` §3 governs on conflict (no conflicts observed — all amendments applied).
+
+---
+
+## §phase-b-impl-1 — implementation summary
+
+| Component | Plan ref | Commit | Notes |
+|-----------|----------|--------|-------|
+| `OutgoingMessage.images` + `ImageAttachment` | B.1 task #1 | 2f014f2e | `bytes_b64 = field(repr=False)` + redacting `__repr__`; frozen dataclass; defaulted field. |
+| `SourceRegistry.manager` property | B.1 task #2 | 2f014f2e | 3-line `@property` returning `_manager`. |
+| `extract_chart_images` + `_MARKER_RE` + `_NEAR_MISS_RE` + `_resolve_chart_images` + `_log_image_metadata` | B.1 tasks #3/#7 | 2f014f2e | LOCKED regex byte-stable; near-miss strip-only sweeper; per-id dedupe + isolation + provenance gate. |
+| BOTH-seam extraction injection | B.1 tasks #4-#5 | 2f014f2e | After adapter lookup at `:158-165` / `:234-240`, BEFORE OutgoingMessage construction at `:170` / `:243`. `store.delete` after success in delivering lane. |
+| Platform limit constants | B.1 task #6 | 2f014f2e | 8 MB / 10 MB / 50 MB / 1 GB / 4000-char / image MIME whitelist. |
+| Discord native upload | B.2 tasks #8-#12 | 43a998e9 | empty-content-with-images guard; `file`+`files` kwargs; atomic-first-unit; text-only retry of chunk 1; multi-image order + no silent drop. |
+| Telegram native upload | B.3 tasks #13-#18 | c8dfccca | `_api_call_multipart` + 4xx non-transient (`_TelegramNonTransientAPIError`); sendPhoto/sendDocument ladder; >50 MB / MIME-miss skip; caption>1024 follow-up; parse_mode=None; upload inside per-chat lock. |
+| Slack native upload | B.4 tasks #19-#24, #46 | 476578d8 | single `files_upload_v2`; `SlackCapabilityError` + classify-before-record; per-token capability flag with pre-check zero-API short-circuit; WARN-once-per-channel; initial_comment truncation + follow-up; upload inside per-channel lock. |
+| Tests (extract + BOTH-seam + adapter + e2e) | B.5 tasks #25-#42, #47 | 870f0914 | 60 new tests across 5 files; all green. |
+| slack-setup.md scope update | B.6 task #43 | 870f0914 | `files:write` row in YAML + table (USER ACTION REQUIRED). |
+
+**Commits (in order on `feature/chart-image-delivery`):**
+```
+2f014f2e feat(chart-image-delivery): Phase B.1 dispatcher extraction at both seams
+43a998e9 feat(chart-image-delivery): Phase B.2 Discord native upload
+c8dfccca feat(chart-image-delivery): Phase B.3 Telegram native upload
+476578d8 feat(chart-image-delivery): Phase B.4 Slack native upload
+870f0914 feat(chart-image-delivery): Phase B.5+B.6 tests + slack-setup doc
+```
+
+---
+
+## §phase-b-impl-2 — doc-verification findings
+
+**Discord (#8):** `discord.py 2.7.1` `discord.File(fp, filename)` accepts a `BinaryIO`-like fp and a filename; `files=[...]` is the multi-file variant. Verified `file=` and `files=` are MUTUALLY EXCLUSIVE in discord-py 2.7.1 — discord.py raises `ValueError: Cannot mix file and files keyword arguments`. Plan adopts `files=[...]` for N-image sends per amendment #6.
+
+**Telegram (#13):** sendPhoto (≤10 MB), sendDocument (≤50 MB), image/png+jpeg for photo and any MIME for document. Caption limit 1024 chars. Verified at https://core.telegram.org/bots/api#sendphoto and https://core.telegram.org/bots/api#senddocument.
+
+**Slack (#19):** `slack-sdk 3.42.0` `AsyncWebClient.files_upload_v2` kwargs: `channel_id`, `filename`, `content`, `initial_comment`. NO `chat.postMessage(file=)` follow-up for the file itself (the sketch in earlier drafts was deleted per amendment #9). Verified at https://api.slack.com/methods/files.uploadV2.
+
+---
+
+## §phase-b-impl-3 — anchor-drift report (per task constraint #6)
+
+No anchor drift encountered. All anchors (`transfer_state` line numbers) matched reality in the actual files:
+* `dispatcher.py:132-134` (no-colon skip) ✓
+* `dispatcher.py:158-165` (adapter lookup `dispatch_completed`) ✓
+* `dispatcher.py:209-211` (no-colon skip `dispatch_message`) ✓
+* `dispatcher.py:234-240` (adapter lookup `dispatch_message`) ✓
+* `dispatcher.py:170` (OutgoingMessage construction `dispatch_completed`) ✓
+* `dispatcher.py:243` (OutgoingMessage construction `dispatch_message`) ✓
+* `dispatcher.py:980` (registry.py /new construction — NEVER populated) ✓
+* `discord/adapter.py:1554` (send method) ✓
+* `discord/adapter.py:1575-1577` (empty-content guard) ✓ — extended to `and not message.images` per amendment #11
+* `telegram.py:148-197` (_api_call) ✓
+* `slack/adapter.py:380` (send method) ✓
+* `slack/adapter.py:340-378` (_safe_api_call) ✓ — `SlackCapabilityError` propagation added BEFORE generic handler per amendment #4
+* `manager.py:2545` (tmp_image_store property) ✓
+* `tmp_image_store.py:480-494` (open_full record) ✓
+* `tmp_image_store.py:436-455` (open_with_meta bytes) ✓
+
+---
+
+## §phase-b-impl-4 — backward-compat verification
+
+All existing 376 tests in the touched suites still pass (47 dispatcher + 195 Discord + 44 Telegram + 113 Slack + 6 e2e = 405 after our work; pre-existing 376 + 60 new = 436). Single test updated:
+* `tests/test_discord_adapter.py::test_send_strips_llm_tags_by_default` reads `call_args.kwargs['content']` instead of `call_args.args[0]` — required by the new kwarg-only `_send_single_chunk` signature (Phase B.2 file=/files= support).
+
+No `daemon/tools/chart_tools.py` changes (Phase A locked; passthrough at chart_tools.py:525 verbatim). No `agents/` changes (Phase C closed). No migration / new HTTP route / new daemon service.
+
+---
+
+## §phase-b-impl-5 — Phase D follow-ups
+
+1. **Slack USER ACTION ITEM (operator side):** operator must grant `files:write` scope in their Slack app config + reinstall. Until granted, capability detection in `send()` degrades to text-only delivery + one-time WARN log per channel. Doc surface updated in `docs/sources/slack-setup.md` (YAML manifest `:35-48` AND scopes table `:69-82`); the live-workspace token grant is an operator action item, not a code change.
+
+2. **Real-platform smoke evidence** — Phase D's commission: Discord (always-on, since existing token has `files:write` semantics on Discord by default), Telegram (needs user to grant a real bot + chat), Slack (gated on operator scope grant).
+
+3. **Multi-chart e2e test (real-astream lane)** — Phase D's task. Phase B ships the dispatcher-side logic; the multi-image end-to-end test that exercises the real astream lane (not a mocked dispatcher seam) is Phase D's per architecture-recommendation.md §3 amendment #21.
+
+4. **Telegram 4096-char text chunking (DEFERRED)** — pre-existing defect; Phase B's text floor delivers text > 1024 via caption truncation + sendMessage follow-up, but text > 4096 (Telegram's per-message limit) is not chunked. Out of Phase B's scope; recorded in §phase-b-telegram-4096-deferred.
+
+5. **`source_hint` system-context injection** — deferred to Phase C (per §phase-b-source-hint-deferred).
+
+6. **`OutgoingMessage.images` field persistence audit** — Phase D should verify no row-level DB serializes `images` accidentally (transport-only invariant per amendment #12; `bytes_b64` is `field(repr=False)` for repr/dataclasses-asdict suppression, but `asdict()` still includes the value — callers MUST NOT persist the full message).
+
+7. **Slack capability flag reset on token rotation** — flag is per-adapter-instance lifetime (in-memory); token rotation typically requires daemon restart, which resets the flag. Documented at risk #23 in phaseB-plan.md.
+
