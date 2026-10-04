@@ -1277,13 +1277,14 @@ def create_snapshot_tools(
         # manual recovery path — never silent.
         auto_dispatch_enqueued: bool = False
         auto_dispatch_error: str | None = None
+        auto_dispatch_message_id: str | None = None
         if auto_dispatch and task and task.strip():
             try:
                 # Same provenance as send_message (instance.py:3566)
                 # so downstream tooling sees the parent-id-minted
                 # source and the existing internal_agent:<caller>
                 # source taxonomy continues to apply.
-                await manager.enqueue_message(
+                enqueue_result = await manager.enqueue_message(
                     instance_id=new_instance_id,
                     message=task,
                     source=(
@@ -1292,6 +1293,58 @@ def create_snapshot_tools(
                         else "api"
                     ),
                 )
+                # ── R18 result-inspection invariant (2026-10-04) ──
+                # The defensive contract: any non-queued outcome from
+                # the internal enqueue path MUST route into the SAME
+                # failure/hint surface as exceptions (F1-style). After
+                # verifying
+                # ``daemon.services.instance_messaging.enqueue_message``
+                # (the path this tool uses — distinct from the HTTP
+                # ``enqueue_message_job`` variant), the escape hatch
+                # applies: this path has EXACTLY ONE non-raising return
+                # (``AsyncMessageResult(message_id=…, instance_id=…,
+                # status='queued', job_id=…)`` at
+                # ``instance_messaging.py:2257``) and every failure mode
+                # raises (e.g. ``RuntimeError("Manager is shutting
+                # down…")`` at :1694; the inner ``session.commit()`` /
+                # ``session.refresh(task)`` block at :2071 / :2079 raises
+                # on DB faults). There is NO non-raising non-queued
+                # outcome on this path; the ``queued`` field is hardcoded
+                # to the dataclass default (``False``) and ``status`` is
+                # hardcoded to the literal ``"queued"`` on the only
+                # return site, so a ``result.queued == False`` check
+                # would be dead code that mis-fires on every successful
+                # enqueue. Pin the invariants instead of branching on a
+                # signal that cannot discriminate — a regression here
+                # (e.g. a future ``return AsyncMessageResult(…,
+                # status='rejected')`` branch) MUST update this block,
+                # not silently slip through.
+                if enqueue_result is None:
+                    raise RuntimeError(
+                        "manager.enqueue_message returned None for "
+                        f"new_instance_id={new_instance_id}; the "
+                        "R18 invariant is non-None on success"
+                    )
+                result_message_id = getattr(
+                    enqueue_result, "message_id", None
+                )
+                result_status = getattr(enqueue_result, "status", None)
+                if not result_message_id or result_status != "queued":
+                    # Regression-ladder tripwire. If this ever fires,
+                    # a new non-raising non-queued branch was added
+                    # upstream; route the loud surface here so the
+                    # caller can self-recover. Today this is
+                    # unreachable on the only return path (:2257
+                    # above) — the assertion is a guard against
+                    # silent-failure regressions on the exact contract
+                    # this commission closes.
+                    raise RuntimeError(
+                        f"manager.enqueue_message returned a "
+                        f"non-queued result: status={result_status!r} "
+                        f"message_id={result_message_id!r} "
+                        f"new_instance_id={new_instance_id}"
+                    )
+                auto_dispatch_message_id = result_message_id
                 auto_dispatch_enqueued = True
                 # R18 traffic visibility (review F2) — the forensic-
                 # audit methodology counts enqueue log lines; auto-
@@ -1312,20 +1365,28 @@ def create_snapshot_tools(
                                 "caller_iid": caller_instance_id,
                                 "target_iid": new_instance_id,
                                 "content_len": len(task),
+                                "message_id": result_message_id,
                             }
                         )
                     )
-                except Exception:  # pragma: no cover — defensive belt
+                except Exception:  # noqa: BLE001 — defensive belt: log-line JSON encoding failure MUST NOT mask the successful enqueue above
                     logger.warning(
                         "[Snapshot] R18 auto-dispatch log line "
                         "encoding failed (non-fatal)"
                     )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — enqueue lane raises arbitrary transport/DB errors; F1 contract surfaces them
                 # Review F1 — log the failure (was silent before).
                 # Same `logger` + same f-string sibling style as the
                 # internal-search failure path at :1066 — diagnostics
                 # come from logs alone when a caller reports a
-                # stranded child without preserving the result.
+                # stranded child without preserving the result. The
+                # ``auto_dispatch_message_id`` is preserved on the
+                # result side (None when the enqueue never reached
+                # the dispatch — see the success-path assignment
+                # above) so a future tool consumer can still
+                # distinguish "enqueue never returned an id" from
+                # "enqueue succeeded but downstream tool surface
+                # corrupted".
                 logger.warning(
                     f"[Snapshot] spawn_hot_instance auto-dispatch "
                     f"enqueue failed for {new_instance_id}: {exc}"

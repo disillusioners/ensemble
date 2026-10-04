@@ -178,16 +178,26 @@ class _FakeAsyncMessageResult:
     """Minimal stand-in for ``AsyncMessageResult`` (R18 test surface).
 
     The real type lives in ``daemon.services.instance_messaging`` and
-    is heavy to import. ``spawn_hot_instance`` only reads
-    ``.message_id`` in the enqueue path (the audit's evidence
-    indicates the parent's source marker is the only contract field
-    we need to pin). Tests can override ``message_id`` via the
-    constructor when needed.
+    is heavy to import. ``spawn_hot_instance`` now inspects
+    ``.message_id`` AND ``.status`` on the enqueue return (Commit 1
+    R18 result-inspection invariant: defensive pin that any non-queued
+    non-raising branch upstream must surface through the loud lane;
+    since ``manager.enqueue_message`` cannot return a non-queued
+    non-raising signal in production, the fake defaults to
+    ``status='queued'`` so tests that exercise the success path do not
+    trip the tripwire). Tests that need to exercise the
+    "non-queued" branch can override either field via the constructor.
     """
 
-    def __init__(self, message_id: str = "msg-auto-1", queued: bool = True) -> None:
+    def __init__(
+        self,
+        message_id: str = "msg-auto-1",
+        queued: bool = True,
+        status: str = "queued",
+    ) -> None:
         self.message_id = message_id
         self.queued = queued
+        self.status = status
 
 
 class FakeManager:
@@ -1096,6 +1106,122 @@ class TestR18AutoDispatch:
         # did not.
         assert len(manager.enqueue_calls) >= 1  # cold
         assert len(warm_manager.enqueue_calls) == 1  # warm
+
+    def test_r18_invariant_pin_non_queued_result_routes_failure_surface(
+        self, tools, manager, monkeypatch
+    ):
+        """Commit 1 (2026-10-04) — R18 result-inspection invariant pin.
+
+       Verification proved ``manager.enqueue_message`` cannot carry a
+        non-queued non-raising signal (the only return path hardcodes
+        ``status='queued'`` and defaults ``queued=False``), so the
+        escape hatch applies: we DO NOT branch on ``result.queued``
+        (dead code); we DO pin the result invariants via an assertion
+        that fires the loud lane on a future regression. This test
+        exercises the regression tripwire by injecting a fake that
+        returns a non-queued non-raising result — the loud surface
+        MUST fire (started preserved; error populated; hint names the
+        manual recovery path), exactly like the exception case.
+        """
+        self._auth_ok(monkeypatch)
+        # Inject a fake AsyncMessageResult that mimics a future
+        # non-raising non-queued branch (status != "queued", no message_id).
+        # The defensive block MUST route this into the same failure surface
+        # as exceptions — never silent success.
+        manager.enqueue_result = _FakeAsyncMessageResult(
+            message_id="", queued=False, status="rejected"
+        )
+
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
+
+        # Spawn succeeded (truthful result); started preserved.
+        assert result["started"] == "cold"
+        # Loud lane fires — the F1-style error surfaces the regression with
+        # the audit-trail wording (RuntimeError + tripwire text) plus the
+        # manual-recovery hint the same as the exception path.
+        assert result["error"] is not None
+        assert "auto-dispatch failed" in result["error"]
+        assert "RuntimeError" in result["error"]
+        assert "non-queued result" in result["error"]
+        assert "status='rejected'" in result["error"]
+        assert "send_message" in result["error"]
+        # The hint carries the recovery path AND the failure detail.
+        assert "auto-dispatch ERROR" in result["hint"]
+        assert "new-inst-1" in result["hint"]
+        # The §4.3 6-key contract is preserved.
+        assert set(result.keys()) == RESULT_KEYS
+
+    def test_r18_invariant_pin_enqueue_returning_none_routes_failure_surface(
+        self, tools, manager, monkeypatch
+    ):
+        """Defensive sibling: a None return (the escape hatch's "must not
+        happen but we pin it anyway" branch) MUST surface the loud lane.
+
+        The real path NEVER returns None (a successful enqueue always
+        returns a populated ``AsyncMessageResult``), but a defensive
+        assertion guards against a regression that accidentally drops
+        the return.
+        """
+        self._auth_ok(monkeypatch)
+        manager.enqueue_result = None
+
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
+
+        assert result["started"] == "cold"
+        assert result["error"] is not None
+        assert "auto-dispatch failed" in result["error"]
+        assert "RuntimeError" in result["error"]
+        assert "R18 invariant is non-None on success" in result["error"]
+        assert "send_message" in result["error"]
+        assert "auto-dispatch ERROR" in result["hint"]
+        assert set(result.keys()) == RESULT_KEYS
+
+    def test_r18_f2_log_carries_authoritative_message_id(
+        self, tools, manager, monkeypatch, caplog
+    ):
+        """F2 INFO log carries the daemon-minted ``message_id``.
+
+        The forensic-audit methodology counts enqueue log lines and
+        parents reuse the same ``task`` across many children, so the
+        task text alone is not enough to correlate census. Commit 1
+        surfaces the authoritative ``message_id`` the daemon minted
+        on the enqueue so downstream tooling (grep / census) can
+        cross-reference the same way it already does for the warm-spawn line.
+        """
+        import json as _json
+
+        self._auth_ok(monkeypatch)
+        # Pin a deterministic message_id so the log-line assertion is
+        # stable; the fake's default 'msg-auto-1' would also work but
+        # a custom value makes the correlation explicit.
+        manager.enqueue_result = _FakeAsyncMessageResult(
+            message_id="mid-pinned-001"
+        )
+
+        with caplog.at_level(logging.INFO, logger="daemon.tools.snapshot_tools"):
+            result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "x"}))
+
+        # The success path still produces a started=cold result; the F2 log
+        # is the observability surface, not the result envelope.
+        assert result["started"] == "cold"
+        assert result["error"] is None
+        matched = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.INFO
+            and rec.getMessage().startswith("[SnapshotAutoDispatch] ")
+        ]
+        assert len(matched) == 1, (
+            f"expected exactly one [SnapshotAutoDispatch] INFO line; "
+            f"got {len(matched)}: {[r.getMessage() for r in matched]}"
+        )
+        payload = _json.loads(
+            matched[0].getMessage()[len("[SnapshotAutoDispatch] "):]
+        )
+        assert payload["event"] == "spawn_hot_auto_dispatch"
+        assert payload["caller_iid"] == "caller-1"
+        assert payload["target_iid"] == "new-inst-1"
+        assert payload["content_len"] == 1  # "x"
+        # The Commit 1 F2 message_id surfacing — the authoritative daemon-
 
 
 # ============================================================================

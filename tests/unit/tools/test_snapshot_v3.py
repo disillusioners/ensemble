@@ -89,9 +89,15 @@ from daemon.tools.snapshot_tools import (
 # exercised in TestR18AutoDispatch. A minimal stub here is enough
 # to satisfy the R18 enqueue call.
 class _FakeAsyncMessageResult:
-    def __init__(self, message_id: str = "msg-v3-1", queued: bool = True) -> None:
+    def __init__(
+        self,
+        message_id: str = "msg-v3-1",
+        queued: bool = True,
+        status: str = "queued",
+    ) -> None:
         self.message_id = message_id
         self.queued = queued
+        self.status = status
 
 VALID_KIND_TAGS = ["kind:implementation"]
 # Same tag set used by the Wave-2b suite — keeps the verdict math

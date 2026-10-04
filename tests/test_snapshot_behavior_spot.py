@@ -76,9 +76,15 @@ from daemon.tools.snapshot_tools import (
 # snapshot contract only), so a minimal stub is enough to satisfy
 # the R18 auto-dispatch enqueue call inside the tool.
 class _FakeAsyncMessageResult:
-    def __init__(self, message_id: str = "msg-spot-1", queued: bool = True) -> None:
+    def __init__(
+        self,
+        message_id: str = "msg-spot-1",
+        queued: bool = True,
+        status: str = "queued",
+    ) -> None:
         self.message_id = message_id
         self.queued = queued
+        self.status = status
 
 # A snapshot row carrying the minimum fields required for an
 # active warm-start; mirrors the dev suite's ``_snapshot`` helper.
