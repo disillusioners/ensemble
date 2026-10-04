@@ -1,5 +1,16 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-10-04 — fix/claim-gate-sibling-deadlock FINAL quality cycle (main checkout @ 30e1c7a4, range 2ae91046..HEAD), Iteration 001
+- Commission: quality/maintainability/comment-accuracy ONLY; correctness settled (Reviewer r2 APPROVED); caller pre-identified 1 item + 7 reviewer 🟢 candidates to adjudicate fix-now vs defer; combined budget 2/3 used.
+- Dispatch: 2 parallel read-only workers (readable 1964b16a, hygiene 4ed42678), 6 files +2169/−49. Both reported fully; no gaps; 3 cross-worker merges (INSTR comment, both unused-import findings).
+- Verdict: NEEDS WORK — one mechanical fix-now commit; zero functional changes. 1 High / 12 Medium / 13 Low after dedup.
+- Caller items: LIKE-docstring CONFIRMED (chat-pool :178-179 + sibling :398-399); Six→Eight CONFIRMED (:4); INSERT OR IGNORE CONFIRMED (harness :483); Strongest-pin CONFIRMED (family :643-645/:827/:839-840); "14 chars"→16 (:763-767) UNCONFIRMED by either worker → verify-only in-region; weak in("queued","active")/case-sensitivity/default-lane = test additions → defer (matches caller prior).
+- Only High: inverted Test-3 banner "belt must NOT be ACTIVE-only" (claim-gate pins :666-667) — inverts REQUIRED 1+2; one-line comment fix.
+- Worker conflict: MessageQueue unused in claim-gate file (B yes, A omitted) → Developer grep-verifies; 5 other names agreed both workers.
+- Severity adjudication: 5× wiring-block dup kept 🟡 Medium NOT 🔴 (test-only scaffolding, single file, mechanical extraction — no production surface). `_seed_chat_task` status-param fix routed as comment-only variant; rename (8 call sites) deferred — precision over volume.
+- Deferred to Reviewer: broad except-Exception fail-open belt lookup (job_queue_service.py ~4331-4342); weak acceptance assert (self-documented :756-761); >3000L files pre-existing.
+- Process nit (5th consecutive pass): neither relayed report visibly evidenced the skill_feedback-first tool call.
+
 ## 2026-09-27 — maintenance-console v3.2 dry-run projection tidy pass (feature/dry-run-projection-v3.2 @ df89da37, range b8c8a28a..df89da37, main checkout), Iteration 001
 - Commission: TIDY PASS with 4 dev-disclosed nits (a–d) to adjudicate; Reviewer (contract/security) + Tester (functional) running parallel lanes.
 - Dispatch: 2 parallel read-only workers (readable 178a74a1, hygiene bf971a08), 15 files +1804/−23 (verified = caller claim). Both reported fully; no gaps; 1 cross-worker merge.
