@@ -259,11 +259,14 @@ async def _derive_anchor_less_child_message_id(
     PREFIX ledger (step 0 in ``_recover_one_no_row``) is the
     operative cross-path dedup; the id mismatch is by design.
     """
-    from ..persistence import get_instance_messages
+    from .. import persistence as _persistence
 
     if checkpointer is None:
         return None
-    messages = await get_instance_messages(
+    # Use the module reference (not a local import) so unit
+    # tests can patch ``daemon.persistence.get_instance_messages``
+    # at the module level.
+    messages = await _persistence.get_instance_messages(
         checkpointer, child_id, manager=None
     )
     for msg in reversed(messages):
@@ -1075,7 +1078,7 @@ class ReportDeliveryRecoveryService:
                 logger.warning(
                     f"sweep no_row_backstop row error "
                     f"child={child_id[:8]}..., "
-                    f"msg={child_msg_id[:8]}..., "
+                    f"msg={(child_msg_id or 'NONE')[:8]}..., "
                     f"parent={parent_id[:8]}...: "
                     f"{type(exc).__name__}: {exc}"
                 )
@@ -1213,8 +1216,14 @@ class ReportDeliveryRecoveryService:
         # PREFIX ledger (step 0 above) is the operative
         # cross-path dedup; the id mismatch is by design.
         if not child_msg_id:
-            derived_id = _derive_anchor_less_child_message_id(
-                checkpointer, child_id
+            # The derivation is async; the sweep is sync — drive
+            # the coroutine to completion via the _run_async
+            # adapter (the one already used for the parent-history
+            # PREFIX check above).
+            derived_id = _run_async(
+                _derive_anchor_less_child_message_id,
+                checkpointer,
+                child_id,
             )
             if derived_id is None:
                 logger.warning(

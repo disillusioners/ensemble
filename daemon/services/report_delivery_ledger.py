@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..persistence import get_instance_messages
+from .. import persistence as _persistence
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,11 @@ async def parent_history_has_internal_report(
     if checkpointer is None:
         return False
 
-    messages = await get_instance_messages(
+    # Use the module reference (not a local import) so unit tests
+    # can patch ``daemon.persistence.get_instance_messages`` at the
+    # module level. A local import would create a binding in this
+    # function's namespace that bypasses the patch.
+    messages = await _persistence.get_instance_messages(
         checkpointer, parent_id, manager=manager
     )
     prefix = _source_key(child_id)
@@ -117,6 +121,13 @@ async def parent_history_has_internal_report(
         # The ``source`` key is surfaced at daemon/utils.py:264-266
         # only when set on the source message; ``dict.get("source","")``
         # degrades to ``""`` for pre-migration parents (no field).
+        # The role guard ensures we only scan assistant messages
+        # (the source is stamped on the natural-completion
+        # report-frame assistant message; user-role messages
+        # with a coincidentally-formatted source are not
+        # delivery evidence).
+        if msg.get("role") != "assistant":
+            continue
         source = msg.get("source", "")
         if isinstance(source, str) and source.startswith(prefix):
             return True

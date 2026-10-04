@@ -154,10 +154,24 @@ def pg_engine_double_delivery():
     ``tests/postgres/conftest.py::pg_engine`` so this file works
     whether the runner selects it via ``-m integration`` or
     ``-m postgres``.
+
+    F-1 (durability-f1-f2 / phase1, branch defect fix): the
+    PG test database is session-scoped and shared. If a prior
+    session crashed before teardown, the database may hold a
+    STALE schema (tables from a prior model set, missing
+    columns added in later branches — e.g. the F-1
+    ``auto_continued_at`` column on ``task``). The
+    ``SQLModel.metadata.create_all`` call is a CREATE-only
+    operation: it does NOT ALTER existing tables to add new
+    columns. So a stale schema would silently miss the new
+    columns, and tests that INSERT into the new column would
+    fail with ``UndefinedColumn``. The fix: ``drop_all``
+    BEFORE ``create_all`` at session setup.
     """
     eng = _probe_pg()
     if eng is None:
         pytest.skip(f"PostgreSQL not available at {_PG_URL}")
+    SQLModel.metadata.drop_all(eng)
     SQLModel.metadata.create_all(eng)
     try:
         yield eng
@@ -1449,3 +1463,55 @@ class TestMatrixSummary:
         assert all_pairings[-1] == (
             "natural_completion", "recovered_pending_marker"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# F-2 (durability-f1-f2 / phase2, task 2.11(b)) — straddle-seed coverage
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestF2StraddleSeedCoverage:
+    """F-2 straddle-seed coverage in the double-delivery matrix.
+
+    The F-1 wedge is a no-row straddle: the child terminal
+    report is the checkpoint message (NOT a message_queue row),
+    so the anchor-required filter (removed by F-2 task 2.2)
+    excluded it. After the F-2 fix, the anchor-less child is
+    admitted and the per-row pass derives the
+    child_message_id from the surviving child checkpoint.
+    """
+
+    def test_straddle_seed_no_competing_actor_visible_to_lane2(
+        self, pg_engine_double_delivery: Engine
+    ) -> None:
+        """The straddle-seed state (COMPLETED child, NO
+        message_queue row, NO report_injections row, NO FIRED
+        watcher) is visible to the lane-2 query.
+        """
+        parent = _seed_instance(
+            pg_engine_double_delivery,
+            instance_id=f"straddle-parent-{uuid.uuid4().hex[:8]}",
+        )
+        child = _seed_instance(
+            pg_engine_double_delivery,
+            instance_id=f"straddle-child-{uuid.uuid4().hex[:8]}",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+        ri_repo = ReportInjectionRepository(
+            engine=pg_engine_double_delivery
+        )
+        rows = ri_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        matched = [r for r in rows if r["child_id"] == child]
+        assert matched, (
+            f"straddle seed MUST be admitted by the lane-2 query; "
+            f"rows={rows}"
+        )
+        assert matched[0]["has_anchor"] is False
+        assert matched[0]["child_msg_id"] is None
+        assert matched[0]["parent_id"] == parent

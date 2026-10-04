@@ -168,6 +168,23 @@ def pg_engine():
     if engine is None:
         pytest.skip(f"PostgreSQL not available at {PG_URL}")
 
+    # F-1 (durability-f1-f2 / phase1, branch defect fix): the
+    # PG test database is session-scoped and shared. If a prior
+    # session crashed before teardown, the database may hold a
+    # STALE schema (tables from a prior model set, missing
+    # columns added in later branches — e.g. the F-1
+    # ``auto_continued_at`` column on ``task``). The
+    # ``SQLModel.metadata.create_all`` call is a CREATE-only
+    # operation: it does NOT ALTER existing tables to add new
+    # columns. So a stale schema would silently miss the new
+    # columns, and tests that INSERT into the new column would
+    # fail with ``UndefinedColumn``.
+    #
+    # The fix: ``drop_all`` BEFORE ``create_all`` at session
+    # setup. This ensures a clean slate regardless of the prior
+    # session's teardown state. The teardown-time ``drop_all``
+    # remains for the normal-path cleanup.
+    SQLModel.metadata.drop_all(engine)
     SQLModel.metadata.create_all(engine)
     try:
         yield engine
