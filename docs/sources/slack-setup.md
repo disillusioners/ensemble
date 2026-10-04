@@ -43,6 +43,7 @@ oauth_config:
       - groups:read
       - im:read
       - files:read
+      - files:write   # Phase B: upload chart-render images natively (USER ACTION — see Step 2)
       - users:read
       - reactions:write
       - commands
@@ -77,6 +78,7 @@ If you didn't use the manifest, manually add these OAuth scopes to your app:
 | `groups:read` | List and view private channels |
 | `im:read` | View direct message conversations |
 | `files:read` | Access files shared in channels |
+| `files:write` | Upload files to channels (Phase B chart-image delivery — USER ACTION REQUIRED for chart uploads; without this scope the adapter logs ONE `missing_scope` WARN per channel and degrades to text-only delivery) |
 | `users:read` | View users in workspace |
 | `reactions:write` | Add reactions to messages |
 | `commands` | Create slash commands |

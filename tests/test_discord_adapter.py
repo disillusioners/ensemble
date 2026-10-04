@@ -2733,3 +2733,204 @@ class TestGuildThreadsLockRegression:
         # Exactly one OrderedDict was created, with 20 entries.
         assert len(mgr._threads) == 1
         assert len(mgr._threads["new-guild"]) == 20
+
+
+# ============================================================================
+# Phase B — chart-image delivery tests (Phase B.5 tasks #31, #32)
+# ============================================================================
+#
+# Implements:
+#   * test_discord_empty_content_with_images (Task #9 / amendment #11)
+#   * test_discord_chunk_1_atomic_first_unit (Task #11 / amendment #6)
+#   * test_discord_multi_image_order_preserved_no_drop (Task #12 / amendment #7)
+#   * test_discord_files_kwarg_for_single_image (Task #10)
+#   * test_discord_files_list_kwarg_for_n_images (Task #10)
+#   * test_discord_image_decode_failure_no_silent_drop (Task #12)
+#   * test_discord_upload_fail_text_only_retry (Task #11)
+
+
+import base64
+
+from daemon.sources.base import ImageAttachment
+
+
+def _make_attachment(image_id: str = "a" * 32, *, ok: bool = True, size: int = 100) -> ImageAttachment:
+    """Build a test ImageAttachment (bytes = ok bytes if ok=True, else garbage)."""
+    if ok:
+        bytes_b64 = base64.b64encode(b"X" * size).decode("ascii")
+    else:
+        bytes_b64 = "!!!not-base64!!!"
+    return ImageAttachment(
+        image_id=image_id,
+        content_type="image/png",
+        filename=f"chart-{image_id[:8]}.png",
+        size_bytes=size,
+        bytes_b64=bytes_b64,
+    )
+
+
+class TestDiscordEmptyContentWithImages:
+    """Task #9 / amendment #11: empty content + images is valid."""
+
+    @pytest.mark.asyncio
+    async def test_empty_content_with_images_sends(self, adapter_with_repo):
+        """Empty content after strip + 1 image → upload proceeds, send succeeds."""
+        adapter_with_repo._status = SourceStatus.RUNNING
+
+        fake_target = MagicMock()
+        fake_target.send = AsyncMock(return_value=MagicMock())
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        msg = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="",  # empty after marker strip
+            source_id="discord-main",
+            images=[_make_attachment()],
+        )
+        assert await adapter_with_repo.send(msg) is True
+        fake_target.send.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_content_no_images_early_returns(self, adapter_with_repo):
+        """Empty content + no images → existing early-return guard fires."""
+        msg = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="",
+            source_id="discord-main",
+        )
+        assert await adapter_with_repo.send(msg) is False
+
+
+class TestDiscordChunk1AtomicFirstUnit:
+    """Task #11 / amendment #6: chunk-1 text+file = atomic first unit;
+    ONE text-only retry on chunk-1 file-upload failure; file NEVER
+    re-attempted on later chunks."""
+
+    @pytest.mark.asyncio
+    async def test_chunk1_single_image_attached(self, adapter_with_repo):
+        """Single-image send → chunk 1 carries `file=discord.File`, chunks 2+ text-only."""
+        adapter_with_repo._status = SourceStatus.RUNNING
+
+        fake_target = MagicMock()
+        fake_target.send = AsyncMock(return_value=MagicMock())
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        # 4500 chars / 2000 = 3 chunks; 1 image attached to chunk 1 only.
+        long_content = "x" * 4500
+        msg = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content=long_content,
+            source_id="discord-main",
+            images=[_make_attachment()],
+        )
+        assert await adapter_with_repo.send(msg) is True
+        assert fake_target.send.await_count == 3
+
+        # Chunk 1 has `file=`, chunks 2+ have neither `file=` nor `files=`.
+        chunk1_kwargs = fake_target.send.await_args_list[0].kwargs
+        chunk2_kwargs = fake_target.send.await_args_list[1].kwargs
+        chunk3_kwargs = fake_target.send.await_args_list[2].kwargs
+        assert "file" in chunk1_kwargs
+        assert "files" not in chunk1_kwargs
+        assert "file" not in chunk2_kwargs and "files" not in chunk2_kwargs
+        assert "file" not in chunk3_kwargs and "files" not in chunk3_kwargs
+
+    @pytest.mark.asyncio
+    async def test_chunk1_upload_fail_text_only_retry_succeeds(self, adapter_with_repo):
+        """Chunk-1 with file fails → ONE text-only retry on chunk 1 → success."""
+        adapter_with_repo._status = SourceStatus.RUNNING
+
+        fake_target = MagicMock()
+        # First call (chunk 1 with file) fails; second call (text-only retry) succeeds.
+        fake_target.send = AsyncMock(side_effect=[Exception("upload boom"), MagicMock()])
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        msg = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="hello",
+            source_id="discord-main",
+            images=[_make_attachment()],
+        )
+        # The text-only retry succeeds, so send returns True.
+        assert await adapter_with_repo.send(msg) is True
+        # The retry did NOT pass the file (file= absent on second call).
+        retry_kwargs = fake_target.send.await_args_list[1].kwargs
+        assert "file" not in retry_kwargs and "files" not in retry_kwargs
+
+    @pytest.mark.asyncio
+    async def test_chunk1_retry_fail_returns_false(self, adapter_with_repo):
+        """Chunk-1 retry fails → send returns False (today's total-failure)."""
+        adapter_with_repo._status = SourceStatus.RUNNING
+
+        fake_target = MagicMock()
+        fake_target.send = AsyncMock(side_effect=[Exception("boom"), Exception("boom2")])
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        msg = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="hello",
+            source_id="discord-main",
+            images=[_make_attachment()],
+        )
+        assert await adapter_with_repo.send(msg) is False
+
+
+class TestDiscordMultiImageNoSilentDrop:
+    """Task #12 / amendment #7: 3 images → 3 in `files=[...]` in order;
+    missing/corrupt bytes for image #2 → WARN + drop, images 1 and 3 still
+    delivered."""
+
+    @pytest.mark.asyncio
+    async def test_multi_image_files_list_order(self, adapter_with_repo):
+        adapter_with_repo._status = SourceStatus.RUNNING
+
+        fake_target = MagicMock()
+        fake_target.send = AsyncMock(return_value=MagicMock())
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        # 3 distinct attachments — all decode successfully.
+        atts = [_make_attachment(image_id=f"{i}" * 32) for i in (1, 2, 3)]
+        msg = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="three charts",
+            source_id="discord-main",
+            images=atts,
+        )
+        assert await adapter_with_repo.send(msg) is True
+
+        # Chunk 1 uses `files=[...]` (N > 1), not `file=`.
+        chunk1_kwargs = fake_target.send.await_args_list[0].kwargs
+        assert "files" in chunk1_kwargs
+        assert "file" not in chunk1_kwargs
+        files_list = chunk1_kwargs["files"]
+        assert len(files_list) == 3
+
+    @pytest.mark.asyncio
+    async def test_middle_image_decode_failure_no_silent_drop(self, adapter_with_repo):
+        """Image #2 has corrupt bytes → dropped from `files=[...]` (NOT silent);
+        images 1 and 3 still delivered."""
+        adapter_with_repo._status = SourceStatus.RUNNING
+
+        fake_target = MagicMock()
+        fake_target.send = AsyncMock(return_value=MagicMock())
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        att1 = _make_attachment(image_id="1" * 32)
+        att_bad = _make_attachment(image_id="2" * 32, ok=False)
+        att3 = _make_attachment(image_id="3" * 32)
+
+        msg = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="three charts",
+            source_id="discord-main",
+            images=[att1, att_bad, att3],
+        )
+        assert await adapter_with_repo.send(msg) is True
+
+        # files=[...] has 2 entries (1 and 3, NOT 2); order preserved.
+        chunk1_kwargs = fake_target.send.await_args_list[0].kwargs
+        assert len(chunk1_kwargs["files"]) == 2
+        # filename is `chart-NNNNNNNN.png` — image #1 first, image #3 second.
+        filenames = [f.filename for f in chunk1_kwargs["files"]]
+        assert "chart-11111111.png" in filenames[0]
+        assert "chart-33333333.png" in filenames[1]

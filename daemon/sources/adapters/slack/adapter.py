@@ -535,7 +535,9 @@ class SlackAdapter(MessageSourceAdapter):
         # short-circuit BEFORE the API call so we don't waste a rate-limit
         # token / API roundtrip on a known-broken integration. Subsequent
         # sends for OTHER methods (e.g., chat.postMessage) still go through
-        # normally.
+        # normally — the text floor invariant demands it (architecture-
+        # recommendation.md §3 amendment #8: caption truncation + full-text
+        # follow-up; never block text).
         images = getattr(message, "images", None)
         if images and "files_upload_v2" in self._slack_capability_flags:
             logger.debug(

@@ -712,3 +712,360 @@ class TestTelegramAdapterResourceManagement:
         # Check order: chat_2, chat_3, chat_1 (chat_1 moved to end)
         keys = list(adapter._chat_locks.keys())
         assert keys[-1] == "chat_1"  # Most recently used at end
+
+
+# ============================================================================
+# Phase B — chart-image delivery tests (Phase B.5 tasks #33-#35)
+# ============================================================================
+#
+# Implements:
+#   * test_telegram_send_photo_multipart (Task #33)
+#   * test_telegram_4xx_non_transient_no_circuit_record (Task #34)
+#   * test_telegram_send_document_for_large_image (Task #35)
+#   * test_telegram_oversize_skip_with_warn (Task #16)
+#   * test_telegram_mime_miss_skip_with_warn (Task #16)
+#   * test_telegram_all_images_failed_text_floor (Task #16 — iter-002 blocking #1)
+#   * test_telegram_caption_followup_when_caption_exceeds_1024 (Task #17)
+#   * test_telegram_parse_mode_none_for_image_caption (Task #18)
+
+
+import base64
+import os
+
+from daemon.sources.base import ImageAttachment
+from daemon.constants import (
+    TELEGRAM_PHOTO_MAX_BYTES,
+    TELEGRAM_DOCUMENT_MAX_BYTES,
+    CHART_IMAGE_MIME_WHITELIST,
+)
+from daemon.sources.adapters.telegram import TelegramAPIError, _TelegramNonTransientAPIError
+
+
+def _make_telegram_att(image_id: str = "a" * 32, *, size: int = 100, content_type: str = "image/png") -> ImageAttachment:
+    bytes_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"X" * max(0, size - 8)).decode("ascii")
+    return ImageAttachment(
+        image_id=image_id,
+        content_type=content_type,
+        filename=f"chart-{image_id[:8]}.png",
+        size_bytes=size,
+        bytes_b64=bytes_b64,
+    )
+
+
+def _make_mock_session(*, photo_return: dict | Exception = None, doc_return: dict | Exception = None, message_return: dict | Exception = None):
+    """Build a mock aiohttp.ClientSession that records FormData/multipart posts.
+
+    photo_return / doc_return / message_return:
+      - dict (with "ok": True) → returned as resp.json()
+      - Exception → raised from resp.json()
+      - None → success default
+    """
+    session = AsyncMock()
+    posts: list[dict] = []
+
+    def _post(url, **kwargs):
+        # Capture: which method was called (sendPhoto / sendDocument / sendMessage)
+        # and the FormData fields.
+        if "data" in kwargs and hasattr(kwargs["data"], "_fields"):
+            # aiohttp.FormData._fields: List[Tuple[MultiDict, Dict, bytes/str]]
+            # We only need the field NAME for assertions (photo/document vs
+            # caption/chat_id). The value is bytes for files, str for params.
+            fields = []
+            for entry in kwargs["data"]._fields:
+                name = entry[0].get("name", "") if hasattr(entry[0], "get") else str(entry[0])
+                fields.append((name, entry[2]))
+        else:
+            fields = []
+        posts.append({"url": url, "fields": fields, "kwargs": kwargs})
+
+        # Choose return based on the method substring.
+        method = url.rsplit("/", 1)[-1]
+        if method == "sendPhoto":
+            payload = photo_return if photo_return is not None else {"ok": True, "result": {"message_id": 1}}
+        elif method == "sendDocument":
+            payload = doc_return if doc_return is not None else {"ok": True, "result": {"message_id": 2}}
+        elif method == "sendMessage":
+            payload = message_return if message_return is not None else {"ok": True, "result": {"message_id": 3}}
+        else:
+            payload = {"ok": True, "result": {}}
+
+        if isinstance(payload, Exception):
+            # Return a response whose .json() raises the exception.
+            resp = MagicMock()
+            async_cm = MagicMock()
+            async_cm.json = AsyncMock(side_effect=payload)
+            async_cm.__aenter__ = AsyncMock(return_value=async_cm)
+            async_cm.__aexit__ = AsyncMock(return_value=None)
+            return async_cm
+
+        # Build a proper async context manager wrapping a real aiohttp-style resp.
+        async_cm = MagicMock()
+        async_cm.__aenter__ = AsyncMock(return_value=async_cm)
+        async_cm.__aexit__ = AsyncMock(return_value=None)
+        async_cm.json = AsyncMock(return_value=payload)
+        return async_cm
+
+    session.post = MagicMock(side_effect=_post)
+    session.posts = posts  # expose
+    return session
+
+
+@pytest.fixture
+def tg_adapter(telegram_config, mock_on_message):
+    a = TelegramAdapter(telegram_config, mock_on_message)
+    a._status = SourceStatus.RUNNING
+    a._bot_info = {"username": "test_bot"}
+    return a
+
+
+class TestTelegramSendPhotoMultipart:
+    """Task #33: sendPhoto multipart with the photo field."""
+
+    @pytest.mark.asyncio
+    async def test_send_photo_with_image(self, tg_adapter):
+        session = _make_mock_session()
+        tg_adapter._session = session
+
+        msg = OutgoingMessage(
+            external_user_id="123456",
+            content="Here is the chart",
+            source_id="telegram-main",
+            images=[_make_telegram_att(size=5000)],  # ≤ 10 MB → sendPhoto
+        )
+        assert await tg_adapter.send(msg) is True
+        # One sendPhoto call.
+        photo_posts = [p for p in session.posts if "sendPhoto" in p["url"]]
+        assert len(photo_posts) == 1
+        # Photo field present + content_type image/png.
+        photo_fields = dict(photo_posts[0]["fields"])
+        assert "photo" in photo_fields
+        # parse_mode is NOT passed (firm decision — Mermaid `<` safety).
+        assert "parse_mode" not in photo_fields
+
+
+class TestTelegramSendDocumentForLargeImage:
+    """Task #35: >10 MB → sendDocument."""
+
+    @pytest.mark.asyncio
+    async def test_send_document_for_large_image(self, tg_adapter):
+        session = _make_mock_session()
+        tg_adapter._session = session
+
+        # 11 MB > TELEGRAM_PHOTO_MAX_BYTES (10 MB) → sendDocument
+        msg = OutgoingMessage(
+            external_user_id="123456",
+            content="large chart",
+            source_id="telegram-main",
+            images=[_make_telegram_att(size=11 * 1024 * 1024)],
+        )
+        assert await tg_adapter.send(msg) is True
+        doc_posts = [p for p in session.posts if "sendDocument" in p["url"]]
+        assert len(doc_posts) == 1
+        doc_fields = dict(doc_posts[0]["fields"])
+        assert "document" in doc_fields
+
+
+class TestTelegramCircuitBreakerGuardrail:
+    """Task #34: 4xx non-transient, no record_failure; transport keeps record."""
+
+    @pytest.mark.asyncio
+    async def test_4xx_non_transient_no_circuit_record(self, tg_adapter):
+        # 4xx Telegram response
+        bad_resp = {"ok": False, "error_code": 400, "description": "Bad Request: photo_invalid_dimensions"}
+        session = _make_mock_session(photo_return=bad_resp)
+        tg_adapter._session = session
+
+        initial_failures = tg_adapter._circuit_breaker.failure_count
+
+        msg = OutgoingMessage(
+            external_user_id="123456",
+            content="x",
+            source_id="telegram-main",
+            images=[_make_telegram_att()],
+        )
+        # 4xx → non-transient → image skipped + text floor (delivered_count == 0)
+        # OR (depending on whether text content is empty) sendMessage follows.
+        # Either way, send() returns True (text was delivered).
+        result = await tg_adapter.send(msg)
+
+        # Critical assertion: circuit-breaker DID NOT record failure.
+        assert tg_adapter._circuit_breaker.failure_count == initial_failures
+        # Result was True (text floor delivered).
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_5xx_records_failure_in_helper(self, tg_adapter):
+        """Direct helper test: 5xx → record_failure fires once per attempt.
+
+        Tests the helper in isolation (NOT through send() — the text-floor
+        fallback would call record_success() and reset the breaker after
+        the image-upload failure, which is correct behavior but doesn't
+        let us observe the failure count here).
+        """
+        bad_resp = {"ok": False, "error_code": 500, "description": "Internal Server Error"}
+        session = _make_mock_session(photo_return=bad_resp)
+        tg_adapter._session = session
+
+        initial_failures = tg_adapter._circuit_breaker.failure_count
+
+        file_bytes = b"\x89PNG\r\n\x1a\n" + b"X" * 92
+        with pytest.raises(TelegramAPIError):
+            await tg_adapter._api_call_multipart(
+                "sendPhoto",
+                file_bytes=file_bytes,
+                filename="x.png",
+                file_field="photo",
+                chat_id="123",
+            )
+        # 5xx → record_failure fired on each of MAX_RETRIES attempts.
+        assert tg_adapter._circuit_breaker.failure_count > initial_failures
+
+    @pytest.mark.asyncio
+    async def test_5xx_send_message_text_floor_resets_breaker(self, tg_adapter):
+        """End-to-end send(): 5xx image upload + successful text-floor → breaker
+        resets via the text-floor's record_success. This is CORRECT behavior
+        — the breaker reflects current health, and the text succeeded."""
+        bad_resp = {"ok": False, "error_code": 500, "description": "ISE"}
+        session = _make_mock_session(photo_return=bad_resp)
+        tg_adapter._session = session
+
+        msg = OutgoingMessage(
+            external_user_id="123456",
+            content="x",
+            source_id="telegram-main",
+            images=[_make_telegram_att()],
+        )
+        # 5xx on image upload → text-floor via _api_call (JSON path)
+        # which succeeds → record_success → failure_count resets.
+        result = await tg_adapter.send(msg)
+        # The text was delivered.
+        assert result is True
+        # Breaker reflects the text's success.
+        assert tg_adapter._circuit_breaker.failure_count == 0
+
+
+class TestTelegramOversizeMimeMiss:
+    """Task #16: >50 MB / MIME-miss → skip + WARN + deliver text."""
+
+    @pytest.mark.asyncio
+    async def test_oversize_image_skipped_with_warn(self, tg_adapter, caplog):
+        session = _make_mock_session()
+        tg_adapter._session = session
+
+        # 51 MB > TELEGRAM_DOCUMENT_MAX_BYTES (50 MB) → skip
+        msg = OutgoingMessage(
+            external_user_id="123456",
+            content="text only",
+            source_id="telegram-main",
+            images=[_make_telegram_att(size=51 * 1024 * 1024)],
+        )
+        with caplog.at_level("WARNING", logger="daemon.sources.adapters.telegram"):
+            result = await tg_adapter.send(msg)
+        assert result is True
+        # No sendPhoto / sendDocument calls.
+        upload_posts = [p for p in session.posts if "sendPhoto" in p["url"] or "sendDocument" in p["url"]]
+        assert len(upload_posts) == 0
+        # WARN was logged.
+        assert any("too large" in record.message for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_mime_miss_skipped_with_warn(self, tg_adapter, caplog):
+        session = _make_mock_session()
+        tg_adapter._session = session
+
+        # text/plain not allowed
+        msg = OutgoingMessage(
+            external_user_id="123456",
+            content="text only",
+            source_id="telegram-main",
+            images=[_make_telegram_att(content_type="text/plain")],
+        )
+        with caplog.at_level("WARNING", logger="daemon.sources.adapters.telegram"):
+            result = await tg_adapter.send(msg)
+        assert result is True
+        upload_posts = [p for p in session.posts if "sendPhoto" in p["url"] or "sendDocument" in p["url"]]
+        assert len(upload_posts) == 0
+        assert any("MIME miss" in record.message for record in caplog.records)
+
+
+class TestTelegramAllImagesFailedTextFloor:
+    """Task #16 / iter-002 blocking #1: ALL image uploads fail + content ≤1024 →
+    full text STILL delivered via the `delivered_count == 0` guard."""
+
+    @pytest.mark.asyncio
+    async def test_all_images_failed_content_below_1024_text_floor(self, tg_adapter):
+        session = _make_mock_session()
+        tg_adapter._session = session
+
+        # All MIME-miss → all skipped; content short (below 1024).
+        msg = OutgoingMessage(
+            external_user_id="123456",
+            content="short text",
+            source_id="telegram-main",
+            images=[
+                _make_telegram_att(image_id="1" * 32, content_type="text/plain"),
+                _make_telegram_att(image_id="2" * 32, content_type="text/plain"),
+            ],
+        )
+        result = await tg_adapter.send(msg)
+        # Text floor delivered → success.
+        assert result is True
+        # A sendMessage call (text) was issued.
+        text_posts = [p for p in session.posts if "sendMessage" in p["url"]]
+        assert len(text_posts) >= 1
+
+
+class TestTelegramCaptionFollowup:
+    """Task #17: caption >1024 → truncated on image + full-text follow-up sendMessage."""
+
+    @pytest.mark.asyncio
+    async def test_caption_over_1024_truncated_plus_followup(self, tg_adapter):
+        session = _make_mock_session()
+        tg_adapter._session = session
+
+        long_caption = "x" * 1500  # > 1024
+
+        msg = OutgoingMessage(
+            external_user_id="123456",
+            content=long_caption,
+            source_id="telegram-main",
+            images=[_make_telegram_att(size=5000)],
+        )
+        result = await tg_adapter.send(msg)
+        assert result is True
+
+        # sendPhoto was called with caption[:1024].
+        photo_posts = [p for p in session.posts if "sendPhoto" in p["url"]]
+        assert len(photo_posts) == 1
+        photo_fields = dict(photo_posts[0]["fields"])
+        caption_value = photo_fields.get("caption", "")
+        # aiohttp.FormData stores values as bytes sometimes — handle both.
+        if isinstance(caption_value, bytes):
+            caption_value = caption_value.decode("utf-8", errors="replace")
+        assert len(caption_value) == 1024
+
+        # Follow-up sendMessage with caption[1024:] (476 chars).
+        message_posts = [p for p in session.posts if "sendMessage" in p["url"]]
+        assert len(message_posts) >= 1
+
+
+class TestTelegramParseModeNone:
+    """Task #18: parse_mode=None for image captions."""
+
+    @pytest.mark.asyncio
+    async def test_image_caption_has_no_parse_mode(self, tg_adapter):
+        session = _make_mock_session()
+        tg_adapter._session = session
+
+        msg = OutgoingMessage(
+            external_user_id="123456",
+            content="text",
+            source_id="telegram-main",
+            images=[_make_telegram_att()],
+        )
+        await tg_adapter.send(msg)
+
+        photo_posts = [p for p in session.posts if "sendPhoto" in p["url"]]
+        assert len(photo_posts) == 1
+        photo_fields = dict(photo_posts[0]["fields"])
+        assert "parse_mode" not in photo_fields
