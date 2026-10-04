@@ -2244,3 +2244,71 @@ class TestSlackMultiImageNoSilentDrop:
         # (caplog may contain DEBUG chatter; we only check that the WARN
         # log lines are absent in this happy-path.)
         # (No assertion needed beyond send() returning without raising.)
+
+
+class TestSlackOversizeImage:
+    """M1: oversize image (>SLACK_FILE_MAX_BYTES) → WARN + skip that image;
+    text floor preserved (chat.postMessage still fires)."""
+
+    @pytest.mark.asyncio
+    async def test_oversize_image_skipped_text_still_delivers(
+        self, slack_with_running_status, caplog, monkeypatch
+    ):
+        # Shrink the size guard so a 100-byte test image is "oversize" — avoids
+        # building a real 1 GB buffer.
+        monkeypatch.setattr(
+            "daemon.sources.adapters.slack.adapter.SLACK_FILE_MAX_BYTES",
+            10,
+        )
+        slack_with_running_status._slack_capability_flags = set()
+
+        calls: list[dict] = []
+
+        async def capture(method, **kwargs):
+            calls.append({"method": method, "kwargs": kwargs})
+            if method == "files_upload_v2":
+                return True, {"ok": True, "file": {"id": "F123"}}
+            return True, {}
+
+        slack_with_running_status._safe_api_call = capture
+
+        msg = OutgoingMessage(
+            external_user_id="T123456:C123456",
+            content="Here is a chart",
+            source_id="slack-main",
+            images=[_make_slack_att(image_id="1" * 32, size=100)],
+        )
+
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger="daemon.sources.adapters.slack.adapter")
+
+        # Send still succeeds (text floor invariant).
+        assert await slack_with_running_status.send(msg) is True
+
+        # files_upload_v2 was NOT called — the oversize image was skipped.
+        upload_calls = [c for c in calls if c["method"] == "files_upload_v2"]
+        assert len(upload_calls) == 0, (
+            f"Expected 0 files_upload_v2 calls (image oversize → skipped), "
+            f"got {len(upload_calls)}"
+        )
+
+        # chat.postMessage WAS called — text floor invariant preserved
+        # (amendment #8): if all images skip/fail, text still delivers.
+        post_calls = [c for c in calls if c["method"] == "chat.postMessage"]
+        assert len(post_calls) >= 1, (
+            f"Expected at least 1 chat.postMessage call (text floor), "
+            f"got {len(post_calls)}"
+        )
+
+        # Exactly one WARN was logged for the oversize image — no silent drop.
+        oversize_warns = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "too large" in r.message
+        ]
+        assert len(oversize_warns) == 1, (
+            f"Expected 1 WARN for oversize image, got {len(oversize_warns)}: "
+            f"{[r.message for r in oversize_warns]}"
+        )
+        # The WARN carries image_id[:8] + size, NEVER bytes.
+        assert "11111111" in oversize_warns[0].message
+        assert "size=" in oversize_warns[0].message

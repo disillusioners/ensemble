@@ -311,11 +311,12 @@ class ResponseDispatcher:
         # Phase B: chart-image extraction + in-process bytes resolution.
         # arch-rec §1 pin (verbatim): LAST content transformation before
         # OutgoingMessage, AFTER adapter lookup. API-origin (no-colon)
-        # returned at :132-134 and never reached here. Internal colon-sources
-        # (internal_report / internal_error_report) returned at :152-155;
-        # internal_agent:* returned at :158-165. Both seams (progressive +
-        # completed) carry the same transformation — once-only is preserved
-        # structurally by `_progressive_sent_sources` (:124-128).
+        # returned at the no-colon skip and never reaches here. Internal
+        # colon-sources (internal_report / internal_error_report) returned
+        # at the internal-report skip; internal_agent:* returned at the
+        # adapter-lookup miss. Both seams (progressive + completed) carry
+        # the same transformation — once-only is preserved structurally
+        # by `_progressive_sent_sources`.
         stripped_content, image_ids = extract_chart_images(content)
         images: list[ImageAttachment] | None = None
         if image_ids:
@@ -345,14 +346,13 @@ class ResponseDispatcher:
                 # Phase B amendment #22: chat-delivered → 0-day GET window.
                 # API-origin (no-colon) keeps the 30-day GET per Phase A
                 # §http-api. Mutually-exclusive lanes make double-delete
-                # impossible (progressive delivered → completed discards at
-                # :124-128; progressive adapter-False → completed delivers
-                # + deletes here).
+                # impossible (progressive delivered → completed discards via
+                # `_progressive_sent_sources`; progressive adapter-False →
+                # completed delivers + deletes here).
                 if images:
                     for img in images:
                         try:
                             await asyncio.to_thread(store.delete, img.image_id)
-                            _log_image_metadata(img.image_id, img.size_bytes, img.content_type)
                             logger.debug(
                                 f"chart-image deleted after chat delivery: "
                                 f"image_id={img.image_id[:8]}..."
@@ -460,7 +460,6 @@ class ResponseDispatcher:
                     for img in images:
                         try:
                             await asyncio.to_thread(store.delete, img.image_id)
-                            _log_image_metadata(img.image_id, img.size_bytes, img.content_type)
                             logger.debug(
                                 f"chart-image deleted after progressive delivery: "
                                 f"image_id={img.image_id[:8]}..."

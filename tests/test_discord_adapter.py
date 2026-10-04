@@ -2934,3 +2934,66 @@ class TestDiscordMultiImageNoSilentDrop:
         filenames = [f.filename for f in chunk1_kwargs["files"]]
         assert "chart-11111111.png" in filenames[0]
         assert "chart-33333333.png" in filenames[1]
+
+
+class TestDiscordOversizeImage:
+    """M3: oversize image (>DISCORD_FILE_MAX_BYTES) → WARN + dropped from
+    files=[...]; survivors retain order; text still delivered."""
+
+    @pytest.mark.asyncio
+    async def test_oversize_image_dropped_survivors_still_attached(
+        self, adapter_with_repo, caplog, monkeypatch
+    ):
+        # Shrink the size guard so 100-byte test images are "oversize" — avoids
+        # building a real 8 MB+ buffer.
+        monkeypatch.setattr(
+            "daemon.sources.adapters.discord.adapter.DISCORD_FILE_MAX_BYTES",
+            50,
+        )
+        adapter_with_repo._status = SourceStatus.RUNNING
+
+        fake_target = MagicMock()
+        fake_target.send = AsyncMock(return_value=MagicMock())
+        adapter_with_repo._route_outgoing = AsyncMock(return_value=fake_target)
+
+        # 3 images: small, OVERSIZE, small. The middle one must be dropped
+        # (no silent drop); survivors retain order.
+        att_small1 = _make_attachment(image_id="1" * 32, size=10)
+        att_over = _make_attachment(image_id="2" * 32, size=100)
+        att_small2 = _make_attachment(image_id="3" * 32, size=10)
+
+        msg = OutgoingMessage(
+            external_user_id="987654321098765432:555444333222111333",
+            content="three charts",
+            source_id="discord-main",
+            images=[att_small1, att_over, att_small2],
+        )
+
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger="daemon.sources.adapters.discord.adapter")
+
+        # Send still succeeds (text delivered).
+        assert await adapter_with_repo.send(msg) is True
+
+        # Chunk 1 uses files=[...] (N>1), not file=; only 2 entries survive.
+        chunk1_kwargs = fake_target.send.await_args_list[0].kwargs
+        assert "files" in chunk1_kwargs
+        assert "file" not in chunk1_kwargs
+        assert len(chunk1_kwargs["files"]) == 2
+        # Order preserved: image #1 first, image #3 second.
+        filenames = [f.filename for f in chunk1_kwargs["files"]]
+        assert "chart-11111111.png" in filenames[0]
+        assert "chart-33333333.png" in filenames[1]
+
+        # Exactly one WARN was logged for the oversize image — no silent drop.
+        oversize_warns = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "too large" in r.message
+        ]
+        assert len(oversize_warns) == 1, (
+            f"Expected 1 WARN for oversize image, got {len(oversize_warns)}: "
+            f"{[r.message for r in oversize_warns]}"
+        )
+        # The WARN carries image_id[:8] + size, NEVER bytes.
+        assert "22222222" in oversize_warns[0].message
+        assert "size=" in oversize_warns[0].message

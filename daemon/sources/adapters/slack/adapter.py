@@ -571,6 +571,18 @@ class SlackAdapter(MessageSourceAdapter):
                             )
                             continue
 
+                        # >SLACK_FILE_MAX_BYTES skip (defense + Slack 1 GB hard-limit).
+                        # Mirror Telegram discipline at telegram.py:499-503 — WARN
+                        # + continue. Text floor invariant preserved:
+                        # ``chat.postMessage`` still fires below regardless of how
+                        # many images skip.
+                        if len(file_bytes) > SLACK_FILE_MAX_BYTES:
+                            logger.warning(
+                                f"slack image too large: image_id={img.image_id[:8]}... "
+                                f"size={len(file_bytes)} > {SLACK_FILE_MAX_BYTES}; skipping"
+                            )
+                            continue
+
                         # Slack ``initial_comment`` soft limit ~4000 chars.
                         # Truncate on the file + follow-up ``chat.postMessage``
                         # for the remainder (architecture-recommendation.md §3

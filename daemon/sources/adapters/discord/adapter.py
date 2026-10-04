@@ -1711,6 +1711,20 @@ class DiscordAdapter(MessageSourceAdapter):
                 paired = [
                     (b, img) for b, img in zip(decoded, images) if b
                 ]
+                # >DISCORD_FILE_MAX_BYTES skip (defense + Discord 8 MB bot-upload
+                # hard limit). Per-image oversize → WARN + drop; survivors retain
+                # order. Mirror the decode-fail drop discipline above. If ALL
+                # images drop, the existing empty-content guard handles it.
+                size_filtered: list[tuple[bytes, Any]] = []
+                for _b, _img in paired:
+                    if len(_b) > DISCORD_FILE_MAX_BYTES:
+                        logger.warning(
+                            f"discord image too large: image_id={_img.image_id[:8]}... "
+                            f"size={len(_b)} > {DISCORD_FILE_MAX_BYTES}; dropping from files=[...]"
+                        )
+                        continue
+                    size_filtered.append((_b, _img))
+                paired = size_filtered
                 for img in images:
                     _log_image_metadata(img.image_id, img.size_bytes, img.content_type)
                 if len(paired) == 1:
