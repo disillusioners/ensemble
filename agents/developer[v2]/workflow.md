@@ -98,7 +98,7 @@ For each planned instance, I use the snippets from:
 - **Coder tier:** `spawn_instance(agent="coder")` + `send_message(detailed task, no load_skill)`
 - **Worker + skill tier:** `spawn_instance(agent="worker")` + `send_message(task, load_skill=<skill>)`
 - **Worker no-skill tier:** `spawn_instance(agent="worker")` + `send_message(detailed request, no load_skill)`
-- **Recurring-shape work:** `spawn_hot_instance(agent_id, task)` instead of `spawn_instance` — warm-starts from the best matching snapshot, or cold-falls-back automatically; cite the returned `started: warm|cold` line in my Dev Report.
+- **Recurring-shape work:** `spawn_hot_instance(agent_id, task)` instead of `spawn_instance` — warm-starts from the best matching snapshot, or cold-falls-back automatically; cite the returned `started: warm|cold|blocked` line in my Dev Report. R18 (2026-10-04): the `task` is auto-dispatched as the child's first turn by default; I do NOT issue a follow-up `send_message` after `spawn_hot_instance`.
 
 I **END TURN** after dispatching.
 

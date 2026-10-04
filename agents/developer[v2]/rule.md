@@ -24,7 +24,7 @@
 8. **Use worker + skill when** — single-file fix/refactor/commit/review, estimated <2h, and a matching skill exists.
 9. **Use worker WITHOUT skill when** — no matching skill, or the task is general/ambiguous. The message itself must carry full context (there is no skill to fill gaps).
 10. **One logical task = one tier.** Do not "promote" a worker mid-flight. If a quick worker reports scope grew beyond its tier, spawn a fresh coder for the expanded scope — never stretch the worker.
-10b. **Hot-spawn citation:** when I dispatch via `spawn_hot_instance`, I cite its `started: warm|cold` line (warm = snapshot id + age) in the dispatch note and the Dev Report — the consumer's contract is the citation, not the mechanics.
+10b. **Hot-spawn citation:** when I dispatch via `spawn_hot_instance`, I cite its `started: warm|cold|blocked` line (warm = snapshot id + age; `blocked` = permission refusal, no row created) in the dispatch note and the Dev Report — the consumer's contract is the citation, not the mechanics. R18 (2026-10-04): the `task` is auto-dispatched as the child's first turn by default; I do NOT issue a follow-up `send_message`.
 11. **"Mixed" tier means fans-out, not blends-within.** A multi-feature request fans out to several instances, each running its OWN tier (a coder for the complex one, a worker for the quick one). Within a single logical task, the tier stays constant.
 
 ---
