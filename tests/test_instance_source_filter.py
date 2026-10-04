@@ -22,8 +22,11 @@ Also pins:
 
 These tests run against the in-memory SQLite path used by
 ``test_instance_search.py``. The PostgreSQL-specific JSONB
-``metadata->>'source_type'`` cast is exercised separately under
-``pytest -m postgres`` and is not covered here.
+``metadata->>'source_type'`` cast is exercised under
+``pytest -m postgres`` at
+``tests/postgres/test_instance_source_filter_pg.py`` — that file is
+the canonical regression for C1 (the PG ``->`` + CAST bug that
+silently returned quoted JSON text and zero rows on production).
 """
 
 from __future__ import annotations
@@ -168,6 +171,26 @@ class TestChatSourceTypesConstant:
         assert "whatsapp" in CHAT_SOURCE_TYPES
         assert "whatsapp:" not in CHAT_SOURCE_PREFIXES
 
+    def test_chat_source_types_parity_with_user_origin_gate(self):
+        """M2 parity pin: ``CHAT_SOURCE_TYPES`` (this module's
+        source_type set for the Projects tab filter) MUST equal
+        ``USER_ORIGIN_CHAT_SOURCE_TYPES`` (the live-upgrade gate set
+        in ``daemon.tools.upgrade_journal.py``). The two constants
+        are documented as mirrors of each other but the symmetry
+        is semantic — both lists exist for different consumers
+        (Projects-tab filter vs upgrade gate) and the asymmetry
+        vs ``CHAT_SOURCE_PREFIXES`` is intentional and stays
+        separate. This test imports the gate set live and
+        asserts exact-set equality so a future divergence
+        (e.g. someone adds a fifth chat source to the upgrade
+        gate but forgets the Projects filter, or vice versa)
+        is caught here."""
+        from daemon.tools.upgrade_journal import (
+            USER_ORIGIN_CHAT_SOURCE_TYPES,
+        )
+
+        assert set(CHAT_SOURCE_TYPES) == set(USER_ORIGIN_CHAT_SOURCE_TYPES)
+
 
 # ----- source="chat" ----------------------------------------------------
 
@@ -290,6 +313,36 @@ class TestSourceDisabled:
         instances, total, _ = seeded_repo.list()
         assert total == 8
 
+    def test_source_whitespace_only_treated_as_literal(self, repo):
+        """NIT: pin the whitespace-only ``source=`` behavior. The
+        helper's truthy check is ``if not source: return None`` —
+        ``"   "`` is truthy in Python so it is NOT a no-op sentinel
+        and is passed through as a single-value IN clause. The
+        clause matches zero rows because no source_type equals
+        ``"   "`` (defensive pin: a future change to
+        ``if not source.strip()`` would break here, which is the
+        desired loud-fail behavior)."""
+        _make(repo, "ws-a", agent_id="developer", agent_dir="agents/developer",
+              metadata={"source_type": "telegram"})
+        _make(repo, "ws-b", agent_id="developer", agent_dir="agents/developer",
+              metadata={"source_type": "slack"})
+
+        instances, total, _ = repo.list(source="   ")
+        # Whitespace is NOT the no-op sentinel — it's a real filter
+        # value. No source_type equals "   " → zero matches.
+        assert total == 0
+        assert instances == []
+
+    def test_source_helper_whitespace_returns_clause_not_none(self, repo):
+        """NIT: companion pin to ``test_source_whitespace_only_treated_as_literal``
+        at the helper level. ``"   "`` must NOT be treated as
+        ``None`` — it must produce an IN clause (a regression that
+        switches ``if not source:`` to ``if not source.strip():``
+        would surface here as a None return value)."""
+        from sqlmodel import Session
+        with Session(repo.engine) as s:
+            assert repo._build_source_condition(s, "   ") is not None
+
 
 # ----- combination with other filters --------------------------------
 
@@ -395,13 +448,19 @@ class TestBuildSourceConditionHelper:
             assert cond is not None
             assert hasattr(cond, "right")
 
-    def test_helper_rejects_non_string_source(self, repo):
-        """Non-string truthy values are coerced by the helper into a
-        single-value IN clause — the route layer enforces ``str | None``
-        (FastAPI's type binding), so this is a defense-in-depth check
-        that the helper does not crash on a non-string. The
-        ``str(42)`` coercion mirrors how the helper would handle
-        whatever FastAPI happens to pass."""
+    def test_helper_returns_in_clause_for_non_string_input(self, repo):
+        """NIT: rename of the old ``test_helper_rejects_non_string_source``
+        — the helper does NOT reject and does NOT stringify; the value
+        flows verbatim into ``expr.in_(values)``. For ``source=42`` the
+        clause is ``CAST(... AS VARCHAR) IN (42)`` which compiles
+        cleanly but matches zero rows (the source_type column is TEXT,
+        not INT). The route layer enforces ``str | None`` via
+        FastAPI's type binding, so the helper's leniency is a
+        defense-in-depth contract, not a normalization site.
+
+        The new name says WHAT THE TEST OBSERVES (an IN clause is
+        produced) rather than what it does NOT (rejection /
+        stringification)."""
         from sqlmodel import Session
         with Session(repo.engine) as s:
             # Helper does not raise on a non-string; it stringifies the

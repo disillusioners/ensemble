@@ -751,12 +751,19 @@ describe('InstanceListComponent', () => {
   });
 
   describe('getProjectContext() - Project-Aware Navigation', () => {
-    // Mock TabStateService for navigation testing
+    // Mock TabStateService for navigation testing. Mirrors the real
+    // service surface: `activeProjectId` AND `activeSpecialTabId` (the
+    // latter covers the Chat special tab — see
+    // instances.component.ts:68-72 for the composition).
     class MockTabStateService {
       activeProjectId = signal<string | null>(null);
+      activeSpecialTabId = signal<string | null>(null);
     }
 
-    // Component with getProjectContext method
+    // Component with getProjectContext method — mirrors the production
+    // composition in instance-list.component.ts:244-251. ``activeSpecialTabId``
+    // is intentionally the SECOND fallback (project id wins when both
+    // are set) and the ``'all'`` literal is the third / last resort.
     class ProjectContextTestableComponent {
       private readonly tabStateService: MockTabStateService;
 
@@ -765,7 +772,9 @@ describe('InstanceListComponent', () => {
       }
 
       protected getProjectContext(): string {
-        return this.tabStateService.activeProjectId() ?? 'all';
+        return this.tabStateService.activeProjectId()
+          ?? this.tabStateService.activeSpecialTabId()
+          ?? 'all';
       }
     }
 
@@ -788,6 +797,30 @@ describe('InstanceListComponent', () => {
         tabStateService.activeProjectId.set(null);
 
         expect(component.getProjectContext()).toBe('all');
+      });
+
+      it('should return "chat" when on Chat special tab (no project)', () => {
+        // F1 fix: with no real project selected but the Chat special
+        // tab active, getProjectContext() must return the special-tab
+        // sentinel so the navigation URL is /projects/chat/... and the
+        // chat-source filter is not silently dropped downstream. Prior
+        // shape (activeProjectId() ?? 'all') would have routed to
+        // /projects/all/... on the Chat tab.
+        tabStateService.activeProjectId.set(null);
+        tabStateService.activeSpecialTabId.set('chat');
+
+        expect(component.getProjectContext()).toBe('chat');
+      });
+
+      it('should prefer project id over special tab id when both set', () => {
+        // A real project always wins over the special tab — the
+        // project tab and the special tab are mutually exclusive in
+        // the production tab state, but the composition must be
+        // defensive (project id is checked FIRST).
+        tabStateService.activeProjectId.set('list-project-123');
+        tabStateService.activeSpecialTabId.set('chat');
+
+        expect(component.getProjectContext()).toBe('list-project-123');
       });
 
       it('should return specific project ID when project is selected', () => {
@@ -880,6 +913,23 @@ describe('InstanceListComponent', () => {
         const routerLinkArray = ['/projects', projectContext, 'instances', instanceId];
 
         expect(routerLinkArray).toEqual(['/projects', 'all', 'instances', 'all-tab-inst']);
+      });
+
+      it('should provide "chat" context for template on Chat special tab (F1 regression pin)', () => {
+        // F1 fix: an instance-row click on the Chat tab must produce
+        // /projects/chat/instances/:id, not /projects/all/instances/:id.
+        // Without the activeSpecialTabId() fallback the URL would
+        // silently fall back to 'all' and the chat-source filter
+        // would be lost when the new route is opened.
+        tabStateService.activeProjectId.set(null);
+        tabStateService.activeSpecialTabId.set('chat');
+
+        const projectContext = component.getProjectContext();
+        const instanceId = 'chat-tab-inst';
+
+        const routerLinkArray = ['/projects', projectContext, 'instances', instanceId];
+
+        expect(routerLinkArray).toEqual(['/projects', 'chat', 'instances', 'chat-tab-inst']);
       });
     });
   });

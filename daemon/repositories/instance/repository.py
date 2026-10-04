@@ -333,9 +333,20 @@ class SQLModelInstanceRepository:
         * any other string     → ``source_type == <source>`` (exact match).
         * ``None`` / empty     → ``None`` (caller omits the filter).
 
-        Dialect handling mirrors ``_build_search_condition`` — PostgreSQL
-        uses ``metadata['source_type']`` (JSONB scalar coercion to VARCHAR),
-        SQLite uses ``json_extract(..., '$.source_type')`` cast to TEXT.
+        Dialect handling:
+
+        * **PostgreSQL** — ``func.jsonb_extract_path_text(metadata, "source_type")``
+          returns *unquoted* JSON text (``telegram``), matching the SQLite
+          path. The naïve ``metadata->'source_type'`` + ``CAST(... AS VARCHAR)``
+          form is BUGGY on PG: ``->`` returns ``jsonb`` and
+          ``CAST(jsonb AS VARCHAR)`` yields **QUOTED** JSON text
+          (``"telegram"``), so the IN comparison never matches → 0 rows
+          silently. ``jsonb_extract_path_text`` is the PG-native unquoted
+          extractor and is the safe portable form.
+        * **SQLite** — ``CAST(json_extract(metadata, '$.source_type') AS VARCHAR)``
+          (SQLite's ``json_extract`` already returns unquoted TEXT for
+          string scalars, so the cast is a no-op type alignment).
+
         Both backends carry the JSONB key as TEXT, so a plain ``IN`` is
         portable.
 
@@ -351,7 +362,17 @@ class SQLModelInstanceRepository:
 
         is_postgres = db_session.bind.dialect.name == "postgresql"
         if is_postgres:
-            expr = sa_cast(Instance.instance_metadata["source_type"], String)
+            # ``func.jsonb_extract_path_text`` is the PG-native UNQUOTED
+            # JSONB text extractor. The naïve ``->`` + CAST path returns
+            # quoted JSON text on PG string scalars ('"telegram"' !=
+            # 'telegram'), which silently yields 0 rows. The mirror SQLite
+            # test in tests/test_instance_source_filter.py exercises the
+            # SQLite branch; the dedicated PG regression lives at
+            # tests/postgres/test_instance_source_filter_pg.py
+            # (pytest -m postgres).
+            expr = func.jsonb_extract_path_text(
+                Instance.instance_metadata, "source_type"
+            )
         else:
             expr = sa_cast(func.json_extract(Instance.instance_metadata, "$.source_type"), String)
         return expr.in_(values)

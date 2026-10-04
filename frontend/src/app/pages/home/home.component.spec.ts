@@ -6,6 +6,11 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 // Mock TabStateService for testing
 class MockTabStateService {
   readonly activeProjectId = signal<string | null>(null);
+  // F1 fix: special-tab sentinel (e.g. 'chat') must be honored by
+  // getProjectContext() so instance-row clicks on the Chat tab route
+  // to /projects/chat/... instead of /projects/all/.... Mirrors the
+  // production TabStateService.activeSpecialTabId() surface.
+  readonly activeSpecialTabId = signal<string | null>(null);
 }
 
 // Mock ApiService for testing
@@ -41,7 +46,9 @@ class TestableHomeComponent {
   }
 
   protected getProjectContext(): string {
-    return this.tabStateService.activeProjectId() ?? 'all';
+    return this.tabStateService.activeProjectId()
+      ?? this.tabStateService.activeSpecialTabId()
+      ?? 'all';
   }
 
   protected onSelectAgent(agent: Agent): void {
@@ -218,6 +225,24 @@ describe('HomeComponent - Project-Aware Navigation', () => {
       expect(component.getProjectContext()).toBe('all');
     });
 
+    it('should return "chat" when Chat special tab is active and no project', () => {
+      // F1 fix: instance-row clicks on the Chat tab must build a
+      // /projects/chat/... URL, not /projects/all/.... Without the
+      // activeSpecialTabId() fallback the chat-source filter would
+      // be silently dropped on the next route open.
+      tabStateService.activeProjectId.set(null);
+      tabStateService.activeSpecialTabId.set('chat');
+
+      expect(component.getProjectContext()).toBe('chat');
+    });
+
+    it('should prefer project id over special tab id when both set', () => {
+      tabStateService.activeProjectId.set('project-123');
+      tabStateService.activeSpecialTabId.set('chat');
+
+      expect(component.getProjectContext()).toBe('project-123');
+    });
+
     it('should return project ID when a project is selected', () => {
       tabStateService.activeProjectId.set('project-123');
 
@@ -252,6 +277,22 @@ describe('HomeComponent - Project-Aware Navigation', () => {
 
       expect(component.navigateCalls).toHaveLength(1);
       expect(component.navigateCalls[0].path).toEqual(['/projects', 'project-abc', 'instances', 'inst-002']);
+    });
+
+    it('should navigate to /projects/chat/instances/:instanceId when on Chat special tab (F1 regression pin)', () => {
+      // F1 fix: with no project selected and the Chat special tab
+      // active, an instance-row click must build /projects/chat/...,
+      // not /projects/all/... — otherwise the chat-source filter is
+      // silently dropped downstream via setActiveTab('all').
+      tabStateService.activeProjectId.set(null);
+      tabStateService.activeSpecialTabId.set('chat');
+      const instance = createMockInstance({ instance_id: 'inst-003' });
+      component.instances.set([instance]);
+
+      component.onViewInstances();
+
+      expect(component.navigateCalls).toHaveLength(1);
+      expect(component.navigateCalls[0].path).toEqual(['/projects', 'chat', 'instances', 'inst-003']);
     });
   });
 
