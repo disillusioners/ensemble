@@ -614,6 +614,8 @@ A provenance sidecar is a sibling file: `<artifact>.build-provenance.json` (for 
 
 A missing, empty, or unrecognized load-bearing field refuses **`provenance-malformed`** — it NEVER silently skips its check. (The first cut of this guard `[ -n "$field" ]`-guarded each comparison; a sidecar missing `git_head` silently skipped the head check. That fail-open is dead: the shape gate runs before any comparison.)
 
+Informational fields gate no comparison, but corruption is still refused when present: `git_head_short`, when present and non-empty, must be 7-40 hex characters — garbage free text refuses **`provenance-malformed`** (fail-closed symmetry with `git_head`). Absent/empty `git_head_short` is tolerated (it is not load-bearing).
+
 Sidecar rules:
 - Written by the build path AT BUILD TIME (post-build success; not before, not after stages). The write is ATOMIC (temp file in the same dir + `mv -f`) — a torn sidecar can only come from an out-of-discipline writer, and the empty-sidecar shape gate catches that class.
 - The writer NORMALIZES the dirty flag to canonical JSON booleans and REFUSES to write an unrecognized value (defense in depth: the writer cannot emit an ambiguous sidecar).
@@ -636,7 +638,7 @@ For sandbox stage (unit tests, drills), the fixture owns the sidecar — `tests/
 
 ### A.4 Refusal tokens — the operator's diagnosis table
 
-Every refusal and every override lands a journal event on the install dir's `releases/state.json` with a distinct reason token: `refusal` events carry `(reason=<token>)` in the detail (and the same `(reason=<token>)` suffix prints on the WARN line, so stderr is greppable without a journal read); `stage_freshness_override` events carry `reason=<token> operator_accepted=true`. The journal is ensured to exist before the append (created on a virgin install dir if absent — the event is DURABLE, not best-effort-dropped), so a refusal on a never-staged install dir still records its token. The token is greppable across the install dir's journal history; the operator's remedy follows the token.
+Every refusal and every override lands a journal event on the install dir's `releases/state.json` with a distinct reason token: `refusal` events carry `(reason=<token>)` in the detail (and the same `(reason=<token>)` suffix prints on the WARN line, so stderr is greppable without a journal read); `stage_freshness_override` events carry `reason=<token> operator_accepted=true`. **Durability boundary:** when the install dir EXISTS, the journal is ensured to exist before the append (created on a virgin install dir if absent — the event is DURABLE, not best-effort-dropped), so a refusal on a never-staged install dir still records its token; when the install dir does NOT exist, no row is written (WARN on stderr only) — by design, a refusal never bootstraps an install path that stage itself has not created (a typo'd `INSTALL_DIR` must not materialize a `releases/state.json` at the wrong path). The token is greppable across the install dir's journal history; the operator's remedy follows the token.
 
 | Token | Trigger | Operator remedy |
 |-------|---------|-----------------|

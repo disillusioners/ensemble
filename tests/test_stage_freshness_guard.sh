@@ -173,6 +173,13 @@ _reset_fixture_repo() {
     printf 'stub-index\n' > "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
     printf 'stub-app\n' > "$FAKE_REPO/frontend/dist/frontend/browser/main.js"
     printf 'CREATE TABLE x (id int);\n' > "$FAKE_REPO/daemon/migrations/versions/20260101_000001_init.sql"
+    # Mirror the REAL repo's ignore shape (root .gitignore `dist/` +
+    # frontend/.gitignore `/dist`): the FE provenance sidecar written by
+    # _stamp_fresh lives under frontend/dist/ and MUST be invisible to the
+    # honest dirty probe, or the sidecar would classify itself as tree
+    # dirt (self-referential dirty-build). Committed with the fixture so
+    # the ignore rules apply from the first probe onward.
+    printf 'dist/\n*.build-provenance.json\n' > "$FAKE_REPO/.gitignore"
     git -C "$FAKE_REPO" init -q
     git -C "$FAKE_REPO" add -A 2>/dev/null
     git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -q -m fixture
@@ -193,10 +200,19 @@ _reset_fixture_repo() {
 # call, _head holds the fixture's HEAD sha for assertions.
 _stamp_fresh() {
     _head="$(git -C "$FAKE_REPO" rev-parse HEAD)"
-    _prod_write "$FAKE_REPO" "$FIXTURE/stub-prod" "$_head" "false" \
+    # Honest dirty probe (journal-pack _stamp_provenance_for_repo pattern):
+    # the sidecar records the tree's REAL working-tree state, not a
+    # hardcoded false. Every call site sits at a clean-tree point (post
+    # _reset_fixture_repo, or after the scenario's own dirt is removed),
+    # so the probe yields false at each — but by MEASUREMENT, not decree:
+    # a future scenario that forgets to clean up fails loudly here instead
+    # of stamping a lying sidecar.
+    local dirty
+    dirty="$(_git_dirty_porcelain_via "$FAKE_REPO")"
+    _prod_write "$FAKE_REPO" "$FIXTURE/stub-prod" "$_head" "$dirty" \
         "stub:tests/test_stage_freshness_guard.sh"
     _prod_write "$FAKE_REPO" "$FAKE_REPO/frontend/dist/frontend/browser/index.html" \
-        "$_head" "false" "stub:tests/test_stage_freshness_guard.sh"
+        "$_head" "$dirty" "stub:tests/test_stage_freshness_guard.sh"
 }
 
 # Sandbox install dir + port for stage.sh invocations.
@@ -329,7 +345,7 @@ assert_contains "(ii-a WARN+SKIP) status.sh --verify says integrity OK" "integri
 
 # (ii-b) ACTIVE mode — rebuild the fixture WITH refs/heads/latest at HEAD
 # so _tip_sha resolves (full refspec; a tag named latest would NOT be
-# resolved — that's the S3 contract, pinned in scenario viii below).
+# resolved — that's the S3 contract, pinned in scenario (ix) below).
 _reset_fixture_repo with-latest
 _stamp_fresh
 rm -rf "$SBX" && mkdir -p "$SBX"   # virgin install dir for the active run
@@ -678,6 +694,44 @@ _malformed_case "viii-d missing git_head" "$FIXTURE/mal-d.json"
 # (e) EMPTY sidecar file (torn write class).
 printf '' > "$FIXTURE/mal-e.json"
 _malformed_case "viii-e empty sidecar" "$FIXTURE/mal-e.json"
+# (g) git_head_short PRESENT-but-garbage (finding #4): informational
+#     field, gates no comparison, but garbage free text is a corruption
+#     signal — refuses provenance-malformed instead of free-text pass.
+#     (Absent/empty stays tolerated: it is not load-bearing.)
+cat > "$FIXTURE/mal-g.json" <<EOF
+{
+  "git_head": "$_head",
+  "git_head_short": "<corrupted>",
+  "git_dirty": false,
+  "build_at": "2026-10-04T00:00:00Z",
+  "build_tool": "stub",
+  "artifact_sha256": "$_sha",
+  "artifact_path": "stub"
+}
+EOF
+_malformed_case "viii-g garbage git_head_short" "$FIXTURE/mal-g.json"
+# (h) git_head_short ABSENT → tolerated (the #4 gate is when-present only).
+cat > "$FIXTURE/mal-h.json" <<EOF
+{
+  "git_head": "$_head",
+  "git_dirty": false,
+  "build_at": "2026-10-04T00:00:00Z",
+  "build_tool": "stub",
+  "artifact_sha256": "$_sha",
+  "artifact_path": "stub"
+}
+EOF
+_sbxfresh="$FIXTURE/short-absent-sbx"
+rm -rf "$_sbxfresh" && mkdir -p "$_sbxfresh"
+cp "$FIXTURE/mal-h.json" "$FIXTURE/stub-prod.build-provenance.json"
+out="$(HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$_sbxfresh" PORT="$SBX_PORT" \
+    VERSION="$SBX_V1" bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox \
+    --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+assert_eq "(viii-h) absent git_head_short tolerated → exit 0" "0" "$rc"
+assert_not_contains "(viii-h) NO malformed refusal for absent short-hash" \
+    "provenance-malformed" "$out"
+_stamp_fresh
+
 # (f) Override DOES unlock malformed (consistent with the other tokens)
 #     and journals reason=provenance-malformed.
 cp "$FIXTURE/mal-a.json" "$FIXTURE/stub-prod.build-provenance.json"

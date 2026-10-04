@@ -1795,7 +1795,7 @@ _freshness_refuse() {
 #   provenance-missing, provenance-malformed, stale-provenance,
 #   dirty-build, provenance-hash-mismatch
 _verify_artifact_provenance() {
-    local art="$1" prov json git_head git_dirty art_sha current_sha
+    local art="$1" prov json git_head git_head_short git_dirty art_sha current_sha
     local dirty_flag="" malformed=""
     prov="$(_provenance_path "$art")"
     if [ ! -f "$prov" ]; then
@@ -1833,6 +1833,7 @@ _verify_artifact_provenance() {
     # provenance-malformed case into a bogus stale-provenance (found by
     # scenario viii-d). Anchoring on `"key":` defeats the aliasing.
     git_head="$(_json_field_quoted "$json" '"git_head":' 2>/dev/null)" || git_head=""
+    git_head_short="$(_json_field_quoted "$json" '"git_head_short":' 2>/dev/null)" || git_head_short=""
     git_dirty="$(_json_field_quoted "$json" '"git_dirty":' 2>/dev/null)" || git_dirty=""
     art_sha="$(_json_field_quoted "$json" '"artifact_sha256":' 2>/dev/null)" || art_sha=""
     current_sha="$(_sha256 "$art")"
@@ -1850,6 +1851,12 @@ _verify_artifact_provenance() {
         malformed="git_dirty not a recognized boolean true/True/1 or false/False/0 (got '$git_dirty')"
     elif ! printf '%s' "$art_sha" | grep -Eq '^[0-9a-fA-F]{64}$'; then
         malformed="artifact_sha256 not a sha256 digest (got '$art_sha')"
+    elif [ -n "$git_head_short" ] && ! printf '%s' "$git_head_short" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
+        # git_head_short is INFORMATIONAL (gates no comparison) but it is
+        # operator-facing: garbage free text is a corruption signal, so a
+        # PRESENT-and-garbage value refuses (fail-closed symmetry with
+        # git_head). Absent/empty is tolerated — it is not load-bearing.
+        malformed="git_head_short not a git sha (got '$git_head_short')"
     fi
     if [ -n "$malformed" ]; then
         if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
