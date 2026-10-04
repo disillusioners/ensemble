@@ -62,41 +62,151 @@ TASK_LANE_CHAT: str = "chat"
 def _chat_source_exists_sql() -> str:
     """Render the correlated chat-source EXISTS clause as literal SQL.
 
-    Chosen form (D1/approver N7 — stated in the docstring as
-    required): INLINE LITERALS. The claim seam composes raw
-    ``text()`` SQL, so the portable ``sqlalchemy.or_(...)`` shape from
-    the plan is the PORTABILITY SPEC, rendered here as plain SQL
-    text. ``CHAT_SOURCE_PREFIXES`` is a compile-time constant tuple
-    (``daemon/constants.py``), so the rendered SQL is deterministically
-    known at module load and NO user input ever flows through the
-    literal — interpolation is safe. The rendered clause is IDENTICAL
-    on PostgreSQL and SQLite::
+    Robust adapter-type matching (chat-pool starvation fix,
+    2026-10-04): the predicate joins ``message_queue`` to
+    ``source_configs`` on the source_id prefix and matches the
+    row's ``source_type`` against the canonical chat-type set
+    (``telegram`` / ``slack`` / ``discord``). Deployment-configured
+    source_ids (e.g. ``my-discord-bot``) — NOT the canonical
+    ``discord`` — now route to the chat worker pool.
+
+    Why JOIN source_configs (audit-lean option): the
+    ``source_configs`` table is the persistent record of every
+    registered adapter — it carries both ``source_id`` AND
+    ``source_type``, so a single JOIN resolves adapter type at
+    claim time without forcing operators to register with a
+    canonical source_id (the existing
+    ``routers/sources.py:174-176`` validator REJECTS chat
+    registrations whose ``source_id`` differs from
+    ``source_type`` — but pre-existing misconfigured sources pass
+    silently until re-registered, per the A7.2 forward-looking
+    gate). Filtering by adapter type is the only design that
+    covers both canonical and pre-existing custom source_ids.
+
+    Prefix-match mechanism (council rework iteration 2, REQUIRED 3
+    round-2 fix — INSTR pivot was incorrect on PostgreSQL):
+    ``SUBSTR(source, 1, LENGTH(source_id || ':'))
+        = source_id || ':'``. SUBSTR + LENGTH are native on
+    BOTH PG and SQLite; the predicate is byte-for-byte prefix
+    equality with zero LIKE-metachar semantics.
+
+    Why SUBSTR/LENGTH and not INSTR (round-1 fix REJECTED):
+      * PG probe 2026-10-04 (psql 16.15 → PostgreSQL 16.15,
+        dev DB ensemble_dev, installed extensions = {plpgsql}
+        only, orafce NOT installed) shows
+        ``SELECT INSTR(...) → ERROR: function instr(unknown,
+        unknown) does not exist``. ``pg_proc`` search for
+        ``proname='instr'`` returns 0 rows.
+      * PG natives for substring-position lookup are
+        ``strpos(string, substring)`` and ``position(substring
+        IN string)``. ``INSTR`` is an Oracle / SQLite / Teradata
+        function, NOT a PG native. My round-1 docstring claim
+        "PG has had instr since 7.x" is factually false — the
+        round-1 INSTR pivot broke PG prod (every chat-pool
+        claim would crash with "function does not exist", the
+        starvation bug returns as a crash). The 14/14 green
+        pins run on SQLite (which DOES have instr) and could
+        not surface this — cross-backend probe was missing
+        from round 1.
+      * STRPOS is rejected as the SQLite back-end does NOT
+        expose it (no STRPOS builtin; only ``instr`` and
+        ``substr``). Same portability problem as INSTR but
+        reversed.
+
+    Why SUBSTR/LENGTH and not LIKE-with-ESCAPE (REJECTED
+    alternative):
+      * LIKE treats ``_`` and ``%`` as metachars regardless of
+        ESCAPE clauses. The Pydantic validator at
+        ``daemon/routers/sources.py`` admits
+        ``^[a-zA-Z0-9_-]+$`` — so ``_`` is a valid character
+        in a registered source_id. A registered source_id
+        ``telegram_bot`` would over-match ``telegramXbot:user3``
+        under the original ``source LIKE source_id || ':%'``
+        predicate (LIKE ``_`` matches any single character).
+      * ESCAPE '\\' + escaping at registration time leaves the
+        LIKE-metachar problem in two places (validator +
+        filter) — SUBSTR/LENGTH has zero metachar semantics
+        so it is the durable primitive.
+
+    Predicate shape (portable on PG and SQLite, PG-probe
+    verified 2026-10-04)::
 
         EXISTS (SELECT 1 FROM message_queue
+                JOIN source_configs
+                  ON SUBSTR(message_queue.source, 1,
+                            LENGTH(source_configs.source_id || ':'))
+                     = source_configs.source_id || ':'
                 WHERE message_queue.message_id = task.message_id
-                  AND (message_queue.source LIKE 'telegram:%'
-                       OR message_queue.source LIKE 'slack:%'
-                       OR message_queue.source LIKE 'discord:%'))
+                  AND source_configs.source_type IN ('telegram','slack','discord'))
 
-    Prefix semantics: the tuple members already carry the trailing
-    colon, so ``p + %`` is the wildcard form (D1 reviewer F1 — a bare
-    ``LIKE 'telegram:'`` would be exact-match and silently match
-    nothing). Correlated on the candidate row's ``message_id`` (a PK
-    probe into ``message_queue``; ``source`` is a residual filter on
-    the already-fetched row — NO index migration per D1/A1.3). LIKE
-    case-sensitivity: PG is case-sensitive by default; SQLite is
-    case-insensitive for ASCII unless ``PRAGMA case_sensitive_like =
-    ON`` is issued — the test harnesses issue the PRAGMA (F9) so
-    fixture behavior matches PG.
+    * ``source_id || ':'`` is the prefix we want to match —
+      the trailing ``:`` ensures we match the source_id
+      exactly (not arbitrary substrings; a source_id of ``bot``
+      would NOT match ``other-bot:user`` because the ``:``
+      follows the source_id boundary).
+    * ``SUBSTR(source, 1, LENGTH(prefix))`` returns the
+      leftmost N characters of ``source`` where N is the
+      length of the prefix. If ``source`` is shorter than N,
+      SUBSTR returns ``source`` itself (per SQL standard) —
+      the equality check fails because the returned value is
+      shorter than the prefix.
+    * Equality check is byte-for-byte, zero metachar
+      semantics. LIKE-with-`_` would over-match
+      ``telegramXbot:user3`` against prefix
+      ``telegram_bot:``; SUBSTR/LENGTH rejects it because
+      the leftmost 12 chars of ``telegramXbot:user3`` are
+      ``telegramXbot`` (not ``telegram_bot``).
+    * PG-probe-verified on PostgreSQL 16.15 (no instr /
+      orafce present) — see the commission's REQUIRED 3
+      probe evidence. SQLite-behavior pinned in
+      ``tests/job_queue/test_chat_pool_starvation_pins.py::
+      test_chat_lane_underscore_explicit_substr_check``.
+    * ``source_configs.source_type IN (...)`` is the SAME
+      derivation used by ``routers/sources.py:174`` —
+      ``{prefix.rstrip(":") for prefix in CHAT_SOURCE_PREFIXES}``
+      — single source of truth shared between the lane and the
+      registration gate.
+    * No ``deleted_at`` filter — ``source_configs`` has no
+      soft-delete column; the lifecycle is
+      ``enabled=True/False`` + ``status`` (see
+      ``daemon/repositories/source/models.py``).
+
+    Pre-existing behavior preserved: if a message_queue row has
+    no matching source_configs row (legacy / pre-registration),
+    the JOIN produces empty and the chat lane does NOT pick it
+    up. The default lane (with ``is_chat_lane_active()`` True)
+    excludes it via the NOT-EXISTS clause, so such rows must
+    either wait for source_configs registration OR until
+    chat-lane-active is False (fail-open path). This matches the
+    original fail-closed semantic on disabled sources.
+
+    LIKE case-sensitivity note: SUBSTR / LENGTH equality is
+    case-sensitive on both PG and SQLite (LIKE's case-
+    sensitivity quirk is irrelevant here — SUBSTR is the
+    primitive now). The deployment's source_ids are
+    canonical-lowercase so case-sensitivity is correct-by-
+    design; the ``is_chat_source`` helper at
+    ``daemon/constants.py:843`` remains a separate code path
+    for legacy surfaces that still rely on LIKE.
     """
-    like_clauses = " OR ".join(
-        f"message_queue.source LIKE '{prefix}%'" for prefix in CHAT_SOURCE_PREFIXES
+    chat_types_sql = ", ".join(
+        f"'{prefix.rstrip(':')}'"  # tuple members carry the trailing
+        # colon (``telegram:``); strip it for the source_type
+        # column which has no colon.
+        for prefix in CHAT_SOURCE_PREFIXES
     )
     return (
         "EXISTS ("
         "SELECT 1 FROM message_queue "
+        # SUBSTR/LENGTH prefix equality — see docstring
+        # (LIKE-wildcard exposure; INSTR/STRPOS rejected).
+        "JOIN source_configs "
+        "  ON SUBSTR(message_queue.source, 1, "
+        "      LENGTH(source_configs.source_id || ':')) "
+        "     = source_configs.source_id || ':' "
         "WHERE message_queue.message_id = task.message_id "
-        f"AND ({like_clauses}))"
+        f"AND source_configs.source_type IN ({chat_types_sql})"
+        ")"
     )
 
 
@@ -2572,35 +2682,96 @@ class TaskRepository:
                         -- (one RUNNING task per instance) still applies
                         -- — that is the only invariant reports need.
                         --
-                        -- D13: the previous ``j.job_type = 'message'``
-                        -- filter inside this subquery is removed —
-                        -- messages no longer create ``JobItem`` rows
-                        -- (see InstanceMessagingService.enqueue_message).
-                        -- The subquery now checks for ANY processing
-                        -- ``JobItem`` for the instance; after D13 these
-                        -- are exclusively TASK-type dispatch-queue jobs,
-                        -- so blocking on them is correct (they drive
-                        -- instance spawn + message enqueue and must
-                        -- complete before a second message can be
-                        -- processed for the same instance).
+                        -- claim-gate-sibling-deadlock fix
+                        -- (2026-10-04): the ``j.job_type != 'message'``
+                        -- filter is added BACK to the subquery's
+                        -- WHERE clause. Two rapid external messages
+                        -- to the same instance each mint a
+                        -- ``job_type='message'`` JobItem mirror
+                        -- (``daemon/services/instance_messaging.py:2648-2666``
+                        -- — verified at v0.16.12) AND a backing Task
+                        -- row. The previous guard (which scoped to
+                        -- any ACTIVE JobItem for the instance)
+                        -- therefore saw the SIBLING message-JobItem
+                        -- as evidence of in-flight work and
+                        -- blocked the second Task's claim forever —
+                        -- the worker pool's claim path returned None,
+                        -- both message-JobItems sat ACTIVE, the
+                        -- per-instance parallel-queue slot allowed
+                        -- multiple ACTIVE rows, and the queue would
+                        -- wedge. Excluding message-type JobItems from
+                        -- the blocking set removes the self-induced
+                        -- sibling deadlock.
+                        --
+                        -- SAFETY ARGUMENT — this relaxation CANNOT
+                        -- create concurrent same-instance turns:
+                        -- the per-instance RUNNING-task guard
+                        -- already serializes at the Task layer (one
+                        -- ``status='running'`` task per instance).
+                        -- A TASK-type JobItem still blocks per the
+                        -- original D13 invariant — only the
+                        -- message-mirror sibling protection is
+                        -- invalidated. Per-instance belt at
+                        -- ``daemon/services/job_queue_service.py:start_job``
+                        -- — start_job declines message jobs whose
+                        -- instance holds another ACTIVE message
+                        -- JobItem — provides defense-in-depth so the
+                        -- JobItem-level invariant (at most one ACTIVE
+                        -- message JobItem per instance) holds, and
+                        -- FIFO ordering via the queue-awareness gate
+                        -- keeps the second task held back until the
+                        -- first turn completes.
                         task_type != :process_message_type
                         OR instance_id NOT IN (
                             SELECT j.instance_id FROM job_queue_items j
                             LEFT JOIN instances i ON j.instance_id = i.instance_id
-                            -- Phase 3 admission-decision migration: filter on
-                            -- admission_state IN ('queued', 'active') instead of
-                            -- ``status = 'processing'``. The legacy predicate
-                            -- excluded PAUSED jobs even though they still hold
-                            -- the lock (admission_state='active' under the new
-                            -- model — see Plan §8.1 / ``paused`` admission handling).
-                            -- The IN-list also covers the B1 single-transaction
-                            -- window where a job briefly sits in
-                            -- admission_state='queued' while its lock is held
-                            -- (mirrors ``_ACTIVE_JOB_IDS_SUBQUERY`` in
-                            -- lock_repository.py).
+                            -- claim-gate-sibling-deadlock fix
+                            -- (iteration 3, council rework round 3,
+                            -- REQUIRED 3 round-2): the round-1
+                            -- unconditional ``j.job_type != 'message'``
+                            -- filter is REPLACED with a
+                            -- STATE-DISCRIMINATED NOT EXISTS clause.
+                            -- The discriminator (audited in T2): the
+                            -- backing task's STATE, not job_type
+                            -- alone. Two shapes:
+                            --   (a) original deadlock: message JobItem
+                            --       with backing Task PENDING
+                            --       (sibling-mirror queued state, NOT
+                            --       genuine in-flight work) -> exclusion
+                            --       fires (backing Task with matching
+                            --       work_id is PENDING) -> no block
+                            --       -> claim proceeds -> drain in order
+                            --   (b) regression case: message JobItem
+                            --       with backing Task PAUSED or RUNNING
+                            --       (genuine in-flight work; the
+                            --       per-instance RUNNING-only guard
+                            --       does not cover PAUSED) -> exclusion
+                            --       does NOT fire (backing Task is not
+                            --       PENDING) -> helper's blocking
+                            --       predicate holds -> claim blocked
+                            -- Pin evidence:
+                            --   * tests/job_queue/test_claim_gate_sibling_deadlock_pins.py::test_two_rapid_messages_both_drain_in_order
+                            --     (case a: backing Tasks PENDING -> drain in order)
+                            --   * tests/test_report_lane_phase2.py::test_process_message_blocked_by_cross_system_guard
+                            --     (case b: backing Task PAUSED -> claim blocked)
+                            -- Literal ``'message'`` is the value stamped at
+                            -- ``daemon/services/instance_messaging.py:2661``
+                            -- (``job_type="message"``) -- the ONLY place
+                            -- a JobItem is born as a message mirror
+                            -- (audit-verified at v0.16.12). Same change
+                            -- applied to has_pending_tasks_blocked_by_busy_instance
+                            -- below (mirror site per FOLD-IN 5).
                             WHERE j.admission_state IN {active_admission_states_sql()}
                               AND j.instance_id IS NOT NULL
                               AND j.deleted_at IS NULL
+                              AND NOT (
+                                j.job_type = 'message'
+                                AND EXISTS (
+                                    SELECT 1 FROM task t_pending_mirror
+                                    WHERE t_pending_mirror.work_id = j.job_id
+                                      AND t_pending_mirror.status = 'pending'
+                                )
+                              )
                               -- Self-deadlock fix (2026-08-02): exclude the candidate task's
                               -- own row from the in-flight check — otherwise the guard
                               -- matches the task being claimed and blocks it forever.
@@ -3619,6 +3790,17 @@ class TaskRepository:
         ``claim_pending_task``. JobItems block only when their backing Task is
         PENDING, RUNNING, or PAUSED; the reconciler owns orphan cleanup. The
         WAITING_CHILDREN exception remains part of the shared predicate.
+
+        claim-gate-sibling-deadlock (council rework 2026-10-04,
+        FOLD-IN 5): the JobItem subquery now excludes
+        ``job_type='message'`` to MATCH the ``claim_pending_task``
+        predicate. Without this exclusion the diagnostic would
+        over-report "blocked by busy instance" for any instance
+        holding ACTIVE message JobItems (the same production
+        trigger the claim-gate relaxation fixed). Drift-trap
+        fix — today the impact is diagnostics-only; tomorrow a
+        consumer could gate recovery on this and reintroduce
+        the deadlock via a different route.
         """
         with self.engine.begin() as conn:
             stmt = text(f"""
@@ -3644,9 +3826,36 @@ class TaskRepository:
                             -- covers the B1 single-transaction window.
                             -- See ``_ACTIVE_JOB_IDS_SUBQUERY`` in
                             -- lock_repository.py for the canonical form.
+                            -- claim-gate-sibling-deadlock (council rework
+                            -- iteration 3, 2026-10-04, FOLD-IN 5): the
+                            -- round-1 unconditional
+                            -- ``j_running.job_type != 'message'``
+                            -- filter is REPLACED with the same
+                            -- STATE-DISCRIMINATED NOT EXISTS clause
+                            -- as the claim_pending_task cross-system
+                            -- guard above. Discriminator (audited in
+                            -- T2): the backing task's STATE, not
+                            -- job_type alone. Message JobItems with
+                            -- backing Task PENDING (sibling-mirror
+                            -- queued state) are excluded; backing
+                            -- Task PAUSED/RUNNING (genuine in-flight
+                            -- work) are NOT excluded. Drift-trap fix:
+                            -- the diagnostic no longer over-reports
+                            -- "blocked by busy instance" for any
+                            -- instance holding ACTIVE message
+                            -- JobItems whose backing task is the
+                            -- sibling-mirror PENDING shape.
                             WHERE j_running.admission_state IN {active_admission_states_sql()}
                               AND j_running.instance_id = t_pending.instance_id
                               AND j_running.deleted_at IS NULL
+                              AND NOT (
+                                j_running.job_type = 'message'
+                                AND EXISTS (
+                                    SELECT 1 FROM task t_pending_mirror_running
+                                    WHERE t_pending_mirror_running.work_id = j_running.job_id
+                                      AND t_pending_mirror_running.status = 'pending'
+                                )
+                              )
                               -- Self-deadlock fix (2026-08-02): exclude the outer pending
                               -- task's own row from the in-flight check — otherwise the
                               -- guard matches the pending task's own backing JobItem

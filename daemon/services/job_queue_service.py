@@ -4245,7 +4245,79 @@ class JobQueueService:
             instance_id = job.instance_id  # preserve existing target
         else:
             instance_id = str(uuid.uuid4())  # fresh for new task instances
-        
+
+        # claim-gate-sibling-deadlock BELT (2026-10-04): when a
+        # message-type JobItem targets an instance that already holds
+        # another ACTIVE message JobItem, decline to start this one.
+        # Defense-in-depth for the cross-system guard relaxation at
+        # ``daemon/repositories/task/repository.py`` (which now excludes
+        # message-type JobItems from the blocking set so the
+        # claim-gate sibling deadlock cannot recur). Without the belt,
+        # two rapid external messages to the same instance would both
+        # flip to ACTIVE; per-instance serialization then happens at
+        # the Task layer (the per-instance RUNNING-task guard) — which
+        # works, but the belt enforces the stronger JobItem-level
+        # invariant (at most one ACTIVE message JobItem per instance)
+        # so the second message JobItem stays in QUEUED where the
+        # queue-awareness gate holds its backing Task back in strict
+        # FIFO order. When the first JobItem goes to DONE, the second
+        # can start and the existing per-instance Task guard will
+        # serialize its claim.
+        #
+        # FILTER SCOPE (council rework 2026-10-04, REQUIRED 1):
+        # the helper filters on ``admission_state == 'active'`` ONLY
+        # — NOT ``ACTIVE_ADMISSION_STATES = {queued, active}``.
+        # Including ``queued`` reproduces the exact production
+        # deadlock at ADMISSION: two rapid messages both land
+        # ``queued`` before the dispatch loop admits either; the
+        # FIFO-head sees the second as a "queued in-flight"
+        # sibling, declines its own admission, and the second is
+        # never attempted. ACTIVE-only preserves the contract:
+        # FIFO-head admits, successor declines while predecessor
+        # ACTIVE, observer + poll re-admit after DONE.
+        #
+        # TASK-type JobItems are intentionally excluded from the
+        # belt. SCOPE ASSUMPTION (council rework 2026-10-04,
+        # FOLD-IN 7): TASK-type JobItems ALWAYS mint a fresh
+        # ``instance_id`` (the ``str(uuid.uuid4())`` call below in
+        # the ``else`` branch at line ~4247 — they spawn a NEW
+        # instance per job). Therefore a TASK job CANNOT collide
+        # per-instance with another active TASK job at admission
+        # time — there is no prior TASK-JobItem on this instance
+        # to collide with. The belt is message-only by design.
+        # If TASK jobs ever gain a path to share an instance_id
+        # (e.g. targeting an existing instance for re-processing),
+        # the belt must be extended at that point.
+        if (
+            job.job_type == "message"
+            and job.instance_id
+        ):
+            try:
+                sibling = await asyncio.to_thread(
+                    self._repository.find_active_message_job_for_instance,
+                    job.instance_id,
+                    exclude_job_id=job_id,
+                )
+            except Exception as belt_err:
+                logger.warning(
+                    f"start_job: belt lookup failed for message "
+                    f"job {job_id[:8]}... on instance "
+                    f"{job.instance_id[:8]}...: {belt_err!r} — "
+                    f"falling through (per-instance Task guard still "
+                    f"serializes)."
+                )
+                sibling = None
+            if sibling is not None:
+                logger.info(
+                    f"start_job: message job {job_id[:8]}... "
+                    f"DEFERRED — sibling ACTIVE message job "
+                    f"{sibling.job_id[:8]}... already drives "
+                    f"instance {job.instance_id[:8]}... "
+                    f"(claim-gate-sibling-deadlock belt; FIFO "
+                    f"re-evaluated next cycle)"
+                )
+                return None
+
         # [TRACE] Log instance_id being used
         logger.info(
             f"[TRACE] start_job: using instance_id={instance_id[:8]}... "
