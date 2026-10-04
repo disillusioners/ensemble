@@ -8,13 +8,14 @@ Prove the feature end-to-end on the REAL demo daemon (port 7979, `~/agents-ensem
 
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
-| 5.1 | Pre-flight: verify P4 gates green; deploy the feature branch to demo per the demo install's own release procedure (`~/agents-ensemble-demo/` — releases/ + `current` + `launcher.sh` observed on disk; CONFIRM the exact deploy+restart commands at execution time — drift rule, trap #3). Confirm demo `.env` does NOT set `ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART=0` (default ON). Snapshot "before" state: instance list + statuses, tail of demo daemon log with boot marker | 4.x | Demo boots the feature branch; log shows `AutoContinue boot pass: ContinueResult(...)` line at boot; before-state captured to the evidence file |
+| 5.1 | Pre-flight: verify P4 gates green; **deploy the feature branch to demo from the worktree** (Δ7 / D20) — the worktree's source-of-truth is the implementation HEAD; deploying from the main checkout (which has a stale or absent feature branch checkout) silently deploys old code. **Worktree gate (M23) reconfirmed before deploy:** `git -C ../ensemble-src-wt-auto-continue rev-parse --abbrev-ref HEAD` = `feature/auto-continue-running-after-restart`; the deployed commit hash matches the worktree's HEAD. Verify demo deploys per the demo install's own release procedure (`~/agents-ensemble-demo/` — releases/ + `current` + `launcher.sh` observed on disk; CONFIRM the exact deploy+restart commands at execution time — drift rule, trap #3). Confirm demo `.env` does NOT set `ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART=0` (default ON). Snapshot "before" state: instance list + statuses, tail of demo daemon log with boot marker | 4.x | Demo boots the feature branch (commit recorded, worktree verified); log shows `AutoContinue boot pass: ContinueResult(...)` line at boot; before-state captured to the evidence file |
 | 5.2 | Scenario setup: dispatch a leader-dev workflow via the demo chat/API: the leader MUST (a) delegate ≥1 child task, and (b) the child's task = sleep ~120 s (bash `sleep 120`) THEN output "hello" (long-sleep+say-hello). Wait until observed state: parent instance `WAITING_CHILDREN` (or bus pending-count >0 for the parent — bus count is authoritative, status string cosmetic), child instance `RUNNING` mid-sleep | 5.1 | Observed + recorded: parent parked (WC), child RUNNING, child's Task row status='running', timestamped in evidence file. (If the leader resolves before the sleep ends, re-dispatch with a longer sleep — the state that matters is child RUNNING + parent WC simultaneously) |
 | 5.3 | Restart the demo daemon MID-WORK (while the child sleeps): stop + start via the demo install's own mechanism. Record restart timestamps (t_stop, t_boot). Confirm the boot log shows: `AutoContinue boot pass` line with `candidates≥1`, one `[BOOT_CONTINUE]` line for the child instance, and NO `[BOOT_CONTINUE]` for the parent (WC skip) | 5.2 | Child auto-continued: no manual ping sent between t_stop and hello delivery; boot log evidence lines captured verbatim with timestamps |
 | 5.4 | Verify the continued turn completes: the child finishes sleep+hello from CHECKPOINT (not a re-run from scratch — the sleep does not restart from 0; verify via message timestamps: total child wall-clock ≈ remaining sleep, and/or checkpoint-msg-count continuity in the `[RESUME] has_checkpoint` log line), the hello message arrives at the originating chat | 5.3 | Hello delivered; ZERO manual pings in the transcript between restart and hello; checkpoint-continuity evidence captured |
 | 5.5 | AC3 E2E leg — child completion report wakes the parked parent: after the child's turn terminalizes, observe the parent: `dependency_watchers` FIRED → report enqueued → parent processes the PROCESS_REPORT task and resumes (bus-owned path, `dependency_bus.py:1499-1560` boot re-arm + durable fire). Parent wakes and produces its synthesis WITHOUT any manual message | 5.4 | Parent wakes from the child report alone; log evidence: bus start recovery line at boot + watcher fire + parent resume; timestamps show parent wake AFTER child terminal |
 | 5.6 | No-lost/no-duplicated audit: count reports and turns — exactly ONE hello, exactly ONE child completion report processed by the parent, exactly one `[BOOT_CONTINUE]` for the child, zero `already_resuming` log lines, zero duplicate MessageQueue `internal_report:{child}:*` rows for the same msg, zero double parent wake | 5.5 | All counts exact; any deviation = FAIL with forensic capture (do not hand-wave; report actual) |
 | 5.7 | Evidence bundle + report: write `.agents/tester/RESULTS/2026-MM-DD-auto-continue-demo-e2e.md` (implementation lane, tester conventions) with: before/after instance-state tables, restart timestamps, verbatim boot-pass log lines, hello-delivery proof, parent-wake proof, count audit, demo daemon version/commit (`git log -1` of the deployed release), pass/fail verdict per AC1/AC3/AC8. Link from the implementation PR description | 5.6 | Evidence file exists, complete, and every AC8 assertion has a timestamped artifact behind it |
+| 5.8 | **(Δ3 / D24 — escalation observation, NEW)** After the demo E2E happy-path completes, observe the continued turn's wall-clock duration (timestamped from `[BOOT_CONTINUE]` line to the orphan's COMPLETED status). Record in the evidence file: observed turn duration vs the 10-min STR threshold. **Escalation flip-condition (leader-ratified):** if continued turns **routinely exceed 10 min** in this E2E OR in subsequent LIVE observation → R20 escalates from 🟡 to 🔴, the `last_heartbeat_at` stamp in the CAS transaction becomes MANDATORY (currently a SHOULD in D24, DEFERRED in implementation), and a new D-addendum records the promotion. Single-occurrence long turn = acceptable noise; persistent >10-min pattern = trigger the escalation | 5.7 | Evidence file records the observed turn duration + a one-line escalation verdict ("NO ESCALATION" if <10 min, "ESCALATE — heartbeat stamp mandatory" if ≥10 min and recurring); an explicit PASS or FAIL measurement is recorded with artifact reference |
 
 ## Scenario Outline (runnable)
 
@@ -51,9 +52,10 @@ grep ENSEMBLE_AUTO_CONTINUE /home/nea/agents-ensemble-demo/.env || echo "default
 
 ## Coupling
 
-- **Depends on P1-P4 complete** (feature deployed + gates green).
+- **Depends on P0-P4 complete** (worktree verified, gates green, feature deployed from the worktree).
 - **Black-box + logs** — no new test code; exercises the REAL stack (LangGraph checkpoint, PG/SQLite on demo, bus, wake lanes).
 - **AC3 leg** — 5.5 is the mandatory E2E proof that the bus-owned WC wake survives restart with the feature shipping alongside it.
+- **Δ3 escalation observation (D24)** — 5.8 records the turn-duration measurement that triggers or doesn't trigger the heartbeat-stamp escalation. The observation is a one-line escalation verdict in the evidence file; the verdict feeds the follow-up ticket if ESCALATE fires.
 
 ## Risks
 
@@ -61,6 +63,7 @@ grep ENSEMBLE_AUTO_CONTINUE /home/nea/agents-ensemble-demo/.env || echo "default
 - **Demo deploy mechanics drift**: the demo install's stop/start path must be confirmed at execution time (trap #3). Mitigation: inspect `launcher.sh` + releases layout first; never guess.
 - **Restart during the wrong phase**: restarting during the LEADER's own turn (not the child's) tests the parent-continue leg instead. Mitigation: poll for child-RUNNING + parent-WC BEFORE t_stop; if the leader itself is RUNNING, that is ALSO a valid AC1 observation — record which leg fired.
 - **Demo data safety**: demo is NON-live; still, capture a pre-run DB copy (`cp` the demo data dir) so the audit can be re-queried without re-running.
+- **Worktree source-of-truth (Δ7 / D20 / R21)**: deploying from the main checkout (which lacks the feature branch checkout or has a stale one) silently deploys old code. Mitigation: 5.1's worktree-gate re-verification before deploy; deploy the worktree's HEAD, not the main checkout's HEAD.
 
 ## AC Mapping
 
@@ -69,6 +72,7 @@ grep ENSEMBLE_AUTO_CONTINUE /home/nea/agents-ensemble-demo/.env || echo "default
 - **AC1** — 5.3/5.4 (RUNNING auto-continue; PAUSED untouched is unit-pinned in P3 and observable here if any PAUSED instance exists on demo — record its state as unchanged).
 - **AC5** — 5.6 (no duplicates across a real restart).
 - **AC6** — implicit: boot completed and listener came up with the pass in the lifespan (boot log ordering).
+- **AC7** — 5.1 worktree-gate re-verification + 5.7 evidence file under `.agents/tester/RESULTS/`.
 
 ## Rollback Note
 

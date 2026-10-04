@@ -45,35 +45,39 @@ Testable completion sentence: a RUNNING instance whose daemon dies mid-turn resu
 |---|---|
 | `daemon/repositories/task/models.py` | +1 nullable `datetime` field `auto_continued_at` |
 | `daemon/migrations/versions/20261004_000001_add_task_auto_continued_at.sql` | NEW — SQLite migration (template: `20260606_000001_add_task_last_heartbeat_at.sql`) |
-| `daemon/manager.py` | +1 entry in `_ensure_postgres_columns` (PG column-ensure path, `IF NOT EXISTS`) |
-| `daemon/repositories/task/repository.py` | +2 methods: `find_auto_continue_candidates(boot_epoch)`, `mark_task_auto_continued(task_id, boot_epoch)` |
-| `daemon/services/auto_continue_boot_pass.py` | NEW — the boot pass (MUST carry `from __future__ import annotations` — venv is CPython 3.13) |
+| `daemon/manager.py` | +1 entry in `_ensure_postgres_columns` (PG column-ensure path, `IF NOT EXISTS`) — existing. **(Δ1 / D18) NEW:** surgical terminalizer call in `_resume_processing_background`'s success branch (verified anchor: `:11666-11697`, the orphan-success-branch docstring); calls `complete_task` by work_id via a new helper (`find_task_id_by_work_id` or extended `find_paused_or_cancellable_turn`); guarded by `WHERE status='running'` (`repository.py:2803`) — no-op for cascade/worker shapes |
+| `daemon/repositories/task/repository.py` | +2 methods: `find_auto_continue_candidates(boot_epoch)` (Δ4 / D21: full instance-status exclusion set + `cancel_requested=False`), `mark_task_auto_continued(task_id, boot_epoch)` |
+| `daemon/services/auto_continue_boot_pass.py` | NEW — the boot pass (MUST carry `from __future__ import annotations` — venv is CPython 3.13). **(Δ2 / D19)** epoch-None SKIP + WARNING branch. **(Δ4 / D21)** >1-candidate log-skip defense. **(Δ5 / D22)** 5-resumes / 2s stagger + counter/histogram metrics. **(Δ1 / D18)** module docstring documents the guard-release mechanism (fail_task for failure, terminalizer for success) and the no-heartbeat window (D24). **(Δ7 / D20)** worktree gate is upstream (P0), NOT in this file |
 | `daemon/api.py` | +~20 lines at `:1522`: envelope-wrapped boot-pass call + INFO log |
-| `tests/unit/services/test_auto_continue_boot_pass.py` | NEW — unit/integration corpus |
-| `tests/unit/repositories/test_auto_continue_candidates.py` | NEW — selection/CAS SQL tests |
+| `tests/unit/services/test_auto_continue_boot_pass.py` | NEW — unit/integration corpus (M18 terminalizer, M19 epoch-None skip, M21 >1-candidate log-skip, M22 stagger+metrics) |
+| `tests/unit/repositories/test_auto_continue_candidates.py` | NEW — selection/CAS SQL tests (now with explicit `cancel_requested=False` + full exclusion set per D21) |
+| `tests/unit/services/test_auto_continue_interleaving.py` | NEW — 6-row interleaving matrix (architecture-recommendation.md Focus 3, cited by row); Δ1 complement test in 3.3 |
 | `test/packs/auto_continue_boot_pass_unit_test.sh` | NEW — pack wrapper (mirror `post_restart_arm_notify_sweep_unit_test.sh`) |
 | `test/packs/auto_continue_interleaving_unit_test.sh` | NEW — AC4 pinning pack wrapper |
+| `tests/conftest_worktree.py` (or extension to existing conftest) | NEW (Δ7 / D20) — pytest fixture that fails LOUDLY if `import daemon` resolves outside the worktree |
+| `.agents/shared/planning/auto-continue-running-after-restart/worktree-claim.txt` | NEW (Δ7 / D20) — worktree path + branch receipt from Phase 0 task 0.4 |
 
-No changes to: `instance_messaging.py`, `dependency_bus.py`, `stale_task_recovery.py`, `task_processor.py`, `graph.py`, `upgrade_journal*.py` (consumed read-only).
+No changes to: `instance_messaging.py`, `dependency_bus.py` (start `:1499`; helpers `:1804/:1839/:1896` per D23), `stale_task_recovery.py`, `task_processor.py`, `graph.py`, `upgrade_journal*.py` (consumed read-only). **`manager.py`'s resume internals** were originally listed here; **D18 amends** that — the surgical terminalizer touch is load-bearing for AC4 success-path coverage (D18 / R19).
 
 ## Phases
 
 | Phase | Name | Objective | Tasks | Coupling | ACs | Status |
 |-------|------|-----------|-------|----------|-----|--------|
-| 1 | Schema + CAS column & repository | `task.auto_continued_at` exists on both drivers; selection + CAS repo methods land behind tests | 6 | tight with P2 (repo method signatures are P2's contract) | AC5 | pending |
-| 2 | Boot continue-pass service + wiring + kill-switch | The pass exists, is wired at `api.py:1522`, kill-switch works, three-layer never-wedge | 7 | tight with P1 (repo calls), tight with P3 (placement is the ordering mechanism) | AC1, AC2, AC6, AC9 | pending |
-| 3 | Coexistence ordering + pinning | AC4 interleaving proven: wake FIFO-behind continued turn; wrong-order lock-out test | 5 | tight with P2 (consumes the real placement + real claim-guard) | AC4, AC1 (PAUSED carve-out) | pending |
-| 4 | Tests, packs, gates | Full unit/integration matrix packed; pack SPECS realized as pack files; full-dir gate + cascade e2e green | 6 | loose with P3 (wraps its tests into packs), independent of P5 | AC7 | pending |
-| 5 | Demo E2E + evidence | AC8 real-environment proof on demo (port 7979) with captured evidence bundle | 7 | depends on P1-P4 complete; loose coupling (black-box + logs) | AC8, AC3 (E2E leg) | pending |
+| **0** | **Dedicated worktree + fresh uv venv + import-resolution gate (Δ7 / D20)** | Implementation + E2E lanes run in `../ensemble-src-wt-auto-continue` with `import daemon` resolving INSIDE the worktree | 4 | Precondition for P1-P5; independent of code | AC7 (gate), AC9 (lane discipline) | pending |
+| 1 | Schema + CAS column & repository | `task.auto_continued_at` exists on both drivers; selection (Δ4 hardened) + CAS repo methods land behind tests | 7 (was 6; +1.7 Δ4 hardening) | tight with P2 (repo method signatures are P2's contract) | AC5, AC1 (Δ4 full exclusion + `cancel_requested`) | pending |
+| 2 | Boot continue-pass service + wiring + kill-switch | The pass exists, is wired at `api.py:1522`, kill-switch works, three-layer never-wedge, **(Δ1)** `manager.py:11666-11697` surgical terminalizer, **(Δ2)** epoch-None SKIP + WARNING, **(Δ5)** 5/2s stagger + counter/histogram metrics | 8 (was 7; +2.8 terminalizer; Δ2/Δ5 fold into existing 2.2/2.3) | tight with P1 (repo calls), tight with P3 (placement), **NEW: tight with `manager.py` resume internals (D18 surgical touch)** | AC1, AC2, AC4 (Δ1 extends), AC6 (Δ2 extends), AC9, AC5 | pending |
+| 3 | Coexistence ordering + pinning | AC4 **6-row interleaving matrix** pinned (rows 1-6 per architecture-recommendation.md Focus 3): WS→CP, CP→late-WS, WS→CP→fail, WS→CP→**success** (Δ1 row), STR mid-flight (Δ3 doc row), epoch-None (Δ2 row); wrong-order lock-out test; Δ1 complement regression test | 5 | tight with P2 (consumes the real placement + real claim-guard + Δ1 terminalizer) | AC4, AC1 (PAUSED carve-out + `cancel_requested` per Δ4), AC5 (Δ1 complement), AC6 (Δ2 row 6) | pending |
+| 4 | Tests, packs, gates | Full unit/integration matrix packed; pack SPECS realized as pack files; full-dir gate + cascade e2e per the 2026-10-03 precedent; **(Δ7)** worktree-gate fixture (M23) | 7 (was 6; +4.7 worktree-gate assertion) | loose with P3 (wraps its tests into packs), independent of P5, **precondition from P0** | AC7 | pending |
+| 5 | Demo E2E + evidence | AC8 real-environment proof on demo (port 7979) with captured evidence bundle; **(Δ7)** deploy from worktree; **(Δ3)** escalation observation (5.8) | 8 (was 7; +5.8 escalation flip) | depends on P0-P4 complete; loose coupling (black-box + logs) | AC8, AC3 (E2E leg), AC7 (worktree-gate re-verification) | pending |
 
-**AC traceability:** AC1→P2 (T2.2/T2.4, T2.6) + P3 (T3.4); AC2→P2 (T2.1-T2.3 — orchestration-only audit); AC3→decisions.md D8 + P5 (T5.5-T5.6 E2E proof); AC4→P3 (all); AC5→P1 (T1.4/T1.5) + P2 (T2.5 reboot-loop test); AC6→P2 (T2.6 three-layer isolation tests); AC7→P4 (all); AC8→P5 (all); AC9→P2 (T2.7).
+**AC traceability (Δ-applied):** AC1→P1 (T1.4 Δ4 hardened predicate) + P2 (T2.2/T2.4, T2.6) + P3 (T3.4 carve-outs incl. `cancel_requested`); AC2→P2 (T2.1-T2.3 orchestration-only audit + structural grep-proof); AC3→decisions.md D8 + P5 (T5.5-T5.6 E2E proof); AC4→P3 (T3.2 6-row matrix — row 4 IS the Δ1 success path) + P2 (T2.6 placement) + P2 (T2.8 Δ1 terminalizer); **AC4 extension (Δ1):** the success path is now covered by T3.2 row 4 + T2.8 terminalizer + T3.3 complement regression test; AC5→P1 (T1.4/T1.5/T1.6/T1.7) + P2 (T2.5 reboot-loop test) + P3 (T3.2 row 1 no-double-delivery + T3.3 Δ1 complement); AC6→P2 (T2.6 three-layer isolation tests + T2.2 Δ2 epoch-None SKIP) + P3 (T3.2 row 6); AC7→P4 (all) + P0 (Δ7 worktree gate, precondition row) + P5 (5.1 worktree-gate re-verification); AC8→P5 (all); AC9→P2 (T2.7).
 
-## Boot-Ordering Summary (verified anchors @ cf8efbef)
+## Boot-Ordering Summary (verified anchors @ ce148ad2)
 
 New pass = boot step 27b′, inserted at `daemon/api.py:1522`:
 
 ```
-24. init_dependency_bus (api.py:1306 → dependency_bus.py:1499)   ← AC3 wakes re-arm
+24. init_dependency_bus (api.py:1306 → dependency_bus.py:1499)   ← AC3 wakes re-arm (helpers: _warm_cache :1804 / _recover_fired_unsent :1839 / _sweep_orphan_watchers :1896, D23)
 26. job_processor.start (api.py:1371)                            ← claims QUEUED only
 27a. reconcile_pending_op (api.py:1510)                          ← journal self-heal
 27b. sweep_wake_records (api.py:1521)                            ← pending_wakes delivered (AC4 leg 1)
@@ -83,21 +87,24 @@ New pass = boot step 27b′, inserted at `daemon/api.py:1522`:
 ```
 
 Why this slot (each constraint verified in source):
-- **After bus (24):** a continued turn may spawn children; the bus must already be tracking.
-- **After wake sweep (27b):** the wake's `enqueue_message` lands its PENDING Task row BEFORE the pass schedules the resume → claim-guard (`task.status='running'` orphan) blocks the wake claim deterministically → wake FIFO-behind (AC4). Also matches arm-notify UX: outcome report AFTER the turn finishes.
+- **After bus (24):** a continued turn may spawn children; the bus must already be tracking. Bus helpers re-pinned to `_warm_cache :1804` / `_recover_fired_unsent :1839` / `_sweep_orphan_watchers :1896` per D23.
+- **After wake sweep (27b):** the wake's `enqueue_message` lands its PENDING Task row BEFORE the pass schedules the resume → claim-guard (verified `repository.py:2230-2310` per D23) blocks the wake claim deterministically → wake FIFO-behind (AC4). Also matches arm-notify UX: outcome report AFTER the turn finishes.
 - **Before periodic start (27c):** the tick sees a consistent post-pass state.
 - **Before listener (28):** no user message can race the pass for the same instance's claim-guard; a user message that arrives later simply queues behind per the existing claim path.
-- **NOT inside StaleTaskRecovery (5c):** age-gated steady-state backstop; different blast radius (G8).
+- **StaleTaskRecovery thread (STR):** starts at `pool_orchestrator.py:264-294` (D23-verified), the EARLIEST boot subsystem — NOT a separate ordering constraint. The structural guard is the `boot_epoch` amnesty (`repository.py:3161, :4501`, D23-verified). While the epoch holds, the selection→schedule window has zero STR interference; after the threshold, a continued turn is either terminal (invisible to STR's `status='running'` predicate) or heartbeating (alive) — the miss case is exactly STR's designed job (retry task = checkpoint continuation). **(Δ2 / D19)** on `boot_epoch=None` the pass SKIPS — STR's amnesty clamp vanishes but the pass never started scheduling, so there is no orphan resume to be reaped mid-pass (R22). **(Δ3 / D24)** continued turns are STR-reapable at boot+10 min because the resume path writes no heartbeats; reap = checkpoint retry (idempotent), `retry_count` burn = explicit D6 exception.
 
-## Durable-Idempotency Summary (Option a′ — analysis §A refinement)
+## Durable-Idempotency Summary (Option a′ — analysis §A refinement + Δ-applied)
 
 In-process dedup (`_graph_tasks` `manager.py:506`; `_execution_gate._locks` `execution_gate.py:108-144`) is empty at boot, so a reboot loop is stopped by durable structures only:
 
-1. **Selection** — `find_auto_continue_candidates(boot_epoch)`: `task.status='running' AND task_type IN ('process_message','process_report') AND (auto_continued_at IS NULL OR auto_continued_at < :boot_epoch)` + instance-status exclusion subqueries (PAUSED/terminal/WAITING_CHILDREN excluded). Predicate style mirrors the claim-guard's folded single-statement convention (`repository.py:2230-2294` anti-starvation invariant).
-2. **Per candidate, strictly ordered**: `_has_checkpoint(instance_id)` (`instance_messaging.py:1438`) → `_schedule_explicit_handle_resume(silent=True, target_work_id=work_id, handle_work_id=work_id, selected_suspension_reason=None, route_outcome="boot_continue")` (`manager.py:10915`) → ONLY on `{"status": "resuming"}` → CAS stamp `mark_task_auto_continued(task_id, boot_epoch)`: `UPDATE task SET auto_continued_at=:boot_epoch WHERE id=:id AND status='running' AND (auto_continued_at IS NULL OR auto_continued_at < :boot_epoch)`.
+1. **Selection** — `find_auto_continue_candidates(boot_epoch)` (Δ4 / D21 hardened): `task.status='running'` AND `task.task_type IN ('process_message','process_report')` AND `task.cancel_requested = :cancel_requested_false` AND `(auto_continued_at IS NULL OR auto_continued_at < :boot_epoch)` + instance NOT IN ('paused','terminated','completed','error','failed','waiting_children') (explicit full set, not "PAUSED/terminal/WC"). Predicate style mirrors the claim-guard's folded single-statement convention (`repository.py:2230-2310` anti-starvation invariant, D23-verified). **>1-candidate log-skip** (D21): enforced in the boot service (P2 T2.3), NOT in the repo method — pure-read preservation.
+2. **Per candidate, strictly ordered**: `_has_checkpoint(instance_id)` (`instance_messaging.py:1438`) → `_schedule_explicit_handle_resume(silent=True, target_work_id=work_id, handle_work_id=work_id, selected_suspension_reason=None, route_outcome="boot_continue")` (`manager.py:10915`, D23-verified) → ONLY on `{"status": "resuming"}` → CAS stamp `mark_task_auto_continued(task_id, boot_epoch)`: `UPDATE task SET auto_continued_at=:boot_epoch WHERE id=:task_id AND status='running' AND (auto_continued_at IS NULL OR auto_continued_at < :boot_epoch)`.
 3. **A′ ordering rationale**: stamping AFTER the resume actually scheduled means "marked" ≡ "continued" (no marked-but-never-resumed window). The crash gap that remains (die between schedule and stamp) re-schedules on next boot — safe: `astream(None)` on an advanced checkpoint is idempotent at the LangGraph level, and the ExecutionGate per-instance lock serializes.
-4. **Backstop**: any miss (no checkpoint, schedule refused, CAS failed) is caught by StaleTaskRecovery at boot+10 min (age-gated force-cancel+retry) — unchanged.
-5. **Continue-in-place**: the orphan Task row STAYS `status='running'` — it is the durable proof one driver owns the turn, and it keeps the claim-guard blocking sibling claims (AC4/AC5).
+4. **(Δ2 / D19)** on `boot_epoch=None`: pass SKIPS with WARNING, no DB writes, no scheduling — kills the STR mid-pass reap race (R22); STR's normal age-gated backstop continues to own the orphan.
+5. **(Δ1 / D18)** success-path terminalizer: in `_resume_processing_background`'s success branch (`manager.py:11666-11697`, D23-verified), after `_process_resume_finalize`, call `complete_task` by work_id → `WHERE status='running'` guard (`repository.py:2803`, D23-verified) flips the orphan to COMPLETED → claim-guard opens → pending wake claims FIFO immediately (no STR reap delay on the success path). The guard makes this a **no-op for cascade/worker shapes** (cascade rows are PENDING by then; worker shapes never reach this branch directly).
+6. **(Δ5 / D22)** stagger 5/2s + pass metrics (counter `auto_continue_boot_pass_resumes_total` + histogram `auto_continue_boot_pass_duration_seconds`) bounds the LLM-stampede cost at observed N=33 (~14 s total).
+7. **Backstop**: any miss (no checkpoint, schedule refused, CAS failed, STR mid-flight reap on a >10-min turn) is caught by StaleTaskRecovery at boot+10 min (age-gated force-cancel+retry) — unchanged. Continued turns >10 min are STR-reapable (R20 / D24); reap = checkpoint retry, `retry_count` burn = explicit D6 exception.
+8. **Continue-in-place**: the orphan Task row STAYS `status='running'` — it is the durable proof one driver owns the turn, and it keeps the claim-guard blocking sibling claims (AC4/AC5).
 
 ## Research Insights (shaped this plan)
 
@@ -117,4 +124,18 @@ None that block implementation. The analysis's G1-G8 are all adjudicated as work
 
 ## Reversibility
 
-Drop the column (DOWN migration + remove the `_ensure_postgres_columns` entry), delete the new module, remove the `api.py:1522` block, unset the env var. 4-file change; no data semantics depend on the column (it is advisory-only bookkeeping); behavior reverts to today's StaleTaskRecovery-only backstop. Kill-switch `ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART=0` disables without a code change.
+Drop the column (DOWN migration + remove the `_ensure_postgres_columns` entry), delete the new module, remove the `api.py:1522` block, **revert the Δ1 surgical touch in `manager.py:11666-11697`**, unset the env var. The worktree (`../ensemble-src-wt-auto-continue`) is removable via `git worktree remove`; the `worktree-claim.txt` is removable by deletion. 5-file code change plus planning artifacts; no data semantics depend on the column (it is advisory-only bookkeeping); behavior reverts to today's StaleTaskRecovery-only backstop. **With Δ1 reverted** the orphan success-path returns to its pre-D18 "stranded at success-path" behavior (R19) — STR reaps at boot+10 min instead of immediate FIFO wake. Kill-switch `ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART=0` disables without a code change.
+
+## Plan Revisions (Δ-applied, additive)
+
+This plan was REVISED at 2026-10-04 to fold the architect's validated deltas (architecture-recommendation.md @ `ce148ad2`) into the existing implementation plan, per leader ratifications:
+
+- **Δ1 — Success-path orphan terminalizer (🔴)**: surgical `complete_task` in `_resume_processing_background`'s success branch (`manager.py:11666-11697`); `WHERE status='running'` guard makes it a no-op for cascade/worker shapes. Phase 2 task 2.8 + Phase 3 task 3.2 row 4 + Phase 3 task 3.3 complement regression test. Decisions D18; risk R19.
+- **Δ2 — `boot_epoch=None` SKIP-pass (🔴)**: on capture failure, the pass SKIPS with WARNING (no fallback to aware-datetime — frame mismatch). Phase 2 task 2.2 step (2). Decisions D19; risk R22.
+- **Δ3 — No-heartbeat window documented + optional `last_heartbeat_at` stamp (🟡, SHOULD-DEFERRED)**: module docstring + AC4 narrative rewrite; escalation flip-condition observed in Phase 5 task 5.8. Decisions D24; risk R20.
+- **Δ4 — Selection hardening (🟡)**: full instance-status exclusion set + `cancel_requested=False`; >1-candidate log-skip in service. Phase 1 task 1.4 + 1.7; Phase 2 task 2.3. Decisions D21.
+- **Δ5 — Stagger 5/2s + pass metrics (🟡)**: per-candidate scheduling cadence + counter/histogram. Phase 2 task 2.3. Decisions D22; risk R23.
+- **Δ6 — Anchor re-pins (🟡)**: every execution-lane citation in the plan re-verified at `ce148ad2`; D23 is the verification snapshot. Decisions D23.
+- **Δ7 — Dedicated worktree MANDATE (🔴)**: implementation + E2E lanes run in `../ensemble-src-wt-auto-continue` with fresh uv venv + import-resolution gate. Phase 0 (NEW, precondition); Phase 4 task 4.7 worktree-gate assertion. Decisions D20; risk R21.
+
+Existing D1-D17, R1-R18, and AC traceability are unchanged; D18-D24 and R19-R23 are addenda (ADR/D numbering stable).
