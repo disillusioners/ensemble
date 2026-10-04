@@ -37,7 +37,7 @@ Update the innate `chart` skill and each chart-capable agent's canonical guidanc
 - Changes to chat adapters / image delivery (Phase B's lane).
 - New test files (Phase D's lane).
 - Changes to busy/paused/fallback semantics in the chart skill — keep `_BUSY_STRING`, `_PAUSED_STRING`, and "Wedged-Charter Recovery" section byte-identical.
-- Decision on whether to add a `source_hint` system-context injection (Phase B enrichment candidate, flagged as an open question — Phase C plans the wording, Phase B may own the implementation).
+- Decision on whether to add a `source_hint` system-context injection (Phase B enrichment candidate, flagged as an open question — Phase C plans the wording, Phase B may own the implementation). Close-out (R4): the deferral is NOT open-ended — Phase D's release cut opens the follow-up ticket (deferred-ledger row b).
 
 ---
 
@@ -143,7 +143,7 @@ Each of the 20 gets a one-line cardinal reference. **Phase D's coverage pin #17 
        - `_BUSY_STRING` ("Error: Charter busy; pass fresh=True for parallel charts."): `daemon/tools/chart_tools.py:55` (constant `_BUSY_MSG`) ↔ `tests/test_chart_tools.py:296` (test pin `_BUSY_STRING`) ↔ `agents/_prompt_system/innate-skills/chart/skill.md` (Best Practices + Wedged-Charter Recovery prose).
        - `_PAUSED_STRING` ("Error: Charter is paused; resume it or pass fresh=True for a new charter."): `daemon/tools/chart_tools.py:222` (literal return value) ↔ `tests/test_chart_tools.py:298` (test pin `_PAUSED_STRING`) ↔ `agents/_prompt_system/innate-skills/chart/skill.md` (Wedged-Charter Recovery footnote).
 
-3. **Add cardinal reference to each of the 20 chart-capable agents** (per the table in §Components).
+3. **Add cardinal reference to each of the 20 chart-capable agents** (per the table in §Components). Pre-impl (R4/N1): re-run the meta.json grep and confirm the 20-agent set BEFORE editing — if the count changed, reconcile the plan + Phase D pin #17 first. Read-before-edit (R4/N2): for every cited agent-file line in §Components #2, read the actual section before editing — anchors are content, not line numbers.
    - For agents with no existing chart reference: insert the one-line reference into the cardinal section of `rule.md` (or the "Guidelines" section if the cardinal budget is full — per the guide's ≤7 rule).
    - For agents with existing chart guidance: add the one-line cross-reference to the existing canonical home (per the table), and audit the existing guidance for contradictions (per the table's notes).
    - **Verification:**
@@ -256,6 +256,7 @@ Each of the 20 gets a one-line cardinal reference. **Phase D's coverage pin #17 
 
 1. **Channel detection reliability** — Can agents reliably know they are on a chat source? System context injections do not currently expose `source_type` to the agent prompt. Candidates for a small Phase B enrichment:
    - A `source_hint` system-context injection: "this turn arrived via Discord/Slack/Telegram" appended to the system context, visible to the agent.
+   - **Close-out (R4):** not open-ended — Phase D's release cut opens the follow-up ticket (see phaseD deferred-ledger row b).
    - An `instance_metadata.source_type` field the agent can introspect.
    - **Phase C does NOT plan the daemon change** — Phase C only words the rule robustly (over-deliver-when-uncertain). Phase B may own the implementation as a follow-up enrichment; flag in Phase B's plan as a possible add-on.
    - **Decision needed by:** Phase B planning, before Phase B implementation starts.

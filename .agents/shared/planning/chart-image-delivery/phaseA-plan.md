@@ -23,7 +23,7 @@ Charter (the Mermaid agent) renders the validated diagram to a PNG, persists it 
 - `agents/charter/meta.json` `tools.allow` += `"image"` (gives charter `image_save` / `image_get` / `image_list`; `_auth.py:38` auto-implies `image-reader` as a team_member).
 - `agents/charter/skills-template/install-mermaid-cli.md` — new install skill modeled on `install-opendesign.md` v1.3.0 (job f9946b1d lineage): idempotent, fenced (no Docker / no apt / no system Node), nvm user-space detection+bootstrap, absolute-path capture for non-interactive bash, reversal + verify sections.
 - `agents/_prompt_system/innate-skills/chart/skill.md` — minor: state the new "marker in result" contract in the `generate_chart()` description (one paragraph; keeps sub-agents from stripping the marker).
-- `decisions.md` — author the INITIAL cross-cutting decision record (this plan's companion artifact). D1–D4 verbatim, marker spec, capture contract, HTTP-API behavior, degradation inputs for Phase B, restart/promote matrix.
+- `decisions.md` — **EXISTING artifact (committed at branch head — incl. LOCKED §phase-b-r2-addendum-* and §phase-d-* sections that Phase B APPENDS onto and Phase D pins cite)** — Phase A VERIFIES/COMPLETES it (D1–D4 verbatim, marker spec, capture contract, HTTP-API behavior, degradation inputs, restart/promote matrix); do NOT rewrite or clobber locked sections [R4, approver iter-002 blocking #3].
 
 ### Out of Scope
 
@@ -46,10 +46,10 @@ Charter (the Mermaid agent) renders the validated diagram to a PNG, persists it 
 | `agents/charter/meta.json` | `tools.allow += "image"` | no (picked up at next charter spawn) |
 | `agents/charter/skills-template/install-mermaid-cli.md` | NEW file — install skill, fenced, idempotent, **`## READINESS_PROBE`** section, **HONEST-STOP prereqs** | no (skill_seed_service consumes on next spawn) |
 | `agents/charter/skills-template/install-mermaid-cli.lib.sh` | NEW file — extracted pure-bash + jq library sourced by `workflow.md` Step 5 (single source of truth for the probe; satisfies the agent-prompt-only fence) | no |
-| `agents/_prompt_system/innate-skills/chart/skill.md` | +1 paragraph on marker preservation (seeded here; Phase C extends to all 21 chart consumers) | no |
+| `agents/_prompt_system/innate-skills/chart/skill.md` | +1 paragraph on marker preservation (seeded here; Phase C extends to all 20 chart consumers) | no |
 | `.agents/shared/context.md` | +1 one-line reminder: "ari/commissioner pre-warm the mermaid-cli toolchain as a deploy step on every fresh host (mirrors `install-opendesign` deploy-step execution)" (R6 ratified) | no (planning artifact) |
 | `agents/ari/workflow.md` | +1 note in commissioning workflow: when a new project is provisioned, the mermaid-cli toolchain is part of the deploy-step pre-warm checklist (R6 ratified) | no |
-| `.agents/shared/planning/chart-image-delivery/decisions.md` | NEW file (companion) | n/a — planning artifact |
+| `.agents/shared/planning/chart-image-delivery/decisions.md` | EXISTING (committed) — verify/append only; locked sections byte-unchanged | n/a — planning artifact |
 
 No `daemon/`, `tests/`, or `frontend/` edits in Phase A. No migrations, no SQL, no new HTTP routes.
 
@@ -254,7 +254,7 @@ One canonical syntax, source-agnostic, survives verbatim passthrough through `ge
 2. Charter appends `<!-- ens-img:chart-render:<image_id> -->` to its assistant turn, on its own line AFTER the explanation prose.
 3. `generate_chart` returns the result verbatim (`daemon/tools/chart_tools.py:525` — pinned property).
 4. Parent agent includes the marker in their final response (the chart innate skill already instructs callers to "paste the result directly without re-wrapping"; Phase A adds one sentence: "do not strip the trailing `<!-- ens-img:... -->` marker").
-5. Chat-source dispatcher (Phase B) extracts the marker, strips it from the visible message text, fetches the PNG via the `image_id` (HTTP `GET /api/tmp_images/<id>`), uploads via the platform-native attachment API.
+5. Chat-source dispatcher (Phase B) extracts the marker, strips it from the visible message text, resolves the PNG bytes IN-PROCESS via the tmp_images store (`open_full`/`open_with_meta` — no HTTP self-call; decisions §phase-b-image-access), uploads via the platform-native attachment API. [R4: stale HTTP-fetch description corrected]
 6. Marker that does not parse (typo, missing `chart-render` tag) is ignored by Phase B — text delivery is unaffected.
 
 **HTTP-API caller behavior (non-chat, e.g. tester / web UI direct /api/messages):** the marker remains in the assistant text content. Clients that want the PNG can parse the marker and call `GET /api/tmp_images/<id>`. Clients that don't know the marker just see the validated Mermaid text (no rendering artifact broken — the marker is a single line of `<!-- ens-img:chart-render:abc... -->` at the bottom). This preserves the verbatim-passthrough property without forcing the daemon to invent a second content channel.
@@ -320,6 +320,8 @@ The install is NOT solely charter-driven. Two execution paths converge on the sa
 1. **Pre-warm path (preferred, deploy-step):** `ari` / `commissioner` invokes the `install-mermaid-cli` skill as a deploy step when a new project is provisioned (mirrors `install-opendesign` deploy-step execution). This is OWNED by ari's commissioning workflow (R6 ratified — one-line reminder added to `.agents/shared/context.md` + a note in `agents/ari/workflow.md`). When pre-warm runs, charter always sees a warm probe on first invocation.
 2. **Self-heal path (charter cold-detect, advisory `flock`):** when charter's READINESS_PROBE returns 1, charter attempts the install behind an **advisory `flock`**:
    - Lock file: `$HOME/.cache/charter/mermaid-install.lock`
+
+**Portability (R4, tracking iter-002):** `flock` and `sed -i -E` are GNU-isms — on BSD/macOS the lib degrades gracefully (mkdir-based lock + temp-file sed rewrite, per the project's BSD invariants; `scripts/upgrade/lib.sh` precedent); never a hard failure.
    - Timeout: 10s (advisory; advisory means charter does not block long)
    - Lock-contended → log `install_in_progress_other`, write async queue marker `$HOME/.cache/charter/mermaid-pending-install`, degrade this turn (text-only Mermaid, no marker, no retry). The OTHER charter completes the install; the next render re-probes warm.
    - Inline install allowed ONLY when (a) `cold_misses_in_session < 2` (state held in `$HOME/.cache/charter/mermaid-session-state.json`) AND (b) chromium partially present (resumable) AND (c) hard 60s cap. The 60s cap is the heuristic referenced in arch-rec §7 unverified — `pinned.observedInstallSec` tunes it later.
@@ -368,7 +370,7 @@ The `tmp_images` substrate already implements D3. Spot-checked:
 - `tests/test_chart_tools_legacy_error_contract.py` pins the "Error: ..." return shape for the legacy fresh-path raise. Phase A does not touch this path.
 - `daemon/tools/chart_tools.py:525` verbatim passthrough is the load-bearing property. Phase A does not touch this code; charter emits the marker inside its OWN assistant turn, not via a tool-side transformation. The passthrough test (if any) remains green by construction.
 
-**New unit tests (under `tests/test_charter_render_capture.py`):**
+**New unit tests (under `tests/test_charter_render_capture.py`):** Harness note (R4, tracking iter-002): tests #1–5 exercise charter's LLM-driven workflow — they run via the charter-spawn smoke harness (spawn a charter instance with the toolchain/environment under test), hosted in the pytest module as `@pytest.mark.integration` harness-driven cases, NOT as pure unit tests with no mechanism.
 
 1. `test_charter_workflow_persists_png_on_success` — stub `image_save` to return a fixed `image_id`; assert the rendered marker matches `<!-- ens-img:chart-render:<image_id> -->`. Per arch-rec #19: marker only after a valid `image_save` result.
 2. `test_charter_workflow_no_marker_on_image_save_failure` — `image_save` returns `"Error: store not initialized"`; assert the result contains the Mermaid block but NO `<!-- ens-img:` marker. Per arch-rec #19: error response short-circuits to text-only.
@@ -377,7 +379,7 @@ The `tmp_images` substrate already implements D3. Spot-checked:
 5. `test_charter_workflow_marker_is_byte_stable` — render multiple charts; assert the marker regex is byte-identical for each (no LLM variance).
 6. `test_charter_meta_json_includes_image_category` — `tools.allow` contains `"image"`.
 7. `test_install_skill_idempotent_on_warm_cache` — second invocation of the install skill on a host with mmdc already installed is a no-op (verify only).
-8. `test_install_skill_handles_missing_nvm` — invocation on a host with no `~/.nvm` runs the bootstrap and reports success.
+8. `test_install_skill_handles_missing_nvm` — invocation on a host with no `~/.nvm` runs the bootstrap and reports success. (⚠ R4: downloads ~200MB (nvm+Node) — mark `@pytest.mark.slow`, manual/opt-in CI lane, NOT per-PR.)
 9. `test_readiness_probe_warm_returns_zero` — all 4 signals present in `~/.config/charter-mermaid-puppeteer.json` + valid; `charter_readiness_probe` returns 0 and exports `MMDC_BIN` + `PUPPETEER_EXECUTABLE_PATH`. (NEW — arch-rec #17.)
 10. `test_readiness_probe_cold_returns_one_and_invokes_install` — config file missing; probe returns 1; charter invokes install-mermaid-cli; probe is run again; on success render proceeds. (NEW.)
 11. `test_readiness_probe_install_in_progress_returns_two` — another charter holds the install lock; probe returns 2; charter degrades this turn. (NEW — arch-rec #18.)
@@ -410,7 +412,7 @@ All Phase A work touches a single bounded scope (`agents/charter/*` + `agents/_p
 
 | # | Task | Depends on | Acceptance |
 |---|------|------------|------------|
-| 1 | Write `decisions.md` (D1–D4 verbatim + marker spec + capture contract + restart/promote matrix) | none | File exists at `.agents/shared/planning/chart-image-delivery/decisions.md`; every section cites file:line. |
+| 1 | **Verify/complete the EXISTING `decisions.md`** (already committed at branch head — 868+ lines incl. locked §phase-b-r2-addendum-* / §phase-d-* that Phase B appends onto and Phase D pins cite): confirm D1–D4 verbatim + marker spec + capture contract + restart/promote matrix are present and cited; APPEND missing Phase-A records only — do NOT rewrite [R4, approver iter-002 blocking #3] | none | Existing file verified complete-or-appended; locked sections byte-unchanged (git diff shows appends only). |
 | 2 | Extend `agents/charter/workflow.md` Step 5 to render PNG + persist + emit marker | #1 | Diff shows the new bash block, the new image_save call, and the new marker-emit line. mktemp hygiene preserved. |
 | 3 | Update `agents/charter/rule.md` — add Must for marker contract, Never for "must not strip / must not emit on failure" | #1 | Diff shows +2 lines, no other changes. Verified against `docs/agent-prompt-writing-guide.md` cardinal/guideline split. |
 | 4 | Update `agents/charter/soul.md` — add one sentence to "My Principle" | #1 | Diff shows +1 sentence. Style consistent. |
@@ -426,7 +428,7 @@ All Phase A work touches a single bounded scope (`agents/charter/*` + `agents/_p
 | 14 | Reviewer pass on every `.md` against `docs/agent-prompt-writing-guide.md` | #3, #4, #6, #7 | Reviewer notes no cardinal/guideline violations, no daemon-path leaks, no `meta.json` references in prose. |
 | 15 | Reviewer pass on marker byte-stability | #1, #2, #7 | Reviewer confirms marker regex matches `^<!-- ens-img:chart-render:[a-f0-9]{32} -->$` exactly; one canonical home. |
 | 16 | Reviewer pass on restart/promote matrix | #1, #2–#7 | Reviewer confirms Phase A requires NO daemon restart, NO promote. |
-| 17 | Create `agents/charter/skills-template/install-mermaid-cli.lib.sh` — extracted READINESS_PROBE library (arch-rec #17) | #1 | File exists, pure bash + jq, exports `charter_readiness_probe`; sourced by workflow.md Step 5. |
+| 17 | Create `agents/charter/skills-template/install-mermaid-cli.lib.sh` (land in the SAME commit as the T2 workflow.md Step-5 edit — sourcing a not-yet-committed lib creates a transient-broken intermediate; R4 ordering note) — extracted READINESS_PROBE library (arch-rec #17) | #1 | File exists, pure bash + jq, exports `charter_readiness_probe`; sourced by workflow.md Step 5. |
 | 18 | Add pre-render directive/frontmatter sanitizer to `agents/charter/workflow.md` (arch-rec #15 / F4) | #2 | sed block strips `%%{init}%%` directives and `securityLevel:` frontmatter keys before mmdc invocation. |
 | 19 | Wrap render in `( ulimit -v 2097152; timeout 60 … )` and add `-c '{"securityLevel":"strict","htmlLabels":false}'` to mmdc invocation (arch-rec #15 / F4) | #2, #18 | Bash shows the wrapper; mmdc flags include the security pin. |
 | 20 | Retire `npx -y @mermaid-js/mermaid-cli` from `workflow.md` (arch-rec #16) — replaced with absolute-path invocation of installed global mmdc | #17 | `grep "npx -y @mermaid-js" agents/charter/workflow.md` returns ZERO matches. |

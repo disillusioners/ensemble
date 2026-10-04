@@ -201,7 +201,7 @@ For HTTP-API calls (e.g. `POST /api/messages` from tester, web UI direct, progra
 - The PNG is at `GET /api/tmp_images/<image_id>` (the same route the chat source dispatcher uses).
 - The response is the agent's `result.content` — verbatim passthrough. No additional structure is added in Phase A.
 - The client may parse the marker (regex in §marker) and fetch the PNG, or ignore it.
-- The marker is **never** rendered to the user as visible HTML — it's an HTML comment.
+- The marker never reaches chat END-USERS as visible text — the dispatcher strips it before adapter delivery (HTML comments render LITERALLY on Discord/Telegram/Slack; see §phase-b-r2-addendum-2). HTTP-API callers DO receive the marker line in the response body, where it is parseable and inert in Markdown renderers that hide HTML comments. [wording sharpened R3, approver iter-002]
 
 ---
 
@@ -370,6 +370,9 @@ DISCORD_FILE_MAX_BYTES: int = 8 * 1024 * 1024      # 8 MB  (Discord bot upload l
 TELEGRAM_PHOTO_MAX_BYTES: int = 10 * 1024 * 1024   # 10 MB (Telegram sendPhoto)
 TELEGRAM_DOCUMENT_MAX_BYTES: int = 50 * 1024 * 1024 # 50 MB (Telegram sendDocument)
 SLACK_FILE_MAX_BYTES: int = 1024 * 1024 * 1024     # 1 GB  (Slack upload)
+# R4 verify-at-impl (per D4): Discord non-boosted default has moved 8MB->10MB across API
+# generations; Slack limits are workspace-dependent (1GB = ceiling, not a doc claim);
+# INITIAL_COMMENT_MAX=4000 (Slack initial_comment soft limit) also lands here per phaseB Task #6.
 CHART_IMAGE_MIME_WHITELIST: frozenset[str] = frozenset({
     "image/png", "image/jpeg", "image/gif", "image/webp",
 })
@@ -595,7 +598,7 @@ CHART_IMAGE_MIME_WHITELIST: frozenset[str] = frozenset({
 
 ## §phase-b-r2-addendum-14 — near-miss strip-only sweeper (arch-rec §3 amendment #14)
 
-**Decision:** Add a NEW, clearly-labeled secondary pattern (NOT the locked regex) that STRIPS malformed markers but NEVER extracts and NEVER matches the locked form. Pattern: `^\s*<!--\s*ens-img:chart-render:[^>\n]{0,64}-->\s*$`. Cosmetic junk-line cleanup for slightly-mutated markers (indented, extra whitespace, mutated id). LOCKED regex stays byte-stable.
+**Decision:** Add a NEW, clearly-labeled secondary pattern (NOT the locked regex) that STRIPS malformed markers but NEVER EXTRACTS (R4 comment correction: the pattern CAN textually overlap the locked form at the pattern level — operationally safe ONLY because the locked-regex extraction pass runs FIRST; swept lines are exactly those the locked regex did not match). Pattern: `^\s*<!--\s*ens-img:chart-render:[^>\n]{0,64}-->\s*$`. Cosmetic junk-line cleanup for slightly-mutated markers (indented, extra whitespace, mutated id). LOCKED regex stays byte-stable.
 
 ---
 

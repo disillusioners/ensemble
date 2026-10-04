@@ -40,7 +40,7 @@ When an agent's final response includes a Phase-A-locked `<!-- ens-img:chart-ren
    - **Telegram** — multipart 4xx no retry, fall to text; transport error 3× exponential backoff then text; >50MB / MIME-miss: skip image, WARN, deliver text; caption >1024 truncated + full-text follow-up.
    - **Slack** — first `missing_scope`: set capability flag + WARN-once + text; flagged thereafter: zero API calls + text; other errors per `_safe_api_call` then text. Primary pattern: single `files_upload_v2(channel_id, filename, content, initial_comment)`.
    - **All rungs:** WARN with `image_id[:8]` / size / content_type; multi-image = marker order preserved, NO silent drops (every dropped image WARNs — arch-rec §3 amendment #7).
-9. **Constants** (`daemon/constants.py`) — `DISCORD_FILE_MAX_BYTES=8MB`, `TELEGRAM_PHOTO_MAX_BYTES=10MB`, `TELEGRAM_DOCUMENT_MAX_BYTES=50MB`, `SLACK_FILE_MAX_BYTES=1GB`. Plus `CHART_IMAGE_MIME_WHITELIST = {"image/png", "image/jpeg", "image/gif", "image/webp"}` for defense.
+9. **Constants** (`daemon/constants.py`) — `DISCORD_FILE_MAX_BYTES=8MB`, `TELEGRAM_PHOTO_MAX_BYTES=10MB`, `TELEGRAM_DOCUMENT_MAX_BYTES=50MB`, `SLACK_FILE_MAX_BYTES=1GB`, **`INITIAL_COMMENT_MAX=4000` (Slack `initial_comment` soft limit — used by the §7 sketch, Task #23, and the ACs; previously undefined, defined here per R4)**. Plus `CHART_IMAGE_MIME_WHITELIST = {"image/png", "image/jpeg", "image/gif", "image/webp"}` for defense. *Verify-at-impl (R4, tracking iter-002): Discord's non-boosted bot default has moved 8MB→10MB across API generations and Slack workspace limits vary (1GB is a generous ceiling, not a doc claim) — re-verify per D4 at impl; benign for 50–300KB payloads.*
 10. **Store.delete after successful upload** (`arch-rec §3 amendment #22` — ADOPTED) — after a successful `adapter.send()` in the delivering lane (progressive OR completed), `store.delete(image_id)` collapses the unauth GET window from 30 days to zero for chat-delivered charts. API-origin (no-colon, no adapter.send) keeps the 30-day GET per Phase A §http-api. Mutually-exclusive lanes (api skips both seams; chat gets one lane) make double-delete impossible. ~3 LOC + 1 test.
 11. **Logging contract** (`arch-rec §3 amendment #12` / Focus 3 shared invariants) — `ImageAttachment.bytes_b64 = field(repr=False)` + redacting `__repr__`; declare `OutgoingMessage.images` transport-only — never persisted, never logged whole. Logging format: `image_id[:8]` + `size_bytes` + `content_type` only, at dispatcher AND all three adapters. Bytes NEVER in any log.
 12. **Test strategy** — per-seam unit tests (extraction regex incl. malformed markers; BOTH-seam extraction including progressive lane; API-source keep-marker regression; `test_progressive_then_completed_no_double_send`; id-dedupe; per-id isolation; provenance gate; sweeper) + per-adapter AsyncMock tests (Discord: chunk-1 atomic-first-unit + `files=[…]` + empty-content-with-images; Telegram: sendPhoto + 4xx-non-transient + caption>1024-follow-up + sendDocument ladder + 50MB skip + parse_mode=None; Slack: single `files_upload_v2` + capability-flag-zero-API + WARN-once + `initial_comment` follow-up + upload-inside-lock) + dispatcher integration test + new `tests/test_outbound_image_delivery.py` end-to-end.
@@ -228,7 +228,10 @@ def extract_chart_images(content: str) -> tuple[str, list[str]]:
     swept: list[str] = []
     for line in pending_lines:
         if _NEAR_MISS_RE.match(line):
-            continue  # strip only — never match
+            continue  # strip only — never EXTRACTS. (The pattern CAN textually
+                      # overlap the locked form at the pattern level; safe ONLY because
+                      # the locked-regex extraction pass runs FIRST — swept lines are
+                      # exactly those the locked regex did not match. R4 comment fix.)
         swept.append(line)
 
     return "\n".join(swept), image_ids
@@ -262,16 +265,22 @@ async def _resolve_chart_images(
                     f"skipping (text fallback)"
                 )
                 continue
+            # R4 (approver iter-002): TmpImageRecord has NO `.blob` field (verified) —
+            # the prior hasattr hedge encoded EMPTY bytes. Bytes come from the
+            # store's documented bytes accessor; `record` (open_full) supplies
+            # provenance + metadata only. Test 30a pins this accessor pair.
+            blob_bytes, _ctype_read, _sha = await asyncio.to_thread(
+                store.open_with_meta, image_id
+            )
             ext = (record.content_type or "image/png").split("/")[-1] or "bin"
             resolved.append(ImageAttachment(
                 image_id=image_id,
                 content_type=record.content_type or "image/png",
                 filename=f"chart-{image_id[:8]}.{ext}",
                 size_bytes=record.size_bytes,
-                bytes_b64=_base64.b64encode(record.blob if hasattr(record, "blob") else b"").decode("ascii"),
-                # NOTE: TmpImageRecord stores blob separately; if record has
-                # no .blob attribute, fall through to open() variant. Verify
-                # actual TmpImageRecord shape at impl (tmp_image_store.py:480-494).
+                bytes_b64=_base64.b64encode(blob_bytes).decode("ascii"),
+                # blob_bytes from open_with_meta (tmp_image_store.py:436-455);
+                # record from open_full (:480-494) — verify shapes at impl (test 30a).
             ))
             _log_image_metadata(image_id, record.size_bytes, record.content_type)
         except Exception as e:
@@ -416,6 +425,7 @@ DISCORD_FILE_MAX_BYTES: int = 8 * 1024 * 1024   # 8 MB (Discord bot upload limit
 TELEGRAM_PHOTO_MAX_BYTES: int = 10 * 1024 * 1024  # 10 MB (Telegram sendPhoto)
 TELEGRAM_DOCUMENT_MAX_BYTES: int = 50 * 1024 * 1024  # 50 MB (Telegram sendDocument)
 SLACK_FILE_MAX_BYTES: int = 1024 * 1024 * 1024  # 1 GB (Slack upload — generous)
+INITIAL_COMMENT_MAX: int = 4000  # Slack initial_comment soft limit (verify at impl per D4)
 CHART_IMAGE_MIME_WHITELIST: frozenset[str] = frozenset({
     "image/png", "image/jpeg", "image/gif", "image/webp",
 })
@@ -744,15 +754,21 @@ async def send(self, message: OutgoingMessage) -> bool:
                     logger.warning(f"Telegram image upload unexpected error: {e}; skipping image")
                     continue
 
+            # TEXT FLOOR GUARD (approver iter-002 blocking #1): if ALL image
+            # uploads failed, the FULL content MUST still be delivered as text —
+            # including the content <= 1024 case (caption_remaining == "") where
+            # neither caption branch fires. Without this guard nothing is sent,
+            # return True lies about success, and amendment-#22 store.delete
+            # would delete the never-delivered image.
+            if delivered_count == 0:
+                await self._send_text_only(reply_chat_id, message.content)
+
             # Caption >1024: full-text follow-up sendMessage (text floor — amendment #8)
             if caption_remaining and delivered_count > 0:
                 try:
                     await self._send_text_only(reply_chat_id, caption_remaining)
                 except Exception as e:
                     logger.warning(f"telegram caption-follow-up text send failed: {e}")
-            elif caption_remaining:
-                # No image delivered — text floor MUST still deliver
-                await self._send_text_only(reply_chat_id, full_caption)
         else:
             # No images — original text-send code path runs unchanged
             await self._send_text_only(reply_chat_id, message.content)
@@ -844,15 +860,18 @@ async with lock:
                     else ""
                 )
                 try:
-                    # SINGLE call — no separate postMessage() follow-up for the file itself
-                    result = await self._safe_api_call(
+                    # SINGLE call — no separate postMessage() follow-up for the file itself.
+                    # _safe_api_call returns an (ok, result) TUPLE on its failure contract —
+                    # UNPACK it (iter-002 note: calling .get(...) on the tuple is an
+                    # AttributeError on every upload; verify exact tuple shape at impl).
+                    ok, result = await self._safe_api_call(
                         "files_upload_v2",
                         channel_id=channel_id,
                         filename=img.filename,
                         content=file_bytes,
                         initial_comment=initial_comment,
                     )
-                    if result and result.get("ok"):
+                    if ok and result:
                         image_uploaded = True
                     else:
                         logger.warning(
@@ -909,7 +928,16 @@ if not response.get("ok"):
     raise SlackAPIError(f"Slack API error: {error}")
 ```
 
-**`SlackCapabilityError` propagation** — `_safe_api_call` (`:340-378`) currently catches `SlackAPIError` and logs. Add `SlackCapabilityError` to the catch list; do NOT call `record_failure` (it's not a transport failure); return `(False, None)` per the existing failure contract; the caller in `send()` distinguishes via isinstance and sets the capability flag.
+AND in the surrounding `try/except` of `_call_slack_api` (live `adapter.py:344-346`), add **BEFORE** the generic `except Exception` handler (approver iter-002 blocking #2a):
+
+```python
+    except SlackCapabilityError:
+        raise  # propagate UNCAUGHT — the generic handler calls record_failure()
+               # and re-raises as SlackAPIError, re-arming the exact
+               # breaker-poison defect this fix targets.
+```
+
+**`SlackCapabilityError` propagation (R4, approver iter-002 blocking #2b — corrected mechanism)** — `_safe_api_call` (`:340-378`) must NOT catch `SlackCapabilityError`: the exception propagates UNCAUGHT through `_call_slack_api` (via the `except SlackCapabilityError: raise` placed before its generic handler) AND through `_safe_api_call`, reaching `send()`'s existing `except SlackCapabilityError` handler, which sets the per-token capability flag + WARN-once-per-channel. The `(False, None)` tuple-return failure contract stays reserved for transport/API errors ONLY — a caught-and-returned capability error would make the send()-side isinstance distinguish impossible (the mechanism this iteration rejected). ONE mechanism, end to end.
 
 USER ACTION ITEM: operator must grant `files:write` scope. Doc-update task: `docs/sources/slack-setup.md` YAML manifest (`:17-61`, `scopes:` block `:35-48`) AND scopes table (`:69-82`) get a `files:write` row.
 
@@ -938,8 +966,8 @@ This ships with the code change. Operators must manually grant the scope in thei
 | 2 | Add `manager` property on `SourceRegistry` (daemon/sources/registry.py:~236) | — | `python -c "from daemon.sources.registry import SourceRegistry; ..."` loads cleanly; the property returns the injected manager |
 | 3 | Add `extract_chart_images()` (per-id dedupe first-occurrence order — amendment #2) + `_MARKER_RE` + `_NEAR_MISS_RE` (sweeper — amendment #14) + `_resolve_chart_images()` (per-id isolation — amendment #3; provenance gate `feature == "chart-render"` — amendment #13) | 1, 2 | New unit tests for valid/malformed/multiline/duplicate/near-miss pass; per-id isolation test (one bad id → siblings still deliver); provenance gate test (foreign-feature id → text fallback) |
 | 4 | Inject extraction+resolution into **BOTH** `dispatch_message` AND `dispatch_completed` as the LAST content transformation before OutgoingMessage, AFTER adapter lookup (arch-rec §1 pin, verbatim) | 1, 2, 3 | Both-seam integration test: feed content with marker to `dispatch_message` → adapter.send called with `outgoing.images` populated and marker-stripped content; same for `dispatch_completed` |
-| 5 | Add `store.delete(image_id)` after successful `adapter.send(outgoing)` in the delivering lane (amendment #22 — ADOPTED) | 1, 3, 4 | `test_store_delete_after_success` — successful send → `store.delete` called; failed send → NOT called; API-source → NOT called; double-deleted from both lanes impossible (verify by sending same source to both seams in test) |
-| 6 | Add `DISCORD_FILE_MAX_BYTES` + Telegram + Slack + MIME whitelist to `daemon/constants.py` | — | `python -c "from daemon.constants import ..."` resolves all new constants |
+| 5 | Add `store.delete(image_id)` after successful `adapter.send(outgoing)` in the delivering lane (amendment #22 — ADOPTED) | 1, 3, 4 | `test_store_delete_after_success` — successful send → `store.delete` called; failed send → NOT called; API-source → NOT called; double-delete from both lanes impossible (verify by sending same source to both seams in test); delete fires ONLY on genuine delivery success — the Telegram `delivered_count==0` guard (iter-002 blocking #1) closes the false-success path that would delete never-delivered images |
+| 6 | Add `DISCORD_FILE_MAX_BYTES` + Telegram + Slack + MIME whitelist + `INITIAL_COMMENT_MAX=4000` to `daemon/constants.py` | — | `python -c "from daemon.constants import ..."` resolves all new constants |
 | 7 | Add shared logging helper `_log_image_metadata(image_id, size_bytes, content_type)` in dispatcher.py — bytes never in any log line (amendment #12) | 1 | Helper test: log line contains `image_id[:8]` + size + content_type, NEVER contains base64 payload |
 
 ### Phase B.2 — Discord (atomic-first-unit + files=[…] + empty-content guard)
@@ -957,7 +985,7 @@ This ships with the code change. Operators must manually grant the scope in thei
 | 13 | **Verify** current Telegram Bot API `sendPhoto` / `sendDocument` constraints at https://core.telegram.org/bots/api#sendphoto and https://core.telegram.org/bots/api#senddocument — record photo/document size limits + accept-MIME in commit message | — | Doc URLs + verified size/MIME table in commit body |
 | 14 | Implement `_api_call_multipart()` helper in telegram.py (mirror retry/breaker semantics for transport errors; multipart 4xx classified non-transient, NO breaker record — amendment #5) | 13 | Helper test: FormData with the photo/document field; 3 retries on `aiohttp.ClientError`; multipart 4xx raises `TelegramAPIError` WITHOUT calling `record_failure` (verify breaker counter == 0); circuit-breaker open raises `CircuitOpenError` |
 | 15 | Restructure `send()` so image upload + text-send BOTH execute INSIDE per-chat lock (amendment #10); call `sendPhoto` (≤10 MB) / `sendDocument` (>10 MB) | 1, 6, 14 | sendPhoto test asserts `session.post(data=<FormData with photo field>)`; >10 MB test asserts sendDocument; per-chat-lock test asserts no interleaving (concurrency test with two simultaneous sends to same chat) |
-| 16 | >50MB / MIME-miss skip + WARN + deliver text (amendment §3 Focus 3) | 1, 15 | `test_telegram_oversize_skip` — 50MB+1 file → WARN-logged + skipped; MIME-miss test: text content_type → WARN + skipped + text delivered |
+| 16 | >50MB / MIME-miss skip + WARN + deliver text (amendment §3 Focus 3) | 1, 15 | `test_telegram_oversize_skip` — 50MB+1 file → WARN-logged + skipped; MIME-miss test: text content_type → WARN + skipped + text delivered; `test_telegram_all_images_failed_text_floor` — ALL uploads fail + content ≤1024 → full text delivered by the delivered_count==0 guard (iter-002 blocking #1) |
 | 17 | Caption >1024: truncated caption on photo + full-text follow-up `sendMessage` (amendment #8) | 15 | `test_telegram_caption_followup` — content with 1500 chars + 1 image → `sendPhoto(caption=content[:1024])` + `sendMessage(text=content[1024:])` |
 | 18 | `parse_mode=None` for image captions — FIRM (closes OQ#7; Mermaid `<` breaks HTML mode) | 15 | `test_telegram_parse_mode_none` — image caption has NO `parse_mode` kwarg in `session.post` FormData |
 
@@ -965,9 +993,9 @@ This ships with the code change. Operators must manually grant the scope in thei
 | # | Task | Depends on | Acceptance |
 |---|------|------------|------------|
 | 19 | **Verify** current slack_sdk 3.42.0 `AsyncWebClient.files_upload_v2` method signature at https://api.slack.com/methods/files.uploadV2 — record kwargs (`channel_id`, `filename`, `content`, `initial_comment`, etc.) in commit message | — | Doc URL + verified kwargs in commit body |
-| 20 | Fix defect at `_call_slack_api:326-329` (records failure on ANY `ok=false`): add `SlackCapabilityError` exception; classify `missing_scope` / `not_in_channel` / `channel_not_found` / `is_archived` BEFORE `record_failure` (amendment #4) | 19 | `test_slack_capability_classified_before_record` — `missing_scope` ok=false raises `SlackCapabilityError` and DOES NOT call `record_failure`; `consecutive_failures == 0` after the call |
+| 20 | Fix defect at `_call_slack_api:326-329` (records failure on ANY `ok=false`): add `SlackCapabilityError` exception; classify `missing_scope` / `not_in_channel` / `channel_not_found` / `is_archived` BEFORE `record_failure` (amendment #4); `except SlackCapabilityError: raise` placed BEFORE the generic handler so it propagates UNCAUGHT (R4 single mechanism) | 19 | `test_slack_capability_classified_before_record` — `missing_scope` ok=false raises `SlackCapabilityError` and DOES NOT call `record_failure`; `consecutive_failures == 0` after the call |
 | 21 | Add `_slack_capability_flags: set[str]` to `__init__`; modify `send()` to pre-check flag and skip API call entirely when set (amendment #4 — zero API calls once flagged) | 20 | `test_slack_capability_flag_zero_api_calls` — 5 `missing_scope` sends → only 1 actual API call (the first); flag set after first; subsequent 4 short-circuit before API call; `consecutive_failures == 0` throughout |
-| 22 | Modify `send()` to call SINGLE `files_upload_v2(channel_id, filename, content, initial_comment)` (DELETE upload-then-`postMessage(file=)` sketch — amendment #9); upload INSIDE per-channel lock (amendment #10) | 1, 19, 21 | `test_slack_single_files_upload_v2` — exactly one `_safe_api_call("files_upload_v2", ...)` per send with verified kwargs (channel_id, filename, content, initial_comment); NO `postMessage(file=)` follow-up; per-channel-lock test asserts no interleaving |
+| 22 | Modify `send()` to call SINGLE `files_upload_v2(channel_id, filename, content, initial_comment)` (DELETE upload-then-`postMessage(file=)` sketch — amendment #9); upload INSIDE per-channel lock (amendment #10); UNPACK the `_safe_api_call` (ok, result) tuple (R4 — .get on the tuple AttributeErrors every upload); SlackCapabilityError arrives via UNCAUGHT propagation (not a tuple return) | 1, 19, 21 | `test_slack_single_files_upload_v2` — exactly one `_safe_api_call("files_upload_v2", ...)` per send with verified kwargs (channel_id, filename, content, initial_comment); NO `postMessage(file=)` follow-up; per-channel-lock test asserts no interleaving |
 | 23 | `initial_comment` length limit: truncated + full-text follow-up `chat.postMessage` (amendment #8) | 22 | `test_slack_initial_comment_followup` — content >INITIAL_COMMENT_MAX → `files_upload_v2(initial_comment=content[:MAX])` + `chat.postMessage(text=content[MAX:])` |
 | 24 | WARN-once-per-channel for `missing_scope` — text delivered + USER ACTION ITEM flagged | 21 | `test_slack_warn_once` — 5 sends to same channel with `missing_scope` → exactly ONE WARN log line (not 5); WARN text contains "USER ACTION REQUIRED" + "files:write scope" |
 
@@ -980,14 +1008,14 @@ This ships with the code change. Operators must manually grant the scope in thei
 | 28 | Regression test: API-source dispatch (no `:`) keeps marker in content + `open_full` NOT called (defense against future regression in the no-colon skip; arch-rec §1) | 4 | Test asserts: (a) marker preserved in `outgoing.content` for source=`"api"`; (b) spy on `store.open_full` returns `call_count == 0`; (c) `adapter.send` was NOT called (no chat adapter for `"api"`) |
 | 29 | Regression test: `internal_agent:*` colon-source returns at adapter lookup before extraction (no fetch, no strip) | 4 | Test asserts: spy on `store.open_full` returns `call_count == 0`; content unchanged |
 | 30 | Provenance gate test (amendment #13): stub `store.open_full` to return a `TmpImageRecord` with `provenance.feature="screenshot"` → dispatcher drops the image + text fallback + WARN | 3 | Test asserts `outgoing.images is None` + WARN log + `adapter.send` called with text-only |
-| 30a | `test_image_resolution_returns_nonempty_bytes` — companion to #30 (approver-required, load-bearing): stub `store.open_full` to return a `TmpImageRecord` whose blob accessor yields NON-EMPTY bytes; assert the resolved `ImageAttachment.bytes_b64` decodes to exactly those bytes — pins the TmpImageRecord shape behind the `record.blob` hasattr hedge (verify-at-impl: the record's bytes accessor name) | 3 | Test asserts decoded bytes non-empty and byte-equal to the stubbed record blob |
+| 30a | `test_image_resolution_returns_nonempty_bytes` — companion to #30 (approver-required, load-bearing, R4-aligned): stub the store accessor PAIR — `open_full` → record with `provenance.feature="chart-render"`, `open_with_meta` → NON-EMPTY bytes; assert `ImageAttachment.bytes_b64` decodes byte-equal to the stubbed bytes — pins the resolution path against the VERIFIED TmpImageRecord shape (no `.blob` field exists; the hasattr hedge is removed) | 3 | Test asserts decoded bytes non-empty and byte-equal to the stubbed `open_with_meta` bytes |
 | 31 | Discord adapter test: chunk 1 atomic-first-unit + `files=[…]` N-image + empty-content-with-images guard + upload-fail text-only retry | 9, 10, 11, 12 | All 4 sub-cases pass |
 | 32 | Discord adapter test: multi-image order-preserved no-drop | 12 | Per amendment #7 — 3-image test asserts all 3 in `files=[...]` in marker order |
 | 33 | Telegram adapter test: sendPhoto multipart assertion | 15 | `session.post(data=<FormData with photo>)` + photo field + caption (no parse_mode) |
 | 34 | Telegram adapter test: 4xx-non-transient classification (no circuit-breaker record) | 14 | Mock Telegram 400 → assert `circuit_breaker.consecutive_failures == 0`; mock 500 → assert recorded |
 | 35 | Telegram adapter test: sendPhoto→sendDocument ladder + >50MB skip + caption>1024 follow-up + parse_mode=None | 15, 16, 17, 18 | All 4 sub-cases pass |
 | 36 | Slack adapter test: SINGLE `files_upload_v2` call (NOT upload-then-postMessage) | 22 | Assert exactly one `_safe_api_call("files_upload_v2", ...)`; assert NO `chat.postMessage(file=)` follow-up |
-| 37 | Slack adapter test: `missing_scope` classified BEFORE `record_failure` (consecutive_failures==0) | 20 | Mock `missing_scope` ok=false → `record_failure` NOT called; `SlackCapabilityError` raised |
+| 37 | Slack adapter test: `missing_scope` classified BEFORE `record_failure` (consecutive_failures==0) | 20 | Mock `missing_scope` ok=false → `record_failure` NOT called; `SlackCapabilityError` raised AND propagates uncaught through both `_call_slack_api` and `_safe_api_call` (R4 single mechanism — no catch-and-return path) |
 | 38 | Slack adapter test: capability flag zero-API-call test (5 sends → only 1 actual API call) | 21 | `mock_api_call.call_count == 1` across 5 sends |
 | 39 | Slack adapter test: `initial_comment` truncation + follow-up + upload-inside-lock | 22, 23 | Per-channel-lock test asserts no interleaving; follow-up test asserts both calls in order |
 | 40 | End-to-end integration test (`tests/test_outbound_image_delivery.py`): mock source + mock `tmp_image_store` populated with a tiny PNG → dispatcher → adapter → assert `sent_messages[-1].images` populated and `sent_messages[-1].content` marker-free | 3, 4, 26 | Test passes via mock e2e (BOTH seams) |
@@ -1008,7 +1036,7 @@ This ships with the code change. Operators must manually grant the scope in thei
 | Direction | Dependency |
 |-----------|-----------|
 | **Upstream (locked)** | Phase A's `decisions.md` §marker (regex exact), §capture (50–300 KB assumption), §http-api (marker-preserved-for-API), §degradation (charter-side failures only — Phase B owns the platform-side mirror) |
-| **Upstream (verified)** | `TmpImageStore.open_with_meta` (`daemon/services/tmp_image_store.py:436`) — sync read of (bytes, content_type, sha256_hex); `manager.tmp_image_store` property (`daemon/manager.py:2544-2546`) — returns `None` when not injected (test path) |
+| **Upstream (verified)** | `TmpImageStore.open_full` (`daemon/services/tmp_image_store.py:480-494`) — record read (provenance gate) + `TmpImageStore.open_with_meta` (`:436-455`) — bytes read (bytes, content_type, sha256_hex); `manager.tmp_image_store` property (`daemon/manager.py:2545`) — returns `None` when not injected (test path) |
 | **Downstream** | Phase D (cross-cutting tests/version/docs consolidation; picks up Phase B's restart-promote matrix) |
 | **Independent** | Phase C (agent-prompt-only); Phase A (already shipped/approved) |
 
@@ -1114,6 +1142,7 @@ Mock fixture: a 1×1 PNG (89 bytes) saved to a fixture tmp_image_store; `image_i
 - [ ] Telegram `sendPhoto` size >10 MB → `sendDocument` automatically.
 - [ ] Telegram `sendDocument` size >50 MB → text fallback (rare edge).
 - [ ] Telegram >50MB / MIME-miss → WARN + skip; remaining images + text delivered.
+- [ ] Telegram ALL image uploads fail (4xx/MIME-miss/oversize — any mix) AND content ≤1024 (`caption_remaining == ""`) — full text STILL delivered via the `delivered_count == 0` guard; `send()` returns success only for the actual text delivery; `store.delete` never fires for undelivered images (approver iter-002 blocking #1).
 - [ ] Telegram caption >1024 → truncated on image + full-text follow-up `sendMessage`.
 - [ ] Slack `files_upload_v2` missing_scope → text-only + ONE WARN log per channel (not N); capability flag set; zero API calls thereafter.
 - [ ] Slack `files.uploadV2` other error → text fallback + WARN.
