@@ -2358,35 +2358,66 @@ class TaskRepository:
                         -- (one RUNNING task per instance) still applies
                         -- — that is the only invariant reports need.
                         --
-                        -- D13: the previous ``j.job_type = 'message'``
-                        -- filter inside this subquery is removed —
-                        -- messages no longer create ``JobItem`` rows
-                        -- (see InstanceMessagingService.enqueue_message).
-                        -- The subquery now checks for ANY processing
-                        -- ``JobItem`` for the instance; after D13 these
-                        -- are exclusively TASK-type dispatch-queue jobs,
-                        -- so blocking on them is correct (they drive
-                        -- instance spawn + message enqueue and must
-                        -- complete before a second message can be
-                        -- processed for the same instance).
+                        -- claim-gate-sibling-deadlock fix
+                        -- (2026-10-04): the ``j.job_type != 'message'``
+                        -- filter is added BACK to the subquery's
+                        -- WHERE clause. Two rapid external messages
+                        -- to the same instance each mint a
+                        -- ``job_type='message'`` JobItem mirror
+                        -- (``daemon/services/instance_messaging.py:2648-2666``
+                        -- — verified at v0.16.12) AND a backing Task
+                        -- row. The previous guard (which scoped to
+                        -- any ACTIVE JobItem for the instance)
+                        -- therefore saw the SIBLING message-JobItem
+                        -- as evidence of in-flight work and
+                        -- blocked the second Task's claim forever —
+                        -- the worker pool's claim path returned None,
+                        -- both message-JobItems sat ACTIVE, the
+                        -- per-instance parallel-queue slot allowed
+                        -- multiple ACTIVE rows, and the queue would
+                        -- wedge. Excluding message-type JobItems from
+                        -- the blocking set removes the self-induced
+                        -- sibling deadlock.
+                        --
+                        -- SAFETY ARGUMENT — this relaxation CANNOT
+                        -- create concurrent same-instance turns:
+                        -- the per-instance RUNNING-task guard
+                        -- (above at lines 2230-2294) already
+                        -- serializes at the Task layer (one
+                        -- ``status='running'`` task per instance).
+                        -- A TASK-type JobItem still blocks per the
+                        -- original D13 invariant — only the
+                        -- message-mirror sibling protection is
+                        -- invalidated. Per-instance belt at
+                        -- ``daemon/services/job_queue_service.py:start_job``
+                        -- — start_job declines message jobs whose
+                        -- instance holds another ACTIVE message
+                        -- JobItem — provides defense-in-depth so the
+                        -- JobItem-level invariant (at most one ACTIVE
+                        -- message JobItem per instance) holds, and
+                        -- FIFO ordering via the queue-awareness gate
+                        -- keeps the second task held back until the
+                        -- first turn completes.
                         task_type != :process_message_type
                         OR instance_id NOT IN (
                             SELECT j.instance_id FROM job_queue_items j
                             LEFT JOIN instances i ON j.instance_id = i.instance_id
-                            -- Phase 3 admission-decision migration: filter on
-                            -- admission_state IN ('queued', 'active') instead of
-                            -- ``status = 'processing'``. The legacy predicate
-                            -- excluded PAUSED jobs even though they still hold
-                            -- the lock (admission_state='active' under the new
-                            -- model — see Plan §8.1 / ``paused`` admission handling).
-                            -- The IN-list also covers the B1 single-transaction
-                            -- window where a job briefly sits in
-                            -- admission_state='queued' while its lock is held
-                            -- (mirrors ``_ACTIVE_JOB_IDS_SUBQUERY`` in
-                            -- lock_repository.py).
+                            -- claim-gate-sibling-deadlock fix
+                            -- (2026-10-04): exclude message-type
+                            -- JobItems from the blocking set. See
+                            -- the comment above for the rationale
+                            -- (sibling deadlock, the per-instance
+                            -- belt, the per-instance RUNNING-task
+                            -- guard). The literal ``'message'`` is
+                            -- the value stamped at
+                            -- ``daemon/services/instance_messaging.py:2661``
+                            -- (``job_type="message"``) — the ONLY
+                            -- place a JobItem is born as a message
+                            -- mirror (audit-verified at v0.16.12).
                             WHERE j.admission_state IN {active_admission_states_sql()}
                               AND j.instance_id IS NOT NULL
                               AND j.deleted_at IS NULL
+                              AND j.job_type != 'message'
                               -- Self-deadlock fix (2026-08-02): exclude the candidate task's
                               -- own row from the in-flight check — otherwise the guard
                               -- matches the task being claimed and blocks it forever.

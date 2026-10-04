@@ -4245,7 +4245,59 @@ class JobQueueService:
             instance_id = job.instance_id  # preserve existing target
         else:
             instance_id = str(uuid.uuid4())  # fresh for new task instances
-        
+
+        # claim-gate-sibling-deadlock BELT (2026-10-04): when a
+        # message-type JobItem targets an instance that already holds
+        # another ACTIVE message JobItem, decline to start this one.
+        # Defense-in-depth for the cross-system guard relaxation at
+        # ``daemon/repositories/task/repository.py`` (which now excludes
+        # message-type JobItems from the blocking set so the
+        # claim-gate sibling deadlock cannot recur). Without the belt,
+        # two rapid external messages to the same instance would both
+        # flip to ACTIVE; per-instance serialization then happens at
+        # the Task layer (the per-instance RUNNING-task guard) — which
+        # works, but the belt enforces the stronger JobItem-level
+        # invariant (at most one ACTIVE message JobItem per instance)
+        # so the second message JobItem stays in QUEUED where the
+        # queue-awareness gate holds its backing Task back in strict
+        # FIFO order. When the first JobItem goes to DONE, the second
+        # can start and the existing per-instance Task guard will
+        # serialize its claim.
+        #
+        # TASK-type JobItems are intentionally excluded from the belt
+        # — task jobs target NEW instances (the fresh UUID above) and
+        # therefore cannot collide per-instance with another active
+        # TASK job. The belt is message-only.
+        if (
+            job.job_type == "message"
+            and job.instance_id
+        ):
+            try:
+                sibling = await asyncio.to_thread(
+                    self._repository.find_active_message_job_for_instance,
+                    job.instance_id,
+                    exclude_job_id=job_id,
+                )
+            except Exception as belt_err:
+                logger.warning(
+                    f"start_job: belt lookup failed for message "
+                    f"job {job_id[:8]}... on instance "
+                    f"{job.instance_id[:8]}...: {belt_err!r} — "
+                    f"falling through (per-instance Task guard still "
+                    f"serializes)."
+                )
+                sibling = None
+            if sibling is not None:
+                logger.info(
+                    f"start_job: message job {job_id[:8]}... "
+                    f"DEFERRED — sibling ACTIVE message job "
+                    f"{sibling.job_id[:8]}... already drives "
+                    f"instance {job.instance_id[:8]}... "
+                    f"(claim-gate-sibling-deadlock belt; FIFO "
+                    f"re-evaluated next cycle)"
+                )
+                return None
+
         # [TRACE] Log instance_id being used
         logger.info(
             f"[TRACE] start_job: using instance_id={instance_id[:8]}... "

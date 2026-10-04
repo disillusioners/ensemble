@@ -618,6 +618,52 @@ class JobRepository:
             stmt = stmt.order_by(JobItem.created_at.desc(), JobItem.job_id)
             return db_session.exec(stmt).first()
 
+    def find_active_message_job_for_instance(
+        self,
+        instance_id: str,
+        *,
+        exclude_job_id: str,
+    ) -> JobItem | None:
+        """Find an ACTIVE message-type JobItem driving ``instance_id``,
+        excluding ``exclude_job_id``.
+
+        claim-gate-sibling-deadlock belt (2026-10-04): the per-instance
+        belt at ``JobQueueService.start_job`` calls this helper to
+        determine whether a candidate message JobItem should be held
+        back because another ACTIVE message JobItem already drives the
+        same instance. Returns the OTHER (sibling) JobItem, or ``None``
+        if no sibling is currently active.
+
+        Filters on ``admission_state IN ('queued','active')`` (mirrors
+        ``get_active_by_instance``) AND ``job_type='message'`` AND
+        ``deleted_at IS NULL``. Excludes the candidate via
+        ``exclude_job_id`` so callers can safely probe their own row
+        without false-positive self-blocking.
+
+        Args:
+            instance_id: Target instance to check.
+            exclude_job_id: The candidate's ``job_id`` — never returned
+                even if it would otherwise match (a self-check returns
+                ``None``).
+
+        Returns:
+            The sibling ACTIVE message JobItem driving ``instance_id``,
+            or ``None`` if no sibling is currently active. The freshest
+            sibling is returned on ties (matches
+            :meth:`get_active_by_instance` ordering).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(JobItem)
+                .where(JobItem.instance_id == instance_id)
+                .where(JobItem.deleted_at.is_(None))
+                .where(JobItem.admission_state.in_(ACTIVE_ADMISSION_STATES))
+                .where(JobItem.job_type == "message")
+                .where(JobItem.job_id != exclude_job_id)
+                .order_by(JobItem.created_at.desc(), JobItem.job_id)
+            )
+            return db_session.exec(stmt).first()
+
     def find_by_idempotency_key(self, idempotency_key: str) -> JobItem | None:
         """Find a job by its idempotency key.
         
