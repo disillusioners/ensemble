@@ -46,6 +46,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, field_validator
 
 from ._tool_registry import register_tool_category
 from daemon.services.question_manager import pack_to_dict
@@ -55,6 +56,58 @@ if TYPE_CHECKING:
     from daemon.services.live_event_hub import LiveEventHub
 
 logger = logging.getLogger(__name__)
+
+
+def _unwrap_item_array(value: Any) -> list | None:
+    """Return the inner list of the canonical ``{"item": [...]}`` array wrap, else ``None``.
+
+    Some LLM providers (Zai/GLM-style function-calling) emit array-typed
+    parameters wrapped as a single-key ``{"item": [...]}`` dict instead of
+    a bare JSON array. The wrap is accepted ONLY in canonical form: a
+    dict with EXACTLY one key ``"item"`` whose value is a list. Anything
+    else (extra keys, non-list ``item`` value, non-dict, array, primitive)
+    returns ``None`` so the caller falls through to its existing
+    validation — fail-closed (no normalization, no side effects).
+    """
+    if (
+        isinstance(value, dict)
+        and set(value.keys()) == {"item"}
+        and isinstance(value.get("item"), list)
+    ):
+        return value["item"]
+    return None
+
+
+class _AskQuestionsArgs(BaseModel):
+    """Pydantic args-schema for ``ask_questions`` (defense layer BEFORE the body).
+
+    Mirrors the historically-inferred schema (``questions: list[dict] |
+    None = None``) so the advertised tool contract is byte-identical
+    (verified empirically — same ``anyOf[array-of-object, null]`` shape,
+    same ``title="Questions"``, same default ``null``). Adds a single
+    ``mode="before"`` field validator that unwraps the canonical Zai/GLM
+    single-key ``{"item": [...]}`` array wrap so the body validator (and
+    its field-path hint on failure) gets the bare list. Non-canonical
+    shapes — extra keys, non-list ``item``, ``{"item_key": [...]}``,
+    primitives — are NOT unwrapped and so are rejected by the same
+    ValidationError path that currently rejects ``questions="not-a-list"``
+    (executor wrapper, fail-closed, zero side effects).
+    """
+
+    questions: list[dict] | None = None
+
+    @field_validator("questions", mode="before")
+    @classmethod
+    def _unwrap_item_wrapped_questions(cls, v: Any) -> Any:
+        # Canonical wrap → bare list (body validator handles the rest).
+        # Anything else → pass through unchanged so pydantic's
+        # list[dict] | None check rejects non-canonical dicts at the
+        # executor layer (existing behavior; preserves fail-closed).
+        if isinstance(v, dict):
+            unwrapped = _unwrap_item_array(v)
+            if unwrapped is not None:
+                return unwrapped
+        return v
 
 CATEGORY_NAME = "Question"
 CATEGORY_DOC = """\
@@ -170,7 +223,27 @@ def validate_and_normalize_questions(
         * Unknown extra keys on question dicts and label-objects are
           DROPPED (ratified choice — the normalized dict only carries
           the known keys, so unknown keys cannot leak into storage).
+        * Zai/GLM provider convenience: array-typed parameters
+          (``questions`` itself, and each question's ``options``) may
+          arrive wrapped as the canonical single-key
+          ``{"item": [...]}`` dict. The canonical wrap is unwrapped to
+          the bare list BEFORE the rules above run; the unwrapped value
+          follows every rule above unchanged. Non-canonical shapes
+          (extra keys, non-list ``item``, ``{"item_key": [...]}``,
+          primitives) are rejected — the canonical not-a-list
+          rules above produce the exact field-path hint (fail-closed,
+          zero side effects).
     """
+    # Zai/GLM provider artifact: array-typed parameters may arrive wrapped
+    # as the canonical single-key ``{"item": [...]}`` dict. Canonical wrap
+    # → unwrap to the bare list (the rules below apply unchanged); any
+    # other dict → fall through to the not-a-list rejection below with
+    # the existing error style (fail-closed, zero side effects).
+    if isinstance(questions, dict):
+        unwrapped = _unwrap_item_array(questions)
+        if unwrapped is None:
+            return None, "questions: must be a non-empty list of question dicts"
+        questions = unwrapped
     if not isinstance(questions, list) or len(questions) == 0:
         return None, "questions: must be a non-empty list of question dicts"
 
@@ -210,6 +283,21 @@ def validate_and_normalize_questions(
         option_strings: list[str] = []
         option_descriptions: dict[str, str] = {}
         if raw_options is not None:
+            # Zai/GLM provider artifact: array-typed parameters may arrive
+            # wrapped as the canonical single-key ``{"item": [...]}`` dict.
+            # Canonical wrap → unwrap to the bare list (per-element rules
+            # below apply unchanged); any other dict → fall through to the
+            # not-a-list rejection with the existing error style
+            # (fail-closed, zero side effects — same wording the current
+            # non-list branch already uses).
+            if isinstance(raw_options, dict):
+                unwrapped = _unwrap_item_array(raw_options)
+                if unwrapped is None:
+                    return None, (
+                        f"questions[{q_index}].options: must be a list of "
+                        f"strings or {{label, description}} objects"
+                    )
+                raw_options = unwrapped
             if not isinstance(raw_options, list):
                 return None, (
                     f"questions[{q_index}].options: must be a list of "
@@ -293,7 +381,13 @@ def _format_validation_error(problem: str) -> str:
         "    - required (boolean, optional, default true)\n"
         "  Mixed lists (some strings, some {label, description} objects) are\n"
         "  accepted; label-objects are normalized to their label string before\n"
-        "  storage. Unknown extra keys are dropped.\n\n"
+        "  storage. Unknown extra keys are dropped.\n"
+        "  Zai/GLM provider convenience: array-typed parameters (questions\n"
+        "  itself, and each question's options) also accept the canonical\n"
+        '  single-key wrap {"item": [ ... ]} — it is unwrapped to the bare\n'
+        "  list before validation. Only the canonical shape (exactly one\n"
+        '  key "item", list value) is accepted; any other dict fails the\n'
+        "  rules above unchanged.\n\n"
         "Minimal correct example:\n"
         '  ask_questions(questions=[{"text": "Proceed?", "options": ["Yes", "No"]}])'
     )
@@ -320,7 +414,7 @@ def create_question_tools(
     """
 
     @register_tool_category("question")
-    @tool
+    @tool(args_schema=_AskQuestionsArgs)
     async def ask_questions(questions: list[dict] | None = None) -> str:
         """Ask the user one or more questions; pause the instance until they answer.
 
@@ -341,6 +435,16 @@ def create_question_tools(
             must be answered.
           - ``id`` (str, optional) — caller-supplied identifier; when
             missing the manager auto-generates a UUID4.
+
+        Zai/GLM provider convenience: array-typed parameters
+        (``questions`` itself, and each question's ``options``) also
+        accept the canonical single-key wrap ``{"item": [...]}`` (some
+        providers emit this artifact for array-typed parameters) — it
+        is unwrapped to the bare list BEFORE the validation rules below
+        run, and the unwrapped value follows every rule below
+        unchanged. ONLY the canonical single-key shape is accepted —
+        extra keys or a non-list ``item`` value are rejected
+        (fail-closed, zero side effects).
 
         Validation is strict at the tool body: on any invalid field that
         reaches the tool body, the tool returns a deterministic ``ERROR:``
@@ -549,6 +653,19 @@ effect):
     ``None``, since a silent ``bool(None)`` would flip the True default.
   * Unknown extra keys on question dicts and option objects are
     dropped.
+  * Zai/GLM provider convenience: array-typed parameters
+    (``questions`` itself, and each question's ``options``) may arrive
+    wrapped as the canonical single-key ``{"item": [...]}`` dict. The
+    canonical wrap is unwrapped to the bare list BEFORE the rules above
+    run; the unwrapped value follows every rule above unchanged. ONLY
+    the canonical single-key shape (exactly one key ``item`` with a
+    list value) is accepted. Non-canonical shapes — extra keys,
+    non-list ``item``, ``{"item_key": [...]}``, primitives — are
+    rejected. Canonical questions wraps are unwrapped at the
+    pydantic args-schema layer (``mode="before"`` validator on
+    ``_AskQuestionsArgs``); canonical options wraps and any non-canonical
+    array-wrap are handled by the body validator. Both layers fail
+    closed on rejection (no pack stored, no SSE, no pause).
 
 Failure semantics: for any payload that REACHES THE TOOL BODY and fails
 validation, the tool returns a deterministic ``ERROR:`` hint naming the

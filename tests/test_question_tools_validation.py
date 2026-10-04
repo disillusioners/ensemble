@@ -51,6 +51,45 @@ SECONDARY_PACK = [
 ]
 
 
+# VERBATIM observed failing payload from the dispatch (Zai/GLM wraps each
+# question's ``options`` as the canonical single-key ``{"item": [...]}``).
+# Pre-fix this returned ``ERROR: Invalid ask_questions payload —
+# questions[0].options: must be a list of strings or {label, description}
+# objects.`` from the body validator; the fix unwraps it and normalizes
+# the inner list with descriptions intact.
+OBSERVED_FAILING_PAYLOAD = [
+    {
+        "id": "zombie",
+        "text": "Authorize the zombie-ACTIVE finalize (b639aaf8) to release slot 1?",
+        "options": {
+            "item": [
+                {
+                    "description": (
+                        "One guarded pass: finalize b639aaf8 (done/completed) then lock "
+                        "releases; 4/5 free. Also read-only census of the two earlier "
+                        "suspected wedges (6588/94cd3abd 06:44, 6600/14eb052d 06:54) to "
+                        "confirm whether they self-resolved or are silently accumulating."
+                    ),
+                    "label": "Finalize zombie + census (recommended)",
+                },
+                {
+                    "description": "Only the finalize. Skip the census check.",
+                    "label": "Finalize zombie only",
+                },
+                {
+                    "description": (
+                        "Leave b639aaf8 active and slot 1 held. No urgency (3/5 free, "
+                        "wedge class being fixed by code). Revisit during a dedicated "
+                        "f2-backstop investigation commission later."
+                    ),
+                    "label": "Defer to f2 investigation",
+                },
+            ]
+        },
+    }
+]
+
+
 # =============================================================================
 # Helpers (mirrors tests/test_question_tools.py)
 # =============================================================================
@@ -753,6 +792,342 @@ class TestExecutorLayerSchemaRejects:
         #    SSE never awaited. Reuse the same zero-side-effect contract
         #    the in-body tests verify. (Asserted after the mocks are
         #    restored — manager/hub references are unaffected.)
+        assert manager._question_manager.get_question_pack(INSTANCE_ID) is None
+        manager.set_question_pause_requested.assert_not_called()
+        assert manager.is_question_pause_requested(INSTANCE_ID) is False
+        hub.stream_question_pack.assert_not_awaited()
+
+
+# =============================================================================
+# (f) Zai/GLM ``{"item": [...]}`` array-wrap convenience — acceptance + rejection
+# =============================================================================
+
+
+class TestItemWrappedPayloads:
+    """Some LLM providers (Zai/GLM function-calling) emit array-typed
+    parameters wrapped as the canonical single-key ``{"item": [...]}`` dict
+    instead of a bare JSON array. The body validator unwraps BOTH the
+    ``questions`` parameter and each question's ``options`` BEFORE per-element
+    rules run; non-canonical shapes fall through to the existing rules (reject
+    with the field-path hint at the body layer, or fail-closed at the
+    pydantic args-schema layer if it reaches the executor first).
+    """
+
+    # -- Acceptance: wrapped options -----------------------------------------
+
+    async def test_wrapped_options_accepted_and_stored_identically_to_bare_list(
+        self,
+    ):
+        """Wrapped ``options`` must produce stored state IDENTICAL to the
+        bare-list equivalent (requirement: ``options`` + ``option_descriptions``
+        equality). SSE payload equality too."""
+        tool_wrapped, manager_wrapped, hub_wrapped = _build_tool()
+        wrapped_result = await tool_wrapped.coroutine(
+            questions=[
+                {
+                    "id": "approach",
+                    "text": "Approach?",
+                    "options": {"item": ["A", "B", "C"]},
+                }
+            ],
+        )
+        assert isinstance(wrapped_result, str)
+        stored_wrapped = manager_wrapped._question_manager.get_question_pack(INSTANCE_ID)
+        payload_wrapped = hub_wrapped.stream_question_pack.await_args.args[1]
+
+        tool_bare, manager_bare, hub_bare = _build_tool()
+        bare_result = await tool_bare.coroutine(
+            questions=[
+                {
+                    "id": "approach",
+                    "text": "Approach?",
+                    "options": ["A", "B", "C"],
+                }
+            ],
+        )
+        stored_bare = manager_bare._question_manager.get_question_pack(INSTANCE_ID)
+        payload_bare = hub_bare.stream_question_pack.await_args.args[1]
+
+        # Stored options + option_descriptions MUST be equal.
+        assert stored_wrapped.questions[0].options == stored_bare.questions[0].options == [
+            "A",
+            "B",
+            "C",
+        ]
+        assert (
+            stored_wrapped.questions[0].option_descriptions
+            == stored_bare.questions[0].option_descriptions
+            == {}
+        )
+        # SSE payload equality — the user-facing contract is unchanged.
+        assert (
+            payload_wrapped["questions"][0]["options"]
+            == payload_bare["questions"][0]["options"]
+        )
+        # Both pause + emit side effects equally.
+        manager_wrapped.set_question_pause_requested.assert_called_once_with(INSTANCE_ID)
+        hub_wrapped.stream_question_pack.assert_awaited_once()
+
+    async def test_wrapped_options_with_mixed_elements_validates_and_stores(self):
+        """Mixed strings + label-objects inside an UNWRAPPED list (after the
+        canonical wrap is removed) still validate and store with descriptions
+        carried through as ``option_descriptions`` metadata."""
+        tool, manager, _hub = _build_tool()
+        result = await tool.coroutine(
+            questions=[
+                {
+                    "text": "How to proceed?",
+                    "options": {
+                        "item": [
+                            "Plain string option",
+                            {"label": "Label with desc", "description": "extra detail"},
+                            {"label": "Label no desc"},
+                        ]
+                    },
+                }
+            ],
+        )
+
+        assert isinstance(result, str)
+        stored = manager._question_manager.get_question_pack(INSTANCE_ID)
+        assert stored.questions[0].options == [
+            "Plain string option",
+            "Label with desc",
+            "Label no desc",
+        ]
+        assert stored.questions[0].option_descriptions == {"Label with desc": "extra detail"}
+
+    async def test_wrapped_options_empty_list_accepted(self):
+        """Empty wrapped list ``{"item": []}`` is accepted — empty options
+        are valid (MAIN-format empty list is also accepted per requirement 3)."""
+        tool, manager, _hub = _build_tool()
+        result = await tool.coroutine(
+            questions=[{"id": "open", "text": "t", "options": {"item": []}}],
+        )
+        assert isinstance(result, str)
+        stored = manager._question_manager.get_question_pack(INSTANCE_ID)
+        assert stored.questions[0].options == []
+        assert stored.questions[0].option_descriptions == {}
+
+    # -- Acceptance: wrapped questions (top-level) ----------------------------
+
+    async def test_wrapped_questions_accepted_original_failing_payload(self):
+        """VERBATIM observed failing payload: the dispatcher's report fixture.
+        Pre-fix this raised ``ERROR: Invalid ask_questions payload — questions[0]
+        .options: must be a list of strings or {label, description} objects.``
+        Post-fix the pack is stored with all three labels + descriptions."""
+        tool, manager, hub = _build_tool()
+
+        result = await tool.coroutine(questions=OBSERVED_FAILING_PAYLOAD)
+
+        assert isinstance(result, str)
+        assert "Authorize the zombie-ACTIVE finalize (b639aaf8)" in result
+
+        stored = manager._question_manager.get_question_pack(INSTANCE_ID)
+        assert stored is not None
+        assert stored.status == "pending"
+        q = stored.questions[0]
+        assert q.id == "zombie"
+        assert q.options == [
+            "Finalize zombie + census (recommended)",
+            "Finalize zombie only",
+            "Defer to f2 investigation",
+        ]
+        assert set(q.option_descriptions.keys()) == set(q.options)
+        # Descriptions round-trip (lengths match the original).
+        assert q.option_descriptions["Finalize zombie + census (recommended)"].startswith(
+            "One guarded pass"
+        )
+        assert q.option_descriptions["Finalize zombie only"] == (
+            "Only the finalize. Skip the census check."
+        )
+
+        manager.set_question_pause_requested.assert_called_once_with(INSTANCE_ID)
+        assert manager.is_question_pause_requested(INSTANCE_ID) is True
+        hub.stream_question_pack.assert_awaited_once()
+
+    def test_wrapped_questions_pure_helper(self):
+        """Direct call to ``validate_and_normalize_questions`` with a wrapped
+        top-level questions dict — unwrap + per-question rules."""
+        normalized, problem = validate_and_normalize_questions(
+            {"item": [{"text": "T1"}, {"id": "x", "text": "T2", "options": ["a"]}]}
+        )
+        assert problem is None
+        assert normalized == [
+            {"text": "T1", "options": []},
+            {"text": "T2", "options": ["a"], "id": "x"},
+        ]
+
+    # -- Rejection: options wrap — non-canonical shapes (body layer) ---------
+
+    async def test_options_rejects_item_not_a_list(self):
+        """``{"item": "not-a-list"}`` (item value is not a list) → reject with
+        existing field-path hint, ZERO side effects."""
+        tool, manager, hub = _build_tool()
+        result = await tool.coroutine(
+            questions=[{"text": "t", "options": {"item": "not-a-list"}}]
+        )
+        _assert_zero_side_effects(
+            manager,
+            hub,
+            result,
+            "questions[0].options: must be a list of strings or {label, description} objects",
+        )
+
+    async def test_options_rejects_item_with_extra_key(self):
+        """``{"item": [...], "extra": 1}`` (extra key breaks canonical
+        single-key shape) → reject with existing field-path hint."""
+        tool, manager, hub = _build_tool()
+        result = await tool.coroutine(
+            questions=[{"text": "t", "options": {"item": ["a"], "extra": 1}}]
+        )
+        _assert_zero_side_effects(
+            manager,
+            hub,
+            result,
+            "questions[0].options: must be a list of strings or {label, description} objects",
+        )
+
+    async def test_options_rejects_item_key_mismatch(self):
+        """``{"item_key": [...]}`` (wrong key name) → reject with existing
+        field-path hint."""
+        tool, manager, hub = _build_tool()
+        result = await tool.coroutine(
+            questions=[{"text": "t", "options": {"item_key": ["a"]}}]
+        )
+        _assert_zero_side_effects(
+            manager,
+            hub,
+            result,
+            "questions[0].options: must be a list of strings or {label, description} objects",
+        )
+
+    # -- Rejection: questions wrap — non-canonical shapes (pure helper) -----
+
+    def test_questions_rejects_item_not_a_list_pure_helper(self):
+        normalized, problem = validate_and_normalize_questions({"item": "x"})
+        assert normalized is None
+        assert problem == "questions: must be a non-empty list of question dicts"
+
+    def test_questions_rejects_item_with_extra_key_pure_helper(self):
+        normalized, problem = validate_and_normalize_questions(
+            {"item": [{"text": "t"}], "extra": 1}
+        )
+        assert normalized is None
+        assert problem == "questions: must be a non-empty list of question dicts"
+
+    def test_questions_rejects_item_key_mismatch_pure_helper(self):
+        normalized, problem = validate_and_normalize_questions({"item_key": [{"text": "t"}]})
+        assert normalized is None
+        assert problem == "questions: must be a non-empty list of question dicts"
+
+    # -- Pydantic args-schema layer (executor pin) --------------------------
+
+    async def test_args_schema_accepts_canonical_wrapped_questions_end_to_end(self):
+        """Canonical wrapped questions flow through the pydantic args-schema
+        ``mode="before"`` unwrap, the body runs, the pack is stored, the
+        pause flag is set — mirror of the existing executor pin but on the
+        acceptance path."""
+        import sys
+
+        _saved = {}
+        for _key in list(sys.modules):
+            if _key.startswith("langgraph"):
+                _saved[_key] = sys.modules.pop(_key)
+        try:
+            from langgraph._internal._runnable import CONF, CONFIG_KEY_RUNTIME
+            from langgraph.prebuilt import ToolNode
+            from langgraph.runtime import Runtime
+
+            tool, manager, hub = _build_tool()
+            tool_node = ToolNode([tool], handle_tool_errors=True)
+
+            from langchain_core.messages import AIMessage
+
+            ai_msg = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "ask_questions",
+                        "args": {"questions": {"item": [{"text": "t"}]}},
+                        "id": "call_wrapped_questions",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+            runtime = Runtime()
+            result = await tool_node.ainvoke(
+                {"messages": [ai_msg]},
+                config={CONF: {CONFIG_KEY_RUNTIME: runtime}},
+            )
+            out_messages = result["messages"]
+            assert len(out_messages) == 1
+            msg = out_messages[0]
+            from langchain_core.messages import ToolMessage
+
+            assert isinstance(msg, ToolMessage)
+            # Acceptance pin: NO error — the canonical wrap was unwrapped by
+            # the pydantic before-validator and the body stored the pack.
+            assert msg.status != "error"
+        finally:
+            for _key, _mod in _saved.items():
+                sys.modules[_key] = _mod
+
+        # Side effects DID happen — pack stored, pause flag set, SSE emitted.
+        stored = manager._question_manager.get_question_pack(INSTANCE_ID)
+        assert stored is not None
+        assert stored.status == "pending"
+        assert stored.questions[0].text == "t"
+        manager.set_question_pause_requested.assert_called_once_with(INSTANCE_ID)
+        hub.stream_question_pack.assert_awaited_once()
+
+    async def test_args_schema_rejects_non_canonical_wrapped_questions(self):
+        """Non-canonical wrap (``{"item": "x"}``) at the questions parameter
+        fails the pydantic ValidationError path — executor wrapper, ZERO side
+        effects, fail-closed (the body validator is never reached)."""
+        import sys
+
+        _saved = {}
+        for _key in list(sys.modules):
+            if _key.startswith("langgraph"):
+                _saved[_key] = sys.modules.pop(_key)
+        try:
+            from langgraph._internal._runnable import CONF, CONFIG_KEY_RUNTIME
+            from langgraph.prebuilt import ToolNode
+            from langgraph.runtime import Runtime
+            from langchain_core.messages import AIMessage, ToolMessage
+
+            tool, manager, hub = _build_tool()
+            tool_node = ToolNode([tool], handle_tool_errors=True)
+
+            ai_msg = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "ask_questions",
+                        "args": {"questions": {"item": "not-a-list"}},
+                        "id": "call_bad_wrapped_questions",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+            runtime = Runtime()
+            result = await tool_node.ainvoke(
+                {"messages": [ai_msg]},
+                config={CONF: {CONFIG_KEY_RUNTIME: runtime}},
+            )
+            msg = result["messages"][0]
+            assert isinstance(msg, ToolMessage)
+            assert msg.status == "error"
+            # Executor wrapper text (NOT the body's field-path hint).
+            assert "ask_questions" in msg.content
+            assert "questions" in msg.content
+            assert "ERROR: Invalid ask_questions payload" not in msg.content
+        finally:
+            for _key, _mod in _saved.items():
+                sys.modules[_key] = _mod
+
+        # ZERO side effects — pack not stored, pause never set, SSE never awaited.
         assert manager._question_manager.get_question_pack(INSTANCE_ID) is None
         manager.set_question_pause_requested.assert_not_called()
         assert manager.is_question_pause_requested(INSTANCE_ID) is False
