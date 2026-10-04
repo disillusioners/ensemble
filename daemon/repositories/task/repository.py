@@ -852,6 +852,205 @@ class TaskRepository:
             )
             return db_session.exec(stmt).first()
 
+    # ---------------------------------------------------------------
+    # Auto-continue boot pass (feature/auto-continue-running-after-restart)
+    # ---------------------------------------------------------------
+    #
+    # P1 / D2 / D17 / D21 / architecture-recommendation.md Focus 1.
+    #
+    # Two methods back ``daemon/services/auto_continue_boot_pass.py``:
+    #
+    #   * ``find_auto_continue_candidates(boot_epoch)`` — pure read.
+    #     Folded single-statement SELECT mirroring the claim-guard's
+    #     anti-starvation invariant (``claim_pending_task`` guard at
+    #     ``repository.py:2230-2294``). PAUSED/TERMINAL/COMPLETED/ERROR/FAILED
+    #     WAITING_CHILDREN instance rows are EXCLUDED via instance
+    #     subquery (explicit full set per D21, not "PAUSED/terminal").
+    #     Strict ``status='running'`` task predicate (D7 / G3).
+    #     ``cancel_requested=False`` mirrors ``find_cancellable_tasks`` so
+    #     an in-flight STR cancel cannot double-pick the same task
+    #     (D21 / M20).
+    #
+    #   * ``mark_task_auto_continued(task_id, boot_epoch)`` — single
+    #     statement CAS mirroring the stamp contract in D2. Updates the
+    #     ``auto_continued_at`` column ONLY if the row is still
+    #     ``status='running'`` and either never stamped or stamped
+    #     older. Returns ``rowcount == 1`` → ``True`` (caller counts
+    #     the resume as scheduled); otherwise ``False`` (caller treats
+    #     as skip, never retry-stamps).
+    #
+    # Selection is read-only — >1-candidate / multi-task-per-instance
+    # defense lives in the boot service (P2 / D21), not in this repo
+    # method. A read-only repo method preserves a single SQL statement
+    # boundary that the test in ``M2`` can pin.
+
+    def find_auto_continue_candidates(
+        self, boot_epoch: datetime
+    ) -> list[Task]:
+        """Return RUNNING ``task`` rows eligible for boot auto-continue.
+
+        Feature: auto-continue-running-after-restart. P1 / D2 / D17 / D21.
+
+        Selection predicate (folded single-statement SELECT, claim-guard
+        convention — see ``claim_pending_task``'s atomic
+        ``instance_id NOT IN (...)`` at
+        ``daemon/repositories/task/repository.py:2230-2294``):
+
+          * ``task.status = 'running'`` (D7 / G3 — RUNNING-only;
+            ``idle``/``queued`` have no interrupted in-flight turn)
+          * ``task.task_type IN ('process_message', 'process_report')``
+            (mirrors ``find_paused_or_cancellable_turn:743``; excludes
+            ``SEND_REPORT`` / ``CLEANUP`` which are NOT active graph
+            turns)
+          * ``task.cancel_requested = False`` (D21 — mirrors
+            ``find_cancellable_tasks:4469-4500`` so an in-flight STR
+            cancel cannot double-pick the same task)
+          * ``(task.auto_continued_at IS NULL OR
+             task.auto_continued_at < :boot_epoch)`` (D17 / D2 — the
+            ``< :boot_epoch`` arm re-arms per epoch; IS NULL alone
+            would permanently exclude a still-RUNNING orphan after the
+            first stamp, defeating the restart-storm scenario)
+          * ``task.instance_id NOT IN
+             (SELECT id FROM instance WHERE status IN
+              ('paused', 'terminated', 'completed', 'error', 'failed',
+               'waiting_children'))`` (D21 — explicit full exclusion
+            set, not "PAUSED/terminal"; PAUSED = the
+            ``resume_instance_cascade`` lane; terminal / WC = bus-
+            owned; never touched by this pass)
+
+        Order: ``created_at ASC, id ASC`` (deterministic; oldest first
+        matches the stagger cadence in P2 T2.3 — the per-candidate
+        loop runs sequentially, so oldest-first keeps the most-recent
+        state of the instance at the tail of the boot window).
+
+        Read-only. No row mutation, no instance-status writes, no
+        retry_count increment. The matching ``mark_task_auto_continued``
+        method is the only writer of ``auto_continued_at``.
+
+        Args:
+            boot_epoch: Process-global boot epoch captured at daemon
+                startup (naive-UTC digits — see
+                ``daemon/services/boot_epoch.py:91-133``). The ``<``
+                comparison shares the same naive-UTC frame as the stored
+                ``auto_continued_at`` digit (set by
+                ``mark_task_auto_continued``).
+
+        Returns:
+            List of eligible Task rows. Empty list if no candidate.
+            Order: ``created_at ASC, id ASC``.
+        """
+        if boot_epoch is None:
+            # Defensive — the boot pass already SKIPs on boot_epoch=None
+            # (Δ2 / D19). This repo method, called outside the boot
+            # pass (e.g. by a unit test), returns empty rather than
+            # raising; the predicate is meaningless without an epoch.
+            return []
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task)
+                .where(Task.status == TaskStatus.RUNNING.value)
+                .where(
+                    Task.task_type.in_([
+                        TaskType.PROCESS_MESSAGE.value,
+                        TaskType.PROCESS_REPORT.value,
+                    ])
+                )
+                .where(Task.cancel_requested == False)  # noqa: E712
+                .where(
+                    # (auto_continued_at IS NULL OR auto_continued_at
+                    #  < :boot_epoch) — folded into a single
+                    # expression. SQLAlchemy renders this as a SQL
+                    # OR of two IS NULL / < comparands; the claim-
+                    # guard uses the same folded-OR shape.
+                    (Task.auto_continued_at.is_(None))  # type: ignore[union-attr]
+                    | (Task.auto_continued_at < boot_epoch)
+                )
+                .where(
+                    col(Task.instance_id).not_in(
+                        select(Instance.instance_id).where(
+                            Instance.status.in_([
+                                InstanceStatus.PAUSED.value,
+                                InstanceStatus.TERMINATED.value,
+                                InstanceStatus.COMPLETED.value,
+                                InstanceStatus.ERROR.value,
+                                InstanceStatus.FAILED.value,
+                                InstanceStatus.WAITING_CHILDREN.value,
+                            ])
+                        )
+                    )
+                )
+                .order_by(col(Task.created_at).asc(), col(Task.id).asc())
+            )
+            return list(db_session.exec(stmt).all())
+
+    def mark_task_auto_continued(
+        self, task_id: int, boot_epoch: datetime
+    ) -> bool:
+        """Stamp ``auto_continued_at`` for a successfully resumed Task.
+
+        Feature: auto-continue-running-after-restart. P1 / D2.
+
+        Single-statement atomic CAS (the claim-guard convention — see
+        ``claim_pending_task`` at
+        ``daemon/repositories/task/repository.py:2230-2294``):
+
+            UPDATE task
+            SET auto_continued_at = :boot_epoch
+            WHERE id = :task_id
+              AND status = 'running'
+              AND (auto_continued_at IS NULL
+                   OR auto_continued_at < :boot_epoch)
+
+        Returns ``True`` iff ``rowcount == 1`` (one row updated). Returns
+        ``False`` when:
+
+          * The Task no longer exists (id gone)
+          * The Task's status changed between selection and stamp
+            (e.g. the resume ran and the row is now COMPLETED via the
+            standard worker-pool completion — caller treats as skip,
+            never retry-stamps)
+          * ``auto_continued_at`` was stamped with a newer boot epoch
+            by a concurrent boot (the per-epoch re-arm: a second
+            boot in the same epoch must not overwrite; a NEWER
+            boot's stamp wins because ``< :boot_epoch`` is strict)
+
+        The CAS is intentionally narrower than the selection predicate:
+        the selection predicate may include ``process_report`` (D7
+        sibling to ``process_message``); the stamp requires
+        ``status='running'`` to avoid racing the worker-pool
+        completion path. A stamp returning ``False`` is NEVER a
+        failure — the caller logs INFO and moves on; the pass never
+        re-stamps and never raises on ``False``.
+
+        Args:
+            task_id: Integer primary key of the Task to stamp.
+            boot_epoch: Process-global boot epoch (naive-UTC digits).
+                Same frame as the stored ``auto_continued_at``.
+
+        Returns:
+            ``True`` on stamp success; ``False`` otherwise.
+        """
+        if boot_epoch is None:
+            # Defensive: never stamp with None (the column is naive-UTC;
+            # None would either NULL the column or raise on PG). The
+            # boot pass already SKIPs on boot_epoch=None, so this is
+            # belt-and-suspenders.
+            return False
+        from sqlalchemy import text
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE task "
+                    "SET auto_continued_at = :boot_epoch "
+                    "WHERE id = :task_id "
+                    "  AND status = 'running' "
+                    "  AND (auto_continued_at IS NULL "
+                    "       OR auto_continued_at < :boot_epoch)"
+                ),
+                {"task_id": task_id, "boot_epoch": boot_epoch},
+            )
+            return result.rowcount == 1
+
     def has_inflight_task(self, instance_id: str) -> bool:
         """Return True if any PENDING or RUNNING ``task`` row exists for ``instance_id``.
 

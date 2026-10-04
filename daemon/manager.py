@@ -6023,6 +6023,15 @@ class InstanceManager:
                 "CREATE INDEX IF NOT EXISTS idx_task_running_heartbeat "
                 "ON task(last_heartbeat_at) WHERE status = 'running'"
             ),
+            # task.auto_continued_at (feature/auto-continue-running-after-restart):
+            # boot auto-continue CAS marker. Stamped AFTER a successful
+            # ``_schedule_explicit_handle_resume`` so "marked" ≡ "continued"
+            # (a′ semantics — D2 / Focus 1). Advisory-only; the
+            # ``(auto_continued_at IS NULL OR auto_continued_at < :boot_epoch)``
+            # predicate re-arms per boot epoch. No new index — selection
+            # is gated on ``status='running'`` (served by
+            # ``idx_task_status_type_created``); stamp CAS is PK-scoped (D17).
+            "ALTER TABLE task ADD COLUMN IF NOT EXISTS auto_continued_at TIMESTAMP",
             # source_configs.autostart: whether a source auto-starts on boot
             "ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE",
             # instance_ui_prefs.icon_tag: optional UI icon for existing prefs tables

@@ -1,0 +1,11 @@
+worktree: /home/nea/ensemble-src-wt-auto-continue
+branch:   feature/auto-continue-running-after-restart
+commit:   649c7e70eee4e9c0668fcd1e4b2191bc9fc8030a
+phase:    Phase 0 — worktree + fresh uv venv + import-resolution gate
+import_resolution:
+  command: ".venv/bin/python -c 'import daemon; print(daemon.__file__)'"
+  expected_path: /home/nea/ensemble-src-wt-auto-continue/daemon/__init__.py
+  status: VERIFIED (2026-10-04T07:55Z)
+python:   3.13.15 (uv-managed)
+uv:       0.12.5
+created_by: coder-lane (Phase 0)
