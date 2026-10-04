@@ -12,6 +12,12 @@
 
 ---
 
+## Chart Delivery
+
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+
+---
+
 ## Scope
 
 8. **Only review changed files** — Don't touch unrelated code

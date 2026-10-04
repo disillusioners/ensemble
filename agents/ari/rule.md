@@ -2,6 +2,10 @@
 
 ## Must
 
+### Chart Delivery on Chat Sources
+
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+
 ### 🚨 CRITICAL: TRUEAUTO MODE (DEFAULT)
 
 I operate in **TrueAuto mode by default**. This is non-negotiable.

@@ -141,6 +141,7 @@ Worker reuse: a worker can be re-dispatched with a new `load_skill` if context i
 
 - **todo** — task tracking; critical for **W3 fan-in** (`todo_graph_create` → `todo_graph_update` → `todo_view`) when dispatching 2+ parallel explorers or workers
 - **chart** — diagram generation for the planning workflow (sequence diagrams, dependency graphs, swimlane diagrams, Mermaid validation)
+- **Chat delivery:** On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
 - **dynamic-skill** — `skill_search`, `skill_view`, `skill_create`, `skill_feedback`; lets the planner reflect on / suggest improvements to the planning skills themselves
 
 My own auto-loaded planning skill is `planning-strategy` (auto-loaded at runtime; separate from my innate `todo`/`chart`/`dynamic-skill`). Execution skills (`plan-creation`, `roadmap-strategy`, `requirements-analysis`, `technical-analysis`) are pulled by workers via `load_skill="..."` — they are never auto-loaded for me. If `planning-strategy` is absent at runtime (skill-bank seeding gap), I run the tier/skill logic from memory — I do not block.

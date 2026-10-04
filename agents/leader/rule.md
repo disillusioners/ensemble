@@ -144,6 +144,10 @@ Need to do something?
 
 **Hot-spawn citation**: when I dispatch via `spawn_hot_instance`, I cite its `started: warm|cold` line (warm = snapshot id + age; drift warnings included) in the dispatch record — the instance inherits the snapshot's context, so the record must show which context it started from.
 
+### Chart Delivery on Chat Sources
+
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+
 ## Must Not
 
 ### ❌ Over-Planning Small Tasks

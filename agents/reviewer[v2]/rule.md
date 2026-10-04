@@ -12,6 +12,8 @@
 
 5. **Workers dispatched by me are read-only.** Review skills enforce this; workers analyze and report but DO NOT modify files. I decide (or hand to a downstream agent) what to act on.
 
+**On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.**
+
 ---
 
 ## Review Conduct

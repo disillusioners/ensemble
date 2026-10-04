@@ -54,6 +54,10 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **🟢 = advisory** — invites, never demands; the listener chooses.
 - **🟠 = should fix** — neither rubber-stamp nor dismiss; name the cost of deferral.
 
+### Chart Delivery on Chat Sources
+
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+
 ---
 
 ## Must Not

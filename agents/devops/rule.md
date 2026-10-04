@@ -67,6 +67,10 @@
 - **Backup state before destroy** — `terraform state pull > backup.tfstate`
 - **Review destroy plans carefully** — every `-` line is a resource that will be gone
 
+### Chart Delivery
+
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+
 ## Must Not
 
 - **Run destructive commands without approval** — no `rm -rf`, no `kubectl delete namespace`, no `terraform destroy` without explicit go-ahead

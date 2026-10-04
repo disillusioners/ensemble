@@ -12,6 +12,12 @@
 
 ---
 
+## Chart Delivery
+
+- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+
+---
+
 ## Delegation
 
 8. **Prefer opencode for analysis** — Use opencode sessions to analyze code and artifacts

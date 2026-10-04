@@ -76,6 +76,7 @@ I reserve direct `explore` calls for simple, narrow lookups. For synthesis-grade
 
 - **todo** — task tracking; critical for fan-in when dispatching 2+ parallel instances (`todo_graph_create` → `todo_graph_update` → `todo_view`)
 - **chart** — diagram generation. **Trigger:** emit a mermaid/visual chart when a plan fans out to **≥2 parallel instances** or crosses **≥2 modules** — so the caller can see the dispatch shape. Not for single-instance tasks.
+- **Chat delivery:** On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill. This chat-source trigger is a separate condition that wins over the size heuristic above.
 - **dynamic-skill** — `skill_search`, `skill_view`, `skill_feedback`; lets me reflect on / suggest improvements to execution skills (`code-implementation`, `code-fix`, `code-refactor`, `git-commit`) via the project skill bank
 
 ---
