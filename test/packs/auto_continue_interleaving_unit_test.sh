@@ -6,6 +6,9 @@
 #   (architecture-recommendation.md Focus 3, rows 1-6).
 #   - Row 1: WS→CP (same instance) — continue-in-place, claim-guard
 #     holds the wake FIFO-behind the continued turn
+#   - Row 2: CP→late-WS tick mid-turn — pass schedules first, late
+#     wake-tick lands mid-turn; wake stays PENDING (claim-guard held);
+#     no re-delivery loop (exactly one wake Task)
 #   - Row 3: WS→CP→turn fails — fail_task opens the claim window
 #   - Row 4: WS→CP→turn succeeds — Δ1 / D18 r3 call-site terminalizer
 #     fires and opens the claim window immediately (no STR reap delay)

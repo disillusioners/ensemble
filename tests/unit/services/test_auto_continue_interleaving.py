@@ -62,6 +62,7 @@ Plus M14 negative lock-out + Δ1 complement:
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from contextlib import contextmanager
 from datetime import datetime
@@ -241,6 +242,77 @@ import os  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
+# Log contract helper (P3 / phase3-plan 3.2 plan-mandated contract)
+# ---------------------------------------------------------------------------
+
+
+def _assert_boot_continue_log_contract(
+    caplog, *, expected_scheduled: int
+) -> None:
+    """Assert the plan-mandated log contract for the boot pass.
+
+    The pass emits ``[BOOT_CONTINUE]``-tagged log lines. Three
+    invariants are pinned here (P3 / phase3-plan 3.2):
+
+    1. **Exactly one ``[BOOT_CONTINUE]`` success record per scheduled
+       instance** — the line ``[BOOT_CONTINUE] instance=<iid8>
+       work_id=<wid8> epoch=<iso>`` (auto_continue_boot_pass.py:462).
+       Counted via the ``epoch=`` marker that uniquely identifies the
+       success branch.
+
+    2. **Zero ``[BOOT_CONTINUE] resume refused`` records** — the
+       observable form of the in-process ``already_resuming`` dedup
+       case the pass detects via the resume return value (None /
+       non-dict / non-``"resuming"`` status). The literal string
+       ``already_resuming`` never appears in a log call; the pass
+       logs the rejection as
+       ``[BOOT_CONTINUE] SKIPPED instance=... work_id=...: resume
+       refused (resume=%r)`` (auto_continue_boot_pass.py:434). On a
+       clean resume path this line MUST NOT fire.
+
+    3. **Zero ``force_cancel`` invocation logs** — regression-catch
+       assertion. The pass does not call ``force_cancel``; the
+       existing structural pin at :480 (and the boot pass source
+       itself) is the static counterpart. This caplog assertion
+       catches a future refactor that wires ``force_cancel`` into
+       the pass and emits a ``force_cancel``-tagged log line.
+    """
+    boot_continue = [
+        r
+        for r in caplog.records
+        if "[BOOT_CONTINUE]" in r.getMessage() and "epoch=" in r.getMessage()
+    ]
+    assert len(boot_continue) == expected_scheduled, (
+        f"expected exactly {expected_scheduled} [BOOT_CONTINUE] success "
+        f"log record(s) (one per scheduled instance), got "
+        f"{len(boot_continue)}: {[r.getMessage() for r in boot_continue]}"
+    )
+
+    refused = [
+        r
+        for r in caplog.records
+        if "[BOOT_CONTINUE]" in r.getMessage()
+        and "resume refused" in r.getMessage()
+    ]
+    assert refused == [], (
+        "expected zero [BOOT_CONTINUE] resume_refused log records on a "
+        "clean resume path (the resume_refused line is the observable "
+        "form of the in-process already_resuming case the pass detects "
+        "via the resume return value); got: "
+        f"{[r.getMessage() for r in refused]}"
+    )
+
+    force_cancel_logs = [
+        r for r in caplog.records if "force_cancel" in r.getMessage()
+    ]
+    assert force_cancel_logs == [], (
+        "expected zero force_cancel log records from the pass (the "
+        "pass MUST NOT call force_cancel — D29 / R12); got: "
+        f"{[r.getMessage() for r in force_cancel_logs]}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Row 1 — WS→CP (same instance)
 # ---------------------------------------------------------------------------
 
@@ -252,7 +324,7 @@ class TestRow1WakeThenContinue:
     held by orphan)."""
 
     async def test_continue_keeps_orphan_running_and_wake_pending(
-        self, engine: Engine
+        self, engine: Engine, caplog
     ) -> None:
         _seed_instance(engine, "inst-1")
         wid_orphan = f"work-orphan-{uuid4().hex[:12]}"
@@ -263,9 +335,12 @@ class TestRow1WakeThenContinue:
         boot = now_utc_naive()
 
         with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "1"):
-            result = await pass_mod.continue_running_instances_after_restart(
-                manager, boot
-            )
+            with caplog.at_level(
+                logging.INFO, logger="daemon.services.auto_continue_boot_pass"
+            ):
+                result = await pass_mod.continue_running_instances_after_restart(
+                    manager, boot
+                )
 
         # The pass selected the orphan + scheduled a resume + stamped.
         assert result.scheduled == 1
@@ -290,6 +365,107 @@ class TestRow1WakeThenContinue:
             assert wake is not None
             assert wake.work_id != wid_orphan
 
+        # Log contract: one [BOOT_CONTINUE] success record, no
+        # resume_refused, no force_cancel.
+        _assert_boot_continue_log_contract(caplog, expected_scheduled=1)
+
+
+# ---------------------------------------------------------------------------
+# Row 2 — CP→late-WS tick mid-turn
+# ---------------------------------------------------------------------------
+
+
+class TestRow2ContinueFirstLateWakeTick:
+    """Row 2: the continue pass schedules the resume first; a late
+    WS tick (the periodic STR wake-tick) fires while the resumed
+    turn is still running → wake stays PENDING (claim-guard held by
+    orphan still RUNNING) → no re-delivery loop (the wake Task
+    exists exactly once; the pass does not itself re-enqueue).
+
+    Setup mirrors Row 1's harness: instance status='running', an
+    orphan ``process_message`` Task status='running', and a wake
+    Task status='pending' for the SAME instance. The boot pass
+    runs against this state — the wake's pre-existence simulates
+    the late-WS tick that already enqueued it before/while the pass
+    scheduled the resume (D24 / D18 ordering: placement AFTER
+    ``sweep_wake_records`` so the wake's PENDING row exists before
+    the resume is scheduled).
+    """
+
+    async def test_continue_first_then_late_wake_no_redelivery(
+        self, engine: Engine, caplog
+    ) -> None:
+        _seed_instance(engine, "inst-2")
+        wid_orphan = f"work-orphan-{uuid4().hex[:12]}"
+        _seed_orphan(engine, "inst-2", work_id=wid_orphan)
+        _seed_wake(engine, "inst-2")
+        repo = TaskRepository(engine)
+        manager = _MockManager(repo)
+        boot = now_utc_naive()
+
+        # Sanity: the late-WS tick has already enqueued the wake as
+        # PENDING before the pass runs.
+        from sqlmodel import select as _select_row2
+        with Session(engine) as s:
+            wake_pre = s.exec(
+                _select_row2(Task).where(
+                    Task.task_type == TaskType.PROCESS_MESSAGE.value,
+                    Task.status == TaskStatus.PENDING.value,
+                )
+            ).first()
+            assert wake_pre is not None
+            assert wake_pre.work_id != wid_orphan
+
+        with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "1"):
+            with caplog.at_level(
+                logging.INFO, logger="daemon.services.auto_continue_boot_pass"
+            ):
+                result = await pass_mod.continue_running_instances_after_restart(
+                    manager, boot
+                )
+
+        # CP-first outcome: pass scheduled the resume + stamped the orphan.
+        assert result.scheduled == 1
+        assert len(manager.resume_calls) == 1
+
+        # Orphan stayed RUNNING (continue-in-place, not terminalize-early).
+        with Session(engine) as s:
+            orphan = s.exec(
+                _select_row2(Task).where(Task.work_id == wid_orphan)
+            ).first()
+            assert orphan.status == TaskStatus.RUNNING.value
+            assert orphan.auto_continued_at is not None
+
+        # Row-2 contract: the late-WS tick's wake Task is STILL PENDING
+        # (claim-guard held by orphan RUNNING), and exactly ONE wake
+        # exists (no re-delivery loop from a duplicate enqueue — the
+        # pass does not call enqueue_message for wakes; structural
+        # source-scan at :480 covers the no-force_cancel side).
+        with Session(engine) as s:
+            wakes = s.exec(
+                _select_row2(Task).where(
+                    Task.task_type == TaskType.PROCESS_MESSAGE.value,
+                    Task.status == TaskStatus.PENDING.value,
+                )
+            ).all()
+            assert len(wakes) == 1, (
+                "Row 2: late-WS tick's wake must be delivered exactly "
+                "once; the pass itself MUST NOT re-enqueue"
+            )
+            assert wakes[0].work_id != wid_orphan
+
+        # The claim is blocked while the orphan is RUNNING (the FIFO-
+        # behind-the-turn contract — wake lands after the continued
+        # turn finishes, not mid-turn).
+        assert repo.claim_pending_task(worker_id="probe-row2") is None, (
+            "claim-guard MUST block the late-WS wake while the orphan "
+            "is RUNNING (Row 2: late-WS tick mid-turn)"
+        )
+
+        # Log contract: one [BOOT_CONTINUE] success record, no
+        # resume_refused, no force_cancel.
+        _assert_boot_continue_log_contract(caplog, expected_scheduled=1)
+
 
 # ---------------------------------------------------------------------------
 # Row 3 — WS→CP→turn fails
@@ -301,7 +477,7 @@ class TestRow3TurnFails:
     fail_task opens the guard → wake claims FIFO."""
 
     async def test_fail_task_opens_claim_window(
-        self, engine: Engine
+        self, engine: Engine, caplog
     ) -> None:
         _seed_instance(engine, "inst-3")
         wid_orphan = f"work-orphan-{uuid4().hex[:12]}"
@@ -312,10 +488,18 @@ class TestRow3TurnFails:
         boot = now_utc_naive()
 
         with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "1"):
-            result = await pass_mod.continue_running_instances_after_restart(
-                manager, boot
-            )
+            with caplog.at_level(
+                logging.INFO, logger="daemon.services.auto_continue_boot_pass"
+            ):
+                result = await pass_mod.continue_running_instances_after_restart(
+                    manager, boot
+                )
         assert result.scheduled == 1
+
+        # Log contract: the pass scheduled the orphan → one
+        # [BOOT_CONTINUE] success record; no resume_refused, no
+        # force_cancel.
+        _assert_boot_continue_log_contract(caplog, expected_scheduled=1)
 
         # Before the fail: claim_pending_task returns None because
         # the orphan is RUNNING (the guard's NOT IN clause).
@@ -349,7 +533,7 @@ class TestRow4TurnSucceedsTerminalizer:
     AC4 extension — without Δ1, the wake would wait ~10 min for STR."""
 
     async def test_complete_task_via_call_site_gate_opens_claim(
-        self, engine: Engine
+        self, engine: Engine, caplog
     ) -> None:
         _seed_instance(engine, "inst-4")
         wid_orphan = f"work-orphan-{uuid4().hex[:12]}"
@@ -360,10 +544,18 @@ class TestRow4TurnSucceedsTerminalizer:
         boot = now_utc_naive()
 
         with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "1"):
-            result = await pass_mod.continue_running_instances_after_restart(
-                manager, boot
-            )
+            with caplog.at_level(
+                logging.INFO, logger="daemon.services.auto_continue_boot_pass"
+            ):
+                result = await pass_mod.continue_running_instances_after_restart(
+                    manager, boot
+                )
         assert result.scheduled == 1
+
+        # Log contract: the pass scheduled the orphan → one
+        # [BOOT_CONTINUE] success record; no resume_refused, no
+        # force_cancel.
+        _assert_boot_continue_log_contract(caplog, expected_scheduled=1)
 
         # Before the complete: claim is blocked.
         assert repo.claim_pending_task(worker_id="probe-1") is None

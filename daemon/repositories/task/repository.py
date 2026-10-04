@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from sqlalchemy import (
+    DateTime,
+    bindparam,
     case,
     delete as sql_delete,
     exists,
@@ -1046,7 +1048,20 @@ class TaskRepository:
                     "  AND status = 'running' "
                     "  AND (auto_continued_at IS NULL "
                     "       OR auto_continued_at < :boot_epoch)"
-                ),
+                # Review finding #3 (forward-compat): type the bind
+                # explicitly so SQLAlchemy uses the dialect's native
+                # DateTime converter rather than the sqlite3 driver's
+                # DEFAULT datetime adapter (deprecated since Python 3.12,
+                # removal slated ~3.16 — would otherwise raise). The
+                # typed bind also normalizes the stored digit format on
+                # SQLite to SQLAlchemy's always-6-digit-micro shape,
+                # matching the ORM selection predicate (~:965-966) so
+                # lexicographic comparison stays consistent (the
+                # ``< :boot_epoch`` re-arm arm still re-selects on newer
+                # epochs). PG unaffected (native adapter binding). The
+                # ``text`` import is left inline to mirror the prior
+                # shape of this method.
+                ).bindparams(bindparam("boot_epoch", type_=DateTime)),
                 {"task_id": task_id, "boot_epoch": boot_epoch},
             )
             return result.rowcount == 1
