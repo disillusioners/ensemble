@@ -124,10 +124,6 @@ required task in this cycle).
   `/proc/<pid>/environ`) is captured in the boot log
   copy. The revert procedure is: kill the `ss`-verified
   pid → re-source `boot.env` → `bash boot.sh` → `livez`. **N/A note (per the reviewer's 🟢 suggestion):** the R18 recipe is referenced ONLY for the demo harness (task 3.6 + the E2E scenario design below). The R18-context anchor is **N/A for the F-1 / F-2 boot-sequence coupling** (the recipe is a dev-daemon bootstrap pattern, not a coupling surface).
-  engine line, `/livez` version, `/readyz` components,
-  `/proc/<pid>/environ`) is captured in the boot log
-  copy. The revert procedure is: kill the `ss`-verified
-  pid → re-source `boot.env` → `bash boot.sh` → `livez`.
 * **R-P3-3: the demo E2E evidence is volatile (`/tmp` sweep
   gotcha — the T5.4c PARTIAL disclosure from the
   auto-continue merge gate).** **Mitigation:** task 3.7
@@ -343,4 +339,3 @@ F-2 demo's trigger inventory.
 If the F-1 demo is exercised, the evidence bar is the
 per-leg table in `findings.md` plus the boot log copies
 in `logs/`.
-`findings.md` plus the boot log copies in `logs/`.
