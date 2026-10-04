@@ -274,7 +274,7 @@ pin_08_discord_chunk_kwarg() {
   grep -qE 'file:\s*[^=]*\|\s*None\s*=\s*None' "$f" && \
   grep -qE 'files:\s*list\[[^]]+\]\s*\|\s*None\s*=\s*None' "$f" && \
   grep -qE 'kwargs\["files"\]\s*=\s*files' "$f" && \
-  grep -qE 'kwargs\["file"\]\s*=\s*file' "$f"
+  grep -qE 'kwargs\["file"\]\s*=\s*file\s*(#|$)' "$f"
 }
 
 # Pin 9 — Discord 2000-char chunking preserved (DISCORD_MAX_MESSAGE_LENGTH=2000)

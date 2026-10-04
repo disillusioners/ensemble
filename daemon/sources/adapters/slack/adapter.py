@@ -608,7 +608,7 @@ class SlackAdapter(MessageSourceAdapter):
                             # verified slack-sdk 3.42.0 ``AsyncWebClient.
                             # files_upload_v2`` kwargs per
                             # https://api.slack.com/methods/files.uploadV2 —
-                            # ``channel_id``, ``filename``, ``content``,
+                            # ``channel``, ``filename``, ``content``,
                             # ``initial_comment``. NO ``chat.postMessage(file=)``
                             # follow-up for the file itself.
                             # ``_safe_api_call`` returns ``(True, result)`` on
@@ -619,7 +619,7 @@ class SlackAdapter(MessageSourceAdapter):
                             # below.
                             ok, result = await self._safe_api_call(
                                 "files_upload_v2",
-                                channel_id=channel_id,
+                                channel=channel_id,
                                 filename=img.filename,
                                 content=file_bytes,
                                 initial_comment=initial_comment,

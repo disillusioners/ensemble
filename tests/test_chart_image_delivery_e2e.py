@@ -1237,7 +1237,11 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "daemon/sources/registry.py": "a46da82b930e2efc0b6f16a2f40a902c16343c08c49ee1236fda9ab928213a1b",
     "daemon/sources/dispatcher.py": "50dd3211c1b6c59358c5426e046a88054a9ee58cc8001b8d57d53b6b2813fc3b",
     "daemon/sources/adapters/discord/adapter.py": "87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43",
-    "daemon/sources/adapters/slack/adapter.py": "da935786ce55ef4ea911f19b666bd6841500d0614ccf6f3dc19e77a3733f933d",
+    # Phase B — 7 daemon files + slack-setup.md (8).
+    # slack/adapter.py re-pinned 2026-10-04: authorized remediation commit
+    # (verification CRITICAL #1 — channel= kwarg fix); any FURTHER change
+    # to this file still trips the tripwire.
+    "daemon/sources/adapters/slack/adapter.py": "476ba0b5a17a297f652125ab9060af125ba3955d4b71e324e3de3bf177e1ef1e",
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
     "daemon/constants.py": "fc806c87cdad099283f39b6d69326a059786b4ad233782f1a4a4a67145858a1e",
     # Phase C — 20 agent canonical-home files

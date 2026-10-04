@@ -225,13 +225,23 @@ exit 0
 | `tests/test_sources_dispatcher.py` | 78 | 0 | matches Phase B §phase-b-impl-4 claim |
 | `tests/test_discord_adapter.py` | 196 | 0 | matches Phase B §phase-b-impl-4 claim |
 | `tests/test_telegram_adapter.py` | 45 | 0 | |
-| `tests/test_slack_adapter.py` | 114 | 0 | |
+| `tests/test_slack_adapter.py` | 114 | 0 | **115 post-remediation** (new real-SDK boundary test — see remediation trail below) |
 | `tests/test_outbound_image_delivery.py` | 6 | 0 | Phase B new |
 | `tests/test_chart_image_delivery_audit.py` | 43 | 0 | Phase D new |
 | `tests/test_chart_image_delivery_e2e.py` standard leg | 24 | 4 (`integration`) | marker-trap guarded |
 | `tests/test_chart_image_delivery_e2e.py` integration leg | 4 | 24 | `-m integration` override |
 | `bash tools/audit-chart-image-delivery.sh --class all` | 24/24 (9 + 15) | 0 | exit 0 |
-| **TOTAL named-suite regression** | **619** | **32** (all marker-deselected) | 0 failures; exit 0 |
+| **TOTAL named-suite regression (executed-passed)** | **591** (563 non-e2e + 24 e2e-std + 4 e2e-int) | 8 structural (4 e2e-std `integration` + 3 charter `integration` + 1 charter `slow`) | 0 failures; exit 0 |
+
+**Accounting correction (independent verification 2026-10-04):** the original **619** figure double-counted the e2e file once per leg — the 28 e2e-leg deselections (24 on the std leg + 4 on the int leg) were added back: 563 + 28 + 28 = 619. Executed-passed convention: **563 non-e2e + 24 e2e-std + 4 e2e-int = 591 passed / 0 failed**. The 8 real structural deselections (4 e2e-std `integration` + 3 charter `integration` + 1 charter `slow`) all live outside hermetic scope — no missing coverage.
+
+### Post-verification remediation trail (2026-10-04, this branch)
+
+Independent verification (`.agents/tester/RESULTS/2026-10-04-chart-image-delivery-independent-verification.md`) returned **NOT USER-STORY-VERIFIED** — 1 CRITICAL + 1 audit-pin fragility. Remediation on this branch:
+
+1. **CRITICAL — Slack native upload production-broken (FOUND):** `daemon/sources/adapters/slack/adapter.py:622` passed `channel_id=channel_id` to `files_upload_v2`; slack_sdk 3.42.0's real signature has no `channel_id` parameter (`channel=` is the channel kwarg) → `TypeError: ... got multiple values for keyword argument 'channel_id'` at the SDK's internal `files_completeUploadExternal` call frame → caught by `_safe_api_call` → image silently dropped → text-only. The test at `tests/test_slack_adapter.py` asserted `"channel_id" in upload_call["kwargs"]` — the wrong kwarg — locking the bug in. Two independent repros at the real invocation frame (tester).
+2. **FIXED (this branch):** (a) `channel_id=channel_id` → `channel=channel_id` (+ corrected the adjacent comment that mis-documented `channel_id` as a verified kwarg); (b) test assertion flipped to `"channel"` (file swept — the only upload-kwargs `channel_id` assertion); (c) NEW real-SDK-boundary test `TestSlackSingleFilesUploadV2::test_files_upload_v2_real_sdk_method_transport_stubbed` — real `AsyncWebClient.files_upload_v2` with the stub at the HTTP-transport layer (fake aiohttp session, mirroring the repo's `tests/e2e/conftest.py::_swap_real_mcp_for_e2e` per-test swap pattern); proven to FAIL with the exact production TypeError when the drift is re-introduced, PASS with the fix; (d) audit pin #8 regex tightened to `kwargs\["file"\]\s*=\s*file\s*(#|$)` (was non-comment-aware and matched the `file_obj` prefix — verification finding #2); (e) sealed-artifact baseline for `daemon/sources/adapters/slack/adapter.py` re-pinned to the remediated SHA (`476ba0b5a17a…`) in `SEALED_SHA_BASELINES` with provenance — the Task-18 tripwire correctly fired on the authorized change and was re-pinned; any further change to the file still trips.
+3. **RE-VERIFIED (post-fix):** slack suite **115 passed / 0 failed** (114 + 1 new boundary test); bash audit **24/24, exit 0**; e2e std leg **24 passed / 4 deselected**; e2e int leg **4 passed**. Post-fix executed-passed total: **592** (564 non-e2e + 24 e2e-std + 4 e2e-int).
 
 ### Task 18 tripwire — sealed-artifact protection (re-verified)
 

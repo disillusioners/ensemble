@@ -1,7 +1,11 @@
 """Tests for SlackAdapter implementation."""
 
+import importlib
+import json
 import pytest
+import sys
 import time as time_module
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 from daemon.sources.adapters.slack.adapter import (
@@ -1997,6 +2001,107 @@ def _make_slack_att(image_id: str = "a" * 32, *, size: int = 100) -> ImageAttach
     )
 
 
+# --- transport-layer stub for real-AsyncWebClient files_upload_v2 tests ---
+# AsyncWebClient.files_upload_v2 (and every SDK method above it) stays real;
+# only the HTTP request/response boundary is faked. This is the seam the
+# channel= vs channel_id= kwarg-drift test guards (tester VERIFICATION
+# 2026-10-04 finding #1).
+
+
+class _FakeSlackHttpResponse:
+    """Minimal aiohttp.ClientResponse stand-in (transport layer only)."""
+
+    def __init__(self, payload, status: int = 200, content_type: str = "application/json"):
+        self._payload = payload
+        self.status = status
+        self.headers: dict = {}
+        self.content_type = content_type
+
+    async def json(self):
+        return self._payload
+
+    async def text(self):
+        return self._payload if isinstance(self._payload, str) else json.dumps(self._payload)
+
+    async def read(self):
+        return self._payload if isinstance(self._payload, bytes) else self._payload.encode()
+
+
+class _FakeSlackResponseContext:
+    """async-with wrapper so ``async with session.request(...)`` yields a response."""
+
+    def __init__(self, response: _FakeSlackHttpResponse):
+        self._response = response
+
+    async def __aenter__(self) -> _FakeSlackHttpResponse:
+        return self._response
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+
+class _FakeSlackHttpSession:
+    """aiohttp.ClientSession stand-in — records every request; zero network.
+
+    Routes canned responses per endpoint so the full v2 chain
+    (files.getUploadURLExternal -> binary upload POST -> files.completeUploadExternal)
+    + chat.postMessage all complete hermetically.
+    """
+
+    def __init__(self):
+        self.requests: list[dict] = []
+
+    @property
+    def closed(self) -> bool:
+        return False
+
+    def request(self, http_verb: str, api_url: str, **req_args):
+        self.requests.append({"verb": http_verb, "url": api_url, "req_args": req_args})
+        return _FakeSlackResponseContext(self._route(api_url))
+
+    @staticmethod
+    def _route(api_url: str) -> _FakeSlackHttpResponse:
+        if api_url.endswith("files.getUploadURLExternal"):
+            return _FakeSlackHttpResponse(
+                {"ok": True, "file_id": "FTEST0001", "upload_url": "https://files.slack.com/upload/v1/T0TEST"}
+            )
+        if api_url.endswith("files.completeUploadExternal"):
+            return _FakeSlackHttpResponse({"ok": True, "files": [{"id": "FTEST0001"}]})
+        if "files.slack.com/upload/" in api_url:
+            # step-2 binary PUT answers text/plain ("OK") like the real endpoint
+            return _FakeSlackHttpResponse("OK", content_type="text/plain")
+        return _FakeSlackHttpResponse({"ok": True})
+
+
+@pytest.fixture
+def real_slack_sdk():
+    """Swap the conftest-injected ``slack_sdk`` mock for the real package (per-test).
+
+    Mirrors ``tests/e2e/conftest.py::_swap_real_mcp_for_e2e`` (the repo's
+    established per-test swap pattern — the root conftest installs its mocks
+    at collection time, so a collection-time swap is impossible). Only this
+    test sees the real SDK; the mock is restored in ``finally``.
+    """
+    saved_top = sys.modules.get("slack_sdk")
+    mocked = [k for k in list(sys.modules) if k == "slack_sdk" or k.startswith("slack_sdk.")]
+    for name in mocked:
+        sys.modules.pop(name, None)
+    try:
+        importlib.import_module("slack_sdk")  # force-load the real package
+    except Exception as exc:  # pragma: no cover - defensive
+        if saved_top is not None:
+            sys.modules["slack_sdk"] = saved_top
+        pytest.skip(f"Real slack_sdk package is not importable: {exc}")
+    try:
+        yield
+    finally:
+        real = [k for k in list(sys.modules) if k == "slack_sdk" or k.startswith("slack_sdk.")]
+        for name in real:
+            sys.modules.pop(name, None)
+        if saved_top is not None:
+            sys.modules["slack_sdk"] = saved_top
+
+
 @pytest.fixture
 def slack_with_running_status(mock_slack_adapter):
     """Adapter in RUNNING state with a working app for chart-image upload."""
@@ -2036,7 +2141,7 @@ class TestSlackSingleFilesUploadV2:
         assert len(upload_calls) == 3
         # Each call has the verified kwargs per slack-sdk 3.42.0.
         for upload_call in upload_calls:
-            assert "channel_id" in upload_call["kwargs"]
+            assert "channel" in upload_call["kwargs"]
             assert "filename" in upload_call["kwargs"]
             assert "content" in upload_call["kwargs"]
             assert "initial_comment" in upload_call["kwargs"]
@@ -2085,6 +2190,48 @@ class TestSlackSingleFilesUploadV2:
             f"Expected 1 follow-up chat.postMessage with text=1000 chars, "
             f"got {len(follow_ups)} (post_calls text lengths: {[len(c['kwargs'].get('text', '')) for c in post_calls]})"
         )
+
+    @pytest.mark.asyncio
+    async def test_files_upload_v2_real_sdk_method_transport_stubbed(
+        self, slack_with_running_status, real_slack_sdk
+    ):
+        """Real-SDK-boundary guard (tester VERIFICATION 2026-10-04 finding #1).
+
+        ``AsyncWebClient.files_upload_v2`` is the REAL slack_sdk 3.42.0 method;
+        the stub sits at the HTTP-transport layer (fake aiohttp session), NOT
+        on the SDK method. A kwarg-name drift (``channel_id=`` vs ``channel=``)
+        raises TypeError inside the real signature at the
+        ``files_completeUploadExternal`` call frame BEFORE any HTTP request —
+        exactly the production break this pins against.
+        """
+        # The conftest installs a mock ``slack_sdk`` in sys.modules at
+        # collection time; the ``real_slack_sdk`` fixture swapped it out for
+        # the real package for this test (and restores the mock on teardown).
+        from slack_sdk.web.async_client import AsyncWebClient
+        session = _FakeSlackHttpSession()
+        real_client = AsyncWebClient(token="xoxb-test-fake", session=session)
+        slack_with_running_status._app = SimpleNamespace(client=real_client)
+
+        msg = OutgoingMessage(
+            external_user_id="T123456:C123456",
+            content="chart caption",
+            source_id="slack-main",
+            images=[_make_slack_att(image_id="c" * 32)],
+        )
+        ok = await slack_with_running_status.send(msg)
+
+        assert ok is True
+        # adapter delivered-id path: the image was confirmed uploaded
+        assert msg.delivered_image_ids == ["c" * 32]
+        # transport saw the full resolved v2 chain
+        urls = [r["url"] for r in session.requests]
+        assert any(u.endswith("files.getUploadURLExternal") for u in urls)
+        upload_posts = [r for r in session.requests if "files.slack.com/upload/" in r["url"]]
+        assert len(upload_posts) == 1
+        assert isinstance(upload_posts[0]["req_args"]["data"], bytes)
+        completion = next(r for r in session.requests if r["url"].endswith("files.completeUploadExternal"))
+        # channel propagated through the REAL signature (channel= -> channel_id= inside the SDK)
+        assert completion["req_args"]["params"]["channel_id"] == "C123456"
 
 
 class TestSlackCapabilityClassifiedBeforeRecord:
