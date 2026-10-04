@@ -39,50 +39,25 @@ which is the correct default).
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from .. import persistence as _persistence
 
-logger = logging.getLogger(__name__)
+__all__ = ["parent_history_has_internal_report"]
 
 
 def _source_prefix(child_id: str) -> str:
-    """The no-colon PREFIX for the delivery-evidence scan.
-
-    TWO real-world minting shapes exist (both verified against the
-    production code, iteration 2):
-
-    * Parent-history stamp (``daemon/graph.py:8528``): the
-      completion report is a ``HumanMessage`` whose
-      ``additional_kwargs["source"]`` is
-      ``internal_report:{child_id}`` — NO trailing colon, NO
-      anchor suffix.
-    * Queue-side mint (``daemon/manager.py`` — its six
-      ``MessageQueue(...)`` write sites — plus the seventh at
-      ``daemon/services/child_reports.py:3762``): ``source`` is
-      ``internal_report:{child_id}:{message_id}`` — colon plus
-      anchor suffix.
-
-    The ledger scans parent HISTORY, so the no-colon form is the
-    operative evidence; the colon form is accepted too because
-    both shapes exist historically. Child-boundary safety: a
-    source of ``internal_report:{child_id}2`` (a DIFFERENT child
-    whose id merely extends this one) must NOT match — hence the
-    boundary rule (exact match OR colon-delimited continuation),
-    NOT a bare ``startswith``.
-    """
+    """No-colon PREFIX for the delivery-evidence scan (see module docstring for the two minting shapes)."""
     return f"internal_report:{child_id}"
 
 
 def _is_child_report_source(source: Any, child_id: str) -> bool:
     """Boundary-safe match against the child's report-source shapes.
 
-    Matches ``internal_report:{child_id}`` (exact — the
-    parent-history HumanMessage stamp at ``graph.py:8528``) and
-    ``internal_report:{child_id}:...`` (colon-delimited — the
-    queue-side mint shape). Rejects ``internal_report:{child_id}2``
-    and ``internal_report:{other}`` (child-boundary violations).
+    Matches the two minting shapes per the module docstring
+    (exact no-colon form OR colon-delimited continuation);
+    rejects child-boundary violations (``internal_report:{child_id}2``,
+    ``internal_report:{other}``).
     """
     if not isinstance(source, str) or not source:
         return False
@@ -103,11 +78,10 @@ async def parent_history_has_internal_report(
     skips the synthetic system-prompt injection — the sweep does
     not need it, per the W-5 ``manager=`` kwarg polarity check at
     ``daemon/persistence.py:312-330``). Returns ``True`` if any
-    message's ``source`` is ``internal_report:{child_id}`` (exact)
-    or starts with ``internal_report:{child_id}:`` (colon-
-    delimited) — the boundary-safe match per
-    ``decisions.md §14a`` (startswith semantics, realized with
-    child-boundary safety).
+    message's ``source`` matches the child's report-source shapes
+    (the two minting shapes per the module docstring) — the
+    boundary-safe match per ``decisions.md §14a`` (startswith
+    semantics, realized with child-boundary safety).
 
     **STATE EXPLICITLY:** the pre-migration parent's absence of
     the ``source`` field degrades gracefully to "not yet

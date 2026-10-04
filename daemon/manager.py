@@ -796,7 +796,8 @@ class InstanceManager:
                 logger.warning(
                     f"discard_on_startup: capture_boot_epoch failed "
                     f"({_boot_epoch_err!r}) — proceeding with the "
-                    f"wipe; consumers fall back to None boot_epoch."
+                    f"wipe; consumers fall back to None boot_epoch.",
+                    exc_info=True,
                 )
             msg_count = self._queue_repository.clear_all(
                 preserve_in_flight=True,

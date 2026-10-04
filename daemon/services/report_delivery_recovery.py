@@ -243,9 +243,10 @@ async def _derive_anchor_less_child_message_id(
 
     if checkpointer is None:
         return None
-    # Use the module reference (not a local import) so unit
-    # tests can patch ``daemon.persistence.get_instance_messages``
-    # at the module level.
+    # ``_persistence`` is bound to the ``daemon.persistence``
+    # module, so unit tests can patch
+    # ``daemon.persistence.get_instance_messages`` at the module
+    # level (the binding target is the same module either way).
     messages = await _persistence.get_instance_messages(
         checkpointer, child_id, manager=None
     )
@@ -260,7 +261,9 @@ async def _derive_anchor_less_child_message_id(
         if not msg.get("content"):
             # Plan-2.6: empty content → not a derivable report
             # anchor; log for operator visibility and keep
-            # scanning older assistant messages.
+            # scanning older assistant messages. The check is
+            # falsy-scope (skips falsy values including 0/[]); in
+            # practice content is a string here.
             logger.warning(
                 "sweep no_row_backstop anchor-less derivation "
                 "skipped an assistant message with empty content "
@@ -1078,7 +1081,7 @@ class ReportDeliveryRecoveryService:
         """
         # F-2 (task 2.8): one-line boot log marker so the operator
         # can confirm lane 2 ran on the boot path (post-wipe
-        # recovery, per the plan-overview S8 keep-green pin). The
+        # recovery, per the phase-2 plan task 2.8 acceptance). The
         # marker is emitted ONCE PER LANE-2 INVOCATION (at lane
         # entry, before any row is processed — the comment
         # previously claimed "first row's first call", which did
@@ -1136,6 +1139,29 @@ class ReportDeliveryRecoveryService:
         Per-row invariant ordering (mirror of
         :meth:`_recover_one_deferred_row`):
 
+        **F-2 (durability-f1-f2 / phase2, task 2.5 + 2.6) extended
+        invariant ordering (prepended as steps 0 + 0b):**
+
+        0. **PREFIX-ledger cross-path dedup** (task 2.5):
+           ``MessageQueueRepository.find_wake_already_delivered_evidence(parent, child)``
+           (queue-side) + ``parent_history_has_internal_report(checkpointer, parent, child, manager=None)``
+           (parent-history-side). Either match → ``skipped_already_reported += 1; return``
+           (the PREFIX ledger is the operative cross-path dedup per
+           decisions.md §14a; the obligation-triple unique index
+           handles within-path idempotency per migration
+           ``20260819_000001:114-120``).
+        0b. **Anchor-less ``child_message_id`` derivation** (task
+           2.6): for anchor-less children (``child_msg_id IS NULL``),
+           derive the id from the surviving child checkpoint via
+           ``completion_content.get_last_assistant_message`` +
+           ``get_instance_messages`` (``serialize_message`` chain per
+           W-1 fallback (ii)). Empty/missing content → WARNING +
+           ``return`` (the periodic 300s loop is the retry
+           mechanism; the child stays in the wedge for this pass).
+           The derived id is ``BaseMessage.id`` (UUID4) —
+           STABLE-BUT-DIFFERENT from the natural path's
+           ``MessageQueue.message_id`` (per W-1 confirmation).
+
         1. Skip if ``has_instance_busy(parent_id)``.
         2. ``ensure_deferred(parent, child, child_msg, RESUME_ROUTER)``
            — write-once gate (W6 absorbs IntegrityError on
@@ -1144,30 +1170,7 @@ class ReportDeliveryRecoveryService:
            (D2 — end-state alignment with Lanes 1/3/4; see the
            inline D2 comment). rowcount=0 → already_recovered.
         4. Hand off to the manager's reconcile + re-enter path.
-
-         **F-2 (durability-f1-f2 / phase2, task 2.5 + 2.6) extended
-         invariant ordering (prepended as steps 0 + 0b):**
-
-         0. **PREFIX-ledger cross-path dedup** (task 2.5):
-            ``MessageQueueRepository.find_wake_already_delivered_evidence(parent, child)``
-            (queue-side) + ``parent_history_has_internal_report(checkpointer, parent, child, manager=None)``
-            (parent-history-side). Either match → ``skipped_already_reported += 1; return``
-            (the PREFIX ledger is the operative cross-path dedup per
-            decisions.md §14a; the obligation-triple unique index
-            handles within-path idempotency per migration
-            ``20260819_000001:114-120``).
-         0b. **Anchor-less ``child_message_id`` derivation** (task
-            2.6): for anchor-less children (``child_msg_id IS NULL``),
-            derive the id from the surviving child checkpoint via
-            ``completion_content.get_last_assistant_message`` +
-            ``get_instance_messages`` (``serialize_message`` chain per
-            W-1 fallback (ii)). Empty/missing content → WARNING +
-            ``return`` (the periodic 300s loop is the retry
-            mechanism; the child stays in the wedge for this pass).
-            The derived id is ``BaseMessage.id`` (UUID4) —
-            STABLE-BUT-DIFFERENT from the natural path's
-            ``MessageQueue.message_id`` (per W-1 confirmation).
-         """
+        """
         # Step 0 (F-2 task 2.5): PREFIX-ledger cross-path dedup.
         # The two checks below are the operative cross-path dedup
         # per decisions.md §14a (W-1 LOCKED to fallback (ii)); the
@@ -1254,7 +1257,8 @@ class ReportDeliveryRecoveryService:
                 # row proceeds (no error bump, no skip).
                 logger.warning(
                     "sweep no_row_backstop parent-history PREFIX "
-                    f"lookup failed (non-fatal, proceeding): {exc}"
+                    f"lookup failed (non-fatal, proceeding): {exc}",
+                    exc_info=True,
                 )
 
         # Step 0b (F-2 task 2.6): anchor-less `child_message_id`

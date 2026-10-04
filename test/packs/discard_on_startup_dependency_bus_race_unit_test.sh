@@ -22,7 +22,7 @@
 #   * test_real_error_flips_parent_error (S3; plan §1)
 #   * test_terminal_auto_continued_survives_clear (S4; plan §2 — REAL SQL)
 #   * test_terminal_no_marker_deleted_by_clear (S5; plan §2 — REAL SQL)
-#   * test_boot_sequence_mock_candidates_one (S6; plan §2 — REAL SQL)
+#   * test_boot_sequence_arm3_survival_pin (S6; plan §2 — REAL SQL)
 #   * test_double_restart_no_double_continue (S1; plan §2 — REAL two-boot SQL)
 #   * test_boot_auto_continued_preserve_kill_switch (S7; W-3 / §13c
 #     — pins BOTH ON (preserve) AND OFF (delete) paths for

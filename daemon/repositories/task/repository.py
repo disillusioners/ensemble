@@ -1136,10 +1136,9 @@ class TaskRepository:
             ``False`` when the Task was not in ``status='completed'``
             (the guard no-ops).
         """
-        from sqlalchemy import text as _sa_text_clear_marker
         with self.engine.begin() as conn:
             result = conn.execute(
-                _sa_text_clear_marker(
+                text(
                     "UPDATE task "
                     "SET auto_continued_at = NULL "
                     "WHERE id = :task_id "

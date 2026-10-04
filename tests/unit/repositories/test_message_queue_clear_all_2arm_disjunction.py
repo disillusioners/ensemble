@@ -93,7 +93,7 @@ def engine(tmp_path) -> Engine:
     )
 
     @event.listens_for(eng, "connect")
-    def _enable_pragmas(dbapi_conn, _connection_record):
+    def _enable_pragmas(dbapi_conn, _connection_record) -> None:
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")

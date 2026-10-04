@@ -272,7 +272,7 @@ class TestClearTaskAutoContinued:
         assert again is True
 
 
-class TestClearLifecyleComposition:
+class TestClearLifecycleComposition:
     """F-1 §13b composition: clear + (i) ``EXISTS instances`` co-condition.
 
     The two options are designed to be complementary — option (i)

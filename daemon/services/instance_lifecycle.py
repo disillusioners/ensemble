@@ -101,9 +101,9 @@ logger = logging.getLogger(__name__)
 # aware of the other without a contract document.
 #
 # **W-5 re-anchor (2026-10-04, REVISION CYCLE 2).** The
-# Pause-First Then Quiesce convention is the FIRST labelled
-# block in this file; the new boot-sequence ownership block is
-# BESIDE it (not after). A reader landing on either seam
+# Boot-Sequence Ownership Contract block is the FIRST labelled
+# block in this file; the Pause-First Then Quiesce convention
+# block follows beside it (not after). A reader landing on either seam
 # (``dependency_bus.py:671`` or ``repository.py:4380``) can
 # navigate here in two hops via the inline comments. Drift
 # between this block and ``decisions.md §5`` is a documentation
@@ -184,10 +184,7 @@ logger = logging.getLogger(__name__)
 # (SECOND labelled block in this file — BESIDE the
 # Boot-Sequence Ownership Contract above; per W-5 re-anchor
 # 2026-10-04. The Boot-Sequence block is FIRST; this
-# convention block is BESIDE it. The smaller-diff fix for
-# the prior block-order comment inconsistency is to keep
-# the block order and correct the W-5 re-anchor comment to
-# state the actual on-disk order.)
+# convention block is BESIDE it.)
 #
 # Features requiring a quiescent instance — config flips,
 # activation toggles, in-place migrations, watchover activation

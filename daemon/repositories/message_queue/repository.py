@@ -1088,9 +1088,6 @@ class SQLModelMessageQueueRepository:
         arm3_active = _message_queue_boot_auto_continued_preserve_enabled()
         with Session(self.engine) as session:
             if preserve_in_flight:
-                # F-1 arm 3 SQL fragment — terminal-stamped
-                # rows of non-terminal instances (symmetric to
-                # the task-side predicate).
                 if arm3_active:
                     # F-1 arm 3 SQL fragment — terminal-stamped
                     # rows of non-terminal instances (symmetric to

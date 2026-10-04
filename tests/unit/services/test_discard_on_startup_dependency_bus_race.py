@@ -59,7 +59,7 @@ import os
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -74,14 +74,11 @@ import daemon.repositories.job_queue.models  # noqa: F401
 import daemon.repositories.project.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 
-import daemon.services.dependency_bus as bus_mod
-from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.dependency_bus import (
     DependencyBus,
-    FollowUp,
     Outcome,
     _has_truthy_error,
 )
@@ -448,8 +445,9 @@ def test_terminal_no_marker_deleted_by_clear(engine: Engine) -> None:
 # excluded by the D7/G3 RUNNING-only filter
 # (``find_auto_continue_candidates`` requires
 # ``status='running'``). The plan-pinned test function
-# name ``test_boot_sequence_mock_candidates_one`` is
-# retained; the docstring is corrected to match what the
+# name ``test_boot_sequence_mock_candidates_one`` was
+# renamed to ``test_boot_sequence_arm3_survival_pin``; the
+# docstring is corrected to match what the
 # test actually proves. The candidate SELECTION
 # ``candidates==1`` measure is asserted for real in S1
 # (leg 4b: ``find_auto_continue_candidates`` returns the
@@ -457,7 +455,7 @@ def test_terminal_no_marker_deleted_by_clear(engine: Engine) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_boot_sequence_mock_candidates_one(engine: Engine) -> None:
+def test_boot_sequence_arm3_survival_pin(engine: Engine) -> None:
     """S6 — wipe-side arm-3 SURVIVAL pin for the TERMINAL
     stamped row.
 

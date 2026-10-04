@@ -714,9 +714,7 @@ class DependencyBus:
                     # error text per parent. ``outcome.error`` is the
                     # authoritative source from the bus terminal
                     # emit. It is GUARANTEED truthy by the
-                    # ``_has_truthy_error`` gate above (post-review
-                    # cleanup: the prior ``else: setdefault(...)``
-                    # fallback was unreachable dead code).
+                    # ``_has_truthy_error`` gate above.
                     self._parent_error_message[tgt] = outcome.error
 
             if not pending_rows:
@@ -902,9 +900,7 @@ class DependencyBus:
         if _has_truthy_error(outcome):
             self._parent_errored[parent_instance_id] = True
             # ``outcome.error`` is GUARANTEED truthy by the
-            # ``_has_truthy_error`` gate above (post-review
-            # cleanup: the prior ``else: setdefault(...)``
-            # fallback was unreachable dead code).
+            # ``_has_truthy_error`` gate above.
             self._parent_error_message[parent_instance_id] = (
                 outcome.error
             )

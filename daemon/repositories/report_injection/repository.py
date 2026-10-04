@@ -1,12 +1,5 @@
 """SQLModel-based ReportInjection repository.
 
-SQLModel ``select`` import convention (declared per W-5):
-this file uses ``sqlmodel.select`` (line 124) for all SELECT
-construction. Per-row SQL ``text()`` blocks (none in this
-file) would import from ``sqlalchemy.text``. The choice is
-recorded in the commit message per the phase-2 plan task
-2.2 acceptance.
-
 Persistence layer for the ``report_injections`` table. Exposes the
 three primitives the two delivery paths need:
 
