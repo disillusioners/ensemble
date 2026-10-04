@@ -283,6 +283,16 @@ class Task(SQLModel, table=True):
     # alone, because both look the same in the DB.
     last_heartbeat_at: datetime | None = Field(default=None, index=True)
 
+    # Boot auto-continue CAS marker (feature/auto-continue-running-after-restart):
+    # boot epoch of the last boot pass that successfully scheduled this task's
+    # continuation. NULL = never auto-continued. Advisory bookkeeping ONLY —
+    # never a status. The selection predicate
+    # ``(auto_continued_at IS NULL OR auto_continued_at < :boot_epoch)``
+    # re-arms per boot epoch so a still-RUNNING orphan after a stamp is
+    # re-considered on the next boot (the < boot_epoch arm, not just IS NULL
+    # — see architecture-recommendation.md Focus 1 / D17).
+    auto_continued_at: datetime | None = Field(default=None, index=False)
+
     # Optimistic locking version. SQLAlchemy's version_id_col makes every
     # ORM-flushed UPDATE / DELETE on this row append `AND version = :expected`
     # to the WHERE clause and increment the version on success, raising

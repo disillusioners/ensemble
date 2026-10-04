@@ -1529,6 +1529,39 @@ async def lifespan(app: FastAPI):
                     "(the periodic tick will retry): %s",
                     wake_boot_exc,
                 )
+        # Auto-Continue RUNNING instances after restart
+        # (feature/auto-continue-running-after-restart, Phase 2):
+        # the pass continues every instance that was ``status='running'``
+        # at the moment the daemon died, by re-scheduling its
+        # interrupted turn via ``_schedule_explicit_handle_resume
+        # (silent=True)``. Placement here is the ENVELOPE-try BODY
+        # level — SIBLING of the ``if upgrade_install_dir is not None:``
+        # block above (NOT nested inside it, so dev boots also run
+        # the pass; the kill-switch
+        # ``ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART=0`` is the
+        # only legitimate way to disable on dev). After the wake
+        # sweep (D3 / AC4) and before the periodic tick (consistent
+        # state). Three-layer never-wedge: per-instance (in the
+        # service) → sweep-level (in the service) → lifespan inner
+        # try/except (here).
+        try:
+            from daemon.services.auto_continue_boot_pass import (
+                continue_running_instances_after_restart,
+            )
+            continue_result = await continue_running_instances_after_restart(
+                manager=manager,
+                boot_epoch=get_boot_epoch(),
+            )
+            logger.info(
+                "AutoContinue boot pass: %s",
+                continue_result,
+            )
+        except Exception as cont_boot_exc:  # noqa: BLE001
+            logger.warning(
+                "AutoContinue boot pass failed (StaleTaskRecovery "
+                "backstop will catch orphans at boot+10min): %s",
+                cont_boot_exc,
+            )
     except Exception as boot_exc:  # best-effort — never aborts boot
         logger.warning(
             "UpgradeJournalSweepService boot reconcile failed (the "
