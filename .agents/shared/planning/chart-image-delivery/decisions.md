@@ -631,6 +631,15 @@ Phase B plan §7 (Slack component) and Task #43 (B.6 docs) use the corrected ref
 **Author:** planner[v2] via plan-creation worker
 **Date:** 2026-10-04
 
+### inline-install gate — IMPLEMENTED (supersedes arch-rec Focus 4.1 / phaseA-plan.md:329)
+
+**Decision (as wired at integration points, not as written in arch-rec):** The inline-install gate as IMPLEMENTED is "at most 2 install attempts per session" — wired at `agents/charter/workflow.md:129-145` via `charter_bump_install_session_state` / `charter_read_install_session_state` (helpers from `agents/charter/skills-template/install-mermaid-cli.lib.sh`).
+
+- Counter cleared on success; beyond cap → `install_self_heal_capped` degrade.
+- **SUPERSEDES** arch-rec Focus 4.1 / `phaseA-plan.md:329` pre-fix triple-condition (`cold_misses_in_session < 2 ∧ chromium-partial ∧ 60s-cap`) — the pre-fix condition was more restrictive (3-AND-gate, brittle) and is replaced by the simpler at-most-2-attempts budget.
+- Wiring homes: `agents/charter/rule.md` (the rule that triggers the cap path) + `agents/charter/workflow.md` (the implementation sites at `:129-145`) + `agents/charter/skills-template/install-mermaid-cli.lib.sh` (the helper library exporting the session-state functions).
+- **Status:** APPENDED at Phase D execution 2026-10-04 (count-drift sweep). Phase A's locked §marker / §capture / §degradation / §http-api sections are unchanged. This record is append-only.
+
 ---
 
 ## §phase-d-test-matrix — consolidated regression pin audit (24 pins — R2 update)
@@ -701,6 +710,15 @@ grep -n '__version__' daemon/__init__.py        # expect: __version__ = "0.16.13
 grep -n '^version' pyproject.toml                # expect: version = "0.16.13"
 grep -n 'chart-image-delivery' CHANGELOG.md      # expect: ≥1 hit under [Unreleased]
 ```
+
+## §phase-d-version-bump-timing — version-bump-timing note (leader-routed deviation)
+
+**Decision:** The version bump was committed on-branch at Phase D execution (commits `986be996` docs/changelog-pending file + `b1aa2af4` __init__.py + pyproject.toml + CHANGELOG.md) — DEVIATING from the plan's "release cut only" timing recorded above.
+
+- **Rationale:** release coordinator (giter) needs the bump + CHANGELOG entry committed together for clean promotion; leader-routed per Phase D dispatch task brief ("commit NOW on-branch; note the deviation from plan's release-cut-only in your report").
+- **Tag + promote** remain with giter/release ceremony per `upgrade_policy` (`v0.16.x` staged releases + promote ceremonies); the on-branch implementation-step record is the on-branch state, not a tag cut.
+- **Bump rationale (semver minor, mirror in both homes) is unchanged** — this is a TIMING record only.
+- **Status:** APPENDED at Phase D execution 2026-10-04. §phase-d-version-bump above remains unchanged. This is append-only.
 
 ---
 
@@ -781,6 +799,22 @@ grep -n 'chart-image-delivery' CHANGELOG.md      # expect: ≥1 hit under [Unrel
 **Default plan:** NO additional doc updates beyond Phase B's `slack-setup.md` row + the CHANGELOG entry. The architecture / pluggable-sources / setup / agents docs are architecture-level (not feature-level) and adding a chart-image-delivery mention would be scope creep.
 
 **Verification step** (Phase D.2 Task 5): the Phase D implementer runs a grep + visual scan; if any doc requires a real update, it's listed here in this section (append-only); otherwise the only doc change is `slack-setup.md` (Phase B's row).
+
+## §phase-d-doc-verification-outcome — Task A spot-check results (Phase D execution 2026-10-04)
+
+| Doc | Mentions chart? | Mentions image/attachment? | Requires update? | Outcome (greps run 2026-10-04) |
+|-----|-----------------|---------------------------|-------------------|---------------------------------|
+| `docs/setup.md` | `chart requests` at line 585 (attestation gate context — "missions without such delegation (quick follow-ups, chart requests, plain answers) complete without the gate firing") | `image analysis` (env-vars at lines 280, 336 — pre-existing `OPENAI_MODEL_VISION` references, unrelated to chart delivery) | NO | Out of scope (architecture/setup, not feature-level) |
+| `docs/sources/discord-setup.md` | (False — only `flowchart TD` at line 42, a Mermaid diagram code example illustrating Discord intent validation) | (False) | NO | Out of scope (setup doc; Mermaid diagram is illustrative code, not a delivery claim) |
+| `docs/pluggable-sources-architecture.md` | (False) | `message_type: str = "text"  # "text", "image", "command"` at line 429 (data-model enum, pre-existing); `Rich message support (images, files, buttons)` at line 1232 (backlog item, pre-existing) | NO | Out of scope (architecture-level; both are pre-existing references unrelated to chart-image-delivery) |
+| `docs/architecture.md` | (False — no matches) | (False — no matches) | NO | Clean |
+| `docs/agents.md` | (False) | Lines 40, 383: Tester agent's tool list includes `image` (a tool, not a chart delivery reference) | NO | Out of scope (tool listing, not delivery claim) |
+| `docs/sources/slack-setup.md` | (n/a — Phase B's row is the surface) | n/a | n/a | **CONFIRMED Phase B's row landed** — `grep -n 'files:write' docs/sources/slack-setup.md` returns **2 hits** (line 46 YAML manifest fenced block + line 81 scopes table) — Task A.2 verification PASSED |
+| `docs/agent-prompt-writing-guide.md` | (n/a) | n/a | n/a | **CONFIRMED untouched** — `git log --oneline cf8efbef..HEAD -- docs/agent-prompt-writing-guide.md` is **empty** — Task A.3 verification PASSED |
+
+**Outcome summary:** NO additional doc updates beyond Phase B's `slack-setup.md` row + the CHANGELOG entry. The default plan (no architecture/assembly impact → likely zero changes outside `slack-setup.md`) is confirmed.
+
+**Status:** APPENDED at Phase D execution 2026-10-04. §phase-d-doc-verification above remains unchanged. This is append-only.
 
 ---
 
@@ -979,3 +1013,59 @@ F2 council-review: the three Slack capability tests in `tests/test_slack_adapter
 
 7. **Slack capability flag reset on token rotation** — flag is per-adapter-instance lifetime (in-memory); token rotation typically requires daemon restart, which resets the flag. Documented at risk #23 in phaseB-plan.md.
 
+sist the full message).
+
+7. **Slack capability flag reset on token rotation** — flag is per-adapter-instance lifetime (in-memory); token rotation typically requires daemon restart, which resets the flag. Documented at risk #23 in phaseB-plan.md.
+
+---
+
+# §phase-d-impl-record — implementation record (Phase D dispatch 2026-10-04)
+
+**Status:** APPENDED at Phase D execution. Companion to `release-report.md`. Phase A/B locked sections + prior §phase-d-* decisions are NOT amended. This record is append-only.
+
+**Author:** coder (working-lead) via developer[v2] dispatcher
+**Date:** 2026-10-04
+
+**Precedence:** `release-report.md` §1-§9 governs on conflict.
+
+---
+
+## §phase-d-impl-1 — count-drift sweep (Phase A sealed SHA set + Phase D file count + §phase-b-impl-record placeholders)
+
+### A.1 — Phase A sealed SHA set (was 10)
+
+| Item | Plan said | Reality | Action |
+|------|-----------|---------|--------|
+| Phase A sealed SHA set | 10 files | **8 files** (not 10) | DOCUMENTED — `decisions.md` and `.agents/shared/context.md` are append/live surfaces (decisions.md gets §phase-a append; context.md gets pre-warm one-liner); neither is a "sealed" feature file. Audit (`tests/test_chart_image_delivery_audit.py` + `tools/audit-chart-image-delivery.sh`) cross-validates both scopes (8-file and 10-file); both pass cleanly. **Wording drift, not defect.** |
+
+### A.2 — Phase C agent-prompt commits (wider than pin #18 plan range)
+
+| Item | Plan said | Reality | Action |
+|------|-----------|---------|--------|
+| `pin #18` plan range | `3e2584b9..b31fa926` | actual Phase C agent-prompt commits: **`{4aa2eb13, 53dabf0b, 82c8184d}`** — **wider** than the plan's `pin #18` range | Audit implements plan range as **PRIMARY** assertion + wider cross-validation; both pass cleanly. **Wording drift, not defect.** |
+
+### A.3 — Phase D file count (matches plan §Files Touched)
+
+| Item | Plan said | Reality |
+|------|-----------|---------|
+| Phase D files touched | **10** per `phaseD-plan.md` §Files Touched | **10** per actual commits: e2e (`beed48d3`), audit module + script (`91f41ae6`), changelog-pending (`986be996`), CHANGELOG + `__init__` + pyproject (`b1aa2af4`), Group 7 + ari/workflow.md seal (`d30a4365`), template (`<this-section>` via Task C), filled report (`<this-section>` via Task C), decisions append (`<this-section>` + 3 §phase-d-* append-only edits above) |
+| Plan §Files Touched files | e2e, audit module, audit script, changelog-pending, CHANGELOG, `__init__`, pyproject, template, filled report, decisions append = **10** | MATCH — see `release-report.md` §1 Phase D for commit-by-commit file enumeration |
+
+### A.4 — `<this-commit>` placeholders in §phase-b-impl-record
+
+The two `<this-commit>` placeholders in `decisions.md` §phase-b-impl-1 (rows for F7 council-review + Slack capability real-chain F1/F4/F6 fixes) resolve to **`62934ef6`** (the `fix(chart-image-delivery): council-review NEEDS-FIX patch (F1-F12)` commit). **NOTE ONLY — do not edit those rows** (Phase B's record is append-only; the resolve is recorded here in Phase D's record for cross-reference).
+
+**Status:** §phase-d-impl-1 records count-drift findings. All are wording drift, not defects. Audit + e2e + named-suite regression gate the actual surface; no remediation required.
+
+---
+
+## §phase-d-impl-2 — deviations from plan
+
+| # | Item | Plan said | Actually done | Reason |
+|---|------|-----------|---------------|--------|
+| 1 | Version bump timing | release-cut only (per §phase-d-version-bump) | committed on-branch at Phase D execution (commits `986be996` + `b1aa2af4`) | Leader-routed per Phase D dispatch task brief; release coordinator (giter) needs bump + CHANGELOG together for clean promotion |
+| 2 | docs/changelog-pending file | not explicitly named in §Files Touched (implied release-cut artifact) | committed on-branch at Phase D execution (commit `986be996`) | The release-coordinator copy source needs to be on-branch, not release-cut (otherwise the line in CHANGELOG.md has no provenance file on the branch) |
+| 3 | Smoke contingency | expected real-channel Discord smoke at Phase D execution | **CONTINGENCY INVOKED (plan N6)** — no live daemon serves this worktree; release CUT HELD until post-promote first user chart request | Env-poison incident class per leader fence; interim gate = Group 7 real-astream integration-lane output (4 passed) |
+| 4 | Phase D file count | 10 per §Files Touched | 10 actual commits matching plan | No drift |
+
+**Status:** §phase-d-impl-2 records deviations. All deviations are timing / contingency / wording; no functional deviation from the plan's intent.
