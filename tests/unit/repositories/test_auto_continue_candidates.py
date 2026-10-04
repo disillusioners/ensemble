@@ -151,7 +151,6 @@ class TestAutoContinuedAtColumn:
 
     def test_field_nullable(self) -> None:
         """Annotation is ``datetime | None`` — NULL is allowed."""
-        from typing import get_args, get_origin
         ann = Task.model_fields["auto_continued_at"].annotation
         # The annotation may be stringified under from __future__ import
         # annotations; we just need to confirm None is among the args.

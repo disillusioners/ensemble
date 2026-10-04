@@ -68,7 +68,7 @@ Every decision below adopts the technical-analysis.md recommendation as the plan
 
 ## D11. G7 — RUNNING task with terminal/missing instance row: SKIP (no revive, no reap)
 
-**Decision:** The selection subqueries exclude PAUSED/terminal/WC instance rows, so such tasks are invisible to the pass. No revival (user's "terminal never touched" directive; revival requires a fresh user/child message per `daemon/services/instance_messaging.py:1486-1510`, r2 path). No reaping — StaleTaskRecovery's age-gated backstop owns them. Documented in the module docstring. **Rejected:** revive-from-terminal at boot (injects an unsolicited turn into a dead instance — the exact behavior arm-notify refuses for dead arm-targets); pass-side dead-lettering (duplicates StaleTaskRecovery).
+**Decision:** The selection subqueries exclude PAUSED/terminal/WC instance rows, so such tasks are invisible to the pass; a fully missing instance row is NOT special-cased by the predicate (`repository.py:969-982` filters on status only) — that case cannot occur in practice because cascade delete removes tasks with their instance. No revival (user's "terminal never touched" directive; revival requires a fresh user/child message per `daemon/services/instance_messaging.py:1486-1510`, r2 path). No reaping — StaleTaskRecovery's age-gated backstop owns them. Documented in the module docstring. **Rejected:** revive-from-terminal at boot (injects an unsolicited turn into a dead instance — the exact behavior arm-notify refuses for dead arm-targets); pass-side dead-lettering (duplicates StaleTaskRecovery).
 
 ## D12. G8 — StaleTaskRecovery co-existence: orthogonal, no race, no changes
 

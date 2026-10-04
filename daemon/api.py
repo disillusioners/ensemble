@@ -1548,7 +1548,6 @@ async def lifespan(app: FastAPI):
             from daemon.services.auto_continue_boot_pass import (
                 continue_running_instances_after_restart,
             )
-            from daemon.services.boot_epoch import get_boot_epoch
             continue_result = await continue_running_instances_after_restart(
                 manager=manager,
                 boot_epoch=get_boot_epoch(),

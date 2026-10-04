@@ -23,7 +23,6 @@ import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 

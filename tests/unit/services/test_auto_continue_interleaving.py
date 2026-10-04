@@ -61,7 +61,6 @@ Plus M14 negative lock-out + Δ1 complement:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from contextlib import contextmanager
