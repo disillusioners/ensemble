@@ -347,7 +347,7 @@ export class InstanceService {
           this.searchQuery() || undefined,
           undefined,           // order: BE default (pinned)
           true,                // include_descendants: default true (back-compat)
-          effectiveSource,
+          effectiveSource,     // source: tab's active source-type filter (sticky via _currentSource)
         )
       );
 

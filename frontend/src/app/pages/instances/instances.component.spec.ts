@@ -84,7 +84,11 @@ class TestableInstancesComponent {
     }
 
     const agentPath = `./agents/${agent.id}`;
-    this.api.createInstance(agentPath).subscribe({
+    const projectId = this.getProjectContext();
+    // Mirror of production: 'all' and 'chat' are view-filter
+    // sentinels, not real project ids — coerce both to undefined.
+    const actualProjectId = (projectId === 'all' || projectId === 'chat') ? undefined : projectId;
+    this.api.createInstance(agentPath, undefined, actualProjectId, undefined).subscribe({
       next: (instance: InstanceInfo) => {
         this.router.navigate(['/projects', this.getProjectContext(), 'instances', instance.instance_id]);
       },
@@ -398,7 +402,9 @@ describe('InstancesComponent - Project-Aware Navigation', () => {
     it('should navigate to /projects/chat/instances/:instanceId when on Chat tab', () => {
       // The deep-link URL for a chat-tab-spawned instance must
       // include "chat" as the projectId segment so the back button
-      // / deep links round-trip to the chat tab.
+      // / deep links round-trip to the chat tab. The actual
+      // project_id passed to createInstance must still be undefined
+      // (the chat tab is a view-filter sentinel, not a project).
       tabStateService.activeProjectId.set(null);
       tabStateService.activeSpecialTabId.set('chat');
       const instanceId = 'chat-inst-001';
@@ -411,6 +417,14 @@ describe('InstancesComponent - Project-Aware Navigation', () => {
 
       component.onNewInstance();
 
+      // createInstance(agentPath, _agentName?, project_id?, versionTag?)
+      // — project_id must be undefined, NOT 'chat'.
+      expect(mockApiService.createInstance).toHaveBeenCalledWith(
+        './agents/chat-agent',
+        undefined,
+        undefined,
+        undefined,
+      );
       expect(component.router.navigateCalls).toHaveLength(1);
       expect(component.router.navigateCalls[0].path).toEqual(
         ['/projects', 'chat', 'instances', instanceId]

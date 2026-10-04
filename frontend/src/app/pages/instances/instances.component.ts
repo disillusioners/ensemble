@@ -72,11 +72,13 @@ export class InstancesComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Returns the source-type filter for the active tab, or ``undefined``
-   * when the All / project tab is active (no source filter). Used by
-   * ``onNewInstance`` so the create-instance URL includes the active
-   * source filter context, keeping create flows consistent with the
-   * surrounding tab.
+   * Returns the source-type filter for the active tab (``'chat'``
+   * when the Chat special tab is active, ``undefined`` otherwise).
+   * Currently consumed by ``startPolling`` to forward the source
+   * filter into the instance list polling path. Pinned by tests;
+   * available for future create-flow wiring but NOT yet called by
+   * ``onNewInstance`` (that path uses ``getProjectContext()``
+   * directly for the URL sentinel).
    */
   protected getActiveSource(): string | undefined {
     return this.tabStateService.activeSpecialTabId() === 'chat' ? 'chat' : undefined;
@@ -133,7 +135,11 @@ export class InstancesComponent implements OnInit, OnDestroy {
 
     const agentPath = `./agents/${agent.id}`;
     const projectId = this.getProjectContext();
-    const actualProjectId = projectId === 'all' ? undefined : projectId;
+    // 'all' and 'chat' are view-filter sentinels, not real project ids.
+    // Sending 'chat' as a project_id would create an instance bound to a
+    // non-existent 'chat' project; the URL still surfaces 'chat' for
+    // round-tripping via getProjectContext() below.
+    const actualProjectId = (projectId === 'all' || projectId === 'chat') ? undefined : projectId;
     // Phase 3: forward the chosen version tag (null when none picked —
     // backend falls back to base).
     const versionTag = this.selectedVersionTag() ?? undefined;
