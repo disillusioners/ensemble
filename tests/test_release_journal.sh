@@ -88,46 +88,16 @@ printf 'port: ${PORT:-8088}\n' > "$FAKE_REPO/config.yaml"
 printf 'stub-index\n' > "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 printf 'stub-app\n' > "$FAKE_REPO/frontend/dist/frontend/browser/main.js"
 printf 'CREATE TABLE x (id int);\n' > "$FAKE_REPO/daemon/migrations/versions/20260101_000001_init.sql"
+# Mirror the REAL repo's ignore shape (root .gitignore `dist/`; frontend/
+# has its own .gitignore with /dist): the FE provenance sidecar written by
+# the stamper lives under frontend/dist/ and must be INVISIBLE to
+# `git status --porcelain`, or the honest dirty probe classifies the
+# sidecar itself as an uncommitted change (self-referential dirty-build).
+printf 'dist/\n*.build-provenance.json\n' > "$FAKE_REPO/.gitignore"
 
 # a stub binary "serving" nothing — staging only, no daemon in unit tests
 printf '#!/bin/bash\nexit 78\n' > "$FIXTURE/stub-prod"
 chmod +x "$FIXTURE/stub-prod"
-
-# Stage freshness guard (cn 0472b31f; 2026-10-04): the stage guard verifies
-# the staged artifact's .build-provenance.json sidecar against the current
-# tree. The stub artifacts in this fixture are intentionally simple (a 17-byte
-# binary; a 12-byte index.html); they need a provenance sidecar whose
-# git_head matches FAKE_REPO's HEAD (the v1.0.0-sbx tag) and whose
-# git_dirty=false (the fixture tree is clean after the initial commit).
-# Without these sidecars, the stage guard correctly refuses the fixtures —
-# which would mask the real test signal. The helper writes the sidecar
-# shape the real _provenance_write helper produces (lib.sh:1587+), using
-# the same JSON keys the verifier reads.
-_fixture_head="$(git -C "$FAKE_REPO" rev-parse HEAD)"
-_fixture_dirty="$(git -C "$FAKE_REPO" status --porcelain | wc -l | tr -d ' ')"
-_fixture_head_short="${_fixture_head:0:12}"
-_fixture_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-# helper: _write_provenance <artifact_abs> <tool>
-_write_provenance() {
-    local art="$1" tool="$2" sha prov rel
-    sha="$(shasum -a 256 "$art" | awk '{print $1}')"
-    rel="${art#"$FAKE_REPO"/}"
-    [ "$rel" = "$art" ] && rel="$art"   # outside-repo artifacts (stub-prod): keep absolute
-    prov="${art}.build-provenance.json"
-    cat > "$prov" <<EOF
-{
-  "git_head": "$_fixture_head",
-  "git_head_short": "$_fixture_head_short",
-  "git_dirty": false,
-  "build_at": "$_fixture_now",
-  "build_tool": "$tool",
-  "artifact_sha256": "$sha",
-  "artifact_path": "$rel"
-}
-EOF
-}
-_write_provenance "$FIXTURE/stub-prod" "stub:tests/test_release_journal.sh"
-_write_provenance "$FAKE_REPO/frontend/dist/frontend/browser/index.html" "stub:tests/test_release_journal.sh"
 
 # git-tag the fixture repo so stage.sh's exact-tag guard passes
 git -C "$FAKE_REPO" init -q
@@ -135,6 +105,20 @@ git -C "$FAKE_REPO" add -A 2>/dev/null
 git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm fixture
 SBX_V1="v1.0.0-sbx"
 git -C "$FAKE_REPO" tag "$SBX_V1"
+
+# Stage freshness guard (cn 0472b31f; 2026-10-04): the stage guard verifies
+# the staged artifact's .build-provenance.json sidecar against the current
+# tree, so the stub artifacts need sidecars whose git_head matches
+# FAKE_REPO's HEAD. The sidecars are written by the PRODUCTION writer
+# (_provenance_write in lib.sh, S4 drift fix — no hand-rolled JSON in the
+# fixture); _stamp_provenance_for_repo (defined below) re-stamps before
+# every run_stage/DROP_STAGE call.
+# The .gitignore mirrors the REAL repo's shape (root .gitignore `dist/` +
+# frontend/.gitignore `/dist`): the FE sidecar lives under frontend/dist/
+# and MUST be invisible to `git status --porcelain`, or the production
+# dirty probe (which the stamper now calls honestly) would classify the
+# sidecar itself as an uncommitted change and stamp git_dirty:true onto a
+# clean-tree build — a self-referential dirty-build refusal.
 
 SBX="$FIXTURE/installsb"
 mkdir -p "$SBX"
@@ -146,7 +130,10 @@ run_stage() {  # run_stage <extra args...> — env preset for the sandbox
     # BEFORE each stage call. The DROP fixture re-stamps similarly in
     # DROP_STAGE below. Without this re-stamp, the guard correctly
     # refuses the artifacts as stale (their provenance was written for
-    # an earlier HEAD, or for the DROP repo's HEAD).
+    # an earlier HEAD, or for the DROP repo's HEAD). The stamps go
+    # through the PRODUCTION writer (S4 drift fix — the hand-rolled
+    # JSON this helper used to emit could silently diverge from the real
+    # sidecar shape; the production writer cannot).
     _stamp_provenance_for_repo "$FAKE_REPO" \
         "$FIXTURE/stub-prod" \
         "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
@@ -156,36 +143,38 @@ run_stage() {  # run_stage <extra args...> — env preset for the sandbox
 }
 
 # _stamp_provenance_for_repo <repo> <artifacts...> — rewrite each artifact's
-# .build-provenance.json sidecar so its git_head matches the given repo's
-# current HEAD. git_dirty reflects the repo's working-tree state at call
-# time. Used by run_stage / DROP_STAGE to keep the stub fixtures' sidecars
-# in sync with whichever repo is about to be staged.
+# .build-provenance.json sidecar via the PRODUCTION writer (_provenance_write
+# in lib.sh, sourced in a subshell with REPO_ROOT pointed at <repo>) so the
+# fixture sidecar shape CANNOT drift from what the build path produces (S4).
+# The dirty flag is the repo's real working-tree state, normalized to the
+# canonical JSON boolean by the writer itself — no hand-rolled values here.
 _stamp_provenance_for_repo() {
     local repo="$1"; shift
-    local head head_short dirty now art sha prov
+    local head dirty art
     head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || return 0
-    head_short="${head:0:12}"
-    dirty="$(git -C "$repo" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-    dirty="${dirty:-0}"
-    [ "$dirty" -gt 0 ] 2>/dev/null && dirty=1
-    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    dirty="$(REPO_ROOT="$repo" bash -c '
+        . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh"
+        _git_dirty_porcelain
+    ' 2>/dev/null)"
+    [ -n "$dirty" ] || dirty=false
     for art in "$@"; do
         [ -f "$art" ] || continue
-        sha="$(shasum -a 256 "$art" | awk '{print $1}')"
-        prov="${art}.build-provenance.json"
-        cat > "$prov" <<EOF
-{
-  "git_head": "$head",
-  "git_head_short": "$head_short",
-  "git_dirty": false,
-  "build_at": "$now",
-  "build_tool": "stub:tests/test_release_journal.sh",
-  "artifact_sha256": "$sha",
-  "artifact_path": "stub:tests/test_release_journal.sh"
-}
-EOF
+        REPO_ROOT="$repo" bash -c '
+            . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh"
+            _provenance_write "$1" "$2" "$3" "stub:tests/test_release_journal.sh"
+        ' _stamp "$art" "$head" "$dirty" >/dev/null 2>&1 || {
+            printf 'FAIL: _stamp_provenance_for_repo: production writer FAILED for %s\n' "$art" >&2
+            FAIL=$((FAIL + 1))
+        }
     done
 }
+
+# Initial stamp (function is defined above — bash resolves at call time,
+# but the definition must precede the CALL in file order): covers any
+# direct stage invocation that precedes the first run_stage.
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 
 # ─── 1. syntax gates ────────────────────────────────────────────────────────
 section "syntax gates"
@@ -444,8 +433,17 @@ assert_eq "stage untagged VERSION exits 78" "78" "$rc"
 assert_contains "stage untagged refusal cites ADR-009 D3" "ADR-009 D3" "$out"
 
 # stray .env in the payload tree → stage refuses (m6 invariant)
+# NOTE: this test calls stage.sh DIRECTLY (not via run_stage) — deliberately.
+# The stray .env is intentionally-placed tree dirt; routing through
+# run_stage would re-stamp the sidecars with the honest dirty probe, which
+# would classify the stray .env as build-tree dirt and refuse with
+# dirty-build BEFORE the no-.env invariant this test pins. The provenance
+# sidecar records build-time state (already stamped clean by the preceding
+# run_stage at the same HEAD); the stray-file refusal belongs to the
+# no-.env check, which is what this test exercises.
 printf 'LEAKED=1\n' > "$FAKE_REPO/agents/.env"
-out="$(run_stage --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+out="$(HOME="$FAKE_HOME" VERSION="$SBX_V1" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
 assert_eq "stage refuses stray .env (exit 1)" "1" "$rc"
 assert_contains "no-.env refusal names the file" "agents/.env" "$out"
 rm -f "$FAKE_REPO/agents/.env"
@@ -1235,7 +1233,7 @@ assert_eq "11a no phantom rollback count" "0" "$(b4_inf 'journal_rollback_count_
 b4_seed_journal "$SBX_V1"
 chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
 B4B_OUT="$(b4_run_promote "$SBX_V2")"; B4B_RC=$?
-chmod 644 "$FAKE_REPO/scripts/stop-ensemble.sh"
+chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "11b stop-fail abort exits 1" "1" "$B4B_RC"
 assert_contains "11b abort admits daemon state UNKNOWN" "UNKNOWN" "$B4B_OUT"
 assert_contains "11b abort says txn left open" "txn left open" "$B4B_OUT"
@@ -1272,7 +1270,7 @@ assert_eq "11c recovery keeps current at LKG" "releases/$SBX_V1" "$(readlink "$S
 b4_seed_journal "$SBX_V1"
 chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
 B4D_OUT="$(b4_run_rollback "$SBX_V2")"; B4D_RC=$?
-chmod 644 "$FAKE_REPO/scripts/stop-ensemble.sh"
+chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "11d rollback stop-fail abort exits 1" "1" "$B4D_RC"
 assert_contains "11d abort says txn left open" "txn left open" "$B4D_OUT"
 assert_eq "11d txn OPEN kind=rollback" "rollback" "$(b4_inf_kind)"
@@ -1431,7 +1429,7 @@ b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
 W2_COUNT_BEFORE="$(b4_inf 'journal_rollback_count_24h')"
 chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
 W2E_OUT="$(b4_run_promote "$SBX_V1")"; W2E_RC=$?
-chmod 644 "$FAKE_REPO/scripts/stop-ensemble.sh"
+chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "12e same-version stop-fail abort exits 1" "1" "$W2E_RC"
 assert_eq "12e txn OPEN with target == journal current (same-version)" "$SBX_V1" \
     "$(b4_inf '_json_field "$(_json_sub "$(journal_read)" in_flight)" target')"

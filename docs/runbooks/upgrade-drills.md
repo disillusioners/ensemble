@@ -31,7 +31,7 @@ curl -s localhost:7979/livez   # 200, {"status":"alive", ... "version":"<ver>"}
 curl -s localhost:7979/readyz  # 200, reasons: []
 ```
 
-**0.1a Stage freshness guard prerequisites** (cn 0472b31f trap family; 2026-10-04 — see §A for the full design): the staging tree MUST be at the integration tip (`git rev-parse HEAD` == `git rev-parse origin/latest`), AND the staged artifacts (`dist/ensemble-prod`, `frontend/dist/frontend/browser/index.html`) MUST carry `.build-provenance.json` sidecars that match the current tree. The guard refuses with a distinct reason token (see §A.4) — for any non-trivial drill, run the **MANDATORY pre-stage recipe** in §A.3 BEFORE the stage call. DR-4's clean-promote leg (§5 (a)) is expected to pass the guard without an override.
+**0.1a Stage freshness guard prerequisites** (cn 0472b31f trap family; 2026-10-04 — see §A for the full design): the staging tree MUST be at the integration tip (`git rev-parse HEAD` == `git rev-parse refs/remotes/origin/latest` or `refs/heads/latest`), AND the staged artifacts (`dist/ensemble-prod`, `frontend/dist/frontend/browser/index.html`) MUST carry well-formed `.build-provenance.json` sidecars that match the current tree (§A.2 field contract). The guard refuses with a distinct reason token (see §A.4) — for any non-trivial drill, run the **MANDATORY pre-stage recipe** in §A.3 BEFORE the stage call. DR-4's clean-promote leg (§5 (a)) is expected to pass the guard without an override.
 
 **0.2 DR-0 record exists and is current.** First batch reference: `.agents/tester/RESULTS/2026-08-23-p2-3-dr0-preflight.md` (verdict `DR-0: CONTINUE`). **Scope ruling (FL-1):** a fresh dated DR-0 record is minted at each demo-state-changing **batch** boundary (release promoted, daemon restarted, launcher swapped) — the mint is the dispatcher's job, not a drill's. Within a batch, each drill instead performs an **inline S1–S5-shaped re-inventory** (triple, probes, family pids + lstart, launcher-state, live baseline) recorded in its own RESULTS file — per-drill write-scope is RESULTS-only.
 
@@ -570,25 +570,33 @@ Live `system_restart` via tools is **refused outright** this initiative (ADR-016
 
 The stage.sh staleness trap family has materialized TWICE: the 2026-09-02 `dist/ensemble-prod` reuse would have shipped a stale binary under a new label, and the 2026-10-02 `frontend/dist` reuse would have shipped 21 v0.16.9-era FE files under a v0.16.10 label. Both were caught by luck, not by the pipeline. **The fix is structural**: stage.sh refuses stale artifacts with a loud, actionable error — blind reuse of prebuilt artifacts is rejected by construction.
 
-### A.1 The two layers
+### A.1 The two layers — and L1's three modes
 
-The guard has TWO independent fail-closed layers; the override (`--allow-stale-stage`, §A.4) unlocks BOTH in one go. They run BEFORE the build (L1) and AFTER the build (L2a) / AFTER the FE presence check (L2b) — never after the lock is acquired, so a refused stage leaves zero residue.
+The guard has TWO independent fail-closed layers; the override (`--allow-stale-stage`, §A.5) unlocks BOTH in one go. They run BEFORE the build (L1) and AFTER the build (L2a) / AFTER the FE presence check (L2b) — never after the lock is acquired, so a refused stage leaves zero residue.
 
 | Layer | Check | Refusal token | Catches |
 |-------|-------|---------------|---------|
-| L1 — tip-identity | `git rev-parse HEAD` must equal `origin/latest` (or local `latest`) | `non-tip-tree` | The v0.16.13 payload case: tag placed on a non-tip commit, fixes landing on the tip after the tag |
-| L2a — binary provenance | `dist/ensemble-prod`'s `.build-provenance.json` must match `HEAD` + `dirty=false` + `artifact_sha256` | `provenance-missing`, `stale-provenance`, `dirty-build`, `provenance-hash-mismatch` | The 2026-09-02 case: stale `dist/ensemble-prod` reused blindly |
-| L2b — FE provenance | `frontend/dist/frontend/browser/index.html`'s `.build-provenance.json` must match `HEAD` + `dirty=false` + `artifact_sha256` | Same tokens as L2a | The 2026-10-02 case: 21 v0.16.9-era FE files under a v0.16.10 label |
+| L1 — tip-identity | `git rev-parse HEAD` must equal `refs/remotes/origin/latest` (or `refs/heads/latest`) | `non-tip-tree` | The v0.16.13 payload case: tag placed on a non-tip commit, fixes landing on the tip after the tag |
+| L2a — binary provenance | `dist/ensemble-prod`'s `.build-provenance.json` must be well-formed and match `HEAD` + `git_dirty:false` + `artifact_sha256` | `provenance-missing`, `provenance-malformed`, `stale-provenance`, `dirty-build`, `provenance-hash-mismatch` | The 2026-09-02 case: stale `dist/ensemble-prod` reused blindly |
+| L2b — FE provenance | `frontend/dist/frontend/browser/index.html`'s `.build-provenance.json` — same contract as L2a | Same tokens as L2a | The 2026-10-02 case: 21 v0.16.9-era FE files under a v0.16.10 label |
+
+**L1 runs in exactly three modes** (all visible; never silent):
+
+1. **ACTIVE** — a tip ref resolves AND `HEAD == tip`: the gate is engaged and passes the tree through to L2. No output.
+2. **REFUSE** — a tip ref resolves AND `HEAD != tip`: exit 78 `non-tip-tree` (or override, journaled).
+3. **WARN+SKIP** — NO tip ref resolves (no `refs/remotes/origin/latest`, no `refs/heads/latest` — e.g. a CI checkout or a fixture repo without integration refs): the check is skipped with a loud `tip-identity check SKIPPED (WARN+SKIP mode)` WARN on stderr, and **L2 remains the sole gate**. The skip is a WARN, never a silent pass: operators see it on every stage in this mode.
 
 The L1 check runs FIRST. If the tree is not at the tip, no build runs (no PyInstaller time wasted on a wrong tree). L2 runs after the build (binary) and after the FE-presence check (FE); the build path itself writes the provenance sidecar (`scripts/upgrade/stage.sh` post-build, `scripts/upgrade/_build_frontend.sh` for FE).
 
+Tip-ref resolution uses FULL refspecs only (`refs/remotes/origin/latest`, then `refs/heads/latest`) — the bare-DWIM `latest` form is deliberately never consulted because it can resolve a TAG named `latest` (`refs/tags/latest` wins git's DWIM order), which would pin the "tip" to a tag instead of the integration branch.
+
 ### A.2 Provenance sidecar — the artifact's identity card
 
-A provenance sidecar is a sibling file: `<artifact>.build-provenance.json`. The shape (one JSON object per sidecar):
+A provenance sidecar is a sibling file: `<artifact>.build-provenance.json` (for the FE: `frontend/dist/frontend/browser/index.html.build-provenance.json` — sibling of the file the verifier hashes, NOT a bare `frontend/dist/.build-provenance.json`). The shape (one JSON object per sidecar):
 
 ```json
 {
-  "git_head": "<40-hex sha>",
+  "git_head": "<7-40 hex sha>",
   "git_head_short": "<abbrev>",
   "git_dirty": false,
   "build_at": "<ISO-8601 Z>",
@@ -598,35 +606,46 @@ A provenance sidecar is a sibling file: `<artifact>.build-provenance.json`. The 
 }
 ```
 
+**Load-bearing field contract (fail-closed — no value skips a check):** a sidecar that EXISTS must carry all three load-bearing fields, syntactically valid:
+
+- `git_head` — 7-40 hex characters.
+- `git_dirty` — exactly `true`/`True`/`1` (dirty) or `false`/`False`/`0` (clean). Canonical form emitted by the writer is lowercase JSON `true`/`false`. ANY other value — missing, empty, or unrecognized (e.g. `"yes"`) — refuses **`provenance-malformed`**.
+- `artifact_sha256` — exactly 64 hex characters.
+
+A missing, empty, or unrecognized load-bearing field refuses **`provenance-malformed`** — it NEVER silently skips its check. (The first cut of this guard `[ -n "$field" ]`-guarded each comparison; a sidecar missing `git_head` silently skipped the head check. That fail-open is dead: the shape gate runs before any comparison.)
+
 Sidecar rules:
-- Written by the build path AT BUILD TIME (post-build success; not before, not after stages).
-- Verified at stage time against the current tree (HEAD, dirty, sha256).
-- One sidecar per artifact — a single artifact may not have two sidecars (the sidecar path is deterministic from the artifact path).
+- Written by the build path AT BUILD TIME (post-build success; not before, not after stages). The write is ATOMIC (temp file in the same dir + `mv -f`) — a torn sidecar can only come from an out-of-discipline writer, and the empty-sidecar shape gate catches that class.
+- The writer NORMALIZES the dirty flag to canonical JSON booleans and REFUSES to write an unrecognized value (defense in depth: the writer cannot emit an ambiguous sidecar).
+- Verified at stage time against the current tree (HEAD shape → dirty → head → sha256, in that order).
+- One sidecar per artifact — the sidecar path is deterministic from the artifact path.
 - A sidecar is REMOVED with the artifact (`rm dist/ensemble-prod*` cleans both in one operator gesture).
+- Keep sidecars OUT of git's visible tree: the real repo ignores `dist/` (root `.gitignore`) and `frontend/dist` (`frontend/.gitignore`), so sidecars never show as uncommitted changes. A repo where the sidecar path is NOT ignored would see its own sidecar as tree dirt (self-referential `dirty-build`).
 - The build tool string is operator-greppable; the project's two real paths emit `pyinstaller:ensemble.spec` and `npm run build:frontend`. Test fixtures emit `stub:tests/test_release_journal.sh` etc.
 
 ### A.3 Mandatory pre-stage steps (the recipe)
 
 For any non-sandbox stage (demo, live, or a real-payoff sandbox):
 
-1. **Confirm the tree is at the tip.** `git rev-parse HEAD` must equal `git rev-parse origin/latest` (or local `latest` if `origin/latest` is missing). A non-tip tree MUST either merge into latest and re-tag, or pass `--allow-stale-stage` (which is journaled on the install dir).
+1. **Confirm the tree is at the tip.** `git rev-parse HEAD` must equal `git rev-parse refs/remotes/origin/latest` (or `refs/heads/latest` if the remote-tracking ref is missing). A non-tip tree MUST either merge into latest and re-tag, or pass `--allow-stale-stage` (which is journaled on the install dir). If NO tip ref resolves, L1 runs in WARN+SKIP mode (§A.1) — acceptable only for CI/fixture trees, never for a release stage.
 2. **Rebuild from the current tree.** `rm -rf dist/ frontend/dist/` then run the build (PyInstaller: `cd <repo> && uv run python -m PyInstaller ensemble.spec`; FE: `bash scripts/upgrade/_build_frontend.sh`). The build path writes the sidecar immediately after a successful build.
-3. **Verify the sidecar exists.** For each artifact, `ls -l <artifact>.build-provenance.json` should show a recent mtime and `git_head` matching the current `HEAD`.
-4. **Run stage.** `VERSION=<v> bash scripts/upgrade/stage.sh <target>`. If L1 fires, the tip is wrong; if L2 fires, the build is stale.
+3. **Verify the sidecar exists and is well-formed.** For each artifact, `ls -l <artifact>.build-provenance.json` should show a recent mtime and `git_head` matching the current `HEAD`.
+4. **Run stage.** `VERSION=<v> bash scripts/upgrade/stage.sh <target>`. If L1 fires, the tip is wrong; if L2 fires, the build is stale or malformed.
 
 For sandbox stage (unit tests, drills), the fixture owns the sidecar — `tests/test_release_journal.sh` re-stamps the stub sidecars at the start of every `run_stage` / `DROP_STAGE` call so the test stays self-consistent.
 
 ### A.4 Refusal tokens — the operator's diagnosis table
 
-Every refusal journals a `stage_freshness_override` event (if override) or a `refusal` event (if refused) on the install dir's `releases/state.json`, with a distinct reason token. The token is greppable across the install dir's journal history; the operator's remedy follows the token.
+Every refusal and every override lands a journal event on the install dir's `releases/state.json` with a distinct reason token: `refusal` events carry `(reason=<token>)` in the detail (and the same `(reason=<token>)` suffix prints on the WARN line, so stderr is greppable without a journal read); `stage_freshness_override` events carry `reason=<token> operator_accepted=true`. The journal is ensured to exist before the append (created on a virgin install dir if absent — the event is DURABLE, not best-effort-dropped), so a refusal on a never-staged install dir still records its token. The token is greppable across the install dir's journal history; the operator's remedy follows the token.
 
 | Token | Trigger | Operator remedy |
 |-------|---------|-----------------|
 | `provenance-missing` | The artifact has no `.build-provenance.json` sidecar | Rebuild from the current tree (`rm -rf dist/` then re-run stage — the build path writes the sidecar) — OR for `--skip-build` fixtures, the provided artifact must carry a sidecar (`_provenance_write` in `scripts/upgrade/lib.sh`); see `tests/test_release_journal.sh` for the stub-fixture pattern |
+| `provenance-malformed` | The sidecar exists but is empty/torn, or a load-bearing field (`git_head`, `git_dirty`, `artifact_sha256`) is missing/empty/unrecognized (e.g. `git_dirty: "yes"`) | Rebuild from the current tree (the build path rewrites the sidecar atomically) — or, if the sidecar was hand-maintained, fix the named field to the §A.2 shape. An unrecognized value NEVER silently skips its check |
 | `stale-provenance` | The artifact's sidecar records a different `git_head` than the current `HEAD` | Rebuild from the current tree (the existing binary is from an older commit; staging it would silently ship the older code) |
-| `dirty-build` | The artifact's sidecar records `git_dirty=true` (the build included uncommitted changes) | Commit the working-tree changes, rebuild, re-run stage — staging a dirty build is unsafe because an idempotent re-stage would re-build with different outputs |
+| `dirty-build` | The artifact's sidecar records a dirty build (`git_dirty` in {`true`,`True`,`1`}) | Commit the working-tree changes, rebuild, re-run stage — staging a dirty build is unsafe because an idempotent re-stage would re-build with different outputs |
 | `provenance-hash-mismatch` | The artifact was modified after its build (the sidecar's `artifact_sha256` doesn't match the file's current sha256) | Rebuild from the current tree (the sidecar is now lying about an artifact that no longer matches it) |
-| `non-tip-tree` | The staging tree is not at `origin/latest` (or local `latest`) | Merge your work into the integration branch and re-tag at the tip, then re-run stage — this catches the v0.16.13 payload case (tag on a non-tip commit, fixes landing on the tip later) |
+| `non-tip-tree` | The staging tree is not at `refs/remotes/origin/latest` (or `refs/heads/latest`) | Merge your work into the integration branch and re-tag at the tip, then re-run stage — this catches the v0.16.13 payload case (tag on a non-tip commit, fixes landing on the tip later) |
 
 ### A.5 The override flag — `--allow-stale-stage`
 
@@ -651,11 +670,11 @@ If any of these is stale (e.g. a developer ran `make build` on `latest` then swi
 
 ### A.7 Cross-references
 
-- `scripts/upgrade/lib.sh` — `_provenance_path`, `_provenance_write`, `_provenance_read`, `_git_dirty_porcelain`, `_tip_sha`, `_verify_artifact_provenance`, `_verify_tip_identity` (lib.sh:1587+).
-- `scripts/upgrade/stage.sh` — the L1 + L2a + L2b check sites, the post-build provenance write (stage.sh:216+), the argv parsing for `--allow-stale-stage` (stage.sh:113-120).
-- `scripts/upgrade/_build_frontend.sh` — the FE build wrapper that writes the FE provenance sidecar.
-- `tests/test_stage_freshness_guard.sh` — the freshness-guard test pack (5 scenarios + tip-gate; pin target §A.6).
-- `tests/test_release_journal.sh` — the existing journal/integrity pack, updated to re-stamp stub sidecars for the DROP fixture.
+- `scripts/upgrade/lib.sh` — `_provenance_path`, `_provenance_write` (atomic tmp+mv, canonical-boolean normalization), `_provenance_dirty_canon`, `_provenance_read`, `_git_dirty_porcelain` (canonical true/false), `_tip_sha` (full-refspec resolution), `_stage_freshness_journal_override` + `_freshness_refuse` (durable journal landing), `_verify_artifact_provenance` (shape gate + comparison checks), `_verify_tip_identity` (three modes) — all in the "Build provenance" block (lib.sh ~1587-1900).
+- `scripts/upgrade/stage.sh` — the L1 check site (post-VERSION-discipline, pre-build, pre-lock), the post-build provenance write, the L2a/L2b verify sites, the argv parsing for `--allow-stale-stage`.
+- `scripts/upgrade/_build_frontend.sh` — the FE build wrapper that writes the FE provenance sidecar (sibling of `frontend/dist/frontend/browser/index.html`).
+- `tests/test_stage_freshness_guard.sh` — the freshness-guard test pack (10 scenario groups: syntax/argv, stale, fresh×both-L1-modes, FE-stale, missing, non-tip, override+override-journaling, REAL dirty round-trip + legacy vocabulary, malformed×6, tag-trap, virgin-journal durability).
+- `tests/test_release_journal.sh` — the existing journal/integrity pack; its stub sidecars are stamped via the PRODUCTION writer (`_stamp_provenance_for_repo` → `_provenance_write`) so the fixture shape cannot drift from real sidecars.
 
 ---
 

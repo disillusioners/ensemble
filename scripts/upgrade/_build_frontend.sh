@@ -10,10 +10,10 @@
 # provenance verification at stage time, which requires a provenance
 # sidecar to exist next to the build. This script IS the wrapper that
 # produces that sidecar for the FE: it runs `npm run build` in
-# frontend/, then writes frontend/dist/.build-provenance.json (the same
-# JSON the stage verifier reads — sibling to the file the verifier
-# points at, which is the FE index.html at
-# frontend/dist/frontend/browser/index.html).
+# frontend/, then writes the sidecar NEXT TO the file the stage verifier
+# hashes — frontend/dist/frontend/browser/index.html.build-provenance
+# .json (sibling-of-artifact per the _provenance_path convention; NOT a
+# bare frontend/dist/.build-provenance.json).
 #
 # USAGE:
 #   bash scripts/upgrade/_build_frontend.sh

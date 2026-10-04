@@ -1630,35 +1630,73 @@ _provenance_path() {
 
 # _provenance_write <artifact_abs_path> <git_head> <git_dirty_bool> <tool>
 # — write the provenance sidecar. Computes artifact_sha256 inline. Refuses
-# on missing artifact (caller bug).
+# on missing artifact (caller bug) or an unrecognized dirty value. The
+# dirty value is NORMALIZED to canonical JSON true/false before writing
+# (accepts true/True/1 and false/False/0 — legacy numeric 0/1 producers
+# keep producing correct sidecars). The write is ATOMIC: tmp file in the
+# same dir + mv -f (same discipline as journal_write) — a torn sidecar
+# can only come from an out-of-discipline writer, and the verifier's
+# provenance-malformed gate catches that class.
 _provenance_write() {
     local art="$1" head="$2" dirty="$3" tool="$4"
     if [ ! -f "$art" ]; then
         _warn "_provenance_write: artifact $art missing — refusing to write a sidecar for nothing"
         return 1
     fi
-    local sha short built_at rel prov
+    local dirty_canon
+    dirty_canon="$(_provenance_dirty_canon "$dirty")" || {
+        _warn "_provenance_write: git_dirty value '$dirty' is not a recognized boolean (true/True/1/false/False/0) — refusing to write an ambiguous sidecar"
+        return 1
+    }
+    local sha short built_at rel prov tmp
     sha="$(_sha256 "$art")"
     short="${head:0:12}"
     built_at="$(_now_iso)"
     rel="${art#"$REPO_ROOT"/}"
     prov="$(_provenance_path "$art")"
-    cat > "$prov" <<EOF
+    tmp="$prov.tmp.$$"
+    if ! cat > "$tmp" <<EOF
 {
   "git_head": "$head",
   "git_head_short": "$short",
-  "git_dirty": $dirty,
+  "git_dirty": $dirty_canon,
   "build_at": "$built_at",
   "build_tool": "$(_json_escape "$tool")",
   "artifact_sha256": "$sha",
   "artifact_path": "$(_json_escape "$rel")"
 }
 EOF
-    _log "wrote provenance $prov (head=$short dirty=$dirty tool=$tool)"
+    then
+        rm -f "$tmp" 2>/dev/null
+        _warn "_provenance_write: FAILED to write sidecar tmp $tmp"
+        return 1
+    fi
+    if ! mv -f "$tmp" "$prov"; then
+        rm -f "$tmp" 2>/dev/null
+        _warn "_provenance_write: FAILED to move sidecar tmp into place at $prov"
+        return 1
+    fi
+    _log "wrote provenance $prov (head=$short dirty=$dirty_canon tool=$tool)"
+}
+
+# _provenance_dirty_canon <raw> — normalize a git_dirty flag to the
+# canonical JSON boolean the writer emits and the verifier's dirty branch
+# consumes. Dirty side: true/True/1. Clean side: false/False/0. ANY other
+# value returns 1 — the caller (writer) refuses rather than writing an
+# ambiguous sidecar, and the verifier refuses provenance-malformed on the
+# same vocabulary. No value skips a check, ever (cn 0472b31f C1 contract).
+_provenance_dirty_canon() {
+    case "$1" in
+        true|True|1)    printf 'true' ;;
+        false|False|0)  printf 'false' ;;
+        *) return 1 ;;
+    esac
 }
 
 # _provenance_read <artifact_abs_path> — print sidecar JSON; returns 1 if
-# absent or unreadable. The caller is responsible for the parse shape.
+# absent or unreadable. The VERIFIER consumes this (single read path —
+# writer and reader share the _provenance_path resolution, so a path-shape
+# drift between them is structurally impossible).
 _provenance_read() {
     local prov
     prov="$(_provenance_path "$1")"
@@ -1666,30 +1704,38 @@ _provenance_read() {
     cat "$prov" || return 1
 }
 
-# _git_dirty_porcelain — print 1 if the repo has uncommitted changes
-# (working tree vs index), else 0. `git status --porcelain` is O(file count)
-# and BSD-safe. Ignores submodules (the scripts dir is self-contained; if
-# it grows submodules, add --ignore-submodules=dirty).
+# _git_dirty_porcelain — print the canonical JSON boolean for the repo's
+# working-tree state: true if uncommitted changes exist, false otherwise.
+# `git status --porcelain` is O(file count) and BSD-safe. Ignores
+# submodules (the scripts dir is self-contained; if it grows submodules,
+# add --ignore-submodules=dirty). CANONICAL-BOOLEAN CONTRACT (C1 fix):
+# prints true/false — the exact values _provenance_write normalizes and
+# the verifier's dirty branch matches — never bare 0/1.
 _git_dirty_porcelain() {
     if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
-        printf '1'
+        printf 'true'
     else
-        printf '0'
+        printf 'false'
     fi
 }
 
-# _tip_sha — print the integration-tip SHA (origin/latest → local latest →
-# refs/heads/latest). Returns 1 if no tip ref resolves. The tip is the
-# highest commit on the integration branch — a non-tip staging tree
-# either missed a merge (stale tip behind the tag) or is on a feature
-# branch (intentional but explicit override required for the v0.16.13
-# payload case where the tag was placed BEFORE the merges that included
-# the actual fixes).
+# _tip_sha — print the integration-tip SHA. Resolution order: the
+# remote-tracking ref refs/remotes/origin/latest, then the local BRANCH
+# ref refs/heads/latest. Both are FULL refspecs — the bare-`latest` DWIM
+# form is deliberately NOT used because it can resolve a TAG named
+# `latest` (refs/tags/latest wins in git's DWIM order), which would pin
+# the tip to a tag instead of the integration branch. Returns 1 if no
+# tip ref resolves. The tip is the highest commit on the integration
+# branch — a non-tip staging tree either missed a merge (stale tip
+# behind the tag) or is on a feature branch (intentional but explicit
+# override required for the v0.16.13 payload case where the tag was
+# placed BEFORE the merges that included the actual fixes).
 _tip_sha() {
     local tip
-    tip="$(git -C "$REPO_ROOT" rev-parse --verify origin/latest 2>/dev/null)" && [ -n "$tip" ] && printf '%s' "$tip" && return 0
-    tip="$(git -C "$REPO_ROOT" rev-parse --verify latest 2>/dev/null)" && [ -n "$tip" ] && printf '%s' "$tip" && return 0
-    tip="$(git -C "$REPO_ROOT" rev-parse --verify refs/heads/latest 2>/dev/null)" && [ -n "$tip" ] && printf '%s' "$tip" && return 0
+    tip="$(git -C "$REPO_ROOT" rev-parse --verify refs/remotes/origin/latest 2>/dev/null)" \
+        && [ -n "$tip" ] && printf '%s' "$tip" && return 0
+    tip="$(git -C "$REPO_ROOT" rev-parse --verify refs/heads/latest 2>/dev/null)" \
+        && [ -n "$tip" ] && printf '%s' "$tip" && return 0
     return 1
 }
 
@@ -1698,27 +1744,59 @@ _tip_sha() {
 # (the override event is informational; the lock is for serialization with
 # promote/rollback, which doesn't apply to pre-lock stage). The append
 # rides plain journal_history_append — additive, no new write mechanics.
+# DURABLE LANDING (S1): the journal file is ensured to exist before the
+# append (journal_init is idempotent), so a VIRGIN install dir still
+# records the override — the audit trail does not depend on a prior
+# pipeline op having initialized the journal. The init is gated on the
+# install dir ALREADY existing: a refusal/override never bootstraps an
+# install path that stage itself has not created yet.
 _stage_freshness_journal_override() {
     local reason="$1" detail="$2"
+    if [ -d "${INSTALL_DIR:-}" ]; then
+        journal_init >/dev/null 2>&1 || true
+    fi
     journal_history_append "stage_freshness_override" \
         "$detail (reason=$reason operator_accepted=true)" \
         >/dev/null 2>&1 \
         || _warn "freshness-override journal append FAILED (best-effort) — override is taken but the audit trail is incomplete; reason=$reason"
 }
 
+# _freshness_refuse <token> <msg...> — the freshness guard's refusal
+# wrapper: ensures the install dir's journal exists (same durable-landing
+# gate as _stage_freshness_journal_override) then delegates to the shared
+# _refuse (loud WARN with (reason=<token>) + best-effort journal append +
+# exit 78). Shared _refuse is NOT modified — promote/rollback refusal
+# semantics are untouched; only the freshness guard durably lands its
+# events on a virgin install dir.
+_freshness_refuse() {
+    local token="$1"; shift
+    if [ -d "${INSTALL_DIR:-}" ]; then
+        journal_init >/dev/null 2>&1 || true
+    fi
+    _refuse "$token" "$@"
+}
+
 # _verify_artifact_provenance <artifact_abs_path> — verify provenance matches
 # the current tree. Refuses (exit 78) with a distinct reason token unless
 # STAGE_FRESHNESS_OVERRIDE=1. Token + override journaling in one place so
 # the operator can grep `reason=...` on the install dir's state.json to
-# audit every override. No caller's id argument — the reason token is
-# fixed for THIS helper (provenance-*) so the refusal taxonomy stays
-# greppable. Tip-identity (non-tip-tree) is checked separately at the
-# stage.sh entry point, before this helper runs.
+# audit every override. Tip-identity (non-tip-tree) is checked separately
+# at the stage.sh entry point, before this helper runs.
+#
+# FAIL-CLOSED FIELD CONTRACT (C1/C2 fix, cn 0472b31f): a sidecar that
+# EXISTS must carry ALL THREE load-bearing fields — git_head (7-40 hex),
+# git_dirty (exactly true/True/1 or false/False/0), artifact_sha256
+# (64 hex) — each syntactically valid. ANY missing/empty/unrecognized
+# value refuses provenance-malformed. No value skips a check, ever: the
+# old `[ -n "$field" ] &&` guards are GONE — an empty field was a silent
+# skip, which is exactly the trap family this guard exists to kill.
 #
 # Refusal token vocabulary (the verify helper emits one of):
-#   provenance-missing, stale-provenance, dirty-build, provenance-hash-mismatch
+#   provenance-missing, provenance-malformed, stale-provenance,
+#   dirty-build, provenance-hash-mismatch
 _verify_artifact_provenance() {
     local art="$1" prov json git_head git_dirty art_sha current_sha
+    local dirty_flag="" malformed=""
     prov="$(_provenance_path "$art")"
     if [ ! -f "$prov" ]; then
         if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
@@ -1727,7 +1805,7 @@ _verify_artifact_provenance() {
                 "override: $art has no .build-provenance.json sidecar (looked for $prov)"
             return 0
         fi
-        _refuse provenance-missing \
+        _freshness_refuse provenance-missing \
             "stale-artifact stage refused: no build provenance for $art (looked for $prov). " \
             "Blind reuse of prebuilt artifacts is structurally impossible (cn 0472b31f trap family). " \
             "Remedies, in order: " \
@@ -1735,21 +1813,70 @@ _verify_artifact_provenance() {
             "  2) for --skip-build fixtures: the provided artifact must carry a .build-provenance.json sidecar; see _provenance_write in scripts/upgrade/lib.sh " \
             "  3) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
     fi
-    json="$(cat "$prov" 2>/dev/null)" || {
-        _refuse provenance-missing "stale-artifact stage refused: provenance sidecar $prov exists but is unreadable"
+    # Read via the shared reader (single path resolution for writer and
+    # verifier). An empty read = torn/garbage sidecar → malformed.
+    json="$(_provenance_read "$art" 2>/dev/null)" || {
+        _freshness_refuse provenance-missing \
+            "stale-artifact stage refused: provenance sidecar $prov exists but is unreadable"
     }
-    git_head="$(_json_field "$json" "git_head")"
-    git_dirty="$(_json_field "$json" "git_dirty")"
-    art_sha="$(_json_field "$json" "artifact_sha256")"
+    if [ -z "$json" ]; then
+        _freshness_refuse provenance-malformed \
+            "stale-artifact stage refused: provenance sidecar $prov is EMPTY (torn or truncated write). " \
+            "A sidecar that exists must carry all three load-bearing fields (git_head, git_dirty, artifact_sha256). " \
+            "Remedies, in order: " \
+            "  1) rebuild: 'rm -rf dist/' and re-run stage (the build path rewrites the sidecar atomically) " \
+            "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+    fi
+    # Field extraction uses the QUOTED-key form (_json_field_quoted): the
+    # bare-substring _json_field would match the "git_head" INSIDE
+    # "git_head_short" when the real "git_head" key is absent — turning a
+    # provenance-malformed case into a bogus stale-provenance (found by
+    # scenario viii-d). Anchoring on `"key":` defeats the aliasing.
+    git_head="$(_json_field_quoted "$json" '"git_head":' 2>/dev/null)" || git_head=""
+    git_dirty="$(_json_field_quoted "$json" '"git_dirty":' 2>/dev/null)" || git_dirty=""
+    art_sha="$(_json_field_quoted "$json" '"artifact_sha256":' 2>/dev/null)" || art_sha=""
     current_sha="$(_sha256 "$art")"
-    if [ -n "$git_head" ] && [ "$git_head" != "$HEAD_SHA" ]; then
+    # ── Shape gate (C2): every load-bearing field present + syntactically
+    #    valid, BEFORE any comparison runs. Empty no longer means skip.
+    if [ -z "$git_head" ]; then
+        malformed="git_head missing/empty"
+    elif [ -z "$git_dirty" ]; then
+        malformed="git_dirty missing/empty"
+    elif [ -z "$art_sha" ]; then
+        malformed="artifact_sha256 missing/empty"
+    elif ! printf '%s' "$git_head" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
+        malformed="git_head not a git sha (got '$git_head')"
+    elif ! dirty_flag="$(_provenance_dirty_canon "$git_dirty")"; then
+        malformed="git_dirty not a recognized boolean true/True/1 or false/False/0 (got '$git_dirty')"
+    elif ! printf '%s' "$art_sha" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+        malformed="artifact_sha256 not a sha256 digest (got '$art_sha')"
+    fi
+    if [ -n "$malformed" ]; then
+        if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
+            _warn "FRESHNESS OVERRIDE: provenance sidecar malformed for $art ($malformed) — proceeding (operator accepted; journaled)"
+            _stage_freshness_journal_override provenance-malformed \
+                "override: $art sidecar malformed ($malformed)"
+            return 0
+        fi
+        _freshness_refuse provenance-malformed \
+            "stale-artifact stage refused: provenance sidecar for $art is MALFORMED ($malformed). " \
+            "A sidecar that exists must carry all three load-bearing fields, syntactically valid — " \
+            "an unrecognized value must never silently skip its check (cn 0472b31f trap family). " \
+            "Remedies, in order: " \
+            "  1) rebuild: 'rm -rf dist/' and re-run stage (the build path rewrites the sidecar atomically) " \
+            "  2) if the sidecar was hand-maintained: fix the named field to the documented shape (docs/runbooks/upgrade-drills.md §A.2) " \
+            "  3) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+    fi
+    # ── Comparison checks. Every value here is GUARANTEED non-empty and
+    #    shape-valid by the gate above — no `[ -n ]` guards, no skips.
+    if [ "$git_head" != "$HEAD_SHA" ]; then
         if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
             _warn "FRESHNESS OVERRIDE: provenance head mismatch for $art (built=$git_head current=$HEAD_SHA) — proceeding (operator accepted; journaled)"
             _stage_freshness_journal_override stale-provenance \
                 "override: $art was built at $git_head but staging tree is at $HEAD_SHA"
             return 0
         fi
-        _refuse stale-provenance \
+        _freshness_refuse stale-provenance \
             "stale-artifact stage refused: $art was built at a different commit " \
             "(built at ${git_head:0:12}, current HEAD=$HEAD_SHA). " \
             "Reuse of prebuilt artifacts from a different tree is structurally impossible (cn 0472b31f trap family). " \
@@ -1757,14 +1884,14 @@ _verify_artifact_provenance() {
             "  1) rebuild from the current tree: 'rm -rf dist/' and re-run stage (writes provenance) " \
             "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
     fi
-    if [ "$git_dirty" = "True" ] || [ "$git_dirty" = "true" ]; then
+    if [ "$dirty_flag" = "true" ]; then
         if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
             _warn "FRESHNESS OVERRIDE: $art was built on a dirty tree — proceeding (operator accepted; journaled)"
             _stage_freshness_journal_override dirty-build \
                 "override: $art was built on a dirty tree (HEAD=$HEAD_SHA)"
             return 0
         fi
-        _refuse dirty-build \
+        _freshness_refuse dirty-build \
             "stale-artifact stage refused: $art was built on a dirty (uncommitted) tree. " \
             "Staging an artifact whose build includes uncommitted changes is unsafe: the staged binary " \
             "diverges from any tag on the tree, and an idempotent re-stage would re-build with different " \
@@ -1772,14 +1899,14 @@ _verify_artifact_provenance() {
             "  1) commit the changes, rebuild, re-run stage " \
             "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
     fi
-    if [ -n "$art_sha" ] && [ "$art_sha" != "$current_sha" ]; then
+    if [ "$art_sha" != "$current_sha" ]; then
         if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
             _warn "FRESHNESS OVERRIDE: $art hash mismatch (manifest=$art_sha actual=$current_sha) — proceeding (operator accepted; journaled)"
             _stage_freshness_journal_override provenance-hash-mismatch \
                 "override: $art hash mismatch (manifest=$art_sha actual=$current_sha HEAD=$HEAD_SHA)"
             return 0
         fi
-        _refuse provenance-hash-mismatch \
+        _freshness_refuse provenance-hash-mismatch \
             "stale-artifact stage refused: $art hash doesn't match its build provenance. " \
             "The artifact was modified AFTER its build (manifest=$art_sha, actual=$current_sha). " \
             "Remedies, in order: " \
@@ -1790,23 +1917,36 @@ _verify_artifact_provenance() {
 }
 
 # _verify_tip_identity — refuse if the staging tree is not at the
-# integration tip. The tip SHA comes from _tip_sha (origin/latest or local
-# latest). Refuses with reason token non-tip-tree; STAGE_FRESHNESS_OVERRIDE
-# unlocks + journals. The HEAD_SHA must be set by the caller (stage.sh
-# computes it at entry so this helper is pure-readable).
+# integration tip. The tip SHA comes from _tip_sha (refs/remotes/origin/
+# latest or refs/heads/latest — full refspecs only, never the bare-DWIM
+# `latest` which could resolve a TAG named latest). Refuses with reason
+# token non-tip-tree; STAGE_FRESHNESS_OVERRIDE unlocks + journals. The
+# HEAD_SHA must be set by the caller (stage.sh computes it at entry so
+# this helper is pure-readable).
+#
+# TWO MODES (documented in upgrade-drills.md §A.1):
+#   ACTIVE  — a tip ref resolves and HEAD == tip: the gate is engaged and
+#             PASSES the tree through to L2. No output.
+#   REFUSE  — a tip ref resolves and HEAD != tip: exit 78 (or override).
+#   WARN+SKIP — NO tip ref resolves (no origin/latest, no local latest —
+#             e.g. a CI checkout or a fixture repo without integration
+#             refs): the check is SKIPPED with a loud WARN and L2
+#             (provenance) remains the sole gate. The skip is always
+#             visible on stderr; it is never silent.
 #
 # The v0.16.13 payload case: tag v0.16.13 was placed at commit C; the
-# actual fix commits landed AFTER C on the integration branch, so origin/
-# latest has moved past C. Staging from C would produce a binary without
+# actual fix commits landed AFTER C on the integration branch, so the
+# tip has moved past C. Staging from C would produce a binary without
 # the fixes. This check refuses that path unless the operator explicitly
 # overrides (and the override is journaled on the install dir).
 _verify_tip_identity() {
     local tip
     tip="$(_tip_sha 2>/dev/null || true)"
     if [ -z "$tip" ] || [ -z "$HEAD_SHA" ]; then
-        # no tip ref resolves (e.g. CI without origin) — skip the check
-        # with a warn. The provenance check is still the primary safety.
-        _warn "tip-identity check SKIPPED: no integration tip ref resolves (HEAD=$HEAD_SHA tip=<unset>). Set up 'origin/latest' or local 'latest' to enable."
+        # WARN+SKIP mode: no tip ref resolves (e.g. CI without origin, or
+        # a fixture repo without integration refs). The check is skipped
+        # LOUDLY — L2 (provenance) remains the sole gate in this mode.
+        _warn "tip-identity check SKIPPED (WARN+SKIP mode): no integration tip ref resolves (HEAD=$HEAD_SHA tip=<unset>; looked for refs/remotes/origin/latest then refs/heads/latest). L2 provenance check remains the sole gate."
         return 0
     fi
     if [ "$tip" != "$HEAD_SHA" ]; then
@@ -1816,7 +1956,7 @@ _verify_tip_identity() {
                 "override: staging tree at $HEAD_SHA but integration tip is at $tip"
             return 0
         fi
-        _refuse non-tip-tree \
+        _freshness_refuse non-tip-tree \
             "stale-artifact stage refused: staging tree is NOT at the integration tip " \
             "(HEAD=${HEAD_SHA:0:12} tip=${tip:0:12}). " \
             "The tag at HEAD does not include fixes that landed on the tip after the tag was placed. " \

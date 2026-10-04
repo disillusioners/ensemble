@@ -47,11 +47,14 @@
 # integration tip (catches the v0.16.13 payload case — tag placed on a
 # non-tip commit, actual fixes landed later on the tip), or (b) the
 # prebuilt artifact at dist/ensemble-prod (or frontend/dist/frontend/
-# browser) has no build provenance sidecar, was built on a dirty tree,
-# or was built at a different commit. The override is argv-only:
-# --allow-stale-stage (mirrors --f2-verified-closed; journaled on the
-# install dir, audited at accept). See docs/runbooks/upgrade-drills.md
-# §A (Stage freshness guard) for the operator remedy per refusal token.
+# browser) has no build provenance sidecar, has a malformed sidecar
+# (missing/empty/unrecognized load-bearing field — no value ever skips a
+# check), was built on a dirty tree, was built at a different commit, or
+# no longer matches its recorded sha256. The override is argv-only:
+# --allow-stale-stage (mirrors --f2-verified-closed; journaled DURABLY on
+# the install dir — the journal is created if absent — and audited at
+# accept). See docs/runbooks/upgrade-drills.md §A (Stage freshness guard)
+# for the operator remedy per refusal token.
 #
 # ROLLBACK SAFETY DERIVATION (D-FA4.5): `rollback_safe` defaults to the
 # release author's call via ENSEMBLE_ROLLBACK_SAFE={0,1}; when unset it is
@@ -256,32 +259,27 @@ for req in "$REPO_ROOT/agents" "$REPO_ROOT/config.yaml" "$REPO_ROOT/launcher.sh"
     fi
 done
 if [ ! -d "$REPO_ROOT/frontend/dist/frontend/browser" ]; then
-    # If frontend/dist is absent AND no provenance exists, we cannot
-    # distinguish "FE never built" from "FE stale"; refuse with the
-    # actionable "build FE first" message (unchanged from the pre-guard
-    # behavior — operator must build FE). The provenance write for FE
-    # happens at FE build time (see scripts/upgrade/_build_frontend.sh
-    # or the operator's `cd frontend && npm run build` followed by a
-    # provenance-write step). For the simple in-repo path, stage.sh
-    # writes the FE provenance itself when a frontend/dist/ build is
-    # produced by a wrapped command — see the _build_fe helper below.
-    _warn "no frontend build at frontend/dist/frontend/browser — run 'cd frontend && npm run build' first, then 'bash scripts/upgrade/_build_frontend.sh' to write provenance (refusing to stage a UI-less or unprovenanced release)"
+    # FE absent → the operator must build it (unchanged from the pre-guard
+    # behavior). The FE provenance sidecar is written by the FE build
+    # wrapper scripts/upgrade/_build_frontend.sh (which runs the same
+    # `npm run build` then stamps the sidecar); stage.sh itself never
+    # builds the FE — it VERIFIES the sidecar the wrapper produced.
+    _warn "no frontend build at frontend/dist/frontend/browser — run 'bash scripts/upgrade/_build_frontend.sh' (wraps 'npm run build' + stamps the provenance sidecar; refusing to stage a UI-less release)"
     exit 78
 fi
 # Stage freshness guard — L2: verify FE provenance (same trap family; the
 # 2026-10-02 catch was a 21-file v0.16.9-era FE under a v0.16.10 label).
-# The FE provenance sidecar lives at frontend/dist/.build-provenance.json.
-# If absent, the build path wrote it; if present, verify it matches the
-# current tree. Refusal tokens are the same as the binary provenance
-# check above (--allow-stale-stage unlocks all).
+# The FE provenance sidecar lives NEXT TO the file the verifier hashes:
+# frontend/dist/frontend/browser/index.html.build-provenance.json (the
+# sidecar is a SIBLING of its artifact per the _provenance_path convention
+# — NOT a bare frontend/dist/.build-provenance.json). The wrapper
+# _build_frontend.sh writes it; this block only VERIFIES it.
 FE_DIST_DIR="$REPO_ROOT/frontend/dist"
 if [ -d "$FE_DIST_DIR" ]; then
-    # Build a synthetic aggregate "artifact" for FE: the top-level
-    # frontend/dist/frontend/browser/index.html is the canonical entry
-    # point, and any FE build is identified by its presence. We point
-    # the verifier at the index.html (or any single file under browser/)
-    # so a sha256 mismatch catches a stale build even when the directory
-    # shape is the same. The verifier tolerates a single-file target.
+    # The verifier target is the FE entry point: index.html when present,
+    # else the first file under browser/ (shape-tolerant). A sha256
+    # mismatch on this file catches a stale FE build even when the
+    # directory shape is unchanged.
     _FE_TARGET=""
     if [ -f "$FE_DIST_DIR/frontend/browser/index.html" ]; then
         _FE_TARGET="$FE_DIST_DIR/frontend/browser/index.html"
