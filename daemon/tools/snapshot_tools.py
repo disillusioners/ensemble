@@ -1260,14 +1260,16 @@ def create_snapshot_tools(
                         )
 
         # ── R18 (2026-10-04) auto-dispatch — eliminate the contract trap.
-        # The forensic audit (cfded28b / 6e75621b) proved that
-        # `task` was "accepted-but-never-delivered" — agents uniformly
-        # missed the follow-up send_message requirement. Default
-        # behavior now: if `auto_dispatch=True` AND `task` is non-empty,
-        # enqueue `task` as the child's first turn INSIDE this tool so
-        # the trap is structurally impossible. Ordering: AFTER the
-        # R6b warm-path metadata write so the snapshot digest is
-        # already stamped when the worker picks up the message
+        # Forensic-audit lineage: commissions cfded28b / da8e4809
+        # (leader-synthesized verdict bb100883; audit-doc 6e75621b)
+        # proved that `task` was "accepted-but-never-delivered" —
+        # agents uniformly missed the follow-up send_message
+        # requirement. Default behavior now: if `auto_dispatch=True`
+        # AND `task` is non-empty, enqueue `task` as the child's
+        # first turn INSIDE this tool so the trap is structurally
+        # impossible. Ordering: AFTER the R6b warm-path metadata
+        # write so the snapshot digest is already stamped when the
+        # worker picks up the message
         # (`assemble_context_messages` reads
         # `instance_metadata["snapshot_digest"]` on turn 1). On any
         # enqueue failure the spawn result is preserved but the
@@ -1291,7 +1293,43 @@ def create_snapshot_tools(
                     ),
                 )
                 auto_dispatch_enqueued = True
+                # R18 traffic visibility (review F2) — the forensic-
+                # audit methodology counts enqueue log lines; auto-
+                # dispatch traffic MUST be countable the same way.
+                # Mirrors the warm-spawn JSON log shape at :1243 so
+                # downstream tooling (grep / census) treats both
+                # uniformly. Same `import json as _json` local pattern
+                # to keep the surface minimal and avoid dragging the
+                # module-level namespace.
+                try:
+                    import json as _json
+
+                    logger.info(
+                        "[SnapshotAutoDispatch] "
+                        + _json.dumps(
+                            {
+                                "event": "spawn_hot_auto_dispatch",
+                                "caller_iid": caller_instance_id,
+                                "target_iid": new_instance_id,
+                                "content_len": len(task),
+                            }
+                        )
+                    )
+                except Exception:  # pragma: no cover — defensive belt
+                    logger.warning(
+                        "[Snapshot] R18 auto-dispatch log line "
+                        "encoding failed (non-fatal)"
+                    )
             except Exception as exc:
+                # Review F1 — log the failure (was silent before).
+                # Same `logger` + same f-string sibling style as the
+                # internal-search failure path at :1066 — diagnostics
+                # come from logs alone when a caller reports a
+                # stranded child without preserving the result.
+                logger.warning(
+                    f"[Snapshot] spawn_hot_instance auto-dispatch "
+                    f"enqueue failed for {new_instance_id}: {exc}"
+                )
                 # Never silent — surface as a clear error so the
                 # caller can self-correct via a follow-up
                 # send_message. We do NOT downgrade `started` to

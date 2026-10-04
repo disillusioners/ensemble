@@ -37,6 +37,7 @@ word-boundary forms — substring matching collides with ``snapshot`` /
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 from typing import Any, Iterator
@@ -971,6 +972,62 @@ class TestR18AutoDispatch:
         # backward compatible with the pre-R18 6-key envelope.
         assert "auto_dispatch" not in result
         assert "auto_dispatch_status" not in result
+
+    def test_auto_dispatch_failure_logs_warning_with_instance_id(
+        self, tools, manager, monkeypatch, caplog
+    ):
+        """Review F1 — enqueue failure MUST emit a WARNING log line.
+
+        Pre-F1: the ``except`` block surfaced the failure to the
+        caller's ``error`` field but logged NOTHING — operators
+        triaging a stranded child from logs alone had no breadcrumb.
+        Post-F1: a ``[Snapshot] spawn_hot_instance auto-dispatch
+        enqueue failed for <id>: <exc>`` line lands in the
+        ``daemon.tools.snapshot_tools`` logger at WARNING. Same logger
+        + sibling f-string style as the internal-search failure path
+        (:1066) so log tooling treats both uniformly.
+        """
+        self._auth_ok(monkeypatch)
+        manager.enqueue_raise = RuntimeError(
+            "enqueue lane down (test injected)"
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.tools.snapshot_tools"
+        ):
+            result = _run(
+                tools[2].ainvoke({"agent_id": "worker", "task": "do it"})
+            )
+
+        # Sanity: the failure still surfaces in the loud lane.
+        assert result["error"] is not None
+        assert "auto-dispatch failed" in result["error"]
+
+        # The log assertion: at least one warning carries the
+        # `[Snapshot]` prefix and names the target instance so an
+        # operator can grep from logs alone. The full message format
+        # is anchored so the test fails if the log text drifts from
+        # the F1 contract.
+        matched = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and "[Snapshot] spawn_hot_instance auto-dispatch "
+            "enqueue failed for new-inst-1" in rec.getMessage()
+        ]
+        assert matched, (
+            "F1 regression: expected a `[Snapshot] spawn_hot_instance "
+            "auto-dispatch enqueue failed for new-inst-1: ...` WARNING; "
+            f"got records: {[r.getMessage() for r in caplog.records]}"
+        )
+        # The exception text MUST ride the message so operators can
+        # diagnose from logs alone (the sibling pattern at :1066
+        # embeds ``str(exc)`` verbatim — matches the F1 contract:
+        # f"[Snapshot] spawn_hot_instance auto-dispatch enqueue
+        # failed for {new_instance_id}: {exc}"). The class name rides
+        # the loud ``error`` field on the result, not the log line.
+        assert (
+            "enqueue lane down (test injected)" in matched[0].getMessage()
+        )
 
     def test_auto_dispatch_does_not_run_on_blocked_spawn(
         self, tools, manager, monkeypatch
