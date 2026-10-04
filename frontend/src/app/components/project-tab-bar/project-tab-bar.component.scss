@@ -151,6 +151,19 @@ $accent-cyan: #10a7f7;
   }
 }
 
+// Chat-source tab icon — mirrors the workspace-btn size so the layout
+// stays consistent with the other tabs. The mat-icon element is rendered
+// as a sibling of the tab name (no leading margin override needed here
+// because the parent .tab uses ``gap: 0.375rem``).
+.tab-icon {
+  font-size: 16px !important;
+  width: 16px !important;
+  height: 16px !important;
+  line-height: 16px !important;
+  color: $accent-cyan;
+  flex-shrink: 0;
+}
+
 .tab-add {
   display: inline-flex;
   align-items: center;

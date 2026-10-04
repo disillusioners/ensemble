@@ -66,14 +66,25 @@ class TestApiService {
     return this.http.post(`${this.API_BASE}/instances`, body);
   }
 
-  listInstances(limit: number = 100, offset: number = 0, projectId?: string, excludeKb: boolean = true, search?: string, order?: string): Observable<any> {
+  listInstances(
+    limit: number = 100,
+    offset: number = 0,
+    projectId?: string,
+    excludeKb: boolean = true,
+    search?: string,
+    order?: string,
+    includeDescendants: boolean = true,
+    source?: string,
+  ): Observable<any> {
     // Mirrors the real ApiService.listInstances param construction
     // (HttpParams set-order serialization: limit, offset, exclude_kb,
-    // then optional project_id, search, order).
+    // include_descendants, then optional project_id, search, order,
+    // source).
     const params: string[] = [
       `limit=${limit}`,
       `offset=${offset}`,
       `exclude_kb=${excludeKb}`,
+      `include_descendants=${includeDescendants}`,
     ];
     if (projectId) {
       params.push(`project_id=${projectId}`);
@@ -83,6 +94,9 @@ class TestApiService {
     }
     if (order) {
       params.push(`order=${order}`);
+    }
+    if (source && source.trim().length > 0) {
+      params.push(`source=${source.trim()}`);
     }
     return this.http.get(`${this.API_BASE}/instances?${params.join('&')}`);
   }
@@ -304,7 +318,7 @@ describe('ApiService', () => {
 
       const request = httpMock.getRequests()[0];
       expect(request.method).toBe('GET');
-      expect(request.url).toBe('/api/instances?limit=50&offset=10&exclude_kb=true');
+      expect(request.url).toBe('/api/instances?limit=50&offset=10&exclude_kb=true&include_descendants=true');
     });
 
     it('createInstance() should make POST request to /api/instances', () => {
@@ -357,7 +371,7 @@ describe('ApiService', () => {
       // Mirror now builds the query string like the real implementation.
       const request = httpMock.getRequests()[0];
       expect(request.method).toBe('GET');
-      expect(request.url).toBe('/api/instances?limit=100&offset=0&exclude_kb=false');
+      expect(request.url).toBe('/api/instances?limit=100&offset=0&exclude_kb=false&include_descendants=true');
     });
 
     it('should default exclude_kb to true', () => {
@@ -388,7 +402,7 @@ describe('ApiService', () => {
 
       const request = httpMock.getRequests()[0];
       expect(request.url).toContain('order=activity');
-      expect(request.url).toBe('/api/instances?limit=10&offset=0&exclude_kb=true&order=activity');
+      expect(request.url).toBe('/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=true&order=activity');
     });
 
     it('should omit the order param when not provided (server default)', () => {
@@ -402,7 +416,69 @@ describe('ApiService', () => {
       service.listInstances(25, 0, undefined, true, undefined, 'pinned');
 
       const request = httpMock.getRequests()[0];
-      expect(request.url).toBe('/api/instances?limit=25&offset=0&exclude_kb=true&order=pinned');
+      expect(request.url).toBe('/api/instances?limit=25&offset=0&exclude_kb=true&include_descendants=true&order=pinned');
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Source-type filter — Projects tab Chat-tab wire layer. Mirrors the
+  // BE's GET /api/instances?source=… parameter, exposed on the
+  // service signature as the 8th positional ``source`` arg.
+  // ─────────────────────────────────────────────────────────────────────
+
+  describe('listInstances with source param', () => {
+    it('should append source=chat to the URL when source="chat"', () => {
+      // The Projects tab Chat tab is the canonical consumer — it
+      // passes the special ``"chat"`` sentinel so the BE filters
+      // to the registry-backed chat-source set.
+      service.listInstances(10, 0, undefined, true, undefined, undefined, true, 'chat');
+
+      const request = httpMock.getRequests()[0];
+      expect(request.url).toContain('source=chat');
+    });
+
+    it('should append a specific source value when source is a real type', () => {
+      // Direct source filter (e.g. an agent tool asking for all
+      // telegram instances) — the wire form is the same as the
+      // chat sentinel, just with a different value.
+      service.listInstances(10, 0, undefined, true, undefined, undefined, true, 'telegram');
+
+      const request = httpMock.getRequests()[0];
+      expect(request.url).toContain('source=telegram');
+    });
+
+    it('should omit the source param when not provided (server default)', () => {
+      // Pre-feature default: no source filter. A regression that
+      // defaulted to ``"chat"`` or any other value would break
+      // every existing call.
+      service.listInstances(100, 0);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.url).not.toContain('source=');
+    });
+
+    it('should omit the source param when source is an empty string', () => {
+      // Empty string is treated as "no filter" — the production
+      // code's ``source && source.trim().length > 0`` guard turns
+      // it into a no-op.
+      service.listInstances(100, 0, undefined, true, undefined, undefined, true, '');
+
+      const request = httpMock.getRequests()[0];
+      expect(request.url).not.toContain('source=');
+    });
+
+    it('should compose source with project_id and search', () => {
+      // All three filter dimensions compose: the URL must carry
+      // every active filter alongside the base params.
+      service.listInstances(
+        10, 0, 'proj-1', true, 'refactor', 'activity', true, 'chat'
+      );
+
+      const request = httpMock.getRequests()[0];
+      expect(request.url).toContain('project_id=proj-1');
+      expect(request.url).toContain('search=refactor');
+      expect(request.url).toContain('order=activity');
+      expect(request.url).toContain('source=chat');
     });
   });
 });

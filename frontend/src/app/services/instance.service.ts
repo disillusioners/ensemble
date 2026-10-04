@@ -31,6 +31,15 @@ export class InstanceService {
   private readonly POLLING_INTERVAL = 60_000;
   private pollingIntervalId: ReturnType<typeof setInterval> | null = null;
   private _currentProjectId: string | null = null;
+  /**
+   * Source-type filter threading. ``undefined`` = no filter (default);
+   * the sentinel ``"chat"`` = chat-source roots only (telegram/slack/
+   * discord/whatsapp — registry-backed set mirroring
+   * USER_ORIGIN_CHAT_SOURCE_TYPES on the BE). Mirrors the
+   * ``currentProjectId`` model — both are reset/recomputed by
+   * ``startPolling``.
+   */
+  private _currentSource: string | undefined = undefined;
   private currentOffset: number = 0;
   private _loadSeq = 0;
 
@@ -39,6 +48,15 @@ export class InstanceService {
    */
   get currentProjectId(): string | null {
     return this._currentProjectId;
+  }
+
+  /**
+   * The currently active source-type filter. Returns undefined when no
+   * source filter is applied (``"all"`` view) and ``"chat"`` for the chat
+   * tab. Read-only — the source filter is set by ``startPolling``.
+   */
+  get currentSource(): string | undefined {
+    return this._currentSource;
   }
 
   // Public signals
@@ -296,9 +314,21 @@ export class InstanceService {
    * Load instances from the API.
    * @param projectId Optional project filter
    * @param append If true, append to existing instances; otherwise replace
+   * @param source Optional source-type filter (``"chat"`` for chat-source
+   *   roots, or a specific source_type value). Defaults to the service's
+   *   currently active source filter (``_currentSource``) so the polling
+   *   tick stays in sync with the active tab.
    */
-  async loadInstances(projectId?: string, append = false): Promise<void> {
+  async loadInstances(
+    projectId?: string,
+    append = false,
+    source?: string,
+  ): Promise<void> {
     const seq = ++this._loadSeq;
+    // Default the source filter to the service-level value so callers that
+    // don't pass one (e.g. the polling tick) automatically inherit the
+    // currently active tab's source filter.
+    const effectiveSource = source ?? this._currentSource;
 
     if (append) {
       this.isLoadingMore.set(true);
@@ -315,6 +345,9 @@ export class InstanceService {
           projectId,
           !this.showKb(),
           this.searchQuery() || undefined,
+          undefined,           // order: BE default (pinned)
+          true,                // include_descendants: default true (back-compat)
+          effectiveSource,
         )
       );
 
@@ -363,10 +396,15 @@ export class InstanceService {
   /**
    * Start polling for instance updates.
    * @param projectId Optional project filter
+   * @param source Optional source-type filter (e.g. ``"chat"`` for chat-source
+   *   roots only). When omitted, defaults to no filter (the ``"all"`` view).
+   *   The filter is captured onto ``_currentSource`` so the polling tick
+   *   re-applies it on every 60s interval.
    */
-  startPolling(projectId?: string): void {
+  startPolling(projectId?: string, source?: string): void {
     this.stopPolling();
     this._currentProjectId = projectId ?? null;
+    this._currentSource = source;
 
     // Clear old instances immediately to avoid showing stale data
     this.instances.set([]);
@@ -374,7 +412,7 @@ export class InstanceService {
     this.currentOffset = 0;
 
     // Immediate load
-    this.loadInstances(projectId);
+    this.loadInstances(projectId, false, source);
 
     // Start polling interval (loadInstances reads searchQuery() each tick, so the active filter is reapplied automatically).
     this.pollingIntervalId = setInterval(() => {

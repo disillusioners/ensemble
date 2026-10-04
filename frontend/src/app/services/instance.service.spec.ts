@@ -51,6 +51,12 @@ class TestableInstanceService {
   private readonly POLLING_INTERVAL = 60_000;
   private pollingIntervalId: ReturnType<typeof setInterval> | null = null;
   private currentProjectId: string | null = null;
+  /**
+   * Source-type filter threading (mirror of the production service).
+   * ``undefined`` = no filter; ``"chat"`` = chat-source roots only.
+   * Captured by ``startPolling`` so the 60s tick re-applies it.
+   */
+  private currentSource: string | undefined = undefined;
   private currentOffset: number = 0;
 
   // Terminal statuses - same as actual service
@@ -119,7 +125,11 @@ class TestableInstanceService {
     return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity', true);
   }
 
-  async loadInstances(projectId?: string, append = false): Promise<void> {
+  async loadInstances(
+    projectId?: string,
+    append = false,
+    source?: string,
+  ): Promise<void> {
     if (append) {
       this.isLoadingMore.set(true);
     } else {
@@ -129,7 +139,20 @@ class TestableInstanceService {
 
     try {
       const response = await firstValueFrom(
-        this.api.listInstances(PAGE_SIZE, this.currentOffset, projectId, !this.showKb())
+        this.api.listInstances(
+          PAGE_SIZE,
+          this.currentOffset,
+          projectId,
+          !this.showKb(),
+          undefined,        // search
+          undefined,        // order (default)
+          true,             // include_descendants
+          // Mirror the production service: fall back to the
+          // service-level currentSource when the caller does NOT
+          // pass one (e.g. the 60s polling tick). The fallback is
+          // what keeps the filter sticky across ticks.
+          source ?? this.currentSource,
+        )
       );
 
       if (append) {
@@ -160,9 +183,10 @@ class TestableInstanceService {
     this.loadInstances(this.currentProjectId ?? undefined, true);
   }
 
-  startPolling(projectId?: string): void {
+  startPolling(projectId?: string, source?: string): void {
     this.stopPolling();
     this.currentProjectId = projectId ?? null;
+    this.currentSource = source;
 
     // Clear old instances immediately to avoid showing stale data
     this.instances.set([]);
@@ -170,7 +194,7 @@ class TestableInstanceService {
     this.currentOffset = 0;
 
     // Immediate load
-    this.loadInstances(projectId);
+    this.loadInstances(projectId, false, source);
 
     // Start polling interval
     this.pollingIntervalId = setInterval(() => {
@@ -336,7 +360,9 @@ describe('InstanceService', () => {
 
       await service.loadInstances('project-123');
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, 'project-123', true);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(
+        PAGE_SIZE, 0, 'project-123', true, undefined, undefined, true, undefined
+      );
     });
 
     it('should handle API errors gracefully', async () => {
@@ -442,7 +468,9 @@ describe('InstanceService', () => {
 
       await service.loadInstances('my-project');
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, 'my-project', true);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(
+        PAGE_SIZE, 0, 'my-project', true, undefined, undefined, true, undefined
+      );
     });
 
     it('should not pass projectId when undefined', async () => {
@@ -452,7 +480,9 @@ describe('InstanceService', () => {
 
       await service.loadInstances();
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, undefined, true);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(
+        PAGE_SIZE, 0, undefined, true, undefined, undefined, true, undefined
+      );
     });
   });
 
@@ -519,7 +549,9 @@ describe('InstanceService', () => {
 
       jest.advanceTimersByTime(61000);
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, 'test-project', true);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(
+        PAGE_SIZE, 0, 'test-project', true, undefined, undefined, true, undefined
+      );
     });
 
     it('should stop existing polling before starting new', () => {
@@ -928,7 +960,9 @@ describe('InstanceService', () => {
 
       await service.loadInstances();
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, undefined, true);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(
+        PAGE_SIZE, 0, undefined, true, undefined, undefined, true, undefined
+      );
     });
 
     it('should pass excludeKb=false to API when showKb is true', async () => {
@@ -939,7 +973,9 @@ describe('InstanceService', () => {
 
       await service.loadInstances();
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, undefined, false);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(
+        PAGE_SIZE, 0, undefined, false, undefined, undefined, true, undefined
+      );
     });
 
     it('should respect showKb state changes between calls', async () => {
@@ -949,15 +985,21 @@ describe('InstanceService', () => {
 
       service.showKb.set(false);
       await service.loadInstances();
-      expect(mockApi.listInstances).toHaveBeenLastCalledWith(PAGE_SIZE, 0, undefined, true);
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(
+        PAGE_SIZE, 0, undefined, true, undefined, undefined, true, undefined
+      );
 
       service.showKb.set(true);
       await service.loadInstances();
-      expect(mockApi.listInstances).toHaveBeenLastCalledWith(PAGE_SIZE, 0, undefined, false);
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(
+        PAGE_SIZE, 0, undefined, false, undefined, undefined, true, undefined
+      );
 
       service.showKb.set(false);
       await service.loadInstances();
-      expect(mockApi.listInstances).toHaveBeenLastCalledWith(PAGE_SIZE, 0, undefined, true);
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(
+        PAGE_SIZE, 0, undefined, true, undefined, undefined, true, undefined
+      );
     });
   });
 
@@ -1099,4 +1141,148 @@ describe('InstanceService', () => {
       expect(service['POLLING_INTERVAL']).toBe(60000);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Source-type filter (Projects tab Chat tab) — pins the threading of
+  // ``source`` from startPolling → loadInstances → api.listInstances.
+  //
+  // NOTE: these tests do NOT use ``jest.useFakeTimers()`` — the
+  // production ``startPolling`` schedules a real ``setInterval``, and
+  // using fake timers here interacts badly with the microtask queue
+  // we need for ``firstValueFrom`` to resolve. Real timers + an
+  // explicit ``stopPolling()`` in ``afterEach`` keep the test
+  // deterministic without the clock-faking rabbit hole.
+  // ─────────────────────────────────────────────────────────────────────
+
+  describe('startPolling with source filter', () => {
+    beforeEach(() => {
+      // Replace the mock's listInstances with a jest.fn so we can
+      // assert on the forwarded arguments (mirrors the existing
+      // test pattern in the loadInstances describe block above).
+      mockApi.listInstances = jest.fn().mockReturnValue(of({
+        instances: [],
+        total: 0,
+        has_more: false,
+      }));
+    });
+
+    afterEach(() => {
+      // Tear down the real timer started by startPolling so the
+      // suite does not leak intervals across tests.
+      service.stopPolling();
+    });
+
+    it('passes source="chat" to the API on the immediate load', async () => {
+      // Source is forwarded to the BE on the immediate load (the
+      // "first paint" call inside startPolling) so the chat tab
+      // renders with the correct filter on mount.
+      service.startPolling(undefined, 'chat');
+      await flushPromises();
+
+      expect(mockApi.listInstances).toHaveBeenCalledWith(
+        PAGE_SIZE, 0, undefined, true, undefined, undefined, true, 'chat'
+      );
+    });
+
+    it('passes source=undefined (no filter) when started without source', async () => {
+      // Pre-feature default: omitting source → undefined is the All
+      // tab. A regression that defaulted to ``"chat"`` or any other
+      // value would break every existing tab.
+      service.startPolling();
+      await flushPromises();
+
+      expect(mockApi.listInstances).toHaveBeenCalledWith(
+        PAGE_SIZE, 0, undefined, true, undefined, undefined, true, undefined
+      );
+    });
+
+    it('clears the source filter when startPolling is called again without one', async () => {
+      // First poll: chat filter active.
+      service.startPolling(undefined, 'chat');
+      await flushPromises();
+
+      // User clicks the All tab → startPolling re-invoked without
+      // source. The chat filter MUST be cleared (not stuck) so
+      // the next load uses no source filter.
+      service.startPolling();
+      await flushPromises();
+      mockApi.listInstances.mockClear();
+
+      // Force a fresh load to assert currentSource is reset.
+      await service.loadInstances();
+
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(
+        PAGE_SIZE, 0, undefined, true, undefined, undefined, true, undefined
+      );
+    });
+  });
+
+  describe('loadInstances with explicit source', () => {
+    beforeEach(() => {
+      mockApi.listInstances = jest.fn().mockReturnValue(of({
+        instances: [],
+        total: 0,
+        has_more: false,
+      }));
+    });
+
+    it('forwards the explicit source arg to the API on a non-append call', async () => {
+      // A caller passing source= overrides the service-level default
+      // (set by startPolling) for that single call.
+      service.startPolling();  // no filter
+      await flushPromises();
+      mockApi.listInstances.mockClear();
+
+      await service.loadInstances(undefined, false, 'chat');
+
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(
+        PAGE_SIZE, 0, undefined, true, undefined, undefined, true, 'chat'
+      );
+    });
+
+    it('forwards the explicit source arg on an append (loadMore) call', async () => {
+      service.startPolling(undefined, 'chat');
+      await flushPromises();
+      // After the startPolling immediate load, the offset has
+      // already advanced to PAGE_SIZE. Capture that as the
+      // assertion baseline (mirrors the production offset
+      // accounting — pagination advances by PAGE_SIZE on every
+      // successful load, regardless of include_descendants).
+      const expectedOffset = service['currentOffset'];
+      mockApi.listInstances.mockClear();
+
+      await service.loadInstances(undefined, true, 'chat');
+
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(
+        PAGE_SIZE, expectedOffset, undefined, true, undefined, undefined, true, 'chat'
+      );
+    });
+
+    it('falls back to the service-level currentSource when source is omitted', async () => {
+      // The polling tick (which doesn't pass source) must inherit the
+      // service-level value set by startPolling. A regression that
+      // ignored currentSource and passed undefined would silently
+      // drop the filter after the first paint.
+      service.startPolling(undefined, 'chat');
+      await flushPromises();
+      mockApi.listInstances.mockClear();
+
+      // loadInstances called without an explicit source → service
+      // default (currentSource) wins.
+      await service.loadInstances();
+
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(
+        PAGE_SIZE, 0, undefined, true, undefined, undefined, true, 'chat'
+      );
+    });
+  });
 });
+
+/** Helper: flush queued microtasks (jest fake-timers does not advance
+ *  Promise resolution on its own). Uses a 0-ms setTimeout — the test
+ *  runtime's microtask queue runs to completion before the macrotask
+ *  fires, draining the pending ``firstValueFrom`` Promise inside
+ *  ``loadInstances``. */
+function flushPromises(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}

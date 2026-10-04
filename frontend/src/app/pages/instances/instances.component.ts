@@ -49,15 +49,37 @@ export class InstancesComponent implements OnInit, OnDestroy {
 
   private tabEffect = effect(() => {
     const projectId = this.tabStateService.activeProjectId();
-    this.instanceService.startPolling(projectId ?? undefined);
+    const specialTabId = this.tabStateService.activeSpecialTabId();
+    // Chat tab is the only special tab that drives a source filter; ``all``
+    // (the default) explicitly maps to ``undefined`` so the BE applies no
+    // source filter and stays byte-compatible with the pre-feature behavior.
+    const source = specialTabId === 'chat' ? 'chat' : undefined;
+    this.instanceService.startPolling(projectId ?? undefined, source);
   });
 
   /**
    * Get the current project context for navigation.
-   * Returns 'all' when on the All tab, or the project ID otherwise.
+   * Returns 'all' when on the All tab, 'chat' when on the Chat tab, or
+   * the project ID when on a project tab. Drives the
+   * ``/projects/<context>/...`` URL segment, so the routing layer can
+   * mirror the active tab in deep links (and the existing e2e tests
+   * that pin the ``'all'`` sentinel for the All tab stay intact).
    */
   protected getProjectContext(): string {
-    return this.tabStateService.activeProjectId() ?? 'all';
+    return this.tabStateService.activeProjectId()
+      ?? this.tabStateService.activeSpecialTabId()
+      ?? 'all';
+  }
+
+  /**
+   * Returns the source-type filter for the active tab, or ``undefined``
+   * when the All / project tab is active (no source filter). Used by
+   * ``onNewInstance`` so the create-instance URL includes the active
+   * source filter context, keeping create flows consistent with the
+   * surrounding tab.
+   */
+  protected getActiveSource(): string | undefined {
+    return this.tabStateService.activeSpecialTabId() === 'chat' ? 'chat' : undefined;
   }
 
   ngOnInit(): void {
@@ -65,7 +87,10 @@ export class InstancesComponent implements OnInit, OnDestroy {
       next: (response) => {
         const projectIds = response.projects.map(p => p.project_id);
         this.tabStateService.restoreState(projectIds);
-        this.instanceService.startPolling(this.tabStateService.activeProjectId() ?? undefined);
+        this.instanceService.startPolling(
+          this.tabStateService.activeProjectId() ?? undefined,
+          this.getActiveSource(),
+        );
         this.loadAgents();
       },
       error: (err) => {

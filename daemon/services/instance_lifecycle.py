@@ -4646,6 +4646,7 @@ class InstanceLifecycleService:
         include_descendants: bool = False,
         search: str | None = None,
         order: str = "pinned",
+        source: str | None = None,
     ) -> tuple[list[dict], int, bool]:
         """List instances with pagination.
 
@@ -4675,6 +4676,12 @@ class InstanceLifecycleService:
                 ``updated_at`` DESC). Applies to the root-based pagination
                 path only; see
                 :meth:`SQLModelInstanceRepository.list`.
+            source: Optional source-type filter. Special value ``"chat"``
+                restricts to chat-source instances (the registry-backed
+                set mirroring ``USER_ORIGIN_CHAT_SOURCE_TYPES`` — telegram,
+                slack, discord, whatsapp). Any other string is matched as a
+                single ``source_type`` value. ``None`` (default) applies no
+                source filter.
 
         Returns:
             Tuple of (list of instance info dicts, total count, truncated flag).
@@ -4694,6 +4701,7 @@ class InstanceLifecycleService:
             include_descendants=include_descendants,
             search=search,
             order=order,
+            source=source,
         )
         # Convert Instance objects to dicts for backward compatibility, then
         # populate ``children`` from the permanent ``instances.parent_id``
