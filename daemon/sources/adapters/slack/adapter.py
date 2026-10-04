@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from collections import OrderedDict
@@ -12,6 +13,11 @@ import aiohttp
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.aiohttp import AsyncSocketModeHandler
 
+from daemon.constants import (
+    CHART_IMAGE_MIME_WHITELIST,
+    INITIAL_COMMENT_MAX,
+    SLACK_FILE_MAX_BYTES,
+)
 from daemon.sources.base import (
     IncomingMessage,
     MessageSourceAdapter,
@@ -33,6 +39,23 @@ BLOCKS_CONTENT_THRESHOLD = 400
 TEXT_FALLBACK_MAX_LENGTH = 500
 
 
+def _log_image_metadata(image_id: str, size_bytes: int | None, content_type: str | None) -> None:
+    """Standardized image metadata line — bytes never included.
+
+    (architecture-recommendation.md §3 amendment #12.) Mirrored across
+    the Discord / Telegram / Slack adapters + dispatcher. Logs
+    ``image_id[:8]`` + ``size_bytes`` + ``content_type`` only.
+    """
+    short = image_id[:8]
+    if size_bytes is not None and content_type is not None:
+        logger.debug(
+            f"slack chart-image: image_id={short}... size={size_bytes} "
+            f"content_type={content_type}"
+        )
+    else:
+        logger.debug(f"slack chart-image: image_id={short}...")
+
+
 class CircuitOpenError(Exception):
     """Circuit breaker is open."""
     pass
@@ -41,6 +64,18 @@ class CircuitOpenError(Exception):
 class SlackAPIError(Exception):
     """Slack API error."""
     pass
+
+
+class SlackCapabilityError(SlackAPIError):
+    """Raised when Slack rejects an API call due to missing capability.
+
+    Distinct from generic SlackAPIError so callers can classify without
+    touching circuit-breaker state (architecture-recommendation.md §3
+    amendment #4). Examples: ``missing_scope`` (e.g., ``files:write``
+    not granted), ``not_in_channel``, ``channel_not_found``,
+    ``is_archived``. These are CONFIGURATION/SETUP problems, not
+    transport failures — they MUST NOT trip the breaker.
+    """
 
 
 class SlackAdapter(MessageSourceAdapter):
@@ -124,6 +159,18 @@ class SlackAdapter(MessageSourceAdapter):
         # Per-channel locks for message ordering
         self._channel_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._channel_locks_guard = asyncio.Lock()
+
+        # Phase B (architecture-recommendation.md §3 amendment #4):
+        # per-adapter-instance capability flags — once a method (e.g.,
+        # ``files_upload_v2``) hits a capability error (``missing_scope``,
+        # ``files:write`` not granted, ``not_in_channel``), subsequent
+        # sends short-circuit BEFORE the API call (zero API calls once
+        # flagged) until process restart. Per-token / per-method scope.
+        self._slack_capability_flags: set[str] = set()
+        # Channel-scoped once-per-channel WARN de-duplication for
+        # ``missing_scope`` / ``not_in_channel`` so the log doesn't
+        # drown out other events when a misconfigured app repeats sends.
+        self._slack_capability_warned_channels: set[str] = set()
 
         # DM channel cache: user_id -> channel_id
         self._dm_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()  # user_id -> (channel_id, timestamp)
@@ -325,12 +372,29 @@ class SlackAdapter(MessageSourceAdapter):
 
             if not response.get("ok"):
                 error = response.get("error", "unknown_error")
+                # Phase B (architecture-recommendation.md §3 amendment #4):
+                # classify capability-class errors BEFORE record_failure.
+                # missing_scope / files:write not granted / not_in_channel
+                # / channel_not_found / is_archived are CONFIG problems,
+                # not transport — they MUST NOT trip the breaker. The
+                # SlackCapabilityError propagates UNCAUGHT through
+                # ``_call_slack_api`` (the ``except SlackCapabilityError:
+                # raise`` below sits BEFORE the generic handler) and
+                # through ``_safe_api_call`` (which returns (False, None)
+                # ONLY for transport/API errors). See plan §phase-b-r2-addendum-5.
+                if error in ("missing_scope", "not_in_channel", "channel_not_found", "is_archived"):
+                    raise SlackCapabilityError(f"Slack capability error: {error}")
                 await self._circuit_breaker.record_failure()
                 raise SlackAPIError(f"Slack API error: {error}")
 
             await self._circuit_breaker.record_success()
             return response
 
+        # SlackCapabilityError propagates UNCAUGHT — the generic handler
+        # below calls record_failure() which would re-arm the exact
+        # breaker-poison defect this fix targets.
+        except SlackCapabilityError:
+            raise
         except SlackAPIError:
             raise
         except Exception as e:
@@ -350,10 +414,23 @@ class SlackAdapter(MessageSourceAdapter):
 
         Returns:
             Tuple of (success, result) where result is None on failure.
+
+        Phase B (architecture-recommendation.md §3 amendment #4 /
+        decisions.md §phase-b-r2-addendum-5): ``SlackCapabilityError``
+        propagates UNCAUGHT through this wrapper — the (False, None)
+        tuple return is reserved for transport/API errors. Catching
+        ``SlackCapabilityError`` here and converting to `(False, None)`
+        would re-arm the exact breaker-poison defect this fix targets
+        (the send()-side isinstance distinguish becomes impossible).
         """
         try:
             result = await self._call_slack_api(method, **kwargs)
             return True, result
+        except SlackCapabilityError:
+            # UNCAUGHT — propagate to the caller (send() handles via
+            # isinstance and sets the per-token capability flag +
+            # WARN-once-per-channel). See plan §7 mechanism.
+            raise
         except CircuitOpenError:
             logger.warning(f"Circuit open for {method}")
             return False, None
@@ -453,11 +530,131 @@ class SlackAdapter(MessageSourceAdapter):
             logger.warning(f"Circuit open, cannot send to channel {channel_id}")
             return False
 
-        # Get per-channel lock
+        # Phase B pre-check (architecture-recommendation.md §3 amendment #4):
+        # if files_upload_v2 has been flagged as missing_scope previously,
+        # short-circuit BEFORE the API call so we don't waste a rate-limit
+        # token / API roundtrip on a known-broken integration. Subsequent
+        # sends for OTHER methods (e.g., chat.postMessage) still go through
+        # normally.
+        images = getattr(message, "images", None)
+        if images and "files_upload_v2" in self._slack_capability_flags:
+            logger.debug(
+                f"slack capability flag set: skipping files_upload_v2 for channel {channel_id}"
+            )
+            images = None  # degrade to text-only delivery below
+
+        # Get per-channel lock — image upload + postMessage (if any)
+        # BOTH execute inside the lock (architecture-recommendation.md §3
+        # amendment #10 — ordering hazard; otherwise chat-A image-A
+        # starts uploading, chat-A text-A interleaves, etc.).
         lock = await self._get_channel_lock(channel_id)
 
         async with lock:
             try:
+                # Phase B: chart-image native upload (slack-sdk 3.42.0+
+                # ``files_upload_v2`` — single call per image; the upload-
+                # then-``postMessage(file=)`` sketch was REMOVED, amendment #9).
+                # iterate ALL images (amendment #7 — no silent drops;
+                # per-image WARN on failure; order preserved).
+                uploaded_count = 0
+                if images:
+                    for img in images:
+                        _log_image_metadata(img.image_id, img.size_bytes, img.content_type)
+                        try:
+                            file_bytes = base64.b64decode(img.bytes_b64)
+                        except Exception as e:
+                            logger.warning(
+                                f"slack image decode failed image_id={img.image_id[:8]}...: {e}; "
+                                f"skipping"
+                            )
+                            continue
+
+                        # Slack ``initial_comment`` soft limit ~4000 chars.
+                        # Truncate on the file + follow-up ``chat.postMessage``
+                        # for the remainder (architecture-recommendation.md §3
+                        # amendment #8 — text floor).
+                        initial_comment = message.content[:INITIAL_COMMENT_MAX] if message.content else ""
+                        caption_remaining = (
+                            message.content[INITIAL_COMMENT_MAX:]
+                            if message.content and len(message.content) > INITIAL_COMMENT_MAX
+                            else ""
+                        )
+
+                        try:
+                            # SINGLE ``files_upload_v2`` call (amendment #9):
+                            # verified slack-sdk 3.42.0 ``AsyncWebClient.
+                            # files_upload_v2`` kwargs per
+                            # https://api.slack.com/methods/files.uploadV2 —
+                            # ``channel_id``, ``filename``, ``content``,
+                            # ``initial_comment``. NO ``chat.postMessage(file=)``
+                            # follow-up for the file itself.
+                            # ``_safe_api_call`` returns ``(True, result)`` on
+                            # success or ``(False, None)`` on transport /
+                            # API errors. ``SlackCapabilityError`` is NOT
+                            # caught here — it propagates UNCAUGHT to the
+                            # outer ``except SlackCapabilityError`` block
+                            # below.
+                            ok, result = await self._safe_api_call(
+                                "files_upload_v2",
+                                channel_id=channel_id,
+                                filename=img.filename,
+                                content=file_bytes,
+                                initial_comment=initial_comment,
+                            )
+                            if ok and result:
+                                uploaded_count += 1
+                            else:
+                                logger.warning(
+                                    f"Slack files_upload_v2 returned non-ok for channel {channel_id}: {result}; "
+                                    f"text fallback"
+                                )
+                        except SlackCapabilityError as e:
+                            # Classify BEFORE record_failure (amendment #4) —
+                            # set the per-token capability flag, NEVER call
+                            # record_failure. WARN-once-per-channel to
+                            # prevent log flooding under a misconfigured app.
+                            err_str = str(e).lower()
+                            if "missing_scope" in err_str or "files:write" in err_str:
+                                self._slack_capability_flags.add("files_upload_v2")
+                                if channel_id not in self._slack_capability_warned_channels:
+                                    self._slack_capability_warned_channels.add(channel_id)
+                                    logger.warning(
+                                        f"Slack channel {channel_id}: missing files:write scope. "
+                                        f"USER ACTION REQUIRED: grant files:write scope in Slack app config. "
+                                        f"Image upload disabled until scope granted; text-only delivery."
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"slack channel {channel_id}: files:write already flagged; "
+                                        f"suppressing repeat WARN"
+                                    )
+                            elif "not_in_channel" in err_str:
+                                if channel_id not in self._slack_capability_warned_channels:
+                                    self._slack_capability_warned_channels.add(channel_id)
+                                    logger.warning(
+                                        f"Slack channel {channel_id}: bot not in channel. "
+                                        f"Invite the bot to the channel; text-only delivery."
+                                    )
+                            else:
+                                logger.warning(
+                                    f"Slack files_upload_v2 capability error: {e}; text fallback"
+                                )
+                        except Exception as e:
+                            logger.warning(f"Slack files_upload_v2 failed: {e}; text fallback")
+
+                    # ``initial_comment`` > INITIAL_COMMENT_MAX: full-text
+                    # follow-up ``chat.postMessage`` (text floor).
+                    if uploaded_count > 0 and caption_remaining:
+                        try:
+                            await self._safe_api_call(
+                                "chat.postMessage",
+                                channel=channel_id,
+                                text=caption_remaining,
+                                **({"thread_ts": reply_ts} if reply_ts else {}),
+                            )
+                        except Exception as e:
+                            logger.warning(f"slack caption-follow-up text post failed: {e}")
+
                 # Lazy import to avoid pulling the formatters package in at
                 # module import time; mirrors the pattern used by blocks.py.
                 from daemon.sources.formatters.registry import get_or_passthrough
