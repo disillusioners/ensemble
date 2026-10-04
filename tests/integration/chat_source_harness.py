@@ -464,6 +464,7 @@ def seed_chat_message(
     import uuid
 
     from daemon.repositories.message_queue.models import MessageQueue
+    from daemon.repositories.source.models import SourceConfig
     from daemon.repositories.task.models import Task, TaskType
     from daemon.repositories.instance.models import Instance
 
@@ -473,6 +474,64 @@ def seed_chat_message(
         work_id = f"work-{uuid.uuid4().hex[:12]}"
     if created_at is None:
         created_at = _now_utc_naive()
+
+    # chat-pool starvation fix (2026-10-04, council rework
+    # 2026-10-04 FOLD-IN 6): the chat-lane JOIN resolves adapter
+    # type via source_configs. The harness MUST seed that row
+    # for the lane filter to match (the production path has the
+    # row because the adapter registered itself). Idempotent —
+    # INSERT OR IGNORE on PK (source_id).
+    source_id = source.split(":", 1)[0] if ":" in source else source
+    # source_id → source_type: derive from CHAT_SOURCE_PREFIXES
+    # via SUBSTRING containment (NOT ``startswith`` — that was the
+    # council rework 2026-10-04 FOLD-IN 6 fix; ``startswith`` does
+    # NOT map ``my-discord-bot`` → ``discord`` because
+    # ``"my-discord-bot".startswith("discord")`` is False).
+    # Examples that DO match under ``in``:
+    #   * ``discord`` (canonical)  → ``discord``
+    #   * ``my-discord-bot``        → ``discord``
+    #   * ``discord-bot``           → ``discord``
+    #   * ``prod_telegram``         → ``telegram``
+    # The chat lane filter matches on source_type, so we map
+    # the source_id back to its adapter type via the same
+    # canonical tuple. Production adapters always register with
+    # source_type matching one of the canonical chat types; the
+    # A7.2 forward-looking gate at routers/sources.py:174-176
+    # REJECTS new chat registrations whose source_id !=
+    # source_type, but pre-existing misconfigured sources pass
+    # through — the harness mirrors that pre-existing shape.
+    from daemon.constants import CHAT_SOURCE_PREFIXES
+    matched_type: str | None = None
+    for prefix in CHAT_SOURCE_PREFIXES:
+        canonical_type = prefix.rstrip(":")
+        if source_id == canonical_type:
+            # Exact match wins first so we never over-match.
+            matched_type = canonical_type
+            break
+        if canonical_type in source_id:
+            # E.g. ``my-discord-bot`` → ``discord``,
+            # ``prod_telegram`` → ``telegram``.
+            matched_type = canonical_type
+            # Do NOT break: a longer prefix might match later
+            # in the loop (e.g. for a hypothetical chat-type
+            # ``telegram-bot`` it should beat ``telegram``). The
+            # current tuple has no such pairs, so this is a
+            # forward-compatible guard rather than a current
+            # # correctness fix.
+    if matched_type is not None:
+        with Session(engine) as s:
+            existing_sc = s.get(SourceConfig, source_id)
+            if existing_sc is None:
+                s.add(
+                    SourceConfig(
+                        source_id=source_id,
+                        source_type=matched_type,
+                        name=source_id,
+                        enabled=True,
+                        autostart=True,
+                    )
+                )
+                s.commit()
 
     # Ensure instance row exists (FK target). Idempotent — no-op if
     # the row is already present.

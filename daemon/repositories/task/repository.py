@@ -60,41 +60,151 @@ TASK_LANE_CHAT: str = "chat"
 def _chat_source_exists_sql() -> str:
     """Render the correlated chat-source EXISTS clause as literal SQL.
 
-    Chosen form (D1/approver N7 — stated in the docstring as
-    required): INLINE LITERALS. The claim seam composes raw
-    ``text()`` SQL, so the portable ``sqlalchemy.or_(...)`` shape from
-    the plan is the PORTABILITY SPEC, rendered here as plain SQL
-    text. ``CHAT_SOURCE_PREFIXES`` is a compile-time constant tuple
-    (``daemon/constants.py``), so the rendered SQL is deterministically
-    known at module load and NO user input ever flows through the
-    literal — interpolation is safe. The rendered clause is IDENTICAL
-    on PostgreSQL and SQLite::
+    Robust adapter-type matching (chat-pool starvation fix,
+    2026-10-04): the predicate joins ``message_queue`` to
+    ``source_configs`` on the source_id prefix and matches the
+    row's ``source_type`` against the canonical chat-type set
+    (``telegram`` / ``slack`` / ``discord``). Deployment-configured
+    source_ids (e.g. ``my-discord-bot``) — NOT the canonical
+    ``discord`` — now route to the chat worker pool.
+
+    Why JOIN source_configs (audit-lean option): the
+    ``source_configs`` table is the persistent record of every
+    registered adapter — it carries both ``source_id`` AND
+    ``source_type``, so a single JOIN resolves adapter type at
+    claim time without forcing operators to register with a
+    canonical source_id (the existing
+    ``routers/sources.py:174-176`` validator REJECTS chat
+    registrations whose ``source_id`` differs from
+    ``source_type`` — but pre-existing misconfigured sources pass
+    silently until re-registered, per the A7.2 forward-looking
+    gate). Filtering by adapter type is the only design that
+    covers both canonical and pre-existing custom source_ids.
+
+    Prefix-match mechanism (council rework iteration 2, REQUIRED 3
+    round-2 fix — INSTR pivot was incorrect on PostgreSQL):
+    ``SUBSTR(source, 1, LENGTH(source_id || ':'))
+        = source_id || ':'``. SUBSTR + LENGTH are native on
+    BOTH PG and SQLite; the predicate is byte-for-byte prefix
+    equality with zero LIKE-metachar semantics.
+
+    Why SUBSTR/LENGTH and not INSTR (round-1 fix REJECTED):
+      * PG probe 2026-10-04 (psql 16.15 → PostgreSQL 16.15,
+        dev DB ensemble_dev, installed extensions = {plpgsql}
+        only, orafce NOT installed) shows
+        ``SELECT INSTR(...) → ERROR: function instr(unknown,
+        unknown) does not exist``. ``pg_proc`` search for
+        ``proname='instr'`` returns 0 rows.
+      * PG natives for substring-position lookup are
+        ``strpos(string, substring)`` and ``position(substring
+        IN string)``. ``INSTR`` is an Oracle / SQLite / Teradata
+        function, NOT a PG native. My round-1 docstring claim
+        "PG has had instr since 7.x" is factually false — the
+        round-1 INSTR pivot broke PG prod (every chat-pool
+        claim would crash with "function does not exist", the
+        starvation bug returns as a crash). The 14/14 green
+        pins run on SQLite (which DOES have instr) and could
+        not surface this — cross-backend probe was missing
+        from round 1.
+      * STRPOS is rejected as the SQLite back-end does NOT
+        expose it (no STRPOS builtin; only ``instr`` and
+        ``substr``). Same portability problem as INSTR but
+        reversed.
+
+    Why SUBSTR/LENGTH and not LIKE-with-ESCAPE (REJECTED
+    alternative):
+      * LIKE treats ``_`` and ``%`` as metachars regardless of
+        ESCAPE clauses. The Pydantic validator at
+        ``daemon/routers/sources.py`` admits
+        ``^[a-zA-Z0-9_-]+$`` — so ``_`` is a valid character
+        in a registered source_id. A registered source_id
+        ``telegram_bot`` would over-match ``telegramXbot:user3``
+        under the original ``source LIKE source_id || ':%'``
+        predicate (LIKE ``_`` matches any single character).
+      * ESCAPE '\\' + escaping at registration time leaves the
+        LIKE-metachar problem in two places (validator +
+        filter) — SUBSTR/LENGTH has zero metachar semantics
+        so it is the durable primitive.
+
+    Predicate shape (portable on PG and SQLite, PG-probe
+    verified 2026-10-04)::
 
         EXISTS (SELECT 1 FROM message_queue
+                JOIN source_configs
+                  ON SUBSTR(message_queue.source, 1,
+                            LENGTH(source_configs.source_id || ':'))
+                     = source_configs.source_id || ':'
                 WHERE message_queue.message_id = task.message_id
-                  AND (message_queue.source LIKE 'telegram:%'
-                       OR message_queue.source LIKE 'slack:%'
-                       OR message_queue.source LIKE 'discord:%'))
+                  AND source_configs.source_type IN ('telegram','slack','discord'))
 
-    Prefix semantics: the tuple members already carry the trailing
-    colon, so ``p + %`` is the wildcard form (D1 reviewer F1 — a bare
-    ``LIKE 'telegram:'`` would be exact-match and silently match
-    nothing). Correlated on the candidate row's ``message_id`` (a PK
-    probe into ``message_queue``; ``source`` is a residual filter on
-    the already-fetched row — NO index migration per D1/A1.3). LIKE
-    case-sensitivity: PG is case-sensitive by default; SQLite is
-    case-insensitive for ASCII unless ``PRAGMA case_sensitive_like =
-    ON`` is issued — the test harnesses issue the PRAGMA (F9) so
-    fixture behavior matches PG.
+    * ``source_id || ':'`` is the prefix we want to match —
+      the trailing ``:`` ensures we match the source_id
+      exactly (not arbitrary substrings; a source_id of ``bot``
+      would NOT match ``other-bot:user`` because the ``:``
+      follows the source_id boundary).
+    * ``SUBSTR(source, 1, LENGTH(prefix))`` returns the
+      leftmost N characters of ``source`` where N is the
+      length of the prefix. If ``source`` is shorter than N,
+      SUBSTR returns ``source`` itself (per SQL standard) —
+      the equality check fails because the returned value is
+      shorter than the prefix.
+    * Equality check is byte-for-byte, zero metachar
+      semantics. LIKE-with-`_` would over-match
+      ``telegramXbot:user3`` against prefix
+      ``telegram_bot:``; SUBSTR/LENGTH rejects it because
+      the leftmost 12 chars of ``telegramXbot:user3`` are
+      ``telegramXbot`` (not ``telegram_bot``).
+    * PG-probe-verified on PostgreSQL 16.15 (no instr /
+      orafce present) — see the commission's REQUIRED 3
+      probe evidence. SQLite-behavior pinned in
+      ``tests/job_queue/test_chat_pool_starvation_pins.py::
+      test_chat_lane_underscore_explicit_substr_check``.
+    * ``source_configs.source_type IN (...)`` is the SAME
+      derivation used by ``routers/sources.py:174`` —
+      ``{prefix.rstrip(":") for prefix in CHAT_SOURCE_PREFIXES}``
+      — single source of truth shared between the lane and the
+      registration gate.
+    * No ``deleted_at`` filter — ``source_configs`` has no
+      soft-delete column; the lifecycle is
+      ``enabled=True/False`` + ``status`` (see
+      ``daemon/repositories/source/models.py``).
+
+    Pre-existing behavior preserved: if a message_queue row has
+    no matching source_configs row (legacy / pre-registration),
+    the JOIN produces empty and the chat lane does NOT pick it
+    up. The default lane (with ``is_chat_lane_active()`` True)
+    excludes it via the NOT-EXISTS clause, so such rows must
+    either wait for source_configs registration OR until
+    chat-lane-active is False (fail-open path). This matches the
+    original fail-closed semantic on disabled sources.
+
+    LIKE case-sensitivity note: SUBSTR / LENGTH equality is
+    case-sensitive on both PG and SQLite (LIKE's case-
+    sensitivity quirk is irrelevant here — SUBSTR is the
+    primitive now). The deployment's source_ids are
+    canonical-lowercase so case-sensitivity is correct-by-
+    design; the ``is_chat_source`` helper at
+    ``daemon/constants.py:843`` remains a separate code path
+    for legacy surfaces that still rely on LIKE.
     """
-    like_clauses = " OR ".join(
-        f"message_queue.source LIKE '{prefix}%'" for prefix in CHAT_SOURCE_PREFIXES
+    chat_types_sql = ", ".join(
+        f"'{prefix.rstrip(':')}'"  # tuple members carry the trailing
+        # colon (``telegram:``); strip it for the source_type
+        # column which has no colon.
+        for prefix in CHAT_SOURCE_PREFIXES
     )
     return (
         "EXISTS ("
         "SELECT 1 FROM message_queue "
+        # INSTR — see docstring for the LIKE-wildcard exposure
+        # rationale (council rework 2026-10-04, REQUIRED 3).
+        "JOIN source_configs "
+        "  ON SUBSTR(message_queue.source, 1, "
+        "      LENGTH(source_configs.source_id || ':')) "
+        "     = source_configs.source_id || ':' "
         "WHERE message_queue.message_id = task.message_id "
-        f"AND ({like_clauses}))"
+        f"AND source_configs.source_type IN ({chat_types_sql})"
+        ")"
     )
 
 
