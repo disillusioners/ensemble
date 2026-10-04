@@ -1225,6 +1225,11 @@ class TestR18AutoDispatch:
         assert payload["target_iid"] == "new-inst-1"
         assert payload["content_len"] == 1  # "x"
         # The Commit 1 F2 message_id surfacing — the authoritative daemon-
+        # minted enqueue id — is pinned here because census tooling (the
+        # forensic-audit P2 methodology) counts enqueue log lines and the
+        # auto-dispatch traffic must stay visible and attributable by
+        # message_id.
+        assert payload["message_id"] == "mid-pinned-001"
 
 
 # ============================================================================
