@@ -372,7 +372,10 @@ Until granted, Slack chart-image delivery is text-only with a WARN-once log per 
 
 - **Phase D execution:** developer[v2] dispatcher via coder lanes — `dev-coder-audit` (audit module + standalone script, commit `91f41ae6`), `dev-coder-e2e` (8-group e2e suite, commit `beed48d3`), `dev-coder-e2e-fix-group7` (real-astream lane in-process + ari/workflow.md seal, commit `d30a4365`), `dev-coder-release` (release-bump + docs/report, commits `986be996` + `b1aa2af4` + `<release-report-commit>`).
 - **Date:** 2026-10-04
-- **Release tag:** **PENDING** — deferred to the release cut after giter's integration (branch bases on `cf8efbef`; latest has advanced; a pre-rebase tag would point at the wrong history).
+- **Integration (giter, 2026-10-04):** drift `cf8efbef..577838b7` (22 commits: spawn-hot fix, auto-continue feature, ask_questions array fix) integrated by **merge, not rebase** (zero file overlap between lanes: 61 ours ∩ 33 theirs = ∅; repo convention is merge-based — cf8efbef/dac38fd8 exemplars). Drift merge `362ca92d` → feature tip; **merge to latest `0a89c53b`** (`--no-ff`, per convention).
+- **Post-integration audit:** **24/24 PASS** (preservation 9/9 + feature 15/15), re-run from `tools/audit-chart-image-delivery.sh` at integrated state `362ca92d`.
+- **Tester verdict:** **USER-STORY-VERIFIED** @ `e3e64825` (pre-integration branch tip; 592 passed / 0 failed).
+- **Release tag:** **PENDING — release cut intentionally HELD (N6)**: first real-channel smoke post-promote is the remaining condition before the user's tag + promote ceremony. Version bump already committed on-branch (`b1aa2af4`) and rides merge `0a89c53b`.
 - **Project-owner sign-off:** ________________________ (left blank for the promote ceremony)
 
 ---
