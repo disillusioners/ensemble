@@ -11657,6 +11657,68 @@ class InstanceManager:
                             result.content if result else None
                         ),
                     )
+                    # Δ1 / D18 (feature/auto-continue-running-after-restart):
+                    # call-site-gated success-path terminalizer. The
+                    # boot pass CAS-stamps ``task.auto_continued_at``
+                    # AFTER a successful ``_schedule_explicit_handle_resume``
+                    # so a row with a non-NULL stamp is, by
+                    # construction, a direct-resume orphan. Flipping
+                    # the orphan to ``status='completed'`` here
+                    # opens the claim-guard (``repository.py:2230-2294``)
+                    # so any pending wake lands FIFO-behind this
+                    # turn (arm-notify UX: outcome report AFTER the
+                    # turn finishes) WITHOUT waiting for the
+                    # ~10-min STR reap.
+                    #
+                    # The gate is AT THE CALL SITE (Option (b) per
+                    # the r3 approver — D18 r3 / D29) — the shared
+                    # ``complete_task`` SQL stays byte-identical to
+                    # pre-feature. The r2 fold's "AND auto_continued_at
+                    # IS NOT NULL" conjunct inside the shared SQL was
+                    # REJECTED in D29 because it would silently make
+                    # every worker-pool / task-processor completion a
+                    # no-op (NONE of those callers set
+                    # ``auto_continued_at``; the call-site gate
+                    # scopes the terminalizer to CAS-stamped rows
+                    # only).
+                    #
+                    # Cascade/worker-shape rows are naturally
+                    # declined:
+                    #   * Cascade rows are PENDING (not RUNNING)
+                    #     by the time a resume finishes → the
+                    #     ``WHERE status='running'`` guard inside
+                    #     ``complete_task`` (repository.py:2859-2869)
+                    #     refuses them.
+                    #   * Worker-claimed RUNNING rows have
+                    #     ``auto_continued_at IS NULL`` (the boot
+                    #     pass never CAS-stamps them) → the call-
+                    #     site gate refuses them.
+                    try:
+                        boot_task = await asyncio.to_thread(
+                            self._task_repo.get_by_work_id, old_job_id
+                        )
+                        if (
+                            boot_task is not None
+                            and boot_task.auto_continued_at is not None
+                        ):
+                            await asyncio.to_thread(
+                                self._task_repo.complete_task,
+                                boot_task.id,
+                                {"resume_outcome": "boot_continue_succeeded"},
+                            )
+                    except Exception as terminalizer_exc:
+                        # Terminalizer failure is logged but does
+                        # NOT escape the success branch — STR's
+                        # backstop still owns the orphan at
+                        # boot+10 min.
+                        logger.warning(
+                            "[BOOT_CONTINUE] terminalizer failed "
+                            "instance=%s work_id=%s: %s: %s (STR "
+                            "backstop continues to own the orphan)",
+                            instance_id[:8], old_job_id[:8],
+                            type(terminalizer_exc).__name__,
+                            terminalizer_exc,
+                        )
                 else:
                     # Hard-error fallback (Phase 3 review, W3 fix): the
                     # observer must be wired before resume processing.
