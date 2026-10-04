@@ -661,3 +661,275 @@ class TestPerInstanceBelt:
             f"{new_state_b!r} after start_job — neither belt-"
             f"declined (queued) nor belt-let-through (active)."
         )
+
+
+# ── Test 3 (council rework 2026-10-04, REQUIRED 2): belt must NOT
+# ── be ACTIVE-only on siblings. ──
+
+
+class TestBeltActiveOnlyFilter:
+    """Council rework 2026-10-04, REQUIRED 1+2: the per-instance
+    belt MUST filter on ``admission_state='active'`` ONLY — NOT
+    ``ACTIVE_ADMISSION_STATES = {queued, active}``. The
+    pre-rework helper filtered on the superset, which reproduces
+    the exact production deadlock at ADMISSION: two rapid
+    messages both land ``queued`` before the dispatch loop
+    admits either; FIFO-head M1 sees M2 as a queued
+    "in-flight" sibling, declines its own admission, and M2
+    is never attempted — symmetric permanent wedge at
+    admission, starving everything behind M1.
+
+    These three pins (both-QUEUED admission, real self-match
+    exclusion, belt recovery path) are the council's
+    repro-and-pin suite for the rework.
+    """
+
+    def test_belt_admits_fifo_head_when_both_queued(
+        self, bug_engine
+    ) -> None:
+        """REQUIRED 2.1: FIFO-head M1 with a QUEUED sibling M2
+        MUST be admitted (not declined). Pre-rework the belt
+        helper filtered on ``ACTIVE_ADMISSION_STATES`` which
+        includes ``queued`` — M1 sees M2 as a queued
+        "in-flight" sibling, declines its own admission, and
+        M2 is never attempted. The exact production
+        deadlock at ADMISSION. Post-rework the helper
+        filters on ``ACTIVE`` only, so the QUEUED sibling is
+        ignored and M1 admits cleanly."""
+        from daemon.services.job_queue_service import JobQueueService
+
+        wid_a = "wid-queued-A"  # FIFO-head
+        wid_b = "wid-queued-B"  # sibling — both QUEUED
+        inst = "inst-queued"
+
+        _seed_instance(bug_engine, instance_id=inst)
+        # BOTH message JobItems are QUEUED — neither has been
+        # admitted yet. Pre-rework this is the deadlock
+        # trigger; the dispatch loop must admit M1.
+        _seed_message_job_item(
+            bug_engine,
+            job_id=wid_a,
+            instance_id=inst,
+            admission_state=AdmissionState.QUEUED.value,
+        )
+        _seed_message_job_item(
+            bug_engine,
+            job_id=wid_b,
+            instance_id=inst,
+            admission_state=AdmissionState.QUEUED.value,
+        )
+
+        job_repo = JobRepository(bug_engine)
+        queue_repo = JobQueueRepository(bug_engine)
+        lock_manager = LockRepository(bug_engine)
+        service = JobQueueService(job_repo, lock_manager, queue_repo)
+        service._project_repo = None
+        service._instance_manager = None
+
+        # M1 (FIFO-head) MUST be admitted — the belt must
+        # NOT see the QUEUED sibling as a blocker.
+        import asyncio
+        result = asyncio.run(service.start_job(wid_a))
+        assert result is not None, (
+            "start_job declined M1 despite M2 being QUEUED "
+            "(not ACTIVE). The belt is over-matching on "
+            "admission_state. Pre-rework the helper included "
+            "'queued' in its filter set, reproducing the "
+            "exact production deadlock at ADMISSION: FIFO-"
+            "head sees M2 as queued 'in-flight', and M2 "
+            "is never attempted. ACTIVE-ONLY filter is the "
+            "council-required fix."
+        )
+        assert result.admission_state == AdmissionState.ACTIVE.value, (
+            f"start_job returned a JobItem with admission_state "
+            f"{result.admission_state!r} (expected 'active') "
+            f"— the queue-admission guard transition did not "
+            f"land."
+        )
+
+    def test_belt_self_match_excludes_self(
+        self, bug_engine
+    ) -> None:
+        """REQUIRED 2.2: ACTIVE candidate with no other ACTIVE
+        sibling MUST be admitted (the helper's
+        ``exclude_job_id`` self-match exclusion must work).
+        The pre-rework pin
+        ``test_belt_allows_different_instance`` had a near-
+        tautological check ``in ('queued','active')`` that
+        never exercised the self-exclusion — that test passed
+        for the wrong reasons. Post-rework the helper
+        uses ``admission_state == 'active'`` so the check is
+        tighter and self-match would block ALL admissions
+        without the exclusion. Pin the exclusion."""
+        from daemon.services.job_queue_service import JobQueueService
+
+        wid = "wid-self"
+        inst = "inst-self"
+
+        # Seed ONLY the candidate row — no sibling at all.
+        # The candidate is ACTIVE so its self-row matches
+        # the (instance_id, job_type='message', ACTIVE)
+        # filter. Without ``exclude_job_id``, the helper
+        # would return the candidate's OWN row and the belt
+        # would decline the candidate's own start_job call.
+        # With the exclusion, the helper returns None and
+        # the candidate starts cleanly.
+        _seed_instance(bug_engine, instance_id=inst)
+        _seed_message_job_item(
+            bug_engine,
+            job_id=wid,
+            instance_id=inst,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+        _seed_job_lock(bug_engine, job_id=wid, instance_id=inst)
+
+        job_repo = JobRepository(bug_engine)
+        queue_repo = JobQueueRepository(bug_engine)
+        lock_manager = LockRepository(bug_engine)
+        service = JobQueueService(job_repo, lock_manager, queue_repo)
+        service._project_repo = None
+        service._instance_manager = None
+
+        # Sanity: the helper itself, called with
+        # exclude_job_id=wid, must return None (no sibling).
+        helper_result = job_repo.find_active_message_job_for_instance(
+            instance_id=inst, exclude_job_id=wid
+        )
+        assert helper_result is None, (
+            "find_active_message_job_for_instance(self) "
+            f"returned {helper_result!r} instead of None — "
+            f"the exclude_job_id self-match exclusion is "
+            f"broken. The belt would decline every candidate's "
+            f"own start_job call."
+        )
+
+        # Sanity: the helper WITHOUT exclude_job_id returns
+        # the candidate (proves the helper's filter is
+        # ACTIVE-only as expected — if it returned None, the
+        # candidate's own row wouldn't match the helper
+        # either, which would mask the self-exclusion bug).
+        helper_no_exclude = (
+            job_repo.find_active_message_job_for_instance(
+                instance_id=inst, exclude_job_id="some-other-id"
+            )
+        )
+        assert helper_no_exclude is not None, (
+            "find_active_message_job_for_instance WITHOUT "
+            "exclude_job_id returned None — the helper's "
+            "ACTIVE-only filter is broken (no row matches "
+            "its own query)."
+        )
+        assert helper_no_exclude.job_id == wid, (
+            f"find helper returned wrong row: expected {wid!r} "
+            f"got {helper_no_exclude.job_id!r}."
+        )
+
+        # Strongest pin: start_job on the candidate must
+        # NOT be declined by self-match. Belt decline
+        # observable as start_job returning None AND the
+        # admission_state remaining 'queued' (or, since the
+        # candidate is already ACTIVE, the ValueError raised
+        # by start_job_atomic_with_lock for "not in queued"
+        # — start_job catches that and returns None too).
+        import asyncio
+        result = asyncio.run(service.start_job(wid))
+        # The candidate is already ACTIVE — start_job would
+        # normally return None via the "not QUEUED" guard,
+        # NOT via the belt. Belt decline is the focus; the
+        # helper-level assertion above is the strongest
+        # pin on the self-match exclusion itself.
+        assert result is None, (
+            "start_job on already-ACTIVE candidate returned "
+            f"non-None ({result!r}) — expected None via the "
+            f"'not in QUEUED' admission_state guard."
+        )
+
+    def test_belt_recovers_after_first_done(
+        self, bug_engine
+    ) -> None:
+        """REQUIRED 2.3: belt recovery path — decline M2
+        while M1 ACTIVE → M1 → DONE → M2 admits on next
+        start_job call (simulating observer / poll
+        re-admission). Pins the full lifecycle."""
+        from daemon.services.job_queue_service import JobQueueService
+
+        wid_a = "wid-recovery-A"
+        wid_b = "wid-recovery-B"
+        inst = "inst-recovery"
+
+        _seed_instance(bug_engine, instance_id=inst)
+        # M1 is ACTIVE; M2 is QUEUED (will be declined by belt).
+        _seed_message_job_item(
+            bug_engine,
+            job_id=wid_a,
+            instance_id=inst,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+        _seed_job_lock(bug_engine, job_id=wid_a, instance_id=inst)
+        _seed_message_job_item(
+            bug_engine,
+            job_id=wid_b,
+            instance_id=inst,
+            admission_state=AdmissionState.QUEUED.value,
+        )
+
+        job_repo = JobRepository(bug_engine)
+        queue_repo = JobQueueRepository(bug_engine)
+        lock_manager = LockRepository(bug_engine)
+        service = JobQueueService(job_repo, lock_manager, queue_repo)
+        service._project_repo = None
+        service._instance_manager = None
+
+        # Step 1: start_job on M2 MUST be declined (M1 ACTIVE).
+        import asyncio
+        result_b = asyncio.run(service.start_job(wid_b))
+        assert result_b is None, (
+            "start_job did NOT decline M2 while M1 ACTIVE — "
+            "the belt is broken. Expected decline (M2 stays "
+            f"queued), got {result_b!r}."
+        )
+        assert _read_admission_state(bug_engine, wid_b) == "queued", (
+            "M2 transitioned out of 'queued' despite belt "
+            "decline — the belt returned without effect. "
+            "Expected to stay queued."
+        )
+
+        # Step 2: M1 → DONE. Simulates JobFeedbackObserver
+        # releasing the slot after a successful turn.
+        with bug_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE job_queue_items "
+                    "SET admission_state = :done, terminal_reason = 'completed' "
+                    "WHERE job_id = :wid"
+                ),
+                {
+                    "done": AdmissionState.DONE.value,
+                    "wid": wid_a,
+                },
+            )
+            conn.execute(
+                text("DELETE FROM job_locks WHERE job_id = :wid"),
+                {"wid": wid_a},
+            )
+
+        # Step 3: start_job on M2 now MUST admit cleanly
+        # (no ACTIVE sibling — M1 is DONE; belt does NOT
+        # block).
+        result_b2 = asyncio.run(service.start_job(wid_b))
+        assert result_b2 is not None, (
+            "start_job did NOT admit M2 after M1 → DONE — "
+            "the belt's recovery path is broken. The "
+            "observer/poll re-admission contract is that "
+            "the second message starts cleanly when the "
+            "first turn completes; this pin ensures the "
+            "belt's ACTIVE-only filter correctly lets the "
+            "successor through once no ACTIVE sibling "
+            "remains."
+        )
+        assert result_b2.admission_state == AdmissionState.ACTIVE.value, (
+            f"M2 admitted but admission_state is "
+            f"{result_b2.admission_state!r} (expected 'active') "
+            f"— the queue-admission guard transition did not "
+            f"land."
+        )

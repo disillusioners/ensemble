@@ -4264,10 +4264,30 @@ class JobQueueService:
         # can start and the existing per-instance Task guard will
         # serialize its claim.
         #
-        # TASK-type JobItems are intentionally excluded from the belt
-        # — task jobs target NEW instances (the fresh UUID above) and
-        # therefore cannot collide per-instance with another active
-        # TASK job. The belt is message-only.
+        # FILTER SCOPE (council rework 2026-10-04, REQUIRED 1):
+        # the helper filters on ``admission_state == 'active'`` ONLY
+        # — NOT ``ACTIVE_ADMISSION_STATES = {queued, active}``.
+        # Including ``queued`` reproduces the exact production
+        # deadlock at ADMISSION: two rapid messages both land
+        # ``queued`` before the dispatch loop admits either; the
+        # FIFO-head sees the second as a "queued in-flight"
+        # sibling, declines its own admission, and the second is
+        # never attempted. ACTIVE-only preserves the contract:
+        # FIFO-head admits, successor declines while predecessor
+        # ACTIVE, observer + poll re-admit after DONE.
+        #
+        # TASK-type JobItems are intentionally excluded from the
+        # belt. SCOPE ASSUMPTION (council rework 2026-10-04,
+        # FOLD-IN 7): TASK-type JobItems ALWAYS mint a fresh
+        # ``instance_id`` (the ``str(uuid.uuid4())`` call below in
+        # the ``else`` branch at line ~4252 — they spawn a NEW
+        # instance per job). Therefore a TASK job CANNOT collide
+        # per-instance with another active TASK job at admission
+        # time — there is no prior TASK-JobItem on this instance
+        # to collide with. The belt is message-only by design.
+        # If TASK jobs ever gain a path to share an instance_id
+        # (e.g. targeting an existing instance for re-processing),
+        # the belt must be extended at that point.
         if (
             job.job_type == "message"
             and job.instance_id

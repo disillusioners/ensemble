@@ -3436,6 +3436,17 @@ class TaskRepository:
         ``claim_pending_task``. JobItems block only when their backing Task is
         PENDING, RUNNING, or PAUSED; the reconciler owns orphan cleanup. The
         WAITING_CHILDREN exception remains part of the shared predicate.
+
+        claim-gate-sibling-deadlock (council rework 2026-10-04,
+        FOLD-IN 5): the JobItem subquery now excludes
+        ``job_type='message'`` to MATCH the ``claim_pending_task``
+        predicate. Without this exclusion the diagnostic would
+        over-report "blocked by busy instance" for any instance
+        holding ACTIVE message JobItems (the same production
+        trigger the claim-gate relaxation fixed). Drift-trap
+        fix — today the impact is diagnostics-only; tomorrow a
+        consumer could gate recovery on this and reintroduce
+        the deadlock via a different route.
         """
         with self.engine.begin() as conn:
             stmt = text(f"""
@@ -3461,9 +3472,21 @@ class TaskRepository:
                             -- covers the B1 single-transaction window.
                             -- See ``_ACTIVE_JOB_IDS_SUBQUERY`` in
                             -- lock_repository.py for the canonical form.
+                            -- claim-gate-sibling-deadlock (council rework
+                            -- 2026-10-04, FOLD-IN 5): the
+                            -- ``j_running.job_type != 'message'``
+                            -- exclusion MUST match the
+                            -- ``claim_pending_task`` predicate
+                            -- (added 2026-10-04 — see
+                            -- ``daemon/repositories/task/repository.py``
+                            -- cross-system guard). Without this, the
+                            -- diagnostic would over-report "blocked
+                            -- by busy instance" for any instance
+                            -- holding ACTIVE message JobItems.
                             WHERE j_running.admission_state IN {active_admission_states_sql()}
                               AND j_running.instance_id = t_pending.instance_id
                               AND j_running.deleted_at IS NULL
+                              AND j_running.job_type != 'message'
                               -- Self-deadlock fix (2026-08-02): exclude the outer pending
                               -- task's own row from the in-flight check — otherwise the
                               -- guard matches the pending task's own backing JobItem

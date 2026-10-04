@@ -624,40 +624,61 @@ class JobRepository:
         *,
         exclude_job_id: str,
     ) -> JobItem | None:
-        """Find an ACTIVE message-type JobItem driving ``instance_id``,
-        excluding ``exclude_job_id``.
+        """Find an ACTIVE (``admission_state='active'`` ONLY) message-type
+        JobItem driving ``instance_id``, excluding ``exclude_job_id``.
 
         claim-gate-sibling-deadlock belt (2026-10-04): the per-instance
         belt at ``JobQueueService.start_job`` calls this helper to
         determine whether a candidate message JobItem should be held
         back because another ACTIVE message JobItem already drives the
-        same instance. Returns the OTHER (sibling) JobItem, or ``None``
-        if no sibling is currently active.
+        same instance.
 
-        Filters on ``admission_state IN ('queued','active')`` (mirrors
-        ``get_active_by_instance``) AND ``job_type='message'`` AND
-        ``deleted_at IS NULL``. Excludes the candidate via
-        ``exclude_job_id`` so callers can safely probe their own row
-        without false-positive self-blocking.
+        FILTER SCOPE — ACTIVE-ONLY, NOT ``ACTIVE_ADMISSION_STATES``
+        (council rework 2026-10-04, REQUIRED 1).
+
+        Filtering on ``ACTIVE_ADMISSION_STATES = {queued, active}``
+        reproduces the exact production deadlock at the ADMISSION
+        layer: two rapid messages both land ``queued`` before the
+        dispatch loop admits either; FIFO-head M1 sees M2 as a
+        ``queued`` "in-flight" sibling, declines its own admission,
+        and M2 is never attempted. Symmetric permanent wedge at
+        admission — both messages starve. The docstring
+        contract ("another ACTIVE message JobItem") was contradicted
+        by the implementation.
+
+        Tightening to ``admission_state == 'active'`` preserves
+        the intended semantics:
+          * FIFO-head admits (no ACTIVE sibling yet).
+          * FIFO successor declines while predecessor ACTIVE.
+          * Predecessor transitions to DONE → observer
+            ``_trigger_next_job_by_id`` + poll re-admit the
+            successor.
+          * Self-exclusion via ``exclude_job_id`` is preserved
+            so a candidate's own row never false-positives.
+
+        Does NOT mirror :meth:`get_active_by_instance` (which
+        uses ``ACTIVE_ADMISSION_STATES``) — that helper is for
+        caller sites that need to know "is anything live for
+        this instance" (different question, different intent).
 
         Args:
             instance_id: Target instance to check.
-            exclude_job_id: The candidate's ``job_id`` — never returned
-                even if it would otherwise match (a self-check returns
-                ``None``).
+            exclude_job_id: The candidate's ``job_id`` — never
+                returned even if it would otherwise match.
 
         Returns:
-            The sibling ACTIVE message JobItem driving ``instance_id``,
-            or ``None`` if no sibling is currently active. The freshest
-            sibling is returned on ties (matches
-            :meth:`get_active_by_instance` ordering).
+            The sibling ACTIVE message JobItem driving
+            ``instance_id``, or ``None`` if no sibling is
+            currently ACTIVE. The freshest sibling wins on ties
+            (``created_at DESC``).
         """
         with SQLModelSession(self.engine) as db_session:
             stmt = (
                 select(JobItem)
                 .where(JobItem.instance_id == instance_id)
                 .where(JobItem.deleted_at.is_(None))
-                .where(JobItem.admission_state.in_(ACTIVE_ADMISSION_STATES))
+                # ACTIVE-ONLY — see FILTER SCOPE comment above.
+                .where(JobItem.admission_state == AdmissionState.ACTIVE.value)
                 .where(JobItem.job_type == "message")
                 .where(JobItem.job_id != exclude_job_id)
                 .order_by(JobItem.created_at.desc(), JobItem.job_id)
