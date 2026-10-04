@@ -899,7 +899,11 @@ class TestableChatComponent {
     this.sseService.disconnect();
 
     const agentPath = `./agents/${agent.id}`;
-    const projectContext = this.tabStateService.activeProjectId() ?? 'all';
+    // F1 fix: mirror the post-create composition in chat.component.ts:1289-1291
+    // so the Chat special tab routes to /projects/chat/... (not 'all').
+    const projectContext = this.tabStateService.activeProjectId()
+      ?? this.tabStateService.activeSpecialTabId()
+      ?? 'all';
 
     this.api.createInstance(agentPath).subscribe({
       next: (instance: InstanceInfo) => {
@@ -1031,6 +1035,22 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       expect(component.navigateCalls).toHaveLength(1);
       expect(component.navigateCalls[0].path).toEqual(['/projects', 'chat-project', 'instances', instanceId]);
+    });
+
+    it('should navigate to /projects/chat/instances/:instanceId when on Chat special tab', () => {
+      tabStateService.setActiveTab('chat');
+      const instanceId = 'chat-inst-003';
+      mockApiService.createInstance.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next(createMockInstance({ instance_id: instanceId }));
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onNewInstance();
+
+      expect(component.navigateCalls).toHaveLength(1);
+      expect(component.navigateCalls[0].path).toEqual(['/projects', 'chat', 'instances', instanceId]);
     });
 
     it('should navigate to home when no agent is selected', () => {
