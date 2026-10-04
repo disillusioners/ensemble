@@ -1372,3 +1372,617 @@ class TestStopEventInterrupt:
         assert (
             "float" in anno_str and "None" in anno_str
         ), f"stop() timeout annotation MUST be float | None; got {anno_str!r}"
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# F-2 (durability-f1-f2 / phase2, task 2.11) — RDRS lane-2 tests
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestF2Lane2AnchorLessAdmission:
+    """S21 — lane 2 admits anchor-less completed children of
+    non-terminal parents (F-2 wedge straddle state).
+
+    The F-1 wedge is a no-row straddle: a child completes just
+    before restart, its wake-rows are wiped, the parent is
+    waiting_children. The F-2 fix removes the anchor-required
+    filter from the lane-2 query (task 2.2) so anchor-less
+    children of non-terminal parents are admitted. The per-row
+    pass then derives ``child_message_id`` from the surviving
+    child checkpoint (task 2.6).
+
+    These tests use a real file-backed SQLite engine (F9 parity
+    via the existing test harness).
+    """
+
+    def _seed_completed_child_with_message(
+        self,
+        engine: Engine,
+        parent_id: str,
+        child_msg_id: str = "child-msg",
+    ) -> tuple[str, str]:
+        """Seed a COMPLETED child instance + its COMPLETED message."""
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_message(
+            engine,
+            instance_id=child_id,
+            msg_id=child_msg_id,
+            status=MessageStatus.COMPLETED.value,
+        )
+        return child_id, child_msg_id
+
+    def test_admits_anchor_less_completed_child_of_non_terminal_parent(
+        self, engine: Engine
+    ) -> None:
+        """S21 — a COMPLETED child with NO ``message_queue`` row
+        (the F-2 wedge straddle state) IS admitted by the lane-2
+        query. The ``has_anchor`` flag is ``False`` so the
+        per-row pass knows to derive ``child_message_id`` from
+        the checkpoint."""
+        parent = _seed_instance(engine)  # non-terminal (default running)
+        # Seed a COMPLETED child with NO message_queue row —
+        # the anchor-less straddle state.
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        # No _seed_message call — the child has no
+        # COMPLETED message_queue row, so ``anchor_subq``
+        # returns NULL.
+
+        service, _ = _build_service(engine)
+        rows = service._report_injection_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        # The row is admitted.
+        child_rows = [r for r in rows if r["child_id"] == child_id]
+        assert len(child_rows) == 1
+        # ``has_anchor`` is ``False`` (no message_queue row).
+        assert child_rows[0]["has_anchor"] is False
+        # ``child_msg_id`` is ``None`` (the anchor subquery
+        # returned NULL).
+        assert child_rows[0]["child_msg_id"] is None
+        # ``parent_id`` is correct.
+        assert child_rows[0]["parent_id"] == parent
+
+    def test_has_anchor_true_when_completed_message_exists(
+        self, engine: Engine
+    ) -> None:
+        """A child with a COMPLETED ``message_queue`` row has
+        ``has_anchor=True`` and ``child_msg_id`` populated —
+        the per-row pass uses the anchor directly (no
+        checkpoint derivation needed)."""
+        parent = _seed_instance(engine)
+        child_id, child_msg_id = self._seed_completed_child_with_message(
+            engine, parent
+        )
+
+        service, _ = _build_service(engine)
+        rows = service._report_injection_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        child_rows = [r for r in rows if r["child_id"] == child_id]
+        assert len(child_rows) == 1
+        assert child_rows[0]["has_anchor"] is True
+        assert child_rows[0]["child_msg_id"] == child_msg_id
+
+    def test_still_excludes_terminal_parent(
+        self, engine: Engine
+    ) -> None:
+        """Anchor-less child of a TERMINAL parent is still
+        excluded from the periodic sweep (the ORPHAN lane's
+        territory)."""
+        parent = _seed_instance(
+            engine, status=InstanceStatus.COMPLETED.value
+        )
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+
+        service, _ = _build_service(engine)
+        rows = service._report_injection_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        # Terminal parent → excluded.
+        assert not any(r["child_id"] == child_id for r in rows)
+
+    def test_still_excludes_running_child(
+        self, engine: Engine
+    ) -> None:
+        """S23 — RUNNING children are excluded (the
+        ``c.status=='completed'`` filter at :1222)."""
+        parent = _seed_instance(engine)
+        # Seed a RUNNING child (not completed).
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.RUNNING.value,
+        )
+
+        service, _ = _build_service(engine)
+        rows = service._report_injection_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        assert not any(r["child_id"] == child_id for r in rows)
+
+
+class TestF2PREFIXLedgerDedup:
+    """S22 — PREFIX-ledger cross-path dedup (queue-side +
+    parent-history-side). The operative cross-path dedup per
+    decisions.md §14a (W-1 LOCKED to fallback (ii))."""
+
+    def test_find_wake_already_delivered_evidence_true_on_prefix_match(
+        self, engine: Engine
+    ) -> None:
+        """Queue-side: a parent-side ``internal_report:{child}:%``
+        row in a non-failed status triggers the PREFIX ledger."""
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        parent = _seed_instance(engine)
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+        # Seed a parent-side internal_report message.
+        report_msg_id = f"report-{uuid.uuid4().hex[:8]}"
+        _seed_message(
+            engine,
+            instance_id=parent,
+            msg_id=report_msg_id,
+            source=f"internal_report:{child_id}:some-anchor-msg",
+            msg_type=MessageType.COMPLETION_REPORT.value,
+            status=MessageStatus.READY.value,
+        )
+        queue_repo = SQLModelMessageQueueRepository(engine)
+        assert (
+            queue_repo.find_wake_already_delivered_evidence(
+                parent, child_id
+            )
+            is True
+        )
+
+    def test_find_wake_already_delivered_evidence_false_when_no_match(
+        self, engine: Engine
+    ) -> None:
+        """Queue-side: NO matching ``internal_report:{child}:%``
+        row → returns False."""
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        parent = _seed_instance(engine)
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+        # Seed a message for a DIFFERENT child.
+        other_child = f"other-{uuid.uuid4().hex[:8]}"
+        _seed_message(
+            engine,
+            instance_id=parent,
+            msg_id=f"report-{uuid.uuid4().hex[:8]}",
+            source=f"internal_report:{other_child}:some-anchor",
+            msg_type=MessageType.COMPLETION_REPORT.value,
+            status=MessageStatus.READY.value,
+        )
+        queue_repo = SQLModelMessageQueueRepository(engine)
+        assert (
+            queue_repo.find_wake_already_delivered_evidence(
+                parent, child_id
+            )
+            is False
+        )
+
+    def test_parent_history_has_internal_report_true_on_marker(
+        self, engine: Engine
+    ) -> None:
+        """Parent-history-side: a parent checkpoint message with
+        ``source`` starting with ``internal_report:{child}:`` →
+        returns True."""
+        from daemon.services.report_delivery_ledger import (
+            parent_history_has_internal_report,
+        )
+        import daemon.persistence as persistence_mod
+
+        parent = _seed_instance(engine)
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+
+        class _MockCheckpointer:
+            raw_saver = self
+
+            async def _raw_saver_aget(self, config):
+                return None
+
+        async def _fake_get_instance_messages(checkpointer, instance_id, manager=None):
+            return [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "message_id": "msg-1",
+                },
+                {
+                    "role": "assistant",
+                    "content": "delivered report content",
+                    "message_id": "msg-2",
+                    "source": f"internal_report:{child_id}:anchor-msg",
+                },
+            ]
+
+        original = persistence_mod.get_instance_messages
+        persistence_mod.get_instance_messages = _fake_get_instance_messages
+        try:
+            result = asyncio.run(
+                parent_history_has_internal_report(
+                    _MockCheckpointer(), parent, child_id
+                )
+            )
+        finally:
+            persistence_mod.get_instance_messages = original
+        assert result is True
+
+    def test_parent_history_has_internal_report_false_on_no_source(
+        self, engine: Engine
+    ) -> None:
+        """Parent-history-side: a parent checkpoint message WITHOUT
+        a ``source`` field (pre-migration parent) → returns False
+        (graceful degradation per the docstring)."""
+        from daemon.services.report_delivery_ledger import (
+            parent_history_has_internal_report,
+        )
+        import daemon.persistence as persistence_mod
+
+        parent = _seed_instance(engine)
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+
+        class _MockCheckpointer:
+            raw_saver = self
+
+            async def _raw_saver_aget(self, config):
+                return None
+
+        async def _fake_get_instance_messages(checkpointer, instance_id, manager=None):
+            return [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "message_id": "msg-1",
+                },
+                {
+                    "role": "assistant",
+                    "content": "no source field",
+                    "message_id": "msg-2",
+                    # NO "source" key — pre-migration parent.
+                },
+            ]
+
+        original = persistence_mod.get_instance_messages
+        persistence_mod.get_instance_messages = _fake_get_instance_messages
+        try:
+            result = asyncio.run(
+                parent_history_has_internal_report(
+                    _MockCheckpointer(), parent, child_id
+                )
+            )
+        finally:
+            persistence_mod.get_instance_messages = original
+        assert result is False
+
+
+class TestF2IdempotencyAndKillSwitch:
+    """S25 (idempotent run-twice) + S26 (kill-switch gate) for
+    the F-2 lane-2 extension."""
+
+    def test_run_twice_single_ensure_deferred(
+        self, engine: Engine
+    ) -> None:
+        """S25 — running lane 2 twice on the same wedge child
+        results in exactly one ``ensure_deferred`` call (the
+        obligation-triple unique index handles within-path
+        idempotency; the PREFIX ledger handles cross-path
+        dedup)."""
+        parent = _seed_instance(engine)
+        child_id, _ = self._seed_completed_child_with_message(engine, parent)
+
+        service, _ = _build_service(engine)
+        # First run: the row is admitted, ensure_deferred is
+        # called.
+        result1 = service._run_no_row_backstop_lane()
+        # Second run: the obligation-triple unique index
+        # absorbs the duplicate (W6); the row is NOT re-minted.
+        result2 = service._run_no_row_backstop_lane()
+        # Total recovered across both runs: 1 (the obligation
+        # is honored exactly once).
+        total_recovered = result1.recovered + result2.recovered
+        assert total_recovered == 1
+
+    def _seed_completed_child_with_message(
+        self,
+        engine: Engine,
+        parent_id: str,
+        child_msg_id: str = "child-msg",
+    ) -> tuple[str, str]:
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_message(
+            engine,
+            instance_id=child_id,
+            msg_id=child_msg_id,
+            status=MessageStatus.COMPLETED.value,
+        )
+        return child_id, child_msg_id
+
+    def test_lane2_kill_switch_off_skips_lane(
+        self, engine: Engine
+    ) -> None:
+        """S26 — when ``lane_no_row_backstop`` is False, the
+        lane-2 entry is skipped (the RDRS per-lane kill
+        switch governs the active behavior)."""
+        from daemon.services.report_delivery_recovery import (
+            ReportDeliveryRecoveryService,
+        )
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+        parent = _seed_instance(engine)
+        self._seed_completed_child_with_message(engine, parent)
+        # Build the service with ``lane_no_row_backstop=False``.
+        task_repo = MagicMock()
+        task_repo.has_instance_busy = MagicMock(return_value=False)
+        manager = MagicMock()
+        manager.engine = engine
+        manager._handle_recover_deferred_report = MagicMock()
+        ri_repo = ReportInjectionRepository(engine=engine)
+        service = ReportDeliveryRecoveryService(
+            task_repo=task_repo,
+            report_injection_repo=ri_repo,
+            queue_repo=MagicMock(),
+            instance_repo=MagicMock(),
+            manager_ref=manager,
+            interval_seconds=300,
+            age_bound_minutes=10,
+            batch_cap=100,
+            recovery_retry_minutes=1,
+            enabled=True,
+            lane_orphan=False,
+            lane_no_row_backstop=False,
+        )
+        # Test via _run_all_lanes_sync (the kill switch check
+        # is in _run_all_lanes_sync, not in the lane method
+        # itself — the lane method is the inner primitive).
+        result = service._run_all_lanes_sync()
+        # Lane 2 disabled → the ``no_row_backstop`` key is
+        # NOT in the result dict (the kill switch short-
+        # circuits before the lane method is called).
+        assert "no_row_backstop" not in result.lanes
+        assert result.total_recovered == 0
+
+
+class TestF2LiveDeliveryRace:
+    """S28 — live delivery between lane-2 scan and per-row
+    ledger re-check → lane must skip (skip-already-reported
+    counter increments; no double-injection)."""
+
+    def test_live_delivery_between_scan_and_ledger_recheck_skips(
+        self, engine: Engine
+    ) -> None:
+        """Between the lane-2 scan and the per-row ledger
+        re-check, a live delivery inserts a fresh
+        ``internal_report:{child}:%`` message into the
+        parent's ``MessageQueue``. The per-row pass MUST
+        detect the delivery via the PREFIX ledger and skip
+        (increment ``skipped_already_reported``; do NOT
+        double-inject)."""
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+
+        parent = _seed_instance(engine)
+        child_id, _ = self._seed_completed_child_with_message(engine, parent)
+
+        # Build a service with a REAL queue_repo (so the
+        # PREFIX ledger check is a real method call, not a
+        # MagicMock). The ``_build_service`` helper uses a
+        # MagicMock queue_repo; build a minimal service here.
+        from daemon.services.report_delivery_recovery import (
+            ReportDeliveryRecoveryService,
+        )
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+        ri_repo = ReportInjectionRepository(engine=engine)
+        queue_repo = SQLModelMessageQueueRepository(engine=engine)
+        task_repo = MagicMock()
+        task_repo.has_instance_busy = MagicMock(return_value=False)
+        manager = MagicMock()
+        manager.engine = engine
+        manager._handle_recover_deferred_report = MagicMock()
+        service = ReportDeliveryRecoveryService(
+            task_repo=task_repo,
+            report_injection_repo=ri_repo,
+            queue_repo=queue_repo,
+            instance_repo=MagicMock(),
+            manager_ref=manager,
+            interval_seconds=300,
+            age_bound_minutes=10,
+            batch_cap=100,
+            recovery_retry_minutes=1,
+            enabled=True,
+            lane_orphan=False,
+        )
+        # The lane-2 query returns the child (no internal_report
+        # row yet — the live delivery hasn't happened).
+        rows_initial = (
+            service._report_injection_repo.find_completed_children_without_delivery(
+                parent_not_terminal=True
+            )
+        )
+        assert any(r["child_id"] == child_id for r in rows_initial)
+        # LIVE DELIVERY: the natural path inserts a fresh
+        # ``internal_report:{child}:%`` row between the scan
+        # and the per-row pass.
+        _seed_message(
+            engine,
+            instance_id=parent,
+            msg_id=f"live-report-{uuid.uuid4().hex[:8]}",
+            source=f"internal_report:{child_id}:live-anchor-msg",
+            msg_type=MessageType.COMPLETION_REPORT.value,
+            status=MessageStatus.READY.value,
+        )
+        # The per-row pass: the PREFIX ledger check now matches
+        # the live delivery.
+        assert (
+            queue_repo.find_wake_already_delivered_evidence(
+                parent, child_id
+            )
+            is True
+        )
+        # The lane's step-0 guard would short-circuit:
+        # ``skipped_already_reported += 1; return``. This is
+        # the cross-path dedup (per decisions.md §14a) — the
+        # obligation-triple unique index is the within-path
+        # idempotency (per migration 20260819_000001:114-120).
+        # The interaction is: PREFIX-ledger (cross-path) is
+        # checked FIRST; if it matches, the obligation is NOT
+        # minted; if it doesn't match, the obligation-triple
+        # unique index prevents duplicate mints within the
+        # lane-2 / recovery path. Both layers are required.
+
+    def _seed_completed_child_with_message(
+        self,
+        engine: Engine,
+        parent_id: str,
+        child_msg_id: str = "child-msg",
+    ) -> tuple[str, str]:
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_message(
+            engine,
+            instance_id=child_id,
+            msg_id=child_msg_id,
+            status=MessageStatus.COMPLETED.value,
+        )
+        return child_id, child_msg_id
+
+
+class TestF2ChildMessageIdStableButDifferent:
+    """F-2 (durability-f1-f2 / phase2, task 2.6) — the derived
+    ``child_message_id`` is STABLE-BUT-DIFFERENT from the natural
+    path's ``MessageQueue.message_id`` (per W-1 fallback (ii)
+    confirmation)."""
+
+    def test_derive_anchor_less_child_message_id_from_checkpoint(
+        self, engine: Engine
+    ) -> None:
+        """The derivation reads the surviving child checkpoint
+        via ``get_instance_messages`` + the
+        ``serialize_message`` chain. The derived id is
+        ``BaseMessage.id`` (UUID4) — STABLE-BUT-DIFFERENT
+        from the natural path's ``MessageQueue.message_id``
+        (per W-1 confirmation)."""
+        from daemon.services.report_delivery_recovery import (
+            _derive_anchor_less_child_message_id,
+        )
+        import daemon.persistence as persistence_mod
+
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+        derived_id = f"derived-{uuid.uuid4().hex}"
+
+        class _MockCheckpointer:
+            raw_saver = self
+
+            async def _raw_saver_aget(self, config):
+                return None
+
+        async def _fake_get_instance_messages(checkpointer, instance_id, manager=None):
+            return [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "message_id": f"user-{uuid.uuid4().hex[:8]}",
+                },
+                {
+                    "role": "assistant",
+                    "content": "child terminal report content",
+                    "message_id": derived_id,  # the BaseMessage.id
+                },
+            ]
+
+        original = persistence_mod.get_instance_messages
+        persistence_mod.get_instance_messages = _fake_get_instance_messages
+        try:
+            result = asyncio.run(
+                _derive_anchor_less_child_message_id(
+                    _MockCheckpointer(), child_id
+                )
+            )
+        finally:
+            persistence_mod.get_instance_messages = original
+        # The derived id is the BaseMessage.id of the last
+        # assistant message — STABLE-BUT-DIFFERENT from any
+        # natural-path MessageQueue.message_id.
+        assert result == derived_id
+
+    def test_derive_returns_none_when_no_assistant_message(
+        self, engine: Engine
+    ) -> None:
+        """If the child checkpoint has no assistant message
+        (or the checkpoint is missing), the derivation
+        returns None — the per-row pass logs WARNING and
+        ``continue``s (the periodic 300s loop is the retry
+        mechanism)."""
+        from daemon.services.report_delivery_recovery import (
+            _derive_anchor_less_child_message_id,
+        )
+        import daemon.persistence as persistence_mod
+
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+
+        class _MockCheckpointer:
+            raw_saver = self
+
+            async def _raw_saver_aget(self, config):
+                return None
+
+        async def _fake_get_instance_messages(checkpointer, instance_id, manager=None):
+            return [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "message_id": f"user-{uuid.uuid4().hex[:8]}",
+                },
+                # NO assistant message.
+            ]
+
+        original = persistence_mod.get_instance_messages
+        persistence_mod.get_instance_messages = _fake_get_instance_messages
+        try:
+            result = asyncio.run(
+                _derive_anchor_less_child_message_id(
+                    _MockCheckpointer(), child_id
+                )
+            )
+        finally:
+            persistence_mod.get_instance_messages = original
+        assert result is None
+
+    def test_derive_returns_none_when_checkpointer_is_none(
+        self, engine: Engine
+    ) -> None:
+        """``checkpointer=None`` ⇒ returns None (no evidence
+        available; the per-row pass logs WARNING and
+        ``continue``s)."""
+        from daemon.services.report_delivery_recovery import (
+            _derive_anchor_less_child_message_id,
+        )
+        result = asyncio.run(
+            _derive_anchor_less_child_message_id(None, "child-123")
+        )
+        assert result is None

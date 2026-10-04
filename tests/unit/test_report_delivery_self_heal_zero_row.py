@@ -229,10 +229,12 @@ def test_lane2_finds_zero_row_stuck_pair(engine, stuck_pair):
         parent_not_terminal=True,
         limit=100,
     )
-    assert {"child_id": child_id, "child_msg_id": msg_id,
-            "parent_id": leader_id} in rows, (
-        "the zero-row stuck pair must be a Lane-2 candidate"
-    )
+    assert any(
+        r.get("child_id") == child_id
+        and r.get("child_msg_id") == msg_id
+        and r.get("parent_id") == leader_id
+        for r in rows
+    ), "the zero-row stuck pair must be a Lane-2 candidate"
 
 
 def test_sweep_self_heals_zero_row_pair_and_no_flap(
