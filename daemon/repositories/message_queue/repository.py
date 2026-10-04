@@ -13,6 +13,7 @@ from sqlalchemy import delete as sql_delete, func, and_, or_, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select, col
 
+from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc, now_utc_naive
 
 from .models import MessageQueue, MessageStatus
@@ -1032,14 +1033,26 @@ class SQLModelMessageQueueRepository:
                 # rows of non-terminal instances (symmetric to
                 # the task-side predicate).
                 if arm3_active:
+                    # F-1 arm 3 SQL fragment — terminal-stamped
+                    # rows of non-terminal instances (symmetric to
+                    # the task-side predicate). The terminal
+                    # status list is sourced from the canonical
+                    # ``TERMINAL_INSTANCE_STATUSES`` constant at
+                    # ``daemon/constants.py:584-589`` (mirrors the
+                    # task-side predicate at
+                    # ``task/repository.py:4394-4405``).
+                    _terminal_instance_statuses_sql = (
+                        "(" + ",".join(
+                            f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)
+                        ) + ")"
+                    )
                     _arm3_keep_sql = (
                         " OR ("
                         "auto_continued_at IS NOT NULL "
                         "AND EXISTS ("
                         "SELECT 1 FROM instances "
                         "WHERE instances.instance_id = task.instance_id "
-                        "AND instances.status NOT IN "
-                        "('completed', 'terminated', 'error', 'failed')"
+                        f"AND instances.status NOT IN {_terminal_instance_statuses_sql}"
                         ")"
                         ")"
                     )

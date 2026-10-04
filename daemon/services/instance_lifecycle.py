@@ -181,7 +181,13 @@ logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────
 # Pause-First Then Quiesce Convention
-# (FIRST labelled block in this file, per W-5 re-anchor 2026-10-04)
+# (SECOND labelled block in this file — BESIDE the
+# Boot-Sequence Ownership Contract above; per W-5 re-anchor
+# 2026-10-04. The Boot-Sequence block is FIRST; this
+# convention block is BESIDE it. The smaller-diff fix for
+# the prior block-order comment inconsistency is to keep
+# the block order and correct the W-5 re-anchor comment to
+# state the actual on-disk order.)
 #
 # Features requiring a quiescent instance — config flips,
 # activation toggles, in-place migrations, watchover activation
