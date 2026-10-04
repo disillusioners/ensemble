@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-04 (revised R2)
 **Author:** planner[v2] via plan-creation worker
-**Status:** Draft R2 — Revision loop 2
+**Status:** Draft R3 — Revision loop 3 FINAL (TrueAuto)
 **Branch base:** `latest` @ `cf8efbeff9d932a6d01d7cbb2411836057e7b099`
 **Plan output dir:** `.agents/shared/planning/chart-image-delivery/`
 
@@ -154,12 +154,12 @@ Each of the 20 gets a one-line cardinal reference. **Phase D's coverage pin #17 
    - The MUST-use rule body appears in exactly ONE place: the chart skill. Agent files contain only the one-line cross-reference.
    - No `.md` path token in the new content of any `rule.md`, `soul.md`, or `tools_note.md`.
    - **Verification:**
-     - `grep -rnE 'MUST.*generate_chart|when.*chat.*generate_chart' agents/*/rule.md agents/*/soul.md agents/*/tools_note.md agents/*/workflow.md | grep -v 'agents/_prompt_system/innate-skills/chart/skill.md'` returns 0 hits.
+     - `grep -rniE 'MUST.*generate_chart|when.*chat.*generate_chart' agents/*/rule.md agents/*/soul.md agents/*/tools_note.md agents/*/workflow.md | grep -v 'agents/_prompt_system/innate-skills/chart/skill.md'` returns 0 hits. (R5: `-i` — case-insensitive; exact-cardinal wording varies by agent file, case-sensitive greps false-pass.)
      - `grep -nE '\.md\b' agents/<name>/rule.md` (per the v2 form audit) returns 0 hits in the new content.
 
 5. **Verify no edits to Phase A / B / D files.**
-   - `git diff --stat feature/chart-image-delivery -- agents/charter/ daemon/tools/chart_tools.py daemon/services/instance_messaging.py daemon/sources/ tests/` returns empty.
-   - `git diff --stat feature/chart-image-delivery -- agents/_prompt_system/innate-skills/chart/skill.md agents/*/rule.md agents/*/tools_note.md agents/*/soul.md agents/*/workflow.md` returns the expected file list (the chart skill + 20 agent files).
+   - `git diff --stat <pre-Phase-C-commit>..<Phase-C-head> -- agents/charter/ daemon/tools/chart_tools.py daemon/services/instance_messaging.py daemon/sources/ tests/` returns empty (R5: diff the Phase C COMMIT RANGE — diffing against the branch tip is vacuous once Phase C commits land on that branch).
+   - `git diff --stat <pre-Phase-C-commit>..<Phase-C-head> -- agents/_prompt_system/innate-skills/chart/skill.md agents/*/rule.md agents/*/tools_note.md agents/*/soul.md agents/*/workflow.md` returns the expected file list (the chart skill + 20 agent files).
    - **Verification:** explicit `git status` / `git diff --stat` in the implementation commit message.
 
 6. **State the restart/promote property in the implementation report.**

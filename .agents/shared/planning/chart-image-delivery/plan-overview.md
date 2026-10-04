@@ -1,9 +1,9 @@
 # Chart-Image-Delivery — Plan Overview
 
-**Date:** 2026-10-04 (revised R2 — architecture fold-in, revision loop 2 of 3)
+**Date:** 2026-10-04 (revised R5 — approver iterations 001-003 folded; FINAL pre-implementation, TrueAuto)
 **Commission:** `chart-image-delivery` on branch `feature/chart-image-delivery` (base `latest` @ `cf8efbeff9d932a6d01d7cbb2411836057e7b099`), repo `/home/nea/ensemble-src`, project `agents-ensemble`
 **Synthesized by:** planner[v2] from four plan-creation worker outputs (A `6b312cbf`, B `798d2451`, C `8ef85540`, D `e074b8e8`), revised per the architectural review
-**Status:** Draft R2 — all 22 amendments from `architecture-recommendation.md` folded into phase plans + decisions (reviewer R1–R9 + optionals applied)
+**Status:** Draft R3 FINAL — all 22 amendments folded (incl. §degradation-v2-toolchain, added R5) + approver iterations 001-003 blockers and note sets applied. TrueAuto: after giter commits, implementation dispatches WITHOUT another approver cycle; code-level reviewer/tester own quality from there.
 
 > **Precedence:** `architecture-recommendation.md` §3 governs over phase-plan prose on conflict.
 
@@ -45,14 +45,14 @@ Charter renders the PNG **at validation time** (sandboxed: `securityLevel:strict
 
 | Phase | Objective | Plan file (size) | Restart/Promote |
 |-------|-----------|------------------|-----------------|
-| **A** | Render+capture, marker contract, D1 install skill + lib.sh probe, hybrid executor, security pins; +R6 ari pre-warm ownership (context.md + ari/workflow.md) | `phaseA-plan.md` (538 ln; T17–T24 appended) | **NO** (10 files, all agent-prompt/bash) |
-| **B** | Delivery: **both-seam extraction**, provenance gate, breaker guardrails, multi-image, empty-content guard, store.delete-after-upload, logging redaction, sweeper | `phaseB-plan.md` (1202 ln) | **YES + promote** (daemon code) |
-| **C** | Agent guidance: chart-skill "Chat Delivery" + cardinal refs in **20** chart-capable agents (verified list) | `phaseC-plan.md` (285 ln) | **NO** |
-| **D** | Consolidation: **24-pin audit (PRESERVATION vs FEATURE classes, D.0 pre-baseline gate)**, **8 e2e groups incl. real-astream Group 7 + store.delete Group 8**, version 0.16.12→0.16.13, CHANGELOG, release report w/ adopted-items ledger | `phaseD-plan.md` (430 ln) | Gates release cut + promote |
+| **A** | Render+capture, marker contract, D1 install skill + lib.sh probe, hybrid executor, security pins; +R6 ari pre-warm ownership (context.md + ari/workflow.md) | `phaseA-plan.md` (542 ln; T17–T24 appended) | **NO** (10 files, all agent-prompt/bash) |
+| **B** | Delivery: **both-seam extraction**, provenance gate, breaker guardrails, multi-image, empty-content guard, store.delete-after-upload, logging redaction, sweeper | `phaseB-plan.md` (1242 ln) | **YES + promote** (daemon code) |
+| **C** | Agent guidance: chart-skill "Chat Delivery" + cardinal refs in **20** chart-capable agents (verified list) | `phaseC-plan.md` (286 ln) | **NO** |
+| **D** | Consolidation: **24-pin audit (PRESERVATION vs FEATURE classes, D.0 pre-baseline gate)**, **8 e2e groups incl. real-astream Group 7 + store.delete Group 8**, version 0.16.12→0.16.13, CHANGELOG, release report w/ adopted-items ledger | `phaseD-plan.md` (434 ln) | Gates release cut + promote |
 
 **Sequencing (unchanged, arch-rec Focus 6 confirmed):** A ∥ C → B → D. Instance budget ≤ 3 concurrent holds.
 
-## Key Decisions (pointers — full text in decisions.md, 866 ln)
+## Key Decisions (pointers — full text in decisions.md, 875 ln)
 
 - **§marker** (LOCKED) — canonical marker; malformed markers ignored; near-miss sweeper (#14) strips-but-never-extracts.
 - **§phase-b-r2-addendum-1** — **BOTH-SEAM extraction pin (NON-NEGOTIABLE, arch-rec §1 verbatim)**; images populated at dispatcher.py:170 AND :243, never registry.py:980; once-only structural via `_progressive_sent_sources`.
@@ -61,6 +61,7 @@ Charter renders the PNG **at validation time** (sandboxed: `securityLevel:strict
 - **§phase-b-r2-addendum-5/6** — MANDATORY breaker guardrails (Slack classify-before-record + capability flag; Telegram 4xx non-transient).
 - **§phase-b-r2-addendum-9** — amendment #22 ADOPTED: `store.delete` after successful chat upload (API path keeps 30-day GET).
 - **§phase-d-test-matrix** — 24 pins split PRESERVATION/FEATURE; pin #6 INVERTED (both-seam); pin #24 Ari pre-warm; content-addressable greps throughout.
+- **§degradation-v2-toolchain** (added R5) — charter-side render-failure taxonomy from arch-rec Focus 4.3 / amendment #20 (syntax-only retry; never retry render-side; per-class degrade).
 - **§phase-d-adopted-items / §phase-d-deferred-items** — adopted ledger (store.delete) + 4 deferred items + ACCEPTED RESIDUAL stale-real-id (~1–3%, revisit trigger: strip-rate >10% post-Phase-C or user report).
 - Reviewer-ordered in-place corrections at decisions.md **:95** (marker not invisible) and **:321** (both-seam prose) — recorded as exceptions to append-only in the addenda.
 
@@ -94,15 +95,15 @@ Per-phase suites (A: 18 cases incl. probe/sanitizer/security-pin/ulimit + chart-
 | Progressive/completed double-send | Structural once-only via `_progressive_sent_sources`; pinned by `test_progressive_then_completed_no_double_send` |
 | Payload in logs | `bytes_b64` repr-redacted; logging contract pinned across dispatcher + 3 adapters |
 
-## Deliverable Index (R2)
+## Deliverable Index (R5 — final)
 
 ```
 .agents/shared/planning/chart-image-delivery/
 ├── plan-overview.md                  ← this file (synthesis; planner-authored)
 ├── architecture-recommendation.md    ← 22 amendments; §3 GOVERNS on conflict
-├── decisions.md                      ← 866 ln: locked contracts + §phase-b-r2-addendum-1..16 + §phase-d R2 records
-├── phaseA-plan.md                    ← 538 ln, Draft R2 (amdt #15-#19, R6, T17-T24)
-├── phaseB-plan.md                    ← 1202 ln, Draft R2 (R1 both-seam, R2-R4, R7, amdt #2-#14)
-├── phaseC-plan.md                    ← 285 ln, Draft R2 (20 agents, greps, pin labels)
-└── phaseD-plan.md                    ← 430 ln, Draft R2 (24 pins/8 groups, D.0, astream e2e, ledgers)
+├── decisions.md                      ← 875 ln: locked contracts + §phase-b-r2-addendum-1..16 + §degradation-v2-toolchain + §phase-d records
+├── phaseA-plan.md                    ← 542 ln, Draft R3 FINAL (amdt #15-#19, R6, T17-T24)
+├── phaseB-plan.md                    ← 1242 ln, Draft R3 FINAL (R1 both-seam, R2-R4, R7, amdt #2-#14, Slack N-image)
+├── phaseC-plan.md                    ← 286 ln, Draft R3 FINAL (20 agents, greps, pin labels)
+└── phaseD-plan.md                    ← 434 ln, Draft R3 FINAL (24 pins/8 groups, D.0, astream e2e + integration lane, ledgers)
 ```

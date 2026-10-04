@@ -2,7 +2,7 @@
 
 Date: 2026-10-04 (R1 05:01 / R2 05:55)
 Author: planner[v2] via plan-creation worker
-Status: Draft R2 — Revision loop 2 (R1-R9 fold-in)
+Status: Draft R3 — Revision loop 3 FINAL (TrueAuto: implementation dispatch follows)
 Feature commission: `chart-image-delivery` (D1 self-install, D2 local render, D3 tmp_images substrate, D4 per-platform native delivery)
 
 > **Precedence:** `architecture-recommendation.md` §3 governs over phase-plan prose on conflict.
@@ -188,6 +188,8 @@ with open("/tmp/charter_XXXXXX.png", "rb") as f:
 # current chart-render footprint is > 80% of the cap, skip the persist
 # entirely — text-only Mermaid, `image_store_full` log line. Saves a
 # wasted render. The cap is 1 GiB by default (tmp_image_store.py:140-148).
+# (OPTIONAL v1 helper — R5 tracking note: called here but defined nowhere else;
+#  define inline via image_list size-sum (bash+jq) or drop for v1 — NOT required for acceptance.)
 if image_store_chart_render_usage_under_threshold():
     result_json = image_save(
         content_b64=png_b64,
@@ -404,8 +406,8 @@ The `tmp_images` substrate already implements D3. Spot-checked:
 
 All Phase A work touches a single bounded scope (`agents/charter/*` + `agents/_prompt_system/innate-skills/chart/skill.md` + ari/context touchpoints + planning artifacts). Implementation should be a **single developer + reviewer + tester chain** on a shared branch (the commission already names `feature/chart-image-delivery`, head `cf8efbeff9d932a6d01d7cbb2411836057e7b099` — verified in shared meta-kv).
 
-- **Developer** — edits the 9 files (charter workflow/rule/soul/meta, install skill + lib, chart skill, ari workflow, shared context.md). Reuses instance-spawn to verify in the live daemon (the dev lane is already running per the charter workflow.md spot-check).
-- **Reviewer** — checks every charter `.md` against `docs/agent-prompt-writing-guide.md` (cardinal/guideline split, one canonical home per artifact, no daemon path leaks). Spot-checks the marker regex against the spec in decisions.md. Verifies the pin-audit `grep -F` passes (NOT a line-number diff — Phase C will insert content above the audit targets).
+- **Developer** — edits the **10 files** (charter workflow/rule/soul/meta, install skill + lib, chart skill, ari workflow, shared context.md, + decisions.md verify/append only). [R5, iter-003 blocking #1 alignment] Reuses instance-spawn to verify in the live daemon (the dev lane is already running per the charter workflow.md spot-check).
+- **Reviewer** — checks every charter `.md` against `docs/agent-prompt-writing-guide.md` (cardinal/guideline split, one canonical home per artifact, no daemon path leaks). **Literacy prerequisite (R5, tracking iter-003):** has READ `architecture-recommendation.md` §3 — the ~30 amendment citations this plan references. Spot-checks the marker regex against the spec in decisions.md. Verifies the pin-audit `grep -F` passes (NOT a line-number diff — Phase C will insert content above the audit targets).
 - **Tester** — runs the existing `test_chart_tools.py` (must stay green) and the new `test_charter_render_capture.py` (18 cases per Components §6). Spot-checks D3 sweep semantics via a unit test on `sweep_once()`. Verifies the 4-signal READINESS_PROBE, the flock-guarded self-heal, and the pre-warm path under simulated cold and warm conditions.
 
 ## Tasks (ordered)

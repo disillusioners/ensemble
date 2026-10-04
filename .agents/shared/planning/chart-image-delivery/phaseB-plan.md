@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-04 (R2 — Revision loop 2: arch-recommendation.md fold-in)
 **Author:** planner[v2] via plan-creation worker
-**Status:** Draft R2 — Revision loop 2 (R1-R9 fold-in)
+**Status:** Draft R3 — Revision loop 3 FINAL (TrueAuto: implementation dispatch follows)
 **Feature commission:** `chart-image-delivery` (D1 self-install / D2 local render / D3 tmp_images substrate / D4 per-platform native delivery)
 **Branch base:** `latest` @ `cf8efbeff9d932a6d01d7cbb2411836057e7b099`
 **Companion artifact:** `.agents/shared/planning/chart-image-delivery/decisions.md` (Phase A locked contract — **APPEND** §phase-b-* sections at end per dispatch note; reviewer-ordered in-place corrections at decisions.md:95 and decisions.md:321; new §phase-b addendum records R2 adoption of amendment #22 + both-seam rule + sweeper + logging contract + provenance gate)
@@ -838,67 +838,73 @@ async with lock:
         # ... existing text-prep blocks-vs-text branching ... :469-498 ...
         # Phase B: chart-image native upload (Slack single files_upload_v2 — amendment #9)
         images = getattr(message, "images", None)
-        image_uploaded = False
+        uploaded_count = 0
         if images and "files_upload_v2" not in flagged_methods:
-            img = images[0]
-            _log_image_metadata(img.image_id, img.size_bytes, img.content_type)
-            try:
-                file_bytes = base64.b64decode(img.bytes_b64)
-            except Exception as e:
-                logger.warning(
-                    f"slack image decode failed image_id={img.image_id[:8]}...: {e}; "
-                    f"skipping"
-                )
-                file_bytes = None
-
-            if file_bytes is not None:
-                # Slack initial_comment length limit (~4000 chars; verify at impl)
-                initial_comment = message.content[:INITIAL_COMMENT_MAX] if message.content else ""
-                caption_remaining = (
-                    message.content[INITIAL_COMMENT_MAX:]
-                    if message.content and len(message.content) > INITIAL_COMMENT_MAX
-                    else ""
-                )
+            # MULTI-IMAGE (approver iter-003 blocking #2): iterate ALL images —
+            # NO silent drops (amendment #7). One files_upload_v2 call per image
+            # in marker order (or a single N-file call if the verified SDK signature
+            # supports it — decide at the Task #19 SDK verification); each failed
+            # image WARNs with image_id[:8] + size + content_type and never aborts
+            # the siblings.
+            for img in images:
+                _log_image_metadata(img.image_id, img.size_bytes, img.content_type)
                 try:
-                    # SINGLE call — no separate postMessage() follow-up for the file itself.
-                    # _safe_api_call returns an (ok, result) TUPLE on its failure contract —
-                    # UNPACK it (iter-002 note: calling .get(...) on the tuple is an
-                    # AttributeError on every upload; verify exact tuple shape at impl).
-                    ok, result = await self._safe_api_call(
-                        "files_upload_v2",
-                        channel_id=channel_id,
-                        filename=img.filename,
-                        content=file_bytes,
-                        initial_comment=initial_comment,
-                    )
-                    if ok and result:
-                        image_uploaded = True
-                    else:
-                        logger.warning(
-                            f"Slack files_upload_v2 returned non-ok for channel {channel_id}: {result}; text fallback"
-                        )
-                except SlackCapabilityError as e:
-                    # Classify BEFORE record_failure (amendment #4) — set flag, never re-attempt
-                    err_str = str(e).lower()
-                    if "missing_scope" in err_str or "files:write" in err_str:
-                        self._slack_capability_flags.add("files_upload_v2")
-                        logger.warning(
-                            f"Slack channel {channel_id}: missing files:write scope. "
-                            f"USER ACTION REQUIRED: grant files:write scope in Slack app config. "
-                            f"Image upload disabled until scope granted; text-only delivery."
-                        )
-                    elif "not_in_channel" in err_str:
-                        logger.warning(
-                            f"Slack channel {channel_id}: bot not in channel. "
-                            f"Invite the bot to the channel; text-only delivery."
-                        )
-                    else:
-                        logger.warning(f"Slack files_upload_v2 capability error: {e}; text fallback")
+                    file_bytes = base64.b64decode(img.bytes_b64)
                 except Exception as e:
-                    logger.warning(f"Slack files_upload_v2 failed: {e}; text fallback")
+                    logger.warning(
+                        f"slack image decode failed image_id={img.image_id[:8]}...: {e}; "
+                        f"skipping"
+                    )
+                    file_bytes = None
+
+                if file_bytes is not None:
+                    # Slack initial_comment length limit (~4000 chars; verify at impl)
+                    initial_comment = message.content[:INITIAL_COMMENT_MAX] if message.content else ""
+                    caption_remaining = (
+                        message.content[INITIAL_COMMENT_MAX:]
+                        if message.content and len(message.content) > INITIAL_COMMENT_MAX
+                        else ""
+                    )
+                    try:
+                        # SINGLE call — no separate postMessage() follow-up for the file itself.
+                        # _safe_api_call returns an (ok, result) TUPLE on its failure contract —
+                        # UNPACK it (iter-002 note: calling .get(...) on the tuple is an
+                        # AttributeError on every upload; verify exact tuple shape at impl).
+                        ok, result = await self._safe_api_call(
+                            "files_upload_v2",
+                            channel_id=channel_id,
+                            filename=img.filename,
+                            content=file_bytes,
+                            initial_comment=initial_comment,
+                        )
+                        if ok and result:
+                            uploaded_count += 1
+                        else:
+                            logger.warning(
+                                f"Slack files_upload_v2 returned non-ok for channel {channel_id}: {result}; text fallback"
+                            )
+                    except SlackCapabilityError as e:
+                        # Classify BEFORE record_failure (amendment #4) — set flag, never re-attempt
+                        err_str = str(e).lower()
+                        if "missing_scope" in err_str or "files:write" in err_str:
+                            self._slack_capability_flags.add("files_upload_v2")
+                            logger.warning(
+                                f"Slack channel {channel_id}: missing files:write scope. "
+                                f"USER ACTION REQUIRED: grant files:write scope in Slack app config. "
+                                f"Image upload disabled until scope granted; text-only delivery."
+                            )
+                        elif "not_in_channel" in err_str:
+                            logger.warning(
+                                f"Slack channel {channel_id}: bot not in channel. "
+                                f"Invite the bot to the channel; text-only delivery."
+                            )
+                        else:
+                            logger.warning(f"Slack files_upload_v2 capability error: {e}; text fallback")
+                    except Exception as e:
+                        logger.warning(f"Slack files_upload_v2 failed: {e}; text fallback")
 
             # Caption >INITIAL_COMMENT_MAX: full-text follow-up chat.postMessage (amendment #8)
-            if image_uploaded and caption_remaining:
+            if uploaded_count > 0 and caption_remaining:
                 try:
                     await self._safe_api_call(
                         "chat.postMessage",
@@ -997,7 +1003,8 @@ This ships with the code change. Operators must manually grant the scope in thei
 | 21 | Add `_slack_capability_flags: set[str]` to `__init__`; modify `send()` to pre-check flag and skip API call entirely when set (amendment #4 — zero API calls once flagged) | 20 | `test_slack_capability_flag_zero_api_calls` — 5 `missing_scope` sends → only 1 actual API call (the first); flag set after first; subsequent 4 short-circuit before API call; `consecutive_failures == 0` throughout |
 | 22 | Modify `send()` to call SINGLE `files_upload_v2(channel_id, filename, content, initial_comment)` (DELETE upload-then-`postMessage(file=)` sketch — amendment #9); upload INSIDE per-channel lock (amendment #10); UNPACK the `_safe_api_call` (ok, result) tuple (R4 — .get on the tuple AttributeErrors every upload); SlackCapabilityError arrives via UNCAUGHT propagation (not a tuple return) | 1, 19, 21 | `test_slack_single_files_upload_v2` — exactly one `_safe_api_call("files_upload_v2", ...)` per send with verified kwargs (channel_id, filename, content, initial_comment); NO `postMessage(file=)` follow-up; per-channel-lock test asserts no interleaving |
 | 23 | `initial_comment` length limit: truncated + full-text follow-up `chat.postMessage` (amendment #8) | 22 | `test_slack_initial_comment_followup` — content >INITIAL_COMMENT_MAX → `files_upload_v2(initial_comment=content[:MAX])` + `chat.postMessage(text=content[MAX:])` |
-| 24 | WARN-once-per-channel for `missing_scope` — text delivered + USER ACTION ITEM flagged | 21 | `test_slack_warn_once` — 5 sends to same channel with `missing_scope` → exactly ONE WARN log line (not 5); WARN text contains "USER ACTION REQUIRED" + "files:write scope" |
+| 24 | WARN-once-per-channel for `missing_scope` — text delivered + USER ACTION ITEM flagged | 21 |
+| 46 | Slack N-image: iterate ALL images (iter-003 blocking #2) — per-image `files_upload_v2` in marker order (or single N-file call if SDK-verified at Task #19); per-image WARN-on-drop; no silent drops | 22 | `test_slack_warn_once` — 5 sends to same channel with `missing_scope` → exactly ONE WARN log line (not 5); WARN text contains "USER ACTION REQUIRED" + "files:write scope" |
 
 ### Phase B.5 — Tests (BOTH-seam regression + amendments)
 | # | Task | Depends on | Acceptance |
@@ -1014,13 +1021,14 @@ This ships with the code change. Operators must manually grant the scope in thei
 | 33 | Telegram adapter test: sendPhoto multipart assertion | 15 | `session.post(data=<FormData with photo>)` + photo field + caption (no parse_mode) |
 | 34 | Telegram adapter test: 4xx-non-transient classification (no circuit-breaker record) | 14 | Mock Telegram 400 → assert `circuit_breaker.consecutive_failures == 0`; mock 500 → assert recorded |
 | 35 | Telegram adapter test: sendPhoto→sendDocument ladder + >50MB skip + caption>1024 follow-up + parse_mode=None | 15, 16, 17, 18 | All 4 sub-cases pass |
-| 36 | Slack adapter test: SINGLE `files_upload_v2` call (NOT upload-then-postMessage) | 22 | Assert exactly one `_safe_api_call("files_upload_v2", ...)`; assert NO `chat.postMessage(file=)` follow-up |
+| 36 | Slack adapter test: SINGLE `files_upload_v2` call per image (NOT upload-then-postMessage) | 22 | Assert exactly one `_safe_api_call("files_upload_v2", ...)` PER IMAGE (N images → N calls or 1 N-file call per Task #46); assert NO `chat.postMessage(file=)` follow-up; if OQ#1 decides on `_safe_files_upload`, THIS test asserts on that method instead (R5 mechanism-reflection note) |
 | 37 | Slack adapter test: `missing_scope` classified BEFORE `record_failure` (consecutive_failures==0) | 20 | Mock `missing_scope` ok=false → `record_failure` NOT called; `SlackCapabilityError` raised AND propagates uncaught through both `_call_slack_api` and `_safe_api_call` (R4 single mechanism — no catch-and-return path) |
 | 38 | Slack adapter test: capability flag zero-API-call test (5 sends → only 1 actual API call) | 21 | `mock_api_call.call_count == 1` across 5 sends |
 | 39 | Slack adapter test: `initial_comment` truncation + follow-up + upload-inside-lock | 22, 23 | Per-channel-lock test asserts no interleaving; follow-up test asserts both calls in order |
 | 40 | End-to-end integration test (`tests/test_outbound_image_delivery.py`): mock source + mock `tmp_image_store` populated with a tiny PNG → dispatcher → adapter → assert `sent_messages[-1].images` populated and `sent_messages[-1].content` marker-free | 3, 4, 26 | Test passes via mock e2e (BOTH seams) |
 | 41 | End-to-end integration test: `store.delete` after success in delivering lane | 5 | Test asserts `store.delete.call_count == 1` after successful send; `== 0` after failed send |
 | 42 | Full-chain API-caller keeps marker (e2e twin) — POST `/api/messages` → assert marker byte-for-byte in `result.content` | 28 | E2E twin test passes; matches the regression test at #28 |
+| 47 | Slack adapter test: N-image delivery — no silent drops (iter-003 blocking #2) | 46 | `test_slack_multi_image_no_silent_drop` — 3 markers → 3 uploads attempted (or 1 N-file call); middle image fails → WARN for it + images 1,3 delivered; text unaffected |
 
 ### Phase B.6 — Docs + finalize
 | # | Task | Depends on | Acceptance |
@@ -1078,6 +1086,8 @@ Mock fixture: a 1×1 PNG (89 bytes) saved to a fixture tmp_image_store; `image_i
 - [ ] **Internal-report/internal_error_report/incomplete internal_agent:* colon-sources skip at adapter lookup before extraction** — test asserts `store.open_full` spy returns `call_count == 0`.
 
 ### Multi-image discipline (arch-rec §3 amendment #7)
+
+- [ ] **Slack N-image (approver iter-003 blocking #2):** ALL images attempted in marker order — per-image `files_upload_v2` calls (or one N-file call if the Task #19 SDK verification supports it); per-image WARN on failure; NO silent drops; text floor unaffected. Pinned by `test_slack_multi_image_no_silent_drop` (Task #47).
 - [ ] **Marker order preserved** — `extract_chart_images` returns `image_ids` in first-occurrence order (per-id dedupe).
 - [ ] **NO silent drops** — every dropped image WARNs with `image_id[:8]` + size + content_type. Discord `files=[…]` constructed from full image list; missing/corrupt image → WARN + drop from list (not silent). Telegram: per-image failure → WARN + skip; remaining images continue. Slack: per-image failure → WARN + skip; text delivered.
 - [ ] **All images delivered in single send** when no failures — Discord `files=[…]` (N); Telegram sequential sendPhoto/sendDocument per image (or upgrade to media-group API in v2); Slack: single files_upload_v2 with N files (verify at impl).

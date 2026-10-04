@@ -1,6 +1,6 @@
 # Decisions — chart-image-delivery
 
-**Status:** INITIAL record. Authored at Phase A planning. Phases B and D consume this. Do not amend light-heartedly; marker regex and capture contract are LOCKING contracts for downstream phases.
+**Status:** R5 state — Phase A locked sections (with reviewer/approver-ordered in-place corrections) + Phase B/D append-only addenda through approver iteration 003. Authored at Phase A planning. Phases B and D consume this. Do not amend light-heartedly; marker regex and capture contract are LOCKING contracts for downstream phases.
 **Author:** planner[v2] via plan-creation worker
 **Date:** 2026-10-04
 **Companion:** `phaseA-plan.md` (same directory)
@@ -622,6 +622,10 @@ Phase B plan §7 (Slack component) and Task #43 (B.6 docs) use the corrected ref
 
 # Phase D decisions — chart-image-delivery (cross-cutting consolidation + release)
 
+## §degradation-v2-toolchain — render-failure taxonomy (arch-rec §3 amendment #20, added R5)
+
+**Decision:** Charter-side degradation taxonomy per arch-rec Focus 4.3 — syntax errors keep the 3-attempt retry budget (SYNTAX ONLY); render-side failures never retry. Cold → pre-warm expected / async queue marker; env-class mmdc errors (ENOENT/sandbox/EACCES) → one retry after sandbox check, else degrade; timeout 124 → kill, no retry; `TmpImageStoreFull` / store-not-initialized → degrade, no retry (cap won't free mid-session); other `image_save` errors → one retry, else degrade. Every rung: no marker, text-only Mermaid, log line. Where this conflicts with §degradation's earlier charter-side retry prose, amendment #19's never-retry rule is operative (architecture-recommendation.md §3 precedence). Recorded here because the R2 fold-in missed this addendum (iter-003 tracking note).
+
 **Status:** APPENDED at Phase D planning. Companion to `phaseD-plan.md` (same directory). Phase A's locked sections (§marker, §capture, §degradation, §http-api) and Phase B's locked §phase-b-* sections are unchanged. This record is append-only.
 
 **Author:** planner[v2] via plan-creation worker
@@ -660,7 +664,7 @@ Phase B plan §7 (Slack component) and Task #43 (B.6 docs) use the corrected ref
 **Pin class split (per R5 fix — the pre-baseline gate depends on this):**
 
 - **PRESERVATION** (pins 1, 2, 3, 4, 5, 9, 13, 22, 23 — ~9 pins): pre-existing invariants that already hold on clean `latest` BEFORE any feature merge. Run them in the **D.0 pre-baseline gate task** (`tools/audit-chart-image-delivery.sh --class preservation`) on clean `latest` before A/B/C merge; if any fail, escalate as **pre-existing breakage** (open a fix ticket; do NOT log as feature regression).
-- **FEATURE** (pins 6, 7, 8, 10-partial, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 24 — ~15 pins): assert post-merge state. These CANNOT pass on pre-merge `latest`; they are the gate at release cut.
+- **FEATURE** (pins 6, 7, 8, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 24 = 15 pins — R5: #10 wholly FEATURE, matching phaseD): assert post-merge state. These CANNOT pass on pre-merge `latest`; they are the gate at release cut.
 
 **Audit-script + e2e-test run order (per `phaseD-plan.md` Tasks D.0 + D.1):**
 
@@ -704,7 +708,7 @@ grep -n 'chart-image-delivery' CHANGELOG.md      # expect: ≥1 hit under [Unrel
 
 **Decision:** The Phase D implementer produces `.agents/shared/planning/chart-image-delivery/release-report.md` (the FILLED-IN template) with **nine** enumerated sections per `phaseD-plan.md` Components §6 (R2 added the adopted-items ledger + deferred+residual sections; R3 renumbered the map to nine contiguous sections §1-§9 — canonical: 1 What shipped, 2 Test evidence, 3 USER ACTION ITEM, 4 Restart/promote matrix, 5 Rollback notes, 6 Adopted-items ledger, 7 Deferred-items ledger + accepted residual, 8 Real-platform smoke evidence, 9 Sign-off):
 
-1. **What shipped** — per-phase deliverable list (Phase A's 6 files, Phase B's 7 daemon files + slack-setup.md row, Phase C's **20** cardinal references + chart skill section). File lists verbatim.
+1. **What shipped** — per-phase deliverable list (Phase A's **10** files [9 code/prompt + decisions.md verify/append], Phase B's 7 daemon files + slack-setup.md row, Phase C's **20** cardinal references + chart skill section). File lists verbatim. [R5, iter-003 blocking #1]
 2. **Test evidence** — per-suite green counts (every suite named in `phaseD-plan.md` §Test Strategy). Counts from CI output, not just "✓".
 3. **USER ACTION ITEM — Slack `files:write` scope** — verbatim wording per `phaseD-plan.md` Components §6 §3 (the 5-step operator procedure + the text-only fallback note).
 4. **Restart/promote matrix** — verbatim table from `phaseD-plan.md` §restart-promote (the four rows: Phase A = no restart, Phase B = restart + promote, Phase C = no restart, docs/tests = n/a).
@@ -782,14 +786,14 @@ grep -n 'chart-image-delivery' CHANGELOG.md      # expect: ≥1 hit under [Unrel
 
 ## §phase-d-restart-promote — consolidated restart/promote matrix
 
-**Decision:** The FINAL restart/promote matrix for the chart-image-delivery release, surfaced in the release report §5 verbatim.
+**Decision:** The FINAL restart/promote matrix for the chart-image-delivery release. THIS section (§phase-d-restart-promote) is the CANONICAL matrix; the release report §4 reproduces it verbatim (the 6-row table here consolidates the plan's 4-row matrix plus the docs + release-cut rows). [R5 placement clarification]
 
 | Phase | Files | Daemon restart? | Promote? |
 |-------|-------|-----------------|----------|
-| A | `agents/charter/workflow.md`, `agents/charter/rule.md`, `agents/charter/soul.md`, `agents/charter/meta.json`, `agents/charter/skills-template/install-mermaid-cli.md`, `agents/_prompt_system/innate-skills/chart/skill.md` (paragraph addition) | NO (agent-prompt only; picked up at next instance spawn) | NO |
+| A (10 files) | `agents/charter/workflow.md`, `agents/charter/rule.md`, `agents/charter/soul.md`, `agents/charter/meta.json`, `agents/charter/skills-template/install-mermaid-cli.md`, `agents/charter/skills-template/install-mermaid-cli.lib.sh`, `agents/_prompt_system/innate-skills/chart/skill.md` (paragraph addition), `.agents/shared/context.md` (pre-warm one-liner), `agents/ari/workflow.md` (commissioning note), `decisions.md` (verify/append only) | NO (agent-prompt + bash lib only; picked up at next instance spawn / lib sourced per-render) | NO |
 | B | `daemon/sources/base.py`, `daemon/sources/registry.py`, `daemon/sources/dispatcher.py`, `daemon/sources/adapters/discord/adapter.py`, `daemon/sources/adapters/slack/adapter.py`, `daemon/sources/adapters/telegram.py`, `daemon/constants.py` | **YES** | **YES** |
 | C | `agents/_prompt_system/innate-skills/chart/skill.md` (Chat Delivery section + table row), **20** agent canonical-home files (`agents/*/{rule,soul,tools_note,workflow}.md`) | NO (agent-prompt only) | NO |
-| D | `tests/test_chart_image_delivery_e2e.py` (NEW), `tests/test_chart_image_delivery_audit.py` (NEW), `tools/audit-chart-image-delivery.sh` (NEW), `docs/changelog-pending/chart-image-delivery.md` (NEW), `.agents/shared/planning/chart-image-delivery/release-report-template.md` (NEW), `decisions.md` (APPEND §phase-d-*) | n/a (test/docs/planning only) | n/a |
+| D (10 files) | `tests/test_chart_image_delivery_e2e.py` (NEW), `tests/test_chart_image_delivery_audit.py` (NEW), `tools/audit-chart-image-delivery.sh` (NEW), `docs/changelog-pending/chart-image-delivery.md` (NEW), `.agents/shared/planning/chart-image-delivery/release-report-template.md` (NEW), `.agents/shared/planning/chart-image-delivery/release-report.md` (NEW — the FILLED, COMMITTED report; iter-003 blocking #6), `decisions.md` (APPEND §phase-d-*) | n/a (test/docs/planning only) | n/a |
 | docs | `docs/sources/slack-setup.md` (Phase B's row) | no (doc only) | no |
 | Release cut (Phase D.6) | `daemon/__init__.py` (`__version__` bump), `pyproject.toml` (`version` bump), `CHANGELOG.md` (`[Unreleased]` entry slice) | YES (release cut) | YES (per promote ceremony) |
 
@@ -826,16 +830,16 @@ grep -n 'chart-image-delivery' CHANGELOG.md      # expect: ≥1 hit under [Unrel
 
 ---
 
-## §phase-d-deferred-items-leger — supplementary notes (cross-references) (R2 update)
+## §phase-d-deferred-items-ledger — supplementary notes (cross-references) (R2 update)
 
 This section is a cross-reference index for the deferred-items ledger (§phase-d-deferred-items above) and the adopted-items ledger (§phase-d-adopted-items). No new content; just pointers to where each item is discussed in detail:
 
 **Deferred:**
 
-- **Telegram 4096-char text chunking** — Phase B §phase-b-telegram-4096-deferred at `decisions.md:393-403` (Phase B's lock).
-- **`source_hint` system-context injection** — Phase C open question #1 at `phaseC-plan.md:239-244` (Phase C's lock); Phase B §phase-b-source-hint-deferred at `decisions.md:378-389` (Phase B's deferral).
+- **Telegram 4096-char text chunking** — Phase B §phase-b-telegram-4096-deferred (Phase B's lock; content-addressed — line refs removed, R5).
+- **`source_hint` system-context injection** — Phase C open question #1 (Phase C's lock) + Phase B §phase-b-source-hint-deferred (Phase B's deferral); both content-addressed (line refs removed, R5).
 - **Real-platform e2e credentials** — operator workflow; no project-ticket home.
-- **HTTP-API structured image-ref response** — Phase A §http-api at `decisions.md:194-203` (current marker-only contract).
+- **HTTP-API structured image-ref response** — Phase A §http-api (current marker-only contract; content-addressed, R5).
 
 **Adopted (R2 NEW — promoted out of the prior deferred ledger):**
 
@@ -855,14 +859,14 @@ This section is a cross-reference index for the deferred-items ledger (§phase-d
 
 | # | Amendment | Source | Phase D action |
 |---|-----------|--------|-----------------|
-| R1 (D-side) | Invert pin #6 + update test matrix per arch-rec §3 amendment #21 | arch-rec §0/§1 + §3 amendment #21 + §5 risk | Pin #6 in `§phase-d-test-matrix` inverted; e2e Group 1 expanded with `test_progressive_lane_extracts_and_strips` + `test_progressive_then_completed_no_double_send` + `test_extraction_after_adapter_lookup` + `test_duplicate_marker_dedup` + empty-content-with-images; `test_image_get_provenance_feature_mismatch_text_delivered` added to Group 2; `test_foreign_feature_marker_text_fallback` added to Group 4; `test_install_mermaid_cli_4_signal_readiness_probe_in_skill` added to Group 5; `test_full_chain_api_caller_keeps_marker` enhanced with `open_with_meta` spy + e2e byte-for-byte twin |
+| R1 (D-side) | Invert pin #6 + update test matrix per arch-rec §3 amendment #21 | arch-rec §0/§1 + §3 amendment #21 + §5 risk | Pin #6 in `§phase-d-test-matrix` inverted; e2e Group 1 expanded with `test_progressive_lane_extracts_and_strips` + `test_progressive_then_completed_no_double_send` + `test_extraction_after_adapter_lookup` + `test_duplicate_marker_dedup` + empty-content-with-images; `test_image_get_provenance_feature_mismatch_text_delivered` added to Group 2; `test_foreign_feature_marker_text_fallback` added to Group 4; `test_install_mermaid_cli_4_signal_readiness_probe_in_skill` added to Group 5; `test_full_chain_api_caller_keeps_marker` enhanced with resolution-accessor spy (`open_full`/`open_with_meta` — assert ZERO store calls; R5 correction: post-addendum-4 the record accessor is `open_full`) + e2e byte-for-byte twin |
 | R2 | `store.delete` ADOPTED | arch-rec §3 amendment #22 + `decisions.md` §phase-b-r2-addendum-9 | Moved `image_delete-after-upload` row out of `§phase-d-deferred-items` into new `§phase-d-adopted-items` (R2 NEW); release report §6 carries the adopted ledger row; e2e Group 8 added with 4 test cases (`test_chat_delivery_calls_store_delete_once` + `test_chat_delivery_upload_failure_does_not_delete` + `test_api_source_does_not_delete` + `test_both_lanes_only_one_delete`) |
 | R5 | Split pin catalog into PRESERVATION / FEATURE; add D.0 pre-baseline gate task | Pre-BR5 fix for the unsatisfiable pre-baseline acceptance | `§phase-d-test-matrix` table gains a Class column + split rows; new `D.0 pre-baseline gate` task (`tools/audit-chart-image-delivery.sh --class preservation`) added; audit-script spec accepts `--class preservation\|feature\|all`; acceptance criteria §Cross-cutting regression gains D.0 line + 24-pin counts |
 | R6 | Pin #24 — Ari pre-warm reminder | arch-rec §3 amendment #18 + §6 pending #3 | Pin #24 added to `§phase-d-test-matrix` (FEATURE class; content-addressable grep in `.agents/shared/context.md` AND `agents/ari/workflow.md`); e2e Group 5 installer hygiene unchanged (this is a pin-only addition) |
 | R8 | Add real-astream-lane e2e | arch-rec §0/§1 dominant finding + §3 amendment #21 | New e2e Group 7 (REAL-ASTREAM-LANE) added with 4 tests (`test_astream_discord_user_receives_png` + `test_astream_progressive_lane_marker_extracted` + `test_astream_progressive_lane_failure_routes_to_completed` + `test_astream_internal_agent_source_no_extract`); harness via existing `tests/e2e/` daemon-infrastructure |
 | OPT-21→20 | Update 21 to 20 EVERYWHERE (per Phase C R2 reviewer correction) | `phaseC-plan.md:75-81` verified list | Narrative lines 14, 30, 44, 145, 185, 270 in phaseD-plan.md updated to "20"; risk-1 + risk-3 wording in decisions.md §phase-d-deferred-items updated; pin #17 catalog updated; test counts (Phase C coverage) updated; SHA tripwire (Group 6) updated; Component §6 §1 updated |
 | OPT-busy/paused | Correct _BUSY/_PAUSED_STRING pin labels (verified sites: busy = chart_tools.py:55 + test_chart_tools.py:296 + skill.md:62,68 narrative; paused = chart_tools.py:222 literal + test_chart_tools.py:298 + skill.md:74 narrative) | Verified spot-check 2026-10-04 | Pin #1 (busy) and #2 (paused) re-labeled to content-addressable grep descriptions; pin #19 updated to specify call-site (skill.md) rather than `skill.md:74` (which is the paused site, not busy) |
-| OPT-stale-real-id | Add stale-real-id residual (~1-3%, revisit trigger strip-rate >10% post-Phase C or user report) | arch-rec §4 merge-table focus #6 + §5 risk + §6 pending #2 | New row R in `§phase-d-deferred-items`; cross-ref added to `§phase-d-deferred-items-leger`; risk #13 added to phaseD-plan.md Risks table |
+| OPT-stale-real-id | Add stale-real-id residual (~1-3%, revisit trigger strip-rate >10% post-Phase C or user report) | arch-rec §4 merge-table focus #6 + §5 risk + §6 pending #2 | New row R in `§phase-d-deferred-items`; cross-ref added to `§phase-d-deferred-items-ledger`; risk #13 added to phaseD-plan.md Risks table |
 | GLOBAL-precedence | Add precedence clause to phaseD-plan.md header | Project-wide convention adopted in R2 (per phaseC-plan.md:9 + phaseB-plan.md R2) | Header updated: `> **Precedence:** \`architecture-recommendation.md\` §3 governs over phase-plan prose on conflict.` |
 | GLOBAL-status | Update Status to "Draft R2 — Revision loop 2 (R1-R9 fold-in)" | Project-wide convention | phaseD-plan.md header Status updated |
 
