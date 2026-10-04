@@ -82,6 +82,17 @@ from daemon.tools.snapshot_tools import (
     is_snapshot_create_enabled,
 )
 
+
+# R18 (2026-10-04) — local stand-in for AsyncMessageResult. Mirrors
+# the helper in the unit test file. v3 tests pin the snapshot-
+# create / metrics / search behavior; the auto-dispatch surface is
+# exercised in TestR18AutoDispatch. A minimal stub here is enough
+# to satisfy the R18 enqueue call.
+class _FakeAsyncMessageResult:
+    def __init__(self, message_id: str = "msg-v3-1", queued: bool = True) -> None:
+        self.message_id = message_id
+        self.queued = queued
+
 VALID_KIND_TAGS = ["kind:implementation"]
 # Same tag set used by the Wave-2b suite — keeps the verdict math
 # stable across test files.
@@ -158,7 +169,7 @@ class FakeSearchService:
 
 
 class FakeManager:
-    """R6b ordering + Wave-3 metrics passthrough."""
+    """R6b ordering + Wave-3 metrics passthrough + R18 enqueue."""
 
     def __init__(self, rows: dict[str, Any], repo: SnapshotRepository):
         self._instance_repository = FakeInstanceRepo(rows)
@@ -170,6 +181,19 @@ class FakeManager:
         self.events: list[str] = []
         self.spawn_calls: list[dict[str, Any]] = []
         self.metadata_calls: list[tuple[str, dict[str, Any]]] = []
+        # R18 (2026-10-04) auto-dispatch seam — the spawn_hot_instance
+        # tool now calls ``manager.enqueue_message`` to enqueue the
+        # task as the child's first turn. The v3 tests pin the
+        # snapshot-create / metrics / search behavior; the
+        # auto-dispatch surface is tested in TestR18AutoDispatch in
+        # the unit test file. A no-op recorder is sufficient here.
+        self.enqueue_calls: list[dict[str, Any]] = []
+        self.enqueue_result: Any = _FakeAsyncMessageResult()
+
+    async def enqueue_message(self, **kwargs: Any) -> Any:
+        self.events.append("enqueue")
+        self.enqueue_calls.append(kwargs)
+        return self.enqueue_result
 
     def spawn_instance(self, **kwargs) -> tuple[str, str | None]:
         self.events.append("spawn")
