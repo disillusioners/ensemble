@@ -56,6 +56,7 @@ from daemon.repositories.snapshot.models import (
 from daemon.repositories.snapshot.repository import SnapshotRepository
 from daemon.services.snapshot_executor import SnapshotExecutor
 from daemon.tools.snapshot_tools import (
+    _denied_result,
     create_snapshot_tools,
     is_snapshot_create_enabled,
 )
@@ -464,8 +465,94 @@ class TestSpawnHotInstance:
     def test_auth_failure_is_an_error_not_a_spawn(self, tools, manager, monkeypatch):
         self._auth_denied(monkeypatch)
         result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert result["error"] is not None
+        # Silent-failure fix (2026-10-04 E2E finding #1): an
+        # authorization denial MUST return ``started: "blocked"``,
+        # NOT ``"cold"`` — the previous shape let callers confuse
+        # "spawned cold" with "spawn refused". The error field
+        # already carried the membership message; the
+        # ``started == "blocked"`` value is the loud, machine-
+        # readable differentiator the contract was missing.
+        assert result["started"] == "blocked"
         assert result["instance_id"] is None
+        assert result["snapshot_id"] is None
+        assert result["staleness"] == {}
+        assert "Permission denied" in result["hint"]
+        assert "is not in caller's team" in result["error"]
+        assert manager.events == []  # nothing spawned
+
+    def test_auth_failure_result_keys_match_cold_contract(
+        self, tools, monkeypatch
+    ):
+        """R14 6-key contract (§4.3) is preserved on the BLOCKED path."""
+        self._auth_denied(monkeypatch)
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
+        assert set(result.keys()) == RESULT_KEYS
+
+    def test_auth_failure_hint_is_actionable(
+        self, tools, monkeypatch
+    ):
+        """The hint must name the refusal + how to resolve it (caller
+        cannot otherwise self-correct from the result alone)."""
+        self._auth_denied(monkeypatch)
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
+        # The actionable direction: add the requested agent to the
+        # caller's team_members. Caller-facing language, not internal
+        # implementation detail.
+        assert "team_members" in result["hint"]
+        # The underlying error is surfaced so the caller knows WHO
+        # is missing the requested agent.
+        assert "is not in caller's team" in result["hint"]
+
+    def test_denied_result_helper_shape(self):
+        """Unit-level pin on ``_denied_result`` itself — guards the
+        helper against future drift independent of the tool's wiring."""
+        result = _denied_result(
+            error="Agent 'leader' is not allowed to spawn 'worker'. "
+            "Allowed team members: []"
+        )
+        assert result == {
+            "instance_id": None,
+            "started": "blocked",
+            "snapshot_id": None,
+            "staleness": {},
+            "hint": (
+                "Permission denied — spawn blocked "
+                "(reason: permission-denied). Nothing was spawned. "
+                "Resolve the authorization problem (e.g. add the "
+                "requested agent to the caller's team_members) and "
+                "retry. Detail: Agent 'leader' is not allowed to "
+                "spawn 'worker'. Allowed team members: []"
+            ),
+            "error": (
+                "Agent 'leader' is not allowed to spawn 'worker'. "
+                "Allowed team members: []"
+            ),
+        }
+
+    def test_no_caller_returns_blocked_not_cold(self, manager, monkeypatch):
+        """Same-class fix for the wiring-bug branch: when
+        ``caller_agent_id`` is empty (the tool was created without
+        an agent binding), the refusal MUST surface as
+        ``started: "blocked"`` too — NOT as a cold-fallback shape
+        that pretends the spawn was a snapshot miss.
+
+        The ``create_snapshot_tools`` signature is ``(manager,
+        current_instance_id, agent_id, version_tag)`` — we pass an
+        empty ``agent_id`` (3rd positional) to trigger the
+        ``caller_agent_id = ""`` branch at the wiring guard.
+        """
+        tools = create_snapshot_tools(manager, "caller-1", "", None)
+        # Belt-and-braces: keep auth-ok monkeypatch in place so a
+        # regression in the wiring-branch order would still fail
+        # this test (auth would mask the no-caller path).
+        self._auth_ok(monkeypatch)
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
+        assert result["started"] == "blocked"
+        assert result["instance_id"] is None
+        assert result["snapshot_id"] is None
+        assert result["staleness"] == {}
+        assert "Permission denied" in result["hint"]
+        assert "wiring/configuration bug" in result["error"]
         assert manager.events == []  # nothing spawned
 
     def test_explicit_warm(self, engine, caller_rows, monkeypatch):

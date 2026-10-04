@@ -1,5 +1,12 @@
 # Test Packs
 
+## Completed commission — AUTO-CONTINUE-RUNNING-AFTER-RESTART (merge-gate pack registration) (2026-10-04)
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `auto_continue_boot_pass_unit_test` | `test/packs/auto_continue_boot_pass_unit_test.sh` | tests/unit/repositories/test_auto_continue_candidates.py (26) + tests/unit/services/test_auto_continue_boot_pass.py (23) + tests/unit/services/test_auto_continue_terminalizer.py (7) — M1-M22 selection/CAS/kill-switch/isolation/stagger + Δ1 call-site gate + shared-SQL-untouched pin | <1 min | 2026-10-04 | ✅ PASS 56/56 (12.49 s) |
+| `auto_continue_interleaving_unit_test` | `test/packs/auto_continue_interleaving_unit_test.sh` | tests/unit/services/test_auto_continue_interleaving.py (14) — 6-row AC4 interleaving matrix (incl. Row 2 pass-first + Row 4 SUCCESS terminalizer path) + [BOOT_CONTINUE] log-contract caplog + terminalize-early lock-out + carve-outs + boot-order pin | <1 min | 2026-10-04 | ✅ PASS 14/14 (5.73 s) |
+
 ## Completed commission — POST-RESTART ARM-NOTIFY PHASE 4 (banner + runbook + drill + release notes + banner pack) (2026-10-04)
 
 Branch `feature/post-restart-arm-notify` @ phase 4 commit (base `85fbf709` = phases 1–3 tip). **VERDICT: 🟢 BANNER PACK PASS — phase 4 closes the operator-facing surface.** Arm-time banner in `daemon/tools/upgrade_tools.py` swapped to the auto-wake prose in BOTH arm-return branches (D-FA1.2 supersession close-out — the obsolete pull-model "ask me to run `upgrade_status`" instruction is gone, regression-pinned); operator runbook `docs/runbooks/post-restart-arm-notify.md` (kill-switch, structured log lines, Recovery Flow covering R-21/R-24/R-25, all six ADRs referenced); bash drill `test/drills/post_restart_arm_notify_drill.sh` + driver `test/drills/wake_drill_driver.py` (six sandbox scenarios D1–D6, P2.2 tool-interlock technique, 9/9 checks exit-0 GREEN); drill smoke `tests/test_post_restart_arm_notify_drill_smoke.py`; release-notes line in `CHANGELOG.md` [Unreleased]. The banner pack is the SIXTH arm-notify pack (r4 fold W3 complete). No live contact (fake homes, in-process driver, live-pid checkpoint unchanged).
