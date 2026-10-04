@@ -214,7 +214,7 @@ rm -f "$HOME/.cache/charter/mermaid-session-state.json"
 rm -f "$HOME/.cache/charter/mermaid-install.lock"
 ```
 
-## ## READINESS_PROBE (single source of truth — see install-mermaid-cli.lib.sh)
+## READINESS_PROBE (single source of truth — see install-mermaid-cli.lib.sh)
 
 The 4-signal READINESS_PROBE lives in the extracted library
 `install-mermaid-cli.lib.sh` (sourced by charter's workflow.md Step 5).
