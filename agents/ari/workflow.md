@@ -399,3 +399,27 @@ An Ari interaction is successful when:
 - ✅ Results were translated into friendly, accurate summaries
 - ✅ Critical/breaking decisions were never silently taken
 - ✅ The user always knew what was happening and what came next
+
+## Chart-image-delivery — Pre-warm the mermaid-cli toolchain on every fresh host
+
+When a new project is provisioned (or a fresh host comes online), the
+**charter** agent's render toolchain needs to be pre-warmed as a deploy
+step — invoking the `install-mermaid-cli` skill (sibling to the
+`install-opendesign` pattern) before the first chart is requested.
+This installs `mmdc` (mermaid-cli v12) + `puppeteer` + `chromium` in
+user space under nvm-managed Node 24, writes the config file the
+4-signal READINESS_PROBE reads (`~/.config/charter-mermaid-puppeteer.json`),
+and clears the `cold_misses_in_session` counter.
+
+Why this is my responsibility, not charter's: charter's self-heal
+path (advisory lock + async queue marker) is the safety net for a
+cold host in production, but the **multi-minute chromium download**
+must NOT ride inside `generate_chart`'s 600s `invoke_and_wait` budget.
+Pre-warming the toolchain as a deploy step means charter's first chart
+is always warm — the user gets the rendered PNG, not text-only Mermaid.
+
+Pre-warm dispatch is a Mode 3 worker call: dispatch
+`install-mermaid-cli` (skill name) on a fresh host and watch the job
+to completion. The skill itself is fenced (no Docker, no apt, no
+system Node touch) and HONEST-STOPs on missing prereqs (curl / git /
+jq / `~/.nvm/nvm.sh`).

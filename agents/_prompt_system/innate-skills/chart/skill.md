@@ -56,6 +56,8 @@ A good `description` specifies:
 
 `generate_chart()` returns a single ```mermaid block, already validated. Paste it directly into your response — don't re-wrap, re-tag, or strip the fence. If a validation warning is returned, decide whether it's good enough, or simplify the description and call `generate_chart()` again. The result may include a 1–2 sentence explanation; treat that as part of the deliverable.
 
+**Chat Delivery — preserve the trailing image-reference marker.** When the render to PNG succeeds, `generate_chart()`'s result includes a single trailing line of the form `<!-- ens-img:chart-render:<32-hex-id> -->`. **Do not strip that line**; pass the result through verbatim into your final response so the chat-source dispatcher can extract the marker, strip it from the visible text, and attach the rendered PNG to the same message via the platform's native API (Discord / Slack / Telegram). Treat the marker as a byte-stable contract — no reformatting, no wrapping in code fences, no comment-out, no manual edits. The marker is conditional: it is only present when the render and persist succeeded; on any failure path, the result is text-only Mermaid with no marker.
+
 ## Best Practices
 
 - **Be specific.** "Create a flowchart" is too vague; "Create a flowchart TD showing API → Auth Middleware → Handler → DB, with branches for cache hit/miss" is right.
