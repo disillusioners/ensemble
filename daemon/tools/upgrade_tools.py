@@ -76,8 +76,10 @@ from ._tool_registry import register_tool_category
 from . import upgrade_journal as uj
 from .upgrade_journal import (
     JournalTorn,
+    PENDING_WAKE_GRACE_S,
     PendingAction,
     PendingOp,
+    PendingWake,
     iso_plus,
     mint_nonce,
     mint_run_id,
@@ -1078,6 +1080,124 @@ _OUTCOME_LABELS: dict[str, str] = {
 # ═══════════════════════════════════════
 # Actor-tool helpers (P2.2 Dispatch B — system_restart / system_upgrade)
 # ═══════════════════════════════════════
+
+
+# Post-Restart Arm-Notify capture helpers (ADR-039 + ADR-041, Phase 1 T8/T9).
+#
+# These helpers snapshot the in-memory routing context at arm time so the
+# wake record can re-stamp the user-origin window on the wake turn (Phase 2,
+# T6). The capture is best-effort — non-user-origin arms leave the wake's
+# source as "" (sentinel, falls back to "api" in Phase 2); the agent_id is
+# informational only (the wake's target is the instance id).
+#
+# Defensive: every helper swallows exceptions and returns a sentinel —
+# the arm NEVER blocks on the capture (D-FA2.2, "never blocks on the
+# agent id resolution").
+
+
+def _capture_user_source(manager: "InstanceManager | Any", instance_id: str) -> str:
+    """Read the recorded ``source`` from the manager's per-instance
+    user-origin window. Returns ``""`` on absence (non-user-origin arm;
+    Phase 2 falls back to ``"api"`` for routing). Defensive — never raises.
+    """
+    try:
+        windows = getattr(manager, "_user_origin_windows", None)
+        if not isinstance(windows, dict):
+            return ""
+        entry = windows.get(instance_id)
+        if not isinstance(entry, dict):
+            return ""
+        source = entry.get("source")
+        return str(source) if isinstance(source, str) else ""
+    except Exception:  # defensive — capture is best-effort
+        return ""
+
+
+def _capture_user_message_id(
+    manager: "InstanceManager | Any", instance_id: str
+) -> str | None:
+    """Read the recorded ``message_id`` from the manager's per-instance
+    user-origin window. Returns ``None`` on absence. Defensive — never
+    raises.
+    """
+    try:
+        windows = getattr(manager, "_user_origin_windows", None)
+        if not isinstance(windows, dict):
+            return None
+        entry = windows.get(instance_id)
+        if not isinstance(entry, dict):
+            return None
+        msg_id = entry.get("message_id")
+        return str(msg_id) if isinstance(msg_id, str) else None
+    except Exception:  # defensive
+        return None
+
+
+def _resolve_agent_id(
+    manager: "InstanceManager | Any", instance_id: str
+) -> str | None:
+    """Read the ``agent_id`` for the arming instance via the instance
+    repository (canonical: ``manager._instance_repository``). Returns
+    ``None`` on a miss (the wake's target is the instance id, not the
+    agent id — the agent id is informational). Defensive
+    ``try/except Exception`` returns ``None`` on any repo error; the
+    arm never blocks on the agent id resolution (D-FA2.2).
+    """
+    try:
+        repo = getattr(manager, "_instance_repository", None)
+        if repo is None:
+            return None
+        get = getattr(repo, "get", None)
+        if not callable(get):
+            return None
+        meta = get(instance_id)
+        if meta is None:
+            return None
+        agent_id = getattr(meta, "agent_id", None)
+        return str(agent_id) if isinstance(agent_id, str) else None
+    except Exception:  # defensive
+        return None
+
+
+def _arm_pending_wake_for_op(
+    manager: "InstanceManager | Any",
+    install_dir: Path,
+    op: PendingOp,
+    current_instance_id: str,
+) -> None:
+    """Capture the routing context + write the ``PendingWake`` for an
+    armed ``PendingOp`` (Phase 1 T8/T9). Called INSIDE the lock-holding
+    ``try`` block at BOTH arm sites (``system_restart`` and
+    ``system_upgrade``) — the wake rides the SAME caller-acquired
+    journal lock as the ``pending_op`` write; ``journal_write`` has no
+    internal lock (architecture delta #3, ADR-039). Best-effort, never
+    raises (a failure logs WARNING; the arm itself succeeds — wake
+    absence is the documented degraded mode).
+    """
+    try:
+        wake = PendingWake(
+            run_id=op.run_id,
+            kind=op.kind,
+            env=op.env,
+            arming_instance_id=current_instance_id,
+            arming_agent_id=_resolve_agent_id(manager, current_instance_id),
+            source=_capture_user_source(manager, current_instance_id),
+            message_id=_capture_user_message_id(manager, current_instance_id),
+            message_metadata={},
+            target_version=op.target if op.kind == "promote" else None,
+            mode=op.mode if op.kind == "restart" else None,
+            armed_at=op.armed_at,
+            expires_at=op.expires_at,
+            abandon_after=iso_plus(op.expires_at, PENDING_WAKE_GRACE_S),
+        )
+        uj.arm_pending_wake(install_dir, wake)
+    except Exception as exc:  # never-raises — arm itself stays clean
+        logger.warning(
+            "system_restart/system_upgrade: arm_pending_wake failed for "
+            "run_id=%s: %s — arming continues without wake (the arm's "
+            "pending_op IS persisted; the wake is absent; documented mode)",
+            op.run_id, exc,
+        )
 
 
 def _journal_refusal_event(reason: str, message: str) -> None:
@@ -2206,6 +2326,15 @@ Returns:
                     },
                 )
                 uj.write_pending_op(install_dir, op)
+                # Post-Restart Arm-Notify (ADR-039 + ADR-044): ride the SAME
+                # caller-acquired journal lock as ``pending_op`` (the wake is
+                # structurally inseparable from the arm; architecture delta
+                # #3 — atomicity is BY the caller's lock, not the journal's).
+                # INSIDE the same lock-holding ``try`` so a torn journal /
+                # OSError unwinds BOTH writes.
+                _arm_pending_wake_for_op(
+                    manager, install_dir, op, current_instance_id
+                )
             except (JournalTorn, OSError, KeyError) as exc:
                 # NIT-2 (P2.2 tidy cycle-3 carry-over, closed P2.3 B3.5):
                 # unwind BEFORE releasing the lock. Releasing first opened
@@ -2255,7 +2384,7 @@ Returns:
                     "executes: after this turn (deferred post-turn trigger; the "
                     "fallback is restart.sh's bounded waiter / boot sweep)",
                     "expected downtime 15-90s (SINGLE-TERM + launcher re-exec + boot preflight)",
-                    f"post-restart: ask me to run upgrade_status(run_id=\"{run_id}\") or release_info(section=current)",
+                    f"post-restart: the arm is recorded (run_id=\"{run_id}\"); on daemon restart an auto-wake will be delivered to this instance to report the outcome — no user action required; kill-switch: ENSEMBLE_POST_RESTART_ARM_NOTIFY=0 in <install_dir>/.env",
                     f"journal: releases/state.json pending-op opened (kind=restart, started_at={op.armed_at}, owner=exec-pending)",
                     f"trigger: {'post-turn-callback armed' if marker_ok else 'post-turn callback unavailable — fallback (bounded waiter/boot sweep)'}",
                     busy,
@@ -2847,6 +2976,15 @@ never decides go/rollback).
                     confirmed_source=confirmed_source,
                 )
                 uj.write_pending_op(install_dir, op)
+                # Post-Restart Arm-Notify (ADR-039 + ADR-044): ride the SAME
+                # caller-acquired journal lock as ``pending_op`` (the wake is
+                # structurally inseparable from the arm; architecture delta
+                # #3 — atomicity is BY the caller's lock, not the journal's).
+                # INSIDE the same lock-holding ``try`` so a torn journal /
+                # OSError unwinds BOTH writes.
+                _arm_pending_wake_for_op(
+                    manager, install_dir, op, current_instance_id
+                )
             except (JournalTorn, OSError, KeyError) as exc:
                 journal_lock_release(install_dir)
                 return f"Error: system_upgrade failed while arming: {type(exc).__name__}: {exc}"
@@ -2868,7 +3006,7 @@ never decides go/rollback).
                 [
                     f"UPGRADE ARMED — run_id={run_id} env={self_env} target={version} mode=promote",
                     "executes: after this turn completes (deferred — daemonized promote.sh)",
-                    f"watch: upgrade_status(run_id=\"{run_id}\") for phase transitions; terminal state readable post-restart",
+                    f"post-restart: the arm is recorded (run_id=\"{run_id}\"); on daemon restart an auto-wake will be delivered to this instance to report the outcome — no user action required; kill-switch: ENSEMBLE_POST_RESTART_ARM_NOTIFY=0 in <install_dir>/.env",
                     f"journal: releases/state.json txn opened (started_at={op.armed_at}, owner=exec-pending)",
                     (
                         f"live-confirmation: nonce consumed (confirmed_source={confirmed_source})"

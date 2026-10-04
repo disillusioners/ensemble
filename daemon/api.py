@@ -1486,6 +1486,15 @@ async def lifespan(app: FastAPI):
     )
 
     upgrade_install_dir = _resolve_install_dir(_self_env_marker())
+    # Post-Restart Arm-Notify (Phase 2 T9 + T18, r4 fold C2): wire the
+    # manager into the sweep service as a constructor kwarg. The wake
+    # delivery's ``self._manager.enqueue_message`` + ``stamp_user_origin_window``
+    # are reachable only via this wired attribute — a module-level
+    # ``manager`` reference would violate AC6 (parallel-machinery ban).
+    # The manager singleton is in scope at this lifespan block; the
+    # existing ``manager.set_upgrade_journal_sweep(upgrade_journal_sweep)``
+    # call below (api.py:1514 in the pre-feature version) confirms
+    # availability. No-op when manager is not yet constructed.
     upgrade_journal_sweep = UpgradeJournalSweepService(
         upgrade_install_dir,
         reconcile_interval_seconds=(
@@ -1494,6 +1503,7 @@ async def lifespan(app: FastAPI):
         reaper_timeout_seconds=(
             config.services.upgrade_journal_reaper_timeout_seconds
         ),
+        manager=manager,
     )
     try:
         if upgrade_install_dir is not None:
@@ -1502,6 +1512,22 @@ async def lifespan(app: FastAPI):
                 logger.info(
                     "UpgradeJournalSweepService boot reconcile: %s",
                     boot_note,
+                )
+            # Post-Restart Arm-Notify (Phase 2 T9, D-FA5.4 + ADR-040):
+            # the wake sweep's boot pass. Wrapped in try/except (never
+            # aborts boot); the wake sweep itself is wrapped at TWO levels
+            # (per-wake + sweep-level) so a wake failure cannot abort boot.
+            try:
+                wake_result = await upgrade_journal_sweep.sweep_wake_records()
+                logger.info(
+                    "UpgradeJournalSweepService wake boot sweep: %s",
+                    wake_result,
+                )
+            except Exception as wake_boot_exc:  # noqa: BLE001
+                logger.warning(
+                    "UpgradeJournalSweepService wake boot sweep failed "
+                    "(the periodic tick will retry): %s",
+                    wake_boot_exc,
                 )
     except Exception as boot_exc:  # best-effort — never aborts boot
         logger.warning(
