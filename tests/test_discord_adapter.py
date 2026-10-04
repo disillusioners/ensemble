@@ -1468,10 +1468,10 @@ class TestSendRouting:
             source_id="discord-main",
         )
         await adapter_with_repo.send(out)
-        # ``channel.send`` is invoked positionally with ``content`` as the first
-        # positional argument.
+        # ``channel.send`` is invoked with ``content`` as a keyword argument
+        # (Phase B kwarg-only _send_single_chunk signature).
         call_args = fake_target.send.await_args
-        sent_content = call_args.args[0]
+        sent_content = call_args.kwargs["content"]
         assert "<think>" not in sent_content
         assert sent_content == "visible"
 
