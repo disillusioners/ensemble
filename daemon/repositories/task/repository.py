@@ -4499,8 +4499,13 @@ class TaskRepository:
                         "SELECT 1 FROM job_queue_items jqi "
                         "WHERE jqi.job_id = task.work_id "
                         f"AND jqi.admission_state IN {active_admission_states_sql()} "
-                        "AND jqi.deleted_at IS NULL"
-                        f") {_arm3_mirror_sql}"
+                        "AND jqi.deleted_at IS NULL)"
+                        # Render the arm-3 suffix only when present —
+                        # with the kill-switch OFF the suffix is ""
+                        # and the unconditional f-string rendered a
+                        # trailing space into the audit SQL string
+                        # (post-review green #4).
+                        + (f" {_arm3_mirror_sql}" if _arm3_mirror_sql else "")
                     )
                 ).all()
                 doomed_work_ids = [r[0] for r in doomed_rows if r[0] is not None]

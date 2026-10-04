@@ -1182,3 +1182,47 @@ original numbering (see §11 below).
 
 ---
 
+
+### §16 — POST-REVIEW HARDENING BACKLOG (recorded-not-implemented, 2026-10-04)
+
+**Appendix (additive; no history rewrites).** The external
+post-implementation code review (APPROVE-WITH-NOTES, 2026-10-04)
+recorded the following hardening items as backlog. They are
+RECORDED-NOT-IMPLEMENTED: none is a merge blocker for the F-1/F-2
+branch; each is a candidate for a follow-up hardening cycle.
+
+(a) **S28 PG positive ledger-skip test.** A real-PG test proving
+the parent-history PREFIX ledger POSITIVE path (a parent history
+carrying the real no-colon HumanMessage stamp ⇒ the lane-2
+per-row pass skips with `skipped_already_reported += 1`). The
+shipped S24/S27 pair covers admission + no-duplicate-execution;
+the positive-skip path is unit-pinned only.
+
+(b) **`except (Exception, CancelledError)` at both bridge seams.**
+The manager-loop bridge call sites (parent-history PREFIX check
+and anchor-less derivation in
+`daemon/services/report_delivery_recovery.py`) catch bare
+`Exception`; a `CancelledError` crossing the seam would escape
+the per-row isolation. Python 3.13-safe re-raise semantics
+apply (see the lifecycle-hooks precedent).
+
+(c) **Bridge `.result(timeout)` coroutine-cancel on timeout.**
+When the manager-loop bridge times out, the scheduled coroutine
+keeps running on the manager loop (fire-and-forget). A follow-up
+could cancel the future/wrapped task on timeout so a wedged
+read cannot accumulate across sweep cycles. Both seams (bridge
+method + the step-4 seam in `manager.py`).
+
+(d) **Pre-manager-init sweep debug log**
+(`report_delivery_recovery.py:1233-1236` area): the anchor-less
+"no derivable child_message_id" WARNING currently fires before
+the manager is fully initialized during boot-adjacent sweeps;
+a debug-grade pre-init marker would distinguish that expected
+boot-noise from genuine wedge persistence.
+
+(e) **Falsy-non-None error operator-visibility warning.** An
+`Outcome(status="error", error="")` (falsy-but-not-None error)
+currently trips neither the `_has_truthy_error` flip nor any
+WARNING — the bus silently skips the parent-error flip. A
+one-line operator-visibility warning for the falsy-non-None
+shape would keep that state observable.

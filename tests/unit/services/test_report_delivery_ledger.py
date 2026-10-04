@@ -14,8 +14,9 @@ parent-history delivery evidence is the report-frame
 ``additional_kwargs["source"] = f"internal_report:{child_id}"``
 (NO trailing colon) — which serializes with ``role == "user"``
 (``daemon/utils.py:109`` role_map maps ``human → user``). The
-queue-side mint shape (``daemon/manager.py``, all six
-``MessageQueue`` write sites) is
+queue-side mint shape (``daemon/manager.py`` plus
+``daemon/services/child_reports.py:3762`` — seven
+``MessageQueue(...)`` write sites in total) is
 ``internal_report:{child_id}:{message_id}`` (colon-delimited).
 The matcher accepts BOTH via the boundary rule and rejects
 child-boundary violations (``internal_report:{child}2``,
@@ -133,8 +134,9 @@ class TestParentHistoryHasInternalReportPrefixMatch:
         self,
     ) -> None:
         """The colon-delimited queue-side mint shape
-        (``internal_report:{child_id}:{anchor}`` — written by all
-        six ``MessageQueue`` sites in ``daemon/manager.py``) also
+        (``internal_report:{child_id}:{anchor}`` — written by the
+        seven ``MessageQueue`` write sites, six in
+        ``daemon/manager.py`` plus ``child_reports.py:3762``) also
         matches: both forms exist historically, so the boundary
         rule accepts exact-no-colon OR colon-delimited."""
         from daemon.services.report_delivery_ledger import (

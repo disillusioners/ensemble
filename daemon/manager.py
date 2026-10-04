@@ -777,12 +777,21 @@ class InstanceManager:
             # is swallowed (the function is non-raising in practice;
             # the try/except is a belt for unexpected DB / engine
             # states) and consumers fall back to ``None``.
+            # Post-review fix: the resolution itself lives INSIDE the
+            # try (review yellow #1) — with the name resolved after
+            # the except, a lazy-import failure left ``get_boot_epoch``
+            # unbound and the NEXT reference raised NameError,
+            # crashing ``InstanceManager.__init__`` and defeating the
+            # swallow-to-None contract. A boot must never die because
+            # boot_epoch failed.
+            _boot_epoch = None
             try:
                 from daemon.services.boot_epoch import (
                     capture_boot_epoch as _capture_boot_epoch,
-                    get_boot_epoch,
+                    get_boot_epoch as _get_boot_epoch,
                 )
                 _capture_boot_epoch(self._engine)
+                _boot_epoch = _get_boot_epoch()
             except Exception as _boot_epoch_err:
                 logger.warning(
                     f"discard_on_startup: capture_boot_epoch failed "
@@ -791,7 +800,7 @@ class InstanceManager:
                 )
             msg_count = self._queue_repository.clear_all(
                 preserve_in_flight=True,
-                boot_epoch=get_boot_epoch(),
+                boot_epoch=_boot_epoch,
             )
             logger.info(
                 f"Cleared {msg_count} backlog message(s) "

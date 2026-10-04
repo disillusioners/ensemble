@@ -713,16 +713,11 @@ class DependencyBus:
                     # Phase 1 (2026-06-24): capture the LAST child
                     # error text per parent. ``outcome.error`` is the
                     # authoritative source from the bus terminal
-                    # emit; we use a non-empty fallback ("child
-                    # agent error") when the outcome carries no
-                    # message so the finalize path always has a
-                    # non-None string for ``InstanceStatus.ERROR``.
-                    if outcome.error:
-                        self._parent_error_message[tgt] = outcome.error
-                    else:
-                        self._parent_error_message.setdefault(
-                            tgt, "child agent error"
-                        )
+                    # emit. It is GUARANTEED truthy by the
+                    # ``_has_truthy_error`` gate above (post-review
+                    # cleanup: the prior ``else: setdefault(...)``
+                    # fallback was unreachable dead code).
+                    self._parent_error_message[tgt] = outcome.error
 
             if not pending_rows:
                 logger.debug(
@@ -906,14 +901,13 @@ class DependencyBus:
             )
         if _has_truthy_error(outcome):
             self._parent_errored[parent_instance_id] = True
-            if outcome.error:
-                self._parent_error_message[parent_instance_id] = (
-                    outcome.error
-                )
-            else:
-                self._parent_error_message.setdefault(
-                    parent_instance_id, "child agent error"
-                )
+            # ``outcome.error`` is GUARANTEED truthy by the
+            # ``_has_truthy_error`` gate above (post-review
+            # cleanup: the prior ``else: setdefault(...)``
+            # fallback was unreachable dead code).
+            self._parent_error_message[parent_instance_id] = (
+                outcome.error
+            )
 
         # DB is source of truth — read PENDING watchers by (parent,
         # child) pair, NOT the cache. The cache is keyed on

@@ -58,8 +58,9 @@ def _source_prefix(child_id: str) -> str:
       ``additional_kwargs["source"]`` is
       ``internal_report:{child_id}`` — NO trailing colon, NO
       anchor suffix.
-    * Queue-side mint (``daemon/manager.py`` — all six
-      ``MessageQueue(...)`` write sites): ``source`` is
+    * Queue-side mint (``daemon/manager.py`` — its six
+      ``MessageQueue(...)`` write sites — plus the seventh at
+      ``daemon/services/child_reports.py:3762``): ``source`` is
       ``internal_report:{child_id}:{message_id}`` — colon plus
       anchor suffix.
 
