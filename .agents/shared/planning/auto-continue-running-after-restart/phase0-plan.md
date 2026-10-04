@@ -48,6 +48,36 @@ After grep-verifying all 15 citations above, the following corrections must be a
 
 Every row in the checklist above is grep-verified at `4f50c34d`, every disagreement is recorded (and the tree wins), every citation correction is applied to the active plan files, and the plan files read back with no stale citations. The P1 verification step (the worktree-gate re-check) is the implicit re-verification — any P1 commit that uses a citation must re-grep-verify it (P1 step 6, phase1-plan.md).
 
+### Phase 0.5 r3b addendum — Git-object-only verification (WT contamination, 2026-10-04 ~06:22 UTC)
+
+**Incident (dispatcher-verified):** the r3 fold (committed at `d1a1421`, 2026-10-04) grep-verified its "anchor corrections" against the **WORKING TREE** on the shared checkout — but a concurrent lane mutated the shared checkout's `daemon/` tree to an OLD-sha state (~06:22 UTC). The result: every "Live-tree anchor @ `cf95a1a5`" line in the r3 table was a **WT-derived drift snapshot**, NOT a committed-tree value. The r3b fold re-pins every anchor against the COMMITTED tree at `d1a1421` via `git grep` + `git show`.
+
+**Verification method rule (r3b — supersedes r3's "verify at use time"):**
+
+On the `feature/auto-continue-running-after-restart` branch, ALL execution-lane anchor verification MUST use git OBJECTS, NEVER the shared checkout's working tree, until the WT is adjudicated (see R25). Required verification command set:
+
+| Verification type | Command |
+|---|---|
+| Existence + line number | `git grep -n '<pattern>' <rev> -- <path>` |
+| Content + region | `git show <rev>:<path> \| sed -n 'X,Yp'` |
+| File existence (negative verify, catches "X is NOT at path Y" claims) | `git ls-tree -r <rev> -- <path>/` |
+| Multi-file caller sets | `git grep -rn '<pattern>' <rev> -- <scope>/` |
+
+**Why the rule upgrade (r3b):** the r3 fold's "verify-at-use at the current HEAD" rule was correct in spirit but underspecified — a planner who reads "verify at HEAD" can verify against the WT, and the WT is a concurrent lane's state on this branch. The r3b rule pins the verification method (git objects only) and adds the negative-verify command for file-existence claims (catches the "X is NOT at path Y" claim that the r3 D27 fold asserted via WT inspection without `git ls-tree` confirmation).
+
+**Checklist invariant (r3b — add to every future sweep on this branch):**
+
+| # | Check | Pass criterion |
+|---|-------|----------------|
+| 1 | For every anchor cite in the plan file, the verifier command is one of the four above (not bare `grep` / `sed` on the WT) | All anchors carry a `git grep -n '...' <rev> -- <path>` or equivalent git-object-only verifier in the table |
+| 2 | Every row's `<rev>` matches the current HEAD of the plan's target branch (or the documented snapshot SHA the row was pinned against) | `git rev-parse <rev>` returns a valid SHA; for "at HEAD" claims, `<rev>` = `HEAD`'s SHA at the time of writing |
+| 3 | File-existence negative claims (e.g. "X is NOT at path Y") are backed by `git ls-tree` output, not by WT inspection | Every "not at" claim has a `git ls-tree -r <rev> -- <path>/` line in the verifier |
+| 4 | Anchor-correction tables include BOTH the r2 cite AND the r3 fold's WT-derived "correction" alongside the d1a1421 verified value, so the r3b provenance chain is auditable | Every corrected row has 3 columns (r2 cite | r3 fold pin | r3b verified @ d1a1421), not just the r3b value alone |
+
+**Exit criterion (r3b addendum):** all four checks above pass on every anchor cite in the r3b-revised plan files. The P1 verification step (worktree-gate re-check) is updated to: when running P1, re-run the r3b checklist on every anchor cite the P1 commit uses, with `<rev> = d1a1421` (or the current P1-branch HEAD if it has advanced past d1a1421 via a legitimate plan-touch commit, NOT via WT contamination).
+
+**See also:** D29 r3b incident note (decisions.md) + R25 (risk-register.md) + test-strategy.md lane-drift rule (r3b — supersedes r3).
+
 ## Phase 0 (canonical, unchanged)
 
 ## Objective
