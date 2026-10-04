@@ -1,5 +1,12 @@
 """SQLModel-based ReportInjection repository.
 
+SQLModel ``select`` import convention (declared per W-5):
+this file uses ``sqlmodel.select`` (line 124) for all SELECT
+construction. Per-row SQL ``text()`` blocks (none in this
+file) would import from ``sqlalchemy.text``. The choice is
+recorded in the commit message per the phase-2 plan task
+2.2 acceptance.
+
 Persistence layer for the ``report_injections`` table. Exposes the
 three primitives the two delivery paths need:
 
@@ -1192,8 +1199,18 @@ class ReportInjectionRepository:
             # ONE deterministic anchor per child: the child's latest
             # COMPLETED message_queue row (correlated scalar
             # subquery; message_id tie-break keeps the order total).
-            # NULL (child with no completed message rows) → filtered
-            # out — nothing to key the obligation triple on.
+            # NULL (child with no completed message rows) → row is
+            # still admitted to the result set; the per-row pass
+            # checks `has_anchor` (computed from `child_msg_id IS
+            # NOT NULL` in Python below) and derives the
+            # `child_message_id` from the surviving child checkpoint
+            # via the `serialize_message` chain (task 2.6) when
+            # `has_anchor` is False. This is the F-2 wedge straddle
+            # state: the child's terminal report IS the child's
+            # last checkpoint message (NOT a `message_queue` row of
+            # the child), so the exact-anchor filter previously
+            # excluded anchor-less children. Admitting them here
+            # closes the F-2 wedge.
             anchor_msg = aliased(MessageQueue, name="am")
             anchor_subq = (
                 select(anchor_msg.message_id)
@@ -1236,9 +1253,15 @@ class ReportInjectionRepository:
                 .where(~has_delivery_row)
                 .where(~has_injection_row)
                 .where(~has_fired_watcher)
-                # Anchor must exist (child with no completed message
-                # rows has nothing to key the triple on).
-                .where(anchor_subq.is_not(None))
+                # F-2 (durability-f1-f2 / phase2): the anchor filter
+                # (`.where(anchor_subq.is_not(None))`) is REMOVED.
+                # Anchor-less children of non-terminal parents are
+                # admitted so the per-row pass can derive the
+                # `child_message_id` from the surviving child
+                # checkpoint (task 2.6). The `has_anchor` flag in
+                # the result dict (computed below) tells the per-row
+                # pass whether to use the anchor or derive from
+                # the checkpoint.
                 .order_by(child_inst.last_activity_at.asc().nullslast())
                 .limit(limit)
             )
@@ -1248,6 +1271,12 @@ class ReportInjectionRepository:
                 "child_id": row.child_id,
                 "child_msg_id": row.child_msg_id,
                 "parent_id": row.parent_id,
+                # F-2 (phase2 task 2.2): ``has_anchor`` flag derived
+                # from the scalar subquery's null-state. ``False``
+                # means the child has no COMPLETED message_queue row
+                # → the per-row pass must derive `child_message_id`
+                # from the surviving child checkpoint (task 2.6).
+                "has_anchor": row.child_msg_id is not None,
             }
             for row in rows
         ]

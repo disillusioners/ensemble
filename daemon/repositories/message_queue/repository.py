@@ -181,6 +181,71 @@ class SQLModelMessageQueueRepository:
         return self.get(message_id)
 
     # --------------------------------------------------------
+    # F-2 PREFIX ledger (durability-f1-f2 / phase2 task 2.3)
+    # --------------------------------------------------------
+
+    def find_wake_already_delivered_evidence(
+        self, parent_id: str, child_id: str
+    ) -> bool:
+        """Queue-side PREFIX ledger check — operative cross-path dedup.
+
+        F-2 (durability-f1-f2 / phase2 task 2.3). Returns ``True`` if any
+        ``MessageQueue`` row exists with
+        ``instance_id = :parent_id AND source LIKE
+        'internal_report:{child_id}:%' AND status IN
+        ('ready', 'processing', 'completed')``.
+
+        **This is the OPERATIVE cross-path dedup** (per
+        ``decisions.md §14a`` W-1 LOCKED to fallback (ii)). The
+        exact-id equality at ``child_reports.py:3498-3507`` is the
+        natural-path-only check; the PREFIX ledger is the cross-path
+        check that survives the F-2 wedge's id-space mismatch
+        (``BaseMessage.id`` vs ``MessageQueue.message_id``).
+
+        Precedent commits: ``dfac6ff0`` and ``000f39db``
+        ("prefix-match internal_report:{child}:% for delivery
+        evidence"). The parent-history-side PREFIX check lives in
+        ``daemon/services/report_delivery_ledger.py`` (task 2.4).
+
+        Args:
+            parent_id: The parent instance ID (the ``MessageQueue``
+                row's ``instance_id`` column).
+            child_id: The child instance ID (the source-suffix
+                segment after ``internal_report:``).
+
+        Returns:
+            ``True`` if any delivery-evidence row matches the PREFIX
+            (a parent-side ``internal_report:{child}:%`` row in a
+            non-failed status); ``False`` otherwise.
+        """
+        with Session(self.engine) as session:
+            from sqlalchemy import literal
+            source_prefix = (
+                literal("internal_report:")
+                + literal(child_id)
+                + literal(":%")
+            )
+            stmt = (
+                select(MessageQueue.message_id)
+                .where(MessageQueue.instance_id == parent_id)
+                .where(
+                    MessageQueue.source.like(
+                        f"internal_report:{child_id}:%"
+                    )
+                )
+                .where(
+                    MessageQueue.status.in_([
+                        MessageStatus.READY.value,
+                        MessageStatus.PROCESSING.value,
+                        MessageStatus.COMPLETED.value,
+                    ])
+                )
+                .limit(1)
+            )
+            row = session.exec(stmt).first()
+            return row is not None
+
+    # --------------------------------------------------------
     # DEQUEUE (get next ready message)
     # --------------------------------------------------------
 

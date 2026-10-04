@@ -7,6 +7,66 @@ single sweep pass; each lane is independently kill-switchable via
 config (``lane_deferred``, ``lane_no_row_backstop``,
 ``lane_pending_age``, ``lane_recovery_retry``, ``lane_orphan``).
 
+════════════════════════════════════════════════════════════════════
+W-2 DO NOT CALL (durability-f1-f2 / phase2 task 2.9)
+════════════════════════════════════════════════════════════════════
+
+The following seams are documented as **NEVER** direct-call
+entry points from any F-2 recovery lane. The RDRS chain is the
+ONLY sanctioned path (see ``decisions.md §12d`` + §12a (B3)):
+
+* **DO NOT** make a **DIRECT** call into
+  ``ChildReportsService._process_child_completion_and_notify_parent(
+  self, instance_id, completed_message_id)`` at
+  ``child_reports.py:2458`` — takes the **CHILD** id first; passing
+  the parent id silently no-ops on the root branch
+  (``deferred_waiting_children`` → SSE-only at
+  ``child_reports.py:2828-2854, :4481-4495``) or mints a report to
+  the wrong grandparent for non-root parents. **The prohibition
+  is on DIRECT calls; the transitive re-entry into
+  ``_process_child_completion_and_notify_parent``
+  POST-materialization, through the sanctioned RDRS chain, is NOT
+  prohibited** — the artifacts (MessageQueue READY +
+  PROCESS_REPORT PENDING) are minted in one txn at
+  ``manager.py:9178-9331`` BEFORE re-entry, and the
+  ``child_reports.py:2773-2787`` child-status guard returns
+  ``idempotency_skip`` (no exception, no erase, no duplicate). The
+  transitive re-entry is the 5th hop of the chain listed in
+  §12a (B3) and is the only path by which the parent-wake claim
+  reaches the WAITING_CHILDREN exception at
+  ``task/repository.py:2789-2830``.
+
+* **DO NOT** wrap any public ``ChildReportsService`` entry in
+  ``bus._get_parent_lock`` — ``_get_parent_lock`` at
+  ``dependency_bus.py:1627-1665`` constructs a **plain
+  non-reentrant** ``asyncio.Lock()`` (``:1664``); same-task
+  re-acquire blocks forever with no timeout. The public entry
+  self-acquires the same key at ``child_reports.py:2563``; wrapping
+  it deadlocks deterministically.
+
+* **DO NOT** call the async twin
+  ``_handle_recover_deferred_report_async`` (``manager.py:8393``)
+  from the sweep thread — it is loop-only. The sweep-side seam is
+  the **SYNC** ``_handle_recover_deferred_report`` (``manager.py:8487``,
+  "Sweep-side entry point" docstring at ``:8497``, calls
+  ``_reconcile_deferred_report`` at ``:8546``, bridges re-entry via
+  ``run_coroutine_threadsafe(...).result(8.0)`` at ``:8586-8596``).
+
+* **DO NOT** call ``_dispatch_post_commit_side_effects``
+  (``child_reports.py:4435-4440``) standalone — its input is a
+  ``_ChildCompletionDbResult`` produced only by the db-sync helper;
+  standalone caller must synthesize the object + hand-pick an
+  outcome. Pure post-commit dispatcher; holds NO transaction context.
+
+The transitive re-entry path is the ONLY sanctioned way to
+deliver a child completion to a waiting_children parent from
+this module. Any direct call into the four prohibited seams
+above is a deterministic deadlock (b), a silent no-op or
+wrong-grandparent mint (a), an asyncio loop violation (c), or a
+context-less dispatcher call (d).
+
+════════════════════════════════════════════════════════════════════
+
 Service shape (matches the ``StaleTaskRecovery`` precedent):
 
 * ``__init__`` accepts the task / report-injection / queue / instance
@@ -135,6 +195,85 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ── F-2 (durability-f1-f2 / phase2, tasks 2.5 + 2.6) helpers ────────────────
+
+
+def _run_async(coro_func: Any, *args: Any, **kwargs: Any) -> Any:
+    """Drive an async coroutine to completion from sync context.
+
+    The sweep runs in a sync thread; the
+    ``parent_history_has_internal_report`` helper (task 2.4) is
+    async. This adapter runs the coroutine to completion using
+    ``asyncio.run`` when no event loop is running, or via the
+    running loop's ``run_until_complete`` when one is available.
+
+    Used only by the no-row backstop lane's per-row handler; never
+    on the asyncio event loop (the sweep is a daemon thread).
+    """
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        # An event loop is running on this thread (should not
+        # happen in the sweep thread, but defensive). Run via
+        # ``run_coroutine_threadsafe`` would require a loop ref
+        # we don't have; raise to surface the misuse.
+        raise RuntimeError(
+            "_run_async called from a thread with a running event "
+            "loop; the sweep is sync-only. Use the async-friendly "
+            "parent call site instead."
+        )
+    return asyncio.run(coro_func(*args, **kwargs))
+
+
+async def _derive_anchor_less_child_message_id(
+    checkpointer: Any,
+    child_id: str,
+) -> str | None:
+    """Derive the anchor-less child's ``message_id`` from the checkpoint.
+
+    F-2 (durability-f1-f2 / phase2 task 2.6). For anchor-less
+    children (the ``has_anchor`` flag from the lane-2 query is
+    ``False``), the ``child_msg_id`` from the anchor subquery is
+    ``NULL`` and the derivation must come from the surviving child
+    checkpoint via the ``serialize_message`` chain (W-1 fallback
+    (ii) per ``decisions.md §14a``).
+
+    Implementation:
+      1. ``get_instance_messages(checkpointer, child_id, manager=None)``
+         (manager=None per the W-5 polarity check — no synthetic
+         system-prompt injection needed for id extraction).
+      2. Find the last assistant message with a truthy
+         ``message_id`` (every serialized dict carries the
+         ``message_id`` key per ``daemon/utils.py:205-206``).
+      3. Return the ``message_id``; ``None`` if the child has
+         no messages, the checkpoint is missing, or no
+         assistant message has a ``message_id``.
+
+    The derived id is ``BaseMessage.id`` (UUID4) —
+    STABLE-BUT-DIFFERENT from the natural path's
+    ``MessageQueue.message_id`` (per W-1 confirmation). The
+    PREFIX ledger (step 0 in ``_recover_one_no_row``) is the
+    operative cross-path dedup; the id mismatch is by design.
+    """
+    from ..persistence import get_instance_messages
+
+    if checkpointer is None:
+        return None
+    messages = await get_instance_messages(
+        checkpointer, child_id, manager=None
+    )
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant":
+            msg_id = msg.get("message_id")
+            if msg_id:
+                return str(msg_id)
+    return None
+
+
 # Defaults — overridable via ``ServicesConfig`` (task 2.6). Kept
 # module-level so the constants have a single source of truth and
 # config can reference them in the pydantic Field default factory.
@@ -168,7 +307,11 @@ class LaneResult:
     from "busy-check itself failed" via the two counters);
     ``already_recovered`` counts rows where
     ``transition_deferred_to_pending`` returned ``False`` (another
-    actor won the race); ``errors`` counts per-row exceptions that
+    actor won the race); ``skipped_already_reported`` counts
+    rows where the F-2 PREFIX ledger (task 2.5) matched a
+    parent-side ``internal_report:{child}:%`` delivery-evidence
+    row (the natural path already delivered or is in-flight —
+    the sweep defers); ``errors`` counts per-row exceptions that
     left the row in a recoverable state.
     """
 
@@ -177,6 +320,12 @@ class LaneResult:
     busy_check_failed: int = 0
     already_recovered: int = 0
     orphan_disposition: int = 0
+    # F-2 (durability-f1-f2 / phase2 task 2.5): PREFIX-ledger
+    # cross-path dedup match count. The lane did NOT mint a
+    # report because the natural path already delivered or is
+    # in-flight; the row is left in its current state and the
+    # periodic 300s loop is the retry mechanism.
+    skipped_already_reported: int = 0
     errors: int = 0
 
     def to_dict(self) -> dict[str, int]:
@@ -186,6 +335,7 @@ class LaneResult:
             "busy_check_failed": self.busy_check_failed,
             "already_recovered": self.already_recovered,
             "orphan_disposition": self.orphan_disposition,
+            "skipped_already_reported": self.skipped_already_reported,
             "errors": self.errors,
         }
 
@@ -440,6 +590,25 @@ class ReportDeliveryRecoveryService:
 
     def _run_all_lanes_sync(self) -> SweepResult:
         """Run every lane once and aggregate.
+
+        **F-2 (durability-f1-f2 / phase2, task 2.7) — Window-to-lane
+        map (binding):**
+
+        | F-2 sub-window | What happens | Lane | Why |
+        |---|---|---|---|
+        | W-A (terminal-write → wake-rows-commit) | child's natural completion writes ``internal_report:`` to the parent's queue; wake row PENDING | **Lane 2** (post-wipe) | the wipe deletes the wake row + the anchor; Lane 2 admits anchor-less completed children of non-terminal parents and derives the id from the checkpoint |
+        | W-B (commit → ``enqueued_at`` stamp) | wake row stamped | **Lane 2** (post-wipe) | same post-wipe shape; the stamp does NOT survive the wipe |
+        | W-C (stamp → wake-task claim) | PROCESS_REPORT task claimed by worker pool | **Lane 2** (post-wipe) | the PROCESS_REPORT task itself survives the wipe (no ``work_id``); Lane 2's per-row pass materializes a FRESH PROCESS_REPORT + MessageQueue READY + re-enters through the sanctioned RDRS chain (per W-2 guardrail #1 in decisions.md §12d) |
+        | marker-minted pre-restart | a ``report_injections`` row was written before the restart | **Lanes 1/3/4** | the marker survives the wipe (the wipe targets ``message_queue`` + ``task`` only); Lanes 1/3/4 own the recovery of these rows via ``ensure_deferred`` → ``transition_deferred_to_pending`` |
+        | orphan-deferred-of-terminal-parents | a DEFERRED row whose parent is TERMINAL | **Lane 5** | the ORPHAN lane's terminal-parent revival path; observable log + metric, never silent |
+
+        All three F-2 sub-windows (W-A/W-B/W-C) converge to the
+        same post-wipe shape (PENDING wake rows deleted regardless
+        of stamp state) and are covered by Lane 2 (the no-row
+        backstop, with the F-2 anchor-less extension at task 2.2).
+        The mixed case (marker WAS minted pre-restart) is handled
+        by Lanes 1/3/4 + sub-shape (c) carrier revival at
+        ``manager.py:8971-9017``.
 
         Lanes run in dependency order: DEFERRED (Lane 1) first so
         any row the router / FM-1-guarded path already transitioned
@@ -866,6 +1035,17 @@ class ReportDeliveryRecoveryService:
         first (W6 absorbs duplicates), then the router's
         transition + reconcile + re-enter path.
         """
+        # F-2 (task 2.8): one-line boot log marker so the operator
+        # can confirm lane 2 ran on the boot path (post-wipe
+        # recovery, per the plan-overview S8 keep-green pin). The
+        # marker is emitted on the lane-2 entry point of the FIRST
+        # row's first call — periodic-loop invocations also emit it
+        # (the ``start()``/``recover_now()`` log lines identify
+        # the invocation context).
+        logger.info(
+            "RDRS lane 2: post-wipe recovery (no-row backstop; "
+            "F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)"
+        )
         out = LaneResult()
         rows = self._report_injection_repo.find_completed_children_without_delivery(
             parent_not_terminal=True,
@@ -923,7 +1103,131 @@ class ReportDeliveryRecoveryService:
            (D2 — end-state alignment with Lanes 1/3/4; see the
            inline D2 comment). rowcount=0 → already_recovered.
         4. Hand off to the manager's reconcile + re-enter path.
-        """
+
+         **F-2 (durability-f1-f2 / phase2, task 2.5 + 2.6) extended
+         invariant ordering (prepended as steps 0 + 0b):**
+
+         0. **PREFIX-ledger cross-path dedup** (task 2.5):
+            ``MessageQueueRepository.find_wake_already_delivered_evidence(parent, child)``
+            (queue-side) + ``parent_history_has_internal_report(checkpointer, parent, child, manager=None)``
+            (parent-history-side). Either match → ``skipped_already_reported += 1; return``
+            (the PREFIX ledger is the operative cross-path dedup per
+            decisions.md §14a; the obligation-triple unique index
+            handles within-path idempotency per migration
+            ``20260819_000001:114-120``).
+         0b. **Anchor-less ``child_message_id`` derivation** (task
+            2.6): for anchor-less children (``child_msg_id IS NULL``),
+            derive the id from the surviving child checkpoint via
+            ``completion_content.get_last_assistant_message`` +
+            ``get_instance_messages`` (``serialize_message`` chain per
+            W-1 fallback (ii)). Empty/missing content → WARNING +
+            ``return`` (the periodic 300s loop is the retry
+            mechanism; the child stays in the wedge for this pass).
+            The derived id is ``BaseMessage.id`` (UUID4) —
+            STABLE-BUT-DIFFERENT from the natural path's
+            ``MessageQueue.message_id`` (per W-1 confirmation).
+         """
+        # Step 0 (F-2 task 2.5): PREFIX-ledger cross-path dedup.
+        # The two checks below are the operative cross-path dedup
+        # per decisions.md §14a (W-1 LOCKED to fallback (ii)); the
+        # exact-id equality at child_reports.py:3498-3507 is the
+        # natural-path-only check. The PREFIX-ledger cross-path
+        # check + the obligation-triple unique index (migration
+        # 20260819_000001:114-120) jointly enforce exactly-once
+        # across the natural and recovery paths.
+        #   - Queue-side: MessageQueueRepository.find_wake_already_delivered_evidence
+        #     (PREFIX on `source LIKE 'internal_report:{child}:%'`)
+        #   - Parent-history-side: report_delivery_ledger.parent_history_has_internal_report
+        #     (PREFIX on serialized.get("source","").startswith(...))
+        # Either match ⇒ the report is already delivered (or
+        # in-flight) on the natural path; skip and increment
+        # `skipped_already_reported`. The PREFIX ledger is the
+        # CROSS-PATH dedup; the obligation-triple unique index
+        # is the WITHIN-PATH idempotency (per task 2.5).
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        from daemon.services.report_delivery_ledger import (
+            parent_history_has_internal_report,
+        )
+        if isinstance(
+            self._queue_repo, SQLModelMessageQueueRepository
+        ) and self._queue_repo.find_wake_already_delivered_evidence(
+            parent_id, child_id
+        ):
+            result.skipped_already_reported += 1
+            logger.debug(
+                "sweep no_row_backstop skipped_already_reported "
+                "(queue-side PREFIX ledger match) "
+                f"parent={parent_id[:8]}..., child={child_id[:8]}..."
+            )
+            return
+        # Parent-history-side PREFIX check. The manager's
+        # checkpointer is the canonical access path;
+        # ``getattr(self._manager, "_checkpointer", None)`` is the
+        # guarded lookup that degrades to "no parent-history
+        # evidence" when the checkpointer is absent. The
+        # ``manager=None`` default further degrades pre-migration
+        # parents to "not yet reported" (the correct default per
+        # the report_delivery_ledger docstring).
+        checkpointer = getattr(self._manager, "_checkpointer", None)
+        if checkpointer is not None:
+            try:
+                if _run_async(
+                    parent_history_has_internal_report,
+                    checkpointer,
+                    parent_id,
+                    child_id,
+                    None,
+                ):
+                    result.skipped_already_reported += 1
+                    logger.debug(
+                        "sweep no_row_backstop skipped_already_reported "
+                        "(parent-history PREFIX ledger match) "
+                        f"parent={parent_id[:8]}..., "
+                        f"child={child_id[:8]}..."
+                    )
+                    return
+            except Exception as exc:
+                # Defensive: a parent-history lookup failure must
+                # NOT abort the sweep (the queue-side check above
+                # already covers the cross-path dedup for the
+                # PREFIX). Log and proceed.
+                logger.debug(
+                    "sweep no_row_backstop parent-history PREFIX "
+                    f"lookup failed (non-fatal, proceeding): {exc}"
+                )
+
+        # Step 0b (F-2 task 2.6): anchor-less `child_message_id`
+        # derivation. For anchor-less children (the `has_anchor`
+        # flag is False from the lane-2 query at task 2.2), the
+        # `child_msg_id` from the anchor subquery is NULL and the
+        # derivation must come from the surviving child checkpoint
+        # via the `serialize_message` chain (W-1 fallback (ii) per
+        # decisions.md §14a). Empty/missing content → WARNING +
+        # `return` (the child stays in the wedge for this pass;
+        # the periodic 300s loop is the retry mechanism).
+        # The derived id is `BaseMessage.id` (UUID4) —
+        # STABLE-BUT-DIFFERENT from the natural path's
+        # `MessageQueue.message_id` (per W-1 confirmation). The
+        # PREFIX ledger (step 0 above) is the operative
+        # cross-path dedup; the id mismatch is by design.
+        if not child_msg_id:
+            derived_id = _derive_anchor_less_child_message_id(
+                checkpointer, child_id
+            )
+            if derived_id is None:
+                logger.warning(
+                    "sweep no_row_backstop anchor-less child has no "
+                    "derivable child_message_id (child checkpoint "
+                    "missing or empty); continuing — the periodic "
+                    "300s loop is the retry mechanism. "
+                    f"parent={parent_id[:8]}..., "
+                    f"child={child_id[:8]}..."
+                )
+                return
+            child_msg_id = derived_id
+
         # Step 1: busy-check — uniform helper (Lanes 2/3/4 busy-skips
         # are now logged at INFO like Lane 1/5, Rec-2 2026-08-20).
         if self._check_parent_busy(parent_id, result, lane="no_row_backstop"):
