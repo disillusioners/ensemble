@@ -420,7 +420,7 @@ All Phase A work touches a single bounded scope (`agents/charter/*` + `agents/_p
 | 8 | Charter spawn test — fresh instance, real mmdc, real image_save, real response | #2, #5 | `generate_chart` returns text containing both the mermaid block and the marker; `image_list(feature="chart-render")` finds the row. |
 | 9 | Charter spawn test — forced mmdc failure | #2, #5 | `generate_chart` returns text containing the mermaid block, no marker, no exception; `image_list` empty. |
 | 10 | Charter spawn test — forced image_save failure (store full) | #2, #5 | `generate_chart` returns mermaid text only, no marker; no exception. |
-| 11 | Add `tests/test_charter_render_capture.py` (8 tests) | #2, #5, #6, #7 | New file; all 8 tests green. |
+| 11 | Add `tests/test_charter_render_capture.py` (18 tests — canonical count per Components §6 and Test Strategy) | #2, #5, #6, #7 | New file; all 18 tests green. |
 | 12 | Run full `tests/test_chart_tools.py` (regression) | #2, #5, #7 | 100% green; _BUSY_STRING pins intact. |
 | 13 | Run full `tests/test_chart_tools_legacy_error_contract.py` (regression) | #2, #5, #7 | 100% green; "Error: ..." return shape intact. |
 | 14 | Reviewer pass on every `.md` against `docs/agent-prompt-writing-guide.md` | #3, #4, #6, #7 | Reviewer notes no cardinal/guideline violations, no daemon-path leaks, no `meta.json` references in prose. |

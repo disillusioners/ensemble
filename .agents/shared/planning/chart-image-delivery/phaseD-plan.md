@@ -39,7 +39,7 @@ After Phases A, B, and C are merged to `latest`, Phase D verifies the **entire c
 
 ### Out of Scope
 
-- **Any new feature work** — Phase D is consolidation only. New ideas (Telegram 4096-char text chunking, `source_hint` injection, real-platform e2e credentials, HTTP-API structured image-ref response) go to the deferred-items ledger with the responsible future-ticket call-out. The one item that LOOKED new but is ADOPTED in R2: `store.delete(image_id)` after successful chat delivery (arch-rec §3 amendment #22 / `decisions.md` §phase-b-r2-addendum-9) — moved from the deferred ledger to the adopted-ledger row in the release report §7.
+- **Any new feature work** — Phase D is consolidation only. New ideas (Telegram 4096-char text chunking, `source_hint` injection, real-platform e2e credentials, HTTP-API structured image-ref response) go to the deferred-items ledger with the responsible future-ticket call-out. The one item that LOOKED new but is ADOPTED in R2: `store.delete(image_id)` after successful chat delivery (arch-rec §3 amendment #22 / `decisions.md` §phase-b-r2-addendum-9) — moved from the deferred ledger to the adopted-ledger row in the release report §6.
 - **Adapter upload code changes** — `daemon/sources/adapters/{discord,slack,telegram}/...` is Phase B's sealed surface. Phase D does NOT touch.
 - **Agent prompt edits** — `agents/_prompt_system/innate-skills/chart/skill.md` and the **20** chart-capable agent files are Phase C's sealed surface. Phase D's audit SCRIPT runs against them.
 - **Charter workflow / install-skill** — `agents/charter/*` is sealed by Phase A. Phase D does NOT touch.
@@ -99,7 +99,7 @@ This file consolidates Phase D's end-to-end coverage and bridges the cases the p
 - `test_install_mermaid_cli_4_signal_readiness_probe_in_skill` (R1 amendment #17) — assert the install skill contains a `READINESS_PROBE` section referencing all 4 signals (config-file existence, mmdcPath executable, puppeteer chromium probed at probe time, version match) — content-addressable, no line numbers.
 
 **Group 6 — out-of-scope guard (Phase D itself):**
-- `test_phase_d_does_not_modify_sealed_artifacts` — at test setup, snapshot the SHA256 of the files Phase D MUST NOT touch (Phase A's 6 files, Phase B's 6 daemon files, Phase C's 20 agent files + the chart skill). At teardown, assert SHAs unchanged. This is a tripwire against accidental drift in Phase D's own commits.
+- `test_phase_d_does_not_modify_sealed_artifacts` — at test setup, snapshot the SHA256 of the files Phase D MUST NOT touch (Phase A's 6 files, Phase B's 7 daemon files, Phase C's 20 agent files + the chart skill). At teardown, assert SHAs unchanged. This is a tripwire against accidental drift in Phase D's own commits.
 
 **Group 7 — REAL-ASTREAM-LANE end-to-end (R8 + arch-rec §3 amendment #21):**
 
@@ -135,7 +135,7 @@ A single pytest module whose tests are themselves the audit. Each test asserts o
 | 7 | `OutgoingMessage.images` field defaults to `None` in `daemon/sources/base.py` (`ImageAttachment` dataclass exists) | FEATURE | content-grep for `images: list[ImageAttachment] \| None = None` |
 | 8 | Discord `_send_single_chunk` accepts `file=None` kwarg (chunk-1 atomic unit on success; file never re-attempted on later chunks; `files=[…]` for N>1) | FEATURE | grep for the `file` kwarg + the `files=` switch in chunk-1 logic |
 | 9 | Discord 2000-char chunking preserved | PRESERVATION | content-grep for the 2000-char chunker in discord adapter |
-| 10 | Telegram `_api_call_multipart` 3-retry (transport error) + 4xx-non-transient classification (no breaker record); circuit-breaker | FEATURE / PRESERVATION | content-grep for the 4xx classifier + the retry loop |
+| 10 | Telegram `_api_call_multipart` 3-retry (transport error) + 4xx-non-transient classification (no breaker record); circuit-breaker | FEATURE (new multipart code; the retry discipline mirrors the existing `_api_call` but the classifier is post-merge) | content-grep for the 4xx classifier + the retry loop |
 | 11 | Telegram `sendPhoto` (≤10 MB) / `sendDocument` (≤50 MB) ladder | FEATURE | content-grep for the size-threshold branch |
 | 12 | Slack single-call `files_upload_v2(channel_id, filename, content, initial_comment)` (NOT upload-then-postMessage(file=)); capability flag in `self._slack_capability_flags`; classify `missing_scope` BEFORE `record_failure`; WARN-once-per-channel | FEATURE | content-grep for `files_upload_v2` + `SlackCapabilityError` + the `_slack_capability_flags` set |
 | 13 | Slack `BLOCKS_CONTENT_THRESHOLD` (400 chars) preserved | PRESERVATION | content-grep for the threshold constant |
@@ -153,8 +153,8 @@ A single pytest module whose tests are themselves the audit. Each test asserts o
 
 **Pin classes** (per R5 fix):
 
-- **PRESERVATION** (pins 1, 2, 3, 4, 5, 9, 10 partial, 22, 23 = ~9 pins) — pre-existing invariants that already hold on clean `latest` BEFORE any feature merge. Run them in the new **D.0 pre-baseline gate task** (see Tasks §D.0) on clean `latest` before A/B/C merge; if any fail, escalate as pre-existing breakage (open a fix ticket), NOT as feature regression.
-- **FEATURE** (pins 6, 7, 8, 10 partial, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 24 = ~15 pins) — assert post-merge state. These CANNOT pass on pre-merge `latest`; they are the gate at release cut.
+- **PRESERVATION** (pins 1, 2, 3, 4, 5, 9, 13, 22, 23 = 9 pins — R3: #10 moved wholly to FEATURE, #13 added here; 9+15=24) — pre-existing invariants that already hold on clean `latest` BEFORE any feature merge. Run them in the new **D.0 pre-baseline gate task** (see Tasks §D.0) on clean `latest` before A/B/C merge; if any fail, escalate as pre-existing breakage (open a fix ticket), NOT as feature regression.
+- **FEATURE** (pins 6, 7, 8, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 24 = 15 pins) — assert post-merge state. These CANNOT pass on pre-merge `latest`; they are the gate at release cut.
 
 Each pin is a `def test_pin_NN_*():` function. Failure stops the run; CI gate at "all 24 pass" plus the full Phase A/B/C suites.
 
@@ -183,13 +183,14 @@ Both files currently at `0.16.12` (verified: `daemon/__init__.py:3` `__version__
 The template the Phase D implementer fills in for the final release report. Sections (each enumerated with the expected content):
 
 1. **What shipped** — enumerate per-phase: Phase A (charter + install skill + chart skill wording), Phase B (dispatcher + 3 adapters + constants + slack-setup.md), Phase C (chart skill section + 20 cardinal references). File lists verbatim.
-3. **Test evidence** — per-suite counts green: `tests/test_chart_tools.py`, `tests/test_chart_tools_reuse_integration.py`, `tests/test_chart_tools_legacy_error_contract.py`, `tests/test_charter_render_capture.py` (Phase A new), `tests/test_sources_dispatcher.py`, `tests/test_discord_adapter.py`, `tests/test_telegram_adapter.py`, `tests/test_slack_adapter.py`, `tests/test_outbound_image_delivery.py` (Phase B new), `tests/test_chart_image_delivery_e2e.py` + `tests/test_chart_image_delivery_audit.py` (Phase D new), `tools/audit-chart-image-delivery.sh` (Phase D new shell).
-4. **USER ACTION ITEM — Slack `files:write` scope** — verbatim: *"To enable Slack chart-image delivery, grant the `files:write` OAuth scope in your Slack app's Bot Token Scopes and reinstall the app. Steps: 1) Open your Slack app config at api.slack.com/apps; 2) OAuth & Permissions → Bot Token Scopes → add `files:write`; 3) Save; 4) Reinstall the app to your workspace; 5) Restart the daemon if needed. Until granted, Slack chart-image delivery is text-only with a WARN-once log per channel. See `docs/sources/slack-setup.md`."*
-5. **Restart/promote matrix** — verbatim table from §restart-promote (below).
-6. **Rollback notes** — Phase B is the risky surface. Revert the Phase B commit(s); chart-render capability degrades gracefully to text-only (charter still emits the Mermaid block, just no marker; HTTP-API marker disappears; chat users see the code block). Phase A revert is the inverse: charter stops emitting the marker; chart-image delivery stops working for new charts; existing chart-render PNGs in `tmp_images` are unaffected (TTL sweep reaps them on schedule). Phase C revert: agents may stop cross-referencing Chat Delivery for chat-source turns; over-deliver-when-uncertain default still applies; no functional break.
-7. **Adopted-items ledger** (R2 addition — was the deferred ledger pre-R2) — items promoted out of the deferred ledger during the commission. R2 fold-in promotes `store.delete(image_id)` after successful chat delivery (arch-rec §3 amendment #22 / `decisions.md` §phase-b-r2-addendum-9). The new ledger row: ~3 LOC + 1 test; API-origin keeps the 30-day GET per §http-api; mutually-exclusive lanes (api skips both seams; chat gets one lane) make double-delete impossible. Phase D's Group 8 in `tests/test_chart_image_delivery_e2e.py` covers the four test cases (chat-delivery success → 1 delete; upload-fail → 0 delete; API → 0 delete; both-lanes-fire → 1 total delete).
-8. **Deferred-items ledger** — items after Phase D ship, each with owning future-ticket placeholders. **Four items** (R2 correction — moved image_delete to §7 adopted): (a) Telegram 4096-char text chunking (pre-existing defect; new ticket — `daemon/sources/adapters/telegram.py:262` `send()` lacks chunking for >4096-char text); (b) `source_hint` system-context injection (Phase C's open question #1; prompt-side, not adapter-side, deferred to Phase C's over-deliver-when-uncertain wording being sufficient); (c) real-platform e2e credentials (always operator-dependent); (d) HTTP-API structured image-ref response (Phase A §http-api currently marker-only; backward-compatible additive structured payload `{content, images: […]}`; new ticket). **Plus one ACCEPTED RESIDUAL** (not a deferred item — sound design debt needing an instance-carrying seam first): stale-real-id wrong-image delivery at ~1-3% (real stale id from an earlier turn/conversation attaches the wrong/old image; inherent to in-band marker Option A per arch-rec §4 merge table focus #6 + §6 pending #2); revisit trigger = strip-rate >10% post-Phase C or user report.
-9. **Real-platform smoke evidence** — Discord (always-on): screenshot of the PNG in the channel + the marker-stripped explanation; Slack (gated): text-only delivery + WARN log line until scope granted; Telegram (gated): sendPhoto delivery with the PNG inline + caption (Telegram `parse_mode=None` per `decisions.md` §phase-b-r2-addendum-16).
+2. **Test evidence** — per-suite counts green: `tests/test_chart_tools.py`, `tests/test_chart_tools_reuse_integration.py`, `tests/test_chart_tools_legacy_error_contract.py`, `tests/test_charter_render_capture.py` (Phase A new), `tests/test_sources_dispatcher.py`, `tests/test_discord_adapter.py`, `tests/test_telegram_adapter.py`, `tests/test_slack_adapter.py`, `tests/test_outbound_image_delivery.py` (Phase B new), `tests/test_chart_image_delivery_e2e.py` + `tests/test_chart_image_delivery_audit.py` (Phase D new), `tools/audit-chart-image-delivery.sh` (Phase D new shell).
+3. **USER ACTION ITEM — Slack `files:write` scope** — verbatim: *"To enable Slack chart-image delivery, grant the `files:write` OAuth scope in your Slack app's Bot Token Scopes and reinstall the app. Steps: 1) Open your Slack app config at api.slack.com/apps; 2) OAuth & Permissions → Bot Token Scopes → add `files:write`; 3) Save; 4) Reinstall the app to your workspace; 5) Restart the daemon if needed. Until granted, Slack chart-image delivery is text-only with a WARN-once log per channel. See `docs/sources/slack-setup.md`."*
+4. **Restart/promote matrix** — verbatim table from §restart-promote (below).
+5. **Rollback notes** — Phase B is the risky surface. Revert the Phase B commit(s); chart-render capability degrades gracefully to text-only (charter still emits the Mermaid block, just no marker; HTTP-API marker disappears; chat users see the code block). Phase A revert is the inverse: charter stops emitting the marker; chart-image delivery stops working for new charts; existing chart-render PNGs in `tmp_images` are unaffected (TTL sweep reaps them on schedule). Phase C revert: agents may stop cross-referencing Chat Delivery for chat-source turns; over-deliver-when-uncertain default still applies; no functional break.
+6. **Adopted-items ledger** (R2 addition — was the deferred ledger pre-R2) — items promoted out of the deferred ledger during the commission. R2 fold-in promotes `store.delete(image_id)` after successful chat delivery (arch-rec §3 amendment #22 / `decisions.md` §phase-b-r2-addendum-9). The new ledger row: ~3 LOC + 1 test; API-origin keeps the 30-day GET per §http-api; mutually-exclusive lanes (api skips both seams; chat gets one lane) make double-delete impossible. Phase D's Group 8 in `tests/test_chart_image_delivery_e2e.py` covers the four test cases (chat-delivery success → 1 delete; upload-fail → 0 delete; API → 0 delete; both-lanes-fire → 1 total delete).
+7. **Deferred-items ledger** — items after Phase D ship, each with owning future-ticket placeholders. **Four items** (R2 correction — moved image_delete to §7 adopted): (a) Telegram 4096-char text chunking (pre-existing defect; new ticket — `daemon/sources/adapters/telegram.py:262` `send()` lacks chunking for >4096-char text); (b) `source_hint` system-context injection (Phase C's open question #1; prompt-side, not adapter-side, deferred to Phase C's over-deliver-when-uncertain wording being sufficient); (c) real-platform e2e credentials (always operator-dependent); (d) HTTP-API structured image-ref response (Phase A §http-api currently marker-only; backward-compatible additive structured payload `{content, images: […]}`; new ticket). **Plus one ACCEPTED RESIDUAL** (not a deferred item — sound design debt needing an instance-carrying seam first): stale-real-id wrong-image delivery at ~1-3% (real stale id from an earlier turn/conversation attaches the wrong/old image; inherent to in-band marker Option A per arch-rec §4 merge table focus #6 + §6 pending #2); revisit trigger = strip-rate >10% post-Phase C or user report.
+8. **Real-platform smoke evidence** — Discord (always-on): screenshot of the PNG in the channel + the marker-stripped explanation; Slack (gated): text-only delivery + WARN log line until scope granted; Telegram (gated): sendPhoto delivery with the PNG inline + caption (Telegram `parse_mode=None` per `decisions.md` §phase-b-r2-addendum-16).
+9. **Sign-off** — project owner + the developer/tester who ran Phase D; date; release tag (mirrors `decisions.md` §phase-d-release-report item 9). [R3: section map renumbered to nine contiguous sections]
 
 ### 7. `decisions.md` — APPEND §phase-d-* sections (R2 update)
 
@@ -205,17 +206,19 @@ Five new sections, all append-only (never amend Phase A's locked §marker / §ca
 
 ## Tasks (ordered, each with a verification step)
 
-### D.0 — Pre-baseline gate (R5: must run on clean `latest` BEFORE A/B/C merge)
+### D.0 — Pre-baseline gate (R5 + R3 fix: AUTHOR-THEN-RUN — the script must exist before the gate runs)
 
 | # | Task | Depends on | Acceptance (verification) |
 |---|------|------------|---------------------------|
-| 0 | Run the **PRESERVATION subset** of the audit (pins 1, 2, 3, 4, 5, 9, 10 partial, 22, 23 — ~9 pins that are pre-existing invariants) on clean `latest` BEFORE A/B/C merge: `tools/audit-chart-image-delivery.sh --class preservation` exits 0 | none | Script exits 0 against pre-merge `latest`; if any PRESERVATION pin fails, escalate as **pre-existing breakage** (open a fix ticket; do NOT log as feature regression) — the FEATURE pins (6, 7, 8, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 24 = ~15 pins) will of course fail pre-merge and that is expected |
+| 0a | **Author** `tools/audit-chart-image-delivery.sh` + the PRESERVATION subset of `tests/test_chart_image_delivery_audit.py` (pins 1, 2, 3, 4, 5, 9, 13, 22, 23 = 9 pre-existing-invariant pins) AGAINST THE PRE-MERGE BASE — a clean checkout/worktree of the recorded base `cf8efbef` + planning commit `f4bf1557` (the commission worktree qualifies) — NOT a post-merge tree | none | Script + preservation tests exist and collect cleanly on the pre-merge base |
+| 0b | **Run** the preservation gate on that pre-merge base BEFORE A/B/C implementation merges: `tools/audit-chart-image-delivery.sh --class preservation` exits 0 | 0a | Script exits 0 against the pre-merge base; any PRESERVATION pin failure escalates as **pre-existing breakage** (open a fix ticket; do NOT log as feature regression) — the FEATURE pins (6, 7, 8, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 24 = 15 pins) will of course fail pre-merge and that is expected |
+| 0c | After A+B+C merge, run the FULL audit (`--class all`, all 24 pins) | 0b, A+B+C merged | All 24 pins green on the merged tree |
 
 ### D.1 — Audit-script + e2e scaffolding
 
 | # | Task | Depends on | Acceptance (verification) |
 |---|------|------------|---------------------------|
-| 1 | Write `tests/test_chart_image_delivery_audit.py` with the **24** pins (PRESERVATION + FEATURE classes; pin #6 INVERTED per arch-rec §3 amendment #21; pin #24 added per amendment #18; content-addressable greps, NOT line numbers) | A+B+C merged | `pytest tests/test_chart_image_delivery_audit.py -v` runs all 24 tests; all pass against the merged tree |
+| 1 | Write `tests/test_chart_image_delivery_audit.py` with the **24** pins (PRESERVATION + FEATURE classes; pin #6 INVERTED per arch-rec §3 amendment #21; pin #24 added per amendment #18; content-addressable greps, NOT line numbers) | 0a (authoring extends the pre-merge module; the all-green run requires A+B+C merged) | `pytest tests/test_chart_image_delivery_audit.py -v` runs all 24 tests; all pass against the merged tree |
 | 2 | Write `tools/audit-chart-image-delivery.sh` — bash wrapper that invokes the 24 pin tests + a couple of static greps for the marker regex; supports `--class preservation\|feature\|all` selector (default `all`); supports `--release-pin FILES…` for the OQ4 deferred-pin backstop | 1 | `./tools/audit-chart-image-delivery.sh` exits 0 against merged tree; `./tools/audit-chart-image-delivery.sh --class preservation` exits 0 against pre-merge `latest` (D.0 gate) |
 | 3 | Write `tests/test_chart_image_delivery_e2e.py` with the **8** test groups (full-chain happy + api-keep-marker + amendment #21 list; degraded image_get + wrong-MIME + provenance-mismatch; multi-chart + concurrent ordering; multi-source; installer hygiene; out-of-scope SHA tripwire; **REAL-ASTREAM-LANE per R8**; **store.delete-after-upload per R2 adopted**) | 1 | `pytest tests/test_chart_image_delivery_e2e.py -v` runs all tests; all pass after Phase A/B/C merge |
 | 4 | Verify the audit script catches a known regression (sanity) — temporarily edit `daemon/tools/chart_tools.py:_BUSY_MSG` to drop the period; re-run `--class preservation`; assert exit non-zero with a clear failure message for pin #1; revert | 1, 2 | Audit script catches the deliberate break; revert restores green |
@@ -240,7 +243,7 @@ Five new sections, all append-only (never amend Phase A's locked §marker / §ca
 
 | # | Task | Depends on | Acceptance |
 |---|------|------------|------------|
-| 11 | Write `.agents/shared/planning/chart-image-delivery/release-report-template.md` with the 8 sections enumerated in Components §6 (what shipped, test evidence, USER ACTION ITEM, restart/promote matrix, rollback notes, deferred-items ledger, real-platform smoke evidence, sign-off) | 1–7 | File exists; sections enumerated; USER ACTION ITEM wording is verbatim per the brief; restart/promote matrix matches the consolidation in §restart-promote (below) |
+| 11 | Write `.agents/shared/planning/chart-image-delivery/release-report-template.md` with the 9 sections enumerated in Components §6 (what shipped, test evidence, USER ACTION ITEM, restart/promote matrix, rollback notes, adopted-items ledger, deferred-items ledger + accepted residual, real-platform smoke evidence, sign-off) | 1–7 | File exists; sections enumerated; USER ACTION ITEM wording is verbatim per the brief; restart/promote matrix matches the consolidation in §restart-promote (below) |
 | 12 | Append §phase-d-* to `decisions.md` (4 sections: test matrix consolidation, version bump decision, release-report template, deferred-items ledger) | 11 | decisions.md has the new sections appended; Phase A and Phase B locked sections unchanged (verified via `git diff` on the locked sections) |
 | 13 | Fill in the release report — the Phase D implementer replaces the template's `[...]` placeholders with the actual evidence: per-suite test counts, real-platform smoke screenshots, the final commit hashes for A/B/C/D | 11, A+B+C+D merged | `release-report.md` complete; signed off by the reviewer |
 
@@ -248,7 +251,7 @@ Five new sections, all append-only (never amend Phase A's locked §marker / §ca
 
 | # | Task | Depends on | Acceptance |
 |---|------|------------|------------|
-| 14 | Full regression run — every suite named in release-report §3 + the audit script + the e2e tests, all green in one CI pass | 1–13 | Exit 0; counts recorded in the release report |
+| 14 | Full regression run — every suite named in release-report §2 + the audit script + the e2e tests, all green in one CI pass | 1–13 | Exit 0; counts recorded in the release report |
 | 15 | Manual Discord real-platform smoke — submit a `generate_chart` request via a real Discord channel against the staging daemon; capture the PNG attachment + the marker-stripped explanation as evidence in `release-report.md` §8 | 14 | Screenshot in the release report; PNG is the actual `mmdc` output, not a fixture |
 | 16 | Manual Slack real-platform smoke (gated) — IF the operator has granted `files:write` scope, run the same flow on Slack; otherwise record the text-only delivery + WARN-once log as evidence (the gating IS the user action item — the report makes this explicit) | 14 | Either: PNG in Slack channel + file ref visible in the post, OR text-only delivery with the documented WARN-once log line + scope-not-granted note in the report |
 | 17 | Manual Telegram real-platform smoke (gated) — IF the operator has a real bot token + chat_id, run the same flow on Telegram; otherwise record the gating as deferred evidence | 14 | Either: sendPhoto delivery with PNG + caption, OR deferred-evidence note in the report |
@@ -332,7 +335,7 @@ Five new sections, all append-only (never amend Phase A's locked §marker / §ca
 
 ### Out-of-scope tripwire
 
-- [ ] `tests/test_chart_image_delivery_e2e.py::test_phase_d_does_not_modify_sealed_artifacts` green — SHA256 of Phase A's 6 files + Phase B's 6 daemon files + Phase C's **20** agent files + chart skill unchanged after Phase D's commits.
+- [ ] `tests/test_chart_image_delivery_e2e.py::test_phase_d_does_not_modify_sealed_artifacts` green — SHA256 of Phase A's 6 files + Phase B's 7 daemon files + Phase C's **20** agent files + chart skill unchanged after Phase D's commits.
 
 ### Version + CHANGELOG
 
@@ -347,7 +350,7 @@ Five new sections, all append-only (never amend Phase A's locked §marker / §ca
 
 ### Restart/promote (consolidated)
 
-- [ ] Release report §5 contains the verbatim restart/promote matrix:
+- [ ] Release report §4 contains the verbatim restart/promote matrix:
   - Phase A files = NO restart (agent-prompt only; picked up at next instance spawn).
   - Phase B daemon files = YES restart + YES promote (`daemon/sources/base.py`, `daemon/sources/registry.py`, `daemon/sources/dispatcher.py`, `daemon/sources/adapters/{discord,slack,telegram}/*`, `daemon/constants.py`).
   - Phase C files = NO restart (agent-prompt only).
@@ -355,13 +358,13 @@ Five new sections, all append-only (never amend Phase A's locked §marker / §ca
 
 ### USER ACTION ITEM surfaced
 
-- [ ] Release report §4 carries the verbatim Slack `files:write` USER ACTION ITEM with the 5-step operator procedure (api.slack.com/apps → OAuth & Permissions → add scope → save → reinstall → restart daemon if needed) and the gating note (until granted, Slack chart-image delivery is text-only with WARN-once per channel).
+- [ ] Release report §3 carries the verbatim Slack `files:write` USER ACTION ITEM with the 5-step operator procedure (api.slack.com/apps → OAuth & Permissions → add scope → save → reinstall → restart daemon if needed) and the gating note (until granted, Slack chart-image delivery is text-only with WARN-once per channel).
 
 ### Rollback + deferred items
 
-- [ ] Release report §6 documents Phase B as the risky surface; describes the graceful degradation (text-only Mermaid delivery) if reverted.
-- [ ] Release report §7 carries the ADOPTED-items ledger row (`store.delete(image_id)` after successful chat delivery — promoted from prior §open-questions #5 in R2; ~3 LOC + 1 test).
-- [ ] Release report §8 carries the **4**-item deferred-items ledger: (a) Telegram 4096-char text chunking; (b) `source_hint` injection (Phase C's open question #1); (c) real-platform e2e credentials; (d) HTTP-API structured image-ref response — PLUS the ACCEPTED RESIDUAL stale-real-id (~1-3%, inherent to in-band marker Option A; revisit trigger = strip-rate >10% post-Phase C or user report).
+- [ ] Release report §5 documents Phase B as the risky surface; describes the graceful degradation (text-only Mermaid delivery) if reverted.
+- [ ] Release report §6 carries the ADOPTED-items ledger row (`store.delete(image_id)` after successful chat delivery — promoted from prior §open-questions #5 in R2; ~3 LOC + 1 test).
+- [ ] Release report §7 carries the **4**-item deferred-items ledger: (a) Telegram 4096-char text chunking; (b) `source_hint` injection (Phase C's open question #1); (c) real-platform e2e credentials; (d) HTTP-API structured image-ref response — PLUS the ACCEPTED RESIDUAL stale-real-id (~1-3%, inherent to in-band marker Option A; revisit trigger = strip-rate >10% post-Phase C or user report).
 
 ---
 
@@ -370,7 +373,7 @@ Five new sections, all append-only (never amend Phase A's locked §marker / §ca
 | # | Risk | Impact | Likelihood | Mitigation |
 |---|------|--------|------------|------------|
 | 1 | Phase D's audit script catches a pin that was actually broken before Phase A/B/C (false positive — pin was already broken on `latest`) | Med | Med | Run the audit script on a clean `latest` BEFORE Phase A/B/C merge; if any pin fails pre-merge, escalate to the test agent + open a fix ticket before Phase D proceeds |
-| 2 | The full-chain e2e test's `TmpImageStore` integration is flaky (real store vs. mock-store divergence) | Med | Med | Construct the store via the same factory the daemon uses at lifespan boot (verified via `daemon/persistence.py:79-89`); run the e2e in a hermetic tmp dir with a fresh UUID per test; teardown deletes both blob and sidecar |
+| 2 | The full-chain e2e test's `TmpImageStore` integration is flaky (real store vs. mock-store divergence) | Med | Med | Construct the store via the same factory the daemon uses at lifespan boot (verified via `daemon/manager.py:2545` `tmp_image_store` property + `:433-452` constructor param injected from `app.state.tmp_image_store` at lifespan — replaces the false `daemon/persistence.py:79-89` anchor, R3); run the e2e in a hermetic tmp dir with a fresh UUID per test; teardown deletes both blob and sidecar |
 | 3 | Out-of-scope SHA tripwire catches a Phase D commit that legitimately needed to touch a "sealed" file (e.g., a regression in Phase A's `daemon/tools/chart_tools.py` discovered mid-Phase-D) | Med | Low | Tripwire is a WARNING, not a hard gate; escalate to dispatcher; the Phase D implementer does NOT silently amend a sealed file — they surface the discovery to the planner |
 | 4 | The real-platform smoke on Discord requires the staging daemon to be running with chart-image-delivery staged + promoted; if not, the smoke fails | Med | Med | Phase D's implementer coordinates with the operator to ensure staging is staged + promoted BEFORE the manual smoke; the staging lane is the project's standard staging lane (verified via shared meta-kv `git.branch = "feature/chart-image-delivery"`) |
 | 5 | The Slack USER ACTION ITEM requires operator action that may not happen before the release cut | Med | Med | The release report makes the gating explicit (text-only delivery + WARN-once log) so the feature is shippable without the scope grant; the operator action is a follow-up that ENABLES Slack delivery, not a blocker for the release |
@@ -380,7 +383,7 @@ Five new sections, all append-only (never amend Phase A's locked §marker / §ca
 | 10 | The release-report-template.md is too prescriptive and Phase D's implementer just fills in checkboxes without thinking | Low | Med | The template is a STRUCTURE for evidence, not a checklist of completion; the reviewer cross-checks every section's evidence (e.g., "test counts green" must list actual test counts from CI output, not just "✓") |
 | 11 | The version bump (`0.16.12 → 0.16.13`) collides with another feature also bumping to `0.16.13` | Med | Low | The release cut coordinates version bumps via the project's standard release process (verified via shared meta-kv `upgrade_policy`); Phase D's bump is recorded in `decisions.md` §phase-d-version-bump so the release coordinator sees it |
 | 12 | Phase D's audit script + e2e tests pass on the developer's machine but fail on a fresh CI runner (env drift — `~/.nvm/nvm-exec`, `~/.cache/puppeteer`, etc.) | Med | Low | The audit script + e2e tests do NOT depend on mmdc / puppeteer / nvm (they test the delivery chain, not the render chain); the render chain is covered by Phase A's charter-spawn smokes (manual in CI; not Phase D's lane) |
-| 13 | **Stale-real-id wrong-image delivery** (accepted residual, ~1-3% per arch-rec §4 merge-table focus #6 + §6 pending #2; inherent to in-band marker Option A — a real stale `image_id` from an earlier turn or another conversation attaches the wrong/old image; mint-ledger-recorded sound design debt needing an instance-carrying seam first) | Med | Med | Documented in release report §8 as ACCEPTED RESIDUAL (NOT a deferred engineering item); revisit trigger = **strip-rate >10% post-Phase C or user report** (per arch-rec §6 pending #2 + decided in §5 risks "Stale-real-id wrong image delivery — ledgered"); Phase D's smoke evidence + post-release telemetry (log: `image_id[:8]` + size + content_type per arch-rec §3 amendment #12) feeds the strip-rate metric; if the trigger fires, open a new commission for an instance-carrying sidecar (Option B's correlation fix becomes tractable once the carrier exists) |
+| 13 | **Stale-real-id wrong-image delivery** (accepted residual, ~1-3% per arch-rec §4 merge-table focus #6 + §6 pending #2; inherent to in-band marker Option A — a real stale `image_id` from an earlier turn or another conversation attaches the wrong/old image; mint-ledger-recorded sound design debt needing an instance-carrying seam first) | Med | Med | Documented in release report §7 as ACCEPTED RESIDUAL (NOT a deferred engineering item); revisit trigger = **strip-rate >10% post-Phase C or user report** (per arch-rec §6 pending #2 + decided in §5 risks "Stale-real-id wrong image delivery — ledgered"); Phase D's smoke evidence + post-release telemetry (log: `image_id[:8]` + size + content_type per arch-rec §3 amendment #12) feeds the strip-rate metric; if the trigger fires, open a new commission for an instance-carrying sidecar (Option B's correlation fix becomes tractable once the carrier exists) |
 | 14 | Pin #6 inversion / pin #24 (Ari pre-warm) added during R2 fold-in; if a CI-gate script was already wired to the prior 23-pin catalog, the script breaks on the new pin count | Low | Low | D.1 Task #4 (sanity regression) catches the count mismatch on the next CI invocation; the bash wrapper's `--class preservation\|feature\|all` selector makes the gate CI-portable |
 
 ---
@@ -391,7 +394,7 @@ Five new sections, all append-only (never amend Phase A's locked §marker / §ca
 
 2. **Who reviews the release report?** — Phase D plans "one reviewer for the release report"; the project's standard release-review chain is the project owner (per `upgrade_policy.ratified_by_user` — user-confirmed promote ceremony). **Decision needed by:** release coordinator. Default plan: the project owner reviews the report + the version bump + the CHANGELOG entry at release cut; the developer/tester who ran Phase D confirms the test evidence + the USER ACTION ITEM wording. The "3-factor arm ceremony" (user_confirmed + genuine-user-turn + nonce match) at promote is the final gate.
 
-3. **What is the exact format of the Slack `files:write` USER ACTION ITEM in the release report?** — The brief says "the operator steps: grant scope + reinstall app"; Phase D plans a 5-step procedure. **Decision needed by:** none — Phase D uses the procedure as written; if the operator prefers a different format at review time, the wording is in `release-report-template.md` §4 and is editable.
+3. **What is the exact format of the Slack `files:write` USER ACTION ITEM in the release report?** — The brief says "the operator steps: grant scope + reinstall app"; Phase D plans a 5-step procedure. **Decision needed by:** none — Phase D uses the procedure as written; if the operator prefers a different format at review time, the wording is in `release-report-template.md` §3 and is editable.
 
 4. **Should the deferred-items ledger link to existing project tickets, or just be a flat list?** — Phase D plans a flat list (no ticket IDs since the integration doesn't yet plan Phase 2 / post-execution work for these items). **Decision needed by:** release coordinator. Default plan: flat list with one-line summaries; the release coordinator opens the tickets after release and adds IDs to the ledger retroactively.
 
@@ -403,7 +406,7 @@ Five new sections, all append-only (never amend Phase A's locked §marker / §ca
 
 - **Phase A** (render-at-validation capture + marker contract): owns the marker regex, the capture flags, the degradation ladder (charter-side), the install skill. Phase D's audit pins #3, #6, #15, #16 + the charter-spawn test in the green-locked pin list; Phase D's e2e Group 1 asserts the marker end-to-end.
 - **Phase B** (chat-adapter delivery): owns the dispatcher extraction, the per-adapter upload, the constants, the slack-setup.md scope table. Phase D's audit pins #5, #7-14, #21, #22; Phase D's e2e Groups 1-4 assert the dispatch chain.
-- **Phase C** (agent guidance): owns the chart skill's "Chat Delivery" section + the 21 cardinal references. Phase D's audit pins #17, #18, #19, #20; Phase D's e2e Group 5 verifies the install-skill frontmatter.
+- **Phase C** (agent guidance): owns the chart skill's "Chat Delivery" section + the 20 cardinal references. Phase D's audit pins #17, #18, #19, #20; Phase D's e2e Group 5 verifies the install-skill frontmatter.
 
 Phase D is the LAST phase to land. All three upstream phases' per-files MUST be in `latest` before Phase D's implementer runs.
 
@@ -420,7 +423,7 @@ The restart/promote the feature as a whole requires is determined by the OTHER t
 - Phase C files = NO restart (agent-prompt only).
 - docs/tests = n/a.
 
-This matrix is the FINAL entry in the release report §5. The release cut + promote are Phase D.6 (release-cut-only), executed per the project's upgrade policy (`upgrade_policy.ratified_by_user` + `upgrade_workflow_preference` effective from v0.16.8: prefer speed, slim safety steps; full backup only when explicitly requested by user).
+This matrix is the FINAL entry in the release report §4. The release cut + promote are Phase D.6 (release-cut-only), executed per the project's upgrade policy (`upgrade_policy.ratified_by_user` + `upgrade_workflow_preference` effective from v0.16.8: prefer speed, slim safety steps; full backup only when explicitly requested by user).
 
 ---
 

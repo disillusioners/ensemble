@@ -26,6 +26,8 @@ Charter MAY self-install its render toolchain following the `designer/install-op
 
 **Trigger in workflow.md Step 5:** pre-flight check `command -v mmdc || [ -f ~/.config/charter-mermaid-puppeteer.json ]`; on miss, invoke `install-mermaid-cli` skill via standard skill-execution path; on success, re-check and proceed.
 
+> **[SUPERSEDED R3]** — the `command -v mmdc` pre-flight above is superseded by arch-rec §3 amendment #17: non-interactive bash never sources `~/.bashrc`, so `command -v` gives a permanent false-cold even when the install exists. The 4-signal READINESS_PROBE (`install-mermaid-cli.lib.sh`, sourced by `workflow.md` Step 5) replaces it — see `phaseA-plan.md` Components §4.
+
 ---
 
 ## D2 — render FINAL (verbatim from user directive)
@@ -243,7 +245,7 @@ Phase A is a planning artifact + agent-prompt change only. **No `daemon/` code, 
 
 ## §phase-b-image-access — in-process TmpImageStore access path
 
-**Decision:** Phase B's dispatcher resolves image bytes via direct in-process access (`manager.tmp_image_store.open_with_meta(image_id)`), **NOT** an HTTP self-call to `GET /api/tmp_images/<image_id>`.
+**Decision:** Phase B's dispatcher resolves image bytes via direct in-process access (`manager.tmp_image_store.open_with_meta(image_id)`), **NOT** an HTTP self-call to `GET /api/tmp_images/<image_id>`. **[API-name superseded R3]** — resolution now uses `store.open_full(image_id)` (returns the full `TmpImageRecord` so the provenance gate can read `record.provenance.feature`) per `§phase-b-r2-addendum-4`; the `open_with_meta` references below predate that amendment.
 
 **Rationale:**
 
@@ -283,18 +285,18 @@ class ImageAttachment:
 
 Base64 (vs `bytes`) keeps the field JSON-serializable for logging + avoids BytesIO pickling across the adapter boundary. Adapters decode per their platform's upload API. ~67–400 KB encoded for 50–300 KB source — negligible.
 
-**Construction-site impact:** zero. All 3 sites (`dispatcher.py:170`, `:243`, `registry.py:980`) pass kwargs by name; the field auto-defaults to `None`. The dispatcher populates `images` only at `dispatch_completed` site (line 170). `dispatch_message` (progressive, :243) and `registry.py:980` (/new confirmation) keep `images=None` — progressive never carries marker (defense in depth); /new confirmation never has marker.
+**Construction-site impact:** zero for existing callers — all 3 sites (`dispatcher.py:170`, `:243`, `registry.py:980`) pass kwargs by name; the field auto-defaults to `None`. **[CORRECTED R3, approver iteration-001 blocking #1 — both-seam]** The dispatcher populates `images` at BOTH construction sites (`dispatcher.py:170` AND `:243`) per `§phase-b-r2-addendum-1`; `registry.py:980` (/new confirmation) keeps `images=None` (that path never carries a marker).
 
 ---
 
 ## §phase-b-marker-extraction — extraction in BOTH dispatch seams (arch-rec §1)
 
-**Decision:** Marker extraction runs **only** in `dispatch_completed` (the final-response dispatch path). `dispatch_message` (progressive, per-agent-node path) is **untouched**.
+**Decision:** [CORRECTED R3, approver iteration-001 — see the BOTH SEAMS paragraph at :323] Marker extraction runs in **BOTH** `dispatch_message` AND `dispatch_completed` as the last content transformation before `OutgoingMessage` construction (`§phase-b-r2-addendum-1`, NON-NEGOTIABLE).
 
 **Why:**
 
-1. Phase A's contract: charter emits the marker in its **own assistant turn** → parent receives the result via `generate_chart()` → parent's final AIMessage contains the marker. Progressive text from intermediate agent-nodes does NOT carry the marker.
-2. `MessageProcessingPipeline._dispatch_completed` (`daemon/services/message_processing_pipeline.py:720-800`) is the FINAL dispatch call site — this is where extraction runs.
+1. Phase A's contract: charter emits the marker in its **own assistant turn** → parent receives the result via `generate_chart()` → parent's final AIMessage contains the marker. and for external chat sources that final message is delivered by the PROGRESSIVE lane (instance_messaging.py:4506-4566, :4815-4834), hence extraction at both seams. [CORRECTED R3, approver iteration-001]
+2. `MessageProcessingPipeline._dispatch_completed` (`daemon/services/message_processing_pipeline.py:720-800`) is the completed-lane call site — extraction runs there AND at the `dispatch_message` construction site (`dispatcher.py:243`). [CORRECTED R3]
 3. `InstanceMessagingService._process_message_with_tracking:4824` calls `dispatch_message` for the "deferred final" — but the dispatcher's progressive_sent_sources guard (`daemon/sources/dispatcher.py:124-128`) ensures `dispatch_completed` is skipped if progressive already sent for the same source. So the marker-stripping + image-upload happens exactly once.
 
 **Regex (byte-stable, from §marker):**
@@ -461,7 +463,7 @@ CHART_IMAGE_MIME_WHITELIST: frozenset[str] = frozenset({
 
 ## §phase-b-r2-addendum-1 — BOTH-SEAM extraction (arch-rec §1, NON-NEGOTIABLE)
 
-**Supersedes:** §phase-b-marker-extraction's framing of "extraction in dispatch_completed ONLY" (R2 in-place correction at decisions.md:321).
+**Supersedes:** §phase-b-marker-extraction's framing of "extraction in dispatch_completed ONLY" (R2 in-place correction at decisions.md:321) **and** §phase-b-outgoing-extension's "Construction-site impact" single-seam claim (R3 in-place corrections at decisions.md:286 and :292-297, per approver iteration-001 blocking #1).
 
 **Decision:** `extract_chart_images` runs in `dispatch_message` AND `dispatch_completed` as the LAST content transformation before `OutgoingMessage` construction — after the no-colon skip (`dispatcher.py:132-134` / `:209-211`), after source validation, after the internal-report skip, and after the adapter lookup (`dispatcher.py:158-165` / `:234-240`).
 
@@ -697,9 +699,9 @@ grep -n 'chart-image-delivery' CHANGELOG.md      # expect: ≥1 hit under [Unrel
 
 ## §phase-d-release-report — release report template (R2 update)
 
-**Decision:** The Phase D implementer produces `.agents/shared/planning/chart-image-delivery/release-report.md` (the FILLED-IN template) with **nine** enumerated sections per `phaseD-plan.md` Components §6 (R2 added §7 adopted-ledger + §8 deferred+residual):
+**Decision:** The Phase D implementer produces `.agents/shared/planning/chart-image-delivery/release-report.md` (the FILLED-IN template) with **nine** enumerated sections per `phaseD-plan.md` Components §6 (R2 added the adopted-items ledger + deferred+residual sections; R3 renumbered the map to nine contiguous sections §1-§9 — canonical: 1 What shipped, 2 Test evidence, 3 USER ACTION ITEM, 4 Restart/promote matrix, 5 Rollback notes, 6 Adopted-items ledger, 7 Deferred-items ledger + accepted residual, 8 Real-platform smoke evidence, 9 Sign-off):
 
-1. **What shipped** — per-phase deliverable list (Phase A's 6 files, Phase B's 6 daemon files + slack-setup.md row, Phase C's **20** cardinal references + chart skill section). File lists verbatim.
+1. **What shipped** — per-phase deliverable list (Phase A's 6 files, Phase B's 7 daemon files + slack-setup.md row, Phase C's **20** cardinal references + chart skill section). File lists verbatim.
 2. **Test evidence** — per-suite green counts (every suite named in `phaseD-plan.md` §Test Strategy). Counts from CI output, not just "✓".
 3. **USER ACTION ITEM — Slack `files:write` scope** — verbatim wording per `phaseD-plan.md` Components §6 §3 (the 5-step operator procedure + the text-only fallback note).
 4. **Restart/promote matrix** — verbatim table from `phaseD-plan.md` §restart-promote (the four rows: Phase A = no restart, Phase B = restart + promote, Phase C = no restart, docs/tests = n/a).
@@ -809,7 +811,7 @@ grep -n 'chart-image-delivery' CHANGELOG.md      # expect: ≥1 hit under [Unrel
 
 **Reviewer (project owner) cross-checks** at the release-report review:
 
-1. All 23 audit pins green.
+1. All 24 audit pins green.
 2. All **8** e2e groups green (including the **REAL-ASTREAM-LANE** Group 7 per arch-rec §1 dominant finding + arch-rec §3 amendment #21, and the **store.delete-after-upload** Group 8 per arch-rec §3 amendment #22 / `decisions.md` §phase-b-r2-addendum-9 R2 adopted).
 3. SHA tripwire green (Phase A/B/C files unchanged).
 4. USER ACTION ITEM wording verbatim.
@@ -854,7 +856,7 @@ This section is a cross-reference index for the deferred-items ledger (§phase-d
 | R2 | `store.delete` ADOPTED | arch-rec §3 amendment #22 + `decisions.md` §phase-b-r2-addendum-9 | Moved `image_delete-after-upload` row out of `§phase-d-deferred-items` into new `§phase-d-adopted-items` (R2 NEW); release report §6 carries the adopted ledger row; e2e Group 8 added with 4 test cases (`test_chat_delivery_calls_store_delete_once` + `test_chat_delivery_upload_failure_does_not_delete` + `test_api_source_does_not_delete` + `test_both_lanes_only_one_delete`) |
 | R5 | Split pin catalog into PRESERVATION / FEATURE; add D.0 pre-baseline gate task | Pre-BR5 fix for the unsatisfiable pre-baseline acceptance | `§phase-d-test-matrix` table gains a Class column + split rows; new `D.0 pre-baseline gate` task (`tools/audit-chart-image-delivery.sh --class preservation`) added; audit-script spec accepts `--class preservation\|feature\|all`; acceptance criteria §Cross-cutting regression gains D.0 line + 24-pin counts |
 | R6 | Pin #24 — Ari pre-warm reminder | arch-rec §3 amendment #18 + §6 pending #3 | Pin #24 added to `§phase-d-test-matrix` (FEATURE class; content-addressable grep in `.agents/shared/context.md` AND `agents/ari/workflow.md`); e2e Group 5 installer hygiene unchanged (this is a pin-only addition) |
-| R8 | Add real-astream-lane e2e | arch-rec §0/§1 dominant finding + §3 amendment #21 | New e2e Group 7 (REAL-ASTREAM-LANE) added with 4 tests (`test_reamstream_discord_user_receives_png` + `test_astream_progressive_lane_marker_extracted` + `test_astream_progressive_lane_failure_routes_to_completed` + `test_astream_internal_agent_source_no_extract`); harness via existing `tests/e2e/` daemon-infrastructure |
+| R8 | Add real-astream-lane e2e | arch-rec §0/§1 dominant finding + §3 amendment #21 | New e2e Group 7 (REAL-ASTREAM-LANE) added with 4 tests (`test_astream_discord_user_receives_png` + `test_astream_progressive_lane_marker_extracted` + `test_astream_progressive_lane_failure_routes_to_completed` + `test_astream_internal_agent_source_no_extract`); harness via existing `tests/e2e/` daemon-infrastructure |
 | OPT-21→20 | Update 21 to 20 EVERYWHERE (per Phase C R2 reviewer correction) | `phaseC-plan.md:75-81` verified list | Narrative lines 14, 30, 44, 145, 185, 270 in phaseD-plan.md updated to "20"; risk-1 + risk-3 wording in decisions.md §phase-d-deferred-items updated; pin #17 catalog updated; test counts (Phase C coverage) updated; SHA tripwire (Group 6) updated; Component §6 §1 updated |
 | OPT-busy/paused | Correct _BUSY/_PAUSED_STRING pin labels (verified sites: busy = chart_tools.py:55 + test_chart_tools.py:296 + skill.md:62,68 narrative; paused = chart_tools.py:222 literal + test_chart_tools.py:298 + skill.md:74 narrative) | Verified spot-check 2026-10-04 | Pin #1 (busy) and #2 (paused) re-labeled to content-addressable grep descriptions; pin #19 updated to specify call-site (skill.md) rather than `skill.md:74` (which is the paused site, not busy) |
 | OPT-stale-real-id | Add stale-real-id residual (~1-3%, revisit trigger strip-rate >10% post-Phase C or user report) | arch-rec §4 merge-table focus #6 + §5 risk + §6 pending #2 | New row R in `§phase-d-deferred-items`; cross-ref added to `§phase-d-deferred-items-leger`; risk #13 added to phaseD-plan.md Risks table |

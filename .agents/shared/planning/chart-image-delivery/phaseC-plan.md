@@ -78,7 +78,7 @@ Update the innate `chart` skill and each chart-capable agent's canonical guidanc
 
 > approver, approver[v2], architect, ari, coder, developer, developer[v2], devops, doc-writer, governor, leader, maintenancer, planner, planner[v2], project-manager, reviewer, reviewer[v2], tidier, tidier[v2], wanderer
 
-Each of the 20 gets a one-line cardinal reference. **Phase D's coverage pin (#17, `phaseD-plan.md:117`) must be updated to 20 in lockstep** — otherwise the pin would false-fail at 21 (the old incorrect count).
+Each of the 20 gets a one-line cardinal reference. **Phase D's coverage pin #17 (20-agent coverage) was updated to 20 in R2 — keep it in lockstep with the verified set above** (it false-fails if either side drifts). [stale line-pinned cross-ref corrected R3]
 
 | Agent | Existing chart references (line numbers) | Canonical home for new reference | Edit shape |
 |---|---|---|---|
@@ -115,8 +115,8 @@ Each of the 20 gets a one-line cardinal reference. **Phase D's coverage pin (#17
 - `daemon/tools/chart_tools.py` — Phase A.
 - `daemon/sources/adapters/{discord,slack,telegram}/*` — Phase B.
 - `tests/test_chart_tools.py` — Phase D (regression).
-- `daemon/services/instance_messaging.py` — Phase A (image marker transport).
-- `daemon/services/instance_lifecycle.py` — Phase A (chart-skill validation capture).
+- `daemon/services/instance_messaging.py` — Phase B scope (outbound delivery chain / progressive-lane dispatch; NOT Phase A — Phase A is agent-prompt only). [CORRECTED R3, approver iteration-001 blocking #2]
+- `daemon/services/instance_lifecycle.py` — Phase B scope (instance_metadata source_type write site; NOT Phase A — Phase A is agent-prompt only). [CORRECTED R3]
 
 ---
 
@@ -223,7 +223,7 @@ Each of the 20 gets a one-line cardinal reference. **Phase D's coverage pin (#17
 
 - [ ] `agents/_prompt_system/innate-skills/chart/skill.md` has a new "Chat Delivery" section stating the MUST-use rule, the channel-detection wording, and the over-deliver-when-uncertain default.
 - [ ] The chart skill's "Self-generate vs. Delegate" table has a new row: "User is on a chat source OR asks for an image/visual → Use `generate_chart()`".
-- [ ] All **20** chart-capable agents (per `innate_skills: ["chart"]` in their `meta.json` — verified set in §Components #2) have a one-line cardinal reference to the chart skill's "Chat Delivery" section in their canonical home. Phase D's coverage pin (`phaseD-plan.md:117`) is updated to 20 in lockstep to avoid false-fail.
+- [ ] All **20** chart-capable agents (per `innate_skills: ["chart"]` in their `meta.json` — verified set in §Components #2) have a one-line cardinal reference to the chart skill's "Chat Delivery" section in their canonical home. Phase D's coverage pin #17 (content-addressable, 20-agent coverage) is in lockstep with §Components #2 to avoid false-fail. [stale line-pinned cross-ref corrected R3]
 - [ ] No prompt has a `.md` path token introduced by Phase C edits (cross-reference hygiene, per `docs/agent-prompt-writing-guide.md` §3 v2 form).
 - [ ] The MUST-use rule body appears in exactly one place: the chart skill. Agent-level rule.md / tools_note.md entries are short references only.
 - [ ] The `_BUSY_STRING` text ("Error: Charter busy; pass fresh=True for parallel charts.") appears in skill.md and is byte-identical to the same text in `tests/test_chart_tools.py:296` — verified by `grep -F` content match (no line-number pin).
@@ -272,9 +272,9 @@ Each of the 20 gets a one-line cardinal reference. **Phase D's coverage pin (#17
 
 ## Cross-Reference to Phase A / B / D
 
-- **Phase A** (render-at-validation capture + marker contract): authors the canonical image-reference marker in `decisions.md` (lockdown: `<!-- ens-img:chart-render:<id> -->`). The HTML comment is **NOT invisible to chat clients — it renders literally on Discord/Telegram/Slack**; the dispatcher (Phase B) strips it, the near-miss sweeper (Phase A, amendment #3) strips malformed variants, and the Mermaid block + attached image is what the user sees. Phase C's chart-skill wording cross-references this marker by name. Phase C plans no daemon changes; Phase A's `daemon/services/instance_messaging.py` and `daemon/services/instance_lifecycle.py` edits are out of scope here.
+- **Phase A** (render-at-validation capture + marker contract): authors the canonical image-reference marker in `decisions.md` (lockdown: `<!-- ens-img:chart-render:<id> -->`). The HTML comment is **NOT invisible to chat clients — it renders literally on Discord/Telegram/Slack**; the dispatcher (Phase B) strips it, the near-miss sweeper (Phase A, amendment #3) strips malformed variants, and the Mermaid block + attached image is what the user sees. Phase C's chart-skill wording cross-references this marker by name. Phase C plans no daemon changes; `daemon/services/instance_messaging.py` and `daemon/services/instance_lifecycle.py` belong to Phase B's scope (delivery chain), not Phase A's (agent-prompt only). [CORRECTED R3]
 - **Phase B** (chat-adapter delivery): owns the per-platform native image upload. The CORRECT delivery attribution (per `architecture-recommendation.md` §1) is three-step: **charter renders the PNG at validation time → the dispatcher extracts the marker and resolves the image bytes → the chat adapter uploads the PNG natively** (Discord attachment, Telegram `sendPhoto`, Slack `files_upload_v2`). Phase C's "Chat Delivery" section wording reflects this — do not reintroduce the earlier "delivery layer renders the diagram" phrasing. **Amendment #22 (delete-after-chat-upload, narrowing deferred item (c) to the chat path) is ADOPTED — Phase B's concern, not C's**; Phase C's plan does not contradict it (no reference to the 30-day GET window or a "deferred image_delete" anywhere in Phase C).
-- **Phase D** (tests / version / docs): owns the regression test pack, the version-bump CHANGELOG entry, the docs/CHANGELOG update, and the restart-prompt matrix. Phase C hands off the prompt-audit checklist (Test Strategy §1) for inclusion in the regression suite. **Phase D's coverage pin #17 (`phaseD-plan.md:117`) must be updated from 21 → 20 to match the verified set in §Components #2** — otherwise the pin false-fails against the real agent count.
+- **Phase D** (tests / version / docs): owns the regression test pack, the version-bump CHANGELOG entry, the docs/CHANGELOG update, and the restart-prompt matrix. Phase C hands off the prompt-audit checklist (Test Strategy §1) for inclusion in the regression suite. **Phase D's coverage pin #17 asserts the same **20**-agent set (updated in R2)** — keep in lockstep with the verified set in §Components #2. [stale line-pinned cross-ref corrected R3]
 
 ---
 

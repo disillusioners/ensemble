@@ -46,7 +46,7 @@ Charter renders the PNG **at validation time** (sandboxed: `securityLevel:strict
 | Phase | Objective | Plan file (size) | Restart/Promote |
 |-------|-----------|------------------|-----------------|
 | **A** | Render+capture, marker contract, D1 install skill + lib.sh probe, hybrid executor, security pins; +R6 ari pre-warm ownership (context.md + ari/workflow.md) | `phaseA-plan.md` (538 ln; T17–T24 appended) | **NO** (10 files, all agent-prompt/bash) |
-| **B** | Delivery: **both-seam extraction**, provenance gate, breaker guardrails, multi-image, empty-content guard, store.delete-after-upload, logging redaction, sweeper | `phaseB-plan.md` (1211 ln) | **YES + promote** (daemon code) |
+| **B** | Delivery: **both-seam extraction**, provenance gate, breaker guardrails, multi-image, empty-content guard, store.delete-after-upload, logging redaction, sweeper | `phaseB-plan.md` (1202 ln) | **YES + promote** (daemon code) |
 | **C** | Agent guidance: chart-skill "Chat Delivery" + cardinal refs in **20** chart-capable agents (verified list) | `phaseC-plan.md` (285 ln) | **NO** |
 | **D** | Consolidation: **24-pin audit (PRESERVATION vs FEATURE classes, D.0 pre-baseline gate)**, **8 e2e groups incl. real-astream Group 7 + store.delete Group 8**, version 0.16.12→0.16.13, CHANGELOG, release report w/ adopted-items ledger | `phaseD-plan.md` (430 ln) | Gates release cut + promote |
 
@@ -56,6 +56,7 @@ Charter renders the PNG **at validation time** (sandboxed: `securityLevel:strict
 
 - **§marker** (LOCKED) — canonical marker; malformed markers ignored; near-miss sweeper (#14) strips-but-never-extracts.
 - **§phase-b-r2-addendum-1** — **BOTH-SEAM extraction pin (NON-NEGOTIABLE, arch-rec §1 verbatim)**; images populated at dispatcher.py:170 AND :243, never registry.py:980; once-only structural via `_progressive_sent_sources`.
+- **R3 in-place correction ledger (approver iteration-001)** — decisions.md :286 + :292-299 (single-seam residue in §phase-b-outgoing-extension + §phase-b-marker-extraction) corrected to the both-seam rule; recorded in addendum-1's Supersedes line.
 - **§phase-b-r2-addendum-2/3/4** — invisibility-claim correction (reviewer-ordered in-place edit at :95), logging contract (`bytes_b64` repr-redacted; `image_id[:8]`+size+MIME only), provenance gate + optional 24h freshness.
 - **§phase-b-r2-addendum-5/6** — MANDATORY breaker guardrails (Slack classify-before-record + capability flag; Telegram 4xx non-transient).
 - **§phase-b-r2-addendum-9** — amendment #22 ADOPTED: `store.delete` after successful chat upload (API path keeps 30-day GET).
@@ -74,7 +75,7 @@ Charter renders the PNG **at validation time** (sandboxed: `securityLevel:strict
 1. ~~Phase B code-sketch vs pin #5~~ — **RESOLVED by arch-rec §1 / R1**: both-seam extraction adopted verbatim; the old completed-only sketch and its defect-pinning acceptance test are gone (replaced by `test_progressive_lane_extracts_and_strips` + `test_progressive_then_completed_no_double_send`).
 2. **Shared file `agents/_prompt_system/innate-skills/chart/skill.md`** — A's marker-preservation paragraph + C's Chat Delivery section land coordinated (A-then-C or one commit); pins are content-addressable greps (line numbers removed — both phases insert content).
 3. ~~Pre-baseline acceptance unsatisfiable~~ — **RESOLVED by R5**: pins classified PRESERVATION vs FEATURE; D.0 gate runs preservation-only on clean `latest` pre-merge.
-4. **Doc verification at impl time (D4)** — Discord/Telegram/Slack API signatures remain verify-tasks (phaseB tasks; slack-setup.md refs corrected to YAML :17-32 / table :62-75).
+4. **Doc verification at impl time (D4)** — Discord/Telegram/Slack API signatures remain verify-tasks (phaseB tasks; slack-setup.md refs corrected to YAML :17-61 / table :69-82).
 5. **Real-lane testing (R8)** — Group 7 drives the real astream → progressive dispatch path; mock-seam tests remain as unit-layer coverage only.
 6. **Aggregator hygiene fix (disclosed):** `phaseD-plan.md:108` test-name typo `test_reamstream_…` → `test_astream_…` (name-only; siblings already `test_astream_*`).
 
@@ -101,7 +102,7 @@ Per-phase suites (A: 18 cases incl. probe/sanitizer/security-pin/ulimit + chart-
 ├── architecture-recommendation.md    ← 22 amendments; §3 GOVERNS on conflict
 ├── decisions.md                      ← 866 ln: locked contracts + §phase-b-r2-addendum-1..16 + §phase-d R2 records
 ├── phaseA-plan.md                    ← 538 ln, Draft R2 (amdt #15-#19, R6, T17-T24)
-├── phaseB-plan.md                    ← 1211 ln, Draft R2 (R1 both-seam, R2-R4, R7, amdt #2-#14)
+├── phaseB-plan.md                    ← 1202 ln, Draft R2 (R1 both-seam, R2-R4, R7, amdt #2-#14)
 ├── phaseC-plan.md                    ← 285 ln, Draft R2 (20 agents, greps, pin labels)
 └── phaseD-plan.md                    ← 430 ln, Draft R2 (24 pins/8 groups, D.0, astream e2e, ledgers)
 ```
