@@ -157,7 +157,7 @@ $ pytest tests/test_chart_tools_legacy_error_contract.py -v --tb=no -q
 2 passed in 0.41s
 $ pytest tests/test_charter_render_capture.py -v --tb=no -q
 44 passed, 4 deselected in 1.01s
-(4 `slow`-marked tests deselected under default addopts; rerunning with `-m slow` would re-include them but they're mmdc-conditional and skipped without the toolchain — out of named-suite scope per Task D)
+(4 deselected under default addopts (3 integration + 1 slow); rerunning with `-m slow` would re-include them but they're mmdc-conditional and skipped without the toolchain — out of named-suite scope per Task D)
 $ pytest tests/test_sources_dispatcher.py -v --tb=no -q
 78 passed in 0.48s
 $ pytest tests/test_discord_adapter.py -v --tb=no -q
@@ -221,7 +221,7 @@ exit 0
 | `tests/test_chart_tools.py` | 24 | 0 | |
 | `tests/test_chart_tools_reuse_integration.py` | 11 | 0 | |
 | `tests/test_chart_tools_legacy_error_contract.py` | 2 | 0 | |
-| `tests/test_charter_render_capture.py` | 44 | 4 (`slow`) | marker-trap guarded |
+| `tests/test_charter_render_capture.py` | 44 | 4 (3 integration + 1 slow) | marker-trap guarded |
 | `tests/test_sources_dispatcher.py` | 78 | 0 | matches Phase B §phase-b-impl-4 claim |
 | `tests/test_discord_adapter.py` | 196 | 0 | matches Phase B §phase-b-impl-4 claim |
 | `tests/test_telegram_adapter.py` | 45 | 0 | |
@@ -262,7 +262,7 @@ To enable Slack chart-image delivery, grant the `files:write` OAuth scope in you
 1. Open your Slack app config at `api.slack.com/apps`.
 2. OAuth & Permissions → Bot Token Scopes → add `files:write`.
 3. Save.
-5. Reinstall the app to your workspace.
+4. Reinstall the app to your workspace.
 5. Restart the daemon if needed.
 
 Until granted, Slack chart-image delivery is text-only with a WARN-once log per channel. See `docs/sources/slack-setup.md` (YAML manifest fenced block + scope row).

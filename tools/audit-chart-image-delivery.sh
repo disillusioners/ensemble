@@ -37,7 +37,7 @@ Usage: tools/audit-chart-image-delivery.sh [options]
 
 Options:
   --class preservation|feature|all   Pin class to run (default: all)
-  --release-pin FILE…                OQ4 deferred-pin selector (backstop)
+  --release-pin FILES…                RESERVED (not yet implemented) — OQ4 deferred-pin backstop, file arguments ignored
   -h, --help                         Show this help
 
 Exit codes: 0 = all selected pins PASS, 1 = any FAIL, 2 = usage error.
@@ -65,6 +65,15 @@ while [ $# -gt 0 ]; do
   esac
   shift || true
 done
+
+# ---------- reserved --release-pin honesty (Phase D review Finding #2) ----------
+# The flag is parsed into RELEASE_PIN_FILES but is NOT implemented. Refuse to
+# silently no-op: emit ONE explicit WARN line and continue (selector stays
+# class-based; no pin logic, no exit-code change). Keeps the documented
+# signature while making the deferred-pin status visible to operators.
+if [ "${#RELEASE_PIN_FILES[@]}" -gt 0 ]; then
+  echo "WARN: --release-pin is reserved (OQ4 deferred-pin backstop) and is NOT implemented — running ALL pins in the selected class(es); file arguments ignored." >&2
+fi
 
 # ---------- colour (TERM-aware) ----------
 if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
