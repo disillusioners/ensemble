@@ -93,6 +93,42 @@ printf 'CREATE TABLE x (id int);\n' > "$FAKE_REPO/daemon/migrations/versions/202
 printf '#!/bin/bash\nexit 78\n' > "$FIXTURE/stub-prod"
 chmod +x "$FIXTURE/stub-prod"
 
+# Stage freshness guard (cn 0472b31f; 2026-10-04): the stage guard verifies
+# the staged artifact's .build-provenance.json sidecar against the current
+# tree. The stub artifacts in this fixture are intentionally simple (a 17-byte
+# binary; a 12-byte index.html); they need a provenance sidecar whose
+# git_head matches FAKE_REPO's HEAD (the v1.0.0-sbx tag) and whose
+# git_dirty=false (the fixture tree is clean after the initial commit).
+# Without these sidecars, the stage guard correctly refuses the fixtures —
+# which would mask the real test signal. The helper writes the sidecar
+# shape the real _provenance_write helper produces (lib.sh:1587+), using
+# the same JSON keys the verifier reads.
+_fixture_head="$(git -C "$FAKE_REPO" rev-parse HEAD)"
+_fixture_dirty="$(git -C "$FAKE_REPO" status --porcelain | wc -l | tr -d ' ')"
+_fixture_head_short="${_fixture_head:0:12}"
+_fixture_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# helper: _write_provenance <artifact_abs> <tool>
+_write_provenance() {
+    local art="$1" tool="$2" sha prov rel
+    sha="$(shasum -a 256 "$art" | awk '{print $1}')"
+    rel="${art#"$FAKE_REPO"/}"
+    [ "$rel" = "$art" ] && rel="$art"   # outside-repo artifacts (stub-prod): keep absolute
+    prov="${art}.build-provenance.json"
+    cat > "$prov" <<EOF
+{
+  "git_head": "$_fixture_head",
+  "git_head_short": "$_fixture_head_short",
+  "git_dirty": false,
+  "build_at": "$_fixture_now",
+  "build_tool": "$tool",
+  "artifact_sha256": "$sha",
+  "artifact_path": "$rel"
+}
+EOF
+}
+_write_provenance "$FIXTURE/stub-prod" "stub:tests/test_release_journal.sh"
+_write_provenance "$FAKE_REPO/frontend/dist/frontend/browser/index.html" "stub:tests/test_release_journal.sh"
+
 # git-tag the fixture repo so stage.sh's exact-tag guard passes
 git -C "$FAKE_REPO" init -q
 git -C "$FAKE_REPO" add -A 2>/dev/null
@@ -105,9 +141,50 @@ mkdir -p "$SBX"
 SBX_PORT=18377   # throwaway port; never a real env port
 
 run_stage() {  # run_stage <extra args...> — env preset for the sandbox
+    # Stage freshness guard (cn 0472b31f; 2026-10-04): re-stamp the stub
+    # artifacts' provenance sidecars to match FAKE_REPO's current HEAD
+    # BEFORE each stage call. The DROP fixture re-stamps similarly in
+    # DROP_STAGE below. Without this re-stamp, the guard correctly
+    # refuses the artifacts as stale (their provenance was written for
+    # an earlier HEAD, or for the DROP repo's HEAD).
+    _stamp_provenance_for_repo "$FAKE_REPO" \
+        "$FIXTURE/stub-prod" \
+        "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
     HOME="$FAKE_HOME" VERSION="$SBX_V1" TARGET=sandbox \
         INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
         bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox "$@"
+}
+
+# _stamp_provenance_for_repo <repo> <artifacts...> — rewrite each artifact's
+# .build-provenance.json sidecar so its git_head matches the given repo's
+# current HEAD. git_dirty reflects the repo's working-tree state at call
+# time. Used by run_stage / DROP_STAGE to keep the stub fixtures' sidecars
+# in sync with whichever repo is about to be staged.
+_stamp_provenance_for_repo() {
+    local repo="$1"; shift
+    local head head_short dirty now art sha prov
+    head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || return 0
+    head_short="${head:0:12}"
+    dirty="$(git -C "$repo" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    dirty="${dirty:-0}"
+    [ "$dirty" -gt 0 ] 2>/dev/null && dirty=1
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    for art in "$@"; do
+        [ -f "$art" ] || continue
+        sha="$(shasum -a 256 "$art" | awk '{print $1}')"
+        prov="${art}.build-provenance.json"
+        cat > "$prov" <<EOF
+{
+  "git_head": "$head",
+  "git_head_short": "$head_short",
+  "git_dirty": false,
+  "build_at": "$now",
+  "build_tool": "stub:tests/test_release_journal.sh",
+  "artifact_sha256": "$sha",
+  "artifact_path": "stub:tests/test_release_journal.sh"
+}
+EOF
+    done
 }
 
 # ─── 1. syntax gates ────────────────────────────────────────────────────────
@@ -1084,6 +1161,14 @@ printf 'b4-second-version\n' > "$FAKE_REPO/B4_FIXTURE"
 git -C "$FAKE_REPO" add B4_FIXTURE
 git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm b4-fixture >/dev/null 2>&1
 git -C "$FAKE_REPO" tag "$SBX_V2" 2>/dev/null
+# Stage freshness guard (cn 0472b31f; 2026-10-04): the new commit moved
+# FAKE_REPO's HEAD, so the stub-prod + FE sidecars MUST be re-stamped
+# against the new HEAD before the stage call (the old stamp recorded the
+# v1 commit's SHA, which now diverges from HEAD). The helper re-derives
+# HEAD + dirty state and rewrites the sidecars in place.
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 HOME="$FAKE_HOME" VERSION="$SBX_V2" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
     bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1
 [ -f "$SBX/releases/$SBX_V2/manifest.json" ] && _pass || _fail "B4 fixture: v2 staged"
@@ -1222,6 +1307,11 @@ printf 'batchc-third-version\n' > "$FAKE_REPO/BATCHC_FIXTURE"
 git -C "$FAKE_REPO" add BATCHC_FIXTURE
 git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm batchc-fixture >/dev/null 2>&1
 git -C "$FAKE_REPO" tag "$SBX_V3" 2>/dev/null
+# Stage freshness guard (cn 0472b31f; 2026-10-04): the new commit moved
+# FAKE_REPO's HEAD again — re-stamp the stub-prod + FE sidecars.
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 HOME="$FAKE_HOME" VERSION="$SBX_V3" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
     bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1
 [ -f "$SBX/releases/$SBX_V3/manifest.json" ] && _pass || _fail "12 fixture: v3 staged"
@@ -1461,11 +1551,26 @@ git -C "$FAKE_REPO_DROP" -c user.email=t@t -c user.name=t commit -qm fixture
 git -C "$FAKE_REPO_DROP" tag "$SBX_V1"
 # DROP_STAGE <install_dir> — like run_stage but targets the DROP-bearing fixture
 DROP_STAGE() {
+    # Re-stamp provenance for the DROP fixture (different HEAD than FAKE_REPO).
+    _stamp_provenance_for_repo "$FAKE_REPO_DROP" \
+        "$FIXTURE/stub-prod" \
+        "$FAKE_REPO_DROP/frontend/dist/frontend/browser/index.html"
     HOME="$FAKE_HOME" VERSION="$SBX_V1" TARGET=sandbox \
         INSTALL_DIR="$1" PORT="$SBX_PORT" \
         bash "$FAKE_REPO_DROP/scripts/upgrade/stage.sh" sandbox --version "$SBX_V1" \
         --skip-build "$FIXTURE/stub-prod"
 }
+
+# Re-stamp provenance for the BENIGN fixture (FAKE_REPO) before the
+# rollback_safe rider section. The DROP_STAGE calls above (when 9e/9g/9h
+# fire later) flip the sidecars to the DROP repo's HEAD; the 9a-9d
+# subtests in this section all run against FAKE_REPO directly (not via
+# run_stage), so they need the sidecar to match FAKE_REPO. run_stage
+# also re-stamps defensively on every call, so 9f-9i (which DO go
+# through run_stage) stay correct.
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 
 # 9a. explicit ENSEMBLE_ROLLBACK_SAFE=1 honored (benign fixture)
 RIDER_DIR="$FIXTURE/rider9a"
@@ -1534,6 +1639,13 @@ rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
 out="$(unset ENSEMBLE_ROLLBACK_SAFE; HOME="$FAKE_HOME" TARGET=sandbox \
     INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
     DROP_STAGE "$RIDER_DIR" 2>&1)"; rc=$?
+# Stage freshness guard (cn 0472b31f; 2026-10-04): DROP_STAGE re-stamps
+# the stub-prod + FE sidecars to FAKE_REPO_DROP's HEAD. The 9f subtest
+# below runs against FAKE_REPO directly, so re-stamp back to FAKE_REPO
+# before the next direct stage.sh call.
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 assert_eq "9e unset+DROP refused: rc 78" "78" "$rc"
 assert_contains "9e unset+DROP refused: WARNING cites override" \
     "ENSEMBLE_ROLLBACK_SAFE=1" "$out"
@@ -1573,6 +1685,11 @@ rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
 out="$(unset ENSEMBLE_ROLLBACK_SAFE; HOME="$FAKE_HOME" TARGET=sandbox \
     INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
     DROP_STAGE "$RIDER_DIR" 2>&1)"; rc=$?
+# Stage freshness guard (cn 0472b31f; 2026-10-04): re-stamp back to FAKE_REPO
+# for any later direct stage.sh call (see 9e rider).
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 if [ "$rc" = "78" ] && [ ! -f "$RIDER_DIR/releases/$SBX_V1/manifest.json" ]; then
     _pass
 else
