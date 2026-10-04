@@ -1,9 +1,9 @@
 # Plan Overview: auto-continue RUNNING instances after daemon restart
 
-Date: 2026-10-04T05:00:00Z
-Author: planner[v2] via plan-creation worker
-Status: Ready for Review
-Feature branch: `feature/auto-continue-running-after-restart` @ `cf8efbef`
+Date: 2026-10-04T05:00:00Z (r2 fold), revised 2026-10-04T07:00:00Z (r3 fold, this revision)
+Author: planner[v2] via plan-creation worker; r3 fold by planner revision worker per approver rejection (one blocking fix + ride-alongs only)
+Status: Ready for Review (r3 fold)
+Feature branch: `feature/auto-continue-running-after-restart` @ `cf95a1a5` (the r2 fold pin `cf8efbef` is now stale; r3 fold pin = `cf95a1a5`; post-r3 commit pin to be assigned by the r3 commit's hash — see commit footer)
 Inputs: `investigation.md` (wanderer, verified reuse inventory + empirical gap), `technical-analysis.md` (900-line design AUTHORITY — its recommendations are this plan's working decisions)
 
 ---
@@ -128,13 +128,13 @@ None that block implementation. The analysis's G1-G8 are all adjudicated as work
 
 ## Reversibility
 
-Drop the column (DOWN migration + remove the `_ensure_postgres_columns` entry), delete the new module, remove the `api.py:1522` block, **revert the Δ1 surgical touch in `manager.py:11666-11697`**, unset the env var. The worktree (`../ensemble-src-wt-auto-continue`) is removable via `git worktree remove`; the `worktree-claim.txt` is removable by deletion. 5-file code change plus planning artifacts; no data semantics depend on the column (it is advisory-only bookkeeping); behavior reverts to today's StaleTaskRecovery-only backstop. **With Δ1 reverted** the orphan success-path returns to its pre-D18 "stranded at success-path" behavior (R19) — STR reaps at boot+10 min instead of immediate FIFO wake. Kill-switch `ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART=0` disables without a code change.
+Drop the column (DOWN migration + remove the `_ensure_postgres_columns` entry), delete the new module, remove the `api.py:1522` block, **revert the Δ1 r3 call-site-gate wrapper in `_resume_processing_background`'s success branch (success-branch docstring ENDS at `manager.py:11645`, `except Exception as e:` at `:11647`, NOT `:11666-11697` as the r2 reversibility note cited — see D29 anchor corrections)** — i.e. remove the `if task.auto_continued_at is not None:` wrapper around the `await asyncio.to_thread(self._task_repo.complete_task, task.id, ...)` call. **The shared `complete_task` SQL stays byte-identical to pre-feature across this reversion (the r2 fold's `AND auto_continued_at IS NOT NULL` conjunct was REJECTED in D29 — it never landed in shared SQL).** Unset the env var. The worktree (`../ensemble-src-wt-auto-continue`) is removable via `git worktree remove`; the `worktree-claim.txt` is removable by deletion. 5-file code change plus planning artifacts; no data semantics depend on the column (it is advisory-only bookkeeping); behavior reverts to today's StaleTaskRecovery-only backstop. **With the r3 call-site-gate wrapper reverted** the orphan success-path returns to its pre-D18 "stranded at success-path" behavior (R19) — STR reaps at boot+10 min instead of immediate FIFO wake. Kill-switch `ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART=0` disables without a code change.
 
 ## Plan Revisions (Δ-applied, additive)
 
 This plan was REVISED at 2026-10-04 to fold the architect's validated deltas (architecture-recommendation.md @ `ce148ad2`) into the existing implementation plan, per leader ratifications:
 
-- **Δ1 — Success-path orphan terminalizer (🔴)**: surgical `complete_task` in `_resume_processing_background`'s success branch (`manager.py:11666-11697`); `WHERE status='running'` guard makes it a no-op for cascade/worker shapes. Phase 2 task 2.8 + Phase 3 task 3.2 row 4 + Phase 3 task 3.3 complement regression test. Decisions D18; risk R19.
+- **Δ1 — Success-path orphan terminalizer (🔴, r3 REVISED to call-site gate per approver Option (b))**: surgical `complete_task` call in `_resume_processing_background`'s success branch (success-branch docstring ENDS at `manager.py:11645`, `except Exception as e:` at `:11647` — D29 anchor corrections), wrapped with the call-site gate `if task.auto_continued_at is not None:` (Option (b) per approver). The shared `complete_task` SQL stays byte-identical to pre-feature (no `auto_continued_at IS NOT NULL` conjunct added — the r2 scheme was REJECTED in D29 because it would silently make worker-pool / task-processor completion a no-op). Phase 2 task 2.8 + Phase 3 task 3.2 row 4 + Phase 3 task 3.3 complement regression test. Decisions D18 r3 + D29; risk R19 r3.
 - **Δ2 — `boot_epoch=None` SKIP-pass (🔴)**: on capture failure, the pass SKIPS with WARNING (no fallback to aware-datetime — frame mismatch). Phase 2 task 2.2 step (2). Decisions D19; risk R22.
 - **Δ3 — No-heartbeat window documented + optional `last_heartbeat_at` stamp (🟡, SHOULD-DEFERRED)**: module docstring + AC4 narrative rewrite; escalation flip-condition observed in Phase 5 task 5.8. Decisions D24; risk R20.
 - **Δ4 — Selection hardening (🟡)**: full instance-status exclusion set + `cancel_requested=False`; >1-candidate log-skip in service. Phase 1 task 1.4 + 1.7; Phase 2 task 2.3. Decisions D21.
@@ -143,3 +143,7 @@ This plan was REVISED at 2026-10-04 to fold the architect's validated deltas (ar
 - **Δ7 — Dedicated worktree MANDATE (🔴)**: implementation + E2E lanes run in `../ensemble-src-wt-auto-continue` with fresh uv venv + import-resolution gate. Phase 0 (NEW, precondition); Phase 4 task 4.7 worktree-gate assertion. Decisions D20; risk R21.
 
 Existing D1-D17, R1-R18, and AC traceability are unchanged; D18-D24 and R19-R23 are addenda (ADR/D numbering stable).
+
+### r3 fold (this revision — approver rejection of r2 Δ1 shared-SQL scope)
+
+This plan was FURTHER REVISED at 2026-10-04 (post-r2 leader-ratification) to fold the r3 approver's rejection of the r2 fold's Δ1 shared-SQL scope (Option (a) — extend `complete_task` with `AND auto_continued_at IS NOT NULL`) in favor of **call-site gating (Option (b))** — per approver's "REJECTED on ONE isolated issue" verdict. The r3 sweep touches ONE blocking fix (item 1+2 of the approver's note) + listed ride-alongs (items 3-7). No new scope; everything not listed is twice-approved. Anchor corrections (D29) record the `cf95a1a5`-verified line snapshots for the drift-prone anchors (success-branch tail `:11666-11697` → `:11615-11645`; `except Exception as e:` `:11699` → `:11647`; `complete_task` `:2803` → `:2553`; `fail_task` `:2932` → `:2682`; `get_by_work_id` `:484` → `:410`; D25's four anchors marked verify-at-use). T5.4b M-row registration in the M-matrix (test-strategy.md M22b — ride-along #4). Plan header commit pin updated to `cf95a1a5` (ride-along #5). Epoch-None SKIP narrative consistency verified across D19/T2.2/M11/M19 (ride-along #6 — all describe SKIP + WARNING + counter increment, no fallback). D27 enum-count prose aligned to live-tree-verified 10-value enum (ride-along #7 — the r2 prose's "9-value" + "WAITING legacy cosmetic" wording is corrected; D27 records the live-tree enum). Plan-overview.md reversibility note (line 131) updated to "revert the r3 call-site-gate wrapper" instead of "revert the Δ1 surgical touch in `:11666-11697`" (the r2 reversibility cite was drift).
