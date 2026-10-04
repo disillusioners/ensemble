@@ -95,6 +95,22 @@ from daemon.repositories.dependency_bus import (
 logger = logging.getLogger(__name__)
 
 
+def _has_truthy_error(outcome: Outcome) -> bool:
+    """Return True when ``outcome`` carries both an error status and a
+    non-empty error message.
+
+    F-1 (durability-f1-f2 / phase1) gates the ``_parent_errored`` flip on
+    this helper so that ``Outcome(status="error", error=None)`` — produced
+    legitimately by the terminated branch in
+    ``daemon/services/instance_lifecycle.py:256`` and by other None-capable
+    producers — does not poison the parent. Two bus gates consume the
+    helper (:meth:`DependencyBus.emit_terminal` and
+    :meth:`DependencyBus.emit_terminal_for_child_instance`); the helper
+    keeps the condition identical at both sites.
+    """
+    return outcome.status == "error" and bool(outcome.error)
+
+
 # -------------------------------------------------------------------------
 # Module-level constants
 # -------------------------------------------------------------------------
@@ -668,7 +684,22 @@ class DependencyBus:
             # Mirrors the old CM ``_determine_terminal_status``
             # "any error → error" rule that was lost when CM was
             # removed in Phase 5.
-            if outcome.status == "error":
+            # F-1 gate (durability-f1-f2 / phase1, plan §1): the
+            # ``_parent_errored`` flip is gated on a truthy error —
+            # see the ownership block in
+            # ``daemon/services/instance_lifecycle.py`` (boot
+            # step 7: ``init_dependency_bus``).
+            if outcome.status == "error" and outcome.error is None:
+                logger.warning(
+                    "bus emit_terminal: status='error' but error=None; "
+                    "skipping _parent_errored flip "
+                    "(terminated-branch or None-capable producer; "
+                    "see dependency_bus.py _has_truthy_error helper). "
+                    "task_id=%s status=%s",
+                    task_id[:8],
+                    outcome.status,
+                )
+            if _has_truthy_error(outcome):
                 # Collect the unique target ids of the watchers
                 # we're about to fire, then mark each as errored.
                 # Using a set avoids redundant dict writes when
@@ -856,7 +887,24 @@ class DependencyBus:
         # error") and consulted by the finalize path in
         # JobFeedbackObserver._process_event. Plain dict writes,
         # atomic in CPython, no lock needed (same as emit_terminal).
-        if outcome.status == "error":
+        # F-1 gate (durability-f1-f2 / phase1, plan §1): same
+        # truthy-error gate as :meth:`emit_terminal` — see
+        # the ownership block in
+        # ``daemon/services/instance_lifecycle.py`` (boot
+        # step 7: ``init_dependency_bus``).
+        if outcome.status == "error" and outcome.error is None:
+            logger.warning(
+                "bus emit_terminal_for_child_instance: "
+                "status='error' but error=None; "
+                "skipping _parent_errored flip "
+                "(terminated-branch or None-capable producer; "
+                "see dependency_bus.py _has_truthy_error helper). "
+                "parent=%s child=%s status=%s",
+                parent_instance_id[:8],
+                child_instance_id[:8],
+                outcome.status,
+            )
+        if _has_truthy_error(outcome):
             self._parent_errored[parent_instance_id] = True
             if outcome.error:
                 self._parent_error_message[parent_instance_id] = (
