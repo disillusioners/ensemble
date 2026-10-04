@@ -480,7 +480,7 @@ def seed_chat_message(
     # type via source_configs. The harness MUST seed that row
     # for the lane filter to match (the production path has the
     # row because the adapter registered itself). Idempotent —
-    # INSERT OR IGNORE on PK (source_id).
+    # read-then-insert on PK (source_id).
     source_id = source.split(":", 1)[0] if ":" in source else source
     # source_id → source_type: derive from CHAT_SOURCE_PREFIXES
     # via SUBSTRING containment (NOT ``startswith`` — that was the
@@ -512,12 +512,13 @@ def seed_chat_message(
             # E.g. ``my-discord-bot`` → ``discord``,
             # ``prod_telegram`` → ``telegram``.
             matched_type = canonical_type
-            # Do NOT break: a longer prefix might match later
-            # in the loop (e.g. for a hypothetical chat-type
-            # ``telegram-bot`` it should beat ``telegram``). The
-            # current tuple has no such pairs, so this is a
-            # forward-compatible guard rather than a current
-            # # correctness fix.
+            # Last match wins: a longer prefix in a later loop
+            # iteration would replace the current match. The
+            # current CHAT_SOURCE_PREFIXES tuple has no nested
+            # chat-type names, so this is benign today. Revisit
+            # if nested chat-type names are added (e.g. a
+            # ``telegram-bot`` prefix that should beat
+            # ``telegram``).
     if matched_type is not None:
         with Session(engine) as s:
             existing_sc = s.get(SourceConfig, source_id)

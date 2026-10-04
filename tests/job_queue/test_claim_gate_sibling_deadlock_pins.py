@@ -31,7 +31,7 @@ Three classes cover the fix and its council rework:
   path after the first JobItem DONE (REQUIRED 2.3).
 
 All tests use the file-local ``bug_engine`` fixture (per-test
-file-backed SQLite engine; see the fixture at :120) — NOT the
+file-backed SQLite engine) — NOT the
 ``tests/job_queue/conftest.py`` ``engine`` fixture (session-scoped
 in-memory SQLite shared with sibling test files). This file
 intentionally opts out for bulletproof per-test DB isolation. No
@@ -40,22 +40,14 @@ external DB. No daemon boot. No env-poison risk.
 
 from __future__ import annotations
 
-import json
-import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, event, text
-from sqlmodel import Session, SQLModel
+from sqlmodel import SQLModel
 
-from daemon.repositories.instance.models import (
-    Instance,
-    InstanceStatus,
-)
-from daemon.repositories.instance.repository import (
-    SQLModelInstanceRepository,
-)
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import (
     AdmissionState,
     JobItem,
@@ -65,10 +57,7 @@ from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.queue_repository import (
     JobQueueRepository,
 )
-from daemon.repositories.message_queue.models import (
-    MessageQueue,
-    MessageStatus,
-)
+from daemon.repositories.message_queue.models import MessageStatus
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 
@@ -308,15 +297,6 @@ def _read_task_status(engine, work_id: str) -> str | None:
     with engine.begin() as conn:
         row = conn.execute(
             text("SELECT status FROM task WHERE work_id = :work_id"),
-            {"work_id": work_id},
-        ).first()
-    return row[0] if row else None
-
-
-def _read_task_instance(engine, work_id: str) -> str | None:
-    with engine.begin() as conn:
-        row = conn.execute(
-            text("SELECT instance_id FROM task WHERE work_id = :work_id"),
             {"work_id": work_id},
         ).first()
     return row[0] if row else None
@@ -592,9 +572,6 @@ class TestPerInstanceBelt:
         (one per queue slot). Pin against the obvious belt bug
         (over-matching by instance_id — must be exact match)."""
         from daemon.services.job_queue_service import JobQueueService
-        from daemon.repositories.job_queue.repository import (
-            JobRepository,
-        )
 
         wid_a = "wid-diff-A"
         wid_b = "wid-diff-B"
@@ -640,9 +617,6 @@ class TestPerInstanceBelt:
         # sibling deadlock does NOT apply here because the
         # instances differ.
         #
-        # Strongest pin: call start_job on JobItem-A — already
-        # ACTIVE — the candidate path must also work, proving
-        # the belt's exclude_job_id clause prevents self-match.
         import asyncio
         result_b = asyncio.run(service.start_job(wid_b))
         # JobItem-B should be eligible to start (belt doesn't
@@ -663,8 +637,7 @@ class TestPerInstanceBelt:
         )
 
 
-# ── Test 3 (council rework 2026-10-04, REQUIRED 2): belt must NOT
-# ── be ACTIVE-only on siblings. ──
+# ── Test 3 (council rework 2026-10-04, REQUIRED 1+2): belt must be ACTIVE-only. ──
 
 
 class TestBeltActiveOnlyFilter:
@@ -751,14 +724,18 @@ class TestBeltActiveOnlyFilter:
         self, bug_engine
     ) -> None:
         """REQUIRED 2.2: ACTIVE candidate with no other ACTIVE
-        sibling MUST be admitted (the helper's
-        ``exclude_job_id`` self-match exclusion must work).
-        The pre-rework pin
-        ``test_belt_allows_different_instance`` had a near-
-        tautological check ``in ('queued','active')`` that
-        never exercised the self-exclusion — that test passed
-        for the wrong reasons. Post-rework the helper
-        uses ``admission_state == 'active'`` so the check is
+        sibling — pin the helper's ``exclude_job_id`` self-match
+        exclusion at the helper level. With the candidate's
+        own work_id passed as ``exclude_job_id``, the helper
+        MUST return None (no self-match), while the same call
+        with a different ``exclude_job_id`` returns the
+        candidate (proves the helper's filter is ACTIVE-only).
+        Pre-rework the near-tautological ``in ('queued',
+        'active')`` check in
+        ``test_belt_allows_different_instance`` never
+        exercised the self-exclusion — that test passed for
+        the wrong reasons. Post-rework the helper uses
+        ``admission_state == 'active'`` so the check is
         tighter and self-match would block ALL admissions
         without the exclusion. Pin the exclusion."""
         from daemon.services.job_queue_service import JobQueueService
@@ -824,7 +801,7 @@ class TestBeltActiveOnlyFilter:
             f"got {helper_no_exclude.job_id!r}."
         )
 
-        # Strongest pin: start_job on the candidate must
+        # Secondary check: start_job on the candidate must
         # NOT be declined by self-match. Belt decline
         # observable as start_job returning None AND the
         # admission_state remaining 'queued' (or, since the

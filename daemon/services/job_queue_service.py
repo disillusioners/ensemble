@@ -4280,7 +4280,7 @@ class JobQueueService:
         # belt. SCOPE ASSUMPTION (council rework 2026-10-04,
         # FOLD-IN 7): TASK-type JobItems ALWAYS mint a fresh
         # ``instance_id`` (the ``str(uuid.uuid4())`` call below in
-        # the ``else`` branch at line ~4252 — they spawn a NEW
+        # the ``else`` branch at line ~4247 — they spawn a NEW
         # instance per job). Therefore a TASK job CANNOT collide
         # per-instance with another active TASK job at admission
         # time — there is no prior TASK-JobItem on this instance

@@ -1,7 +1,7 @@
 """Pinned tests for the chat-pool starvation fix
 (2026-10-04, ``fix/claim-gate-sibling-deadlock``).
 
-Six pins (TestChatPoolStarvationFix) cover the fix and its
+Eight pins (TestChatPoolStarvationFix) cover the fix and its
 council rework:
 
 * ``test_chat_lane_matches_custom_source_id`` — the
@@ -46,7 +46,7 @@ council rework:
   exact byte-for-byte prefix equality. Pin against the over-match.
 
 * ``test_chat_lane_underscore_explicit_substr_check`` —
-  SUBSTR/LENGTH semantics pin (PG + SQLite).
+  SUBSTR/LENGTH semantics pin (file-backed SQLite harness).
 
 All tests use the file-local ``bug_engine`` fixture (per-test
 file-backed SQLite engine; see the fixture at :120) — NOT the
@@ -57,8 +57,6 @@ intentionally opts out for bulletproof per-test DB isolation.
 
 from __future__ import annotations
 
-import json
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -66,15 +64,9 @@ from sqlalchemy import create_engine, event, text
 from sqlmodel import SQLModel
 
 from daemon.constants import CHAT_SOURCE_PREFIXES
-from daemon.repositories.instance.models import (
-    InstanceStatus,
-)
-from daemon.repositories.message_queue.models import (
-    MessageQueue,
-    MessageStatus,
-)
-from daemon.repositories.source.models import SourceConfig
-from daemon.repositories.task.models import Task, TaskStatus, TaskType
+from daemon.repositories.instance.models import InstanceStatus
+from daemon.repositories.message_queue.models import MessageStatus
+from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.task.repository import (
     TaskRepository,
     set_chat_lane_active,
@@ -175,8 +167,10 @@ def _seed_source_config(
 
     The chat-pool starvation fix (2026-10-04) resolves adapter
     type at claim time via ``source_configs.source_type`` — the
-    filter is ``source_id LIKE source_configs.source_id || ':%'``
-    AND ``source_configs.source_type IN (chat_types)``.
+    filter uses SUBSTR/LENGTH byte-for-byte prefix equality
+    (``SUBSTR(source, 1, LENGTH(source_id || ':')) =
+    source_id || ':'``) AND ``source_configs.source_type IN
+    (chat_types)``.
     """
     now_iso = _iso_now()
     with engine.begin() as conn:
@@ -213,7 +207,11 @@ def _seed_chat_task(
 ) -> int:
     """Insert a ``process_message`` Task row + matching
     ``MessageQueue`` row with the given source string. Returns
-    the Task rowid."""
+    the Task rowid.
+
+    ``status`` applies to the task row only; the message_queue
+    row is always PROCESSING.
+    """
     now_iso = _iso_now()
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
     with engine.begin() as conn:
@@ -264,10 +262,7 @@ def _seed_chat_task(
 
 
 def _read_task_status(engine, work_id: str) -> str | None:
-    """Read the task row's status by work_id. Used by the
-    council-required underscore-over-match pin to assert the
-    over-match row stays PENDING after the chat-lane
-    exclusion."""
+    """Read the task row's status by work_id."""
     with engine.begin() as conn:
         row = conn.execute(
             text(
@@ -395,8 +390,8 @@ class TestChatPoolStarvationFix:
         """Negative pin — non-chat sources (``webhook:...``)
         must NOT be claimed by the chat lane, even with the
         broader JOIN. Pin against accidental over-matching on
-        the new JOIN path (the JOIN's LIKE pattern must NOT
-        match unrelated source_ids)."""
+        the new JOIN path (the JOIN's SUBSTR/LENGTH prefix
+        equality must NOT match unrelated source_ids)."""
         inst = "inst-non-chat"
         wid = "wid-non-chat"
         msg_id = "msg-non-chat"

@@ -196,8 +196,8 @@ def _chat_source_exists_sql() -> str:
     return (
         "EXISTS ("
         "SELECT 1 FROM message_queue "
-        # INSTR — see docstring for the LIKE-wildcard exposure
-        # rationale (council rework 2026-10-04, REQUIRED 3).
+        # SUBSTR/LENGTH prefix equality — see docstring
+        # (LIKE-wildcard exposure; INSTR/STRPOS rejected).
         "JOIN source_configs "
         "  ON SUBSTR(message_queue.source, 1, "
         "      LENGTH(source_configs.source_id || ':')) "
@@ -2492,8 +2492,7 @@ class TaskRepository:
                         -- SAFETY ARGUMENT — this relaxation CANNOT
                         -- create concurrent same-instance turns:
                         -- the per-instance RUNNING-task guard
-                        -- (above at lines 2230-2294) already
-                        -- serializes at the Task layer (one
+                        -- already serializes at the Task layer (one
                         -- ``status='running'`` task per instance).
                         -- A TASK-type JobItem still blocks per the
                         -- original D13 invariant — only the
