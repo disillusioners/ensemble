@@ -10,12 +10,15 @@ Spec contracts pinned here:
 
 * **R14 auto-fallback** (§4.3 / §6.3) — the result contract is
   EXACTLY six keys: ``{instance_id, started, snapshot_id, staleness,
-  hint, error}``; ``started`` is ``"warm"|"cold"`` (always present,
-  never null/missing on either path); ``reason`` rides inside the
-  ``hint`` string verbatim. The hint format is also pinned:
-  - warm: ``"Warm-started from snapshot {id} (age {n}d; tags …)"``
+  hint, error}``; ``started`` is ``"warm"|"cold"|"blocked"`` (always
+  present, never null/missing on either path; ``"blocked"`` = R18
+  adjacent — the 1090f308 authorization-refusal value); ``reason``
+  rides inside the ``hint`` string verbatim. The hint format is also
+  pinned:
+  - warm: ``"Warm-started from snapshot {id} (age {n}d; tags …) — auto-dispatched as first turn …"``
   - cold: ``"No matching snapshot — spawned cold (searched: …; reason:
-    no-hit | expired | verify-failed)"``
+    no-hit | expired | verify-failed) — auto-dispatched as first turn …"``
+  - blocked: ``"Permission denied — spawn blocked (reason: permission-denied). …"``
 
 * **R12 supersession** (§6.3) — a SUPERSEDED snapshot is NEVER
   returned as a candidate. The explicit-id verify branch refuses
@@ -65,6 +68,30 @@ from daemon.tools.snapshot_tools import (
     create_snapshot_tools,
     is_snapshot_create_enabled,
 )
+from tests.unit.tools._fakes import FakeAsyncMessageResult
+
+
+# R18 (2026-10-04) — local stand-in for AsyncMessageResult. Mirrors the
+# helper in ``tests/unit/tools/test_snapshot_tools.py``. The spot
+# pack does not assert on the enqueue result shape (it pins the
+# snapshot contract only), so a minimal stub is enough to satisfy
+# the R18 auto-dispatch enqueue call inside the tool.
+class _FakeAsyncMessageResult(FakeAsyncMessageResult):
+    """spot alias — see :class:`tests.unit.tools._fakes.FakeAsyncMessageResult`.
+
+    Kept as a thin subclass so the spot pack continues to use its
+    convention (``_FakeAsyncMessageResult``); the spot default
+    ``message_id`` stays ``'msg-spot-1'``.
+    """
+
+    def __init__(
+        self,
+        message_id: str = "msg-spot-1",
+        queued: bool = True,
+        status: str = "queued",
+    ) -> None:
+        super().__init__(message_id=message_id, queued=queued, status=status)
+
 
 # A snapshot row carrying the minimum fields required for an
 # active warm-start; mirrors the dev suite's ``_snapshot`` helper.
@@ -156,7 +183,7 @@ class FakeSearchService:
 
 
 class FakeManager:
-    """Records the spawn / metadata-write ordering (R6b)."""
+    """Records the spawn / metadata-write ordering (R6b) + R18 enqueue."""
 
     def __init__(self, rows: dict[str, Any], repo: SnapshotRepository) -> None:
         self._instance_repository = FakeInstanceRepo(rows)
@@ -167,6 +194,22 @@ class FakeManager:
         self.events: list[str] = []
         self.spawn_calls: list[dict[str, Any]] = []
         self.metadata_calls: list[tuple[str, dict[str, Any]]] = []
+        # R18 (2026-10-04) auto-dispatch seam — the spawn_hot_instance
+        # tool now calls ``manager.enqueue_message`` to enqueue the
+        # task as the child's first turn. The spot tests don't
+        # exercise the auto-dispatch surface (they pin the snapshot
+        # contract: started / hint / error / staleness / 6-key shape),
+        # so a no-op recorder that records the call + returns a
+        # fake AsyncMessageResult is sufficient. Tests that need to
+        # assert on enqueue behavior live in the unit test file
+        # ``tests/unit/tools/test_snapshot_tools.py`` (TestR18AutoDispatch).
+        self.enqueue_calls: list[dict[str, Any]] = []
+        self.enqueue_result: Any = _FakeAsyncMessageResult()
+
+    async def enqueue_message(self, **kwargs: Any) -> Any:
+        self.events.append("enqueue")
+        self.enqueue_calls.append(kwargs)
+        return self.enqueue_result
 
     def spawn_instance(self, **kwargs: Any) -> tuple[str, str | None]:
         self.events.append("spawn")

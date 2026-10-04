@@ -81,6 +81,30 @@ from daemon.tools.snapshot_tools import (
     create_snapshot_tools,
     is_snapshot_create_enabled,
 )
+from tests.unit.tools._fakes import FakeAsyncMessageResult
+
+
+# R18 (2026-10-04) — local stand-in for AsyncMessageResult. Mirrors
+# the helper in the unit test file. v3 tests pin the snapshot-
+# create / metrics / search behavior; the auto-dispatch surface is
+# exercised in TestR18AutoDispatch. A minimal stub here is enough
+# to satisfy the R18 enqueue call.
+class _FakeAsyncMessageResult(FakeAsyncMessageResult):
+    """v3 alias — see :class:`tests.unit.tools._fakes.FakeAsyncMessageResult`.
+
+    Kept as a thin subclass so the v3 suite continues to use its
+    convention (``_FakeAsyncMessageResult``); Wave-3's default
+    ``message_id`` stays ``'msg-v3-1'``.
+    """
+
+    def __init__(
+        self,
+        message_id: str = "msg-v3-1",
+        queued: bool = True,
+        status: str = "queued",
+    ) -> None:
+        super().__init__(message_id=message_id, queued=queued, status=status)
+
 
 VALID_KIND_TAGS = ["kind:implementation"]
 # Same tag set used by the Wave-2b suite — keeps the verdict math
@@ -158,7 +182,7 @@ class FakeSearchService:
 
 
 class FakeManager:
-    """R6b ordering + Wave-3 metrics passthrough."""
+    """R6b ordering + Wave-3 metrics passthrough + R18 enqueue."""
 
     def __init__(self, rows: dict[str, Any], repo: SnapshotRepository):
         self._instance_repository = FakeInstanceRepo(rows)
@@ -170,6 +194,19 @@ class FakeManager:
         self.events: list[str] = []
         self.spawn_calls: list[dict[str, Any]] = []
         self.metadata_calls: list[tuple[str, dict[str, Any]]] = []
+        # R18 (2026-10-04) auto-dispatch seam — the spawn_hot_instance
+        # tool now calls ``manager.enqueue_message`` to enqueue the
+        # task as the child's first turn. The v3 tests pin the
+        # snapshot-create / metrics / search behavior; the
+        # auto-dispatch surface is tested in TestR18AutoDispatch in
+        # the unit test file. A no-op recorder is sufficient here.
+        self.enqueue_calls: list[dict[str, Any]] = []
+        self.enqueue_result: Any = _FakeAsyncMessageResult()
+
+    async def enqueue_message(self, **kwargs: Any) -> Any:
+        self.events.append("enqueue")
+        self.enqueue_calls.append(kwargs)
+        return self.enqueue_result
 
     def spawn_instance(self, **kwargs) -> tuple[str, str | None]:
         self.events.append("spawn")

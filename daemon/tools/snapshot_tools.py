@@ -47,6 +47,39 @@ problem and how to resolve it. Callers can then separate "spawned
 cold" from "spawn refused" without parsing the ``error`` string.
 Genuine snapshot misses / verify-fails / expired fallbacks keep
 returning ``started: "cold"`` with the existing R14 hint shape.
+
+R18 auto-dispatch (2026-10-04 — contract trap fix): by default
+``spawn_hot_instance`` enqueues the supplied ``task`` as the new
+instance's first turn INSIDE the tool, so callers do NOT need a
+follow-up ``send_message(instance_id, task)`` call. The forensic
+audit (2026-10-04, evidence
+``.agents/tester/RESULTS/2026-10-04-v01612-spawn-enqueue-forensic-audit.md``)
+proved the previous contract was "accepted-but-never-delivered" —
+agents uniformly missed the follow-up requirement, so spawned
+children sat idle until manually POSTed. The ``auto_dispatch`` flag
+defaults to ``True`` to make the trap structurally impossible; opt
+out with ``auto_dispatch=False`` to restore the legacy two-step
+ritual (callers MUST then call ``send_message`` themselves). The
+hint line on every result states the dispatch outcome ("auto-
+dispatched", "skipped: task was empty", "auto_dispatch=False", or
+"auto-dispatch ERROR" on enqueue failure), so a caller can always
+see at-a-glance whether the child is working on the task. The
+``error`` field carries the loud failure detail when the enqueue
+fails after a successful spawn (never silent).
+
+Size rationale (2026-10-04): the module is ~1440 lines because it
+hosts three tightly-coupled Wave-2b tools (snapshot_create,
+snapshot_search, spawn_hot_instance) plus the Wave-3 settings gate,
+R16 monitoring counters, R12 supersession, R14 auto-fallback, R18
+auto-dispatch, and D8 cross-project handoff — each is a non-trivial
+state machine with its own helper surface (R9 verdict, R6b ordering,
+auto-dispatch invariants, verify=git anchor). A split would force
+shared helpers (e.g. _cold_result, _denied_result, _safe_inc_*,
+_staleness_report plumbing) into a third module and add import-order
+complexity without reducing the per-tool surface. The trigger to split
+would be the addition of a FOURTH tool surface (e.g. an authoring
+sub-tool) or the comment block for a single tool exceeding ~500
+lines — neither condition is close today.
 """
 
 from __future__ import annotations
@@ -94,12 +127,19 @@ A snapshot is a distilled digest of one instance's working experience
   from the best matching snapshot (digest injected as turn-1
   context). Falls back to a normal cold spawn when no snapshot is
   found, expired, or verification fails — the result's
-  "started": "warm"|"cold" line says which happened; cite it in
-  your dispatch/report. **Authorization failures** (e.g. the
+  "started": "warm"|"cold"|"blocked" line says which happened; cite
+  it in your dispatch/report. **Authorization failures** (e.g. the
   caller's `team_members` does not include the requested agent)
   return `"started": "blocked"` instead — distinct from a cold
   fallback so callers can separate "spawned cold" from "spawn
-  refused" without parsing `error`. Pass `allow_cross_project=True` to consume
+  refused" without parsing `error`. **R18 auto-dispatch
+  (2026-10-04)**: by default the supplied `task` is enqueued as the
+  child's first turn INSIDE the tool, so callers do NOT need a
+  follow-up `send_message` — the result's hint line states the
+  dispatch outcome ("auto-dispatched", "skipped: task was empty",
+  "auto_dispatch=False", or "auto-dispatch ERROR" on enqueue
+  failure). Opt out with `auto_dispatch=False` to restore the
+  legacy two-step ritual. Pass `allow_cross_project=True` to consume
   a cross-project snapshot explicitly (off by default — fail-closed
   D8 isolation). Project-less callers (e.g. an instance whose
   project is unknown) always get a cold spawn — the internal search
@@ -245,8 +285,13 @@ class SpawnHotInstanceInput(BaseModel):
             "Self-contained task description. On a warm start the "
             "snapshot digest lands in the new instance's turn-1 "
             "context BEFORE this task; on a cold start this is the "
-            "whole context. Either way you must still dispatch it via "
-            "send_message(instance_id, task)."
+            "whole context. By default (auto_dispatch=True) the tool "
+            "enqueues this task as the child's first turn — callers "
+            "do NOT need a follow-up send_message. When the task is "
+            "empty/whitespace the auto-dispatch is a no-op (the row "
+            "is created but no first-turn message is enqueued; the "
+            "caller MUST send the first message themselves in that "
+            "case — the warm-cold hint line states this explicitly)."
         ),
     )]
 
@@ -312,6 +357,27 @@ class SpawnHotInstanceInput(BaseModel):
             "are always project-scoped (D8 permanent)."
         ),
     )] = False
+
+    auto_dispatch: Annotated[bool, Field(
+        default=True,
+        description=(
+            "Auto-dispatch the task as the child's first turn (R18, "
+            "2026-10-04 — the spawn_hot_instance contract trap fix). "
+            "Default ``True``: the tool enqueues ``task`` as the new "
+            "instance's first message itself, so callers do NOT need "
+            "a follow-up ``send_message(instance_id, task)`` call. "
+            "The hint line on success notes "
+            "``auto-dispatched as first turn`` so the caller can see "
+            "what happened. Set to ``False`` ONLY when the caller "
+            "wants manual control (e.g. batching multiple children "
+            "behind a barrier, or the caller prefers the legacy "
+            "two-step ``spawn_hot_instance`` + ``send_message`` "
+            "ritual for symmetric reasoning). When ``False`` is "
+            "passed, the tool does NOT enqueue anything and the "
+            "caller MUST follow up with ``send_message`` — same "
+            "trap as the pre-R18 spawn_instance contract."
+        ),
+    )] = True
 
 
 # ── module-level helpers (pure, testable) ──────────────────────────────
@@ -857,8 +923,18 @@ def create_snapshot_tools(
         model: Annotated[str | None, Field(description="Optional LLM model override (spawn_instance fallback semantics).")] = None,
         verify: Annotated[Literal["metadata", "git"], Field(description="Staleness depth: 'metadata' (default) or 'git' repo-divergence anchor.")] = "metadata",
         allow_cross_project: Annotated[bool, Field(description="D8/Wave 2b handoff: explicit cross-project override. False (default) → mismatch is a verify-fail cold fallback. True → consume the cross-project snapshot anyway (staleness still computed; hint notes the cross-project origin). Only meaningful when snapshot_id is supplied.")] = False,
+        auto_dispatch: Annotated[bool, Field(description="Auto-enqueue ``task`` as the child's first turn (R18, 2026-10-04). Default True eliminates the spawn_hot_instance contract trap; False restores the legacy two-step ritual (caller MUST then call send_message). When task is empty/whitespace the auto-dispatch is a no-op regardless.")] = True,
     ) -> dict:
-        """Spawn an instance warm-started from the best matching snapshot; cold fallback on any miss. Use tool_help("spawn_hot_instance") for details."""
+        """Spawn an instance warm-started from the best matching snapshot; cold fallback on any miss. Use tool_help("spawn_hot_instance") for details.
+
+        R18 (2026-10-04) — auto-dispatch. The ``task`` argument is
+        enqueued as the child's first turn by default, so callers do
+        NOT need a follow-up ``send_message(instance_id, task)`` call.
+        Set ``auto_dispatch=False`` to opt out (legacy two-step ritual).
+        When ``task`` is empty/whitespace the auto-dispatch is a
+        no-op (a row is still created, but the caller must send the
+        first message themselves — the hint line states this).
+        """
         # ── Auth: team membership (same gate as spawn_instance) ───────
         # Per the repo convention (authorization helpers fail closed for
         # agent-backed operations) the membership gate here is the SAME
@@ -1197,6 +1273,151 @@ def create_snapshot_tools(
                             "encoding failed (non-fatal)"
                         )
 
+        # ── R18 (2026-10-04) auto-dispatch — eliminate the contract trap.
+        # Forensic-audit lineage: commissions cfded28b / da8e4809
+        # (leader-synthesized verdict bb100883; audit-doc 6e75621b)
+        # proved that `task` was "accepted-but-never-delivered" —
+        # agents uniformly missed the follow-up send_message
+        # requirement. Default behavior now: if `auto_dispatch=True`
+        # AND `task` is non-empty, enqueue `task` as the child's
+        # first turn INSIDE this tool so the trap is structurally
+        # impossible. Ordering: AFTER the R6b warm-path metadata
+        # write so the snapshot digest is already stamped when the
+        # worker picks up the message
+        # (`assemble_context_messages` reads
+        # `instance_metadata["snapshot_digest"]` on turn 1). On any
+        # enqueue failure the spawn result is preserved but the
+        # `error` field surfaces the failure and the hint names the
+        # manual recovery path — never silent.
+        auto_dispatch_enqueued: bool = False
+        auto_dispatch_error: str | None = None
+        auto_dispatch_message_id: str | None = None
+        if auto_dispatch and task and task.strip():
+            try:
+                # Same provenance as send_message (instance.py:3566)
+                # so downstream tooling sees the parent-id-minted
+                # source and the existing internal_agent:<caller>
+                # source taxonomy continues to apply.
+                enqueue_result = await manager.enqueue_message(
+                    instance_id=new_instance_id,
+                    message=task,
+                    source=(
+                        f"internal_agent:{caller_instance_id}"
+                        if caller_instance_id
+                        else "api"
+                    ),
+                )
+                # ── R18 result-inspection invariant (2026-10-04) ──
+                # The defensive contract: any non-queued outcome from
+                # the internal enqueue path MUST route into the SAME
+                # failure/hint surface as exceptions (F1-style). After
+                # verifying
+                # ``daemon.services.instance_messaging.enqueue_message``
+                # (the path this tool uses — distinct from the HTTP
+                # ``enqueue_message_job`` variant), the escape hatch
+                # applies: this path has EXACTLY ONE non-raising return
+                # (``AsyncMessageResult(message_id=…, instance_id=…,
+                # status='queued', job_id=…)`` at
+                # ``instance_messaging.py:2257``) and every failure mode
+                # raises (e.g. ``RuntimeError("Manager is shutting
+                # down…")`` at :1694; the inner ``session.commit()`` /
+                # ``session.refresh(task)`` block at :2071 / :2079 raises
+                # on DB faults). There is NO non-raising non-queued
+                # outcome on this path; the ``queued`` field is hardcoded
+                # to the dataclass default (``False``) and ``status`` is
+                # hardcoded to the literal ``"queued"`` on the only
+                # return site, so a ``result.queued == False`` check
+                # would be dead code that mis-fires on every successful
+                # enqueue. Pin the invariants instead of branching on a
+                # signal that cannot discriminate — a regression here
+                # (e.g. a future ``return AsyncMessageResult(…,
+                # status='rejected')`` branch) MUST update this block,
+                # not silently slip through.
+                if enqueue_result is None:
+                    raise RuntimeError(
+                        "manager.enqueue_message returned None for "
+                        f"new_instance_id={new_instance_id}; the "
+                        "R18 invariant is non-None on success"
+                    )
+                result_message_id = getattr(
+                    enqueue_result, "message_id", None
+                )
+                result_status = getattr(enqueue_result, "status", None)
+                if not result_message_id or result_status != "queued":
+                    # Regression-ladder tripwire. If this ever fires,
+                    # a new non-raising non-queued branch was added
+                    # upstream; route the loud surface here so the
+                    # caller can self-recover. Today this is
+                    # unreachable on the only return path (:2257
+                    # above) — the assertion is a guard against
+                    # silent-failure regressions on the exact contract
+                    # this commission closes.
+                    raise RuntimeError(
+                        f"manager.enqueue_message returned a "
+                        f"non-queued result: status={result_status!r} "
+                        f"message_id={result_message_id!r} "
+                        f"new_instance_id={new_instance_id}"
+                    )
+                auto_dispatch_message_id = result_message_id
+                auto_dispatch_enqueued = True
+                # R18 traffic visibility (review F2) — the forensic-
+                # audit methodology counts enqueue log lines; auto-
+                # dispatch traffic MUST be countable the same way.
+                # Mirrors the warm-spawn JSON log shape at :1243 so
+                # downstream tooling (grep / census) treats both
+                # uniformly. Same `import json as _json` local pattern
+                # to keep the surface minimal and avoid dragging the
+                # module-level namespace.
+                try:
+                    import json as _json
+
+                    logger.info(
+                        "[SnapshotAutoDispatch] "
+                        + _json.dumps(
+                            {
+                                "event": "spawn_hot_auto_dispatch",
+                                "caller_iid": caller_instance_id,
+                                "target_iid": new_instance_id,
+                                "content_len": len(task),
+                                "message_id": result_message_id,
+                            }
+                        )
+                    )
+                except Exception:  # noqa: BLE001 — defensive belt: log-line JSON encoding failure MUST NOT mask the successful enqueue above
+                    logger.warning(
+                        "[Snapshot] R18 auto-dispatch log line "
+                        "encoding failed (non-fatal)"
+                    )
+            except Exception as exc:  # noqa: BLE001 — enqueue lane raises arbitrary transport/DB errors; F1 contract surfaces them
+                # Review F1 — log the failure (was silent before).
+                # Same `logger` + same f-string sibling style as the
+                # internal-search failure path at :1066 — diagnostics
+                # come from logs alone when a caller reports a
+                # stranded child without preserving the result. The
+                # ``auto_dispatch_message_id`` is preserved on the
+                # result side (None when the enqueue never reached
+                # the dispatch — see the success-path assignment
+                # above) so a future tool consumer can still
+                # distinguish "enqueue never returned an id" from
+                # "enqueue succeeded but downstream tool surface
+                # corrupted".
+                logger.warning(
+                    f"[Snapshot] spawn_hot_instance auto-dispatch "
+                    f"enqueue failed for {new_instance_id}: {exc}"
+                )
+                # Never silent — surface as a clear error so the
+                # caller can self-correct via a follow-up
+                # send_message. We do NOT downgrade `started` to
+                # "blocked" because the spawn DID succeed; the
+                # `error` field is the loud lane.
+                auto_dispatch_error = (
+                    f"ERROR: spawn succeeded but auto-dispatch "
+                    f"failed: {type(exc).__name__}: {exc}. "
+                    f"Call send_message(instance_id="
+                    f"\"{new_instance_id}\", message=<your task>) "
+                    f"explicitly to deliver the first turn."
+                )
+
         if started == "warm":
             tags_text = ", ".join(list(getattr(consumed, "domain_tags", None) or [])[:8])
             age = (
@@ -1237,6 +1458,40 @@ def create_snapshot_tools(
             if warnings:
                 hint += f" — warnings: {'; '.join(warnings)}"
 
+        # ── R18 auto-dispatch tail: append the dispatch-status note
+        # to the hint so the caller can see at-a-glance whether the
+        # task was enqueued automatically, was skipped (opt-out or
+        # empty task), or failed. The error field carries the loud
+        # failure detail; the hint is the visible contract line.
+        if auto_dispatch_enqueued:
+            hint += (
+                " — auto-dispatched as first turn "
+                "(do NOT call send_message again — the child is "
+                "already working on this task)"
+            )
+        elif auto_dispatch and not (task and task.strip()):
+            # auto_dispatch=True but the task was empty/whitespace —
+            # we did not enqueue anything. Tell the caller loudly so
+            # they know they must send the first message themselves.
+            hint += (
+                f" — auto-dispatch SKIPPED: task was empty; caller "
+                f"MUST call send_message(instance_id="
+                f"\"{new_instance_id}\", message=<task>) to start "
+                f"the child"
+            )
+        elif not auto_dispatch:
+            # Legacy two-step ritual. Same hint text as the
+            # pre-R18 contract so a caller who opts out gets the
+            # explicit next-step instruction (and the docstring /
+            # agent-prompt teaching continues to apply).
+            hint += (
+                f" — auto_dispatch=False: caller MUST call "
+                f"send_message(instance_id=\"{new_instance_id}\", "
+                f"message=<task>) to deliver the first turn"
+            )
+        if auto_dispatch_error:
+            hint += f" — auto-dispatch ERROR: {auto_dispatch_error}"
+
         result = {
             "instance_id": new_instance_id,
             "started": started,
@@ -1246,7 +1501,7 @@ def create_snapshot_tools(
             # service unavailable would otherwise emit None).
             "staleness": staleness if isinstance(staleness, dict) else {},
             "hint": hint,
-            "error": None,
+            "error": auto_dispatch_error,
         }
         # Wave 2b review FIX 4 — the conditional top-level
         # ``result["warnings"]`` key (7th key) was REMOVED: the §4.3
