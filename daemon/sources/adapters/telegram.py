@@ -230,6 +230,7 @@ class TelegramAdapter(MessageSourceAdapter):
         file_bytes: bytes,
         filename: str,
         file_field: str = "photo",
+        content_type: str = "image/png",
         **params,
     ) -> dict:
         """Make a Telegram Bot API call with multipart file upload.
@@ -267,7 +268,11 @@ class TelegramAdapter(MessageSourceAdapter):
         for attempt in range(MAX_RETRIES):
             form = aiohttp.FormData()
             # Multipart upload: photo/document bytes (filename hint).
-            form.add_field(file_field, file_bytes, filename=filename, content_type="image/png")
+            # F8 (council-review): ``content_type`` is passed in from the
+            # caller (``ImageAttachment.content_type``), defaulting to
+            # ``image/png`` for callers that don't override — preserving
+            # the prior behavior for any non-image MIME we'd add later.
+            form.add_field(file_field, file_bytes, filename=filename, content_type=content_type)
             for k, v in params.items():
                 if v is not None:
                     form.add_field(k, str(v))
@@ -484,6 +489,12 @@ class TelegramAdapter(MessageSourceAdapter):
 
                 delivered_count = 0
                 chat_id = reply_chat_id
+                # F5 (council-review): mutable list captured on the message
+                # by-reference; the dispatcher reads ``message.delivered_image_ids``
+                # AFTER ``send()`` to decide which images to ``store.delete``.
+                # ``None`` → backward-compat: dispatcher deletes all images.
+                if message.delivered_image_ids is None:
+                    message.delivered_image_ids = []
                 for img in images:
                     _log_image_metadata(img.image_id, img.size_bytes, img.content_type)
                     try:
@@ -523,11 +534,19 @@ class TelegramAdapter(MessageSourceAdapter):
                             file_bytes=file_bytes,
                             filename=img.filename,
                             file_field=file_field,
+                            # F8: pass through the actual stored MIME so
+                            # jpeg/gif/webp uploads carry the correct
+                            # content_type (preserved when stored by the
+                            # charter render, not hardcoded to png).
+                            content_type=img.content_type,
                             chat_id=chat_id,
                             caption=caption_truncated,
                             # parse_mode=None (default) — Mermaid `<` safety
                         )
                         delivered_count += 1
+                        # F5: track the id so the dispatcher can delete
+                        # only images the adapter confirmed delivered.
+                        message.delivered_image_ids.append(img.image_id)
                     except _TelegramNonTransientAPIError as e:
                         # 4xx non-transient — skip this image (no breaker).
                         logger.warning(f"Telegram {method} non-transient: {e}; skipping image")

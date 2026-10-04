@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 
 from .base import ImageAttachment, OutgoingMessage
 
+from daemon.constants import CHART_IMAGE_MIME_WHITELIST
+
 if TYPE_CHECKING:
     from .registry import SourceRegistry
 
@@ -34,6 +36,17 @@ _MARKER_RE = re.compile(
 # form. Fixes the cosmetic junk-line failure mode where HTML comments render
 # literally on Discord / Telegram / Slack (decisions.md §phase-b-r2-addendum-2).
 # The LOCKED marker regex above stays byte-stable — no relaxation in v1.
+#
+# INVARIANT (F12 — drift-proof prose form, no specific line numbers):
+#   ``extract_chart_images`` runs the LOCKED extraction pass FIRST
+#   (adds to ``image_ids``, deduped + first-occurrence order), and only
+#   THEN applies this near-miss sweeper to the LINES the locked pass did
+#   NOT match. The sweeper therefore can only STRIP junk; it can NEVER
+#   mint a new ``image_ids`` entry — the locked pass would already have
+#   claimed any real marker. If a future contributor re-orders the two
+#   passes or runs the sweeper over the raw input, the cosmetic-strip
+#   purpose is preserved but a real marker might get stripped-and-not-
+#   extracted (silent chart loss). Keep the order.
 _NEAR_MISS_RE = re.compile(
     r"^\s*<!--\s*ens-img:chart-render:[^>\n]{0,64}-->\s*$",
     re.MULTILINE,
@@ -145,6 +158,21 @@ async def _resolve_chart_images(
             blob_bytes, _ctype_read, _sha = await asyncio.to_thread(
                 store.open_with_meta, image_id
             )
+            # Source-agnostic MIME gate (architecture-recommendation.md §3
+            # amendment #3 — dispatcher owns MIME whitelist; the per-adapter
+            # ladder enforces platform-specific limits separately). A MIME
+            # mismatch here is a STORE/PROVENANCE defect, not a chat-source
+            # concern — drop + WARN, deliver text fallback for siblings.
+            stored_content_type = record.content_type or "image/png"
+            if stored_content_type not in CHART_IMAGE_MIME_WHITELIST:
+                _log_image_metadata(image_id, record.size_bytes, stored_content_type)
+                logger.warning(
+                    f"chart-image MIME mismatch: image_id={image_id[:8]}... "
+                    f"content_type={stored_content_type!r} not in "
+                    f"{sorted(CHART_IMAGE_MIME_WHITELIST)}; skipping "
+                    f"(text fallback)"
+                )
+                continue
             ext = (record.content_type or "image/png").split("/")[-1] or "bin"
             resolved.append(ImageAttachment(
                 image_id=image_id,
@@ -349,18 +377,34 @@ class ResponseDispatcher:
                 # impossible (progressive delivered → completed discards via
                 # `_progressive_sent_sources`; progressive adapter-False →
                 # completed delivers + deletes here).
+                #
+                # F5 (council-review): only delete images the adapter
+                # actually delivered. Adapters that don't populate
+                # ``outgoing.delivered_image_ids`` (None) fall back to
+                # deleting every input image — backward-compat. Adapters
+                # that DO populate it delete only the delivered subset;
+                # decode-failed / oversize / MIME-miss / capability-
+                # short-circuit images stay in the store for retry.
                 if images:
-                    for img in images:
+                    delivered = getattr(outgoing, "delivered_image_ids", None)
+                    if delivered is None:
+                        ids_to_delete = [img.image_id for img in images]
+                    else:
+                        ids_to_delete = [
+                            img.image_id for img in images
+                            if img.image_id in delivered
+                        ]
+                    for img_id in ids_to_delete:
                         try:
-                            await asyncio.to_thread(store.delete, img.image_id)
+                            await asyncio.to_thread(store.delete, img_id)
                             logger.debug(
                                 f"chart-image deleted after chat delivery: "
-                                f"image_id={img.image_id[:8]}..."
+                                f"image_id={img_id[:8]}..."
                             )
                         except Exception as e:
                             logger.warning(
                                 f"chart-image post-delivery delete failed: "
-                                f"image_id={img.image_id[:8]}...: {e}"
+                                f"image_id={img_id[:8]}...: {e}"
                             )
             else:
                 logger.warning(f"Failed to send response to user {external_user_id} via {source_id}")
@@ -456,18 +500,31 @@ class ResponseDispatcher:
             if success:
                 logger.debug(f"Sent progressive message to user {external_user_id} via {source_id}")
                 # Phase B amendment #22: chat-delivered → 0-day GET window.
+                # F5 (council-review): only delete images the adapter
+                # actually delivered. ``outgoing.delivered_image_ids`` is
+                # populated by the adapter during ``send()`` on successful
+                # per-image delivery; ``None`` → backward-compat fallback
+                # to deleting every input image.
                 if images:
-                    for img in images:
+                    delivered = getattr(outgoing, "delivered_image_ids", None)
+                    if delivered is None:
+                        ids_to_delete = [img.image_id for img in images]
+                    else:
+                        ids_to_delete = [
+                            img.image_id for img in images
+                            if img.image_id in delivered
+                        ]
+                    for img_id in ids_to_delete:
                         try:
-                            await asyncio.to_thread(store.delete, img.image_id)
+                            await asyncio.to_thread(store.delete, img_id)
                             logger.debug(
                                 f"chart-image deleted after progressive delivery: "
-                                f"image_id={img.image_id[:8]}..."
+                                f"image_id={img_id[:8]}..."
                             )
                         except Exception as e:
                             logger.warning(
                                 f"chart-image post-delivery delete failed: "
-                                f"image_id={img.image_id[:8]}...: {e}"
+                                f"image_id={img_id[:8]}...: {e}"
                             )
                 # Track this source so dispatch_completed won't send again
                 self._progressive_sent_sources.add(source)

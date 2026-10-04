@@ -901,6 +901,9 @@ This section is a cross-reference index for the deferred-items ledger (§phase-d
 | Slack native upload | B.4 tasks #19-#24, #46 | 476578d8 | single `files_upload_v2`; `SlackCapabilityError` + classify-before-record; per-token capability flag with pre-check zero-API short-circuit; WARN-once-per-channel; initial_comment truncation + follow-up; upload inside per-channel lock. |
 | Tests (extract + BOTH-seam + adapter + e2e) | B.5 tasks #25-#42, #47 | 870f0914 | 60 new tests across 5 files; all green. |
 | slack-setup.md scope update | B.6 task #43 | 870f0914 | `files:write` row in YAML + table (USER ACTION REQUIRED). |
+| Oversize-image regression tests (Slack + Discord) | M1/M3 review-cleanups (3c32da1f) | 3c32da1f | +2 new tests; oversize image → WARN + skip that image; text floor preserved. |
+| Telegram multi-image mixed-success order test | F7 council-review (this commit) | <this-commit> | +1 new test; 3 images, 2nd fails (4xx non-transient); order preserved + F5 delivered_image_ids. |
+| Slack capability real-chain tests (F2/F4/F6) + F1/F3/F5/F8/F9/F11/F12 fixes | F1-F12 council-review | <this-commit> | Retired/rerouted 3 bypassing capability tests through the real `acquire_and_execute` chain; F6 added real assertions (was vacuous); F4 added global-scope test. |
 
 **Commits (in order on `feature/chart-image-delivery`):**
 ```
@@ -946,10 +949,17 @@ No anchor drift encountered. All anchors (`transfer_state` line numbers) matched
 
 ## §phase-b-impl-4 — backward-compat verification
 
-All existing 376 tests in the touched suites still pass (47 dispatcher + 195 Discord + 44 Telegram + 113 Slack + 6 e2e = 405 after our work; pre-existing 376 + 60 new = 436). Single test updated:
+All existing 376 tests in the touched suites still pass (78 dispatcher + 196 Discord + 45 Telegram + 114 Slack + 6 e2e = 439 after our work; pre-existing 376 + 63 new = 439). Per-finding breakdown of the 63 new tests:
+- Phase B.5+B.6 (870f0914): 60 new tests across 5 files
+- Phase A review-cleanups M1/M3 (3c32da1f): 2 new tests (Slack + Discord oversize-image regression)
+- F7 council-review (this commit): 1 new test (Telegram multi-image mixed-success order)
+
+Single test updated:
 * `tests/test_discord_adapter.py::test_send_strips_llm_tags_by_default` reads `call_args.kwargs['content']` instead of `call_args.args[0]` — required by the new kwarg-only `_send_single_chunk` signature (Phase B.2 file=/files= support).
 
 No `daemon/tools/chart_tools.py` changes (Phase A locked; passthrough at chart_tools.py:525 verbatim). No `agents/` changes (Phase C closed). No migration / new HTTP route / new daemon service.
+
+F2 council-review: the three Slack capability tests in `tests/test_slack_adapter.py` (`TestSlackCapabilityClassifiedBeforeRecord.test_missing_scope_raises_capability_error`, `TestSlackCapabilityFlagZeroApiCalls.test_capability_flag_short_circuits_subsequent_sends`, `TestSlackWarnOncePerChannel.test_warn_once_global_across_channels`) were MODIFIED in-place to stub `_do_api_call` instead of `_safe_api_call` — the real `SlackTieredRateLimiter.acquire_and_execute` chain now runs end-to-end. F1's `SlackCapabilityError: raise` guard is exercised: without the F1 fix, the rate-limiter catch-all would swallow the capability error, the breaker would record_failure on a config problem, and these tests would FAIL. Verified by reverting F1 against the F2-rerouted tests.
 
 ---
 

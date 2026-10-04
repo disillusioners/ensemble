@@ -14,7 +14,6 @@ from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.aiohttp import AsyncSocketModeHandler
 
 from daemon.constants import (
-    CHART_IMAGE_MIME_WHITELIST,
     INITIAL_COMMENT_MAX,
     SLACK_FILE_MAX_BYTES,
 )
@@ -167,10 +166,14 @@ class SlackAdapter(MessageSourceAdapter):
         # sends short-circuit BEFORE the API call (zero API calls once
         # flagged) until process restart. Per-token / per-method scope.
         self._slack_capability_flags: set[str] = set()
-        # Channel-scoped once-per-channel WARN de-duplication for
-        # ``missing_scope`` / ``not_in_channel`` so the log doesn't
-        # drown out other events when a misconfigured app repeats sends.
-        self._slack_capability_warned_channels: set[str] = set()
+        # F4 (council-review): WARN dedup is now GLOBAL (no per-channel
+        # dimension), matching the capability flag's lifetime scope. A
+        # capability defect is a CONFIGURATION problem of the Slack app
+        # itself — once any channel has warned, every subsequent send on
+        # every channel stays silent. Per-channel dedup left a fresh
+        # channel un-warned and produced an inconsistent log signal
+        # across channels for the same root cause.
+        self._slack_capability_warned: bool = False
 
         # DM channel cache: user_id -> channel_id
         self._dm_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()  # user_id -> (channel_id, timestamp)
@@ -559,6 +562,12 @@ class SlackAdapter(MessageSourceAdapter):
                 # iterate ALL images (amendment #7 — no silent drops;
                 # per-image WARN on failure; order preserved).
                 uploaded_count = 0
+                # F5 (council-review): mutable list captured on the message
+                # by-reference; the dispatcher reads ``message.delivered_image_ids``
+                # AFTER ``send()`` to decide which images to ``store.delete``.
+                # ``None`` → backward-compat: dispatcher deletes all images.
+                if message.delivered_image_ids is None:
+                    message.delivered_image_ids = []
                 if images:
                     for img in images:
                         _log_image_metadata(img.image_id, img.size_bytes, img.content_type)
@@ -617,6 +626,9 @@ class SlackAdapter(MessageSourceAdapter):
                             )
                             if ok and result:
                                 uploaded_count += 1
+                                # F5: track the id so the dispatcher can
+                                # delete only images the adapter confirmed.
+                                message.delivered_image_ids.append(img.image_id)
                             else:
                                 logger.warning(
                                     f"Slack files_upload_v2 returned non-ok for channel {channel_id}: {result}; "
@@ -625,17 +637,20 @@ class SlackAdapter(MessageSourceAdapter):
                         except SlackCapabilityError as e:
                             # Classify BEFORE record_failure (amendment #4) —
                             # set the per-token capability flag, NEVER call
-                            # record_failure. WARN-once-per-channel to
-                            # prevent log flooding under a misconfigured app.
+                            # record_failure. F4 (council-review): WARN dedup
+                            # is GLOBAL across the adapter lifetime — first
+                            # capability error on ANY channel warns once,
+                            # subsequent errors (any channel) stay silent.
                             err_str = str(e).lower()
                             if "missing_scope" in err_str or "files:write" in err_str:
                                 self._slack_capability_flags.add("files_upload_v2")
-                                if channel_id not in self._slack_capability_warned_channels:
-                                    self._slack_capability_warned_channels.add(channel_id)
+                                if not self._slack_capability_warned:
+                                    self._slack_capability_warned = True
                                     logger.warning(
                                         f"Slack channel {channel_id}: missing files:write scope. "
                                         f"USER ACTION REQUIRED: grant files:write scope in Slack app config. "
-                                        f"Image upload disabled until scope granted; text-only delivery."
+                                        f"Image upload disabled until scope granted; text-only delivery. "
+                                        f"(F4: WARN-once global — subsequent channels will not re-warn.)"
                                     )
                                 else:
                                     logger.debug(
@@ -643,11 +658,17 @@ class SlackAdapter(MessageSourceAdapter):
                                         f"suppressing repeat WARN"
                                     )
                             elif "not_in_channel" in err_str:
-                                if channel_id not in self._slack_capability_warned_channels:
-                                    self._slack_capability_warned_channels.add(channel_id)
+                                if not self._slack_capability_warned:
+                                    self._slack_capability_warned = True
                                     logger.warning(
                                         f"Slack channel {channel_id}: bot not in channel. "
-                                        f"Invite the bot to the channel; text-only delivery."
+                                        f"Invite the bot to the channel; text-only delivery. "
+                                        f"(F4: WARN-once global — subsequent channels will not re-warn.)"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"slack channel {channel_id}: not_in_channel already flagged; "
+                                        f"suppressing repeat WARN"
                                     )
                             else:
                                 logger.warning(
@@ -657,7 +678,9 @@ class SlackAdapter(MessageSourceAdapter):
                             logger.warning(f"Slack files_upload_v2 failed: {e}; text fallback")
 
                     # ``initial_comment`` > INITIAL_COMMENT_MAX: full-text
-                    # follow-up ``chat.postMessage`` (text floor).
+                    # follow-up ``chat.postMessage`` (text floor). This is
+                    # the ONLY chat.postMessage call in the image-bearing
+                    # path when truncation occurs (F9 — see below).
                     if uploaded_count > 0 and caption_remaining:
                         try:
                             await self._safe_api_call(
@@ -668,6 +691,30 @@ class SlackAdapter(MessageSourceAdapter):
                             )
                         except Exception as e:
                             logger.warning(f"slack caption-follow-up text post failed: {e}")
+                        # F9: caption was delivered; text floor invariant
+                        # satisfied. DO NOT fall through to the redundant
+                        # full-text ``chat.postMessage`` below.
+                        return True
+
+                # F9 (council-review): ``initial_comment`` is the primary text
+                # carrier for image-bearing sends (text travels with the file).
+                # ``chat.postMessage`` here fires ONLY when text-only delivery
+                # is required — i.e. no images, OR every image was dropped
+                # (decode-fail, oversize, MIME-miss, capability-short-circuit).
+                # In the image-bearing path that already uploaded at least one
+                # file, the ``initial_comment`` carries the full text (truncation
+                # case already returned above; non-truncation case has no
+                # caption_remaining and no postMessage needed). Mirrors
+                # Discord's "chunk 1 carries text+file" and Telegram's "caption
+                # carries text + follow-up on overflow" — every adapter treats
+                # the upload as the text's first carrier and the explicit
+                # message as overflow/all-failed fallback.
+                must_post_text = uploaded_count == 0
+                if not must_post_text:
+                    # Image-bearing send where all text fit in initial_comment
+                    # — text floor invariant satisfied by initial_comment; no
+                    # postMessage needed.
+                    return True
 
                 # Lazy import to avoid pulling the formatters package in at
                 # module import time; mirrors the pattern used by blocks.py.

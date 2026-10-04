@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 from daemon.sources.adapters.slack.adapter import (
     SlackAdapter,
     SlackAPIError,
+    SlackCapabilityError,
     CircuitOpenError,
 )
 from daemon.sources.base import (
@@ -2087,17 +2088,34 @@ class TestSlackSingleFilesUploadV2:
 
 
 class TestSlackCapabilityClassifiedBeforeRecord:
-    """Task #20 / amendment #4: missing_scope → SlackCapabilityError, NO record_failure."""
+    """Task #20 / amendment #4: missing_scope → SlackCapabilityError, NO record_failure.
+
+    F2 (council-review): rerouted from bypassing `_safe_api_call` to stubbing
+    `_do_api_call` so the real `acquire_and_execute` chain runs end-to-end.
+    The SlackTieredRateLimiter is NOT short-circuited; F1's `SlackCapabilityError:
+    raise` guard is exercised. Without F1's fix this test would FAIL (the
+    capability error would be swallowed by rate_limiter and converted to
+    (False, None), `_call_slack_api` would raise SlackAPIError("Rate limit
+    timeout"), and the breaker would record_failure — violating the
+    "no record_failure on capability" invariant).
+    """
 
     @pytest.mark.asyncio
     async def test_missing_scope_raises_capability_error(self, slack_with_running_status):
         slack_with_running_status._app = MagicMock()
         slack_with_running_status._slack_capability_flags = set()
 
+        # Stub the lowest layer: _do_api_call. Real chain above
+        # (rate_limiter.acquire_and_execute → _call_slack_api → _safe_api_call
+        # → _do_api_call) runs UNMOCKED — F1's `except SlackCapabilityError:
+        # raise` guard is what makes the exception reach the send() handler.
         async def raises_capability(method, **kwargs):
-            raise SlackCapabilityError(f"Slack capability error: missing_scope")
+            if method == "files_upload_v2":
+                raise SlackCapabilityError(f"Slack capability error: missing_scope")
+            # chat.postMessage (text floor) still succeeds.
+            return {"ok": True}
 
-        slack_with_running_status._safe_api_call = raises_capability
+        slack_with_running_status._do_api_call = raises_capability
 
         initial = slack_with_running_status._circuit_breaker.failure_count
 
@@ -2120,6 +2138,12 @@ class TestSlackCapabilityFlagZeroApiCalls:
 
     After the first missing_scope sets the flag, subsequent sends short-circuit
     BEFORE the API call.
+
+    F2 (council-review): rerouted from bypassing `_safe_api_call` to stubbing
+    `_do_api_call` so the real `acquire_and_execute` chain runs end-to-end.
+    F1's guard is exercised: SlackCapabilityError must reach the send()
+    handler to set the flag (otherwise the catch-all in rate_limiter
+    converts it to (False, None) and the flag is never set).
     """
 
     @pytest.mark.asyncio
@@ -2128,15 +2152,18 @@ class TestSlackCapabilityFlagZeroApiCalls:
     ):
         slack_with_running_status._app = MagicMock()
         slack_with_running_status._slack_capability_flags = set()
-        slack_with_running_status._slack_capability_warned_channels = set()
+        slack_with_running_status._slack_capability_warned = False
 
         api_calls: list[dict] = []
 
-        async def fake_safe_api_call(method, **kwargs):
+        async def fake_do_api_call(method, **kwargs):
             api_calls.append({"method": method, "kwargs": kwargs})
-            raise SlackCapabilityError(f"Slack capability error: missing_scope")
+            if method == "files_upload_v2":
+                raise SlackCapabilityError(f"Slack capability error: missing_scope")
+            # chat.postMessage succeeds.
+            return {"ok": True}
 
-        slack_with_running_status._safe_api_call = fake_safe_api_call
+        slack_with_running_status._do_api_call = fake_do_api_call
 
         msg = OutgoingMessage(
             external_user_id="T123456:C123456",
@@ -2152,15 +2179,20 @@ class TestSlackCapabilityFlagZeroApiCalls:
         # Count files_upload_v2 vs chat.postMessage calls.
         upload_calls = [c for c in api_calls if c["method"] == "files_upload_v2"]
         post_calls = [c for c in api_calls if c["method"] == "chat.postMessage"]
-        # First send: 1 files_upload_v2 (raises SlackCapabilityError, sets flag)
-        # + 1 chat.postMessage (text delivery still fires — amendment #8).
+        # First send: 1 files_upload_v2 (raises SlackCapabilityError, sets flag).
+        # NOTE: with F9 fix, chat.postMessage fires only when uploaded_count==0
+        # or caption_remaining. Here uploaded_count == 0 (capability error
+        # is raised BEFORE the ok-and-result branch, so the image is NOT
+        # counted as uploaded). So chat.postMessage fires each time to
+        # deliver the text (text floor invariant).
         # Sends 2-5: pre-check sees flag → images=None → no upload attempts.
-        # text chat.postMessage still fires each time (text floor invariant).
+        # Text chat.postMessage still fires each time (text floor invariant).
         assert len(upload_calls) == 1, (
             f"Expected exactly 1 files_upload_v2 call (the first), got {len(upload_calls)}. "
             f"Capability flag must short-circuit subsequent uploads."
         )
-        # chat.postMessage fires once per send (text delivery).
+        # chat.postMessage fires once per send (text delivery — uploaded_count
+        # is 0 because the capability error happens BEFORE we count it).
         assert len(post_calls) == 5
         # consecutive_failures == 0 — never recorded (capability, not transport).
         assert slack_with_running_status._circuit_breaker.failure_count == 0
@@ -2169,40 +2201,68 @@ class TestSlackCapabilityFlagZeroApiCalls:
 
 
 class TestSlackWarnOncePerChannel:
-    """Task #24: first missing_scope per channel → ONE WARN log; subsequent do NOT re-WARN."""
+    """Task #24: first missing_scope → ONE WARN log; subsequent do NOT re-WARN.
+
+    F2 + F4 (council-review): rerouted from bypassing `_safe_api_call` to
+    stubbing `_do_api_call` (real chain runs), AND changed to GLOBAL scope
+    (F4) — first capability error on ANY channel warns once, subsequent
+    errors (any channel) stay silent. Includes a fresh-channel test that
+    asserts the global scope via a SECOND channel after the first warned.
+    """
 
     @pytest.mark.asyncio
-    async def test_warn_once_per_channel(self, slack_with_running_status, caplog):
+    async def test_warn_once_global_across_channels(
+        self, slack_with_running_status, caplog
+    ):
         slack_with_running_status._app = MagicMock()
         slack_with_running_status._slack_capability_flags = set()
-        slack_with_running_status._slack_capability_warned_channels = set()
+        slack_with_running_status._slack_capability_warned = False
 
-        async def fake_safe_api_call(method, **kwargs):
-            raise SlackCapabilityError(f"Slack capability error: missing_scope")
+        async def fake_do_api_call(method, **kwargs):
+            if method == "files_upload_v2":
+                raise SlackCapabilityError(f"Slack capability error: missing_scope")
+            return {"ok": True}
 
-        slack_with_running_status._safe_api_call = fake_safe_api_call
-
-        msg = OutgoingMessage(
-            external_user_id="T123456:C123456",
-            content="chart",
-            source_id="slack-main",
-            images=[_make_slack_att()],
-        )
+        slack_with_running_status._do_api_call = fake_do_api_call
 
         import logging as _logging
         caplog.set_level(_logging.WARNING, logger="daemon.sources.adapters.slack.adapter")
-        # First send → WARN.
-        await slack_with_running_status.send(msg)
+
+        # First send → channel A → WARN.
+        msg_a = OutgoingMessage(
+            external_user_id="T123456:C000111",
+            content="chart",
+            source_id="slack-main",
+            images=[_make_slack_att(image_id="a" * 32)],
+        )
+        await slack_with_running_status.send(msg_a)
         first_warn_count = sum(
             1 for r in caplog.records
             if "files:write scope" in r.message or "missing files:write" in r.message
         )
         assert first_warn_count == 1
 
-        # Subsequent sends → no new WARN (same channel, already warned).
+        # F4: fresh channel B → NO new WARN (global, not per-channel).
         caplog.clear()
-        await slack_with_running_status.send(msg)
-        await slack_with_running_status.send(msg)
+        msg_b = OutgoingMessage(
+            external_user_id="T123456:C000222",
+            content="chart",
+            source_id="slack-main",
+            images=[_make_slack_att(image_id="b" * 32)],
+        )
+        await slack_with_running_status.send(msg_b)
+        fresh_channel_warn_count = sum(
+            1 for r in caplog.records
+            if "files:write scope" in r.message or "missing files:write" in r.message
+        )
+        assert fresh_channel_warn_count == 0, (
+            f"F4: fresh channel B should NOT re-WARN (global dedup), "
+            f"got {fresh_channel_warn_count} WARN lines"
+        )
+
+        # Third send to channel A → still no new WARN (already warned).
+        caplog.clear()
+        await slack_with_running_status.send(msg_a)
         subsequent_warn_count = sum(
             1 for r in caplog.records
             if "files:write scope" in r.message or "missing files:write" in r.message
@@ -2211,7 +2271,14 @@ class TestSlackWarnOncePerChannel:
 
 
 class TestSlackMultiImageNoSilentDrop:
-    """Task #47 / iter-003 blocking #2: 3 markers → 3 uploads attempted (NO silent drops)."""
+    """Task #47 / iter-003 blocking #2: 3 markers → 3 uploads attempted (NO silent drops).
+
+    F6 (council-review): was vacuous — zero assertions beyond send() not
+    raising. Now asserts per-image files_upload_v2 calls, order preserved,
+    exactly one `files_upload_v2` per image, NO silent-drop WARNs on the
+    happy path, text still delivered (text floor), no chat.postMessage
+    double-fire (F9 — initial_comment carries text).
+    """
 
     @pytest.mark.asyncio
     async def test_three_images_three_uploads_no_silent_drop(
@@ -2219,12 +2286,21 @@ class TestSlackMultiImageNoSilentDrop:
     ):
         slack_with_running_status._app = MagicMock()
         slack_with_running_status._slack_capability_flags = set()
+        slack_with_running_status._slack_capability_warned = False
+
+        calls: list[dict] = []
 
         async def fake_safe_api_call(method, **kwargs):
-            # All succeed.
-            return True, {}
+            calls.append({"method": method, "kwargs": kwargs})
+            # All succeed — return a TRUTHY response dict so the adapter's
+            # ``if ok and result`` branch counts the image (empty dict {}
+            # is falsy and would skip the count + emit the non-ok WARN).
+            return True, {"ok": True, "file": {"id": "F123"}}
 
         slack_with_running_status._safe_api_call = fake_safe_api_call
+
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger="daemon.sources.adapters.slack.adapter")
 
         msg = OutgoingMessage(
             external_user_id="T123456:C123456",
@@ -2236,14 +2312,49 @@ class TestSlackMultiImageNoSilentDrop:
                 _make_slack_att(image_id="3" * 32),
             ],
         )
+        # F9: image-bearing send with text fitting in initial_comment
+        # → chat.postMessage must NOT fire (no double-text).
         await slack_with_running_status.send(msg)
-        # The test is satisfied by counting files_upload_v2 calls in
-        # test_files_upload_v2_called_per_image; here we assert NO silent-drop
-        # warnings are emitted when all uploads succeed.
-        # No "skipped" WARN lines expected.
-        # (caplog may contain DEBUG chatter; we only check that the WARN
-        # log lines are absent in this happy-path.)
-        # (No assertion needed beyond send() returning without raising.)
+
+        # F6: exactly 3 files_upload_v2 calls, one per image, in order.
+        upload_calls = [c for c in calls if c["method"] == "files_upload_v2"]
+        assert len(upload_calls) == 3, (
+            f"Expected 3 files_upload_v2 calls (one per image, no silent drop), "
+            f"got {len(upload_calls)}"
+        )
+        # Order preserved — image_ids in call order.
+        assert "1" * 32 in upload_calls[0]["kwargs"]["filename"] or \
+               "11111111" in upload_calls[0]["kwargs"]["filename"]
+        assert "22222222" in upload_calls[1]["kwargs"]["filename"]
+        assert "33333333" in upload_calls[2]["kwargs"]["filename"]
+
+        # F9: image-bearing send with text fitting in initial_comment
+        # → NO chat.postMessage (text travels with the file via
+        # initial_comment; double-fire would render the same text twice).
+        post_calls = [c for c in calls if c["method"] == "chat.postMessage"]
+        assert len(post_calls) == 0, (
+            f"F9: expected 0 chat.postMessage calls (initial_comment carries text), "
+            f"got {len(post_calls)}: {[c['kwargs'].get('text', '')[:40] for c in post_calls]}"
+        )
+
+        # No silent-drop WARNs on the happy path.
+        silent_drop_warns = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and (
+                "decode failed" in r.message
+                or "too large" in r.message
+                or "skipped" in r.message.lower()
+            )
+        ]
+        assert len(silent_drop_warns) == 0, (
+            f"Expected 0 silent-drop WARNs on the happy path, "
+            f"got {len(silent_drop_warns)}: {[r.message for r in silent_drop_warns]}"
+        )
+
+        # F5: all 3 image_ids reported as delivered (no drops).
+        assert sorted(msg.delivered_image_ids) == sorted(["1" * 32, "2" * 32, "3" * 32]), (
+            f"F5: expected all 3 image_ids in delivered_image_ids, got {msg.delivered_image_ids}"
+        )
 
 
 class TestSlackOversizeImage:

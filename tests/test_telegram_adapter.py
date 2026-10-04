@@ -1015,6 +1015,78 @@ class TestTelegramAllImagesFailedTextFloor:
         assert len(text_posts) >= 1
 
 
+class TestTelegramMixedSuccessOrderPreserved:
+    """F7 (council-review): 3 images → 2 succeed, 1 fails (4xx non-transient).
+    Asserts: order preserved in the delivered subset, surviving siblings
+    delivered in original order, F5 ``delivered_image_ids`` carries exactly
+    the 2 successful ids, the failing id is NOT marked delivered.
+    """
+
+    @pytest.mark.asyncio
+    async def test_three_images_two_succeed_one_fails_order_preserved(self, tg_adapter):
+        from daemon.sources.adapters.telegram import _TelegramNonTransientAPIError
+
+        session = _make_mock_session()
+        tg_adapter._session = session
+
+        original_post = session.post.side_effect
+
+        def _post_with_failure(url, **kwargs):
+            # Track which sendPhoto call number this is in this batch.
+            # Fail the SECOND sendPhoto to exercise order preservation
+            # around a sibling that succeeded before + after the failure.
+            if "sendPhoto" in url:
+                _post_with_failure._call_count = getattr(
+                    _post_with_failure, "_call_count", 0
+                ) + 1
+                fail_now = _post_with_failure._call_count == 2
+            else:
+                fail_now = False
+            # Always invoke original_post first so the mock records the
+            # attempt in `posts` — the test asserts that ALL 3 sendPhoto
+            # ATTEMPTS were made (the 2nd one just happens to fail inside).
+            result_coro = original_post(url, **kwargs)
+            if fail_now:
+                # Inject a failure on the response object — the 2nd sendPhoto
+                # call's body raises ``_TelegramNonTransientAPIError`` BEFORE
+                # we yield the response. The Telegram adapter catches it as
+                # a per-image skip.
+                raise _TelegramNonTransientAPIError(
+                    "Telegram 400 (test injection): photo_invalid_dimensions"
+                )
+            return result_coro
+
+        session.post.side_effect = _post_with_failure
+
+        msg = OutgoingMessage(
+            external_user_id="123456",
+            content="caption text",
+            source_id="telegram-main",
+            images=[
+                _make_telegram_att(image_id="1" * 32, size=5000),  # photo
+                _make_telegram_att(image_id="2" * 32, size=5000),  # photo (will fail)
+                _make_telegram_att(image_id="3" * 32, size=5000),  # photo
+            ],
+        )
+        result = await tg_adapter.send(msg)
+        # Mixed-success overall: still True (text floor OK, 2 of 3 delivered).
+        assert result is True
+
+        photo_posts = [p for p in session.posts if "sendPhoto" in p["url"]]
+        # 3 attempts (one per image); the 2nd raises 4xx internally and is
+        # caught as a per-image skip. All 3 hit sendPhoto.
+        assert len(photo_posts) == 3, (
+            f"Expected 3 sendPhoto attempts (one per image, no silent skip), "
+            f"got {len(photo_posts)}"
+        )
+
+        # F5: delivered_image_ids has exactly the 2 successful ids, NOT the
+        # failed one. Order matches the input order.
+        assert msg.delivered_image_ids == ["1" * 32, "3" * 32], (
+            f"F7/F5: expected delivered ids ['1'*32, '3'*32], got {msg.delivered_image_ids}"
+        )
+
+
 class TestTelegramCaptionFollowup:
     """Task #17: caption >1024 → truncated on image + full-text follow-up sendMessage."""
 

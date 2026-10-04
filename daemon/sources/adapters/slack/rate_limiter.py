@@ -263,6 +263,23 @@ class SlackTieredRateLimiter:
             result = await fn()
             return True, result
         except Exception as e:
+            # Re-raise ``SlackCapabilityError`` UNCAUGHT — see adapter.py:393-397,
+            # 425-433 for the parallel guard. Capability-class errors
+            # (``missing_scope`` / ``files:write`` not granted /
+            # ``not_in_channel`` / ``channel_not_found`` / ``is_archived``)
+            # are CONFIGURATION problems, NOT transport — the Slack adapter
+            # classifies them BEFORE ``record_failure`` so they don't poison
+            # the breaker. The catch-all below converts transport exceptions
+            # to ``(False, None)``; converting capability exceptions would
+            # re-arm the exact breaker-poison defect the F1 fix targets.
+            # Lazy import to avoid import-time circular dependency
+            # (rate_limiter is imported by adapter, not vice-versa).
+            try:
+                from .adapter import SlackCapabilityError
+            except ImportError:
+                SlackCapabilityError = None  # type: ignore[assignment]
+            if SlackCapabilityError is not None and isinstance(e, SlackCapabilityError):
+                raise
             logger.error(f"Error executing {method}: {e}")
             return False, None
 

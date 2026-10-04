@@ -92,6 +92,15 @@ class OutgoingMessage:
     never populate ``images``. The /new confirmation construction site
     (``daemon/sources/registry.py``) is also NEVER populated — /new
     confirmation messages never carry markers.
+
+    ``delivered_image_ids`` (F5 / chart-image-delivery council-review): the
+    adapter MAY populate this during ``send()`` with the subset of
+    ``images`` actually delivered to the platform (excludes per-id drops
+    from decode failure, oversize guard, MIME-miss, capability-short-circuit,
+    transport error). The dispatcher then deletes only the delivered subset
+    from the tmp-images store; non-delivered ids stay queryable. The field
+    defaults to ``None`` — adapters that don't populate it fall back to
+    "delete all images" for backward compatibility.
     """
     external_user_id: str
     content: str
@@ -100,6 +109,18 @@ class OutgoingMessage:
     message_type: str = "text"
     reply_to_id: str | None = None
     images: list[ImageAttachment] | None = None  # NEW — defaulted, backward-compat
+    delivered_image_ids: list[str] | None = None  # F5 — adapters set on success
+
+    def __post_init__(self) -> None:
+        # Lightweight invariant: ``images`` MUST be either ``None`` or a list.
+        # Other callers construct ``OutgoingMessage`` everywhere; this guard
+        # only catches accidental misuse (a string, a dict) at construction
+        # time instead of much later when the dispatcher iterates ``images``.
+        if self.images is not None and not isinstance(self.images, list):
+            raise TypeError(
+                f"OutgoingMessage.images must be a list or None, "
+                f"got {type(self.images).__name__}"
+            )
 
 
 @dataclass

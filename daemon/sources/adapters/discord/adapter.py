@@ -45,7 +45,6 @@ from typing import Any, Awaitable, Callable, ClassVar
 import aiohttp
 
 from daemon.constants import (
-    CHART_IMAGE_MIME_WHITELIST,
     DISCORD_FILE_MAX_BYTES,
 )
 from daemon.sources.base import (
@@ -1692,6 +1691,12 @@ class DiscordAdapter(MessageSourceAdapter):
         file_obj: Any | None = None
         files_objs: list[Any] | None = None
         images = getattr(message, "images", None)
+        # F5 (council-review): mutable list captured on the message
+        # by-reference; the dispatcher reads ``message.delivered_image_ids``
+        # AFTER ``send()`` to decide which images to ``store.delete``.
+        # ``None`` → backward-compat: dispatcher deletes all images.
+        if message.delivered_image_ids is None:
+            message.delivered_image_ids = []
         if images:
             try:
                 import discord as _discord_mod
@@ -1776,6 +1781,21 @@ class DiscordAdapter(MessageSourceAdapter):
                         chunk,
                         **kwargs,
                     )
+                    # F5: when chunk-1 with file/files succeeds, every
+                    # image in ``paired`` was delivered. Mark each id so
+                    # the dispatcher can delete only the delivered subset.
+                    # We use ``paired`` (post decode/oversize filtering)
+                    # so decode-failed/oversize images never reach this
+                    # path. The atomic-first-unit retry below is text-only
+                    # — if it succeeds, the images were NOT delivered and
+                    # ``delivered_image_ids`` correctly stays empty.
+                    if (
+                        ok
+                        and sent_count == 0
+                        and (file_obj is not None or files_objs is not None)
+                    ):
+                        for _b, _img in paired:
+                            message.delivered_image_ids.append(_img.image_id)
                     if not ok and sent_count == 0 and (file_obj is not None or files_objs is not None):
                         # Phase B amendment #6: ONE text-only retry of the
                         # atomic first unit. File/files NEVER re-attempted
