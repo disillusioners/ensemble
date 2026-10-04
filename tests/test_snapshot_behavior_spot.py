@@ -68,6 +68,7 @@ from daemon.tools.snapshot_tools import (
     create_snapshot_tools,
     is_snapshot_create_enabled,
 )
+from tests.unit.tools._fakes import FakeAsyncMessageResult
 
 
 # R18 (2026-10-04) — local stand-in for AsyncMessageResult. Mirrors the
@@ -75,16 +76,22 @@ from daemon.tools.snapshot_tools import (
 # pack does not assert on the enqueue result shape (it pins the
 # snapshot contract only), so a minimal stub is enough to satisfy
 # the R18 auto-dispatch enqueue call inside the tool.
-class _FakeAsyncMessageResult:
+class _FakeAsyncMessageResult(FakeAsyncMessageResult):
+    """spot alias — see :class:`tests.unit.tools._fakes.FakeAsyncMessageResult`.
+
+    Kept as a thin subclass so the spot pack continues to use its
+    convention (``_FakeAsyncMessageResult``); the spot default
+    ``message_id`` stays ``'msg-spot-1'``.
+    """
+
     def __init__(
         self,
         message_id: str = "msg-spot-1",
         queued: bool = True,
         status: str = "queued",
     ) -> None:
-        self.message_id = message_id
-        self.queued = queued
-        self.status = status
+        super().__init__(message_id=message_id, queued=queued, status=status)
+
 
 # A snapshot row carrying the minimum fields required for an
 # active warm-start; mirrors the dev suite's ``_snapshot`` helper.

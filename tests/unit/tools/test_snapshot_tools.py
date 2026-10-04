@@ -32,6 +32,15 @@ Rider (e): every regex/grep assertion on the hot-spawn tool name in
 this file uses the ``\\bhot\\b`` / ``\\bspawn_hot_instance\\b``
 word-boundary forms — substring matching collides with ``snapshot`` /
 ``shot``.
+
+Size rationale (2026-10-04): the file is ~1350 lines because it pins the
+Wave-2b + R18 + D8 contracts at the TOOL seam (47+ classes / 100+
+test methods) on top of FakeManager / FakeSearchService /
+FakeCaptureService / FakeInstanceRepo / FakeAsyncMessageResult
+fakes + a ResultKeys / RESULT_KEYS contract constant. The >3000 refactor watch band is documented here so the next hygiene pass knows
+when the fixture divergence justifies a split: split if a SINGLE test
+class exceeds 700 lines, or if a fake's import list exceeds 12 names —
+neither is close today.
 """
 
 from __future__ import annotations
@@ -61,6 +70,7 @@ from daemon.tools.snapshot_tools import (
     create_snapshot_tools,
     is_snapshot_create_enabled,
 )
+from tests.unit.tools._fakes import FakeAsyncMessageResult
 
 TOOLS_DIR = Path(__file__).resolve().parents[3] / "daemon" / "tools"
 
@@ -174,19 +184,14 @@ class FakeSearchService:
         return {"results": list(self.results), "error": self.error}
 
 
-class _FakeAsyncMessageResult:
-    """Minimal stand-in for ``AsyncMessageResult`` (R18 test surface).
+class _FakeAsyncMessageResult(FakeAsyncMessageResult):
+    """Wave-2b alias — see :class:`tests.unit.tools._fakes.FakeAsyncMessageResult`.
 
-    The real type lives in ``daemon.services.instance_messaging`` and
-    is heavy to import. ``spawn_hot_instance`` now inspects
-    ``.message_id`` AND ``.status`` on the enqueue return (Commit 1
-    R18 result-inspection invariant: defensive pin that any non-queued
-    non-raising branch upstream must surface through the loud lane;
-    since ``manager.enqueue_message`` cannot return a non-queued
-    non-raising signal in production, the fake defaults to
-    ``status='queued'`` so tests that exercise the success path do not
-    trip the tripwire). Tests that need to exercise the
-    "non-queued" branch can override either field via the constructor.
+    Kept as a thin subclass (not a verbatim duplicate) so the Wave-2b
+    suite continues to use its convention (``_FakeAsyncMessageResult``)
+    and the shared fake stays importable from the canonical module.
+    The default ``message_id`` stays ``'msg-auto-1'`` for Wave-2b tests
+    that pre-date the R18 tripwire field.
     """
 
     def __init__(
@@ -195,9 +200,7 @@ class _FakeAsyncMessageResult:
         queued: bool = True,
         status: str = "queued",
     ) -> None:
-        self.message_id = message_id
-        self.queued = queued
-        self.status = status
+        super().__init__(message_id=message_id, queued=queued, status=status)
 
 
 class FakeManager:
@@ -215,8 +218,8 @@ class FakeManager:
         # R18 enqueue recorder — mirrors the manager's
         # ``enqueue_message`` async surface so the test can assert
         # on-call (kwargs), opt-out (auto_dispatch=False), and the
-        # failure-injection path (raise_side_effect). The default
-        # result is a fake AsyncMessageResult with message_id
+        # failure-injection path (set ``enqueue_raise`` to a BaseException).
+        # The default result is a fake AsyncMessageResult with message_id
         # "msg-auto-1"; tests can swap it.
         self.enqueue_calls: list[dict[str, Any]] = []
         self.enqueue_raise: BaseException | None = None

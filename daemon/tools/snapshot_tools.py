@@ -66,6 +66,20 @@ dispatched", "skipped: task was empty", "auto_dispatch=False", or
 see at-a-glance whether the child is working on the task. The
 ``error`` field carries the loud failure detail when the enqueue
 fails after a successful spawn (never silent).
+
+Size rationale (2026-10-04): the module is ~1440 lines because it
+hosts three tightly-coupled Wave-2b tools (snapshot_create,
+snapshot_search, spawn_hot_instance) plus the Wave-3 settings gate,
+R16 monitoring counters, R12 supersession, R14 auto-fallback, R18
+auto-dispatch, and D8 cross-project handoff — each is a non-trivial
+state machine with its own helper surface (R9 verdict, R6b ordering,
+auto-dispatch invariants, verify=git anchor). A split would force
+shared helpers (e.g. _cold_result, _denied_result, _safe_inc_*,
+_staleness_report plumbing) into a third module and add import-order
+complexity without reducing the per-tool surface. The trigger to split
+would be the addition of a FOURTH tool surface (e.g. an authoring
+sub-tool) or the comment block for a single tool exceeding ~500
+lines — neither condition is close today.
 """
 
 from __future__ import annotations
@@ -1451,9 +1465,9 @@ def create_snapshot_tools(
         # failure detail; the hint is the visible contract line.
         if auto_dispatch_enqueued:
             hint += (
-                f" — auto-dispatched as first turn "
-                f"(do NOT call send_message again — the child is "
-                f"already working on this task)"
+                " — auto-dispatched as first turn "
+                "(do NOT call send_message again — the child is "
+                "already working on this task)"
             )
         elif auto_dispatch and not (task and task.strip()):
             # auto_dispatch=True but the task was empty/whitespace —

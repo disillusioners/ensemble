@@ -81,6 +81,7 @@ from daemon.tools.snapshot_tools import (
     create_snapshot_tools,
     is_snapshot_create_enabled,
 )
+from tests.unit.tools._fakes import FakeAsyncMessageResult
 
 
 # R18 (2026-10-04) — local stand-in for AsyncMessageResult. Mirrors
@@ -88,16 +89,22 @@ from daemon.tools.snapshot_tools import (
 # create / metrics / search behavior; the auto-dispatch surface is
 # exercised in TestR18AutoDispatch. A minimal stub here is enough
 # to satisfy the R18 enqueue call.
-class _FakeAsyncMessageResult:
+class _FakeAsyncMessageResult(FakeAsyncMessageResult):
+    """v3 alias — see :class:`tests.unit.tools._fakes.FakeAsyncMessageResult`.
+
+    Kept as a thin subclass so the v3 suite continues to use its
+    convention (``_FakeAsyncMessageResult``); Wave-3's default
+    ``message_id`` stays ``'msg-v3-1'``.
+    """
+
     def __init__(
         self,
         message_id: str = "msg-v3-1",
         queued: bool = True,
         status: str = "queued",
     ) -> None:
-        self.message_id = message_id
-        self.queued = queued
-        self.status = status
+        super().__init__(message_id=message_id, queued=queued, status=status)
+
 
 VALID_KIND_TAGS = ["kind:implementation"]
 # Same tag set used by the Wave-2b suite — keeps the verdict math
