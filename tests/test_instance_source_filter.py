@@ -21,18 +21,28 @@ Also pins:
   lineage of in-scope roots is preserved).
 
 These tests run against the in-memory SQLite path used by
-``test_instance_search.py``. The PostgreSQL-specific JSONB
-``metadata->>'source_type'`` cast is exercised under
-``pytest -m postgres`` at
-``tests/postgres/test_instance_source_filter_pg.py`` — that file is
-the canonical regression for C1 (the PG ``->`` + CAST bug that
-silently returned quoted JSON text and zero rows on production).
+``test_instance_search.py``. The PG-only live JSONB regression
+lives at ``tests/postgres/test_instance_source_filter_pg.py``
+(run with ``pytest -m postgres``); that file is the canonical
+C1 headline regression (the ``->`` + CAST bug that silently
+returned quoted JSON text and zero rows on production).
+
+The dialect-aware compile pin for ``_build_source_condition``
+lives HERE (``TestSourceConditionCompileDialect``) -- it compiles
+the helper against the PG dialect via a stub engine, so it catches
+a future revert of the PG branch to the naive ``->`` + CAST form
+WITHOUT requiring a live PG server. The PG-marked file's autouse
+``_pg_truncate_tables`` fixture chains the compile pin to the
+live ``pg_engine`` probe (skipping when PG is unreachable), so the
+no-PG safety net had to live outside the PG-marked file.
 """
 
 from __future__ import annotations
 
 import pytest
-from sqlmodel import SQLModel, create_engine
+from sqlalchemy import create_engine
+from sqlalchemy.dialects import postgresql
+from sqlmodel import Session, SQLModel, create_engine
 
 from daemon.repositories.instance import (
     CHAT_SOURCE_TYPES,
@@ -463,10 +473,111 @@ class TestBuildSourceConditionHelper:
         stringification)."""
         from sqlmodel import Session
         with Session(repo.engine) as s:
-            # Helper does not raise on a non-string; it stringifies the
-            # value and treats it as a single source_type. This keeps
+            # Helper does not raise on a non-string; it passes the value
+            # verbatim into expr.in_(values) (see repository.py:381).
+            # This keeps
             # the helper's contract simple: ``source`` is a value, the
             # caller is responsible for typing it.
             cond = repo._build_source_condition(s, 42)  # type: ignore[arg-type]
             assert cond is not None
             assert hasattr(cond, "right")
+
+# ------------------------------------------------------------------------------#
+# Compile-dialect pin (no live PG required)
+# ------------------------------------------------------------------------------#
+#
+# Relocated from tests/postgres/test_instance_source_filter_pg.py
+# (MINOR-2 delta re-review): the PG-marked file's autouse
+# _pg_truncate_tables fixture chains this class to the live pg_engine
+# probe, so on hosts without PG the entire pin SKIPS -- defeating the
+# no-PG safety net this class is supposed to provide. The pin now
+# lives HERE (the unmarked SQLite suite) and runs under plain pytest.
+# The test semantics are unchanged: build a stub PG engine against an
+# unreachable port, compile the helper expression against the PG
+# dialect, assert the safe jsonb_extract_path_text form is present and
+# the buggy metadata -> 'source_type' + CAST shape is not.
+
+class TestSourceConditionCompileDialect:
+    """Compile the helper against the PG dialect and assert the safe
+    ``jsonb_extract_path_text`` form is present and the buggy
+    ``metadata -> 'source_type'`` + ``CAST AS VARCHAR`` shape is not.
+
+    This is the regression pin that catches a future change that
+    reverts the PG branch to the naive ``->`` + CAST form -- which
+    silently returns 0 rows on production while keeping the SQLite
+    path green. It does NOT need a live PG: it builds a
+    ``postgresql.dialect()`` instance and compiles the helper
+    expression against it via a stub engine.
+    """
+
+    def test_pg_dialect_uses_jsonb_extract_path_text(self):
+        """The PG branch of ``_build_source_condition`` must compile
+        to ``jsonb_extract_path_text(metadata, 'source_type')`` --
+        the unquoted-text PG-native extractor. The naive
+        ``metadata -> 'source_type'`` + ``CAST AS VARCHAR`` shape
+        is the C1 bug and must not appear.
+
+        The engine URL points at an unreachable port so it is never
+        actually connected -- the test only compiles the SQLAlchemy
+        expression against the PG dialect (no live PG required for
+        the compile-time pin)."""
+        # Unreachable port on purpose: we only need the dialect
+        # metadata, not a live connection. The helper builds a
+        # SQLAlchemy expression object without touching the network.
+        stub_engine = create_engine(
+            "postgresql+psycopg://stub:stub@127.0.0.1:1/stub"
+        )
+        repo = SQLModelInstanceRepository(stub_engine)
+        with Session(stub_engine) as session:
+            cond = repo._build_source_condition(session, "telegram")
+        assert cond is not None
+        compiled = str(
+            cond.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        # Safe form: jsonb_extract_path_text returns unquoted TEXT.
+        assert "jsonb_extract_path_text" in compiled, (
+            f"Expected jsonb_extract_path_text in compiled SQL, got: {compiled}"
+        )
+        # The buggy form would compare against quoted JSON text:
+        #   CAST((metadata -> 'source_type') AS VARCHAR) IN ('telegram')
+        # which on PG yields '"telegram"' != 'telegram'. If the
+        # compiled SQL contains this pattern, the C1 regression is
+        # back -- fail loud.
+        assert "metadata -> 'source_type'" not in compiled, (
+            f"C1 regression: PG branch fell back to metadata -> 'source_type' "
+            f"+ CAST (returns quoted JSON text). Compiled SQL: {compiled}"
+        )
+
+    def test_pg_dialect_chat_sentinel_includes_four_members(self):
+        """``source='chat'`` on PG must IN-bind the four
+        CHAT_SOURCE_TYPES members as unquoted literals. The
+        buggy form would still bind the four members -- but the
+        comparison would fail because the metadata side returns
+        QUOTED text. This test pins the bind shape: literal
+        text members, no quotes inside the strings."""
+        stub_engine = create_engine(
+            "postgresql+psycopg://stub:stub@127.0.0.1:1/stub"
+        )
+        repo = SQLModelInstanceRepository(stub_engine)
+        with Session(stub_engine) as session:
+            cond = repo._build_source_condition(session, "chat")
+        assert cond is not None
+        compiled = str(
+            cond.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        # The four registry members must be bound as literals.
+        for member in CHAT_SOURCE_TYPES:
+            # Members are unquoted TEXT, not quoted JSON.
+            assert f"'{member}'" in compiled, (
+                f"Expected literal '{member}' in compiled SQL, got: {compiled}"
+            )
+        # No doubled-quote artifact of the C1 bug (the buggy form
+        # would compare to '"telegram"' with embedded quotes; here
+        # we just sanity-check the bind form).
+        assert "jsonb_extract_path_text" in compiled

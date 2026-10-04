@@ -365,10 +365,14 @@ class SQLModelInstanceRepository:
             # ``func.jsonb_extract_path_text`` is the PG-native UNQUOTED
             # JSONB text extractor. The naïve ``->`` + CAST path returns
             # quoted JSON text on PG string scalars ('"telegram"' !=
-            # 'telegram'), which silently yields 0 rows. The mirror SQLite
-            # test in tests/test_instance_source_filter.py exercises the
-            # SQLite branch; the dedicated PG regression lives at
-            # tests/postgres/test_instance_source_filter_pg.py
+            # 'telegram'), which silently yields 0 rows. Regression coverage:
+            # the mirror SQLite test in tests/test_instance_source_filter.py
+            # exercises both the SQLite branch AND the portable compile-dialect
+            # pin (TestSourceConditionCompileDialect, which catches a C1-style
+            # regression without requiring a live PG server -- it compiles the
+            # helper against the PG dialect via a stub engine). The dedicated
+            # PG live regression (source='telegram' actually returns the row on
+            # real PG) lives at tests/postgres/test_instance_source_filter_pg.py
             # (pytest -m postgres).
             expr = func.jsonb_extract_path_text(
                 Instance.instance_metadata, "source_type"

@@ -1304,9 +1304,15 @@ describe('JobsComponent Logic', () => {
   });
 
   describe('Project-Aware Navigation (onDrawerViewInstance)', () => {
-    // Mock TabStateService for navigation testing
+    // Mock TabStateService for navigation testing. ``activeSpecialTabId``
+    // was added in the MINOR-1 delta re-review so the drawer's
+    // 3-way composition (activeProjectId() ?? activeSpecialTabId() ??
+    // 'all') is faithfully mirrored — without it, the spec would
+    // diverge from production and silently pass even if the production
+    // fix regressed.
     class MockTabStateService {
       activeProjectId = signal<string | null>(null);
+      activeSpecialTabId = signal<string | null>(null);
     }
 
     // Mock Router for tracking navigation
@@ -1329,7 +1335,14 @@ describe('JobsComponent Logic', () => {
       }
 
       onDrawerViewInstance(instanceId: string): void {
-        const projectContext = this.tabStateService.activeProjectId() ?? 'all';
+        // MINOR-1 (delta re-review): 3-way composition mirrors the
+        // real JobsComponent.onDrawerViewInstance (jobs.component.ts
+        // :2768-2783). Without ``activeSpecialTabId()`` the chat tab
+        // context is lost and the drawer routes ``/projects/all/...``
+        // while the user is on /jobs.
+        const projectContext = this.tabStateService.activeProjectId()
+          ?? this.tabStateService.activeSpecialTabId()
+          ?? 'all';
         this.router.navigate(['/projects', projectContext, 'instances', instanceId]);
       }
     }
@@ -1396,6 +1409,26 @@ describe('JobsComponent Logic', () => {
         expect(path[1]).toBe('structure-project');
         expect(path[2]).toBe('instances');
         expect(typeof path[3]).toBe('string');
+      });
+    });
+
+    describe('Chat-tab drawer path (MINOR-1 spec pin)', () => {
+      // Regression pin for MINOR-1 (delta re-review): when the user is
+      // on /jobs with the chat tab active and clicks "View Instance"
+      // on a job drawer row, the route must include the chat tab
+      // context (``/projects/chat/instances/:id``) rather than
+      // ``/projects/all/instances/:id``. The latter would route to
+      // setActiveTab('all') downstream and silently drop the source
+      // filter. Without the 3-way composition fix on the production
+      // component, this test fails.
+      it('should route /projects/chat/instances/:id when activeSpecialTabId is "chat" and activeProjectId is null', () => {
+        tabStateService.activeProjectId.set(null);
+        tabStateService.activeSpecialTabId.set('chat');
+
+        navComponent.onDrawerViewInstance('chat-inst-001');
+
+        expect(router.navigateCalls).toHaveLength(1);
+        expect(router.navigateCalls[0].path).toEqual(['/projects', 'chat', 'instances', 'chat-inst-001']);
       });
     });
   });

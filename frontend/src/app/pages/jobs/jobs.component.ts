@@ -2766,7 +2766,18 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   protected onDrawerViewInstance(instanceId: string): void {
-    const projectContext = this.tabStateService.activeProjectId() ?? 'all';
+    // MINOR-1 (delta re-review): 3-way composition so the drawer's
+    // "View Instance" routes through the active tab context — same
+    // shape as chat.component.ts:149-153, instances.component.ts:68-72,
+    // home.component.ts:39-43. Without ``activeSpecialTabId()`` the
+    // drawer would route ``/projects/all/instances/:id`` while the
+    // user is on /jobs with the chat tab active, which downstream
+    // resolves to ``setActiveTab('all')`` and silently drops the
+    // source filter (TabStateService is a root singleton and the
+    // /jobs route never switches the active tab away from CHAT_TAB).
+    const projectContext = this.tabStateService.activeProjectId()
+      ?? this.tabStateService.activeSpecialTabId()
+      ?? 'all';
     this.router.navigate(['/projects', projectContext, 'instances', instanceId]);
   }
 
