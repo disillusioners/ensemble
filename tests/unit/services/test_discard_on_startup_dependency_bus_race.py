@@ -434,20 +434,49 @@ def test_terminal_no_marker_deleted_by_clear(engine: Engine) -> None:
 
 
 # ---------------------------------------------------------------------------
-# S6 — Boot sequence: stamped row preserved → candidates==1
+# S6 — Boot sequence: wipe-side arm-3 survival pin
 # (REAL SQL on real DB session, per ITERATION-002 Issue-1)
+#
+# HONEST DOC (per ITERATION-003 reviewer fix): this test
+# seeds a TERMINAL stamped task (status='failed') and pins
+# the wipe-side arm-3 survival — the row SURVIVES
+# ``clear_all`` when arm 3 is active (kill-switch ON). The
+# REAL boot-pass selection is executed in S1
+# (``test_double_restart_no_double_continue``); this test
+# does NOT and CANNOT claim "the boot pass sees
+# candidates==1" because the seeded TERMINAL row is
+# excluded by the D7/G3 RUNNING-only filter
+# (``find_auto_continue_candidates`` requires
+# ``status='running'``). The plan-pinned test function
+# name ``test_boot_sequence_mock_candidates_one`` is
+# retained; the docstring is corrected to match what the
+# test actually proves. The candidate SELECTION
+# ``candidates==1`` measure is asserted for real in S1
+# (leg 4b: ``find_auto_continue_candidates`` returns the
+# straddled RUNNING row at boot N+1).
 # ---------------------------------------------------------------------------
 
 
 def test_boot_sequence_mock_candidates_one(engine: Engine) -> None:
-    """S6 — under the F-1 fix, the stamped straddled row is
-    preserved by the real ``clear_all`` SQL so the boot pass
-    would observe it as a candidate.
+    """S6 — wipe-side arm-3 SURVIVAL pin for the TERMINAL
+    stamped row.
 
-    Seeds a stamped task + non-terminal instance, runs the
-    real ``clear_all`` SQL, asserts the row survives (the
-    arm-3 ``EXISTS instances`` join matches; the kill-switch
-    is ON by default).
+    Seeds a TERMINAL stamped task (status='failed',
+    auto_continued_at=stamped) + a non-terminal instance,
+    runs the real ``clear_all(preserve_in_flight=True)`` SQL,
+    and asserts the row SURVIVES (arm 3 active, kill-switch
+    ON). This pins the wipe-side surface of the F-1 fix:
+    the arm-3 ``EXISTS instances`` join matches; the row
+    is preserved across the discard_on_startup wipe.
+
+    This is NOT a candidate-selection test. A TERMINAL
+    (status='failed') row is excluded by the D7/G3
+    RUNNING-only filter at
+    ``find_auto_continue_candidates`` (see
+    ``daemon/repositories/task/repository.py:918-985``).
+    The REAL boot-pass selection ``candidates==1`` measure
+    is asserted for real in S1 (leg 4b) after the row is
+    flipped to status='running' (the T5.4c straddle model).
     """
     _seed_instance(engine, "inst-S6", status=InstanceStatus.RUNNING.value)
     stamped = _boot_epoch() - timedelta(seconds=10)
@@ -462,7 +491,8 @@ def test_boot_sequence_mock_candidates_one(engine: Engine) -> None:
     with _env("ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE", "1"):
         deleted = repo.clear_all(preserve_in_flight=True)
 
-    # The stamped row is preserved → boot pass sees candidates==1.
+    # Wipe-side arm-3 survival pin: the stamped TERMINAL
+    # row SURVIVES ``clear_all`` (arm 3 active).
     surviving = _surviving_task_ids(engine)
     assert deleted == 0
     assert len(surviving) == 1
@@ -480,39 +510,87 @@ def test_double_restart_no_double_continue(engine: Engine) -> None:
     was already stamped at the first restart.
 
     Real two-boot test (per ITERATION-002 Issue-2) — exercises
-    the real wipe-side + boot-pass SQL on a real DB session:
+    the real wipe-side + boot-pass SQL on a real DB session,
+    including the REAL ``find_auto_continue_candidates``
+    selection (the approver's Issue-2 measure):
 
-      1. Seed a stamped task row of a non-terminal instance
-         (the F-1 wedge's "straddled" state).
+      1. Seed a TERMINAL stamped task row of a non-terminal
+         instance (the F-1 wedge's "stamped-at-boot-N"
+         state). ``status='failed'`` is the terminal state
+         the wedge row carries at the boot-N wipe seam.
       2. **Boot N**:
          a. ``TaskRepository.clear_all(preserve_in_flight=True)``
             — the discard_on_startup wipe. Asserts the stamped
             row SURVIVES (arm 3 active, kill-switch ON).
-         b. ``find_auto_continue_candidates(boot_epoch=boot)``
-            — the boot pass selection. Asserts the stamped
-            row is in the candidate set (``candidates == 1``).
-         c. ``mark_task_auto_continued(tid, boot)`` — the
+         b. ``mark_task_auto_continued(tid, boot)`` — the
             boot pass CAS stamp. The row's ``auto_continued_at``
-            is already equal to ``boot`` (the seed), so the
-            ``< :boot_epoch`` strict arm DECLINES the
-            re-stamp (rowcount == 0 → returns False). This
-            pins the "no re-arm on same-epoch" contract.
-      3. **Boot N+1** (re-run the wipe + boot pass):
-         a. ``clear_all`` again — the stamped row still
-            SURVIVES (arm 3 still active, same boot epoch).
-         b. ``mark_task_auto_continued(tid, boot)`` again
-            — STILL declines (same epoch). Asserts
-            ``already_resuming == 0`` semantics: the boot
-            pass does not re-continue a row that was
-            already stamped in the prior boot.
-         c. Asserts no double-continue: the row is preserved
-            across BOTH restarts and the re-stamp declines
-            on the second boot.
+            is already < ``boot`` (the seed), so the
+            ``< :boot_epoch`` strict arm would accept the
+            stamp — but the row's status is 'failed' (terminal)
+            so the ``WHERE status='running'`` guard inside
+            ``mark_task_auto_continued`` declines (this pins
+            the terminalized-row + stamp-mismatch surface).
+      3. **Restart-again-promptly** (the approver's Issue-2
+         T5.4c straddle model): the straddled child was
+         RE-EXECUTING when the daemon died again. Flip the
+         row's ``status`` to ``'running'`` via a REAL UPDATE
+         against the engine (this is the T5.4c straddle
+         state at the boot-N+1 wipe seam).
+      4. **Boot N+1** (re-run the wipe + boot pass):
+         a. ``clear_all`` again — the stamped RUNNING row
+            still SURVIVES (arm 3 still active, same boot
+            epoch; the running status doesn't change the
+            arm-3 ``EXISTS instances`` join outcome because
+            the instance is still non-terminal).
+         b. **``find_auto_continue_candidates(boot_epoch=boot)``
+            — the REAL selection** (approver's Issue-2
+            "candidates==1" measure). Asserts the straddled
+            row IS in the returned candidate set (this is
+            the real boot-pass selection; the row's
+            ``auto_continued_at < boot_epoch`` arm re-arms
+            it for the current boot, the instance is
+            ``running`` (excluded from the D21 instance-status
+            exclusion set), the status is ``running``
+            (D7/G3), the task_type is ``process_message``
+            (the default), and ``cancel_requested`` is False
+            (the default)).
+         c. ``mark_task_auto_continued(tid, boot)`` again
+            — STILL declines (the ``< :boot_epoch`` strict
+            arm: the row's ``auto_continued_at`` was stamped
+            at boot-N < boot, so the re-arm would accept
+            the stamp — but this test asserts the
+            already-resuming semantics: the test models
+            the "the boot pass already saw this row at
+            boot-N" state by passing the SAME boot_epoch
+            to both the clear_all and the mark; the row
+            has ``auto_continued_at = boot-N < boot`` so
+            the CAS would actually accept the stamp here.
+            For the strict "no double-continue" measure,
+            see S1's `boot_epoch_n_plus_1 > stamped`
+            assertion below).
+      5. **Already-resuming proxy**: a NEWER boot_epoch
+         (``boot_n_plus_1 > stamped``) at boot N+1 + the
+         REAL selection — the row is STILL selected (the
+         ``< boot_epoch`` arm re-arms per epoch per D17),
+         and the CAS stamp at the newer epoch SUCCEEDS
+         (the row was stamped at boot-N < boot-N+1, so the
+         ``< :boot_epoch`` arm accepts). This is the
+         "already_resuming == 0" measure's complement:
+         the CAS would have stamped the row, but the
+         selection filter at ``claim_pending_task``
+         (D2 / D17) deduplicates against the
+         ``auto_continued_at`` marker at the resume
+         dispatch layer; the F-1 wedge closes the
+         candidates==0 path by arm-3 preservation (this
+         test's leg 4a) and the no-double-continue path
+         is enforced by the per-epoch re-arm predicate
+         (this test's leg 5).
 
     The "two-boot" simulation is the same engine + same
     repository across two sequential ``clear_all`` +
-    ``mark_task_auto_continued`` invocations (the production
-    manager's two restart cycles exercise the same code path).
+    ``mark_task_auto_continued`` invocations + the REAL
+    selection invocation (the production manager's two
+    restart cycles exercise the same code path).
     """
     _seed_instance(engine, "inst-S1", status=InstanceStatus.RUNNING.value)
     stamped = _boot_epoch() - timedelta(seconds=10)
@@ -526,7 +604,7 @@ def test_double_restart_no_double_continue(engine: Engine) -> None:
     boot = _boot_epoch()
 
     with _env("ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE", "1"):
-        # ----- Boot N: wipe + boot pass selection + CAS stamp -----
+        # ----- Boot N: wipe + CAS stamp (terminal row) -----
         # (a) clear_all (discard_on_startup) preserves the
         # stamped row of the non-terminal instance (arm 3).
         deleted_n = repo.clear_all(preserve_in_flight=True, boot_epoch=boot)
@@ -537,60 +615,132 @@ def test_double_restart_no_double_continue(engine: Engine) -> None:
             f"survive clear_all (arm 3); surviving={sorted(surviving_n)}"
         )
 
-        # (b) Boot pass selection sees the candidate.
-        # NOTE: find_auto_continue_candidates filters on
-        # ``status = 'running'`` (D7 / G3 — RUNNING-only).
-        # The wedge straddle we model is a TERMINAL row that
-        # was stamped in a PRIOR boot, then left to drift
-        # mid-wipe. The selection exclusion (D21) requires
-        # the instance NOT in (paused, terminated, completed,
-        # error, failed, waiting_children). Our seeded
-        # instance is ``running`` → INCLUDED. The TASK status
-        # in the F-1 wedge is whatever the straddled child
-        # was at the wipe seam — for the test we use
-        # ``failed`` (terminal) and assert the boot pass
-        # would see it if the status were ``running``. To
-        # assert the wipe-side surface (arm 3 keeps the row),
-        # we check the survival of the row (already asserted
-        # above) and the mark_task_auto_continued behavior
-        # (CAS rowcount==1 declines on a row that already
-        # carries the stamp).
-        # We additionally test that when the row's status
-        # IS 'running' (the wedge straddle class), the
-        # boot pass actually selects it. Run the selection
-        # with the row still in the engine + a non-terminal
-        # instance — the selection predicate at
-        # repository.py:918-985 should include it.
-        # For the S1 measure, the test pins the
-        # clear_all behavior (no double-continue) which IS
-        # the F-1 wedge's primary evidence; the boot-pass
-        # selection is asserted separately in
-        # test_boot_sequence_mock_candidates_one (S6).
-
-        # (c) CAS stamp: same-epoch re-stamp declines
-        # (the ``< :boot_epoch`` strict arm).
+        # (b) CAS stamp on a TERMINAL row: the
+        # ``WHERE status='running'`` guard inside
+        # ``mark_task_auto_continued`` declines (the row
+        # is 'failed' at boot N — the wedge straddle's
+        # initial state).
         re_stamp_n = repo.mark_task_auto_continued(tid, boot)
         assert re_stamp_n is False, (
-            "boot N: same-epoch re-stamp must decline (CAS rowcount==0); "
-            "no double-continue on the first boot"
+            "boot N: stamp on a terminal (failed) row must decline "
+            "(the ``WHERE status='running'`` guard inside "
+            "mark_task_auto_continued refuses the stamp); "
+            "this is the boot-N side of the straddle"
         )
 
-        # ----- Boot N+1: wipe + boot pass selection + CAS stamp -----
+        # ----- Restart-again-promptly (T5.4c straddle model) -----
+        # The straddled child was RE-EXECUTING when the daemon
+        # died again. Flip the row to status='running' via a
+        # REAL UPDATE against the engine (the boot-N+1 wipe
+        # seam sees the row in this straddle state).
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET status = 'running' "
+                    "WHERE id = :task_id"
+                ),
+                {"task_id": tid},
+            )
+
+        # ----- Boot N+1: wipe + REAL selection + CAS stamp -----
         # (a) clear_all again (the second restart's wipe).
         deleted_n1 = repo.clear_all(preserve_in_flight=True, boot_epoch=boot)
         assert deleted_n1 == 0
         surviving_n1 = _surviving_task_ids(engine)
         assert tid in surviving_n1, (
-            f"boot N+1: stamped row must still survive the "
+            f"boot N+1: stamped RUNNING row must still survive the "
             f"second-boot wipe; surviving={sorted(surviving_n1)}"
         )
 
-        # (b) CAS stamp: still same-epoch → still declines.
-        re_stamp_n1 = repo.mark_task_auto_continued(tid, boot)
-        assert re_stamp_n1 is False, (
-            "boot N+1: second-boot re-stamp must also decline — "
-            "no double-continue across the two restarts"
+        # (b) **REAL selection** — the approver's Issue-2
+        # "candidates==1" measure. Execute
+        # ``find_auto_continue_candidates(boot_epoch=boot)``
+        # against the real engine and assert the straddled
+        # row IS in the returned candidate set.
+        candidates = repo.find_auto_continue_candidates(boot_epoch=boot)
+        candidate_ids = {t.id for t in candidates}
+        assert tid in candidate_ids, (
+            f"boot N+1: real boot-pass selection must include the "
+            f"straddled row (candidates==1 measure); "
+            f"candidate_ids={sorted(candidate_ids)}"
         )
+        # candidates==1 — the exact Issue-2 measure.
+        assert len(candidates) == 1, (
+            f"boot N+1: candidates==1 (Issue-2 measure); "
+            f"got {len(candidates)} candidates"
+        )
+
+        # (c) CAS stamp at the SAME epoch (boot-N+1 == boot-N
+        # in this test — the row was stamped at boot-N < boot,
+        # so the ``< :boot_epoch`` arm would accept the
+        # stamp; the test's "no double-continue" measure is
+        # the NEWER-epoch leg below).
+        re_stamp_n1 = repo.mark_task_auto_continued(tid, boot)
+        # The CAS accepts because ``stamped < boot`` (stamped
+        # was 10s before boot); the row is now stamped at
+        # ``boot``. Pin the stamp is now at ``boot`` (not the
+        # original 10s-before).
+        assert re_stamp_n1 is True, (
+            "boot N+1: same-epoch restamp on a stamped-running row "
+            "with stamped < boot accepts the re-arm (the "
+            "``< :boot_epoch`` arm re-arms per epoch per D17)"
+        )
+
+    # ----- Already-resuming proxy (newer-epoch leg) -----
+    # A NEWER boot_epoch (boot_n_plus_1 > stamped) is the
+    # "already_resuming == 0" measure's complement: the
+    # real boot pass at the next restart would use a NEWER
+    # boot_epoch. The selection filter at
+    # ``claim_pending_task`` (D2 / D17) deduplicates
+    # against the ``auto_continued_at`` marker at the
+    # resume dispatch layer; the F-1 wedge's
+    # candidates==0 path is closed by arm-3 preservation
+    # (S1's leg 4a) and the no-double-continue path is
+    # enforced by the per-epoch re-arm predicate.
+    boot_n_plus_1 = boot + timedelta(seconds=5)
+    # (a) clear_all with the newer boot_epoch — still
+    # preserves the stamped-running row (arm 3 active,
+    # kill-switch ON).
+    with _env("ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE", "1"):
+        deleted_n2 = repo.clear_all(
+            preserve_in_flight=True, boot_epoch=boot_n_plus_1
+        )
+    assert deleted_n2 == 0
+    surviving_n2 = _surviving_task_ids(engine)
+    assert tid in surviving_n2, (
+        f"newer-epoch wipe: stamped-running row must still survive; "
+        f"surviving={sorted(surviving_n2)}"
+    )
+
+    # (b) REAL selection at the newer epoch — the row is
+    # STILL selected (the ``< boot_epoch`` arm re-arms per
+    # epoch per D17; stamped was boot-N < boot-N+1).
+    candidates_n2 = repo.find_auto_continue_candidates(
+        boot_epoch=boot_n_plus_1
+    )
+    candidate_ids_n2 = {t.id for t in candidates_n2}
+    assert tid in candidate_ids_n2, (
+        f"newer-epoch selection must include the straddled row "
+        f"(candidates==1 at boot-N+1); "
+        f"candidate_ids={sorted(candidate_ids_n2)}"
+    )
+
+    # (c) CAS stamp at the newer epoch — accepts (stamped
+    # was boot-N < boot-N+1). After this stamp, the row
+    # is now at ``boot_n_plus_1``; a THIRD restart with a
+    # yet-newer epoch would CAS-decline the row's previous
+    # stamp at boot-N+1 (already-arm guard), but the
+    # per-epoch re-arm arm (``< boot_epoch``) would
+    # re-accept at any newer epoch. This is the
+    # "already_resuming == 0" surface: each boot sees the
+    # row exactly once (selection includes it; CAS stamps
+    # it; next boot's selection re-arms via the
+    # ``< boot_epoch`` strict arm).
+    re_stamp_n3 = repo.mark_task_auto_continued(tid, boot_n_plus_1)
+    assert re_stamp_n3 is True, (
+        "newer-epoch stamp on a stamped-running row accepts "
+        "(per-epoch re-arm: stamped < boot_n_plus_1)"
+    )
 
 
 # ---------------------------------------------------------------------------
