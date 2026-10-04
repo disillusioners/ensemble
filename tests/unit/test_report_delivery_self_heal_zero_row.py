@@ -160,20 +160,33 @@ def _build_service(
     *,
     busy_ids: set[str] | None = None,
 ) -> tuple[ReportDeliveryRecoveryService, MagicMock]:
-    """Real sweep service + mock manager (per-row calls asserted)."""
+    """Real sweep service + mock manager (per-row calls asserted).
+
+    Iteration-2 wiring (W-4 duck-typing + blocker-1 bridge): the
+    queue repo mock must declare ``find_wake_already_delivered_
+    evidence`` returning ``False`` (the per-row pass duck-types the
+    method; an unconfigured auto-attr's truthiness would fake a
+    ledger match), and ``manager._checkpointer = None`` keeps the
+    parent-history ledger check out of these mechanical tests.
+    """
     ri_repo = ReportInjectionRepository(engine=engine)
     task_repo = MagicMock()
     task_repo.has_instance_busy = MagicMock(
         side_effect=lambda instance_id: instance_id in (busy_ids or set())
     )
+    queue_repo = MagicMock()
+    queue_repo.find_wake_already_delivered_evidence = MagicMock(
+        return_value=False
+    )
     manager = MagicMock()
     manager.engine = engine
+    manager._checkpointer = None
     manager._handle_recover_deferred_report = MagicMock()
 
     service = ReportDeliveryRecoveryService(
         task_repo=task_repo,
         report_injection_repo=ri_repo,
-        queue_repo=MagicMock(),
+        queue_repo=queue_repo,
         instance_repo=MagicMock(),
         manager_ref=manager,
         interval_seconds=300,

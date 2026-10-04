@@ -69,6 +69,9 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+import asyncio
+import contextlib
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock
@@ -360,14 +363,27 @@ def _build_pg_service(
     task_repo.has_instance_busy = MagicMock(
         side_effect=lambda instance_id: instance_id in (busy_ids or set())
     )
+    queue_repo = MagicMock()
+    # Iteration-2 W-4: the per-row pass duck-types
+    # ``find_wake_already_delivered_evidence`` — the mock must
+    # declare it (returning False = no delivery evidence) or its
+    # auto-attr truthiness would fake a ledger match.
+    queue_repo.find_wake_already_delivered_evidence = MagicMock(
+        return_value=False
+    )
     manager = MagicMock()
     manager.engine = engine
+    # Iteration-2 blocker-1: mechanical tests keep the
+    # parent-history ledger check out of scope (None → guarded
+    # lookup degrades to "no evidence"); the S24/S27 pass-through
+    # tests wire a real checkpointer + manager loop explicitly.
+    manager._checkpointer = None
     manager._handle_recover_deferred_report = MagicMock()
 
     service = ReportDeliveryRecoveryService(
         task_repo=task_repo,
         report_injection_repo=ri_repo,
-        queue_repo=MagicMock(),
+        queue_repo=queue_repo,
         instance_repo=MagicMock(),
         manager_ref=manager,
         interval_seconds=300,
@@ -1733,10 +1749,18 @@ class TestF2S24MultiChildMixedOnPG:
         straddle state), so the per-row pass proceeds to
         mint the obligation.
 
-        This is the F-1 wedge closure proof: the parent
-        receives a wake, the obligation triple is minted,
-        the PENDING task is claimable by the worker pool
-        (PROCESS_REPORT ranked FIRST), the parent wake fires.
+        EXERCISED (W-3 re-word, iteration 2): lane-2 admission →
+        queue-side ledger miss → parent-history ledger miss →
+        anchor-less derivation (manager-loop bridge) →
+        ``ensure_deferred`` mint → DEFERRED→PENDING transition →
+        the manager hand-off is INVOKED with the exact triple
+        (the manager is a mock at that seam).
+
+        NOT EXERCISED: the real reconcile/re-enter path behind
+        the hand-off seam (actual parent wake delivery, the
+        worker-pool PROCESS_REPORT claim, delivery completion).
+        Those are the manager-side seams covered by the
+        sub-shape tests in test_resume_router_deferred_recovery.
         """
         parent = _seed_instance(pg_engine_3_6)
         child_straddle = _seed_instance(
@@ -1786,9 +1810,12 @@ class TestF2S24MultiChildMixedOnPG:
                         return None
                 raw_saver = _MockRawSaver()
             service._manager._checkpointer = _RealCheckpointer()
-
-            # Run the lane 2 backstop.
-            result = service._run_no_row_backstop_lane()
+            # Iteration-2 blocker 1: the bridge needs the
+            # manager's REAL loop (loop-bound checkpointer locks).
+            with _manager_loop() as loop:
+                service._manager._loop = loop
+                # Run the lane 2 backstop.
+                result = service._run_no_row_backstop_lane()
 
             # The straddle child was admitted, the PREFIX
             # ledger found no match (no delivery evidence),
@@ -1947,6 +1974,13 @@ class TestF2S27NoDuplicateExecutionRegressionOnPG:
         sanctioned path (per W-2 guardrails in
         ``decisions.md §12d``). A double-invocation would
         cause a duplicate parent-wake.
+
+        EXERCISED (W-3 re-word, iteration 2): two full lane-2
+        sweeps against real PG; the manager hand-off INVOCATION
+        COUNT at the (mocked) seam is exactly 1 with the exact
+        triple + source. NOT EXERCISED: the real reconcile/re-enter
+        behind the seam (an actual parent wake is not delivered —
+        the mock records the call instead).
         """
         parent = _seed_instance(pg_engine_3_6)
         child_straddle = _seed_instance(
@@ -1982,13 +2016,17 @@ class TestF2S27NoDuplicateExecutionRegressionOnPG:
                 raw_saver = _MockRawSaver()
             service._manager._checkpointer = _RealCheckpointer()
 
-            # First run: the straddle child is recovered.
-            result1 = service._run_no_row_backstop_lane()
-            assert result1.recovered == 1
+            # Iteration-2 blocker 1: the bridge needs the
+            # manager's REAL loop (loop-bound checkpointer locks).
+            with _manager_loop() as loop:
+                service._manager._loop = loop
+                # First run: the straddle child is recovered.
+                result1 = service._run_no_row_backstop_lane()
+                assert result1.recovered == 1
 
-            # Second run: no new recovery.
-            result2 = service._run_no_row_backstop_lane()
-            assert result2.recovered == 0
+                # Second run: no new recovery.
+                result2 = service._run_no_row_backstop_lane()
+                assert result2.recovered == 0
 
             # The manager's ``_handle_recover_deferred_report``
             # was called EXACTLY ONCE across both runs (the
@@ -2030,6 +2068,28 @@ class TestF2S27NoDuplicateExecutionRegressionOnPG:
 # ── F-2 (phase2) test helpers ───────────────────────────────────────────
 
 
+@contextlib.contextmanager
+def _manager_loop():
+    """A REAL running event loop standing in for ``manager._loop``.
+
+    Iteration-2 blocker 1: the per-row pass bridges checkpointer
+    coroutines onto the manager's loop via
+    ``asyncio.run_coroutine_threadsafe(...).result(timeout=8)`` —
+    the loop must be LIVE (running on a background thread) or the
+    bridge's ``.result()`` would never resolve. Teardown stops the
+    loop and joins the thread so no loop leaks across tests.
+    """
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5.0)
+        loop.close()
+
+
 def _mock_persistence_messages(
     instance_id: str, messages: list[dict[str, Any]]
 ) -> Any:
@@ -2042,14 +2102,27 @@ def _mock_persistence_messages(
     tests there is no real LangGraph checkpointer, so the
     derivation would fail. This helper patches the function
     to return a fixture for the duration of a test.
+
+    Iteration-2 routing: the per-row pass now reads the
+    checkpointer for BOTH bridge consumers — the parent-history
+    ledger scan (instance_id = PARENT) and the derivation
+    (instance_id = CHILD). The mock returns the fixture for the
+    seeded child and an empty history for every other instance
+    (the parent scan finds no delivery evidence → no match → the
+    pass proceeds to the derivation), instead of asserting on the
+    instance id (the prior assert turned the ledger scan into a
+    silent DEBUG-swallowed failure).
     """
     import daemon.persistence as persistence_mod
 
     async def _fake_get_instance_messages(
         checkpointer, _instance_id, manager=None
     ):
-        assert _instance_id == instance_id
-        return messages
+        if _instance_id == instance_id:
+            return messages
+        # Any other instance (the parent-history ledger scan):
+        # empty history → no PREFIX evidence → proceed.
+        return []
 
     # Save the original so _unmock_persistence_messages can
     # restore it.

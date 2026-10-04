@@ -219,12 +219,6 @@ class SQLModelMessageQueueRepository:
             non-failed status); ``False`` otherwise.
         """
         with Session(self.engine) as session:
-            from sqlalchemy import literal
-            source_prefix = (
-                literal("internal_report:")
-                + literal(child_id)
-                + literal(":%")
-            )
             stmt = (
                 select(MessageQueue.message_id)
                 .where(MessageQueue.instance_id == parent_id)

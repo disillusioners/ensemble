@@ -1124,8 +1124,15 @@ class ReportInjectionRepository:
             limit: Batch cap.
 
         Returns:
-            List of ``{"child_id", "child_msg_id", "parent_id"}``
-            dicts — at most ONE row per child. Empty list when none.
+            List of
+            ``{"child_id", "child_msg_id", "parent_id", "has_anchor"}``
+            dicts — at most ONE row per child. ``has_anchor`` is
+            ``True`` when the anchor subquery found a completed
+            ``message_queue`` row (``child_msg_id`` is the anchor id)
+            and ``False`` for the F-2 wedge straddle state
+            (``child_msg_id`` is ``None`` — the per-row pass derives
+            the id from the surviving child checkpoint, task 2.6).
+            Empty list when none.
         """
         from sqlalchemy import Integer, cast as sa_cast, exists
 

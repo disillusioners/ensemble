@@ -198,37 +198,6 @@ logger = logging.getLogger(__name__)
 # ── F-2 (durability-f1-f2 / phase2, tasks 2.5 + 2.6) helpers ────────────────
 
 
-def _run_async(coro_func: Any, *args: Any, **kwargs: Any) -> Any:
-    """Drive an async coroutine to completion from sync context.
-
-    The sweep runs in a sync thread; the
-    ``parent_history_has_internal_report`` helper (task 2.4) is
-    async. This adapter runs the coroutine to completion using
-    ``asyncio.run`` when no event loop is running, or via the
-    running loop's ``run_until_complete`` when one is available.
-
-    Used only by the no-row backstop lane's per-row handler; never
-    on the asyncio event loop (the sweep is a daemon thread).
-    """
-    import asyncio
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop is not None:
-        # An event loop is running on this thread (should not
-        # happen in the sweep thread, but defensive). Run via
-        # ``run_coroutine_threadsafe`` would require a loop ref
-        # we don't have; raise to surface the misuse.
-        raise RuntimeError(
-            "_run_async called from a thread with a running event "
-            "loop; the sweep is sync-only. Use the async-friendly "
-            "parent call site instead."
-        )
-    return asyncio.run(coro_func(*args, **kwargs))
-
-
 async def _derive_anchor_less_child_message_id(
     checkpointer: Any,
     child_id: str,
@@ -246,18 +215,29 @@ async def _derive_anchor_less_child_message_id(
       1. ``get_instance_messages(checkpointer, child_id, manager=None)``
          (manager=None per the W-5 polarity check — no synthetic
          system-prompt injection needed for id extraction).
-      2. Find the last assistant message with a truthy
-         ``message_id`` (every serialized dict carries the
-         ``message_id`` key per ``daemon/utils.py:205-206``).
+      2. Find the last assistant message that carries BOTH a
+         truthy ``message_id`` AND non-empty content (the plan-2.6
+         empty-content guard: an empty-content assistant message is
+         not a derivable report anchor — skip it and keep scanning
+         older assistant messages).
       3. Return the ``message_id``; ``None`` if the child has
-         no messages, the checkpoint is missing, or no
-         assistant message has a ``message_id``.
+         no qualifying message (no messages, missing checkpoint,
+         or every assistant message lacks an id or has empty
+         content).
 
     The derived id is ``BaseMessage.id`` (UUID4) —
     STABLE-BUT-DIFFERENT from the natural path's
     ``MessageQueue.message_id`` (per W-1 confirmation). The
     PREFIX ledger (step 0 in ``_recover_one_no_row``) is the
     operative cross-path dedup; the id mismatch is by design.
+
+    LOOP AFFINITY (verification iteration 2, blocker 1): this
+    coroutine MUST be driven on the manager's event loop (via
+    ``ReportDeliveryRecoveryService._run_async_on_manager_loop``) —
+    production checkpointers (``AsyncSqliteSaver`` /
+    ``AsyncPostgresSaver``) hold loop-bound ``asyncio.Lock`` s, so
+    an ephemeral ``asyncio.run`` loop raises cross-loop on every
+    real read.
     """
     from .. import persistence as _persistence
 
@@ -270,10 +250,26 @@ async def _derive_anchor_less_child_message_id(
         checkpointer, child_id, manager=None
     )
     for msg in reversed(messages):
-        if msg.get("role") == "assistant":
-            msg_id = msg.get("message_id")
-            if msg_id:
-                return str(msg_id)
+        if msg.get("role") != "assistant":
+            continue
+        msg_id = msg.get("message_id")
+        if not msg_id:
+            # Plan-2.6: missing id → not derivable from this
+            # message; keep scanning older assistant messages.
+            continue
+        if not msg.get("content"):
+            # Plan-2.6: empty content → not a derivable report
+            # anchor; log for operator visibility and keep
+            # scanning older assistant messages.
+            logger.warning(
+                "sweep no_row_backstop anchor-less derivation "
+                "skipped an assistant message with empty content "
+                f"(child={child_id[:8]}..., "
+                f"msg_id={str(msg_id)[:8]}...); scanning older "
+                "messages"
+            )
+            continue
+        return str(msg_id)
     return None
 
 
@@ -601,7 +597,7 @@ class ReportDeliveryRecoveryService:
         |---|---|---|---|
         | W-A (terminal-write → wake-rows-commit) | child's natural completion writes ``internal_report:`` to the parent's queue; wake row PENDING | **Lane 2** (post-wipe) | the wipe deletes the wake row + the anchor; Lane 2 admits anchor-less completed children of non-terminal parents and derives the id from the checkpoint |
         | W-B (commit → ``enqueued_at`` stamp) | wake row stamped | **Lane 2** (post-wipe) | same post-wipe shape; the stamp does NOT survive the wipe |
-        | W-C (stamp → wake-task claim) | PROCESS_REPORT task claimed by worker pool | **Lane 2** (post-wipe) | the PROCESS_REPORT task itself survives the wipe (no ``work_id``); Lane 2's per-row pass materializes a FRESH PROCESS_REPORT + MessageQueue READY + re-enters through the sanctioned RDRS chain (per W-2 guardrail #1 in decisions.md §12d) |
+        | W-C (stamp → wake-task claim) | PROCESS_REPORT task claimed by worker pool | **Lane 2** (post-wipe) | the PROCESS_REPORT task does NOT survive the wipe (the ``task`` table is wiped regardless of ``work_id`` — the reviewer-corrected justification, iteration 2); Lane 2's per-row pass materializes a FRESH PROCESS_REPORT + MessageQueue READY + re-enters through the sanctioned RDRS chain (per W-2 guardrail #1 in decisions.md §12d) |
         | marker-minted pre-restart | a ``report_injections`` row was written before the restart | **Lanes 1/3/4** | the marker survives the wipe (the wipe targets ``message_queue`` + ``task`` only); Lanes 1/3/4 own the recovery of these rows via ``ensure_deferred`` → ``transition_deferred_to_pending`` |
         | orphan-deferred-of-terminal-parents | a DEFERRED row whose parent is TERMINAL | **Lane 5** | the ORPHAN lane's terminal-parent revival path; observable log + metric, never silent |
 
@@ -1026,6 +1022,48 @@ class ReportDeliveryRecoveryService:
                 "available (manager loop closed)"
             ) from None
 
+    def _run_async_on_manager_loop(
+        self, coro_func: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        """Bridge a coroutine onto the manager's loop (sync caller).
+
+        F-2 (durability-f1-f2 / phase2, verification iteration 2
+        blocker 1): the per-row pass's checkpointer-touching
+        coroutines (the parent-history PREFIX ledger check and the
+        anchor-less ``child_message_id`` derivation) MUST run on the
+        manager's canonical event loop. Production checkpointers
+        (``AsyncSqliteSaver`` / ``AsyncPostgresSaver``) hold
+        loop-bound ``asyncio.Lock`` s — driving them from an
+        ephemeral ``asyncio.run`` loop raises cross-loop on every
+        production read (the prior ``_run_async`` adapter did
+        exactly that, turning the F-2 belt into a production
+        no-op and risking a boot-race poisoning of the main
+        loop's saver lock).
+
+        This mirrors the module's OWN sanctioned step-4 bridge
+        (``manager.py`` ``_reenter_completion_via_loop`` /
+        ``asyncio.run_coroutine_threadsafe(...).result(timeout)``
+        at manager.py:8612-8622) and the revival seam directly
+        below (``_revive_terminal_parent``). The per-row timeout
+        is 8.0s — the same W3-aligned budget: ``stop()`` joins the
+        sweep thread with a 10s budget; 8s leaves 2s headroom, and
+        a row that cannot complete within 8s propagates to the
+        per-row ``except`` handler (counted as an error, retried
+        next cycle).
+
+        Failure semantics per call site:
+          * parent-history PREFIX check — caught by the caller's
+            ``except`` (WARNING, proceed; the check is a skip-gate,
+            not a delivery step).
+          * derivation — propagates to the lane's per-row handler
+            (``errors += 1``, retried next cycle).
+        """
+        loop = self._get_event_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            coro_func(*args, **kwargs), loop
+        )
+        return future.result(timeout=8.0)
+
     # --------------------------------------------------------
     # Lane 2 — NO-ROW BACKSTOP (C3)
     # --------------------------------------------------------
@@ -1041,10 +1079,10 @@ class ReportDeliveryRecoveryService:
         # F-2 (task 2.8): one-line boot log marker so the operator
         # can confirm lane 2 ran on the boot path (post-wipe
         # recovery, per the plan-overview S8 keep-green pin). The
-        # marker is emitted on the lane-2 entry point of the FIRST
-        # row's first call — periodic-loop invocations also emit it
-        # (the ``start()``/``recover_now()`` log lines identify
-        # the invocation context).
+        # marker is emitted ONCE PER LANE-2 INVOCATION (at lane
+        # entry, before any row is processed — the comment
+        # previously claimed "first row's first call", which did
+        # not match the code; iteration-2 cheap-item fix).
         logger.info(
             "RDRS lane 2: post-wipe recovery (no-row backstop; "
             "F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)"
@@ -1147,15 +1185,21 @@ class ReportDeliveryRecoveryService:
         # `skipped_already_reported`. The PREFIX ledger is the
         # CROSS-PATH dedup; the obligation-triple unique index
         # is the WITHIN-PATH idempotency (per task 2.5).
-        from daemon.repositories.message_queue.repository import (
-            SQLModelMessageQueueRepository,
-        )
+        # Queue-side PREFIX check. Duck-typed (verification
+        # iteration 2, W-4): the previous isinstance gate on
+        # ``SQLModelMessageQueueRepository`` silently fail-opened
+        # for any other repo implementation; calling the method
+        # when it exists covers every real repo (and explicitly
+        # configured test doubles) without the type check.
         from daemon.services.report_delivery_ledger import (
             parent_history_has_internal_report,
         )
-        if isinstance(
-            self._queue_repo, SQLModelMessageQueueRepository
-        ) and self._queue_repo.find_wake_already_delivered_evidence(
+        queue_evidence_fn = getattr(
+            self._queue_repo,
+            "find_wake_already_delivered_evidence",
+            None,
+        )
+        if callable(queue_evidence_fn) and queue_evidence_fn(
             parent_id, child_id
         ):
             result.skipped_already_reported += 1
@@ -1173,10 +1217,16 @@ class ReportDeliveryRecoveryService:
         # ``manager=None`` default further degrades pre-migration
         # parents to "not yet reported" (the correct default per
         # the report_delivery_ledger docstring).
+        #
+        # LOOP AFFINITY (iteration-2 blocker 1): the ledger
+        # coroutine is bridged onto the manager's loop — NOT an
+        # ephemeral ``asyncio.run`` loop — because production
+        # checkpointers hold loop-bound locks. See
+        # ``_run_async_on_manager_loop``.
         checkpointer = getattr(self._manager, "_checkpointer", None)
         if checkpointer is not None:
             try:
-                if _run_async(
+                if self._run_async_on_manager_loop(
                     parent_history_has_internal_report,
                     checkpointer,
                     parent_id,
@@ -1195,8 +1245,14 @@ class ReportDeliveryRecoveryService:
                 # Defensive: a parent-history lookup failure must
                 # NOT abort the sweep (the queue-side check above
                 # already covers the cross-path dedup for the
-                # PREFIX). Log and proceed.
-                logger.debug(
+                # PREFIX). Log and proceed. WARNING (iteration-2
+                # blocker 1): the prior DEBUG level swallowed the
+                # dead-belt signal — a persistently failing ledger
+                # check means the cross-path dedup is running
+                # one-legged (queue-side only) and MUST be visible
+                # to the operator. Counter semantics unchanged: the
+                # row proceeds (no error bump, no skip).
+                logger.warning(
                     "sweep no_row_backstop parent-history PREFIX "
                     f"lookup failed (non-fatal, proceeding): {exc}"
                 )
@@ -1216,15 +1272,24 @@ class ReportDeliveryRecoveryService:
         # PREFIX ledger (step 0 above) is the operative
         # cross-path dedup; the id mismatch is by design.
         if not child_msg_id:
-            # The derivation is async; the sweep is sync — drive
-            # the coroutine to completion via the _run_async
-            # adapter (the one already used for the parent-history
-            # PREFIX check above).
-            derived_id = _run_async(
-                _derive_anchor_less_child_message_id,
-                checkpointer,
-                child_id,
-            )
+            # The derivation is async; the sweep is sync — bridge
+            # it onto the manager's loop via the SAME sanctioned
+            # pattern the step-4 seam uses (iteration-2 blocker 1:
+            # the prior ephemeral-loop adapter failed cross-loop
+            # against every production checkpointer).
+            # A None checkpointer short-circuits INSIDE the
+            # coroutine (returns None); skip the bridge entirely
+            # for that case so the graceful "no derivable id"
+            # WARNING path below is preserved even when no loop
+            # is available.
+            if checkpointer is None:
+                derived_id = None
+            else:
+                derived_id = self._run_async_on_manager_loop(
+                    _derive_anchor_less_child_message_id,
+                    checkpointer,
+                    child_id,
+                )
             if derived_id is None:
                 logger.warning(
                     "sweep no_row_backstop anchor-less child has no "
