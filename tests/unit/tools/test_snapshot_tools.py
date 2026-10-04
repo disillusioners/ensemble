@@ -173,8 +173,24 @@ class FakeSearchService:
         return {"results": list(self.results), "error": self.error}
 
 
+class _FakeAsyncMessageResult:
+    """Minimal stand-in for ``AsyncMessageResult`` (R18 test surface).
+
+    The real type lives in ``daemon.services.instance_messaging`` and
+    is heavy to import. ``spawn_hot_instance`` only reads
+    ``.message_id`` in the enqueue path (the audit's evidence
+    indicates the parent's source marker is the only contract field
+    we need to pin). Tests can override ``message_id`` via the
+    constructor when needed.
+    """
+
+    def __init__(self, message_id: str = "msg-auto-1", queued: bool = True) -> None:
+        self.message_id = message_id
+        self.queued = queued
+
+
 class FakeManager:
-    """Records the spawn / metadata-write ordering (R6b)."""
+    """Records the spawn / metadata-write ordering (R6b) + R18 enqueue."""
 
     def __init__(self, rows: dict[str, Any], repo: SnapshotRepository):
         self._instance_repository = FakeInstanceRepo(rows)
@@ -185,6 +201,22 @@ class FakeManager:
         self.events: list[str] = []
         self.spawn_calls: list[dict[str, Any]] = []
         self.metadata_calls: list[tuple[str, dict[str, Any]]] = []
+        # R18 enqueue recorder — mirrors the manager's
+        # ``enqueue_message`` async surface so the test can assert
+        # on-call (kwargs), opt-out (auto_dispatch=False), and the
+        # failure-injection path (raise_side_effect). The default
+        # result is a fake AsyncMessageResult with message_id
+        # "msg-auto-1"; tests can swap it.
+        self.enqueue_calls: list[dict[str, Any]] = []
+        self.enqueue_raise: BaseException | None = None
+        self.enqueue_result: Any = _FakeAsyncMessageResult()
+
+    async def enqueue_message(self, **kwargs: Any) -> Any:
+        self.events.append("enqueue")
+        self.enqueue_calls.append(kwargs)
+        if self.enqueue_raise is not None:
+            raise self.enqueue_raise
+        return self.enqueue_result
 
     def spawn_instance(self, **kwargs: Any) -> tuple[str, str | None]:
         self.events.append("spawn")
@@ -571,7 +603,12 @@ class TestSpawnHotInstance:
         assert result["snapshot_id"] == "snap-1"
         assert result["instance_id"] == "new-inst-1"
         assert result["hint"].startswith("Warm-started from snapshot snap-1")
-        assert result["hint"].endswith("tags kind:implementation, subsystem:upgrade-pipeline)")
+        # R18 (2026-10-04): the hint now carries the auto-dispatch
+        # tail AFTER the warm-start lineage text. The tags fragment
+        # is still present in the warm-start prefix — assert it as
+        # a substring instead of as a hard suffix.
+        assert "tags kind:implementation, subsystem:upgrade-pipeline)" in result["hint"]
+        assert "auto-dispatched as first turn" in result["hint"]
         assert result["error"] is None
 
     def test_explicit_missing_snapshot_cold_verify_failed(self, tools, manager, monkeypatch):
@@ -747,6 +784,264 @@ class TestSpawnHotInstance:
 
 
 # ============================================================================
+# R18 (2026-10-04) auto-dispatch — the spawn_hot_instance contract trap fix
+#
+# The forensic audit (2026-10-04, evidence file
+# .agents/tester/RESULTS/2026-10-04-v01612-spawn-enqueue-forensic-audit.md)
+# proved the pre-R18 contract was "accepted-but-never-delivered":
+# `task` was consumed by snapshot search (snapshot_tools.py:995) and
+# hint text (:989) but never forwarded to the child. Agents uniformly
+# missed the follow-up `send_message` requirement — three children
+# sat idle 6-23 minutes before being manually POSTed (audit §3, §4).
+#
+# R18 default: `auto_dispatch=True` enqueues `task` as the child's
+# first turn INSIDE the tool. The trap is structurally impossible.
+# Opt-out: `auto_dispatch=False` restores the legacy two-step
+# ritual. The `started` contract is preserved at {warm, cold, blocked}
+# — 1090f308's 3-value envelope still holds.
+# ============================================================================
+
+
+class TestR18AutoDispatch:
+    """Pins the R18 contract: auto-dispatch + opt-out + failure surface."""
+
+    def _auth_ok(self, monkeypatch):
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda caller, requested, tag=None: None
+        )
+
+    def _auth_denied(self, monkeypatch):
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership",
+            lambda caller, requested, tag=None: "agent 'x' is not in caller's team",
+        )
+
+    def test_default_auto_dispatches_task_as_first_turn(
+        self, tools, manager, monkeypatch
+    ):
+        """Default behavior: task IS enqueued as the child's first turn.
+
+        Pre-R18 trap: the row was created but the child never received
+        the task. R18 default = the trap is structurally impossible.
+        """
+        self._auth_ok(monkeypatch)
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do the thing"}))
+        # The spawn succeeded (started=cold; no-hit default), and the
+        # task was auto-dispatched.
+        assert result["started"] == "cold"
+        assert result["error"] is None
+        assert manager.enqueue_calls, "task was NOT auto-dispatched (the trap)"
+        kwargs = manager.enqueue_calls[0]
+        assert kwargs["instance_id"] == "new-inst-1"
+        assert kwargs["message"] == "do the thing"
+        # Provenance: matches send_message's source marker
+        # (instance.py:3566 — f"internal_agent:{caller}").
+        assert kwargs["source"] == "internal_agent:caller-1"
+        # The hint states the dispatch outcome at-a-glance.
+        assert "auto-dispatched as first turn" in result["hint"]
+        # R6b ordering: spawn → enqueue (no metadata write on cold).
+        assert manager.events == ["spawn", "enqueue"]
+
+    def test_auto_dispatch_warm_writes_metadata_then_enqueues(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """R6b ordering is preserved: spawn → metadata → enqueue.
+
+        The metadata write MUST happen BEFORE the enqueue so the
+        snapshot digest is available to ``assemble_context_messages``
+        when the worker picks up the first-turn message. Audit
+        flagged this as a potential race — the order below proves it
+        is held.
+        """
+        manager = FakeManager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = manager._snapshot_repo
+        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
+        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
+        self._auth_ok(monkeypatch)
+        result = _run(
+            tools[2].ainvoke({"agent_id": "worker", "task": "warm task", "snapshot_id": "snap-1"})
+        )
+        assert result["started"] == "warm"
+        # The exact R6b+R18 ordering: spawn, metadata stamp, enqueue.
+        assert manager.events == ["spawn", "metadata", "enqueue"]
+        assert manager.enqueue_calls
+        assert manager.enqueue_calls[0]["instance_id"] == "new-inst-1"
+        assert manager.enqueue_calls[0]["message"] == "warm task"
+        assert manager.enqueue_calls[0]["source"] == "internal_agent:leader-1"
+        # The hint carries BOTH the warm-start lineage AND the
+        # auto-dispatch note — callers can read both from a single
+        # string.
+        assert "Warm-started from snapshot snap-1" in result["hint"]
+        assert "auto-dispatched as first turn" in result["hint"]
+
+    def test_auto_dispatch_false_skips_enqueue(
+        self, tools, manager, monkeypatch
+    ):
+        """Opt-out: auto_dispatch=False restores the legacy two-step ritual.
+
+        Caller is now responsible for the follow-up send_message.
+        The hint explicitly states the requirement so the trap is at
+        least loudly visible (vs. pre-R18's silent omission).
+        """
+        self._auth_ok(monkeypatch)
+        result = _run(
+            tools[2].ainvoke(
+                {"agent_id": "worker", "task": "do it", "auto_dispatch": False}
+            )
+        )
+        assert result["started"] == "cold"
+        assert result["error"] is None
+        assert manager.enqueue_calls == [], "opt-out was IGNORED — auto-enqueued anyway"
+        # The hint carries the explicit next-step instruction so
+        # callers who opt out can still see what they must do.
+        assert "auto_dispatch=False" in result["hint"]
+        assert "caller MUST call send_message" in result["hint"]
+        # Order: spawn only (no metadata on cold, no enqueue on opt-out).
+        assert manager.events == ["spawn"]
+
+    def test_auto_dispatch_skipped_when_task_empty(
+        self, tools, manager, monkeypatch
+    ):
+        """Empty/whitespace task: no enqueue, hint says so.
+
+        Backward compat: a caller who passes ``task=""`` (e.g. for a
+        snapshot-verify-only test shape) should NOT trigger an
+        enqueue — the row is created but the caller is told they
+        MUST send the first message themselves.
+        """
+        self._auth_ok(monkeypatch)
+        for empty_task in ("", "   ", "\n\t  \n"):
+            result = _run(tools[2].ainvoke({"agent_id": "worker", "task": empty_task}))
+            assert result["started"] == "cold", f"task={empty_task!r} should be cold"
+            assert result["error"] is None, f"task={empty_task!r} should be error-free"
+            assert manager.enqueue_calls == [], (
+                f"empty task={empty_task!r} should NOT enqueue; got "
+                f"{manager.enqueue_calls}"
+            )
+            assert "auto-dispatch SKIPPED: task was empty" in result["hint"]
+            assert "caller MUST call send_message" in result["hint"]
+            # Reset recorder for the next iteration.
+            manager.enqueue_calls.clear()
+            manager.events.clear()
+
+    def test_auto_dispatch_failure_surfaces_as_error_not_silent(
+        self, tools, manager, monkeypatch
+    ):
+        """Enqueue failure after successful spawn: NEVER silent.
+
+        Audit requirement (item A, failure-mode clause): "enqueue
+        fails after row created → surface as `blocked` or clear
+        error, never silent death". R18 chose: keep the spawn
+        result truthful (started reflects what actually happened in
+        the DB), but populate ``error`` with the loud failure and
+        name the manual recovery path in the hint.
+        """
+        self._auth_ok(monkeypatch)
+        manager.enqueue_raise = RuntimeError("enqueue lane down (test injected)")
+
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
+
+        # Spawn succeeded (truthful result); started preserves the
+        # actual DB outcome — NOT downgraded to "blocked" (the
+        # spawn DID happen). The error field carries the loud failure.
+        assert result["started"] == "cold"
+        assert result["error"] is not None
+        assert "auto-dispatch failed" in result["error"]
+        assert "RuntimeError" in result["error"]
+        assert "send_message" in result["error"]
+        # The hint carries the recovery path AND the failure detail.
+        assert "auto-dispatch ERROR" in result["hint"]
+        assert "new-inst-1" in result["hint"]
+
+    def test_auto_dispatch_failure_preserves_six_key_contract(
+        self, tools, manager, monkeypatch
+    ):
+        """The §4.3 6-key contract is preserved even on enqueue failure.
+
+        Adding the error field MUST NOT introduce a 7th top-level
+        key. The contract is exactly 6 keys; failure detail rides
+        the existing ``error`` field and the ``hint`` text.
+        """
+        self._auth_ok(monkeypatch)
+        manager.enqueue_raise = RuntimeError("enqueue lane down")
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
+        assert set(result.keys()) == RESULT_KEYS
+        assert result["error"] is not None
+        # No top-level "auto_dispatch" key — the result shape is
+        # backward compatible with the pre-R18 6-key envelope.
+        assert "auto_dispatch" not in result
+        assert "auto_dispatch_status" not in result
+
+    def test_auto_dispatch_does_not_run_on_blocked_spawn(
+        self, tools, manager, monkeypatch
+    ):
+        """Blocked spawn (auth denial) MUST NOT trigger an enqueue.
+
+        The team-membership check runs BEFORE the spawn — there is
+        no new instance to enqueue against. R18 must not regress
+        this invariant.
+        """
+        self._auth_denied(monkeypatch)
+        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
+        assert result["started"] == "blocked"
+        assert result["instance_id"] is None
+        # The FakeManager MUST not have seen any spawn or enqueue
+        # call — assert on the closed-over manager directly (the
+        # ``manager`` fixture shares the FakeManager instance with
+        # ``tools``).
+        assert manager.enqueue_calls == [], (
+            f"enqueue called on a blocked spawn: {manager.enqueue_calls}"
+        )
+        assert manager.events == [], (
+            f"manager.events should be empty on a blocked spawn; "
+            f"got {manager.events}"
+        )
+        # Belt-and-braces: the blocked result shape itself proves
+        # the auth gate fired first.
+        assert "Permission denied" in result["hint"]
+        assert result["error"] is not None
+
+    def test_3_value_started_contract_preserved(
+        self, tools, manager, monkeypatch, engine, caller_rows
+    ):
+        """R18 does NOT regress the 3-value ``started`` envelope
+        (1090f308, 2026-10-04). All three values are still reachable
+        via the documented paths.
+        """
+        # cold (no-hit default)
+        self._auth_ok(monkeypatch)
+        r_cold = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
+        assert r_cold["started"] == "cold"
+        # warm (explicit snapshot) — needs its own manager+fresh tools
+        warm_manager = FakeManager(caller_rows, SnapshotRepository(engine))
+        warm_manager._snapshot_repo.create_with_embeddings(
+            _snapshot(snapshot_id="snap-warm", target="inst-1")
+        )
+        warm_tools = create_snapshot_tools(warm_manager, "leader-1", "leader", None)
+        self._auth_ok(monkeypatch)
+        r_warm = _run(
+            warm_tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "snap-warm"})
+        )
+        assert r_warm["started"] == "warm"
+        # blocked (auth denial)
+        self._auth_denied(monkeypatch)
+        r_blocked = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
+        assert r_blocked["started"] == "blocked"
+        # All three values are reachable; the 1090f308 3-value
+        # envelope is preserved.
+        assert {r_cold["started"], r_warm["started"], r_blocked["started"]} == {
+            "cold",
+            "warm",
+            "blocked",
+        }
+        # The R18 default is auto_dispatch=True, so the warm and
+        # cold paths both made the enqueue call; the blocked path
+        # did not.
+        assert len(manager.enqueue_calls) >= 1  # cold
+        assert len(warm_manager.enqueue_calls) == 1  # warm
+
+
+# ============================================================================
 # R6b warm-path ordering + stamp content
 # ============================================================================
 
@@ -762,20 +1057,32 @@ class TestWarmPathOrdering:
         )
         result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "snap-1"}))
         # R6b ordering: spawn FIRST, atomic metadata write SECOND, both
-        # BEFORE the instance_id is returned.
-        assert manager.events == ["spawn", "metadata"]
+        # BEFORE the instance_id is returned. R18 (2026-10-04) added
+        # the auto-dispatch enqueue as the THIRD step (the digest
+        # stamp MUST land before the enqueue so the first turn sees
+        # the digest — see test_r18_warm_writes_metadata_then_enqueues).
+        assert manager.events == ["spawn", "metadata", "enqueue"]
         assert result["instance_id"] == "new-inst-1"
         instance_id, updates = manager.metadata_calls[0]
         assert instance_id == "new-inst-1"
         assert updates["spawned_from_snapshot_id"] == "snap-1"
         assert updates["snapshot_digest"] == {"task_summary_text": "did the thing"}
+        # The R18 enqueue ran third; the metadata write did land
+        # before the enqueue (the order assertion above proves it).
 
     def test_cold_path_writes_no_stamp(self, tools, manager, monkeypatch):
         monkeypatch.setattr(
             "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
         )
         _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert manager.events == ["spawn"]  # NO metadata write on cold
+        # R18 (2026-10-04): cold path still writes no metadata
+        # stamp; the only events on a cold spawn are "spawn" (the
+        # row) + "enqueue" (the auto-dispatched first turn). The
+        # NO-METADATA-WRITE invariant is preserved — assert it
+        # explicitly (it was the load-bearing claim of the original
+        # R6b test, and it must not regress).
+        assert manager.events == ["spawn", "enqueue"]  # no "metadata" on cold
+        assert manager.metadata_calls == []  # NO metadata write on cold
 
 
 # ============================================================================
