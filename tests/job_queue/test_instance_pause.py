@@ -200,6 +200,18 @@ class TestJobQueueServiceInstancePause:
         mock_repository.start_job_atomic_with_lock = MagicMock(
             return_value=(started_job, True)
         )
+        # Iteration 3 (council rework round 3, RCA-2): the
+        # belt at JobQueueService.start_job calls
+        # find_active_message_job_for_instance; the test
+        # fixture wires only ``repository.get``, so MagicMock
+        # auto-attr would return a truthy mock → belt
+        # declines → start_job returns None → assertion
+        # fails. Mock the helper to return None (no ACTIVE
+        # sibling — production-equivalent for this single-
+        # instance test scenario).
+        mock_repository.find_active_message_job_for_instance = (
+            MagicMock(return_value=None)
+        )
 
         # Call start_job
         result = await job_queue_service.start_job(job_id)

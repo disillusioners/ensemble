@@ -2512,21 +2512,52 @@ class TaskRepository:
                             SELECT j.instance_id FROM job_queue_items j
                             LEFT JOIN instances i ON j.instance_id = i.instance_id
                             -- claim-gate-sibling-deadlock fix
-                            -- (2026-10-04): exclude message-type
-                            -- JobItems from the blocking set. See
-                            -- the comment above for the rationale
-                            -- (sibling deadlock, the per-instance
-                            -- belt, the per-instance RUNNING-task
-                            -- guard). The literal ``'message'`` is
-                            -- the value stamped at
+                            -- (iteration 3, council rework round 3,
+                            -- REQUIRED 3 round-2): the round-1
+                            -- unconditional ``j.job_type != 'message'``
+                            -- filter is REPLACED with a
+                            -- STATE-DISCRIMINATED NOT EXISTS clause.
+                            -- The discriminator (audited in T2): the
+                            -- backing task's STATE, not job_type
+                            -- alone. Two shapes:
+                            --   (a) original deadlock: message JobItem
+                            --       with backing Task PENDING
+                            --       (sibling-mirror queued state, NOT
+                            --       genuine in-flight work) -> exclusion
+                            --       fires (backing Task with matching
+                            --       work_id is PENDING) -> no block
+                            --       -> claim proceeds -> drain in order
+                            --   (b) regression case: message JobItem
+                            --       with backing Task PAUSED or RUNNING
+                            --       (genuine in-flight work; the
+                            --       per-instance RUNNING-only guard
+                            --       does not cover PAUSED) -> exclusion
+                            --       does NOT fire (backing Task is not
+                            --       PENDING) -> helper's blocking
+                            --       predicate holds -> claim blocked
+                            -- Pin evidence:
+                            --   * tests/job_queue/test_claim_gate_sibling_deadlock_pins.py::test_two_rapid_messages_both_drain_in_order
+                            --     (case a: backing Tasks PENDING -> drain in order)
+                            --   * tests/test_report_lane_phase2.py::test_process_message_blocked_by_cross_system_guard
+                            --     (case b: backing Task PAUSED -> claim blocked)
+                            -- Literal ``'message'`` is the value stamped at
                             -- ``daemon/services/instance_messaging.py:2661``
-                            -- (``job_type="message"``) — the ONLY
-                            -- place a JobItem is born as a message
-                            -- mirror (audit-verified at v0.16.12).
+                            -- (``job_type="message"``) -- the ONLY place
+                            -- a JobItem is born as a message mirror
+                            -- (audit-verified at v0.16.12). Same change
+                            -- applied to has_pending_tasks_blocked_by_busy_instance
+                            -- below (mirror site per FOLD-IN 5).
                             WHERE j.admission_state IN {active_admission_states_sql()}
                               AND j.instance_id IS NOT NULL
                               AND j.deleted_at IS NULL
-                              AND j.job_type != 'message'
+                              AND NOT (
+                                j.job_type = 'message'
+                                AND EXISTS (
+                                    SELECT 1 FROM task t_pending_mirror
+                                    WHERE t_pending_mirror.work_id = j.job_id
+                                      AND t_pending_mirror.status = 'pending'
+                                )
+                              )
                               -- Self-deadlock fix (2026-08-02): exclude the candidate task's
                               -- own row from the in-flight check — otherwise the guard
                               -- matches the task being claimed and blocks it forever.
@@ -3582,20 +3613,35 @@ class TaskRepository:
                             -- See ``_ACTIVE_JOB_IDS_SUBQUERY`` in
                             -- lock_repository.py for the canonical form.
                             -- claim-gate-sibling-deadlock (council rework
-                            -- 2026-10-04, FOLD-IN 5): the
+                            -- iteration 3, 2026-10-04, FOLD-IN 5): the
+                            -- round-1 unconditional
                             -- ``j_running.job_type != 'message'``
-                            -- exclusion MUST match the
-                            -- ``claim_pending_task`` predicate
-                            -- (added 2026-10-04 — see
-                            -- ``daemon/repositories/task/repository.py``
-                            -- cross-system guard). Without this, the
-                            -- diagnostic would over-report "blocked
-                            -- by busy instance" for any instance
-                            -- holding ACTIVE message JobItems.
+                            -- filter is REPLACED with the same
+                            -- STATE-DISCRIMINATED NOT EXISTS clause
+                            -- as the claim_pending_task cross-system
+                            -- guard above. Discriminator (audited in
+                            -- T2): the backing task's STATE, not
+                            -- job_type alone. Message JobItems with
+                            -- backing Task PENDING (sibling-mirror
+                            -- queued state) are excluded; backing
+                            -- Task PAUSED/RUNNING (genuine in-flight
+                            -- work) are NOT excluded. Drift-trap fix:
+                            -- the diagnostic no longer over-reports
+                            -- "blocked by busy instance" for any
+                            -- instance holding ACTIVE message
+                            -- JobItems whose backing task is the
+                            -- sibling-mirror PENDING shape.
                             WHERE j_running.admission_state IN {active_admission_states_sql()}
                               AND j_running.instance_id = t_pending.instance_id
                               AND j_running.deleted_at IS NULL
-                              AND j_running.job_type != 'message'
+                              AND NOT (
+                                j_running.job_type = 'message'
+                                AND EXISTS (
+                                    SELECT 1 FROM task t_pending_mirror_running
+                                    WHERE t_pending_mirror_running.work_id = j_running.job_id
+                                      AND t_pending_mirror_running.status = 'pending'
+                                )
+                              )
                               -- Self-deadlock fix (2026-08-02): exclude the outer pending
                               -- task's own row from the in-flight check — otherwise the
                               -- guard matches the pending task's own backing JobItem
