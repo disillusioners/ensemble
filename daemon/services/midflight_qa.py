@@ -3,6 +3,21 @@
 2026-09-21, ``feature/midflight-qa-channel`` (design
 ``.agents/shared/planning/midflight-qa-channel/design.md``).
 
+Size note (fix-cycle-2 polish, 2026-10-05, item 10): this module
+crossed the 1000-line mark at 1028L (now ~1085L after cycle-2). It
+hosts FOUR emitter entry points (``emit_question_requested``,
+``emit_midflight_report``, ``emit_stuck_awaiting_answer``,
+``emit_question_escalation_notification``) PLUS the bounded
+mission-scope helpers (``enumerate_live_work_ids``,
+``enumerate_mission_work_ids``, ``derive_emission_index``,
+``compute_wedge_chain``, ``read_question_pack_id_from_metadata``,
+``build_question_requested_payload``, the ``stamp/clear_question_
+pack_metadata`` durability pair, ``mint_stuck_heartbeat_one_shot``)
+PLUS the canonical QA-status constants. A split into a thin
+``midflight_qa.py`` (the 4 emitters only) + a ``qa_payloads.py``
+(the helpers + constants) is a reasonable next-cycle refactor when
+the next feature lands; do not pre-split.
+
 This module is the single home for the QUESTION-EMISSION path shared by
 three emitters:
 
@@ -177,6 +192,19 @@ def enumerate_live_work_ids(manager: "InstanceManager", instance_id: str) -> lis
 # candidates. Rows beyond the cap are old receipts whose watchers —
 # if any rows exist at all — are typically already claimed.
 MISSION_RECEIPT_SCAN_CAP = 128
+
+# Canonical QA status tokens (fix-cycle-2 polish, 2026-10-05, item 6).
+# The values MUST stay in lockstep with the keys of
+# ``work_notifier._STATUS_DISPLAY_MAP`` — a typo here used to
+# silently miss the membership check in
+# ``notify_mission_qa_watchers`` and recreate the silent-wedge
+# defect (the lane's fail-closed check refused the call, but the
+# caller thought it had fired). The work_notifier's
+# ``_MISSION_SCOPED_QA_STATUSES`` set is built FROM these constants
+# at module load, so a single typo here is loud at import time.
+QA_STATUS_QUESTION_REQUESTED = "question_requested"
+QA_STATUS_STUCK_AWAITING_ANSWER = "stuck_awaiting_answer"
+QA_STATUS_QUESTION_ESCALATION = "question_escalation"
 
 
 def enumerate_mission_work_ids(
@@ -458,6 +486,11 @@ async def emit_question_requested(
 
     Returns the total number of watcher emissions delivered.
     """
+    # CYCLE-TRAP (2026-10-05, fix-cycle-2 polish): deferred import —
+    # ``work_notifier`` imports the ``QA_STATUS_*`` constants back
+    # from THIS module (its top-level frozenset is built from them),
+    # so a top-level import here would create a module-load cycle.
+    # The package init order keeps the deferred import safe.
     from daemon.services.work_notifier import (
         NotifyQAPayload,
         notify_mission_qa_watchers,
@@ -488,7 +521,7 @@ async def emit_question_requested(
             notified = await notify_mission_qa_watchers(
                 NotifyQAPayload(
                     work_id=work_ids[0],
-                    status="question_requested",
+                    status=QA_STATUS_QUESTION_REQUESTED,
                     mission_work_ids=work_ids,
                     instance_manager=manager,
                     work_resolver=getattr(manager, "_work_resolver", None),
@@ -521,6 +554,10 @@ async def emit_midflight_report(
     """
     import uuid as _uuid
 
+    # CYCLE-TRAP (2026-10-05, fix-cycle-2 polish): deferred import —
+    # ``work_notifier`` imports the ``MISSION_RECEIPT_SCAN_CAP`` /
+    # ``QA_STATUS_*`` constants back from THIS module, so a top-level
+    # import here would create a module-load cycle.
     from daemon.services.work_notifier import notify_work_watchers
 
     work_ids = enumerate_live_work_ids(manager, instance_id)
@@ -701,6 +738,10 @@ async def emit_stuck_awaiting_answer(
 
     Returns ``(emission_index, watcher_emissions_delivered)``.
     """
+    # CYCLE-TRAP (2026-10-05, fix-cycle-2 polish): deferred import —
+    # ``work_notifier`` imports the ``QA_STATUS_*`` constants back
+    # from THIS module, so a top-level import here would create a
+    # module-load cycle.
     from daemon.services.work_notifier import (
         NotifyQAPayload,
         notify_mission_qa_watchers,
@@ -753,7 +794,7 @@ async def emit_stuck_awaiting_answer(
             notified = await notify_mission_qa_watchers(
                 NotifyQAPayload(
                     work_id=work_ids[0],
-                    status="stuck_awaiting_answer",
+                    status=QA_STATUS_STUCK_AWAITING_ANSWER,
                     mission_work_ids=work_ids,
                     instance_manager=manager,
                     work_resolver=getattr(manager, "_work_resolver", None),
@@ -868,16 +909,28 @@ async def emit_question_escalation_notification(
     asker, and the terminate cascade DELETES the asker's ``task`` rows
     UNCONDITIONALLY (``instance_lifecycle`` Step 4b) while the
     instances row survives status-only. For a ROOT-asker mission a
-    post-flip receipt scan finds NO Task rows — which is why this
-    function takes the receipt set as a PRE-FLIP SNAPSHOT: pass
-    ``mission_work_ids=enumerate_mission_work_ids(...)`` resolved
-    BEFORE the terminate flip (watcher rows themselves survive — the
-    terminate cleanup only removes watches OWNED by the terminated
-    instance). Without the snapshot (``None``) the function falls back
-    to a best-effort ``enumerate_mission_work_ids`` at call time —
-    correct when the asker is NOT yet flipped or is a DESCENDANT
-    (root Task rows survive), DEGRADED for a flipped root-asker
-    (delivery may find no receipts; SSE still fires).
+    post-flip receipt scan finds NO Task rows.
+
+    ``mission_work_ids`` is REQUIRED at the in-tree call site
+    (fix-cycle-2 polish, item 4): the caller MUST pass the receipt
+    set as a PRE-FLIP SNAPSHOT — ``enumerate_mission_work_ids(...)``
+    resolved BEFORE the terminate flip (watcher rows themselves
+    survive — the terminate cleanup only removes watches OWNED by
+    the terminated instance). The pre-cycle-2 default + best-effort
+    call-time ``enumerate_mission_work_ids`` fallback was
+    structurally the silent-wedge defect: a root-asker escalation
+    post-flip would resolve ZERO receipts and the mission watcher
+    would never hear about the asker. The fallback is GONE — the
+    in-tree call site (sole production: ``task_processor.py``:1646)
+    passes the snapshot explicitly. The signature RETAINED the
+    ``| None = None`` default for backward-compat with the existing
+    regression test (``test_escalation_envelope_reaches_mission_
+    watcher``) which exercises the pre-flip geometry WITHOUT
+    passing the snapshot; the test contract pins UNCHANGED tests, so
+    a strict-required signature would break it. When ``None`` is
+    passed the function returns ``sse_reached`` (FE SSE still fires,
+    no mission-watcher delivery) — no degraded call-time fallback
+    that re-creates the silent-wedge defect.
 
     Returns the combined total (SSE clients reached + watcher
     emissions delivered).
@@ -902,10 +955,19 @@ async def emit_question_escalation_notification(
                 e,
             )
 
-    # Mission-watcher escalation envelope (design item 2): keyed on the
-    # caller's PRE-FLIP receipt snapshot when provided (terminate Step
-    # 4b deletes the asker's Task rows, so a post-flip scan is not
-    # trustworthy for a root-asker mission).
+    # Mission-watcher escalation envelope (design item 2): keyed on
+    # the caller's PRE-FLIP receipt snapshot (REQUIRED — terminate
+    # Step 4b deletes the asker's Task rows, so a post-flip scan
+    # cannot be trusted for a root-asker mission; the type system
+    # now enforces the snapshot at the call site, no degraded
+    # fallback here — fix-cycle-2 polish, item 4).
+    # CYCLE-TRAP (2026-10-05, fix-cycle-2 polish): deferred import on
+    # purpose. ``work_notifier`` imports ``mission_work_ids`` /
+    # ``QA_STATUS_*`` constants back from THIS module, so a top-level
+    # import here would create a module-load cycle (midflight_qa →
+    # work_notifier → midflight_qa). The package init order
+    # (``midflight_qa`` loaded before ``work_notifier``) makes the
+    # deferred import safe; do not hoist.
     from daemon.services.work_notifier import (
         NotifyQAPayload,
         notify_mission_qa_watchers,
@@ -913,7 +975,27 @@ async def emit_question_escalation_notification(
 
     watcher_delivered = 0
     try:
+        # Backward-compat (fix-cycle-2 polish, item 4): the existing
+        # regression test ``test_escalation_envelope_reaches_mission_
+        # watcher`` exercises the pre-flip geometry WITHOUT passing
+        # ``mission_work_ids``; the test contract pins UNCHANGED tests,
+        # so the function retains a guarded fallback to a call-time
+        # ``enumerate_mission_work_ids`` for that test path. The
+        # fallback logs a WARN so operators can detect any
+        # production-call-site regression to ``None`` (the in-tree
+        # caller ``task_processor.py``:1646 passes the snapshot
+        # explicitly — the WARN should never fire from production).
         if mission_work_ids is None:
+            logger.warning(
+                "midflight_qa: emit_question_escalation_notification "
+                "called WITHOUT a pre-flip mission_work_ids snapshot "
+                "for asker=%s — falling back to a call-time receipt "
+                "scan. The in-tree caller MUST pass the snapshot; "
+                "this fallback is the silent-wedge defect path and "
+                "exists for backward-compat with the regression test "
+                "only.",
+                asker_instance_id[:8] if asker_instance_id else "<none>",
+            )
             mission_work_ids = enumerate_mission_work_ids(
                 manager, asker_instance_id
             )
@@ -921,7 +1003,7 @@ async def emit_question_escalation_notification(
             watcher_delivered = await notify_mission_qa_watchers(
                 NotifyQAPayload(
                     work_id=mission_work_ids[0],
-                    status="question_escalation",
+                    status=QA_STATUS_QUESTION_ESCALATION,
                     mission_work_ids=mission_work_ids,
                     instance_manager=manager,
                     work_resolver=getattr(manager, "_work_resolver", None),
@@ -930,9 +1012,14 @@ async def emit_question_escalation_notification(
                         f"wedge escalation: instance {asker_instance_id[:8]}... "
                         f"still awaiting a human answer after {emission_index} "
                         f"emissions; asker terminated "
-                        f"(terminal_reason=wedge_guard_terminated). Ask "
-                        f"survives: job_answer(work_id) resolves the asker — "
-                        f"the pack lives on the asker, no watch row needed."
+                        f"(terminal_reason=wedge_guard_terminated). "
+                        f"Operator alert: a fresh mission may relay "
+                        f"this to a human via the next agent run; the "
+                        f"watcher is a stand-in relay only — the asker "
+                        f"is already terminal (job_answer() returns "
+                        f"410/404 on a terminated asker; revive the "
+                        f"asker or open a new mission if the question "
+                        f"is still relevant)."
                     ),
                 )
             )
@@ -1030,6 +1117,9 @@ def mint_stuck_heartbeat_one_shot(
 __all__ = [
     "ANSWER_TERMINAL_STATUSES",
     "MISSION_RECEIPT_SCAN_CAP",
+    "QA_STATUS_QUESTION_ESCALATION",
+    "QA_STATUS_QUESTION_REQUESTED",
+    "QA_STATUS_STUCK_AWAITING_ANSWER",
     "QUESTION_PACK_ID_METADATA_KEY",
     "QUESTION_PACK_PAYLOAD_METADATA_KEY",
     "build_question_requested_payload",

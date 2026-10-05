@@ -106,7 +106,12 @@ from daemon.services.mission_live_guard import (
 # The earlier module-load order guarantees the constant is bound by
 # the time any function in this module runs; do not hoist without
 # auditing both call sites and the package init.
-from daemon.services.midflight_qa import MISSION_RECEIPT_SCAN_CAP
+from daemon.services.midflight_qa import (
+    MISSION_RECEIPT_SCAN_CAP,
+    QA_STATUS_QUESTION_ESCALATION,
+    QA_STATUS_QUESTION_REQUESTED,
+    QA_STATUS_STUCK_AWAITING_ANSWER,
+)
 from daemon.services.work_status import is_terminal as _is_terminal
 
 if TYPE_CHECKING:
@@ -1218,8 +1223,17 @@ async def notify_work_watchers(
 #   ``daemon.services.midflight_qa.enumerate_mission_work_ids``); dedupe
 #   is per watcher instance (rows on multiple receipts → ONE emission).
 
+# Built from the canonical constants in ``daemon.services.midflight_qa``
+# (fix-cycle-2 polish, item 6) — typo-safety: a constant name drift
+# fails loud at module load, not silently at emission time. The set
+# stays a frozenset (immutable; safe to share across the deferred-
+# import boundary).
 _MISSION_SCOPED_QA_STATUSES: frozenset[str] = frozenset(
-    {"question_requested", "stuck_awaiting_answer", "question_escalation"}
+    {
+        QA_STATUS_QUESTION_REQUESTED,
+        QA_STATUS_STUCK_AWAITING_ANSWER,
+        QA_STATUS_QUESTION_ESCALATION,
+    }
 )
 
 # Defensive row cap on the multi-receipt watcher SELECT (pairs with the
