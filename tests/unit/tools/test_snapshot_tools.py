@@ -1267,6 +1267,7 @@ class TestR18AutoDispatch:
         )
         assert m.enqueue_calls == []
         assert "auto-dispatch" not in result
+        assert "auto_dispatch" not in result
         # The success prefix is byte-identical to the pre-unification
         # contract (modulo the child-cap line from the mock baseline).
         assert "Successfully spawned instance: new-inst-1" in result
