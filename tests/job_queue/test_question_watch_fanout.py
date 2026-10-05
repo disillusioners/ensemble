@@ -61,7 +61,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
 
-from daemon.constants import STUCK_HEARTBEAT_AFTER_SECONDS
 from daemon.repositories.event.models import EventKind
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
@@ -81,7 +80,7 @@ from daemon.services.midflight_qa import (
     emit_question_requested,
     emit_stuck_awaiting_answer,
 )
-from daemon.services.question_manager import QuestionManager, pack_to_dict
+from daemon.services.question_manager import QuestionManager
 from daemon.services.task_processor import HeartbeatEmitStuckProcessor
 from daemon.services.work_notifier import notify_work_watchers
 from daemon.services.work_resolver import WorkResolverService
@@ -726,14 +725,14 @@ class TestBoundedLookup:
     def test_qa_watchers_multi_receipt_select_is_capped(self, harness):
         """The watcher IN-select carries a defensive LIMIT: a watcher
         population larger than the cap cannot explode the emission."""
-        from daemon.services.work_notifier import _QA_WATCHER_ROW_CAP
+        from daemon.services.work_notifier import QA_WATCHER_ROW_CAP
 
         mission = _seed_instance(harness.engine)
         r1 = _seed_task(harness.engine, mission)
         r2 = _seed_task(harness.engine, mission)
         # Cap + extra watchers, all armed on the same two receipts.
         seeded = []
-        for _ in range(_QA_WATCHER_ROW_CAP + 10):
+        for _ in range(QA_WATCHER_ROW_CAP + 10):
             w = _seed_instance(harness.engine, status=InstanceStatus.IDLE.value)
             harness.watcher_repo.add_watch(r1, w, ["mission_terminal"])
             seeded.append(w)
@@ -753,7 +752,7 @@ class TestBoundedLookup:
             )
         )
 
-        assert notified == _QA_WATCHER_ROW_CAP
+        assert notified == QA_WATCHER_ROW_CAP
 
 
 # =============================================================================

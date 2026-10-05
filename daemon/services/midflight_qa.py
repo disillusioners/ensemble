@@ -458,7 +458,10 @@ async def emit_question_requested(
 
     Returns the total number of watcher emissions delivered.
     """
-    from daemon.services.work_notifier import notify_mission_qa_watchers
+    from daemon.services.work_notifier import (
+        NotifyQAPayload,
+        notify_mission_qa_watchers,
+    )
 
     payload = build_question_requested_payload(manager, instance_id, pack)
     work_ids: list[str] = list(payload["job_id"])
@@ -483,14 +486,15 @@ async def emit_question_requested(
     if work_ids:
         try:
             notified = await notify_mission_qa_watchers(
-                work_id=work_ids[0],
-                status="question_requested",
-                mission_work_ids=work_ids,
-                instance_manager=manager,
-                work_resolver=getattr(manager, "_work_resolver", None),
-                watcher_repo=getattr(manager, "_watcher_repo", None),
-                progress=None,
-                result_summary=pack_to_dict(pack),
+                NotifyQAPayload(
+                    work_id=work_ids[0],
+                    status="question_requested",
+                    mission_work_ids=work_ids,
+                    instance_manager=manager,
+                    work_resolver=getattr(manager, "_work_resolver", None),
+                    watcher_repo=getattr(manager, "_watcher_repo", None),
+                    result_summary=pack_to_dict(pack),
+                )
             )
         except Exception as e:  # noqa: BLE001 — §8.6
             logger.warning(
@@ -697,7 +701,10 @@ async def emit_stuck_awaiting_answer(
 
     Returns ``(emission_index, watcher_emissions_delivered)``.
     """
-    from daemon.services.work_notifier import notify_mission_qa_watchers
+    from daemon.services.work_notifier import (
+        NotifyQAPayload,
+        notify_mission_qa_watchers,
+    )
 
     emission_index = derive_emission_index(manager, asker_instance_id, question_pack_id)
     work_ids = enumerate_mission_work_ids(manager, asker_instance_id)
@@ -744,16 +751,25 @@ async def emit_stuck_awaiting_answer(
     if work_ids:
         try:
             notified = await notify_mission_qa_watchers(
-                work_id=work_ids[0],
-                status="stuck_awaiting_answer",
-                mission_work_ids=work_ids,
-                instance_manager=manager,
-                work_resolver=getattr(manager, "_work_resolver", None),
-                watcher_repo=getattr(manager, "_watcher_repo", None),
-                progress=(
-                    f"paused awaiting answer for {waiting_for_seconds}s "
-                    f"(emission {emission_index})"
-                ),
+                NotifyQAPayload(
+                    work_id=work_ids[0],
+                    status="stuck_awaiting_answer",
+                    mission_work_ids=work_ids,
+                    instance_manager=manager,
+                    work_resolver=getattr(manager, "_work_resolver", None),
+                    watcher_repo=getattr(manager, "_watcher_repo", None),
+                    # The prior ``progress=`` kwarg was structurally dead
+                    # (the QA lane's ``_MISSION_SCOPED_QA_STATUSES`` excludes
+                    # ``in_progress``; the envelope's in_progress branch is
+                    # the only consumer of ``progress``). Route the
+                    # heartbeat text through ``result_summary`` so it now
+                    # renders in the ``Result:`` body — same intent, non-
+                    # discarded (fix-cycle-2 polish, item 1).
+                    result_summary=(
+                        f"paused awaiting answer for {waiting_for_seconds}s "
+                        f"(emission {emission_index})"
+                    ),
+                )
             )
         except Exception as e:  # noqa: BLE001 — §8.6
             logger.warning(
@@ -890,7 +906,10 @@ async def emit_question_escalation_notification(
     # caller's PRE-FLIP receipt snapshot when provided (terminate Step
     # 4b deletes the asker's Task rows, so a post-flip scan is not
     # trustworthy for a root-asker mission).
-    from daemon.services.work_notifier import notify_mission_qa_watchers
+    from daemon.services.work_notifier import (
+        NotifyQAPayload,
+        notify_mission_qa_watchers,
+    )
 
     watcher_delivered = 0
     try:
@@ -900,20 +919,22 @@ async def emit_question_escalation_notification(
             )
         if mission_work_ids:
             watcher_delivered = await notify_mission_qa_watchers(
-                work_id=mission_work_ids[0],
-                status="question_escalation",
-                mission_work_ids=mission_work_ids,
-                instance_manager=manager,
-                work_resolver=getattr(manager, "_work_resolver", None),
-                watcher_repo=getattr(manager, "_watcher_repo", None),
-                result_summary=(
-                    f"wedge escalation: instance {asker_instance_id[:8]}... "
-                    f"still awaiting a human answer after {emission_index} "
-                    f"emissions; asker terminated "
-                    f"(terminal_reason=wedge_guard_terminated). Ask "
-                    f"survives: job_answer(work_id) resolves the asker — "
-                    f"the pack lives on the asker, no watch row needed."
-                ),
+                NotifyQAPayload(
+                    work_id=mission_work_ids[0],
+                    status="question_escalation",
+                    mission_work_ids=mission_work_ids,
+                    instance_manager=manager,
+                    work_resolver=getattr(manager, "_work_resolver", None),
+                    watcher_repo=getattr(manager, "_watcher_repo", None),
+                    result_summary=(
+                        f"wedge escalation: instance {asker_instance_id[:8]}... "
+                        f"still awaiting a human answer after {emission_index} "
+                        f"emissions; asker terminated "
+                        f"(terminal_reason=wedge_guard_terminated). Ask "
+                        f"survives: job_answer(work_id) resolves the asker — "
+                        f"the pack lives on the asker, no watch row needed."
+                    ),
+                )
             )
     except Exception as e:  # noqa: BLE001 — MINOR-7: escalation emit failures are WARN-logged
         logger.warning(
