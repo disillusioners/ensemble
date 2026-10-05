@@ -90,3 +90,22 @@
   - Lane 6 heal: task 1751→1752, recovered=1
 - 06:09:05 LEG 3: manual ping → parent completed
 - 06:10+ R5: write findings, commit, restore dev lane
+
+## LEG-1 FINAL Live Proof (Wake-Through) — 2026-10-05
+- 07:09 LEG 1: kill v0.16.11, boot durability, create parent 5c791341 + child fb23ca4f (helloF4)
+- 07:11:20 LEG 1: wedge captured (SIGSTOP, wake_task=running, worker_id=worker-2, inj=PENDING)
+- 07:11:20 LEG 1: SIGKILL
+- 07:11:20 → 07:13:10 LEG 1: wait 100s, heartbeat stale
+- 07:13:24 LEG 1: reboot, lane 6 wake-through dispatch
+  - sweep stuck_wake heal: task 1756 → retry 1757, recovered=1
+  - _process_child_completion_and_notify_parent called: instance=fb23ca4f, message_id=334e080b
+  - **IDEMPOTENCY GUARD FIRED**: child already completed → skip _process_child_completion_db_sync
+  - **NO WAKE ROW CREATED** → parent STUCK
+- 07:13:24 → 07:19 LEG 1: zero-ping observation (300s)
+  - parent NEVER left waiting_children
+  - api_msgs=0 (no manual pings)
+  - inj_state: PENDING → TASK_DELIVERED at t+35s
+  - retry 1757 at 07:14:25: "already delivered via report-injection (INJECTED) — skipping"
+- 07:20:16 LEG 1: manual ping → parent completed (iter=16, ~32s) — R4ii STILL VERIFIED
+- 07:21 LEG 1: FAIL verdict documented
+- 07:22+ R5: commit, restore dev lane

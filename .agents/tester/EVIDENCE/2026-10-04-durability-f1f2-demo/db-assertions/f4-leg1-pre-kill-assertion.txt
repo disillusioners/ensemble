@@ -1,0 +1,9 @@
+   what    |      status      
+-----------+------------------
+ parent    | waiting_children
+ child     | completed
+ wake_task | running
+ wake_msg  | ready
+ inj       | PENDING
+(5 rows)
+
