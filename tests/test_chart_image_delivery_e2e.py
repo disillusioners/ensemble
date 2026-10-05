@@ -1222,13 +1222,24 @@ class TestInstallerSkillHygiene:
 # snapshots — same-run snapshots only catch same-run mutation and
 # false-green across Phase D's commits between runs). See
 # phaseD-plan.md Components §1 Group 6 + iter-003 blocking #5.
+#
+# Re-pinning history (each entry is a sanctioned seal update; no
+# functional file-list change, only SHA refresh after a legitimate
+# content edit on the listed path):
+#   - 2026-10-05 charter-skill-improvement fix pass: workflow.md,
+#     rule.md, install-mermaid-cli.md re-pinned to the NEEDS-FIX
+#     post-fix tree (Step 5.5 lib-mirror + 12 skill/doc folds).
+#     The 3 changes are content-bearing (per the test file's
+#     "Phase A — charter agent + install skill + chart innate
+#     skill + ari workflow" header) and tripwire correctness
+#     requires the new SHAs.
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
-    "agents/charter/workflow.md": "50152c74274f73d5b74ab9bc9f75c032b09682cc0d6546fbf99019451a73d375",
-    "agents/charter/rule.md": "bb7aecb0cebe53c83b79704f09dfc9356b66586e95068211c34143b0a8a7be31",
+    "agents/charter/workflow.md": "870ec32faf071cc1478c0540690381ef46c0bd1ae6667163215845ad39992581",
+    "agents/charter/rule.md": "2ee5d27d5bbc09474dbcb78de49d6cbcfc8074f98b3ec358cfecc4c5aae26701",
     "agents/charter/soul.md": "458f65a608b495df0cac8c565a83663595ea85c3d13a200295dc611189387aad",
     "agents/charter/meta.json": "e1034e1d92e7bb30f2d39ab0a625a661287251cf5ca961cbeba3e1893dcfd492",
-    "agents/charter/skills-template/install-mermaid-cli.md": "8dd699f7e12a33cb44d49d68fef0fa4f583d70f56cc4178f6a5414a2ceb4731f",
+    "agents/charter/skills-template/install-mermaid-cli.md": "344f206d2c211751125fcf12cc605843d0b5b96f89d138b2ee3f328e2abedbe5",
     "agents/charter/skills-template/install-mermaid-cli.lib.sh": "fcd6f4612d6077a81fe521341e6e2332d1f5da31880d3fc710decbc0579fedbf",
     "agents/_prompt_system/innate-skills/chart/skill.md": "fa29084d7dc0f86c87d667ef46dcfc060fa11e20e0b647295cdd75ff43353515",
     "agents/ari/workflow.md": "d39ce087888869611884a1ff71d4851f2b203a376d71c44d2b38b2f991ab3a38",
