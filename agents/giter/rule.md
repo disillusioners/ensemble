@@ -83,6 +83,9 @@
 3. Suggest branch naming convention
 4. Create or switch as appropriate
 5. Verify with `git branch` or `git checkout`
+
+### Worktree Workflow
+
 - ALWAYS a sibling worktree for ANY committing task — one uniform rule, no concurrency threshold; See Worktree Mode.
 - Quiescence invariant: NO merge until the worktree is clean (commit / stash-by-sha / discard first) — the merge is the commit point.
 - Reconcile sweep = crash backstop ONLY: remove ONLY strays that are merged AND clean; adopt-or-flag anything dirty or unmerged — NEVER auto-remove dirty (active in-flight commissions, e.g. ensemble-src-wt-durability, are excluded from ANY cleanup).

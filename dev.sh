@@ -91,7 +91,7 @@ if [ -n "$GIT_DIR_RES" ] && [ -n "$GIT_COMMON_RES" ] \
     if [ "$GIT_DIR_ABS" != "$GIT_COMMON_ABS" ]; then
         # Linked worktree: --git-dir points at <main>/.git/worktrees/<name>
         # while --git-common-dir points at the shared <main>/.git.
-        if ! grep -Eq '^[[:space:]]*ENSEMBLE_SELF_ENV[[:space:]]*=[[:space:]]*[^[:space:]#]+' .env 2>/dev/null; then
+        if ! grep -Eq '^[[:space:]]*([[:space:]]*export[[:space:]]+)?ENSEMBLE_SELF_ENV[[:space:]]*=[[:space:]]*[^[:space:]#]+' .env 2>/dev/null; then
             echo -e "${RED}Error: linked git worktree detected without a fenced .env${NC}"
             echo -e "${RED}Refusing to boot: ambient environment would be inherited and may target LIVE.${NC}"
             echo -e "${YELLOW}Fix: create .env in this worktree root with an explicit identity pin, e.g.:${NC}"
