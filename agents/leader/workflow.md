@@ -404,7 +404,7 @@ PHASE 2:
 
 **For SMALL scope (single phase, single component):** Spawn instances as needed. They complete naturally when done.
 
-**Recurring-shape dispatch:** for work whose shape repeats across phases/components (same agent + same task family), prefer `spawn_hot_instance(agent_id, task)` — it warm-starts the instance from the best matching snapshot (digest in turn-1 context) or cold-falls-back automatically; cite the returned `started: warm|cold|blocked` line in the dispatch record (R18 (2026-10-04): `task` is auto-dispatched as the child's first turn, so I do NOT issue a follow-up `send_message`).
+**Recurring-shape dispatch:** for work whose shape repeats across phases/components (same agent + same task family), prefer `spawn_instance(agent_id, task=...)` — when the target agent's `meta.json` has `snapshot_enabled: true` (enabled for tester + developer[v2]), the tool warm-starts the instance from the best matching snapshot (digest in turn-1 context) or cold-falls-back automatically; agents without the gate cold-spawn regardless of any matching snapshot. Cite the returned `started: warm|cold` line in the dispatch record (auth/membership denials surface as plain `ERROR: ...` strings — leading `ERROR:` prefix, no citation line; R18 (2026-10-04): `task` is auto-dispatched as the child's first turn, so I do NOT issue a follow-up `send_message`; omit `task` to use the two-step `spawn_instance` + `send_message` ritual).
 
 ---
 

@@ -8,17 +8,16 @@ re-implements private helpers.
 
 Spec contracts pinned here:
 
-* **R14 auto-fallback** (§4.3 / §6.3) — the result contract is
-  EXACTLY six keys: ``{instance_id, started, snapshot_id, staleness,
-  hint, error}``; ``started`` is ``"warm"|"cold"|"blocked"`` (always
-  present, never null/missing on either path; ``"blocked"`` = R18
-  adjacent — the 1090f308 authorization-refusal value); ``reason``
-  rides inside the ``hint`` string verbatim. The hint format is also
-  pinned:
-  - warm: ``"Warm-started from snapshot {id} (age {n}d; tags …) — auto-dispatched as first turn …"``
-  - cold: ``"No matching snapshot — spawned cold (searched: …; reason:
-    no-hit | expired | verify-failed) — auto-dispatched as first turn …"``
-  - blocked: ``"Permission denied — spawn blocked (reason: permission-denied). …"``
+* **R14 auto-fallback** (§4.3 / §6.3) — UPDATED by unify-spawn-tools
+  (2026-10-05): the consumption surface is the unified
+  ``spawn_instance`` tool (TARGET-agent ``snapshot_enabled`` gate);
+  the former 6-key dict / ``started: "blocked"`` contract is now the
+  ``[snapshot] started: warm|cold — …`` citation LINE on the tool's
+  STRING return (auth denials are the tool's plain ERROR strings).
+  The citation format is pinned:
+  - warm: ``"[snapshot] started: warm — Warm-started from snapshot {id} (age {n}d; tags …)…"``
+  - cold: ``"[snapshot] started: cold — No matching snapshot
+    (searched: …; reason: no-hit | expired | verify-failed)…"``
 
 * **R12 supersession** (§6.3) — a SUPERSEDED snapshot is NEVER
   returned as a candidate. The explicit-id verify branch refuses
@@ -27,8 +26,9 @@ Spec contracts pinned here:
 
 * **R15 settings toggle** (§6.3 / §10 Q7-A) — toggle default OFF.
   ``snapshot_create`` is cleanly disabled (NOT a crash, NOT a silent
-  success) — the disabled result shape is exact; ``spawn_hot_instance``
-  still succeeds via COLD fallback (no-OFF-breaks-spawn invariant).
+  success) — the disabled result shape is exact; the spawn
+  consumption path still succeeds via COLD fallback
+  (no-OFF-breaks-spawn invariant).
 
 * **D8 project scoping** (§10 Q5-A, permanent) — a project-A-bound
   caller requesting a snapshot id belonging to foreign project B
@@ -65,8 +65,13 @@ from daemon.repositories.snapshot.models import (
 )
 from daemon.repositories.snapshot.repository import SnapshotRepository
 from daemon.tools.snapshot_tools import (
+    SNAPSHOT_STEERING_IGNORED_LINE,
     create_snapshot_tools,
     is_snapshot_create_enabled,
+)
+from tests.helpers.send_message_fixtures import (
+    make_spawn_manager,
+    patch_heavy_helpers,
 )
 from tests.unit.tools._fakes import FakeAsyncMessageResult
 
@@ -100,13 +105,11 @@ VALID_TAGS = [
     "subsystem:upgrade-pipeline",
 ]
 
-# The 6-key R14 result contract — pinned by spec §4.3 and re-asserted
-# by the Wave-2b review FIX 4 (top-level ``warnings`` key was removed).
-RESULT_KEYS = {"instance_id", "started", "snapshot_id", "staleness", "hint", "error"}
-
-# Spec §4.3 hint format: warm / cold markers + reason lexeme.
-WARM_HINT_PREFIX = "Warm-started from snapshot "
-COLD_HINT_PREFIX = "No matching snapshot — spawned cold"
+# The R14 result contract surface after unify-spawn-tools: the
+# ``[snapshot] started: …`` citation LINE (the 6-key dict contract
+# was removed with spawn_hot_instance).
+WARM_CITATION_PREFIX = "[snapshot] started: warm — Warm-started from snapshot "
+COLD_CITATION_PREFIX = "[snapshot] started: cold — No matching snapshot"
 
 
 # ============================================================================
@@ -183,26 +186,43 @@ class FakeSearchService:
 
 
 class FakeManager:
-    """Records the spawn / metadata-write ordering (R6b) + R18 enqueue."""
+    """Records the spawn / metadata-write ordering (R6b) + R18 enqueue.
+
+    Used directly by the snapshot_create tool tests; the unified
+    ``spawn_instance`` tests use :func:`_unified_spawn_manager`
+    (MagicMock baseline — the real ``create_instance_tools`` factory
+    touches a wider manager surface).
+    """
 
     def __init__(self, rows: dict[str, Any], repo: SnapshotRepository) -> None:
+        from types import SimpleNamespace
+
         self._instance_repository = FakeInstanceRepo(rows)
         self._snapshot_repo = repo
         self._snapshot_service = FakeCaptureService()
         self._snapshot_search_service = FakeSearchService()
         self._project_repository = None
+        # Unified-spawn surface (child cap + tier config + fallback
+        # notice) — required when this fake is adapted for spawn tests.
+        self.config = SimpleNamespace(
+            llm=SimpleNamespace(allowed_models=["agentic"]),
+            limits=SimpleNamespace(max_children_per_instance=50),
+        )
+        self._lifecycle_service = SimpleNamespace(
+            _format_model_fallback_notice=lambda model, validated: ""
+        )
         self.events: list[str] = []
         self.spawn_calls: list[dict[str, Any]] = []
         self.metadata_calls: list[tuple[str, dict[str, Any]]] = []
-        # R18 (2026-10-04) auto-dispatch seam — the spawn_hot_instance
-        # tool now calls ``manager.enqueue_message`` to enqueue the
-        # task as the child's first turn. The spot tests don't
-        # exercise the auto-dispatch surface (they pin the snapshot
-        # contract: started / hint / error / staleness / 6-key shape),
-        # so a no-op recorder that records the call + returns a
-        # fake AsyncMessageResult is sufficient. Tests that need to
-        # assert on enqueue behavior live in the unit test file
-        # ``tests/unit/tools/test_snapshot_tools.py`` (TestR18AutoDispatch).
+        # R18 (2026-10-04) auto-dispatch seam — the unified
+        # spawn_instance tool calls ``manager.enqueue_message`` to
+        # enqueue the task as the child's first turn. The spot tests
+        # don't exercise the auto-dispatch surface (they pin the
+        # snapshot citation contract), so a no-op recorder that
+        # records the call + returns a fake AsyncMessageResult is
+        # sufficient. Tests that need to assert on enqueue behavior
+        # live in ``tests/unit/tools/test_snapshot_tools.py``
+        # (TestR18AutoDispatch).
         self.enqueue_calls: list[dict[str, Any]] = []
         self.enqueue_result: Any = _FakeAsyncMessageResult()
 
@@ -304,6 +324,80 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _snapshot_gate(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
+    """Steer the TARGET-agent snapshot gate at its real seam
+    (unify-spawn-tools) — ``daemon.tools.instance._target_snapshot_enabled``."""
+    monkeypatch.setattr(
+        "daemon.tools.instance._target_snapshot_enabled",
+        lambda agent_id, version_tag=None: enabled,
+    )
+
+
+def _unified_spawn_manager(
+    rows: dict[str, Any],
+    repo: SnapshotRepository,
+) -> Any:
+    """MagicMock manager wired for the UNIFIED ``spawn_instance`` tool.
+
+    Baseline: ``tests.helpers.send_message_fixtures.make_spawn_manager``.
+    Snapshot seams + the instance repo ride over in FakeManager shapes;
+    the spawn / metadata / enqueue recorders append to ``m.events``.
+    """
+    m = make_spawn_manager()
+    m._snapshot_repo = repo
+    m._snapshot_service = FakeCaptureService()
+    m._snapshot_search_service = FakeSearchService()
+    m._snapshot_metrics_service = None
+    m._instance_repository = FakeInstanceRepo(rows)
+    m._project_repository = None
+    m.events = []
+    m.spawn_calls = []
+    m.metadata_calls = []
+    m.enqueue_calls = []
+    m.enqueue_result: Any = _FakeAsyncMessageResult()
+
+    def _spawn(**kw: Any) -> tuple[str, str | None]:
+        m.events.append("spawn")
+        m.spawn_calls.append(dict(kw))
+        return ("new-inst-1", None)
+
+    def _meta(instance_id: str, updates: dict[str, Any]) -> None:
+        m.events.append("metadata")
+        m.metadata_calls.append((instance_id, dict(updates)))
+
+    async def _enqueue(**kw: Any) -> Any:
+        m.events.append("enqueue")
+        m.enqueue_calls.append(dict(kw))
+        return m.enqueue_result
+
+    m.spawn_instance = _spawn
+    m.set_metadata_many = _meta
+    m.enqueue_message = _enqueue
+    return m
+
+
+def _spawn_tool(manager: Any, caller_id: str = "caller-1", agent_id: str = "coder") -> Any:
+    """Build the unified ``spawn_instance`` tool bound to ``manager``
+    via the REAL ``create_instance_tools`` factory (heavy helpers
+    patched out)."""
+    from daemon.tools.instance import create_instance_tools
+
+    patches = patch_heavy_helpers()
+    for _p in patches:
+        _p.start()
+    try:
+        all_tools = create_instance_tools(
+            manager, caller_id, agent_id=agent_id, version_tag=None
+        )
+    finally:
+        for _p in reversed(patches):
+            _p.stop()
+    for _t in all_tools:
+        if getattr(_t, "name", None) == "spawn_instance":
+            return _t
+    raise RuntimeError("spawn_instance tool not found")
+
+
 def _gate(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
     """Steer the R15 gate at its REAL seam (the async util)."""
 
@@ -350,60 +444,69 @@ def tools(manager: FakeManager) -> list[Any]:
 
 
 class TestR14ExplicitWarmContract:
-    """R14 — explicit-id warm hit. The result contract keys MUST
-    always be present (6 keys), and ``started`` MUST be ``"warm"``
-    with the canonical warm-hint prefix carrying the consumed id.
+    """R14 — explicit-id warm hit via the unified spawn tool (gate ON).
+    The citation line MUST carry the canonical warm prefix with the
+    consumed id, and the R6b stamp MUST land.
     """
 
-    def test_explicit_warm_all_six_keys_present_and_started_warm(
+    def test_explicit_warm_citation_and_stamp(
         self, engine: Engine, manager: FakeManager, callers_p1: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repo: SnapshotRepository = manager._snapshot_repo
         repo.create_with_embeddings(_snapshot_row(snapshot_id="snap-warm", tags=VALID_TAGS))
-        tools_local = create_snapshot_tools(manager, "caller-1", "coder", None)
         _auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        spawn_m = _unified_spawn_manager(callers_p1, manager._snapshot_repo)
+        spawn_m._snapshot_service = manager._snapshot_service
         result = _run(
-            tools_local[2].ainvoke(
-                {"agent_id": "worker", "task": "t", "snapshot_id": "snap-warm"}
+            _spawn_tool(spawn_m, "caller-1", "coder").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-warm",
+                    "auto_dispatch": False,
+                }
             )
         )
-        # EXACTLY 6 keys (spec §4.3).
-        assert set(result.keys()) == RESULT_KEYS
-        # Always-present contract — never null/missing.
-        assert result["started"] == "warm"
-        assert result["error"] is None
-        assert result["hint"].startswith(WARM_HINT_PREFIX)
-        assert "snap-warm" in result["hint"]
+        # Citation-line contract (unify-spawn-tools surface).
+        assert WARM_CITATION_PREFIX in result
+        assert "snap-warm" in result
+        assert "Successfully spawned instance: new-inst-1" in result
         # WARM path stamps the spawned_from_snapshot_id (R6b).
-        instance_id, updates = manager.metadata_calls[0]
+        instance_id, updates = spawn_m.metadata_calls[0]
         assert instance_id == "new-inst-1"
         assert updates["spawned_from_snapshot_id"] == "snap-warm"
 
 
 class TestR14ExplicitColdContract:
-    """R14 — explicit-id cold paths (miss / expired / verify-failed).
-
-    On every cold path the result MUST still carry the six canonical
-    keys (fail-soft per rider h), ``started`` MUST be ``"cold"``, and
-    the ``reason`` lexeme MUST ride inside the ``hint`` string verbatim
-    (one of ``verify-failed`` / ``expired``).
+    """R14 — explicit-id cold paths (miss / expired / verify-failed)
+    via the unified spawn tool: fail-soft per rider h — the spawn
+    proceeds plain-cold and the reason lexeme rides the citation line
+    verbatim (``verify-failed`` / ``expired``).
     """
 
-    def test_explicit_missing_id_cold_verify_failed_reason_in_hint(
-        self, tools: list[Any], monkeypatch: pytest.MonkeyPatch
+    def test_explicit_missing_id_cold_verify_failed_reason_in_citation(
+        self, engine: Engine, manager: FakeManager, callers_p1: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        spawn_m = _unified_spawn_manager(callers_p1, manager._snapshot_repo)
         result = _run(
-            tools[2].ainvoke(
-                {"agent_id": "worker", "task": "t", "snapshot_id": "missing-snap"}
+            _spawn_tool(spawn_m, "caller-1", "coder").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "missing-snap",
+                    "auto_dispatch": False,
+                }
             )
         )
-        assert set(result.keys()) == RESULT_KEYS
-        assert result["started"] == "cold"
-        assert result["error"] is None  # fail-soft, never an error
-        assert result["snapshot_id"] is None  # nothing consumed
-        assert result["hint"].startswith(COLD_HINT_PREFIX)
-        assert "reason: verify-failed" in result["hint"]
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert COLD_CITATION_PREFIX in result
+        assert "reason: verify-failed" in result
+        assert spawn_m.metadata_calls == []  # nothing consumed → no stamp
 
     def test_explicit_expired_snapshot_cold_with_expired_reason(
         self,
@@ -416,47 +519,59 @@ class TestR14ExplicitColdContract:
         # ``expired`` so the verify branch flips it to cold.
         repo: SnapshotRepository = manager._snapshot_repo
         repo.create_with_embeddings(_snapshot_row(snapshot_id="snap-old"))
-        manager._snapshot_service.staleness = {
+        _auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        spawn_m = _unified_spawn_manager(callers_p1, manager._snapshot_repo)
+        spawn_m._snapshot_service = manager._snapshot_service
+        spawn_m._snapshot_service.staleness = {
             "snapshot_age_days": 60.0,
             "freshness": "expired",
             "warnings": [],
             "repo_state": None,
         }
-        tools_local = create_snapshot_tools(manager, "caller-1", "coder", None)
-        _auth_ok(monkeypatch)
         result = _run(
-            tools_local[2].ainvoke(
-                {"agent_id": "worker", "task": "t", "snapshot_id": "snap-old"}
+            _spawn_tool(spawn_m, "caller-1", "coder").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-old",
+                    "auto_dispatch": False,
+                }
             )
         )
-        assert set(result.keys()) == RESULT_KEYS
-        assert result["started"] == "cold"
-        assert result["error"] is None
-        assert "reason: expired" in result["hint"]
+        assert COLD_CITATION_PREFIX in result
+        assert "reason: expired" in result
+        assert spawn_m.metadata_calls == []
 
 
 class TestR14InternalSearchContract:
-    """R14 — internal-search selection path (snapshot_id is None).
-
-    The same always-present contract applies: 6 keys, ``started`` set,
-    ``reason`` lexeme riding in the ``hint`` for the cold-no-hit and
-    cold-expired paths; warm-start on a top candidate with the
-    canonical warm prefix.
+    """R14 — internal-search selection path (snapshot_id is None) via
+    the unified spawn tool: cold-no-hit and warm-top-match with the
+    canonical citation prefixes.
     """
 
     def test_internal_search_no_hit_cold_no_hit_reason(
-        self, tools: list[Any], manager: FakeManager, monkeypatch: pytest.MonkeyPatch
+        self, engine: Engine, manager: FakeManager, callers_p1: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        manager._snapshot_search_service = FakeSearchService(results=[])
-        tools_local = create_snapshot_tools(manager, "caller-1", "coder", None)
         _auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        spawn_m = _unified_spawn_manager(callers_p1, manager._snapshot_repo)
+        spawn_m._snapshot_search_service = FakeSearchService(results=[])
         result = _run(
-            tools_local[2].ainvoke({"agent_id": "worker", "task": "do it"})
+            _spawn_tool(spawn_m, "caller-1", "coder").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "do it",
+                    "project_id": "p1",
+                    "auto_dispatch": False,
+                }
+            )
         )
-        assert set(result.keys()) == RESULT_KEYS
-        assert result["started"] == "cold"
-        assert result["error"] is None
-        assert "reason: no-hit" in result["hint"]
+        assert COLD_CITATION_PREFIX in result
+        assert "reason: no-hit" in result
+        # The internal search consumed the task as its query.
+        assert spawn_m._snapshot_search_service.calls[0]["query"] == "do it"
 
     def test_internal_search_warm_top_match_started_warm(
         self,
@@ -467,19 +582,25 @@ class TestR14InternalSearchContract:
     ) -> None:
         repo: SnapshotRepository = manager._snapshot_repo
         repo.create_with_embeddings(_snapshot_row(snapshot_id="snap-search", tags=VALID_TAGS))
-        manager._snapshot_search_service = FakeSearchService(
+        _auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        spawn_m = _unified_spawn_manager(callers_p1, manager._snapshot_repo)
+        spawn_m._snapshot_service = manager._snapshot_service
+        spawn_m._snapshot_search_service = FakeSearchService(
             [_candidate("snap-search", VALID_TAGS)]
         )
-        tools_local = create_snapshot_tools(manager, "caller-1", "coder", None)
-        _auth_ok(monkeypatch)
         result = _run(
-            tools_local[2].ainvoke({"agent_id": "worker", "task": "t"})
+            _spawn_tool(spawn_m, "caller-1", "coder").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "auto_dispatch": False,
+                }
+            )
         )
-        assert set(result.keys()) == RESULT_KEYS
-        assert result["started"] == "warm"
-        assert result["error"] is None
-        assert result["hint"].startswith(WARM_HINT_PREFIX)
-        assert "snap-search" in result["hint"]
+        assert WARM_CITATION_PREFIX in result
+        assert "snap-search" in result
 
 
 # ============================================================================
@@ -504,16 +625,23 @@ class TestR12SupersededNeverSpawns:
         repo.create_with_embeddings(
             _snapshot_row(snapshot_id="snap-old", status=SNAPSHOT_STATUS_SUPERSEDED)
         )
-        tools_local = create_snapshot_tools(manager, "caller-1", "coder", None)
         _auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        spawn_m = _unified_spawn_manager(callers_p1, manager._snapshot_repo)
         result = _run(
-            tools_local[2].ainvoke(
-                {"agent_id": "worker", "task": "t", "snapshot_id": "snap-old"}
+            _spawn_tool(spawn_m, "caller-1", "coder").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-old",
+                    "auto_dispatch": False,
+                }
             )
         )
-        assert result["started"] == "cold"
-        assert "reason: verify-failed" in result["hint"]
-        assert result["error"] is None  # fail-soft
+        assert COLD_CITATION_PREFIX in result
+        assert "reason: verify-failed" in result
+        assert spawn_m.metadata_calls == []
 
     def test_internal_search_drops_superseded_top_candidate(
         self,
@@ -524,31 +652,42 @@ class TestR12SupersededNeverSpawns:
     ) -> None:
         # R12 invariant — superseded NEVER returns as a warm
         # candidate. The search service boundary filters status to
-        # 'active' (list_active_by_project); the spawn branch
-        # additionally re-checks the consumed row's status before
-        # marking it warm. We inject a SUPERSEDED top candidate
-        # (bypassing the search-service boundary) and assert the
-        # spawn branch catches it as no-hit cold.
+        # 'active'; the spawn branch additionally re-checks the
+        # consumed row's status before marking it warm. We inject a
+        # SUPERSEDED top candidate (bypassing the search-service
+        # boundary) and assert the spawn branch catches it as no-hit
+        # cold.
         repo: SnapshotRepository = manager._snapshot_repo
         repo.create_with_embeddings(
             _snapshot_row(snapshot_id="snap-old", status=SNAPSHOT_STATUS_SUPERSEDED)
         )
         repo.create_with_embeddings(_snapshot_row(snapshot_id="snap-new"))
-        manager._snapshot_search_service = FakeSearchService(
+        _auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        spawn_m = _unified_spawn_manager(callers_p1, manager._snapshot_repo)
+        spawn_m._snapshot_search_service = FakeSearchService(
             [_candidate("snap-old", VALID_TAGS)]
         )
-        tools_local = create_snapshot_tools(manager, "caller-1", "coder", None)
-        _auth_ok(monkeypatch)
         result = _run(
-            tools_local[2].ainvoke({"agent_id": "worker", "task": "t"})
+            _spawn_tool(spawn_m, "caller-1", "coder").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "auto_dispatch": False,
+                }
+            )
         )
         # The spawn branch re-verifies status; a SUPERSEDED top
-        # candidate is dropped (cold, reason: no-hit, no
-        # cross-project cross-fire, fail-soft).
-        assert result["started"] == "cold"
-        assert result["snapshot_id"] is None
-        assert result["error"] is None
-        assert "reason: no-hit" in result["hint"]
+        # candidate is dropped (cold, reason: no-hit, fail-soft).
+        assert COLD_CITATION_PREFIX in result
+        assert "reason: no-hit" in result
+        assert spawn_m.metadata_calls == []
+
+
+# ============================================================================
+# R15 — settings toggle (default OFF; write-side ONLY)
+# ============================================================================
 
 
 # ============================================================================
@@ -599,28 +738,39 @@ class TestR15SettingsToggle:
         assert result["error"] is None
         assert len(manager._snapshot_service.calls) == 1
 
-    def test_r15_off_spawn_hot_instance_still_cold_fallback(
+    def test_r15_off_spawn_consumption_still_cold_fallback(
         self,
-        tools: list[Any],
+        engine: Engine,
         manager: FakeManager,
+        callers_p1: dict[str, Any],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """R15 OFF must NOT break the spawn path (the
-        no-OFF-breaks-spawn invariant). spawn_hot_instance ships
-        always-on; OFF just means there are no fresh snapshots being
-        created, so the search returns no candidates → cold.
+        no-OFF-breaks-spawn invariant, renamed for unify-spawn-tools).
+        The unified spawn's consumption path ships always-on (gated by
+        the TARGET ``snapshot_enabled`` flag, never by R15); OFF just
+        means there are no fresh snapshots being created, so the
+        search returns no candidates → cold.
         """
         # Toggle steered OFF (and the internal search returns nothing).
         _gate(monkeypatch, False)
-        manager._snapshot_search_service = FakeSearchService(results=[])
-        tools_local = create_snapshot_tools(manager, "caller-1", "coder", None)
+        _snapshot_gate(monkeypatch, True)
         _auth_ok(monkeypatch)
+        spawn_m = _unified_spawn_manager(callers_p1, manager._snapshot_repo)
+        spawn_m._snapshot_search_service = FakeSearchService(results=[])
         result = _run(
-            tools_local[2].ainvoke({"agent_id": "worker", "task": "t"})
+            _spawn_tool(spawn_m, "caller-1", "coder").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "auto_dispatch": False,
+                }
+            )
         )
-        assert result["error"] is None
-        assert result["started"] == "cold"
-        assert result["instance_id"] == "new-inst-1"
+        assert COLD_CITATION_PREFIX in result
+        assert "reason: no-hit" in result
+        assert "Successfully spawned instance: new-inst-1" in result
 
 
 # ============================================================================
@@ -647,57 +797,76 @@ class TestD8ProjectScoping:
         repo.create_with_embeddings(
             _snapshot_row(snapshot_id="snap-xp", project_id="p2")
         )
-        tools_local = create_snapshot_tools(manager, "caller-1", "coder", None)
         _auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        spawn_m = _unified_spawn_manager(callers_p1, manager._snapshot_repo)
         result = _run(
-            tools_local[2].ainvoke(
-                {"agent_id": "worker", "task": "t", "snapshot_id": "snap-xp"}
+            _spawn_tool(spawn_m, "caller-1", "coder").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-xp",
+                    "auto_dispatch": False,
+                }
             )
         )
         # D8 default (allow_cross_project=False): no cross-project warm.
-        assert result["started"] == "cold"
-        assert result["error"] is None  # fail-soft
-        # The reason rides in the hint — verify-failed with project info.
-        assert "reason: verify-failed" in result["hint"]
-        assert "p2" in result["hint"]
+        assert COLD_CITATION_PREFIX in result
+        # The reason rides the citation line — verify-failed with
+        # project info.
+        assert "reason: verify-failed" in result
+        assert "p2" in result
 
 
 # ============================================================================
-# Final aggregate sanity — the 6-key contract is intact for EVERY
-# branch (warm / cold / no-hit / expired / verify-failed). Pinned as
-# a parametrized sweep so a single regression in the result-shape
-# assembly is loud.
+# Final aggregate sanity — the citation-line contract is intact for
+# EVERY branch (cold / no-hit / expired / verify-failed; the warm
+# variants are pinned in the classes above). Parametrized sweep so a
+# single regression in the citation-line assembly is loud.
 # ============================================================================
 
 
 @pytest.mark.parametrize(
-    "label, invoke_kwargs, expected_started, expected_reason_lexeme",
+    "label, invoke_kwargs, expected_started_value, expected_reason_lexeme",
     [
         ("explicit-missing-cold", {"snapshot_id": "missing"}, "cold", "verify-failed"),
         ("internal-search-no-hit-cold", {}, "cold", "no-hit"),
     ],
 )
-def test_result_shape_keys_always_six(
+def test_citation_line_contract_on_cold_branches(
     label: str,
     invoke_kwargs: dict[str, Any],
-    expected_started: str,
+    expected_started_value: str,
     expected_reason_lexeme: str | None,
-    tools: list[Any],
+    engine: Engine,
     manager: FakeManager,
+    callers_p1: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _auth_ok(monkeypatch)
+    _snapshot_gate(monkeypatch, True)
+    spawn_m = _unified_spawn_manager(callers_p1, manager._snapshot_repo)
     # Internal-search cold needs an empty candidate list.
     if label == "internal-search-no-hit-cold":
-        manager._snapshot_search_service = FakeSearchService(results=[])
-        tools_local = create_snapshot_tools(manager, "caller-1", "coder", None)
-    else:
-        tools_local = tools
-    _auth_ok(monkeypatch)
-    result = _run(tools_local[2].ainvoke({"agent_id": "worker", "task": "t", **invoke_kwargs}))
-    assert set(result.keys()) == RESULT_KEYS, f"{label}: keys drifted"
-    assert result["started"] == expected_started, f"{label}: started drifted"
-    assert result["error"] is None, f"{label}: never an error on miss"
+        spawn_m._snapshot_search_service = FakeSearchService(results=[])
+    result = _run(
+        _spawn_tool(spawn_m, "caller-1", "coder").ainvoke(
+            {
+                "agent_id": "worker",
+                "task": "t",
+                "project_id": "p1",
+                "auto_dispatch": False,
+                **invoke_kwargs,
+            }
+        )
+    )
+    assert COLD_CITATION_PREFIX in result, f"{label}: citation prefix drifted"
+    assert f"started: {expected_started_value}" in result, f"{label}: started drifted"
+    assert "Successfully spawned instance: new-inst-1" in result, (
+        f"{label}: the spawn must still succeed (fail-soft)"
+    )
     if expected_reason_lexeme is not None:
         assert (
-            f"reason: {expected_reason_lexeme}" in result["hint"]
-        ), f"{label}: reason lexeme missing from hint"
+            f"reason: {expected_reason_lexeme}" in result
+        ), f"{label}: reason lexeme missing from citation line"

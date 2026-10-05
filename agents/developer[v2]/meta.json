@@ -7,6 +7,7 @@
   "version": "2.0.0",
   "innate_skills": ["todo", "chart", "dynamic-skill"],
   "skill_injection": false,
+  "snapshot_enabled": true,
   "no_force_explore": true,
   "context_injection": {
     "heuristic_match_shared_md_files": true

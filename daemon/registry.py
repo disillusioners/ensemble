@@ -299,6 +299,22 @@ class AgentMetadata(BaseModel):
         default=False,
         description="Whether this agent should have dynamic skills injected into conversations.",
     )
+    snapshot_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in gate for snapshot warm-start consumption via the "
+            "spawn_instance tool (unify-spawn-tools, 2026-10-05): when "
+            "true on the TARGET (being-spawned) agent, callers may pass "
+            "snapshot_id / tags / verify / allow_cross_project to "
+            "spawn_instance and the tool warm-starts the child from the "
+            "best matching snapshot (cold fallback on any miss — R14 "
+            "fail-soft). Default False (absent/false) = plain cold "
+            "spawn: no snapshot search, no snapshot output. This gates "
+            "CONSUMPTION only — snapshot_create (capture, R15-gated) "
+            "and snapshot_search (read-only) are separate per-tool "
+            "grants and are NOT affected."
+        ),
+    )
     skill_search_interval: int = Field(
         default=1,
         ge=1,
@@ -621,6 +637,7 @@ class AgentRegistry:
                     llm_models=meta.get("llm_models"),
                     team_members=meta.get("team_members", []) or [],
                     skill_injection=meta.get("skill_injection", False),
+                    snapshot_enabled=meta.get("snapshot_enabled", False),
                     skill_search_interval=meta.get("skill_search_interval", 1),
                     blueprint_inactive=meta.get("blueprint_inactive", False),  # NEW
                     context_injection=context_injection_arg,
@@ -686,6 +703,7 @@ class AgentRegistry:
                         llm_models=None,
                         team_members=meta.get("team_members", []) or [],
                         skill_injection=meta.get("skill_injection", False),
+                        snapshot_enabled=meta.get("snapshot_enabled", False),
                         skill_search_interval=meta.get("skill_search_interval", 1),
                         blueprint_inactive=meta.get("blueprint_inactive", False),  # NEW
                         context_injection=context_injection_arg,

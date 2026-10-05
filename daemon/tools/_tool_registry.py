@@ -94,12 +94,13 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # Agent Snapshot tools (agent-snapshot v1 Wave 2b, PR6) — created by
     # create_snapshot_tools() factory (daemon/tools/snapshot_tools.py).
     # snapshot_create + snapshot_search ship in the "snapshot" category
-    # (per-tool grants for the creator agents); spawn_hot_instance ships
-    # in the "instance" category (auto-granted to every instance-category
-    # holder — zero per-agent meta.json edits; ari permanently excluded).
+    # (per-tool grants for the creator agents). Warm-start CONSUMPTION
+    # is not a tool since unify-spawn-tools (2026-10-05): spawn_instance
+    # (the single spawn tool, "instance" category) consumes the snapshot
+    # helpers directly, gated by the TARGET agent's snapshot_enabled
+    # meta flag — spawn_hot_instance was removed.
     "snapshot_create",
     "snapshot_search",
-    "spawn_hot_instance",
     # service tools (service-tool Phase 1, 2026-09-15) — created by
     # create_service_tools() factory (daemon/tools/service_tools.py).
     # Default-enabled per override 2026-09-16 (see
@@ -611,12 +612,15 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # DYNAMIC_TOOL_NAMES below.
     "service": "daemon.tools.service_tools",
     # Agent Snapshot tools (agent-snapshot v1 Wave 2b, PR6) — one
-    # module hosting two grant categories: snapshot_create +
-    # snapshot_search carry the "snapshot" category (per-tool
-    # creator grants); spawn_hot_instance carries the "instance"
-    # category (consumer auto-grant). The AST source discovery scans
-    # the MODULE, so all three factory tools are picked up here
-    # regardless of their per-tool category attribute.
+    # module hosting the "snapshot" grant category: snapshot_create +
+    # snapshot_search (per-tool creator grants). The module ALSO hosts
+    # the unified-spawn consumption helpers (resolve_spawn_snapshot /
+    # finalize_spawn_snapshot / format_snapshot_citation) consumed by
+    # spawn_instance — those are plain functions, NOT @tool defs, so
+    # the AST source discovery scans only the two tools here. Since
+    # unify-spawn-tools (2026-10-05) spawn_hot_instance no longer
+    # exists (its capability rides spawn_instance, gated by the
+    # TARGET agent's snapshot_enabled meta flag).
     "snapshot": "daemon.tools.snapshot_tools",
     # ens-env category (Stage 1 of the OpenDesign self-provisioning
     # chain, feature/od-self-provisioning, 2026-10-02) — single-tool
@@ -851,7 +855,6 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "snapshot_create",
     "snapshot_search",
     "spawn_councilor",
-    "spawn_hot_instance",
     "spawn_instance",
     "subtree_messages",
     "subtree_status",

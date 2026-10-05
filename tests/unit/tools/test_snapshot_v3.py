@@ -3,20 +3,23 @@
 Covers the commissioned Wave 3 deliverables at the test seam:
 
 * **R15 settings toggle** (rider (i)) — OFF gates ONLY
-  ``snapshot_create``; ``snapshot_search`` and ``spawn_hot_instance``
-  are NEVER gated. ``is_snapshot_create_enabled`` reads the real
+  ``snapshot_create``; ``snapshot_search`` and the warm-start
+  consumption path (now inside the unified ``spawn_instance`` tool,
+  gated by the TARGET agent's ``snapshot_enabled`` flag —
+  unify-spawn-tools 2026-10-05, ``spawn_hot_instance`` removed) are
+  NEVER R15-gated. ``is_snapshot_create_enabled`` reads the real
   daemon setting via the project repository (with the fail-closed
   constant fallback); unset settings → OFF.
 * **R16 monitoring metrics** (rider (j)) — ``snapshot_create``
   increments the capture counter REGARDLESS of R9 verdict (REUSE +
-  NEW + SUPERSEDE + CREATE-FRESH all count); ``spawn_hot_instance``
-  WARM path increments the spawn-warm counter; cold / no-hit /
-  expired / verify-failed paths DO NOT increment. Counters are
-  fail-soft (a counter failure never bubbles up to the tool).
-* **D8 / Wave 2b handoff** — ``spawn_hot_instance`` accepts an
-  explicit ``allow_cross_project`` opt-in (default ``False``,
-  preserves Wave 2b fail-closed); True → cross-project snapshot is
-  consumed anyway (staleness still computed; hint notes the
+  NEW + SUPERSEDE + CREATE-FRESH all count); the unified spawn WARM
+  path increments the spawn-warm counter; cold / no-hit / expired /
+  verify-failed paths DO NOT increment. Counters are fail-soft (a
+  counter failure never bubbles up to the tool).
+* **D8 / Wave 2b handoff** — the unified spawn accepts an explicit
+  ``allow_cross_project`` opt-in (default ``False``, preserves
+  Wave 2b fail-closed); True → cross-project snapshot is consumed
+  anyway (staleness still computed; the citation line notes the
   cross-project origin).
 * **Monitoring-only pin** — the ranking modules
   (``snapshot_search_service``, ``snapshot_embedding_service``) do
@@ -182,7 +185,14 @@ class FakeSearchService:
 
 
 class FakeManager:
-    """R6b ordering + Wave-3 metrics passthrough + R18 enqueue."""
+    """R6b ordering + Wave-3 metrics passthrough + R18 enqueue.
+
+    Used directly by the snapshot_create / snapshot_search tool tests;
+    the unified ``spawn_instance`` tests use
+    :func:`_unified_spawn_manager` (MagicMock baseline — the real
+    ``create_instance_tools`` factory touches a wider manager
+    surface).
+    """
 
     def __init__(self, rows: dict[str, Any], repo: SnapshotRepository):
         self._instance_repository = FakeInstanceRepo(rows)
@@ -191,12 +201,23 @@ class FakeManager:
         self._snapshot_search_service = FakeSearchService()
         self._snapshot_metrics_service = None  # Wave-3 tools wire this
         self._project_repository = None
+        # Unified-spawn surface (child cap + tier config + fallback
+        # notice) — required when this fake is adapted for spawn tests.
+        from types import SimpleNamespace
+
+        self.config = SimpleNamespace(
+            llm=SimpleNamespace(allowed_models=["agentic"]),
+            limits=SimpleNamespace(max_children_per_instance=50),
+        )
+        self._lifecycle_service = SimpleNamespace(
+            _format_model_fallback_notice=lambda model, validated: ""
+        )
         self.events: list[str] = []
         self.spawn_calls: list[dict[str, Any]] = []
         self.metadata_calls: list[tuple[str, dict[str, Any]]] = []
-        # R18 (2026-10-04) auto-dispatch seam — the spawn_hot_instance
-        # tool now calls ``manager.enqueue_message`` to enqueue the
-        # task as the child's first turn. The v3 tests pin the
+        # R18 (2026-10-04) auto-dispatch seam — the unified
+        # spawn_instance tool calls ``manager.enqueue_message`` to
+        # enqueue the task as the child's first turn. The v3 tests pin the
         # snapshot-create / metrics / search behavior; the
         # auto-dispatch surface is tested in TestR18AutoDispatch in
         # the unit test file. A no-op recorder is sufficient here.
@@ -318,6 +339,87 @@ def _gate(monkeypatch, enabled: bool) -> None:
         "daemon.tools.snapshot_tools.get_snapshot_create_enabled",
         _fake_enabled,
     )
+
+
+def _snapshot_gate(monkeypatch, enabled: bool) -> None:
+    """Steer the TARGET-agent snapshot gate at its real seam
+    (unify-spawn-tools) — ``daemon.tools.instance._target_snapshot_enabled``."""
+    monkeypatch.setattr(
+        "daemon.tools.instance._target_snapshot_enabled",
+        lambda agent_id, version_tag=None: enabled,
+    )
+
+
+def _unified_spawn_manager(
+    rows: dict[str, Any],
+    repo: SnapshotRepository,
+) -> Any:
+    """MagicMock manager wired for the UNIFIED ``spawn_instance`` tool.
+
+    Baseline: ``tests.helpers.send_message_fixtures.make_spawn_manager``.
+    Snapshot seams + the instance repo ride over in FakeManager shapes;
+    the spawn / metadata / enqueue recorders append to ``m.events`` so
+    the R6b+R18 ordering pins stay assertable.
+    """
+    from tests.helpers.send_message_fixtures import make_spawn_manager
+
+    m = make_spawn_manager()
+    m._snapshot_repo = repo
+    m._snapshot_service = FakeCaptureService()
+    m._snapshot_search_service = FakeSearchService()
+    m._snapshot_metrics_service = None
+    m._instance_repository = FakeInstanceRepo(rows)
+    m._project_repository = None
+    m.events = []
+    m.spawn_calls = []
+    m.metadata_calls = []
+    m.enqueue_calls = []
+    m.enqueue_raise: BaseException | None = None
+    m.enqueue_result: Any = _FakeAsyncMessageResult()
+
+    def _spawn(**kw: Any) -> tuple[str, str | None]:
+        m.events.append("spawn")
+        m.spawn_calls.append(dict(kw))
+        return ("new-inst-1", None)
+
+    def _meta(instance_id: str, updates: dict[str, Any]) -> None:
+        m.events.append("metadata")
+        m.metadata_calls.append((instance_id, dict(updates)))
+
+    async def _enqueue(**kw: Any) -> Any:
+        m.events.append("enqueue")
+        m.enqueue_calls.append(dict(kw))
+        if m.enqueue_raise is not None:
+            raise m.enqueue_raise
+        return m.enqueue_result
+
+    m.spawn_instance = _spawn
+    m.set_metadata_many = _meta
+    m.enqueue_message = _enqueue
+    return m
+
+
+def _spawn_tool(manager: Any, caller_id: str = "caller-1", agent_id: str = "coder") -> Any:
+    """Build the unified ``spawn_instance`` tool bound to ``manager``
+    via the REAL ``create_instance_tools`` factory (heavy helpers
+    patched out)."""
+    from daemon.tools.instance import create_instance_tools
+    from tests.helpers.send_message_fixtures import patch_heavy_helpers
+
+    patches = patch_heavy_helpers()
+    for _p in patches:
+        _p.start()
+    try:
+        all_tools = create_instance_tools(
+            manager, caller_id, agent_id=agent_id, version_tag=None
+        )
+    finally:
+        for _p in reversed(patches):
+            _p.stop()
+    for _t in all_tools:
+        if getattr(_t, "name", None) == "spawn_instance":
+            return _t
+    raise RuntimeError("spawn_instance tool not found")
 
 
 # ============================================================================
@@ -502,7 +604,8 @@ class TestR15SettingsToggle:
 class TestR15ToolIsolation:
     """Rider (i) — R15 OFF gates ``snapshot_create`` ONLY.
 
-    ``snapshot_search`` and ``spawn_hot_instance`` are NEVER gated.
+    ``snapshot_search`` and the warm-start consumption path inside the
+    unified ``spawn_instance`` tool are NEVER R15-gated.
     The disabled result shape is EXACTLY ``{"disabled": True,
     "error": "snapshot_create disabled by settings toggle"}``.
     """
@@ -535,12 +638,53 @@ class TestR15ToolIsolation:
         result = _run(tools[1].ainvoke({"query": "anything"}))
         assert result == {"results": [], "error": None}
 
-    def test_spawn_hot_instance_not_gated(self, tools, monkeypatch):
+    def test_spawn_consumption_not_r15_gated(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Rider (i) isolation, renamed for unify-spawn-tools: with the
+        R15 toggle OFF at its real seam and the TARGET gate ON, an
+        explicit-id warm start still succeeds — consumption is gated
+        by ``snapshot_enabled`` only, never by R15."""
         _gate(monkeypatch, False)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        # R14 fail-soft contract MUST return cold; error stays None.
-        assert result["error"] is None
-        assert result["started"] == "cold"
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = m._snapshot_repo
+        repo.create_with_embeddings(
+            Snapshot(
+                id="snap-r15-v3",
+                project_id="p1",
+                created_by_agent_id="coder",
+                target_instance_id="inst-1",
+                title="r15 isolation",
+                task_summary="",
+                domain_tags=[],
+                status=SNAPSHOT_STATUS_ACTIVE,
+                repo_path=None,
+                vcs_type=None,
+                git_sha=None,
+                git_branch=None,
+                git_dirty=False,
+                runtime_version="0.14.2",
+                effective_model="cheap-model",
+                digest={"task_summary_text": "r15"},
+            )
+        )
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-r15-v3",
+                    "auto_dispatch": False,
+                }
+            )
+        )
+        assert "[snapshot] started: warm" in result
+        assert "auto-dispatch ERROR" not in result
 
     def test_unset_setting_reads_as_off(self, tools):
         # When `is_snapshot_create_enabled` falls through to the
@@ -645,7 +789,7 @@ class TestR16MonitoringMetrics:
 
     * ``snapshot_create`` increments on REUSE + NEW + SUPERSEDE +
       CREATE-FRESH (every R9 verdict).
-    * ``spawn_hot_instance`` increments spawn on WARM only —
+    * The unified spawn increments spawn on WARM only —
       cold / no-hit / expired / verify-failed DO NOT increment.
     * Both increments are fail-soft: a counter failure never
       bubbles up; the spawn/create path proceeds.
@@ -777,7 +921,7 @@ class TestR16MonitoringMetrics:
         assert row.value == 1
 
     def test_spawn_counter_warm_path_increments(
-        self, tools, manager, engine, monkeypatch
+        self, tools, manager, engine, caller_rows, monkeypatch
     ):
         self._enable(monkeypatch)
         self._wire_metrics(manager, engine)
@@ -802,16 +946,26 @@ class TestR16MonitoringMetrics:
                 digest={"task_summary_text": "warm"},
             )
         )
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        # Unified-spawn path: a fresh MagicMock manager sharing THIS
+        # engine's snapshot repo + the wired metrics service.
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
+        spawn_m._snapshot_metrics_service = manager._snapshot_metrics_service
         result = _run(
-            tools[2].ainvoke(
+            _spawn_tool(spawn_m).ainvoke(
                 {
                     "agent_id": "worker",
                     "task": "warm me",
+                    "project_id": "p1",
                     "snapshot_id": "snap-warm",
+                    "auto_dispatch": False,
                 }
             )
         )
-        assert result["started"] == "warm"
+        assert "[snapshot] started: warm" in result
         with Session(engine) as session:
             row = session.exec(
                 select(SnapshotUsageCounter).where(
@@ -826,63 +980,116 @@ class TestR16MonitoringMetrics:
     ):
         self._enable(monkeypatch)
         self._wire_metrics(manager, engine)
-        # No snapshot at all → cold fallback.
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "no snapshot"}))
-        assert result["started"] == "cold"
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        # No snapshot at all → cold fallback (internal search default).
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
+        spawn_m._snapshot_metrics_service = manager._snapshot_metrics_service
+        result = _run(
+            _spawn_tool(spawn_m).ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "no snapshot",
+                    "project_id": "p1",
+                    "auto_dispatch": False,
+                }
+            )
+        )
+        assert "[snapshot] started: cold" in result
         with Session(engine) as session:
             rows = list(session.exec(select(SnapshotUsageCounter)).all())
         assert all(not r.scope.startswith(SPAWN_COUNTER_PREFIX) for r in rows)
 
     def test_spawn_counter_internal_search_no_hit_no_increment(
-        self, manager, engine, monkeypatch
+        self, manager, engine, caller_rows, monkeypatch
     ):
         self._enable(monkeypatch)
         self._wire_metrics(manager, engine)
-        manager._snapshot_search_service = FakeSearchService([])
-        tools = create_snapshot_tools(manager, "caller-1", "coder", None)
-        result = _run(
-            tools[2].ainvoke({"agent_id": "worker", "task": "find something"})
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
         )
-        assert result["started"] == "cold"
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
+        spawn_m._snapshot_search_service = FakeSearchService([])
+        spawn_m._snapshot_metrics_service = manager._snapshot_metrics_service
+        result = _run(
+            _spawn_tool(spawn_m).ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "find something",
+                    "project_id": "p1",
+                    "auto_dispatch": False,
+                }
+            )
+        )
+        assert "[snapshot] started: cold" in result
         with Session(engine) as session:
             rows = list(session.exec(select(SnapshotUsageCounter)).all())
         assert all(not r.scope.startswith(SPAWN_COUNTER_PREFIX) for r in rows)
 
-    def test_spawn_counter_expired_no_increment(self, manager, engine, monkeypatch):
+    def test_spawn_counter_expired_no_increment(
+        self, manager, engine, caller_rows, monkeypatch
+    ):
         self._enable(monkeypatch)
         self._wire_metrics(manager, engine)
-        manager._snapshot_search_service = FakeSearchService(
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
+        spawn_m._snapshot_search_service = FakeSearchService(
             [_candidate("snap-old", ["kind:implementation"], freshness="expired")]
         )
-        tools = create_snapshot_tools(manager, "caller-1", "coder", None)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "warm me"}))
-        assert result["started"] == "cold"
+        spawn_m._snapshot_metrics_service = manager._snapshot_metrics_service
+        result = _run(
+            _spawn_tool(spawn_m).ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "warm me",
+                    "project_id": "p1",
+                    "auto_dispatch": False,
+                }
+            )
+        )
+        assert "[snapshot] started: cold" in result
         with Session(engine) as session:
             rows = list(session.exec(select(SnapshotUsageCounter)).all())
         assert all(not r.scope.startswith(SPAWN_COUNTER_PREFIX) for r in rows)
 
     def test_spawn_counter_verify_failed_no_increment(
-        self, tools, manager, engine, monkeypatch
+        self, tools, manager, engine, caller_rows, monkeypatch
     ):
         self._enable(monkeypatch)
         self._wire_metrics(manager, engine)
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
         # Explicit snapshot_id on a row that doesn't exist → verify-fail
         # cold fallback.
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
+        spawn_m._snapshot_metrics_service = manager._snapshot_metrics_service
         result = _run(
-            tools[2].ainvoke(
+            _spawn_tool(spawn_m).ainvoke(
                 {
                     "agent_id": "worker",
                     "task": "warm me",
+                    "project_id": "p1",
                     "snapshot_id": "snap-ghost",
+                    "auto_dispatch": False,
                 }
             )
         )
-        assert result["started"] == "cold"
+        assert "[snapshot] started: cold" in result
         with Session(engine) as session:
             rows = list(session.exec(select(SnapshotUsageCounter)).all())
         assert all(not r.scope.startswith(SPAWN_COUNTER_PREFIX) for r in rows)
 
-    def test_counter_failure_does_not_break_tool(self, tools, manager, monkeypatch):
+    def test_counter_failure_does_not_break_tool(
+        self, tools, manager, caller_rows, monkeypatch
+    ):
         """Fail-soft: a broken metrics service MUST NOT bubble up
         (rider j — increments fail-soft; never raise; never fail
         the spawn/create).
@@ -906,17 +1113,30 @@ class TestR16MonitoringMetrics:
         )
         assert result["error"] is None
         assert result["verdict"] == "new"
-        # spawn_hot_instance cold path also must not raise.
-        result = _run(
-            tools[2].ainvoke({"agent_id": "worker", "task": "t"})
+        # The unified spawn cold path also must not raise.
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
         )
-        assert result["error"] is None
-        assert result["started"] == "cold"
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
+        spawn_m._snapshot_metrics_service = manager._snapshot_metrics_service
+        result = _run(
+            _spawn_tool(spawn_m).ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "auto_dispatch": False,
+                }
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert "[snapshot] started: cold" in result
 
     # ── rider (j): the observability FLOOR — structured log lines ────
 
     def test_warm_spawn_emits_snapshotspawnwarm_log_line(
-        self, tools, manager, engine, monkeypatch, caplog
+        self, tools, manager, engine, caller_rows, monkeypatch, caplog
     ):
         """Rider (j): a WARM spawn emits the structured
         ``[SnapshotSpawnWarm]`` JSON line (R16 observability floor).
@@ -947,17 +1167,25 @@ class TestR16MonitoringMetrics:
                 digest={"task_summary_text": "warm"},
             )
         )
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
+        spawn_m._snapshot_metrics_service = manager._snapshot_metrics_service
         with caplog.at_level(logging.INFO, logger="daemon.tools.snapshot_tools"):
             result = _run(
-                tools[2].ainvoke(
+                _spawn_tool(spawn_m).ainvoke(
                     {
                         "agent_id": "worker",
                         "task": "warm me",
+                        "project_id": "p1",
                         "snapshot_id": "snap-warm-log",
+                        "auto_dispatch": False,
                     }
                 )
             )
-        assert result["started"] == "warm"
+        assert "[snapshot] started: warm" in result
         warm_lines = [
             r for r in caplog.records
             if r.getMessage().startswith("[SnapshotSpawnWarm] ")
@@ -975,7 +1203,7 @@ class TestR16MonitoringMetrics:
         assert payload["project_id"] == "p1"
 
     def test_cold_spawn_emits_no_snapshotspawnwarm_line(
-        self, tools, manager, engine, monkeypatch, caplog
+        self, tools, manager, engine, caller_rows, monkeypatch, caplog
     ):
         """Rider (j) mirror: the cold path emits NO warm line (the
         counter and the log line are both warm-only)."""
@@ -983,11 +1211,24 @@ class TestR16MonitoringMetrics:
 
         self._enable(monkeypatch)
         self._wire_metrics(manager, engine)
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
+        spawn_m._snapshot_metrics_service = manager._snapshot_metrics_service
         with caplog.at_level(logging.INFO, logger="daemon.tools.snapshot_tools"):
             result = _run(
-                tools[2].ainvoke({"agent_id": "worker", "task": "no snapshot"})
+                _spawn_tool(spawn_m).ainvoke(
+                    {
+                        "agent_id": "worker",
+                        "task": "no snapshot",
+                        "project_id": "p1",
+                        "auto_dispatch": False,
+                    }
+                )
             )
-        assert result["started"] == "cold"
+        assert "[snapshot] started: cold" in result
         assert not [
             r for r in caplog.records
             if r.getMessage().startswith("[SnapshotSpawnWarm] ")
@@ -1036,47 +1277,57 @@ class TestCrossProjectOverride:
         )
 
     def test_default_false_project_mismatch_is_cold(
-        self, tools, manager, monkeypatch
+        self, manager, engine, caller_rows, monkeypatch
     ):
         self._enable(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
         # Caller lives in p1; snapshot belongs to p2. With default
         # allow_cross_project=False, this MUST cold-fallback.
         self._seed_cross_project_snap(manager)
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
         result = _run(
-            tools[2].ainvoke(
+            _spawn_tool(spawn_m).ainvoke(
                 {
                     "agent_id": "worker",
                     "task": "warm me",
+                    "project_id": "p1",
                     "snapshot_id": "snap-xp",
+                    "auto_dispatch": False,
                 }
             )
         )
-        assert result["started"] == "cold"
-        # Hint / staleness warnings reference the project mismatch.
-        assert "snap-xp" in result["hint"] or any(
-            "snap-xp" in w
-            for w in (result.get("staleness") or {}).get("warnings") or []
-        )
+        assert "[snapshot] started: cold" in result
+        # The citation line references the mismatched snapshot id.
+        assert "snap-xp" in result
 
     def test_explicit_true_cross_project_consumes(
-        self, manager, engine, monkeypatch
+        self, manager, engine, caller_rows, monkeypatch
     ):
         self._enable(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
         self._seed_cross_project_snap(manager)
-        manager._snapshot_metrics_service = SnapshotMetricsService(engine=engine)
-        tools = create_snapshot_tools(manager, "caller-1", "coder", None)
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
+        spawn_m._snapshot_metrics_service = SnapshotMetricsService(engine=engine)
         result = _run(
-            tools[2].ainvoke(
+            _spawn_tool(spawn_m).ainvoke(
                 {
                     "agent_id": "worker",
                     "task": "warm me cross-project",
+                    "project_id": "p1",
                     "snapshot_id": "snap-xp",
                     "allow_cross_project": True,
+                    "auto_dispatch": False,
                 }
             )
         )
-        assert result["started"] == "warm"
-        assert "cross-project" in result["hint"]
+        assert "[snapshot] started: warm" in result
+        assert "cross-project consume from p2" in result
         # Spawn counter still increments.
         with Session(engine) as session:
             row = session.exec(
@@ -1088,12 +1339,16 @@ class TestCrossProjectOverride:
         assert row.value == 1
 
     def test_explicit_true_within_project_unchanged(
-        self, tools, manager, monkeypatch
+        self, manager, engine, caller_rows, monkeypatch
     ):
         """allow_cross_project=True on a same-project snapshot is
         a no-op (the verify-fail branch never fires).
         """
         self._enable(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
         # Both snapshot and caller live in p1.
         repo: SnapshotRepository = manager._snapshot_repo
         repo.create_with_embeddings(
@@ -1116,20 +1371,23 @@ class TestCrossProjectOverride:
                 digest={"task_summary_text": "same"},
             )
         )
+        spawn_m = _unified_spawn_manager(caller_rows, manager._snapshot_repo)
         result = _run(
-            tools[2].ainvoke(
+            _spawn_tool(spawn_m).ainvoke(
                 {
                     "agent_id": "worker",
                     "task": "warm me",
+                    "project_id": "p1",
                     "snapshot_id": "snap-same",
                     "allow_cross_project": True,
+                    "auto_dispatch": False,
                 }
             )
         )
-        assert result["started"] == "warm"
+        assert "[snapshot] started: warm" in result
         # No cross-project marker (the explicit flag was a no-op
         # since the project matched).
-        assert "cross-project" not in result["hint"]
+        assert "cross-project" not in result
 
 
 class TestProjectlessExplicitId:
@@ -1201,60 +1459,81 @@ class TestProjectlessExplicitId:
         )
 
     @pytest.fixture
-    def projectless_tools(
-        self, projectless_manager: FakeManager
-    ):
-        return create_snapshot_tools(
-            projectless_manager, "caller-1", "coder", None
+    def projectless_spawn(
+        self,
+        projectless_manager: FakeManager,
+        projectless_caller_rows: dict[str, Any],
+        monkeypatch,
+    ) -> Any:
+        """The UNIFIED-spawn manager (MagicMock baseline adapted over
+        the project-less FakeManager's snapshot repo) — tests build
+        the unified spawn_instance tool from it via :func:`_spawn_tool`.
+        The TARGET gate is steered ON."""
+        _snapshot_gate(monkeypatch, True)
+        return _unified_spawn_manager(
+            projectless_caller_rows, projectless_manager._snapshot_repo
         )
 
     def test_projectless_caller_foreign_snapshot_is_cold(
-        self, projectless_tools, projectless_manager, monkeypatch
+        self,
+        projectless_spawn,
+        projectless_manager,
+        monkeypatch,
     ):
         """(a) project-less caller + foreign-project snapshot via
         EXPLICIT id → verify-fail cold fallback, NOT silent warm."""
         _gate(monkeypatch, True)
         self._seed(projectless_manager, "p2")
         result = _run(
-            projectless_tools[2].ainvoke(
+            _spawn_tool(projectless_spawn).ainvoke(
                 {
                     "agent_id": "worker",
                     "task": "warm me",
+                    "project_id": None,
                     "snapshot_id": "snap-pl",
+                    "auto_dispatch": False,
                 }
             )
         )
-        assert result["started"] == "cold"
-        assert "verify-failed" in result["hint"]
+        assert "[snapshot] started: cold" in result
+        assert "reason: verify-failed" in result
         # Warning names the snapshot's project AND the missing scope.
-        assert "p2" in result["hint"]
-        assert "no project to scope against" in result["hint"]
-        # No snapshot consumed → no digest stamp surface.
-        assert result["snapshot_id"] is None
+        assert "p2" in result
+        assert "no project to scope against" in result
+        # No snapshot consumed → no digest stamp.
+        assert projectless_spawn.metadata_calls == []
 
     def test_projectless_caller_cross_project_optin_warm(
-        self, projectless_tools, projectless_manager, monkeypatch
+        self,
+        projectless_spawn,
+        projectless_manager,
+        monkeypatch,
     ):
         """(b) same + ``allow_cross_project=True`` → warm + the
-        cross-project marker in the hint (consent recorded)."""
+        cross-project marker in the citation line (consent recorded)."""
         _gate(monkeypatch, True)
         self._seed(projectless_manager, "p2")
         result = _run(
-            projectless_tools[2].ainvoke(
+            _spawn_tool(projectless_spawn).ainvoke(
                 {
                     "agent_id": "worker",
                     "task": "warm me",
+                    "project_id": None,
                     "snapshot_id": "snap-pl",
                     "allow_cross_project": True,
+                    "auto_dispatch": False,
                 }
             )
         )
-        assert result["started"] == "warm"
-        assert "cross-project consume from p2" in result["hint"]
-        assert "(allow_cross_project=True)" in result["hint"]
+        assert "[snapshot] started: warm" in result
+        assert "cross-project consume from p2" in result
+        assert "(allow_cross_project=True)" in result
 
     def test_projectless_snapshot_no_false_cold(
-        self, projectless_tools, projectless_manager, monkeypatch
+        self,
+        projectless_spawn,
+        projectless_manager,
+        monkeypatch,
     ):
         """(c) project-less caller + snapshot WITHOUT a project →
         proceeds normally (no false cold, no cross-project marker)."""
@@ -1262,39 +1541,46 @@ class TestProjectlessExplicitId:
         self._seed(projectless_manager, None)
         self._stub_projectless_get(projectless_manager, monkeypatch)
         result = _run(
-            projectless_tools[2].ainvoke(
+            _spawn_tool(projectless_spawn).ainvoke(
                 {
                     "agent_id": "worker",
                     "task": "warm me",
+                    "project_id": None,
                     "snapshot_id": "snap-pl",
+                    "auto_dispatch": False,
                 }
             )
         )
-        assert result["started"] == "warm"
-        assert "cross-project" not in result["hint"]
+        assert "[snapshot] started: warm" in result
+        assert "cross-project" not in result
 
     def test_projectless_spawn_normalizes_to_system_default(
-        self, projectless_tools, projectless_manager, monkeypatch
+        self,
+        projectless_spawn,
+        projectless_manager,
+        monkeypatch,
     ):
-        """Normalize-parity (instance.py:2211-2215): a project-less
-        caller's spawn resolves project_id via ``normalize_project_id``
-        → the system default project, not ``None`` (the old
-        ``if project_id else None`` conditional skipped resolution)."""
+        """Normalize-parity: a project-less caller's spawn resolves
+        project_id via ``normalize_project_id`` → the system default
+        project, not ``None`` (the unified tool preserves the
+        auto-inherit + normalize lane of the pre-unification spawn)."""
         _gate(monkeypatch, True)
         self._seed(projectless_manager, None)
         self._stub_projectless_get(projectless_manager, monkeypatch)
         result = _run(
-            projectless_tools[2].ainvoke(
+            _spawn_tool(projectless_spawn).ainvoke(
                 {
                     "agent_id": "worker",
                     "task": "warm me",
+                    "project_id": None,
                     "snapshot_id": "snap-pl",
+                    "auto_dispatch": False,
                 }
             )
         )
-        assert result["started"] == "warm"
+        assert "[snapshot] started: warm" in result
         assert (
-            projectless_manager.spawn_calls[0]["project_id"]
+            projectless_spawn.spawn_calls[0]["project_id"]
             == SYSTEM_DEFAULT_PROJECT_ID
         )
 

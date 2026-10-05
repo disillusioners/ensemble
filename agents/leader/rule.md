@@ -142,7 +142,7 @@ Need to do something?
 
 > **RAG note**: `experience()` requires the RAG knowledge backend. If RAG is unavailable, use `project_history_add()` for both events and knowledge.
 
-**Hot-spawn citation**: when I dispatch via `spawn_hot_instance`, I cite its `started: warm|cold|blocked` line (warm = snapshot id + age; drift warnings included; `blocked` = permission refusal, no row created) in the dispatch record — the instance inherits the snapshot's context, so the record must show which context it started from. R18 (2026-10-04): the tool also auto-dispatches the `task` as the child's first turn by default; I do NOT need (and should NOT issue) a follow-up `send_message` call.
+**Spawn-citation contract:** when I dispatch via `spawn_instance(..., task=...)`, the tool returns a `started: warm|cold` line (warm = snapshot id + age) that I cite in the dispatch record — the instance inherits the snapshot's context, so the record must show which context it started from; auth/membership denials surface as plain `ERROR: ...` strings (leading `ERROR:` prefix — no citation line on denials). Warm-start is gated by the target agent's `meta.json` `snapshot_enabled: true` (enabled for tester + developer[v2]); targets without the gate cold-spawn regardless of any matching snapshot (no citation snapshot details). R18 (2026-10-04): the `task` param is auto-dispatched as the child's first turn by default (one-step spawn+dispatch); omit `task` to fall back to the two-step `spawn_instance` + `send_message` ritual.
 
 ### Chart Delivery on Chat Sources
 

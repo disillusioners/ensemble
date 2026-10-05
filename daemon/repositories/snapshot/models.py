@@ -49,9 +49,10 @@ no modifications to existing tables):
     ``snapshot_create`` invocation REGARDLESS of R9 verdict
     (REUSE + NEW + SUPERSEDE + CREATE-FRESH all increment).
   - ``"spawn:snapshot:<snapshot_id>"`` — increments on the
-    ``spawn_hot_instance`` WARM path ONLY. Cold spawns
-    (``None`` snapshot consumption / no-hit / expired /
-    verify-failed) DO NOT increment (R16 rider j).
+    unified ``spawn_instance`` WARM path ONLY (formerly the removed
+    ``spawn_hot_instance``). Cold spawns (``None`` snapshot
+    consumption / no-hit / expired / verify-failed) DO NOT
+    increment (R16 rider j).
 
   MONITORING ONLY — explicitly NOT a ranking signal (R10 forbids
   usage-ranking in v1; the snapshot_search / snapshot_embedding
@@ -79,7 +80,7 @@ def _now_iso() -> str:
 
 
 # Searchable lifecycle states (design §3.2 — the ONLY states
-# snapshot_search / spawn_hot_instance candidate filters may match).
+# snapshot_search / unified-spawn candidate filters may match).
 SNAPSHOT_STATUS_ACTIVE = "active"
 SNAPSHOT_STATUS_SUPERSEDED = "superseded"
 
@@ -308,8 +309,9 @@ class SnapshotEmbedding(SQLModel, table=True):
 #   scope = "capture:agent:<agent_id>"   — increments on every
 #           ``snapshot_create`` invocation regardless of R9 verdict.
 #   scope = "spawn:snapshot:<snapshot_id>" — increments on the
-#           ``spawn_hot_instance`` WARM path ONLY. Cold / no-hit /
-#           expired / verify-failed paths DO NOT increment (R16 rider j).
+#           unified ``spawn_instance`` WARM path ONLY (formerly the
+#           removed ``spawn_hot_instance``). Cold / no-hit / expired /
+#           verify-failed paths DO NOT increment (R16 rider j).
 #
 # ``agent_id`` / ``snapshot_id`` are the natural keys the FE / FE
 # join surfaces will look up by. The two scopes are deliberately

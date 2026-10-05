@@ -243,7 +243,15 @@ from .question_tools import create_question_tools
 from .midflight_report import create_midflight_tools
 from .skill_tools import create_skill_tools
 from .skill_evolution_tools import create_skill_evolution_tools
-from .snapshot_tools import create_snapshot_tools
+from .snapshot_tools import (
+    SNAPSHOT_STEERING_IGNORED_LINE,
+    SpawnSnapshotResolution,
+    _caller_project_id,
+    create_snapshot_tools,
+    finalize_spawn_snapshot,
+    format_snapshot_citation,
+    resolve_spawn_snapshot,
+)
 from .external_opencode import create_opencode_tools
 from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
@@ -784,6 +792,218 @@ def _check_team_membership(
     from ._auth import _check_team_membership as _impl
 
     return _impl(caller_agent_id, requested_agent_id, version_tag)
+
+
+def _target_snapshot_enabled(agent_id: str, version_tag: str | None) -> bool:
+    """Consult the TARGET agent's resolved ``snapshot_enabled`` meta flag.
+
+    unify-spawn-tools (2026-10-05) gate: warm-start consumption rides
+    ``spawn_instance`` and is enabled per TARGET agent via
+    ``"snapshot_enabled": true`` in the agent's meta.json. The consult
+    uses the versioned-resolution machinery — ``get_version(agent_id,
+    version_tag) or get_resolved(agent_id)`` — the SAME fallback
+    pattern as ``_apply_tool_filter`` (instance.py) and
+    ``manager._resolve_agent_meta``, so a versioned agent (e.g.
+    ``developer[v2]``) gates on ITS variant's flag, not the base one.
+
+    Fail-closed: unknown agent / registry fault / missing flag ⇒
+    ``False`` (plain cold spawn, exactly the pre-unification behavior).
+    """
+    from ..registry import get_registry
+
+    try:
+        registry = get_registry()
+        meta = None
+        try:
+            meta = registry.get_version(agent_id, version_tag)
+        except Exception:  # noqa: BLE001 — registry faults fail closed
+            meta = None
+        if meta is None:
+            meta = registry.get_resolved(agent_id)
+        return bool(getattr(meta, "snapshot_enabled", False))
+    except Exception:  # noqa: BLE001 — fail-closed belt
+        return False
+
+
+async def _auto_dispatch_first_turn(
+    manager: "InstanceManager",
+    *,
+    instance_id: str,
+    task: str,
+    caller_instance_id: str | None,
+) -> tuple[bool, str | None]:
+    """R18 auto-dispatch — enqueue ``task`` as the child's first turn.
+
+    unify-spawn-tools (2026-10-05) moved this out of the removed
+    ``spawn_hot_instance`` into the unified ``spawn_instance`` tool.
+    Behavior is preserved verbatim: default-on dispatch eliminates the
+    "accepted-but-never-delivered" contract trap (forensic audit,
+    2026-10-04); on any enqueue failure the spawn result is preserved
+    but the error is surfaced loudly (never silent).
+
+    Returns ``(enqueued, error)`` — ``error`` carries the manual-
+    recovery instruction when the enqueue failed AFTER a successful
+    spawn. The R18 result-inspection invariant is preserved: the
+    internal enqueue path has EXACTLY ONE non-raising return
+    (``AsyncMessageResult(..., status='queued')``); a ``None`` return
+    or a non-queued status raises through the tripwire below so a
+    future regression routes into the loud lane, never silent success.
+    """
+    try:
+        # Same provenance as send_message so downstream tooling sees
+        # the parent-id-minted source and the existing
+        # internal_agent:<caller> source taxonomy continues to apply.
+        enqueue_result = await manager.enqueue_message(
+            instance_id=instance_id,
+            message=task,
+            source=(
+                f"internal_agent:{caller_instance_id}"
+                if caller_instance_id
+                else "api"
+            ),
+        )
+        # ── R18 result-inspection invariant (2026-10-04) ──
+        # The defensive contract: any non-queued outcome from
+        # the internal enqueue path MUST route into the SAME
+        # failure/hint surface as exceptions (F1-style). After
+        # verifying
+        # ``daemon.services.instance_messaging.enqueue_message``
+        # (the path this tool uses — distinct from the HTTP
+        # ``enqueue_message_job`` variant), the escape hatch
+        # applies: this path has EXACTLY ONE non-raising return
+        # (``AsyncMessageResult(message_id=…, instance_id=…,
+        # status='queued', job_id=…)``) and every failure mode
+        # raises (e.g. ``RuntimeError("Manager is shutting
+        # down…")``; the inner ``session.commit()`` /
+        # ``session.refresh(task)`` block raises on DB faults).
+        # There is NO non-raising non-queued outcome on this path;
+        # the ``queued`` field is hardcoded to the dataclass default
+        # (``False``) and ``status`` is hardcoded to the literal
+        # ``"queued"`` on the only return site, so a ``result.queued
+        # == False`` check would be dead code that mis-fires on every
+        # successful enqueue. Pin the invariants instead of branching
+        # on a signal that cannot discriminate — a regression here
+        # (e.g. a future ``return AsyncMessageResult(…,
+        # status='rejected')`` branch) MUST update this block, not
+        # silently slip through.
+        if enqueue_result is None:
+            raise RuntimeError(
+                "manager.enqueue_message returned None for "
+                f"instance_id={instance_id}; the "
+                "R18 invariant is non-None on success"
+            )
+        result_message_id = getattr(enqueue_result, "message_id", None)
+        result_status = getattr(enqueue_result, "status", None)
+        if not result_message_id or result_status != "queued":
+            # Regression-ladder tripwire. If this ever fires, a new
+            # non-raising non-queued branch was added upstream; route
+            # the loud surface here so the caller can self-recover.
+            raise RuntimeError(
+                f"manager.enqueue_message returned a "
+                f"non-queued result: status={result_status!r} "
+                f"message_id={result_message_id!r} "
+                f"instance_id={instance_id}"
+            )
+        # R18 traffic visibility (review F2) — the forensic-audit
+        # methodology counts enqueue log lines; auto-dispatch traffic
+        # MUST be countable the same way. Mirrors the warm-spawn
+        # ``[SnapshotSpawnWarm]`` JSON log shape so downstream tooling
+        # (grep / census) treats both uniformly. Event renamed from
+        # ``spawn_hot_auto_dispatch`` per unify-spawn-tools decision 7.
+        try:
+            import json as _json
+
+            logger.info(
+                "[SpawnAutoDispatch] "
+                + _json.dumps(
+                    {
+                        "event": "spawn_instance_auto_dispatch",
+                        "caller_iid": caller_instance_id,
+                        "target_iid": instance_id,
+                        "content_len": len(task),
+                        "message_id": result_message_id,
+                    }
+                )
+            )
+        except Exception:  # noqa: BLE001 — defensive belt: a log-line
+            # encoding failure MUST NOT mask the successful enqueue.
+            logger.warning(
+                "[Spawn] R18 auto-dispatch log line encoding failed "
+                "(non-fatal)"
+            )
+        return True, None
+    except Exception as exc:  # noqa: BLE001 — enqueue lane raises
+        # Review F1 — log the failure (was silent before). Diagnostics
+        # come from logs alone when a caller reports a stranded child
+        # without preserving the result.
+        logger.warning(
+            f"[Spawn] spawn_instance auto-dispatch enqueue failed for "
+            f"{instance_id}: {exc}"
+        )
+        # Never silent — surface as a clear error so the caller can
+        # self-correct via a follow-up send_message. The spawn DID
+        # succeed; the loud lane is the string return, not a downgrade.
+        return False, (
+            f"ERROR: spawn succeeded but auto-dispatch "
+            f"failed: {type(exc).__name__}: {exc}. "
+            f"Call send_message(instance_id="
+            f"\"{instance_id}\", message=<your task>) "
+            f"explicitly to deliver the first turn."
+        )
+
+
+def _auto_dispatch_tail(
+    *,
+    auto_dispatch: bool,
+    task: str | None,
+    instance_id: str,
+    dispatch_error: str | None,
+) -> str:
+    """The R18 mutually-exclusive dispatch-status tail (hint semantics).
+
+    Four mutually exclusive outcomes, verbatim-semantics from the
+    removed ``spawn_hot_instance`` hint contract:
+
+    * enqueued — ``auto-dispatched as first turn (do NOT call
+      send_message again …)``
+    * ``auto_dispatch=True`` but the task was empty/whitespace — loud
+      SKIPPED note (the caller MUST send the first message).
+    * ``auto_dispatch=False`` — legacy two-step ritual instruction.
+    * dispatch ERROR — the loud failure detail + manual recovery path.
+
+    Returns ``""`` when no tail applies (task absent entirely ⇒ the
+    pre-unification two-step behavior, string unchanged).
+    """
+    tail = ""
+    if dispatch_error:
+        tail += f" — auto-dispatch ERROR: {dispatch_error}"
+        return tail
+    if auto_dispatch and task and task.strip():
+        tail += (
+            " — auto-dispatched as first turn "
+            "(do NOT call send_message again — the child is "
+            "already working on this task)"
+        )
+    elif auto_dispatch and task is not None and not task.strip():
+        # auto_dispatch=True but the task was empty/whitespace — we
+        # did not enqueue anything. Tell the caller loudly so they
+        # know they must send the first message themselves.
+        tail += (
+            f" — auto-dispatch SKIPPED: task was empty; caller "
+            f"MUST call send_message(instance_id="
+            f"\"{instance_id}\", message=<task>) to start "
+            f"the child"
+        )
+    elif not auto_dispatch and task is not None:
+        # Legacy two-step ritual. Same instruction semantics as the
+        # pre-R18 contract so a caller who opts out gets the explicit
+        # next-step instruction.
+        tail += (
+            f" — auto_dispatch=False: caller MUST call "
+            f"send_message(instance_id=\"{instance_id}\", "
+            f"message=<task>) to deliver the first turn"
+        )
+    return tail
 
 
 async def _register_child_completion_watcher(
@@ -2040,6 +2260,93 @@ class SpawnInstanceInput(BaseModel):
         ),
     )] = None
 
+    # ── R18 auto-dispatch (moved from the removed spawn_hot_instance,
+    # unify-spawn-tools 2026-10-05). task + auto_dispatch are
+    # snapshot-INDEPENDENT: they apply to every spawn regardless of
+    # the snapshot gate.
+    task: Annotated[str | None, Field(
+        default=None,
+        description=(
+            "Self-contained task description to auto-dispatch as the "
+            "child's first turn (R18). When provided and "
+            "auto_dispatch=True (default), the tool enqueues this task "
+            "as the child's first message — callers do NOT need a "
+            "follow-up send_message. Omit (None) for the legacy "
+            "two-step ritual (spawn, then send_message yourself). An "
+            "explicitly empty/whitespace task is a loud no-op: nothing "
+            "is enqueued and the result says the caller MUST send the "
+            "first message."
+        ),
+    )] = None
+
+    auto_dispatch: Annotated[bool, Field(
+        default=True,
+        description=(
+            "Auto-dispatch the task as the child's first turn (R18). "
+            "Default True: the tool enqueues task as the new "
+            "instance's first message itself. Set False ONLY for "
+            "manual control (batching multiple children behind a "
+            "barrier, or the legacy two-step spawn_instance + "
+            "send_message ritual). Only meaningful when task is "
+            "non-empty; task absent ⇒ exactly the legacy two-step "
+            "behavior."
+        ),
+    )] = True
+
+    # ── Snapshot warm-start steering (unify-spawn-tools 2026-10-05).
+    # Only consulted when the TARGET agent's resolved meta has
+    # ``snapshot_enabled: true`` — otherwise ignored with a single
+    # informational line (plain cold spawn, fail-closed).
+    snapshot_id: Annotated[str | None, Field(
+        default=None,
+        description=(
+            "Explicit snapshot to warm-start from — verified "
+            "(exists, project match, status active, staleness) and a "
+            "failed verification falls back to a cold spawn with a "
+            "warning (never an error). Omit to let the tool search "
+            "for the best active match itself (requires task for the "
+            "search query). Only consulted when the TARGET agent has "
+            '"snapshot_enabled": true in its meta.json — otherwise '
+            "ignored with an informational line."
+        ),
+    )] = None
+
+    tags: Annotated[list[str], Field(
+        description=(
+            "Optional R8 `dim:value` tags steering the internal "
+            "snapshot search when snapshot_id is omitted. Only "
+            "consulted when the TARGET agent has "
+            '"snapshot_enabled": true in its meta.json.'
+        ),
+    )] = []
+
+    verify: Annotated[Literal["metadata", "git"], Field(
+        default="metadata",
+        description=(
+            "Snapshot staleness check depth. 'metadata' (default): "
+            "age + runtime version + post-capture advance — no "
+            "subprocess. 'git': additionally counts how far the repo "
+            "diverged since the snapshot's recorded commit (opt-in; "
+            "requires the snapshot to carry a repo path + sha)."
+        ),
+    )] = "metadata"
+
+    allow_cross_project: Annotated[bool, Field(
+        default=False,
+        description=(
+            "D8/Wave 2b handoff — explicit cross-project override. "
+            "Default False (fail-closed): a snapshot from a different "
+            "project than the caller's triggers a verify-fail cold "
+            "fallback with a warning, preventing cross-project digest "
+            "leakage through a shared leader. Set True to consume a "
+            "cross-project snapshot anyway — staleness is still "
+            "computed; the citation line notes the cross-project "
+            "origin. Only meaningful when snapshot_id is supplied; "
+            "internal-search results are always project-scoped (D8 "
+            "permanent)."
+        ),
+    )] = False
+
     @model_validator(mode='after')
     def validate_params(self):
         """Require agent_id."""
@@ -2089,12 +2396,23 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
 
     @register_tool_category("instance")
     @tool(args_schema=SpawnInstanceInput)
-    async def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'developer', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None, model: Annotated[str | None, Field(default=None, description="Optional LLM model override for this instance (highest priority — overrides meta.json and env). If provided but not in config.llm.allowed_models, silently falls back to default.")] = None, model_tier: Annotated[Literal["high"] | None, Field(default=None, description="Opt-in: spawn child with high-intelligence model (see SpawnInstanceInput.model_tier for full semantics). When set, raises ValueError if the resolved model is not in allowed_models. Use ONLY when you specifically want the configured high-tier model.")] = None) -> str:
+    async def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'developer', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None, model: Annotated[str | None, Field(default=None, description="Optional LLM model override for this instance (highest priority — overrides meta.json and env). If provided but not in config.llm.allowed_models, silently falls back to default.")] = None, model_tier: Annotated[Literal["high"] | None, Field(default=None, description="Opt-in: spawn child with high-intelligence model (see SpawnInstanceInput.model_tier for full semantics). When set, raises ValueError if the resolved model is not in allowed_models. Use ONLY when you specifically want the configured high-tier model.")] = None, task: Annotated[str | None, Field(default=None, description="Self-contained task to auto-dispatch as the child's first turn (R18). With auto_dispatch=True (default) no follow-up send_message is needed. Omit for the legacy two-step ritual.")] = None, auto_dispatch: Annotated[bool, Field(default=True, description="Auto-enqueue task as the child's first turn (R18). Only meaningful when task is non-empty; task absent = legacy two-step behavior.")] = True, snapshot_id: Annotated[str | None, Field(default=None, description="Explicit snapshot to warm-start from; omit to search. Verify-fail falls back to cold + warning. Only consulted when the TARGET agent has snapshot_enabled: true.")] = None, tags: Annotated[list[str], Field(description="Optional R8 tags steering the internal snapshot search when snapshot_id is omitted. Only consulted when the TARGET agent has snapshot_enabled: true.")] = [], verify: Annotated[Literal["metadata", "git"], Field(default="metadata", description="Snapshot staleness depth: 'metadata' (default) or 'git' repo-divergence anchor.")] = "metadata", allow_cross_project: Annotated[bool, Field(default=False, description="D8 handoff: explicit cross-project snapshot consume override. False (default) = mismatch is a verify-fail cold fallback.")] = False) -> str:
         """Spawn a new agent instance and return its instance_id.
 
         IMPORTANT: After spawning, you MUST use send_message(instance_id, message)
         to communicate with the new instance. The spawned instance will not do anything
-        until you send it a message.
+        until you send it a message. (Exception: when you pass ``task`` with the
+        default ``auto_dispatch=True``, the task is enqueued as the child's first
+        turn automatically — do NOT send it again.)
+
+        Snapshot warm start (unify-spawn-tools): when the TARGET agent's meta.json
+        sets ``"snapshot_enabled": true``, you may pass ``snapshot_id``/``tags``/
+        ``verify``/``allow_cross_project`` to warm-start the child from a matching
+        snapshot; any miss/expiry/verify-failure degrades to a plain cold spawn and
+        the result carries a ``[snapshot] started: warm|cold — …`` citation line to
+        cite in your report. When the gate is off (default for most agents), those
+        params are ignored with a one-line notice and the spawn is a plain cold
+        spawn.
 
         Args:
             agent_id: Agent ID to spawn (e.g., 'developer', 'leader').
@@ -2121,9 +2439,40 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 wins with a visible ``[NOTE]`` supersede line in the return;
                 ``allowed_models`` empty is treated as unrestricted (pass-through,
                 no WARN, no ERROR) per the A2 contract.
+            task: Optional self-contained task description. When provided (and
+                auto_dispatch=True, the default), it is enqueued as the child's
+                first turn INSIDE this tool — do NOT call send_message again.
+                Omit (None) for the legacy two-step ritual: spawn, then
+                send_message yourself. An explicitly empty/whitespace task is
+                a loud no-op (nothing enqueued; the result tells you to send
+                the first message).
+            auto_dispatch: Auto-dispatch the task as the child's first turn
+                (R18). Default True. Only meaningful when task is non-empty;
+                task absent ⇒ exactly the legacy two-step behavior.
+            snapshot_id: Optional explicit snapshot to warm-start from (only
+                when the TARGET agent has ``"snapshot_enabled": true``).
+                Verified (exists, project match, status active, staleness);
+                any verify failure falls back to a cold spawn with a warning —
+                never an error. Omit to let the tool search for the best
+                active match itself (the search uses ``task`` as the query).
+            tags: Optional R8 ``dim:value`` tags steering the internal snapshot
+                search when snapshot_id is omitted (gate-on targets only).
+            verify: Snapshot staleness depth: 'metadata' (default — age +
+                runtime version + post-capture advance) or 'git' (additionally
+                counts repo divergence since the snapshot's recorded commit).
+            allow_cross_project: D8 handoff — explicit cross-project snapshot
+                consume override. Default False (fail-closed): a mismatch is a
+                verify-fail cold fallback with a warning. Only meaningful when
+                snapshot_id is supplied; internal-search results are always
+                project-scoped.
 
         Returns:
-            The instance_id of the newly spawned instance. Use this with send_message().
+            A string starting with the new instance's instance_id (parse the
+            UUID from the first line). With the snapshot gate on, a
+            ``[snapshot] started: warm|cold — …`` citation line is appended;
+            with ``task`` given, an ``auto-dispatch`` status tail is appended
+            (including a loud ERROR tail if the enqueue failed after a
+            successful spawn — then call send_message explicitly).
         """
         # ─── Authorization gate (BEFORE any DB transaction) ───────────────
         # The caller agent (the instance invoking this tool) is the closure
@@ -2262,6 +2611,40 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 manager._project_repository, agent_id, registry
             )
 
+            # ── unify-spawn-tools (2026-10-05): TARGET-agent snapshot
+            # gate. Warm-start consumption rides this tool and is
+            # enabled per TARGET agent via ``"snapshot_enabled": true``
+            # in its meta.json. The consult uses the versioned
+            # resolution (the same tag this spawn will start the child
+            # with) so developer[v2]-style variants gate on THEIR
+            # flag. Gate OFF ⇒ NO snapshot work at all: no search, no
+            # repo reads, no snapshot output — exactly the
+            # pre-unification plain cold spawn.
+            snapshot_gate_on = _target_snapshot_enabled(agent_id, version_tag)
+            resolution: SpawnSnapshotResolution | None = None
+            steering_note = ""
+            if snapshot_gate_on:
+                # D8 scoping: snapshot resolution scopes on the
+                # CALLER's project (auto-inherit) — identical to the
+                # removed spawn_hot_instance.
+                caller_project = _caller_project_id(
+                    manager, current_instance_id
+                )
+                resolution = await resolve_spawn_snapshot(
+                    manager,
+                    task=task,
+                    snapshot_id=snapshot_id,
+                    tags=tags,
+                    verify=verify,
+                    allow_cross_project=allow_cross_project,
+                    caller_project_id=caller_project,
+                )
+            elif snapshot_id or tags:
+                # Steering params passed to a non-snapshot target —
+                # ONE informational line, then a plain cold spawn
+                # (fail-closed, never an error).
+                steering_note = SNAPSHOT_STEERING_IGNORED_LINE
+
             new_instance_id, validated_model_override = manager.spawn_instance(
                 agent_id=agent_id,
                 instance_id=None,
@@ -2309,20 +2692,58 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 if child_count is not None
                 else ""
             )
+            # ── R6b warm-path stamp + R16 counter (BEFORE any
+            # enqueue). The digest MUST be stamped before the R18
+            # auto-dispatch enqueue so ``assemble_context_messages``
+            # sees it on turn 1. A stamp failure downgrades
+            # warm → cold inside the resolution (surface via the
+            # citation line), never fails the spawn.
+            if resolution is not None:
+                resolution = await finalize_spawn_snapshot(
+                    manager, resolution, new_instance_id=new_instance_id
+                )
+            # ── R18 auto-dispatch (snapshot-INDEPENDENT — runs on
+            # every spawn when task is given, gate on or off).
+            dispatch_error: str | None = None
+            if task is not None and auto_dispatch and task.strip():
+                _, dispatch_error = await _auto_dispatch_first_turn(
+                    manager,
+                    instance_id=new_instance_id,
+                    task=task,
+                    caller_instance_id=current_instance_id,
+                )
             # Feature #1 (W3) — composite return spec:
             #   (1) UUID prefix preserved byte-identical.
             #   (2) ``[NOTE]`` supersede line ONLY on both-params path (D12).
             #   (3) ``model='<resolved>' (model_tier='high')`` line on EVERY
             #       tier-path success.
-            # Legacy/no-tier return stays byte-identical to today.
+            #   (4) unify-spawn-tools: the R18 dispatch tail rides the
+            #       send_message instruction line (only when task was
+            #       given); the ``[snapshot] …`` citation line (gate on)
+            #       or the steering-ignored notice is the FINAL line.
+            # Legacy/no-tier/no-task return stays byte-identical.
             tier_tail = ""
             if tier_visibility_line:
                 tier_tail = f"\n{tier_visibility_line}"
             note_tail = f"\n{note_supersede}" if note_supersede else ""
+            dispatch_tail = _auto_dispatch_tail(
+                auto_dispatch=auto_dispatch,
+                task=task,
+                instance_id=new_instance_id,
+                dispatch_error=dispatch_error,
+            )
+            snapshot_line = ""
+            if resolution is not None:
+                snapshot_line = format_snapshot_citation(resolution)
+            elif steering_note:
+                snapshot_line = steering_note
+            snapshot_tail = f"\n{snapshot_line}" if snapshot_line else ""
             return (
                 f"Successfully spawned instance: {new_instance_id}{child_count_line}\n"
                 f"To communicate with this instance, use: send_message(instance_id=\"{new_instance_id}\", message=\"your message here\")"
+                f"{dispatch_tail}"
                 f"{fallback_notice or ''}{tier_tail}{note_tail}"
+                f"{snapshot_tail}"
             )
         except ValueError as e:
             # Return text guidance instead of raising - agent can self-correct
@@ -5269,9 +5690,12 @@ Returns:
 
     # ── Agent Snapshot tools (agent-snapshot v1 Wave 2b, PR6) ──
     # snapshot_create + snapshot_search (category "snapshot") are
-    # granted per-tool via tools.allow; spawn_hot_instance rides the
-    # "instance" category so every instance-category holder gets it.
-    # All three fail-soft when the snapshot services are not wired on
+    # granted per-tool via tools.allow. Warm-start CONSUMPTION is not
+    # a tool since unify-spawn-tools (2026-10-05): spawn_instance
+    # above consumes the snapshot_tools helpers directly, gated by the
+    # TARGET agent's snapshot_enabled meta flag (spawn_hot_instance
+    # was removed).
+    # Both tools fail-soft when the snapshot services are not wired on
     # the manager (test doubles / partial init), so this call is safe
     # everywhere create_instance_tools runs. version_tag is forwarded
     # for the team-membership check (C1 parity with spawn_instance).

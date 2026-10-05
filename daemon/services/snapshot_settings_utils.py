@@ -23,8 +23,9 @@ Rider (i) isolation: only ``snapshot_create`` consults this helper
 directly; the ``is_snapshot_create_enabled`` sync stub in
 ``daemon/tools/snapshot_tools.py`` is sync-context-only and always
 answers the fail-closed default).
-``snapshot_search`` (read) and ``spawn_hot_instance`` (consumption) are
-NEVER gated — they ship always-on. Toggle OFF = instant cold fallback
+``snapshot_search`` (read) and the warm-start consumption path inside
+``spawn_instance`` (consumption) are NEVER R15-gated — they ship
+always-on (consumption is per-agent ``snapshot_enabled`` instead). Toggle OFF = instant cold fallback
 per R14 (the spawn succeeds but no snapshot is found because none is
 being created).
 """

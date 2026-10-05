@@ -646,7 +646,9 @@ async def get_plane_config():
 
 # ==================== Agent Snapshot — R15 Toggle (write side ONLY) ====================
 # Gates ONLY ``snapshot_create`` (rider (i) isolation —
-# ``snapshot_search`` and ``spawn_hot_instance`` are NEVER gated).
+# ``snapshot_search`` and the warm-start consumption path inside
+# ``spawn_instance`` are NEVER gated; consumption is gated per-agent
+# by the TARGET's ``snapshot_enabled`` meta flag instead).
 # Default OFF — unset / missing / unknown values all read as False
 # (fail-closed opt-in rollout). Storage shape mirrors
 # ``editor_preference`` (R2: ``set_metadata`` opens its own Session).
@@ -710,9 +712,10 @@ async def get_snapshot_usage_metrics():
     * capture counts — incremented on every ``snapshot_create``
       invocation regardless of R9 verdict (REUSE + NEW + SUPERSEDE +
       CREATE-FRESH all count);
-    * per-snapshot spawn counts — incremented on the ``spawn_hot_instance``
-      WARM path only (cold / no-hit / expired / verify-failed paths
-      DO NOT count — R16 rider j).
+    * per-snapshot spawn counts — incremented on the warm-start
+      path of ``spawn_instance`` (the unified spawn tool; formerly the
+      removed ``spawn_hot_instance``) only — cold / no-hit / expired /
+      verify-failed paths DO NOT count (R16 rider j).
 
     The endpoint is purely observational: no tool surface mutates on
     its output, and ranking modules (snapshot_search + snapshot_embedding_service)
