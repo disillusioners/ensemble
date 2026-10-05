@@ -17,6 +17,28 @@ This file is the ratification skeleton. Each decision D0..D5 states the question
 
 ---
 
+## 2026-10-05 — Uniform Worktree Flow (user-approved 2026-10-04; supersedes the specific D-verdicts listed below)
+
+Redesign following the worktree audit (75c85973). This entry supersedes ONLY the aspects named in the table; everything else in D0–D5 stands unchanged.
+
+| Aspect | Old (2026-09-06 ratification) | New (2026-10-05) |
+|--------|-------------------------------|------------------|
+| Trigger (D1 / O-D1.1) | ≥2 TTL-fresh `wt.active.*` census rows for the branch | **ALWAYS create a worktree for ANY committing task** — no concurrency threshold; leader still pre-writes census rows, giter consumes them AND creates worktrees on direct request |
+| Merge gate | AFTER-gate dispatched by leader when feature done | **Quiescence invariant**: NO merge until the worktree is clean (WIP committed / stash-by-sha / discarded) — the merge IS the commit point |
+| Cleanup (D4 in-flow) | merge → remove → delete_keys → reconcile | **Atomic chained cleanup**: merge `--no-ff` into latest → remove worktree → delete branch → delete KV census+claim rows — ONE sequence, no lingering between steps; "continue working" after merge = craft a NEW worktree (stateless continuation; never resurrect the old one) |
+| Reconcile (D2) | adopt-vs-remove criterion (dirty or HEAD age <30 min → adopt+heartbeat; else remove) | **Crash backstop only** — never a routine sweep: remove ONLY strays that are **merged AND clean**; adopt-or-flag anything dirty or unmerged; NEVER auto-remove dirty; dirty-remove refusal → STOP+report. The merged+clean-only rule inherently protects live in-flight commissions (`ensemble-src-wt-durability` — excluded from ANY cleanup; `ensemble-src-wt-stage-guard` — live unmerged commission on `feature/stage-freshness-guard`) |
+| `.env` trap (D4 row "`.env` source trap") | never launch dev.sh inside a worktree; export the main repo's `.env` first | **Fenced `.env`**: every worktree creation writes a local `.env` fence whose marker is `ENSEMBLE_SELF_ENV=dev`. NOT `worktree` — enum-invalid: `VALID_ENVS=(dev\|demo\|live\|sandbox)` at `daemon/tools/upgrade_tools.py:165`; `dev` is a valid member and true for dev DBs. The explicit assignment pins identity (explicit wins > opt-out > auto-derive install-dir+DB→live) and kills the ambient live-default inherit path for worktree boots. `dev.sh` now mechanically refuses boot in an unfenced linked worktree (guard between the env-load block and the OPENAI_API_KEY check; git absent → loud warning + proceed, fail-open for detection only) |
+| venv (D4 "cwd isolation trap" addendum) | fresh worktree has no `.venv`; `uv sync` (~30 s) if code must run there | **Lazy venv rule**: NO venv at creation; `uv sync` inside the worktree ONLY when a task must run tests; NEVER reuse the main checkout's `.venv` from a worktree — editable-install trap: the main `.venv`'s `_editable_impl_ensemble.pth` pins the original checkout, so pytest silently imports the WRONG branch's daemon |
+
+Additional encoding notes:
+
+- **Branch delete after merge**: run `git branch -d <branch>` from a checkout on `latest` — with no upstream configured, `-d` checks merged-ness against the CURRENT HEAD, so run from the wrong checkout it refuses (or reports the wrong verdict).
+- **Why always-worktree**: six env-poison incidents trace to ambient-env boots silently hitting LIVE; the ≥2 threshold left single-editor committing tasks on the main checkout, exactly where the ambient-inherit path is live.
+- **Prompt scope (v2 rule)**: v2 variant exists → v2 ONLY (developer[v2] edited; developer/tidier bases untouched — tidier base :39 adjudicated still-valid pointer, tidier[v2] silent). No v2 → full edit (giter, leader, coder, tester). giter soul.md confirmed trigger-free (no-op).
+- **Implementation**: branch `feature/worktree-uniform-flow` (worktree `/home/nea/ensemble-src-wt-uniform-flow`, base 39036550): giter prompts (workflow/rule/tools_note), leader workflow+tools_note, coder workflow + `git-commit` skill, tester pointer+guard note, developer[v2] workflow, `dev.sh` guard, this entry.
+
+---
+
 ## D0 — Framing (added only because the cross-cutting contract needs an explicit canonical home)
 
 **Question:** Which agent's prompt is the canonical home for the worktree-awareness contract?
@@ -355,7 +377,7 @@ Recorded verbatim from the review disposition; NO design work done here, NO fork
 - `daemon/repositories/shared_meta_kv/{models.py:33, repository.py:178-243,276-315}` — KV primitives (real tool surface: `set_kv` / `delete_keys` / `clear_all` + no-arg read; `get_all_as_dict` is the repository read path, not a tool — `daemon/tools/shared_meta_kv_tools.py:71-75,109-150`)
 - `daemon/services/context_messages.py:964-997` — `_fetch_kv_metadata` (ambient auto-surface; **opportunistic only**, never load-bearing per D3)
 - `daemon/tools/instance.py:2738-2759` / `instance_messaging.py:1753-1765` — non-empty `context=` routing (PRIMARY awareness channel)
-- `agents/leader/workflow.md:35-102` — "Git Setup is NOT Parallelizable" rule
+- `agents/leader/workflow.md:35-104` — Git Flow incl. "Git Setup is NOT Parallelizable" rule (range updated 2026-10-05: worktree-default edits grew the section by ~6 lines)
 - `agents/leader/tools_note.md:20-41` — prior `send_message` context= usage doc
 - `agents/governor/workflow.md:59-62,107,141,385-390` — `council_manifest` crash-anchor + cleanup-on-delivery + **explicit tool read on restore** (the precedent for D3's defense-in-depth)
 - `agents/project-manager/workflow.md:82,91-92` — `spawn → set_kv → send_message` discipline (intentionally overridden by leader's pre-spawn census write; the override is stated in D2 lifecycle)
