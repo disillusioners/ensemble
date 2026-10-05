@@ -156,3 +156,20 @@ G1-r ✅ · G2-r ✅ · G3-r ✅ · G4-r ❌. The single blocking defect is prec
 3. 🟠 §12e cleanup (orphan header, dangling fragment).
 4. 🟢 Multi-child mixed live leg remains unproven (retry after the join fix).
 5. 🟢 Serialize ALL PG-lane dispatches against `ensemble_test` (this gate's contamination events) — logged to LESSONS.
+
+---
+
+# FINAL RE-GATE (2026-10-05, fix HEAD `c498c6d9`)
+
+Delta (preflight-verified, all anchored): source-correlation join `mq.source LIKE 'internal_report:' || ri.child_instance_id || ':%'` (repository.py:2131-2136, colon-anchored, old id-join gone from executable SQL) · live-shape seeds (real `34cedf8d≠ddbeef1d` invariant) + 2 new pins (source-correlation, sibling-boundary) · env-var parity (config.py:1380 Field + pool_orchestrator.py:337 wiring) · §12e repaired. "5 files +401/−33" holds under code/test/docs scope (raw range also carries this gate's ~26 evidence artifacts). The "3-RED meta" is a documented temporary revert in the commit message; the durable automated guard = the 3 live-shape pins.
+
+## Suite results at `c498c6d9` — ALL GREEN
+F-1 pack 15/15 (AST pin green) · boot_pass 56/56 · interleaving 14/14 · **F-2 family 142/142** (4-test lane-6 quartet green incl. the rewritten live-shape heals-test + both new pins; PG serialized, contention-checked) · spot re-run `test_boot_report_recovery.py` 14/14 (sole non-family consumer of the changed wiring). G1-r/G2-r/G3-r results at f53a0638 stand per leader ruling (delta blast radius fully covered by the above).
+
+## G4-r2 LIVE legs (SIGSTOP recipe; evidence prefix f3-; commits `a519f241` + `08b64b7d`)
+- **LEG 1 (main straddle): ❌ FAIL against the bar — one criterion short.** PROVEN live: lane 6 finds the candidate via the source correlation (join fix works on the REAL shape — recovered=1), force-cancel→retry chain with same-message_id + retry_count=1 + no double-retry (criteria a/d/e/f PASS). **Residual defect:** lane 6 marks `report_injections TASK_DELIVERED` + resolves the wake row, but the injection path **does not enqueue a graph turn for the parent** — the retry task skips ("already delivered via injection"), so the parent stays `waiting_children` until a MANUAL PING (criterion b "zero manual pings" violated; c shows the deviation). Root cause is surgically narrow: last-mile wake — schedule the parent turn after TASK_DELIVERED via injection (or route the retry's skip into a resume).
+- **LEG 2 (multi-child mixed): PASS** — selectivity proven on the real shape: ONLY child2 recovered (child=afd68442), child1 not re-processed, exactly ONE new internal_report row, no duplicates (same auto-wake caveat as LEG 1 applied to the synthesis step).
+- **LEG 3 (kill-switch env): PASS** — end-to-end env wiring proven live: OFF boot → `stuck_wake=False` in the constructor log + wedge persists ≥120s; default-ON reboot → heals via lane 6. The G4-r operational gap is CLOSED. (Name-note: the working env value format verified live = false/False/0; the operative env name per the live leg is recorded in the f3-leg3 evidence.)
+
+## FINAL VERDICT: ❌ NOT READY — one remaining defect (LEG 1 criterion b)
+Progression across three rounds, each verified live: (1) no lane admits the shape → (2) lane admits but can't find it (join key) → (3) lane finds + delivers + is selective + is kill-switchable, but doesn't auto-wake the parent. Remaining fix is the last mile: enqueue the parent graph turn upon lane-6 injection delivery. Re-gate scope after that fix: LEG 1 only (the recipe + harness are committed and fast).

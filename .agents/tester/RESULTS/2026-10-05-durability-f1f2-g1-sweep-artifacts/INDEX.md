@@ -73,3 +73,11 @@
 | `g1r-batchA3.log.gz` | G1-r batchA3: 33 default-lane files, 76F/2345P/18S/23E in 79.08s. Re-gate @ f53a0638 |
 | `g1r-batchB.log.gz` | G1-r batchB: 3 PG files, 6F/12P/2 xfailed/24E in 49.11s. Re-gate @ f53a0638 |
 | `g1r-batchC.log.gz` | G1-r batchC: 5 new-code consumer files, 96P in 14.33s. Re-gate @ f53a0638 |
+
+## FINAL RE-GATE @ c498c6d9 (2026-10-05)
+
+| File | Provenance |
+|---|---|
+| `f3-f2-batch1.log` | G4-r2 F-2 family batch-1 re-run (final): all 4 lane-6 tests green incl. source-correlation + sibling-boundary + live-shape. Final re-gate @ c498c6d9 |
+| `f3-f2-batch2.log` | G4-r2 F-2 family batch-2 re-run (final): F-2 family 142/142, lane-6 quartet green, selectivity verified. Final re-gate @ c498c6d9 |
+| `f3-boot-report-recovery.log` | G4-r2 spot re-run: `tests/unit/test_boot_report_recovery.py` 14/14 (sole non-family consumer of the changed wiring). Final re-gate @ c498c6d9 |
