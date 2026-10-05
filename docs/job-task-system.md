@@ -444,6 +444,44 @@ the burning consumer class — the ambiguity is live in their prompts today
 (ari/soul.md per-kind-status caveat, jober/soul.md per-kind-status caveat — key decisions on a single ambiguous `status`);
 operators already have FE mission chips. Tools-first retires the actual pain first.
 
+#### Question/stuck emission fan-out (QA events — events-filter-exempt, non-claiming; 2026-10-05)
+
+> From `feature/question-watch-fanout` (merged `ac399874`); design record:
+> `.agents/shared/planning/midflight-qa-channel/design.md` ("Superseded scope
+> note", §2). Only the QA lane was widened; everything below leaves terminal
+> semantics untouched.
+
+QA emissions — `question requested ❓`, `stuck awaiting answer ⏳`, and the
+≥3-heartbeat wedge escalation — resolve recipients at **emission time by
+mission scope**: every watcher holding an **unclaimed** row on ANY receipt
+of the asking mission is notified (`enumerate_mission_work_ids` →
+`notify_mission_qa_watchers` → `get_watchers_for_jobs`). This covers
+**spontaneous turns** whose receipt was minted after watch rows were armed
+(e.g. a parent woken by a child report) — the QA path does not key on the
+asking turn's receipt. Three properties distinguish the QA lane from the
+terminal lane above:
+
+- **Events-filter-exempt** — a row armed with `events=['mission_terminal']`
+  only still receives QA notifications. The events filter is applied only on
+  the terminal lane (`notify_work_watchers`); `get_watchers_for_jobs` has no
+  watch-events predicate.
+- **Non-claiming + deduped** — QA delivery does NOT consume the watch row
+  (contrast the terminal lane's `claim_watchers_for_job` CAS-delete); dedup
+  is per watcher instance. The watch survives QA notifications and still
+  fires at mission-terminal.
+- **Bounded enumeration** — scope is mission-tree Task receipts newest-first
+  (cap 128, `MISSION_RECEIPT_SCAN_CAP`), the asker's live work-ids, and
+  active JobItems; cap hit logs a WARN. Non-root descendant `watch_job`
+  geometries are NOT enumerated (documented limitation — design.md
+  "superseded-scope" note; they ride the legacy per-receipt path with the
+  events filter).
+
+`mission_terminal` firing itself is unchanged: receipt-keyed, claimed at
+fire (three-bucket partition, `evaluate_mission_live` guard, CAS claim).
+The mid-flight contract is now explicit for the QA path: non-terminal
+question/stuck notifications arrive on the same `[JOB_EVENT]` header and
+the watch survives them.
+
 #### Directed modifications (override spec text)
 
 - **The M3 one-release version-gate / dual-render window is DROPPED.** The wire rename
