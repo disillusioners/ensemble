@@ -683,8 +683,15 @@ def test_verify_toolchain_passes_on_real_evidence(tmp_path):
     )
     assert "vrc=0" in r.stdout, f"verify should pass: {r.stdout} {r.stderr}"
     log = calls.read_text()
-    # Render contract: security pin present, both artifacts requested
-    assert '"securityLevel":"strict","htmlLabels":false' in log
+    # Render contract: security pin present, both artifacts requested.
+    # mmdc 12.x dropped inline -c JSON; config is now staged to a
+    # per-render temp file. Pin -c <path> in ARGS + JSON source in the lib.
+    assert re.search(r"-c\s+/tmp/charter-mmdc-cfg\.\w+\.json\b", log), (
+        f"verify render must pass config via -c <mmd_json temp file>; got log: {log!r}"
+    )
+    assert '"securityLevel":"strict","htmlLabels":false' in INSTALL_LIB.read_text(), (
+        "security pin JSON must live in install-mermaid-cli.lib.sh"
+    )
     assert log.count("ARGS: ") == 2  # one svg + one png render
 
 
