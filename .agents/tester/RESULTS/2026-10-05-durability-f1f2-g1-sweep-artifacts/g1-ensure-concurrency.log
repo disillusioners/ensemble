@@ -1,0 +1,41 @@
+=== Test Pack: concurrency_atomic_unit_test ===
+[note] Running 13 test file(s):
+  - tests/test_deadlock_fix.py
+  - tests/test_cascade_race3.py
+  - tests/test_cascade_concurrency.py
+  - tests/test_cascade_unified.py
+  - tests/test_observer_race1.py
+  - tests/test_observer_correlation.py
+  - tests/test_observer_late_msg.py
+  - tests/test_instance_metadata_atomic.py
+  - tests/test_project_repository_atomic.py
+  - tests/test_gate_threading_serialization.py
+  - tests/test_finalize_job_h15.py
+  - tests/test_cascade_integration.py
+  - tests/test_report_lane_phase2.py
+..........ssssssssssssssssssssssssssssssssssssssssssssssssssssssssss.... [ 41%]
+.......................................................ssssssssssssssss. [ 83%]
+...........................F                                             [100%]
+=================================== FAILURES ===================================
+___ TestErrorPropagation.test_error_flag_uses_fallback_when_message_missing ____
+tests/test_report_lane_phase2.py:1497: in test_error_flag_uses_fallback_when_message_missing
+    assert bus.had_parent_error(parent_id) is True
+E   AssertionError: assert False is True
+E    +  where False = had_parent_error('inst-227284ec')
+E    +    where had_parent_error = <daemon.services.dependency_bus.DependencyBus object at 0x7250712b29c0>.had_parent_error
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.dependency_bus:dependency_bus.py:693 bus emit_terminal: status='error' but error=None; skipping _parent_errored flip (terminated-branch or None-capable producer; see dependency_bus.py _has_truthy_error helper). task_id=1 status=error
+=============================== warnings summary ===============================
+tests/test_deadlock_fix.py::TestProcessChildCompletionDbSyncOffloaded::test_process_child_completion_db_sync_runs_off_loop_thread
+tests/test_deadlock_fix.py::TestProcessChildCompletionDbSyncOffloaded::test_process_child_completion_db_sync_is_scheduled_via_to_thread
+  /home/nea/ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlmodel/orm/session.py:75: SAWarning: The engine provided as bind produced a connection that is already in a transaction. This is usually caused by a core event, such as 'engine_connect', that has left a transaction open. The effective join transaction mode used by this session is 'create_savepoint'. To silence this warning, do not leave transactions open
+    results = super().execute(
+
+tests/test_report_lane_phase2.py: 55 warnings
+  /home/nea/ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_report_lane_phase2.py::TestErrorPropagation::test_error_flag_uses_fallback_when_message_missing
+1 failed, 97 passed, 74 skipped, 57 warnings in 66.09s (0:01:06)

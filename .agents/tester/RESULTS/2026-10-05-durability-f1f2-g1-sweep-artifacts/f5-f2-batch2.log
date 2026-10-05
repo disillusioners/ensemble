@@ -1,0 +1,135 @@
+=== F-2 RE-GATE (pin 3c7c4df6) — BATCH 2 (unit, default addopts) ===
+START_TIME=2026-10-05T07:47:29+00:00
+WORKDIR=/home/nea/ensemble-src-wt-durability
+HEAD=3c7c4df6a0ac4c0b22fe3c9bacd6d95f8a653249
+PIN=3c7c4df6
+---
+============================= test session starts ==============================
+platform linux -- Python 3.13.15, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src-wt-auto-continue/.venv/bin/python3
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/nea/ensemble-src-wt-durability
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 30.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 102 items
+
+tests/unit/test_report_delivery_recovery_service.py::TestSweepServiceShape::test_sweep_returns_empty_result_no_rows PASSED [  0%]
+tests/unit/test_report_delivery_recovery_service.py::TestSweepServiceShape::test_sweep_lane_kill_switches PASSED [  1%]
+tests/unit/test_report_delivery_recovery_service.py::TestDeferredLane::test_deferred_row_recovered PASSED [  2%]
+tests/unit/test_report_delivery_recovery_service.py::TestDeferredLane::test_deferred_row_skipped_when_parent_busy PASSED [  3%]
+tests/unit/test_report_delivery_recovery_service.py::TestDeferredLane::test_deferred_row_accounts_busy_check_failure PASSED [  4%]
+tests/unit/test_report_delivery_recovery_service.py::TestDeferredLane::test_idempotent_re_run PASSED [  5%]
+tests/unit/test_report_delivery_recovery_service.py::TestBatchCap::test_batch_cap_limits_rows PASSED [  6%]
+tests/unit/test_report_delivery_recovery_service.py::TestLaneKillSwitches::test_lane_pending_age_disabled PASSED [  7%]
+tests/unit/test_report_delivery_recovery_service.py::TestNoRowBackstopFalsePositiveMatrix::test_excludes_when_existing_completion_report_message PASSED [  8%]
+tests/unit/test_report_delivery_recovery_service.py::TestNoRowBackstopFalsePositiveMatrix::test_excludes_when_existing_injection_row PASSED [  9%]
+tests/unit/test_report_delivery_recovery_service.py::TestNoRowBackstopFalsePositiveMatrix::test_excludes_when_parent_terminal PASSED [ 10%]
+tests/unit/test_report_delivery_recovery_service.py::TestNoRowBackstopFalsePositiveMatrix::test_diagnostic_includes_terminal_parents PASSED [ 11%]
+tests/unit/test_report_delivery_recovery_service.py::TestNoRowBackstopFalsePositiveMatrix::test_no_row_lane_end_state_not_deferred PASSED [ 12%]
+tests/unit/test_report_delivery_recovery_service.py::TestOrphanLane::test_orphan_lane_disabled_by_default PASSED [ 13%]
+tests/unit/test_report_delivery_recovery_service.py::TestOrphanLaneLiveSweep::test_live_sweep_revive_and_deliver PASSED [ 14%]
+tests/unit/test_report_delivery_recovery_service.py::TestOrphanLaneLiveSweep::test_live_sweep_revival_failure_structured_disposition PASSED [ 15%]
+tests/unit/test_report_delivery_recovery_service.py::TestOrphanLaneLiveSweep::test_live_sweep_no_row_silent_drop_regression PASSED [ 16%]
+tests/unit/test_report_delivery_recovery_service.py::TestFailSafe::test_per_row_exception_does_not_abort PASSED [ 17%]
+tests/unit/test_report_delivery_recovery_service.py::TestPendingAgeLanes::test_pending_row_recovered PASSED [ 18%]
+tests/unit/test_report_delivery_recovery_service.py::TestGetEventLoopClosedLoop::test_no_live_loop_raises_runtime_error PASSED [ 19%]
+tests/unit/test_report_delivery_recovery_service.py::TestStopEventInterrupt::test_stop_event_exits_mid_batch PASSED [ 20%]
+tests/unit/test_report_delivery_recovery_service.py::TestStopEventInterrupt::test_stop_returns_within_honest_budget PASSED [ 21%]
+tests/unit/test_report_delivery_recovery_service.py::TestStopEventInterrupt::test_explicit_timeout_still_respected PASSED [ 22%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2Lane2AnchorLessAdmission::test_admits_anchor_less_completed_child_of_non_terminal_parent PASSED [ 23%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2Lane2AnchorLessAdmission::test_has_anchor_true_when_completed_message_exists PASSED [ 24%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2Lane2AnchorLessAdmission::test_still_excludes_terminal_parent PASSED [ 25%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2Lane2AnchorLessAdmission::test_still_excludes_running_child PASSED [ 26%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2PREFIXLedgerDedup::test_find_wake_already_delivered_evidence_true_on_prefix_match PASSED [ 27%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2PREFIXLedgerDedup::test_find_wake_already_delivered_evidence_false_when_no_match PASSED [ 28%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2PREFIXLedgerDedup::test_parent_history_has_internal_report_true_on_marker PASSED [ 29%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2PREFIXLedgerDedup::test_parent_history_has_internal_report_false_on_no_source PASSED [ 30%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2IdempotencyAndKillSwitch::test_run_twice_single_ensure_deferred PASSED [ 31%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2IdempotencyAndKillSwitch::test_lane2_kill_switch_off_skips_lane PASSED [ 32%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2LiveDeliveryRace::test_live_delivery_between_scan_and_ledger_recheck_skips PASSED [ 33%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2ChildMessageIdStableButDifferent::test_derive_anchor_less_child_message_id_from_checkpoint PASSED [ 34%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2ChildMessageIdStableButDifferent::test_derive_returns_none_when_no_assistant_message PASSED [ 35%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2ChildMessageIdStableButDifferent::test_derive_returns_none_when_checkpointer_is_none PASSED [ 36%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2ChildMessageIdStableButDifferent::test_derive_skips_empty_content_assistant_message PASSED [ 37%]
+tests/unit/test_report_delivery_recovery_service.py::TestF2ManagerLoopBridgeAffinity::test_lane2_routes_all_checkpointer_reads_through_manager_loop PASSED [ 38%]
+tests/unit/test_report_delivery_recovery_service.py::TestG4R3StuckWakeParentScheduleSeam::test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs PASSED [ 39%]
+tests/unit/test_report_delivery_self_heal_zero_row.py::test_lane2_finds_zero_row_stuck_pair PASSED [ 40%]
+tests/unit/test_report_delivery_self_heal_zero_row.py::test_sweep_self_heals_zero_row_pair_and_no_flap PASSED [ 41%]
+tests/unit/test_report_delivery_self_heal_zero_row.py::test_flap_signature_fails_if_false_positive_returns PASSED [ 42%]
+tests/unit/test_report_delivery_self_heal_zero_row.py::test_lane2_duplicate_none_still_skips_as_already_recovered PASSED [ 43%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestOcc5Repro::test_occ5_repro_terminal_reason_preserved PASSED [ 44%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestOcc5Repro::test_fp2_alone_breaks_damage_chain PASSED [ 45%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestC264aa8aR3::test_orphan_mission_live_not_finalized PASSED [ 46%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestC264aa8aR3::test_orphan_mission_dead_does_finalize PASSED [ 47%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestFP1BootWipe::test_pending_task_anchoring_active_job_preserved PASSED [ 48%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestFP1BootWipe::test_journal_line_emitted_before_wipe PASSED [ 49%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestFP3Vocabulary::test_orphaned_no_task_in_canonical_map PASSED [ 50%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestFP3Vocabulary::test_orphaned_no_task_is_terminal PASSED [ 50%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestFP3Vocabulary::test_orphaned_no_task_canonicalize_identity PASSED [ 51%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestFP3Vocabulary::test_message_queue_arm_no_longer_stamps_failed PASSED [ 52%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestFP3Vocabulary::test_message_queue_arm_orphan_not_mislabeled_failed PASSED [ 53%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestFP3Vocabulary::test_vocab_round_trip_no_other_terminal_regressed PASSED [ 54%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestPP1ZeroWatcherWarn::test_pp1_warn_fires_on_terminal_with_zero_watchers PASSED [ 55%]
+tests/job_queue/test_report_delivery_bug_family_pins.py::TestPP1ZeroWatcherWarn::test_pp1_warn_does_not_fire_for_non_terminal_status PASSED [ 56%]
+tests/unit/services/test_report_delivery_ledger.py::TestParentHistoryHasInternalReportPrefixMatch::test_real_stamp_shape_no_colon_user_role_matches PASSED [ 57%]
+tests/unit/services/test_report_delivery_ledger.py::TestParentHistoryHasInternalReportPrefixMatch::test_queue_side_colon_form_also_matches PASSED [ 58%]
+tests/unit/services/test_report_delivery_ledger.py::TestParentHistoryHasInternalReportPrefixMatch::test_scan_is_role_agnostic PASSED [ 59%]
+tests/unit/services/test_report_delivery_ledger.py::TestParentHistoryHasInternalReportPrefixMatch::test_child_boundary_violation_does_not_match PASSED [ 60%]
+tests/unit/services/test_report_delivery_ledger.py::TestParentHistoryHasInternalReportPrefixMatch::test_other_child_does_not_match PASSED [ 61%]
+tests/unit/services/test_report_delivery_ledger.py::TestParentHistoryHasInternalReportPrefixMatch::test_returns_false_for_pre_migration_parent_without_source PASSED [ 62%]
+tests/unit/services/test_report_delivery_ledger.py::TestParentHistoryHasInternalReportPrefixMatch::test_returns_false_when_checkpointer_is_none PASSED [ 63%]
+tests/unit/services/test_report_delivery_ledger.py::TestParentHistoryHasInternalReportPrefixMatch::test_returns_false_when_messages_empty PASSED [ 64%]
+tests/unit/services/test_report_delivery_ledger.py::TestChildReportSourceMatcherShape::test_accepts_exact_no_colon_form PASSED [ 65%]
+tests/unit/services/test_report_delivery_ledger.py::TestChildReportSourceMatcherShape::test_accepts_colon_delimited_form PASSED [ 66%]
+tests/unit/services/test_report_delivery_ledger.py::TestChildReportSourceMatcherShape::test_rejects_child_boundary_extension PASSED [ 67%]
+tests/unit/services/test_report_delivery_ledger.py::TestChildReportSourceMatcherShape::test_rejects_other_child PASSED [ 68%]
+tests/unit/services/test_report_delivery_ledger.py::TestChildReportSourceMatcherShape::test_rejects_degenerate_sources PASSED [ 69%]
+tests/unit/services/test_report_delivery_ledger.py::TestChildReportSourceMatcherShape::test_source_prefix_is_no_colon PASSED [ 70%]
+tests/test_report_lane_phase2.py::TestIndependentTurn::test_child_completion_creates_separate_report_task PASSED [ 71%]
+tests/test_report_lane_phase2.py::TestIndependentTurn::test_two_children_create_two_separate_report_tasks PASSED [ 72%]
+tests/test_report_lane_phase2.py::TestIndependentTurn::test_report_tasks_have_distinct_message_ids PASSED [ 73%]
+tests/test_report_lane_phase2.py::TestReportLaneGuard::test_process_report_bypasses_cross_system_guard PASSED [ 74%]
+tests/test_report_lane_phase2.py::TestReportLaneGuard::test_process_message_blocked_by_cross_system_guard PASSED [ 75%]
+tests/test_report_lane_phase2.py::TestReportLaneGuard::test_process_message_unblocked_when_message_id_matches PASSED [ 76%]
+tests/test_report_lane_phase2.py::TestEdgeCases::test_two_simultaneous_reports_serialized_per_instance PASSED [ 77%]
+tests/test_report_lane_phase2.py::TestEdgeCases::test_report_waits_for_running_message_task_to_finish PASSED [ 78%]
+tests/test_report_lane_phase2.py::TestPauseSafety::test_paused_instance_blocks_report_task_claim PASSED [ 79%]
+tests/test_report_lane_phase2.py::TestPauseSafety::test_guard_blocked_claim_emits_debug_log PASSED [ 80%]
+tests/test_report_lane_phase2.py::TestPauseSafety::test_guard_blocked_claim_with_no_pending_tasks_emits_no_log PASSED [ 81%]
+tests/test_report_lane_phase2.py::TestPauseSafety::test_report_task_stays_pending_while_parent_paused PASSED [ 82%]
+tests/test_report_lane_phase2.py::TestPauseSafety::test_resume_allows_report_task_claim PASSED [ 83%]
+tests/test_report_lane_phase2.py::TestPauseSafety::test_terminated_instance_blocks_report_task_claim PASSED [ 84%]
+tests/test_report_lane_phase2.py::TestPauseSafety::test_process_message_task_also_blocked_for_paused PASSED [ 85%]
+tests/test_report_lane_phase2.py::TestPauseGateEdgeCases::test_s3_paused_task_does_not_block_sibling_pending_claim PASSED [ 86%]
+tests/test_report_lane_phase2.py::TestPauseGateEdgeCases::test_w5_new_message_during_pause_blocked_then_unblocked_on_resume PASSED [ 87%]
+tests/test_report_lane_phase2.py::TestCrashRecovery::test_fired_unstamped_watcher_recovered_on_restart PASSED [ 88%]
+tests/test_report_lane_phase2.py::TestCrashRecovery::test_stamped_fired_watcher_not_recovered PASSED [ 89%]
+tests/test_report_lane_phase2.py::TestCrashRecovery::test_pending_watcher_not_in_recovery PASSED [ 90%]
+tests/test_report_lane_phase2.py::TestCrashRecovery::test_finalize_is_idempotent_via_atomic_transition PASSED [ 91%]
+tests/test_report_lane_phase2.py::TestCrashRecovery::test_note_crash_window_a_pre_existing_gap PASSED [ 92%]
+tests/test_report_lane_phase2.py::TestErrorPropagation::test_child_error_sets_had_parent_error PASSED [ 93%]
+tests/test_report_lane_phase2.py::TestErrorPropagation::test_multiple_children_one_errors_one_succeeds PASSED [ 94%]
+tests/test_report_lane_phase2.py::TestErrorPropagation::test_all_children_succeed_no_error_flag PASSED [ 95%]
+tests/test_report_lane_phase2.py::TestErrorPropagation::test_clear_parent_error_resets_error_flag PASSED [ 96%]
+tests/test_report_lane_phase2.py::TestErrorPropagation::test_clear_parent_error_is_idempotent PASSED [ 97%]
+tests/test_report_lane_phase2.py::TestErrorPropagation::test_error_flag_propagates_to_finalize_status PASSED [ 98%]
+tests/test_report_lane_phase2.py::TestErrorPropagation::test_error_flag_no_flip_with_none_error_logs_warning PASSED [ 99%]
+tests/test_report_lane_phase2.py::TestErrorPropagation::test_error_flag_flip_with_truthy_error_sets_fallback PASSED [100%]
+
+=============================== warnings summary ===============================
+tests/unit/test_report_delivery_recovery_service.py: 5 warnings
+tests/job_queue/test_report_delivery_bug_family_pins.py: 12 warnings
+tests/test_report_lane_phase2.py: 55 warnings
+  /home/nea/ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+====================== 102 passed, 72 warnings in 13.16s =======================
+---
+END_TIME=2026-10-05T07:47:47+00:00
+RUNTIME_SEC=18
+EXIT_CODE=0

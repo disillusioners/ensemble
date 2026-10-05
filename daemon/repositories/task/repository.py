@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -22,7 +23,10 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
-from daemon.constants import CHAT_SOURCE_PREFIXES
+from daemon.constants import (
+    CHAT_SOURCE_PREFIXES,
+    TERMINAL_INSTANCE_STATUSES,
+)
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.feature_flags import TURN_RECONCILER_DIRECT_WRITE_PARITY
 from daemon.services.timestamps import (
@@ -47,6 +51,31 @@ from ..job_queue.models import (
 from .models import SuspensionReason, Task, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
+
+
+# F-1 (durability-f1-f2 / phase1, plan §2c, §13c) — operator
+# kill-switch that gates ONLY the arm-3 ``auto_continued_at`` arm of
+# the ``clear_all`` 2-arm disjunction. Default ON; ``=0`` disables arm
+# 3, restoring the exact pre-F-1 wipe predicate (arm 1
+# ``status IN ('running','paused')`` + the FP1 JobItem-anchor
+# clause — both unchanged). Read per wipe (NOT cached) so an
+# operator flip takes effect on the next daemon restart. Mirrors
+# ``ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART`` at
+# ``daemon/services/auto_continue_boot_pass.py:145-156``.
+BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV = (
+    "ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE"
+)
+
+
+def _boot_auto_continued_preserve_enabled() -> bool:
+    """Per-wipe kill-switch read.
+
+    Returns ``True`` unless the operator has explicitly set
+    ``ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE=0``. The default is ON —
+    the F-1 wedge fix is the deliverable; the kill-switch exists
+    for operator opt-out, NOT default-off.
+    """
+    return os.environ.get(BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV, "1") != "0"
 
 
 # ── Chat-source lane (chat-source-worker-lane, D1/N7/E2) ─────────────────────
@@ -1173,6 +1202,59 @@ class TaskRepository:
                 # shape of this method.
                 ).bindparams(bindparam("boot_epoch", type_=DateTime)),
                 {"task_id": task_id, "boot_epoch": boot_epoch},
+            )
+            return result.rowcount == 1
+
+    def clear_task_auto_continued(self, task_id: int) -> bool:
+        """Clear the ``auto_continued_at`` marker for a terminalized Task.
+
+        Feature: durability-f1-f2 / F-1 (plan §13b). The arm-3
+        ``EXISTS instances`` co-condition on ``clear_all`` is
+        bounded by instance lifetime (a terminal instance row
+        un-preserves the row), but the marker LEAKED across
+        boots when the instance itself remained non-terminal
+        (WAITING_CHILDREN / revived / long-lived). This method
+        closes the leak: at the terminalizer call site
+        (``manager.py:11660-11721``, gate conjunct
+        ``:11700-11702``), AFTER a successful ``complete_task``,
+        the auto-continue marker is unconditionally cleared.
+
+        Single-statement atomic UPDATE:
+
+            UPDATE task
+            SET auto_continued_at = NULL
+            WHERE id = :task_id
+              AND status = 'completed'
+
+        The ``status='completed'`` guard makes the clear a
+        no-op on still-running rows (the marker stays so the
+        next wipe preserves the row when the instance is
+        non-terminal — the intended behavior). The kill-switch
+        ``ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE`` does NOT gate
+        this clear: the wipe-side arm 3 is the operator's
+        opt-out; the marker-clearing is the lifecycle bound
+        (composition with the ``EXISTS instances`` co-condition
+        per §13b). The D18 r3 / D29 RATIFIED call-site-gate
+        pattern is followed: the gate is AT THE CALL SITE, and
+        the shared ``complete_task`` SQL stays byte-identical.
+
+        Args:
+            task_id: Integer primary key of the Task to clear.
+
+        Returns:
+            ``True`` iff ``rowcount == 1`` (one row updated).
+            ``False`` when the Task was not in ``status='completed'``
+            (the guard no-ops).
+        """
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE task "
+                    "SET auto_continued_at = NULL "
+                    "WHERE id = :task_id "
+                    "  AND status = 'completed'"
+                ),
+                {"task_id": task_id},
             )
             return result.rowcount == 1
 
@@ -4488,7 +4570,12 @@ class TaskRepository:
             db_session.commit()
             return result.rowcount
 
-    def clear_all(self, preserve_in_flight: bool = False) -> int:
+    def clear_all(
+        self,
+        preserve_in_flight: bool = False,
+        *,
+        boot_epoch: datetime | None = None,
+    ) -> int:
         """Delete tasks, optionally preserving resumable / in-flight work.
 
         Args:
@@ -4514,9 +4601,35 @@ class TaskRepository:
                     preserve predicate missed the non-RUNNING / non-PAUSED
                     live anchor case).
 
+                F-1 (durability-f1-f2 / phase1, plan §2, §13b): the
+                preserve predicate gains a third arm — terminal task
+                rows carrying an ``auto_continued_at`` marker whose
+                owning instance is still non-terminal
+                (``instances.status NOT IN TERMINAL_INSTANCE_STATUSES``)
+                are preserved across the boot-wipe. This closes the
+                F-1 wedge where a child mid-``discard_on_startup``
+                terminal → ``Outcome(status='error', error=None)`` →
+                ``_parent_errored=True`` flip stranded the next boot's
+                auto-continue pass at ``candidates == 0``. The arm is
+                gated by
+                ``ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE`` (default
+                ON; ``=0`` restores the exact pre-F-1 predicate).
+                The composition with the terminalizer-side marker
+                clearing (plan §13b, ``clear_task_auto_continued``)
+                bounds the marker lifetime to instance lifetime.
+
                 This is the mode the ``discard_on_startup`` startup hook
                 uses: a clean backlog slate without orphaning resumable
                 state.
+
+            boot_epoch: Captured boot epoch (naive-UTC, ``None`` when
+                capture failed). The F-1 predicate does NOT consume it
+                (arm 3's ``EXISTS instances`` co-condition is on
+                ``instances.status`` only — the marker lifetime is
+                bounded by instance status, not by epoch). The
+                parameter is RETAINED for the auto-continue consumer
+                (api.py:1553) and for future consumers; passing
+                ``None`` is safe and equivalent to omitting it.
 
         Returns:
             Number of tasks deleted.
@@ -4544,12 +4657,48 @@ class TaskRepository:
         # what was logged. Behaviour preserved on the wipe path;
         # only the audit-trail cardinality is bounded.
         with SQLModelSession(self.engine) as db_session:
+            # F-1 (durability-f1-f2 / phase1) — read the arm-3
+            # kill-switch ONCE per wipe so the mirror SQL and the
+            # DELETE predicate agree (avoids the rare race where an
+            # operator flips the env var between the two reads).
+            arm3_active = _boot_auto_continued_preserve_enabled()
             if preserve_in_flight:
                 # Capture doomed work_ids BEFORE the wipe. The
                 # doomed set is the preserve-complement: every
                 # task row that the preserve predicate would
                 # NOT save (not RUNNING/PAUSED AND not
-                # anchoring a non-terminal JobItem).
+                # anchoring a non-terminal JobItem AND not
+                # F-1-arm-3-stamped on a non-terminal instance).
+                # The arm-3 mirror keeps the doomed-id list
+                # honest so the audit log is not over-broad
+                # when the kill-switch is ON.
+                _terminal_instance_statuses_sql = (
+                    "(" + ",".join(
+                        f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)
+                    ) + ")"
+                )
+                if arm3_active:
+                    _arm3_mirror_sql = (
+                        "AND NOT ("
+                        "auto_continued_at IS NOT NULL "
+                        "AND EXISTS ("
+                        "SELECT 1 FROM instances "
+                        "WHERE instances.instance_id = task.instance_id "
+                        f"AND instances.status NOT IN {_terminal_instance_statuses_sql}"
+                        ")"
+                        ")"
+                    )
+                else:
+                    # Kill-switch OFF: arm 3 is disabled; the doomed
+                    # set reverts to the exact pre-F-1 mirror.
+                    _arm3_mirror_sql = ""
+                    logger.warning(
+                        "JOURNAL: TaskRepository.clear_all "
+                        "kill-switch %s=0 — arm 3 DISABLED; "
+                        "preserve predicate reverts to pre-F-1 "
+                        "(arms 1 + FP1 only).",
+                        BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV,
+                    )
                 doomed_rows = db_session.exec(
                     text(
                         "SELECT work_id FROM task "
@@ -4558,8 +4707,13 @@ class TaskRepository:
                         "SELECT 1 FROM job_queue_items jqi "
                         "WHERE jqi.job_id = task.work_id "
                         f"AND jqi.admission_state IN {active_admission_states_sql()} "
-                        "AND jqi.deleted_at IS NULL"
-                        ")"
+                        "AND jqi.deleted_at IS NULL)"
+                        # Render the arm-3 suffix only when present —
+                        # with the kill-switch OFF the suffix is ""
+                        # and the unconditional f-string rendered a
+                        # trailing space into the audit SQL string
+                        # (post-review green #4).
+                        + (f" {_arm3_mirror_sql}" if _arm3_mirror_sql else "")
                     )
                 ).all()
                 doomed_work_ids = [r[0] for r in doomed_rows if r[0] is not None]
@@ -4586,6 +4740,14 @@ class TaskRepository:
                 # stays in lockstep with the queue-side admission
                 # vocabulary. Both SQLite and PostgreSQL accept the
                 # same IN-list literal (no dialect shim required).
+                #
+                # F-1 (durability-f1-f2 / phase1, plan §2, §13b) —
+                # wipe-side ownership block:
+                # ``daemon/services/instance_lifecycle.py`` (boot
+                # step 1: ``InstanceManager`` constructor's
+                # ``discard_on_startup`` wipe; plan §5). The
+                # ``_parent_errored`` flip in ``dependency_bus.py``
+                # and this wipe are the F-1 contract's two seams.
                 stmt = sql_delete(Task).where(
                     Task.status.notin_([
                         TaskStatus.RUNNING.value,
@@ -4601,6 +4763,34 @@ class TaskRepository:
                         ")"
                     )
                 )
+                if arm3_active:
+                    # F-1 arm 3 (plan §2, §13b) — terminal task rows
+                    # with an ``auto_continued_at`` marker whose
+                    # owning instance is still non-terminal are
+                    # PRESERVED. The negation here is the
+                    # delete-eligibility complement: delete the row
+                    # only when the marker is missing OR the
+                    # instance is already terminal. The
+                    # ``instances`` join is the FIRST instance-join
+                    # introduced into ``clear_all`` SQL — the table
+                    # is read-only here and the join is a
+                    # correlated-EXISTS so the wipe stays
+                    # single-statement. Gated by
+                    # ``ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE``;
+                    # kill-switch OFF (=0) restores the exact
+                    # pre-F-1 predicate.
+                    stmt = stmt.where(
+                        text(
+                            "NOT ("
+                            "auto_continued_at IS NOT NULL "
+                            "AND EXISTS ("
+                            "SELECT 1 FROM instances "
+                            "WHERE instances.instance_id = task.instance_id "
+                            f"AND instances.status NOT IN {_terminal_instance_statuses_sql}"
+                            ")"
+                            ")"
+                        )
+                    )
             else:
                 doomed_rows = db_session.exec(
                     text("SELECT work_id FROM task")

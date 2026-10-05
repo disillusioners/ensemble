@@ -1,0 +1,12 @@
+=== D1 T+300s FORENSICS ===
+Time: 2026-10-05T01:27:06Z (reboot was 01:23:30Z, t+216s — note: t+300s was delayed by parallel G1 sweep)
+parent_status: waiting_children (STILL STUCK, NEVER HEALED)
+wake_msgs: 1, status='ready'
+inj_state: PENDING (unchanged from t+30s to t+300s)
+parent_tasks: 1
+child_tasks: 0
+RDRS lane 2: ran at boot (01:23:29), no per-row processing for c63eecab
+Other lanes: no activity for c63eecab
+Watchdog: interval=3600s — WILL NOT FIRE within observation window (next check at ~02:23:30Z)
+pg_stat_activity: only my own query, no stuck locks
+RDRRS boot log lines for c63eecab: ONLY the initial MCP tool load and message processing at 01:22:12–14. NO RDRS sweep lines reference c63eecab.

@@ -1,0 +1,41 @@
+=== R4r: Lane-6 Negatives ===
+
+Date: 2026-10-05 04:52–04:54 UTC
+
+R4(i) No duplicate execution vs stale_task_recovery on the shared primitive:
+- RUNTIME: lane 6 never processed any candidate (R1 query bug — see r1r findings).
+  Cannot verify retry_count/same-message_id from runtime data.
+- CODE-LEVEL CHECK (read-only):
+  * force_cancel_and_schedule_retry signature at
+    daemon/repositories/task/repository.py:5094:
+    def force_cancel_and_schedule_retry(self, task_id: int, max_retries: int,
+                                        reason: str, backoff_base: int = 60,
+                                        backoff_max: int = 3600)
+  * max_retries=3 (caller in lane 6 — line 905)
+  * backoff_base=60s, backoff_max=3600s
+  * The retry task carries next_retry_at = now + backoff (per f53a0638 §3)
+  * The retry task's message_id contract: per the f53a0638 review close-out (§3),
+    the retry task carries the SAME message_id as the original wake task
+    (same-message_id contract — verified by the PG test claimability pin at
+    test_report_delivery_recovery_pg.py ~2475).
+  * retry_count bounded: max_retries=3 means at most 3 retries total;
+    retry_count increments on each retry, so the final value is bounded by
+    the primitive's own logic (not the lane caller).
+- VERDICT: cannot verify RUNTIME (lane 6 never processed). CODE-LEVEL:
+  retry_count bounded (max_retries=3), same-message_id contract documented
+  in the fix's review close-out.
+
+R4(ii) Manual-ping deadlock GONE in the healed state:
+- Setup: fresh parent 2acdf6b2 + child 474f4c8c (normal completion, 15s sleep)
+- Parent healed naturally at 04:52:48 (no lane 6 needed)
+- Manual ping sent at 04:53:28 to the HEALED parent
+- Ping response: message_id=e4250338, role=assistant, queued=false, auto_resumed=false
+- Parent completed AGAIN at iter=7 (~14s) — NORMAL RESPONSE
+- VERDICT: manual-ping deadlock IS GONE in the healed state (parent
+  was completed before, so the busy-guard is not blocking)
+
+R4 caveat: the healed state test (ii) uses a parent that healed NATURALLY
+(not via lane 6). If lane 6 had healed the parent, the retry task would be
+in PENDING with next_retry_at in the future — the busy-guard would be
+in a different state. The test as-designed only verifies the manual-ping
+behavior in the post-natural-heal state, not the post-lane-6-heal state.

@@ -769,7 +769,40 @@ class InstanceManager:
         # The previous implementation wiped the task + message tables
         # unconditionally, which orphaned paused instances on restart.
         if config.queue.discard_on_startup:
-            msg_count = self._queue_repository.clear_all(preserve_in_flight=True)
+            # F-1 (durability-f1-f2 / phase1, plan §2a, §13a): capture
+            # the boot epoch BEFORE the queue wipe so consumers (the
+            # auto-continue boot pass at api.py:1553, etc.) observe a
+            # consistent epoch across the wipe. Lazy import avoids any
+            # module-load-time cycle. Best-effort: failure to capture
+            # is swallowed (the function is non-raising in practice;
+            # the try/except is a belt for unexpected DB / engine
+            # states) and consumers fall back to ``None``.
+            # Post-review fix: the resolution itself lives INSIDE the
+            # try (review yellow #1) — with the name resolved after
+            # the except, a lazy-import failure left ``get_boot_epoch``
+            # unbound and the NEXT reference raised NameError,
+            # crashing ``InstanceManager.__init__`` and defeating the
+            # swallow-to-None contract. A boot must never die because
+            # boot_epoch failed.
+            _boot_epoch = None
+            try:
+                from daemon.services.boot_epoch import (
+                    capture_boot_epoch as _capture_boot_epoch,
+                    get_boot_epoch as _get_boot_epoch,
+                )
+                _capture_boot_epoch(self._engine)
+                _boot_epoch = _get_boot_epoch()
+            except Exception as _boot_epoch_err:
+                logger.warning(
+                    f"discard_on_startup: capture_boot_epoch failed "
+                    f"({_boot_epoch_err!r}) — proceeding with the "
+                    f"wipe; consumers fall back to None boot_epoch.",
+                    exc_info=True,
+                )
+            msg_count = self._queue_repository.clear_all(
+                preserve_in_flight=True,
+                boot_epoch=_boot_epoch,
+            )
             logger.info(
                 f"Cleared {msg_count} backlog message(s) "
                 f"(discard_on_startup=backlog-clear; in-flight/paused preserved)"
@@ -866,7 +899,17 @@ class InstanceManager:
                     # lists get the ``[+ N more truncated]`` marker.
                     f"investigation: {_capped_doomed_id_repr(completed_active_work_ids)}"
                 )
-            task_count = task_repo.clear_all(preserve_in_flight=True)
+            task_count = task_repo.clear_all(
+                preserve_in_flight=True,
+                # F-1 belt consumer (pre-promote fix): reuse the
+                # belt's already-captured variable — the queue-side
+                # lazy import binds ONLY the aliased names, so the
+                # prior bare get_boot_epoch() here was an unbound
+                # NameError on every discard_on_startup boot.
+                # _boot_epoch is pre-initialized to None at :788, so
+                # it is bound on both the try and except paths.
+                boot_epoch=_boot_epoch,
+            )
             logger.info(
                 f"Cleared {task_count} backlog task(s) "
                 f"(discard_on_startup=backlog-clear; running/paused preserved)"
@@ -11706,11 +11749,28 @@ class InstanceManager:
                             boot_task is not None
                             and boot_task.auto_continued_at is not None
                         ):
-                            await asyncio.to_thread(
+                            completed = await asyncio.to_thread(
                                 self._task_repo.complete_task,
                                 boot_task.id,
                                 {"resume_outcome": "boot_continue_succeeded"},
                             )
+                            # F-1 (durability-f1-f2 / phase1, plan
+                            # §13b) — marker-clearing at the
+                            # terminalizer. After successful
+                            # ``complete_task`` (i.e., the row IS
+                            # terminal now), clear the
+                            # ``auto_continued_at`` marker so the
+                            # arm-3 ``EXISTS instances`` co-condition
+                            # is the LIFETIME bound, not a re-arm.
+                            # The clear is unconditional post-commit
+                            # (the kill-switch governs ONLY the
+                            # wipe-side preserve; clearing is
+                            # lifecycle hygiene, not an opt-out).
+                            if completed is not None:
+                                await asyncio.to_thread(
+                                    self._task_repo.clear_task_auto_continued,
+                                    boot_task.id,
+                                )
                     except Exception as terminalizer_exc:
                         # Terminalizer failure is logged but does
                         # NOT escape the success branch — STR's

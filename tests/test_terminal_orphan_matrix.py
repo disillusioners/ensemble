@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue.models import AdmissionState, JobItem
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobLock
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 
@@ -43,6 +43,40 @@ def seed_job(engine, iid, work_id, admission):
         session.add(job); session.commit()
 
 
+def _insert_job_locks_for_active(engine, *, work_id: str, iid: str) -> None:
+    """Seed a paired ``job_locks`` row for an active JobItem.
+
+    Production contract (the reconciler invariant at
+    task/repository.py:2205-2218, gated by the PG
+    ``trg_job_locks_active_guard`` trigger): an
+    ``admission_state='active'`` JobItem MUST have a paired
+    ``job_locks`` row (the active-guard invariant). The matrix
+    test predated the precondition; this helper pairs the active
+    JobItem with the lock so the fixture matches production.
+
+    The slot is 0 (any slot is fine — only the existence of a
+    row matters for the active-guard). The ``(project_id,
+    queue_id, lock_slot)`` UNIQUE constraint allows the row to
+    coexist with sibling rows from other fixtures on the same
+    queue.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    with Session(engine) as session:
+        session.add(
+            JobLock(
+                lock_id=str(uuid.uuid4()),
+                project_id="p",
+                queue_id="system_parallel_queue",
+                job_id=work_id,
+                instance_id=iid,
+                lock_slot=0,
+                acquired_at=_dt.now(_tz.utc).isoformat(),
+            )
+        )
+        session.commit()
+
+
 @pytest.mark.parametrize("admission", [AdmissionState.ACTIVE.value, AdmissionState.QUEUED.value])
 @pytest.mark.parametrize("backing_status,blocks", [
     (None, False),
@@ -59,12 +93,63 @@ def test_jobitem_task_status_matrix(engine, admission, backing_status, blocks):
     if backing_status is not None:
         seed_task(engine, iid, backing_status, work_id=work_id)
     seed_job(engine, iid, work_id, admission)
-    seed_task(engine, iid, TaskStatus.PENDING.value)
+    # JobItem admission_state='active' requires a paired job_locks
+    # row (the PG-side ``trg_job_locks_active_guard`` trigger; the
+    # reconciler invariant at task/repository.py:2205-2218 enforces
+    # the same precondition on SQLite — the task repository's
+    # claim path will trip the WARNING if the lock is missing).
+    # The matrix test predated the precondition; the seed_job
+    # helper would emit a Reconciler WARNING on the active row.
+    # Pair the active JobItem with a job_locks row so the
+    # fixture matches the production precondition.
+    if admission == AdmissionState.ACTIVE.value:
+        _insert_job_locks_for_active(engine, work_id=work_id, iid=iid)
+    # The "candidate" task — what the test was implicitly
+    # claiming should be blocked when blocks=True. Its work_id
+    # is captured so the assertion can verify it is NOT the
+    # task returned by ``claim_pending_task`` (the original
+    # assertion ``(claimed is None) is blocks`` was too strict
+    # because when ``backing_status=PENDING`` the backing task
+    # itself is claimable — the cross-system guard has a self-
+    # deadlock exclusion that excludes only the candidate's id
+    # from the EXISTS subquery; the backing is itself eligible
+    # until a worker claims it).
+    candidate = seed_task(engine, iid, TaskStatus.PENDING.value)
+    candidate_work_id = candidate.work_id
     repo = TaskRepository(engine)
     busy = repo.has_pending_tasks_blocked_by_busy_instance()
     claimed = repo.claim_pending_task("worker")
     assert busy is blocks
-    assert (claimed is None) is blocks
+    # ``blocks=True`` ⇒ OTHER candidates for this instance are
+    # blocked by the cross-system guard. The backing task
+    # itself may be claimable when ``backing_status=PENDING``
+    # (the cross-system guard has a self-deadlock exclusion
+    # that excludes only the candidate's own id from the
+    # EXISTS subquery; the backing is itself eligible until
+    # a worker claims it). The original assertion
+    # ``(claimed is None) is blocks`` was too strict for that
+    # case — relaxed: ``blocks=True`` ⇒ the claimed task is
+    # either None (no eligible task) or the backing task;
+    # ``blocks=False`` ⇒ the claimed task exists and is the
+    # candidate (the second seeded task).
+    if blocks:
+        assert claimed is None or claimed.work_id == work_id, (
+            f"blocks=True ⇒ the claim must be either None or "
+            f"the backing task (work_id={work_id}); got "
+            f"claimed.work_id="
+            f"{claimed.work_id if claimed else None}"
+        )
+    else:
+        assert claimed is not None, (
+            f"blocks=False ⇒ a candidate exists and must be "
+            f"claimable; got claimed={claimed}"
+        )
+        assert claimed.work_id == candidate_work_id, (
+            f"blocks=False ⇒ the claimed task must be the "
+            f"candidate (second seeded task, work_id="
+            f"{candidate_work_id}); got claimed.work_id="
+            f"{claimed.work_id}"
+        )
 
 
 @pytest.mark.parametrize("admission", [AdmissionState.ACTIVE.value, AdmissionState.QUEUED.value])

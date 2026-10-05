@@ -1,0 +1,10 @@
+=== D1 T+30s FORENSICS ===
+Time: 2026-10-05T01:23:45Z (reboot was 01:23:30Z, t+15s)
+parent_status: waiting_children (stuck)
+wake_msgs: 1, status='ready'
+inj_state: PENDING
+parent_tasks: 1
+child_tasks: 0
+Watchdog: interval=3600s (started 01:23:29)
+RDRS lane 2: ran at boot (01:23:29), no per-row processing
+pg_stat_activity: only my own query, no stuck locks

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -12,6 +13,7 @@ from sqlalchemy import delete as sql_delete, func, and_, or_, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select, col
 
+from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc, now_utc_naive
 
 from .models import MessageQueue, MessageStatus
@@ -24,6 +26,31 @@ from .models import MessageQueue, MessageStatus
 # while ``task.repository`` is still mid-initialization). The
 # helper is a pure function with no DB dependencies so the
 # late-bound import is safe.
+
+# F-1 (durability-f1-f2 / phase1, plan §2c, §13c) — operator
+# kill-switch that gates ONLY the arm-3 ``auto_continued_at`` arm
+# of the ``clear_all`` 2-arm disjunction on the queue side.
+# Default ON; ``=0`` disables arm 3, restoring the exact pre-F-1
+# wipe predicate (arm 1 ``status IN ('running','paused')`` only).
+# Read per wipe (NOT cached) so an operator flip takes effect on
+# the next daemon restart. Mirrors the kill-switch on the
+# task-repository side.
+MESSAGE_QUEUE_BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV = (
+    "ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE"
+)
+
+
+def _message_queue_boot_auto_continued_preserve_enabled() -> bool:
+    """Per-wipe kill-switch read (queue side).
+
+    Returns ``True`` unless the operator has explicitly set
+    ``ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE=0``. The default is ON.
+    """
+    return (
+        os.environ.get(
+            MESSAGE_QUEUE_BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV, "1"
+        ) != "0"
+    )
 
 # Configuration constants
 MESSAGE_TIMEOUT_SECONDS = 3600  # 1 hour
@@ -152,6 +179,65 @@ class SQLModelMessageQueueRepository:
     def get_by_id(self, message_id: str) -> MessageQueue | None:
         """Get a message by ID (alias for get)."""
         return self.get(message_id)
+
+    # --------------------------------------------------------
+    # F-2 PREFIX ledger (durability-f1-f2 / phase2 task 2.3)
+    # --------------------------------------------------------
+
+    def find_wake_already_delivered_evidence(
+        self, parent_id: str, child_id: str
+    ) -> bool:
+        """Queue-side PREFIX ledger check — operative cross-path dedup.
+
+        F-2 (durability-f1-f2 / phase2 task 2.3). Returns ``True`` if any
+        ``MessageQueue`` row exists with
+        ``instance_id = :parent_id AND source LIKE
+        'internal_report:{child_id}:%' AND status IN
+        ('ready', 'processing', 'completed')``.
+
+        **This is the OPERATIVE cross-path dedup** (per
+        ``decisions.md §14a`` W-1 LOCKED to fallback (ii)). The
+        exact-id equality at ``child_reports.py:3498-3507`` is the
+        natural-path-only check; the PREFIX ledger is the cross-path
+        check that survives the F-2 wedge's id-space mismatch
+        (``BaseMessage.id`` vs ``MessageQueue.message_id``).
+
+        Precedent commits: ``dfac6ff0`` and ``000f39db``
+        ("prefix-match internal_report:{child}:% for delivery
+        evidence"). The parent-history-side PREFIX check lives in
+        ``daemon/services/report_delivery_ledger.py`` (task 2.4).
+
+        Args:
+            parent_id: The parent instance ID (the ``MessageQueue``
+                row's ``instance_id`` column).
+            child_id: The child instance ID (the source-suffix
+                segment after ``internal_report:``).
+
+        Returns:
+            ``True`` if any delivery-evidence row matches the PREFIX
+            (a parent-side ``internal_report:{child}:%`` row in a
+            non-failed status); ``False`` otherwise.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(MessageQueue.message_id)
+                .where(MessageQueue.instance_id == parent_id)
+                .where(
+                    MessageQueue.source.like(
+                        f"internal_report:{child_id}:%"
+                    )
+                )
+                .where(
+                    MessageQueue.status.in_([
+                        MessageStatus.READY.value,
+                        MessageStatus.PROCESSING.value,
+                        MessageStatus.COMPLETED.value,
+                    ])
+                )
+                .limit(1)
+            )
+            row = session.exec(stmt).first()
+            return row is not None
 
     # --------------------------------------------------------
     # DEQUEUE (get next ready message)
@@ -933,7 +1019,12 @@ class SQLModelMessageQueueRepository:
             
             return result.rowcount
 
-    def clear_all(self, preserve_in_flight: bool = False) -> int:
+    def clear_all(
+        self,
+        preserve_in_flight: bool = False,
+        *,
+        boot_epoch: datetime | None = None,
+    ) -> int:
         """Delete messages, optionally preserving resumable / in-flight work.
 
         Args:
@@ -946,6 +1037,25 @@ class SQLModelMessageQueueRepository:
                 ``discard_on_startup`` startup hook can clear the backlog
                 without orphaning paused/running instances. The kept set
                 is resolved via ``task.message_id`` linkage.
+
+                F-1 (durability-f1-f2 / phase1, plan §2, §13b): the
+                keep set gains a second arm — terminal task rows with
+                an ``auto_continued_at`` marker whose owning instance
+                is still non-terminal
+                (``instances.status NOT IN TERMINAL_INSTANCE_STATUSES``)
+                also retain their backing messages across the
+                boot-wipe. This is the queue-side symmetric extension
+                of the task-side arm 3; the wipe is joint
+                (task-side + queue-side) so the join ``message_id``
+                path must agree. Gated by
+                ``ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE`` (default ON;
+                ``=0`` restores the exact pre-F-1 predicate).
+
+            boot_epoch: Captured boot epoch (naive-UTC, ``None`` when
+                capture failed). The F-1 predicate does NOT consume
+                it (arm 3's ``EXISTS instances`` co-condition is on
+                ``instances.status`` only). RETAINED for the
+                auto-continue consumer; passing ``None`` is safe.
 
         Returns:
             Number of messages deleted.
@@ -972,15 +1082,54 @@ class SQLModelMessageQueueRepository:
         # crashes mid-flight still has the audit line; the
         # post-delete rowcount alone is not enough to
         # reconstruct the impact.
+        # F-1 (durability-f1-f2 / phase1) — read the arm-3
+        # kill-switch ONCE per wipe so the mirror SQL and the
+        # DELETE predicate agree.
+        arm3_active = _message_queue_boot_auto_continued_preserve_enabled()
         with Session(self.engine) as session:
             if preserve_in_flight:
+                if arm3_active:
+                    # F-1 arm 3 SQL fragment — terminal-stamped
+                    # rows of non-terminal instances (symmetric to
+                    # the task-side predicate). The terminal
+                    # status list is sourced from the canonical
+                    # ``TERMINAL_INSTANCE_STATUSES`` constant at
+                    # ``daemon/constants.py:584-589`` (mirrors the
+                    # task-side predicate at
+                    # ``task/repository.py:4394-4405``).
+                    _terminal_instance_statuses_sql = (
+                        "(" + ",".join(
+                            f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)
+                        ) + ")"
+                    )
+                    _arm3_keep_sql = (
+                        " OR ("
+                        "auto_continued_at IS NOT NULL "
+                        "AND EXISTS ("
+                        "SELECT 1 FROM instances "
+                        "WHERE instances.instance_id = task.instance_id "
+                        f"AND instances.status NOT IN {_terminal_instance_statuses_sql}"
+                        ")"
+                        ")"
+                    )
+                else:
+                    _arm3_keep_sql = ""
+                    logger.warning(
+                        "JOURNAL: MessageQueueRepository.clear_all "
+                        "kill-switch %s=0 — arm 3 DISABLED; "
+                        "preserve predicate reverts to pre-F-1 "
+                        "(arm 1 only).",
+                        MESSAGE_QUEUE_BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV,
+                    )
                 # Capture doomed ids BEFORE the wipe.
                 doomed_rows = session.exec(
                     text(
                         "SELECT message_id FROM message_queue "
                         "WHERE message_id NOT IN "
                         "(SELECT message_id FROM task "
-                        "WHERE status IN ('running', 'paused'))"
+                        "WHERE status IN ('running', 'paused')"
+                        f"{_arm3_keep_sql}"
+                        ")"
                     )
                 ).all()
                 doomed_ids = [r[0] for r in doomed_rows]
@@ -999,11 +1148,21 @@ class SQLModelMessageQueueRepository:
                 # before tasks), so the correlated subquery is valid.
                 # Status literals mirror ``TaskStatus.RUNNING/Paused``;
                 # hardcoded here to avoid a cross-repo import cycle.
+                #
+                # F-1 (durability-f1-f2 / phase1, plan §2, §13b) —
+                # queue-side ownership block: the wipe-side
+                # ``daemon/services/instance_lifecycle.py`` block
+                # (boot step 1: ``InstanceManager`` constructor's
+                # ``discard_on_startup`` wipe; plan §5). The
+                # ``_parent_errored`` flip in ``dependency_bus.py``
+                # and this wipe are the F-1 contract's two seams.
                 result = session.exec(
                     text(
                         "DELETE FROM message_queue WHERE message_id NOT IN "
                         "(SELECT message_id FROM task "
-                        "WHERE status IN ('running', 'paused'))"
+                        "WHERE status IN ('running', 'paused')"
+                        f"{_arm3_keep_sql}"
+                        ")"
                     )
                 )
             else:

@@ -69,9 +69,12 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+import asyncio
+import contextlib
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -109,7 +112,7 @@ from daemon.repositories.report_injection.models import (
 from daemon.repositories.report_injection.repository import (
     ReportInjectionRepository,
 )
-from daemon.repositories.task.models import Task, TaskStatus
+from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.services.report_delivery_recovery import (
     LaneResult,
     ReportDeliveryRecoveryService,
@@ -346,6 +349,7 @@ def _build_pg_service(
     lane_pending_age: bool = True,
     lane_recovery_retry: bool = True,
     lane_orphan: bool = False,
+    lane_stuck_wake: bool = True,
 ) -> tuple[ReportDeliveryRecoveryService, MagicMock]:
     """Build the recovery service against the PG engine.
 
@@ -360,14 +364,41 @@ def _build_pg_service(
     task_repo.has_instance_busy = MagicMock(
         side_effect=lambda instance_id: instance_id in (busy_ids or set())
     )
+    queue_repo = MagicMock()
+    # Iteration-2 W-4: the per-row pass duck-types
+    # ``find_wake_already_delivered_evidence`` — the mock must
+    # declare it (returning False = no delivery evidence) or its
+    # auto-attr truthiness would fake a ledger match.
+    queue_repo.find_wake_already_delivered_evidence = MagicMock(
+        return_value=False
+    )
     manager = MagicMock()
     manager.engine = engine
+    # Iteration-2 blocker-1: mechanical tests keep the
+    # parent-history ledger check out of scope (None → guarded
+    # lookup degrades to "no evidence"); the S24/S27 pass-through
+    # tests wire a real checkpointer + manager loop explicitly.
+    manager._checkpointer = None
     manager._handle_recover_deferred_report = MagicMock()
+    # G4-r4 last-mile seam: lane 6 bridges to the manager's
+    # event loop and invokes ``enqueue_message`` (the SAME
+    # primitive the manual ping uses — the unified dispatcher
+    # auto-resumes waiting_children → RUNNING at :1968).
+    # The test infrastructure here is mechanical (no PG-side
+    # check that the parent is actually scheduled — the EFFECT
+    # pin lives at tests/unit/test_report_delivery_recovery_
+    # service.py::TestG4R3StuckWakeParentScheduleSeam).
+    # Wire the mock to a no-op coroutine so the bridge call
+    # resolves without raising; the unit test pins the
+    # schedule call shape + the effect.
+    async def _no_op_enqueue(_instance_id, _message, **kwargs):
+        return None
+    manager.enqueue_message = AsyncMock(side_effect=_no_op_enqueue)
 
     service = ReportDeliveryRecoveryService(
         task_repo=task_repo,
         report_injection_repo=ri_repo,
-        queue_repo=MagicMock(),
+        queue_repo=queue_repo,
         instance_repo=MagicMock(),
         manager_ref=manager,
         interval_seconds=300,
@@ -380,6 +411,7 @@ def _build_pg_service(
         lane_pending_age=lane_pending_age,
         lane_recovery_retry=lane_recovery_retry,
         lane_orphan=lane_orphan,
+        lane_stuck_wake=lane_stuck_wake,
     )
     return service, manager
 
@@ -736,12 +768,19 @@ class TestC3FalsePositiveMatrixPG:
             "include the terminal-parent candidate"
         )
 
-    def test_c3_excludes_when_child_message_not_completed(
+    def test_c3_anchor_less_child_admitted_on_pg(
         self, pg_engine_3_6: Engine
     ) -> None:
-        """C3 case 4: a row whose child message is NOT COMPLETED
-        is EXCLUDED (the INNER JOIN ``message.status ==
-        'completed'`` filters it out).
+        """C3 case 4 (F-2 UPDATE): a row whose child message is
+        NOT COMPLETED is ADMITTED (the anchor filter was removed
+        by F-2 task 2.2 — the child's terminal report is the
+        checkpoint message, not a message_queue row).
+
+        Pre-F-2: the ``anchor_subq.is_not(None)`` filter
+        excluded children whose message status is not COMPLETED.
+        Post-F-2: anchor-less children of non-terminal parents
+        are admitted so the per-row pass can derive the
+        child_message_id from the checkpoint.
         """
         parent = _seed_instance(pg_engine_3_6)
         child_id = _seed_instance(
@@ -761,10 +800,18 @@ class TestC3FalsePositiveMatrixPG:
         rows = ri_repo.find_completed_children_without_delivery(
             parent_not_terminal=True
         )
-        assert not any(r["child_id"] == child_id for r in rows), (
-            "C3 case 4 (non-completed child message) MUST exclude "
-            "the candidate — the INNER JOIN filters on "
-            "message.status='completed'"
+        matched = [r for r in rows if r["child_id"] == child_id]
+        assert matched, (
+            "C3 case 4 (F-2): anchor-less child of non-terminal "
+            "parent MUST be ADMITTED — the anchor filter was "
+            "removed by F-2 task 2.2 (the child's terminal report "
+            "is the checkpoint message, not a message_queue row)"
+        )
+        assert matched[0]["has_anchor"] is False, (
+            "has_anchor is False (the anchor subquery filters on "
+            "status='completed'; the child's only message is "
+            "PROCESSING, so the anchor is NULL — the per-row pass "
+            "derives the child_message_id from the checkpoint)"
         )
 
     def test_c3_excludes_when_fired_dependency_watcher(
@@ -1057,6 +1104,9 @@ class TestLaneKillSwitchesPG:
             lane_pending_age=False,
             lane_recovery_retry=False,
             lane_orphan=False,
+            # Block-1 G4 lane: disabled too (same empty-lane-dict
+            # contract as the all-disabled test above).
+            lane_stuck_wake=False,
         )
         result = service._run_all_lanes_sync()
         # All lanes disabled → empty result. The Lane 1
@@ -1154,6 +1204,9 @@ class TestLaneKillSwitchesPG:
             lane_pending_age=False,
             lane_recovery_retry=False,
             lane_orphan=False,
+            # Block-1 G4 lane: must be disabled too for the
+            # empty-lane-dict assertion.
+            lane_stuck_wake=False,
         )
         result = service._run_all_lanes_sync()
         assert result.lanes == {}, (
@@ -1362,30 +1415,39 @@ class TestLane2QueryCompilationRegression:
         import re
 
         captured_sql = self._capture_production_sql()
-        # Slice out just the EXISTS subquery. The shape is
-        # ``EXISTS (... )`` — find the matching close paren.
-        exists_open = captured_sql.upper().find("EXISTS (")
-        assert exists_open >= 0, (
-            f"Could not locate EXISTS subquery in captured SQL; "
-            f"unexpected shape:\n{captured_sql}"
-        )
-        # Walk forward to find the matching close paren at depth 0
-        depth = 0
-        close_idx = -1
-        for i in range(exists_open, len(captured_sql)):
-            ch = captured_sql[i]
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0:
-                    close_idx = i
+        # Slice out the FIRED-watcher EXISTS subquery. The SQL
+        # has MULTIPLE EXISTS subqueries (delivery, injection,
+        # fired-watcher) — find the one that references
+        # dependency_watchers (F-2 UPDATE: the WHERE clause
+        # order changed after removing the anchor filter).
+        search_from = 0
+        exists_body = None
+        while True:
+            exists_open = captured_sql.upper().find("EXISTS (", search_from)
+            if exists_open < 0:
+                break
+            depth = 0
+            close_idx = -1
+            for i in range(exists_open, len(captured_sql)):
+                ch = captured_sql[i]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        close_idx = i
+                        break
+            if close_idx > exists_open:
+                candidate = captured_sql[exists_open:close_idx + 1]
+                if "dependency_watchers" in candidate:
+                    exists_body = candidate
                     break
-        assert close_idx > exists_open, (
-            f"Could not locate EXISTS subquery close paren in "
-            f"captured SQL:\n{captured_sql}"
+            search_from = exists_open + 1
+        assert exists_body is not None, (
+            f"Could not locate the FIRED-watcher EXISTS subquery "
+            f"(the one referencing dependency_watchers) in "
+            f"captured SQL: {captured_sql}"
         )
-        exists_body = captured_sql[exists_open:close_idx + 1]
         # Count occurrences of ``dependency_watchers`` (the table
         # name) in the EXISTS subquery. Pre-fix there are TWO:
         # the unaliased ``dependency_watchers`` AND the aliased
@@ -1592,3 +1654,1253 @@ class TestLane2PGRegressionEndToEnd:
         # Sanity: the returned row carries the child_msg_id we seeded.
         assert matched[0]["child_msg_id"] == child_msg_id
         assert matched[0]["parent_id"] == parent
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# F-2 (durability-f1-f2 / phase2, task 2.11(b)) — S24 + S27
+# MANDATORY real-PG integration tests on the real delivery seam
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestF2S24MultiChildMixedOnPG:
+    """S24 — multi-child mixed on real PG.
+
+    Per phase2-plan.md task 2.11(b): "S24 (multi-child mixed):
+    seed a parent with three children (one straddle, one
+    RUNNING, one already-delivered); run RDRS lane 2; assert
+    exactly one ``ensure_deferred`` for the straddle child."
+
+    The reviewer named S24 the DEFINITIVE claim-gate proof
+    for waiting_children parents. The lane 2 backstop must
+    admit the straddle child (anchor-less completed child of
+    a non-terminal parent) while excluding the RUNNING child
+    and the already-delivered child — the three-way
+    composition is the F-1 wedge state.
+    """
+
+    def test_s24_multi_child_mixed_lane2_admits_only_straddle(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        """S24 — the lane 2 backstop admits the straddle child
+        and excludes the RUNNING child and the already-delivered
+        child on real PG (the F-1 wedge state on the real
+        delivery seam).
+
+        Seeds a parent (RUNNING) + three children:
+          * child_straddle: COMPLETED, NO message_queue row
+            (the F-1 wedge straddle state — anchor-less)
+          * child_running: RUNNING (excluded by the
+            c.status='completed' filter)
+          * child_delivered: COMPLETED + an existing
+            ``internal_report:{child}:%`` message (excluded
+            by the has_delivery_row PREFIX ledger)
+
+        Asserts the lane 2 result contains ONLY child_straddle
+        (exactly one row; the other two are excluded by the
+        respective predicates).
+        """
+        parent = _seed_instance(pg_engine_3_6)
+
+        # Child 1: STRADDLE — COMPLETED, no message_queue row.
+        # This is the F-1 wedge state: the child's terminal
+        # report is the checkpoint message, not a
+        # message_queue row, so the anchor filter (removed by
+        # F-2 task 2.2) does not exclude it.
+        child_straddle = _seed_instance(
+            pg_engine_3_6,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+
+        # Child 2: RUNNING — excluded by c.status='completed'.
+        child_running = _seed_instance(
+            pg_engine_3_6,
+            parent_id=parent,
+            status=InstanceStatus.RUNNING.value,
+        )
+
+        # Child 3: DELIVERED — COMPLETED + an
+        # ``internal_report:{child}:%`` message already on the
+        # parent's queue. Excluded by has_delivery_row.
+        child_delivered = _seed_instance(
+            pg_engine_3_6,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_pg_message(
+            pg_engine_3_6,
+            instance_id=parent,
+            message_id=f"report-delivered-{uuid.uuid4().hex[:8]}",
+            source=f"internal_report:{child_delivered}:anchor-msg",
+            status=MessageStatus.READY.value,
+        )
+
+        ri_repo = ReportInjectionRepository(engine=pg_engine_3_6)
+        rows = ri_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        child_ids = {r["child_id"] for r in rows}
+        # ONLY child_straddle is admitted (exactly one row).
+        assert child_straddle in child_ids, (
+            f"straddle child {child_straddle} MUST be admitted "
+            f"(F-1 wedge state); child_ids={sorted(child_ids)}"
+        )
+        assert child_running not in child_ids, (
+            f"running child {child_running} MUST be excluded "
+            f"(c.status='completed' filter); child_ids={sorted(child_ids)}"
+        )
+        assert child_delivered not in child_ids, (
+            f"delivered child {child_delivered} MUST be excluded "
+            f"(has_delivery_row PREFIX ledger); child_ids={sorted(child_ids)}"
+        )
+        # Exactly one row admitted.
+        assert len(child_ids) == 1, (
+            f"exactly one straddle child admitted; "
+            f"child_ids={sorted(child_ids)}"
+        )
+
+    def test_s24_straddle_passes_through_lane2_per_row_pass(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        """S24 (integration) — the straddle child, after being
+        admitted by the lane 2 query, is minted as a
+        ``ReportInjection`` row (PENDING) by the per-row pass
+        (via ``ensure_deferred``). The PREFIX ledger check
+        finds no ``internal_report:{child}:%`` row (the
+        straddle state), so the per-row pass proceeds to
+        mint the obligation.
+
+        EXERCISED (W-3 re-word, iteration 2): lane-2 admission →
+        queue-side ledger miss → parent-history ledger miss →
+        anchor-less derivation (manager-loop bridge) →
+        ``ensure_deferred`` mint → DEFERRED→PENDING transition →
+        the manager hand-off is INVOKED with the exact triple
+        (the manager is a mock at that seam).
+
+        NOT EXERCISED: the real reconcile/re-enter path behind
+        the hand-off seam (actual parent wake delivery, the
+        worker-pool PROCESS_REPORT claim, delivery completion).
+        Those are the manager-side seams covered by the
+        sub-shape tests in test_resume_router_deferred_recovery.
+        """
+        parent = _seed_instance(pg_engine_3_6)
+        child_straddle = _seed_instance(
+            pg_engine_3_6,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        # No message_queue row — the straddle state.
+        # No report_injections row — the wedge state.
+
+        # Build a real queue_repo for the PREFIX ledger check
+        # (the per-row pass calls find_wake_already_delivered_evidence).
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        queue_repo = SQLModelMessageQueueRepository(
+            engine=pg_engine_3_6
+        )
+
+        # Mock the checkpointer so the anchor-less
+        # ``child_message_id`` derivation succeeds. The
+        # derivation reads the surviving child checkpoint
+        # via ``get_instance_messages`` and returns the last
+        # assistant message's ``message_id`` (BaseMessage.id).
+        # We patch ``daemon.persistence.get_instance_messages``
+        # to return a fixture with a known message_id.
+        derived_id = f"derived-{uuid.uuid4().hex}"
+        _mock_persistence_messages(
+            child_straddle,
+            [
+                {
+                    "role": "assistant",
+                    "content": "child terminal report content",
+                    "message_id": derived_id,
+                },
+            ],
+        )
+        try:
+            service, _ = _build_pg_service(pg_engine_3_6)
+            # Wire the real queue_repo into the service.
+            service._queue_repo = queue_repo
+            # Wire a real checkpointer into the manager so
+            # the derivation has a checkpointer to read.
+            class _RealCheckpointer:
+                class _MockRawSaver:
+                    async def aget(self, config):
+                        return None
+                raw_saver = _MockRawSaver()
+            service._manager._checkpointer = _RealCheckpointer()
+            # Iteration-2 blocker 1: the bridge needs the
+            # manager's REAL loop (loop-bound checkpointer locks).
+            with _manager_loop() as loop:
+                service._manager._loop = loop
+                # Run the lane 2 backstop.
+                result = service._run_no_row_backstop_lane()
+
+            # The straddle child was admitted, the PREFIX
+            # ledger found no match (no delivery evidence),
+            # the derivation succeeded, the
+            # ``ensure_deferred`` minted a PENDING row, the
+            # ``transition_deferred_to_pending`` accepted the
+            # transition, the ``_handle_recover_deferred_report``
+            # was called.
+            assert result.recovered == 1, (
+                f"straddle child must be recovered (F-1 wedge "
+                f"closure); recovered={result.recovered}, "
+                f"skipped_already_reported={result.skipped_already_reported}"
+            )
+            # Verify the row state: a PENDING row exists for
+            # the (parent, child_straddle) triple.
+            from daemon.repositories.report_injection.models import (
+                ReportInjection,
+                ReportInjectionState,
+            )
+            with Session(pg_engine_3_6) as session:
+                row = session.exec(
+                    sm_select(ReportInjection).where(
+                        ReportInjection.parent_instance_id == parent,
+                        ReportInjection.child_instance_id
+                        == child_straddle,
+                    )
+                ).first()
+            assert row is not None, (
+                f"ensure_deferred must have minted a row for the "
+                f"straddle child; no row found for "
+                f"(parent={parent}, child={child_straddle})"
+            )
+            # The state should be PENDING (the per-row pass
+            # transitions DEFERRED → PENDING before the
+            # handoff).
+            assert row.state == ReportInjectionState.PENDING.value, (
+                f"row state MUST be PENDING (D2 end-state "
+                f"alignment); got {row.state}"
+            )
+            # The child_message_id on the row is the
+            # derived_id (BaseMessage.id from the checkpoint).
+            assert row.child_message_id == derived_id, (
+                f"row child_message_id MUST be the derived "
+                f"BaseMessage.id (the checkpoint extraction); "
+                f"got {row.child_message_id}, expected {derived_id}"
+            )
+        finally:
+            _unmock_persistence_messages()
+
+
+class TestF2S27NoDuplicateExecutionRegressionOnPG:
+    """S27 — no-duplicate-execution regression on real PG.
+
+    Per phase2-plan.md task 2.11(b) + Issue-7: "S27
+    (no-regression) — INTEGRATION on real PG seam per C-2 —
+    NON-DROPPABLE. Dropping S27 would mean the gate claims
+    green on unit tests alone, which C-2 explicitly rejects."
+
+    The load-bearing correctness invariant the RDRS chain
+    provides: the obligation-triple unique index (migration
+    20260819_000001:114-120) prevents duplicate execution of
+    the same (parent, child, child_msg) obligation. The
+    per-row pass drives ``ensure_deferred`` (W6 absorbs the
+    IntegrityError on duplicate). Running the lane 2 backstop
+    twice on the same wedge child results in exactly one
+    ``ensure_deferred`` call and exactly one recovery.
+    """
+
+    def test_s27_no_duplicate_execution_on_double_run(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        """S27 — no-duplicate-execution regression on real PG.
+
+        Calls ``ensure_deferred`` twice with the SAME
+        (parent, child, child_msg) triple. Asserts:
+          * First call: returns the row (the obligation is
+            minted).
+          * Second call: returns ``None`` (the existing
+            PENDING row absorbs the duplicate — the
+            obligation-triple unique index prevents
+            duplicate INSERTs).
+          * The obligation-triple row count is EXACTLY 1.
+        """
+        parent = _seed_instance(pg_engine_3_6)
+        child_straddle = _seed_instance(
+            pg_engine_3_6,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        from daemon.constants import DEFERRED_REASON_RESUME_ROUTER
+        ri_repo = ReportInjectionRepository(engine=pg_engine_3_6)
+        child_msg_id = f"derived-{uuid.uuid4().hex}"
+
+        # First call: insert a fresh DEFERRED row.
+        row1 = ri_repo.ensure_deferred(
+            parent_instance_id=parent,
+            child_instance_id=child_straddle,
+            child_message_id=child_msg_id,
+            deferred_reason=DEFERRED_REASON_RESUME_ROUTER,
+        )
+        assert row1 is not None, (
+            "first ensure_deferred MUST return the row "
+            "(a fresh DEFERRED row was inserted); got None"
+        )
+
+        # Transition the row to PENDING.
+        ri_repo.transition_deferred_to_pending(row1.injection_id)
+
+        # Second call: the existing PENDING row absorbs the
+        # duplicate (the obligation-triple unique index
+        # prevents duplicate INSERTs).
+        row2 = ri_repo.ensure_deferred(
+            parent_instance_id=parent,
+            child_instance_id=child_straddle,
+            child_message_id=child_msg_id,
+            deferred_reason=DEFERRED_REASON_RESUME_ROUTER,
+        )
+        assert row2 is None, (
+            "second ensure_deferred MUST return None (the "
+            "obligation-triple unique index absorbed the "
+            "duplicate; the existing PENDING row's same-reason "
+            "duplicate routing is a benign no-op); "
+            f"got {row2}"
+        )
+
+        # Verify the obligation-triple row count: EXACTLY 1.
+        from daemon.repositories.report_injection.models import (
+            ReportInjection,
+        )
+        with Session(pg_engine_3_6) as session:
+            rows = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.parent_instance_id == parent,
+                    ReportInjection.child_instance_id
+                    == child_straddle,
+                )
+            ).all()
+        assert len(rows) == 1, (
+            f"obligation-triple unique index MUST prevent "
+            f"duplicate INSERTs; got {len(rows)} rows for "
+            f"(parent={parent}, child={child_straddle})"
+        )
+
+    def test_s27_no_duplicate_via_real_handle_recover_deferred_report(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        """S27 (end-to-end) — the ``_handle_recover_deferred_report``
+        call is made exactly once per obligation across the
+        two-run scenario. The PREFIX ledger + the
+        obligation-triple unique index jointly enforce
+        exactly-once end-to-end.
+
+        This is the load-bearing no-duplicate-execution
+        regression: the RDRS chain (ensure_deferred →
+        transition → reconcile + re-enter) is the only
+        sanctioned path (per W-2 guardrails in
+        ``decisions.md §12d``). A double-invocation would
+        cause a duplicate parent-wake.
+
+        EXERCISED (W-3 re-word, iteration 2): two full lane-2
+        sweeps against real PG; the manager hand-off INVOCATION
+        COUNT at the (mocked) seam is exactly 1 with the exact
+        triple + source. NOT EXERCISED: the real reconcile/re-enter
+        behind the seam (an actual parent wake is not delivered —
+        the mock records the call instead).
+        """
+        parent = _seed_instance(pg_engine_3_6)
+        child_straddle = _seed_instance(
+            pg_engine_3_6,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        queue_repo = SQLModelMessageQueueRepository(
+            engine=pg_engine_3_6
+        )
+
+        _mock_persistence_messages(
+            child_straddle,
+            [
+                {
+                    "role": "assistant",
+                    "content": "child terminal report content",
+                    "message_id": f"derived-{uuid.uuid4().hex}",
+                },
+            ],
+        )
+        try:
+            service, manager = _build_pg_service(pg_engine_3_6)
+            service._queue_repo = queue_repo
+            class _RealCheckpointer:
+                class _MockRawSaver:
+                    async def aget(self, config):
+                        return None
+                raw_saver = _MockRawSaver()
+            service._manager._checkpointer = _RealCheckpointer()
+
+            # Iteration-2 blocker 1: the bridge needs the
+            # manager's REAL loop (loop-bound checkpointer locks).
+            with _manager_loop() as loop:
+                service._manager._loop = loop
+                # First run: the straddle child is recovered.
+                result1 = service._run_no_row_backstop_lane()
+                assert result1.recovered == 1
+
+                # Second run: no new recovery.
+                result2 = service._run_no_row_backstop_lane()
+                assert result2.recovered == 0
+
+            # The manager's ``_handle_recover_deferred_report``
+            # was called EXACTLY ONCE across both runs (the
+            # exactly-once invariant at the manager level).
+            handle_calls = (
+                manager._handle_recover_deferred_report.call_args_list
+            )
+            assert len(handle_calls) == 1, (
+                f"manager._handle_recover_deferred_report MUST "
+                f"be called exactly once across both runs (no "
+                f"duplicate-execution); got {len(handle_calls)} calls"
+            )
+            # The call shape: the FIRST call was for the
+            # straddle child (the obligation that was minted
+            # in the first run). The second run saw the
+            # existing obligation and skipped (already_recovered
+            # path).
+            first_call = handle_calls[0]
+            first_kwargs = first_call.kwargs
+            assert (
+                first_kwargs.get("child_instance_id")
+                == child_straddle
+            ), (
+                f"first handle_recover call MUST be for the "
+                f"straddle child; got child_instance_id="
+                f"{first_kwargs.get('child_instance_id')}"
+            )
+            assert (
+                first_kwargs.get("source") == "sweep_no_row_backstop"
+            ), (
+                f"first handle_recover call MUST source from "
+                f"the no_row_backstop lane; got source="
+                f"{first_kwargs.get('source')}"
+            )
+        finally:
+            _unmock_persistence_messages()
+
+
+# ── F-2 (phase2) test helpers ───────────────────────────────────────────
+
+
+@contextlib.contextmanager
+def _manager_loop():
+    """A REAL running event loop standing in for ``manager._loop``.
+
+    Iteration-2 blocker 1: the per-row pass bridges checkpointer
+    coroutines onto the manager's loop via
+    ``asyncio.run_coroutine_threadsafe(...).result(timeout=8)`` —
+    the loop must be LIVE (running on a background thread) or the
+    bridge's ``.result()`` would never resolve. Teardown stops the
+    loop and joins the thread so no loop leaks across tests.
+    """
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5.0)
+        loop.close()
+
+
+def _mock_persistence_messages(
+    instance_id: str, messages: list[dict[str, Any]]
+) -> Any:
+    """Patch ``daemon.persistence.get_instance_messages`` to return
+    the given messages for the given instance_id.
+
+    F-2 (phase2 task 2.6) — the per-row pass's anchor-less
+    ``child_message_id`` derivation reads the child
+    checkpoint via this function. In the PG integration
+    tests there is no real LangGraph checkpointer, so the
+    derivation would fail. This helper patches the function
+    to return a fixture for the duration of a test.
+
+    Iteration-2 routing: the per-row pass now reads the
+    checkpointer for BOTH bridge consumers — the parent-history
+    ledger scan (instance_id = PARENT) and the derivation
+    (instance_id = CHILD). The mock returns the fixture for the
+    seeded child and an empty history for every other instance
+    (the parent scan finds no delivery evidence → no match → the
+    pass proceeds to the derivation), instead of asserting on the
+    instance id (the prior assert turned the ledger scan into a
+    silent DEBUG-swallowed failure).
+    """
+    import daemon.persistence as persistence_mod
+
+    async def _fake_get_instance_messages(
+        checkpointer, _instance_id, manager=None
+    ):
+        if _instance_id == instance_id:
+            return messages
+        # Any other instance (the parent-history ledger scan):
+        # empty history → no PREFIX evidence → proceed.
+        return []
+
+    # Save the original so _unmock_persistence_messages can
+    # restore it.
+    _mock_persistence_messages._original = (
+        persistence_mod.get_instance_messages
+    )
+    persistence_mod.get_instance_messages = _fake_get_instance_messages
+    # Also patch the ledger module's import (the ledger uses
+    # `from .. import persistence as _persistence` so the patch
+    # at the daemon.persistence module level is picked up).
+    return _fake_get_instance_messages
+
+
+def _unmock_persistence_messages() -> None:
+    """Restore the original ``daemon.persistence.get_instance_messages``."""
+    import daemon.persistence as persistence_mod
+    if hasattr(_mock_persistence_messages, "_original"):
+        persistence_mod.get_instance_messages = (
+            _mock_persistence_messages._original
+        )
+
+
+# =============================================================================
+# Block-1 G4 — real-PG seeded test mirroring the captured wedge
+# =============================================================================
+#
+# Evidence:
+# .agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/db-assertions/d1-pre-kill-assertion.txt
+# (decisive R1 capture via SIGSTOP->verify->SIGKILL). Captured state:
+#   parent_instance | <id> | waiting_children
+#   child_instance  | <id> | completed
+#   wake_task       | running | process_report
+#   wake_msg_status | ready
+#   inj_state       | PENDING
+# RDRS lane 1/2/3/4/5 are all skipped on this state (Lane 1 needs
+#   DEFERRED, Lane 2 excludes on has_injection_row, Lane 3+4 skip
+#   on the 10-minute age_bound, Lane 5 only handles TERMINAL parents).
+#   stale_task_recovery defers for 15min via the F-1 boot_epoch
+#   amendment. Manual ping deadlocks against the worker-pool
+#   per-instance busy guard at task/repository.py:2648-2650.
+#
+# The new lane 6 (stuck_wake) heals the captured state within one
+# sweep cadence by invoking the existing
+# ``TaskRepository.force_cancel_and_schedule_retry`` primitive on
+# the dead-worker wake task. The retry wakes the worker pools
+# =============================================================================
+# Block-1 G4 — real-PG seeded test mirroring the captured wedge
+# =============================================================================
+#
+# Evidence:
+# .agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/db-assertions/d1-pre-kill-assertion.txt
+# (decisive R1 capture via SIGSTOP->verify->SIGKILL). Captured state:
+#   parent_instance | <id> | waiting_children
+#   child_instance  | <id> | completed
+#   wake_task       | running | process_report
+#   wake_msg_status | ready
+#   inj_state       | PENDING
+# RDRS lane 1/2/3/4/5 are all skipped on this state (Lane 1 needs
+#   DEFERRED, Lane 2 excludes on has_injection_row, Lane 3+4 skip
+#   on the 10-minute age_bound, Lane 5 only handles TERMINAL parents).
+#   stale_task_recovery defers for 15min via the F-1 boot_epoch
+#   amendment. Manual ping deadlocks against the worker-pool
+#   per-instance busy guard at task/repository.py:2648-2650.
+#
+# The new lane 6 (stuck_wake) heals the captured state within one
+# sweep cadence by invoking the existing
+# ``TaskRepository.force_cancel_and_schedule_retry`` primitive on
+# the dead-worker wake task. The retry wakes the worker pool's
+# per-instance claim (no RUNNING task for the parent), the worker
+# reads the preserved wake row, and ``instance_messaging`` flips
+# the parent from waiting_children to RUNNING.
+
+
+class TestBlock1G4StuckWakeHealOnPG:
+    """Block-1 G4: the captured wedge heals within one sweep cadence.
+
+    Mirrors the R1-captured state verbatim. The lane action is
+    observable:
+
+    * ``recovered == 1`` (one wake task force-cancelled + retry).
+    * The dead-worker wake task is now ``cancelled`` (the
+      ``force_cancel`` arm of ``force_cancel_and_schedule_retry``).
+    * A new retry task exists in ``pending`` with the same
+      ``message_id`` (the wake row's content) — the worker pool
+      claims it (per-instance busy no longer matches because the
+      parent has no RUNNING task) and delivers the preserved wake
+      row to the parent.
+    * The PENDING marker is left in place (the lane's heal
+      action does NOT mint or transition the marker — the marker
+      is the recovery contract, not the delivery path; the
+      preserved wake row IS the delivery).
+    * The parent instance stays at ``waiting_children`` (the heal
+      unblocks the worker; the LLM-notify's flip is exercised by
+      the manager test, not here).
+    """
+
+    def test_stuck_wake_lane_heals_captured_wedge_on_pg(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        from daemon.services.report_delivery_recovery import (
+            ReportDeliveryRecoveryService,
+        )
+        from daemon.repositories.task.repository import TaskRepository
+        from daemon.repositories.task.models import TaskType
+
+        # ── Seed the LIVE r1r-captured state ───────────────────────
+        # Parent + child instances.
+        parent = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-parent-b5a5e621",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        child = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-child-b7c2a7c9",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        # The marker's child_message_id = the CHILD's content
+        # message (the message the child sent at completion —
+        # ``34cedf8d-...`` per the r1r pre-kill assertion). The
+        # wake row has a DIFFERENT message_id (``ddbeef1d-...``)
+        # minted when the wake was created. The two are NOT
+        # equal — correlation is via the wake row's ``source``
+        # pattern. This is the LIVE shape; the prior commit
+        # (3a2bbdf8) used a satisfying-join seed where
+        # ``mq.message_id == ri.child_message_id`` (false
+        # assurance; the seed satisfied the wrong join).
+        child_content_message_id = "g4-child-content-34cedf8d"
+        wake_message_id = "g4-wake-msg-ddbeef1d"
+        assert child_content_message_id != wake_message_id, (
+            "LIVE shape: the wake row's message_id is a fresh "
+            "uuid minted at wake-mint time, NOT the marker-stored "
+            "child_content_message_id (the two are different ids "
+            "per the r1r pre-kill assertion)"
+        )
+        _seed_pg_message(
+            pg_engine_3_6,
+            instance_id=parent,
+            message_id=wake_message_id,
+            status=MessageStatus.READY.value,
+            type_=MessageType.COMPLETION_REPORT.value,
+            # The source encodes the child_content_message_id
+            # (colon-form, per the seven mint sites — see the F-1
+            # / F-2 rationale in
+            # ``daemon/services/report_delivery_ledger.py`` /
+            # ``daemon/repositories/message_queue/repository.py``):
+            # ``f"internal_report:{child_iid}:{child_content_msg_id}"``.
+            # The lane's source-PREFIX correlation
+            # (``mq.source LIKE 'internal_report:' || ri.child_instance_id || ':%'``)
+            # matches via the child_iid prefix.
+            source=(
+                f"internal_report:{child}:{child_content_message_id}"
+            ),
+        )
+        # Dead-worker wake task (process_report on the parent's
+        # queue, claimed by a worker that died with the daemon,
+        # stale heartbeat since the crash). The wake task's
+        # ``message_id`` is the wake ROW's message_id (the worker
+        # reads the wake row content via ``task.message_id``).
+        stale_heartbeat = (
+            _dt.now(_tz.utc).replace(tzinfo=None) - _td(minutes=10)
+        ).isoformat()
+        wake_task = Task(
+            work_id=f"g4-wake-work-{uuid.uuid4().hex[:8]}",
+            task_type=TaskType.PROCESS_REPORT.value,
+            instance_id=parent,
+            message_id=wake_message_id,
+            status=TaskStatus.RUNNING.value,
+            worker_id="dead-worker-0",
+            started_at=stale_heartbeat,
+            last_heartbeat_at=stale_heartbeat,
+        )
+        with Session(pg_engine_3_6) as session:
+            session.add(wake_task)
+            session.commit()
+            session.refresh(wake_task)
+            dead_wake_task_id = int(wake_task.id)
+
+        # The PENDING marker (the recovery obligation for the
+        # obligation triple). The marker's child_message_id ==
+        # the CHILD's content message (NOT the wake row's
+        # message_id — the two are different ids in the LIVE
+        # shape; the lane correlates via the wake row's source
+        # pattern).
+        _seed_pg_deferred_row(
+            pg_engine_3_6,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id=child_content_message_id,
+            state=ReportInjectionState.PENDING.value,
+            deferred_reason="system:crash_wake",
+        )
+
+        # ── Run the lane ────────────────────────────────────────────
+        # Real task_repo so force_cancel_and_schedule_retry actually
+        # creates a retry row (the lane's duck-typed gate fires the
+        # heal primitive, not a MagicMock).
+        ri_repo = ReportInjectionRepository(engine=pg_engine_3_6)
+        task_repo = TaskRepository(engine=pg_engine_3_6)
+        queue_repo = MagicMock()
+        queue_repo.find_wake_already_delivered_evidence = MagicMock(
+            return_value=False
+        )
+        manager = MagicMock()
+        manager.engine = pg_engine_3_6
+        manager._checkpointer = None
+        manager._handle_recover_deferred_report = MagicMock()
+        # G4-r4 last-mile: lane 6 dispatches the parent-schedule
+        # via enqueue_message (the SAME primitive the manual
+        # ping uses; the auto-resume bumps waiting_children →
+        # RUNNING at instance_messaging.py:1968). The unit test
+        # tests/unit/test_report_delivery_recovery_service.py::
+        # TestG4R3StuckWakeParentScheduleSeam pins the schedule
+        # call + the EFFECT on the seeded state. Wire the
+        # PG-test manager to a no-op coroutine so the bridge
+        # resolves without raising; this test focuses on the
+        # heal mechanics (cancel + retry + preserve), not the
+        # schedule primitive.
+        async def _no_op_enqueue(_instance_id, _message, **kwargs):
+            return None
+        manager.enqueue_message = AsyncMock(
+            side_effect=_no_op_enqueue
+        )
+        service = ReportDeliveryRecoveryService(
+            task_repo=task_repo,
+            report_injection_repo=ri_repo,
+            queue_repo=queue_repo,
+            instance_repo=MagicMock(),
+            manager_ref=manager,
+            interval_seconds=300,
+            age_bound_minutes=10,
+            batch_cap=100,
+            recovery_retry_minutes=1,
+            enabled=True,
+        )
+
+        # ── Candidate query finds the captured state ───────────────
+        candidates = ri_repo.find_stuck_wake_candidates(limit=10)
+        assert len(candidates) == 1, (
+            f"the captured wedge (LIVE shape: mq.message_id != "
+            f"ri.child_message_id, source-PREFIX correlation) "
+            f"MUST be a stuck-wake candidate; got {candidates!r}"
+        )
+        cand = candidates[0]
+        assert cand["parent_instance_id"] == parent
+        assert cand["child_instance_id"] == child
+        assert cand["wake_task_id"] == dead_wake_task_id
+        assert cand["wake_message_id"] == wake_message_id
+        assert cand["child_message_id"] == child_content_message_id
+
+        # ── The heal ─────────────────────────────────────────────────
+        # G4-r4: lane 6 bridges to a real background loop standing
+        # in for ``manager._loop`` so the parent-schedule call
+        # resolves (the loop must be LIVE on a background thread
+        # or the bridge's ``.result(timeout=8)`` never resolves).
+        # The PG test focuses on the heal mechanics (cancel +
+        # retry + preserve), not the schedule primitive (the
+        # unit test in
+        # tests/unit/test_report_delivery_recovery_service.py::
+        # TestG4R3StuckWakeParentScheduleSeam pins the schedule
+        # call + the EFFECT on the seeded state).
+        with _manager_loop() as loop:
+            service._manager._loop = loop
+            lane = service._run_stuck_wake_lane()
+
+        # ── Assertions ──────────────────────────────────────────────
+        # The lane counts ONE recovery.
+        assert lane.recovered == 1, (
+            f"the dead-worker wake task MUST be force-cancelled "
+            f"+ retry-minted in a single sweep; recovered="
+            f"{lane.recovered}, skipped_busy={lane.skipped_busy}, "
+            f"errors={lane.errors}"
+        )
+        assert lane.errors == 0
+
+        # The dead-worker task is now cancelled (the force_cancel
+        # arm of force_cancel_and_schedule_retry).
+        with Session(pg_engine_3_6) as session:
+            cancelled = session.get(Task, dead_wake_task_id)
+            assert cancelled.status == TaskStatus.CANCELLED.value, (
+                f"dead-worker task MUST be CANCELLED after heal; "
+                f"got status={cancelled.status}"
+            )
+            assert cancelled.retry_scheduled is True, (
+                f"force_cancel MUST set retry_scheduled=True "
+                f"(the atomic-UPDATE-with-guard pattern); got "
+                f"retry_scheduled={cancelled.retry_scheduled}"
+            )
+
+            # The retry task exists in PENDING with the same
+            # message_id (the wake row's content).
+            retry_tasks = list(
+                session.exec(
+                    sm_select(Task).where(
+                        Task.message_id == wake_message_id,
+                        Task.id != dead_wake_task_id,
+                    )
+                ).all()
+            )
+            assert len(retry_tasks) == 1, (
+                f"exactly ONE retry task must exist for the wake "
+                f"message_id; got {len(retry_tasks)} retries"
+            )
+            retry = retry_tasks[0]
+            assert retry.status == TaskStatus.PENDING.value, (
+                f"retry task MUST be PENDING (claimable by the "
+                f"worker pool — the per-instance busy guard no "
+                f"longer matches because the parent has no RUNNING "
+                f"task); got status={retry.status}"
+            )
+            assert retry.instance_id == parent, (
+                f"retry task MUST anchor to the parent (worker "
+                f"reads the parent's wake row); got "
+                f"instance_id={retry.instance_id}"
+            )
+
+            # The wake row still exists (the F-1 epoch-belt
+            # preservation semantic) and is the message_queue row
+            # that the retry worker will read. Its ``status``
+            # may have transitioned to ``failed`` as a
+            # ``force_cancel_and_schedule_retry`` side effect
+            # (the cancel arm marks the companion message_queue
+            # row failed so the message-delivery ledger tracks
+            # the cancellation — the retry task re-drives the
+            # new delivery via the worker's claim of the retry
+            # task). The CONTENT + parent linkage are what
+            # matter for delivery.
+            wake_row = session.exec(
+                sm_select(MessageQueue).where(
+                    MessageQueue.message_id == wake_message_id,
+                )
+            ).first()
+            assert wake_row is not None, (
+                f"preserved wake row MUST persist (F-1 epoch-belt); "
+                f"got None"
+            )
+            assert wake_row.instance_id == parent, (
+                f"preserved wake row MUST anchor to the parent; "
+                f"got instance_id={wake_row.instance_id}"
+            )
+            assert wake_row.status in {
+                MessageStatus.READY.value,
+                MessageStatus.FAILED.value,
+            }, (
+                f"preserved wake row status MUST be ready (pre-heal) "
+                f"or failed (post-cancel side effect); got "
+                f"status={wake_row.status}"
+            )
+
+            # Exactly ONE wake row (no duplicate delivery evidence).
+            all_wake_rows = list(
+                session.exec(
+                    sm_select(MessageQueue).where(
+                        MessageQueue.instance_id == parent,
+                        MessageQueue.type == (
+                            MessageType.COMPLETION_REPORT.value
+                        ),
+                    )
+                ).all()
+            )
+            assert len(all_wake_rows) == 1, (
+                f"exactly ONE preserved wake row must exist; got "
+                f"{len(all_wake_rows)} (a duplicate would create a "
+                f"duplicate-execution wedge)"
+            )
+
+            # The PENDING marker is preserved (the heal does not
+            # touch the marker; the marker is the recovery contract,
+            # the wake row is the delivery artifact).
+            inj_rows = list(
+                session.exec(
+                    sm_select(ReportInjection).where(
+                        ReportInjection.parent_instance_id == parent,
+                        ReportInjection.child_instance_id == child,
+                    )
+                ).all()
+            )
+            assert len(inj_rows) == 1
+            assert (
+                inj_rows[0].state == ReportInjectionState.PENDING.value
+            )
+
+        # The child instance is unchanged (the heal does not
+        # re-execute the child — child re-execution would be a
+        # duplicate-execution regression).
+        with Session(pg_engine_3_6) as session:
+            child_row = session.get(Instance, child)
+            assert (
+                child_row.status == InstanceStatus.COMPLETED.value
+            ), (
+                f"child instance MUST stay COMPLETED (no re-execution); "
+                f"got status={child_row.status}"
+            )
+
+        # ── (b) half: parent's busy-guard no longer blocks ────────
+        # The captured state's deadlock (G4 D2 root cause:
+        # per-instance busy guard at task/repository.py:2648-2650)
+        # is gone post-heal — the dead-worker wake task is
+        # CANCELLED (above); the retry task is PENDING with no
+        # worker_id (above); the parent has NO RUNNING sibling.
+        # ``has_pending_tasks_blocked_by_busy_instance`` (the
+        # SAME busy-guard predicate ``claim_pending_task`` uses,
+        # gated to status='running' only) returns False: a NEW
+        # pending candidate for this parent is no longer
+        # blocked by a RUNNING sibling. The (b) half of the
+        # captured wedge's deadlock is gone — the chicken-and-
+        # egg with the worker-pool per-instance guard is broken
+        # by the dead-worker task cancel + retry mint.
+        #
+        # Note: ``has_instance_busy`` (the wider call-site guard
+        # widened to PENDING + RUNNING + PAUSED at
+        # task/repository.py:339) is True post-heal — the retry
+        # task IS in PENDING. That guard gates call-site surface
+        # operations (NOT the claim path), and the retry task
+        # being PENDING is the production-heal shape. The claim-
+        # path closure is what unblocks the wedge.
+        #
+        # Note 2: the retry task is NOT immediately claimable by
+        # ``claim_pending_task`` — it carries the production
+        # ``next_retry_at = now + backoff`` (backoff_base=60s
+        # default; ``schedule_retry`` exponential formula) and
+        # the claim's ``next_retry_at <= :now_str`` filter
+        # excludes it until the backoff elapses. This is the
+        # production-shape wake lane (a worker claims it AFTER
+        # the backoff — see task/repository.py:2698-2704 for the
+        # PROCESS_REPORT wake-lane priority). The deadlock is
+        # gone (the busy guard no longer blocks); the worker
+        # claim timing is the production default.
+        repo_for_post_heal = TaskRepository(engine=pg_engine_3_6)
+        assert (
+            repo_for_post_heal.has_pending_tasks_blocked_by_busy_instance()
+            is False
+        ), (
+            "post-heal busy-guard CLOSURE: the parent's claim-path "
+            "busy-guard no longer blocks new claims (the dead-"
+            "worker wake task is CANCELLED and no RUNNING "
+            "sibling remains; the worker's claim is unblocked — "
+            "the (b) half of the captured wedge's deadlock is "
+            "gone)"
+        )
+        # And a NEW pending candidate seeded for the parent is
+        # also unblocked (the chicken-and-egg would have been:
+        # the wake task blocks new candidates → the worker
+        # can't claim → the wake can't deliver; post-heal the
+        # wake task is CANCELLED → new candidates are claimable
+        # once their next_retry_at elapses).
+        new_candidate_id = _seed_pg_task(
+            pg_engine_3_6,
+            instance_id=parent,
+            status=TaskStatus.PENDING.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+        )
+        with Session(pg_engine_3_6) as session:
+            new_candidate = session.get(Task, new_candidate_id)
+            # The new candidate is in PENDING (its own per-instance
+            # busy guard query would return True — a PENDING task
+            # for this parent — but the CLAIM PATH's busy guard
+            # is status='running' only, and the dead-worker wake
+            # task is now CANCELLED).
+            assert new_candidate.status == TaskStatus.PENDING.value
+        # Force the claim-path check: this is what ``claim_pending_task``
+        # uses internally (status='RUNNING' guard at the top of
+        # the WHERE cascade). The new candidate is a
+        # ``process_message`` type; the cross-system guard also
+        # fires (blocks OTHER candidates whose instance has an
+        # active JobItem). With NO active JobItem for this
+        # parent (the captured state had a JobItem but the heal
+        # does not touch JobItem — the cross-system guard
+        # therefore STILL blocks the new candidate). The
+        # dispatch's "no RUNNING sibling" closure is the (b)
+        # contract; the JobItem-aware cross-system guard is a
+        # separate invariant (already satisfied post-heal ONLY
+        # IF the captured-state JobItem has been transitioned
+        # off-active by some other actor — out of scope for
+        # this fix).
+
+    def test_stuck_wake_query_correlates_via_source_not_id_join_on_pg(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        """Live-shape correlation pin (G4-r round-2 — the id-join
+        regression class). Seeds the captured state with
+        NON-matching message_id vs child_message_id + a
+        source-PREFIX correlation. The query MUST find the row
+        via the source-PREFIX join (``mq.source LIKE 'internal_report:' ||
+        ri.child_instance_id || ':%'``).
+
+        This test pins the source-correlation fix: the prior
+        commit (3a2bbdf8) had ``mq.message_id = ri.child_message_id``
+        as the join condition — a satisfying-join seed (where
+        both ids are equal) made that test green while the LIVE
+        row shape (different ids, source correlation) was broken.
+        The retry suite (this commit) uses a non-matching id
+        seed; an id-join regression would now FAIL this test.
+
+        Companion shape (sibling-child exclusion) is covered by
+        ``test_stuck_wake_lane_excludes_sibling_child_on_pg`` below.
+        """
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+
+        parent = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-parent-source-pin",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        child = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-child-source-pin",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        # The CHILD's content message (the message that the
+        # child sent at completion). This is what the marker's
+        # ``child_message_id`` references. Per the natural-
+        # completion mint at child_reports.py:3762, this id is
+        # also embedded in the wake row's ``source`` (colon-form).
+        child_content_message_id = "g4-child-content-pin"
+        # The WAKE ROW's own message_id — a fresh uuid minted
+        # when the wake was created. Different from the child's
+        # content message_id (LIVE shape, per the r1r pre-kill
+        # assertion: mq.message_id=ddbeef1d, ri.child_message_id=
+        # 34cedf8d).
+        wake_message_id = "g4-wake-msg-source-pin"
+        assert child_content_message_id != wake_message_id
+        _seed_pg_message(
+            pg_engine_3_6,
+            instance_id=parent,
+            message_id=wake_message_id,
+            status=MessageStatus.READY.value,
+            type_=MessageType.COMPLETION_REPORT.value,
+            source=(
+                f"internal_report:{child}:{child_content_message_id}"
+            ),
+        )
+        # Dead-worker wake task (RUNNING, stale heartbeat).
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from daemon.repositories.task.models import TaskType
+
+        stale_heartbeat = (
+            _dt.now(_tz.utc).replace(tzinfo=None) - _td(minutes=10)
+        ).isoformat()
+        with Session(pg_engine_3_6) as session:
+            session.add(
+                Task(
+                    work_id=f"g4-wake-work-pin-{uuid.uuid4().hex[:8]}",
+                    task_type=TaskType.PROCESS_REPORT.value,
+                    instance_id=parent,
+                    message_id=wake_message_id,
+                    status=TaskStatus.RUNNING.value,
+                    worker_id="dead-worker-pin",
+                    started_at=stale_heartbeat,
+                    last_heartbeat_at=stale_heartbeat,
+                )
+            )
+            session.commit()
+        _seed_pg_deferred_row(
+            pg_engine_3_6,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id=child_content_message_id,
+            state=ReportInjectionState.PENDING.value,
+            deferred_reason="system:crash_wake",
+        )
+
+        ri_repo = ReportInjectionRepository(engine=pg_engine_3_6)
+        candidates = ri_repo.find_stuck_wake_candidates(limit=10)
+        # The candidate query joins via the source-PREFIX
+        # correlation. An id-join regression (mq.message_id =
+        # ri.child_message_id) would return 0 candidates here
+        # because the ids differ.
+        assert len(candidates) == 1, (
+            f"LIVE shape: source-PREFIX correlation MUST match "
+            f"(wake row id={wake_message_id} != marker "
+            f"child_message_id={child_content_message_id}); "
+            f"an id-join regression would return 0 here — got "
+            f"{candidates!r}"
+        )
+        cand = candidates[0]
+        assert cand["wake_message_id"] == wake_message_id
+        assert cand["child_message_id"] == child_content_message_id
+
+    def test_stuck_wake_lane_excludes_sibling_child_on_pg(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        """Child-boundary safety pin (G4-r round-2). Seeds TWO
+        children whose wake rows would both collide on a bare
+        substring search — the PREFIX boundary rule
+        (``internal_report:{child_iid}:...`` colon-form)
+        ensures only the matched child's wake row is returned.
+
+        Companion to the source-correlation pin: this test
+        catches a regression where the boundary safety of the
+        source pattern is broken (e.g. a wrong LIKE prefix that
+        matches sibling-child wakes).
+        """
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+
+        parent = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-parent-boundary",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        # Two children whose ids share a prefix (the
+        # child-boundary collision case). The boundary rule
+        # requires the suffix to be colon-delimited OR exact.
+        child_a = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-child-boundary-A",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        # child_b's id EXTENDS G4 child_a's id (the boundary
+        # collision). A bare substring LIKE would match BOTH;
+        # the colon-form prefix matches ONLY child_a.
+        child_b = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-child-boundary-A-sibling",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        child_a_content_msg = "g4-child-A-content"
+        _seed_pg_message(
+            pg_engine_3_6,
+            instance_id=parent,
+            message_id="g4-wake-A-msg",
+            status=MessageStatus.READY.value,
+            type_=MessageType.COMPLETION_REPORT.value,
+            source=(
+                f"internal_report:{child_a}:{child_a_content_msg}"
+            ),
+        )
+        child_b_content_msg = "g4-child-B-content"
+        _seed_pg_message(
+            pg_engine_3_6,
+            instance_id=parent,
+            message_id="g4-wake-B-msg",
+            status=MessageStatus.READY.value,
+            type_=MessageType.COMPLETION_REPORT.value,
+            source=(
+                f"internal_report:{child_b}:{child_b_content_msg}"
+            ),
+        )
+        # Dead-worker wake tasks for both children (with stale
+        # heartbeats).
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from daemon.repositories.task.models import TaskType
+
+        stale_heartbeat = (
+            _dt.now(_tz.utc).replace(tzinfo=None) - _td(minutes=10)
+        ).isoformat()
+        with Session(pg_engine_3_6) as session:
+            for msg_id, inst_id in [
+                ("g4-wake-A-msg", parent),
+                ("g4-wake-B-msg", parent),
+            ]:
+                session.add(
+                    Task(
+                        work_id=f"g4-wake-work-boundary-{uuid.uuid4().hex[:8]}",
+                        task_type=TaskType.PROCESS_REPORT.value,
+                        instance_id=inst_id,
+                        message_id=msg_id,
+                        status=TaskStatus.RUNNING.value,
+                        worker_id="dead-worker-boundary",
+                        started_at=stale_heartbeat,
+                        last_heartbeat_at=stale_heartbeat,
+                    )
+                )
+            session.commit()
+        # PENDING markers for BOTH children.
+        _seed_pg_deferred_row(
+            pg_engine_3_6,
+            parent_instance_id=parent,
+            child_instance_id=child_a,
+            child_message_id=child_a_content_msg,
+            state=ReportInjectionState.PENDING.value,
+            deferred_reason="system:crash_wake",
+        )
+        _seed_pg_deferred_row(
+            pg_engine_3_6,
+            parent_instance_id=parent,
+            child_instance_id=child_b,
+            child_message_id=child_b_content_msg,
+            state=ReportInjectionState.PENDING.value,
+            deferred_reason="system:crash_wake",
+        )
+
+        ri_repo = ReportInjectionRepository(engine=pg_engine_3_6)
+        candidates = ri_repo.find_stuck_wake_candidates(limit=10)
+        # Both children are eligible (their wakes match the
+        # boundary-safe LIKE). A regression that breaks the
+        # boundary (e.g. LIKE without trailing colon) would
+        # double-count or shift; the assertion pins the
+        # per-child correlation.
+        assert len(candidates) == 2, (
+            f"two children with two distinct wake rows should "
+            f"correlate correctly; got {len(candidates)} "
+            f"candidates"
+        )
+        child_ids = {c["child_instance_id"] for c in candidates}
+        assert child_ids == {child_a, child_b}, (
+            f"both children MUST be in the candidate set; got "
+            f"{child_ids}, expected {{{child_a}, {child_b}}}"
+        )
+        # And each candidate's wake_message_id matches its
+        # child's wake row (no cross-pollination from the
+        # source-PREFIX correlation).
+        for cand in candidates:
+            if cand["child_instance_id"] == child_a:
+                assert cand["wake_message_id"] == "g4-wake-A-msg"
+            else:
+                assert cand["wake_message_id"] == "g4-wake-B-msg"
+
+    def test_stuck_wake_lane_is_noop_on_empty_db_on_pg(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        """Empty DB → lane candidate query returns 0 rows → the
+        lane records zero recovered (the in-lane loop does not
+        execute). This pins the empty-DB contract on PG (the
+        unit suite covers SQLite)."""
+        from daemon.services.report_delivery_recovery import (
+            ReportDeliveryRecoveryService,
+        )
+        from daemon.repositories.task.repository import TaskRepository
+
+        ri_repo = ReportInjectionRepository(engine=pg_engine_3_6)
+        task_repo = TaskRepository(engine=pg_engine_3_6)
+        queue_repo = MagicMock()
+        queue_repo.find_wake_already_delivered_evidence = MagicMock(
+            return_value=False
+        )
+        manager = MagicMock()
+        manager.engine = pg_engine_3_6
+        manager._checkpointer = None
+        manager._handle_recover_deferred_report = MagicMock()
+        service = ReportDeliveryRecoveryService(
+            task_repo=task_repo,
+            report_injection_repo=ri_repo,
+            queue_repo=queue_repo,
+            instance_repo=MagicMock(),
+            manager_ref=manager,
+            interval_seconds=300,
+            age_bound_minutes=10,
+            batch_cap=100,
+            recovery_retry_minutes=1,
+            enabled=True,
+        )
+        # Empty PG DB (the autouse TRUNCATE cleared the seed).
+        assert (
+            ri_repo.find_stuck_wake_candidates(limit=10) == []
+        )
+        lane = service._run_stuck_wake_lane()
+        assert lane.recovered == 0
+        assert lane.errors == 0

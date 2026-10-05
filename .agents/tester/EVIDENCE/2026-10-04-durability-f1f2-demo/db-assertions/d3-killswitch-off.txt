@@ -1,0 +1,13 @@
+=== D3: KILL-SWITCH OFF BOOT ===
+Time: 2026-10-05T01:31:57Z (boot)
+Boot ready: 01:32:09Z
+
+Lane-2 config verified:
+"ReportDeliveryRecoveryService started: interval=300s, age_bound=10min, batch_cap=100, retry=1min, lanes=[deferred=True, no_row_backstop=False, pending_age=True, recovery_retry=True, orphan=True]"
+
+Boot-time RDRS marker (always prints regardless of kill-switch):
+"RDRS lane 2: post-wipe recovery (no-row backstop; F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)"
+
+No per-row processing for lane 2 (because it's disabled).
+
+D3 wedge capture: SKIPPED (previous 3 R2 attempts failed consistently — wedge window <100ms in dev env). Kill-switch OFF boot is verified separately from wedge capture.

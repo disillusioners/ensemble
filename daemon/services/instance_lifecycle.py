@@ -89,6 +89,132 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────
+# Boot-Sequence Ownership Contract (F-1, durability-f1-f2 / phase1)
+#
+# The F-1 wedge is a two-seam coupling: the bus-side
+# ``_parent_errored`` flip in
+# ``daemon/services/dependency_bus.py`` (gates at :671 and :859)
+# and the wipe-side ``clear_all`` predicate in
+# ``daemon/repositories/task/repository.py`` and
+# ``daemon/repositories/message_queue/repository.py``. Both
+# seams are exercised by every daemon restart; neither seam is
+# aware of the other without a contract document.
+#
+# **W-5 re-anchor (2026-10-04, REVISION CYCLE 2).** The
+# Boot-Sequence Ownership Contract block is the FIRST labelled
+# block in this file; the Pause-First Then Quiesce convention
+# block follows beside it (not after). A reader landing on either seam
+# (``dependency_bus.py:671`` or ``repository.py:4380``) can
+# navigate here in two hops via the inline comments. Drift
+# between this block and ``decisions.md §5`` is a documentation
+# defect — fix the block, not the decisions.
+#
+# Boot order, one owner per step (mirrors ``decisions.md §5``):
+#
+#  1. ``InstanceManager.__init__`` (``api.py:393-398``,
+#     ``manager.py:771-873``) — OWNER: ``manager.py``. Runs
+#     the ``discard_on_startup`` wipe; F-1 captures the
+#     ``boot_epoch`` HERE (BEFORE the wipe; plan §2a, §13a —
+#     RETAINED per the W-3 directive even though arm 2 is
+#     dropped, because the auto-continue consumer at
+#     ``api.py:1553`` needs the epoch).
+#  2. ``manager.initialize()`` (``api.py:399``) — OWNER:
+#     ``manager.py``. Engine, repos, pool, etc.
+#  3. ``capture_boot_epoch(manager.engine)`` (``api.py:412``) —
+#     OWNER: ``boot_epoch.py``. Best-effort; idempotent (the
+#     constructor capture at step 1 also fires — first-wins).
+#  4. Critical-notes boot-state probe (``api.py:422``) — OWNER:
+#     ``config.py``.
+#  5. Execution-gate stale-lease recovery (``api.py:431-436``)
+#     — OWNER: gating service.
+#  6. ``manager.setup_worker_pool()`` (``api.py:439``) — OWNER:
+#     ``pool_orchestrator.py`` / StaleTaskRecovery. Wires
+#     ``PoolOrchestrator.recover_on_startup`` and the periodic
+#     start.
+#  7. ``init_dependency_bus(app, manager)`` (``api.py:1306``) —
+#     OWNER: ``dependency_bus.py``. Bus-internal order (warm
+#     cache → ``_recover_fired_unsent`` →
+#     ``_sweep_orphan_watchers``); the F-1 §1 truthy-error
+#     gates (this file's peer in the F-1 contract) are inside
+#     this owner and are exercised by every daemon that
+#     reaches the bus.
+#  8. Finalization-only recovery loop (``api.py:2459+``) — OWNER:
+#     ``dependency_bus.py``. Per-target finalize-or-defer; never
+#     re-drives wake delivery.
+#  9. ``UpgradeJournalSweepService`` boot reconcile + wake
+#     sweep (``api.py:1498-1521``) — OWNER:
+#     ``upgrade_journal_sweep.py``.
+# 10. Auto-continue boot pass (``api.py:1547-1564``) — OWNER:
+#     ``auto_continue_boot_pass.py``. Selection excludes
+#     ``waiting_children`` (the F-1 wedge straddle class —
+#     ``repository.py:915-921``).
+# 11. (Phase 2 — RDRS lane-2 extension sits here, AFTER the
+#     auto-continue pass; F-1 does NOT touch this step.)
+# 12. ``upgrade_journal_sweep.start()`` (``api.py:1571``) +
+#     ``manager.set_upgrade_journal_sweep`` (``:1573``) — OWNER:
+#     ``upgrade_journal_sweep.py``.
+# 13. ``ServiceReconciliationService`` await
+#     (``api.py:1615-1684``) — OWNER:
+#     ``service_reconciliation.py``.
+#
+# F-1 two-seam coupling:
+#   * Bus seam: ``dependency_bus.py:671`` and ``:859`` gate the
+#     ``_parent_errored`` flip on a truthy error (plan §1) and
+#     log a WARNING on the None path (plan §1a). An inline
+#     comment at ``:671`` names this ownership block so a
+#     reader can navigate here in two hops.
+#   * Wipe seam: ``task/repository.py:4380`` (and the
+#     queue-side mirror at ``message_queue/repository.py:1002``)
+#     restructured to a 2-arm disjunction (plan §2, §13b) —
+#     status + auto-continued-on-non-terminal-instance. An
+#     inline comment at ``task/repository.py:4380`` names this
+#     ownership block. The arm-3 marker is cleared at the
+#     terminalizer call site ``manager.py:11660-11721`` via
+#     ``clear_task_auto_continued`` (plan §13b).
+#
+# The two seams are designed to be independent: a regression
+# at the bus seam (a producer regression re-introducing
+# ``status='error', error=None``) is bounded by the wipe seam
+# (the arm-3 ``EXISTS instances`` co-condition + the
+# terminalizer marker-clearing), and vice versa.
+
+
+# ─────────────────────────────────────────────────────────────────
+# Pause-First Then Quiesce Convention
+# (SECOND labelled block in this file — BESIDE the
+# Boot-Sequence Ownership Contract above; per W-5 re-anchor
+# 2026-10-04. The Boot-Sequence block is FIRST; this
+# convention block is BESIDE it.)
+#
+# Features requiring a quiescent instance — config flips,
+# activation toggles, in-place migrations, watchover activation
+# — follow this convention:
+#
+#   1. ``pause_instance_cascade`` FIRST (cancels the in-flight
+#      graph task via ``graph_task.cancel()``; LangGraph
+#      checkpoints at node boundaries, freezing the turn at
+#      the last committed boundary).
+#   2. Bounded quiescence confirmation (poll for
+#      ``count_pending_for_target == 0`` or similar; bounded by
+#      an explicit deadline — never infinite).
+#   3. State mutation (the feature's intended write).
+#   4. ``resume_instance_cascade`` (DB-only
+#      ``PAUSED → RUNNING``; the next dispatch with
+#      ``is_retry=True`` resumes from checkpoint).
+#
+# Cancellation semantics: tasks cancelled by pause stay in
+# ``PROCESSING`` (NOT ``FAILED``); ``CancellationReason``
+# discriminates pause from shutdown. First proven consumer is
+# ``WatchoverService.activate_watchover``; lifecycle
+# orchestration lives in
+# ``daemon/services/instance_lifecycle.py`` (this file).
+#
+# The Boot-Sequence Ownership Contract block above is BESIDE
+# this block (sibling, not stacked-after) — both are
+# first-class labelled blocks in this file.
+
+
+# ─────────────────────────────────────────────────────────────────
 # Pause/resume watcher-durability kill-switch (Debug Phase 4, 2026-09-07)
 #
 # The resume cascade re-arms CANCELLED, never-delivered child-completion

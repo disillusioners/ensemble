@@ -1,0 +1,626 @@
+F....................................................................... [ 21%]
+..........sssss......................................................... [ 43%]
+...........F..F...............................ssssssssssssssssssssssssss [ 65%]
+ss.......EEEEEFFFFEE.EEEE....FxxEEEEEEEEEEEEE........................... [ 87%]
+.........................s.................                              [100%]
+==================================== ERRORS ====================================
+_ ERROR at setup of TestEnsurePostgresColumnsPath.test_hook_upgrades_legacy_schema_columns_notnull_indexes _
+tests/postgres/test_report_deferred_migration_pg.py:390: in legacy_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestEnsurePostgresColumnsPath.test_hook_idempotent_column_adds_and_index_rerun _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestEnsurePostgresColumnsPath.test_hook_drop_not_null_from_legacy_not_null_column _
+tests/postgres/test_report_deferred_migration_pg.py:390: in legacy_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestEnsurePostgresColumnsPath.test_triple_index_predicate_matches_storage_literals _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestEnsurePostgresColumnsPath.test_c1_duplicate_triple_post_migration_raises_citing_index _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+____ ERROR at setup of TestW3DedupPreCheck.test_w3_no_mutations_when_clean _____
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestW3DedupPreCheck.test_w3_hook_logs_detection_in_statement_source _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestW8RollbackOrder.test_down_section_executes_on_pg_in_documented_order _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestW8RollbackOrder.test_w8_column_first_revert_silently_drops_dependent_index _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestW8RollbackOrder.test_w8_set_not_null_blocked_while_null_rows_exist _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestW8RollbackOrder.test_w8_hook_reheals_after_wrong_order_partial_revert _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_claim_for_task_delivery_missing_when_no_row_exists _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_claim_for_task_delivery_claimed_after_artifact_backfill _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_find_row_by_report_message_id_none_returns_none _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_manager_has_non_terminal_injection_for_none_is_false _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_claim_for_injection_excludes_deferred_and_survives_null_keys _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_count_and_lanes_handle_null_keyed_rows _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_find_completed_children_excludes_existing_null_keyed_row _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_reconcile_turn_mirror_null_message_task_excludes_null_keyed_row _
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1967: in _exec_single_context
+    self.dialect.do_execute(
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: in do_execute
+    cursor.execute(statement, parameters)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/cursor.py:117: in execute
+    raise ex.with_traceback(None)
+E   psycopg.errors.DeadlockDetected: deadlock detected
+E   DETAIL:  Process 909706 waits for AccessExclusiveLock on relation 1063485 of database 16386; blocked by process 910653.
+E   Process 910653 waits for AccessExclusiveLock on relation 1063381 of database 16386; blocked by process 909706.
+E   HINT:  See server log for query details.
+
+The above exception was the direct cause of the following exception:
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7164: in _ensure_postgres_columns
+    conn.execute(text(stmt))
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1419: in execute
+    return meth(
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/sql/elements.py:527: in _execute_on_connection
+    return connection._execute_clauseelement(
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1641: in _execute_clauseelement
+    ret = self._execute_context(
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1846: in _execute_context
+    return self._exec_single_context(
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1986: in _exec_single_context
+    self._handle_dbapi_exception(
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:2363: in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1967: in _exec_single_context
+    self.dialect.do_execute(
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: in do_execute
+    cursor.execute(statement, parameters)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/cursor.py:117: in execute
+    raise ex.with_traceback(None)
+E   sqlalchemy.exc.OperationalError: (psycopg.errors.DeadlockDetected) deadlock detected
+E   DETAIL:  Process 909706 waits for AccessExclusiveLock on relation 1063485 of database 16386; blocked by process 910653.
+E   Process 910653 waits for AccessExclusiveLock on relation 1063381 of database 16386; blocked by process 909706.
+E   HINT:  See server log for query details.
+E   [SQL: ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE]
+E   (Background on this error at: https://sqlalche.me/e/20/e3q8)
+_ ERROR at setup of TestC4NullConsumerAudit.test_count_actionable_pending_tasks_null_keyed_not_suppressing _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_enqueue_signature_excludes_null_by_type _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_ensure_deferred_writes_null_key_by_design _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_transition_deferred_to_pending_keys_on_injection_id _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ ERROR at setup of TestC4NullConsumerAudit.test_consumer_enumeration_is_complete_and_audited _
+tests/postgres/test_report_deferred_migration_pg.py:398: in baseline_shape
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+=================================== FAILURES ===================================
+________________ test_orphan_watcher_cancelled_on_startup_sweep ________________
+tests/postgres/test_06f500af_bug_class_eliminated_pg.py:479: in test_orphan_watcher_cancelled_on_startup_sweep
+    assert row.state == cancelled_state, (
+E   AssertionError: 06f500af bug class: orphan watcher for source_task_id=1 (task.status='cancelled') must be CANCELLED after bus.start() — got state='PENDING'. Phase 1 _sweep_orphan_watchers() not implemented yet.
+E   assert 'PENDING' == 'CANCELLED'
+E     
+E     - CANCELLED
+E     + PENDING
+_______ test_list_queues_with_admittable_work_includes_queued_and_active _______
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1145: in _commit_impl
+    self.engine.dialect.do_commit(self.connection)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:715: in do_commit
+    dbapi_connection.commit()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/connection.py:305: in commit
+    self.wait(self._commit_gen())
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/connection.py:484: in wait
+    return waiting.wait(gen, self.pgconn.socket, interval=interval)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+psycopg_binary/_psycopg/waiting.pyx:241: in psycopg_binary._psycopg.wait_c
+    ???
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/_connection_base.py:585: in _commit_gen
+    yield from self._exec_command(b"COMMIT")
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/_connection_base.py:483: in _exec_command
+    raise e.error_from_result(result, encoding=self.pgconn._encoding)
+E   psycopg.errors.IntegrityConstraintViolation: admission_state=active requires a job_locks row (instance_id=<NULL>)
+E   CONTEXT:  PL/pgSQL function job_queue_items_active_lock_guard() line 1 at RAISE
+
+The above exception was the direct cause of the following exception:
+tests/postgres/test_list_queues_with_admittable_work_pg.py:264: in test_list_queues_with_admittable_work_includes_queued_and_active
+    with pg_engine.begin() as conn:
+         ^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/contextlib.py:148: in __exit__
+    next(self.gen)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:3258: in begin
+    with conn.begin():
+         ^^^^^^^^^^^^
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/util.py:147: in __exit__
+    with util.safe_reraise():
+         ^^^^^^^^^^^^^^^^^^^
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/util/langhelpers.py:121: in __exit__
+    raise exc_value.with_traceback(exc_tb)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/util.py:145: in __exit__
+    self.commit()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:2640: in commit
+    self._do_commit()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:2745: in _do_commit
+    self._connection_commit_impl()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:2716: in _connection_commit_impl
+    self.connection._commit_impl()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1147: in _commit_impl
+    self._handle_dbapi_exception(e, None, None, None, None)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:2363: in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1145: in _commit_impl
+    self.engine.dialect.do_commit(self.connection)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:715: in do_commit
+    dbapi_connection.commit()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/connection.py:305: in commit
+    self.wait(self._commit_gen())
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/connection.py:484: in wait
+    return waiting.wait(gen, self.pgconn.socket, interval=interval)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+psycopg_binary/_psycopg/waiting.pyx:241: in psycopg_binary._psycopg.wait_c
+    ???
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/_connection_base.py:585: in _commit_gen
+    yield from self._exec_command(b"COMMIT")
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/_connection_base.py:483: in _exec_command
+    raise e.error_from_result(result, encoding=self.pgconn._encoding)
+E   sqlalchemy.exc.IntegrityError: (psycopg.errors.IntegrityConstraintViolation) admission_state=active requires a job_locks row (instance_id=<NULL>)
+E   CONTEXT:  PL/pgSQL function job_queue_items_active_lock_guard() line 1 at RAISE
+E   (Background on this error at: https://sqlalche.me/e/20/gkpj)
+___________ test_list_queues_with_admittable_work_4_shapes_combined ____________
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1145: in _commit_impl
+    self.engine.dialect.do_commit(self.connection)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:715: in do_commit
+    dbapi_connection.commit()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/connection.py:305: in commit
+    self.wait(self._commit_gen())
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/connection.py:484: in wait
+    return waiting.wait(gen, self.pgconn.socket, interval=interval)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+psycopg_binary/_psycopg/waiting.pyx:241: in psycopg_binary._psycopg.wait_c
+    ???
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/_connection_base.py:585: in _commit_gen
+    yield from self._exec_command(b"COMMIT")
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/_connection_base.py:483: in _exec_command
+    raise e.error_from_result(result, encoding=self.pgconn._encoding)
+E   psycopg.errors.IntegrityConstraintViolation: admission_state=active requires a job_locks row (instance_id=<NULL>)
+E   CONTEXT:  PL/pgSQL function job_queue_items_active_lock_guard() line 1 at RAISE
+
+The above exception was the direct cause of the following exception:
+tests/postgres/test_list_queues_with_admittable_work_pg.py:382: in test_list_queues_with_admittable_work_4_shapes_combined
+    with pg_engine.begin() as conn:
+         ^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/contextlib.py:148: in __exit__
+    next(self.gen)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:3258: in begin
+    with conn.begin():
+         ^^^^^^^^^^^^
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/util.py:147: in __exit__
+    with util.safe_reraise():
+         ^^^^^^^^^^^^^^^^^^^
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/util/langhelpers.py:121: in __exit__
+    raise exc_value.with_traceback(exc_tb)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/util.py:145: in __exit__
+    self.commit()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:2640: in commit
+    self._do_commit()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:2745: in _do_commit
+    self._connection_commit_impl()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:2716: in _connection_commit_impl
+    self.connection._commit_impl()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1147: in _commit_impl
+    self._handle_dbapi_exception(e, None, None, None, None)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:2363: in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py:1145: in _commit_impl
+    self.engine.dialect.do_commit(self.connection)
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:715: in do_commit
+    dbapi_connection.commit()
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/connection.py:305: in commit
+    self.wait(self._commit_gen())
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/connection.py:484: in wait
+    return waiting.wait(gen, self.pgconn.socket, interval=interval)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+psycopg_binary/_psycopg/waiting.pyx:241: in psycopg_binary._psycopg.wait_c
+    ???
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/_connection_base.py:585: in _commit_gen
+    yield from self._exec_command(b"COMMIT")
+../ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/psycopg/_connection_base.py:483: in _exec_command
+    raise e.error_from_result(result, encoding=self.pgconn._encoding)
+E   sqlalchemy.exc.IntegrityError: (psycopg.errors.IntegrityConstraintViolation) admission_state=active requires a job_locks row (instance_id=<NULL>)
+E   CONTEXT:  PL/pgSQL function job_queue_items_active_lock_guard() line 1 at RAISE
+E   (Background on this error at: https://sqlalche.me/e/20/gkpj)
+____ TestEnsurePostgresColumnsPath.test_full_hook_tolerates_fixture_schema _____
+tests/postgres/test_report_deferred_migration_pg.py:700: in test_full_hook_tolerates_fixture_schema
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+---------------------------- Captured log teardown -----------------------------
+ERROR    tests.postgres.test_report_deferred_migration_pg:test_report_deferred_migration_pg.py:384 Failed to restore report_injections baseline
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 382, in _restore_baseline
+    _reset_report_injections_baseline(pg_engine)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 345, in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+    ~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 321, in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/daemon/manager.py", line 7343, in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+______ TestW3DedupPreCheck.test_w3_detection_query_finds_duplicate_groups ______
+tests/postgres/test_report_deferred_migration_pg.py:783: in test_w3_detection_query_finds_duplicate_groups
+    self._pre_index_state_with_duplicates(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:725: in _pre_index_state_with_duplicates
+    _reset_report_injections_baseline(engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+---------------------------- Captured log teardown -----------------------------
+ERROR    tests.postgres.test_report_deferred_migration_pg:test_report_deferred_migration_pg.py:384 Failed to restore report_injections baseline
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 382, in _restore_baseline
+    _reset_report_injections_baseline(pg_engine)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 345, in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+    ~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 321, in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/daemon/manager.py", line 7343, in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+______ TestW3DedupPreCheck.test_w3_resolves_duplicates_then_index_builds _______
+tests/postgres/test_report_deferred_migration_pg.py:799: in test_w3_resolves_duplicates_then_index_builds
+    self._pre_index_state_with_duplicates(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:725: in _pre_index_state_with_duplicates
+    _reset_report_injections_baseline(engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+---------------------------- Captured log teardown -----------------------------
+ERROR    tests.postgres.test_report_deferred_migration_pg:test_report_deferred_migration_pg.py:384 Failed to restore report_injections baseline
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 382, in _restore_baseline
+    _reset_report_injections_baseline(pg_engine)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 345, in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+    ~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 321, in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/daemon/manager.py", line 7343, in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+___ TestW3DedupPreCheck.test_w3_keep_one_semantics_min_injection_id_survives ___
+tests/postgres/test_report_deferred_migration_pg.py:826: in test_w3_keep_one_semantics_min_injection_id_survives
+    self._pre_index_state_with_duplicates(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:725: in _pre_index_state_with_duplicates
+    _reset_report_injections_baseline(engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+---------------------------- Captured log teardown -----------------------------
+ERROR    tests.postgres.test_report_deferred_migration_pg:test_report_deferred_migration_pg.py:384 Failed to restore report_injections baseline
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 382, in _restore_baseline
+    _reset_report_injections_baseline(pg_engine)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 345, in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+    ~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 321, in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/daemon/manager.py", line 7343, in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+_ TestSQLiteCompanionParity.test_fresh_create_all_index_names_identical_sqlite_vs_pg _
+tests/postgres/test_report_deferred_migration_pg.py:1222: in test_fresh_create_all_index_names_identical_sqlite_vs_pg
+    _reset_report_injections_baseline(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:345: in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+tests/postgres/test_report_deferred_migration_pg.py:321: in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+daemon/manager.py:7343: in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+---------------------------- Captured log teardown -----------------------------
+ERROR    tests.postgres.test_report_deferred_migration_pg:test_report_deferred_migration_pg.py:384 Failed to restore report_injections baseline
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 382, in _restore_baseline
+    _reset_report_injections_baseline(pg_engine)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 345, in _reset_report_injections_baseline
+    _run_hook(pg_engine)
+    ~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/tests/postgres/test_report_deferred_migration_pg.py", line 321, in _run_hook
+    InstanceManager._ensure_postgres_columns(proxy)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/home/nea/ensemble-src-wt-durability/daemon/manager.py", line 7343, in _ensure_postgres_columns
+    self._migrate_overloaded_image_refs_rows()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+=============================== warnings summary ===============================
+tests/postgres/test_critical_notes_repository_pg.py::TestUpdateCriticalNoteReferenceNone::test_reference_none_preserves_stored_reference
+  /home/nea/ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/httpcore/_exceptions.py:38: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    class LocalProtocolError(ProtocolError):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/postgres/test_critical_notes_repository_pg.py::TestUpdateCriticalNoteReferenceNone::test_reference_none_preserves_stored_reference
+  /home/nea/ensemble-src-wt-auto-continue/.venv/lib/python3.13/site-packages/httpcore/_exceptions.py:38: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+    class LocalProtocolError(ProtocolError):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/postgres/test_06f500af_bug_class_eliminated_pg.py::test_orphan_watcher_cancelled_on_startup_sweep
+FAILED tests/postgres/test_list_queues_with_admittable_work_pg.py::test_list_queues_with_admittable_work_includes_queued_and_active
+FAILED tests/postgres/test_list_queues_with_admittable_work_pg.py::test_list_queues_with_admittable_work_4_shapes_combined
+FAILED tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_full_hook_tolerates_fixture_schema
+FAILED tests/postgres/test_report_deferred_migration_pg.py::TestW3DedupPreCheck::test_w3_detection_query_finds_duplicate_groups
+FAILED tests/postgres/test_report_deferred_migration_pg.py::TestW3DedupPreCheck::test_w3_resolves_duplicates_then_index_builds
+FAILED tests/postgres/test_report_deferred_migration_pg.py::TestW3DedupPreCheck::test_w3_keep_one_semantics_min_injection_id_survives
+FAILED tests/postgres/test_report_deferred_migration_pg.py::TestSQLiteCompanionParity::test_fresh_create_all_index_names_identical_sqlite_vs_pg
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_hook_upgrades_legacy_schema_columns_notnull_indexes
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_hook_idempotent_column_adds_and_index_rerun
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_hook_drop_not_null_from_legacy_not_null_column
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_triple_index_predicate_matches_storage_literals
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_c1_duplicate_triple_post_migration_raises_citing_index
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW3DedupPreCheck::test_w3_no_mutations_when_clean
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW3DedupPreCheck::test_w3_hook_logs_detection_in_statement_source
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW8RollbackOrder::test_down_section_executes_on_pg_in_documented_order
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW8RollbackOrder::test_w8_column_first_revert_silently_drops_dependent_index
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW8RollbackOrder::test_w8_set_not_null_blocked_while_null_rows_exist
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW8RollbackOrder::test_w8_hook_reheals_after_wrong_order_partial_revert
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_claim_for_task_delivery_missing_when_no_row_exists
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_claim_for_task_delivery_claimed_after_artifact_backfill
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_find_row_by_report_message_id_none_returns_none
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_manager_has_non_terminal_injection_for_none_is_false
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_claim_for_injection_excludes_deferred_and_survives_null_keys
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_count_and_lanes_handle_null_keyed_rows
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_find_completed_children_excludes_existing_null_keyed_row
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_reconcile_turn_mirror_null_message_task_excludes_null_keyed_row
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_count_actionable_pending_tasks_null_keyed_not_suppressing
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_enqueue_signature_excludes_null_by_type
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_ensure_deferred_writes_null_key_by_design
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_transition_deferred_to_pending_keys_on_injection_id
+ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_consumer_enumeration_is_complete_and_audited
+8 failed, 263 passed, 34 skipped, 2 xfailed, 2 warnings, 24 errors in 260.73s (0:04:20)

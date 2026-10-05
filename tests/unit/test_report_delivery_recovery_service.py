@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -190,6 +190,22 @@ def _seed_deferred_row(
     return injection_id
 
 
+def _queue_repo_mock(evidence: bool = False) -> MagicMock:
+    """A queue-repo mock with the duck-typed ledger method declared.
+
+    Iteration-2 W-4: the per-row pass duck-types
+    ``find_wake_already_delivered_evidence`` (no isinstance gate) —
+    an UNconfigured MagicMock's auto-attr returns a truthy MagicMock,
+    which would fake a ledger match and skip every row. Every test
+    building a service inline MUST use this (or a real repo).
+    """
+    mock = MagicMock()
+    mock.find_wake_already_delivered_evidence = MagicMock(
+        return_value=evidence
+    )
+    return mock
+
+
 def _build_service(
     engine: Engine,
     *,
@@ -200,6 +216,20 @@ def _build_service(
     Returns ``(service, manager_mock)``. The mock manager's
     ``_handle_recover_deferred_report`` is a MagicMock so the
     tests can assert the recovery call shape.
+
+    Iteration-2 wiring (W-4 duck-typing + blocker-1 bridge):
+    * ``manager._checkpointer = None`` — the parent-history
+      PREFIX check is explicitly NOT exercised by the mechanical
+      lane tests (``None`` degrades to "no parent-history
+      evidence" per the guarded lookup). Ledger-specific behavior
+      is covered by ``TestF2PREFIXLedgerDedup`` and the
+      ``TestF2ManagerLoopBridgeAffinity`` pin (which wire a real
+      manager loop + checkpointer).
+    * ``queue_repo.find_wake_already_delivered_evidence`` is a
+      configured MagicMock returning ``False`` — the per-row pass
+      now duck-types the queue repo (no isinstance gate), so the
+      mock must declare the method explicitly or its auto-attr
+      truthiness would fake a ledger match.
     """
     from daemon.repositories.report_injection.repository import (
         ReportInjectionRepository,
@@ -210,14 +240,19 @@ def _build_service(
     task_repo.has_instance_busy = MagicMock(
         side_effect=lambda instance_id: instance_id in (busy_ids or set())
     )
+    queue_repo = MagicMock()
+    queue_repo.find_wake_already_delivered_evidence = MagicMock(
+        return_value=False
+    )
     manager = MagicMock()
     manager.engine = engine
+    manager._checkpointer = None
     manager._handle_recover_deferred_report = MagicMock()
 
     service = ReportDeliveryRecoveryService(
         task_repo=task_repo,
         report_injection_repo=ri_repo,
-        queue_repo=MagicMock(),
+        queue_repo=queue_repo,
         instance_repo=MagicMock(),
         manager_ref=manager,
         interval_seconds=300,
@@ -253,6 +288,11 @@ class TestSweepServiceShape:
         assert "pending_age" in result.lanes
         assert "recovery_retry" in result.lanes
         assert "orphan" not in result.lanes  # lane_orphan disabled
+        # Block-1 G4 lane is enabled by default; on an empty DB
+        # the candidate query returns 0 rows and the lane
+        # self-records as present (zero recovered) — asserting the
+        # key is in the dict is the post-fix contract.
+        assert "stuck_wake" in result.lanes
         for name, lane in result.lanes.items():
             assert isinstance(lane, LaneResult)
             assert lane.recovered == 0
@@ -269,7 +309,7 @@ class TestSweepServiceShape:
         svc = ReportDeliveryRecoveryService(
             task_repo=MagicMock(),
             report_injection_repo=ReportInjectionRepository(engine=engine),
-            queue_repo=MagicMock(),
+            queue_repo=_queue_repo_mock(),
             instance_repo=MagicMock(),
             manager_ref=MagicMock(),
             enabled=True,
@@ -278,6 +318,9 @@ class TestSweepServiceShape:
             lane_pending_age=False,
             lane_recovery_retry=False,
             lane_orphan=False,
+            # Block-1 G4 lane: must be disabled too for the
+            # empty-lane-dict assertion.
+            lane_stuck_wake=False,
         )
         result = svc.recover_now()
         assert result.lanes == {}
@@ -475,12 +518,13 @@ class TestBatchCap:
         task_repo = MagicMock()
         task_repo.has_instance_busy = MagicMock(return_value=False)
         manager = MagicMock()
+        manager._checkpointer = None
         manager._handle_recover_deferred_report = MagicMock()
 
         service = ReportDeliveryRecoveryService(
             task_repo=task_repo,
             report_injection_repo=ri_repo,
-            queue_repo=MagicMock(),
+            queue_repo=_queue_repo_mock(),
             instance_repo=MagicMock(),
             manager_ref=manager,
             interval_seconds=300,
@@ -533,13 +577,14 @@ class TestLaneKillSwitches:
         task_repo = MagicMock()
         task_repo.has_instance_busy = MagicMock(return_value=False)
         manager = MagicMock()
+        manager._checkpointer = None
         manager._handle_recover_deferred_report = MagicMock()
 
         # Disable Lane 3.
         service = ReportDeliveryRecoveryService(
             task_repo=task_repo,
             report_injection_repo=ri_repo,
-            queue_repo=MagicMock(),
+            queue_repo=_queue_repo_mock(),
             instance_repo=MagicMock(),
             manager_ref=manager,
             enabled=True,
@@ -796,6 +841,7 @@ def _build_orphan_service(
     task_repo.has_instance_busy = MagicMock(return_value=False)
     manager = MagicMock()
     manager.engine = engine
+    manager._checkpointer = None
     manager._loop = asyncio.get_running_loop()
     manager._revive_terminal_instance = AsyncMock(return_value=revive_result)
     handle_mock = MagicMock()
@@ -804,7 +850,7 @@ def _build_orphan_service(
     service = ReportDeliveryRecoveryService(
         task_repo=task_repo,
         report_injection_repo=ri_repo,
-        queue_repo=MagicMock(),
+        queue_repo=_queue_repo_mock(),
         instance_repo=MagicMock(),
         manager_ref=manager,
         interval_seconds=300,
@@ -1372,3 +1418,1132 @@ class TestStopEventInterrupt:
         assert (
             "float" in anno_str and "None" in anno_str
         ), f"stop() timeout annotation MUST be float | None; got {anno_str!r}"
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# F-2 (durability-f1-f2 / phase2, task 2.11) — RDRS lane-2 tests
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestF2Lane2AnchorLessAdmission:
+    """S21 — lane 2 admits anchor-less completed children of
+    non-terminal parents (F-2 wedge straddle state).
+
+    The F-1 wedge is a no-row straddle: a child completes just
+    before restart, its wake-rows are wiped, the parent is
+    waiting_children. The F-2 fix removes the anchor-required
+    filter from the lane-2 query (task 2.2) so anchor-less
+    children of non-terminal parents are admitted. The per-row
+    pass then derives ``child_message_id`` from the surviving
+    child checkpoint (task 2.6).
+
+    These tests use a real file-backed SQLite engine (F9 parity
+    via the existing test harness).
+    """
+
+    def _seed_completed_child_with_message(
+        self,
+        engine: Engine,
+        parent_id: str,
+        child_msg_id: str = "child-msg",
+    ) -> tuple[str, str]:
+        """Seed a COMPLETED child instance + its COMPLETED message."""
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_message(
+            engine,
+            instance_id=child_id,
+            msg_id=child_msg_id,
+            status=MessageStatus.COMPLETED.value,
+        )
+        return child_id, child_msg_id
+
+    def test_admits_anchor_less_completed_child_of_non_terminal_parent(
+        self, engine: Engine
+    ) -> None:
+        """S21 — a COMPLETED child with NO ``message_queue`` row
+        (the F-2 wedge straddle state) IS admitted by the lane-2
+        query. The ``has_anchor`` flag is ``False`` so the
+        per-row pass knows to derive ``child_message_id`` from
+        the checkpoint."""
+        parent = _seed_instance(engine)  # non-terminal (default running)
+        # Seed a COMPLETED child with NO message_queue row —
+        # the anchor-less straddle state.
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        # No _seed_message call — the child has no
+        # COMPLETED message_queue row, so ``anchor_subq``
+        # returns NULL.
+
+        service, _ = _build_service(engine)
+        rows = service._report_injection_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        # The row is admitted.
+        child_rows = [r for r in rows if r["child_id"] == child_id]
+        assert len(child_rows) == 1
+        # ``has_anchor`` is ``False`` (no message_queue row).
+        assert child_rows[0]["has_anchor"] is False
+        # ``child_msg_id`` is ``None`` (the anchor subquery
+        # returned NULL).
+        assert child_rows[0]["child_msg_id"] is None
+        # ``parent_id`` is correct.
+        assert child_rows[0]["parent_id"] == parent
+
+    def test_has_anchor_true_when_completed_message_exists(
+        self, engine: Engine
+    ) -> None:
+        """A child with a COMPLETED ``message_queue`` row has
+        ``has_anchor=True`` and ``child_msg_id`` populated —
+        the per-row pass uses the anchor directly (no
+        checkpoint derivation needed)."""
+        parent = _seed_instance(engine)
+        child_id, child_msg_id = self._seed_completed_child_with_message(
+            engine, parent
+        )
+
+        service, _ = _build_service(engine)
+        rows = service._report_injection_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        child_rows = [r for r in rows if r["child_id"] == child_id]
+        assert len(child_rows) == 1
+        assert child_rows[0]["has_anchor"] is True
+        assert child_rows[0]["child_msg_id"] == child_msg_id
+
+    def test_still_excludes_terminal_parent(
+        self, engine: Engine
+    ) -> None:
+        """Anchor-less child of a TERMINAL parent is still
+        excluded from the periodic sweep (the ORPHAN lane's
+        territory)."""
+        parent = _seed_instance(
+            engine, status=InstanceStatus.COMPLETED.value
+        )
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+
+        service, _ = _build_service(engine)
+        rows = service._report_injection_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        # Terminal parent → excluded.
+        assert not any(r["child_id"] == child_id for r in rows)
+
+    def test_still_excludes_running_child(
+        self, engine: Engine
+    ) -> None:
+        """S23 — RUNNING children are excluded (the
+        ``c.status=='completed'`` filter at :1222)."""
+        parent = _seed_instance(engine)
+        # Seed a RUNNING child (not completed).
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.RUNNING.value,
+        )
+
+        service, _ = _build_service(engine)
+        rows = service._report_injection_repo.find_completed_children_without_delivery(
+            parent_not_terminal=True
+        )
+        assert not any(r["child_id"] == child_id for r in rows)
+
+
+class TestF2PREFIXLedgerDedup:
+    """S22 — PREFIX-ledger cross-path dedup (queue-side +
+    parent-history-side). The operative cross-path dedup per
+    decisions.md §14a (W-1 LOCKED to fallback (ii))."""
+
+    def test_find_wake_already_delivered_evidence_true_on_prefix_match(
+        self, engine: Engine
+    ) -> None:
+        """Queue-side: a parent-side ``internal_report:{child}:%``
+        row in a non-failed status triggers the PREFIX ledger."""
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        parent = _seed_instance(engine)
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+        # Seed a parent-side internal_report message.
+        report_msg_id = f"report-{uuid.uuid4().hex[:8]}"
+        _seed_message(
+            engine,
+            instance_id=parent,
+            msg_id=report_msg_id,
+            source=f"internal_report:{child_id}:some-anchor-msg",
+            msg_type=MessageType.COMPLETION_REPORT.value,
+            status=MessageStatus.READY.value,
+        )
+        queue_repo = SQLModelMessageQueueRepository(engine)
+        assert (
+            queue_repo.find_wake_already_delivered_evidence(
+                parent, child_id
+            )
+            is True
+        )
+
+    def test_find_wake_already_delivered_evidence_false_when_no_match(
+        self, engine: Engine
+    ) -> None:
+        """Queue-side: NO matching ``internal_report:{child}:%``
+        row → returns False."""
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        parent = _seed_instance(engine)
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+        # Seed a message for a DIFFERENT child.
+        other_child = f"other-{uuid.uuid4().hex[:8]}"
+        _seed_message(
+            engine,
+            instance_id=parent,
+            msg_id=f"report-{uuid.uuid4().hex[:8]}",
+            source=f"internal_report:{other_child}:some-anchor",
+            msg_type=MessageType.COMPLETION_REPORT.value,
+            status=MessageStatus.READY.value,
+        )
+        queue_repo = SQLModelMessageQueueRepository(engine)
+        assert (
+            queue_repo.find_wake_already_delivered_evidence(
+                parent, child_id
+            )
+            is False
+        )
+
+    def test_parent_history_has_internal_report_true_on_marker(
+        self, engine: Engine
+    ) -> None:
+        """Parent-history-side: the REAL evidence shape — a
+        user-role (HumanMessage) parent-history dict with the
+        NO-COLON source ``internal_report:{child}`` (the stamp at
+        ``graph.py:8528``) → returns True. Iteration-2 blocker-2
+        reshape: the prior fixture baked an assistant-role +
+        colon-suffixed shape the production stamp can never
+        produce."""
+        from daemon.services.report_delivery_ledger import (
+            parent_history_has_internal_report,
+        )
+        import daemon.persistence as persistence_mod
+
+        parent = _seed_instance(engine)
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+
+        class _MockCheckpointer:
+            raw_saver = self
+
+            async def _raw_saver_aget(self, config):
+                return None
+
+        async def _fake_get_instance_messages(checkpointer, instance_id, manager=None):
+            return [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "message_id": "msg-1",
+                },
+                {
+                    "role": "user",  # HumanMessage stamp
+                    "content": "[Child terminal report] ...",
+                    "message_id": "msg-2",
+                    "source": f"internal_report:{child_id}",  # NO colon
+                },
+            ]
+
+        original = persistence_mod.get_instance_messages
+        persistence_mod.get_instance_messages = _fake_get_instance_messages
+        try:
+            result = asyncio.run(
+                parent_history_has_internal_report(
+                    _MockCheckpointer(), parent, child_id
+                )
+            )
+        finally:
+            persistence_mod.get_instance_messages = original
+        assert result is True
+
+    def test_parent_history_has_internal_report_false_on_no_source(
+        self, engine: Engine
+    ) -> None:
+        """Parent-history-side: a parent checkpoint message WITHOUT
+        a ``source`` field (pre-migration parent) → returns False
+        (graceful degradation per the docstring)."""
+        from daemon.services.report_delivery_ledger import (
+            parent_history_has_internal_report,
+        )
+        import daemon.persistence as persistence_mod
+
+        parent = _seed_instance(engine)
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+
+        class _MockCheckpointer:
+            raw_saver = self
+
+            async def _raw_saver_aget(self, config):
+                return None
+
+        async def _fake_get_instance_messages(checkpointer, instance_id, manager=None):
+            return [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "message_id": "msg-1",
+                },
+                {
+                    "role": "assistant",
+                    "content": "no source field",
+                    "message_id": "msg-2",
+                    # NO "source" key — pre-migration parent.
+                },
+            ]
+
+        original = persistence_mod.get_instance_messages
+        persistence_mod.get_instance_messages = _fake_get_instance_messages
+        try:
+            result = asyncio.run(
+                parent_history_has_internal_report(
+                    _MockCheckpointer(), parent, child_id
+                )
+            )
+        finally:
+            persistence_mod.get_instance_messages = original
+        assert result is False
+
+
+class TestF2IdempotencyAndKillSwitch:
+    """S25 (idempotent run-twice) + S26 (kill-switch gate) for
+    the F-2 lane-2 extension."""
+
+    def test_run_twice_single_ensure_deferred(
+        self, engine: Engine
+    ) -> None:
+        """S25 — running lane 2 twice on the same wedge child
+        results in exactly one ``ensure_deferred`` call (the
+        obligation-triple unique index handles within-path
+        idempotency; the PREFIX ledger handles cross-path
+        dedup)."""
+        parent = _seed_instance(engine)
+        child_id, _ = self._seed_completed_child_with_message(engine, parent)
+
+        service, _ = _build_service(engine)
+        # First run: the row is admitted, ensure_deferred is
+        # called.
+        result1 = service._run_no_row_backstop_lane()
+        # Second run: the obligation-triple unique index
+        # absorbs the duplicate (W6); the row is NOT re-minted.
+        result2 = service._run_no_row_backstop_lane()
+        # Total recovered across both runs: 1 (the obligation
+        # is honored exactly once).
+        total_recovered = result1.recovered + result2.recovered
+        assert total_recovered == 1
+
+    def _seed_completed_child_with_message(
+        self,
+        engine: Engine,
+        parent_id: str,
+        child_msg_id: str = "child-msg",
+    ) -> tuple[str, str]:
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_message(
+            engine,
+            instance_id=child_id,
+            msg_id=child_msg_id,
+            status=MessageStatus.COMPLETED.value,
+        )
+        return child_id, child_msg_id
+
+    def test_lane2_kill_switch_off_skips_lane(
+        self, engine: Engine
+    ) -> None:
+        """S26 — when ``lane_no_row_backstop`` is False, the
+        lane-2 entry is skipped (the RDRS per-lane kill
+        switch governs the active behavior)."""
+        from daemon.services.report_delivery_recovery import (
+            ReportDeliveryRecoveryService,
+        )
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+        parent = _seed_instance(engine)
+        self._seed_completed_child_with_message(engine, parent)
+        # Build the service with ``lane_no_row_backstop=False``.
+        task_repo = MagicMock()
+        task_repo.has_instance_busy = MagicMock(return_value=False)
+        manager = MagicMock()
+        manager.engine = engine
+        manager._checkpointer = None
+        manager._handle_recover_deferred_report = MagicMock()
+        ri_repo = ReportInjectionRepository(engine=engine)
+        service = ReportDeliveryRecoveryService(
+            task_repo=task_repo,
+            report_injection_repo=ri_repo,
+            queue_repo=_queue_repo_mock(),
+            instance_repo=MagicMock(),
+            manager_ref=manager,
+            interval_seconds=300,
+            age_bound_minutes=10,
+            batch_cap=100,
+            recovery_retry_minutes=1,
+            enabled=True,
+            lane_orphan=False,
+            lane_no_row_backstop=False,
+        )
+        # Test via _run_all_lanes_sync (the kill switch check
+        # is in _run_all_lanes_sync, not in the lane method
+        # itself — the lane method is the inner primitive).
+        result = service._run_all_lanes_sync()
+        # Lane 2 disabled → the ``no_row_backstop`` key is
+        # NOT in the result dict (the kill switch short-
+        # circuits before the lane method is called).
+        assert "no_row_backstop" not in result.lanes
+        assert result.total_recovered == 0
+
+
+class TestF2LiveDeliveryRace:
+    """S28 — live delivery between lane-2 scan and per-row
+    ledger re-check → lane must skip (skip-already-reported
+    counter increments; no double-injection)."""
+
+    def test_live_delivery_between_scan_and_ledger_recheck_skips(
+        self, engine: Engine
+    ) -> None:
+        """Between the lane-2 scan and the per-row ledger
+        re-check, a live delivery inserts a fresh
+        ``internal_report:{child}:%`` message into the
+        parent's ``MessageQueue``. The per-row pass MUST
+        detect the delivery via the PREFIX ledger and skip
+        (increment ``skipped_already_reported``; do NOT
+        double-inject)."""
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+
+        parent = _seed_instance(engine)
+        child_id, _ = self._seed_completed_child_with_message(engine, parent)
+
+        # Build a service with a REAL queue_repo (so the
+        # PREFIX ledger check is a real method call, not a
+        # MagicMock). The ``_build_service`` helper uses a
+        # MagicMock queue_repo; build a minimal service here.
+        from daemon.services.report_delivery_recovery import (
+            ReportDeliveryRecoveryService,
+        )
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+        ri_repo = ReportInjectionRepository(engine=engine)
+        queue_repo = SQLModelMessageQueueRepository(engine=engine)
+        task_repo = MagicMock()
+        task_repo.has_instance_busy = MagicMock(return_value=False)
+        manager = MagicMock()
+        manager.engine = engine
+        manager._checkpointer = None
+        manager._handle_recover_deferred_report = MagicMock()
+        service = ReportDeliveryRecoveryService(
+            task_repo=task_repo,
+            report_injection_repo=ri_repo,
+            queue_repo=queue_repo,
+            instance_repo=MagicMock(),
+            manager_ref=manager,
+            interval_seconds=300,
+            age_bound_minutes=10,
+            batch_cap=100,
+            recovery_retry_minutes=1,
+            enabled=True,
+            lane_orphan=False,
+        )
+        # The lane-2 query returns the child (no internal_report
+        # row yet — the live delivery hasn't happened).
+        rows_initial = (
+            service._report_injection_repo.find_completed_children_without_delivery(
+                parent_not_terminal=True
+            )
+        )
+        assert any(r["child_id"] == child_id for r in rows_initial)
+        # LIVE DELIVERY: the natural path inserts a fresh
+        # ``internal_report:{child}:%`` row between the scan
+        # and the per-row pass.
+        _seed_message(
+            engine,
+            instance_id=parent,
+            msg_id=f"live-report-{uuid.uuid4().hex[:8]}",
+            source=f"internal_report:{child_id}:live-anchor-msg",
+            msg_type=MessageType.COMPLETION_REPORT.value,
+            status=MessageStatus.READY.value,
+        )
+        # The per-row pass: the PREFIX ledger check now matches
+        # the live delivery.
+        assert (
+            queue_repo.find_wake_already_delivered_evidence(
+                parent, child_id
+            )
+            is True
+        )
+        # The lane's step-0 guard would short-circuit:
+        # ``skipped_already_reported += 1; return``. This is
+        # the cross-path dedup (per decisions.md §14a) — the
+        # obligation-triple unique index is the within-path
+        # idempotency (per migration 20260819_000001:114-120).
+        # The interaction is: PREFIX-ledger (cross-path) is
+        # checked FIRST; if it matches, the obligation is NOT
+        # minted; if it doesn't match, the obligation-triple
+        # unique index prevents duplicate mints within the
+        # lane-2 / recovery path. Both layers are required.
+
+    def _seed_completed_child_with_message(
+        self,
+        engine: Engine,
+        parent_id: str,
+        child_msg_id: str = "child-msg",
+    ) -> tuple[str, str]:
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_message(
+            engine,
+            instance_id=child_id,
+            msg_id=child_msg_id,
+            status=MessageStatus.COMPLETED.value,
+        )
+        return child_id, child_msg_id
+
+
+class TestF2ChildMessageIdStableButDifferent:
+    """F-2 (durability-f1-f2 / phase2, task 2.6) — the derived
+    ``child_message_id`` is STABLE-BUT-DIFFERENT from the natural
+    path's ``MessageQueue.message_id`` (per W-1 fallback (ii)
+    confirmation)."""
+
+    def test_derive_anchor_less_child_message_id_from_checkpoint(
+        self, engine: Engine
+    ) -> None:
+        """The derivation reads the surviving child checkpoint
+        via ``get_instance_messages`` + the
+        ``serialize_message`` chain. The derived id is
+        ``BaseMessage.id`` (UUID4) — STABLE-BUT-DIFFERENT
+        from the natural path's ``MessageQueue.message_id``
+        (per W-1 confirmation)."""
+        from daemon.services.report_delivery_recovery import (
+            _derive_anchor_less_child_message_id,
+        )
+        import daemon.persistence as persistence_mod
+
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+        derived_id = f"derived-{uuid.uuid4().hex}"
+
+        class _MockCheckpointer:
+            raw_saver = self
+
+            async def _raw_saver_aget(self, config):
+                return None
+
+        async def _fake_get_instance_messages(checkpointer, instance_id, manager=None):
+            return [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "message_id": f"user-{uuid.uuid4().hex[:8]}",
+                },
+                {
+                    "role": "assistant",
+                    "content": "child terminal report content",
+                    "message_id": derived_id,  # the BaseMessage.id
+                },
+            ]
+
+        original = persistence_mod.get_instance_messages
+        persistence_mod.get_instance_messages = _fake_get_instance_messages
+        try:
+            result = asyncio.run(
+                _derive_anchor_less_child_message_id(
+                    _MockCheckpointer(), child_id
+                )
+            )
+        finally:
+            persistence_mod.get_instance_messages = original
+        # The derived id is the BaseMessage.id of the last
+        # assistant message — STABLE-BUT-DIFFERENT from any
+        # natural-path MessageQueue.message_id.
+        assert result == derived_id
+
+    def test_derive_returns_none_when_no_assistant_message(
+        self, engine: Engine
+    ) -> None:
+        """If the child checkpoint has no assistant message
+        (or the checkpoint is missing), the derivation
+        returns None — the per-row pass logs WARNING and
+        ``continue``s (the periodic 300s loop is the retry
+        mechanism)."""
+        from daemon.services.report_delivery_recovery import (
+            _derive_anchor_less_child_message_id,
+        )
+        import daemon.persistence as persistence_mod
+
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+
+        class _MockCheckpointer:
+            raw_saver = self
+
+            async def _raw_saver_aget(self, config):
+                return None
+
+        async def _fake_get_instance_messages(checkpointer, instance_id, manager=None):
+            return [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "message_id": f"user-{uuid.uuid4().hex[:8]}",
+                },
+                # NO assistant message.
+            ]
+
+        original = persistence_mod.get_instance_messages
+        persistence_mod.get_instance_messages = _fake_get_instance_messages
+        try:
+            result = asyncio.run(
+                _derive_anchor_less_child_message_id(
+                    _MockCheckpointer(), child_id
+                )
+            )
+        finally:
+            persistence_mod.get_instance_messages = original
+        assert result is None
+
+    def test_derive_returns_none_when_checkpointer_is_none(
+        self, engine: Engine
+    ) -> None:
+        """``checkpointer=None`` ⇒ returns None (no evidence
+        available; the per-row pass logs WARNING and
+        ``continue``s)."""
+        from daemon.services.report_delivery_recovery import (
+            _derive_anchor_less_child_message_id,
+        )
+        result = asyncio.run(
+            _derive_anchor_less_child_message_id(None, "child-123")
+        )
+        assert result is None
+
+    def test_derive_skips_empty_content_assistant_message(
+        self, engine: Engine
+    ) -> None:
+        """Plan-2.6 empty-content guard: an assistant message with
+        a truthy id but EMPTY content is not a derivable report
+        anchor — the derivation skips it (WARNING) and falls
+        through to an older assistant message with content, or
+        returns None when none qualifies."""
+        from daemon.services.report_delivery_recovery import (
+            _derive_anchor_less_child_message_id,
+        )
+        import daemon.persistence as persistence_mod
+
+        child_id = f"child-{uuid.uuid4().hex[:8]}"
+        older_id = f"older-{uuid.uuid4().hex}"
+
+        class _MockCheckpointer:
+            raw_saver = self
+
+            async def _raw_saver_aget(self, config):
+                return None
+
+        async def _fake_get_instance_messages(
+            checkpointer, instance_id, manager=None
+        ):
+            return [
+                {
+                    "role": "assistant",
+                    "content": "older real report",
+                    "message_id": older_id,
+                },
+                {
+                    # Newest assistant message: id present,
+                    # content EMPTY → not a derivable anchor.
+                    "role": "assistant",
+                    "content": "",
+                    "message_id": f"empty-{uuid.uuid4().hex[:8]}",
+                },
+            ]
+
+        original = persistence_mod.get_instance_messages
+        persistence_mod.get_instance_messages = _fake_get_instance_messages
+        try:
+            result = asyncio.run(
+                _derive_anchor_less_child_message_id(
+                    _MockCheckpointer(), child_id
+                )
+            )
+        finally:
+            persistence_mod.get_instance_messages = original
+        assert result == older_id
+
+
+class TestF2ManagerLoopBridgeAffinity:
+    """Iteration-2 blocker-1 LOOP-AFFINITY pin.
+
+    Production checkpointers (``AsyncSqliteSaver`` /
+    ``AsyncPostgresSaver``) hold loop-bound ``asyncio.Lock`` s. The
+    per-row pass MUST route every checkpointer-touching coroutine
+    (the parent-history PREFIX ledger check AND the anchor-less
+    ``child_message_id`` derivation) through the manager-loop
+    bridge (``_run_async_on_manager_loop`` →
+    ``asyncio.run_coroutine_threadsafe``), NEVER through an
+    ephemeral ``asyncio.run`` loop.
+
+    The pin is double-barreled:
+
+    1. **Loop-bound fake checkpointer** — the patched
+       ``get_instance_messages`` records the loop it ran on and
+       RAISES if that loop is not the manager loop. A regression
+       to an ephemeral loop fails the read (and the test).
+    2. **``asyncio.run`` tripwire** — ``asyncio.run`` is patched
+       to raise for the duration of the sweep; any use anywhere in
+       the per-row path explodes the test.
+
+    Both bridge consumers are exercised in one pass-through: the
+    child is ANCHOR-LESS, so the per-row pass hits the ledger
+    check (parent-id read) and then the derivation (child-id
+    read) — both must land on the manager loop.
+    """
+
+    def test_lane2_routes_all_checkpointer_reads_through_manager_loop(
+        self, engine: Engine
+    ) -> None:
+        import threading
+
+        import daemon.persistence as persistence_mod
+        from daemon.services.report_delivery_recovery import (
+            ReportDeliveryRecoveryService,
+        )
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+
+        # ── Real background loop standing in for manager._loop ──
+        manager_loop = asyncio.new_event_loop()
+        loop_thread = threading.Thread(
+            target=manager_loop.run_forever, daemon=True
+        )
+        loop_thread.start()
+
+        acquired_loops: list[asyncio.AbstractEventLoop] = []
+        derived_id = f"derived-{uuid.uuid4().hex}"
+
+        class _LoopBoundCheckpointer:
+            """Fake checkpointer: raises if acquired from a
+            foreign loop (the production savers' loop-bound lock
+            behavior, abstracted)."""
+
+            raw_saver = None
+
+        async def _loop_checking_get_instance_messages(
+            checkpointer, instance_id, manager=None
+        ):
+            running = asyncio.get_running_loop()
+            acquired_loops.append(running)
+            if running is not manager_loop:
+                raise RuntimeError(
+                    "cross-loop seam regression: checkpointer read "
+                    "landed on a foreign loop (ephemeral asyncio.run "
+                    "loop instead of the manager loop)"
+                )
+            if instance_id == child_id:
+                # The surviving child checkpoint (derivation read).
+                return [
+                    {
+                        "role": "assistant",
+                        "content": "child terminal report content",
+                        "message_id": derived_id,
+                    },
+                ]
+            # The parent-history ledger scan → no evidence.
+            return []
+
+        original_get = persistence_mod.get_instance_messages
+        original_asyncio_run = asyncio.run
+
+        def _tripwire_run(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError(
+                "asyncio.run used in the per-row pass — cross-loop "
+                "seam regression (must use the manager-loop bridge)"
+            )
+
+        parent = _seed_instance(engine)
+        # Anchor-less COMPLETED child: NO message_queue row seeded
+        # → the per-row pass must DERIVE the id (the second bridge
+        # consumer).
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        try:
+            persistence_mod.get_instance_messages = (
+                _loop_checking_get_instance_messages
+            )
+            asyncio.run = _tripwire_run  # type: ignore[assignment]
+
+            # Anchor-less child: NO message seeded → the per-row
+            # pass must DERIVE the id (the second bridge consumer).
+            ri_repo = ReportInjectionRepository(engine=engine)
+            queue_repo = MagicMock()
+            queue_repo.find_wake_already_delivered_evidence = (
+                MagicMock(return_value=False)
+            )
+            task_repo = MagicMock()
+            task_repo.has_instance_busy = MagicMock(return_value=False)
+            manager = MagicMock()
+            manager.engine = engine
+            manager._loop = manager_loop
+            manager._checkpointer = _LoopBoundCheckpointer()
+            manager._handle_recover_deferred_report = MagicMock()
+            service = ReportDeliveryRecoveryService(
+                task_repo=task_repo,
+                report_injection_repo=ri_repo,
+                queue_repo=queue_repo,
+                instance_repo=MagicMock(),
+                manager_ref=manager,
+                interval_seconds=300,
+                age_bound_minutes=10,
+                batch_cap=100,
+                recovery_retry_minutes=1,
+                enabled=True,
+                lane_orphan=False,
+            )
+
+            result = service._run_no_row_backstop_lane()
+        finally:
+            persistence_mod.get_instance_messages = original_get
+            asyncio.run = original_asyncio_run  # type: ignore[assignment]
+            manager_loop.call_soon_threadsafe(manager_loop.stop)
+            loop_thread.join(timeout=5.0)
+            manager_loop.close()
+
+        # The full pass-through succeeded on the manager loop.
+        assert result.recovered == 1, (
+            f"anchor-less child must be recovered through the "
+            f"manager-loop bridge; lanes={result.to_dict() if hasattr(result, 'to_dict') else result}"
+        )
+        assert result.errors == 0
+        # BOTH bridge consumers ran, and EVERY checkpointer read
+        # landed on the manager loop (never a foreign/ephemeral
+        # loop).
+        assert len(acquired_loops) >= 2, (
+            f"both the ledger check and the derivation must have "
+            f"read the checkpointer; got {len(acquired_loops)} reads"
+        )
+        assert all(
+            loop is manager_loop for loop in acquired_loops
+        ), "every checkpointer read MUST run on the manager loop"
+        # The derived id (not a queue-row anchor) landed on the row.
+        from daemon.repositories.report_injection.models import (
+            ReportInjection,
+            ReportInjectionState,
+        )
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.child_instance_id == child_id
+                )
+            ).first()
+        assert row is not None
+        assert row.state == ReportInjectionState.PENDING.value
+        assert row.child_message_id == derived_id
+"""G4-r3 unit test for the stuck-wake parent-schedule seam (last-mile)."""
+
+
+class TestG4R3StuckWakeParentScheduleSeam:
+    """G4-r4 (wake-only — ping-seam reuse) EFFECT-LEVEL pin.
+
+    The dispatch's LESSONS #6 hardened bar: assert the END-TO-END
+    EFFECT on the seeded LIVE state — the parent transitions OUT OF
+    waiting_children — NOT a dispatch-call assertion. This replaces
+    the round-3 dispatch-assertion pin (which only proved the
+    call fired, not that the call's effect actually dispatched the
+    parent turn — the round-3 call hit the :2773 idempotency
+    guard and no-oped).
+
+    The fix reuses the SAME primitive the manual ping uses
+    (``self._manager.enqueue_message(parent_id, message,
+    source="system:wedge-resolve", ...)`` at manager.py:7987) —
+    the unified dispatcher auto-resumes waiting_children → RUNNING
+    (instance_messaging._prepare_enqueued_message:1968) and
+    notifies the worker pool. The retry's claim path stays
+    unchanged (it sees "already_delivered" and skips — the dedup
+    contract works as designed).
+
+    Live evidence (f4- @ 97f71920): with the round-3 fix, the
+    parent stayed waiting_children through t+300s. The f4- LEG 1
+    tester-proved condition: a manual ping completes cleanly from
+    the same state — so the ping-seam is the right reuse target.
+
+    Pin: real background loop as manager._loop, side_effect that
+    bumps the parent row to RUNNING (simulating the real
+    primitive's effect on the seeded state), assert parent.status
+    transitions out of waiting_children on the seeded LIVE state.
+    """
+
+    def test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs(
+        self, engine
+    ) -> None:
+        import threading
+        from unittest.mock import AsyncMock
+        from sqlalchemy import text as sa_text
+        from daemon.repositories.task.repository import TaskRepository
+        from daemon.repositories.task.models import Task, TaskStatus, TaskType
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+        from daemon.repositories.instance.models import (
+            Instance,
+            InstanceStatus,
+        )
+
+        # Real background loop standing in for manager._loop
+        manager_loop = asyncio.new_event_loop()
+        loop_thread = threading.Thread(
+            target=manager_loop.run_forever, daemon=True
+        )
+        loop_thread.start()
+
+        # Capture the dispatch + record the EFFECT on the parent
+        # row (the dispatch's hardened bar — effect-level, not
+        # dispatch-call). The side_effect simulates the real
+        # _prepare_enqueued_message path's auto-resume at :1968.
+        schedule_calls = []
+        original_loop_ref = []
+
+        async def _schedule_parent(
+            parent_id_arg, msg, source, *args, **kwargs
+        ):
+            running = asyncio.get_running_loop()
+            original_loop_ref.append(running)
+            schedule_calls.append((parent_id_arg, source))
+            # Effect: bump the parent to RUNNING (the auto-resume
+            # at _prepare_enqueued_message :1968 — the real
+            # primitive's end-state for the ping-seam reuse).
+            with engine.begin() as conn:
+                conn.execute(
+                    sa_text(
+                        "UPDATE instances SET status = :run "
+                        "WHERE instance_id = :iid"
+                    ),
+                    {
+                        "run": InstanceStatus.RUNNING.value,
+                        "iid": parent_id_arg,
+                    },
+                )
+            return None
+
+        # Seed the captured state (LIVE id-shape — r1r evidence).
+        parent = _seed_instance(
+            engine,
+            instance_id="g4r4-parent-1",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        child = _seed_instance(
+            engine,
+            instance_id="g4r4-child-1",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        child_content_message_id = "g4r4-child-content-1"
+        wake_message_id = "g4r4-wake-msg-1"
+        assert child_content_message_id != wake_message_id, (
+            "LIVE shape: wake row id != child content msg id "
+            "(r1r evidence: ddbeef1d != 34cedf8d)"
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                sa_text(
+                    "INSERT INTO message_queue ("
+                    "message_id, instance_id, type, status, source, "
+                    "content, priority, retry_count, max_retries, "
+                    "enqueued_at"
+                    ") VALUES ("
+                    ":message_id, :instance_id, :type, :status, :source, "
+                    ":content, :priority, :retry_count, :max_retries, "
+                    ":enqueued_at"
+                    ")"
+                ),
+                {
+                    "message_id": wake_message_id,
+                    "instance_id": parent,
+                    "type": "completion_report",
+                    "status": "ready",
+                    "source": (
+                        f"internal_report:{child}:"
+                        f"{child_content_message_id}"
+                    ),
+                    "content": "child terminal report content",
+                    "priority": 0,
+                    "retry_count": 0,
+                    "max_retries": 3,
+                    "enqueued_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            # Dead-worker wake task (RUNNING with stale heartbeat).
+            stale = (
+                datetime.now(timezone.utc).replace(tzinfo=None)
+                - timedelta(minutes=10)
+            ).isoformat()
+            wake_task_obj = Task(
+                work_id=f"g4r4-wake-work-{uuid.uuid4().hex[:8]}",
+                task_type=TaskType.PROCESS_REPORT.value,
+                instance_id=parent,
+                message_id=wake_message_id,
+                status=TaskStatus.RUNNING.value,
+                worker_id="dead-worker-g4r4",
+                started_at=stale,
+                last_heartbeat_at=stale,
+                created_at=stale,
+            )
+            conn.execute(
+                sa_text(
+                    "INSERT INTO task ("
+                    "work_id, task_type, instance_id, message_id, status, "
+                    "worker_id, started_at, last_heartbeat_at, "
+                    "retry_count, cancel_requested, cancel_requested_at, "
+                    "retry_scheduled, is_deferred, is_background, result, "
+                    "error, completed_at, auto_continued_at, "
+                    "suspension_reason, resume_target_turn_id, next_retry_at, "
+                    "created_at"
+                    ") VALUES ("
+                    ":work_id, :task_type, :instance_id, :message_id, "
+                    ":status, :worker_id, :started_at, :last_heartbeat_at, "
+                    ":retry_count, :cancel_requested, :cancel_requested_at, "
+                    ":retry_scheduled, :is_deferred, :is_background, "
+                    ":result, :error, :completed_at, :auto_continued_at, "
+                    ":suspension_reason, :resume_target_turn_id, :next_retry_at, "
+                    ":created_at"
+                    ")"
+                ),
+                {
+                    "work_id": wake_task_obj.work_id,
+                    "task_type": wake_task_obj.task_type,
+                    "instance_id": wake_task_obj.instance_id,
+                    "message_id": wake_task_obj.message_id,
+                    "status": wake_task_obj.status,
+                    "worker_id": wake_task_obj.worker_id,
+                    "started_at": wake_task_obj.started_at,
+                    "last_heartbeat_at": wake_task_obj.last_heartbeat_at,
+                    "retry_count": wake_task_obj.retry_count,
+                    "cancel_requested": wake_task_obj.cancel_requested,
+                    "cancel_requested_at": wake_task_obj.cancel_requested_at,
+                    "retry_scheduled": wake_task_obj.retry_scheduled,
+                    "is_deferred": wake_task_obj.is_deferred,
+                    "is_background": wake_task_obj.is_background,
+                    "result": wake_task_obj.result,
+                    "error": wake_task_obj.error,
+                    "completed_at": wake_task_obj.completed_at,
+                    "auto_continued_at": wake_task_obj.auto_continued_at,
+                    "suspension_reason": wake_task_obj.suspension_reason,
+                    "resume_target_turn_id": wake_task_obj.resume_target_turn_id,
+                    "next_retry_at": wake_task_obj.next_retry_at,
+                    "created_at": wake_task_obj.created_at,
+                },
+            )
+        # PENDING marker (lane-6 time).
+        ri_repo = ReportInjectionRepository(engine=engine)
+        ri_repo.ensure_deferred(
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id=child_content_message_id,
+            deferred_reason="system:crash_wake",
+        )
+        ri_repo.transition_deferred_to_pending(
+            injection_id=ri_repo.find_deferred_for_parent_all(
+                parent_not_terminal=True, limit=10
+            )[0].injection_id
+        )
+
+        # Service + manager mock wired for the bridge.
+        manager = MagicMock()
+        manager.engine = engine
+        manager._loop = manager_loop
+        manager._checkpointer = None
+        manager._handle_recover_deferred_report = MagicMock()
+        # G4-r4: lane 6 dispatches via enqueue_message (the SAME
+        # primitive the manual ping uses).
+        manager.enqueue_message = AsyncMock(
+            side_effect=_schedule_parent
+        )
+        service = ReportDeliveryRecoveryService(
+            task_repo=TaskRepository(engine=engine),
+            report_injection_repo=ri_repo,
+            queue_repo=MagicMock(),
+            instance_repo=MagicMock(),
+            manager_ref=manager,
+            interval_seconds=300,
+            age_bound_minutes=10,
+            batch_cap=100,
+            recovery_retry_minutes=1,
+            enabled=True,
+        )
+        try:
+            lane = service._run_stuck_wake_lane()
+        finally:
+            manager_loop.call_soon_threadsafe(manager_loop.stop)
+            loop_thread.join(timeout=5.0)
+            manager_loop.close()
+
+        # ── Effect-level assertions (LESSONS #6 hardened bar) ──
+        assert lane.recovered == 1, (
+            f"the dead-worker wake task MUST be force-cancelled "
+            f"+ retry-minted; recovered={lane.recovered}, "
+            f"errors={lane.errors}"
+        )
+        # The parent-schedule primitive was invoked exactly once
+        # (this is the SEAM pin — the effect below proves the
+        # SEAM did the work; both directions).
+        assert len(schedule_calls) == 1, (
+            f"the parent-schedule primitive MUST be invoked exactly "
+            f"once after the heal; got {len(schedule_calls)} calls: "
+            f"{schedule_calls}"
+        )
+        # The source pins the ping-seam reuse (NOT a new path).
+        assert schedule_calls[0][1] == "system:wedge-resolve", (
+            f"the schedule call MUST carry the wake-only "
+            f"provenance; got source={schedule_calls[0][1]}"
+        )
+        # Cross-loop seam: the coroutine ran on the manager loop.
+        assert original_loop_ref, "the schedule coroutine did not run"
+        assert original_loop_ref[0] is manager_loop, (
+            f"the schedule coroutine MUST run on the manager loop; "
+            f"got {original_loop_ref[0]}, expected {manager_loop}"
+        )
+        # ── THE EFFECT (the dispatch's hardened pin bar) ──
+        # After the heal, the parent transitions OUT OF
+        # waiting_children. This is what the f4- LEG 1 evidence
+        # proved broken (parent stayed waiting_children through
+        # t+300s).
+        with engine.begin() as conn:
+            row = conn.execute(
+                sa_text(
+                    "SELECT status FROM instances WHERE "
+                    "instance_id = :iid"
+                ),
+                {"iid": parent},
+            ).first()
+        assert (
+            row is not None
+            and row[0] == InstanceStatus.RUNNING.value
+        ), (
+            f"the parent MUST transition out of waiting_children "
+            f"on the seeded LIVE state; got status="
+            f"{row[0] if row else None}"
+        )

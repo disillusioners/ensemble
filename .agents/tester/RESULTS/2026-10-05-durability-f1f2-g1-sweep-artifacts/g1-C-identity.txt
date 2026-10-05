@@ -1,0 +1,161 @@
+# G1 Lane-C — Failure identity file
+# Lane C of 4: sweep of tests/job_queue + tests/services + tests/repositories + tests/migration (C1) + dirs + 7-file e2e list (C2)
+# Override note: HEAD = 8a1a196f (commissioned pin fb0f4655 + 2 G4 .agents/ evidence commits; non-.agents/ diff = 0)
+# Tag legend: [KNOWN-4] = chunk plan's v0.13.10-era 3-node TestSite1InlineMirrorFinalize set; [QUARANTINE-FAMILY] = active row in .agents/tester/QUARANTINE.md; [NEW?] = no ledger match, blocker candidate per chunk plan §5
+# C1 chunk complete: 29 failed / 2979 passed / 58 skipped / 3 deselected / runtime 387.58s
+# C2 chunk: (run pending, will append below)
+
+# --- C1: tests/job_queue tests/services tests/repositories tests/migration ---
+[KNOWN-4] tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_hook_fires_settled_and_dual_fire_is_deduped :: TypeError: Object of type MagicMock is not JSON serializable (task_repository.py:3148)
+[KNOWN-4] tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_pre_terminal_task_completes_on_success_fully :: TypeError: Object of type MagicMock is not JSON serializable (task_repository.py:3148)
+[KNOWN-4] tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_hook_skips_when_finalize_races_to_none :: TypeError: Object of type MagicMock is not JSON serializable (task_repository.py:3148)
+[QUARANTINE-FAMILY] tests/job_queue/test_in_progress_guard.py::TestJobFeedbackObserverWaitingForGuard::test_completed_with_no_waiting_runs_normal_path :: AssertionError: Expected 'notify_watchers' to have been called once. Called 0 times. (QUARANTINE.md row 92 lcan_matrix_delivery_2 2026-09-18, also row 18 mission-terminal 2026-09-25 / row 19 U1-watch-reconcile 2026-09-27 — fake_sync 5-vs-6 arity family)
+[QUARANTINE-FAMILY] tests/job_queue/test_in_progress_guard.py::TestJobFeedbackObserverWaitingForGuard::test_waiting_for_none_treated_as_zero :: AttributeError: 'NoneType' object has no attribute 'args' (QUARANTINE.md row 92 + row 18/19 — same fake_sync 5-vs-6 arity family)
+[QUARANTINE-FAMILY] tests/job_queue/test_job_answer_tool.py::TestJobAnswerRegistration::test_create_job_tools_returns_job_answer :: AssertionError: Last tool in create_job_tools() should be 'job_answer', got 'job_resume' (QUARANTINE.md row 18/19 tool-surface drift job_resume/job_answer order)
+[QUARANTINE-FAMILY] tests/job_queue/test_jober_watch_integration.py::TestJoberWatchIntegration::test_tool_registration :: AssertionError: assert 24 == 22 (QUARANTINE.md row 18/19 tool-surface drift 24≠22)
+[QUARANTINE-FAMILY] tests/job_queue/test_jober_watch_integration.py::TestJobWatcherRepository::test_add_watch_creates_record :: AssertionError: At index 1 diff: 'settled' != 'failed' (QUARANTINE.md row 18/19 + row 30 mission settled-rename 7-node family + row 81 mission-program FINAL stale-fixture family)
+[QUARANTINE-FAMILY] tests/job_queue/test_n8_hot_path_pin.py::TestN8HotPathPin::test_mirror_work_id_renders_settled_via_primary_event_path :: AssertionError: post-commit outbox must fire notify_watchers for the mirror work_id; got zero calls (QUARANTINE.md row 19 U1-watch-reconcile — fake_sync 5-vs-6 arity family at call-site drift :1732→:1796)
+[QUARANTINE-FAMILY] tests/job_queue/test_round2_council_fixes.py::TestStaleTaskRecoveryWedgeHook::test_wedge_resolver_end_to_end_for_dead_letter_root :: RuntimeError: There is no current event loop in thread 'MainThread'. (QUARANTINE.md row 18 mission-terminal + row 19 U1 + row 23 fs-tool-guardrails event-loop pollution family)
+[QUARANTINE-FAMILY] tests/job_queue/test_terminal_write_census.py::TestTerminalWriteCensus::test_every_terminal_write_site_is_classified :: AssertionError: UNLISTED TERMINAL-WRITE SITE daemon/manager.py:5824 (QUARANTINE.md row 18 mission-terminal + row 19 U1 terminal-write census family)
+[QUARANTINE-FAMILY] tests/job_queue/test_terminal_write_census.py::TestTerminalWriteCensus::test_hooked_entries_point_at_live_notify_calls :: AssertionError: hooked_at entries no longer point at a notify_watchers call (13 stale anchors) (QUARANTINE.md row 18 mission-terminal + row 19 U1 terminal-write census fixture-rot)
+[QUARANTINE-FAMILY] tests/job_queue/test_watcher_repository_concurrent.py::TestSequentialAddWatch::test_first_call_inserts :: AssertionError: At index 1 diff: 'settled' != 'failed' (QUARANTINE.md row 18 + row 19 + row 30 + row 81 — watch_events default-events drift family)
+[QUARANTINE-FAMILY] tests/job_queue/test_watcher_repository_concurrent.py::TestConcurrentAddWatch::test_concurrent_threads_default_events_single_row :: AssertionError: At index 1 diff: 'settled' != 'failed' (QUARANTINE.md row 18 + row 19 + row 30 + row 81 — same family)
+[QUARANTINE-FAMILY] tests/services/test_instance_messaging_queue_routing.py::TestMessageRouteQueueIdForwarding::test_router_forwards_queue_id_to_enqueue_message_job :: TypeError: object MagicMock can't be used in 'await' expression (daemon/routers/messages.py:325) (QUARANTINE.md row 44 LCA-gate 2026-09-06 messages.py:258 MagicMock-await class 32-node family + row 78 M2-gate + row 86 hoisting-gate §4a + row 102 v0.15.3 tool-lane 32→34)
+[NEW?] tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_success_callback_path_records_succeeded_true :: AttributeError: 'types.SimpleNamespace' object has no attribute 'priority' (daemon/services/task_processor.py:552)
+[NEW?] tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_work_fn_error_path_records_succeeded_false :: AttributeError: 'types.SimpleNamespace' object has no attribute 'priority' (daemon/services/task_processor.py:552)
+[NEW?] tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_post_processing_error_path_records_succeeded_false :: AttributeError: 'types.SimpleNamespace' object has no attribute 'priority' (daemon/services/task_processor.py:552)
+[NEW?] tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_cancellation_path_operation_cancelled_does_not_fire_hook :: AttributeError: 'types.SimpleNamespace' object has no attribute 'priority' (daemon/services/task_processor.py:552)
+[NEW?] tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_cancellation_path_asyncio_cancelled_does_not_fire_hook :: AttributeError: 'types.SimpleNamespace' object has no attribute 'priority' (daemon/services/task_processor.py:552)
+[NEW?] tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_requeue_path_does_not_fire_hook :: AttributeError: 'types.SimpleNamespace' object has no attribute 'priority' (daemon/services/task_processor.py:552)
+[NEW?] tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_iterations_and_duration_are_non_zero :: AttributeError: 'types.SimpleNamespace' object has no attribute 'priority' (daemon/services/task_processor.py:552)
+[NEW?] tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_zero_iterations_when_no_agent_messages :: AttributeError: 'types.SimpleNamespace' object has no attribute 'priority' (daemon/services/task_processor.py:552)
+[NEW?] tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_compute_iterations_and_duration_extracts_task_message :: AttributeError: 'types.SimpleNamespace' object has no attribute 'priority' (daemon/services/task_processor.py:552)
+[NEW?] tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_compute_task_message_empty_when_no_human_message :: AttributeError: 'types.SimpleNamespace' object has no attribute 'priority' (daemon/services/task_processor.py:552)
+[NEW?] tests/repositories/test_turn_reconciler.py::TestJobQueueItems::test_missing_task_sets_admission_done_orphan_reason :: AssertionError: assert 'active' == 'done' (admission_state mismatch on missing Task)
+[NEW?] tests/repositories/test_turn_reconciler.py::TestJobLocks::test_missing_task_deletes_lock :: AssertionError: assert 0 >= 1 (job_locks updated_count)
+[NEW?] tests/repositories/test_turn_reconciler.py::TestJobWatchers::test_hard_deleted_task_watcher_deleted :: AssertionError: Expected job_watchers to be deleted for hard-deleted Task, got updated_counts={'job_queue_items': 1, 'job_locks': 0, ..., 'job_watchers': 0}
+[QUARANTINE-FAMILY] tests/migration/test_attestation_migration.py::TestNoBooleanIntegerDefaultInShippedMigrations::test_no_boolean_int_literal_default :: AssertionError: BOOLEAN column(s) with int-literal DEFAULT 0 found in shipped migrations: 20260915_120000_critical_notes_lifecycle.sql (QUARANTINE.md row 12/10 int4-overflow closing-gate 2026-09-28 + row 90 service-tool FINAL gate 2026-09-16 — migration boolean-default family)
+
+# --- C2: tests/message_queue_redesign + tests/api + tests/manager + tests/lint + tests/static + tests/performance + tests/property + tests/integration + tests/opencode + tests/e2e (with --ignore=tests/e2e/test_context_injection_hybrid.py) ---
+# C2 chunk: TIMEOUT (killed at 1500s/25min command-level by `timeout` wrapper; pytest-timeout 30s thread-mode also fired on the hung test; pytest exited 1 via SIGTERM handling, no summary line printed)
+# Last pytest progress: [ 29%] — 546 passed / 13 skipped / 17 hypothesis F / 0 deselected / ~1400 tests never reached
+# Pytest NEVER printed a summary line OR any `FAILED <nodeid>` lines (because killed before summary stage)
+# Collected-count exact value UNKNOWN (no summary); math estimate: 576/0.29 ≈ 1986 tests (chunk plan said 1972) — close but imprecise
+# Hung-test identification (from captured stack trace in log + 2 `+++ Timeout +++` banners): tests/property/test_turn_state_machine.py::TestTurnReconcilerStateMachine::test_state_machine — STUCK in hypothesis shrink loop on cursor.execute (SQLite DDL) at hypothesis/stateful.py:121 / engine.py:1653, hypothesis test hung waiting on a DDL that never returned. 17 F's in progress dots are all hypothesis shrunk-failing-cases of THIS one test method (hypothesis stateful reports each shrunk case as a separate F).
+# Per task: no retries, capture-don't-investigate — I will not dig into the 17 hypothesis sub-cases (they are all the same nodeid)
+[QUARANTINE-FAMILY] tests/property/test_turn_state_machine.py::TestTurnReconcilerStateMachine::test_state_machine :: Hung in hypothesis shrink loop on cursor.execute (SQLite DDL) — 30s pytest-timeout fired twice, command-level 1500s finally killed pytest. (QUARANTINE.md row 66 — turn_transitions_reconciler_unit_test 2026-08-20, base-evidenced 1F @ base 6bb99d5f, deselected in turn_transitions_reconciler_unit_test.sh)
+
+# --- Summary of all g1-C-lane failures ---
+# C1 chunk: 29 failures, all classified (3 [KNOWN-4] + 13 [QUARANTINE-FAMILY] + 13 [NEW?])
+# C2 chunk: 1 identified failure (test_turn_state_machine, [QUARANTINE-FAMILY]) + ~1400 untested tests due to TIMEOUT
+# New?-tagged failures (potential blocker candidates per chunk plan §5):
+#   - 10× tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::* (priority AttributeError, daemon/services/task_processor.py:552)
+#   - 3× tests/repositories/test_turn_reconciler.py::{TestJobQueueItems::test_missing_task_sets_admission_done_orphan_reason, TestJobLocks::test_missing_task_deletes_lock, TestJobWatchers::test_hard_deleted_task_watcher_deleted} (admission_state drift + 0>=1 count drift on missing/hard-deleted Task)
+#   - TOTAL: 13 [NEW?] nodes — all confined to C1, all in 2 test files, all show deterministic attribute/count mismatches (NOT command-level timeout; 30s pytest-timeout did NOT fire on any of them; the C1 run completed normally in 387.58s)
+#   - None of the 13 match any row in QUARANTINE.md (not in the 5 named active families; not in any of the 30+ other active rows I read in the file)
+#   - Per chunk plan §5: "Anything else = NEW → blocker candidate → targeted base A/B (fresh worktree @18827dbd, failing files only)" — these 13 are the candidate
+
+# --- C2b: tests/integration only ---
+# C2b chunk: TIMEOUT (killed at 1500s/25min command-level by `timeout` wrapper; pytest-timeout 30s thread-mode also fired on the hung test; pytest exited 1 via SIGTERM handling, no summary line printed)
+# Last pytest progress: 23 dots (23 tests PASS) + 47 plus-signs (current test hung for 47 ticks) + 2 `+++ Timeout +++` banners
+# Pytest NEVER printed a summary line OR any `FAILED <nodeid>` lines (because killed before summary stage)
+# Collected count: 812 tests (default addopts deselected 385; full dir has 1197 tests)
+# Hung-test identification (24th in collect order, matching the 23 dots before the hung test):
+[NEW?] tests/integration/test_attestation_bound_escalation.py::test_bound_plus_one_escalates_once_without_fourth_nudge :: Hung in live LLM judge call (model=quick, leader_completion_gate_fused_judge) blocked on ssl.py read at httpcore/_sync/http11.py:217 _network_stream.read → _sock.recv(max_bytes) — 30s pytest-timeout thread-mode fired 2x but cannot kill asyncio thread in _run_once(); 1500s command-level timeout SIGTERM'd pytest (exit 1). ScriptedChatModel scripts the LEADER only (model=scripted-test, 6 responses: delegate + 4 hallucinated + final); the JUDGE is live (model=quick) and hangs because no live LLM is reachable. (NOT in any active QUARANTINE.md row; pattern similar to row 93/117 "Live fused-judge verdict variance" family but nodeid+file do not match — different specific test, same root cause class.)
+
+# --- C2c: NOT EXECUTED (Test Leader: "If C2b itself times out, identify the hung test the same way and STOP") ---
+# Per instruction, C2c (tests/opencode + tests/e2e --ignore=hybrid + tests/property --deselect=hung test) was NOT run.
+# The C2c directive is preserved here for traceability but is gated on Test Leader's next decision.
+
+# --- Final Lane-C summary (post-remainder) ---
+# C1: 29 failures (3 KNOWN-4 + 13 QUARANTINE-FAMILY + 13 NEW?), 2979 passed, 58 skipped, 3 deselected, 387.58s — FAIL
+# C2: TIMEOUT at 1500s, 1 identifiable hung test (test_turn_state_machine, QUARANTINE row 66), ~1400 tests never reached
+# C2b: TIMEOUT at 1500s, 1 identifiable hung test (test_bound_plus_one_escalates_once_without_fourth_nudge, NEW? — not in QUARANTINE), 23 tests passed + 0 failures printed + ~788 tests never reached
+# C2c: NOT RUN (C2b timeout → STOP per Test Leader)
+# Grand total: 30 failure-tagged lines in g1-C-identity.txt (3 KNOWN-4 + 14 QUARANTINE-FAMILY + 13 NEW? from C1; 1 NEW? from C2b; 1 QUARANTINE-FAMILY from C2)
+# Of 30, 14 are potential blocker candidates (13 NEW? from C1 + 1 NEW? from C2b) — all deterministic, all on tests that should run in the sweep per default addopts
+
+# --- C2d: tests/integration --deselect=test_attestation_bound_escalation::test_bound_plus_one_escalates_once_without_fourth_nudge + --timeout-method=signal ---
+# C2d chunk: COMPLETED in 790.31s (0:13:10) — SIGALRM signal-mode timeout worked, no command-level timeout
+# Result: 27 failed, 781 passed, 3 skipped, 386 deselected, 285 warnings, 1 error
+# 'Failed: Timeout' (30s cap) exact string: 7 hits (live LLM judge tests killed by signal at 30s)
+# '+++ Timeout +++' banners: 14 (mix of signal-killed tests and the deselected one's hang-over banners)
+# Note: 1 ERROR is setup-time FileNotFoundError (initdb at macOS path on Linux env) — env-defect, not test failure
+
+# [LLM-ENV?] tag = env-dependent live-LLM class (test dies to signal-mode timeout because no live LLM is reachable; expected-fail-without-LLM, NOT counted as NEW blocker without further evidence)
+# [QUARANTINE-FAMILY] tag = test matches an active row in .agents/tester/QUARANTINE.md
+# [NEW?] tag = test is deterministic, fails in C2d, NOT in QUARANTINE — candidate blocker pending base A/B
+
+[LLM-ENV?] tests/integration/test_attestation_idle_orphan_incident.py::test_b08f40fe_idle_orphan_tree_denies_instead_of_branch5_allow :: Failed: Timeout (>30.0s) from pytest-timeout — live LLM judge (model=quick) hung in SSL recv; SIGALRM killed the test at 30s. Pattern matches QUARANTINE.md row 93 (lcan_matrix_6_intf_s1, "Live fused-judge verdict variance, 1F/2P base retry budget") — same family.
+[LLM-ENV?] tests/integration/test_attestation_idle_orphan_incident.py::test_b08f40fe_terminated_orphans_without_attestation_still_denies :: Failed: Timeout (>30.0s) — same file, same mechanism. (Not explicitly listed in row 93 but same file + family — likely same root cause.)
+[LLM-ENV?] tests/integration/test_attestation_incident_acceptance_lca.py::test_lca_b08f40fe_phase1_incident_phrase_denies_no_silent_completion :: Failed: Timeout (>30.0s) — live LLM judge (model=quick) hung; SIGALRM killed. (NOT in QUARANTINE.md under this exact nodeid; same mechanism as row 93/117 family.)
+[LLM-ENV?] tests/integration/test_attestation_ledger_reset.py::test_attested_allow_resets_and_next_mission_starts_clean :: Failed: Timeout (>30.0s) — live LLM judge hung; SIGALRM killed. (NOT in QUARANTINE.md under this exact nodeid; same mechanism.)
+[LLM-ENV?] tests/integration/test_attestation_live_descendants.py::test_all_descendants_terminal_still_denies :: Failed: Timeout (>30.0s) — live LLM judge hung. (NOT in QUARANTINE.md under this exact nodeid.)
+[LLM-ENV?] tests/integration/test_attestation_live_descendants.py::test_error_and_failed_descendants_are_terminal :: Failed: Timeout (>30.0s) — live LLM judge hung. (NOT in QUARANTINE.md under this exact nodeid.)
+[QUARANTINE-FAMILY] tests/integration/test_attestation_revive_after_escalation.py::test_terminal_reset_and_fresh_episode_rearm_next_mission :: Failed: Timeout (>30.0s) — live LLM judge hung. (QUARANTINE.md row 117 — lca3_matrix_15_slow_b_integration_test 2026-09-17, "live-LLM verdict stochasticity", base-identical proven 1P/2F @ HEAD, 2P @ base f7588291)
+[QUARANTINE-FAMILY] tests/integration/test_complete_cancel_route_through_transitions.py::test_complete_task_direct_call_reconciles_all_8_mirrors :: AssertionError: 'active' != 'done' (no timeout — synchronous test). (QUARANTINE.md row 47 — LCA-gate 2026-09-06 U11 integration behavioral cluster, "Task-finalize / zombie-reaper / pause-race surfaces — zero production files in LCA diff", base-evidenced 11/11 FAIL-identical @ e866c116)
+[QUARANTINE-FAMILY] tests/integration/test_complete_cancel_route_through_transitions.py::test_cancel_task_direct_call_reconciles_all_8_mirrors :: AssertionError: 'active' != 'done' (synchronous). (QUARANTINE.md row 47 same family.)
+[QUARANTINE-FAMILY] tests/integration/test_complete_cancel_route_through_transitions.py::test_fail_task_direct_call_reconciles_all_8_mirrors :: AssertionError: 'active' != 'done' (synchronous). (QUARANTINE.md row 47 same family.)
+[QUARANTINE-FAMILY] tests/integration/test_complete_cancel_route_through_transitions.py::test_fail_task_does_not_collapse_to_cancel_task :: AssertionError: not-collapse (synchronous). (QUARANTINE.md row 47 same family.)
+[QUARANTINE-FAMILY] tests/integration/test_lcan_legacy_checkpoint.py::test_s1_legacy_note_in_pre_removal_shape_activates_a_band :: AssertionError: 'attested 2nd turn plain-allow' contract vs 'hold + Final Report Reminder' actual (no timeout). (QUARANTINE.md row 26 — lca-check-note-removal gate 2026-09-23, "fixture under-cans the post-attest HOLD reminder 5th turn", pre-existing at base 6bf7bed7)
+[QUARANTINE-FAMILY] tests/integration/test_lcau_incident_e2e.py::test_scenario_b_formal_report_ignoring_question_denies_with_nudge :: AssertionError: same 5th-turn HOLD reminder under-canning (no timeout). (QUARANTINE.md row 26 same family.)
+[NEW?] tests/integration/test_m2_missions_runtime_contract.py::test_liveness_dead_letter_alone_returns_400_with_accepted_set :: AssertionError (no timeout; deterministic, sync). (NOT in QUARANTINE.md; test file last touched 99fcab22 / ad63a2d8 — M2 probe W4 — pre-branch ancestry. Needs base A/B at 18827dbd per chunk plan §5.)
+[QUARANTINE-FAMILY] tests/integration/test_message_metadata_deletion_paths_prune.py::TestOrphanSweepPruneHappyPath::test_orphan_sweep_drops_side_table_rows :: AssertionError: adelete_thread('...') await not found (synchronous). (QUARANTINE.md row 10 — user-timezone independent gate 4ac8fd4a orphan-sweep pair, 2F/2F @ HEAD ≡ 2F @ base e73ae6ff; same family as row 39 LCA orphan+marker final gate 2026-09-11)
+[QUARANTINE-FAMILY] tests/integration/test_message_metadata_deletion_paths_prune.py::TestOrphanSweepPruneNeverRaise::test_prune_failure_does_not_abort_orphan_sweep :: AssertionError: same await-not-found signature (synchronous). (QUARANTINE.md row 10/39 same family.)
+[NEW?] tests/integration/test_mission_final_vocab_runtime.py::test_row6_n8_hot_path_real_settle_emits_settled_text :: AssertionError (synchronous; final-word-count/marker check). (NOT in QUARANTINE.md under this nodeid; test file last touched e9a66c12 mission-final-gate era — pre-branch ancestry. Needs base A/B per chunk plan §5.)
+[QUARANTINE-FAMILY] tests/integration/test_pause_race_w7_jobitem_skip.py::test_w7_marker_guard_skips_jobitem_creation :: AssertionError: Unknown queue_type MagicMock (synchronous). (QUARANTINE.md row 47 — U11 LCA-gate 2026-09-06 "MagicMock queue_type" + row 78 M2-gate "MagicMock queue_type" — both base-evidenced at e866c116 / e676ddea)
+[NEW?] tests/integration/test_spawn_default_unchanged.py::TestResolverNotCalledOnDefaultPath::test_resolver_not_invoked_when_model_tier_absent :: AssertionError: tools list at daemon/tools/instance.py:5207 create_instance_tools (synchronous). (NOT in QUARANTINE.md; test file last touched ca86f493 spawn-intelligence-override — pre-branch. Needs base A/B per chunk plan §5.)
+[NEW?] tests/integration/test_spawn_intelligence_tier.py::TestSpawnIntelligenceTierSuccess::test_tier_high_resolves_to_agentic_with_visibility_line :: AssertionError at _get_spawn_tool(manager) → create_instance_tools (synchronous). (NOT in QUARANTINE.md; same file as test_spawn_default_unchanged; pre-branch. Needs base A/B.)
+[NEW?] tests/integration/test_spawn_intelligence_tier.py::TestSpawnIntelligenceTierLoud::test_tier_high_with_agentic_excluded_raises_value_error :: AssertionError at create_instance_tools (synchronous). (NOT in QUARANTINE.md; same file; pre-branch. Needs base A/B.)
+[NEW?] tests/integration/test_spawn_intelligence_tier.py::TestSurfaceBoundary::test_spawn_councilor_signature_does_not_accept_model_tier :: AssertionError at create_instance_tools (synchronous). (NOT in QUARANTINE.md; same file; pre-branch. Needs base A/B.)
+[NEW?] tests/integration/test_spawn_intelligence_tier.py::TestSurfaceBoundary::test_terminate_instance_signature_does_not_accept_model_tier :: AssertionError at create_instance_tools (synchronous). (NOT in QUARANTINE.md; same file; pre-branch. Needs base A/B.)
+[NEW?] tests/integration/test_spawn_intelligence_tier.py::TestBothParamsPrecedence::test_model_tier_wins_over_model_with_visible_note :: AssertionError at _get_spawn_tool (synchronous). (NOT in QUARANTINE.md; same file; pre-branch. Needs base A/B.)
+[NEW?] tests/integration/test_spawn_intelligence_tier.py::TestBothParamsPrecedence::test_model_tier_wins_with_operator_overridden_default :: AssertionError (synchronous). (NOT in QUARANTINE.md; same file; pre-branch. Needs base A/B.)
+[NEW?] tests/integration/test_spawn_intelligence_tier.py::TestBothParamsInvalidLegacyModel::test_both_params_with_invalid_legacy_model_suppresses_notice :: AssertionError (synchronous). (NOT in QUARANTINE.md; same file; pre-branch. Needs base A/B.)
+[QUARANTINE-FAMILY] tests/integration/test_vscode_security_integration.py::TestC1PathTraversal::test_c1_valid_repo_folder_not_blocked :: AssertionError: "DID NOT RAISE httpx.ConnectError; proxy returns 503 instead" (synchronous). (QUARANTINE.md row 51 — LCA-gate 2026-09-06 vscode C1 proxy translation, "Persists solo with certs unset; proxy swallows upstream ConnectError into 503", base-evidenced 1/1 FAIL-identical @ e866c116)
+[ENV-DEFECT] tests/integration/test_empty_guard_checkpoint_roundtrip.py::test_pg_round_trip_preserves_nudge_markers_and_guard_semantics :: FileNotFoundError: '/opt/homebrew/opt/postgresql@14/bin/initdb' (SETUP error; macOS Homebrew path on Linux env — env-defect, not test failure; pre-existing pattern matches QUARANTINE.md row 21 b1_wc env-defect family). NOT counted as [NEW?] blocker.
+
+# --- C2e: tests/opencode + tests/e2e (--ignore=hybrid) + tests/property (--deselect=turn_state_machine::test_state_machine) + --timeout-method=signal ---
+# C2e chunk: COMPLETED in 46.90s — clean exit, no timeouts
+# Result: 4 failed, 541 passed, 56 deselected, 43 warnings
+# 'Failed: Timeout' (30s cap) exact string: 0
+# '+++ Timeout +++' banners: 0 (no live LLM tests in C2e scope)
+
+[QUARANTINE-FAMILY] tests/e2e/test_answer_dismiss_flow.py::test_full_answer_lifecycle_pause_answer_resume_complete :: AssertionError: "Terminal Task MUST have JobItem admission_state='done'; got 'active'." (synchronous; c171a289 family pattern — JobItem admission_state 'active' vs 'done'). (QUARANTINE.md row 78 — M2-gate 12-node "T0-mirror timing (test_answer_dismiss_flow ×1)" — same file; specific test name not in row 78 but assertion pattern + file match the family; same drift as c171a289 commit 2026-08-13.)
+[QUARANTINE-FAMILY] tests/e2e/test_pause_during_report_resume_turn_handle.py::test_resume_after_pause_during_report_consumes_handle :: AssertionError: "ResumeTurn must transition PAUSED → CANCELLED; got 'pending'." (synchronous; c171a289 family). (QUARANTINE.md row 58 — Release Gate 1f 2026-08-20, "PAUSED→PENDING for WorkerPool re-claim", base-evidenced 1F @ base 6bb99d5f)
+[QUARANTINE-FAMILY] tests/e2e/test_pause_during_report_resume_turn_handle.py::test_resume_does_not_create_new_task_or_jobitem :: AssertionError: JobItem 'active' vs 'done' (synchronous; c171a289 family). (QUARANTINE.md row 59 — Release Gate 1f 2026-08-20, "reconciler no longer force-completes message", base-evidenced 1F @ base 6bb99d5f)
+[QUARANTINE-FAMILY] tests/e2e/test_pause_during_report_turn_then_resume.py::test_pause_during_report_turn_then_resume_closes_orphan_path :: AssertionError: "message_queue row should be completed, got status='processing'" (synchronous; c171a289 family). (QUARANTINE.md row 56 — Release Gate 1e 2026-08-20, "PAUSED→CANCELLED→PAUSED→PENDING in c171a289", base-evidenced 1F @ base 6bb99d5f)
+
+# --- FINAL Lane-C summary ---
+# C1: 29 failures (3 KNOWN-4 + 13 QUARANTINE-FAMILY + 13 NEW?)
+# C2: TIMEOUT at 1500s, 1 hung test (test_turn_state_machine, QUARANTINE row 66)
+# C2b: TIMEOUT at 1500s, 1 hung test (test_bound_plus_one_escalates, NEW? — not in QUARANTINE)
+# C2d: 27 failed (5 [LLM-ENV?] + 1 [QUARANTINE-FAMILY] + 12 [QUARANTINE-FAMILY] + 9 [NEW?]) + 1 env-defect ERROR
+# C2e: 4 failed (all [QUARANTINE-FAMILY])
+# 
+# Lane-C failure-tagged totals (counting unique test nodeids):
+#   [KNOWN-4]:           3
+#   [QUARANTINE-FAMILY]: 30 (13 C1 + 1 C2 + 1 C2b-error-precursor  + 0  C2b-hung counted as NEW? + 13 C2d + 4 C2e - see C2b note)
+#   [NEW?]:              23 (13 C1 + 1 C2b + 9 C2d)
+#   [LLM-ENV?]:          5 (C2d: 5 live-LLM-judge tests with Failed: Timeout; row-93 family already counted under QUARANTINE-FAMILY if explicit match)
+#   [ENV-DEFECT]:        1 (C2d: macOS initdb path on Linux)
+#   TOTAL:               62 unique test nodeids
+# 
+# Of NEW? candidates (23): all are deterministic, none are timeouts. Pattern split:
+#   - 10× tests/services/test_process_message_metrics.py::TestRecordMetricsWiring (priority AttributeError)
+#   - 3× tests/repositories/test_turn_reconciler.py (admission_state/count drift on missing/hard-deleted Task)
+#   - 1× tests/integration/test_attestation_bound_escalation.py::test_bound_plus_one (C2b hung; live LLM judge hang)
+#   - 1× tests/integration/test_m2_missions_runtime_contract.py::test_liveness_dead_letter
+#   - 1× tests/integration/test_mission_final_vocab_runtime.py::test_row6_n8_hot_path
+#   - 1× tests/integration/test_spawn_default_unchanged.py::TestResolverNotCalledOnDefaultPath::test_resolver_not_invoked_when_model_tier_absent
+#   - 7× tests/integration/test_spawn_intelligence_tier.py (TestSpawnIntelligenceTierSuccess ×1, TestSpawnIntelligenceTierLoud ×1, TestSurfaceBoundary ×2, TestBothParamsPrecedence ×2, TestBothParamsInvalidLegacyModel ×1)
+# 
+# Of LLM-ENV? candidates (5): all are tests/integration/test_attestation_*.py that hit live LLM judge (model=quick) and died to the 30s signal-mode timeout. These need a live LLM (or a scripted judge) to pass — they are not NEW durability-branch bugs.
+
+# --- Coverage statement (post-remainder) ---
+# Lane-C expected: 5,038 tests (3,066 C1 + 1,972 C2; per chunk plan)
+# Lane-C collected: 4,228 (3,066 C1 + 812 C2b + 350 C2d) — C2d total 812 = 386 deselected + 426 collected (1 ERROR setup + 27 F + 781 P + 3 S); 426 (not 812) because the deselect of bound_escalation only removed 1 test
+# Lane-C reached/executed: ~4,000+ (C1 3,066 + C2 576 progress + C2b 23 + C2d 808 = ~4,473 tests touched)
+# Lane-C unexecuted: tests in C2d that were not reached due to the deselect + 1 ENV-DEFECT + 27 FAILs took 30s each. C2e: 545 collected (4 F + 541 P).
+# Lane-C unrun after this pass: 0 (all 5 chunks attempted; C2c was skipped per the previous turn's STOP)
+# Test Leader's --timeout-method=signal override worked: 0 command-level TIMEOUTs in C2d or C2e (both completed normally)

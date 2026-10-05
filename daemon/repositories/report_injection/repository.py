@@ -117,7 +117,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
-from sqlalchemy import literal, true, update as sa_update
+from sqlalchemy import literal, text, true, update as sa_update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
@@ -1117,8 +1117,15 @@ class ReportInjectionRepository:
             limit: Batch cap.
 
         Returns:
-            List of ``{"child_id", "child_msg_id", "parent_id"}``
-            dicts — at most ONE row per child. Empty list when none.
+            List of
+            ``{"child_id", "child_msg_id", "parent_id", "has_anchor"}``
+            dicts — at most ONE row per child. ``has_anchor`` is
+            ``True`` when the anchor subquery found a completed
+            ``message_queue`` row (``child_msg_id`` is the anchor id)
+            and ``False`` for the F-2 wedge straddle state
+            (``child_msg_id`` is ``None`` — the per-row pass derives
+            the id from the surviving child checkpoint, task 2.6).
+            Empty list when none.
         """
         from sqlalchemy import Integer, cast as sa_cast, exists
 
@@ -1192,8 +1199,18 @@ class ReportInjectionRepository:
             # ONE deterministic anchor per child: the child's latest
             # COMPLETED message_queue row (correlated scalar
             # subquery; message_id tie-break keeps the order total).
-            # NULL (child with no completed message rows) → filtered
-            # out — nothing to key the obligation triple on.
+            # NULL (child with no completed message rows) → row is
+            # still admitted to the result set; the per-row pass
+            # checks `has_anchor` (computed from `child_msg_id IS
+            # NOT NULL` in Python below) and derives the
+            # `child_message_id` from the surviving child checkpoint
+            # via the `serialize_message` chain (task 2.6) when
+            # `has_anchor` is False. This is the F-2 wedge straddle
+            # state: the child's terminal report IS the child's
+            # last checkpoint message (NOT a `message_queue` row of
+            # the child), so the exact-anchor filter previously
+            # excluded anchor-less children. Admitting them here
+            # closes the F-2 wedge.
             anchor_msg = aliased(MessageQueue, name="am")
             anchor_subq = (
                 select(anchor_msg.message_id)
@@ -1236,9 +1253,15 @@ class ReportInjectionRepository:
                 .where(~has_delivery_row)
                 .where(~has_injection_row)
                 .where(~has_fired_watcher)
-                # Anchor must exist (child with no completed message
-                # rows has nothing to key the triple on).
-                .where(anchor_subq.is_not(None))
+                # F-2 (durability-f1-f2 / phase2): the anchor filter
+                # (`.where(anchor_subq.is_not(None))`) is REMOVED.
+                # Anchor-less children of non-terminal parents are
+                # admitted so the per-row pass can derive the
+                # `child_message_id` from the surviving child
+                # checkpoint (task 2.6). The `has_anchor` flag in
+                # the result dict (computed below) tells the per-row
+                # pass whether to use the anchor or derive from
+                # the checkpoint.
                 .order_by(child_inst.last_activity_at.asc().nullslast())
                 .limit(limit)
             )
@@ -1248,6 +1271,12 @@ class ReportInjectionRepository:
                 "child_id": row.child_id,
                 "child_msg_id": row.child_msg_id,
                 "parent_id": row.parent_id,
+                # F-2 (phase2 task 2.2): ``has_anchor`` flag derived
+                # from the scalar subquery's null-state. ``False``
+                # means the child has no COMPLETED message_queue row
+                # → the per-row pass must derive `child_message_id`
+                # from the surviving child checkpoint (task 2.6).
+                "has_anchor": row.child_msg_id is not None,
             }
             for row in rows
         ]
@@ -1938,6 +1967,205 @@ class ReportInjectionRepository:
                 "child_instance_id": r.child_instance_id,
                 "state": r.state,
                 "child_terminal_status": r.child_terminal_status,
+            }
+            for r in rows
+        ]
+
+    def find_stuck_wake_candidates(
+        self,
+        *,
+        heartbeat_stale_threshold_seconds: int = 90,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Find PENDING-marker obligations whose wake row is wedged.
+
+        Block 1 G4 wedge (durability-f1-f2 / merge-gate G4 main
+        leg, evidence in
+        ``.agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/db-assertions/``).
+        The captured wedge state — PENDING marker minted pre-crash,
+        wake row in ``message_queue`` status ``ready`` preserved
+        by the F-1 epoch-belt, wake ``task`` row still ``running``
+        (claimed by the dead worker), parent in
+        ``waiting_children`` — is unreachable by every existing
+        RDRS lane:
+
+        * Lane 1 (DEFERRED) skips: row is PENDING, not DEFERRED.
+        * Lane 2 (no-row backstop) skips: the marker exists (the
+          ``has_injection_row`` exclusion matches).
+        * Lane 3 + 4 (pending-age) skip: ``age_bound_minutes=10``
+          (the F-1-frozen in-flight protection) blocks the
+          young-from-creation row for the first 10 minutes after
+          boot — but the parent is wedged NOW, and the
+          ``stale_task_recovery`` F-1 amendment (r-20260929) defers
+          the dead-worker's wake task reap by another 15 minutes.
+        * Lane 5 (orphan) skips: parent is waiting_children, not
+          TERMINAL.
+
+        This helper exposes the captured state to a NEW RDRS lane
+        (``_run_stuck_wake_lane``) so the wedge heals within one
+        sweep cadence via the existing
+        ``TaskRepository.force_cancel_and_schedule_retry``
+        primitive — the retry wakes the worker pool's per-instance
+        claim (no RUNNING task for the parent), the worker reads
+        the preserved wake row, instance_messaging flips the parent
+        from waiting_children to RUNNING, and the child's report
+        lands in the parent's graph state.
+
+        Args:
+            heartbeat_stale_threshold_seconds: A wake task whose
+                ``last_heartbeat_at`` is older than this is treated
+                as dead-worker. The 30-second heartbeat cadence is
+                empirically anchored at THREE points:
+
+                * ``daemon/services/worker_pool.py:45`` —
+                  ``DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30.0``
+                  (the cadence constant the worker pool reads).
+                * ``daemon/services/worker_pool.py:152`` — the
+                  worker calls ``task_repo.update_heartbeat(task_id)``
+                  on the cadence (the empirical writer).
+                * ``daemon/repositories/task/repository.py:3015`` —
+                  the heartbeat write
+                  (``UPDATE task SET last_heartbeat_at = :now
+                  WHERE id = :id AND status = 'running'``).
+
+                Default 90s = 3× the heartbeat interval — comfortably
+                larger than a single missed tick while smaller than
+                the F-1 15-minute
+                ``DEFAULT_STALE_THRESHOLD_MINUTES``
+                (``daemon/services/stale_task_recovery.py:25``). The
+                three-point anchor is the post-review cite (the
+                reviewer noted the prior cite at line :45 alone
+                was unverifiable from a wider search; this anchors
+                the cadence empirically).
+            limit: Batch cap.
+
+        Returns:
+            List of
+            ``{"injection_id", "parent_instance_id",
+            "child_instance_id", "child_message_id",
+            "wake_task_id", "wake_message_id"}``
+            dicts. The caller (``_run_stuck_wake_lane``) passes
+            ``wake_task_id`` to ``force_cancel_and_schedule_retry``.
+            ``child_message_id`` (the child's content message id,
+            which differs from ``wake_message_id`` in the LIVE
+            shape per the G4-r round-2 fix — the two are
+            correlated via the wake row's source pattern, NOT
+            equal-id joined) is included for the live-shape
+            test pin.
+        """
+        # Naive-UTC frame (DC-A fix) — mirrors
+        # ``find_stale_running_tasks`` (which the production
+        # ``stale_task_recovery`` consumes) so the heartbeat
+        # comparison uses the same clock frame the worker's
+        # heartbeat thread writes.
+        threshold_iso = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            - timedelta(seconds=heartbeat_stale_threshold_seconds)
+        ).isoformat()
+
+        # Join order (Block-1 G4-r round-2 fix — the prior join
+        # ``mq.message_id = ri.child_message_id`` assumed the
+        # wake row's own ``message_id`` is the marker-stored
+        # ``child_message_id``; that is NOT what is captured in
+        # production. The merge check in
+        # ``.agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/logs/r1r-reboot.log``
+        # + ``db-assertions/r1r-pre-kill-assertion.txt`` (the LIVE
+        # r1r capture) shows ``mq.message_id=ddbeef1d-...`` for
+        # the wake row vs ``ri.child_message_id=34cedf8d-...`` for
+        # the child content message — DIFFERENT ids; correlation
+        # is via the wake row's ``source`` pattern per the
+        # natural-completion mint sites at ``manager.py:8855`` /
+        # ``:8883`` / ``:9266`` / ``:9282`` / ``:9506`` / ``:9534``
+        # + ``child_reports.py:3762`` (seven mint sites; all carry
+        # the colon-form ``f"internal_report:{child_instance_id}:
+        # {child_message_id}"``; per the verification iter 2 prior
+        # review):
+        #
+        #   report_injections (PENDING marker)
+        #   → message_queue   (wake row in 'ready', correlated via
+        #                     ``mq.source LIKE 'internal_report:' ||
+        #                     ri.child_instance_id || ':%'`` and
+        #                     anchored to the parent via
+        #                     ``instance_id``)
+        #   → task            (wake PROCESS_REPORT task in
+        #                     'running', claimed by the dead
+        #                     worker, instance_id=parent;
+        #                     ``message_id`` is the wake row's
+        #                     ``message_id`` — the worker reads
+        #                     the wake row content via
+        #                     ``task.message_id``).
+        #
+        # The source-PREFIX correlation is the same shape used
+        # by the queue-side PREFIX ledger at
+        # ``MessageQueueRepository.find_wake_already_delivered_
+        # evidence`` (``daemon/repositories/message_queue/repository.py``
+        # — the colon-form ``internal_report:{child}:%`` is the
+        # documented shape). Child-boundary safety: a wake row
+        # with source ``internal_report:{child_iid}2:msg``
+        # (sibling child) does NOT match
+        # ``internal_report:{child_iid}:%`` because the ``2``
+        # is a different child id — the LIKE suffix is anchored
+        # by the preceding colon.
+        #
+        # False-skip interaction check (per the dispatch's
+        # "verification point beyond the fix"): lane 6 does NOT
+        # consult the queue-side PREFIX ledger
+        # (``find_wake_already_delivered_evidence``); it only
+        # calls ``find_stuck_wake_candidates`` (this query) +
+        # ``TaskRepository.force_cancel_and_schedule_retry``.
+        # Lane 2's per-row pass DOES consult the ledger (and
+        # excludes on ``has_injection_row`` first; the ledger
+        # match is redundant for marker-minted candidates). The
+        # stuck-wake shape: lane 2 still skips via the injection
+        # check (PENDING marker exists) — the ledger result is
+        # unchanged for this shape.
+        sql = text(
+            """
+            SELECT
+                ri.injection_id,
+                ri.parent_instance_id,
+                ri.child_instance_id,
+                ri.child_message_id,
+                tk.id AS wake_task_id,
+                mq.message_id AS wake_message_id
+            FROM report_injections ri
+            JOIN message_queue mq
+              ON mq.instance_id = ri.parent_instance_id
+             AND mq.source LIKE (
+                 'internal_report:' || ri.child_instance_id || ':%'
+             )
+            JOIN task tk
+              ON tk.message_id = mq.message_id
+             AND tk.instance_id = ri.parent_instance_id
+             AND tk.task_type = :process_report_type
+            WHERE ri.state = :state_pending
+              AND mq.status = :status_ready
+              AND tk.status = :status_running
+              AND tk.last_heartbeat_at IS NOT NULL
+              AND tk.last_heartbeat_at < :heartbeat_threshold
+            LIMIT :limit
+        """
+        )
+        with Session(self.engine) as session:
+            rows = session.execute(
+                sql,
+                {
+                    "state_pending": _PENDING_STATE,
+                    "status_ready": "ready",
+                    "status_running": "running",
+                    "process_report_type": "process_report",
+                    "heartbeat_threshold": threshold_iso,
+                    "limit": limit,
+                },
+            ).all()
+        return [
+            {
+                "injection_id": r.injection_id,
+                "parent_instance_id": r.parent_instance_id,
+                "child_instance_id": r.child_instance_id,
+                "child_message_id": r.child_message_id,
+                "wake_task_id": int(r.wake_task_id),
+                "wake_message_id": r.wake_message_id,
             }
             for r in rows
         ]

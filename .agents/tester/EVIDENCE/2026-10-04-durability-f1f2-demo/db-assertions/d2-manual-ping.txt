@@ -1,0 +1,25 @@
+=== D2: MANUAL PING (since parent stuck at t+300s) ===
+Time: 2026-10-05T01:27:20Z (manual ping sent)
+Message: "[system:wedge-resolve] Your child has completed and reported helloD1. Please check your message queue and process the pending report."
+
+D2 wait (bounded 150s):
+- iter=1-30 (0-60s): parent=running, int_msg=ready (unchanged)
+- iter=31-75 (60-150s): parent=running, int_msg=ready (unchanged)
+- Parent NEVER completed in 150s observation window
+- wake_msg STILL in 'ready' state (worker pool per-instance guard blocks)
+- inj_state STILL PENDING
+- internal_reports_in_parent_history: 1 (no new injection)
+
+D2 root cause: chicken-and-egg deadlock
+1. Parent is 'running' (processing the API ping message via LLM)
+2. Worker pool per-instance guard: won't claim 'ready' message for instance with another task RUNNING
+3. Parent won't process internal_report until worker pool claims it
+4. Worker pool won't claim until parent completes current task
+5. LLM is taking very long to respond (possibly due to G1 sweep consuming LLM resources in parallel)
+6. DEADLOCK: neither side can proceed
+
+D2 final state (after 150s):
+- parent: running
+- wake_msg_status: ready
+- inj_state: PENDING
+- internal_reports_in_parent_history: 1 (no new injection)

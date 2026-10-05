@@ -1,0 +1,67 @@
+=== F-2 RE-GATE (pin 3c7c4df6) — BATCH 1 (PG/integration, -m postgres) ===
+START_TIME=2026-10-05T07:47:57+00:00
+WORKDIR=/home/nea/ensemble-src-wt-durability
+HEAD=3c7c4df6a0ac4c0b22fe3c9bacd6d95f8a653249
+PIN=3c7c4df6
+ACTIVE_CONN_AT_START=0
+---
+============================= test session starts ==============================
+platform linux -- Python 3.13.15, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src-wt-auto-continue/.venv/bin/python3
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/nea/ensemble-src-wt-durability
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 30.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 41 items
+
+tests/postgres/test_report_delivery_recovery_pg.py::TestLane1DeferredPG::test_busy_parent_skipped_on_pg PASSED [  2%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLane1DeferredPG::test_idempotent_re_run_on_pg PASSED [  4%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLane1DeferredPG::test_batch_cap_100_processes_100_logs_remainder PASSED [  7%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestC3FalsePositiveMatrixPG::test_c3_excludes_when_existing_completion_report_message PASSED [  9%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestC3FalsePositiveMatrixPG::test_c3_excludes_when_existing_injection_row_any_state PASSED [ 12%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestC3FalsePositiveMatrixPG::test_c3_excludes_when_parent_terminal PASSED [ 14%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestC3FalsePositiveMatrixPG::test_c3_anchor_less_child_admitted_on_pg PASSED [ 17%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestC3FalsePositiveMatrixPG::test_c3_excludes_when_fired_dependency_watcher PASSED [ 19%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLane2NoRowBackstopPG::test_no_row_lane_recovers_never_markered_drop_on_pg PASSED [ 21%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLane3Lane4PendingAgePG::test_legacy_stranded_pending_recovered_on_pg PASSED [ 24%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLaneKillSwitchesPG::test_lane1_disabled_absent_from_sweep_on_pg PASSED [ 26%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLaneKillSwitchesPG::test_lane1_enabled_present_in_sweep_on_pg PASSED [ 29%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLaneKillSwitchesPG::test_all_lanes_disabled_returns_empty_result PASSED [ 31%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestNeverTouchesLiveInstancePG::test_sweep_skips_live_instance_on_pg PASSED [ 34%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLane2QueryCompilationRegression::test_aliased_dependency_watchers_in_exists_from PASSED [ 36%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLane2QueryCompilationRegression::test_no_unaliased_dependency_watcher_in_exists_select PASSED [ 39%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLane2PGRegressionEndToEnd::test_fired_watcher_excludes_candidate_on_pg PASSED [ 41%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestLane2PGRegressionEndToEnd::test_no_fired_watcher_returns_candidate_on_pg PASSED [ 43%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestF2S24MultiChildMixedOnPG::test_s24_multi_child_mixed_lane2_admits_only_straddle PASSED [ 46%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestF2S24MultiChildMixedOnPG::test_s24_straddle_passes_through_lane2_per_row_pass PASSED [ 48%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestF2S27NoDuplicateExecutionRegressionOnPG::test_s27_no_duplicate_execution_on_double_run PASSED [ 51%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestF2S27NoDuplicateExecutionRegressionOnPG::test_s27_no_duplicate_via_real_handle_recover_deferred_report PASSED [ 53%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestBlock1G4StuckWakeHealOnPG::test_stuck_wake_lane_heals_captured_wedge_on_pg PASSED [ 56%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestBlock1G4StuckWakeHealOnPG::test_stuck_wake_query_correlates_via_source_not_id_join_on_pg PASSED [ 58%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestBlock1G4StuckWakeHealOnPG::test_stuck_wake_lane_excludes_sibling_child_on_pg PASSED [ 60%]
+tests/postgres/test_report_delivery_recovery_pg.py::TestBlock1G4StuckWakeHealOnPG::test_stuck_wake_lane_is_noop_on_empty_db_on_pg PASSED [ 63%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestCrossActorDoubleDeliveryMatrix::test_pairing_hotpath_drain_vs_fallback_task PASSED [ 65%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestCrossActorDoubleDeliveryMatrix::test_pairing_hotpath_drain_vs_resume_router PASSED [ 68%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestCrossActorDoubleDeliveryMatrix::test_pairing_hotpath_drain_vs_sweep PASSED [ 70%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestCrossActorDoubleDeliveryMatrix::test_pairing_hotpath_drain_vs_fm1_guarded PASSED [ 73%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestCrossActorDoubleDeliveryMatrix::test_pairing_fallback_task_vs_resume_router PASSED [ 75%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestCrossActorDoubleDeliveryMatrix::test_pairing_fallback_task_vs_sweep PASSED [ 78%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestCrossActorDoubleDeliveryMatrix::test_pairing_fallback_task_vs_fm1_guarded PASSED [ 80%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestCrossActorDoubleDeliveryMatrix::test_pairing_resume_router_vs_sweep PASSED [ 82%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestCrossActorDoubleDeliveryMatrix::test_pairing_resume_router_vs_fm1_guarded PASSED [ 85%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestCrossActorDoubleDeliveryMatrix::test_pairing_sweep_vs_fm1_guarded PASSED [ 87%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestNaturalCompletionRacingRecoveredPendingMarker::test_natural_completion_vs_recovered_pending_on_pg PASSED [ 90%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestTransitionBeforeReconcileOrdering::test_mirror_predicate_sees_pending_only_after_transition PASSED [ 92%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestTransitionBeforeReconcileOrdering::test_reversed_order_skip_demonstrated PASSED [ 95%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestMatrixSummary::test_matrix_acceptance_summary PASSED [ 97%]
+tests/integration/test_report_delivery_double_delivery_pg.py::TestF2StraddleSeedCoverage::test_straddle_seed_no_competing_actor_visible_to_lane2 PASSED [100%]
+
+============================= 41 passed in 48.86s ==============================
+---
+END_TIME=2026-10-05T07:48:51+00:00
+RUNTIME_SEC=54
+EXIT_CODE=0
