@@ -1022,3 +1022,6 @@ export interface MaintenanceErrorBody {
     [k: string]: unknown;
   };
 }
+
+// Snapshot subsystem types (snapshot-uiux v1) — see snapshot.model.ts
+export * from "./snapshot.model";
