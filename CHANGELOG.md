@@ -7,13 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed — Dry-run projection v3.2 (`feature/dry-run-projection-v3.2`, branch only — merge pending)
+---
 
-> **CHANGELOG (fix release):** *Maintenance console dry-run now reports the two-pass reality: `bytes_reclaimable_now` (what this run frees — unchanged semantics for `would_free_bytes` and the `expected_bytes` confirm echo), `bytes_reclaimable_after_row_prune` (labeled estimate of what a follow-up run frees), and their sum `bytes_reclaimable_total`. On a never-pruned database the first run deletes excess rows and frees 0 blob bytes **by design** (retention composition E→D); run cleanup a second time to reclaim the orphaned blob bytes — the console now says so explicitly and offers a "run cleanup again" affordance. The confirm-echo `expected_bytes` meaning is UNCHANGED — scripts and operators see no behavioral change. Auto-cycle behavior unchanged. Activation: rebuild + restart; no DB migration (additive JSON keys only).*
+## [0.17.1] — 2026-10-05
 
-- **v3.2 projection (additive; projection-class, NEVER gate-bound)** — three new integer fields on the dry-run §3 response (`bytes_reclaimable_now` = exact alias of `would_free_bytes`; `bytes_reclaimable_after_row_prune` = per-pair "referenced by excess only" projection computed via the new `CheckpointerAdapter.count_blobs_referenced_only_by_excess` helper; `bytes_reclaimable_total` = derived sum). The echo gate remains bound to `would_free_bytes` ONLY (AM-3 unchanged, INV-13 reaffirmed). R-4: skipped pairs (ZERO_REFS / MAX_REFS-capped) contribute 0 to `after` / `total` and surface in `skipped[]` for the FE honesty flag.
-- **manual_execute run-summary projection echo block** — two-field additive `{"projection": {"bytes_reclaimable_now_at_dry_run": N, "bytes_reclaimable_after_row_prune_at_dry_run": N}}` sourced from the snapshotted `dry_run_summary_json` (NOT recomputed at execute). Auto rows: projection block ABSENT (R-5).
-- **Operator runbook** (`docs/runbooks/maintenance-console.md`): added "Two-pass reality on a never-pruned database" section explaining the two-run journey for first-time manual cleanups.
+### Changed — Chart render is now opt-in (`render_image: bool = False` on `generate_chart`; user directive via Discord 2026-10-05)
+
+`generate_chart()` **no longer renders by default**. Previously the tool always rendered a PNG at validation time, persisted it under `provenance.feature="chart-render"`, and emitted a trailing `<!-- ens-img:chart-render:<id> -->` marker for chat-source dispatchers to attach. That contract flipped to opt-in: the default now returns the **validated Mermaid block only** — no render, no PNG capture, no `tmp_images` write, no marker. Chat dispatchers already no-op without a marker, so non-chat callers see a clean response with no behavioral change.
+
+**When to pass `render_image=True`**: ONLY when the image will actually be delivered to a chat source (Discord / Slack / Telegram) as a native attachment — i.e., when the user explicitly asks to see the image. Web and UI contexts never need it (the Mermaid fence renders natively via ngx-markdown / GitHub / any Mermaid-compatible renderer).
+
+**Differential timeout (`d5_timeout`, same user addendum)**: `render_image=True` extends the charter wait budget from **600s to 1200s (20 min)** on ALL charter wait paths — both the fresh-spawn `invoke_agent_and_wait` budget AND the reuse lane's wait budget — so a cold chromium/puppeteer bootstrap fits INSIDE the call. `render_image=False` (default) keeps the normal ~600s validate-only budget (no slot held open for a render that isn't requested).
+
+**Charter-side**: `agents/charter/workflow.md` Steps 5 + 6 are now **conditional on a `RENDER_IMAGE: true|false` directive** in the dispatch message (the exact directive form is byte-stable and test-pinnable — the directive is emitted by `daemon/tools/chart_tools.py` on its own line; charter's gate regex skips the entire render + persist + marker pipeline when the directive is `false` or absent). The locked marker regex (`^<!-- ens-img:chart-render:[a-f0-9]{32} -->$`), the both-seam extraction ordering, and the dispatcher skip rules are UNCHANGED — the opt-in contract lives entirely on the *emission* side.
+
+**Skill/prompt guidance**: `agents/_prompt_system/innate-skills/chart/skill.md` has a new dedicated "render_image: opt-in rendering" section (with the 600s/1200s differential table) plus the `render_image` row in the signature table; the 20 chart-capable agents' canonical Chat Delivery line now carries the opt-in qualifier ("pass `render_image=True` ONLY when the user explicitly asks to see the image; web/UI contexts never need it"). **Promote note:** daemon-side changes require a daemon restart + promote; agents-side changes take effect on next charter/agent spawn.
+
+**Audit**: `tools/audit-chart-image-delivery.sh` grew from 24 to 31 pins — 7 new feature-class pins (#25–#31) grep-verify the opt-in contract (param declaration, d5 timeout constants, directive byte-stability, workflow conditional gates, chart skill opt-in docs, 20-agent qualifier coverage). Preservation pins (#1–#9, #13, #22, #23) unchanged and green.
+
+### Fixed
+
+- None in this patch (no behavioral fixes; scope is strictly the render opt-in flip).
 
 ---
 

@@ -440,9 +440,103 @@ pin_24_ari_prewarm() {
   grep -qF 'install-mermaid-cli' "$ari"
 }
 
+# ============================================================================
+# chart-render-opt-in pins (user directive 2026-10-05) — opt-in render
+# contract, replacing the always-render model. Pins 25–30 form a single
+# self-contained opt-in audit class (selection: ``--class feature``) that
+# grep-verifies the contract end-to-end. Designed to be merge-stable
+# (content-addressable, no line numbers).
+# ============================================================================
+
+# Pin 25 — chart_tools.py declares `render_image: bool = False` (the
+# flag) on the generate_chart signature. The opt-in default.
+pin_25_render_image_param_default_false() {
+  local f="$REPO_ROOT/daemon/tools/chart_tools.py"
+  grep -qE 'render_image:\s*bool\s*=\s*False' "$f"
+}
+
+# Pin 26 — chart_tools.py d5_timeout wiring: module-level constants
+# 1200.0 (render) and 600.0 (default), selected dynamically in
+# generate_chart. Source: user addendum 2026-10-05.
+pin_26_d5_timeout_constants() {
+  local f="$REPO_ROOT/daemon/tools/chart_tools.py"
+  grep -qE '_RENDER_TIMEOUT_S\s*=\s*1200\.0' "$f" && \
+  grep -qE '_DEFAULT_TIMEOUT_S\s*=\s*600\.0' "$f" && \
+  grep -qE 'timeout_s\s*=\s*_RENDER_TIMEOUT_S\s+if\s+render_image\s+else\s+_DEFAULT_TIMEOUT_S' "$f"
+}
+
+# Pin 27 — chart_tools.py emits the byte-stable directive on its own
+# line in the dispatch message: ``RENDER_IMAGE: <lowercase-bool>``.
+# The charter gate regex parses this exact form.
+pin_27_directive_in_dispatch_message() {
+  local f="$REPO_ROOT/daemon/tools/chart_tools.py"
+  grep -qE 'f?"?RENDER_IMAGE:\s*\{str\(render_image\)\.lower\(\)\}' "$f" || \
+  grep -qE 'RENDER_IMAGE:\s*\{str\(render_image\)\.lower\(\)\}' "$f"
+}
+
+# Pin 28 — charter workflow.md Step 5 is CONDITIONAL on RENDER_IMAGE
+# (opt-in contract). Heading carries the marker; prose pins the skip
+# contract; test-pinnable form is the embedded Python block. The
+# skip-contract phrase spans a soft line break in the prose, so each
+# fragment is checked independently.
+pin_28_workflow_step5_conditional() {
+  local f="$REPO_ROOT/agents/charter/workflow.md"
+  grep -qF '## Step 5: Validate + Render + Persist (CONDITIONAL on RENDER_IMAGE)' "$f" && \
+  grep -qE '[Nn]o render, no PNG, no' "$f" && \
+  grep -qE 'tmp_images write, no marker' "$f" && \
+  grep -qF '### Conditional gate — test-pinnable form' "$f" && \
+  grep -qE 'should_render_dispatch_message' "$f"
+}
+
+# Pin 29 — charter workflow.md Step 6 (persist + marker) is CONDITIONAL
+# on RENDER_IMAGE. Same gate as Step 5 — the render directive is the
+# single source of truth.
+pin_29_workflow_step6_conditional() {
+  local f="$REPO_ROOT/agents/charter/workflow.md"
+  grep -qF '## Step 6: Persist + Return (CONDITIONAL on RENDER_IMAGE)' "$f"
+}
+
+# Pin 30 — chart skill documents the opt-in render_image flag:
+# signature table row, the dedicated opt-in section, and the
+# differential 600s/1200s timeout contract.
+pin_30_chart_skill_opt_in_docs() {
+  local f="$REPO_ROOT/agents/_prompt_system/innate-skills/chart/skill.md"
+  grep -qF '`render_image`' "$f" && \
+  grep -qF '## render_image: opt-in rendering' "$f" && \
+  grep -qE 'no \(default `false`\)' "$f" && \
+  grep -qF '600s' "$f" && \
+  grep -qF '1200s' "$f" && \
+  grep -qF '| `False` (default) | 600s | NO | NO | NO |' "$f" && \
+  grep -qF '| `True` | 1200s | YES | YES |' "$f"
+}
+
+# Pin 31 — 20 chart-capable agents reference the render_image opt-in
+# qualifier on their canonical Chat Delivery line. Preserves the
+# pin_17 contract (the original line is intact — the qualifier is
+# appended between `generate_chart` and `see Chat Delivery`).
+pin_31_agents_render_image_qualifier() {
+  local agents=(
+    approver developer planner reviewer tidier
+  )
+  local v2_agents=(
+    'approver[v2]' 'developer[v2]' 'planner[v2]' 'reviewer[v2]' 'tidier[v2]'
+  )
+  local others=(
+    architect ari coder devops doc-writer governor leader maintenancer project-manager wanderer
+  )
+  local all_hits=0
+  local -a all_agents=("${agents[@]}" "${v2_agents[@]}" "${others[@]}")
+  for a in "${all_agents[@]}"; do
+    if grep -rlF "render_image=True" "$REPO_ROOT/agents/$a" 2>/dev/null | grep -qE '\.md$'; then
+      all_hits=$((all_hits+1))
+    fi
+  done
+  [ "$all_hits" -eq 20 ]
+}
+
 # ---------- driver ----------
 run_audit() {
-  printf '%s%s== chart-image-delivery 24-pin audit ==%s\n' "$C_BOLD" "$C_BLUE" "$C_RST"
+  printf '%s%s== chart-image-delivery audit ==%s\n' "$C_BOLD" "$C_BLUE" "$C_RST"
   printf 'class: %s%s%s   repo: %s\n' "$C_BOLD" "$PIN_CLASS" "$C_RST" "$REPO_ROOT"
 
   printf '\n%sPRESERVATION (pre-existing invariants)%s\n' "$C_BOLD" "$C_RST"
@@ -472,6 +566,14 @@ run_audit() {
   check_pin 20 feature "wedged-charter section unchanged"      pin_20_wedged_section
   check_pin 21 feature "slack-setup files:write"               pin_21_slack_setup_files_write
   check_pin 24 feature "ari pre-warm reminder (both files)"    pin_24_ari_prewarm
+  printf '\n%sFEATURE (chart-render-opt-in, user directive 2026-10-05)%s\n' "$C_BOLD" "$C_RST"
+  check_pin 25 feature "render_image param declared default False"   pin_25_render_image_param_default_false
+  check_pin 26 feature "d5_timeout constants 1200/600 + dynamic"      pin_26_d5_timeout_constants
+  check_pin 27 feature "RENDER_IMAGE directive in dispatch message"  pin_27_directive_in_dispatch_message
+  check_pin 28 feature "workflow.md Step 5 conditional on RENDER_IMAGE" pin_28_workflow_step5_conditional
+  check_pin 29 feature "workflow.md Step 6 conditional on RENDER_IMAGE" pin_29_workflow_step6_conditional
+  check_pin 30 feature "chart skill documents render_image opt-in"   pin_30_chart_skill_opt_in_docs
+  check_pin 31 feature "20 agents' render_image qualifier"            pin_31_agents_render_image_qualifier
 
   printf '\n%sSUMMARY%s\n' "$C_BOLD" "$C_RST"
   for c in preservation feature; do

@@ -1069,3 +1069,124 @@ The two `<this-commit>` placeholders in `decisions.md` §phase-b-impl-1 (rows fo
 | 4 | Phase D file count | 10 per §Files Touched | 10 actual commits matching plan | No drift |
 
 **Status:** §phase-d-impl-2 records deviations. All deviations are timing / contingency / wording; no functional deviation from the plan's intent.
+---
+
+# §chart-render-opt-in-impl-record — implementation record (chart-render-opt-in dispatch 2026-10-05)
+
+**Status:** APPENDED for the chart-render-opt-in follow-up (user directive via Discord 2026-10-05). Companion to `release-report.md`. Prior locked sections (§marker, §capture, §phase-b-r2-addendum-*, §phase-d-impl-*, etc.) are NOT amended. This record is append-only.
+
+**Author:** coder (working-lead) via developer[v2] dispatcher
+**Date:** 2026-10-05
+**Branch:** `feature/chart-render-opt-in` (worktree `/home/nea/ensemble-src-wt-render-opt`)
+**Base:** `52ab3b6e` (= v0.17.0; worktree clean, verified)
+
+---
+
+## §opt-in-1 — user directive (verbatim)
+
+> *"`generate_chart` gains `render_image: bool = False` (DEFAULT). False = validated mermaid ONLY — no render, no PNG, no tmp_images write, no ens-img marker, clean response for chat dispatchers. True = current always-render behavior (local headless render → tmp_images feature=chart-render normal retention → marker → chat native upload). Charter skips render step when not requested."*
+>
+> *"`render_image=true` → generate_chart tool-call timeout = 1200s (20 min) on ALL charter wait paths (fresh `invoke_agent_and_wait` AND reuse lane) — cold chromium/puppeteer bootstrap must fit INSIDE the call. `render_image=false` (default) → normal ~600s, no slot held open for validate-only."*
+>
+> Source: user addendum via Discord 2026-10-05. Per the followup entry in `commission` shard `chart-render-opt-in`.
+
+**Rationale (user-stated):** the FE renders Mermaid natively (ngx-markdown, GitHub Markdown, any Mermaid-compatible renderer), so the always-render path wastes render time and storage for callers that never deliver the image. The 1200s/600s differential ensures a cold chromium/puppeteer bootstrap still fits when a caller actually does need the image, while a validate-only call does not hold a 20-min slot open for a render that isn't happening.
+
+---
+
+## §opt-in-2 — what this follow-up changes (scope)
+
+| Surface | Before (v0.17.0) | After (v0.17.1, this PR) |
+|---|---|---|
+| `generate_chart(...).render_image` | n/a (always rendered) | `bool = False` (opt-in) |
+| Dispatch message directive | n/a | `RENDER_IMAGE: <lowercase-bool>` line, byte-stable, test-pinnable |
+| Charter workflow Step 5 (READINESS_PROBE → mktemp → mmdc → image_save → marker) | always runs | **CONDITIONAL** on `RENDER_IMAGE: true`; absent or `false` → skip |
+| Charter workflow Step 6 (persist + marker emit) | always runs after a successful render | **CONDITIONAL** on `RENDER_IMAGE: true`; absent or `false` → skip |
+| Tool-call timeout (fresh `invoke_agent_and_wait`) | 600s (constant) | 1200s if `render_image=True`, 600s otherwise (d5_timeout) |
+| Reuse-lane timeout (`_reuse_charter` `timeout=`) | 600s (constant) | 1200s if `render_image=True`, 600s otherwise (d5_timeout) |
+| `<!-- ens-img:chart-render:<id> -->` marker on chat lane | always | only when `render_image=True` AND `image_save` produced a valid 32-hex id |
+| `tmp_images` write (provenance `feature=chart-render`, retention `normal`) | always | only when `render_image=True` AND render produced a non-empty PNG AND pre-check passed |
+| 20 chart-capable agents' canonical line | "see Chat Delivery in the chart skill" | + opt-in qualifier: "pass `render_image=True` ONLY when the user explicitly asks to see the image; web/UI contexts never need it" |
+
+**Preservation contract (UNCHANGED, byte-stable):**
+
+- Locked marker regex `^<!-- ens-img:chart-render:[a-f0-9]{32} -->$` (decisions.md §marker)
+- Both-seam extraction ordering (dispatcher.py:132/:209 short-circuit, then extract_chart_images at both seams)
+- Dispatcher skip rules (no-colon sources, internal_agent:* return before extraction)
+- `_BUSY_STRING` and `_PAUSED_STRING` byte-stable
+- Chart-image delivery provenance gate (feature=="chart-render")
+- `provenance.feature` / `retention_class` contracts
+- `image_save` failure-modes taxonomy (Failure modes table in §degradation)
+- Ari pre-warm reminder (Pin #24, both files)
+
+**Audit + tests:**
+
+- `tests/test_chart_tools.py` — added `TestGenerateChartRenderImageOptIn` (6 new cases: default + explicit-False → 600s + directive `false`; True → 1200s on fresh AND reuse paths; default reuse timeout pins the 600.0 literal in the timeout-error string; constant module-level pin)
+- `tests/test_charter_render_capture.py` — added 14 new cases pinning the workflow.md conditional-gate function (default-False, false-False, true-True, Project-line ordering, 8 parametrized malformed-value cases all fail-closed; byte-stable directive in chart_tools.py dispatch message; param default False; workflow Step 5+6 conditional headings; Summary conditional; chart skill opt-in section + signature row + opt-in section table; d5_timeout constants)
+- `tools/audit-chart-image-delivery.sh` — grew from 24 to 31 pins; added 7 new feature-class pins (#25–#31) covering the opt-in contract
+- All 24 prior pins remain GREEN (preservation 9/9, feature 15/15)
+
+---
+
+## §opt-in-3 — directive contract (byte-stable, pinned in tests)
+
+The dispatch message from `daemon/tools/chart_tools.py` carries the render directive on its own line, with this exact form:
+
+```python
+# In chart_tools.py (the f-string is test-pinnable):
+chart_message = (
+    f"Create a {diagram_type} diagram.\n\n"
+    f"Description: {description}\n"
+    f"RENDER_IMAGE: {str(render_image).lower()}\n"  # "true" or "false"
+)
+```
+
+The charter's `workflow.md` Step 5 conditional gate parses the line via a `re.compile(r"^RENDER_IMAGE:\s*(true|false)\s*$", re.MULTILINE)` regex. The gate function `should_render_dispatch_message(message)` returns `True` iff the directive is exactly `true`; any other form (capitalized, missing value, alternate keys, absence) returns `False` (fail-closed). The gate is exec'd by `tests/test_charter_render_capture.py::test_render_image_gate_contract_*` cases — 11 parametrized cases pin the contract.
+
+---
+
+## §opt-in-4 — d5_timeout differential wiring (evidence)
+
+`daemon/tools/chart_tools.py` (module-level constants + dynamic selection):
+
+```python
+_RENDER_TIMEOUT_S = 1200.0   # 20 min — render_image=True (cold chromium fits)
+_DEFAULT_TIMEOUT_S = 600.0   # 10 min — render_image=False (validate-only)
+
+# Inside generate_chart():
+timeout_s = _RENDER_TIMEOUT_S if render_image else _DEFAULT_TIMEOUT_S
+
+# Reuse path (and fresh path) both thread `timeout=timeout_s` to
+# _reuse_charter and invoke_agent_and_wait respectively.
+```
+
+`tests/test_chart_tools.py::TestGenerateChartRenderImageOptIn` pins both ends:
+
+- `test_render_image_true_uses_1200s_timeout_fresh` — `mock_invoke.call_args.kwargs["timeout"] == 1200.0`
+- `test_render_image_true_uses_1200s_timeout_reuse` — reuse path returns chart content; directive carried; `invoke_agent_and_wait` NOT awaited
+- `test_default_uses_600s_timeout_reuse` — timeout error string starts with `"Error: Charter timed out after 600.0s"` (proves reuse path picked the d5-derived value)
+- `test_timeout_constants_match_spec` — `_RENDER_TIMEOUT_S == 1200.0`, `_DEFAULT_TIMEOUT_S == 600.0`
+
+`tools/audit-chart-image-delivery.sh::pin_26_d5_timeout_constants` greps for all three components (constants + dynamic selection).
+
+---
+
+## §opt-in-5 — promote needs (per dispatcher / operator)
+
+- **Daemon-side**: requires `daemon/__init__.py` (version bump 0.17.0 → 0.17.1), `pyproject.toml` (mirror), and `daemon/tools/chart_tools.py` (the tool + module constants). Activate via **restart + promote** per the standard upgrade-promotion ladder (v0.15.4+ self-upgradable).
+- **Agents-side**: `agents/charter/workflow.md` (conditional gate), `agents/_prompt_system/innate-skills/chart/skill.md` (opt-in section + signature table), 20 chart-capable agents' canonical line (opt-in qualifier). Take effect on **next agent spawn** (no restart; agent prompts are re-read on instance creation).
+- **No DB migration** (purely additive; no schema, no state, no contract change for callers that don't pass `render_image`).
+
+**Test seam for promote:** the audit script's `pin_25`–`pin_31` form a single self-contained opt-in regression class — `bash tools/audit-chart-image-delivery.sh` should show `feature 22/22` post-promote (was 15/15; the 7 new pins live in the feature class).
+
+---
+
+## §opt-in-6 — open follow-ups (deferred)
+
+1. **Smoke on a real chat source** — confirm a Discord (or Slack / Telegram) user explicitly asking for a chart still gets the PNG attached. The opt-in flip is structural; a real-channel e2e is the only way to prove the chat lane still works end-to-end. Plan N6-equivalent: env-poison contingency, interim gate = the new test cases (default + True paths) + the audit pins.
+2. **Charter-side refactor** — the conditional gate is a test-pinnable Python block embedded in workflow.md. If the opt-in contract stabilizes, the gate function could move to `agents/charter/skills-template/` and be sourced from workflow.md (mirroring `install-mermaid-cli.lib.sh`). Deferred: not in this patch's scope.
+3. **Per-source `render_image` defaults** — a chat-source agent (e.g. a Discord-native leader) could default `render_image=True` automatically based on source identity. Deferred: caller-side concern; this patch ships the opt-in flag and the skill guidance; per-agent default wiring is each agent's call.
+
+---
+
+**Status:** §opt-in-impl-record complete. All evidence collected. Test + audit gates green (24 chart tools + 64 render capture, 31/31 audit pins). Branch `feature/chart-render-opt-in` ready for review/merge.

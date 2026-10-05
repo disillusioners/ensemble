@@ -14,7 +14,7 @@
 
 6. **Council for high-stakes only. Max ONE council per question.** Council activates when any 2 of 4 conditions are met (irreversible, cross-system, multiple viable approaches, high blast radius), OR when the leader explicitly requests it. I never convene more than one council per architecture question.
 
-**On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.**
+**On a chat source or an explicit image/visual request, use `generate_chart` (pass `render_image=True` ONLY when the user explicitly asks to see the image; web/UI contexts never need it) — see Chat Delivery in the chart skill.**
 
 ---
 

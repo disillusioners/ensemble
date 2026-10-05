@@ -24,11 +24,22 @@ Use this skill whenever the artifact is **structural** rather than purely textua
 When the user is on a chat source (Discord, Slack, Telegram, or any external chat adapter) OR asks for an image / diagram / chart visual, you MUST call `generate_chart()` — never hand-write a ` ```mermaid ` block in your response. The user receives the rendered image directly in the channel; a code block is the failure mode.
 
 - Use `generate_chart()` even for diagrams you could self-generate (the simple ones) when the source is a chat adapter or the user asked for a visual.
-- Pure-text contexts (internal planning, HTTP-API callers, no user-visible chat surface) may still self-generate trivial diagrams.
 - When in doubt about the source, prefer `generate_chart()` — over-delivering an image is safer than shipping a code block the user cannot render.
-- The result is a single ` ```mermaid ` block, already validated, followed by a `<!-- ens-img:chart-render:<id> -->` marker. Paste both into your response verbatim — do not re-wrap, re-tag, or strip the fence. **Do NOT strip the trailing marker** — the dispatcher reads it to extract the image id and upload the PNG to your channel; stripping it silently downgrades the user to a wall of Mermaid code.
+- **Pass `render_image=True` ONLY when the user explicitly asks to see the image** (e.g. "send me a diagram", "show me a chart", "attach the picture"). The default `render_image=False` validates the Mermaid and returns the block — the Mermaid fence renders natively in the chat UI (Discord / Slack / Telegram / ngx-markdown / GitHub), so most chat sources do NOT need the PNG path. Web and UI contexts never need it.
+- **Always-pass-the-marker rule (when `render_image=True`):** the result carries a trailing `<!-- ens-img:chart-render:<id> -->`. Paste it into your response verbatim — do not re-wrap, re-tag, or strip the fence. **Do NOT strip the trailing marker** — the dispatcher reads it to extract the image id and upload the PNG to your channel; stripping it silently downgrades the user to a wall of Mermaid code.
 - Charter renders the PNG and saves it under `provenance.feature="chart-render"`; the dispatcher extracts the marker and resolves the image bytes; the chat adapter uploads the PNG natively. Pasted-by-you, extracted-by-dispatcher, uploaded-by-adapter — three different components, the marker is the handoff.
 - Existing rules apply unchanged: self-generation for trivial cases in pure-text contexts, busy/paused error handling, and the Wedged-Charter Recovery ladder.
+
+## render_image: opt-in rendering
+
+`generate_chart()` has an opt-in render mode. The default is `False` — call sites that do not need the image (HTTP-API callers, internal tools, web/UI renderers, plan authors using the chart for their own visual review) get the validated Mermaid block only, no PNG, no tmp_images write, no `<!-- ens-img:... -->` marker. The chat dispatcher already no-ops without a marker, so the response stays clean.
+
+Pass `render_image=True` ONLY when the image will actually be delivered to a chat source as a native attachment — that path renders the PNG inside the charter (with the 1200s wait budget to absorb a cold chromium/puppeteer bootstrap) and emits the marker. Setting `render_image=True` for a non-chat caller wastes render time + storage for no delivery benefit.
+
+| `render_image` | Tool call timeout | PNG rendered | tmp_images write | Marker emitted |
+|---|---|---|---|---|
+| `False` (default) | 600s | NO | NO | NO |
+| `True` | 1200s | YES | YES | YES (on valid `image_save`) |
 
 ## How to use `generate_chart()`
 
@@ -58,6 +69,7 @@ generate_chart(
 | `diagram_type` | str | no (default `"flowchart"`) | One of `"flowchart"`, `"sequence"`, `"class"`, `"er"`, `"state"`, `"gantt"` |
 | `project_id` | str | no | Optional project context for the call |
 | `fresh` | bool | no (default `false`) | Pass `true` to spawn a brand-new charter instead of continuing your existing one |
+| `render_image` | bool | no (default `false`) | Pass `true` ONLY when the image will be delivered to a chat source as a native attachment — extends the wait timeout from 600s to 1200s (so a cold chromium/puppeteer bootstrap fits inside the call), renders the PNG, persists under `provenance.feature="chart-render"`, and emits the `<!-- ens-img:chart-render:<id> -->` marker. Default `false` returns the validated Mermaid block only — no render, no marker, no tmp_images write. Web/UI contexts and HTTP-API callers never need it. |
 
 A good `description` specifies:
 

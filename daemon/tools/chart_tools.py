@@ -48,6 +48,15 @@ _inflight_reuse: set[str] = set()
 # and invisible to the agent-tool revive budget.
 _reuse_revive_attempts: dict[str, int] = {}
 
+# d5_timeout — render_image=True extends the charter wait budget so a cold
+# chromium/puppeteer bootstrap fits INSIDE the call. render_image=False
+# (default) keeps the normal validate-only budget. Hoisted as module
+# constants so the three call sites (fresh path, reuse path default,
+# ``_full_doc_``) stay in lock-step. Source: user addendum via Discord
+# 2026-10-05.
+_RENDER_TIMEOUT_S = 1200.0   # 20 min — render_image=True (cold chromium fits)
+_DEFAULT_TIMEOUT_S = 600.0   # 10 min — render_image=False (validate-only)
+
 # Busy-reject message — hoisted so the two return sites stay in lock-step.
 # Tests pin this string verbatim (``tests/test_chart_tools.py:_BUSY_STRING``);
 # any copy-edit must update both. The ``_full_doc_`` docstring mention
@@ -150,7 +159,7 @@ async def _reuse_charter(
     charter_id: str,
     message: str,
     caller_id: str,
-    timeout: float = 600.0,
+    timeout: float = _DEFAULT_TIMEOUT_S,
 ) -> tuple[str, str]:
     """Register → enqueue → wait on the caller's EXISTING charter instance.
 
@@ -402,6 +411,7 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
         diagram_type: str = "flowchart",
         project_id: str | None = None,
         fresh: bool = False,
+        render_image: bool = False,
     ) -> str:
         """Generate a validated Mermaid diagram by delegating to the Charter agent.
 
@@ -428,20 +438,46 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
                 Defaults to False — successive calls refine the caller's
                 most recent charter child (reuse is the default). Pass
                 True for a parallel/independent chart or to start over.
+            render_image: When True, the charter agent ALSO renders the
+                diagram to a PNG and emits the ``<!-- ens-img:chart-render:<id> -->``
+                marker so chat-source dispatchers can attach the image to
+                the same message. Default False — the validated Mermaid
+                block is the entire deliverable; no render, no marker, no
+                tmp_images write. Pass True ONLY when the caller (a chat
+                source or an explicit user image request) needs the image
+                — the render budget extends the wait timeout from 600s to
+                1200s so a cold chromium/puppeteer bootstrap fits inside
+                the call. Web/UI contexts never need it.
 
         Returns:
             The Charter agent's response containing a validated ```` ```mermaid ````
-            fenced code block and a brief explanation.
+            fenced code block and a brief explanation. On
+            ``render_image=True`` the response also carries a trailing
+            ``<!-- ens-img:chart-render:<id> -->`` marker line so chat
+            dispatchers can attach the PNG.
         """
         pid = project_id or _get_project_id()
+
+        # d5_timeout — differential by render_image (user addendum
+        # 2026-10-05): render_image=True → 1200s so a cold
+        # chromium/puppeteer bootstrap fits; render_image=False (default)
+        # → 600s, no slot held open for validate-only. The charter-side
+        # directive is threaded into the dispatch message below.
+        timeout_s = _RENDER_TIMEOUT_S if render_image else _DEFAULT_TIMEOUT_S
 
         # Construct a structured prompt for the charter agent. Mirrors the
         # ``explore()`` style at knowledge_tools.py — short label-style header
         # lines so the agent has explicit context for type and project scope.
         # Message construction is IDENTICAL on the reuse and fresh paths (M9).
+        # The RENDER_IMAGE directive is a test-pinnable contract — the charter
+        # workflow.md Step 5 conditional gate parses this exact line and
+        # skips the render/persist/marker step when the value is false (or
+        # when the line is absent, which is the validated-Mermaid-only
+        # default).
         chart_message = (
             f"Create a {diagram_type} diagram.\n\n"
             f"Description: {description}\n"
+            f"RENDER_IMAGE: {str(render_image).lower()}\n"
         )
         if pid:
             chart_message += f"Project: {pid}\n"
@@ -481,7 +517,7 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
                         charter_id=charter_id,
                         message=chart_message,
                         caller_id=current_instance_id,
-                        timeout=600.0,
+                        timeout=timeout_s,
                     )
                     return content
         if not mode_logged:
@@ -509,7 +545,7 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
                 project_id=pid,
                 parent_id=current_instance_id,
                 instance_name=f"chart-{description[:30]}",
-                timeout=600.0,
+                timeout=timeout_s,
                 return_instance_id=True,
             )
         except Exception as exc:
@@ -535,12 +571,18 @@ block. The agent is responsible for:
    implicit by the caller, charter will infer from the description).
 2. Drafting the Mermaid syntax.
 3. Validating via ``npx -y @mermaid-js/mermaid-cli``.
-4. Returning the validated diagram with a brief explanation.
+4. (Only on ``render_image=True``) rendering the PNG and persisting it
+   via ``image_save``, then emitting the byte-exact
+   ``<!-- ens-img:chart-render:<id> -->`` marker. The default
+   (``render_image=False``) returns the validated Mermaid block only —
+   no render, no PNG, no marker, no tmp_images write.
+5. Returning the validated diagram with a brief explanation.
 
-The tool blocks until the agent produces its final response (default
-``timeout`` = 600s) and returns the agent's text — a ```` ```mermaid ````
-fenced block plus explanation — directly to the caller. Paste it into
-your response without re-wrapping or stripping the fence.
+The tool blocks until the agent produces its final response. The wait
+timeout is differential by ``render_image``: 600s (validate-only, the
+default) or 1200s (render=True — a cold chromium/puppeteer bootstrap
+fits inside the call). Pasted into your response without re-wrapping
+or stripping the fence.
 
 Args:
     description: What the diagram should show — the subject, scope, and
@@ -558,11 +600,20 @@ Args:
         Defaults to False — successive calls refine the caller's most
         recent charter child (reuse is the default). Pass True for a
         parallel/independent chart or to start over.
+    render_image: When True, the charter agent renders the diagram to a
+        PNG and emits the ``<!-- ens-img:chart-render:<id> -->`` marker
+        so chat-source dispatchers can attach the image. Default False
+        (validated Mermaid only). Pass True ONLY when the caller is a
+        chat source or the user explicitly asked to see the image; web
+        and UI contexts never need it.
 
 Returns:
     Charter agent's response containing a single ```` ```mermaid ```` fenced
     code block (the validated diagram) and a brief explanation. On
-    timeout or failure the tool returns a short ``"Error: ..."`` string.
+    ``render_image=True`` the response also carries a trailing
+    ``<!-- ens-img:chart-render:<id> -->`` marker line so chat
+    dispatchers can attach the PNG. On timeout or failure the tool
+    returns a short ``"Error: ..."`` string.
 
 Charter reuse: by default (``fresh=False``) the tool reuses the caller's
 most recent charter child instead of spawning a new one — the request is
