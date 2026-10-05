@@ -85,3 +85,20 @@ Parent config-file leg: 2F/10P (vs HEAD 2F/14P — the +4 delta is exactly the b
 | `selector_e2e_leak_behavior_test` (ad-hoc) | /tmp/ens-selsel/selector_e2e_leak_behavior_test.sh | real Config→manager-dict→real `_llm_select` leak probe | 2026-10-05 @ 4df0b100 | ✅ PASS (3 PASS legs + 1 SKIP-known-env) |
 
 ## New failures found: NONE
+
+---
+
+# Post-merge insurance — `latest` @ `7dc927a9` (2026-10-05)
+
+## 🟢 VERDICT: READY-TO-PUSH
+
+Merge commit `7dc927a9` (parents `39036550` + `1879bfad` — verified via `git log --format="%H %P" -1`). Workers: d7664100 (static), 8d43bbb3 (config pack), 02a94ecc (search pack). Logs: `/tmp/ens-selsel/merge_*`.
+
+1. **HEAD/parents**: `latest` @ `7dc927a9668426b0b954b948309c3952c9ca0851`, parents exactly `39036550` + `1879bfad`. ✓
+2. **Merged `skill_llm_config` block (manager.py:1510-1532)**: `"selector_model": self.config.skill_evolution.selector_model` present at :1519; dict balanced, all-unique keys, comma-clean; selector addition is a pure 5-line insertion between `model` and `model_vision`. Chat-tab side's manager.py change confined to `list_instances` (~:11997, purely additive `source` param) — ~10k lines away, different function/scope, no encroachment. ✓
+3. **Pack re-runs on merged latest**:
+   - `tests/services/test_skill_search_service.py`: **34P/0F/0E/0S**, `TestSelectorModelResolution` 3/3 — exact match to pre-merge. ✓
+   - `tests/test_skill_evolution_config.py`: **14P/2F/0E/0S**, both failures MATCH-EXPECTED (F1 ambient `SKILL_EVOLUTION_EMBEDDING_BASE_URL`; F2 `ab_sample_size` 20-vs-10) — byte-identical signatures to the pre-merge run (and base-proven pre-existing at `ac1bf7b9` in the main verification). Selector tests green: YamlMirror 3/3, EnvOverride incl. `test_env_override_selector_model`. ✓
+4. **Import sanity**: `daemon` + `daemon.config` + `daemon.services.skill_search_service` import cleanly, resolve to `/home/nea/ensemble-src/daemon`; `py_compile` on manager.py/config.py/skill_search_service.py exit 0. ✓
+
+**New failures vs pre-merge baseline: NONE.** Push gate satisfied.
