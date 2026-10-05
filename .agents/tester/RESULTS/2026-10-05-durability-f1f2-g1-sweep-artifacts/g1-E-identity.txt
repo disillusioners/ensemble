@@ -1,0 +1,315 @@
+# Lane E G1 Full-Dir Sweep — Failure Identity List
+# Source: E1 (a-m), E2 (n-z), D1 (postgres) — all 3 chunks run
+# Tags: [KNOWN-4] = pre-existing chunk-plan red, [QUARANTINE-FAMILY:...] = active in QUARANTINE.md, [NEW?] = not classified
+
+
+## Chunk E1 — 69 unique failing/erroring nodes (raw 69)
+# Grand total: 150 unique failing/erroring nodes
+# Per-chunk: E1=69  E2=49  D1=32
+
+[NEW?] FAILED tests/test_agents_api.py::test_list_agents_success
+    :: AssertionError: a...
+[NEW?] FAILED tests/test_agents_api.py::test_list_agents_empty_directory
+    :: Assertion...
+[NEW?] FAILED tests/test_api.py::test_health_check
+    :: AssertionError: assert '0.16.13...
+[NEW?] FAILED tests/test_api.py::test_send_message_success
+    :: TypeError: object Mock ...
+[NEW?] FAILED tests/test_api.py::test_global_exception_handler
+    :: TypeError: object M...
+[NEW?] FAILED tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts::test_phase_d_does_not_modify_sealed_artifacts
+    :: E   Failed: Phase D modified sealed Phase A/B/C artifacts:
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncil::test_convene_council_happy_path
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncil::test_convene_council_non_blocking
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncil::test_convene_council_invalid_councilor_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncil::test_convene_council_no_team_membership_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestSpawnCouncilor::test_invalid_councilor_agent_id_raises_value_error
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestSpawnCouncilor::test_non_team_member_agent_raises_value_error/home/nea/ensemble
+    :: src-wt-auto-continue/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:33: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+[NEW?] FAILED tests/test_council_tools.py::TestSpawnCouncilor::test_invalid_model_raises_value_error_no_fallback
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestSpawnCouncilor::test_valid_agent_and_model_succeeds
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestSpawnCouncilor::test_model_canonicalization_normalizes_casing
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestClearCouncilorErrors::test_no_dependency_bus_returns_warning
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestClearCouncilorErrors::test_clears_flag_for_current_instance_id
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestClearCouncilorErrors::test_bus_exception_returns_warning_not_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestGovernorCouncilToolsWiring::test_governor_has_council_tools_bound
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestGovernorCouncilToolsWiring::test_council_tools_have_council_category_marker
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_happy_path
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_non_blocking
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_empty_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_whitespace_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_none_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_invalid_councilor_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_no_team_membership_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_optional_models_and_max
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_special_chars
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_missing_skill_warns_but_proceeds
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_found_skill_no_warn
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_registered_as_council_category
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_council_tools.py::TestConveneCouncilWithSkill::test_convene_council_with_skill_skill_check_after_authorization
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[KNOWN-4] FAILED tests/test_enqueue_shared.py::TestTitleGeneration::test_triggers_title_on_idle_to_running
+    :: E   AssertionError: assert 2 == 1
+[NEW?] FAILED tests/test_governor_integration.py::TestCouncilToolBinding::test_spawn_councilor_bound_on_governor_instance
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestCouncilToolBinding::test_spawn_councilor_survives_tool_filter_for_governor
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestClearCouncilorErrors::test_clear_councilor_errors_clears_sticky_flag
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestClearCouncilorErrors::test_clear_councilor_errors_warns_when_bus_missing
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_model_canonicalization_uppercase_input
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_model_canonicalization_mixed_case
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_strict_model_rejection_error_message
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS
+[NEW?] FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_invalid_councilor_agent_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_non_team_member_councilor_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_empty_model_raises
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_model_canonicalization_dedup_property
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestBackwardCompat::test_spawn_instance_bound_on_leader_instance
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestBackwardCompat::test_spawn_instance_model_is_optional
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestNonGovernorFiltering::test_leader_no_council_tools
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestNonGovernorFiltering::test_developer_no_council_tools
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_governor_integration.py::TestNonGovernorFiltering::test_governor_has_council_tools
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-pro']). Silent default resolution is FORBIDDEN per arch §8 🔴. A
+[NEW?] FAILED tests/test_innate_skills_refactoring.py::TestInnateSkillsSystemPromptIdentity::test_all_agents_get_correct_innate_skills_in_system_prompt
+    :: E   AssertionError: leader should have ['coordination', 'chart', 'todo'], got ['coordination', 'chart', 'todo', 'question']
+[NEW?] FAILED tests/test_job_queue_tools.py::TestResolverRoutedTools::test_watch_job_terminal_enriches_result_from_instance
+    :: E   assert 'completed' in "Error watching job: '>' not supported between instances of 'AsyncMock' and 'int'"
+[NEW?] FAILED tests/test_job_queue_tools.py::TestResolverRoutedTools::test_watch_job_terminal_no_manager_is_best_effort
+    :: E   assert 'completed' in "Error watching job: '>' not supported between instances of 'AsyncMock' and 'int'"
+[NEW?] FAILED tests/test_job_queue_tools.py::TestResolverRoutedTools::test_watch_job_terminal_manager_exception_is_swallowed
+    :: E   assert 'completed' in "Error watching job: '>' not supported between instances of 'AsyncMock' and 'int'"
+[NEW?] FAILED tests/test_job_queue_tools.py::TestResolverRoutedTools::test_watch_jobs_terminal_enriches_result_from_instance
+    :: E   AssertionError: assert 1 == 2
+[NEW?] FAILED tests/test_llm_load_balance_meta_loading.py::TestRealAgentsBackwardCompat::test_coder_unchanged
+    :: E   AssertionError: assert [LLMModelWeight(model='coding2', weight=30), LLMModelWeight(model='coding', weight=70)] is None
+[NEW?] FAILED tests/test_memory_integration.py::TestFullLifecycleIntegration::test_compound_request_with_mixed_intents
+    :: E   TypeError: expected string or bytes-like object, got 'MagicMock'
+[NEW?] FAILED tests/test_memory_integration.py::TestFullLifecycleIntegration::test_rag_redirect_with_compound_requests
+    :: E   TypeError: expected string or bytes-like object, got 'MagicMock'
+[NEW?] FAILED tests/test_memory_integration.py::TestEdgeCases::test_empty_string_request
+    :: E   TypeError: expected string or bytes-like object, got 'MagicMock'
+[NEW?] FAILED tests/test_memory_integration.py::TestEdgeCases::test_whitespace_only_request
+    :: E   TypeError: expected string or bytes-like object, got 'MagicMock'
+[NEW?] FAILED tests/test_memory_integration.py::TestEdgeCases::test_very_long_request_exceeds_limit
+    :: E   TypeError: expected string or bytes-like object, got 'MagicMock'
+[NEW?] FAILED tests/test_memory_integration.py::TestRegressionChecks::test_target_none_default_still_works
+    :: E   TypeError: expected string or bytes-like object, got 'MagicMock'
+[NEW?] FAILED tests/test_memory_integration.py::TestRegressionChecks::test_intent_none_default_still_works
+    :: E   TypeError: expected string or bytes-like object, got 'MagicMock'
+[NEW?] FAILED tests/test_memory_integration.py::TestRegressionChecks::test_inner_soul_with_content_parameter
+    :: E   TypeError: expected string or bytes-like object, got 'MagicMock'
+[NEW?] FAILED tests/test_memory_integration.py::TestRegressionChecks::test_access_memory_regular_files_still_work
+    :: E   AssertionError: assert 'Test Memory' in 'Access denied'
+[NEW?] FAILED tests/test_memory_integration.py::TestRegressionChecks::test_compound_request_backward_compatibility
+    :: E   TypeError: expected string or bytes-like object, got 'MagicMock'
+[NEW?] FAILED tests/test_migration_api_comprehensive.py::TestIntegration::test_api_tests_pass
+    :: E   FileNotFoundError: [Errno 2] No such file or directory: '/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble'
+[NEW?] FAILED tests/test_migration_api_comprehensive.py::TestIntegration::test_manager_tests_pass
+    :: E   FileNotFoundError: [Errno 2] No such file or directory: '/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble'
+[NEW?] FAILED tests/test_models.py::TestErrorCodes::test_error_codes_values
+    :: Assert...
+
+## Chunk E2 — 49 unique failing/erroring nodes (raw 49)
+
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_streaming_extracts_string_content
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_streaming_extracts_list_content
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_streaming_mixed_list_content_only_text_dispatched
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_streaming_deduplication_by_message_id
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_streaming_multiple_messages_same_execution
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_streaming_empty_content_not_dispatched
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_stores_original_source_in_metadata
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_uses_original_source_for_internal_report
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_skips_dispatch_when_no_original_source
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_uses_original_source_for_internal_error_report
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_internal_agent_source_does_not_trigger_source_replacement
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_source_inheritance_parent_to_child
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_write_once_guard_original_source
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_integration_external_source_child_report_dispatch
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_manager_warns_when_original_source_not_found
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_full_chain_external_msg_to_telegram_after_child_completion
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_source_inheritance_grandchild_from_grandparent
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_progressive_dispatch.py::test_write_once_guard_persists_through_multiple_external_messages
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_report_lane_phase2.py::TestErrorPropagation::test_error_flag_uses_fallback_when_message_missing
+    :: E   AssertionError: assert False is True
+[NEW?] FAILED tests/test_skill_evolution_config.py::TestDefaults::test_defaults
+    :: As...
+[NEW?] FAILED tests/test_skill_evolution_config.py::TestConfigIntegration::test_skill_evolution_defaults_via_config
+    :: E   AssertionError: assert 20 == 10
+[NEW?] FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_root_instance_bypasses_check_parent_id_none
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_root_instance_bypasses_check_parent_id_empty_string
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_parent_at_limit_raises_value_error
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_parent_below_limit_succeeds
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_error_message_includes_parent_id
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_count_children_called_with_correct_parent_id
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_edge_case_at_limit_minus_one
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_edge_case_at_limit
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_edge_case_above_limit
+    :: E   sqlite3.OperationalError: near "EXISTS": syntax error
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_valid_spawn_leader_can_spawn_developer
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_valid_spawn_leader_can_spawn_each_team_member
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_invalid_spawn_leader_cannot_spawn_leader
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_valid_spawn_leader_can_spawn_explorer
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_invalid_spawn_developer_cannot_spawn_non_team_targets
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_restricted_team_members_rejects_non_team_spawns
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_unknown_caller_agent_is_denied
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_unknown_requested_agent_is_denied
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_standalone_coder_rejected_by_leader_team_members
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_standalone_coder_caller_has_empty_team_members
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_empty_agent_id_request_rejected
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_missing_caller_agent_id_rejected
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestTeamMembersRegistryParsing::test_leader_team_members_parsed
+    :: E   AssertionError: leader.team_members mismatch: got ['planner', 'developer', 'reviewer', 'tidier', 'approver', 'architect', 'tester', 'giter', 'devops', 'explorer', 'wanderer', 'kb-writer', 'doc-writer', 'maintenancer', 'designer']
+[NEW?] FAILED tests/test_spawn_team_members.py::TestSendMessageTeamMembersGate::test_send_message_blocks_pm_to_developer
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestSendMessageTeamMembersGate::test_send_message_allows_pm_to_leader
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestSendMessageTeamMembersGate::test_send_message_blocks_leader_to_pm
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestSendMessageTeamMembersGate::test_send_message_target_without_agent_id_fails_closed
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_spawn_team_members.py::TestSendMessageTeamMembersGate::test_send_message_denied_message_does_not_pollute_queue
+    :: E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+[NEW?] FAILED tests/test_terminal_orphan_matrix.py::test_jobitem_task_status_matrix[pending
+    :: True-active]
+
+## Chunk D1 — 32 unique failing/erroring nodes (raw 32)
+
+[NEW?] FAILED tests/postgres/test_06f500af_bug_class_eliminated_pg.py::test_orphan_watcher_cancelled_on_startup_sweep
+    :: E   AssertionError: 06f500af bug class: orphan watcher for source_task_id=1 (task.status='cancelled') must be CANCELLED after bus.start() — got state='PENDING'. Phase 1 _sweep_orphan_watchers() not implemented yet.
+[NEW?] FAILED tests/postgres/test_list_queues_with_admittable_work_pg.py::test_list_queues_with_admittable_work_includes_queued_and_active
+    :: E   psycopg.errors.IntegrityConstraintViolation: admission_state=active requires a job_locks row (instance_id=<NULL>)
+[NEW?] FAILED tests/postgres/test_list_queues_with_admittable_work_pg.py::test_list_queues_with_admittable_work_4_shapes_combined
+    :: E   psycopg.errors.IntegrityConstraintViolation: admission_state=active requires a job_locks row (instance_id=<NULL>)
+[NEW?] FAILED tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_full_hook_tolerates_fixture_schema
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] FAILED tests/postgres/test_report_deferred_migration_pg.py::TestW3DedupPreCheck::test_w3_detection_query_finds_duplicate_groups
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] FAILED tests/postgres/test_report_deferred_migration_pg.py::TestW3DedupPreCheck::test_w3_resolves_duplicates_then_index_builds
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] FAILED tests/postgres/test_report_deferred_migration_pg.py::TestW3DedupPreCheck::test_w3_keep_one_semantics_min_injection_id_survives
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] FAILED tests/postgres/test_report_deferred_migration_pg.py::TestSQLiteCompanionParity::test_fresh_create_all_index_names_identical_sqlite_vs_pg
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_hook_upgrades_legacy_schema_columns_notnull_indexes
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_hook_idempotent_column_adds_and_index_rerun
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_hook_drop_not_null_from_legacy_not_null_column
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_triple_index_predicate_matches_storage_literals
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestEnsurePostgresColumnsPath::test_c1_duplicate_triple_post_migration_raises_citing_index
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW3DedupPreCheck::test_w3_no_mutations_when_clean
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW3DedupPreCheck::test_w3_hook_logs_detection_in_statement_source
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW8RollbackOrder::test_down_section_executes_on_pg_in_documented_order
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW8RollbackOrder::test_w8_column_first_revert_silently_drops_dependent_index
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW8RollbackOrder::test_w8_set_not_null_blocked_while_null_rows_exist
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestW8RollbackOrder::test_w8_hook_reheals_after_wrong_order_partial_revert
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_claim_for_task_delivery_missing_when_no_row_exists
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_claim_for_task_delivery_claimed_after_artifact_backfill
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_find_row_by_report_message_id_none_returns_none
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_manager_has_non_terminal_injection_for_none_is_false
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_claim_for_injection_excludes_deferred_and_survives_null_keys
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_count_and_lanes_handle_null_keyed_rows
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_find_completed_children_excludes_existing_null_keyed_row
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_reconcile_turn_mirror_null_message_task_excludes_null_keyed_row
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_count_actionable_pending_tasks_null_keyed_not_suppressing
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_enqueue_signature_excludes_null_by_type
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_ensure_deferred_writes_null_key_by_design
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_transition_deferred_to_pending_keys_on_injection_id
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'
+[NEW?] ERROR tests/postgres/test_report_deferred_migration_pg.py::TestC4NullConsumerAudit::test_consumer_enumeration_is_complete_and_audited
+    :: E   AttributeError: '_MinimalManagerProxy' object has no attribute '_migrate_overloaded_image_refs_rows'

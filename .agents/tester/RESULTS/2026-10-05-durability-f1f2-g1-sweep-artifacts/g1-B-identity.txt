@@ -1,0 +1,90 @@
+tests/unit/test_api_router_extraction.py::TestRouteRegistration::test_http_methods_are_correct :: AssertionError: Path /api/schedules: expected {'GET'}, got {'GET', 'POST'}
+tests/unit/test_api_router_extraction.py::TestApiModuleSize::test_api_module_is_small :: AssertionError: daemon/api.py has 3142 lines, expected under 1600 after refactoring
+tests/unit/test_caller_model_overrides_seam.py::TestModelTierPrecedence::test_model_tier_wins_over_model_with_visible_note :: FAILED (no inline tb)
+tests/unit/test_coder_developer_migration.py::TestRestoreInstanceWithCoderAgentId::test_restore_instance_with_coder_agent_id_does_not_raise :: FAILED (no inline tb)
+tests/unit/test_coder_developer_migration.py::TestRestoreInstanceWithCoderAgentId::test_restore_instance_with_developer_agent_id_still_works :: FAILED (no inline tb)
+tests/unit/test_coder_developer_migration.py::TestJobQueueEnqueueWithCoderAgentId::test_enqueue_with_coder_agent_id_succeeds :: FAILED (no inline tb)
+tests/unit/test_coder_developer_migration.py::TestJobQueueEnqueueWithCoderAgentId::test_enqueue_with_coder_and_idempotency_key_succeeds :: FAILED (no inline tb)
+tests/unit/test_coder_developer_migration.py::TestJobQueueEnqueueWithCoderAgentId::test_enqueue_with_developer_agent_id_still_works :: FAILED (no inline tb)
+tests/unit/test_devops_agent.py::TestDevopsMetaJsonValidation::test_innate_skills_is_dynamic_skill_and_todo :: FAILED (no inline tb)
+tests/unit/test_devops_agent.py::TestDevopsMetaJsonValidation::test_skill_injection_enabled :: AssertionError: DevOps should have skill_injection == true, got: False
+tests/unit/test_devops_agent.py::TestDevopsPromptComposition::test_no_opencode_skill_content_in_system_prompt :: FAILED (no inline tb)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_exact_match :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_one_char_wrong :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_two_chars_wrong :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_three_chars_wrong :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_case_insensitive :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_custom_max_distance :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_returns_all_exact_matches :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_at_threshold_seven :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_uuid_fix_insertion :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_uuid_multiple_differences_within_threshold :: FAILED (no inline tb)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_uuid_exceeds_threshold :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_returns_sorted_by_distance :: ValueError: not enough values to unpack (expected 3, got 2)
+tests/unit/test_find_near_instance.py::TestFindNearInstance::test_find_near_instance_multiple_matches_at_same_distance :: FAILED (no inline tb)
+tests/unit/test_fm11_shield_gap.py::TestW12CrashMidShield::test_lost_write_shape_backstop_recovers_within_one_cycle :: FAILED (no inline tb)
+tests/unit/test_gaia_agent.py::TestGaiaRegistryDiscovery::test_gaia_tools_config_in_registry :: AssertionError: assert ['bash', 'pro...'system', ...] == ['bash', 'pro...'system', ...]
+tests/unit/test_gaia_agent.py::TestGaiaToolFiltering::test_gaia_tool_filter_from_registry :: AssertionError: assert ['bash', 'pro...'system', ...] == ['bash', 'pro...'system', ...]
+tests/unit/test_gaia_agent.py::TestGaiaToolFiltering::test_gaia_tool_filter_config_parsed_correctly :: AssertionError: assert ['bash', 'pro...'system', ...] == ['bash', 'pro...'system', ...]
+tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_legit_leader_governor_councilors_passes :: FAILED (no inline tb)
+tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_root_position_governor_spawn_allowed :: FAILED (no inline tb)
+tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_k_zero_disables_guard :: daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_kill_switch_env_zero_disables :: daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: config.llm.allowed_models is not a list (got MagicMock). Refusing to init the facade.
+tests/unit/test_governor_recursion_guard.py::TestToolLayerConveneRefusal::test_convene_council_governor_caller_refused :: daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['gpt-4o', 'claude-3-5-sonnet']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+tests/unit/test_governor_recursion_guard.py::TestToolLayerConveneRefusal::test_convene_council_with_skill_governor_caller_refused :: FAILED (no inline tb)
+tests/unit/test_governor_recursion_guard.py::TestToolLayerConveneRefusal::test_convene_council_leader_caller_still_allowed :: FAILED (no inline tb)
+tests/unit/test_governor_recursion_guard.py::TestChildRequestTemplateFix::test_convene_council_message_names_spawn_councilor :: FAILED (no inline tb)
+tests/unit/test_governor_recursion_guard.py::TestChildRequestTemplateFix::test_convene_council_with_skill_message_names_spawn_councilor :: FAILED (no inline tb)
+tests/unit/test_governor_recursion_guard.py::TestSpawnCouncilorGovernorBlocked::test_spawn_councilor_targeting_governor_hits_lifecycle_guard :: FAILED (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_creates_servers :: AttributeError: Mock object has no attribute 'service_tool'
+tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_idempotent :: AttributeError: Mock object has no attribute 'service_tool'
+tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_schema_drift :: AttributeError: Mock object has no attribute 'service_tool'
+tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_fault_tolerant :: AttributeError: Mock object has no attribute 'service_tool'
+tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_skips_user_created_servers :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_disabled_skips_creation :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_disabled_deactivates_existing :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_reenable_reactivates :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_enabled_creates_new :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_disabled_with_user_server :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_reenable_with_schema_drift :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestBootstrapSkipsUnavailable::test_bootstrap_skips_unavailable_builtin :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestBootstrapSkipsUnavailable::test_bootstrap_no_exception_when_unavailable :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_orphaned_active_builtin_is_deactivated :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_registered_builtin_left_active :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_user_created_server_never_deactivated :: ERROR (no inline tb)
+tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_sweep_idempotent :: AttributeError: Mock object has no attribute 'service_tool'
+tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_creates_context7_server :: ERROR (no inline tb)
+tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_context7_schema_empty :: ERROR (no inline tb)
+tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_context7_config_matches_base :: ERROR (no inline tb)
+tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_schema_drift_refreshes_config :: ERROR (no inline tb)
+tests/unit/test_job_processor_status_guard.py::TestStatusStrEnumGuard::test_job_completes_when_instance_status_is_string :: AssertionError: Expected 'complete_job' to have been called once. Called 0 times.
+tests/unit/test_job_processor_status_guard.py::TestStatusStrEnumGuard::test_job_completes_when_instance_status_is_enum :: AssertionError: Expected 'complete_job' to have been called once. Called 0 times.
+tests/unit/test_job_processor_status_guard.py::TestStatusStrEnumGuard::test_job_fails_when_instance_status_is_error_string :: FAILED (no inline tb)
+tests/unit/test_job_processor_status_guard.py::TestStatusStrEnumGuard::test_job_fails_when_instance_status_is_error_enum :: AssertionError: Expected 'complete_job' to have been called once. Called 0 times.
+tests/unit/test_maintenancer_agent.py::TestLeaderTeamMembership::test_leader_team_members_length_14 :: AssertionError: leader team_members length must be 14 after W1-P1 task 1.9 (was 13, +1 for 'maintenancer'). Got: 15
+tests/unit/test_maintenancer_kb_coverage.py::test_release_tag_pin_matches_pyproject :: AssertionError: Test expectation drift: EXPECTED_RELEASE_TAG=v0.12.4 vs pyproject.toml=v0.16.13. Update the constant when bumping.
+tests/unit/test_mcp_tool_timeout.py::TestToolNodeIntegration::test_tool_node_handles_timeout :: ModuleNotFoundError: No module named 'langgraph._internal'
+tests/unit/test_mcp_warmup_pool_env_refresh.py::TestUpdateServerEnv::test_update_server_env_visible_to_subsequent_create_pooled_connection :: FAILED (no inline tb)
+tests/unit/test_models_split.py::TestAllCompleteness::test_daemon_models_all_contains_expected_names :: AssertionError: Extra in __all__: LivezResponse
+tests/unit/test_pause_never_dispatched_ghosts.py::TestPauseCascadeSkipsNeverDispatchedGhosts::test_ghosts_skipped_dispatched_child_still_pauses :: FAILED (no inline tb)
+tests/unit/test_pause_never_dispatched_ghosts.py::TestPauseCascadeSkipsNeverDispatchedGhosts::test_resume_never_touches_ghosts_and_they_stay_idle :: FAILED (no inline tb)
+tests/unit/test_pause_never_dispatched_ghosts.py::TestPauseCascadeSkipsNeverDispatchedGhosts::test_probe_failure_degrades_to_legacy_pause_all :: FAILED (no inline tb)
+tests/unit/test_pause_never_dispatched_ghosts.py::TestPauseCascadeSkipsNeverDispatchedGhosts::test_probe_failure_falls_back_to_pause_not_skip :: FAILED (no inline tb)
+tests/unit/test_paused_instance_ttl.py::TestPausedAtField::test_pause_single_sets_paused_at_field :: TypeError: TestPausedAtField.test_pause_single_sets_paused_at_field.<locals>._mock_pause_db_sync() got an unexpected keyword argument 'originator_instance_id'
+tests/unit/test_phase4_manager_decomposition.py::TestFacadeDelegationPattern::test_manager_pause_instance_cascade_delegates_to_lifecycle_service :: FAILED (no inline tb)
+tests/unit/test_project_manager_agent.py::TestPromptComposition::test_soul_cites_rule_for_severity_framing :: AssertionError: soul.md must cross-reference rule.md (e.g., severity framing)
+tests/unit/test_project_manager_agent.py::TestPromptComposition::test_workflow_cites_soul_and_rule :: AssertionError: workflow.md must reference soul.md for output templates
+tests/unit/test_report_integrity_prompts.py::test_every_parent_agent_carries_scrutiny_guidance[designer] :: FAILED (no inline tb)
+tests/unit/test_resume_router_report_dup.py::TestLostReportRecoveredExactlyOnce::test_recovery_is_exactly_once_across_sweep_passes :: FAILED (no inline tb)
+tests/unit/test_spawn_instance_input.py::test_spawn_instance_docstring_mentions_model_tier_and_high :: daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['agentic', 'coding']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+tests/unit/test_spawn_instance_input.py::test_spawn_instance_docstring_mentions_asymmetry :: daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['agentic', 'coding']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+tests/unit/test_terminal_reason_mirror_set_regression.py::test_no_new_terminal_reason_literals_without_mirror_set :: AssertionError: Phase 2 task 2.5d regression: new terminal_reason literals detected without MIRROR_SET declaration: ['orphan_retired', 'pattern_f1_orphan', 'wedge_guard_terminated']. Either (a) remove the literal, or (b) add it to _KNOWN_TERMINAL_REASONS in this test AND to ALL_8_MIRRORS in daemon/services/turn_transitions.py.
+tests/unit/test_validate_agent_id_compat.py::TestValidateAgentIdCompat::test_returns_tuple_for_valid_agent :: AttributeError: <module 'daemon.utils' from '/home/nea/ensemble-src-wt-durability/daemon/utils.py'> does not have the attribute 'get_registry'
+tests/unit/test_vision.py::TestImagesWithoutVisionConfig::test_send_message_without_images_no_vision_succeeds :: FAILED (no inline tb)
+tests/unit/test_wanderer_agent.py::TestWandererMetaJsonValidation::test_tools_allow_has_all_declared_categories :: FAILED (no inline tb)
+tests/unit/test_wanderer_agent.py::TestWandererMetaJsonValidation::test_tools_allow_does_not_contain_db :: AssertionError: assert 'db' not in ['bash', 'proc', 'filesystem', 'time', 'self', 'help', ...]
+tests/unit/test_worker_skill_seed.py::TestWorkerSkillSetParses::test_skill_set_exists_and_parses :: AssertionError: assert '1.3.0' == '1.0.0'
+tests/unit/test_worker_skill_seed.py::TestWorkerSkillSetParses::test_requires_tools_and_env_only :: AssertionError: assert ['bash', 'infra', 'ens-env'] == ['bash', 'instance']
+tests/unit/test_worker_skill_seed.py::TestStrictRegistryLoad::test_production_load_real_tree_strict_ok :: daemon.services.capability_resolver.CapabilityRegistryError: registry entry #0 ('opendesign') references builtin_mcp_class='OpenDesignMCP' which does not resolve against the builtin_servers registry
+tests/unit/test_webfetch_builtin.py::TestWebFetchBootstrapIntegration::test_bootstrap_creates_webfetch_server :: ERROR (no inline tb)
+tests/unit/test_webfetch_builtin.py::TestWebFetchBootstrapIntegration::test_schema_drift_removes_stale_flag :: ERROR (no inline tb)
