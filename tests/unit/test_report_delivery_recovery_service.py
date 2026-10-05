@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -2263,3 +2263,273 @@ class TestF2ManagerLoopBridgeAffinity:
         assert row is not None
         assert row.state == ReportInjectionState.PENDING.value
         assert row.child_message_id == derived_id
+"""G4-r3 unit test for the stuck-wake parent-schedule seam (last-mile)."""
+
+
+class TestG4R3StuckWakeParentScheduleSeam:
+    """G4-r3 LOOP-AFFINITY pin + parent-schedule seam (last-mile).
+
+    The captured-wedge shape (LIVE evidence: r1r pre-kill
+    assertion at .agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/
+    db-assertions/r1r-pre-kill-assertion.txt): parent waiting_children,
+    child completed, wake task running (dead worker), wake row ready,
+    report_injections TASK_DELIVERED. The dead worker had
+    transitioned PENDING->TASK_DELIVERED via claim_for_task_delivery
+    pre-SIGKILL; the retry's claim sees TASK_DELIVERED and skips
+    (the dedup contract). The parent stays in waiting_children
+    because the worker's normal delivery path never got to dispatch
+    the parent turn.
+
+    The fix: lane 6's heal action also calls the SAME primitive the
+    natural wake uses to dispatch the parent turn
+    (``_process_child_completion_and_notify_parent``), via the
+    manager-loop bridge (run_coroutine_threadsafe + .result(timeout)).
+
+    This is a NEW caller of the same primitive -- the function body,
+    the normal wake's path, the worker's claim/dedup contract, and
+    every existing lane are unchanged. No frozen behavior touched.
+
+    The pin: a manager-loop bridge mock that records the call
+    AND asserts the loop it ran on IS the manager loop (the
+    cross-loop seam regression class from the F-2 verification
+    iter 2 must not re-emerge here).
+    """
+
+    def test_lane6_heal_dispatches_parent_via_natural_primitive(
+        self, engine
+    ) -> None:
+        import threading
+        from sqlalchemy import text as sa_text
+        from daemon.repositories.task.repository import TaskRepository
+        from daemon.repositories.task.models import Task, TaskStatus, TaskType
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+        from daemon.services.report_delivery_recovery import (
+            ReportDeliveryRecoveryService,
+        )
+
+        # Real background loop standing in for manager._loop
+        manager_loop = asyncio.new_event_loop()
+        loop_thread = threading.Thread(
+            target=manager_loop.run_forever, daemon=True
+        )
+        loop_thread.start()
+
+        # Mock for the parent-schedule primitive. AsyncMock so
+        # run_coroutine_threadsafe(coro, loop).result() resolves
+        # (the coro is awaited on manager_loop).
+        schedule_calls = []
+        original_loop_ref = []
+
+        async def _schedule_parent(child_id_arg, child_message_id_arg):
+            # Record which loop this coroutine ran on -- must be
+            # the manager loop (cross-loop seam regression class).
+            running = asyncio.get_running_loop()
+            original_loop_ref.append(running)
+            schedule_calls.append(
+                (child_id_arg, child_message_id_arg, "scheduled")
+            )
+            return None
+
+        # Seed the captured state (LIVE id-shape)
+        parent = _seed_instance(
+            engine,
+            instance_id="g4r3-parent-1",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        child_id = _seed_instance(
+            engine,
+            instance_id="g4r3-child-1",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        # LIVE-shape: mq.message_id != ri.child_message_id;
+        # correlation via the wake row's source pattern.
+        child_content_message_id = "g4r3-child-content-1"
+        wake_message_id = "g4r3-wake-msg-1"
+        with engine.begin() as conn:
+            conn.execute(
+                sa_text(
+                    "INSERT INTO message_queue ("
+                    "message_id, instance_id, type, status, source, "
+                    "content, priority, retry_count, max_retries, "
+                    "enqueued_at"
+                    ") VALUES ("
+                    ":message_id, :instance_id, :type, :status, :source, "
+                    ":content, :priority, :retry_count, :max_retries, "
+                    ":enqueued_at"
+                    ")"
+                ),
+                {
+                    "message_id": wake_message_id,
+                    "instance_id": parent,
+                    "type": "completion_report",
+                    "status": "ready",
+                    "source": (
+                        f"internal_report:{child_id}:"
+                        f"{child_content_message_id}"
+                    ),
+                    "content": "child terminal report content",
+                    "priority": 0,
+                    "retry_count": 0,
+                    "max_retries": 3,
+                    "enqueued_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        # Dead-worker wake task (RUNNING with stale heartbeat).
+        stale = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            - timedelta(minutes=10)
+        ).isoformat()
+        with engine.begin() as conn:
+            wake_task_obj = Task(
+                work_id=f"g4r3-wake-work-{uuid.uuid4().hex[:8]}",
+                task_type=TaskType.PROCESS_REPORT.value,
+                instance_id=parent,
+                message_id=wake_message_id,
+                status=TaskStatus.RUNNING.value,
+                worker_id="dead-worker-g4r3",
+                started_at=stale,
+                last_heartbeat_at=stale,
+                created_at=stale,
+            )
+            conn.execute(
+                sa_text(
+                    "INSERT INTO task ("
+                    "work_id, task_type, instance_id, message_id, status, "
+                    "worker_id, started_at, last_heartbeat_at, "
+                    "retry_count, cancel_requested, cancel_requested_at, "
+                    "retry_scheduled, is_deferred, is_background, result, "
+                    "error, completed_at, auto_continued_at, "
+                    "suspension_reason, resume_target_turn_id, next_retry_at, "
+                    "created_at"
+                    ") VALUES ("
+                    ":work_id, :task_type, :instance_id, :message_id, "
+                    ":status, :worker_id, :started_at, :last_heartbeat_at, "
+                    ":retry_count, :cancel_requested, :cancel_requested_at, "
+                    ":retry_scheduled, :is_deferred, :is_background, "
+                    ":result, :error, :completed_at, :auto_continued_at, "
+                    ":suspension_reason, :resume_target_turn_id, :next_retry_at, "
+                    ":created_at"
+                    ")"
+                ),
+                {
+                    "work_id": wake_task_obj.work_id,
+                    "task_type": wake_task_obj.task_type,
+                    "instance_id": wake_task_obj.instance_id,
+                    "message_id": wake_task_obj.message_id,
+                    "status": wake_task_obj.status,
+                    "worker_id": wake_task_obj.worker_id,
+                    "started_at": wake_task_obj.started_at,
+                    "last_heartbeat_at": wake_task_obj.last_heartbeat_at,
+                    "retry_count": wake_task_obj.retry_count,
+                    "cancel_requested": wake_task_obj.cancel_requested,
+                    "cancel_requested_at": wake_task_obj.cancel_requested_at,
+                    "retry_scheduled": wake_task_obj.retry_scheduled,
+                    "is_deferred": wake_task_obj.is_deferred,
+                    "is_background": wake_task_obj.is_background,
+                    "result": wake_task_obj.result,
+                    "error": wake_task_obj.error,
+                    "completed_at": wake_task_obj.completed_at,
+                    "auto_continued_at": wake_task_obj.auto_continued_at,
+                    "suspension_reason": wake_task_obj.suspension_reason,
+                    "resume_target_turn_id": wake_task_obj.resume_target_turn_id,
+                    "next_retry_at": wake_task_obj.next_retry_at,
+                    "created_at": wake_task_obj.created_at,
+                },
+            )
+        # PENDING marker (the captured-wedge shape at lane-6 time:
+        # the dead worker had NOT YET called claim_for_task_delivery
+        # pre-SIGKILL -- the TASK_DELIVERED transition happens
+        # AFTER lane 6 runs, when the retry is claimed by a worker.
+        # The lane 6 query requires state='pending').
+        ri_repo = ReportInjectionRepository(engine=engine)
+        ri_repo.ensure_deferred(
+            parent_instance_id=parent,
+            child_instance_id=child_id,
+            child_message_id=child_content_message_id,
+            deferred_reason="system:crash_wake",
+        )
+        # After ensure_deferred the marker is DEFERRED. The lane 6
+        # query requires state='pending' (not DEFERRED) — the
+        # captured-wedge shape is PENDING, so transition DEFERRED
+        # to PENDING via transition_deferred_to_pending. The
+        # captured-wedge shape in the live evidence: the marker is
+        # PENDING at lane-6 time (this transition models the
+        # post-mint, pre-crash state).
+        ri_repo.transition_deferred_to_pending(
+            injection_id=ri_repo.find_deferred_for_parent_all(
+                parent_not_terminal=True, limit=10
+            )[0].injection_id
+        )
+
+        # Service + manager mock wired for the bridge
+        manager = MagicMock()
+        manager.engine = engine
+        manager._loop = manager_loop
+        manager._checkpointer = None
+        manager._handle_recover_deferred_report = MagicMock()
+        manager._process_child_completion_and_notify_parent = AsyncMock(
+            side_effect=_schedule_parent
+        )
+        service = ReportDeliveryRecoveryService(
+            task_repo=TaskRepository(engine=engine),
+            report_injection_repo=ri_repo,
+            queue_repo=MagicMock(),
+            instance_repo=MagicMock(),
+            manager_ref=manager,
+            interval_seconds=300,
+            age_bound_minutes=10,
+            batch_cap=100,
+            recovery_retry_minutes=1,
+            enabled=True,
+        )
+        try:
+            lane = service._run_stuck_wake_lane()
+        finally:
+            manager_loop.call_soon_threadsafe(manager_loop.stop)
+            loop_thread.join(timeout=5.0)
+            manager_loop.close()
+
+        # Assertions (the dispatch's "red->green" meta-test)
+        # Lane reports the heal.
+        assert lane.recovered == 1, (
+            f"the dead-worker wake task MUST be force-cancelled "
+            f"+ retry-minted; recovered={lane.recovered}, "
+            f"errors={lane.errors}"
+        )
+        # The parent-schedule primitive was called exactly once
+        # for the (child_id, child_message_id) pair (the natural
+        # primitive the normal wake uses -- no new messaging path).
+        assert len(schedule_calls) == 1, (
+            f"the parent-schedule primitive MUST be invoked exactly "
+            f"once after the heal; got {len(schedule_calls)} calls: "
+            f"{schedule_calls}"
+        )
+        called_child_id, called_msg_id, _ = schedule_calls[0]
+        assert called_child_id == child_id, (
+            f"the schedule call MUST be for the captured child; got "
+            f"{called_child_id}, expected {child_id}"
+        )
+        assert called_msg_id == child_content_message_id, (
+            f"the schedule call MUST carry the child's content "
+            f"message_id (the natural primitive's signature); got "
+            f"{called_msg_id}, expected {child_content_message_id}"
+        )
+        # Cross-loop seam: the coroutine MUST have run on the
+        # manager loop (NOT an ephemeral asyncio.run loop). A
+        # regression to ephemeral-loop dispatch would re-introduce
+        # the F-2 iter 2 blocker 1 class.
+        assert original_loop_ref, "the schedule coroutine did not run"
+        assert original_loop_ref[0] is manager_loop, (
+            f"the schedule coroutine MUST run on the manager loop; "
+            f"got {original_loop_ref[0]}, expected {manager_loop}"
+        )
+        # The manager's _process_child_completion_and_notify_parent
+        # was awaited via the bridge (not via an in-test call to
+        # the mock -- the side_effect=_schedule_parent ran on
+        # manager_loop via run_coroutine_threadsafe).
+        manager._process_child_completion_and_notify_parent.assert_awaited_once_with(
+            child_id, child_content_message_id
+        )

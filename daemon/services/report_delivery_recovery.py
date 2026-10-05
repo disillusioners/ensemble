@@ -906,6 +906,7 @@ class ReportDeliveryRecoveryService:
             wake_task_id = cand["wake_task_id"]
             parent_id = cand["parent_instance_id"]
             child_id = cand["child_instance_id"]
+            child_message_id = cand["child_message_id"]
             try:
                 retry_task = force_cancel_fn(
                     task_id=wake_task_id,
@@ -941,6 +942,65 @@ class ReportDeliveryRecoveryService:
                 f"child={child_id[:8]}..."
             )
             out.recovered += 1
+            # ── Last-mile parent-schedule seam (G4-r3) ───────────────
+            # The captured wedge shape: the dead worker had
+            # already transitioned the marker PENDING→TASK_DELIVERED
+            # (the worker's claim_for_task_delivery call ran pre-
+            # SIGKILL), but the daemon died BEFORE the worker's
+            # normal delivery path dispatched the parent's graph
+            # turn. The retry's claim now sees TASK_DELIVERED and
+            # returns "already_delivered" → the worker's drain
+            # path correctly skips (the dedup contract) — but the
+            # parent is still wedged in waiting_children.
+            #
+            # Close the gap by calling the SAME primitive the
+            # natural wake uses to dispatch the parent turn:
+            # ``_process_child_completion_and_notify_parent`` on the
+            # manager. The function:
+            #   1. Re-fetches the child's last assistant content
+            #      (idempotent — content is in the child checkpoint).
+            #   2. Re-creates the report_injection marker (W6
+            #      dedup handles the duplicate — returns None on
+            #      conflict).
+            #   3. Re-creates the wake row + task (deduped via
+            #      message_id / work_id).
+            #   4. Either fires the bus watcher for the parent
+            #      (re-arming the dep watch the bus rebuild dropped)
+            #      OR triggers the cascade transition (parent
+            #      waiting_children → RUNNING) when no more
+            #      pending children remain.
+            # The function's body is unchanged — this is a NEW
+            # caller. No new messaging paths; the retry is still
+            # useful as the process_report fallback.
+            #
+            # Bridge to the manager's event loop using the
+            # module's own sanctioned step-4 pattern (the
+            # run_coroutine_threadsafe(...).result(timeout)
+            # bridge used by _handle_recover_deferred_report at
+            # manager.py:8612 and the revival seam).
+            try:
+                loop = self._get_event_loop()
+                coroutine = (
+                    self._manager
+                    ._process_child_completion_and_notify_parent
+                )
+                future = asyncio.run_coroutine_threadsafe(
+                    coroutine(child_id, child_message_id),
+                    loop,
+                )
+                future.result(timeout=8.0)
+            except Exception as exc:
+                # Per-row fail-safe — log + count, sweep continues.
+                # The retry is still pending; the worker will retry
+                # the delivery on next claim cycle.
+                logger.warning(
+                    f"sweep stuck_wake parent-schedule failed "
+                    f"parent={parent_id[:8]}... "
+                    f"child={child_id[:8]}... "
+                    f"msg={(child_message_id or 'NONE')[:8]}...: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                out.errors += 1
         return out
 
     def _recover_one_deferred_row(
