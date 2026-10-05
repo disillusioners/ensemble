@@ -629,9 +629,16 @@ body field is NOT exposed on the agent tool surface (hardcoded to
 ``None``).
 
 Use this when the agent has been watching a job (``watch_job`` /
-``watch_jobs``) and received a ``[JOB_EVENT] Job {work_id}...
-question requested ❓`` line with a pack payload: relay the question to
-the human, capture the reply, and submit it via ``job_answer``.
+``watch_jobs`` / ``watch_mission``) and received a ``[JOB_EVENT] Job
+{work_id}... question requested ❓`` line with a pack payload: relay
+the question to the human, capture the reply, and submit it via
+``job_answer``. The question event is MISSION-SCOPED (it reaches every
+watcher holding an unclaimed row on any receipt of the asking mission,
+events-filter-exempt), so the ``work_id`` on the line may be ANY
+receipt of the mission — including one this watcher armed. Resolution
+to the asker is WATCHER-INDEPENDENT: the pack lives on the asker and
+the WorkResolver maps any mission receipt (live or already-settled)
+to the owning instance.
 
 Args:
     work_id: The job / work_id whose instance asked the question
@@ -3300,7 +3307,10 @@ def create_job_tools(
                     "The work_id whose instance asked the question "
                     "(matches the work_id on the "
                     "``[JOB_EVENT] Job ... question requested ❓`` line "
-                    "that the watcher received)."
+                    "that the watcher received — the question event is "
+                    "mission-scoped, so this may be any receipt of the "
+                    "asking mission; resolution to the asker is "
+                    "watcher-independent)."
                 )
             ),
         ]
@@ -3922,7 +3932,13 @@ def create_mission_watch_tools(
         Accepts a mission_id or the job_id receipt returned by
         job_create / job_continue, and arms one watcher row per
         currently-live receipt (already-settled receipts are skipped —
-        no replay of historical receipts).
+        no replay of historical receipts). Mid-flight QA events
+        (``question requested ❓`` / ``stuck awaiting answer ⏳`` /
+        escalation) are MISSION-SCOPED at emission time and
+        events-filter-exempt: armed rows receive them even
+        ``mission_terminal``-only — but TERMINAL coverage stays
+        per-receipt delta-arm (receipts minted after this call need a
+        re-call).
 
         Use tool_help("watch_mission") for details."""
         try:
@@ -4109,10 +4125,14 @@ def create_mission_watch_tools(
                 f"receipt-settle) until the canonical "
                 f"``evaluate_mission_live`` guard confirms the parent "
                 f"instance + every descendant is terminal. "
-                f"Re-call watch_mission after job_continue — new "
-                f"receipts are not auto-watched; the re-call is a "
-                f"delta-arm (already-settled receipts are skipped, "
-                f"never replayed)."
+                f"Mid-flight QA events (question requested ❓ / stuck "
+                f"awaiting answer ⏳ / escalation) reach your rows at "
+                f"emission time mission-scoped and events-exempt "
+                f"(non-claiming) — but TERMINAL coverage stays "
+                f"per-receipt delta-arm: re-call watch_mission after "
+                f"job_continue, new receipts are not auto-watched; the "
+                f"re-call is a delta-arm (already-settled receipts are "
+                f"skipped, never replayed)."
             )
         except Exception as e:
             return f"Error watching mission: {str(e)}"
@@ -4149,14 +4169,29 @@ def create_mission_watch_tools(
         "is the LAST firing event and CAS-claims the row. Pre-C1 the "
         "row was CAS-claimed at receipt-settle and the mission-terminal "
         "fire was silently DROPPED; C1 reverses that.\n"
+        "    * Mid-flight QA events (``question requested ❓``, ``stuck "
+        "awaiting answer ⏳``, the ≥3-heartbeat escalation) are "
+        "EMISSION-TIME MISSION-SCOPED and EVENTS-FILTER-EXEMPT: your "
+        "armed rows receive them regardless of their ``watch_events`` "
+        "subscription and regardless of which receipt the asking turn "
+        "rides — delivery is non-claiming (rows survive, they still "
+        "fire for their own subscribed events) and deduped per watcher "
+        "(rows on multiple receipts → ONE emission, naming your own "
+        "armed receipt). A mission blocked awaiting a human answer is "
+        "state every mission watcher needs. This QA reach does NOT "
+        "create TERMINAL coverage — the per-receipt delta-arm rule "
+        "below still governs mission_terminal.\n"
         "    * One mission-terminal produces N [JOB_EVENT]s for N "
         "watched receipts — the FIRST event after your watch is the "
         "signal; the rest are echoes. Act once.\n"
         "    * Re-call watch_mission after every job_continue — "
-        "receipts minted after this call are NOT auto-watched. The "
-        "re-call is a delta-arm: already-settled receipts are "
-        "skipped, never replayed, so re-calling cannot duplicate "
-        "deliveries.\n"
+        "receipts minted after this call (including spontaneous "
+        "child-report wakes) are NOT auto-watched for TERMINAL "
+        "coverage. The re-call is a delta-arm: already-settled "
+        "receipts are skipped, never replayed, so re-calling cannot "
+        "duplicate deliveries. QA events reach you through rows on ANY "
+        "mission receipt; mission_terminal needs a row on a LIVE "
+        "receipt, so re-arm after new receipts mint.\n"
         "    * Delivery is AT-MOST-ONCE with possible delay: the "
         "registration-time classification gates ROW EXISTENCE only — "
         "the emit-time CAS claim is the authoritative exactly-once "

@@ -33,7 +33,7 @@ Two live incidents on 2026-09-21:
 
 ## 2. Target Architecture
 
-Three event classes ride the **same push-only substrate** — the watcher pipeline that already exists for terminal job events — extended with non-terminal status fan-out. The orchestrator/jober subscribes via the existing `watch_job` tool; the event surfaces in its context as a `[JOB_EVENT]` line; the human answers via a new job-addressed HTTP route.
+Three event classes ride the **same push-only substrate** — the watcher pipeline that already exists for terminal job events — extended with non-terminal status fan-out. The orchestrator/jober subscribes via the existing `watch_job` tool; the event surfaces in its context as a `[JOB_EVENT]` line; the human answers via a new job-addressed HTTP route. **Update (2026-10-05, `feature/question-watch-fanout`):** QA events (`question requested ❓`, `stuck awaiting answer ⏳`, the ≥3-heartbeat escalation) fan out MISSION-SCOPED at EMISSION TIME and are EVENTS-FILTER-EXEMPT — every watcher holding an unclaimed row on ANY receipt associated with the asking instance's mission receives them regardless of the row's `events` subscription; delivery is NON-CLAIMING (rows preserved; the `mission_live` HOLD governs the terminal fire only) and deduped per watcher. `mission_terminal` itself remains per-receipt delta-arm — spontaneous receipts (child-report wakes) still need a `watch_mission` re-arm for TERMINAL coverage. Pending-pack resolution stays watcher-independent (the pack lives on the asker).
 
 ### 2.1 Substrate reuse (do NOT introduce parallel infrastructure)
 
@@ -188,7 +188,7 @@ The icon set matches the existing glyph vocabulary (`✓ ✗ ⟳ ⏸ ❓ ⏳`).
 }
 ```
 
-**Why fan-out is the DEFAULT, not an optimization:** the `instance_lifecycle.question_pack` SSE is fire-and-forget on `LiveEventHub`; the `[JOB_EVENT] Job {work_id}... question_requested ❓` line is delivered to every row in `job_watchers WHERE work_id IN (live_work_ids)`. Missing a work_id = the orchestrator watching the OTHER work_id never hears about the question — that IS incident 1. **Sanctioned fallback** (only if fan-out proves noisy at scale): document a first-turn-only scope + a new instance-routed event lane. Fan-out remains the default until measured otherwise.
+**Why fan-out is the DEFAULT, not an optimization:** the `instance_lifecycle.question_pack` SSE is fire-and-forget on `LiveEventHub`; the `[JOB_EVENT] Job {work_id}... question_requested ❓` line is delivered to every row in `job_watchers WHERE work_id IN (live_work_ids)`. Missing a work_id = the orchestrator watching the OTHER work_id never hears about the question — that IS incident 1. **Superseded scope note (2026-10-05, `feature/question-watch-fanout`):** per-live-work-id fan-out still missed two shapes — receipts minted AFTER registration (spontaneous child-report wakes carry zero watch coverage) and `mission_terminal`-only rows (events filter → held_for_mission). QA emissions now resolve recipients at EMISSION TIME over the MISSION's receipt set (`enumerate_mission_work_ids` → one bounded `job_id IN (...)` select, `notify_mission_qa_watchers`): mission-scoped, events-filter-exempt, non-claiming, deduped per watcher. **Sanctioned fallback** (only if fan-out proves noisy at scale): document a first-turn-only scope + a new instance-routed event lane. Fan-out remains the default until measured otherwise.
 
 **`QUESTION_ANSWERED`** (emitted by `POST /api/jobs/{work_id}/answer`):
 

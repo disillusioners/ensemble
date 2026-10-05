@@ -184,6 +184,11 @@ _STATUS_DISPLAY_MAP: dict[str, str] = {
     "answer_received": "answer received ✓",
     "midflight_report": "mid-flight report ⟳",
     "stuck_awaiting_answer": "stuck awaiting answer ⏳",
+    # Mission-scoped escalation envelope (feature/question-watch-fanout,
+    # 2026-10-05): the wedge-guard escalation (emission_index >= 3)
+    # delivers to mission watchers in ADDITION to the FE SSE broadcast.
+    # Additive words inside the parser's header prefix — byte-compatible.
+    "question_escalation": "question escalation ⏳",
 }
 
 
@@ -193,6 +198,47 @@ def _format_status_display(status: str) -> str:
     Unknown statuses pass through unchanged (the prior behaviour).
     """
     return _STATUS_DISPLAY_MAP.get(status, status)
+
+
+def _build_event_envelope(
+    *,
+    work_id: str,
+    status: str,
+    status_display: str,
+    agent_id: str,
+    progress: str | None = None,
+    result_summary: str | None = None,
+    error: str | None = None,
+) -> str:
+    """Build the ``[JOB_EVENT]`` envelope — the SINGLE body builder.
+
+    Extracted (feature/question-watch-fanout, 2026-10-05) from the
+    ``notify_work_watchers`` notify loop so the mission-scoped QA lane
+    (``notify_mission_qa_watchers``) renders byte-identical envelopes
+    from the same code. The parser contract keys off the
+    ``[JOB_EVENT] Job {work_id[:8]}... {status_display}`` header and
+    the ``  Agent:`` / ``  Progress:`` / ``  Result:`` / ``  Error:``
+    line shapes — do not reformat.
+
+    The ``in_progress`` branch is keyed on the raw ``status`` token
+    (progress line only for progress events); every other status
+    renders ``Result:`` / ``Error:`` blocks from the provided content.
+    """
+    notification_parts = [
+        f"[JOB_EVENT] Job {work_id[:8]}... {status_display}",
+        f"  Agent: {agent_id}",
+    ]
+
+    if status == "in_progress":
+        if progress:
+            notification_parts.append(f"  Progress:\n{progress}")
+    else:
+        if result_summary:
+            notification_parts.append(f"  Result:\n{result_summary}")
+        if error:
+            notification_parts.append(f"  Error: {error}")
+
+    return "\n".join(notification_parts)
 
 
 async def notify_work_watchers(
@@ -911,21 +957,18 @@ async def notify_work_watchers(
         notified = 0
         failed_claimed: list[JobWatcher] = []  # S15: per-watch failures → compensation
         for watcher in notify_list:
-            notification_parts = [
-                f"[JOB_EVENT] Job {work_id[:8]}... {status_display}",
-                f"  Agent: {agent_id}",
-            ]
-
-            if status == "in_progress":
-                if progress:
-                    notification_parts.append(f"  Progress:\n{progress}")
-            else:
-                if effective_result:
-                    notification_parts.append(f"  Result:\n{effective_result}")
-                if effective_error:
-                    notification_parts.append(f"  Error: {effective_error}")
-
-            notification = "\n".join(notification_parts)
+            # Envelope build extracted to ``_build_event_envelope`` (the
+            # single body builder — the mission-scoped QA lane renders
+            # byte-identical envelopes from the same code).
+            notification = _build_event_envelope(
+                work_id=work_id,
+                status=status,
+                status_display=status_display,
+                agent_id=agent_id,
+                progress=progress,
+                result_summary=effective_result,
+                error=effective_error,
+            )
 
             # DEFECT-1 round-3 arbitration instrumentation: full body at
             # DEBUG so the delivered envelope can be byte-discriminated
@@ -1098,4 +1141,246 @@ async def notify_work_watchers(
         return 0
 
 
-__all__ = ["notify_work_watchers"]
+# =============================================================================
+# Mission-scoped, EMISSION-TIME QA fan-out
+# (feature/question-watch-fanout, 2026-10-05)
+# =============================================================================
+#
+# RCA (ratified): QA fan-out was recipient-addressed PER RECEIPT, so
+# (1) spontaneous receipts (child-report wake mints a new Task row)
+# carried ZERO watch coverage and the asking turn rode a receipt nobody
+# watched, and (2) ``mission_terminal``-only rows never matched QA
+# statuses (standard_match=False → held_for_mission) — the mission
+# e71d133d incident: watcher armed on settled receipt 4d31ddbe, wake
+# minted 6d8765f2, ask on that turn → ZERO emissions.
+#
+# The fix resolves recipients at EMISSION TIME by MISSION SCOPE: every
+# watcher holding an UNCLAIMED row on ANY receipt associated with the
+# asking instance's mission, regardless of (i) which receipt the asking
+# turn rides and (ii) the row's ``watch_events`` (events-filter-EXEMPT
+# — a mission blocked awaiting a human answer is state every mission
+# watcher needs; filtering it recreates the silent wedge).
+#
+# Invariants (do not regress):
+# * NON-CLAIMING — this lane never claims/transitions watcher rows; the
+#   three-bucket partition (claimable / readonly / held_for_mission),
+#   the C1 ``evaluate_mission_live`` gate, the N1 claim-first CAS, the
+#   C3 fail-CLOSED direction, and the F1 no-replay registration filter
+#   are untouched (the 36be8aef family). The ``mission_live`` HOLD
+#   governs the TERMINAL fire only — QA delivers while the mission is
+#   live (PAUSED is live) and never consumes a row.
+# * ``mission_terminal`` stays receipt-keyed via ``notify_work_watchers``
+#   — spontaneous receipts still need a ``watch_mission`` re-arm for
+#   TERMINAL coverage; QA reach does NOT create terminal coverage.
+# * BOUNDED — the recipient query is ONE ``job_id IN (...)`` SELECT with
+#   a defensive LIMIT over a capped receipt set (see
+#   ``daemon.services.midflight_qa.enumerate_mission_work_ids``); dedupe
+#   is per watcher instance (rows on multiple receipts → ONE emission).
+
+_MISSION_SCOPED_QA_STATUSES: frozenset[str] = frozenset(
+    {"question_requested", "stuck_awaiting_answer", "question_escalation"}
+)
+
+# Defensive row cap on the multi-receipt watcher SELECT (pairs with the
+# ``JobWatcherRepository.get_watchers_for_jobs`` limit parameter).
+_QA_WATCHER_ROW_CAP = 256
+
+
+async def notify_mission_qa_watchers(
+    *,
+    work_id: str,
+    status: str,
+    mission_work_ids: list[str],
+    instance_manager: Any,
+    work_resolver: Any,
+    watcher_repo: Any,
+    progress: str | None = None,
+    result_summary: str | None = None,
+    error: str | None = None,
+) -> int:
+    """Deliver one QA event to every mission watcher — non-claiming.
+
+    Recipient resolution is EMISSION-TIME and MISSION-SCOPED: one
+    bounded ``job_id IN (...)`` SELECT over the mission's receipt set
+    (``mission_work_ids``, capped + deduped by the caller's
+    ``enumerate_mission_work_ids``) finds every watcher holding an
+    UNCLAIMED row on ANY associated receipt. QA events are
+    EVENTS-FILTER-EXEMPT — the row's ``watch_events`` subscription does
+    not gate delivery (a ``mission_terminal``-only row DOES receive QA
+    events). Dedupe is per watcher instance: rows on multiple receipts
+    yield ONE emission, whose envelope names the watcher's
+    highest-priority receipt (its own armed identity — the asking-turn
+    live receipt when it holds a row there, else the newest mission
+    receipt it holds). Any mission receipt resolves back to the asker
+    through the WorkResolver, so the answer route
+    (``POST /api/jobs/{work_id}/answer`` / ``job_answer``) needs no
+    watch row — the pack lives on the asker.
+
+    Delivery is NON-CLAIMING (readonly): no CAS, no row transition, no
+    ``evaluate_mission_live`` call — the mission_live HOLD governs the
+    terminal fire only. Rows survive this delivery intact for their own
+    subscribed events.
+
+    Args:
+        work_id: Primary envelope candidate (the asking-turn receipt
+            when one exists) — also the fallback ``Agent:`` identity
+            source via ``work_resolver.resolve_work``. A resolve miss
+            degrades to ``"unknown"`` and STILL delivers: dropping the
+            question would recreate the silent wedge this lane closes.
+        status: One of :data:`_MISSION_SCOPED_QA_STATUSES`. Anything
+            else (transport kinds, ``mission_terminal``) is REFUSED
+            fail-closed — terminal delivery is exclusively
+            ``notify_work_watchers``' C1/N1 machinery.
+        mission_work_ids: The mission's bounded receipt set (newest
+            live receipt first). Callers build it with
+            ``midflight_qa.enumerate_mission_work_ids``.
+        instance_manager: The ``InstanceManager`` whose
+            ``enqueue_message`` delivers the envelope.
+        work_resolver: WorkResolverService (Agent-line identity).
+        watcher_repo: The ``JobWatcherRepository`` whose
+            ``get_watchers_for_jobs`` performs the read-only IN-select.
+        progress: Optional progress line content (stuck heartbeat
+            cadence text). Rendered only for ``in_progress``-style
+            envelopes; QA statuses render ``Result:``/``Error:``.
+        result_summary: Optional ``Result:`` body (question pack
+            payload / escalation description).
+        error: Optional ``Error:`` body.
+
+    Returns:
+        Number of watcher emissions delivered (deduped per watcher).
+    """
+    if status not in _MISSION_SCOPED_QA_STATUSES:
+        # Fail-closed: this lane must never become a side door for
+        # terminal/transport delivery — the C1/N1/C3 machinery in
+        # ``notify_work_watchers`` is the ONLY terminal path.
+        logger.warning(
+            "notify_mission_qa_watchers: refused non-QA status=%s for "
+            "work_id=%s — mission-scoped QA lane is events-exempt and "
+            "non-claiming by contract; terminal delivery stays on "
+            "notify_work_watchers",
+            status,
+            work_id[:8] if work_id else "<none>",
+        )
+        return 0
+
+    if instance_manager is None or watcher_repo is None:
+        logger.debug(
+            "notify_mission_qa_watchers: missing dependency for "
+            "work_id=%s status=%s — skipping (instance_manager=%s, "
+            "watcher_repo=%s)",
+            work_id[:8] if work_id else "<none>",
+            status,
+            instance_manager is not None,
+            watcher_repo is not None,
+        )
+        return 0
+
+    # Bounded candidate set: caller's mission receipts, primary first,
+    # deduped, defensively re-capped.
+    candidate_ids: list[str] = []
+    seen: set[str] = set()
+    for rid in [work_id, *(mission_work_ids or [])]:
+        if rid and rid not in seen:
+            seen.add(rid)
+            candidate_ids.append(rid)
+    candidate_ids = candidate_ids[:128]
+
+    try:
+        watchers = await asyncio.to_thread(
+            watcher_repo.get_watchers_for_jobs,
+            candidate_ids,
+            _QA_WATCHER_ROW_CAP,
+        )
+    except Exception as sel_err:  # noqa: BLE001 — emission must not break the asker
+        logger.warning(
+            "notify_mission_qa_watchers: receipt-select failed for "
+            "status=%s work_id=%s (%d candidates): %s",
+            status,
+            work_id[:8] if work_id else "<none>",
+            len(candidate_ids),
+            sel_err,
+        )
+        return 0
+    if not watchers:
+        return 0
+
+    # Agent-line identity: resolve ONCE from the primary receipt (the
+    # asker is the same for every recipient). Resolve failure degrades
+    # to "unknown" — QA delivery never depends on the resolver.
+    agent_id = "unknown"
+    if work_resolver is not None:
+        try:
+            work_record = await asyncio.to_thread(
+                work_resolver.resolve_work, work_id
+            )
+            if work_record is not None:
+                agent_id = work_record.agent_id or "unknown"
+        except Exception as res_err:  # noqa: BLE001
+            logger.debug(
+                "notify_mission_qa_watchers: agent resolve failed for "
+                "work_id=%s (%s) — delivering with unknown identity",
+                work_id[:8] if work_id else "<none>",
+                res_err,
+            )
+
+    # Dedupe per watcher instance; pick the envelope's receipt key as
+    # the watcher's highest-priority held receipt (candidate order =
+    # live asking-turn receipts first, then newest mission receipts).
+    rows_by_instance: dict[str, list[JobWatcher]] = {}
+    for watcher in watchers:
+        rows_by_instance.setdefault(watcher.instance_id, []).append(watcher)
+
+    status_display = _format_status_display(status)
+    notified = 0
+    for instance_id, rows in rows_by_instance.items():
+        row_ids = {r.job_id for r in rows}
+        key_work_id = next(
+            (rid for rid in candidate_ids if rid in row_ids), rows[0].job_id
+        )
+        envelope = _build_event_envelope(
+            work_id=key_work_id,
+            status=status,
+            status_display=status_display,
+            agent_id=agent_id,
+            progress=progress,
+            result_summary=result_summary,
+            error=error,
+        )
+        # Per-watch exception boundary (S15 discipline): one failed
+        # enqueue never drops the other recipients. NON-CLAIMING — no
+        # row was deleted, so no compensation is needed.
+        try:
+            await instance_manager.enqueue_message(
+                instance_id=instance_id,
+                message=envelope,
+                source=f"internal_agent:job_event:{key_work_id}:{status}",
+            )
+            notified += 1
+        except Exception as enq_err:  # noqa: BLE001
+            logger.warning(
+                "notify_mission_qa_watchers: enqueue failed for watcher "
+                "status=%s key_work_id=%s to=%s (%s: %s) — row untouched "
+                "(non-claiming lane)",
+                status,
+                key_work_id[:8] if key_work_id else "<none>",
+                instance_id[:8],
+                type(enq_err).__name__,
+                enq_err,
+            )
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[qa-fanout] ts=%d status=%s primary=%s candidates=%d "
+            "rows=%d watchers=%d delivered=%d",
+            time.time_ns(),
+            status,
+            work_id[:8] if work_id else "<none>",
+            len(candidate_ids),
+            len(watchers),
+            len(rows_by_instance),
+            notified,
+        )
+    return notified
+
+
+__all__ = ["notify_mission_qa_watchers", "notify_work_watchers"]

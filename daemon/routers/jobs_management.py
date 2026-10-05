@@ -1124,10 +1124,12 @@ async def answer_questions_job(
     """Submit the human's answer to a question asked by ``work_id``'s instance.
 
     The orchestrator relay path for the mid-flight QA channel: when a
-    watched instance calls ``ask_questions``, its watchers receive a
-    ``[JOB_EVENT] Job {work_id}... question requested ❓`` line with
-    the pack payload; the orchestrator relays the question to the
-    human in chat and POSTs the reply here.
+    watched instance calls ``ask_questions``, mission watchers receive
+    a ``[JOB_EVENT] Job {receipt}... question requested ❓`` line with
+    the pack payload (emission-time MISSION-SCOPED fan-out — every
+    watcher holding an unclaimed row on ANY receipt of the asking
+    mission, events-filter-exempt, non-claiming); the orchestrator
+    relays the question to the human in chat and POSTs the reply here.
 
     Body:
         ``answers`` (dict, required) — keyed by question id (preferred)
@@ -1137,7 +1139,9 @@ async def answer_questions_job(
 
     Resolution is watcher-independent: the pack lives on the ASKER;
     ``WorkResolver.resolve_work(work_id)`` maps the work_id to the
-    owning instance via Task.work_id / JobItem.job_id lookups.
+    owning instance via Task.work_id / JobItem.job_id lookups — any
+    mission receipt (live or already-settled) resolves to the asker,
+    so the ``work_id`` on the question line needs no watch row.
     """
     from pydantic import ValidationError
 

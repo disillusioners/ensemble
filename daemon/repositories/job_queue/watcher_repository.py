@@ -143,6 +143,45 @@ class JobWatcherRepository:
             stmt = select(JobWatcher).where(JobWatcher.job_id == job_id)
             return list(db_session.exec(stmt).all())
 
+    def get_watchers_for_jobs(
+        self, job_ids: list[str], limit: int = 256
+    ) -> list[JobWatcher]:
+        """Read-only multi-receipt watcher SELECT (mission-scoped fan-out).
+
+        Companion of :meth:`get_watchers_for_job` for the emission-time
+        mission-scoped QA fan-out (``feature/question-watch-fanout``,
+        2026-10-05): one bounded ``job_id IN (...)`` query replaces a
+        per-receipt fan-out loop, so a mission-scoped emission resolves
+        ALL of its candidate receipts' watchers in a single indexed
+        SELECT.
+
+        Read-only by contract — the QA lane never claims/transitions
+        rows; the caller dedupes per watcher instance. ``job_ids`` is
+        defensively sliced to 512 entries and the result set is capped
+        at ``limit`` (ORDER BY ``created_at`` ASC for deterministic
+        dedupe) so a pathological receipt/watcher population cannot
+        explode the emission.
+
+        Args:
+            job_ids: Candidate work_ids (the mission's receipt set).
+            limit: Maximum rows returned (default 256).
+
+        Returns:
+            List of JobWatcher records (oldest first), capped.
+        """
+        if not job_ids:
+            return []
+        ids = list(job_ids)[:512]
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(JobWatcher)
+                .where(JobWatcher.job_id.in_(ids))
+                .order_by(JobWatcher.created_at.asc())
+                .limit(limit)
+            )
+            return list(db_session.exec(stmt).all())
+
+
     def get_watches_for_instance(self, instance_id: str) -> list[JobWatcher]:
         """Get all watches for an instance.
 
