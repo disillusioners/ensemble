@@ -1,5 +1,24 @@
 # Test Packs
 
+## Completed commission — QUESTION-WATCH-FANOUT VERIFICATION GATE @ c7862368 (2026-10-05) — 🟢 VERDICT: SHIP
+
+Worktree `/home/nea/ensemble-src-wt-question-watch-fanout`, branch `feature/question-watch-fanout` @ `c7862368` (base `52ab3b6e`, 10 commits, 11 files +2064/−115). READ-ONLY gate: zero repo code changes/commits/push; no :9797/:7979/:8088 contact; artifacts `/tmp/qwf/`. New suite 19/19 with real-side-effect evidence (incident geometry, non-claiming, dedupe, events-exemption, reconcile-mint, Step-4b DELETE-fidelity); 4 scoped packs green (44+55+4+4); 36be8aef family 30/30 + mission_pins exact 3F/34P parity; job_queue 4-quarter sweep (2024 tests) + adjacent 61-file sweep (1733 tests): **43 unique reds → 40 machine-proven pre-existing @ 52ab3b6e + 3 documented family, 0 new-at-delta**; concurrency pack 99P/0F/74S; full-chain in-process harness PASS (❓ + ⏳×3 + ⚠ verbatim to mission watcher). Full evidence: RESULTS/2026-10-05-question-watch-fanout-verification-gate.md. 18 workers.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `question_watch_fanout_suite` (ad-hoc) | tests/job_queue/test_question_watch_fanout.py | new 19-test regression suite | <1 min | 2026-10-05 @ c7862368 | ✅ PASS 19/19 (4.47s) |
+| `report_delivery_recovery_regression` (repo pack, narrative-registered) | test/packs/report_delivery_recovery_regression_unit_test.sh | 44 tests (row says 27 — drift; header comment stale) | <1 min | 2026-10-05 @ c7862368 | ✅ PASS 44/44 (5.96s) |
+| `c2_question_deferred_pause` (repo pack) | test/packs/c2_question_deferred_pause_unit_test.sh | 55 tests (row says 40 — drift) | ~1 min | 2026-10-05 @ c7862368 | ✅ PASS 55/55 (8s) |
+| `watcher_rearm_integration` (repo pack, narrative-registered) | test/packs/watcher_rearm_integration_test.sh | 4 integration tests | ~1 min | 2026-10-05 @ c7862368 | ✅ PASS 4/4 (10s) |
+| `terminal_report_wake_unit` (repo pack) | test/packs/terminal_report_wake_unit_test.sh | 4 bus-regression tests (pg_smoke/prefix_worktree variants excluded from gate) | <1 min | 2026-10-05 @ c7862368 | ✅ PASS 4/4 (2.36s) |
+| `mission_pins_family_36be8aef` (ad-hoc) | tests/job_queue/test_mission_terminal_commission_pins.py + test_mission_live_guard.py | 30 tests (standalone files — NOT inside mission_pins pack; pack-coverage gap noted) | ~2 min | 2026-10-05 @ c7862368 | ✅ PASS 30/30 (8.87s) |
+| `mission_pins_final` (repo pack) | test/packs/mission_pins_final_test.sh | 37 tests; DOCUMENTED pre-existing 3F | ~1 min | 2026-10-05 @ c7862368 | ✅ parity 3F/34P (11.13s) |
+| `qwf_jobqueue_quarters` (ad-hoc ×4) | /tmp/qwf/sweep_q{1..4}.sh | tests/job_queue/ 2024 tests in 4 file-quarters (new-suite file excluded — own pack) | 2-3 min/quarter | 2026-10-05 @ c7862368 | ⚠️ 15F — ALL pre-existing (12 baseline-proven + 3 documented) |
+| `qwf_adjacent_sweep` (ad-hoc ×3 slices) | /tmp/qwf/adj_run_{1,2,3}.sh | tests/unit+tests/services 61 module-matched files, 1733 tests | ~1 min/slice | 2026-10-05 @ c7862368 | ⚠️ 28F — ALL baseline-proven pre-existing |
+| `qwf_baseline_52ab3b6e` (ad-hoc ×3 legs) | /tmp/qwf/base-52ab3b6e-{sweep,b2,b3} (detached, removed) | attribution runs: 40 reds re-run @ pristine base | ~4 min/leg | 2026-10-05 | ✅ 40/40 PRE-EXISTING, 0 new-at-delta (leg C comm-diff = 0) |
+| `qwf_orig_scenario` (ad-hoc, mock lane) | /tmp/qwf/orig_scenario_pack.sh | full 7-link incident chain, in-process real repos + real processors | <1 min | 2026-10-05 @ c7862368 | ✅ PASS 2/2 (2.7s) — ❓/⏳/⚠ verbatim delivered |
+| `concurrency_atomic_unit_test` (ensure.md Core #2/#3; repo pack) | test/packs/concurrency_atomic_unit_test.sh | 99P/0F/74S (baseline 98P — +1 coverage-direction) | ~2 min | 2026-10-05 @ c7862368 | ✅ PASS (74.28s) |
+
 ## Completed commission — SKILL-SELECTOR-QUICK-MODEL VERIFICATION @ 4df0b100 (2026-10-05) — 🟢 VERDICT: READY
 
 Branch `feature/skill-selector-quick-model` @ `4df0b100` (base `ac1bf7b9`, 2 commits: b178d5c5 code + 4df0b100 docs-only). READ-ONLY gate: zero repo modifications by this commission. Selector resolves `"quick"` default / env-override wins / main `OPENAI_MODEL` proven non-leaking end-to-end (real `Config` probe `gpt-4o-leak-probe` → real `_llm_select` → client got `"quick"`); evolution/analysis model config diff-verified untouched; commit hygiene 10/10 paths exact, docs commit 3 paths +5/−0; **all 5 non-green signals base-proven pre-existing at ac1bf7b9 (0 branch-caused)**. Full evidence: RESULTS/2026-10-05-skill-selector-quick-model-verification.md; artifacts /tmp/ens-selsel/. 6 workers.
