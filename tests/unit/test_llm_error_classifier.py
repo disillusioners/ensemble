@@ -1158,6 +1158,32 @@ class TestTransientChannelClassification:
         with pytest.raises(TransientLLMError):
             self._classified_llm(_bare_api_error("ALL MODELS RATE LIMITED")).invoke([])
 
+    def test_2064_high_load_load_shed_via_config_pattern(self, restore_default_patterns):
+        """RCA 2026-10-05: provider 2064 'high load' load-shed blips must
+        classify as transient+retryable via the config-driven allowlist
+        (config.yaml:transient_apierror_allowlist). Exercises the full
+        load_config -> configure_transient_channel_patterns wiring rather
+        than hand-calling the classifier with hardcoded substrings; if a
+        future config edit drops the new entries, this test re-fails."""
+        from pathlib import Path
+
+        from daemon.config import load_config
+
+        config_path = (
+            Path(__file__).resolve().parent.parent.parent / "config.yaml"
+        )
+        load_config(str(config_path))
+
+        original = _bare_api_error(
+            "server cluster under high load, please retry (2064)"
+        )
+
+        with pytest.raises(TransientLLMError) as exc_info:
+            self._classified_llm(original).invoke([])
+
+        assert exc_info.value.kind == "api_error_body"
+        assert exc_info.value.original is original
+
     # --- Regression tests: must stay NON-retryable ---
 
     def test_2056_token_plan_typed_usage_limit(self):
