@@ -1,0 +1,280 @@
+<div class="snapshot-drawer" data-test="snapshot-drawer">
+  <!-- Drawer header -->
+  <div class="drawer-header">
+    <div class="header-top">
+      <h2 class="drawer-title">
+        @if (detail(); as d) {
+          {{ d.title }}
+        } @else {
+          Snapshot detail
+        }
+      </h2>
+      <div class="header-actions">
+        @if (detail()?.id) {
+          <button
+            mat-icon-button
+            (click)="onCopyId()"
+            matTooltip="Copy snapshot ID"
+            aria-label="Copy snapshot ID"
+            data-test="drawer-copy-id"
+          >
+            <mat-icon>content_copy</mat-icon>
+          </button>
+        }
+        <button
+          mat-icon-button
+          (click)="onClose()"
+          matTooltip="Close"
+          aria-label="Close drawer"
+          data-test="drawer-close"
+        >
+          <mat-icon>close</mat-icon>
+        </button>
+      </div>
+    </div>
+    @if (detail(); as d) {
+      <div class="header-meta">
+        <span class="status-chip" [ngClass]="'status-' + d.status">{{ d.status }}</span>
+        <span class="muted">id:</span>
+        <code class="mono">{{ truncatedSnapshotId() }}</code>
+        @if (d.git_dirty) {
+          <span class="dirty-flag" matTooltip="Working tree was dirty at capture">⚠ dirty</span>
+        }
+      </div>
+    }
+  </div>
+
+  <mat-divider></mat-divider>
+
+  <!-- Detail error state (with retry) -->
+  @if (detailError(); as errMsg) {
+    <div class="error-block" role="alert" data-test="drawer-error">
+      <mat-icon>error_outline</mat-icon>
+      <p>{{ errMsg }}</p>
+      <button
+        mat-stroked-button
+        (click)="onRetryDetail()"
+        data-test="drawer-retry"
+      >
+        <mat-icon>refresh</mat-icon>
+        Retry
+      </button>
+    </div>
+  }
+
+  <!-- Detail loading skeleton -->
+  @else if (detailLoading() && !detail()) {
+    <div class="loading-block" role="status" aria-live="polite">
+      <div class="skeleton-card">
+        <div class="skeleton-line title"></div>
+        <div class="skeleton-line short"></div>
+        <div class="skeleton-line medium"></div>
+        <div class="skeleton-line"></div>
+      </div>
+      <div class="skeleton-card">
+        <div class="skeleton-line short"></div>
+        <div class="skeleton-line medium"></div>
+      </div>
+      <span class="visually-hidden">Loading snapshot details…</span>
+    </div>
+  }
+
+  <!-- Detail loaded — 7 sections (D-5: warm-spawn section OMITTED) -->
+  @else if (detail(); as d) {
+    <div class="drawer-body">
+
+      <!-- 1. Task summary -->
+      <section class="detail-section" data-test="drawer-section">
+        <h3>Task summary</h3>
+        @if (d.task_summary) {
+          <p class="task-summary">{{ d.task_summary }}</p>
+        } @else {
+          <span class="muted">No task summary recorded.</span>
+        }
+      </section>
+
+      <!-- 2. Git anchor -->
+      <section class="detail-section" data-test="drawer-section">
+        <h3>Git anchor</h3>
+        <div class="kv-list">
+          <div class="kv-row">
+            <span class="kv-key">SHA</span>
+            <code class="kv-val mono">
+              {{ d.git_sha || '—' }}
+            </code>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Branch</span>
+            <span class="kv-val">{{ d.git_branch || '—' }}</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Repo path</span>
+            <span class="kv-val mono small">{{ d.repo_path || '—' }}</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Dirty</span>
+            <span class="kv-val">{{ d.git_dirty ? 'Yes' : 'No' }}</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. Runtime / Model -->
+      <section class="detail-section" data-test="drawer-section">
+        <h3>Runtime / Model</h3>
+        <div class="kv-list">
+          <div class="kv-row">
+            <span class="kv-key">Runtime version</span>
+            <code class="kv-val mono">{{ d.runtime_version || '—' }}</code>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Effective model</span>
+            <code class="kv-val mono">{{ d.effective_model || '—' }}</code>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. Supersedes chain -->
+      <section class="detail-section" data-test="drawer-section">
+        <h3>Supersedes chain</h3>
+        @if (d.supersedes_snapshot_id) {
+          <button
+            mat-button
+            color="primary"
+            (click)="onSupersedesClick()"
+            class="predecessor-link"
+          >
+            <mat-icon>link</mat-icon>
+            {{ d.supersedes_snapshot_id | slice: 0 : 8 }}… (open predecessor)
+          </button>
+        } @else {
+          <span class="muted">This snapshot does not supersede another.</span>
+        }
+      </section>
+
+      <!-- 5. Tags -->
+      <section class="detail-section" data-test="drawer-section">
+        <h3>Tags</h3>
+        @if (d.domain_tags?.length) {
+          <div class="tag-list">
+            @for (tag of d.domain_tags; track tag) {
+              <span class="tag-chip">{{ tag }}</span>
+            }
+          </div>
+        } @else {
+          <span class="muted">No tags.</span>
+        }
+      </section>
+
+      <!-- 6. Timestamps -->
+      <section class="detail-section" data-test="drawer-section">
+        <h3>Timestamps</h3>
+        <div class="kv-list">
+          <div class="kv-row">
+            <span class="kv-key">Created</span>
+            <span class="kv-val">{{ formatCreatedAt(d.created_at) }}</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 7. Context (project + agent) -->
+      <section class="detail-section" data-test="drawer-section">
+        <h3>Context</h3>
+        <div class="kv-list">
+          <div class="kv-row">
+            <span class="kv-key">Project</span>
+            <code class="kv-val mono small">{{ d.project_id }}</code>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Agent</span>
+            <code class="kv-val mono">{{ d.created_by_agent_id }}</code>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">Target instance</span>
+            <code class="kv-val mono small" [matTooltip]="d.target_instance_id">
+              {{ truncatedTargetInstanceId() }}
+            </code>
+          </div>
+        </div>
+      </section>
+
+      <!-- Digest (lazy, render-only guard at 200KB) -->
+      <section class="detail-section digest-section" data-test="drawer-section">
+        <div class="digest-header">
+          <h3>Digest</h3>
+          <button
+            mat-stroked-button
+            (click)="onToggleDigest()"
+            [disabled]="digestLoading()"
+            class="digest-toggle-btn"
+          >
+            @if (digestLoading()) {
+              <mat-progress-spinner diameter="14" mode="indeterminate"></mat-progress-spinner>
+              Loading…
+            } @else if (showDigest()) {
+              <mat-icon>expand_less</mat-icon>
+              Hide digest
+            } @else {
+              <mat-icon>expand_more</mat-icon>
+              Show digest
+            }
+          </button>
+        </div>
+
+        @if (showDigest()) {
+          @if (digestError(); as derr) {
+            <div class="error-block digest-error" role="alert">
+              <mat-icon>error_outline</mat-icon>
+              <p>Failed to load digest: {{ derr }}</p>
+              <button mat-stroked-button (click)="onRetryDigest()">
+                <mat-icon>refresh</mat-icon>
+                Retry
+              </button>
+            </div>
+          } @else if (digestLoading()) {
+            <div class="digest-loading">
+              <mat-progress-spinner diameter="20" mode="indeterminate"></mat-progress-spinner>
+              <span>Loading digest…</span>
+            </div>
+          } @else if (digest()) {
+            @if (digestTooLarge()) {
+              <div class="digest-too-large" role="status">
+                <mat-icon>warning_amber</mat-icon>
+                <span>
+                  Digest too large to display
+                  ({{ digestJsonString().length | number }} bytes,
+                  guard is 200 KB). Use the Copy button to grab the raw JSON.
+                </span>
+                <button
+                  mat-stroked-button
+                  (click)="onCopyDigest()"
+                  class="copy-digest-btn"
+                  data-test="digest-copy"
+                >
+                  <mat-icon>content_copy</mat-icon>
+                  Copy
+                </button>
+              </div>
+            } @else {
+              <pre
+                class="digest-pre"
+                data-test="digest-pre"
+              >{{ digestJsonString() }}</pre>
+              <div class="digest-actions">
+                <button
+                  mat-stroked-button
+                  (click)="onCopyDigest()"
+                  data-test="digest-copy"
+                >
+                  <mat-icon>content_copy</mat-icon>
+                  Copy digest
+                </button>
+              </div>
+            }
+          }
+        } @else {
+          <span class="muted">Digest is loaded on demand.</span>
+        }
+      </section>
+    </div>
+  }
+</div>

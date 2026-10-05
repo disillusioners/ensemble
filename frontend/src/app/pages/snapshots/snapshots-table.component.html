@@ -1,0 +1,205 @@
+<div class="snapshots-table">
+  <!-- Skeleton / initial loading -->
+  @if (loading() && rows().length === 0) {
+    <div class="skeleton-list" role="status" aria-live="polite">
+      @for (i of [0, 1, 2, 3, 4]; track i) {
+        <div class="skeleton-row">
+          <div class="skeleton-bar title"></div>
+          <div class="skeleton-bar short"></div>
+          <div class="skeleton-bar short"></div>
+          <div class="skeleton-bar chip"></div>
+          <div class="skeleton-bar medium"></div>
+          <div class="skeleton-bar short"></div>
+          <div class="skeleton-bar tiny"></div>
+        </div>
+      }
+      <span class="visually-hidden">Loading snapshots…</span>
+    </div>
+  }
+
+  <!-- Error state -->
+  @else if (error()) {
+    <div class="state-block error-state" role="alert">
+      <mat-icon>error_outline</mat-icon>
+      <p class="error-message">{{ error() }}</p>
+      <button mat-stroked-button (click)="onRetry()">
+        <mat-icon>refresh</mat-icon>
+        Retry
+      </button>
+    </div>
+  }
+
+  <!-- Empty + filtered-empty -->
+  @else if (isFilteredEmpty()) {
+    <div class="state-block empty-state" role="status" aria-live="polite">
+      <mat-icon>search_off</mat-icon>
+      <p>No snapshots match your filters.</p>
+      <span class="hint">Try clearing the filters or broadening the search.</span>
+    </div>
+  }
+  @else if (isEmpty()) {
+    <div class="state-block empty-state" role="status" aria-live="polite">
+      <mat-icon>history</mat-icon>
+      <p>No snapshots yet.</p>
+      <span class="hint">
+        A snapshot captures an instance's experience for warm starts. Enable
+        <strong>Snapshot creation</strong> above to begin capturing.
+      </span>
+    </div>
+  }
+
+  <!-- Loaded: table + paginator -->
+  @else {
+    <!-- Subsequent page loading: thin progress bar (replace-path; keep
+         previous rows visible — fe-plan §7.1) -->
+    @if (loading()) {
+      <mat-progress-bar
+        mode="indeterminate"
+        class="reloading-bar"
+        aria-label="Loading next page"
+      ></mat-progress-bar>
+    }
+
+    <table
+      mat-table
+      [dataSource]="rows()"
+      [trackBy]="trackById"
+      class="snapshots-mat-table">
+      <!-- title -->
+      <ng-container matColumnDef="title">
+        <th mat-header-cell *matHeaderCellDef>Title</th>
+        <td mat-cell *matCellDef="let row" class="title-cell">
+          <span
+            class="title-truncate"
+            [matTooltip]="row.title"
+            (click)="onRowClick(row)"
+            tabindex="0"
+            role="button"
+            (keydown.enter)="onRowClick(row)"
+            (keydown.space)="onRowClick(row); $event.preventDefault()"
+          >{{ row.title }}</span>
+        </td>
+      </ng-container>
+
+      <!-- project (D-5: truncated UUID) -->
+      <ng-container matColumnDef="project">
+        <th mat-header-cell *matHeaderCellDef>Project</th>
+        <td mat-cell *matCellDef="let row">
+          <span
+            class="muted mono"
+            [matTooltip]="row.project_id"
+          >{{ truncateId(row.project_id) }}</span>
+        </td>
+      </ng-container>
+
+      <!-- agent -->
+      <ng-container matColumnDef="agent">
+        <th mat-header-cell *matHeaderCellDef>Agent</th>
+        <td mat-cell *matCellDef="let row">
+          <span class="agent-cell">{{ row.created_by_agent_id }}</span>
+        </td>
+      </ng-container>
+
+      <!-- status -->
+      <ng-container matColumnDef="status">
+        <th mat-header-cell *matHeaderCellDef>Status</th>
+        <td mat-cell *matCellDef="let row">
+          <span
+            class="status-chip"
+            [ngClass]="statusClass(row.status)"
+          >{{ row.status }}</span>
+        </td>
+      </ng-container>
+
+      <!-- tags -->
+      <ng-container matColumnDef="tags">
+        <th mat-header-cell *matHeaderCellDef>Tags</th>
+        <td mat-cell *matCellDef="let row">
+          <div class="tags-cell">
+            @for (tag of visibleTags(row); track tag) {
+              <span class="tag-chip" [matTooltip]="tag">{{ tag }}</span>
+            }
+            @if (overflowCount(row) > 0) {
+              <span
+                class="tag-overflow"
+                [matTooltip]="(row.domain_tags || []).slice(2).join(', ')"
+              >+{{ overflowCount(row) }}</span>
+            }
+            @if (visibleTags(row).length === 0) {
+              <span class="muted">—</span>
+            }
+          </div>
+        </td>
+      </ng-container>
+
+      <!-- created -->
+      <ng-container matColumnDef="created">
+        <th mat-header-cell *matHeaderCellDef>Created</th>
+        <td mat-cell *matCellDef="let row">
+          <span
+            class="muted"
+            [matTooltip]="formatAbsolute(row.created_at)"
+          >{{ formatRelative(row.created_at) }}</span>
+        </td>
+      </ng-container>
+
+      <!-- warm (D-5: always '—' in v1; column slot kept for Phase-2) -->
+      <ng-container matColumnDef="warm">
+        <th mat-header-cell *matHeaderCellDef>Warm</th>
+        <td mat-cell *matCellDef="let row">
+          <span class="muted" [matTooltip]="'Coming in a future release'">—</span>
+        </td>
+      </ng-container>
+
+      <!-- actions -->
+      <ng-container matColumnDef="actions">
+        <th mat-header-cell *matHeaderCellDef></th>
+        <td mat-cell *matCellDef="let row">
+          <button
+            mat-icon-button
+            (click)="onRowClick(row); $event.stopPropagation()"
+            matTooltip="Open detail"
+            aria-label="Open snapshot detail">
+            <mat-icon>chevron_right</mat-icon>
+          </button>
+        </td>
+      </ng-container>
+
+      <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
+      <tr
+        mat-row
+        *matRowDef="let row; columns: displayedColumns"
+        class="snapshots-row"
+        (click)="onRowClick(row)"
+        [attr.aria-label]="'Open snapshot ' + row.title"
+        role="button"
+        tabindex="0"
+        (keydown.enter)="onRowClick(row)"
+        (keydown.space)="onRowClick(row); $event.preventDefault()"
+      ></tr>
+    </table>
+
+    <!-- Paginator (data-test="paginator") -->
+    <mat-paginator
+      [length]="total()"
+      [pageSize]="pageSize()"
+      [pageIndex]="pageIndex()"
+      [pageSizeOptions]="[10, 25, 50]"
+      (page)="onPageChange($event)"
+      data-test="paginator"
+      class="snapshots-paginator">
+    </mat-paginator>
+
+    <!-- Hidden marker so the e2e spec can assert pageIndex reset to 0
+         (data-test="paginator-page-1") — exposed as the FIRST option
+         button. Material's mat-paginator renders a button per page; the
+         first page button has aria-label="Page 1" which we mirror. -->
+    <button
+      type="button"
+      class="visually-hidden"
+      data-test="paginator-page-1"
+      aria-hidden="true"
+      tabindex="-1"
+    ></button>
+  }
+</div>
