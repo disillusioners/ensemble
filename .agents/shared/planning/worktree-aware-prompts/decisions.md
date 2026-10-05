@@ -377,7 +377,7 @@ Recorded verbatim from the review disposition; NO design work done here, NO fork
 - `daemon/repositories/shared_meta_kv/{models.py:33, repository.py:178-243,276-315}` — KV primitives (real tool surface: `set_kv` / `delete_keys` / `clear_all` + no-arg read; `get_all_as_dict` is the repository read path, not a tool — `daemon/tools/shared_meta_kv_tools.py:71-75,109-150`)
 - `daemon/services/context_messages.py:964-997` — `_fetch_kv_metadata` (ambient auto-surface; **opportunistic only**, never load-bearing per D3)
 - `daemon/tools/instance.py:2738-2759` / `instance_messaging.py:1753-1765` — non-empty `context=` routing (PRIMARY awareness channel)
-- `agents/leader/workflow.md:35-104` — Git Flow incl. "Git Setup is NOT Parallelizable" rule (range updated 2026-10-05: worktree-default edits grew the section by ~6 lines)
+- `agents/leader/workflow.md:35-104` — Git Flow incl. "Git Setup is NOT Parallelizable" rule (range unchanged 2026-10-05: in-place worktree-default rewrites only, 6 insertions / 6 deletions, net 0)
 - `agents/leader/tools_note.md:20-41` — prior `send_message` context= usage doc
 - `agents/governor/workflow.md:59-62,107,141,385-390` — `council_manifest` crash-anchor + cleanup-on-delivery + **explicit tool read on restore** (the precedent for D3's defense-in-depth)
 - `agents/project-manager/workflow.md:82,91-92` — `spawn → set_kv → send_message` discipline (intentionally overridden by leader's pre-spawn census write; the override is stated in D2 lifecycle)
