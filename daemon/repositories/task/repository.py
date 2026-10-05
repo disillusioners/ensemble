@@ -621,9 +621,18 @@ class TaskRepository:
         long-lived mission (one Task row per turn) can never turn an
         emission into an unbounded scan.
 
+        Cap canonical home (fix-cycle-2 polish, item 8): the
+        service-side ``MISSION_RECEIPT_SCAN_CAP`` constant in
+        :mod:`daemon.services.midflight_qa` is the canonical
+        cap-for-the-lane value. The repository's ``limit=`` parameter
+        default is a backstop; callers should pass the service
+        constant explicitly. The cap-equality pin in
+        ``test_question_watch_fanout.py`` keeps the two in sync.
+
         Args:
             instance_id: The mission instance whose receipts to scan.
-            limit: Maximum work_ids returned (default 128).
+            limit: Maximum work_ids returned (default 128; backstop —
+                see cap canonical home note above).
 
         Returns:
             Work_ids newest-first, capped at ``limit``.

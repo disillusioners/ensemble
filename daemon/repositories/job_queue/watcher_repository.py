@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 # this is the repository-side backstop so NO caller can hand us an
 # unbounded IN-list.
 _MAX_IN_SELECT_IDS = 512
+# SERVICE-CANONICAL CAP (fix-cycle-2 polish, item 8): the
+# row-cap for the multi-receipt fan-out lives at
+# ``QA_WATCHER_ROW_CAP`` in ``daemon.services.work_notifier`` (the
+# caller-visible surface). The default below is a backstop; the
+# cap-equality pin in ``test_question_watch_fanout.py`` keeps the
+# repository default and the service canonical in sync.
 
 
 class JobWatcherRepository:
@@ -165,16 +171,36 @@ class JobWatcherRepository:
         Read-only by contract — the QA lane never claims/transitions
         rows; the caller dedupes per watcher instance. ``job_ids`` is
         defensively sliced to 512 entries and the result set is capped
-        at ``limit`` (ORDER BY ``created_at`` ASC for deterministic
-        dedupe) so a pathological receipt/watcher population cannot
+        at ``limit`` (ORDER BY ``created_at`` DESC, fix-cycle-2 polish,
+        item 13) so a pathological receipt/watcher population cannot
         explode the emission.
+
+        Cap canonical home (fix-cycle-2 polish, item 8): the
+        service-side ``QA_WATCHER_ROW_CAP`` constant in
+        :mod:`daemon.services.work_notifier` is the canonical
+        cap-for-the-lane value. The repository's ``limit=`` parameter
+        default is a backstop; callers should pass the service
+        constant explicitly. The cap-equality pin in
+        ``test_question_watch_fanout.py`` keeps the two in sync.
+
+        Cap-hit observability (fix-cycle-2 polish, item 13): when the
+        cap is HIT (i.e. the row count returned equals ``limit`` and a
+        follow-up ``COUNT(*)`` over the same IN-set reports a larger
+        total), the repository logs a single ``[qa-watcher-cap-hit]``
+        WARN naming the total count + cap + job_ids. ``ASC`` ordering
+        was the silent-delivery-loss trap: it kept the OLDEST rows, so
+        a freshly delta-armed orchestrator was the likeliest silent-
+        drop victim. ``DESC`` keeps the NEWEST rows — the row
+        population that is most likely to be live and the candidate a
+        recent re-arm cares about.
 
         Args:
             job_ids: Candidate work_ids (the mission's receipt set).
-            limit: Maximum rows returned (default 256).
+            limit: Maximum rows returned (default 256; backstop — see
+                cap canonical home note above).
 
         Returns:
-            List of JobWatcher records (oldest first), capped.
+            List of JobWatcher records (newest first), capped.
         """
         if not job_ids:
             return []
@@ -183,10 +209,38 @@ class JobWatcherRepository:
             stmt = (
                 select(JobWatcher)
                 .where(JobWatcher.job_id.in_(ids))
-                .order_by(JobWatcher.created_at.asc())
+                .order_by(JobWatcher.created_at.desc())
                 .limit(limit)
             )
-            return list(db_session.exec(stmt).all())
+            rows = list(db_session.exec(stmt).all())
+            # Cap-hit observability: only the cheap COUNT is enough to
+            # detect a hit (the SELECT already bounded the row payload
+            # to ``limit``). Drop the cap-hit count is
+            # ``total - len(rows)`` when the COUNT is over the cap.
+            if len(rows) >= limit:
+                count_stmt = (
+                    select(func.count())
+                    .select_from(JobWatcher)
+                    .where(JobWatcher.job_id.in_(ids))
+                )
+                total = int(db_session.exec(count_stmt).one() or 0)
+                if total > limit:
+                    logger.warning(
+                        "[qa-watcher-cap-hit] get_watchers_for_jobs: "
+                        "cap reached for mission-scoped QA fan-out — "
+                        "total_rows=%d limit=%d dropped=%d "
+                        "candidate_job_ids=%d (newest %d delivered; "
+                        "oldest %d silently dropped). Same silent-"
+                        "delivery-loss defect family as the reported "
+                        "bug: cap is observable, not silent.",
+                        total,
+                        limit,
+                        total - limit,
+                        len(ids),
+                        limit,
+                        total - limit,
+                    )
+            return rows
 
 
     def get_watches_for_instance(self, instance_id: str) -> list[JobWatcher]:

@@ -754,6 +754,76 @@ class TestBoundedLookup:
 
         assert notified == QA_WATCHER_ROW_CAP
 
+    def test_cap_canonical_home_pins_equality(self):
+        """Service-canonical cap ↔ repository-default cap.
+
+        The cap canonical home (fix-cycle-2 polish, item 8) lives at
+        ``QA_WATCHER_ROW_CAP`` in ``daemon.services.work_notifier``;
+        the repository's ``limit=`` parameter default in
+        ``JobWatcherRepository.get_watchers_for_jobs`` is a backstop.
+        The two MUST stay in sync — a divergence silently changes the
+        cap and re-opens the silent-delivery-loss defect family.
+        Same shape as the MISSION_RECEIPT_SCAN_CAP ↔
+        ``TaskRepository.get_recent_work_ids`` default pin.
+        """
+        import inspect
+
+        from daemon.repositories.job_queue.watcher_repository import (
+            JobWatcherRepository,
+        )
+        from daemon.repositories.task.repository import TaskRepository
+        from daemon.services.midflight_qa import MISSION_RECEIPT_SCAN_CAP
+        from daemon.services.work_notifier import QA_WATCHER_ROW_CAP
+
+        # The repository default values are the backstop; the service
+        # constants are the canonical home. The two must match so a
+        # future drift (one side bumped, the other forgotten) is loud.
+        watcher_sig = inspect.signature(JobWatcherRepository.get_watchers_for_jobs)
+        task_sig = inspect.signature(TaskRepository.get_recent_work_ids)
+        assert watcher_sig.parameters["limit"].default == QA_WATCHER_ROW_CAP
+        assert task_sig.parameters["limit"].default == MISSION_RECEIPT_SCAN_CAP
+
+    def test_cap_hit_logs_observable_warn(self, harness, caplog):
+        """The QA watcher-row cap is OBSERVABLE on hit (fix-cycle-2 polish,
+        item 13): when the population exceeds the cap, the repository
+        logs a single ``[qa-watcher-cap-hit]`` WARN naming the total
+        + cap + dropped count + candidate count. Same silent-delivery-
+        loss defect family as the reported bug: a cap that is
+        silently hit is worse than no cap at all (operators cannot
+        see the loss).
+        """
+        import logging
+
+        from daemon.services.work_notifier import QA_WATCHER_ROW_CAP
+
+        mission = _seed_instance(harness.engine)
+        r1 = _seed_task(harness.engine, mission)
+        # Cap + extra watchers, all armed on the same receipt.
+        for i in range(QA_WATCHER_ROW_CAP + 5):
+            w = _seed_instance(
+                harness.engine, status=InstanceStatus.IDLE.value
+            )
+            # Stagger the created_at so DESC ordering yields a
+            # deterministic cap-hit (newest N survive).
+            harness.watcher_repo.add_watch(r1, w, ["mission_terminal"])
+
+        with caplog.at_level(logging.WARNING, logger="daemon.repositories.job_queue.watcher_repository"):
+            rows = harness.watcher_repo.get_watchers_for_jobs([r1])
+
+        assert len(rows) == QA_WATCHER_ROW_CAP
+        cap_hit = [
+            r
+            for r in caplog.records
+            if "[qa-watcher-cap-hit]" in r.getMessage()
+        ]
+        assert len(cap_hit) == 1, caplog.records
+        msg = cap_hit[0].getMessage()
+        # The WARN names total + cap + dropped + candidates (observable
+        # cap, not silent).
+        assert "total_rows=" in msg
+        assert f"limit={QA_WATCHER_ROW_CAP}" in msg
+        assert "dropped=" in msg
+
 
 # =============================================================================
 # 36be8aef-family guard — mission_terminal semantics untouched
