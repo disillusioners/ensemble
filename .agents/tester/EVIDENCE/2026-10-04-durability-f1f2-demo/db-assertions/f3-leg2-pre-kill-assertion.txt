@@ -1,0 +1,3 @@
+ERROR:  each UNION query must have the same number of columns
+LINE 5: UNION ALL SELECT 'child1_inj', state FROM report_injections ...
+                         ^

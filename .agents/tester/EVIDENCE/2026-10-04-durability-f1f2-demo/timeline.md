@@ -60,3 +60,33 @@
 - 04:50 R3r: child1 delivered naturally, poller missed child2's wedge, daemon crashed (pre-existing bug)
 - 04:52 R4r: fresh parent 2acdf6b2 healed naturally, manual ping → normal response (no deadlock)
 - 04:55 R5: write findings, commit, restore dev lane
+
+## G4-r2 FINAL RE-GATE (2026-10-05)
+- 05:42 LEG 1: kill v0.16.11, boot durability, create parent 344655ff + child 51ecc39b
+- 05:44:19 LEG 1: wedge captured (SIGSTOP, wake_task=running, worker_id=worker-1, inj=PENDING)
+- 05:44:19 LEG 1: SIGKILL
+- 05:44:19 → 05:46:14 LEG 1: wait 100s (heartbeat stale 92s > 90s)
+- 05:46:24 LEG 1: reboot, lane 6 heal PASS (recovered=1, task 1734→1735, same-message_id, retry_count=1)
+- 05:46:24 LEG 1: injection recorded TASK_DELIVERED but parent STUCK
+- 05:51:45 LEG 1: manual ping → parent completed (iter=17, ~34s)
+- 05:55 LEG 2: create parent 1162418c + child1 50dcc93d (3s) + child2 afd68442 (60s)
+- 05:56:48 LEG 2: child2 wedge captured
+- 05:56:48 LEG 2: SIGKILL
+- 05:56:48 → 05:58:14 LEG 2: wait 100s, heartbeat stale
+- 05:58:15 LEG 2: reboot
+- 05:59:18 LEG 2: lane 6 heal child2 ONLY (recovered=1, task 1746→1747)
+- 05:59:18 LEG 2: parent stuck (injection gap)
+- 06:00:30 LEG 2: manual ping → parent completed
+- 06:02 LEG 3: create parent b0a7bd55 + child 0f5becb1
+- 06:03:54 LEG 3: wedge captured
+- 06:03:54 LEG 3: SIGKILL
+- 06:03:54 → 06:06:00 LEG 3: wait 100s, heartbeat stale
+- 06:06:00 LEG 3: boot with SERVICES_REPORT_DELIVERY_RECOVERY_LANE_STUCK_WAKE=false
+  - Constructor log: stuck_wake=False
+  - /proc/environ: env var =false
+  - Wedge persists ≥120s (verified at t+0 and t+120s)
+- 06:08:32 LEG 3: reboot WITHOUT override (default ON)
+  - Constructor log: stuck_wake=True
+  - Lane 6 heal: task 1751→1752, recovered=1
+- 06:09:05 LEG 3: manual ping → parent completed
+- 06:10+ R5: write findings, commit, restore dev lane
