@@ -191,11 +191,53 @@ run_stage() {  # run_stage <version> <binary> — own commit + tag first
         git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t \
             commit -qm "fixture-$1" >/dev/null 2>&1
         git -C "$FAKE_REPO" tag "$1" 2>/dev/null
+        # Stage freshness guard (cn 0472b31f): stamp sidecars via the
+        # PRODUCTION writer against the just-tagged HEAD so the j-pack
+        # legs exercise the genuine writer→verifier round-trip, not
+        # the guard's refusal path. Both artifacts (binary + FE entry)
+        # need sidecars — stage.sh verifies both (lib.sh:252 for
+        # binary, lib.sh:290 for FE). REPO_ROOT=$FAKE_REPO so the
+        # writer records the right repo-relative artifact_path.
+        _stamp_provenance_for_repo "$FAKE_REPO" \
+            "$2" \
+            "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
         HOME="$FAKE_HOME" VERSION="$1" TARGET=sandbox \
         INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
         ENSEMBLE_BINARY_VERSION="${1#v}" \
         bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$2"
     )
+}
+
+# _stamp_provenance_for_repo <repo> <artifacts...> — port from
+# tests/test_release_journal.sh (cn 0472b31f fixture pattern): rewrite
+# each artifact's .build-provenance.json sidecar via the PRODUCTION
+# writer (_provenance_write in lib.sh, sourced in a subshell with
+# REPO_ROOT pointed at <repo>) so the fixture sidecar SHAPE cannot
+# drift from what the build path produces. The guard (cn 0472b31f
+# trap family) refuses --skip-build stubs without a sidecar as
+# provenance-missing; this helper re-stamps before each run_stage
+# call so the j-pack legs exercise the genuine fresh-match
+# pass-through path (writer → verifier round-trip), exactly what a
+# DR drill leg should prove.
+_stamp_provenance_for_repo() {
+    local repo="$1"; shift
+    local head dirty art
+    head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || return 0
+    dirty="$(REPO_ROOT="$repo" bash -c '
+        . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh"
+        _git_dirty_porcelain
+    ' 2>/dev/null)"
+    [ -n "$dirty" ] || dirty=false
+    for art in "$@"; do
+        [ -f "$art" ] || continue
+        REPO_ROOT="$repo" bash -c '
+            . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh"
+            _provenance_write "$1" "$2" "$3" "stub:tests/test_supervision_journal.sh"
+        ' _stamp "$art" "$head" "$dirty" >/dev/null 2>&1 || {
+            printf 'FAIL: _stamp_provenance_for_repo: production writer FAILED for %s\n' "$art" >&2
+            FAIL=$((FAIL + 1))
+        }
+    done
 }
 
 # stage both releases + seed current=VA (first-promote-equivalent)

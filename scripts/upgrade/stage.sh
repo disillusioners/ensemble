@@ -42,6 +42,20 @@
 #   bash scripts/upgrade/stage.sh sandbox --version v1 --skip-build ./stub-prod
 #   (sandbox also needs INSTALL_DIR=<dir> PORT=<port> [POSTGRES_DB=<db>])
 #
+# FRESHNESS GUARD (cn 0472b31f trap family; 2026-10-04): a structural
+# fail-closed check refuses stage when (a) the staging tree is not at the
+# integration tip (catches the v0.16.13 payload case — tag placed on a
+# non-tip commit, actual fixes landed later on the tip), or (b) the
+# prebuilt artifact at dist/ensemble-prod (or frontend/dist/frontend/
+# browser) has no build provenance sidecar, has a malformed sidecar
+# (missing/empty/unrecognized load-bearing field — no value ever skips a
+# check), was built on a dirty tree, was built at a different commit, or
+# no longer matches its recorded sha256. The override is argv-only:
+# --allow-stale-stage (mirrors --f2-verified-closed; journaled DURABLY on
+# the install dir — the journal is created if absent — and audited at
+# accept). See docs/runbooks/upgrade-drills.md §A (Stage freshness guard)
+# for the operator remedy per refusal token.
+#
 # ROLLBACK SAFETY DERIVATION (D-FA4.5): `rollback_safe` defaults to the
 # release author's call via ENSEMBLE_ROLLBACK_SAFE={0,1}; when unset it is
 # DERIVED — false iff the staged migration set contains destructive DDL
@@ -63,6 +77,15 @@ VERSION="${VERSION:-}"
 SKIP_BUILD=0
 BINARY_SRC=""
 TARGET_ARG=""
+# STAGE_FRESHNESS_OVERRIDE — argv-only override flag (--allow-stale-stage;
+# mirrors the --f2-verified-closed pattern from promote.sh: 2026-10-04
+# cn 0472b31f trap family). Unlocks BOTH the tip-identity check
+# (non-tip-tree) AND the artifact provenance check (provenance-* + dirty-
+# build), and journals the override on the install dir's state.json so
+# the operator's acceptance is auditable. NEVER set as a side effect of
+# any other argv (a leading '-' ends the value per the --skip-build
+# pattern; the flag is a STICKY BOOL, no value).
+STAGE_FRESHNESS_OVERRIDE=0
 args=("$@")
 i=0
 while [ $i -lt ${#args[@]} ]; do
@@ -90,7 +113,15 @@ while [ $i -lt ${#args[@]} ]; do
                 esac
             fi
             ;;
-        -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --allow-stale-stage)
+            # argv-only override: unlocks BOTH the tip-identity check AND
+            # the artifact provenance check. Journaled on the install dir
+            # by the verify helpers (one entry per reason token, with
+            # operator_accepted=true). Mirrors --f2-verified-closed (argv-
+            # only, refused at the gate, audited on accept).
+            STAGE_FRESHNESS_OVERRIDE=1
+            ;;
+        -h|--help) sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "stage: unknown flag '$arg' — see --help" >&2; exit 78 ;;
     esac
     i=$((i + 1))
@@ -117,6 +148,19 @@ if [ "$GIT_DESCRIBE" != "$VERSION" ]; then
     _warn "VERSION '$VERSION' does not match the exact tag at HEAD (git describe: '${GIT_DESCRIBE:-<untagged>}') — refusing (ADR-009 D3: stage what was built, no auto pull / no network fetch)"
     exit 78
 fi
+
+# ── Stage freshness guard — L1: tip-identity (cn 0472b31f; 2026-10-04) ──────
+# Computed ONCE here, after the VERSION discipline, so both the tip-identity
+# check and the per-artifact provenance check see the same HEAD. The tip
+# is `origin/latest` (or local `latest` fallback) — a non-tip staging tree
+# either missed a merge (stale tip behind the tag) or is on a feature
+# branch (intentional, but explicit override required for the v0.16.13
+# payload case where the tag was placed BEFORE the merges that included
+# the actual fixes). The check runs BEFORE the build, BEFORE the lock —
+# a structural fail-closed that refuses on bad trees, not a soft warning.
+HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+export HEAD_SHA STAGE_FRESHNESS_OVERRIDE
+_verify_tip_identity
 
 # ── Build (bare PyInstaller — deploy.sh:195-197 pattern) ────────────────────
 BINARY="$REPO_ROOT/dist/ensemble-prod"
@@ -173,6 +217,15 @@ if [ "$SKIP_BUILD" = "0" ]; then
             exit 1
         fi
         [ -x "$BINARY" ] || { _warn "build produced no $BINARY"; exit 78; }
+        # Stage freshness guard — write provenance sidecar (cn 0472b31f; 2026-10-04).
+        # The build JUST produced the binary, so we own its provenance. The
+        # sidecar records HEAD + dirty + artifact_sha256 — a later stage from
+        # a different tree (or a dirty tree) will refuse with stale-provenance
+        # / dirty-build. git_dirty is the WORKING-TREE state at the moment of
+        # the build, NOT at the moment of stage (which can be later); a build
+        # on a clean tree stays clean for the lifetime of the binary.
+        _provenance_write "$BINARY" "$HEAD_SHA" "$(_git_dirty_porcelain)" "pyinstaller:ensemble.spec" \
+            || { _warn "provenance write FAILED for $BINARY — refusing to stage an unprovenanced build (cn 0472b31f trap family)"; exit 78; }
     else
         _log "using existing binary at $BINARY (pass --skip-build to force-bypass a rebuild check, or rm dist/)"
     fi
@@ -188,6 +241,16 @@ else
     _log "build skipped (--skip-build) — binary source: $BINARY_SRC"
 fi
 
+# ── Stage freshness guard — L2: verify binary provenance (cn 0472b31f) ──────
+# The build path wrote provenance for the just-built binary (above). The
+# --skip-build path and the "existing binary, no rebuild" path both
+# require verification: the artifact's sidecar must match the current
+# tree's HEAD + dirty state, and the artifact's sha256 must match the
+# recorded one. Refusal tokens (provenance-missing / stale-provenance /
+# dirty-build / provenance-hash-mismatch) are journaled on the install
+# dir when STAGE_FRESHNESS_OVERRIDE=1; otherwise they exit 78.
+_verify_artifact_provenance "$BINARY_SRC"
+
 # ── Payload sources must exist ──────────────────────────────────────────────
 for req in "$REPO_ROOT/agents" "$REPO_ROOT/config.yaml" "$REPO_ROOT/launcher.sh"; do
     if [ ! -e "$req" ]; then
@@ -196,8 +259,36 @@ for req in "$REPO_ROOT/agents" "$REPO_ROOT/config.yaml" "$REPO_ROOT/launcher.sh"
     fi
 done
 if [ ! -d "$REPO_ROOT/frontend/dist/frontend/browser" ]; then
-    _warn "no frontend build at frontend/dist/frontend/browser — run 'cd frontend && npm run build' first (refusing to stage a UI-less release)"
+    # FE absent → the operator must build it (unchanged from the pre-guard
+    # behavior). The FE provenance sidecar is written by the FE build
+    # wrapper scripts/upgrade/_build_frontend.sh (which runs the same
+    # `npm run build` then stamps the sidecar); stage.sh itself never
+    # builds the FE — it VERIFIES the sidecar the wrapper produced.
+    _warn "no frontend build at frontend/dist/frontend/browser — run 'bash scripts/upgrade/_build_frontend.sh' (wraps 'npm run build' + stamps the provenance sidecar; refusing to stage a UI-less release)"
     exit 78
+fi
+# Stage freshness guard — L2: verify FE provenance (same trap family; the
+# 2026-10-02 catch was a 21-file v0.16.9-era FE under a v0.16.10 label).
+# The FE provenance sidecar lives NEXT TO the file the verifier hashes:
+# frontend/dist/frontend/browser/index.html.build-provenance.json (the
+# sidecar is a SIBLING of its artifact per the _provenance_path convention
+# — NOT a bare frontend/dist/.build-provenance.json). The wrapper
+# _build_frontend.sh writes it; this block only VERIFIES it.
+FE_DIST_DIR="$REPO_ROOT/frontend/dist"
+if [ -d "$FE_DIST_DIR" ]; then
+    # The verifier target is the FE entry point: index.html when present,
+    # else the first file under browser/ (shape-tolerant). A sha256
+    # mismatch on this file catches a stale FE build even when the
+    # directory shape is unchanged.
+    _FE_TARGET=""
+    if [ -f "$FE_DIST_DIR/frontend/browser/index.html" ]; then
+        _FE_TARGET="$FE_DIST_DIR/frontend/browser/index.html"
+    elif [ -n "$(find "$FE_DIST_DIR/frontend/browser" -maxdepth 1 -type f 2>/dev/null | head -1)" ]; then
+        _FE_TARGET="$(find "$FE_DIST_DIR/frontend/browser" -maxdepth 1 -type f 2>/dev/null | head -1)"
+    fi
+    if [ -n "$_FE_TARGET" ]; then
+        _verify_artifact_provenance "$_FE_TARGET"
+    fi
 fi
 
 # ── Schema generation facts (manifest informational fields) ────────────────
@@ -288,6 +379,21 @@ chmod +x "$STAGE_TMP/ensemble-prod"
 cp -R "$REPO_ROOT/agents" "$STAGE_TMP/agents" || { rm -rf "$STAGE_TMP"; exit 1; }
 mkdir -p "$STAGE_TMP/frontend/dist/frontend"
 cp -R "$REPO_ROOT/frontend/dist/frontend/browser" "$STAGE_TMP/frontend/dist/frontend/browser" || { rm -rf "$STAGE_TMP"; exit 1; }
+# G3 (review round 2): EXCLUDE the FE provenance sidecar from the release
+# payload (it is web-servable: the front-end container serves every file
+# under browser/). The sidecar is BUILD-TIME state, not a runtime
+# artifact — shipping it would expose a per-deployment hash + git HEAD
+# to any client that can fetch /assets/index.html.build-provenance.json.
+# The verifier (in _verify_artifact_provenance) reads the sidecar from
+# the SOURCE tree ($REPO_ROOT), not from the staged payload, so exclusion
+# does not affect stage-time checks. The manifest per-file map is
+# computed AFTER this rm and therefore does not include the sidecar →
+# the sidecar is not part of the release's integrity contract either.
+rm -f "$STAGE_TMP/frontend/dist/frontend/browser/index.html.build-provenance.json" || {
+    _warn "stage: FAILED to remove the FE provenance sidecar from $STAGE_TMP/.../browser/ (FE sidecar would ship inside the web-servable payload and perturb the FE tree hash). Aborting stage to keep the release payload consistent with the verifier's expectations; the assemble-into-temp + rename-aside swap is atomic only as long as the assembly is clean."
+    rm -rf "$STAGE_TMP"
+    exit 1
+}
 cp "$REPO_ROOT/config.yaml" "$STAGE_TMP/config.yaml" || { rm -rf "$STAGE_TMP"; exit 1; }
 cp "$REPO_ROOT/launcher.sh" "$STAGE_TMP/launcher.sh" || { rm -rf "$STAGE_TMP"; exit 1; }
 chmod +x "$STAGE_TMP/launcher.sh"

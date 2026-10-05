@@ -88,6 +88,12 @@ printf 'port: ${PORT:-8088}\n' > "$FAKE_REPO/config.yaml"
 printf 'stub-index\n' > "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 printf 'stub-app\n' > "$FAKE_REPO/frontend/dist/frontend/browser/main.js"
 printf 'CREATE TABLE x (id int);\n' > "$FAKE_REPO/daemon/migrations/versions/20260101_000001_init.sql"
+# Mirror the REAL repo's ignore shape (root .gitignore `dist/`; frontend/
+# has its own .gitignore with /dist): the FE provenance sidecar written by
+# the stamper lives under frontend/dist/ and must be INVISIBLE to
+# `git status --porcelain`, or the honest dirty probe classifies the
+# sidecar itself as an uncommitted change (self-referential dirty-build).
+printf 'dist/\n*.build-provenance.json\n' > "$FAKE_REPO/.gitignore"
 
 # a stub binary "serving" nothing — staging only, no daemon in unit tests
 printf '#!/bin/bash\nexit 78\n' > "$FIXTURE/stub-prod"
@@ -100,15 +106,75 @@ git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm fixture
 SBX_V1="v1.0.0-sbx"
 git -C "$FAKE_REPO" tag "$SBX_V1"
 
+# Stage freshness guard (cn 0472b31f; 2026-10-04): the stage guard verifies
+# the staged artifact's .build-provenance.json sidecar against the current
+# tree, so the stub artifacts need sidecars whose git_head matches
+# FAKE_REPO's HEAD. The sidecars are written by the PRODUCTION writer
+# (_provenance_write in lib.sh, S4 drift fix — no hand-rolled JSON in the
+# fixture); _stamp_provenance_for_repo (defined below) re-stamps before
+# every run_stage/DROP_STAGE call.
+# The .gitignore mirrors the REAL repo's shape (root .gitignore `dist/` +
+# frontend/.gitignore `/dist`): the FE sidecar lives under frontend/dist/
+# and MUST be invisible to `git status --porcelain`, or the production
+# dirty probe (which the stamper now calls honestly) would classify the
+# sidecar itself as an uncommitted change and stamp git_dirty:true onto a
+# clean-tree build — a self-referential dirty-build refusal.
+
 SBX="$FIXTURE/installsb"
 mkdir -p "$SBX"
 SBX_PORT=18377   # throwaway port; never a real env port
 
 run_stage() {  # run_stage <extra args...> — env preset for the sandbox
+    # Stage freshness guard (cn 0472b31f; 2026-10-04): re-stamp the stub
+    # artifacts' provenance sidecars to match FAKE_REPO's current HEAD
+    # BEFORE each stage call. The DROP fixture re-stamps similarly in
+    # DROP_STAGE below. Without this re-stamp, the guard correctly
+    # refuses the artifacts as stale (their provenance was written for
+    # an earlier HEAD, or for the DROP repo's HEAD). The stamps go
+    # through the PRODUCTION writer (S4 drift fix — the hand-rolled
+    # JSON this helper used to emit could silently diverge from the real
+    # sidecar shape; the production writer cannot).
+    _stamp_provenance_for_repo "$FAKE_REPO" \
+        "$FIXTURE/stub-prod" \
+        "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
     HOME="$FAKE_HOME" VERSION="$SBX_V1" TARGET=sandbox \
         INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
         bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox "$@"
 }
+
+# _stamp_provenance_for_repo <repo> <artifacts...> — rewrite each artifact's
+# .build-provenance.json sidecar via the PRODUCTION writer (_provenance_write
+# in lib.sh, sourced in a subshell with REPO_ROOT pointed at <repo>) so the
+# fixture sidecar shape CANNOT drift from what the build path produces (S4).
+# The dirty flag is the repo's real working-tree state, normalized to the
+# canonical JSON boolean by the writer itself — no hand-rolled values here.
+_stamp_provenance_for_repo() {
+    local repo="$1"; shift
+    local head dirty art
+    head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || return 0
+    dirty="$(REPO_ROOT="$repo" bash -c '
+        . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh"
+        _git_dirty_porcelain
+    ' 2>/dev/null)"
+    [ -n "$dirty" ] || dirty=false
+    for art in "$@"; do
+        [ -f "$art" ] || continue
+        REPO_ROOT="$repo" bash -c '
+            . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh"
+            _provenance_write "$1" "$2" "$3" "stub:tests/test_release_journal.sh"
+        ' _stamp "$art" "$head" "$dirty" >/dev/null 2>&1 || {
+            printf 'FAIL: _stamp_provenance_for_repo: production writer FAILED for %s\n' "$art" >&2
+            FAIL=$((FAIL + 1))
+        }
+    done
+}
+
+# Initial stamp (function is defined above — bash resolves at call time,
+# but the definition must precede the CALL in file order): covers any
+# direct stage invocation that precedes the first run_stage.
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 
 # ─── 1. syntax gates ────────────────────────────────────────────────────────
 section "syntax gates"
@@ -367,8 +433,17 @@ assert_eq "stage untagged VERSION exits 78" "78" "$rc"
 assert_contains "stage untagged refusal cites ADR-009 D3" "ADR-009 D3" "$out"
 
 # stray .env in the payload tree → stage refuses (m6 invariant)
+# NOTE: this test calls stage.sh DIRECTLY (not via run_stage) — deliberately.
+# The stray .env is intentionally-placed tree dirt; routing through
+# run_stage would re-stamp the sidecars with the honest dirty probe, which
+# would classify the stray .env as build-tree dirt and refuse with
+# dirty-build BEFORE the no-.env invariant this test pins. The provenance
+# sidecar records build-time state (already stamped clean by the preceding
+# run_stage at the same HEAD); the stray-file refusal belongs to the
+# no-.env check, which is what this test exercises.
 printf 'LEAKED=1\n' > "$FAKE_REPO/agents/.env"
-out="$(run_stage --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+out="$(HOME="$FAKE_HOME" VERSION="$SBX_V1" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+    bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
 assert_eq "stage refuses stray .env (exit 1)" "1" "$rc"
 assert_contains "no-.env refusal names the file" "agents/.env" "$out"
 rm -f "$FAKE_REPO/agents/.env"
@@ -1084,6 +1159,14 @@ printf 'b4-second-version\n' > "$FAKE_REPO/B4_FIXTURE"
 git -C "$FAKE_REPO" add B4_FIXTURE
 git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm b4-fixture >/dev/null 2>&1
 git -C "$FAKE_REPO" tag "$SBX_V2" 2>/dev/null
+# Stage freshness guard (cn 0472b31f; 2026-10-04): the new commit moved
+# FAKE_REPO's HEAD, so the stub-prod + FE sidecars MUST be re-stamped
+# against the new HEAD before the stage call (the old stamp recorded the
+# v1 commit's SHA, which now diverges from HEAD). The helper re-derives
+# HEAD + dirty state and rewrites the sidecars in place.
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 HOME="$FAKE_HOME" VERSION="$SBX_V2" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
     bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1
 [ -f "$SBX/releases/$SBX_V2/manifest.json" ] && _pass || _fail "B4 fixture: v2 staged"
@@ -1150,7 +1233,7 @@ assert_eq "11a no phantom rollback count" "0" "$(b4_inf 'journal_rollback_count_
 b4_seed_journal "$SBX_V1"
 chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
 B4B_OUT="$(b4_run_promote "$SBX_V2")"; B4B_RC=$?
-chmod 644 "$FAKE_REPO/scripts/stop-ensemble.sh"
+chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "11b stop-fail abort exits 1" "1" "$B4B_RC"
 assert_contains "11b abort admits daemon state UNKNOWN" "UNKNOWN" "$B4B_OUT"
 assert_contains "11b abort says txn left open" "txn left open" "$B4B_OUT"
@@ -1187,7 +1270,7 @@ assert_eq "11c recovery keeps current at LKG" "releases/$SBX_V1" "$(readlink "$S
 b4_seed_journal "$SBX_V1"
 chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
 B4D_OUT="$(b4_run_rollback "$SBX_V2")"; B4D_RC=$?
-chmod 644 "$FAKE_REPO/scripts/stop-ensemble.sh"
+chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "11d rollback stop-fail abort exits 1" "1" "$B4D_RC"
 assert_contains "11d abort says txn left open" "txn left open" "$B4D_OUT"
 assert_eq "11d txn OPEN kind=rollback" "rollback" "$(b4_inf_kind)"
@@ -1222,6 +1305,11 @@ printf 'batchc-third-version\n' > "$FAKE_REPO/BATCHC_FIXTURE"
 git -C "$FAKE_REPO" add BATCHC_FIXTURE
 git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm batchc-fixture >/dev/null 2>&1
 git -C "$FAKE_REPO" tag "$SBX_V3" 2>/dev/null
+# Stage freshness guard (cn 0472b31f; 2026-10-04): the new commit moved
+# FAKE_REPO's HEAD again — re-stamp the stub-prod + FE sidecars.
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 HOME="$FAKE_HOME" VERSION="$SBX_V3" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
     bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1
 [ -f "$SBX/releases/$SBX_V3/manifest.json" ] && _pass || _fail "12 fixture: v3 staged"
@@ -1341,7 +1429,7 @@ b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
 W2_COUNT_BEFORE="$(b4_inf 'journal_rollback_count_24h')"
 chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
 W2E_OUT="$(b4_run_promote "$SBX_V1")"; W2E_RC=$?
-chmod 644 "$FAKE_REPO/scripts/stop-ensemble.sh"
+chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "12e same-version stop-fail abort exits 1" "1" "$W2E_RC"
 assert_eq "12e txn OPEN with target == journal current (same-version)" "$SBX_V1" \
     "$(b4_inf '_json_field "$(_json_sub "$(journal_read)" in_flight)" target')"
@@ -1461,11 +1549,26 @@ git -C "$FAKE_REPO_DROP" -c user.email=t@t -c user.name=t commit -qm fixture
 git -C "$FAKE_REPO_DROP" tag "$SBX_V1"
 # DROP_STAGE <install_dir> — like run_stage but targets the DROP-bearing fixture
 DROP_STAGE() {
+    # Re-stamp provenance for the DROP fixture (different HEAD than FAKE_REPO).
+    _stamp_provenance_for_repo "$FAKE_REPO_DROP" \
+        "$FIXTURE/stub-prod" \
+        "$FAKE_REPO_DROP/frontend/dist/frontend/browser/index.html"
     HOME="$FAKE_HOME" VERSION="$SBX_V1" TARGET=sandbox \
         INSTALL_DIR="$1" PORT="$SBX_PORT" \
         bash "$FAKE_REPO_DROP/scripts/upgrade/stage.sh" sandbox --version "$SBX_V1" \
         --skip-build "$FIXTURE/stub-prod"
 }
+
+# Re-stamp provenance for the BENIGN fixture (FAKE_REPO) before the
+# rollback_safe rider section. The DROP_STAGE calls above (when 9e/9g/9h
+# fire later) flip the sidecars to the DROP repo's HEAD; the 9a-9d
+# subtests in this section all run against FAKE_REPO directly (not via
+# run_stage), so they need the sidecar to match FAKE_REPO. run_stage
+# also re-stamps defensively on every call, so 9f-9i (which DO go
+# through run_stage) stay correct.
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 
 # 9a. explicit ENSEMBLE_ROLLBACK_SAFE=1 honored (benign fixture)
 RIDER_DIR="$FIXTURE/rider9a"
@@ -1534,6 +1637,13 @@ rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
 out="$(unset ENSEMBLE_ROLLBACK_SAFE; HOME="$FAKE_HOME" TARGET=sandbox \
     INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
     DROP_STAGE "$RIDER_DIR" 2>&1)"; rc=$?
+# Stage freshness guard (cn 0472b31f; 2026-10-04): DROP_STAGE re-stamps
+# the stub-prod + FE sidecars to FAKE_REPO_DROP's HEAD. The 9f subtest
+# below runs against FAKE_REPO directly, so re-stamp back to FAKE_REPO
+# before the next direct stage.sh call.
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 assert_eq "9e unset+DROP refused: rc 78" "78" "$rc"
 assert_contains "9e unset+DROP refused: WARNING cites override" \
     "ENSEMBLE_ROLLBACK_SAFE=1" "$out"
@@ -1573,6 +1683,11 @@ rm -rf "$RIDER_DIR"; mkdir -p "$RIDER_DIR"
 out="$(unset ENSEMBLE_ROLLBACK_SAFE; HOME="$FAKE_HOME" TARGET=sandbox \
     INSTALL_DIR="$RIDER_DIR" PORT="$SBX_PORT" \
     DROP_STAGE "$RIDER_DIR" 2>&1)"; rc=$?
+# Stage freshness guard (cn 0472b31f; 2026-10-04): re-stamp back to FAKE_REPO
+# for any later direct stage.sh call (see 9e rider).
+_stamp_provenance_for_repo "$FAKE_REPO" \
+    "$FIXTURE/stub-prod" \
+    "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 if [ "$rc" = "78" ] && [ ! -f "$RIDER_DIR/releases/$SBX_V1/manifest.json" ]; then
     _pass
 else

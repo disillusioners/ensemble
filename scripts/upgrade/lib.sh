@@ -1581,6 +1581,560 @@ _no_env_in_release() {
     return 0
 }
 
+# ── Build provenance (cn 0472b31f trap family; 2026-10-04) ─────────────────
+#
+# The stage.sh staleness trap family has materialized TWICE (2026-09-02
+# dist/, 2026-10-02 frontend/dist) and was caught only by luck each time.
+# The structural fix: a provenance sidecar MUST be written at BUILD time and
+# verified at STAGE time — blind reuse of prebuilt artifacts is rejected
+# with a loud, actionable error. Provenance records:
+#
+#   - git_head       — the commit at build time (40-hex)
+#   - git_head_short — abbreviated sha (operator-friendly log line)
+#   - git_dirty      — true if the working tree had uncommitted changes
+#                      when the build was produced (a dirty build is unsafe
+#                      to stage: an idempotent re-stage would re-build with
+#                      DIFFERENT outputs, and the staged binary diverges
+#                      from any tag on the tree)
+#   - build_at       — ISO-8601 Z timestamp
+#   - build_tool     — free-form string identifying the build pipeline
+#                      (e.g. "pyinstaller:ensemble.spec", "ng build:frontend")
+#   - artifact_sha256 — sha256 of the artifact, computed at build time
+#   - artifact_path  — repo-relative path (operator log line)
+#
+# Sidecar filename: "<artifact>.build-provenance.json" (sibling to the
+# artifact). This shape avoids collision with any other manifest, keeps
+# the sidecar atomic with the artifact (one write, one fsync), and lets
+# `rm dist/ensemble-prod*` clean both in a single operator gesture.
+#
+# Refusal tokens (best-effort journaled on the install dir):
+#   provenance-missing       — no .build-provenance.json sidecar
+#   stale-provenance         — provenance records a different git HEAD
+#   dirty-build              — provenance reports a dirty build tree
+#   provenance-hash-mismatch — provenance's artifact_sha256 doesn't match
+#   non-tip-tree             — staging tree is not at the integration tip
+#                              (origin/latest or local latest; the
+#                              v0.16.13 payload case where a tag was placed
+#                              on a non-tip commit and the actual fixes
+#                              landed later on the tip)
+#
+# Override: STAGE_FRESHNESS_OVERRIDE=1 (set by --allow-stale-stage in
+# stage.sh; mirrors the --f2-verified-closed pattern). The override
+# unlocks ALL refusal tokens in one go, AND journals the override event
+# on the install dir so the operator's acceptance is auditable.
+
+# _provenance_path <artifact_abs_path> — sidecar path (sibling).
+_provenance_path() {
+    printf '%s.build-provenance.json' "$1"
+}
+
+# _provenance_write <artifact_abs_path> <git_head> <git_dirty_bool> <tool>
+# — write the provenance sidecar. Computes artifact_sha256 inline. Refuses
+# on missing artifact (caller bug) or an unrecognized dirty value. The
+# dirty value is NORMALIZED to canonical JSON true/false before writing
+# (accepts true/True/1 and false/False/0 — legacy numeric 0/1 producers
+# keep producing correct sidecars). The write is ATOMIC: tmp file in the
+# same dir + mv -f (same discipline as journal_write) — a torn sidecar
+# can only come from an out-of-discipline writer, and the verifier's
+# provenance-malformed gate catches that class.
+_provenance_write() {
+    local art="$1" head="$2" dirty="$3" tool="$4"
+    if [ ! -f "$art" ]; then
+        _warn "_provenance_write: artifact $art missing — refusing to write a sidecar for nothing"
+        return 1
+    fi
+    local dirty_canon
+    dirty_canon="$(_provenance_dirty_canon "$dirty")" || {
+        _warn "_provenance_write: git_dirty value '$dirty' is not a recognized boolean (true/True/1/false/False/0) — refusing to write an ambiguous sidecar"
+        return 1
+    }
+    local sha short built_at rel prov tmp
+    if ! sha="$(_sha256 "$art")" || [ -z "$sha" ]; then
+        # M3 (review round 2): refuse LOUDLY on an empty hash. The
+        # production hashing tool (shasum -a 256) is missing on this
+        # host OR is failing — either way, silently writing
+        # `"artifact_sha256": ""` would let stage misdirect with
+        # provenance-malformed instead of naming the actual cause
+        # (missing hashing tooling). Actionable: install shasum (perl
+        # core on most systems) or run from a host that has it; the
+        # broader sha256sum/openssl capability-detection is a follow-up
+        # (out of this round's scope per the council report's G5/G6/G7
+        # deferred ledger).
+        _warn "_provenance_write: empty sha256 for $art — the 'shasum' tool is missing, not on PATH, or failed for this artifact. Install shasum (perl core on most systems; BSD's native 'sha256' is non-portable) or run from a host that has it, then rebuild. Refusing to write a sidecar with artifact_sha256:\"\" — stage would misdirect with provenance-malformed instead of naming the missing tooling."
+        return 1
+    fi
+    short="${head:0:12}"
+    built_at="$(_now_iso)"
+    rel="${art#"$REPO_ROOT"/}"
+    prov="$(_provenance_path "$art")"
+    tmp="$prov.tmp.$$"
+    if ! cat > "$tmp" <<EOF
+{
+  "git_head": "$head",
+  "git_head_short": "$short",
+  "git_dirty": $dirty_canon,
+  "build_at": "$built_at",
+  "build_tool": "$(_json_escape "$tool")",
+  "artifact_sha256": "$sha",
+  "artifact_path": "$(_json_escape "$rel")"
+}
+EOF
+    then
+        rm -f "$tmp" 2>/dev/null
+        _warn "_provenance_write: FAILED to write sidecar tmp $tmp"
+        return 1
+    fi
+    if ! mv -f "$tmp" "$prov"; then
+        rm -f "$tmp" 2>/dev/null
+        _warn "_provenance_write: FAILED to move sidecar tmp into place at $prov"
+        return 1
+    fi
+    _log "wrote provenance $prov (head=$short dirty=$dirty_canon tool=$tool)"
+}
+
+# _provenance_dirty_canon <raw> — normalize a git_dirty flag to the
+# canonical JSON boolean the writer emits and the verifier's dirty branch
+# consumes. Dirty side: true/True/1. Clean side: false/False/0. ANY other
+# value returns 1 — the caller (writer) refuses rather than writing an
+# ambiguous sidecar, and the verifier refuses provenance-malformed on the
+# same vocabulary. No value skips a check, ever (cn 0472b31f C1 contract).
+_provenance_dirty_canon() {
+    case "$1" in
+        true|True|1)    printf 'true' ;;
+        false|False|0)  printf 'false' ;;
+        *) return 1 ;;
+    esac
+}
+
+# _provenance_read <artifact_abs_path> — print sidecar JSON content;
+# returns 1 (and sets _PROVENANCE_READ_STATUS) when the content cannot be
+# trusted. The verifier consumes the status to dispatch the refusal token:
+#
+#   ok          — _PROVENANCE_READ_STATUS=ok; prints the JSON to stdout.
+#   absent      — sidecar file does not exist; verifier → provenance-missing.
+#   unreadable  — file exists but cat failed; verifier → provenance-missing.
+#   malformed   — file present but content fails _provenance_sidecar_ok
+#                 (unbalanced quote/brace, or a load-bearing key appears
+#                 more than once — the laundering signature: a hand-
+#                 crafted sidecar with an unescaped-quote decoy
+#                 `"git_dirty": false` or `"git_head": "<sha>"` inside
+#                 an earlier field's value, which would otherwise win the
+#                 textual first-occurrence race and let a dirty build
+#                 pass as clean — see cn 0472b31f fix round 2, M1).
+#                 verifier → provenance-malformed.
+#
+# Single read path: writer and reader share the _provenance_path
+# resolution, so a path-shape drift between them is structurally
+# impossible.
+_provenance_read() {
+    local prov
+    prov="$(_provenance_path "$1")"
+    _PROVENANCE_READ_STATUS="absent"
+    [ -f "$prov" ] || return 1
+    local json
+    if ! json="$(cat "$prov" 2>/dev/null)"; then
+        _PROVENANCE_READ_STATUS="unreadable"; return 1
+    fi
+    _PROVENANCE_READ_STATUS="malformed"
+    [ -n "$json" ] || { _PROVENANCE_READ_DETAIL="empty file"; return 1; }
+    if ! _provenance_sidecar_ok "$json"; then
+        _PROVENANCE_READ_DETAIL="quote/brace imbalance OR a load-bearing key appears more than once (laundering signature)"
+        return 1
+    fi
+    _PROVENANCE_READ_STATUS="ok"
+    _PROVENANCE_READ_DETAIL=""
+    printf '%s' "$json"
+}
+_PROVENANCE_READ_STATUS=""
+_PROVENANCE_READ_DETAIL=""
+
+# _provenance_sidecar_ok <json> — return 0 if the sidecar content is
+# well-formed enough to trust _json_field_quoted's first-occurrence
+# extraction; 1 otherwise. TWO gates, both bash-only (no jq, no python
+# — same discipline as journal_read lib.sh:519-566; python3 IS
+# available on every host that runs the upgrade pipeline but the
+# verifier stays portable per ADR-014):
+#
+#   Gate 1: journal_read quote/brace-balance scanner, ported verbatim
+#           (catches torn writes + unclosed strings; reviewer-spec M1).
+#   Gate 2: load-bearing-key uniqueness — each of `"git_head":`,
+#           `"git_dirty":`, `"artifact_sha256":` must appear EXACTLY ONCE
+#           in the content. The first-occurrence extractor would
+#           otherwise return the DECOY (in a non-key field's value)
+#           and let a dirty build pass as clean. The balance scan
+#           alone is insufficient here — the reviewer's M1 spec
+#           suggested it, but the laundering shapes (decoy inside a
+#           `"note": "leaked "git_dirty": false more text"` value)
+#           are quote-balanced yet invalid; the uniqueness check is
+#           what catches the class. Absent (count 0) is tolerated by
+#           THIS gate (the downstream load-bearing shape gate handles
+#           the missing-field case).
+#
+# The validity-bounded is balanced quotes + balanced braces + unique
+# load-bearing keys. Together: enough to defeat the laundering class
+# without a real JSON parser.
+_provenance_sidecar_ok() {
+    local json="$1"
+    # Gate 1: balance scan (ported from journal_read lib.sh:540-565).
+    local ob=0 cb=0 os=0 cs=0 i c in_str=0 esc=0
+    for ((i = 0; i < ${#json}; i++)); do
+        c="${json:i:1}"
+        if [ "$esc" = "1" ]; then esc=0; continue; fi
+        if [ "$c" = "\\" ]; then
+            if [ "$in_str" = "1" ]; then esc=1; fi
+            continue
+        fi
+        if [ "$c" = "\"" ]; then
+            in_str=$((1 - in_str))
+            continue
+        fi
+        [ "$in_str" = "1" ] && continue
+        case "$c" in
+            '{') ob=$((ob + 1)) ;;
+            '}') cb=$((cb + 1)) ;;
+            '[') os=$((os + 1)) ;;
+            ']') cs=$((cs + 1)) ;;
+        esac
+    done
+    if [ "$ob" -ne "$cb" ] || [ "$os" -ne "$cs" ] || [ "$in_str" -ne 0 ]; then
+        return 1
+    fi
+    # Gate 2: load-bearing-key uniqueness (laundering signature).
+    # The writer's output contains each of these exactly once; a hand-
+    # crafted sidecar with a decoy `"git_dirty":` or `"git_head":` in
+    # a non-key field's leaked value contains it twice. bash 3.2-safe
+    # pattern-stripping count (no grep dependency).
+    local key count tmp
+    for key in '"git_head":' '"git_dirty":' '"artifact_sha256":'; do
+        tmp="$json"; count=0
+        while [ "${tmp#*"$key"}" != "$tmp" ]; do
+            tmp="${tmp#*"$key"}"
+            count=$((count + 1))
+        done
+        if [ "$count" -gt 1 ]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+# _git_dirty_porcelain — print the canonical JSON boolean for the repo's
+# working-tree state: true if uncommitted changes exist, false otherwise.
+# `git status --porcelain` is O(file count) and BSD-safe. Ignores
+# submodules (the scripts dir is self-contained; if it grows submodules,
+# add --ignore-submodules=dirty). CANONICAL-BOOLEAN CONTRACT (C1 fix):
+# prints true/false — the exact values _provenance_write normalizes and
+# the verifier's dirty branch matches — never bare 0/1.
+_git_dirty_porcelain() {
+    if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
+        printf 'true'
+    else
+        printf 'false'
+    fi
+}
+
+# _tip_sha — print the integration-tip SHA. Resolution order: the
+# remote-tracking ref refs/remotes/origin/latest, then the local BRANCH
+# ref refs/heads/latest. Both are FULL refspecs — the bare-`latest` DWIM
+# form is deliberately NOT used because it can resolve a TAG named
+# `latest` (refs/tags/latest wins in git's DWIM order), which would pin
+# the tip to a tag instead of the integration branch. Returns 1 if no
+# tip ref resolves. The tip is the highest commit on the integration
+# branch — a non-tip staging tree either missed a merge (stale tip
+# behind the tag) or is on a feature branch (intentional but explicit
+# override required for the v0.16.13 payload case where the tag was
+# placed BEFORE the merges that included the actual fixes).
+_tip_sha() {
+    local tip
+    tip="$(git -C "$REPO_ROOT" rev-parse --verify refs/remotes/origin/latest 2>/dev/null)" \
+        && [ -n "$tip" ] && printf '%s' "$tip" && return 0
+    tip="$(git -C "$REPO_ROOT" rev-parse --verify refs/heads/latest 2>/dev/null)" \
+        && [ -n "$tip" ] && printf '%s' "$tip" && return 0
+    return 1
+}
+
+# _stage_freshness_journal_override <reason_token> <detail> — best-effort
+# journal append for a freshness-guard override. Idempotent and unlocked
+# (the override event is informational; the lock is for serialization with
+# promote/rollback, which doesn't apply to pre-lock stage). The append
+# rides plain journal_history_append — additive, no new write mechanics.
+# DURABLE LANDING (S1): the journal file is ensured to exist before the
+# append (journal_init is idempotent), so a VIRGIN install dir still
+# records the override — the audit trail does not depend on a prior
+# pipeline op having initialized the journal. The init is gated on the
+# install dir ALREADY existing: a refusal/override never bootstraps an
+# install path that stage itself has not created yet.
+_stage_freshness_journal_override() {
+    local reason="$1" detail="$2"
+    if [ -d "${INSTALL_DIR:-}" ]; then
+        journal_init >/dev/null 2>&1 || true
+    fi
+    journal_history_append "stage_freshness_override" \
+        "$detail (reason=$reason operator_accepted=true)" \
+        >/dev/null 2>&1 \
+        || _warn "freshness-override journal append FAILED (best-effort) — override is taken but the audit trail is incomplete; reason=$reason"
+}
+
+# _freshness_refuse <token> <msg...> — the freshness guard's refusal
+# wrapper: ensures the install dir's journal exists (same durable-landing
+# gate as _stage_freshness_journal_override) then delegates to the shared
+# _refuse (loud WARN with (reason=<token>) + best-effort journal append +
+# exit 78). Shared _refuse is NOT modified — promote/rollback refusal
+# semantics are untouched; only the freshness guard durably lands its
+# events on a virgin install dir.
+_freshness_refuse() {
+    local token="$1"; shift
+    if [ -d "${INSTALL_DIR:-}" ]; then
+        journal_init >/dev/null 2>&1 || true
+    fi
+    _refuse "$token" "$@"
+}
+
+# _verify_artifact_provenance <artifact_abs_path> — verify provenance matches
+# the current tree. Refuses (exit 78) with a distinct reason token unless
+# STAGE_FRESHNESS_OVERRIDE=1. Token + override journaling in one place so
+# the operator can grep `reason=...` on the install dir's state.json to
+# audit every override. Tip-identity (non-tip-tree) is checked separately
+# at the stage.sh entry point, before this helper runs.
+#
+# FAIL-CLOSED FIELD CONTRACT (C1/C2 fix, cn 0472b31f): a sidecar that
+# EXISTS must carry ALL THREE load-bearing fields — git_head (7-40 hex),
+# git_dirty (exactly true/True/1 or false/False/0), artifact_sha256
+# (64 hex) — each syntactically valid. ANY missing/empty/unrecognized
+# value refuses provenance-malformed. No value skips a check, ever: the
+# old `[ -n "$field" ] &&` guards are GONE — an empty field was a silent
+# skip, which is exactly the trap family this guard exists to kill.
+#
+# Refusal token vocabulary (the verify helper emits one of):
+#   provenance-missing, provenance-malformed, stale-provenance,
+#   dirty-build, provenance-hash-mismatch
+_verify_artifact_provenance() {
+    local art="$1" prov json git_head git_head_short git_dirty art_sha current_sha
+    local dirty_flag="" malformed=""
+    prov="$(_provenance_path "$art")"
+    if [ ! -f "$prov" ]; then
+        if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
+            _warn "FRESHNESS OVERRIDE: provenance missing for $art — proceeding (operator accepted; journaled on install dir)"
+            _stage_freshness_journal_override provenance-missing \
+                "override: $art has no .build-provenance.json sidecar (looked for $prov)"
+            return 0
+        fi
+        _freshness_refuse provenance-missing \
+            "stale-artifact stage refused: no build provenance for $art (looked for $prov). " \
+            "Blind reuse of prebuilt artifacts is structurally impossible (cn 0472b31f trap family). " \
+            "Remedies, in order: " \
+            "  1) rebuild: 'rm -rf dist/ frontend/dist/' and re-run stage (build path writes provenance) " \
+            "  2) for --skip-build fixtures: the provided artifact must carry a .build-provenance.json sidecar; see _provenance_write in scripts/upgrade/lib.sh " \
+            "  3) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+    fi
+    # Read via the shared reader (single path resolution for writer and
+    # verifier). _PROVENANCE_READ_STATUS is the dispatch: absent/unreadable
+    # → provenance-missing; malformed (empty / torn / quote-imbalance /
+    # laundering signature — see _provenance_read + _provenance_sidecar_ok)
+    # → provenance-malformed; ok → fall through to the shape gate.
+    #
+    # Call _provenance_read DIRECTLY (no command substitution) and capture
+    # stdout via a temp file. The _PROVENANCE_READ_STATUS /
+    # _PROVENANCE_READ_DETAIL globals are set by _provenance_read IN the
+    # caller's scope this way — a previous `json="$(...)"` subshell
+    # silently dropped the mutations and the case dispatch below never
+    # fired (review round 3 d-1: the 4-state routing was DEAD CODE; the
+    # shape-gate "missing" message was reaching operators for the
+    # laundering class). rc 0 means the sidecar passed the sidecar_ok
+    # gate (status=ok, content on stdout); rc 1 means one of the three
+    # failure states — read the globals to learn which.
+    local _pr_tmp _pr_status _pr_detail _pr_json=""
+    _pr_tmp="$(mktemp)"
+    if _provenance_read "$art" > "$_pr_tmp" 2>/dev/null; then
+        _pr_status="ok"
+        _pr_json="$(cat "$_pr_tmp")"
+    else
+        _pr_status="$_PROVENANCE_READ_STATUS"
+        _pr_detail="$_PROVENANCE_READ_DETAIL"
+    fi
+    rm -f "$_pr_tmp"
+    case "$_pr_status" in
+        absent)
+            _freshness_refuse provenance-missing \
+                "stale-artifact stage refused: no build provenance for $art (looked for $prov). " \
+                "Blind reuse of prebuilt artifacts is structurally impossible (cn 0472b31f trap family). " \
+                "Remedies, in order: " \
+                "  1) rebuild: 'rm -rf dist/ frontend/dist/' and re-run stage (build path writes provenance) " \
+                "  2) for --skip-build fixtures: the provided artifact must carry a .build-provenance.json sidecar; see _provenance_write in scripts/upgrade/lib.sh " \
+                "  3) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+            ;;
+        unreadable)
+            _freshness_refuse provenance-missing \
+                "stale-artifact stage refused: provenance sidecar $prov exists but is unreadable. " \
+                "A sidecar that exists must carry all three load-bearing fields (git_head, git_dirty, artifact_sha256). " \
+                "Remedies, in order: " \
+                "  1) rebuild: 'rm -rf dist/' and re-run stage (the build path rewrites the sidecar atomically) " \
+                "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+            ;;
+        malformed)
+            _freshness_refuse provenance-malformed \
+                "stale-artifact stage refused: provenance sidecar for $art is MALFORMED (${_pr_detail}). " \
+                "A sidecar that exists must carry all three load-bearing fields, syntactically valid, AND be well-formed enough " \
+                "that the field extractor can trust it (no quote/brace imbalance, no laundering signature — a decoy key in a " \
+                "non-key field's value would otherwise win the textual first-occurrence race and let a dirty build pass as clean). " \
+                "Remedies, in order: " \
+                "  1) rebuild: 'rm -rf dist/' and re-run stage (the build path rewrites the sidecar atomically) " \
+                "  2) if the sidecar was hand-maintained: fix the named issue (empty / unbalanced / duplicate key) " \
+                "  3) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+            ;;
+    esac
+    # ok → _pr_json holds the validated content; fall through to the shape gate.
+    # Field extraction uses the QUOTED-key form (_json_field_quoted): the
+    # bare-substring _json_field would match the "git_head" INSIDE
+    # "git_head_short" when the real "git_head" key is absent — turning a
+    # provenance-malformed case into a bogus stale-provenance (found by
+    # scenario viii-d). Anchoring on `"key":` defeats the aliasing.
+    git_head="$(_json_field_quoted "$_pr_json" '"git_head":' 2>/dev/null)" || git_head=""
+    git_head_short="$(_json_field_quoted "$_pr_json" '"git_head_short":' 2>/dev/null)" || git_head_short=""
+    git_dirty="$(_json_field_quoted "$_pr_json" '"git_dirty":' 2>/dev/null)" || git_dirty=""
+    art_sha="$(_json_field_quoted "$_pr_json" '"artifact_sha256":' 2>/dev/null)" || art_sha=""
+    current_sha="$(_sha256 "$art")"
+    # ── Shape gate (C2): every load-bearing field present + syntactically
+    #    valid, BEFORE any comparison runs. Empty no longer means skip.
+    if [ -z "$git_head" ]; then
+        malformed="git_head missing/empty"
+    elif [ -z "$git_dirty" ]; then
+        malformed="git_dirty missing/empty"
+    elif [ -z "$art_sha" ]; then
+        malformed="artifact_sha256 missing/empty"
+    elif ! printf '%s' "$git_head" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
+        malformed="git_head not a git sha (got '$git_head')"
+    elif ! dirty_flag="$(_provenance_dirty_canon "$git_dirty")"; then
+        malformed="git_dirty not a recognized boolean true/True/1 or false/False/0 (got '$git_dirty')"
+    elif ! printf '%s' "$art_sha" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+        malformed="artifact_sha256 not a sha256 digest (got '$art_sha')"
+    elif [ -n "$git_head_short" ] && ! printf '%s' "$git_head_short" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
+        # git_head_short is INFORMATIONAL (gates no comparison) but it is
+        # operator-facing: garbage free text is a corruption signal, so a
+        # PRESENT-and-garbage value refuses (fail-closed symmetry with
+        # git_head). Absent/empty is tolerated — it is not load-bearing.
+        malformed="git_head_short not a git sha (got '$git_head_short')"
+    fi
+    if [ -n "$malformed" ]; then
+        if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
+            _warn "FRESHNESS OVERRIDE: provenance sidecar malformed for $art ($malformed) — proceeding (operator accepted; journaled)"
+            _stage_freshness_journal_override provenance-malformed \
+                "override: $art sidecar malformed ($malformed)"
+            return 0
+        fi
+        _freshness_refuse provenance-malformed \
+            "stale-artifact stage refused: provenance sidecar for $art is MALFORMED ($malformed). " \
+            "A sidecar that exists must carry all three load-bearing fields, syntactically valid — " \
+            "an unrecognized value must never silently skip its check (cn 0472b31f trap family). " \
+            "Remedies, in order: " \
+            "  1) rebuild: 'rm -rf dist/' and re-run stage (the build path rewrites the sidecar atomically) " \
+            "  2) if the sidecar was hand-maintained: fix the named field to the documented shape (docs/runbooks/upgrade-drills.md §A.2) " \
+            "  3) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+    fi
+    # ── Comparison checks. Every value here is GUARANTEED non-empty and
+    #    shape-valid by the gate above — no `[ -n ]` guards, no skips.
+    if [ "$git_head" != "$HEAD_SHA" ]; then
+        if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
+            _warn "FRESHNESS OVERRIDE: provenance head mismatch for $art (built=$git_head current=$HEAD_SHA) — proceeding (operator accepted; journaled)"
+            _stage_freshness_journal_override stale-provenance \
+                "override: $art was built at $git_head but staging tree is at $HEAD_SHA"
+            return 0
+        fi
+        _freshness_refuse stale-provenance \
+            "stale-artifact stage refused: $art was built at a different commit " \
+            "(built at ${git_head:0:12}, current HEAD=$HEAD_SHA). " \
+            "Reuse of prebuilt artifacts from a different tree is structurally impossible (cn 0472b31f trap family). " \
+            "Remedies, in order: " \
+            "  1) rebuild from the current tree: 'rm -rf dist/' and re-run stage (writes provenance) " \
+            "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+    fi
+    if [ "$dirty_flag" = "true" ]; then
+        if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
+            _warn "FRESHNESS OVERRIDE: $art was built on a dirty tree — proceeding (operator accepted; journaled)"
+            _stage_freshness_journal_override dirty-build \
+                "override: $art was built on a dirty tree (HEAD=$HEAD_SHA)"
+            return 0
+        fi
+        _freshness_refuse dirty-build \
+            "stale-artifact stage refused: $art was built on a dirty (uncommitted) tree. " \
+            "Staging an artifact whose build includes uncommitted changes is unsafe: the staged binary " \
+            "diverges from any tag on the tree, and an idempotent re-stage would re-build with different " \
+            "outputs. Remedies, in order: " \
+            "  1) commit the changes, rebuild, re-run stage " \
+            "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+    fi
+    if [ "$art_sha" != "$current_sha" ]; then
+        if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
+            _warn "FRESHNESS OVERRIDE: $art hash mismatch (manifest=$art_sha actual=$current_sha) — proceeding (operator accepted; journaled)"
+            _stage_freshness_journal_override provenance-hash-mismatch \
+                "override: $art hash mismatch (manifest=$art_sha actual=$current_sha HEAD=$HEAD_SHA)"
+            return 0
+        fi
+        _freshness_refuse provenance-hash-mismatch \
+            "stale-artifact stage refused: $art hash doesn't match its build provenance. " \
+            "The artifact was modified AFTER its build (manifest=$art_sha, actual=$current_sha). " \
+            "Remedies, in order: " \
+            "  1) rebuild: 'rm -rf dist/' and re-run stage (writes fresh provenance) " \
+            "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+    fi
+    return 0
+}
+
+# _verify_tip_identity — refuse if the staging tree is not at the
+# integration tip. The tip SHA comes from _tip_sha (refs/remotes/origin/
+# latest or refs/heads/latest — full refspecs only, never the bare-DWIM
+# `latest` which could resolve a TAG named latest). Refuses with reason
+# token non-tip-tree; STAGE_FRESHNESS_OVERRIDE unlocks + journals. The
+# HEAD_SHA must be set by the caller (stage.sh computes it at entry so
+# this helper is pure-readable).
+#
+# TWO MODES (documented in upgrade-drills.md §A.1):
+#   ACTIVE  — a tip ref resolves and HEAD == tip: the gate is engaged and
+#             PASSES the tree through to L2. No output.
+#   REFUSE  — a tip ref resolves and HEAD != tip: exit 78 (or override).
+#   WARN+SKIP — NO tip ref resolves (no origin/latest, no local latest —
+#             e.g. a CI checkout or a fixture repo without integration
+#             refs): the check is SKIPPED with a loud WARN and L2
+#             (provenance) remains the sole gate. The skip is always
+#             visible on stderr; it is never silent.
+#
+# The v0.16.13 payload case: tag v0.16.13 was placed at commit C; the
+# actual fix commits landed AFTER C on the integration branch, so the
+# tip has moved past C. Staging from C would produce a binary without
+# the fixes. This check refuses that path unless the operator explicitly
+# overrides (and the override is journaled on the install dir).
+_verify_tip_identity() {
+    local tip
+    tip="$(_tip_sha 2>/dev/null || true)"
+    if [ -z "$tip" ] || [ -z "$HEAD_SHA" ]; then
+        # WARN+SKIP mode: no tip ref resolves (e.g. CI without origin, or
+        # a fixture repo without integration refs). The check is skipped
+        # LOUDLY — L2 (provenance) remains the sole gate in this mode.
+        _warn "tip-identity check SKIPPED (WARN+SKIP mode): no integration tip ref resolves (HEAD=$HEAD_SHA tip=<unset>; looked for refs/remotes/origin/latest then refs/heads/latest). L2 provenance check remains the sole gate."
+        return 0
+    fi
+    if [ "$tip" != "$HEAD_SHA" ]; then
+        if [ "${STAGE_FRESHNESS_OVERRIDE:-0}" = "1" ]; then
+            _warn "FRESHNESS OVERRIDE: tip-identity mismatch (HEAD=$HEAD_SHA tip=$tip) — proceeding (operator accepted; journaled)"
+            _stage_freshness_journal_override non-tip-tree \
+                "override: staging tree at $HEAD_SHA but integration tip is at $tip"
+            return 0
+        fi
+        _freshness_refuse non-tip-tree \
+            "stale-artifact stage refused: staging tree is NOT at the integration tip " \
+            "(HEAD=${HEAD_SHA:0:12} tip=${tip:0:12}). " \
+            "The tag at HEAD does not include fixes that landed on the tip after the tag was placed. " \
+            "This catches the v0.16.13 payload case: a tag placed on a non-tip commit, with the actual " \
+            "fixes landing later on the tip. Remedies, in order: " \
+            "  1) merge your work into the integration branch and re-tag at the tip, then re-run stage — " \
+            "or, if the local branch is ahead of origin: `git fetch origin` (a stale " \
+            "refs/remotes/origin/latest with fixes still landing there would be refreshed), " \
+            "or `git push origin <branch>:latest` first so the remote-tracking tip catches up, then re-check " \
+            "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+    fi
+    return 0
+}
+
 # integrity_verify <ver> — verify a staged release against its manifest.
 # Exit 0 clean; exit 1 with the offending file(s) named on mismatch.
 # Checks: manifest exists + readable; no .env inside; every checksummed
@@ -3095,7 +3649,11 @@ _refuse() {
         _warn "refusal helper MISUSED: _refuse requires a non-empty reason token AND message (got reason='${reason:-}' msg='$*') — refusing without journaling"
         exit 78
     fi
-    _warn "$*"
+    # Include the reason token in the WARN line too (not just the journal)
+    # so the operator can grep stderr for the taxonomy without a journal
+    # read. The journal still gets the full detail for audit; this is a
+    # parallel channel, not a replacement.
+    _warn "$* (reason=$reason)"
     journal_history_append refusal "$* (reason=$reason)" >/dev/null 2>&1 \
         || _warn "refusal journal append FAILED (best-effort) — proceeding to exit 78"
     exit 78
