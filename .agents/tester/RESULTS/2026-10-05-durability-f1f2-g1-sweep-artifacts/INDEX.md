@@ -81,3 +81,10 @@
 | `f3-f2-batch1.log` | G4-r2 F-2 family batch-1 re-run (final): all 4 lane-6 tests green incl. source-correlation + sibling-boundary + live-shape. Final re-gate @ c498c6d9 |
 | `f3-f2-batch2.log` | G4-r2 F-2 family batch-2 re-run (final): F-2 family 142/142, lane-6 quartet green, selectivity verified. Final re-gate @ c498c6d9 |
 | `f3-boot-report-recovery.log` | G4-r2 spot re-run: `tests/unit/test_boot_report_recovery.py` 14/14 (sole non-family consumer of the changed wiring). Final re-gate @ c498c6d9 |
+
+## LEG-1 FINAL round @ b1d222e6 (2026-10-05)
+
+| File | Provenance |
+|---|---|
+| `f4-f2-batch1.log` | LEG-1 FINAL F-2 batch-1 re-run: lane-6 quartet + 26/26 PG green. Final proof @ b1d222e6 |
+| `f4-f2-batch2.log` | LEG-1 FINAL F-2 batch-2 re-run: F-2 family 143/143 incl. schedule-pin; wake-through dispatch present but no-op. Final proof @ b1d222e6 |

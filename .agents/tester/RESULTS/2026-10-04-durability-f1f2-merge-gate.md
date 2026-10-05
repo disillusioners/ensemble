@@ -173,3 +173,26 @@ F-1 pack 15/15 (AST pin green) · boot_pass 56/56 · interleaving 14/14 · **F-2
 
 ## FINAL VERDICT: ❌ NOT READY — one remaining defect (LEG 1 criterion b)
 Progression across three rounds, each verified live: (1) no lane admits the shape → (2) lane admits but can't find it (join key) → (3) lane finds + delivers + is selective + is kill-switchable, but doesn't auto-wake the parent. Remaining fix is the last mile: enqueue the parent graph turn upon lane-6 injection delivery. Re-gate scope after that fix: LEG 1 only (the recipe + harness are committed and fast).
+
+---
+
+# LEG-1 FINAL PROOF (2026-10-05, fix HEAD `b1d222e6`) — ❌ FAIL; verdict does NOT flip to READY
+
+Delta: `4b601955` wake-through (daemon delta = ONLY `report_delivery_recovery.py` +117 — no task_processor.py change in range, correcting the commission note; the already_delivered skip at task_processor.py:444-451 was diverted around, not modified) + `b1d222e6` doc-only (W-2 LANE-6 EXCEPTION block at module head; §12d companion — both quoted verbatim in EVIDENCE).
+
+## Suites @ b1d222e6 — ALL GREEN (authoritative counts, dev claims verified)
+F-2 family **143/143**: service 40/40 (+1 = the schedule-pin `TestG4R3StuckWakeParentScheduleSeam::test_lane6_heal_dispatches_parent_via_natural_primitive` @ service.py:2298), PG 26/26 (all 4 lane-6 tests), double_delivery 15/15, self-heal 4/4, bug_family_pins 14/14, ledger 14/14, report_lane_phase2 30/30.
+
+## LEG 1 live (zero-ping window, SIGSTOP recipe, evidence f4- @ `97f71920`)
+| Criterion | Status |
+|---|---|
+| a. lane 6 recovers via source correlation (recovered=1) | PASS |
+| b. parent leaves waiting_children + synthesizes, ZERO pings | **FAIL — stuck through t+300s** (api_msgs=0 verified; marker TASK_DELIVERED at t+35s; parent never moved) |
+| c. exactly one internal_report row | PASS |
+| d. child not re-executed | PASS |
+| e. no double-retry (retry 1757 same-message_id, skips "already delivered") | PASS |
+| f. schedule dispatch in boot log | PARTIAL — the call line IS present verbatim, but the call is a NO-OP |
+
+**Root cause (fourth narrowing, live-proven):** the wake-through's `_process_child_completion_and_notify_parent(child_id, child_message_id)` dispatch (`asyncio.run_coroutine_threadsafe(...).result(8.0)` at report_delivery_recovery.py:985+) hits the primitive's idempotency guard (child_reports.py:2773-2787): the child is ALREADY terminal (completed naturally pre-kill) → early return `idempotency_skip` → **the wake row (the primitive's step 3) is never created** → parent unwakeable without a manual ping. The guard is doing its designed job — the flaw is dispatching the FULL completion-processing primitive when only the parent-wake half is needed. Fix shape: a wake-only dispatch (bypass/branch the guard for the terminal-child + marker-delivered + parent-waiting case), or have the guard distinguish "already notified" from "never notified". The unit pin passes because it asserts the dispatch, not the primitive's effect on an already-terminal child — the seeded-vs-live pattern (LESSONS #6) for the fourth consecutive round.
+
+Post-fix re-gate scope: **LEG 1 only** (harness committed; ~10 min). Manual-ping deadlock remains gone (iter=16, 32s post-ping completion).
