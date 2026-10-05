@@ -1,5 +1,34 @@
 # Test Packs
 
+## Completed commission — SKILL-SELECTOR-QUICK-MODEL VERIFICATION @ 4df0b100 (2026-10-05) — 🟢 VERDICT: READY
+
+Branch `feature/skill-selector-quick-model` @ `4df0b100` (base `ac1bf7b9`, 2 commits: b178d5c5 code + 4df0b100 docs-only). READ-ONLY gate: zero repo modifications by this commission. Selector resolves `"quick"` default / env-override wins / main `OPENAI_MODEL` proven non-leaking end-to-end (real `Config` probe `gpt-4o-leak-probe` → real `_llm_select` → client got `"quick"`); evolution/analysis model config diff-verified untouched; commit hygiene 10/10 paths exact, docs commit 3 paths +5/−0; **all 5 non-green signals base-proven pre-existing at ac1bf7b9 (0 branch-caused)**. Full evidence: RESULTS/2026-10-05-skill-selector-quick-model-verification.md; artifacts /tmp/ens-selsel/. 6 workers.
+**Post-merge re-run @ merged `latest` 7dc927a9 (2026-10-05)**: STATIC-OK (selector wiring intact :1519; chat-tab manager change isolated in `list_instances`) + both packs re-run — search 34P/0F exact, config 14P/2F with byte-identical known-signature failures; imports/py_compile clean. 🟢 READY-TO-PUSH. Details in RESULTS (post-merge section).
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `skill_evol_config_unit_test` (ad-hoc) | /tmp/ens-selsel/skill_evol_config_unit_test.sh | tests/test_skill_evolution_config.py full file (16): 14P/2F — both F base-proven (ambient embedding env + ab_sample_size drift) | <1 min | 2026-10-05 @ 4df0b100 | ✅ PASS (0 branch reds) |
+| `skill_search_service_unit_test` (ad-hoc) | /tmp/ens-selsel/skill_search_service_unit_test.sh | tests/services/test_skill_search_service.py (34): 34P/0F, TestSelectorModelResolution 3/3 | <1 min | 2026-10-05 @ 4df0b100 | ✅ PASS |
+| `selector_parent_baseline_test` (ad-hoc, base-compare) | /tmp/ens-selsel/selector_parent_baseline_test.sh | manager+config files @ HEAD vs ac1bf7b9 (worktree, import-verified, removed): 5/5 failures identical → PRE-EXISTING | ~4 min | 2026-10-05 | ✅ attribution leg |
+| `selector_e2e_leak_behavior_test` (ad-hoc) | /tmp/ens-selsel/selector_e2e_leak_behavior_test.sh | real Config(OPENAI_MODEL probe)→manager-shaped dict→real `_llm_select`→mocked client: model kwarg `"quick"` (no leak); override leg wins | <3 min | 2026-10-05 @ 4df0b100 | ✅ PASS (LEG2 SKIP-known-env: pre-existing sqlite migration) |
+
+## Completed commission — PROJECTS-CHAT-TAB CLOSING GATE @ 2bf999db (2026-10-05) — 🟢 VERDICT: READY-WITH-NOTES
+
+Worktree `/home/nea/ensemble-src-wt-projects-chat-tab`, branch `feature/projects-chat-tab` @ `2bf999db` (base `ac1bf7b9` = origin/latest, 6 commits). READ-ONLY gate held: zero repo modifications, tree clean at close. **Feature proven end-to-end on a real full stack (BE :8179 PG-fallback disposable + FE :4299 proxy + Playwright 4/4: source=chat wire-verified, chat-only rows, /projects/chat/instances/:id context preserved, All param-free); nothing pre-existing regressed — every non-green signal base-proven (103F/38 files unit + 2F api + 4F FE, exact-match @ ac1bf7b9) or environmental-transient (7F, 3/3 clean re-runs) or documented (23E mock family). Sole branch red: `tests/unit/test_hide_kb_instances.py` 7 stale `assert_called_once_with` missing `source=None` (F1, test-code-only fix).** ensure.md Core #2/#3 baseline-exact; Core #1 PASS-with-F1-note; Release Gate not triggered. Findings F1-F6 + full evidence: RESULTS/2026-10-05-projects-chat-tab-closing-gate.md; artifacts /tmp/ens-chatgate/. 11 workers.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `chatgate_be_suites` (ad-hoc) | /tmp/ens-chatgate/chatgate_be_suites_test.sh | 4 new/extended suites: 42 non-PG (4.05s) + 13 PG (10.18s, `-m postgres --override-ini="addopts="`, disposable ensemble_test) | 2-3 min | 2026-10-05 @ 2bf999db | ✅ PASS 55/55 |
+| `chatgate_be_unit_sweep` (ad-hoc, 9 partitions a,e-l; b voided+re-split) | /tmp/ens-chatgate/chatgate_be_unit_sweep_*.sh | tests/unit 14,609/14,609: 14,410P/117F/23E/59S → 103F pre-existing (base-proof) + 7F transient (3/3 clean) + 7F branch-caused (F1) + 23E documented | ~4 min/partition, 27 min wall | 2026-10-05 @ 2bf999db | ⚠️ 7 branch reds (F1), rest adjudicated |
+| `chatgate_be_api_sweep` (ad-hoc) | /tmp/ens-chatgate/chatgate_be_api_sweep_test.sh | tests/api 69: 67P/2F — both PRE-EXISTING (base-run identical @ ac1bf7b9; stale _ManagerStandin predates branch) | 1-2 min | 2026-10-05 @ 2bf999db | ✅ PASS (0 branch reds) |
+| `chatgate_fe_touched_tsc` (ad-hoc) | /tmp/ens-chatgate/chatgate_fe_touched_tsc_test.sh | tsc exit 0 + 9 touched Jest specs 570/570 | 2-4 min | 2026-10-05 @ 2bf999db | ✅ PASS |
+| `chatgate_fe_full` (ad-hoc) | /tmp/ens-chatgate/chatgate_fe_full_test.sh | 103 spec files: 3679P/4F — the 4 EXACT-MATCH base-proven pre-existing (jobs-grouping ×3, jobs-filter-state ×1) | 3-5 min | 2026-10-05 @ 2bf999db | ✅ PASS (0 branch reds) |
+| `concurrency_atomic_unit_test` (ensure.md Core #2/#3; repo pack @ worktree) | timeout 300 bash test/packs/concurrency_atomic_unit_test.sh | 98P/0F/74S baseline-exact, 63.9s | ~80s | 2026-10-05 @ 2bf999db | ✅ PASS |
+| `chat_tab_e2e` (ad-hoc, TrueAuto full-stack) | /tmp/ens-chatgate/projects-chat-tab.spec.ts + playwright.config.ts | BE :8179 (PG fallback: SQLite blocked by pre-existing migration bug 20260714) + FE :4299 proxy + 4 scenarios PASS w/ screenshots; DB ensemble_e2e_chatgate created+dropped | boot ~1.5 min + pack | 2026-10-05 @ 2bf999db | ✅ PASS 4/4 |
+| `chatgate_fe_jobs_baseline_base` (ad-hoc base-compare) | /tmp/ens-chatgate/chatgate_fe_jobs_baseline_base_test.sh | 2 jobs specs @ ac1bf7b9: 4F/57P exact-match → pre-existing | ~1 min | 2026-10-05 @ base | ✅ attribution leg |
+| `chatgate_unit_basecmp_{1,2,3}` (ad-hoc base-compare) | /tmp/ens-chatgate/chatgate_unit_basecmp_*.sh | 41 failing files @ ac1bf7b9: 2563P/103F — 38 identical, 3 branch-window (1 real F1 + 2 transient) | ~2 min | 2026-10-05 @ base | ✅ attribution leg |
+| `chatgate_retry_{hidekb,p3,failover}` (ad-hoc retry budget) | /tmp/ens-chatgate/chatgate_retry_*.sh | hidekb 7F deterministic; p3 + failover 3/3 PASS → environmental-transient | ~3 min | 2026-10-05 @ 2bf999db | ✅ adjudication leg |
+
 ## Completed commission — AUTO-CONTINUE-RUNNING-AFTER-RESTART (merge-gate pack registration) (2026-10-04)
 
 | Pack | Location | Scope | Est. | Last Run | Status |
