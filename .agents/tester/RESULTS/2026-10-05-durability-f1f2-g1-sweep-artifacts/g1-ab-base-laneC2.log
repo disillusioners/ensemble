@@ -1,0 +1,176 @@
+FF..FFFF..F.F......F..............F...                                   [100%]
+=================================== FAILURES ===================================
+_ TestSpawnIntelligenceTierSuccess.test_tier_high_resolves_to_agentic_with_visibility_line _
+tests/integration/test_spawn_intelligence_tier.py:91: in test_tier_high_resolves_to_agentic_with_visibility_line
+    spawn_tool = _get_spawn_tool(manager)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_spawn_intelligence_tier.py:54: in _get_spawn_tool
+    tools = create_instance_tools(
+daemon/tools/instance.py:5207: in create_instance_tools
+    compare_tool_list = create_compare_tools(manager, current_instance_id)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/tools/compare_tools.py:1203: in create_compare_tools
+    _verify_vision_allowed(manager)
+daemon/tools/compare_tools.py:1169: in _verify_vision_allowed
+    raise VisionModelNotAllowedError(
+E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['agentic', 'coding', 'coding2']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+_ TestSpawnIntelligenceTierLoud.test_tier_high_with_agentic_excluded_raises_value_error _
+tests/integration/test_spawn_intelligence_tier.py:157: in test_tier_high_with_agentic_excluded_raises_value_error
+    spawn_tool = _get_spawn_tool(manager)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_spawn_intelligence_tier.py:54: in _get_spawn_tool
+    tools = create_instance_tools(
+daemon/tools/instance.py:5207: in create_instance_tools
+    compare_tool_list = create_compare_tools(manager, current_instance_id)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/tools/compare_tools.py:1203: in create_compare_tools
+    _verify_vision_allowed(manager)
+daemon/tools/compare_tools.py:1169: in _verify_vision_allowed
+    raise VisionModelNotAllowedError(
+E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['coding']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+_ TestSurfaceBoundary.test_spawn_councilor_signature_does_not_accept_model_tier _
+tests/integration/test_spawn_intelligence_tier.py:292: in test_spawn_councilor_signature_does_not_accept_model_tier
+    tools = create_instance_tools(
+daemon/tools/instance.py:5207: in create_instance_tools
+    compare_tool_list = create_compare_tools(manager, current_instance_id)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/tools/compare_tools.py:1203: in create_compare_tools
+    _verify_vision_allowed(manager)
+daemon/tools/compare_tools.py:1169: in _verify_vision_allowed
+    raise VisionModelNotAllowedError(
+E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['agentic', 'coding', 'coding2']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+_ TestSurfaceBoundary.test_terminate_instance_signature_does_not_accept_model_tier _
+tests/integration/test_spawn_intelligence_tier.py:323: in test_terminate_instance_signature_does_not_accept_model_tier
+    tools = create_instance_tools(
+daemon/tools/instance.py:5207: in create_instance_tools
+    compare_tool_list = create_compare_tools(manager, current_instance_id)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/tools/compare_tools.py:1203: in create_compare_tools
+    _verify_vision_allowed(manager)
+daemon/tools/compare_tools.py:1169: in _verify_vision_allowed
+    raise VisionModelNotAllowedError(
+E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['agentic', 'coding', 'coding2']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+__ TestBothParamsPrecedence.test_model_tier_wins_over_model_with_visible_note __
+tests/integration/test_spawn_intelligence_tier.py:372: in test_model_tier_wins_over_model_with_visible_note
+    spawn_tool = _get_spawn_tool(manager)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_spawn_intelligence_tier.py:54: in _get_spawn_tool
+    tools = create_instance_tools(
+daemon/tools/instance.py:5207: in create_instance_tools
+    compare_tool_list = create_compare_tools(manager, current_instance_id)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/tools/compare_tools.py:1203: in create_compare_tools
+    _verify_vision_allowed(manager)
+daemon/tools/compare_tools.py:1169: in _verify_vision_allowed
+    raise VisionModelNotAllowedError(
+E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['agentic', 'coding']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+_ TestBothParamsPrecedence.test_model_tier_wins_with_operator_overridden_default _
+tests/integration/test_spawn_intelligence_tier.py:422: in test_model_tier_wins_with_operator_overridden_default
+    spawn_tool = _get_spawn_tool(manager)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_spawn_intelligence_tier.py:54: in _get_spawn_tool
+    tools = create_instance_tools(
+daemon/tools/instance.py:5207: in create_instance_tools
+    compare_tool_list = create_compare_tools(manager, current_instance_id)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/tools/compare_tools.py:1203: in create_compare_tools
+    _verify_vision_allowed(manager)
+daemon/tools/compare_tools.py:1169: in _verify_vision_allowed
+    raise VisionModelNotAllowedError(
+E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['agentic', 'coding', 'gpt-5']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+_ TestBothParamsInvalidLegacyModel.test_both_params_with_invalid_legacy_model_suppresses_notice _
+tests/integration/test_spawn_intelligence_tier.py:501: in test_both_params_with_invalid_legacy_model_suppresses_notice
+    spawn_tool = _get_spawn_tool(manager)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_spawn_intelligence_tier.py:54: in _get_spawn_tool
+    tools = create_instance_tools(
+daemon/tools/instance.py:5207: in create_instance_tools
+    compare_tool_list = create_compare_tools(manager, current_instance_id)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/tools/compare_tools.py:1203: in create_compare_tools
+    _verify_vision_allowed(manager)
+daemon/tools/compare_tools.py:1169: in _verify_vision_allowed
+    raise VisionModelNotAllowedError(
+E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['agentic', 'coding']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+_ TestResolverNotCalledOnDefaultPath.test_resolver_not_invoked_when_model_tier_absent _
+tests/integration/test_spawn_default_unchanged.py:178: in test_resolver_not_invoked_when_model_tier_absent
+    tools = create_instance_tools(
+daemon/tools/instance.py:5207: in create_instance_tools
+    compare_tool_list = create_compare_tools(manager, current_instance_id)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/tools/compare_tools.py:1203: in create_compare_tools
+    _verify_vision_allowed(manager)
+daemon/tools/compare_tools.py:1169: in _verify_vision_allowed
+    raise VisionModelNotAllowedError(
+E   daemon.tools.compare_tools.VisionModelNotAllowedError: compare_images: 'vision' model is missing from config.llm.allowed_models (['agentic', 'coding', 'coding2']). Silent default resolution is FORBIDDEN per arch §8 🔴. Add 'vision' to OPENAI_SELECTABLE_MODELS and restart the daemon.
+________ test_liveness_dead_letter_alone_returns_400_with_accepted_set _________
+tests/integration/test_m2_missions_runtime_contract.py:721: in test_liveness_dead_letter_alone_returns_400_with_accepted_set
+    assert accepted == [
+E   AssertionError: accepted vocabulary must equal the §8.2 value-space minus dead_letter (the W4/S4 evidence); got ['cancelled', 'completed', 'failed', 'orphaned_no_task', 'paused', 'pending', 'processing']
+E   assert ['cancelled',...pending', ...] == ['cancelled',... 'processing']
+E     
+E     At index 3 diff: 'orphaned_no_task' != 'paused'
+E     Left contains one more item: 'processing'
+E     Use -v to get more diff
+_____________ test_row6_n8_hot_path_real_settle_emits_settled_text _____________
+tests/integration/test_mission_final_vocab_runtime.py:1195: in test_row6_n8_hot_path_real_settle_emits_settled_text
+    assert len(captured_messages) >= 1, (
+E   AssertionError: primary event path must have fired at least one notify_watchers → enqueue_message call; got zero. The observer flow (_process_event → _finalize_job → post-commit outbox) didn't reach enqueue.
+E   assert 0 >= 1
+E    +  where 0 = len([])
+------------------------------ Captured log call -------------------------------
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2578 Failed to finalize job job-row6... status=completed: test_row6_n8_hot_path_real_settle_emits_settled_text.<locals>._fake_sync() takes 5 positional arguments but 6 were given
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-d1f2-base/daemon/services/job_feedback_observer.py", line 1828, in _finalize_job
+    db_result = await asyncio.to_thread(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 73, in run
+    return fn(*args, **kwargs)
+TypeError: test_row6_n8_hot_path_real_settle_emits_settled_text.<locals>._fake_sync() takes 5 positional arguments but 6 were given
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/integration/test_spawn_intelligence_tier.py: 49 warnings
+tests/integration/test_spawn_default_unchanged.py: 7 warnings
+  /home/nea/ensemble-src-wt-d1f2-base/daemon/tools/instance.py:1739: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+tests/integration/test_spawn_intelligence_tier.py: 56 warnings
+tests/integration/test_spawn_default_unchanged.py: 8 warnings
+  /home/nea/ensemble-src-wt-d1f2-base/daemon/tools/instance.py:1678: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(wrapped_func):
+
+tests/integration/test_spawn_intelligence_tier.py::TestSpawnIntelligenceTierSuccess::test_tier_high_resolves_to_agentic_with_visibility_line
+tests/integration/test_spawn_intelligence_tier.py::TestSpawnIntelligenceTierLoud::test_tier_high_with_agentic_excluded_raises_value_error
+tests/integration/test_spawn_intelligence_tier.py::TestSurfaceBoundary::test_spawn_councilor_signature_does_not_accept_model_tier
+tests/integration/test_spawn_intelligence_tier.py::TestSurfaceBoundary::test_terminate_instance_signature_does_not_accept_model_tier
+tests/integration/test_spawn_intelligence_tier.py::TestBothParamsPrecedence::test_model_tier_wins_over_model_with_visible_note
+tests/integration/test_spawn_intelligence_tier.py::TestBothParamsPrecedence::test_model_tier_wins_with_operator_overridden_default
+tests/integration/test_spawn_intelligence_tier.py::TestBothParamsInvalidLegacyModel::test_both_params_with_invalid_legacy_model_suppresses_notice
+tests/integration/test_spawn_default_unchanged.py::TestResolverNotCalledOnDefaultPath::test_resolver_not_invoked_when_model_tier_absent
+  /home/nea/ensemble-src-wt-d1f2-base/daemon/tools/instance.py:1812: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestSpawnIntelligenceTierSuccess::test_tier_high_resolves_to_agentic_with_visibility_line
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestSpawnIntelligenceTierLoud::test_tier_high_with_agentic_excluded_raises_value_error
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestSurfaceBoundary::test_spawn_councilor_signature_does_not_accept_model_tier
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestSurfaceBoundary::test_terminate_instance_signature_does_not_accept_model_tier
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestBothParamsPrecedence::test_model_tier_wins_over_model_with_visible_note
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestBothParamsPrecedence::test_model_tier_wins_with_operator_overridden_default
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestBothParamsInvalidLegacyModel::test_both_params_with_invalid_legacy_model_suppresses_notice
+FAILED tests/integration/test_spawn_default_unchanged.py::TestResolverNotCalledOnDefaultPath::test_resolver_not_invoked_when_model_tier_absent
+FAILED tests/integration/test_m2_missions_runtime_contract.py::test_liveness_dead_letter_alone_returns_400_with_accepted_set
+FAILED tests/integration/test_mission_final_vocab_runtime.py::test_row6_n8_hot_path_real_settle_emits_settled_text
+10 failed, 28 passed, 129 warnings in 16.95s

@@ -1,0 +1,125 @@
+......FFFFFFFFFF...F..F..........F.......                                [100%]
+=================================== FAILURES ===================================
+__ TestRecordMetricsWiring.test_success_callback_path_records_succeeded_true ___
+tests/services/test_process_message_metrics.py:705: in test_success_callback_path_records_succeeded_true
+    result = await processor.process(task)  # type: ignore[arg-type]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/task_processor.py:552: in process
+    message.priority == 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'priority'
+___ TestRecordMetricsWiring.test_work_fn_error_path_records_succeeded_false ____
+tests/services/test_process_message_metrics.py:774: in test_work_fn_error_path_records_succeeded_false
+    await processor.process(task)  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/task_processor.py:552: in process
+    message.priority == 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'priority'
+_ TestRecordMetricsWiring.test_post_processing_error_path_records_succeeded_false _
+tests/services/test_process_message_metrics.py:849: in test_post_processing_error_path_records_succeeded_false
+    await processor.process(task)  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/task_processor.py:552: in process
+    message.priority == 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'priority'
+_ TestRecordMetricsWiring.test_cancellation_path_operation_cancelled_does_not_fire_hook _
+tests/services/test_process_message_metrics.py:942: in test_cancellation_path_operation_cancelled_does_not_fire_hook
+    await processor.process(task)  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/task_processor.py:552: in process
+    message.priority == 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'priority'
+_ TestRecordMetricsWiring.test_cancellation_path_asyncio_cancelled_does_not_fire_hook _
+tests/services/test_process_message_metrics.py:1008: in test_cancellation_path_asyncio_cancelled_does_not_fire_hook
+    await processor.process(task)  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/task_processor.py:552: in process
+    message.priority == 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'priority'
+_________ TestRecordMetricsWiring.test_requeue_path_does_not_fire_hook _________
+tests/services/test_process_message_metrics.py:1077: in test_requeue_path_does_not_fire_hook
+    result = await processor.process(task)  # type: ignore[arg-type]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/task_processor.py:552: in process
+    message.priority == 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'priority'
+______ TestRecordMetricsWiring.test_iterations_and_duration_are_non_zero _______
+tests/services/test_process_message_metrics.py:1173: in test_iterations_and_duration_are_non_zero
+    result = await processor.process(task)  # type: ignore[arg-type]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/task_processor.py:552: in process
+    message.priority == 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'priority'
+_____ TestRecordMetricsWiring.test_zero_iterations_when_no_agent_messages ______
+tests/services/test_process_message_metrics.py:1254: in test_zero_iterations_when_no_agent_messages
+    result = await processor.process(task)  # type: ignore[arg-type]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/task_processor.py:552: in process
+    message.priority == 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'priority'
+_ TestRecordMetricsWiring.test_compute_iterations_and_duration_extracts_task_message _
+tests/services/test_process_message_metrics.py:1372: in test_compute_iterations_and_duration_extracts_task_message
+    result = await processor.process(task)  # type: ignore[arg-type]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/task_processor.py:552: in process
+    message.priority == 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'priority'
+_ TestRecordMetricsWiring.test_compute_task_message_empty_when_no_human_message _
+tests/services/test_process_message_metrics.py:1461: in test_compute_task_message_empty_when_no_human_message
+    result = await processor.process(task)  # type: ignore[arg-type]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/task_processor.py:552: in process
+    message.priority == 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'priority'
+____ TestJobQueueItems.test_missing_task_sets_admission_done_orphan_reason _____
+tests/repositories/test_turn_reconciler.py:566: in test_missing_task_sets_admission_done_orphan_reason
+    assert full["admission_state"] == AdmissionState.DONE.value
+E   AssertionError: assert 'active' == 'done'
+E     
+E     - done
+E     + active
+_________________ TestJobLocks.test_missing_task_deletes_lock __________________
+tests/repositories/test_turn_reconciler.py:634: in test_missing_task_deletes_lock
+    assert result["updated_counts"]["job_locks"] >= 1
+E   assert 0 >= 1
+____________ TestJobWatchers.test_hard_deleted_task_watcher_deleted ____________
+tests/repositories/test_turn_reconciler.py:1109: in test_hard_deleted_task_watcher_deleted
+    assert result["updated_counts"].get("job_watchers", 0) >= 1, (
+E   AssertionError: Expected job_watchers to be deleted for hard-deleted Task, got updated_counts={'job_queue_items': 1, 'job_locks': 0, 'message_queue': 0, 'dependency_watchers': 0, 'report_injections': 0, 'job_watchers': 0}
+E   assert 0 >= 1
+E    +  where 0 = <built-in method get of dict object at 0x717c55de5d00>('job_watchers', 0)
+E    +    where <built-in method get of dict object at 0x717c55de5d00> = {'dependency_watchers': 0, 'job_locks': 0, 'job_queue_items': 1, 'job_watchers': 0, ...}.get
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/repositories/test_turn_reconciler.py: 28 warnings
+  /home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_success_callback_path_records_succeeded_true
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_work_fn_error_path_records_succeeded_false
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_post_processing_error_path_records_succeeded_false
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_cancellation_path_operation_cancelled_does_not_fire_hook
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_cancellation_path_asyncio_cancelled_does_not_fire_hook
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_requeue_path_does_not_fire_hook
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_iterations_and_duration_are_non_zero
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_zero_iterations_when_no_agent_messages
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_compute_iterations_and_duration_extracts_task_message
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_compute_task_message_empty_when_no_human_message
+FAILED tests/repositories/test_turn_reconciler.py::TestJobQueueItems::test_missing_task_sets_admission_done_orphan_reason
+FAILED tests/repositories/test_turn_reconciler.py::TestJobLocks::test_missing_task_deletes_lock
+FAILED tests/repositories/test_turn_reconciler.py::TestJobWatchers::test_hard_deleted_task_watcher_deleted
+13 failed, 28 passed, 29 warnings in 4.61s

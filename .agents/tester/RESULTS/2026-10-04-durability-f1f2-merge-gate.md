@@ -9,7 +9,7 @@ Ruling honored: evidence-only — NO code changes, NO fixes from the test lane; 
 ## Overall Verdict
 
 **❌ NOT READY for merge.**
-- **G1 full-dir sweep: FAIL** — 298 branch-side failure nodeids attributed by fresh-base A/B (`18827dbd`): **283 PRE-EXISTING / 8 BRANCH-CAUSED / 7 DIVERGENT (env-class)**. The commission's expected 4 known REDs (v0.13.10-era) are confirmed **exactly 4, unchanged**. Any NEW failure was the blocker bar → the 8 branch-caused entries block, with full repro in `/tmp/ac-gate/g1-ab-verdict.md` (durable copy: `RESULTS/2026-10-05-durability-f1f2-g1-sweep-artifacts/`).
+- **G1 full-dir sweep: FAIL** — 298 branch-side failure nodeids attributed by fresh-base A/B (`18827dbd`): 283 PRE-EXISTING / 8 per-A-B BRANCH-CAUSED / 7 DIVERGENT (env-class) — **post-wrap correction: the langgraph entry is REFUTED (uv.lock diff EMPTY; test file identical base↔branch; 12/12 pass in BOTH venvs on re-run — transient venv state during the sweep) → 7 CONFIRMED branch-caused**. The commission's expected 4 known REDs (v0.13.10-era) are confirmed **exactly 4, unchanged**. Any NEW failure was the blocker bar → the 7 confirmed entries block, with full repro in `/tmp/ac-gate/g1-ab-verdict.md` (durable copy: `RESULTS/2026-10-05-durability-f1f2-g1-sweep-artifacts/`).
 - **G2 pack re-runs: PASS** (15/15 + 56/56).
 - **G3 auto-continue regression chain: PASS** (14/14 + 94/94 incl. MANDATORY real-seam integration 15/15 on real PG).
 - **G4 F-2 demo E2E (UNCONDITIONAL): FAIL (main leg)** — a true straddle capture (marker PENDING, wake ready, SIGSTOP→verify→SIGKILL) leaves the parent **wedged in `waiting_children` indefinitely** (no heal in 300s; RDRS lane-2 emits zero sweep lines for the child; watchdog interval 3600s; a manual ping deadlocks against the worker-pool per-instance guard). Controls: (b) non-straddle PASS, (c) run-twice idempotency PASS; kill-switch-OFF boot config verified (behavioral OFF→ON contrast moot — ON does not heal the captured variant); multi-child mixed leg = declared gap (capture-luck).
@@ -55,17 +55,18 @@ Lanes (execution HEAD `8a1a196f`, code-state `fb0f4655`, import-gate verified pe
 
 ## 3. Base A/B (`18827dbd`, fresh detached worktree `/home/nea/ensemble-src-wt-d1f2-base`, own `uv sync` venv, no-`.env` parity both legs, location-vs-commit confound structurally eliminated)
 
-**283 PRE-EXISTING · 8 BRANCH-CAUSED · 7 DIVERGENT (env-class) = 298.**
+**283 PRE-EXISTING · 8 per-A/B BRANCH-CAUSED (→ 7 CONFIRMED after wrap) · 7 DIVERGENT (env-class) = 298.**
 (The 6 C2d live-LLM signal-kills + 1 macOS-path ENV-DEFECT are classified by mechanism, not A/B — disclosed.)
 
-**The 8 BRANCH-CAUSED (G1 blockers, full repro in artifacts):**
-1. `tests/unit/test_mcp_tool_timeout.py::TestToolNodeIntegration::test_tool_node_handles_timeout` — `ModuleNotFoundError: langgraph._internal` (attribution sub-class — dependency-pin delta vs venv drift — recorded in `g1-sweep-artifacts/uv-lock-check.txt`)
-2. `tests/unit/test_fm11_shield_gap.py::TestW12CrashMidShield::test_lost_write_shape_backstop_recovers_within_one_cycle` — **F-1 wedge family regression (passes at base)**
-3. `tests/unit/test_resume_router_report_dup.py::TestLostReportRecoveredExactlyOnce::test_recovery_is_exactly_once_across_sweep_passes` — **F-1 wedge family regression (passes at base)**
-4. `tests/test_council_tools.py::TestSpawnCouncilor::test_non_team_member_agent_raises_value_error…` — identity-line parse artifact; test is canonical target
-5. `tests/test_report_lane_phase2.py::TestErrorPropagation::test_error_flag_uses_fallback_when_message_missing` — **root-caused: F-1's intentional truthy-error gate (decisions §1) + §1a defensive WARNING observed firing at dependency_bus.py:693; the test encodes the PRE-fix contract (expects `_parent_errored` flip on error=None). Stale-test-contract drift — the sibling-drift hazard class. Also the sole delta in the ensure concurrency pack (98P→97P baseline).**
-6. `tests/test_terminal_orphan_matrix.py::test_jobitem_task_status_matrix[pending-True-active]` — parse artifact noted
-7-8. `tests/postgres/test_list_queues_with_admittable_work_pg.py` ×2 — `admission_state=active requires a job_locks row` (PG guard enforcement vs test fixture)
+**The CONFIRMED branch-caused set (7; G1 blockers, full repro in artifacts):**
+1. `tests/unit/test_fm11_shield_gap.py::TestW12CrashMidShield::test_lost_write_shape_backstop_recovers_within_one_cycle` — **F-1 wedge family regression (passes at base)**
+2. `tests/unit/test_resume_router_report_dup.py::TestLostReportRecoveredExactlyOnce::test_recovery_is_exactly_once_across_sweep_passes` — **F-1 wedge family regression (passes at base)**
+3. `tests/test_council_tools.py::TestSpawnCouncilor::test_non_team_member_agent_raises_value_error…` — identity-line parse artifact; test is canonical target
+4. `tests/test_report_lane_phase2.py::TestErrorPropagation::test_error_flag_uses_fallback_when_message_missing` — **root-caused: F-1's intentional truthy-error gate (decisions §1) + §1a defensive WARNING observed firing at dependency_bus.py:693; the test encodes the PRE-fix contract (expects `_parent_errored` flip on error=None). Stale-test-contract drift — the sibling-drift hazard class. Also the sole delta in the ensure concurrency pack (98P→97P baseline).**
+5. `tests/test_terminal_orphan_matrix.py::test_jobitem_task_status_matrix[pending-True-active]` — parse artifact noted
+6-7. `tests/postgres/test_list_queues_with_admittable_work_pg.py` ×2 — `admission_state=active requires a job_locks row` (PG guard enforcement vs test fixture)
+
+**REFUTED post-wrap (was per-A/B branch-caused #1):** `tests/unit/test_mcp_tool_timeout.py::TestToolNodeIntegration::test_tool_node_handles_timeout` (`ModuleNotFoundError: langgraph._internal`) — `git diff 18827dbd..fb0f4655 -- uv.lock` EMPTY; test file identical base↔branch; langgraph pinned 1.0.9 both sides; re-run today passes 12/12 in BOTH the base and branch venvs. Transient venv state during the sweep — not a branch regression. (Methodology lesson recorded: import-error branch-caused entries get a dual-venv re-run before final verdict.)
 
 ## 4. G4 — F-2 Demo E2E (UNCONDITIONAL; gates promote)
 
@@ -93,7 +94,7 @@ Environment: R18 dev-lane recipe (8079/ensemble_dev, `QUEUE_DISCARD_ON_STARTUP=t
 ## 6. Findings & Follow-ups (for the leader)
 
 1. 🔴 **G4 main-leg FAIL** — reachable straddle state (marker PENDING at crash) never heals; watchdog 3600s; manual ping deadlocks. Fix commission needed (coverage of the PENDING-marker variant, or a claim-guard exemption for wake claims, or wipe/markers interplay redesign).
-2. 🔴 **8 branch-caused test failures** — 2 F-1-family regressions (fm11_shield_gap, resume_router_report_dup), 1 stale-contract (report_lane_phase2 — update test to post-F-1 semantics), 2 PG job_locks fixture, 1 langgraph import (see uv-lock-check), 2 parse-artifact-adjacent. Dev-lane scope.
+2. 🔴 **7 confirmed branch-caused test failures** — 2 F-1-family regressions (fm11_shield_gap, resume_router_report_dup), 1 stale-contract (report_lane_phase2 — update test to post-F-1 semantics), 2 PG job_locks fixture, 2 parse-artifact-adjacent. (An 8th per-A/B entry, mcp_tool_timeout/langgraph, was REFUTED post-wrap: empty uv.lock diff + dual-venv 12/12 re-pass — transient venv state.) Dev-lane scope.
 3. 🟠 Base durability bug (pre-existing): leftover child completion at boot crashes the daemon (`child_reports.py:2841` A8). Separate commission.
 4. 🟠 tests/integration live-LLM fused-judge tests hang whole chunks without an LLM endpoint (thread-mode timeout can't kill SSL recv). Recommend scripted-judge fixtures or a quarantine row; signal-mode is the sweep workaround.
 5. 🟢 Sweep-visible pre-existing reds: 283 nodeids (clusters in ab-verdict.md) — candidate for the standing F-3-style triage commission; QUARANTINE.md additions optional.
@@ -119,9 +120,11 @@ Environment: R18 dev-lane recipe (8079/ensemble_dev, `QUEUE_DISCARD_ON_STARTUP=t
 ---
 
 ### Gate Verdicts
-- G1: **FAIL** (8 branch-caused; known-4 confirmed unchanged; 283 pre-existing documented)
+- G1: **FAIL** (7 confirmed branch-caused + 1 refuted false-positive; known-4 confirmed unchanged; 283 pre-existing documented)
 - G2: **PASS** (both packs green; count claim 56→70 refuted, actual 56)
 - G3: **PASS** (keep-green chain + F-2 suite + mandatory real-seam integration green)
 - G4: **FAIL** (main leg never-heal + intervention deadlock; controls b/c PASS; gaps disclosed)
-- ensure.md Core: **FAIL** (R1 single test = branch-caused entry #5; R2/R3 green)
-- **Overall: ❌ NOT READY — merge blocked pending the G4 coverage fix + the 8 branch-caused failures' remediation.**
+- ensure.md Core: **FAIL** (R1 single test = branch-caused entry #4 above; R2/R3 green)
+- **Overall: ❌ NOT READY — merge blocked pending the G4 coverage fix + the 7 confirmed branch-caused failures' remediation.**
+
+Wrap commit (this file v1 + chunk plan + 26 artifact files): `e51939c6`. Post-wrap correction (langgraph refutation + 4 force-added .log evidence files + lessons) rides the follow-up commit.

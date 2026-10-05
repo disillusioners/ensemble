@@ -1,0 +1,142 @@
++++++++++++++++++++++++++++++++++++ Timeout ++++++++++++++++++++++++++++++++++++
+~~~~~~~~~~~~~~~~~~~~~ Stack of asyncio_0 (126272508262080) ~~~~~~~~~~~~~~~~~~~~~
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082, in _bootstrap_inner
+    self._context.run(self.run)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 119, in _worker
+    work_item.run(ctx)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "/home/nea/ensemble-src-wt-d1f2-base/daemon/services/llm_failover.py", line 605, in invoke
+    return self._retrying(self._classified.invoke, *args, **kwargs)
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/tenacity/__init__.py", line 473, in __call__
+    result = fn(*args, **kwargs)
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/runnables/base.py", line 5018, in invoke
+    return self._call_with_config(
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/runnables/base.py", line 2060, in _call_with_config
+    context.run(
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/runnables/config.py", line 461, in call_func_with_variable_args
+    return func(input, **kwargs)  # type: ignore[call-arg]
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/runnables/base.py", line 4875, in _invoke
+    output = call_func_with_variable_args(
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/runnables/config.py", line 461, in call_func_with_variable_args
+    return func(input, **kwargs)  # type: ignore[call-arg]
+  File "/home/nea/ensemble-src-wt-d1f2-base/daemon/llm_error_classifier.py", line 909, in _run_with_classification
+    result = llm_with_tools.invoke(messages, **kwargs)
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/language_models/chat_models.py", line 402, in invoke
+    self.generate_prompt(
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/language_models/chat_models.py", line 1123, in generate_prompt
+    return self.generate(prompt_messages, stop=stop, callbacks=callbacks, **kwargs)
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/language_models/chat_models.py", line 933, in generate
+    self._generate_with_cache(
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/language_models/chat_models.py", line 1192, in _generate_with_cache
+    for chunk in self._stream(messages, stop=stop, **kwargs):
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_openai/chat_models/base.py", line 1395, in _stream
+    for chunk in response:
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/openai/_streaming.py", line 49, in __iter__
+    for item in self._iterator:
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/openai/_streaming.py", line 62, in __stream__
+    for sse in iterator:
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/openai/_streaming.py", line 53, in _iter_events
+    yield from self._decoder.iter_bytes(self.response.iter_bytes())
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/openai/_streaming.py", line 297, in iter_bytes
+    for chunk in self._iter_chunks(iterator):
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/openai/_streaming.py", line 308, in _iter_chunks
+    for chunk in iterator:
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/httpx/_models.py", line 897, in iter_bytes
+    for raw_bytes in self.iter_raw():
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/httpx/_models.py", line 951, in iter_raw
+    for raw_stream_bytes in self.stream:
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/httpx/_client.py", line 153, in __iter__
+    for chunk in self._stream:
+  File "/home/nea/ensemble-src-wt-d1f2-base/daemon/services/llm_stream_watchdog.py", line 246, in __iter__
+    for chunk in self._inner:
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 127, in __iter__
+    for part in self._httpcore_stream:
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/httpcore/_sync/connection_pool.py", line 403, in __iter__
+    for part in self._stream:
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py", line 334, in __iter__
+    for chunk in self._connection._receive_response_body(**kwargs):
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py", line 203, in _receive_response_body
+    event = self._receive_event(timeout=timeout)
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py", line 217, in _receive_event
+    data = self._network_stream.read(
+  File "/home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/httpcore/_backends/sync.py", line 128, in read
+    return self._sock.recv(max_bytes)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/ssl.py", line 1297, in recv
+    return self.read(buflen)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/ssl.py", line 1152, in read
+    return self._sslobj.read(len)
++++++++++++++++++++++++++++++++++++ Timeout ++++++++++++++++++++++++++++++++++++
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_bound_plus_one_escalates_once_without_fourth_nudge ____________
+.venv/lib/python3.14/site-packages/pytest_asyncio/plugin.py:469: in runtest
+    super().runtest()
+.venv/lib/python3.14/site-packages/pytest_asyncio/plugin.py:716: in inner
+    runner.run(coro, context=context)
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py:128: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py:707: in run_until_complete
+    self.run_forever()
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py:678: in run_forever
+    self._run_once()
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py:2019: in _run_once
+    event_list = self._selector.select(timeout)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/selectors.py:452: in select
+    fd_event_list = self._selector.poll(timeout, max_ev)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: Timeout (>30.0s) from pytest-timeout.
+------------------------------ Captured log call -------------------------------
+INFO     daemon.graph:graph.py:8603 [LLM][attestation] Invoking LLM (STANDARD) with 2 messages (model=scripted-test, transient_attempts=8, timeout_attempts=3)
+INFO     daemon.graph:graph.py:9230 [LLM] Tool call: send_message — {'target': 'child'}..., tools: ['send_message']
+INFO     daemon.graph:graph.py:8603 [LLM][attestation] Invoking LLM (STANDARD) with 4 messages (model=scripted-test, transient_attempts=8, timeout_attempts=3)
+INFO     daemon.graph:graph.py:9232 [LLM] Response: hallucinated 0...
+INFO     daemon.services.attestation_gate:attestation_gate.py:1697 event=leader_completion_gate decision=denied instance_id=attestation-leader-e2e gate_location=graph_end_candidate leader_prompt_version= mode=enforce attestation_present=False denied_count=0 next_denied_count=1 pending_children=0 queued_or_expected_wakeups=0 live_descendants=0 busy_descendants=0 attestation_required=True last_real_user_found=True last_real_user_index=0 first_delegation_after_last_user_index=1 delegation_tool_call_total=1 messages_scanned=2 scanned_window_size=3 scanner_window_truncated=True scanner_summary_seen=False should_inject_nudge=True marker_hit=False marker_terms=<none> length_trigger=True final_word_count=2 user_answer_pending=False
+INFO     daemon.services.attestation_resolver:attestation_resolver.py:605 promotion_metric: name=enforce_denied_total registered (canonical Phase 4 task 4.6 metric — operators query this for the dry→enforce flip adjudication).
+INFO     daemon.config:config.py:4579 [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+INFO     daemon.config:config.py:4599 [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+INFO     daemon.config:config.py:4618 [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+INFO     daemon.config:config.py:4664 [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+INFO     daemon.config:config.py:4671 [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+INFO     daemon.config:config.py:4717 [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+INFO     daemon.config:config.py:4743 [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+INFO     daemon.graph:graph.py:6103 event=leader_completion_gate_fused_judge instance_id=attestation-leader-e2e band=deny verdict=not_complete llm_judge_model=quick llm_judge_latency_ms=16036 llm_judge_attempt=1 llm_judge_first_unparsable_excerpt=<none> llm_judge_reason=The lead's newest message ('delegating') signals mid-work handoff with no completion report, attestation, or evidence of delivered outcomes fulfilling the user's request. llm_judge_error_class=<none> judge_invoked=True
+INFO     daemon.services.attestation_resolver_activation:attestation_resolver_activation.py:1637 event=leader_completion_resolver_eval instance_id=attestation-leader-e2e gate_location=graph_end_candidate leader_prompt_version= mode=enforce fired=True band=deny terms_fired=c_quiet,b_fires bypass_reason=none attestation_required=True attested=False user_answer_pending=False pending_children=0 queued_or_expected_wakeups=0 live_descendants=0 busy_descendants=0 marker_hit=False length_trigger=True final_word_count=2 a_advisory_present=False a_notes=0 a_kwargs_seen=False would_be_outcome=would_deny_nudge old_decision_value=denied agreement=True fail_open=False bundle_sha256=0b1a90a69ec70960929bfb6de560cf87adfe45dbc30a4c448beb9b642baeb67f bundle_size_chars=596 bundle_a_chars=108 bundle_b_chars=225 bundle_c_chars=158 bundle_u_chars=71 user_message_included=True judge_invoked=True judge_verdict=not_complete resolver_outcome=deny_nudge
+INFO     daemon.graph:graph.py:6803 [AttestationGate] deny instance=attestation-leader-e2e denied_count=0 -> next=1 nudge_kind=standard progress_tools=1 prior_progress=None consecutive_identical=1 degenerate_streak=0 nudge_inject_ts=2026-10-05T03:00:39.439725+00:00; injecting in-graph nudge
+INFO     daemon.graph:graph.py:8603 [LLM][attestation] Invoking LLM (STANDARD) with 6 messages (model=scripted-test, transient_attempts=8, timeout_attempts=3)
+INFO     daemon.graph:graph.py:9232 [LLM] Response: hallucinated 1...
+INFO     daemon.services.attestation_gate:attestation_gate.py:1697 event=leader_completion_gate decision=denied instance_id=attestation-leader-e2e gate_location=graph_end_candidate leader_prompt_version= mode=enforce attestation_present=False denied_count=1 next_denied_count=2 pending_children=0 queued_or_expected_wakeups=0 live_descendants=0 busy_descendants=0 attestation_required=True last_real_user_found=True last_real_user_index=0 first_delegation_after_last_user_index=1 delegation_tool_call_total=1 messages_scanned=3 scanned_window_size=3 scanner_window_truncated=False scanner_summary_seen=False should_inject_nudge=True marker_hit=False marker_terms=<none> length_trigger=True final_word_count=2 user_answer_pending=False
+INFO     daemon.config:config.py:4579 [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+INFO     daemon.config:config.py:4599 [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+INFO     daemon.config:config.py:4618 [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+INFO     daemon.config:config.py:4664 [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+INFO     daemon.config:config.py:4671 [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+INFO     daemon.config:config.py:4717 [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+INFO     daemon.config:config.py:4743 [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/integration/test_attestation_bound_escalation.py::test_bound_plus_one_escalates_once_without_fourth_nudge
+tests/integration/test_attestation_bound_escalation.py::test_bound_plus_one_escalates_once_without_fourth_nudge
+  /home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/runnables/utils.py:756: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    return asyncio.iscoroutinefunction(func) or (
+
+tests/integration/test_attestation_bound_escalation.py::test_bound_plus_one_escalates_once_without_fourth_nudge
+tests/integration/test_attestation_bound_escalation.py::test_bound_plus_one_escalates_once_without_fourth_nudge
+  /home/nea/ensemble-src-wt-d1f2-base/.venv/lib/python3.14/site-packages/langchain_core/runnables/utils.py:758: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    and asyncio.iscoroutinefunction(func.__call__)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/integration/test_attestation_bound_escalation.py::test_bound_plus_one_escalates_once_without_fourth_nudge
+1 failed, 5 warnings in 32.62s
