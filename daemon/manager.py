@@ -901,7 +901,14 @@ class InstanceManager:
                 )
             task_count = task_repo.clear_all(
                 preserve_in_flight=True,
-                boot_epoch=get_boot_epoch(),
+                # F-1 belt consumer (pre-promote fix): reuse the
+                # belt's already-captured variable — the queue-side
+                # lazy import binds ONLY the aliased names, so the
+                # prior bare get_boot_epoch() here was an unbound
+                # NameError on every discard_on_startup boot.
+                # _boot_epoch is pre-initialized to None at :788, so
+                # it is bound on both the try and except paths.
+                boot_epoch=_boot_epoch,
             )
             logger.info(
                 f"Cleared {task_count} backlog task(s) "

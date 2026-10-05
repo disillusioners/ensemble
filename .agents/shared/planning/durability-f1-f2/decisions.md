@@ -1226,3 +1226,39 @@ currently trips neither the `_has_truthy_error` flip nor any
 WARNING — the bus silently skips the parent-error flip. A
 one-line operator-visibility warning for the falsy-non-None
 shape would keep that state observable.
+
+### §16(f) — PRE-PROMOTE TIDIER MEDIUMS (recorded-not-applied, 2026-10-04)
+
+**Appendix (additive; no history rewrites).** Three additional
+tidier mediums surfaced by the post-promote hygiene review. All are
+RECORDED-NOT-IMPLEMENTED for a follow-up cycle; none blocks the
+current promote.
+
+(a) **Size-rationale comments for the grown files.** Three
+production files have grown large enough that a future reader may
+question whether a split is overdue. Capture the *non-split*
+decision in a header comment so the reader does not re-litigate
+it: ``daemon/services/report_delivery_recovery.py`` (1511 lines),
+``daemon/repositories/task/repository.py`` (5417 lines),
+``daemon/repositories/message_queue/repository.py`` (1279 lines).
+Each header note should cite the local load-bearing reasons
+(coupling, cross-cite density, the existing intentional
+non-splits documented elsewhere in this decisions corpus).
+
+(b) **Numeric-anchor de-rotation in the ``instance_lifecycle.py``
+ownership block.** The block introduced in §5 documents the
+13-step boot-order contract with inline numeric anchors (e.g.
+``daemon/services/dependency_bus.py:671``). The anchors drift as
+the file grows. The tidier recommends the documented "re-anchor
+per edit batch" discipline (the gotcha addendum) plus a periodic
+de-rotation pass that either re-anchors or replaces the numerics
+with stable labels (e.g. the W-5 marker). De-rotation is
+cosmetic but reduces re-litigation cost.
+
+(c) **``monkeypatch.setattr`` migration for the ×26 hand-rolled
+patches.** Across the unit + PG test files for the F-1/F-2 work,
+twenty-six ``monkeypatch`` patches use the older
+``monkeypatch.setattr(obj, attr, value)`` form rather than the
+newer ``monkeypatch.setattr(obj, attr_name, value)`` (positional
+value swap in the signature). The migration is mechanical and
+test-suite safe; it does not change behavior.

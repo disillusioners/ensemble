@@ -886,3 +886,48 @@ def test_fp1_jobitem_anchor_clause_keeps_pending_task(engine: Engine) -> None:
         f"FP1 JobItem-anchor clause must preserve PENDING task "
         f"with active JobItem; surviving={sorted(surviving)}"
     )
+
+
+# ── Pre-promote pin: unbound-name-after-aliasing class ──────────────────────
+
+
+def test_no_bare_boot_epoch_name_in_manager() -> None:
+    """Pre-promote regression pin (2026-10-04): the F-1 belt lazy
+    import in ``InstanceManager.__init__`` binds ONLY the aliased
+    names (``_capture_boot_epoch`` / ``_get_boot_epoch``), so any
+    BARE ``get_boot_epoch`` / ``capture_boot_epoch`` Name node in
+    ``daemon/manager.py`` is unbound by construction — the exact
+    defect class that put a NameError on the task-side
+    ``clear_all`` boot path (dispatcher-verified at 7488d3ab:
+    ``boot_epoch=get_boot_epoch()`` with no module-level binding,
+    same scope, no covering try ⇒ daemon boot dies whenever
+    ``config.queue.discard_on_startup`` is truthy).
+
+    Static AST check — no ``InstanceManager`` construction needed
+    (no test constructs one, which is why neither suite nor pack
+    caught the defect). Whole-file coverage. Chosen over ruff
+    F821 / pyflakes because NEITHER tool exists in the worktree
+    venv or on the system PATH (probed 2026-10-04); comments,
+    docstrings, and the import-alias lines itself do not produce
+    ``ast.Name`` nodes, so the check is precise, not greppy.
+    """
+    import ast
+    from pathlib import Path
+
+    manager_src = (
+        Path(__file__).resolve().parents[3]
+        / "daemon"
+        / "manager.py"
+    )
+    tree = ast.parse(manager_src.read_text())
+    unbound_names = {"get_boot_epoch", "capture_boot_epoch"}
+    offenders = [
+        (node.lineno, node.id)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id in unbound_names
+    ]
+    assert not offenders, (
+        "bare unaliased boot-epoch reference(s) in daemon/manager.py "
+        f"(unbound after the aliased lazy import — NameError on the "
+        f"discard_on_startup boot path): {offenders}"
+    )
