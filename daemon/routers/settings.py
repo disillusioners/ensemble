@@ -7,7 +7,7 @@ import re
 import shutil
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from sqlmodel import Session
 from zoneinfo import available_timezones
 
@@ -27,6 +27,7 @@ from daemon.services.vscode_server_manager import (
 )
 from daemon import constants
 from daemon.util.tz import _validate_iana
+from daemon.routers.snapshots import _proxy_to_snapshots_metrics
 from .schemas import (
     LanguagePreferenceResponse,
     LanguagePreferenceUpdate,
@@ -697,42 +698,52 @@ async def set_snapshot_create_preference(request: SnapshotCreatePreferenceUpdate
 # the R16 storage collects: per-agent capture counts + per-snapshot
 # spawn-warm counts. Cold spawns (``None`` snapshot consumption) are
 # NOT counted — see ``daemon/services/snapshot_metrics_service.py``.
+#
+# As of snapshot-uiux v1 this legacy path is **deprecated**. The new
+# canonical home is ``GET /api/snapshots/metrics`` (see
+# ``daemon/routers/snapshots.py:get_snapshot_metrics``). The legacy
+# handler below is kept operational for one release window with
+# manual ``Deprecation`` / ``Sunset`` / ``Link`` response headers
+# (FastAPI's ``deprecated=True`` ONLY marks the route in the OpenAPI
+# schema — it does NOT emit actual response headers; we set them
+# manually, copied from the project precedent at
+# ``daemon/routers/blueprints.py:551-557``, per
+# RFC 8594 Deprecation + RFC 8288 Link). The body is delegated to
+# the canonical handler via the ``_proxy_to_snapshots_metrics``
+# helper (LEADER RULING, sequencing pass 4 amendment blocker #6 —
+# the helper is defined in ``daemon/routers/snapshots.py`` and
+# imported here, NOT defined alongside this legacy handler, to keep
+# the coupling direction one-way: ``settings.py`` → ``snapshots.py``).
 
 
-@router.get("/snapshot-usage-metrics", response_model=SnapshotUsageMetricsResponse)
-async def get_snapshot_usage_metrics():
-    """Surface the R16 counters (monitoring only).
+@router.get(
+    "/snapshot-usage-metrics",
+    response_model=SnapshotUsageMetricsResponse,
+    deprecated=True,
+)
+async def get_snapshot_usage_metrics_deprecated(
+    request: Request, response: Response
+) -> SnapshotUsageMetricsResponse:
+    """DEPRECATED — use ``GET /api/snapshots/metrics`` instead.
 
-    The metrics service aggregates counter rows from
-    ``daemon/repositories/snapshot/models.py:SnapshotUsageCounter``.
-    Storage shape:
+    Re-export to preserve any non-FE caller (CLI, scripts, curl
+    dashboards) for one release window. Removal planned once the
+    FE has shipped and a CHANGELOG deprecation note is in place.
 
-    * capture counts — incremented on every ``snapshot_create``
-      invocation regardless of R9 verdict (REUSE + NEW + SUPERSEDE +
-      CREATE-FRESH all count);
-    * per-snapshot spawn counts — incremented on the ``spawn_hot_instance``
-      WARM path only (cold / no-hit / expired / verify-failed paths
-      DO NOT count — R16 rider j).
+    **Deprecation signal.** ``FastAPI``'s ``deprecated=True`` flag
+    only marks the route in the OpenAPI schema (it does NOT emit
+    HTTP response headers — that would have to be a middleware).
+    We set the ``Deprecation``, ``Sunset``, and ``Link`` headers
+    manually on the response object, copying the project precedent
+    at ``daemon/routers/blueprints.py:551-557``. The ``Link`` header
+    points at the successor ``/api/snapshots/metrics`` route per
+    RFC 8288.
 
-    The endpoint is purely observational: no tool surface mutates on
-    its output, and ranking modules (snapshot_search + snapshot_embedding_service)
-    do NOT import the metrics module — pinned by the
-    ``MonitoringOnlyPinTest`` in
-    tests/unit/tools/test_snapshot_v3.py::TestMonitoringOnlyPin.
+    The body delegates to the canonical handler via
+    :func:`daemon.routers.snapshots._proxy_to_snapshots_metrics`
+    (imported above) — no logic duplication.
     """
-    from daemon.services.snapshot_metrics_service import (
-        SnapshotMetricsService,
-    )
-
-    metrics_engine = getattr(_project_repo, "engine", None)
-    if metrics_engine is None:
-        return SnapshotUsageMetricsResponse(
-            capture_counts={},
-            spawn_counts_per_snapshot=[],
-        )
-    service = SnapshotMetricsService(engine=metrics_engine)
-    metrics = await service.surface()
-    return SnapshotUsageMetricsResponse(
-        capture_counts=metrics.get("capture_counts") or {},
-        spawn_counts_per_snapshot=metrics.get("spawn_counts_per_snapshot") or [],
-    )
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Sun, 31 Dec 2026 23:59:59 GMT"
+    response.headers["Link"] = '</api/snapshots/metrics>; rel="successor-version"'
+    return await _proxy_to_snapshots_metrics(request)
