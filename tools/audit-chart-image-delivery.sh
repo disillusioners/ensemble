@@ -534,6 +534,60 @@ pin_31_agents_render_image_qualifier() {
   [ "$all_hits" -eq 20 ]
 }
 
+# ============================================================================
+# charter-skill-improvement pins (post-smoke, 2026-10-05) — durable
+# skill/doc improvements so the next fresh-host first render is BORING.
+# Pins 32–34 form the durable doc-encodes-the-fix contract; without them
+# the committed lib fixes are SYMPTOM PATCHES if the .md doc still
+# teaches the broken procedure. These pins are GREP-based (keyword
+# phrases and `grep -qF` / `grep -qE` patterns) — NOT SHA256 hashes
+# (the seal tripwire in `test_chart_image_delivery_e2e.py` is the
+# hash-based backstop for full-file integrity; the audit pins are
+# the "section present + canonical content" assertion class). A
+# refactor that moves the keyword phrase but preserves the contract
+# is fine; a refactor that drops the contract is not.
+# ============================================================================
+
+# Pin 32 — install-mermaid-cli.md carries a "Provisioning / pre-warm
+# invocation" section that mirrors the install-opendesign deploy-step
+# pattern. Heading + the two load-bearing contract terms
+# (deploy step + pre-warm) are pinned.
+pin_32_install_skill_prewarm_section() {
+  local f="$REPO_ROOT/agents/charter/skills-template/install-mermaid-cli.md"
+  grep -qF '## Provisioning / pre-warm invocation' "$f" && \
+  grep -qF 'deploy step' "$f" && \
+  grep -qE 'pre-warm' "$f" && \
+  grep -qF 'install-mermaid-cli' "$f"
+}
+
+# Pin 33 — install-mermaid-cli.md carries a "Render contract" section
+# that ENCODES all 6 canonical lib.sh fixes as the doc-level mirror.
+# Each fix has a keyword/phrase the audit greps for; missing one
+# means a maintainer edit reintroduced that defect. The lib is the
+# implementation; this section is the doc.
+pin_33_install_skill_render_contract_section() {
+  local f="$REPO_ROOT/agents/charter/skills-template/install-mermaid-cli.md"
+  grep -qF '## Render contract (the 6 canonical fixes)' "$f" && \
+  grep -qF -- '--size 1200' "$f" && \
+  grep -qF 'Stage the security-pin JSON' "$f" && \
+  grep -qE 'NO .ulimit -v.|NO ulimit' "$f" && \
+  grep -qF 'prepend ' "$f" && \
+  grep -qE 'top level|TOP level|TOP-LEVEL' "$f" && \
+  grep -qF '.args = ["--no-sandbox"]' "$f"
+}
+
+# Pin 34 — workflow.md has a "Render-path timeouts" section that
+# cross-references the chart tool's _RENDER_TIMEOUT_S /
+# _DEFAULT_TIMEOUT_S constants by NAME (not by restating the
+# drift-prone 1200s/600s numbers). The convention is "name the
+# constant, not the number".
+pin_34_workflow_render_path_timeouts_section() {
+  local f="$REPO_ROOT/agents/charter/workflow.md"
+  grep -qF '## Render-path timeouts (charter wait budget, d5_timeout)' "$f" && \
+  grep -qF '_DEFAULT_TIMEOUT_S' "$f" && \
+  grep -qF '_RENDER_TIMEOUT_S' "$f"
+}
+
 # ---------- driver ----------
 run_audit() {
   printf '%s%s== chart-image-delivery audit ==%s\n' "$C_BOLD" "$C_BLUE" "$C_RST"
@@ -574,6 +628,10 @@ run_audit() {
   check_pin 29 feature "workflow.md Step 6 conditional on RENDER_IMAGE" pin_29_workflow_step6_conditional
   check_pin 30 feature "chart skill documents render_image opt-in"   pin_30_chart_skill_opt_in_docs
   check_pin 31 feature "20 agents' render_image qualifier"            pin_31_agents_render_image_qualifier
+  printf '\n%sFEATURE (charter-skill-improvement, 2026-10-05 post-smoke)%s\n' "$C_BOLD" "$C_RST"
+  check_pin 32 feature "install-skill pre-warm section (deploy step)" pin_32_install_skill_prewarm_section
+  check_pin 33 feature "install-skill render-contract section (6 fixes)" pin_33_install_skill_render_contract_section
+  check_pin 34 feature "workflow.md render-path timeouts (by-name refs)" pin_34_workflow_render_path_timeouts_section
 
   printf '\n%sSUMMARY%s\n' "$C_BOLD" "$C_RST"
   for c in preservation feature; do

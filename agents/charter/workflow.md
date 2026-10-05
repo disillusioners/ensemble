@@ -105,7 +105,9 @@ tmp_images write, no marker — the dispatcher already no-ops without
 a marker, so the chat lane is unaffected.** Test-pinnable: the
 directive line is exactly ``RENDER_IMAGE: true`` or ``RENDER_IMAGE:
 false`` (lowercase boolean, on its own line, embedded in the
-``generate_chart`` dispatch message by ``daemon/tools/chart_tools.py``).
+``generate_chart`` dispatch message by the chart tool — see the
+chart skill's signature table and `d5_timeout` section below for
+the dispatch-side contract).
 
 ### Conditional gate — test-pinnable form
 
@@ -295,30 +297,53 @@ EOF
 The `REFUSED` line is a skip signal: stop this turn, return the
 text-only shape (Step 6d `⚠️ Validation skipped` prefix, no marker).
 
-### Step 5.5 — Render (mmdc by absolute path, security pin, ulimit + timeout)
+### Step 5.5 — Render (mmdc by absolute path, security-pin temp file, fallback cfg)
 
 ```bash
-# 5. Render PNG. INVOCATION DETAILS (arch-rec §3 amendment #15 + #16):
+# 5. Render PNG. INVOCATION DETAILS (arch-rec §3 amendment #15 + #16).
+#    This step MIRRORS `lib.sh:_charter_mmdc_render` (lib.sh:213-264)
+#    byte-for-byte — a fresh-host charter following workflow.md
+#    VERBATIM must render first-try even when the lib was not
+#    preloaded. Variable mapping (lib → workflow):
+#      $mmdc_bin → $MMDC_BIN, $cfg → $TMPCFG,
+#      $in_mmd → $TMPFILE, $out_file → $TMPPNG,
+#      $mmd_json (new mktemp) → $MMD_JSON,
+#      $cfg_fb (new mktemp)   → $TMPCFG_FB
 #    - absolute-path mmdc (the retired pattern — a remote
 #      fetch-and-execute runner — re-fetched and re-executed on every
 #      render; the toolchain now comes from the install skill only)
-#    - ulimit -v 2097152 KB (~2 GB) — memory bound. Wall-clock timeout
-#      does NOT bound memory; puppeteer can OOM.
+#    - mmdc v12 `-c`/`--configFile` takes a FILE PATH (inline-JSON
+#      support removed in 12.x) — stage the security pin to a
+#      per-render temp file and pass `-c "$MMD_JSON"`.
+#    - mmdc shim shebang is `#!/usr/bin/env node`; non-interactive
+#      shells do NOT have the nvm bin dir on PATH. Prepend the mmdc
+#      bin's own dir so the recorded toolchain's Node 24 runs it
+#      (not whatever system Node happens to be first on PATH).
 #    - timeout 60 — wall-clock budget. Puppeteer cold start is
-#      ~5-10s on warm cache; 60s leaves headroom.
-#    - -c pins securityLevel:strict + htmlLabels:false from the CLI
-#      (the .mmd-side override is sanitized in step 5.3).
+#      ~5-10s on warm cache; 60s leaves headroom. NO `ulimit -v`
+#      wrapper: chromium 154's VA reservations exceed any practical
+#      cap (launch fails even at 8 GB), and the failure masks the
+#      chromium sandbox signature so the `--no-sandbox` fallback
+#      cannot fire.
+#    - --size 1200 (the v12 flag; the legacy -w/--width was removed
+#      in 12.x; both exit non-zero in 12.x).
 #    - sandbox policy (amendment #15): FIRST attempt is sandboxed
-#      (args start empty per step 5.4). --no-sandbox is applied ONLY
-#      as the logged single fallback below when the sandboxed launch
-#      fails with the chromium sandbox signature. That fallback is the
-#      ONLY sanctioned render-side retry; the Never rule for
-#      render-side failures is otherwise untouched.
-RENDER_LOG=$( ( ulimit -v 2097152; timeout 60 "$MMDC_BIN" \
+#      ($TMPCFG args start empty per step 5.4). --no-sandbox is
+#      applied ONLY as the logged single fallback below when the
+#      sandboxed launch fails with the chromium sandbox signature.
+#      That fallback is the ONLY sanctioned render-side retry; the
+#      Never rule for render-side failures is otherwise untouched.
+MMD_JSON=$(mktemp "${TMPDIR:-/tmp}/charter-mmdc-cfg.XXXXXX.json")
+printf '%s\n' '{"securityLevel":"strict","htmlLabels":false}' > "$MMD_JSON"
+# Prepend the mmdc bin's dir to PATH so the recorded nvm Node 24
+# runs the shim (system Node on PATH has the wrong ABI for 24.x
+# WASM init — fails with WASM OOM).
+PATH="$(dirname "$MMDC_BIN"):$PATH"; export PATH
+RENDER_LOG=$( ( timeout 60 "$MMDC_BIN" \
     -i "$TMPFILE" \
     -o "$TMPPNG" \
-    -t default -b white -w 1200 -s 2 \
-    -c '{"securityLevel":"strict","htmlLabels":false}' \
+    -t default -b white --size 1200 -s 2 \
+    -c "$MMD_JSON" \
     --puppeteerConfigFile "$TMPCFG" \
     --quiet \
 ) 2>&1 )
@@ -331,19 +356,28 @@ echo "$RENDER_LOG"
 if [ "$RENDER_EXIT" -ne 0 ] && printf '%s' "$RENDER_LOG" | grep -qi \
     "no usable sandbox\|sandbox was unable\|running as root without --no-sandbox"; then
     echo "WARN: sandboxed launch failed — retrying once WITH --no-sandbox (logged fallback, amendment #15)"
-    cat > "$TMPCFG" <<EOF
-{"executablePath": "$PUPPETEER_EXECUTABLE_PATH", "args": ["--no-sandbox"]}
-EOF
-    ( ulimit -v 2097152; timeout 60 "$MMDC_BIN" \
-        -i "$TMPFILE" \
-        -o "$TMPPNG" \
-        -t default -b white -w 1200 -s 2 \
-        -c '{"securityLevel":"strict","htmlLabels":false}' \
-        --puppeteerConfigFile "$TMPCFG" \
-        --quiet \
-    ) 2>&1
-    RENDER_EXIT=$?
+    # Fresh mktemp for the fallback config; on mktemp failure the
+    # retry is skipped and the original RENDER_EXIT stands (matches
+    # lib's `cfg_fb=$(mktemp ...) || return "$rc"` semantics).
+    TMPCFG_FB=$(mktemp "${TMPDIR:-/tmp}/charter-verify-cfg.XXXXXX") || true
+    if [ -n "$TMPCFG_FB" ]; then
+        # puppeteer reads executablePath/args at the TOP level of the
+        # config file (mmdc passes it through verbatim) — override
+        # the top-level `.args` key.
+        jq '.args = ["--no-sandbox"]' "$TMPCFG" > "$TMPCFG_FB" 2>/dev/null
+        ( timeout 60 "$MMDC_BIN" \
+            -i "$TMPFILE" \
+            -o "$TMPPNG" \
+            -t default -b white --size 1200 -s 2 \
+            -c "$MMD_JSON" \
+            --puppeteerConfigFile "$TMPCFG_FB" \
+            --quiet \
+        ) 2>&1
+        RENDER_EXIT=$?
+        rm -f "$TMPCFG_FB" 2>/dev/null || true
+    fi
 fi
+rm -f "$MMD_JSON" 2>/dev/null || true
 ```
 
 ### Step 5.6 — Inspect the result; preserve syntax-retry budget
@@ -561,6 +595,48 @@ on that exact fence. The `<!-- ens-img:chart-render:<id> -->` line is
 a byte-exact, ANCHORED HTML comment (column 0, own line, no
 surrounding whitespace); chat-source dispatchers strip it before
 adapter delivery and attach the PNG via per-platform native APIs.
+
+---
+
+## Render-path timeouts (charter wait budget, d5_timeout)
+
+The `generate_chart` tool's `invoke_agent_and_wait` outer wait
+budget is **NOT** the same number as the per-render `timeout 60`
+inside Step 5.5. The two timeouts answer different questions:
+
+- **Outer wait budget** — the caller's `generate_chart` runs
+  `invoke_agent_and_wait` against the charter child instance. The
+  budget is selected by `render_image`: the validate-only default
+  uses the shorter budget (the chart skill's signature table
+  documents the exact second counts); `render_image=True` uses
+  the longer budget so a cold chromium/puppeteer bootstrap fits
+  inside the call. The constants are module-level
+  `_DEFAULT_TIMEOUT_S` (validate-only) and `_RENDER_TIMEOUT_S`
+  (render) in the chart tool — referenced by NAME here, not
+  restated, so the doc never drifts from the implementation.
+- **Per-render `timeout 60`** — the wall-clock bound inside the
+  charter's render bash block (Step 5.5). This is what bounds a
+  single mmdc invocation: chromium cold start is ~5–10s on a warm
+  cache, so 60s leaves headroom for the verify-evidence path.
+
+Why this matters for self-heal arithmetic: the
+`charter_readiness_probe` rc=1 cold path in Step 5.0 can take
+minutes (cold chromium download via the install skill). On the
+validate-only default the cold install does NOT fit inside the
+outer wait budget, so the render degrades to text-only Mermaid
+and the user sees a clean failure rather than a hung call. On
+`render_image=True` the longer budget absorbs the cold install;
+the user gets a PNG, not a hang. **This is the structural
+reason the chart tool's `render_image` flag is opt-in, not
+default-true** — every default-true call would pay the longer
+budget whether the call needed it or not.
+
+The `cold_misses_in_session` cap (default 2) is the related
+arithmetic: a permanently-broken host stops flailing the install
+on every cold render. Operators (or `ari` / `commissioner`) clear
+the cap and re-run pre-warm (see
+`install-mermaid-cli`'s "Provisioning / pre-warm invocation"
+section) instead.
 
 ---
 

@@ -31,7 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Skill/prompt guidance**: `agents/_prompt_system/innate-skills/chart/skill.md` has a new dedicated "render_image: opt-in rendering" section (with the 600s/1200s differential table) plus the `render_image` row in the signature table; the 20 chart-capable agents' canonical Chat Delivery line now carries the opt-in qualifier ("pass `render_image=True` ONLY when the user explicitly asks to see the image; web/UI contexts never need it"). **Promote note:** daemon-side changes require a daemon restart + promote; agents-side changes take effect on next charter/agent spawn.
 
-**Audit**: `tools/audit-chart-image-delivery.sh` grew from 24 to 31 pins — 7 new feature-class pins (#25–#31) grep-verify the opt-in contract (param declaration, d5 timeout constants, directive byte-stability, workflow conditional gates, chart skill opt-in docs, 20-agent qualifier coverage). Preservation pins (#1–#9, #13, #22, #23) unchanged and green.
+**Audit**: `tools/audit-chart-image-delivery.sh` grew from 24 to 34 pins — 10 new feature-class pins (#25–#34) grep-verify the opt-in contract plus the charter-skill hardening surface (param declaration, d5 timeout constants, directive byte-stability, workflow conditional gates, chart skill opt-in docs, 20-agent qualifier coverage, pre-warm section, 6-fix keywords, timeout-by-name). Preservation pins (#1–#9, #13, #22, #23) unchanged and green.
+
+**Charter skill hardening (sealed)**: `agents/charter/workflow.md` Step 5.5 render block now mirrors `install-mermaid-cli.lib.sh` exactly (6-fix canonical procedure); `install-mermaid-cli` skill v1.1.0 adds pre-warm provisioning so the first user chart never bootstraps mmdc/chromium in-band; `agents/charter/rule.md` adopts cardinal/guideline split per the prompt-writing guide. **Seal re-pinned 35/35** (skill frontmatter 1.1.0; doc-only — no version bump per `4df0b100`).
 
 ### Fixed
 
