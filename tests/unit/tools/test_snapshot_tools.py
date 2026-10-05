@@ -886,6 +886,48 @@ class TestUnifiedSpawnSnapshot:
         assert "reason: no-hit" in result
         assert "No matching snapshot" in result
 
+    def test_gate_on_no_task_no_snapshot_id_cold_spawns(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Pin: gate ON, no task, no snapshot_id ⇒ COLD spawn via the
+        BM25 empty-query ``[]`` guard (snapshot_tools.py:875 — the
+        ``search_service.search(task or "", ...)`` call surfaces an
+        empty results list, so the resolver falls through to
+        ``cold_reason = "no-hit"``). The child must still spawn
+        successfully (R14 fail-soft contract: a snapshot-system
+        state must never block spawning).
+        """
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        # FakeSearchService() defaults to results=[] — the exact shape
+        # the BM25 empty-query guard returns for "".
+        m._snapshot_search_service = FakeSearchService([])
+        self._auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {"agent_id": "worker", "project_id": "p1"}
+            )
+        )
+        # Child still spawned — snapshot-system state must never block.
+        assert "Successfully spawned instance: new-inst-1" in result
+        # COLD citation line, no-hit reason, no searched: fragment
+        # (resolution.searched_desc is None when task is absent).
+        assert "[snapshot] started: cold" in result
+        assert "reason: no-hit" in result
+        assert "No matching snapshot" in result
+        assert "searched:" not in result
+        # BM25 empty-query guard exercised: the search service was
+        # called with the empty string ("task or ''" seam).
+        assert m._snapshot_search_service.calls, (
+            "search service was not consulted on the no-task arm"
+        )
+        assert m._snapshot_search_service.calls[0]["query"] == ""
+        # Cold path ⇒ no snapshot digest stamp written.
+        assert m.metadata_calls == []
+        # No enqueue (task is absent — R18 legacy two-step shape).
+        assert m.enqueue_calls == []
+        assert m.events == ["spawn"]
+
     def test_stale_warm_carries_drift_note_in_citation(self, engine, caller_rows, monkeypatch):
         m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
         repo: SnapshotRepository = m._snapshot_repo
