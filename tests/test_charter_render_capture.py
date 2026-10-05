@@ -1058,3 +1058,163 @@ def test_chart_tools_timeout_constants_match_d5_spec():
     assert "timeout: float = _DEFAULT_TIMEOUT_S" in body, (
         "_reuse_charter's default timeout must use the module constant"
     )
+
+
+# =========================================================================
+# charter-skill-improvement tests (post-smoke, 2026-10-05)
+# =========================================================================
+#
+# These tests pin the doc-level contract for the 6 lib.sh fixes that
+# the smoke surfaced. The lib encodes the fixes; the .md doc must
+# encode them too (or a maintainer edit will reintroduce them and
+# the doc teaches the wrong procedure). The audit pins 32-34 are the
+# whole-tree gate; these tests are the unit-level mirror so a
+# developer's local test run flags the regression before the audit.
+
+RENDER_CONTRACT_HEADING = "## Render contract (the 6 canonical fixes)"
+PREWARM_HEADING = "## Provisioning / pre-warm invocation"
+
+
+def test_install_skill_has_render_contract_section():
+    """install-mermaid-cli.md must carry the Render contract section —
+    the doc-level mirror of the 6 lib.sh fixes."""
+    body = INSTALL_SKILL_MD.read_text()
+    assert RENDER_CONTRACT_HEADING in body, (
+        f"install-mermaid-cli.md must carry the heading {RENDER_CONTRACT_HEADING!r}"
+    )
+    # The section's introduction: it must explain WHY this exists
+    # (latent lib defects that the lib encodes) and the sync contract
+    # (lib + doc in lock-step).
+    assert "latent lib defects" in body, (
+        "render-contract section must explain the bootstrap-defect origin"
+    )
+    assert "lock-step" in body, (
+        "render-contract section must state the lib+doc sync invariant"
+    )
+
+
+def test_install_skill_render_contract_encodes_all_six_fixes():
+    """Each of the 6 canonical lib.sh fixes must appear in the .md doc
+    as the canonical fix. The table's "Canonical fix" column is what
+    a maintainer reads; missing one means the doc teaches the broken
+    procedure."""
+    body = INSTALL_SKILL_MD.read_text()
+    # Fix 1: --size 1200 (NOT -w 1200)
+    assert "--size 1200" in body, "fix #1: --size 1200 must be in the doc"
+    assert "12.x removed `-w`" in body, (
+        "fix #1: doc must explain WHY -w is wrong (12.x removed it)"
+    )
+    # Fix 2: -c takes a FILE PATH ONLY in 12.x
+    assert "FILE PATH ONLY" in body or "FILE path only" in body, (
+        "fix #2: doc must call out -c takes a file path only in 12.x"
+    )
+    # Fix 3: NO ulimit -v (chromium 154 cannot launch under VA cap)
+    assert "NO `ulimit -v`" in body or "NO ulimit -v" in body, (
+        "fix #3: doc must call out NO ulimit -v wrapper"
+    )
+    # Fix 4: prepend dirname of mmdc_bin to PATH
+    assert "prepend" in body and "dirname" in body, (
+        "fix #4: doc must call out the PATH prepend for the nvm shim"
+    )
+    # Fix 5: TOP-LEVEL puppeteer config derivation
+    assert "TOP-LEVEL" in body or "TOP level" in body or "top level" in body, (
+        "fix #5: doc must call out the top-level puppeteer config derivation"
+    )
+    # Fix 6: --no-sandbox override at top level (not inside puppeteerConfig.args)
+    assert (".args = [\"--no-sandbox\"]" in body
+            or "override `args` at the TOP level" in body), (
+        "fix #6: doc must call out the top-level .args override semantics"
+    )
+
+
+def test_install_skill_has_prewarm_invocation_section():
+    """install-mermaid-cli.md must carry a Provisioning / pre-warm
+    invocation section that encodes the deploy-step pattern (mirrors
+    install-opendesign's daemon source-build section)."""
+    body = INSTALL_SKILL_MD.read_text()
+    assert PREWARM_HEADING in body, (
+        f"install-mermaid-cli.md must carry the heading {PREWARM_HEADING!r}"
+    )
+    # The pattern: dispatch the skill as a deploy step on a fresh host
+    # (mirrors install-opendesign's "Daemon source-build install" section).
+    assert "deploy step" in body, (
+        "pre-warm section must frame this as a deploy step (not self-heal)"
+    )
+    assert "pre-warm" in body, "pre-warm section must use the pre-warm term"
+    # Cross-references to the operator-side (ari) and project-side (context)
+    # reminders, so the deploy-step dispatch contract is complete.
+    assert "ari" in body.lower() or "commissioner" in body.lower(), (
+        "pre-warm section must cross-reference ari/commissioner for the dispatch"
+    )
+    # The verify pattern: probe returns warm after pre-warm
+    assert "charter_readiness_probe" in body, (
+        "pre-warm section must reference the readiness probe as the verify gate"
+    )
+
+
+def test_workflow_md_has_render_path_timeouts_section():
+    """workflow.md must carry the Render-path timeouts section that
+    cross-references the chart tool's _RENDER_TIMEOUT_S /
+    _DEFAULT_TIMEOUT_S constants by NAME — the doc never restates
+    the drift-prone 1200s/600s numbers (it names the constant)."""
+    body = WORKFLOW_MD.read_text()
+    assert "## Render-path timeouts (charter wait budget, d5_timeout)" in body, (
+        "workflow.md must carry the Render-path timeouts heading"
+    )
+    assert "_DEFAULT_TIMEOUT_S" in body, (
+        "Render-path timeouts must name _DEFAULT_TIMEOUT_S"
+    )
+    assert "_RENDER_TIMEOUT_S" in body, (
+        "Render-path timeouts must name _RENDER_TIMEOUT_S"
+    )
+    # The convention: name the constant, not the number. The doc
+    # must NOT restate "1200s" or "600s" inside this section as a
+    # load-bearing contract (skill's signature table may still pin
+    # the numbers, but the workflow's section must not duplicate).
+    # Grep for the numeric forms:
+    section_idx = body.index("## Render-path timeouts")
+    after = body[section_idx:]
+    # Per the convention, the doc references the constant name; the
+    # chart skill signature table is the canonical number source.
+    assert "1200s" not in after.split("## Summary")[0], (
+        "Render-path timeouts section must NOT restate 1200s (drift-prone)"
+    )
+    assert "600s" not in after.split("## Summary")[0], (
+        "Render-path timeouts section must NOT restate 600s (drift-prone)"
+    )
+
+
+def test_rule_md_has_cardinal_guideline_split():
+    """charter's rule.md must follow the cardinal/guideline split
+    convention (≤7 Cardinal at top, Guidelines below). The 7-cardinal
+    cap is the load-bearing invariant; the 5 Guidelines are
+    secondary."""
+    body = (CHARTER_DIR / "rule.md").read_text()
+    # The heading shape
+    assert "## Cardinal" in body, (
+        "rule.md must carry a Cardinal section (≤7 non-negotiables)"
+    )
+    assert "## Guidelines" in body, (
+        "rule.md must carry a Guidelines section (the rest)"
+    )
+    # The split itself: the section order is Cardinal → Guidelines
+    cardinal_idx = body.index("## Cardinal")
+    guidelines_idx = body.index("## Guidelines")
+    assert cardinal_idx < guidelines_idx, (
+        "Cardinal must come BEFORE Guidelines in rule.md"
+    )
+    # Count cardinals: the 7-cardinal cap is load-bearing. A maintainer
+    # who adds an 8th cardinal to the same list breaks the context-
+    # compression-survivor invariant.
+    cardinals_section = body[cardinal_idx:guidelines_idx]
+    # Each cardinal is a numbered item "1. " through "N. "
+    import re as _re
+    cardinals = _re.findall(r"^\d+\.\s+\*\*", cardinals_section, _re.MULTILINE)
+    assert len(cardinals) <= 7, (
+        f"Cardinal section must have ≤7 entries (got {len(cardinals)}); "
+        "extras belong in Guidelines"
+    )
+    assert len(cardinals) >= 5, (
+        f"Cardinal section must have ≥5 entries (got {len(cardinals)}); "
+        "the load-bearing invariants are the top 5-7 of the Must list"
+    )

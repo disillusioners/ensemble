@@ -105,7 +105,9 @@ tmp_images write, no marker — the dispatcher already no-ops without
 a marker, so the chat lane is unaffected.** Test-pinnable: the
 directive line is exactly ``RENDER_IMAGE: true`` or ``RENDER_IMAGE:
 false`` (lowercase boolean, on its own line, embedded in the
-``generate_chart`` dispatch message by ``daemon/tools/chart_tools.py``).
+``generate_chart`` dispatch message by the chart tool — see the
+chart skill's signature table and `d5_timeout` section below for
+the dispatch-side contract).
 
 ### Conditional gate — test-pinnable form
 
@@ -561,6 +563,48 @@ on that exact fence. The `<!-- ens-img:chart-render:<id> -->` line is
 a byte-exact, ANCHORED HTML comment (column 0, own line, no
 surrounding whitespace); chat-source dispatchers strip it before
 adapter delivery and attach the PNG via per-platform native APIs.
+
+---
+
+## Render-path timeouts (charter wait budget, d5_timeout)
+
+The `generate_chart` tool's `invoke_agent_and_wait` outer wait
+budget is **NOT** the same number as the per-render `timeout 60`
+inside Step 5.5. The two timeouts answer different questions:
+
+- **Outer wait budget** — the caller's `generate_chart` runs
+  `invoke_agent_and_wait` against the charter child instance. The
+  budget is selected by `render_image`: the validate-only default
+  uses the shorter budget (the chart skill's signature table
+  documents the exact second counts); `render_image=True` uses
+  the longer budget so a cold chromium/puppeteer bootstrap fits
+  inside the call. The constants are module-level
+  `_DEFAULT_TIMEOUT_S` (validate-only) and `_RENDER_TIMEOUT_S`
+  (render) in the chart tool — referenced by NAME here, not
+  restated, so the doc never drifts from the implementation.
+- **Per-render `timeout 60`** — the wall-clock bound inside the
+  charter's render bash block (Step 5.5). This is what bounds a
+  single mmdc invocation: chromium cold start is ~5–10s on a warm
+  cache, so 60s leaves headroom for the verify-evidence path.
+
+Why this matters for self-heal arithmetic: the
+`charter_readiness_probe` rc=1 cold path in Step 5.0 can take
+minutes (cold chromium download via the install skill). On the
+validate-only default the cold install does NOT fit inside the
+outer wait budget, so the render degrades to text-only Mermaid
+and the user sees a clean failure rather than a hung call. On
+`render_image=True` the longer budget absorbs the cold install;
+the user gets a PNG, not a hang. **This is the structural
+reason the chart tool's `render_image` flag is opt-in, not
+default-true** — every default-true call would pay the longer
+budget whether the call needed it or not.
+
+The `cold_misses_in_session` cap (default 2) is the related
+arithmetic: a permanently-broken host stops flailing the install
+on every cold render. Operators (or `ari` / `commissioner`) clear
+the cap and re-run pre-warm (see
+`install-mermaid-cli`'s "Provisioning / pre-warm invocation"
+section) instead.
 
 ---
 

@@ -28,6 +28,145 @@ pattern; same v1.3.0 lineage, job f9946b1d):
 - Idempotent — re-running on a warm host is a verify-only fast path
 - Pure bash + jq, fits Phase A's agent-prompt-only fence
 
+## Why this skill exists (and when to invoke it)
+
+The install procedure is invoked from two distinct paths, and the
+charter's first chart on a fresh host depends on which path runs:
+
+1. **Cold-detect self-heal (charter's render path)** — the
+   `charter_readiness_probe` in `install-mermaid-cli.lib.sh` reports
+   `rc=1` (cold) when the staged config is missing or stale. The
+   render path acquires the advisory install lock, invokes THIS
+   skill, and re-probes after the install releases the lock. This
+   path can ride inside a `generate_chart` call only when
+   `render_image=True` (the 1200s tool-call timeout absorbs a cold
+   chromium download); on the validate-only default path
+   (`render_image=False`, 600s timeout) the install is too slow to
+   ride in-band and the render degrades to text-only Mermaid until
+   the next turn re-fires it.
+2. **Provisioning / pre-warm (deploy step)** — see
+   [Provisioning / pre-warm invocation](#provisioning--pre-warm-invocation)
+   below. This is the path the operator (or `ari` / `commissioner`
+   in a fresh-host commissioning job) takes BEFORE the first user
+   request. Pre-warm makes the first user-facing chart on a cold
+   host render the PNG, not degrade to text-only Mermaid.
+
+**Goal of the post-smoke revisions (2026-10-05):** the next fresh-host
+first render must be BORING. The previous bootstrap was ~18 min of
+try/fix cycles, dominated by six latent lib defects that the lib
+itself now encodes (see [Render contract](#render-contract-the-6-canonical-fixes)
+below). A maintainer who edits this skill without reading the
+"Render contract" section will reintroduce at least one of them.
+
+## Provisioning / pre-warm invocation
+
+**The single most important change from the post-smoke revision:** on
+a fresh host, run this skill as a **deploy step**, not as a
+self-heal. Cold chromium download is multi-minute (puppeteer
+downloads ~150 MB) and the chart-render contract will not ride it
+inside a validate-only `generate_chart` call (the 600s default
+timeout is too short).
+
+### When to pre-warm
+
+Pre-warm MUST be invoked:
+
+- On every fresh host commissioning (new VM, container, or
+  developer laptop) before the first user request that might
+  produce a chart.
+- After any operator action that invalidates the probe config
+  (e.g. clearing `~/.config/charter-mermaid-puppeteer.json` or
+  removing the chromium cache).
+- On recovery from a render-side self-heal cap (the
+  `cold_misses_in_session` counter hit the limit and the install
+  was abandoned) — clear the cap and re-run pre-warm.
+
+### How to pre-warm (canonical pattern)
+
+This mirrors the install-opendesign deploy-step pattern
+(`install-opendesign.md:823` "Daemon source-build install" section,
+same fences/steps/verify/reversal shape):
+
+1. **Dispatch** this skill (`install-mermaid-cli`, skill name) to a
+   worker on the target host. The worker's `bash` tool runs the
+   body; the install is fenced and idempotent so a second dispatch
+   on a warm host is a verify-only fast path.
+2. **Wait for completion.** The cold path can take several minutes
+   (nvm bootstrap + Node 24 install + `npm i -g @mermaid-js/mermaid-cli@12`
+   + `@puppeteer/browsers@3 install chrome@<pinned-major>` +
+   chromium download); the verify step adds ~10s. Do NOT time out
+   the dispatch under 600s.
+3. **Verify the probe returns warm.** After the skill reports
+   `install-mermaid-cli: OK (mmdc=..., chromium=..., observedInstallSec=...)`,
+   re-run `charter_readiness_probe` against the host (or just
+   inspect `~/.config/charter-mermaid-puppeteer.json` — the 4-signal
+   contract below is what the probe reads). A warm probe = the
+   pre-warm succeeded; a cold probe = the install did not
+   complete and must be re-dispatched.
+
+### Why this is the operator's job, not charter's
+
+Charter's self-heal path (advisory lock + async queue marker) is
+the **safety net** for a cold host in production — it catches
+incidental cold-detects that slip past pre-warm (cache evict,
+manual config clear, etc.). It is NOT a substitute for pre-warm:
+
+- The cold path can take minutes; it MUST NOT ride inside
+  `generate_chart`'s default 600s validate-only timeout. Even with
+  `render_image=True` and the 1200s timeout, a fresh-host cold
+  download can blow the budget.
+- The `cold_misses_in_session` cap (default 2) is the structural
+  brake that stops a permanently-broken host from flailing the
+  install on every cold render — but the cap means a host that
+  needs the install but cannot get it past the cap will deliver
+  text-only Mermaid to the user forever, which is the wrong
+  outcome if the install WOULD succeed given enough wall-clock
+  time.
+
+The pre-warm dispatch is the difference between "charter's first
+chart on this host is a PNG attached to the chat reply" and
+"charter's first chart on this host is text-only Mermaid, and
+maybe the second chart too, and the third maybe renders if the
+user is patient." Pre-warm is what makes the first chart BORING.
+
+### Cross-references
+
+- `ari` workflow (`agents/ari/workflow.md`) carries the
+  "Chart-image-delivery — Pre-warm the mermaid-cli toolchain on
+  every fresh host" reminder (the operator-side dispatch
+  contract).
+- `.agents/shared/context.md` carries the project-level reminder
+  (the one-line "MUST invoke on every fresh host" note).
+- The `install-mermaid-cli.lib.sh` library is the single source of
+  truth for `charter_readiness_probe`, the 4-signal contract, and
+  the render contract (next section).
+
+## Render contract (the 6 canonical fixes)
+
+The render path inside `install-mermaid-cli.lib.sh` (specifically
+`_charter_mmdc_render` and `charter_verify_toolchain`) was the
+single source of truth for six latent lib defects that the
+2026-10-05 smoke surfaced on the first real bootstrap. The lib
+encodes the fixes; this section is the canonical doc so a
+maintainer who edits the lib without reading this section does
+not reintroduce them. **When one of these changes, both the lib
+AND this section must change in lock-step.**
+
+| # | Defect | Canonical fix | Why this is the only correct form |
+|---|--------|---------------|-----------------------------------|
+| 1 | mmdc 12.x removed `-w`/`--width` (the prior CLI flag). | Render with `--size 1200` (the v12 flag) on every mmdc invocation. | `-w` and `--width` both exit non-zero in 12.x; the silent fallback is "no width pin", which the test fixture does not detect. |
+| 2 | mmdc 12.x `-c`/`--configFile` takes a FILE PATH ONLY — inline JSON is no longer accepted. | Stage the security-pin JSON to a per-render temp file and pass `-c "$mmd_json"`. | The lib does this in `_charter_mmdc_render`. The temp file is cleaned up on both success and failure paths. |
+| 3 | chromium 154 cannot launch under any practical VA cap (fails even 8 GB). The failure masks the chromium sandbox signature so the `--no-sandbox` fallback never fires. | NO `ulimit -v` wrapper in the render invocation. `timeout 60` stays as the only wall-clock bound. | Documented in `.agents/charter/memories/2026-10-05-mermaid-cli-12-toolchain-fixes.md`. The `ulimit -v` removal is the single most non-obvious fix — a maintainer who adds it "for memory safety" will silently break every cold launch. |
+| 4 | The mmdc shim's shebang is `#!/usr/bin/env node`. Non-interactive shells (the charter's render path) do NOT have the nvm bin dir on `$PATH`, so a system Node (22.x on Ubuntu 24.04) would run the nvm-24 toolchain — wrong ABI, WASM init OOM. | Before invoking mmdc, prepend `dirname "$mmdc_bin"` to `PATH` so the recorded toolchain's Node 24 runs the shim. | The lib does this in `_charter_mmdc_render` as the first line of the function. A maintainer who extracts the mmdc invocation into a sub-shell and forgets this prepend will see "works on dev box, breaks on every prod box that has system Node 22". |
+| 5 | mmdc's `--puppeteerConfigFile` expects `executablePath`/`args` at the TOP level of the config. The probe's 4-signal config file is NESTED (`puppeteerConfig.executablePath`, `puppeteerConfig.args`). Passing the staged file directly to mmdc silently drops `executablePath` AND `args` — chromium launches with the wrong binary (or none) and no `--no-sandbox` escape. | The verify function (`charter_verify_toolchain`) derives a TOP-LEVEL mmdc-shaped config via `jq '{executablePath: .puppeteerConfig.executablePath, args: .puppeteerConfig.args}' "$staged_cfg" > "$pptr_cfg"` and passes `$pptr_cfg` to mmdc. | The probe-shape is the contract for `charter_readiness_probe`; the mmdc-shape is the contract for mmdc/puppeteer. The lib mediates between the two. |
+| 6 | The `--no-sandbox` fallback (logged single retry after a sandbox launch failure) must override `args` at the TOP level of the config — NOT inside `puppeteerConfig.args`, which is never read by puppeteer. | Fallback jq: `jq '.args = ["--no-sandbox"]' "$pptr_cfg" > "$pptr_cfg_fb"` and pass `$pptr_cfg_fb` to the retry invocation. | Without this fix, a sandboxed launch failure (e.g. Ubuntu 23.10+ AppArmor userns restriction) would never recover — the user gets text-only Mermaid forever, even though a one-line config change would unblock them. |
+
+**The six fixes are coupled:** any one of them broken means the
+render path silently degrades. The lib encodes all six in
+`_charter_mmdc_render` and `charter_verify_toolchain`; this
+section is the doc-level mirror so the next maintainer does not
+have to read the lib source to learn the contract.
+
 ## Fences (preserved verbatim from install-opendesign v1.3.0 lineage)
 
 - **NO Docker** on the install host (no Docker, no Docker Compose,
@@ -224,6 +363,12 @@ probe time), cache eviction is survived.
 #     ANY verify failure exits non-zero WITHOUT promoting the staged
 #     config — the probe stays cold and the next render re-fires this
 #     install. The EXIT trap removes the staged file.
+#
+#     The lib function `charter_verify_toolchain` is the canonical
+#     implementation of the 6-fix render contract (see
+#     `Render contract (the 6 canonical fixes)` above). Editing this
+#     call without reading that section reintroduces one of the
+#     bootstrap defects.
 charter_verify_toolchain "$MMDC_PATH" "$TMPCFG_STAGE" || {
     echo "VERIFY FAILED — staged config discarded, probe stays cold (no false-warm)"
     charter_release_install_lock 2>/dev/null || true
