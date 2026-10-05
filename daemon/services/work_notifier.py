@@ -92,6 +92,7 @@ from typing import TYPE_CHECKING, Any
 from daemon.services.mission_live_guard import (
     evaluate_mission_live,
 )
+from daemon.services.midflight_qa import MISSION_RECEIPT_SCAN_CAP
 from daemon.services.work_status import is_terminal as _is_terminal
 
 if TYPE_CHECKING:
@@ -1283,7 +1284,7 @@ async def notify_mission_qa_watchers(
         if rid and rid not in seen:
             seen.add(rid)
             candidate_ids.append(rid)
-    candidate_ids = candidate_ids[:128]
+    candidate_ids = candidate_ids[:MISSION_RECEIPT_SCAN_CAP]
 
     try:
         watchers = await asyncio.to_thread(

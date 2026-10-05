@@ -544,6 +544,100 @@ class TestEscalationReachesMissionWatcher:
         # The mission_terminal row SURVIVES the escalation deliveries.
         assert len(harness.watcher_repo.get_watchers_for_job(r1_settled)) == 1
 
+    def test_escalation_reaches_watcher_after_step4b_task_deletion(
+        self, harness
+    ):
+        """Step-4b FIDELITY (review blocker, iteration 1): the real
+        terminate cascade DELETES the asker's ``task`` rows
+        UNCONDITIONALLY (``instance_lifecycle.py`` Step 4b —
+        ``DELETE FROM task WHERE instance_id = :iid``; the ``instances``
+        row survives status-only). The asker in the canonical RCA
+        geometry IS the mission root, so a post-flip receipt scan finds
+        NO Task rows. The escalation envelope must STILL reach the
+        mission watcher armed on a Task receipt — the processor
+        resolves the mission receipt set BEFORE the terminate flip and
+        passes the snapshot into the escalation emission.
+
+        The harness ``terminate_instance`` mock here performs the REAL
+        Step-4b deletion as a side effect so the production ordering
+        (stuck emission → terminate flip → escalation emission) is
+        exercised faithfully — the AsyncMock-without-side-effect in the
+        sibling test is what hid this hole."""
+        mission, r1_settled, _r2, watcher = _seed_incident(harness)
+        with Session(harness.engine) as session:
+            session.execute(
+                text("UPDATE instances SET status='paused' WHERE instance_id=:i"),
+                {"i": mission},
+            )
+            session.commit()
+        handle_task = _seed_task(
+            harness.engine,
+            mission,
+            status=TaskStatus.PAUSED.value,
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        )
+        with Session(harness.engine) as session:
+            session.execute(
+                text(
+                    "UPDATE task SET suspension_reason='awaiting_answer', "
+                    "resume_target_turn_id=:w WHERE work_id=:w"
+                ),
+                {"w": handle_task},
+            )
+            session.commit()
+        pack = harness.qm.set_question_pack(mission, [{"text": "Q?"}])
+        harness.instance_repo.set_metadata(mission, "question_pack_id", pack.id)
+        for idx in (1, 2):
+            harness.event_repo.create_event(
+                instance_id=mission,
+                kind=EventKind.STUCK_AWAITING_ANSWER.value,
+                data={"question_pack_id": pack.id, "emission_index": idx},
+            )
+        harness.task_repo.create_one_shot_heartbeat(
+            TaskType.HEARTBEAT_EMIT_STUCK.value,
+            mission,
+            datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+
+        # REAL Step-4b fidelity: the terminate flip deletes the asker's
+        # task rows UNCONDITIONALLY (instance_lifecycle Step 4b shape).
+        async def _step4b_terminating_side_effect(instance_id, **kwargs):
+            with Session(harness.engine) as session:
+                session.execute(
+                    text("DELETE FROM task WHERE instance_id=:i"),
+                    {"i": instance_id},
+                )
+                session.commit()
+            return True
+
+        harness.manager.terminate_instance = AsyncMock(
+            side_effect=_step4b_terminating_side_effect
+        )
+
+        processor = HeartbeatEmitStuckProcessor(
+            harness.manager, harness.task_repo, harness.event_repo
+        )
+        task = harness.task_repo.claim_pending_task("w1")
+        assert task is not None
+
+        result = asyncio.run(processor.process(task))
+
+        assert result["emission"] == "escalated"
+        harness.manager.terminate_instance.assert_awaited_once_with(
+            mission, terminal_reason="wedge_guard_terminated"
+        )
+        # The Task rows are really gone (Step 4b ran).
+        assert harness.task_repo.get_by_instance(mission) == []
+        # The watcher's row SURVIVES (terminate only removes watches
+        # OWNED by the terminated instance).
+        assert len(harness.watcher_repo.get_watchers_for_job(r1_settled)) == 1
+        # THE BLOCKER PIN: the escalation envelope reaches the watcher
+        # even though every Task receipt was deleted by the flip.
+        calls = _enqueues_for(harness, watcher)
+        bodies = [c.kwargs["message"] for c in calls]
+        assert any("question escalation ⏳" in b for b in bodies), bodies
+        assert len(calls) == 2  # pre-flip stuck emission + escalation
+
 
 # =============================================================================
 # Dedupe + scope correctness

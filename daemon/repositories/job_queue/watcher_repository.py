@@ -13,6 +13,13 @@ from .watcher_models import JobWatcher, ALL_WATCHABLE_EVENTS
 
 logger = logging.getLogger(__name__)
 
+# Defensive cap on the ``job_id IN (...)`` id-list length in
+# ``get_watchers_for_jobs`` (mission-scoped QA fan-out select): the
+# caller already caps its candidate set (MISSION_RECEIPT_SCAN_CAP);
+# this is the repository-side backstop so NO caller can hand us an
+# unbounded IN-list.
+_MAX_IN_SELECT_IDS = 512
+
 
 class JobWatcherRepository:
     """Repository for JobWatcher CRUD operations.
@@ -171,7 +178,7 @@ class JobWatcherRepository:
         """
         if not job_ids:
             return []
-        ids = list(job_ids)[:512]
+        ids = list(job_ids)[:_MAX_IN_SELECT_IDS]
         with SQLModelSession(self.engine) as db_session:
             stmt = (
                 select(JobWatcher)

@@ -828,6 +828,7 @@ async def emit_question_escalation_notification(
     asker_agent_id: str | None,
     question_pack_id: str | None,
     emission_index: int,
+    mission_work_ids: list[str] | None = None,
 ) -> int:
     """Fan out the wedge escalation to FE SSE + mission watchers.
 
@@ -842,11 +843,25 @@ async def emit_question_escalation_notification(
     ``[JOB_EVENT] Job {receipt}... question escalation ⏳`` envelope is
     enqueued per mission watcher holding an unclaimed row on any
     mission receipt (same bounded, events-exempt, non-claiming,
-    deduped lane as the QA emissions). Runs after the terminate flip
-    (the processor escalates by terminating the asker) — the receipt
-    scan reads Task rows, which survive termination. The FE-SSE-only
-    escalation gap is closed: the mission watcher — the agent that can
-    relay to the human — now hears about it too.
+    deduped lane as the QA emissions). The FE-SSE-only escalation gap
+    is closed: the mission watcher — the agent that can relay to the
+    human — now hears about it too.
+
+    Terminate-flip ordering (review blocker, iteration 1): the caller
+    (``HeartbeatEmitStuckProcessor``) escalates by terminating the
+    asker, and the terminate cascade DELETES the asker's ``task`` rows
+    UNCONDITIONALLY (``instance_lifecycle`` Step 4b) while the
+    instances row survives status-only. For a ROOT-asker mission a
+    post-flip receipt scan finds NO Task rows — which is why this
+    function takes the receipt set as a PRE-FLIP SNAPSHOT: pass
+    ``mission_work_ids=enumerate_mission_work_ids(...)`` resolved
+    BEFORE the terminate flip (watcher rows themselves survive — the
+    terminate cleanup only removes watches OWNED by the terminated
+    instance). Without the snapshot (``None``) the function falls back
+    to a best-effort ``enumerate_mission_work_ids`` at call time —
+    correct when the asker is NOT yet flipped or is a DESCENDANT
+    (root Task rows survive), DEGRADED for a flipped root-asker
+    (delivery may find no receipts; SSE still fires).
 
     Returns the combined total (SSE clients reached + watcher
     emissions delivered).
@@ -871,14 +886,18 @@ async def emit_question_escalation_notification(
                 e,
             )
 
-    # Mission-watcher escalation envelope (design item 2): mission
-    # scope resolves from Task rows, so this works after the terminate
-    # flip too.
+    # Mission-watcher escalation envelope (design item 2): keyed on the
+    # caller's PRE-FLIP receipt snapshot when provided (terminate Step
+    # 4b deletes the asker's Task rows, so a post-flip scan is not
+    # trustworthy for a root-asker mission).
     from daemon.services.work_notifier import notify_mission_qa_watchers
 
     watcher_delivered = 0
     try:
-        mission_work_ids = enumerate_mission_work_ids(manager, asker_instance_id)
+        if mission_work_ids is None:
+            mission_work_ids = enumerate_mission_work_ids(
+                manager, asker_instance_id
+            )
         if mission_work_ids:
             watcher_delivered = await notify_mission_qa_watchers(
                 work_id=mission_work_ids[0],
