@@ -2014,13 +2014,29 @@ class ReportInjectionRepository:
         Args:
             heartbeat_stale_threshold_seconds: A wake task whose
                 ``last_heartbeat_at`` is older than this is treated
-                as dead-worker (the worker's heartbeat thread
-                updates ``last_heartbeat_at`` every
-                ``DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30.0s``
-                — see ``worker_pool.py:45``). Default 90s = 3x the
-                heartbeat interval, comfortably larger than a
-                single missed tick while smaller than the
-                F-1 15-minute ``DEFAULT_STALE_THRESHOLD_MINUTES``.
+                as dead-worker. The 30-second heartbeat cadence is
+                empirically anchored at THREE points:
+
+                * ``daemon/services/worker_pool.py:45`` —
+                  ``DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30.0``
+                  (the cadence constant the worker pool reads).
+                * ``daemon/services/worker_pool.py:152`` — the
+                  worker calls ``task_repo.update_heartbeat(task_id)``
+                  on the cadence (the empirical writer).
+                * ``daemon/repositories/task/repository.py:3015`` —
+                  the heartbeat write
+                  (``UPDATE task SET last_heartbeat_at = :now
+                  WHERE id = :id AND status = 'running'``).
+
+                Default 90s = 3× the heartbeat interval — comfortably
+                larger than a single missed tick while smaller than
+                the F-1 15-minute
+                ``DEFAULT_STALE_THRESHOLD_MINUTES``
+                (``daemon/services/stale_task_recovery.py:25``). The
+                three-point anchor is the post-review cite (the
+                reviewer noted the prior cite at line :45 alone
+                was unverifiable from a wider search; this anchors
+                the cadence empirically).
             limit: Batch cap.
 
         Returns:

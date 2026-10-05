@@ -1463,7 +1463,7 @@ class TestErrorPropagation:
         assert error_after is None
 
     @pytest.mark.asyncio
-    async def test_error_flag_uses_fallback_when_message_missing(
+    async def test_error_flag_no_flip_with_none_error_logs_warning(
         self, engine, bus, caplog
     ):
         """Post-F-1 contract: the ``error=None`` outcome does NOT flip

@@ -1262,3 +1262,94 @@ twenty-six ``monkeypatch`` patches use the older
 newer ``monkeypatch.setattr(obj, attr_name, value)`` (positional
 value swap in the signature). The migration is mechanical and
 test-suite safe; it does not change behavior.
+
+### §12e — Additive Lane 6 (Block-1 G4 merge-gate, 2026-10-05)
+
+**Additive appendix (no history rewrite).** The merge-gate G4 main-leg
+R1 capture (SIGSTOP→verify→SIGKILL on the worktree branch build) caught a
+wedge the §12a window-to-lane map did NOT predict: a PENDING marker
+(``state=PENDING``) co-existing with a preserved wake row in
+``message_queue`` (``status=ready``, the F-1 epoch-belt preserved
+it) AND a dead-worker wake ``task`` (``status=running``, ``worker_id``
+set, ``last_heartbeat_at`` stale — the worker died with the daemon).
+Captured state in
+``.agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/db-assertions/d1-pre-kill-assertion.txt``
+(``parent=waiting_children``, ``child=completed``, ``wake_task=running``,
+``wake_msg=ready``, ``inj_state=PENDING``).
+
+The §12a window-to-lane maps
+ — Additive Lane 6 (Block-1 G4 merge-gate, 2026-10-05)
+
+**Additive appendix (no history rewrite).** The merge-gate G4 main-leg
+R1 capture (SIGSTOP->verify->SIGKILL on the worktree branch build) caught a
+wedge the §12a window-to-lane map did NOT predict: a PENDING marker
+(`state='PENDING'`) co-existing with a preserved wake row in
+`message_queue` (`status='ready'`, the F-1 epoch-belt preserved
+it) AND a dead-worker wake `task` (`status='running'`, `worker_id`
+set, `last_heartbeat_at` stale — the worker died with the daemon).
+Captured state in
+`.agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/db-assertions/d1-pre-kill-assertion.txt`
+(`parent=waiting_children`, `child=completed`, `wake_task=running`,
+`wake_msg=ready`, `inj_state=PENDING`).
+
+The §12a window-to-lane map's claim — "Lanes 1/3/4 own the
+marker-minted cases" — is **contradicted** by the G4 capture:
+* Lane 1 (DEFERRED) skips (marker is PENDING, not DEFERRED).
+* Lane 2 (no-row backstop) skips (the `has_injection_row` exclusion
+  matches).
+* Lane 3 + 4 (pending_age) skip (the 10-minute `age_bound_minutes`
+  in-flight protection blocks the young-from-creation marker; the
+  dead-worker reap is deferred another 15 minutes by the F-1
+  `boot_epoch` amendment at `task/repository.py:3411`).
+* Lane 5 (orphan) skips (parent is `waiting_children`, not
+  TERMINAL).
+* The worker pool's per-instance busy guard at
+  `task/repository.py:2648-2650` (status='running' guard)
+  blocks every new claim for the parent — including the wake
+  task itself — because the parent has a RUNNING sibling.
+
+The wedge-clearing frontier is the FROZEN §12a machinery plus the
+new lane below; the gap is a reachable dead-worker shape that no
+frozen lane covers.
+
+**Resolution (additive — no frozen behavior touched).** A new RDRS
+lane 6 (stuck_wake) was added via the Block-1 G4 fix commit
+(`3a2bbdf8`) at `daemon/services/report_delivery_recovery.py` and
+`daemon/repositories/report_injection/repository.py:find_stuck_wake_candidates`
+(documented with the full captured-state trace + file:line
+evidence for each of the four skipped lanes + the per-instance
+busy guard + the self-deadlock exclusion). The lane:
+
+* Detects the captured state via a dedicated query (no existing lane
+  predicate is touched) that joins
+  `report_injections` (`state='PENDING'`) + `message_queue`
+  (`status='ready'`, `instance_id=parent`) + `task`
+  (`status='running'`, `task_type='process_report'`,
+  `last_heartbeat_at` stale).
+* For each candidate, invokes the existing
+  `TaskRepository.force_cancel_and_schedule_retry` primitive on
+  the dead-worker wake task (the retry creates a new PENDING task
+  with no `worker_id`; the per-instance busy guard no longer
+  matches because the parent has no RUNNING sibling; the worker
+  pool claims and reads the preserved wake row;
+  `instance_messaging` flips parent `waiting_children -> RUNNING`).
+
+**Addendum to the §12 window-to-lane map (binding).** Append the
+following row to the table; the existing rows are NOT re-numbered
+and no row is rewritten (additive discipline):
+
+| F-2 sub-shape | What happens | Lane | Why |
+|---|---|---|---|
+| marker-minted + preserved-ready-wake + dead-worker wake task | marker `PENDING` at crash; wake row in `message_queue` `ready` preserved by F-1 epoch-belt; wake task `running` claimed by the dead worker | **Lane 6 (stuck_wake heal)** | lanes 1/3/4/5 skip (DEFERRED-required / has_injection_row / 10-min age_bound / parent is waiting_children, NOT TERMINAL); stale_task_recovery defers via F-1 boot_epoch (r-20260929-170301-0cb2). The lane detects the captured shape via `find_stuck_wake_candidates` and invokes `force_cancel_and_schedule_retry` on the dead-worker wake task — the retry's parent-wakes path is the literal inheritance of §12a (lanes 1/3/4 own marker-minted cases IF the wake row is wiped; this case is the F-1 epoch-belt-preserved-wake-row sibling). |
+
+**Why this row is additive and not a rewrite.** The §12a
+window-to-lane map describes the W-A/B/C sub-windows of the F-2
+wedge. The captured G4 state is the W-D sub-window (the F-1
+epoch-belt was a post-§12a hardening; the reachable dead-worker
+wake shape it preserved is the new gap). The frozen F-2 design
+(§12a + §12b + §12c) is not touched; lane 6 reuses the existing
+`force_cancel_and_schedule_retry` primitive and the existing
+worker-pool claim path. The merge-gate evidence-commit
+(`.agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/findings.md`
+R1 + D1 tables) is the load-bearing record for the design rationale;
+this appendix points at it via the one-line cross-ref.

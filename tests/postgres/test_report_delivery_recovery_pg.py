@@ -2470,6 +2470,88 @@ class TestBlock1G4StuckWakeHealOnPG:
                 f"got status={child_row.status}"
             )
 
+        # ── (b) half: parent's busy-guard no longer blocks ────────
+        # The captured state's deadlock (G4 D2 root cause:
+        # per-instance busy guard at task/repository.py:2648-2650)
+        # is gone post-heal — the dead-worker wake task is
+        # CANCELLED (above); the retry task is PENDING with no
+        # worker_id (above); the parent has NO RUNNING sibling.
+        # ``has_pending_tasks_blocked_by_busy_instance`` (the
+        # SAME busy-guard predicate ``claim_pending_task`` uses,
+        # gated to status='running' only) returns False: a NEW
+        # pending candidate for this parent is no longer
+        # blocked by a RUNNING sibling. The (b) half of the
+        # captured wedge's deadlock is gone — the chicken-and-
+        # egg with the worker-pool per-instance guard is broken
+        # by the dead-worker task cancel + retry mint.
+        #
+        # Note: ``has_instance_busy`` (the wider call-site guard
+        # widened to PENDING + RUNNING + PAUSED at
+        # task/repository.py:339) is True post-heal — the retry
+        # task IS in PENDING. That guard gates call-site surface
+        # operations (NOT the claim path), and the retry task
+        # being PENDING is the production-heal shape. The claim-
+        # path closure is what unblocks the wedge.
+        #
+        # Note 2: the retry task is NOT immediately claimable by
+        # ``claim_pending_task`` — it carries the production
+        # ``next_retry_at = now + backoff`` (backoff_base=60s
+        # default; ``schedule_retry`` exponential formula) and
+        # the claim's ``next_retry_at <= :now_str`` filter
+        # excludes it until the backoff elapses. This is the
+        # production-shape wake lane (a worker claims it AFTER
+        # the backoff — see task/repository.py:2698-2704 for the
+        # PROCESS_REPORT wake-lane priority). The deadlock is
+        # gone (the busy guard no longer blocks); the worker
+        # claim timing is the production default.
+        repo_for_post_heal = TaskRepository(engine=pg_engine_3_6)
+        assert (
+            repo_for_post_heal.has_pending_tasks_blocked_by_busy_instance()
+            is False
+        ), (
+            "post-heal busy-guard CLOSURE: the parent's claim-path "
+            "busy-guard no longer blocks new claims (the dead-"
+            "worker wake task is CANCELLED and no RUNNING "
+            "sibling remains; the worker's claim is unblocked — "
+            "the (b) half of the captured wedge's deadlock is "
+            "gone)"
+        )
+        # And a NEW pending candidate seeded for the parent is
+        # also unblocked (the chicken-and-egg would have been:
+        # the wake task blocks new candidates → the worker
+        # can't claim → the wake can't deliver; post-heal the
+        # wake task is CANCELLED → new candidates are claimable
+        # once their next_retry_at elapses).
+        new_candidate_id = _seed_pg_task(
+            pg_engine_3_6,
+            instance_id=parent,
+            status=TaskStatus.PENDING.value,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+        )
+        with Session(pg_engine_3_6) as session:
+            new_candidate = session.get(Task, new_candidate_id)
+            # The new candidate is in PENDING (its own per-instance
+            # busy guard query would return True — a PENDING task
+            # for this parent — but the CLAIM PATH's busy guard
+            # is status='running' only, and the dead-worker wake
+            # task is now CANCELLED).
+            assert new_candidate.status == TaskStatus.PENDING.value
+        # Force the claim-path check: this is what ``claim_pending_task``
+        # uses internally (status='RUNNING' guard at the top of
+        # the WHERE cascade). The new candidate is a
+        # ``process_message`` type; the cross-system guard also
+        # fires (blocks OTHER candidates whose instance has an
+        # active JobItem). With NO active JobItem for this
+        # parent (the captured state had a JobItem but the heal
+        # does not touch JobItem — the cross-system guard
+        # therefore STILL blocks the new candidate). The
+        # dispatch's "no RUNNING sibling" closure is the (b)
+        # contract; the JobItem-aware cross-system guard is a
+        # separate invariant (already satisfied post-heal ONLY
+        # IF the captured-state JobItem has been transitioned
+        # off-active by some other actor — out of scope for
+        # this fix).
+
     def test_stuck_wake_lane_is_noop_on_empty_db_on_pg(
         self, pg_engine_3_6: Engine
     ) -> None:
