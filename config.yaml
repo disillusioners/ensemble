@@ -182,7 +182,7 @@ queue:
   #     budget; other hits to the 10-attempt transient budget).
   #     Corpus: 'All models rate limited' — 21 events 2026-08-19→26,
   #     instance deaths on attempt 1 of 10 (bug doc RC1/C1).
-  transient_apierror_allowlist: ['all models rate limited', 'context deadline exceeded']
+  transient_apierror_allowlist: ['all models rate limited', 'context deadline exceeded', 'high load', '(2064)']
   #   Timeout-body subset of the allowlist — relayed upstream timeouts
   #     ('context deadline exceeded', 2 events, bug doc C1). Each
   #     attempt can cost the upstream's full timeout, so they consume
