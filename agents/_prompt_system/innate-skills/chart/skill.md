@@ -21,7 +21,7 @@ Use this skill whenever the artifact is **structural** rather than purely textua
 
 ## Chat Delivery
 
-When the user is on a chat source (Discord, Slack, Telegram, or any external chat adapter) OR asks for an image / diagram / chart visual, you MUST call `generate_chart()` — never hand-write a ` ```mermaid ` block in your response. The user receives the rendered image directly in the channel; a code block is the failure mode.
+When the user is on a chat source (Discord, Slack, Telegram, or any external chat adapter) OR asks for an image / diagram / chart visual, you MUST call `generate_chart()` — never hand-write a ` ```mermaid ` block in your response. The default (`render_image=False`) validates and returns the block, but the chat-source PNG path below requires the marker handoff that only `generate_chart()` produces — see the render_image=True bullet.
 
 - Use `generate_chart()` even for diagrams you could self-generate (the simple ones) when the source is a chat adapter or the user asked for a visual.
 - Pure-text contexts (internal planning, HTTP-API callers, no user-visible chat surface) may still self-generate trivial diagrams.

@@ -894,6 +894,8 @@ def test_render_image_gate_contract_handles_project_line():
         "render_image: true",      # lowercase key
         "RENDER_IMAGE: truex",     # typo'd value
         "RENDER_IMAGE: false true",  # two values
+        "RENDER_IMAGES: true",     # plural key — not the contract form
+        "RENDER IMAGE: true",      # space in key — not the contract form
     ],
 )
 def test_render_image_gate_contract_malformed_is_false(malformed):
@@ -906,6 +908,35 @@ def test_render_image_gate_contract_malformed_is_false(malformed):
     msg = f"Create a flowchart.\n\nDescription: x\n{malformed}\n"
     assert should_render(msg) is False, (
         f"malformed directive {malformed!r} must fail-closed to False"
+    )
+
+
+@pytest.mark.parametrize(
+    "loose_variant",
+    [
+        "RENDER_IMAGE:true",       # no space after colon — regex \s* allows 0
+        "RENDER_IMAGE: true ",     # trailing space — regex \s* allows >0
+        "RENDER_IMAGE:  true",     # double space — regex \s* allows >0
+    ],
+)
+def test_render_image_gate_contract_regex_loose_whitespace_pins(loose_variant):
+    """Pins CURRENTLY-LOOSE whitespace variants that the regex accepts.
+
+    The directive regex is ``^RENDER_IMAGE:\\s*(true|false)\\s*$`` with
+    ``re.MULTILINE``. The ``\\s*`` quantifier allows zero OR more
+    whitespace, so the forms below DO match today (i.e. the gate
+    returns True for them). This test pins that actual behavior so
+    any future tightening of the regex (e.g. requiring exactly one
+    space, or rejecting trailing whitespace) surfaces as a test
+    failure here. If the regex is later tightened, update this
+    parametrize to the new (True→False) expected outcomes.
+    """
+    should_render = _gate_function()
+    msg = f"Create a flowchart.\n\nDescription: x\n{loose_variant}\n"
+    assert should_render(msg) is True, (
+        f"loose-whitespace variant {loose_variant!r} must currently match "
+        f"the regex (loose \\\\s* behavior); tightening the regex will "
+        f"flip this to False"
     )
 
 
@@ -945,9 +976,7 @@ def test_workflow_md_step5_is_conditional_not_always():
     )
     assert "this entire step" in body, "Step 5 must state the conditional scope"
     assert "RENDER_IMAGE: true" in body, "Step 5 must reference the true directive"
-    assert "RENDER_IMAGE:\nfalse" in body.replace("\n", "\n").replace(
-        "RENDER_IMAGE:\nfalse", "RENDER_IMAGE: false"
-    ) or "RENDER_IMAGE: false" in body, (
+    assert "RENDER_IMAGE: false" in body, (
         "Step 5 must reference the false directive (or absence) as the skip path"
     )
     assert re.search(

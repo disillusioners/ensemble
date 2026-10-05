@@ -1111,7 +1111,7 @@ The two `<this-commit>` placeholders in `decisions.md` §phase-b-impl-1 (rows fo
 **Preservation contract (UNCHANGED, byte-stable):**
 
 - Locked marker regex `^<!-- ens-img:chart-render:[a-f0-9]{32} -->$` (decisions.md §marker)
-- Both-seam extraction ordering (dispatcher.py:132/:209 short-circuit, then extract_chart_images at both seams)
+- Both-seam extraction ordering (dispatcher.py:74 def, :348 and :472 call sites — short-circuit, then extract_chart_images at both seams)
 - Dispatcher skip rules (no-colon sources, internal_agent:* return before extraction)
 - `_BUSY_STRING` and `_PAUSED_STRING` byte-stable
 - Chart-image delivery provenance gate (feature=="chart-render")
