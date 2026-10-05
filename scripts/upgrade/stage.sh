@@ -379,6 +379,17 @@ chmod +x "$STAGE_TMP/ensemble-prod"
 cp -R "$REPO_ROOT/agents" "$STAGE_TMP/agents" || { rm -rf "$STAGE_TMP"; exit 1; }
 mkdir -p "$STAGE_TMP/frontend/dist/frontend"
 cp -R "$REPO_ROOT/frontend/dist/frontend/browser" "$STAGE_TMP/frontend/dist/frontend/browser" || { rm -rf "$STAGE_TMP"; exit 1; }
+# G3 (review round 2): EXCLUDE the FE provenance sidecar from the release
+# payload (it is web-servable: the front-end container serves every file
+# under browser/). The sidecar is BUILD-TIME state, not a runtime
+# artifact — shipping it would expose a per-deployment hash + git HEAD
+# to any client that can fetch /assets/index.html.build-provenance.json.
+# The verifier (in _verify_artifact_provenance) reads the sidecar from
+# the SOURCE tree ($REPO_ROOT), not from the staged payload, so exclusion
+# does not affect stage-time checks. The manifest per-file map is
+# computed AFTER this rm and therefore does not include the sidecar →
+# the sidecar is not part of the release's integrity contract either.
+rm -f "$STAGE_TMP/frontend/dist/frontend/browser/index.html.build-provenance.json"
 cp "$REPO_ROOT/config.yaml" "$STAGE_TMP/config.yaml" || { rm -rf "$STAGE_TMP"; exit 1; }
 cp "$REPO_ROOT/launcher.sh" "$STAGE_TMP/launcher.sh" || { rm -rf "$STAGE_TMP"; exit 1; }
 chmod +x "$STAGE_TMP/launcher.sh"

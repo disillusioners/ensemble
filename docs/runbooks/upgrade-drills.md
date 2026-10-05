@@ -616,6 +616,8 @@ A missing, empty, or unrecognized load-bearing field refuses **`provenance-malfo
 
 Informational fields gate no comparison, but corruption is still refused when present: `git_head_short`, when present and non-empty, must be 7-40 hex characters — garbage free text refuses **`provenance-malformed`** (fail-closed symmetry with `git_head`). Absent/empty `git_head_short` is tolerated (it is not load-bearing).
 
+**Boundary (review round 2 M4):** the provenance sidecar proves the artifact matches its BUILD commit (HEAD + dirty + sha256 captured at build time). It cannot prove the source was unedited AFTER a clean build WITHOUT a rebuild — a `git add` on `frontend/` followed by no rebuild still produces a sidecar with `git_dirty: false` (the dirty probe runs at BUILD time, not at stage time) and the staged payload ships the previous build. The mandatory pre-stage rebuild (§A.3) is the real mitigation; the sidecar's `git_dirty` value is a point-in-time snapshot, not a continuous assertion.
+
 Sidecar rules:
 - Written by the build path AT BUILD TIME (post-build success; not before, not after stages). The write is ATOMIC (temp file in the same dir + `mv -f`) — a torn sidecar can only come from an out-of-discipline writer, and the empty-sidecar shape gate catches that class.
 - The writer NORMALIZES the dirty flag to canonical JSON booleans and REFUSES to write an unrecognized value (defense in depth: the writer cannot emit an ambiguous sidecar).
@@ -647,7 +649,7 @@ Every refusal and every override lands a journal event on the install dir's `rel
 | `stale-provenance` | The artifact's sidecar records a different `git_head` than the current `HEAD` | Rebuild from the current tree (the existing binary is from an older commit; staging it would silently ship the older code) |
 | `dirty-build` | The artifact's sidecar records a dirty build (`git_dirty` in {`true`,`True`,`1`}) | Commit the working-tree changes, rebuild, re-run stage — staging a dirty build is unsafe because an idempotent re-stage would re-build with different outputs |
 | `provenance-hash-mismatch` | The artifact was modified after its build (the sidecar's `artifact_sha256` doesn't match the file's current sha256) | Rebuild from the current tree (the sidecar is now lying about an artifact that no longer matches it) |
-| `non-tip-tree` | The staging tree is not at `refs/remotes/origin/latest` (or `refs/heads/latest`) | Merge your work into the integration branch and re-tag at the tip, then re-run stage — this catches the v0.16.13 payload case (tag on a non-tip commit, fixes landing on the tip later) |
+| `non-tip-tree` | The staging tree is not at `refs/remotes/origin/latest` (or `refs/heads/latest`) | Merge your work into the integration branch and re-tag at the tip, then re-run stage — this catches the v0.16.13 payload case (tag on a non-tip commit, fixes landing on the tip later). If the local branch is ahead of `origin/latest`, `git fetch origin` first to refresh the stale remote-tracking ref, or `git push origin <branch>:latest` to publish the tip before re-checking |
 
 ### A.5 The override flag — `--allow-stale-stage`
 

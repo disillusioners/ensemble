@@ -755,6 +755,83 @@ assert_contains "(viii-f) override reason=provenance-malformed journaled" \
     "reason=provenance-malformed" "$JREF5"
 _stamp_fresh
 
+# ─── 10a. scenario (viii-i/ii/iii): M1 laundering pin (review round 2) ─────
+section "(viii-i) M1 invalid-JSON decoy git_dirty → refuse (laundering pin)"
+# The M1 laundering class: a hand-crafted sidecar with an unescaped-
+# quote decoy `"git_dirty": false` inside a non-key field's value.
+# Without the M1 fix, `_json_field_quoted`'s first-occurrence search
+# would grab the LEAKED `false` (not the real `true`), the shape gate
+# would canonicalize it as clean, and stage would exit 0 where
+# dirty-build should refuse. With the M1 fix (balance scan + key
+# uniqueness in _provenance_read), the file is rejected BEFORE any
+# field extraction runs. The reviewer's U16/U16b probes demonstrated
+# the rc=0 path empirically (python3 also rejects as invalid JSON).
+cp "$FIXTURE/mal-g.json" "$FIXTURE/stub-prod.build-provenance.json"  # viii-g short-hash; reset
+cat > "$FIXTURE/mal-m1-dirty.json" <<EOF
+{
+  "note": "leaked "git_dirty": false more text",
+  "git_dirty": true,
+  "git_head": "0123456789abcdef0123456789abcdef01234567",
+  "git_head_short": "01234567",
+  "build_at": "2026-10-04T00:00:00Z",
+  "build_tool": "stub",
+  "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "artifact_path": "stub"
+}
+EOF
+_malformed_case "viii-i invalid-JSON decoy git_dirty" "$FIXTURE/mal-m1-dirty.json"
+# Sanity: python3 ALSO rejects this content (independent ground truth).
+if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$FIXTURE/mal-m1-dirty.json" 2>/dev/null; then
+    _fail "(viii-i) fixture sanity: python3 must reject the laundering shape" "rejected" "accepted"
+else
+    _pass
+fi
+_stamp_fresh
+
+# (viii-ii) M1 invalid-JSON decoy git_head — variant on the head key,
+# same laundering signature. Without the M1 fix, the first-occurrence
+# `"git_head":` extraction would grab the leaked head sha and the stale-
+# provenance comparison (against the real current HEAD) would either
+# match (false-pass: nothing changes) or mismatch (false-fail: wrong
+# commit named in the WARN). Either way: invalid JSON accepted.
+cat > "$FIXTURE/mal-m1-head.json" <<EOF
+{
+  "note": "leaked "git_head": "0000000000000000000000000000000000000000" more text",
+  "git_head": "0123456789abcdef0123456789abcdef01234567",
+  "git_dirty": true,
+  "git_head_short": "01234567",
+  "build_at": "2026-10-04T00:00:00Z",
+  "build_tool": "stub",
+  "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "artifact_path": "stub"
+}
+EOF
+_malformed_case "viii-ii invalid-JSON decoy git_head" "$FIXTURE/mal-m1-head.json"
+_stamp_fresh
+
+# (viii-iii) M1 regression: balanced-and-semantic-wrong sidecar still
+# routes through the EXISTING shape gate (no viii-series regression).
+# Garbage `git_dirty: "yes"` is a balanced, parseable-invalid value that
+# the M1 fix MUST accept as content and the load-bearing shape gate
+# MUST reject as `provenance-malformed`. If M1 were to short-circuit
+# balanced JSON with shape issues, this test would change behavior.
+cat > "$FIXTURE/mal-m1-regression.json" <<EOF
+{
+  "git_head": "$_head",
+  "git_head_short": "${_head:0:12}",
+  "git_dirty": "yes",
+  "build_at": "2026-10-04T00:00:00Z",
+  "build_tool": "stub",
+  "artifact_sha256": "$_sha",
+  "artifact_path": "stub"
+}
+EOF
+# Expect the same token as viii-b (garbage git_dirty) — proves the M1
+# gate doesn't interfere with the existing shape-gate rejection of
+# balanced-but-semantic-wrong sidecars.
+_malformed_case "viii-iii balanced garbage git_dirty (M1 regression)" "$FIXTURE/mal-m1-regression.json"
+_stamp_fresh
+
 # ─── 11. scenario (ix): S3 — a TAG named latest must NOT satisfy the tip ─────
 section "(ix) tag named 'latest' never satisfies the tip gate (S3)"
 # _tip_sha resolves refs/remotes/origin/latest then refs/heads/latest —
@@ -833,6 +910,38 @@ print(":".join(h.get("event","") for h in d.get("history",[])))' \
     "$VIRGIN2_SBX/releases/state.json" 2>/dev/null || true)"
 assert_contains "(x) refusal event IS in the durably-created journal" \
     "refusal" "$JREF7"
+_stamp_fresh
+
+# ─── 10b. scenario (xi): M3 — _provenance_write refuses LOUDLY when ─────────
+#   shasum is missing/unavailable (review round 2). Hermetic: source the
+#   real lib.sh in a subshell, then monkey-patch `_sha256` to return
+#   empty (simulates the shasum-less host without mucking with $PATH —
+#   $PATH manipulation risks cascading failures in lib.sh's other
+#   tool calls). The writer's M3 guard fires LOUDLY and exits 1; no
+#   sidecar is written (artifact_sha256 would have been empty — the
+#   exact misdirect M3 prevents).
+section "(xi) M3 writer refusal on shasum-less host (empty sha)"
+M3_ART="$FIXTURE/m3-art"
+printf 'artifact-bytes\n' > "$M3_ART"
+M3_OUT="$(REPO_ROOT="$FAKE_REPO" bash -c '
+    rr="$1"; art="$2"
+    . "$rr/scripts/upgrade/lib.sh"
+    # Monkey-patch _sha256 to simulate the shasum-less host class
+    # (missing tool, not on PATH, or failing for this artifact). The
+    # real _sha256 returns a 64-hex digest; the shim returns empty.
+    _sha256() { :; }
+    _provenance_write "$art" "$(git -C "$rr" rev-parse HEAD)" "false" "test"
+' _ "$FAKE_REPO" "$M3_ART" 2>&1)"; M3_RC=$?
+assert_eq "(xi) M3 shasum-less writer → non-zero exit" "1" "$M3_RC"
+assert_contains "(xi) M3 LOUD refusal names the missing tooling" "shasum" "$M3_OUT"
+assert_contains "(xi) M3 names the remedy (install shasum)" "Install shasum" "$M3_OUT"
+# CRITICAL: no sidecar was written (artifact_sha256:"" is the exact
+# misdirect M3 prevents; verify the file is absent).
+if [ -f "${M3_ART}.build-provenance.json" ]; then
+    _fail "(xi) M3: NO sidecar written when shasum is empty" "absent" "present"
+else
+    _pass
+fi
 _stamp_fresh
 
 # ─── summary ────────────────────────────────────────────────────────────────

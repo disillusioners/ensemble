@@ -1649,7 +1649,20 @@ _provenance_write() {
         return 1
     }
     local sha short built_at rel prov tmp
-    sha="$(_sha256 "$art")"
+    if ! sha="$(_sha256 "$art")" || [ -z "$sha" ]; then
+        # M3 (review round 2): refuse LOUDLY on an empty hash. The
+        # production hashing tool (shasum -a 256) is missing on this
+        # host OR is failing — either way, silently writing
+        # `"artifact_sha256": ""` would let stage misdirect with
+        # provenance-malformed instead of naming the actual cause
+        # (missing hashing tooling). Actionable: install shasum (perl
+        # core on most systems) or run from a host that has it; the
+        # broader sha256sum/openssl capability-detection is a follow-up
+        # (out of this round's scope per the council report's G5/G6/G7
+        # deferred ledger).
+        _warn "_provenance_write: empty sha256 for $art — the 'shasum' tool is missing, not on PATH, or failed for this artifact. Install shasum (perl core on most systems; BSD's native 'sha256' is non-portable) or run from a host that has it, then rebuild. Refusing to write a sidecar with artifact_sha256:\"\" — stage would misdirect with provenance-malformed instead of naming the missing tooling."
+        return 1
+    fi
     short="${head:0:12}"
     built_at="$(_now_iso)"
     rel="${art#"$REPO_ROOT"/}"
@@ -1693,15 +1706,116 @@ _provenance_dirty_canon() {
     esac
 }
 
-# _provenance_read <artifact_abs_path> — print sidecar JSON; returns 1 if
-# absent or unreadable. The VERIFIER consumes this (single read path —
-# writer and reader share the _provenance_path resolution, so a path-shape
-# drift between them is structurally impossible).
+# _provenance_read <artifact_abs_path> — print sidecar JSON content;
+# returns 1 (and sets _PROVENANCE_READ_STATUS) when the content cannot be
+# trusted. The verifier consumes the status to dispatch the refusal token:
+#
+#   ok          — _PROVENANCE_READ_STATUS=ok; prints the JSON to stdout.
+#   absent      — sidecar file does not exist; verifier → provenance-missing.
+#   unreadable  — file exists but cat failed; verifier → provenance-missing.
+#   malformed   — file present but content fails _provenance_sidecar_ok
+#                 (unbalanced quote/brace, or a load-bearing key appears
+#                 more than once — the laundering signature: a hand-
+#                 crafted sidecar with an unescaped-quote decoy
+#                 `"git_dirty": false` or `"git_head": "<sha>"` inside
+#                 an earlier field's value, which would otherwise win the
+#                 textual first-occurrence race and let a dirty build
+#                 pass as clean — see cn 0472b31f fix round 2, M1).
+#                 verifier → provenance-malformed.
+#
+# Single read path: writer and reader share the _provenance_path
+# resolution, so a path-shape drift between them is structurally
+# impossible.
 _provenance_read() {
     local prov
     prov="$(_provenance_path "$1")"
+    _PROVENANCE_READ_STATUS="absent"
     [ -f "$prov" ] || return 1
-    cat "$prov" || return 1
+    local json
+    if ! json="$(cat "$prov" 2>/dev/null)"; then
+        _PROVENANCE_READ_STATUS="unreadable"; return 1
+    fi
+    _PROVENANCE_READ_STATUS="malformed"
+    [ -n "$json" ] || { _PROVENANCE_READ_DETAIL="empty file"; return 1; }
+    if ! _provenance_sidecar_ok "$json"; then
+        _PROVENANCE_READ_DETAIL="quote/brace imbalance OR a load-bearing key appears more than once (laundering signature)"
+        return 1
+    fi
+    _PROVENANCE_READ_STATUS="ok"
+    _PROVENANCE_READ_DETAIL=""
+    printf '%s' "$json"
+}
+_PROVENANCE_READ_STATUS=""
+_PROVENANCE_READ_DETAIL=""
+
+# _provenance_sidecar_ok <json> — return 0 if the sidecar content is
+# well-formed enough to trust _json_field_quoted's first-occurrence
+# extraction; 1 otherwise. TWO gates, both bash-only (no jq, no python
+# — same discipline as journal_read lib.sh:519-566; python3 IS
+# available on every host that runs the upgrade pipeline but the
+# verifier stays portable per ADR-014):
+#
+#   Gate 1: journal_read quote/brace-balance scanner, ported verbatim
+#           (catches torn writes + unclosed strings; reviewer-spec M1).
+#   Gate 2: load-bearing-key uniqueness — each of `"git_head":`,
+#           `"git_dirty":`, `"artifact_sha256":` must appear EXACTLY ONCE
+#           in the content. The first-occurrence extractor would
+#           otherwise return the DECOY (in a non-key field's value)
+#           and let a dirty build pass as clean. The balance scan
+#           alone is insufficient here — the reviewer's M1 spec
+#           suggested it, but the laundering shapes (decoy inside a
+#           `"note": "leaked "git_dirty": false more text"` value)
+#           are quote-balanced yet invalid; the uniqueness check is
+#           what catches the class. Absent (count 0) is tolerated by
+#           THIS gate (the downstream load-bearing shape gate handles
+#           the missing-field case).
+#
+# The validity-bounded is balanced quotes + balanced braces + unique
+# load-bearing keys. Together: enough to defeat the laundering class
+# without a real JSON parser.
+_provenance_sidecar_ok() {
+    local json="$1"
+    # Gate 1: balance scan (ported from journal_read lib.sh:540-565).
+    local ob=0 cb=0 os=0 cs=0 i c in_str=0 esc=0
+    for ((i = 0; i < ${#json}; i++)); do
+        c="${json:i:1}"
+        if [ "$esc" = "1" ]; then esc=0; continue; fi
+        if [ "$c" = "\\" ]; then
+            if [ "$in_str" = "1" ]; then esc=1; fi
+            continue
+        fi
+        if [ "$c" = "\"" ]; then
+            in_str=$((1 - in_str))
+            continue
+        fi
+        [ "$in_str" = "1" ] && continue
+        case "$c" in
+            '{') ob=$((ob + 1)) ;;
+            '}') cb=$((cb + 1)) ;;
+            '[') os=$((os + 1)) ;;
+            ']') cs=$((cs + 1)) ;;
+        esac
+    done
+    if [ "$ob" -ne "$cb" ] || [ "$os" -ne "$cs" ] || [ "$in_str" -ne 0 ]; then
+        return 1
+    fi
+    # Gate 2: load-bearing-key uniqueness (laundering signature).
+    # The writer's output contains each of these exactly once; a hand-
+    # crafted sidecar with a decoy `"git_dirty":` or `"git_head":` in
+    # a non-key field's leaked value contains it twice. bash 3.2-safe
+    # pattern-stripping count (no grep dependency).
+    local key count tmp
+    for key in '"git_head":' '"git_dirty":' '"artifact_sha256":'; do
+        tmp="$json"; count=0
+        while [ "${tmp#*"$key"}" != "$tmp" ]; do
+            tmp="${tmp#*"$key"}"
+            count=$((count + 1))
+        done
+        if [ "$count" -gt 1 ]; then
+            return 1
+        fi
+    done
+    return 0
 }
 
 # _git_dirty_porcelain — print the canonical JSON boolean for the repo's
@@ -1814,19 +1928,42 @@ _verify_artifact_provenance() {
             "  3) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
     fi
     # Read via the shared reader (single path resolution for writer and
-    # verifier). An empty read = torn/garbage sidecar → malformed.
-    json="$(_provenance_read "$art" 2>/dev/null)" || {
-        _freshness_refuse provenance-missing \
-            "stale-artifact stage refused: provenance sidecar $prov exists but is unreadable"
-    }
-    if [ -z "$json" ]; then
-        _freshness_refuse provenance-malformed \
-            "stale-artifact stage refused: provenance sidecar $prov is EMPTY (torn or truncated write). " \
-            "A sidecar that exists must carry all three load-bearing fields (git_head, git_dirty, artifact_sha256). " \
-            "Remedies, in order: " \
-            "  1) rebuild: 'rm -rf dist/' and re-run stage (the build path rewrites the sidecar atomically) " \
-            "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
-    fi
+    # verifier). _PROVENANCE_READ_STATUS is the dispatch: absent/unreadable
+    # → provenance-missing; malformed (empty / torn / quote-imbalance /
+    # laundering signature — see _provenance_read + _provenance_sidecar_ok)
+    # → provenance-malformed; ok → fall through to the shape gate.
+    json="$(_provenance_read "$art" 2>/dev/null)"
+    case "$_PROVENANCE_READ_STATUS" in
+        absent)
+            _freshness_refuse provenance-missing \
+                "stale-artifact stage refused: no build provenance for $art (looked for $prov). " \
+                "Blind reuse of prebuilt artifacts is structurally impossible (cn 0472b31f trap family). " \
+                "Remedies, in order: " \
+                "  1) rebuild: 'rm -rf dist/ frontend/dist/' and re-run stage (build path writes provenance) " \
+                "  2) for --skip-build fixtures: the provided artifact must carry a .build-provenance.json sidecar; see _provenance_write in scripts/upgrade/lib.sh " \
+                "  3) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+            ;;
+        unreadable)
+            _freshness_refuse provenance-missing \
+                "stale-artifact stage refused: provenance sidecar $prov exists but is unreadable. " \
+                "A sidecar that exists must carry all three load-bearing fields (git_head, git_dirty, artifact_sha256). " \
+                "Remedies, in order: " \
+                "  1) rebuild: 'rm -rf dist/' and re-run stage (the build path rewrites the sidecar atomically) " \
+                "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+            ;;
+        malformed)
+            _freshness_refuse provenance-malformed \
+                "stale-artifact stage refused: provenance sidecar for $art is MALFORMED (${_PROVENANCE_READ_DETAIL}). " \
+                "A sidecar that exists must carry all three load-bearing fields, syntactically valid, AND be well-formed enough " \
+                "that the field extractor can trust it (no quote/brace imbalance, no laundering signature — a decoy key in a " \
+                "non-key field's value would otherwise win the textual first-occurrence race and let a dirty build pass as clean). " \
+                "Remedies, in order: " \
+                "  1) rebuild: 'rm -rf dist/' and re-run stage (the build path rewrites the sidecar atomically) " \
+                "  2) if the sidecar was hand-maintained: fix the named issue (empty / unbalanced / duplicate key) " \
+                "  3) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+            ;;
+    esac
+    # ok → $json holds the validated content; fall through to the shape gate.
     # Field extraction uses the QUOTED-key form (_json_field_quoted): the
     # bare-substring _json_field would match the "git_head" INSIDE
     # "git_head_short" when the real "git_head" key is absent — turning a
@@ -1969,7 +2106,10 @@ _verify_tip_identity() {
             "The tag at HEAD does not include fixes that landed on the tip after the tag was placed. " \
             "This catches the v0.16.13 payload case: a tag placed on a non-tip commit, with the actual " \
             "fixes landing later on the tip. Remedies, in order: " \
-            "  1) merge your work into the integration branch and re-tag at the tip, then re-run stage " \
+            "  1) merge your work into the integration branch and re-tag at the tip, then re-run stage — " \
+            "or, if the local branch is ahead of origin: `git fetch origin` (a stale " \
+            "refs/remotes/origin/latest with fixes still landing there would be refreshed), " \
+            "or `git push origin <branch>:latest` first so the remote-tracking tip catches up, then re-check " \
             "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
     fi
     return 0
