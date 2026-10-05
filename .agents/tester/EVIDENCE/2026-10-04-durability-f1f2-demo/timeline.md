@@ -109,3 +109,18 @@
 - 07:20:16 LEG 1: manual ping → parent completed (iter=16, ~32s) — R4ii STILL VERIFIED
 - 07:21 LEG 1: FAIL verdict documented
 - 07:22+ R5: commit, restore dev lane
+
+## LEG-1 ROUND-5 (Ping-Seam Wake) — 2026-10-05
+- 07:47 LEG 1: kill v0.16.11, boot durability @ 3c7c4df6, create parent 35ea11b6 + child 3cca8bf4 (helloF5)
+- 07:48:53 LEG 1: wedge captured (SIGSTOP, wake_task=running, worker_id=worker-1, inj=PENDING)
+- 07:48:53 LEG 1: SIGKILL
+- 07:48:53 → 07:50:09 LEG 1: wait 100s, heartbeat stale
+- 07:50:59 LEG 1: reboot, lane 6 heal (recovered=1, task 1761 → retry 1762)
+- 07:50:59 LEG 1: ping-seam dispatch — [system:wedge-resolve] message enqueued to parent
+- 07:50:59 LEG 1: parent auto-resumed WAITING_CHILDREN → RUNNING (instance_messaging.py:1968 seam)
+- 07:50:59 → 07:51:26 LEG 1: parent LLM turn ran — synthesized helloF5 in final reply
+- 07:51:26 LEG 1: pending-tasks guard deferred terminal transition (retry task 1762 still PENDING)
+- 07:52+ LEG 1: retry task 1762 completed — but no event re-fired the terminal transition
+- 07:51:26 → 08:13+ LEG 1: parent STUCK in running (not completed)
+- 08:15 LEG 1: PARTIAL PASS verdict documented
+- 08:16+ R5: commit, restore dev lane
