@@ -1512,6 +1512,11 @@ class InstanceManager:
                 "base_url_backup": self.config.llm.base_url_backup,
                 "api_key": self.config.llm.api_key,
                 "model": self.config.llm.model,
+                # Dedicated Stage-3 skill-search selector model
+                # (``SkillSearchService._llm_select`` resolves key
+                # ``selector_model``). Literal default "quick" — the
+                # selector never rides the main model.
+                "selector_model": self.config.skill_evolution.selector_model,
                 "model_vision": self.config.llm.model_vision,
                 "temperature": self.config.llm.temperature,
                 "request_timeout": self.config.llm.request_timeout,

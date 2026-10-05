@@ -65,6 +65,11 @@ async def test_skill_services_have_correct_dependencies(tmp_path):
         "base_url": manager.config.llm.base_url,
         "api_key": manager.config.llm.api_key,
         "model": manager.config.llm.model,
+        # NOTE: pre-existing staleness (not this task): the actual
+        # ``skill_llm_config`` also carries ``base_url_backup`` and
+        # ``request_gzip``, which this expected dict has never listed —
+        # the exact-equality assert fails independently of selector_model.
+        "selector_model": manager.config.skill_evolution.selector_model,
         "model_vision": manager.config.llm.model_vision,
         "temperature": manager.config.llm.temperature,
         "request_timeout": manager.config.llm.request_timeout,

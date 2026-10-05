@@ -340,8 +340,13 @@ class SkillSearchService:
             Expected methods: ``embed_user_message(text)`` (async)
             and ``cosine_similarity(a, b)`` (sync).
         _llm_config: Dict with at least ``api_key`` and
-            ``base_url``; ``model`` defaults to ``"gpt-4o-mini"``
-            when missing. Used by stage 3 to construct the
+            ``base_url``. Stage 3 (``_llm_select``) resolves the
+            model from the ``selector_model`` key — populated by the
+            manager from ``SkillEvolutionConfig.selector_model``
+            (env ``SKILL_EVOLUTION_SELECTOR_MODEL``, literal default
+            ``"quick"``) and falling back to ``"quick"`` here when
+            the key is missing. The selector never rides the main
+            ``model`` key. Used by stage 3 to construct the
             OpenAI-compatible client.
         _config: Duck-typed
             :class:`~daemon.config.SkillEvolutionConfig`. Held
@@ -779,7 +784,13 @@ class SkillSearchService:
             f"Candidate skills:\n" + "\n".join(candidate_lines)
         )
 
-        model = self._llm_config.get("model") or "gpt-4o-mini"
+        # Dedicated Stage-3 selector model — key ``selector_model`` is
+        # populated from ``SkillEvolutionConfig.selector_model`` (env
+        # ``SKILL_EVOLUTION_SELECTOR_MODEL``) with a LITERAL default of
+        # "quick". The selector deliberately does NOT fall back to the
+        # main ``model`` key: an unconfigured selector resolves to the
+        # cheap "quick" tier, never the main OPENAI_MODEL.
+        model = self._llm_config.get("selector_model") or "quick"
 
         if client is None:
             # v2 HA: route through the shared raw-SDK facade. See

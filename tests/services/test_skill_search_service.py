@@ -736,6 +736,81 @@ class TestLlmSelect:
 
 
 # ============================================================
+# TestSelectorModelResolution
+# ============================================================
+
+
+class TestSelectorModelResolution:
+    """Stage 3 resolves the DEDICATED ``selector_model`` key.
+
+    Contract (2026-10-05): ``_llm_select`` reads key
+    ``selector_model`` — populated by the manager from
+    ``SkillEvolutionConfig.selector_model`` (env
+    ``SKILL_EVOLUTION_SELECTOR_MODEL``, literal default ``"quick"``).
+    The in-function fallback is the LITERAL ``"quick"``; the selector
+    deliberately does NOT fall back to the main ``model`` key (it must
+    never silently ride OPENAI_MODEL).
+    """
+
+    @pytest.mark.asyncio
+    async def test_missing_selector_model_resolves_to_quick(self):
+        # Legacy llm_config dict (only ``model``) — the selector must
+        # resolve to the literal "quick" default, NOT the main model.
+        skill_a = make_skill(skill_id="a", name="a-skill",
+                             description="A description.")
+        client = make_openai_client(
+            response=make_chat_response('{"selected": [], "low_match": []}')
+        )
+        service = make_service(
+            llm_config={"base_url": "https://x", "api_key": "k",
+                        "model": "gpt-4o-mini"},
+        )
+        await service._llm_select(
+            "query", candidates=[(skill_a, 0.5)], max_results=1, client=client,
+        )
+        assert client.chat.completions.create.call_args.kwargs["model"] == "quick"
+
+    @pytest.mark.asyncio
+    async def test_explicit_selector_model_wins_over_main_model(self):
+        # Both keys present — ``selector_model`` wins; the main
+        # ``model`` is never ridden.
+        skill_a = make_skill(skill_id="a", name="a-skill",
+                             description="A description.")
+        client = make_openai_client(
+            response=make_chat_response('{"selected": [], "low_match": []}')
+        )
+        service = make_service(
+            llm_config={"base_url": "https://x", "api_key": "k",
+                        "model": "gpt-4o-mini",
+                        "selector_model": "premium-selector"},
+        )
+        await service._llm_select(
+            "query", candidates=[(skill_a, 0.5)], max_results=1, client=client,
+        )
+        assert client.chat.completions.create.call_args.kwargs["model"] == (
+            "premium-selector"
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_selector_model_falls_back_to_quick(self):
+        # Empty-string (falsy) selector_model — the ``or`` fallback
+        # yields the literal "quick".
+        skill_a = make_skill(skill_id="a", name="a-skill",
+                             description="A description.")
+        client = make_openai_client(
+            response=make_chat_response('{"selected": [], "low_match": []}')
+        )
+        service = make_service(
+            llm_config={"base_url": "https://x", "api_key": "k",
+                        "selector_model": ""},
+        )
+        await service._llm_select(
+            "query", candidates=[(skill_a, 0.5)], max_results=1, client=client,
+        )
+        assert client.chat.completions.create.call_args.kwargs["model"] == "quick"
+
+
+# ============================================================
 # TestLlmFailure
 # ============================================================
 

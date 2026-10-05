@@ -18,17 +18,22 @@ Tests:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic_settings import BaseSettings
 
-from daemon.config import Config, SkillEvolutionConfig
+from daemon.config import Config, SkillEvolutionConfig, substitute_env_vars
 
 
 class TestDefaults:
     """Verify the documented default values."""
 
-    def test_defaults(self):
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch):
         """Instantiate with no env overrides; every default matches the spec."""
+        # Scrub the selector env var so the LITERAL default is what's
+        # under test even on machines where an operator exported it.
+        monkeypatch.delenv("SKILL_EVOLUTION_SELECTOR_MODEL", raising=False)
         cfg = SkillEvolutionConfig()
 
         # Embedding
@@ -40,6 +45,10 @@ class TestDefaults:
         # Evolution models — both None (caller falls back to LLMConfig).
         assert cfg.evolution_model is None
         assert cfg.analysis_model is None
+
+        # Stage-3 skill-search selector — LITERAL default "quick"
+        # (deliberately NOT the None→llm.model fallback pattern).
+        assert cfg.selector_model == "quick"
 
         # Injection
         assert cfg.max_inject_skills == 2
@@ -81,6 +90,7 @@ class TestAllFieldsPresent:
             # Evolution models
             "evolution_model",
             "analysis_model",
+            "selector_model",
             # Injection
             "max_inject_skills",
             "min_score_full_inject",
@@ -170,6 +180,12 @@ class TestEnvOverride:
         cfg = SkillEvolutionConfig()
         assert cfg.embedding_base_url == "https://custom-embeddings.example/v1"
 
+    def test_env_override_selector_model(self, monkeypatch: pytest.MonkeyPatch):
+        """``SKILL_EVOLUTION_SELECTOR_MODEL`` overrides the "quick" default."""
+        monkeypatch.setenv("SKILL_EVOLUTION_SELECTOR_MODEL", "custom-selector-x")
+        cfg = SkillEvolutionConfig()
+        assert cfg.selector_model == "custom-selector-x"
+
     def test_env_prefix_is_correct(self):
         """The env prefix is exactly ``SKILL_EVOLUTION_``."""
         # Inspect the model_config attribute (BaseSettings exposes
@@ -194,6 +210,7 @@ class TestConfigIntegration:
         assert config.skill_evolution.embedding_dimensions == 1536
         assert config.skill_evolution.max_inject_skills == 2
         assert config.skill_evolution.ab_sample_size == 10
+        assert config.skill_evolution.selector_model == "quick"
 
     def test_skill_evolution_is_a_base_settings_subclass(self):
         """``SkillEvolutionConfig`` is a ``BaseSettings`` (env-driven)."""
@@ -202,3 +219,35 @@ class TestConfigIntegration:
     def test_config_skill_evolution_field_present(self):
         """``Config`` declares ``skill_evolution`` as a field."""
         assert "skill_evolution" in Config.model_fields
+
+
+class TestSelectorModelYamlMirror:
+    """The shipped ``config.yaml`` mirrors ``selector_model`` the same way
+    ``llm.model`` mirrors ``OPENAI_MODEL`` (``config.yaml:19``): a
+    ``${VAR:-default}`` interpolation, resolved at YAML-load time via
+    ``daemon.config.substitute_env_vars`` — so an env var overrides the
+    in-file default without editing the yaml.
+    """
+
+    def _raw_mirror_value(self) -> str:
+        import yaml
+
+        repo_root = Path(__file__).resolve().parent.parent
+        raw = yaml.safe_load((repo_root / "config.yaml").read_text())
+        return raw["skill_evolution"]["selector_model"]
+
+    def test_yaml_mirrors_interpolation_form(self):
+        """The shipped yaml carries exactly the documented mirror form."""
+        assert (
+            self._raw_mirror_value() == "${SKILL_EVOLUTION_SELECTOR_MODEL:-quick}"
+        )
+
+    def test_yaml_mirror_resolves_to_quick(self, monkeypatch: pytest.MonkeyPatch):
+        """With no env override, the interpolation resolves to "quick"."""
+        monkeypatch.delenv("SKILL_EVOLUTION_SELECTOR_MODEL", raising=False)
+        assert substitute_env_vars(self._raw_mirror_value()) == "quick"
+
+    def test_yaml_mirror_env_override_wins(self, monkeypatch: pytest.MonkeyPatch):
+        """A set env var flows through the yaml interpolation."""
+        monkeypatch.setenv("SKILL_EVOLUTION_SELECTOR_MODEL", "custom-selector-y")
+        assert substitute_env_vars(self._raw_mirror_value()) == "custom-selector-y"
