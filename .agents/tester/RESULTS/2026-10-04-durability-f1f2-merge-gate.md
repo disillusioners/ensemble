@@ -128,3 +128,31 @@ Environment: R18 dev-lane recipe (8079/ensemble_dev, `QUEUE_DISCARD_ON_STARTUP=t
 - **Overall: ❌ NOT READY — merge blocked pending the G4 coverage fix + the 7 confirmed branch-caused failures' remediation.**
 
 Wrap commit (this file v1 + chunk plan + 26 artifact files): `e51939c6`. Post-wrap correction (langgraph refutation + 4 force-added .log evidence files + lessons) rides the follow-up commit.
+
+---
+
+# RE-GATE (2026-10-05, fix HEAD `f53a0638`)
+
+Fix commission: `3a2bbdf8` (G4: additive lane 6 `stuck_wake`) → `e3644431` (G1: test-side fixes for the 7) → `f53a0638` (review close-out). Dev claims: G1 7→0; G4 heals via lane 6; kill-switch default ON; lanes 1-5 byte-identical. Re-gate verdicts:
+
+## G1-r: **PASS — 0 branch-caused confirmed** (defensible equivalent)
+Scope basis (preflight-verified diff surface): daemon delta = 2 files +267/−2 (report_injection repository + report_delivery_recovery service); lane additivity byte-verified (lanes 1-5 untouched; only sqlalchemy import + constructor log-line append). Sweep = the previously-failing surface (all prior-gate failing FILES, 3 batches) + PG lane files + sampled new-code consumers: **303 [PERSISTING-PRE-EXISTING] · 35 [FIXED] · 0 [NEW?]**. All 7 expected fixes verified FIXED (fm11 ×1, resume_router ×1, council_tools ×24 — whole file fixed by the vision-alias fixture, report_lane_phase2 ×1 post-rename to `test_error_flag_flip_with_truthy_error_sets_fallback`, terminal_orphan_matrix ×1, list_queues ×2 — sealed 3-clean-pass vs 1 contended-fail adjudication, log `g1r-listqueues-confirm.log`). **KNOWN-4: 4/4 unchanged** (files untouched by the fix — preflight empty-diff). Sampling of new-code consumers (batch C, 5 files): 96P/0F. Deviations documented: signal-mode belt on the live-LLM-judge file (same as prior gate), QUARANTINE-row-66 deselect (re-failed standalone as expected — persisting).
+
+## G2-r: **PASS** — F-1 pack 15/15 @4.5s (AST pin + S1-S7 + FP1 by name); boot_pass 56/56 exactly (no count change).
+
+## G3-r: **PASS** — interleaving 14/14; F-2 family **140/140** (Batch-1 PG 39/39 on a serialized clean DB incl. both lane-6 real-shape PG tests green: `test_stuck_wake_lane_heals_captured_wedge_on_pg`, `test_stuck_wake_lane_is_noop_on_empty_db_on_pg`; Batch-2 unit 101/101 incl. report_lane_phase2 30/30 post-rename + ledger 14/14 dev-claim verified); PG-suite dev claim **24/24 VERIFIED**; full PG lane comparative: 263P/8F/24E/34S = prior clusters unchanged (+2P/−2S = exactly the 2 new lane-6 tests). NOTE: one concurrent-PG-dispatch contamination event (mass teardown FK error + the list_queues contended fail) — adjudicated as the documented shared-`ensemble_test` race (conftest's own xdist guard exists for it); all affected evidence superseded by serialized clean runs (adjudication record `g3r-f2-batch1-adjudication.md` in artifacts).
+
+## G4-r: **❌ FAIL (main leg) — the fix does not heal the LIVE wedge**
+True stuck-wake straddle captured per the LESSONS SIGSTOP recipe (marker PENDING; wake task claimed-RUNNING by worker-4; heartbeat staled 183s > 90s threshold; SIGSTOP→verify→SIGKILL; ≥100s dead-wait) → boot → lane 6 RAN but `find_stuck_wake_candidates` returned **0 candidates** → parent never healed (a=FAIL, b/c/d=PASS, e=PARTIAL).
+**Root cause (evidence-backed, rebuttable):** the lane-6 query joins `ri.child_message_id = mq.message_id`, but the REAL captured data carries `mq.message_id ≠ ri.child_message_id` (ddbeef1d ≠ 34cedf8d; the wake row correlates via its `source` pattern — a relaxed source-join returns exactly 1 row). This is the join-key hazard phase1-plan §3 explicitly warned about (queue-side id vs marker id semantics). The seeded PG test passes because the SEED satisfies the join; reality does not — the same tests-seed-the-shape/reality-differs divergence as the first gate, one layer deeper.
+Secondary findings: (1) **kill-switch env gap** — lane 6 has NO `config.py` env var (constructor param only; `pool_orchestrator.py:308` defaults ON) → not operator-reachable; unit-level OFF tests green (2/2); R2 behavioral leg covered only at unit level + documented gap. (2) **§12e decisions.md structural corruption** (orphan duplicate header ~line 1281 from f53a0638; docs-only). (3) Multi-child mixed leg INCOMPLETE (capture-miss + the pre-existing base crash `child_reports.py:2841` recurred mid-leg — still pre-existing, untouched). (4) R4(i) no-double-retry verified code-level only (lane 6 never processed live). **Positive:** manual-ping deadlock GONE (post-heal-state ping → normal response); non-straddle auto-continue intact; run-twice idempotency intact. Evidence @ `e5e60d31` in EVIDENCE/ (r1r/r2r/r3r/r4r files).
+
+## RE-GATE OVERALL: ❌ NOT READY — G4-r blocks (bar was all-gates-green)
+G1-r ✅ · G2-r ✅ · G3-r ✅ · G4-r ❌. The single blocking defect is precise: the lane-6 find-query join key does not match the real message_queue/report_injections data shape. Everything else the fix commission claimed is verified green.
+
+### Follow-up ledger (for the next fix round)
+1. 🔴 Lane-6 join-key fix: correlate via `mq.source` pattern (or add the id mapping per phase1-plan §3 option (i)) — then re-prove with the LIVE SIGSTOP recipe (the PG-seeded test alone demonstrably does not guard this seam).
+2. 🟠 `report_delivery_recovery_lane_stuck_wake` env var in config.py + pool_orchestrator wiring (lanes 1-5 parity).
+3. 🟠 §12e cleanup (orphan header, dangling fragment).
+4. 🟢 Multi-child mixed live leg remains unproven (retry after the join fix).
+5. 🟢 Serialize ALL PG-lane dispatches against `ensemble_test` (this gate's contamination events) — logged to LESSONS.

@@ -56,3 +56,20 @@
 - 14 gzipped chunk logs (A1-A3, B1-B3, C1-C2e, D1, E1-E2) + 4 gzipped A/B base batch logs
 - 1 INDEX.md (this file)
 - = **30 files total** in this directory
+
+## RE-GATE @ f53a0638 (2026-10-05)
+
+| File | Provenance |
+|---|---|
+| `g1r-identity.txt` | G1-r merge-gate re-run: 303 [PERSISTING-PRE-EXISTING] / 0 [NEW?] / 35 [FIXED] — defensible equivalent at fix HEAD f53a0638 (descendant e5e60d31, .agents/ only). Re-gate @ f53a0638 |
+| `g1r-listqueues-confirm.log` | Final serial confirmation: `tests/postgres/test_list_queues_with_admittable_work_pg.py` 5/5 passed (4.75s) — 3-clean-pass vs 1 contended-fail adjudication. Re-gate @ f53a0638 |
+| `g3r-f2-batch1-rerun.log` | G3-r F-2 batch-1 PG re-run (serialized, clean DB): 39/39 incl. both lane-6 real-shape PG tests green. Re-gate @ f53a0638 |
+| `g3r-f2-batch1-adjudication.md` | G3-r concurrent-PG-dispatch contamination adjudication: documented shared-`ensemble_test` race; all affected evidence superseded by serialized clean runs. Re-gate @ f53a0638 |
+| `g2r-pg-suite.log` | G2-r PG-suite dev-claim verification: 24/24 verified. Re-gate @ f53a0638 |
+| `g1r-pg-lane.log` | G1-r PG lane: 3 PG files (test_06f500af + test_list_queues + test_report_deferred_migration). Re-gate @ f53a0638 |
+| `g1r-pg-identity.txt` | G1-r PG lane failure identity. Re-gate @ f53a0638 |
+| `g1r-batchA1.log.gz` | G1-r batchA1: 27 default-lane files, 44F/195P/14S/1E in 436.14s (--timeout-method=signal override). Re-gate @ f53a0638 |
+| `g1r-batchA2.log.gz` | G1-r batchA2: 33 default-lane files (test_turn_state_machine.py deselected), 127F/832P/4 deselected in 113.23s. Re-gate @ f53a0638 |
+| `g1r-batchA3.log.gz` | G1-r batchA3: 33 default-lane files, 76F/2345P/18S/23E in 79.08s. Re-gate @ f53a0638 |
+| `g1r-batchB.log.gz` | G1-r batchB: 3 PG files, 6F/12P/2 xfailed/24E in 49.11s. Re-gate @ f53a0638 |
+| `g1r-batchC.log.gz` | G1-r batchC: 5 new-code consumer files, 96P in 14.33s. Re-gate @ f53a0638 |
