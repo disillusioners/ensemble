@@ -2042,9 +2042,16 @@ class ReportInjectionRepository:
         Returns:
             List of
             ``{"injection_id", "parent_instance_id",
-            "child_instance_id", "wake_task_id", "wake_message_id"}``
+            "child_instance_id", "child_message_id",
+            "wake_task_id", "wake_message_id"}``
             dicts. The caller (``_run_stuck_wake_lane``) passes
             ``wake_task_id`` to ``force_cancel_and_schedule_retry``.
+            ``child_message_id`` (the child's content message id,
+            which differs from ``wake_message_id`` in the LIVE
+            shape per the G4-r round-2 fix — the two are
+            correlated via the wake row's source pattern, NOT
+            equal-id joined) is included for the live-shape
+            test pin.
         """
         # Naive-UTC frame (DC-A fix) — mirrors
         # ``find_stale_running_tasks`` (which the production
@@ -2056,18 +2063,62 @@ class ReportInjectionRepository:
             - timedelta(seconds=heartbeat_stale_threshold_seconds)
         ).isoformat()
 
-        # Join order:
+        # Join order (Block-1 G4-r round-2 fix — the prior join
+        # ``mq.message_id = ri.child_message_id`` assumed the
+        # wake row's own ``message_id`` is the marker-stored
+        # ``child_message_id``; that is NOT what is captured in
+        # production. The merge check in
+        # ``.agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/logs/r1r-reboot.log``
+        # + ``db-assertions/r1r-pre-kill-assertion.txt`` (the LIVE
+        # r1r capture) shows ``mq.message_id=ddbeef1d-...`` for
+        # the wake row vs ``ri.child_message_id=34cedf8d-...`` for
+        # the child content message — DIFFERENT ids; correlation
+        # is via the wake row's ``source`` pattern per the
+        # natural-completion mint sites at ``manager.py:8855`` /
+        # ``:8883`` / ``:9266`` / ``:9282`` / ``:9506`` / ``:9534``
+        # + ``child_reports.py:3762`` (seven mint sites; all carry
+        # the colon-form ``f"internal_report:{child_instance_id}:
+        # {child_message_id}"``; per the verification iter 2 prior
+        # review):
+        #
         #   report_injections (PENDING marker)
-        #   → message_queue   (wake row in 'ready', anchored to
-        #                       parent via instance_id)
+        #   → message_queue   (wake row in 'ready', correlated via
+        #                     ``mq.source LIKE 'internal_report:' ||
+        #                     ri.child_instance_id || ':%'`` and
+        #                     anchored to the parent via
+        #                     ``instance_id``)
         #   → task            (wake PROCESS_REPORT task in
-        #                       'running', claimed by the dead
-        #                       worker, instance_id=parent)
-        # The linkage contract (per the natural-completion path at
-        # ``child_reports.py``): the marker's ``child_message_id``
-        # is the wake row's ``message_id`` AND the wake task's
-        # ``message_id``; the wake row + wake task both anchor to
-        # the parent's instance_id.
+        #                     'running', claimed by the dead
+        #                     worker, instance_id=parent;
+        #                     ``message_id`` is the wake row's
+        #                     ``message_id`` — the worker reads
+        #                     the wake row content via
+        #                     ``task.message_id``).
+        #
+        # The source-PREFIX correlation is the same shape used
+        # by the queue-side PREFIX ledger at
+        # ``MessageQueueRepository.find_wake_already_delivered_
+        # evidence`` (``daemon/repositories/message_queue/repository.py``
+        # — the colon-form ``internal_report:{child}:%`` is the
+        # documented shape). Child-boundary safety: a wake row
+        # with source ``internal_report:{child_iid}2:msg``
+        # (sibling child) does NOT match
+        # ``internal_report:{child_iid}:%`` because the ``2``
+        # is a different child id — the LIKE suffix is anchored
+        # by the preceding colon.
+        #
+        # False-skip interaction check (per the dispatch's
+        # "verification point beyond the fix"): lane 6 does NOT
+        # consult the queue-side PREFIX ledger
+        # (``find_wake_already_delivered_evidence``); it only
+        # calls ``find_stuck_wake_candidates`` (this query) +
+        # ``TaskRepository.force_cancel_and_schedule_retry``.
+        # Lane 2's per-row pass DOES consult the ledger (and
+        # excludes on ``has_injection_row`` first; the ledger
+        # match is redundant for marker-minted candidates). The
+        # stuck-wake shape: lane 2 still skips via the injection
+        # check (PENDING marker exists) — the ledger result is
+        # unchanged for this shape.
         sql = text(
             """
             SELECT
@@ -2079,8 +2130,10 @@ class ReportInjectionRepository:
                 mq.message_id AS wake_message_id
             FROM report_injections ri
             JOIN message_queue mq
-              ON mq.message_id = ri.child_message_id
-             AND mq.instance_id = ri.parent_instance_id
+              ON mq.instance_id = ri.parent_instance_id
+             AND mq.source LIKE (
+                 'internal_report:' || ri.child_instance_id || ':%'
+             )
             JOIN task tk
               ON tk.message_id = mq.message_id
              AND tk.instance_id = ri.parent_instance_id
@@ -2110,6 +2163,7 @@ class ReportInjectionRepository:
                 "injection_id": r.injection_id,
                 "parent_instance_id": r.parent_instance_id,
                 "child_instance_id": r.child_instance_id,
+                "child_message_id": r.child_message_id,
                 "wake_task_id": int(r.wake_task_id),
                 "wake_message_id": r.wake_message_id,
             }

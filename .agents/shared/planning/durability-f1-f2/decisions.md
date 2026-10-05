@@ -1277,9 +1277,6 @@ Captured state in
 (``parent=waiting_children``, ``child=completed``, ``wake_task=running``,
 ``wake_msg=ready``, ``inj_state=PENDING``).
 
-The §12a window-to-lane maps
- — Additive Lane 6 (Block-1 G4 merge-gate, 2026-10-05)
-
 **Additive appendix (no history rewrite).** The merge-gate G4 main-leg
 R1 capture (SIGSTOP->verify->SIGKILL on the worktree branch build) caught a
 wedge the §12a window-to-lane map did NOT predict: a PENDING marker
@@ -1353,3 +1350,25 @@ worker-pool claim path. The merge-gate evidence-commit
 (`.agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/findings.md`
 R1 + D1 tables) is the load-bearing record for the design rationale;
 this appendix points at it via the one-line cross-ref.
+
+**§12e repair note (Block-1 G4-r round-2, 2026-10-05).** The
+append-merge that closed the prior commit (f53a0638)
+duplicated the §12e header's tail (the original commit
+ran `cat /tmp/decisions_appendix.md >> decisions.md`
+with the heredoc EOF marker misrecognized by /bin/sh,
+producing a single in-content fragment
+"The §12a window-to-lane maps -- Additive Lane 6 (Block-1
+G4 merge-gate, 2026-10-05)" at lines 1280-1281 between the
+two halves of the §12e body). The repair above deletes
+that fragment (additive -- no other text touched). The
+§12e header at line 1266 and the appendix body at lines
+1268+ (post-repair) are intact. The Block-1 G4-r
+round-2 join-key correction (source-PREFIX correlation --
+see the G4-r round-2 commit message) and the live-shape
+seed rewrite below supersede the original §12e
+implementation note that the join was
+`mq.message_id = ri.child_message_id` (that join is
+structurally wrong against the LIVE row shape; see the
+r1r pre-kill assertion). The §12e entry above is the
+load-bearing design record; this note adds the
+source-correlation evidence that fixes the join-key.

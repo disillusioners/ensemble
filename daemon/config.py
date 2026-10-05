@@ -1377,6 +1377,29 @@ class ServicesConfig(BaseSettings):
             "parent rows always reach a structured disposition)."
         ),
     )
+    report_delivery_recovery_lane_stuck_wake: bool = Field(
+        default=True,
+        description=(
+            "Lane 6 (stuck_wake heal — Block-1 G4 merge-gate) "
+            "per-lane kill-switch. Defaults to True; the lane "
+            "force-cancels a dead-worker wake task whose worker "
+            "died with the daemon (F-1 epoch-belt preserves the "
+            "wake row + the marker row + the RUNNING task status, "
+            "but the per-instance busy guard at "
+            "task/repository.py:2648-2650 blocks new claims until "
+            "the stale-task-recovery F-1 boot_epoch amendment at "
+            "task/repository.py:3411 elapses — typically after the "
+            "parent has been wedged in waiting_children for the full "
+            "F-1 15-minute DEFAULT_STALE_THRESHOLD_MINUTES). Setting "
+            "this to False (env "
+            "ENSEMBLE_REPORT_DELIVERY_RECOVERY_LANE_STUCK_WAKE=0) "
+            "restores the pre-fix behavior — the wedge heals via "
+            "stale_task_recovery once the F-1 boot_epoch amendment "
+            "elapses, but the parent stays wedged for that "
+            "interval. Production should leave this True (the lane "
+            "is the heal frontier for the captured wedge shape)."
+        ),
+    )
     drift_reconcile_min_pending_age_seconds: int = Field(
         default=300,
         description=(

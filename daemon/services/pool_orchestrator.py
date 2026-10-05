@@ -333,6 +333,9 @@ class PoolOrchestrator:
                     svc.report_delivery_recovery_lane_recovery_retry
                 ),
                 lane_orphan=svc.report_delivery_recovery_lane_orphan,
+                lane_stuck_wake=(
+                    svc.report_delivery_recovery_lane_stuck_wake
+                ),
             )
             # Fire-and-forget boot sweep (binding order S-c:
             # ``_ensure_postgres_columns`` is in ``initialize()``,

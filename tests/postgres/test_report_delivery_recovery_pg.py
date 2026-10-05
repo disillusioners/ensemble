@@ -2238,35 +2238,61 @@ class TestBlock1G4StuckWakeHealOnPG:
         from daemon.repositories.task.repository import TaskRepository
         from daemon.repositories.task.models import TaskType
 
-        # ── Seed the captured state ─────────────────────────────────
+        # ── Seed the LIVE r1r-captured state ───────────────────────
+        # Parent + child instances.
         parent = _seed_instance(
             pg_engine_3_6,
-            instance_id="g4-parent-c63eecab",
+            instance_id="g4-parent-b5a5e621",
             status=InstanceStatus.WAITING_CHILDREN.value,
         )
         child = _seed_instance(
             pg_engine_3_6,
-            instance_id="g4-child-ec1a2dac",
+            instance_id="g4-child-b7c2a7c9",
             parent_id=parent,
             status=InstanceStatus.COMPLETED.value,
         )
-        # Preserved wake row (the F-1 epoch-belt preserves message_queue).
-        wake_message_id = "g4-wake-msg-1"
+        # The marker's child_message_id = the CHILD's content
+        # message (the message the child sent at completion —
+        # ``34cedf8d-...`` per the r1r pre-kill assertion). The
+        # wake row has a DIFFERENT message_id (``ddbeef1d-...``)
+        # minted when the wake was created. The two are NOT
+        # equal — correlation is via the wake row's ``source``
+        # pattern. This is the LIVE shape; the prior commit
+        # (3a2bbdf8) used a satisfying-join seed where
+        # ``mq.message_id == ri.child_message_id`` (false
+        # assurance; the seed satisfied the wrong join).
+        child_content_message_id = "g4-child-content-34cedf8d"
+        wake_message_id = "g4-wake-msg-ddbeef1d"
+        assert child_content_message_id != wake_message_id, (
+            "LIVE shape: the wake row's message_id is a fresh "
+            "uuid minted at wake-mint time, NOT the marker-stored "
+            "child_content_message_id (the two are different ids "
+            "per the r1r pre-kill assertion)"
+        )
         _seed_pg_message(
             pg_engine_3_6,
             instance_id=parent,
             message_id=wake_message_id,
             status=MessageStatus.READY.value,
             type_=MessageType.COMPLETION_REPORT.value,
+            # The source encodes the child_content_message_id
+            # (colon-form, per the seven mint sites — see the F-1
+            # / F-2 rationale in
+            # ``daemon/services/report_delivery_ledger.py`` /
+            # ``daemon/repositories/message_queue/repository.py``):
+            # ``f"internal_report:{child_iid}:{child_content_msg_id}"``.
+            # The lane's source-PREFIX correlation
+            # (``mq.source LIKE 'internal_report:' || ri.child_instance_id || ':%'``)
+            # matches via the child_iid prefix.
             source=(
-                f"internal_report:{child}:wake-message-id"
+                f"internal_report:{child}:{child_content_message_id}"
             ),
         )
         # Dead-worker wake task (process_report on the parent's
         # queue, claimed by a worker that died with the daemon,
-        # stale heartbeat since the crash). The heartbeat is set
-        # 10 minutes ago to satisfy the stuck-wake threshold
-        # (90s default; the dead worker never updates it again).
+        # stale heartbeat since the crash). The wake task's
+        # ``message_id`` is the wake ROW's message_id (the worker
+        # reads the wake row content via ``task.message_id``).
         stale_heartbeat = (
             _dt.now(_tz.utc).replace(tzinfo=None) - _td(minutes=10)
         ).isoformat()
@@ -2286,15 +2312,17 @@ class TestBlock1G4StuckWakeHealOnPG:
             session.refresh(wake_task)
             dead_wake_task_id = int(wake_task.id)
 
-        # The PENDING marker (the recovery obligation for the obligation
-        # triple). The marker's child_message_id == wake row's
-        # message_id — the linkage contract that the lane's query
-        # relies on.
+        # The PENDING marker (the recovery obligation for the
+        # obligation triple). The marker's child_message_id ==
+        # the CHILD's content message (NOT the wake row's
+        # message_id — the two are different ids in the LIVE
+        # shape; the lane correlates via the wake row's source
+        # pattern).
         _seed_pg_deferred_row(
             pg_engine_3_6,
             parent_instance_id=parent,
             child_instance_id=child,
-            child_message_id=wake_message_id,
+            child_message_id=child_content_message_id,
             state=ReportInjectionState.PENDING.value,
             deferred_reason="system:crash_wake",
         )
@@ -2329,14 +2357,16 @@ class TestBlock1G4StuckWakeHealOnPG:
         # ── Candidate query finds the captured state ───────────────
         candidates = ri_repo.find_stuck_wake_candidates(limit=10)
         assert len(candidates) == 1, (
-            f"the captured wedge MUST be a stuck-wake candidate; "
-            f"got {candidates!r}"
+            f"the captured wedge (LIVE shape: mq.message_id != "
+            f"ri.child_message_id, source-PREFIX correlation) "
+            f"MUST be a stuck-wake candidate; got {candidates!r}"
         )
         cand = candidates[0]
         assert cand["parent_instance_id"] == parent
         assert cand["child_instance_id"] == child
         assert cand["wake_task_id"] == dead_wake_task_id
         assert cand["wake_message_id"] == wake_message_id
+        assert cand["child_message_id"] == child_content_message_id
 
         # ── The heal ─────────────────────────────────────────────────
         lane = service._run_stuck_wake_lane()
@@ -2551,6 +2581,245 @@ class TestBlock1G4StuckWakeHealOnPG:
         # IF the captured-state JobItem has been transitioned
         # off-active by some other actor — out of scope for
         # this fix).
+
+    def test_stuck_wake_query_correlates_via_source_not_id_join_on_pg(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        """Live-shape correlation pin (G4-r round-2 — the id-join
+        regression class). Seeds the captured state with
+        NON-matching message_id vs child_message_id + a
+        source-PREFIX correlation. The query MUST find the row
+        via the source-PREFIX join (``mq.source LIKE 'internal_report:' ||
+        ri.child_instance_id || ':%'``).
+
+        This test pins the source-correlation fix: the prior
+        commit (3a2bbdf8) had ``mq.message_id = ri.child_message_id``
+        as the join condition — a satisfying-join seed (where
+        both ids are equal) made that test green while the LIVE
+        row shape (different ids, source correlation) was broken.
+        The retry suite (this commit) uses a non-matching id
+        seed; an id-join regression would now FAIL this test.
+
+        Companion shape (sibling-child exclusion) is covered by
+        ``test_stuck_wake_lane_excludes_sibling_child_on_pg`` below.
+        """
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+
+        parent = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-parent-source-pin",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        child = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-child-source-pin",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        # The CHILD's content message (the message that the
+        # child sent at completion). This is what the marker's
+        # ``child_message_id`` references. Per the natural-
+        # completion mint at child_reports.py:3762, this id is
+        # also embedded in the wake row's ``source`` (colon-form).
+        child_content_message_id = "g4-child-content-pin"
+        # The WAKE ROW's own message_id — a fresh uuid minted
+        # when the wake was created. Different from the child's
+        # content message_id (LIVE shape, per the r1r pre-kill
+        # assertion: mq.message_id=ddbeef1d, ri.child_message_id=
+        # 34cedf8d).
+        wake_message_id = "g4-wake-msg-source-pin"
+        assert child_content_message_id != wake_message_id
+        _seed_pg_message(
+            pg_engine_3_6,
+            instance_id=parent,
+            message_id=wake_message_id,
+            status=MessageStatus.READY.value,
+            type_=MessageType.COMPLETION_REPORT.value,
+            source=(
+                f"internal_report:{child}:{child_content_message_id}"
+            ),
+        )
+        # Dead-worker wake task (RUNNING, stale heartbeat).
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from daemon.repositories.task.models import TaskType
+
+        stale_heartbeat = (
+            _dt.now(_tz.utc).replace(tzinfo=None) - _td(minutes=10)
+        ).isoformat()
+        with Session(pg_engine_3_6) as session:
+            session.add(
+                Task(
+                    work_id=f"g4-wake-work-pin-{uuid.uuid4().hex[:8]}",
+                    task_type=TaskType.PROCESS_REPORT.value,
+                    instance_id=parent,
+                    message_id=wake_message_id,
+                    status=TaskStatus.RUNNING.value,
+                    worker_id="dead-worker-pin",
+                    started_at=stale_heartbeat,
+                    last_heartbeat_at=stale_heartbeat,
+                )
+            )
+            session.commit()
+        _seed_pg_deferred_row(
+            pg_engine_3_6,
+            parent_instance_id=parent,
+            child_instance_id=child,
+            child_message_id=child_content_message_id,
+            state=ReportInjectionState.PENDING.value,
+            deferred_reason="system:crash_wake",
+        )
+
+        ri_repo = ReportInjectionRepository(engine=pg_engine_3_6)
+        candidates = ri_repo.find_stuck_wake_candidates(limit=10)
+        # The candidate query joins via the source-PREFIX
+        # correlation. An id-join regression (mq.message_id =
+        # ri.child_message_id) would return 0 candidates here
+        # because the ids differ.
+        assert len(candidates) == 1, (
+            f"LIVE shape: source-PREFIX correlation MUST match "
+            f"(wake row id={wake_message_id} != marker "
+            f"child_message_id={child_content_message_id}); "
+            f"an id-join regression would return 0 here — got "
+            f"{candidates!r}"
+        )
+        cand = candidates[0]
+        assert cand["wake_message_id"] == wake_message_id
+        assert cand["child_message_id"] == child_content_message_id
+
+    def test_stuck_wake_lane_excludes_sibling_child_on_pg(
+        self, pg_engine_3_6: Engine
+    ) -> None:
+        """Child-boundary safety pin (G4-r round-2). Seeds TWO
+        children whose wake rows would both collide on a bare
+        substring search — the PREFIX boundary rule
+        (``internal_report:{child_iid}:...`` colon-form)
+        ensures only the matched child's wake row is returned.
+
+        Companion to the source-correlation pin: this test
+        catches a regression where the boundary safety of the
+        source pattern is broken (e.g. a wrong LIKE prefix that
+        matches sibling-child wakes).
+        """
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+
+        parent = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-parent-boundary",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        # Two children whose ids share a prefix (the
+        # child-boundary collision case). The boundary rule
+        # requires the suffix to be colon-delimited OR exact.
+        child_a = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-child-boundary-A",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        # child_b's id EXTENDS G4 child_a's id (the boundary
+        # collision). A bare substring LIKE would match BOTH;
+        # the colon-form prefix matches ONLY child_a.
+        child_b = _seed_instance(
+            pg_engine_3_6,
+            instance_id="g4-child-boundary-A-sibling",
+            parent_id=parent,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        child_a_content_msg = "g4-child-A-content"
+        _seed_pg_message(
+            pg_engine_3_6,
+            instance_id=parent,
+            message_id="g4-wake-A-msg",
+            status=MessageStatus.READY.value,
+            type_=MessageType.COMPLETION_REPORT.value,
+            source=(
+                f"internal_report:{child_a}:{child_a_content_msg}"
+            ),
+        )
+        child_b_content_msg = "g4-child-B-content"
+        _seed_pg_message(
+            pg_engine_3_6,
+            instance_id=parent,
+            message_id="g4-wake-B-msg",
+            status=MessageStatus.READY.value,
+            type_=MessageType.COMPLETION_REPORT.value,
+            source=(
+                f"internal_report:{child_b}:{child_b_content_msg}"
+            ),
+        )
+        # Dead-worker wake tasks for both children (with stale
+        # heartbeats).
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from daemon.repositories.task.models import TaskType
+
+        stale_heartbeat = (
+            _dt.now(_tz.utc).replace(tzinfo=None) - _td(minutes=10)
+        ).isoformat()
+        with Session(pg_engine_3_6) as session:
+            for msg_id, inst_id in [
+                ("g4-wake-A-msg", parent),
+                ("g4-wake-B-msg", parent),
+            ]:
+                session.add(
+                    Task(
+                        work_id=f"g4-wake-work-boundary-{uuid.uuid4().hex[:8]}",
+                        task_type=TaskType.PROCESS_REPORT.value,
+                        instance_id=inst_id,
+                        message_id=msg_id,
+                        status=TaskStatus.RUNNING.value,
+                        worker_id="dead-worker-boundary",
+                        started_at=stale_heartbeat,
+                        last_heartbeat_at=stale_heartbeat,
+                    )
+                )
+            session.commit()
+        # PENDING markers for BOTH children.
+        _seed_pg_deferred_row(
+            pg_engine_3_6,
+            parent_instance_id=parent,
+            child_instance_id=child_a,
+            child_message_id=child_a_content_msg,
+            state=ReportInjectionState.PENDING.value,
+            deferred_reason="system:crash_wake",
+        )
+        _seed_pg_deferred_row(
+            pg_engine_3_6,
+            parent_instance_id=parent,
+            child_instance_id=child_b,
+            child_message_id=child_b_content_msg,
+            state=ReportInjectionState.PENDING.value,
+            deferred_reason="system:crash_wake",
+        )
+
+        ri_repo = ReportInjectionRepository(engine=pg_engine_3_6)
+        candidates = ri_repo.find_stuck_wake_candidates(limit=10)
+        # Both children are eligible (their wakes match the
+        # boundary-safe LIKE). A regression that breaks the
+        # boundary (e.g. LIKE without trailing colon) would
+        # double-count or shift; the assertion pins the
+        # per-child correlation.
+        assert len(candidates) == 2, (
+            f"two children with two distinct wake rows should "
+            f"correlate correctly; got {len(candidates)} "
+            f"candidates"
+        )
+        child_ids = {c["child_instance_id"] for c in candidates}
+        assert child_ids == {child_a, child_b}, (
+            f"both children MUST be in the candidate set; got "
+            f"{child_ids}, expected {{{child_a}, {child_b}}}"
+        )
+        # And each candidate's wake_message_id matches its
+        # child's wake row (no cross-pollination from the
+        # source-PREFIX correlation).
+        for cand in candidates:
+            if cand["child_instance_id"] == child_a:
+                assert cand["wake_message_id"] == "g4-wake-A-msg"
+            else:
+                assert cand["wake_message_id"] == "g4-wake-B-msg"
 
     def test_stuck_wake_lane_is_noop_on_empty_db_on_pg(
         self, pg_engine_3_6: Engine
