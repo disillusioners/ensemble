@@ -408,6 +408,21 @@ async def list_instances(
             "value is rejected with 422."
         ),
     ),
+    source: str | None = Query(
+        None,
+        description=(
+            "Optional source-type filter. Special value ``chat`` restricts "
+            "to chat-source instances (telegram/slack/discord/whatsapp — "
+            "the registry-backed set mirroring ``USER_ORIGIN_CHAT_SOURCE_TYPES`` "
+            "in ``daemon/tools/upgrade_journal.py``; excludes webhook — "
+            "CI/automation, not interactive chat). Any other string is "
+            "matched as a single ``source_type`` value (exact match). "
+            "Omitted/empty applies no source filter. When supplied, the "
+            "filter applies to ROOT instances only when descendant loading "
+            "is on; descendants of in-scope roots are returned regardless "
+            "of their own ``source_type`` (lineage is by parent_id)."
+        ),
+    ),
 ) -> InstanceListResponse:
     """List instances with pagination.
 
@@ -435,6 +450,13 @@ async def list_instances(
             pinned-first behavior, byte-compatible) or ``"activity"`` (live
             non-terminal roots first, then ``updated_at`` DESC). Invalid
             values are rejected with 422.
+        source: Optional source-type filter. Special value ``"chat"``
+            restricts to chat-source instances (telegram/slack/discord/
+            whatsapp — registry-backed set mirroring
+            ``USER_ORIGIN_CHAT_SOURCE_TYPES`` in
+            ``daemon/tools/upgrade_journal.py``). Any other string is
+            matched as a single ``source_type`` value. ``None`` applies
+            no filter.
     """
     manager = _get_manager(request)
 
@@ -450,6 +472,7 @@ async def list_instances(
         include_descendants=include_descendants,
         search=search,
         order=order,
+        source=source,
     )
 
     # Merge UI preferences (pin + color tag + icon tag) into each

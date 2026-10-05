@@ -137,8 +137,19 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   private lastLoadedInstanceId: string | null = null;
 
+  /**
+   * Project-context sentinel for navigation. Composes the active
+   * project id, the active special tab id (``'chat'`` etc.), and the
+   * ``'all'`` fallback — same shape as
+   * ``instances.component.ts:68-72`` so sibling routes stay aligned
+   * when the Chat tab is the active filter (an instance-row click on
+   * the Chat tab must route to ``/projects/chat/...``, not
+   * ``/projects/all/...``).
+   */
   protected get projectId(): string {
-    return this.tabStateService.activeProjectId() ?? 'all';
+    return this.tabStateService.activeProjectId()
+      ?? this.tabStateService.activeSpecialTabId()
+      ?? 'all';
   }
 
   /**
@@ -1275,7 +1286,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.api.createInstance(agentPath, undefined, projectId, versionTag).subscribe({
       next: (instance) => {
         // Instance will appear in instanceService via polling
-        const projectContext = this.tabStateService.activeProjectId() ?? 'all';
+        const projectContext = this.tabStateService.activeProjectId()
+          ?? this.tabStateService.activeSpecialTabId()
+          ?? 'all';
         this.router.navigate(['/projects', projectContext, 'instances', instance.instance_id]);
       },
       error: (err) => {

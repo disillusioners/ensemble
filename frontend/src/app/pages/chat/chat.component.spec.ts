@@ -27,19 +27,36 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 
 // Mock TabStateService — mirrors production semantics: `activeProjectId`
 // is a computed that returns null when the active tab is the 'all'
-// pseudo-project, matching the real TabStateService. `setActiveTab(tabId)`
+// pseudo-project, matching the real TabStateService. `activeSpecialTabId`
+// mirrors the production computed that returns the active tab id when
+// it is a 'chat' or 'all' special tab, null otherwise. `setActiveTab(tabId)`
 // looks up the tab in openTabs and falls back to constructing a
 // project-type tab on the fly so tests that switch to non-existent
 // project ids still drive the computed.
 class MockTabStateService {
   readonly openTabs = signal<ProjectTab[]>([
-    { id: 'all', name: 'All', type: 'all' }
+    { id: 'all', name: 'All', type: 'all' },
+    { id: 'chat', name: 'Chat', type: 'chat' },
   ]);
   readonly activeTab = signal<ProjectTab>({ id: 'all', name: 'All', type: 'all' });
 
   readonly activeProjectId = computed(() => {
     const tab = this.activeTab();
     return tab.type === 'project' ? tab.id : null;
+  });
+
+  // F1 fix: mirrors production activeSpecialTabId() in
+  // tab-state.service.ts:47-53. Returns the active tab id when the
+  // tab is a 'chat' or 'all' special tab; null otherwise. The
+  // composition `activeProjectId() ?? activeSpecialTabId() ?? 'all'`
+  // in chat.component.ts (and the sibling instance-list/home
+  // components) relies on this fallback.
+  readonly activeSpecialTabId = computed(() => {
+    const tab = this.activeTab();
+    if (tab.type === 'all' || tab.type === 'chat') {
+      return tab.id;
+    }
+    return null;
   });
 
   setActiveTabCalls: string[] = [];
@@ -882,7 +899,11 @@ class TestableChatComponent {
     this.sseService.disconnect();
 
     const agentPath = `./agents/${agent.id}`;
-    const projectContext = this.tabStateService.activeProjectId() ?? 'all';
+    // F1 fix: mirror the post-create composition in chat.component.ts:1289-1291
+    // so the Chat special tab routes to /projects/chat/... (not 'all').
+    const projectContext = this.tabStateService.activeProjectId()
+      ?? this.tabStateService.activeSpecialTabId()
+      ?? 'all';
 
     this.api.createInstance(agentPath).subscribe({
       next: (instance: InstanceInfo) => {
@@ -916,7 +937,13 @@ class TestableChatComponent {
   }
 
   protected get projectId(): string {
-    return this.tabStateService.activeProjectId() ?? 'all';
+    // F1 fix: compose activeSpecialTabId() into the fallback so the
+    // Chat special tab routes to /projects/chat/... instead of
+    // /projects/all/.... Mirrors chat.component.ts:140-148 and the
+    // production composition in instances.component.ts:68-72.
+    return this.tabStateService.activeProjectId()
+      ?? this.tabStateService.activeSpecialTabId()
+      ?? 'all';
   }
 
   protected onHeaderWorkspaceToggle(): void {
@@ -1010,6 +1037,22 @@ describe('ChatComponent - Project-Aware Navigation', () => {
       expect(component.navigateCalls[0].path).toEqual(['/projects', 'chat-project', 'instances', instanceId]);
     });
 
+    it('should navigate to /projects/chat/instances/:instanceId when on Chat special tab', () => {
+      tabStateService.setActiveTab('chat');
+      const instanceId = 'chat-inst-003';
+      mockApiService.createInstance.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next(createMockInstance({ instance_id: instanceId }));
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onNewInstance();
+
+      expect(component.navigateCalls).toHaveLength(1);
+      expect(component.navigateCalls[0].path).toEqual(['/projects', 'chat', 'instances', instanceId]);
+    });
+
     it('should navigate to home when no agent is selected', () => {
       component.selectedAgent.set(null);
       tabStateService.setActiveTab('all');
@@ -1034,6 +1077,38 @@ describe('ChatComponent - Project-Aware Navigation', () => {
 
       expect(mockSseService.clearEvents).toHaveBeenCalled();
       expect(mockSseService.disconnect).toHaveBeenCalled();
+    });
+  });
+
+  describe('projectId getter - F1 composition pin', () => {
+    // F1 fix: the chat.component.ts:140-148 ``projectId`` getter
+    // composes activeProjectId() ?? activeSpecialTabId() ?? 'all'.
+    // These tests pin the composition so a regression that drops the
+    // activeSpecialTabId() fallback (returning 'all' instead of 'chat'
+    // when only the special tab is active) is caught here.
+    it('should return "all" when on All special tab', () => {
+      tabStateService.setActiveTab('all');
+      expect(component.projectId).toBe('all');
+    });
+
+    it('should return "chat" when on Chat special tab (F1 regression pin)', () => {
+      tabStateService.setActiveTab('chat');
+      expect(component.projectId).toBe('chat');
+    });
+
+    it('should return project id when on a project tab', () => {
+      tabStateService.setActiveTab('proj-abc');
+      expect(component.projectId).toBe('proj-abc');
+    });
+
+    it('should prefer project id over special tab id when both are set', () => {
+      // The composition is order-sensitive: project id must be the
+      // first fallback so a real project always wins.
+      tabStateService.setActiveTab('chat');
+      // Then mutate the activeTab directly to a project-type tab so
+      // both the project id and the special tab id are populated.
+      tabStateService.activeTab.set({ id: 'proj-override', name: 'Override', type: 'project' });
+      expect(component.projectId).toBe('proj-override');
     });
   });
 

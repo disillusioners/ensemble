@@ -5,6 +5,16 @@ const STORAGE_KEY = 'ensemble-project-tabs';
 
 export const ALL_TAB: ProjectTab = { id: 'all', name: 'All', type: 'all' };
 
+/**
+ * Mirror of the production ``CHAT_TAB`` sentinel defined in
+ * ``tab-state.service.ts``. Kept adjacent to ``ALL_TAB`` so the
+ * testable service is a single-file, self-contained copy of the
+ * production logic. The duplication is intentional: the testable
+ * class is an in-test re-implementation that exercises the
+ * behavior without pulling in Angular DI / HttpClient.
+ */
+export const CHAT_TAB: ProjectTab = { id: 'chat', name: 'Chat', type: 'chat' };
+
 interface StoredTabState {
   openTabs: ProjectTab[];
   activeTabId: string;
@@ -12,12 +22,26 @@ interface StoredTabState {
 
 // Testable TabStateService implementation (mirrors actual service)
 class TestableTabStateService {
-  readonly openTabs = signal<ProjectTab[]>([ALL_TAB]);
+  readonly openTabs = signal<ProjectTab[]>([ALL_TAB, CHAT_TAB]);
   readonly activeTab = signal<ProjectTab>(ALL_TAB);
 
   readonly activeProjectId = computed(() => {
     const tab = this.activeTab();
     return tab.type === 'project' ? tab.id : null;
+  });
+
+  /**
+   * Mirror of the production ``activeSpecialTabId`` — the id of the
+   * active special tab (``"all"`` or ``"chat"``) when one of the
+   * two permanent special tabs is active, ``null`` when a project
+   * tab is active.
+   */
+  readonly activeSpecialTabId = computed(() => {
+    const tab = this.activeTab();
+    if (tab.type === 'all' || tab.type === 'chat') {
+      return tab.id;
+    }
+    return null;
   });
 
   addTab(project: { project_id: string; name: string }): void {
@@ -34,7 +58,8 @@ class TestableTabStateService {
   }
 
   removeTab(tabId: string): void {
-    if (tabId === ALL_TAB.id) {
+    if (tabId === ALL_TAB.id || tabId === CHAT_TAB.id) {
+      // Cannot close the permanent special tabs.
       return;
     }
 
@@ -75,7 +100,10 @@ class TestableTabStateService {
 
     try {
       const state: StoredTabState = JSON.parse(stored);
-      const validTabs: ProjectTab[] = [ALL_TAB];
+      // Always re-seed the two permanent special tabs in their canonical
+      // order (All first, Chat second). Mirrors the production restore
+      // behavior.
+      const validTabs: ProjectTab[] = [ALL_TAB, CHAT_TAB];
 
       if (availableProjectIds) {
         for (const tab of state.openTabs) {
@@ -123,14 +151,102 @@ describe('TabStateService', () => {
   });
 
   describe('initial state', () => {
-    it('should have only All tab in openTabs', () => {
-      expect(service.openTabs()).toHaveLength(1);
+    it('should have All tab as the first tab in openTabs', () => {
+      // Two permanent special tabs are always seeded: All + Chat.
+      // The All tab is the canonical first entry (matches the
+      // pre-feature behavior) so existing consumers iterating
+      // ``openTabs[0]`` see no shape change.
+      expect(service.openTabs()).toHaveLength(2);
       expect(service.openTabs()[0].id).toBe('all');
+      expect(service.openTabs()[0].type).toBe('all');
     });
 
-    it('should have All tab as activeTab', () => {
+    it('should have Chat tab as the second tab in openTabs', () => {
+      // The Chat tab is seeded alongside All — non-closable, never
+      // persisted by id across a restoreState cycle (it's always
+      // re-added by the restore logic, see TestRestoreState below).
+      expect(service.openTabs()[1].id).toBe('chat');
+      expect(service.openTabs()[1].type).toBe('chat');
+    });
+
+    it('should have All tab as activeTab by default', () => {
       expect(service.activeTab().id).toBe('all');
       expect(service.activeTab().type).toBe('all');
+    });
+
+    it('should expose activeSpecialTabId="all" by default', () => {
+      // The new computed signal is the wire the InstancesComponent
+      // uses to drive the chat source filter. Must resolve to "all"
+      // on a fresh service so the All tab continues to render
+      // without a source filter (back-compat).
+      expect(service.activeSpecialTabId()).toBe('all');
+    });
+
+    it('should expose activeProjectId=null by default', () => {
+      // activeProjectId is null on the two permanent special tabs —
+      // it is the wire for the project-id filter. Back-compat with
+      // the pre-feature behavior (null = "no project filter").
+      expect(service.activeProjectId()).toBeNull();
+    });
+  });
+
+  describe('Chat tab activation', () => {
+    it('should switch to the Chat tab and expose activeSpecialTabId="chat"', () => {
+      service.setActiveTab('chat');
+
+      expect(service.activeTab().id).toBe('chat');
+      expect(service.activeTab().type).toBe('chat');
+      expect(service.activeSpecialTabId()).toBe('chat');
+      // activeProjectId must still be null on the Chat tab (it's
+      // not a project — the InstancesComponent uses
+      // activeSpecialTabId for the source-filter decision, NOT
+      // activeProjectId).
+      expect(service.activeProjectId()).toBeNull();
+    });
+
+    it('should round-trip the active tab through localStorage', () => {
+      service.setActiveTab('chat');
+      const stored = localStorage.getItem(STORAGE_KEY);
+      expect(stored).not.toBeNull();
+      const state: StoredTabState = JSON.parse(stored!);
+      expect(state.activeTabId).toBe('chat');
+    });
+
+    it('should expose activeSpecialTabId=null on a project tab', () => {
+      service.addTab({ project_id: 'project-1', name: 'Project 1' });
+
+      expect(service.activeTab().id).toBe('project-1');
+      expect(service.activeSpecialTabId()).toBeNull();
+      // activeProjectId resolves to the project id.
+      expect(service.activeProjectId()).toBe('project-1');
+    });
+  });
+
+  describe('removeTab — non-closable special tabs', () => {
+    it('cannot close the All tab', () => {
+      service.removeTab('all');
+      // All tab is still present in openTabs.
+      expect(service.openTabs().some(t => t.id === 'all')).toBe(true);
+    });
+
+    it('cannot close the Chat tab', () => {
+      // Pre-condition: Chat tab is in openTabs (seeded by default).
+      expect(service.openTabs().some(t => t.id === 'chat')).toBe(true);
+
+      service.removeTab('chat');
+
+      // Chat tab is still present in openTabs. The setActiveTab and
+      // the activeTab are also unchanged (the call is a no-op).
+      expect(service.openTabs().some(t => t.id === 'chat')).toBe(true);
+    });
+
+    it('removeTab on Chat does not change the active tab when Chat is active', () => {
+      service.setActiveTab('chat');
+      service.removeTab('chat');
+
+      // The active tab must remain Chat — the no-op close attempt
+      // must not silently fall through to a different tab.
+      expect(service.activeTab().id).toBe('chat');
     });
   });
 
@@ -138,7 +254,8 @@ describe('TabStateService', () => {
     it('should add a new project tab', () => {
       service.addTab({ project_id: 'project-1', name: 'Project 1' });
 
-      expect(service.openTabs()).toHaveLength(2);
+      // 2 permanent special tabs (All + Chat) + 1 project = 3.
+      expect(service.openTabs()).toHaveLength(3);
       const projectTab = service.openTabs().find(tab => tab.id === 'project-1');
       expect(projectTab).toBeDefined();
       expect(projectTab?.name).toBe('Project 1');
@@ -169,8 +286,8 @@ describe('TabStateService', () => {
       // Add duplicate
       service.addTab({ project_id: 'project-1', name: 'Project 1 Updated' });
 
-      // Should still have 3 tabs (All + 2 projects)
-      expect(service.openTabs()).toHaveLength(3);
+      // Should still have 4 tabs (All + Chat + 2 projects)
+      expect(service.openTabs()).toHaveLength(4);
       // Should switch to existing tab
       expect(service.activeTab().id).toBe('project-1');
       // Original name should be preserved
@@ -201,7 +318,8 @@ describe('TabStateService', () => {
     it('should remove a project tab', () => {
       service.removeTab('project-1');
 
-      expect(service.openTabs()).toHaveLength(2);
+      // All + Chat + project-2 = 3 tabs.
+      expect(service.openTabs()).toHaveLength(3);
       expect(service.openTabs().find(t => t.id === 'project-1')).toBeUndefined();
     });
 
@@ -223,8 +341,8 @@ describe('TabStateService', () => {
       expect(service.activeTab().id).toBe('project-1');
     });
 
-    it('should switch to All tab when only project tab is open and removed', () => {
-      // Remove project-2, leaving only [All, project-1]
+    it('should switch to adjacent tab when only project tab is open and removed', () => {
+      // Remove project-2, leaving only [All, Chat, project-1]
       service.activeTab.set(service.openTabs().find(t => t.id === 'project-2')!);
       service.removeTab('project-2');
 
@@ -232,8 +350,12 @@ describe('TabStateService', () => {
       service.activeTab.set(service.openTabs().find(t => t.id === 'project-1')!);
       service.removeTab('project-1');
 
-      // Should switch to All tab since no other project tab exists
-      expect(service.activeTab().id).toBe('all');
+      // With the Chat tab seeded between All and project tabs, the
+      // adjacent-tab fallback lands on Chat (the tab at the same
+      // index), not All. The behavior the test is really pinning is
+      // "the active tab must NOT silently fall to undefined or
+      // throw" — Chat is a valid, sensible target.
+      expect(service.activeTab().id).toBe('chat');
     });
 
     it('should not switch tabs when removing inactive tab', () => {
@@ -246,9 +368,19 @@ describe('TabStateService', () => {
     it('should be no-op for removing All tab', () => {
       service.removeTab('all');
 
-      expect(service.openTabs()).toHaveLength(3); // All + 2 projects
+      expect(service.openTabs()).toHaveLength(4); // All + Chat + 2 projects
       // Active tab is project-2 (last added), unchanged
       expect(service.activeTab().id).toBe('project-2');
+    });
+
+    it('should be no-op for removing Chat tab', () => {
+      // Mirrors the All tab test — Chat is also a permanent special
+      // tab and the close attempt must be a no-op.
+      service.removeTab('chat');
+
+      expect(service.openTabs()).toHaveLength(4); // All + Chat + 2 projects
+      // Chat tab is still present in openTabs.
+      expect(service.openTabs().some(t => t.id === 'chat')).toBe(true);
     });
 
     it('should save state after removal', () => {
@@ -304,7 +436,8 @@ describe('TabStateService', () => {
       const newService = new TestableTabStateService();
       newService.restoreState();
 
-      expect(newService.openTabs()).toHaveLength(3);
+      // All + Chat + 2 projects = 4 tabs after restore.
+      expect(newService.openTabs()).toHaveLength(4);
       expect(newService.activeTab().id).toBe('project-2');
     });
 
@@ -313,8 +446,11 @@ describe('TabStateService', () => {
 
       service.restoreState();
 
-      // Should have default state
-      expect(service.openTabs()).toHaveLength(1);
+      // Corrupted storage is dropped → service falls back to the
+      // canonical default (All + Chat only, no project tabs).
+      expect(service.openTabs()).toHaveLength(2);
+      expect(service.openTabs().some(t => t.id === 'all')).toBe(true);
+      expect(service.openTabs().some(t => t.id === 'chat')).toBe(true);
       expect(service.activeTab().id).toBe('all');
     });
   });
@@ -332,8 +468,11 @@ describe('TabStateService', () => {
       // Only project-1 and project-3 are available
       service.restoreState(['project-1', 'project-3']);
 
-      // Should have 3 tabs: All + project-1 + project-3
-      expect(service.openTabs()).toHaveLength(3);
+      // Should have 4 tabs: All + Chat + project-1 + project-3
+      // (the two permanent special tabs are always re-seeded).
+      expect(service.openTabs()).toHaveLength(4);
+      expect(service.openTabs().some(t => t.id === 'all')).toBe(true);
+      expect(service.openTabs().some(t => t.id === 'chat')).toBe(true);
       expect(service.openTabs().some(t => t.id === 'project-1')).toBe(true);
       expect(service.openTabs().some(t => t.id === 'project-3')).toBe(true);
       expect(service.openTabs().some(t => t.id === 'project-2')).toBe(false);
@@ -363,8 +502,8 @@ describe('TabStateService', () => {
     it('should keep all project tabs when availableProjectIds is not provided', () => {
       service.restoreState();
 
-      // Should keep all project tabs
-      expect(service.openTabs()).toHaveLength(4); // All + 3 projects
+      // All + Chat + 3 projects = 5 tabs.
+      expect(service.openTabs()).toHaveLength(5);
     });
 
     it('should do nothing when no stored state', () => {
@@ -372,8 +511,24 @@ describe('TabStateService', () => {
       const newService = new TestableTabStateService();
       newService.restoreState(['project-1']);
 
-      // Should have default state
-      expect(newService.openTabs()).toHaveLength(1);
+      // No stored state → the service retains its canonical default
+      // (All + Chat), the availableProjectIds list is ignored.
+      expect(newService.openTabs()).toHaveLength(2);
+      expect(newService.openTabs().some(t => t.id === 'all')).toBe(true);
+      expect(newService.openTabs().some(t => t.id === 'chat')).toBe(true);
+    });
+
+    it('should re-seed Chat tab even when it was the active tab before save', () => {
+      // Pre-condition: Chat is active, stored state references it.
+      service.setActiveTab('chat');
+      // Create a new service + restore (simulates page reload while
+      // the Chat tab was the active view).
+      const newService = new TestableTabStateService();
+      newService.restoreState();
+      // The Chat tab must be re-seeded AND the active tab preserved
+      // (the restore code finds the matching id in validTabs).
+      expect(newService.openTabs().some(t => t.id === 'chat')).toBe(true);
+      expect(newService.activeTab().id).toBe('chat');
     });
   });
 

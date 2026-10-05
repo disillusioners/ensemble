@@ -2,16 +2,34 @@ import { signal, computed, EventEmitter } from '@angular/core';
 import { ProjectTab } from '../../models/tab.model';
 import { Project } from '../../models/project.model';
 
-// Mock TabStateService
+// Mock TabStateService — mirrors the production shape: two permanent
+// special tabs (All + Chat) plus a list of project tabs. The mock
+// initial state seeds both special tabs so the test cases can assert
+// on the rendering and the close-button gating for both.
 class MockTabStateService {
   readonly openTabs = signal<ProjectTab[]>([
-    { id: 'all', name: 'All', type: 'all' }
+    { id: 'all', name: 'All', type: 'all' },
+    { id: 'chat', name: 'Chat', type: 'chat' },
   ]);
   readonly activeTab = signal<ProjectTab>({ id: 'all', name: 'All', type: 'all' });
 
   readonly activeProjectId = computed(() => {
     const tab = this.activeTab();
     return tab.type === 'project' ? tab.id : null;
+  });
+
+  /**
+   * Mirror of the production ``activeSpecialTabId`` — exposes the
+   * active special-tab id (All or Chat) or null on a project tab.
+   * The component test only needs the shape; behavioural coverage
+   * lives in ``services/tab-state.service.spec.ts``.
+   */
+  readonly activeSpecialTabId = computed(() => {
+    const tab = this.activeTab();
+    if (tab.type === 'all' || tab.type === 'chat') {
+      return tab.id;
+    }
+    return null;
   });
 
   addTab = jest.fn();
@@ -117,16 +135,31 @@ describe('ProjectTabBarComponent', () => {
       expect(allTab?.type).toBe('all');
     });
 
+    it('should always render Chat tab alongside All', () => {
+      // The Chat tab is a permanent special tab — seeded by default
+      // and never removed by the user. The component renders it via
+      // the same template branch as All (no close button, no
+      // workspace icon).
+      const openTabs = mockTabStateService.openTabs();
+      const chatTab = openTabs.find(t => t.id === 'chat');
+
+      expect(chatTab).toBeDefined();
+      expect(chatTab?.type).toBe('chat');
+      expect(chatTab?.name).toBe('Chat');
+    });
+
     it('should render project tabs from TabStateService', () => {
       mockTabStateService.openTabs.set([
         { id: 'all', name: 'All', type: 'all' },
+        { id: 'chat', name: 'Chat', type: 'chat' },
         { id: 'project-1', name: 'Project 1', type: 'project' },
         { id: 'project-2', name: 'Project 2', type: 'project' },
       ]);
 
       const openTabs = mockTabStateService.openTabs();
 
-      expect(openTabs).toHaveLength(3);
+      // 2 special + 2 project = 4 tabs.
+      expect(openTabs).toHaveLength(4);
       expect(openTabs.filter(t => t.type === 'project')).toHaveLength(2);
     });
 
@@ -159,6 +192,18 @@ describe('ProjectTabBarComponent', () => {
 
       // All tab should have type 'all', not 'project'
       expect(allTab?.type).toBe('all');
+    });
+
+    it('should not have close button on Chat tab', () => {
+      // The Chat tab is a permanent special tab — it shares the
+      // non-closable behavior with the All tab. The component
+      // template's ``@if (tab.type === 'project')`` branch is the
+      // single source of truth for the close button; Chat falls
+      // through to the ``@else`` branch (same as All).
+      const chatTab = mockTabStateService.openTabs().find(t => t.id === 'chat');
+
+      // Chat tab should have type 'chat', not 'project'
+      expect(chatTab?.type).toBe('chat');
     });
 
     it('should call removeTab when closing project tab', () => {
@@ -374,15 +419,17 @@ describe('ProjectTabBarComponent', () => {
   describe('tab state integration', () => {
     it('should reflect TabStateService openTabs changes', () => {
       const initialTabs = mockTabStateService.openTabs();
-      expect(initialTabs).toHaveLength(1);
+      // Two permanent special tabs (All + Chat) are seeded by default.
+      expect(initialTabs).toHaveLength(2);
 
       mockTabStateService.openTabs.set([
         { id: 'all', name: 'All', type: 'all' },
+        { id: 'chat', name: 'Chat', type: 'chat' },
         { id: 'project-new', name: 'New Project', type: 'project' },
       ]);
 
       const updatedTabs = mockTabStateService.openTabs();
-      expect(updatedTabs).toHaveLength(2);
+      expect(updatedTabs).toHaveLength(3);
       expect(updatedTabs.some(t => t.id === 'project-new')).toBe(true);
     });
 

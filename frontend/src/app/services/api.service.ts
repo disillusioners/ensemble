@@ -200,6 +200,7 @@ export class ApiService {
     search?: string,
     order?: string,
     includeDescendants: boolean = true,
+    source?: string,
   ): Observable<InstanceListResponse> {
     let params = new HttpParams()
       .set('limit', limit.toString())
@@ -220,6 +221,14 @@ export class ApiService {
       // 'pinned' (BE default) | 'activity' (live-first, recency) — see
       // GET /api/instances. Omitted → server default (pinned).
       params = params.set('order', order);
+    }
+    if (source && source.trim().length > 0) {
+      // Source-type filter — see GET /api/instances. Special value ``chat``
+      // restricts to chat-source roots (telegram/slack/discord/whatsapp —
+      // registry-backed set mirroring USER_ORIGIN_CHAT_SOURCE_TYPES). Any
+      // other string is matched as a single source_type value. Omitted →
+      // server default (no source filter).
+      params = params.set('source', source.trim());
     }
     return this.http.get<InstanceListResponse>(`${this.API_BASE}/instances`, { params });
   }

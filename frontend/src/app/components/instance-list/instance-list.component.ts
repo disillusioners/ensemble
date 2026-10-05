@@ -239,10 +239,20 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
 
   /**
    * Get the current project context for navigation.
-   * Returns 'all' when on the All tab, or the project ID otherwise.
+   *
+   * Returns the project ID when on a project tab, the special tab id
+   * (e.g. ``'chat'``) when on a special tab, or ``'all'`` for the All
+   * tab. Mirrors the established composition in
+   * ``instances.component.ts:68-72`` so sibling routes on the Chat
+   * tab build the correct ``/projects/<context>/...`` URL segment
+   * (without the special-tab fallback, an instance-row click on the
+   * Chat tab would route to ``/projects/all/...`` and silently drop
+   * the source filter via ``setActiveTab('all')`` downstream).
    */
   protected getProjectContext(): string {
-    return this.tabStateService.activeProjectId() ?? 'all';
+    return this.tabStateService.activeProjectId()
+      ?? this.tabStateService.activeSpecialTabId()
+      ?? 'all';
   }
 
   getAgentInfo(agentDir: string): Agent | undefined {

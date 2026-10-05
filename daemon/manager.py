@@ -11992,6 +11992,7 @@ class InstanceManager:
         include_descendants: bool = False,
         search: str | None = None,
         order: str = "pinned",
+        source: str | None = None,
     ) -> tuple[list[dict], int, bool]:
         """List instances with pagination.
 
@@ -12017,6 +12018,12 @@ class InstanceManager:
                 pinned-first) or ``"activity"`` (live roots first, then
                 ``updated_at`` DESC). Applies to the root-based pagination
                 path only.
+            source: Optional source-type filter. Special value ``"chat"``
+                restricts to chat-source instances (telegram/slack/discord/
+                whatsapp — registry-backed set mirroring
+                ``USER_ORIGIN_CHAT_SOURCE_TYPES``). Any other string matches
+                a single ``source_type`` value. ``None`` (default) applies
+                no source filter.
 
         Returns:
             Tuple of (list of instance info dicts, total count, truncated flag).
@@ -12033,6 +12040,7 @@ class InstanceManager:
             include_descendants=include_descendants,
             search=search,
             order=order,
+            source=source,
         )
 
     def get_instance_info(self, instance_id: str) -> dict:

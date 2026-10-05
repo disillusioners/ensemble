@@ -30,6 +30,17 @@
           <mat-icon>close</mat-icon>
         </span>
       </button>
+    } @else if (tab.type === 'chat') {
+      <button
+        class="tab"
+        [class.active]="tab.id === tabStateService.activeTab().id"
+        (click)="tabStateService.setActiveTab(tab.id)"
+        matTooltip="Chat-source instances (Telegram, Slack, Discord, WhatsApp)"
+        [matTooltipDisabled]="tab.name.length <= 20"
+      >
+        <mat-icon class="tab-icon">chat</mat-icon>
+        <span class="tab-name">{{ tab.name }}</span>
+      </button>
     } @else {
       <button
         class="tab"

@@ -247,6 +247,7 @@ class TestListInstancesExcludeKB:
         mock_manager_with_kb.list_instances.assert_called_once_with(
             limit=10, offset=0, project_id=None, exclude_kb=True,
             include_descendants=True, search=None, order="pinned",
+            source=None,
         )
 
     @pytest.mark.asyncio
@@ -260,6 +261,7 @@ class TestListInstancesExcludeKB:
         mock_manager_with_kb.list_instances.assert_called_once_with(
             limit=10, offset=0, project_id=None, exclude_kb=False,
             include_descendants=True, search=None, order="pinned",
+            source=None,
         )
 
     @pytest.mark.asyncio
@@ -273,6 +275,7 @@ class TestListInstancesExcludeKB:
         mock_manager_with_kb.list_instances.assert_called_once_with(
             limit=10, offset=0, project_id=None, exclude_kb=True,
             include_descendants=True, search=None, order="pinned",
+            source=None,
         )
 
     @pytest.mark.asyncio
@@ -286,6 +289,7 @@ class TestListInstancesExcludeKB:
         mock_manager_with_kb.list_instances.assert_called_once_with(
             limit=10, offset=0, project_id="proj-1", exclude_kb=True,
             include_descendants=True, search=None, order="pinned",
+            source=None,
         )
 
     @pytest.mark.asyncio
@@ -299,6 +303,7 @@ class TestListInstancesExcludeKB:
         mock_manager_with_kb.list_instances.assert_called_once_with(
             limit=10, offset=0, project_id="proj-1", exclude_kb=False,
             include_descendants=True, search=None, order="pinned",
+            source=None,
         )
 
 
@@ -323,6 +328,7 @@ class TestListInstancesIncludeDescendantsRoute:
         mock_manager_with_kb.list_instances.assert_called_once_with(
             limit=10, offset=0, project_id=None, exclude_kb=True,
             include_descendants=True, search=None, order="pinned",
+            source=None,
         )
 
     @pytest.mark.asyncio
@@ -343,6 +349,7 @@ class TestListInstancesIncludeDescendantsRoute:
         mock_manager_with_kb.list_instances.assert_called_once_with(
             limit=10, offset=0, project_id=None, exclude_kb=True,
             include_descendants=False, search=None, order="pinned",
+            source=None,
         )
 
     @pytest.mark.asyncio

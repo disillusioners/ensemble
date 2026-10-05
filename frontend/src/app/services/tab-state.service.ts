@@ -5,6 +5,16 @@ const STORAGE_KEY = 'ensemble-project-tabs';
 
 export const ALL_TAB: ProjectTab = { id: 'all', name: 'All', type: 'all' };
 
+/**
+ * Special "Chat" tab — surfaces chat-source instances (telegram/slack/
+ * discord/whatsapp). Mirrors the ALL_TAB pattern: a permanent, non-closable
+ * tab whose id is a sentinel (``"chat"``) the InstancesRoute + InstanceService
+ * translate into a ``source=chat`` API filter. Excluded from the project tab
+ * menu (it is NOT a real project) and never persisted across a ``restoreState``
+ * cycle by id — it is always re-seeded into ``openTabs`` alongside ``ALL_TAB``.
+ */
+export const CHAT_TAB: ProjectTab = { id: 'chat', name: 'Chat', type: 'chat' };
+
 interface StoredTabState {
   openTabs: ProjectTab[];
   activeTabId: string;
@@ -14,16 +24,32 @@ interface StoredTabState {
   providedIn: 'root'
 })
 export class TabStateService {
-  readonly openTabs: WritableSignal<ProjectTab[]> = signal([ALL_TAB]);
+  readonly openTabs: WritableSignal<ProjectTab[]> = signal([ALL_TAB, CHAT_TAB]);
   readonly activeTab: WritableSignal<ProjectTab> = signal(ALL_TAB);
 
   /**
-   * Returns the active project id if viewing a project tab, null if viewing All tab.
-   * Debouncing is handled in the component using rxjs.
+   * Returns the active project id if viewing a project tab, null if viewing
+   * the All or Chat special tab. Debouncing is handled in the component
+   * using rxjs.
    */
   readonly activeProjectId: Signal<string | null> = computed(() => {
     const tab = this.activeTab();
     return tab.type === 'project' ? tab.id : null;
+  });
+
+  /**
+   * Returns the active special-tab id (``"all"`` or ``"chat"``) when one of
+   * the two permanent special tabs is active, null otherwise. Drives the
+   * InstancesComponent tab-state machine in concert with
+   * ``activeProjectId`` (see also ``getProjectContext`` which composes
+   * both for the route URL).
+   */
+  readonly activeSpecialTabId: Signal<string | null> = computed(() => {
+    const tab = this.activeTab();
+    if (tab.type === 'all' || tab.type === 'chat') {
+      return tab.id;
+    }
+    return null;
   });
 
   /**
@@ -45,10 +71,10 @@ export class TabStateService {
 
   /**
    * Remove a tab and switch to adjacent tab if the removed tab was active.
-   * Cannot remove the 'all' tab.
+   * Cannot remove the 'all' or 'chat' tabs — both are permanent special tabs.
    */
   removeTab(tabId: string): void {
-    if (tabId === ALL_TAB.id) return; // Cannot close "All"
+    if (tabId === ALL_TAB.id || tabId === CHAT_TAB.id) return; // Cannot close special tabs
 
     const currentTabs = this.openTabs();
     const tabIndex = currentTabs.findIndex(t => t.id === tabId);
@@ -85,6 +111,9 @@ export class TabStateService {
   /**
    * Restore state from localStorage.
    * Validates that tabs still exist in availableProjectIds, removes orphaned tabs.
+   * The two permanent special tabs (``all`` and ``chat``) are always re-seeded
+   * alongside any surviving project tabs, so a user returning to a freshly
+   * mounted Projects view always sees both special tabs available.
    */
   restoreState(availableProjectIds?: string[]): void {
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -94,7 +123,9 @@ export class TabStateService {
 
     try {
       const state: StoredTabState = JSON.parse(stored);
-      const validTabs: ProjectTab[] = [ALL_TAB];
+      // Always seed the two permanent special tabs in their canonical order
+      // (All first, Chat second — matches the initial signal value).
+      const validTabs: ProjectTab[] = [ALL_TAB, CHAT_TAB];
 
       if (availableProjectIds) {
         for (const tab of state.openTabs) {
@@ -108,6 +139,9 @@ export class TabStateService {
 
       this.openTabs.set(validTabs);
 
+      // Active tab resolution: prefer the stored active id; fall back to ALL
+      // when the stored id is missing or stale (e.g. an old "all" sentinel
+      // predating the Chat tab is still valid).
       const activeTab = validTabs.find((tab) => tab.id === state.activeTabId);
       this.activeTab.set(activeTab || ALL_TAB);
     } catch {

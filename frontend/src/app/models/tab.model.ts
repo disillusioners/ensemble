@@ -1,5 +1,5 @@
 export interface ProjectTab {
   id: string;
   name: string;
-  type: 'all' | 'project';
+  type: 'all' | 'chat' | 'project';
 }

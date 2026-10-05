@@ -1,9 +1,17 @@
 import { signal } from '@angular/core';
 import type { Agent, InstanceInfo } from '../../models';
 
-// Mock TabStateService for testing
+// Mock TabStateService for testing. Mirrors the production shape — both
+// ``activeProjectId`` and ``activeSpecialTabId`` signals, since the
+// InstancesComponent now consults both to drive its polling + URL
+// composition.
 class MockTabStateService {
   readonly activeProjectId = signal<string | null>(null);
+  readonly activeSpecialTabId = signal<string | null>('all');
+  // Map of all open tabs the production service exposes — not used by
+  // the testable component (which only needs the derived signals) but
+  // kept here so future expansion mirrors the production shape.
+  readonly openTabs = signal<{ id: string; name: string; type: string }[]>([]);
 }
 
 // Mock ApiService for testing
@@ -50,7 +58,18 @@ class TestableInstancesComponent {
   }
 
   protected getProjectContext(): string {
-    return this.tabStateService.activeProjectId() ?? 'all';
+    return this.tabStateService.activeProjectId()
+      ?? this.tabStateService.activeSpecialTabId()
+      ?? 'all';
+  }
+
+  /**
+   * Mirror of the production ``getActiveSource`` — the chat tab is the
+   * only special tab that drives a source filter; everything else
+   * (All / project) returns ``undefined``.
+   */
+  protected getActiveSource(): string | undefined {
+    return this.tabStateService.activeSpecialTabId() === 'chat' ? 'chat' : undefined;
   }
 
   protected onBack(): void {
@@ -65,7 +84,11 @@ class TestableInstancesComponent {
     }
 
     const agentPath = `./agents/${agent.id}`;
-    this.api.createInstance(agentPath).subscribe({
+    const projectId = this.getProjectContext();
+    // Mirror of production: 'all' and 'chat' are view-filter
+    // sentinels, not real project ids — coerce both to undefined.
+    const actualProjectId = (projectId === 'all' || projectId === 'chat') ? undefined : projectId;
+    this.api.createInstance(agentPath, undefined, actualProjectId, undefined).subscribe({
       next: (instance: InstanceInfo) => {
         this.router.navigate(['/projects', this.getProjectContext(), 'instances', instance.instance_id]);
       },
@@ -301,6 +324,111 @@ describe('InstancesComponent - Project-Aware Navigation', () => {
       component.onAgentChange(agent);
 
       expect(component.selectedAgent()).toEqual(agent);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Chat tab integration — getProjectContext / getActiveSource
+  // composition with the new ``activeSpecialTabId`` signal. Pins the
+  // route URL composition and the source-filter selection for the
+  // new "chat" special tab.
+  // ─────────────────────────────────────────────────────────────────────
+
+  describe('getProjectContext() with the Chat tab', () => {
+    it('should return "chat" when the active special tab is Chat', () => {
+      // No project is active and the active special tab is Chat —
+      // getProjectContext must surface "chat" so the URL composition
+      // (``/projects/chat/instances/:id``) reflects the tab.
+      tabStateService.activeProjectId.set(null);
+      tabStateService.activeSpecialTabId.set('chat');
+
+      expect(component.getProjectContext()).toBe('chat');
+    });
+
+    it('should prefer the project id over the special tab id', () => {
+      // The activeProjectId takes precedence when set — same as the
+      // pre-feature project-overrides-special behavior. A regression
+      // that always returned the special tab would break project
+      // tab navigation.
+      tabStateService.activeProjectId.set('instances-proj-7');
+      tabStateService.activeSpecialTabId.set('chat');
+
+      expect(component.getProjectContext()).toBe('instances-proj-7');
+    });
+
+    it('should fall back to "all" when both project and special tab are null', () => {
+      // Defensive: a corrupted localStorage state where neither
+      // signal resolves must still produce a valid URL segment.
+      tabStateService.activeProjectId.set(null);
+      tabStateService.activeSpecialTabId.set(null);
+
+      expect(component.getProjectContext()).toBe('all');
+    });
+  });
+
+  describe('getActiveSource() with the Chat tab', () => {
+    it('should return "chat" when the active special tab is Chat', () => {
+      tabStateService.activeSpecialTabId.set('chat');
+
+      expect(component.getActiveSource()).toBe('chat');
+    });
+
+    it('should return undefined when the active special tab is All', () => {
+      // The All tab is the default — no source filter must be
+      // applied. A regression that returned ``"chat"`` here would
+      // silently filter every existing consumer to chat roots.
+      tabStateService.activeSpecialTabId.set('all');
+
+      expect(component.getActiveSource()).toBeUndefined();
+    });
+
+    it('should return undefined when a project tab is active', () => {
+      // Project tabs do not apply a source filter — only the two
+      // permanent special tabs do.
+      tabStateService.activeSpecialTabId.set(null);
+      tabStateService.activeProjectId.set('instances-proj-1');
+
+      expect(component.getActiveSource()).toBeUndefined();
+    });
+  });
+
+  describe('onNewInstance() - Chat tab URL composition', () => {
+    beforeEach(() => {
+      const agent = createMockAgent({ id: 'chat-agent' });
+      component.agents.set([agent]);
+      component.selectedAgent.set(agent);
+    });
+
+    it('should navigate to /projects/chat/instances/:instanceId when on Chat tab', () => {
+      // The deep-link URL for a chat-tab-spawned instance must
+      // include "chat" as the projectId segment so the back button
+      // / deep links round-trip to the chat tab. The actual
+      // project_id passed to createInstance must still be undefined
+      // (the chat tab is a view-filter sentinel, not a project).
+      tabStateService.activeProjectId.set(null);
+      tabStateService.activeSpecialTabId.set('chat');
+      const instanceId = 'chat-inst-001';
+      mockApiService.createInstance.mockReturnValue({
+        subscribe: (handlers: any) => {
+          handlers.next(createMockInstance({ instance_id: instanceId }));
+          return { unsubscribe: () => {} };
+        }
+      });
+
+      component.onNewInstance();
+
+      // createInstance(agentPath, _agentName?, project_id?, versionTag?)
+      // — project_id must be undefined, NOT 'chat'.
+      expect(mockApiService.createInstance).toHaveBeenCalledWith(
+        './agents/chat-agent',
+        undefined,
+        undefined,
+        undefined,
+      );
+      expect(component.router.navigateCalls).toHaveLength(1);
+      expect(component.router.navigateCalls[0].path).toEqual(
+        ['/projects', 'chat', 'instances', instanceId]
+      );
     });
   });
 });

@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy import bindparam, case, delete as sql_delete, exists, func, literal, not_, or_, String, text
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.engine import Engine
-from sqlalchemy.sql.elements import TextClause
+from sqlalchemy.sql.elements import ColumnElement, TextClause
 from sqlmodel import Session as SQLModelSession, select, col
 
 from .models import Instance, InstanceHierarchy, InstanceStatus
@@ -318,6 +318,68 @@ class SQLModelInstanceRepository:
             Instance.agent_name.ilike(search_term, escape="\\"),
             Instance.agent_id.ilike(search_term, escape="\\"),
         )
+
+    def _build_source_condition(self, db_session: SQLModelSession, source: str | None) -> ColumnElement[bool] | None:
+        """Build a dialect-aware predicate for the source-type filter.
+
+        Translates the public ``source`` parameter into an ``IN`` predicate
+        against ``instance_metadata.source_type``:
+
+        * ``source == "chat"`` → ``source_type IN (CHAT_SOURCE_TYPES)``
+          (telegram / slack / discord / whatsapp — the registry-backed
+          chat-platform set mirroring
+          ``USER_ORIGIN_CHAT_SOURCE_TYPES`` in
+          ``daemon/tools/upgrade_journal.py``).
+        * any other string     → ``source_type == <source>`` (exact match).
+        * ``None`` / empty     → ``None`` (caller omits the filter).
+
+        Dialect handling:
+
+        * **PostgreSQL** — ``func.jsonb_extract_path_text(metadata, "source_type")``
+          returns *unquoted* JSON text (``telegram``), matching the SQLite
+          path. The naïve ``metadata->'source_type'`` + ``CAST(... AS VARCHAR)``
+          form is BUGGY on PG: ``->`` returns ``jsonb`` and
+          ``CAST(jsonb AS VARCHAR)`` yields **QUOTED** JSON text
+          (``"telegram"``), so the IN comparison never matches → 0 rows
+          silently. ``jsonb_extract_path_text`` is the PG-native unquoted
+          extractor and is the safe portable form.
+        * **SQLite** — ``CAST(json_extract(metadata, '$.source_type') AS VARCHAR)``
+          (SQLite's ``json_extract`` already returns unquoted TEXT for
+          string scalars, so the cast is a no-op type alignment).
+
+        Both backends carry the JSONB key as TEXT, so a plain ``IN`` is
+        portable.
+
+        Returns ``None`` when ``source`` is falsy (no filter to apply).
+        """
+        if not source:
+            return None
+
+        if source == "chat":
+            values = list(self.CHAT_SOURCE_TYPES)
+        else:
+            values = [source]
+
+        is_postgres = db_session.bind.dialect.name == "postgresql"
+        if is_postgres:
+            # ``func.jsonb_extract_path_text`` is the PG-native UNQUOTED
+            # JSONB text extractor. The naïve ``->`` + CAST path returns
+            # quoted JSON text on PG string scalars ('"telegram"' !=
+            # 'telegram'), which silently yields 0 rows. Regression coverage:
+            # the mirror SQLite test in tests/test_instance_source_filter.py
+            # exercises both the SQLite branch AND the portable compile-dialect
+            # pin (TestSourceConditionCompileDialect, which catches a C1-style
+            # regression without requiring a live PG server -- it compiles the
+            # helper against the PG dialect via a stub engine). The dedicated
+            # PG live regression (source='telegram' actually returns the row on
+            # real PG) lives at tests/postgres/test_instance_source_filter_pg.py
+            # (pytest -m postgres).
+            expr = func.jsonb_extract_path_text(
+                Instance.instance_metadata, "source_type"
+            )
+        else:
+            expr = sa_cast(func.json_extract(Instance.instance_metadata, "$.source_type"), String)
+        return expr.in_(values)
 
     # --------------------------------------------------------
     # CREATE
@@ -770,6 +832,18 @@ class SQLModelInstanceRepository:
     # LIST
     # --------------------------------------------------------
 
+    # Source-type values that count as a chat platform for the Projects
+    # tab chat-source filter. Mirrors USER_ORIGIN_CHAT_SOURCE_TYPES
+    # (daemon/tools/upgrade_journal.py) — the registry-backed live-upgrade
+    # gate set — and reuses the same membership so a future whatsapp adapter
+    # auto-arms the Projects filter with no extra gate-side edit. The
+    # interactive-chat lane prefix tuple
+    # (daemon.constants.CHAT_SOURCE_PREFIXES) is the THREE-member WORKER-LANE
+    # routing set (no whatsapp because no adapter is registered); the
+    # asymmetry is documented in daemon/tools/upgrade_journal.py:2466-2470.
+    # Stored as a tuple so the rendered SQL IN bind order is deterministic.
+    CHAT_SOURCE_TYPES: tuple[str, ...] = ("telegram", "slack", "discord", "whatsapp")
+
     def list(
         self,
         status: str | None = None,
@@ -780,7 +854,8 @@ class SQLModelInstanceRepository:
         include_descendants: bool = False,
         search: str | None = None,
         order: str = "pinned",
-    ) -> tuple[list[Instance], int]:
+        source: str | None = None,
+    ) -> tuple[list[Instance], int, bool]:
         """List instances with optional root-based pagination and full tree loading.
 
         Two modes are supported:
@@ -865,6 +940,17 @@ class SQLModelInstanceRepository:
                 Timestamps are ISO-8601 strings (lexicographic == chronological);
                 explicit ``NULLS LAST`` keeps SQLite and PostgreSQL (which
                 disagree on default DESC NULL placement) deterministic.
+            source: Optional source-type filter. Special value ``"chat"``
+                restricts to instances whose ``instance_metadata.source_type``
+                is in :data:`CHAT_SOURCE_TYPES` (telegram/slack/discord/whatsapp
+                — the registry-backed chat-platform set, mirroring
+                ``USER_ORIGIN_CHAT_SOURCE_TYPES`` in
+                ``daemon/tools/upgrade_journal.py``). Any other string is
+                matched as a single ``source_type`` value (exact match).
+                ``None`` (default) applies no source filter. Applied to the
+                **root query only** under ``include_descendants=True``
+                (mirrors ``project_id``); descendants of in-scope roots are
+                returned regardless of their own ``source_type``.
 
         Returns:
             Tuple of (flat list of instances, total count, truncated flag).
@@ -898,6 +984,10 @@ class SQLModelInstanceRepository:
                 if search_cond is not None:
                     count_stmt = count_stmt.where(search_cond)
                     stmt = stmt.where(search_cond)
+                source_cond = self._build_source_condition(db_session, source)
+                if source_cond is not None:
+                    count_stmt = count_stmt.where(source_cond)
+                    stmt = stmt.where(source_cond)
 
                 total = db_session.exec(count_stmt).one()
 
@@ -932,6 +1022,13 @@ class SQLModelInstanceRepository:
             # Build the search condition once and reuse across root count,
             # root query, and BFS child queries.
             search_cond = self._build_search_condition(db_session, search)
+            # Build the source-type condition once and reuse across root
+            # count + root query. NOT applied to the BFS child query —
+            # ``source`` mirrors ``project_id`` and only governs WHICH roots
+            # are paginated; descendants of in-scope roots are returned
+            # regardless of their own source_type (lineage is by parent_id,
+            # not by metadata).
+            source_cond = self._build_source_condition(db_session, source)
 
             # 1. Count root instances only (parent_id IS NULL OR empty).
             count_stmt = select(func.count()).select_from(Instance).where(
@@ -945,6 +1042,8 @@ class SQLModelInstanceRepository:
                 count_stmt = count_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
             if search_cond is not None:
                 count_stmt = count_stmt.where(search_cond)
+            if source_cond is not None:
+                count_stmt = count_stmt.where(source_cond)
             total = db_session.exec(count_stmt).one()
 
             # 2. Paginate root instances. Ordering is selected by ``order``:
@@ -968,6 +1067,8 @@ class SQLModelInstanceRepository:
                 root_stmt = root_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
             if search_cond is not None:
                 root_stmt = root_stmt.where(search_cond)
+            if source_cond is not None:
+                root_stmt = root_stmt.where(source_cond)
 
             root_stmt = root_stmt.outerjoin(
                 InstanceUiPrefs,
