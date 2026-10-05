@@ -2212,6 +2212,13 @@ class SkillEvolutionConfig(EmbeddingConfig):
     evolution_model: str | None = Field(default=None)  # Falls back to main model
     analysis_model: str | None = Field(default=None)  # Cheap model for Tier 2
 
+    # Stage-3 skill-search LLM selector model (``SkillSearchService._llm_select``).
+    # LITERAL default "quick" — deliberately NOT the None→llm.model fallback
+    # pattern used by ``evolution_model`` / ``analysis_model`` above: an
+    # unconfigured selector must resolve to the cheap "quick" tier, never
+    # silently ride the main OPENAI_MODEL.
+    selector_model: str = Field(default="quick")
+
     # Injection
     max_inject_skills: int = Field(default=2)
     min_score_full_inject: float = Field(default=0.7)

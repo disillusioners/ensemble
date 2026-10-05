@@ -381,6 +381,9 @@ skill_evolution:
   # Evolution models
   analysis_model: null  # Cheap model for Tier 2 analysis. Falls back to main llm.model if null.
   evolution_model: null  # Model for Tier 3 evolution. Falls back to main llm.model if null.
+  # Stage-3 skill-search LLM selector model (SkillSearchService._llm_select).
+  # LITERAL default "quick" — the selector never rides the main model.
+  selector_model: ${SKILL_EVOLUTION_SELECTOR_MODEL:-quick}
 
   # A/B testing thresholds
   ab_sample_size: 10
