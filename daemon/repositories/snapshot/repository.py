@@ -487,6 +487,16 @@ class SnapshotRepository:
         4. SLICE: ``items = filtered[offset : offset + limit]``.
         5. RETURN: ``(items, total)``.
         """
+        # Belt: validate tag_mode unconditionally so the repo's own
+        # defense is non-negotiable even when ``tags`` is empty (the
+        # router's pattern check fires first on the HTTP path, but a
+        # direct repo caller would otherwise slip through). Mirrors
+        # the belt at ``filter_by_tags:525-528``.
+        if tag_mode not in ("all", "any"):
+            raise ValueError(
+                f"Unknown tag_mode {tag_mode!r}; expected 'all' or 'any'"
+            )
+
         # Step 1 — SQL (UNPAGINATED)
         order_columns = {
             "created_at_desc": col(Snapshot.created_at).desc(),

@@ -59,16 +59,38 @@ class SnapshotResponse(BaseModel):
     created_at: str
 
 
-class SnapshotListItem(SnapshotResponse):
+class SnapshotListItem(BaseModel):
     """List-item body for ``GET /api/snapshots``.
 
-    Same shape as :class:`SnapshotResponse` — the list handler strips
-    ``digest`` (D7) and ``task_summary`` (sequencing §1 addendum A-2)
-    AFTER construction so the wire payload stays lean. We extend
-    ``SnapshotResponse`` (rather than re-declaring every field) so the
-    two shapes share a single source of truth; the strip lives in
-    ``daemon/routers/snapshots.py::_to_list_item``.
+    Subset of :class:`SnapshotResponse` — explicitly DOES NOT carry
+    ``digest`` (D7) or ``task_summary`` (sequencing §1 addendum A-2).
+    The list handler strips both keys BEFORE handing the dict to
+    Pydantic (``daemon/routers/snapshots.py::_to_list_item``); the
+    model itself omits those fields so a stray default cannot leak
+    them back into the wire payload (Pydantic re-adds missing fields
+    with their declared defaults on validation, so the omission
+    matters).
+
+    The detail endpoint (``SnapshotResponse``) still carries the full
+    shape.
     """
+
+    id: str
+    project_id: str
+    created_by_agent_id: str
+    target_instance_id: str
+    title: str
+    domain_tags: list[str] = Field(default_factory=list)
+    status: str
+    supersedes_snapshot_id: str | None = None
+    repo_path: str | None = None
+    vcs_type: str | None = None
+    git_sha: str | None = None
+    git_branch: str | None = None
+    git_dirty: bool = False
+    runtime_version: str
+    effective_model: str | None = None
+    created_at: str
 
 
 class SnapshotListResponse(BaseModel):
