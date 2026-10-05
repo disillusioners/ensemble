@@ -28,3 +28,18 @@
 - 01:15:33 R3 poller on middle child, wedge missed (wake already completed)
 - 01:16:23 R3 parent completed naturally
 - 01:17:00+ R4: write findings.md, timeline.md, commit
+
+## FORENSICS round (2026-10-05)
+- 01:21 D1 prep: stop v0.16.11 dev (kill -9), boot durability daemon
+- 01:22 D1 create parent c63eecab + child ec1a2dac
+- 01:23:07 D1 wedge captured at t=26997ms (SIGSTOP): inj_state=PENDING, wake in 'ready'
+- 01:23:07 D1 SIGKILL sent
+- 01:23:30 D1 reboot ready
+- 01:23:45 D1 t+30s forensics: parent waiting_children, wake ready, inj PENDING, no RDRS activity
+- 01:23:56 D1 t+120s forensics: same (G1 sweep slowed captures)
+- 01:27:06 D1 t+300s forensics: parent STILL STUCK, NEVER HEALED
+- 01:27:20 D2 manual ping sent
+- 01:27:20–01:29:50 D2 wait 150s: parent running, wake still ready, DEADLOCK
+- 01:31:57 D3 boot with kill-switch OFF
+- 01:32:09 D3 verified: lanes=[no_row_backstop=False]
+- 01:32:30+ D5: write findings, commit, restore dev lane

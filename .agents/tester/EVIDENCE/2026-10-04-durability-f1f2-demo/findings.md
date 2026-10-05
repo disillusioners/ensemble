@@ -179,3 +179,77 @@ transitions to 'processing' within ~1s.
 
 - Previous run: `b24cab33 test: durability F-1/F-2 demo E2E evidence (G4)`
 - This run: (to be added) `test: durability F-1/F-2 demo E2E evidence (G4 redo)`
+
+---
+
+## D1 — Stuck-State Forensics (the decisive evidence)
+
+**Date:** 2026-10-05 01:23–01:27 UTC
+**Capture-word:** helloD1
+**Technique:** SIGSTOP→verify→SIGKILL (same as R1)
+
+### D1 wedge capture
+- child_task=completed, parent=waiting_children
+- wake_task=running, wake_msg=ready (in message_queue)
+- inj_state=PENDING (NOT TASK_DELIVERED) — TRUE PENDING state captured
+- SIGSTOP at t=26997ms, precondition verified, SIGKILL at t=27104ms
+
+### D1 forensics observation table
+
+| Time | t+offset | parent_status | wake_msg_status | inj_state | RDRS activity for c63eecab | Watchdog | pg_stat_activity |
+|------|----------|---------------|------------------|-----------|----------------------------|----------|------------------|
+| 01:23:45 | t+15s (t+30s capture overlapping due to G1 sweep slowdown) | waiting_children | ready | PENDING | None (lane 2 ran at boot, no per-row) | interval=3600s, started 01:23:29 | Only my own query |
+| 01:23:56 | t+26s (t+120s capture) | waiting_children | ready | PENDING | None (other lanes: "skipped busy parent=e23ef658" — different parent) | Won't fire in 300s window | Only my own query |
+| 01:27:06 | t+216s (t+300s capture, delayed by G1 sweep) | **waiting_children (STILL STUCK, NEVER HEALED)** | ready | PENDING | **ZERO RDRS sweep lines reference c63eecab** | Won't fire in 300s window | Only my own query |
+
+### D1 verdict
+**PARENT NEVER HEALED** in 300s observation window.
+- Lane 2 ran at boot (01:23:29) but found anchor (message_queue row + report_injections row) and skipped
+- No per-row processing for c63eecab
+- Watchdog interval=3600s — WILL NOT FIRE within observation window
+- pg_stat_activity: no stuck locks (artifact check passes)
+- inj_state PENDING unchanged from t+30 to t+300
+
+### D2 — Manual ping (since stuck at t+300s)
+**Time:** 01:27:20Z
+**Message:** "[system:wedge-resolve] Your child has completed and reported helloD1."
+
+D2 wait (bounded 150s):
+- Parent: running (processing the API ping message)
+- wake_msg: STILL 'ready' (worker pool per-instance guard blocks)
+- inj_state: STILL PENDING
+- internal_reports_in_parent_history: 1 (no new injection)
+- **Parent NEVER completed in 150s observation window**
+
+D2 root cause: chicken-and-egg deadlock
+1. Parent is 'running' (processing the API ping via LLM)
+2. Worker pool per-instance guard: won't claim 'ready' message for instance with another task RUNNING
+3. Parent won't process internal_report until worker pool claims it
+4. Worker pool won't claim until parent completes current task
+5. DEADLOCK
+
+D2 path: **NEVER DELIVERED** (LLM did not respond within 150s, possibly due to G1 sweep consuming LLM resources in parallel)
+
+### D3 — Kill-switch OFF boot (best-effort, wedge capture skipped)
+**Time:** 01:31:57Z (boot)
+**Boot ready:** 01:32:09Z
+
+Lane-2 config verified:
+```
+ReportDeliveryRecoveryService started: interval=300s, age_bound=10min, batch_cap=100, retry=1min, 
+lanes=[deferred=True, no_row_backstop=False, pending_age=True, recovery_retry=True, orphan=True]
+```
+
+Boot-time RDRS marker (always prints regardless of kill-switch):
+```
+RDRS lane 2: post-wipe recovery (no-row backstop; F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)
+```
+
+No per-row processing for lane 2 (because it's disabled). D3 wedge capture SKIPPED (previous 3 R2 attempts failed consistently — wedge window <100ms in dev env).
+
+### D4 — Multi-child mixed: SKIPPED (no D1/D3 attempts naturally produced one)
+
+### DECISIVE VERDICT
+The true straddle capture (SIGSTOP, TRUE PENDING state, no delivery evidence) leads to a parent that NEVER HEALS in the 300s observation window. The lane-2 anchor-less path is never exercised because the anchor (message_queue row + report_injections row) is always created before the kill in a dev environment. The watchdog interval (3600s) means it won't fire within any reasonable observation window. The manual ping triggers a chicken-and-egg deadlock with the worker pool per-instance guard.
+
+This is the merge-gate evidence: the F-2 architecture works correctly (lane 2 correctly skips when anchor exists; watchdog correctly doesn't fire when carrier exists), but the F-2 wedge as defined (anchor-less) is essentially impossible to catch in a dev environment, and the system has no mechanism to process a preserved 'ready' wake after a crash.

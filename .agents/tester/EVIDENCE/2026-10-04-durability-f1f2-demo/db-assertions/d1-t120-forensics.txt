@@ -1,0 +1,11 @@
+=== D1 T+120s FORENSICS ===
+Time: 2026-10-05T01:23:56Z (reboot was 01:23:30Z, t+26s — note: t+120s was overlapping with t+30s capture due to parallel G1 sweep slowdown)
+parent_status: waiting_children (STILL STUCK)
+wake_msgs: 1, status='ready'
+inj_state: PENDING (unchanged)
+parent_tasks: 1
+child_tasks: 0
+RDRS lane 2: ran at boot (01:23:29), no per-row processing for c63eecab
+Other lanes: "sweep pending_age skipped busy parent=e23ef658" and "sweep recovery_retry skipped busy parent=e23ef658" — these are for a DIFFERENT parent (e23ef658, leftover from previous test). My D1 parent c63eecab is NOT processed.
+Watchdog: interval=3600s — WON'T FIRE in 300s window
+pg_stat_activity: only my own query, no stuck locks
