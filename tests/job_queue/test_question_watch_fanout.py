@@ -454,7 +454,7 @@ class TestEscalationReachesMissionWatcher:
         """At escalation (emission_index ≥ 3) the mission watcher
         receives the escalation [JOB_EVENT] in addition to the FE SSE
         broadcast — even though the asker has just been terminated."""
-        mission, r1_settled, _r2, watcher = _seed_incident(harness)
+        mission, r1_settled, r2_fresh, watcher = _seed_incident(harness)
 
         asyncio.run(
             emit_question_escalation_notification(
@@ -463,6 +463,7 @@ class TestEscalationReachesMissionWatcher:
                 "leader",
                 "pack-1",
                 3,
+                mission_work_ids=[r1_settled, r2_fresh],
             )
         )
 

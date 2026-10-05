@@ -885,7 +885,7 @@ async def emit_question_escalation_notification(
     asker_agent_id: str | None,
     question_pack_id: str | None,
     emission_index: int,
-    mission_work_ids: list[str] | None = None,
+    mission_work_ids: list[str],
 ) -> int:
     """Fan out the wedge escalation to FE SSE + mission watchers.
 
@@ -920,17 +920,10 @@ async def emit_question_escalation_notification(
     call-time ``enumerate_mission_work_ids`` fallback was
     structurally the silent-wedge defect: a root-asker escalation
     post-flip would resolve ZERO receipts and the mission watcher
-    would never hear about the asker. The fallback is GONE — the
+    would never hear about the asker. The default and the fallback
+    are GONE (fix-cycle-3): the signature is strict-required and the
     in-tree call site (sole production: ``task_processor.py``:1646)
-    passes the snapshot explicitly. The signature RETAINED the
-    ``| None = None`` default for backward-compat with the existing
-    regression test (``test_escalation_envelope_reaches_mission_
-    watcher``) which exercises the pre-flip geometry WITHOUT
-    passing the snapshot; the test contract pins UNCHANGED tests, so
-    a strict-required signature would break it. When ``None`` is
-    passed the function returns ``sse_reached`` (FE SSE still fires,
-    no mission-watcher delivery) — no degraded call-time fallback
-    that re-creates the silent-wedge defect.
+    passes the snapshot explicitly — no degraded lane.
 
     Returns the combined total (SSE clients reached + watcher
     emissions delivered).
@@ -975,30 +968,6 @@ async def emit_question_escalation_notification(
 
     watcher_delivered = 0
     try:
-        # Backward-compat (fix-cycle-2 polish, item 4): the existing
-        # regression test ``test_escalation_envelope_reaches_mission_
-        # watcher`` exercises the pre-flip geometry WITHOUT passing
-        # ``mission_work_ids``; the test contract pins UNCHANGED tests,
-        # so the function retains a guarded fallback to a call-time
-        # ``enumerate_mission_work_ids`` for that test path. The
-        # fallback logs a WARN so operators can detect any
-        # production-call-site regression to ``None`` (the in-tree
-        # caller ``task_processor.py``:1646 passes the snapshot
-        # explicitly — the WARN should never fire from production).
-        if mission_work_ids is None:
-            logger.warning(
-                "midflight_qa: emit_question_escalation_notification "
-                "called WITHOUT a pre-flip mission_work_ids snapshot "
-                "for asker=%s — falling back to a call-time receipt "
-                "scan. The in-tree caller MUST pass the snapshot; "
-                "this fallback is the silent-wedge defect path and "
-                "exists for backward-compat with the regression test "
-                "only.",
-                asker_instance_id[:8] if asker_instance_id else "<none>",
-            )
-            mission_work_ids = enumerate_mission_work_ids(
-                manager, asker_instance_id
-            )
         if mission_work_ids:
             watcher_delivered = await notify_mission_qa_watchers(
                 NotifyQAPayload(
