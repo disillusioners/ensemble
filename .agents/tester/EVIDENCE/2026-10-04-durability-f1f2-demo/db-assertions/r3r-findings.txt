@@ -1,0 +1,28 @@
+=== R3r: Multi-Child Mixed — INCOMPLETE ===
+
+Date: 2026-10-05 04:50 UTC
+
+Setup:
+- Parent 8b577fe3 + 2 children
+  - Child1 fda0ca6d (3s sleep) — completed + TASK_DELIVERED naturally
+  - Child2 9904e12c (35s sleep) — stuck-wake straddle target
+
+Poller v1 issue: looked at LATEST process_report task (ORDER BY created_at DESC),
+which returned child1's COMPLETED wake task, not child2's RUNNING wake task.
+Child2's wake task (id=1727) was created AFTER the poller started.
+
+Poller v2 issue: DAEMON_PID was empty when passed (ss returned no pid because
+daemon had already crashed). Poller crashed with ValueError.
+
+Daemom crash: pre-existing DependencyBus bug (R0 finding) — NOT caused by R3 test.
+
+R3 outcome: child2 completed naturally before wedge could be captured.
+No stuck-wake straddle for child2.
+
+R3 gap: the original R3 technique (SIGSTOP when wake task CLAIMED-RUNNING)
+was not testable in this environment because:
+1. The original poller was looking at the wrong task (latest, not child2-specific)
+2. The daemon crashed before the v2 poller could start
+3. Child2's natural completion was faster than the poller could react
+
+R3 ASSESSMENT: INCOMPLETE (wedge not captured)

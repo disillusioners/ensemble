@@ -1,0 +1,35 @@
+=== R2r: Kill-Switch OFF Behavioral (ENV-VAR ABSENCE — per Advisory) ===
+
+Date: 2026-10-05 04:45 UTC
+
+ADVISORY (mid-flight): lane 6 kill-switch has NO config.py env var.
+It exists ONLY as constructor param `lane_stuck_wake: bool = True`
+(daemon/services/report_delivery_recovery.py:392). pool_orchestrator.py
+instantiates without the kwarg (defaults ON). Lanes 1-5 each have a
+report_delivery_recovery_lane_* env; lane 6 diverges.
+
+R2r verification (per advisory):
+(i) grep config.py for lane_stuck_wake → empty (no env var)
+    grep config.py for stuck_wake → empty (no env var)
+    RESULT: CONFIRMED — no operator-reachable env var for lane 6
+
+(ii) Tests with lane_stuck_wake=False FOUND:
+    tests/postgres/test_report_delivery_recovery_pg.py:1095 — lane_stuck_wake=False
+    tests/postgres/test_report_delivery_recovery_pg.py:1195 — lane_stuck_wake=False
+    tests/unit/test_report_delivery_recovery_service.py:323 — lane_stuck_wake=False
+
+    Unit test result:
+    .venv/bin/pytest tests/unit/test_report_delivery_recovery_service.py -k "disabled"
+    → 2 passed, 37 deselected in 0.63s
+
+    PG test result: skipped (PG harness not available in this env)
+
+(iii) Operational gap: CONFIRMED
+    "kill-switch-OFF not operator-exercisable as-deployed —
+    env-var parity with lanes 1-5 missing (config.py follow-up needed)"
+
+R2r behavioral intent coverage:
+- Unit-level OFF evidence: PASS (2 unit tests with lane_stuck_wake=False)
+- PG-level OFF evidence: TEST CODE EXISTS (lines 1095, 1195) but can't run in this env
+- Operational gap: DOCUMENTED in findings.md as GATE FINDING
+- Leader adjudicates: unit-level OFF + documented gap covers the R2 intent

@@ -43,3 +43,20 @@
 - 01:31:57 D3 boot with kill-switch OFF
 - 01:32:09 D3 verified: lanes=[no_row_backstop=False]
 - 01:32:30+ D5: write findings, commit, restore dev lane
+
+## G4-r RE-GATE (2026-10-05)
+- 04:40 R1r prep: kill v0.16.11 (kill -9), boot durability (lane 6 default ON verified: stuck_wake=True)
+- 04:40 R1r create parent b5a5e621 + child b7c2a7c9
+- 04:42:25 R1r wedge captured at t=34982ms (SIGSTOP): wake_task=running, worker_id=worker-4, inj_state=PENDING
+- 04:42:25 R1r SIGKILL
+- 04:42:38 R1r assertion saved
+- 04:42:38 → 04:44:18 R1r wait 100s (heartbeat stale 183s > 90s threshold)
+- 04:44:27 R1r reboot ready
+- 04:44:27 R1r lane 6 ran (recover_on_startup) but found 0 candidates — QUERY BUG discovered
+  (mq.message_id != ri.child_message_id in actual data shape)
+- 04:45 R2r: verified NO env var for lane 6 in config.py
+- 04:45 R2r: unit tests with lane_stuck_wake=False PASS (2/2)
+- 04:48 R3r prep: boot durability, create parent 8b577fe3 + 2 children
+- 04:50 R3r: child1 delivered naturally, poller missed child2's wedge, daemon crashed (pre-existing bug)
+- 04:52 R4r: fresh parent 2acdf6b2 healed naturally, manual ping → normal response (no deadlock)
+- 04:55 R5: write findings, commit, restore dev lane

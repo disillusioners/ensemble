@@ -1,0 +1,33 @@
+``wake_msg=ready``, ``inj_state=PENDING``).
+
+The §12a window-to-lane maps
+ — Additive Lane 6 (Block-1 G4 merge-gate, 2026-10-05)
+
+**Additive appendix (no history rewrite).** The merge-gate G4 main-leg
+R1 capture (SIGSTOP->verify->SIGKILL on the worktree branch build) caught a
+wedge the §12a window-to-lane map did NOT predict: a PENDING marker
+(`state='PENDING'`) co-existing with a preserved wake row in
+`message_queue` (`status='ready'`, the F-1 epoch-belt preserved
+it) AND a dead-worker wake `task` (`status='running'`, `worker_id`
+set, `last_heartbeat_at` stale — the worker died with the daemon).
+Captured state in
+`.agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/db-assertions/d1-pre-kill-assertion.txt`
+(`parent=waiting_children`, `child=completed`, `wake_task=running`,
+`wake_msg=ready`, `inj_state=PENDING`).
+
+The §12a window-to-lane map's claim — "Lanes 1/3/4 own the
+marker-minted cases" — is **contradicted** by the G4 capture:
+* Lane 1 (DEFERRED) skips (marker is PENDING, not DEFERRED).
+* Lane 2 (no-row backstop) skips (the `has_injection_row` exclusion
+  matches).
+* Lane 3 + 4 (pending_age) skip (the 10-minute `age_bound_minutes`
+  in-flight protection blocks the young-from-creation marker; the
+  dead-worker reap is deferred another 15 minutes by the F-1
+  `boot_epoch` amendment at `task/repository.py:3411`).
+* Lane 5 (orphan) skips (parent is `waiting_children`, not
+  TERMINAL).
+* The worker pool's per-instance busy guard at
+  `task/repository.py:2648-2650` (status='running' guard)
+  blocks every new claim for the parent — including the wake
+  task itself — because the parent has a RUNNING sibling.
+

@@ -1,255 +1,170 @@
-# F-2 Demo E2E Findings (G4 REDO) — Durability F-1/F-2 Merge Gate
+# F-2 Demo E2E Findings (G4-r Re-Gate) — Durability F-1/F-2 Merge Gate
 
-**Date:** 2026-10-04 to 2026-10-05 UTC
-**Branch:** `feature/durability-f1-f2` @ `fb0f4655` (base `18827dbd`)
+**Date:** 2026-10-05 04:40–04:55 UTC
+**Branch:** `feature/durability-f1-f2` @ `f53a0638` (code-state pin)
 **Worktree:** `/home/nea/ensemble-src-wt-durability`
-**Ruling:** Evidence-only, no code changes/fixes, bounded polls, SELECT-only DB.
+**Fix:** `3a2bbdf8` G4 fix: NEW additive lane 6 `stuck_wake` + `f53a0638` review close-out
+**Ruling:** Evidence-only, no code changes, root-cause reports only.
 
 ---
 
-## ⚠️ DEVIATION FROM BRIEF: TERM → KILL
+## Preflight
 
-**Disclosed prominently per Leader instruction.** The original brief
-specified `kill -TERM <pid>`. In the first L1 attempt, `kill -TERM`
-caused a graceful drain that delivered the pending wake to the
-parent BEFORE the daemon died. This is the **normal production
-behavior** of TERM (graceful shutdown with work draining).
-
-For the F-2 demo, we need the wake to be **undelivered** when the
-daemon dies. The correct signal for crash-durability testing is
-`kill -KILL` (SIGKILL), which is the crash-durability model that
-F-1/F-2 targets (per the F-1 plan §1: "daemon dies mid-claim").
-
-**R1, R1b, R2, R3 all use `kill -KILL` (SIGKILL) after SIGSTOP.**
-The SIGSTOP pauses the daemon in the same iteration the poller
-observes the wedge, allowing DB verification of the precondition
-before the hard kill.
-
----
-
-## R0 — Crash Attribution (PRE-EXISTING-AT-BASE)
-
-**Verdict:** The daemon crash at 00:38:29 with
-`RuntimeError: DependencyBus is not initialized for instance=f165c8f1...`
-is a **pre-existing race condition**, NOT caused by the F-1/F-2 branch.
-
-### Evidence
-- Raise site: `daemon/services/child_reports.py:2841` in `_process_child_completion_db_sync`
-- The raise is an intentional **A8 HARD ERROR** (not graceful degradation)
-- `git log 18827dbd..HEAD -- daemon/services/child_reports.py` → empty (NOT TOUCHED)
-- `git log 18827dbd..HEAD -- daemon/services/message_processing_pipeline.py` → empty (NOT TOUCHED)
-- F-1 branch touched: `daemon/services/dependency_bus.py` (F-1 gates at ~:702 and ~:907)
-- The crash site is in a DIFFERENT file, NOT adjacent to the F-1 gates
-- Full traceback in `db-assertions/r0-crash-attribution.md`
-
-**Recommendation:** Track as separate issue, not an F-1/F-2 regression.
+| Check | Result |
+|-------|--------|
+| HEAD | `f53a0638` ✓ |
+| Code-state protocol (drift = non-.agents/ files) | `git diff --name-only f53a0638..HEAD | grep -vE '^\.agents/' | wc -l` = **0** ✓ |
+| Import gate | `daemon.__file__` resolves in-worktree, RDRS import OK |
+| Lane 6 anchors (pinned from fix code) | |
+| → field | `lane_stuck_wake: bool = True` (report_delivery_recovery.py:392) |
+| → env var | **NO env var** (config.py has NO `lane_stuck_wake`) — constructor param only |
+| → boot-time marker | `ReportDeliveryRecoveryService started: ... stuck_wake={self._lane_stuck_wake}]` |
+| → per-row success log | `sweep stuck_wake heal: dead-worker wake task id=<X> → retry id=<Y>` |
+| → per-row error log | `sweep stuck_wake force_cancel failed wake_task_id=<X>` |
+| → duck-typed log | `stuck_wake lane: task_repo has no force_cancel_and_schedule_retry` |
+| → heartbeat stale threshold | **90s** (find_stuck_wake_candidates default; 3× heartbeat cadence) |
+| → max_retries | **3** (lane 6 caller, line 905) |
+| → backoff | base=60s, max=3600s (force_cancel_and_schedule_retry defaults) |
+| → same-message_id contract | retry task carries SAME message_id as original wake (f53a0638 §3 review close-out) |
+| Port 8088 | UNBOUND (re-verified) — never touched |
+| Port 9797 | pid 3321986 (LIVE prod) — UNCHANGED |
+| Port 7979 | pid 3457886 (demo) — UNCHANGED |
 
 ---
 
-## R0.5 — Clean State
-
-- Booted durability daemon via wrapper
-- Enumerated 22 L1-L5 instances, DELETE all via API
-- Verified task table: 0 rows; message_queue: 0 rows
-- 8088 actual state: **UNBOUND** (recorded per Leader note; never touched)
-- Full record in `db-assertions/r05-clean-state.md`
-
----
-
-## Per-Leg Results (REDO)
+## Per-Leg Results (G4-r)
 
 | Leg | Description | Result | Key Finding | Log File |
 |-----|-------------|--------|-------------|----------|
-| R0 | Crash attribution | **PRE-EXISTING-AT-BASE** | `child_reports.py:2841` not touched by F-1/F-2 | n/a (evidence in r0-crash-attribution.md) |
-| R0.5 | Clean state | DONE | 0 tasks, 0 message_queue, 8088 UNBOUND | n/a |
-| R1 | True straddle (SIGSTOP) | **MIXED** | Wedge captured (inj_state=PENDING, wake in 'ready'). Post-reboot: parent STUCK (lane 2 correctly skips, watchdog correctly doesn't fire, worker pool per-instance guard blocks) | r1-wedge-capture.log, r1-reboot.log, r1-reboot-final.log |
-| R1b | Idempotency reboot | **PASS** | Lane 2 did 0 new work. Parent completed via auto-continue. int_reports count unchanged. | r1b-reboot.log |
-| R2 | Kill-switch OFF→ON | **INCOMPLETE** | Kill-switch OFF boot verified. Wedge consistently missed (3 attempts) — wake transitions too quickly. | r2-boot.log, r2-poller.log, r2r-poller.log, r2f-poller.log |
-| R3 | Multi-child mixed | **INCOMPLETE** | All 3 children completed, parent healed naturally. Wedge missed (same root cause as R1/R2). | r3-boot.log, r3-poller.log |
+| R1 | LIVE stuck-wake straddle (helloR1r) | **PARTIAL** | Wedge captured correctly (SIGSTOP, precondition verified, SIGKILL). Heartbeat stale (183s > 90s). Lane 6 ran (recover_on_startup) but `find_stuck_wake_candidates` returned 0. **QUERY BUG**: join `mq.message_id = ri.child_message_id` doesn't match (mq.message_id=ddbeef1d, ri.child_message_id=34cedf8d — different values). | r1r-wedge-capture.log, r1r-reboot.log |
+| R2 | Kill-switch OFF (helloR2r) | **GAP (per Advisory)** | No env var for lane 6 (config.py:0 matches). pool_orchestrator.py instantiates without kwarg (defaults ON). Unit tests with `lane_stuck_wake=False` exist (test_report_delivery_recovery_pg.py:1095,1195; test_report_delivery_recovery_service.py:323) and PASS. PG tests can't run in this env. Operational gap documented. | n/a (evidence in r2r-killswitch-off.txt) |
+| R3 | Multi-child mixed (helloR3rA/B) | **INCOMPLETE** | child1 delivered naturally. child2's wake task (1727) was created AFTER poller started. Poller v1 looked at wrong task (latest, not child2-specific). Poller v2 crashed (empty DAEMON_PID). Daemon crashed (pre-existing DependencyBus bug). child2 completed naturally. | r3r-crash.log |
+| R4(i) | No duplicate execution | **CODE-LEVEL ONLY** | lane 6 never processed (R1 query bug). Code-level: max_retries=3, backoff 60-3600s, same-message_id contract per f53a0638 §3. retry_count bounded. | n/a (evidence in r4r-negatives.txt) |
+| R4(ii) | Manual-ping deadlock GONE (healed state) | **PASS** | Parent healed naturally. Manual ping sent → normal response (parent completed at iter=7, ~14s). No deadlock. | r4r-ping-test.log |
 
 ---
 
-## R1 PASS Criteria Assessment
+## R1 (Stuck-Wake Straddle) — CRITICAL FINDING
 
+### Wedge capture (SIGSTOP→verify→SIGKILL)
+- t=34982ms: `child_task=completed`, `wake_task=running` (worker_id=worker-4), `wake_msg=ready`, `inj_state=PENDING`
+- SIGSTOP at t=34983ms, precondition verified, SIGKILL at t=35085ms
+- Daemon dead, heartbeat at 04:42:25
+
+### Post-reboot (waited 100s, heartbeat stale_delta=183s > 90s threshold)
+- Lane 6 enabled: `lanes=[..., stuck_wake=True]` ✓
+- `ReportDeliveryRecoveryService started: ... stuck_wake=True` ✓
+- `recover_on_startup` called
+- `find_stuck_wake_candidates` returned **0 candidates**
+- Parent STILL stuck (waiting_children, wake_msg=ready, inj_state=PENDING)
+
+### ROOT CAUSE: query data-shape mismatch
+
+The fix's `find_stuck_wake_candidates` query joins:
+```sql
+JOIN message_queue mq ON mq.message_id = ri.child_message_id
+```
+
+This assumes `mq.message_id` = `ri.child_message_id`. But in the captured state:
+- `ri.child_message_id` = `34cedf8d-ac99-4b57-a00d-8a90d014eb06` (child's message)
+- `mq.message_id` = `ddbeef1d-32bd-4aee-8b7c-c5715bd1e01b` (wake message — DIFFERENT)
+
+The `message_queue.source` encodes the child's message_id: `internal_report:<child_iid>:<child_message_id>`. The wake message is a SEPARATE message with its own `message_id`. The query's join condition is wrong — it should match on `mq.source` containing the `child_message_id`, not on `mq.message_id` directly.
+
+**Verified manually:** relaxing the join to match on `source` pattern returns 1 row (the captured wedge). The original query returns 0 rows.
+
+**Implication:** lane 6 is enabled but CANNOT heal the captured wedge. The fix's query is broken.
+
+### R1 PASS criteria
 | Criterion | Status | Notes |
 |-----------|--------|-------|
-| a. Parent leaves waiting_children + reply synthesizes helloR1 | **FAIL** | Parent stuck in waiting_children (anchor exists, watchdog doesn't fire, worker pool blocked by per-instance guard) |
-| b. ZERO manual pings | **FAIL** | Sent manual wake-up message to verify heal (documented as deviation) |
-| c. EXACTLY ONE internal_report row | **PASS** | 1 row in message_queue (status='ready'), 1 row in report_injections (state='PENDING') |
-| d. Child NOT re-executed | **PASS** | Child has 1 task row, completed. Checkpoint unchanged. |
-| e. Lane-2 boot-log marker + counters | **PARTIAL** | Marker present, no per-row processing (anchor exists, lane 2 correctly skips) |
-
-### R1 root cause analysis
-
-The SIGSTOP technique captured the TRUE PENDING state:
-- `inj_state=PENDING` (not TASK_DELIVERED) ✓
-- `wake_msg=ready` (in message_queue) ✓
-- `wake_task=running` (claimed by worker pool) ✓
-
-But the post-reboot state is STUCK because:
-1. **Lane 2 correctly skips**: anchor exists (message_queue row + report_injections row)
-2. **Watchdog correctly doesn't fire**: carrier exists (message_queue row in 'ready')
-3. **Worker pool per-instance guard**: won't claim 'ready' message while parent is 'running' on another task
-
-The system has no mechanism to process a 'ready' wake that was preserved
-across a crash. This is a **design gap**, not an F-2 code bug.
+| a. Parent leaves waiting_children + synthesizes helloR1r | **FAIL** | Parent stuck (lane 6 didn't process) |
+| b. ZERO manual pings | **PASS** | No manual pings between kill and observation |
+| c. EXACTLY ONE internal_report row | **PASS** | 1 row (status=ready, PENDING inj) |
+| d. Child NOT re-executed | **PASS** | Child has 1 task row, completed |
+| e. Lane-6 marker + result counters | **PARTIAL** | Lane 6 boot marker present, but ZERO per-row processing (query bug) |
 
 ---
 
-## Adjudicated Interpretation of L1/L5 (from Leader)
+## R2 (Kill-Switch OFF) — OPERATIONAL GAP
 
-**Leader ruling:** The straddle was NOT achieved in L1/L5.
-- `report_injections` TASK_DELIVERED + WaitingChildrenWatchdog heal means
-  the wake DELIVERED BEFORE daemon death
-- `kill -TERM` gracefully drains and the drain delivered the pending wake
-- Lane-2 skipping was CORRECT (marker-minted case belongs to lanes 1/3/4
-  per decisions §12a window-map)
-- The demo's purpose — lane 2 healing a TRUE no-row straddle (pending
-  wake wiped by backlog-clear, no delivery evidence) — is still UNPROVEN
-- Criterion (c)=0 rows was a scenario-harness miss, not an F-2 code result
+Per Advisory: lane 6 kill-switch has NO config.py env var.
 
-**R1 (with SIGSTOP+KILL) captured the TRUE PENDING state** but the
-post-reboot state is stuck (anchor preserved, not wiped). The F-2 wedge
-as defined (anchor-less) is essentially impossible to catch in a dev
-environment because the anchor (message_queue row + report_injections
-row) is created within ~70ms of the child's completion, and the wake
-transitions to 'processing' within ~1s.
+| Check | Result |
+|-------|--------|
+| `grep config.py lane_stuck_wake` | empty (no env var) |
+| `grep config.py stuck_wake` | empty (no env var) |
+| pool_orchestrator.py instantiation | without kwarg (defaults ON) |
+| Lanes 1-5 env vars | each have `report_delivery_recovery_lane_*` env |
+| Lane 6 env var parity | **MISSING** |
+| Unit tests with `lane_stuck_wake=False` | `test_report_delivery_recovery_pg.py:1095,1195`; `test_report_delivery_recovery_service.py:323` |
+| Unit test result | `pytest tests/unit/test_report_delivery_recovery_service.py -k disabled` → **2 passed, 37 deselected** |
+| PG test result | PG harness not available in this env |
+| Boot with lane 6 OFF via env | **IMPOSSIBLE** (no env var) |
 
----
-
-## Key Anomalies
-
-1. **F-2 wedge window is <100ms in dev env** — the report_injections row
-   is created at the same time as the child's completion. The wake
-   transitions to 'processing' within ~1s. Lane 2's anchor-less filter
-   skips because the anchor exists.
-
-2. **SIGSTOP technique creates a stuck state** — the wake in 'ready' is
-   preserved by F-1, not wiped. Lane 2 correctly skips (anchor exists).
-   Watchdog correctly doesn't fire (carrier exists). Worker pool per-instance
-   guard blocks the 'ready' message while parent is on another task.
-
-3. **Pre-existing DependencyBus crash** — NOT caused by F-1/F-2 branch.
-   `child_reports.py:2841` not touched by the branch. See R0.
-
-4. **Kill-switch OFF boot verified** — `lanes=[no_row_backstop=False]`
-   in boot log. Service is constructed but lane 2 is disabled.
+**GATE FINDING (per Advisory):** "kill-switch-OFF not operator-exercisable as-deployed — env-var parity with lanes 1-5 missing (config.py follow-up needed)"
 
 ---
 
-## Port-Safety Evidence
+## R3 (Multi-Child Mixed) — INCOMPLETE
 
-| Port | Owner at START (pid) | Owner at END (pid) | Untouched? |
-|------|---------------------|-------------------|------------|
-| 8088 | UNBOUND | UNBOUND (re-verified per Leader note) | YES — never touched |
-| 9797 | ensemble-prod (3321986) | (re-verify at cleanup) | YES — live prod |
-| 7979 | ensemble-prod (3457886) | (re-verify at cleanup) | YES — demo service |
-| 8079 | v0.16.11 dev (3567513) → SIGTERM'd | (restore at cleanup) | N/A (test target) |
+- child1 (3s): completed + TASK_DELIVERED naturally
+- child2 (35s): poller missed the wedge
+  - v1 poller looked at LATEST process_report (child1's, completed)
+  - v2 poller crashed (empty DAEMON_PID)
+  - child2 completed naturally
+- Daemon crashed (pre-existing DependencyBus bug — R0 finding)
 
----
-
-## Preflight Evidence
-
-- HEAD: `fb0f4655fafaad1385d0551a82e5c04348c01d3c` ✓
-- daemon.__file__: `/home/nea/ensemble-src-wt-durability/daemon/__init__.py` ✓ (with PYTHONPATH override for symlinked .venv)
-- Factory engine line: `Creating PostgreSQL engine: 127.0.0.1:5432/ensemble_dev` ✓
-- /livez version: `0.16.13` (worktree, not 0.16.11) ✓
-- /readyz components: all true ✓
-- /proc/<pid>/environ: dev-clean ✓
+**Gap:** cannot test multi-child lane 6 behavior because:
+1. Poller didn't target child2 specifically
+2. Daemon crashed before v2 poller could start
+3. Child2 completed before any wedge could be captured
 
 ---
 
-## Recipe Pointer
+## R4 (Lane-6 Negatives)
 
-- R18 recipe: `/home/nea/ensemble-src/.agents/tester/LESSONS/2026-10-04-r18-dev-e2e-boot-recipe-and-pairing-gotchas.md` (READ-ONLY)
-- Wrapper: `/tmp/durability-f1f2-wc-wedge-demo-boot.sh`
-- Data dir: `/home/nea/dev-daemon-8079-durability-f1f2/data/`
-- Logs: `/home/nea/dev-daemon-8079-durability-f1f2/logs/`
-- Poller: `/tmp/f2-r1-poller.py` (psycopg, SIGSTOP technique)
-- Per-leg env override: `/tmp/l2-lane2-off.env` (L2 kill-switch OFF)
-- Lane-2 kill-switch env var: `SERVICES_REPORT_DELIVERY_RECOVERY_LANE_NO_ROW_BACKSTOP`
-- Lane-2 kill-switch config: `daemon/config.py:1350` (`report_delivery_recovery_lane_no_row_backstop: bool`)
-- Lane-2 sweep log marker: `RDRS lane 2: post-wipe recovery (no-row backstop; F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)`
-- Lane-2 per-row markers: `sweep no_row_backstop ...` (only when rows processed)
-- F-2 wedge poller technique: SIGSTOP in same iteration as observe, then DB-verify, then SIGKILL
+### R4(i) No duplicate execution
+- RUNTIME: cannot verify (lane 6 never processed — R1 query bug)
+- CODE-LEVEL: `force_cancel_and_schedule_retry` at task/repository.py:5094
+  - `max_retries=3` (bounded, caller at report_delivery_recovery.py:905)
+  - `backoff_base=60s, backoff_max=3600s` (production defaults)
+  - `next_retry_at = now + backoff` (per f53a0638 §3)
+  - **same-message_id contract**: retry task carries SAME message_id as original wake (per f53a0638 review close-out §3, verified by PG test claimability pin at test_report_delivery_recovery_pg.py ~2475)
+  - **retry_count bounded** by the primitive's own logic (not the lane caller)
+
+### R4(ii) Manual-ping deadlock GONE in healed state
+- Parent 2acdf6b2 + child 474f4c8c (normal completion, 15s sleep)
+- Parent healed naturally at 04:52:48
+- Manual ping at 04:53:28 → normal response
+- Parent completed again at iter=7 (~14s)
+- **VERDICT: deadlock IS GONE in healed state**
+
+**Caveat:** the healed state test uses NATURAL healing, not lane 6 healing. If lane 6 had healed the parent, the retry task would be in PENDING with next_retry_at in the future — a different busy-guard state. The test as-designed only verifies manual-ping in the post-natural-heal state, not the post-lane-6-heal state.
 
 ---
 
-## Commits
+## §12e Decisions.md Structural Corruption (preflight-cited)
 
-- Previous run: `b24cab33 test: durability F-1/F-2 demo E2E evidence (G4)`
-- This run: (to be added) `test: durability F-1/F-2 demo E2E evidence (G4 redo)`
-
----
-
-## D1 — Stuck-State Forensics (the decisive evidence)
-
-**Date:** 2026-10-05 01:23–01:27 UTC
-**Capture-word:** helloD1
-**Technique:** SIGSTOP→verify→SIGKILL (same as R1)
-
-### D1 wedge capture
-- child_task=completed, parent=waiting_children
-- wake_task=running, wake_msg=ready (in message_queue)
-- inj_state=PENDING (NOT TASK_DELIVERED) — TRUE PENDING state captured
-- SIGSTOP at t=26997ms, precondition verified, SIGKILL at t=27104ms
-
-### D1 forensics observation table
-
-| Time | t+offset | parent_status | wake_msg_status | inj_state | RDRS activity for c63eecab | Watchdog | pg_stat_activity |
-|------|----------|---------------|------------------|-----------|----------------------------|----------|------------------|
-| 01:23:45 | t+15s (t+30s capture overlapping due to G1 sweep slowdown) | waiting_children | ready | PENDING | None (lane 2 ran at boot, no per-row) | interval=3600s, started 01:23:29 | Only my own query |
-| 01:23:56 | t+26s (t+120s capture) | waiting_children | ready | PENDING | None (other lanes: "skipped busy parent=e23ef658" — different parent) | Won't fire in 300s window | Only my own query |
-| 01:27:06 | t+216s (t+300s capture, delayed by G1 sweep) | **waiting_children (STILL STUCK, NEVER HEALED)** | ready | PENDING | **ZERO RDRS sweep lines reference c63eecab** | Won't fire in 300s window | Only my own query |
-
-### D1 verdict
-**PARENT NEVER HEALED** in 300s observation window.
-- Lane 2 ran at boot (01:23:29) but found anchor (message_queue row + report_injections row) and skipped
-- No per-row processing for c63eecab
-- Watchdog interval=3600s — WILL NOT FIRE within observation window
-- pg_stat_activity: no stuck locks (artifact check passes)
-- inj_state PENDING unchanged from t+30 to t+300
-
-### D2 — Manual ping (since stuck at t+300s)
-**Time:** 01:27:20Z
-**Message:** "[system:wedge-resolve] Your child has completed and reported helloD1."
-
-D2 wait (bounded 150s):
-- Parent: running (processing the API ping message)
-- wake_msg: STILL 'ready' (worker pool per-instance guard blocks)
-- inj_state: STILL PENDING
-- internal_reports_in_parent_history: 1 (no new injection)
-- **Parent NEVER completed in 150s observation window**
-
-D2 root cause: chicken-and-egg deadlock
-1. Parent is 'running' (processing the API ping via LLM)
-2. Worker pool per-instance guard: won't claim 'ready' message for instance with another task RUNNING
-3. Parent won't process internal_report until worker pool claims it
-4. Worker pool won't claim until parent completes current task
-5. DEADLOCK
-
-D2 path: **NEVER DELIVERED** (LLM did not respond within 150s, possibly due to G1 sweep consuming LLM resources in parallel)
-
-### D3 — Kill-switch OFF boot (best-effort, wedge capture skipped)
-**Time:** 01:31:57Z (boot)
-**Boot ready:** 01:32:09Z
-
-Lane-2 config verified:
+At `decisions.md:1280` (from f53a0638), there is a stray orphan header:
 ```
-ReportDeliveryRecoveryService started: interval=300s, age_bound=10min, batch_cap=100, retry=1min, 
-lanes=[deferred=True, no_row_backstop=False, pending_age=True, recovery_retry=True, orphan=True]
+The §12a window-to-lane maps
+ — Additive Lane 6 (Block-1 G4 merge-gate, 2026-10-05)
 ```
 
-Boot-time RDRS marker (always prints regardless of kill-switch):
-```
-RDRS lane 2: post-wipe recovery (no-row backstop; F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)
-```
+The first line is NOT a `##` header (it's a continuation fragment) but appears as a standalone line. This is a docs-only formatting issue (markdown structure). Evidence in `db-assertions/decisions-12e-corrupt.txt`.
 
-No per-row processing for lane 2 (because it's disabled). D3 wedge capture SKIPPED (previous 3 R2 attempts failed consistently — wedge window <100ms in dev env).
+---
 
-### D4 — Multi-child mixed: SKIPPED (no D1/D3 attempts naturally produced one)
+## DECISIVE GATE VERDICT
 
-### DECISIVE VERDICT
-The true straddle capture (SIGSTOP, TRUE PENDING state, no delivery evidence) leads to a parent that NEVER HEALS in the 300s observation window. The lane-2 anchor-less path is never exercised because the anchor (message_queue row + report_injections row) is always created before the kill in a dev environment. The watchdog interval (3600s) means it won't fire within any reasonable observation window. The manual ping triggers a chicken-and-egg deadlock with the worker pool per-instance guard.
+**The fix does NOT heal the captured wedge.** The `find_stuck_wake_candidates` query has a data-shape mismatch: it joins `message_queue.message_id = report_injections.child_message_id`, but these are different values in practice (wake message vs child's message). Lane 6 is enabled but finds 0 candidates, so no heal occurs. The parent remains stuck.
 
-This is the merge-gate evidence: the F-2 architecture works correctly (lane 2 correctly skips when anchor exists; watchdog correctly doesn't fire when carrier exists), but the F-2 wedge as defined (anchor-less) is essentially impossible to catch in a dev environment, and the system has no mechanism to process a preserved 'ready' wake after a crash.
+**Operator-reachable kill-switch is MISSING.** Lane 6 has no env var in config.py. Lanes 1-5 have `report_delivery_recovery_lane_*` env vars; lane 6 diverges. Boot with lane 6 OFF is impossible as-deployed.
+
+**R4(ii) manual-ping in healed state works** (parent healed naturally, ping processed normally, no deadlock).
+
+**Recommendations for follow-up:**
+1. Fix the query join: match on `mq.source LIKE 'internal_report:<child_iid>:<child_message_id>'` instead of `mq.message_id = ri.child_message_id`
+2. Add `lane_stuck_wake` env var in config.py with `env_prefix="SERVICES_"` for parity with lanes 1-5
+3. Fix the §12e decisions.md orphan header (docs-only)
