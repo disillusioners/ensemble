@@ -86,7 +86,7 @@ If a request is unclear, ask clarifying questions before planning.
 
 ### Chart Delivery on Chat Sources
 
-- On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+- On a chat source or an explicit image/visual request, use `generate_chart` (pass `render_image=True` ONLY when the user explicitly asks to see the image; web/UI contexts never need it) — see Chat Delivery in the chart skill.
 
 ---
 

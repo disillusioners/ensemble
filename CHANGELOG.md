@@ -17,6 +17,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.17.1] — 2026-10-05
+
+### Changed — Chart render is now opt-in (`render_image: bool = False` on `generate_chart`; user directive via Discord 2026-10-05)
+
+`generate_chart()` **no longer renders by default**. Previously the tool always rendered a PNG at validation time, persisted it under `provenance.feature="chart-render"`, and emitted a trailing `<!-- ens-img:chart-render:<id> -->` marker for chat-source dispatchers to attach. That contract flipped to opt-in: the default now returns the **validated Mermaid block only** — no render, no PNG capture, no `tmp_images` write, no marker. Chat dispatchers already no-op without a marker, so non-chat callers see a clean response with no behavioral change.
+
+**When to pass `render_image=True`**: ONLY when the image will actually be delivered to a chat source (Discord / Slack / Telegram) as a native attachment — i.e., when the user explicitly asks to see the image. Web and UI contexts never need it (the Mermaid fence renders natively via ngx-markdown / GitHub / any Mermaid-compatible renderer).
+
+**Differential timeout (`d5_timeout`, same user addendum)**: `render_image=True` extends the charter wait budget from **600s to 1200s (20 min)** on ALL charter wait paths — both the fresh-spawn `invoke_agent_and_wait` budget AND the reuse lane's wait budget — so a cold chromium/puppeteer bootstrap fits INSIDE the call. `render_image=False` (default) keeps the normal ~600s validate-only budget (no slot held open for a render that isn't requested).
+
+**Charter-side**: `agents/charter/workflow.md` Steps 5 + 6 are now **conditional on a `RENDER_IMAGE: true|false` directive** in the dispatch message (the exact directive form is byte-stable and test-pinnable — the directive is emitted by `daemon/tools/chart_tools.py` on its own line; charter's gate regex skips the entire render + persist + marker pipeline when the directive is `false` or absent). The locked marker regex (`^<!-- ens-img:chart-render:[a-f0-9]{32} -->$`), the both-seam extraction ordering, and the dispatcher skip rules are UNCHANGED — the opt-in contract lives entirely on the *emission* side.
+
+**Skill/prompt guidance**: `agents/_prompt_system/innate-skills/chart/skill.md` has a new dedicated "render_image: opt-in rendering" section (with the 600s/1200s differential table) plus the `render_image` row in the signature table; the 20 chart-capable agents' canonical Chat Delivery line now carries the opt-in qualifier ("pass `render_image=True` ONLY when the user explicitly asks to see the image; web/UI contexts never need it"). **Promote note:** daemon-side changes require a daemon restart + promote; agents-side changes take effect on next charter/agent spawn.
+
+**Audit**: `tools/audit-chart-image-delivery.sh` grew from 24 to 31 pins — 7 new feature-class pins (#25–#31) grep-verify the opt-in contract (param declaration, d5 timeout constants, directive byte-stability, workflow conditional gates, chart skill opt-in docs, 20-agent qualifier coverage). Preservation pins (#1–#9, #13, #22, #23) unchanged and green.
+
+### Fixed
+
+- None in this patch (no behavioral fixes; scope is strictly the render opt-in flip).
+
+---
+
 ## [0.17.0] — 2026-10-05
 
 Restart-resilience release: the daemon now survives restarts without stranding armed notifications, mid-task instances, or dependent wake-ups. Consolidation note: v0.15.x and v0.16.x shipped via tag annotations without CHANGELOG sections — this section carries the entries accumulated under [Unreleased] since [0.14.2] (two of which — checkpoint retention and the selectable-models default — technically shipped in the v0.16.12 tag) plus the full 2026-10-04/05 merge window.

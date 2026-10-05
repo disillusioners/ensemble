@@ -1022,3 +1022,200 @@ class TestGenerateChartReuse:
         # Cleanup is clean post-call.
         assert charter_id not in chart_tools_module._inflight_reuse
         assert not registry.is_registered(charter_id)
+
+
+# ---------------------------------------------------------------------------
+# chart-render-opt-in (user directive 2026-10-05) — render_image flag
+# ---------------------------------------------------------------------------
+#
+# The flag is opt-in: default False (validated Mermaid only, no render, no
+# marker, no tmp_images write). When True, the dispatch message carries
+# ``RENDER_IMAGE: true`` and the wait timeout extends to 1200s so a cold
+# chromium/puppeteer bootstrap fits inside the call. The fresh-spawn and
+# reuse paths both honor the flag.
+
+
+class TestGenerateChartRenderImageOptIn:
+    """Tests for the ``render_image`` opt-in flag.
+
+    Pins (chart-render-opt-in, 2026-10-05):
+      * ``render_image=False`` (default) → dispatch message has
+        ``RENDER_IMAGE: false``; wait timeout = 600s.
+      * ``render_image=True`` → dispatch message has ``RENDER_IMAGE: true``;
+        wait timeout = 1200s (BOTH fresh and reuse paths).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_reuse_module_state(self):
+        chart_tools_module._inflight_reuse.clear()
+        chart_tools_module._reuse_revive_attempts.clear()
+        yield
+        chart_tools_module._inflight_reuse.clear()
+        chart_tools_module._reuse_revive_attempts.clear()
+
+    async def test_default_omits_render_directive_and_uses_600s_timeout(self):
+        """Default (render_image omitted) → directive false, timeout 600s."""
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = _make_manager()
+        mock_invoke = AsyncMock(return_value=("mermaid output", "child-id"))
+
+        with patch(
+            "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+        ):
+            tools = create_chart_tools(manager, "test-instance-id")
+            await tools[0].coroutine(description="Flow")
+
+        kwargs = mock_invoke.call_args.kwargs
+        assert kwargs["timeout"] == 600.0
+        # RENDER_IMAGE directive MUST be present (test-pinnable) and value false.
+        assert "RENDER_IMAGE: false" in kwargs["message"]
+        assert "RENDER_IMAGE: true" not in kwargs["message"]
+
+    async def test_explicit_false_uses_600s_timeout(self):
+        """render_image=False explicit → same as default; timeout 600s."""
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = _make_manager()
+        mock_invoke = AsyncMock(return_value=("mermaid output", "child-id"))
+
+        with patch(
+            "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+        ):
+            tools = create_chart_tools(manager, "test-instance-id")
+            await tools[0].coroutine(
+                description="Flow", render_image=False
+            )
+
+        kwargs = mock_invoke.call_args.kwargs
+        assert kwargs["timeout"] == 600.0
+        assert "RENDER_IMAGE: false" in kwargs["message"]
+
+    async def test_render_image_true_uses_1200s_timeout_fresh(self):
+        """render_image=True on FRESH path → directive true, timeout 1200s."""
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = _make_manager()  # get_children → [] → fresh spawn
+        mock_invoke = AsyncMock(return_value=("mermaid output", "child-id"))
+
+        with patch(
+            "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+        ):
+            tools = create_chart_tools(manager, "test-instance-id")
+            await tools[0].coroutine(
+                description="Flow", render_image=True
+            )
+
+        kwargs = mock_invoke.call_args.kwargs
+        assert kwargs["timeout"] == 1200.0
+        # Directive is test-pinnable, lowercase, on its own line.
+        assert "RENDER_IMAGE: true" in kwargs["message"]
+        # Description + diagram_type still flow through.
+        assert "Flow" in kwargs["message"]
+
+    async def test_render_image_true_uses_1200s_timeout_reuse(self):
+        """render_image=True on REUSE path → directive true, timeout 1200s.
+
+        The reuse path threads the timeout through ``_reuse_charter``'s
+        ``timeout=`` kwarg. Without the d5 wiring, the default
+        ``_DEFAULT_TIMEOUT_S`` would short-circuit the 1200s budget.
+        """
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = _make_manager()
+        completed = _charter_row(
+            instance_id="charter-render",
+            status="completed",
+            last_activity_at=datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc),
+        )
+        manager._instance_repository.get_children = MagicMock(
+            return_value=[completed]
+        )
+        manager._instance_repository.get = MagicMock(return_value=completed)
+        mock_invoke = AsyncMock(return_value=("unused", "x"))
+        mock_registry = _make_registry(
+            wait_result=SimpleNamespace(
+                content="```mermaid\ngraph TD\nA-->B\n```\n", is_error=False
+            )
+        )
+
+        with patch(
+            "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+        ):
+            with _patched_registry(mock_registry):
+                tools = create_chart_tools(manager, "test-instance-id")
+                result = await tools[0].coroutine(
+                    description="Flow", render_image=True
+                )
+
+        # Reuse path returned the registry's content.
+        assert "graph TD" in result
+        # The dispatch message carried the RENDER_IMAGE: true directive.
+        enqueue_kwargs = manager.enqueue_message.call_args.kwargs
+        assert "RENDER_IMAGE: true" in enqueue_kwargs["message"]
+        mock_invoke.assert_not_awaited()
+
+    async def test_render_image_true_uses_1200s_timeout_reuse_error_string(self):
+        # 4th combo in matrix (fresh/reuse × true/false). Registry returns
+        # None so reuse_charter builds the timeout error from d5=1200s.
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = _make_manager()
+        completed = _charter_row(
+            instance_id="charter-render-true", status="completed",
+            last_activity_at=datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc),
+        )
+        manager._instance_repository.get_children = MagicMock(return_value=[completed])
+        manager._instance_repository.get = MagicMock(return_value=completed)
+        mock_invoke = AsyncMock(return_value=("unused", "x"))
+        mock_registry = _make_registry(wait_result=None)
+
+        with patch(
+            "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+        ), _patched_registry(mock_registry):
+            tools = create_chart_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                description="Flow", render_image=True
+            )
+
+        # 1200s verbatim pins d5=1200s reuse; directive true on dispatch.
+        assert result.startswith("Error: Charter timed out after 1200.0s")
+        assert "RENDER_IMAGE: true" in manager.enqueue_message.call_args.kwargs["message"]
+
+    async def test_default_uses_600s_timeout_reuse(self):
+        """render_image omitted on REUSE path → timeout 600s (preservation)."""
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = _make_manager()
+        completed = _charter_row(
+            instance_id="charter-default",
+            status="completed",
+            last_activity_at=datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc),
+        )
+        manager._instance_repository.get_children = MagicMock(
+            return_value=[completed]
+        )
+        manager._instance_repository.get = MagicMock(return_value=completed)
+        mock_invoke = AsyncMock(return_value=("unused", "x"))
+        # Timeout path: registry returns None → reuse_charter must build
+        # the timeout error string with the *current* budget (600.0 here,
+        # proving the reuse path picked the d5-derived value).
+        mock_registry = _make_registry(wait_result=None)
+
+        with patch(
+            "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+        ):
+            with _patched_registry(mock_registry):
+                tools = create_chart_tools(manager, "test-instance-id")
+                result = await tools[0].coroutine(description="Flow")
+
+        # Default timeout (600s) appears verbatim in the timeout error
+        # string — pins the d5=600s preservation contract.
+        assert result.startswith("Error: Charter timed out after 600.0s")
+        enqueue_kwargs = manager.enqueue_message.call_args.kwargs
+        assert "RENDER_IMAGE: false" in enqueue_kwargs["message"]
+
+    async def test_timeout_constants_match_spec(self):
+        """d5 spec: render_image=true → 1200s, false → 600s, hoisted."""
+        assert chart_tools_module._RENDER_TIMEOUT_S == 1200.0
+        assert chart_tools_module._DEFAULT_TIMEOUT_S == 600.0

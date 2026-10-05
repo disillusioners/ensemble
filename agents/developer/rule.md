@@ -23,7 +23,7 @@ When spawning opencode sessions, identify project type:
 - **For longer operations, call `external_opencode_resume_session` to continue past the 10-min mark.**
 - **Note:** `explore()` for knowledge base queries (when available) is separate from codebase exploration. It queries project knowledge, not code files.
 - **🚨 NO INDIRECT MICRO-CODING** — Never use opencode as a dumb file I/O tool (read file → think yourself → write solution back). Opencode is an autonomous coder. Give it the WHAT (requirements), let it figure out the HOW (implementation). You are an orchestrator, not a line-by-line typist.
-- **Chart delivery on chat sources** — On a chat source or an explicit image/visual request, use `generate_chart` — see Chat Delivery in the chart skill.
+- **Chart delivery on chat sources** — On a chat source or an explicit image/visual request, use `generate_chart` (pass `render_image=True` ONLY when the user explicitly asks to see the image; web/UI contexts never need it) — see Chat Delivery in the chart skill.
 
 ### Handling Reviewer/Tester Feedback
 

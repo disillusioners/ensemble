@@ -86,12 +86,53 @@ Write the syntax. Style conventions:
 
 ---
 
-## Step 5: Validate + Render + Persist
+## Step 5: Validate + Render + Persist (CONDITIONAL on RENDER_IMAGE)
 
-After drafting the Mermaid, validate and render it to a PNG that will be
-attached to the chat response. The validated Mermaid text remains the
-primary deliverable; the PNG is layered on top so downstream chat
-sources can attach the image to the same message.
+**After drafting the Mermaid, validate and render it to a PNG that will
+be attached to the chat response. The validated Mermaid text remains
+the primary deliverable; the PNG is layered on top so downstream chat
+sources can attach the image to the same message.**
+
+**Conditional gate (chart-render-opt-in, user directive 2026-10-05):
+this entire step — Steps 5.0 through 5.6, AND the persist + marker
+emission in Step 6b/6c — runs ONLY when the dispatch message carries
+``RENDER_IMAGE: true``. When the directive is ``false`` (or the line
+is absent, the validated-Mermaid-only default), this turn STOPS after
+Step 4: skip Steps 5.0–5.6, skip the image_save call, skip the
+``<!-- ens-img:chart-render:<id> -->`` marker, and return the fenced
+```mermaid block with a brief explanation. No render, no PNG, no
+tmp_images write, no marker — the dispatcher already no-ops without
+a marker, so the chat lane is unaffected.** Test-pinnable: the
+directive line is exactly ``RENDER_IMAGE: true`` or ``RENDER_IMAGE:
+false`` (lowercase boolean, on its own line, embedded in the
+``generate_chart`` dispatch message by ``daemon/tools/chart_tools.py``).
+
+### Conditional gate — test-pinnable form
+
+The gate is a small Python-style block; tests exec it against the
+dispatch message string to decide whether to enter the render pipeline
+or short-circuit to text-only delivery. Source of truth for the
+opt-in contract.
+
+```python
+# Conditional gate (chart-render-opt-in, user directive 2026-10-05):
+# Enter the render pipeline (Steps 5.0–5.6 + Step 6a/6b/6c) ONLY when
+# the dispatch message carries ``RENDER_IMAGE: true``. The validated-
+# Mermaid-only default (False or absent) returns the fenced block with
+# no render, no PNG, no marker, no tmp_images write.
+import re as _re_gate
+
+_RENDER_DIRECTIVE_RE = _re_gate.compile(r"^RENDER_IMAGE:\s*(true|false)\s*$", _re_gate.MULTILINE)
+
+def should_render_dispatch_message(message: str) -> bool:
+    """Return True iff the dispatch message opts into PNG rendering.
+
+    Contract: the directive line is ``RENDER_IMAGE: true|false`` on
+    its own line. Default (line absent) is False — text-only delivery.
+    """
+    m = _RENDER_DIRECTIVE_RE.search(message or "")
+    return bool(m and m.group(1) == "true")
+```
 
 ### Step 5.0 — READINESS_PROBE (4-signal config-file probe)
 
@@ -351,7 +392,16 @@ delivery without the marker.
 
 ---
 
-## Step 6: Persist + Return
+## Step 6: Persist + Return (CONDITIONAL on RENDER_IMAGE)
+
+**Step 6a, 6b, and 6c run ONLY when the dispatch message carries
+``RENDER_IMAGE: true`` AND Step 5 produced a non-empty ``$TMPPNG``;
+otherwise this step's only output is the fenced Mermaid block plus a
+brief explanation (Step 6d, ``marker = ""``). When the directive is
+``false`` (or the line is absent, the validated-Mermaid-only
+default), I skip the store-capacity pre-check, the ``image_save``
+call, the marker-emit conditional, and the marker line — and return
+the Mermaid block directly.**
 
 If the render succeeded AND the PNG is non-empty, persist it via
 `image_save` and emit the canonical image-reference marker. If anything
@@ -525,9 +575,16 @@ Step 3: Pick the diagram type
   ↓
 Step 4: Draft Mermaid syntax
   ↓
-Step 5: READINESS_PROBE → mktemp + sanitized .mmd → render PNG → image_save → marker (or text-only on any failure)
+Step 5: CONDITIONAL on RENDER_IMAGE directive (chart-render-opt-in)
+  - RENDER_IMAGE: true  → READINESS_PROBE → mktemp + sanitized .mmd
+                          → render PNG → image_save → marker
+                          (or text-only on any failure)
+  - RENDER_IMAGE: false → SKIP this step entirely (text-only default)
   ↓
-Step 6: Return fenced ```mermaid block + brief explanation + (on success) <!-- ens-img:chart-render:<id> -->
+Step 6: CONDITIONAL on RENDER_IMAGE directive
+  - true  → persist + return fenced ```mermaid block + brief
+            explanation + (on success) <!-- ens-img:chart-render:<id> -->
+  - false → return fenced ```mermaid block + brief explanation ONLY
 ```
 
 The `<!-- ens-img:chart-render:<id> -->` marker is byte-exact and
@@ -535,4 +592,8 @@ emitted ONLY on a valid `image_save` result containing a 32-hex
 `image_id`. Chat-source dispatchers (Phase B) extract the marker,
 strip it from the visible text, and attach the PNG via per-platform
 native APIs. The Mermaid block is the universal deliverable; the PNG
-is a layered enhancement that never breaks text delivery.
+is a layered enhancement that only ships when the caller asks for it
+(`render_image=True` on the `generate_chart` tool, the
+``RENDER_IMAGE: true`` directive in the dispatch message). Text
+delivery is never broken — the Mermaid block is always returned,
+the PNG/marker is opt-in.

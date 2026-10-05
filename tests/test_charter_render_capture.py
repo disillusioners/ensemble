@@ -683,8 +683,15 @@ def test_verify_toolchain_passes_on_real_evidence(tmp_path):
     )
     assert "vrc=0" in r.stdout, f"verify should pass: {r.stdout} {r.stderr}"
     log = calls.read_text()
-    # Render contract: security pin present, both artifacts requested
-    assert '"securityLevel":"strict","htmlLabels":false' in log
+    # Render contract: security pin present, both artifacts requested.
+    # mmdc 12.x dropped inline -c JSON; config is now staged to a
+    # per-render temp file. Pin -c <path> in ARGS + JSON source in the lib.
+    assert re.search(r"-c\s+/tmp/charter-mmdc-cfg\.\w+\.json\b", log), (
+        f"verify render must pass config via -c <mmd_json temp file>; got log: {log!r}"
+    )
+    assert '"securityLevel":"strict","htmlLabels":false' in INSTALL_LIB.read_text(), (
+        "security pin JSON must live in install-mermaid-cli.lib.sh"
+    )
     assert log.count("ARGS: ") == 2  # one svg + one png render
 
 
@@ -806,3 +813,248 @@ def test_chart_skill_chat_delivery_section_landed():
     assert body.count(_BUSY_STRING) >= 2
     assert _PAUSED_STRING in body
     assert "## Wedged-Charter Recovery" in body
+
+
+# =========================================================================
+# chart-render-opt-in tests — conditional gate (user directive 2026-10-05)
+# =========================================================================
+#
+# The Step 5 gate is CONDITIONAL on the RENDER_IMAGE directive. These
+# tests pin the opt-in contract:
+#   * workflow.md carries the conditional gate (test-pinnable form,
+#     exec-able) that returns False when the directive is absent/false.
+#   * workflow.md carries the render_image=True form that returns True.
+#   * The chart skill's signature table documents the opt-in.
+#   * chart_tools.py declares the flag with a False default.
+#   * The directive in chart_tools.py's dispatch message is byte-stable
+#     (RENDER_IMAGE: true|false on its own line, lowercase).
+#
+# Preservation pins:
+#   * The marker regex (LOCKED form) is untouched.
+#   * Step 6a/6b/6c contract tests still pass under render_image=True.
+#   * The always-render contract is GONE — markers are opt-in only.
+
+GATE_HEADING = "### Conditional gate — test-pinnable form"
+
+
+def _gate_function():
+    """Exec workflow.md's conditional-gate python block; returns the
+    should_render_dispatch_message function under test."""
+    body = WORKFLOW_MD.read_text()
+    idx = body.index(GATE_HEADING)
+    m = re.search(r"```python\n(.*?)```", body[idx:], re.DOTALL)
+    assert m, f"no ```python fence found after {GATE_HEADING!r}"
+    ns: dict = {}
+    exec(compile(m.group(1), "<gate>", "exec"), ns)
+    return ns["should_render_dispatch_message"]
+
+
+def test_render_image_gate_contract_default_is_false():
+    """The gate function treats the ABSENT directive as False."""
+    should_render = _gate_function()
+    # No directive → False (text-only delivery)
+    msg = "Create a flowchart diagram.\n\nDescription: x\nProject: p\n"
+    assert should_render(msg) is False, (
+        "absent RENDER_IMAGE directive MUST default to False (validated Mermaid only)"
+    )
+
+
+def test_render_image_gate_contract_false_is_false():
+    """The gate function treats RENDER_IMAGE: false as False."""
+    should_render = _gate_function()
+    msg = (
+        "Create a flowchart diagram.\n\nDescription: x\n"
+        "RENDER_IMAGE: false\n"
+    )
+    assert should_render(msg) is False
+
+
+def test_render_image_gate_contract_true_is_true():
+    """The gate function treats RENDER_IMAGE: true as True."""
+    should_render = _gate_function()
+    msg = (
+        "Create a flowchart diagram.\n\nDescription: x\n"
+        "RENDER_IMAGE: true\n"
+    )
+    assert should_render(msg) is True
+
+
+def test_render_image_gate_contract_handles_project_line():
+    """The gate function still matches when Project: line comes after."""
+    should_render = _gate_function()
+    msg = (
+        "Create a flowchart diagram.\n\nDescription: x\n"
+        "RENDER_IMAGE: true\n"
+        "Project: proj-1\n"
+    )
+    assert should_render(msg) is True
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "RENDER_IMAGE: True",      # capital T — not the contract form
+        "RENDER_IMAGE: TRUE",      # caps
+        "RENDER_IMAGE: yes",
+        "RENDER_IMAGE: 1",
+        "RENDER_IMAGE:",           # missing value
+        "render_image: true",      # lowercase key
+        "RENDER_IMAGE: truex",     # typo'd value
+        "RENDER_IMAGE: false true",  # two values
+        "RENDER_IMAGES: true",     # plural key — not the contract form
+        "RENDER IMAGE: true",      # space in key — not the contract form
+    ],
+)
+def test_render_image_gate_contract_malformed_is_false(malformed):
+    """Any directive form other than `true`/`false` (lowercase) → False.
+
+    The directive is machine-emitted by chart_tools.py; a malformed
+    value is a bug, not a render trigger. Fail-closed (False) is the
+    safe default."""
+    should_render = _gate_function()
+    msg = f"Create a flowchart.\n\nDescription: x\n{malformed}\n"
+    assert should_render(msg) is False, (
+        f"malformed directive {malformed!r} must fail-closed to False"
+    )
+
+
+@pytest.mark.parametrize(
+    "loose_variant",
+    [
+        "RENDER_IMAGE:true",       # no space after colon — regex \s* allows 0
+        "RENDER_IMAGE: true ",     # trailing space — regex \s* allows >0
+        "RENDER_IMAGE:  true",     # double space — regex \s* allows >0
+    ],
+)
+def test_render_image_gate_contract_regex_loose_whitespace_pins(loose_variant):
+    """Pins CURRENTLY-LOOSE whitespace variants that the regex accepts.
+
+    The directive regex is ``^RENDER_IMAGE:\\s*(true|false)\\s*$`` with
+    ``re.MULTILINE``. The ``\\s*`` quantifier allows zero OR more
+    whitespace, so the forms below DO match today (i.e. the gate
+    returns True for them). This test pins that actual behavior so
+    any future tightening of the regex (e.g. requiring exactly one
+    space, or rejecting trailing whitespace) surfaces as a test
+    failure here. If the regex is later tightened, update this
+    parametrize to the new (True→False) expected outcomes.
+    """
+    should_render = _gate_function()
+    msg = f"Create a flowchart.\n\nDescription: x\n{loose_variant}\n"
+    assert should_render(msg) is True, (
+        f"loose-whitespace variant {loose_variant!r} must currently match "
+        f"the regex (loose \\\\s* behavior); tightening the regex will "
+        f"flip this to False"
+    )
+
+
+def test_render_image_directive_in_chart_tools_message_is_byte_stable():
+    """chart_tools.py's dispatch message carries the exact directive form.
+
+    Pins the test-pinnable contract: ``RENDER_IMAGE: <lowercase-bool>``
+    is emitted on its own line in the dispatch message, so the charter
+    gate regex can match it deterministically.
+    """
+    body = DAEMON_CHART_TOOLS.read_text()
+    # The f-string form the tool emits — byte-exact.
+    assert 'f"RENDER_IMAGE: {str(render_image).lower()}\\n"' in body, (
+        "chart_tools.py must emit RENDER_IMAGE: <lowercase-bool> on its own line "
+        "in the dispatch message (f-string form pinned)"
+    )
+
+
+def test_render_image_flag_declared_with_false_default():
+    """generate_chart's render_image parameter defaults to False."""
+    body = DAEMON_CHART_TOOLS.read_text()
+    # Parameter signature: render_image: bool = False
+    assert re.search(
+        r"render_image:\s*bool\s*=\s*False", body
+    ), "render_image must be declared with default False in generate_chart"
+
+
+def test_workflow_md_step5_is_conditional_not_always():
+    """workflow.md Step 5 is CONDITIONAL on RENDER_IMAGE (opt-in contract).
+
+    Replaces the always-render contract: the step's heading carries the
+    CONDITIONAL marker, and the prose states that the render pipeline is
+    skipped when the directive is false or absent."""
+    body = WORKFLOW_MD.read_text()
+    assert "## Step 5: Validate + Render + Persist (CONDITIONAL on RENDER_IMAGE)" in body, (
+        "Step 5 heading must carry the CONDITIONAL-on-RENDER_IMAGE marker"
+    )
+    assert "this entire step" in body, "Step 5 must state the conditional scope"
+    assert "RENDER_IMAGE: true" in body, "Step 5 must reference the true directive"
+    assert "RENDER_IMAGE: false" in body, (
+        "Step 5 must reference the false directive (or absence) as the skip path"
+    )
+    assert re.search(
+        r"[Nn]o render, no PNG, no\s+tmp_images write, no marker", body
+    ), (
+        "Step 5 must pin the skip contract (no render, no PNG, no tmp_images, no marker)"
+    )
+
+
+def test_workflow_md_step6_is_conditional_not_always():
+    """workflow.md Step 6 (persist + marker) is CONDITIONAL on RENDER_IMAGE."""
+    body = WORKFLOW_MD.read_text()
+    assert "## Step 6: Persist + Return (CONDITIONAL on RENDER_IMAGE)" in body, (
+        "Step 6 heading must carry the CONDITIONAL-on-RENDER_IMAGE marker"
+    )
+    assert "RENDER_IMAGE: true" in body, (
+        "Step 6 must gate persist + marker emission on the true directive"
+    )
+
+
+def test_workflow_md_summary_pin_conditional():
+    """The Summary block reflects the conditional contract."""
+    body = WORKFLOW_MD.read_text()
+    assert "Step 5: CONDITIONAL on RENDER_IMAGE directive" in body, (
+        "Summary must reflect the conditional contract"
+    )
+
+
+def test_chart_skill_signature_includes_render_image():
+    """The chart skill's signature table documents the render_image flag."""
+    body = CHART_SKILL_MD.read_text()
+    assert "`render_image`" in body, "signature table must include render_image"
+    assert "no (default `false`)" in body, "render_image must be documented as opt-in"
+    assert "600s" in body and "1200s" in body, (
+        "render_image must document the differential timeout (600s vs 1200s)"
+    )
+
+
+def test_chart_skill_has_opt_in_render_section():
+    """The chart skill has a dedicated render_image section documenting
+    the opt-in contract."""
+    body = CHART_SKILL_MD.read_text()
+    assert "## render_image: opt-in rendering" in body, (
+        "chart skill must carry the dedicated render_image opt-in section"
+    )
+    # The table with the differential timeout contract
+    assert "| `False` (default) | 600s | NO | NO | NO |" in body, (
+        "render_image=False row (default) must pin 600s + no PNG + no marker"
+    )
+    assert "| `True` | 1200s | YES | YES |" in body, (
+        "render_image=True row must pin 1200s + render + persist + marker"
+    )
+
+
+def test_chart_tools_timeout_constants_match_d5_spec():
+    """d5_timeout (user addendum 2026-10-05): differential timeout wiring."""
+    body = DAEMON_CHART_TOOLS.read_text()
+    # Module-level constants
+    assert re.search(r"_RENDER_TIMEOUT_S\s*=\s*1200\.0", body), (
+        "chart_tools.py must pin _RENDER_TIMEOUT_S = 1200.0 (render_image=True)"
+    )
+    assert re.search(r"_DEFAULT_TIMEOUT_S\s*=\s*600\.0", body), (
+        "chart_tools.py must pin _DEFAULT_TIMEOUT_S = 600.0 (render_image=False default)"
+    )
+    # Dynamic selection in the tool body
+    assert re.search(
+        r"timeout_s\s*=\s*_RENDER_TIMEOUT_S\s+if\s+render_image\s+else\s+_DEFAULT_TIMEOUT_S", body
+    ), (
+        "generate_chart must select the timeout dynamically from render_image"
+    )
+    # Reuse-path default also respects the constant (no hardcoded 600.0)
+    assert "timeout: float = _DEFAULT_TIMEOUT_S" in body, (
+        "_reuse_charter's default timeout must use the module constant"
+    )
