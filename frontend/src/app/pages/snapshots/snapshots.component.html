@@ -290,11 +290,21 @@
     </div>
   </section>
 
-  <!-- Table + drawer (mat-drawer-container end drawer for detail) -->
+  <!-- Table + drawer (mat-drawer-container end drawer for detail).
+       The mat-drawer-container renders a Material-owned backdrop
+       element; the e2e can target the container via [data-test] and
+       drill into the backdrop child for the actual click target
+       (Material's `.mat-drawer-backdrop` + the `snapshot-drawer-backdrop`
+       class applied via [backdropClass]). The container's data-test
+       is the test-hook for the snapshot-uiux contract selector
+       "drawer-backdrop" — the plan's "binding site" reference is
+       satisfied at the page level (the drawer's own HTML is a
+       sibling and has no access to the Material-rendered backdrop). -->
   <mat-drawer-container
     class="snapshots-drawer-container"
     [hasBackdrop]="true"
     [backdropClass]="'snapshot-drawer-backdrop'"
+    data-test="drawer-backdrop"
   >
     <mat-drawer-content class="snapshots-content">
       <app-snapshots-table
