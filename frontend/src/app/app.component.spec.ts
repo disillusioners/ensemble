@@ -2112,5 +2112,16 @@ describe('snapshot-uiux route + menu wiring', () => {
     expect(settingsIdx).toBeLessThan(snapshotsIdx);
     expect(snapshotsIdx).toBeLessThan(dbUpdateIdx);
   });
+
+  it('app.html binds the e2e contract selectors: data-test="gear-menu" on the trigger and the conditional menu-snapshots binding', () => {
+    const source = fs.readFileSync(path.resolve(__dirname, 'app.html'), 'utf8');
+    // data-test="gear-menu" on the settings trigger button.
+    expect(source).toMatch(/data-test="gear-menu"/);
+    // data-test="menu-snapshots" — bound conditionally on the @for
+    // link so the e2e can find the Snapshots menu entry by name.
+    // The binding uses [attr.data-test]="item.route === '/snapshots' ? 'menu-snapshots' : null"
+    // because Angular's static analyzer rejects `data-test` on <a> tags.
+    expect(source).toMatch(/'menu-snapshots'/);
+  });
 });
 });

@@ -51,12 +51,22 @@
       }
       <app-job-queue-indicator></app-job-queue-indicator>
       <app-notification-bell></app-notification-bell>
-      <button mat-icon-button [matMenuTriggerFor]="settingsMenu" class="gear-button" aria-label="Settings menu">
+      <button
+        mat-icon-button
+        [matMenuTriggerFor]="settingsMenu"
+        class="gear-button"
+        aria-label="Settings menu"
+        data-test="gear-menu"
+      >
         <mat-icon>settings</mat-icon>
       </button>
       <mat-menu #settingsMenu="matMenu" matMenuClass="settings-menu">
         @for (item of settingsMenuItems(); track item.route) {
-          <a mat-menu-item [routerLink]="item.route">
+          <a
+            mat-menu-item
+            [routerLink]="item.route"
+            [attr.data-test]="item.route === '/snapshots' ? 'menu-snapshots' : null"
+          >
             <mat-icon>{{ item.icon }}</mat-icon>
             <span>{{ item.label }}</span>
           </a>
