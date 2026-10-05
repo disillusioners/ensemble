@@ -3,6 +3,21 @@
 2026-09-21, ``feature/midflight-qa-channel`` (design
 ``.agents/shared/planning/midflight-qa-channel/design.md``).
 
+Size note (fix-cycle-2 polish, 2026-10-05, item 10): this module
+crossed the 1000-line mark at 1028L (now ~1085L after cycle-2). It
+hosts FOUR emitter entry points (``emit_question_requested``,
+``emit_midflight_report``, ``emit_stuck_awaiting_answer``,
+``emit_question_escalation_notification``) PLUS the bounded
+mission-scope helpers (``enumerate_live_work_ids``,
+``enumerate_mission_work_ids``, ``derive_emission_index``,
+``compute_wedge_chain``, ``read_question_pack_id_from_metadata``,
+``build_question_requested_payload``, the ``stamp/clear_question_
+pack_metadata`` durability pair, ``mint_stuck_heartbeat_one_shot``)
+PLUS the canonical QA-status constants. A split into a thin
+``midflight_qa.py`` (the 4 emitters only) + a ``qa_payloads.py``
+(the helpers + constants) is a reasonable next-cycle refactor when
+the next feature lands; do not pre-split.
+
 This module is the single home for the QUESTION-EMISSION path shared by
 three emitters:
 
@@ -29,6 +44,21 @@ hard-filters ``event_type != "instance_lifecycle"``), and every
 work_notifier status used here is NON-TERMINAL — the notifier's
 non-terminal branch never claims the watcher row, so the eventual
 terminal ``[JOB_EVENT]`` still fires with its ``Result:`` body intact.
+
+Mission-scoped QA fan-out (``feature/question-watch-fanout``,
+2026-10-05): ``emit_question_requested`` and ``emit_stuck_awaiting_answer``
+resolve recipients at EMISSION TIME by MISSION SCOPE — every watcher
+holding an UNCLAIMED row on ANY receipt ever associated with the
+asking instance's mission (``enumerate_mission_work_ids``), regardless
+of which receipt the asking turn rides and regardless of the row's
+``watch_events`` (events-filter-EXEMPT). Delivery is NON-CLAIMING
+(``notify_mission_qa_watchers``) and deduped per watcher. The
+``mission_live`` HOLD governs the TERMINAL fire only — QA delivers
+while the mission is live (PAUSED is live). ``mission_terminal``
+itself stays receipt-keyed per-receipt delta-arm (spontaneous receipts
+still need a ``watch_mission`` re-arm for TERMINAL coverage); the
+pending-pack resolution stays watcher-independent (the pack lives on
+the asker).
 """
 
 from __future__ import annotations
@@ -155,6 +185,127 @@ def enumerate_live_work_ids(manager: "InstanceManager", instance_id: str) -> lis
     return ordered
 
 
+# Mission-scoped QA fan-out (feature/question-watch-fanout, 2026-10-05):
+# the receipt-scan cap. One Task row per turn means a long-lived
+# mission accumulates receipts; the scan (and the downstream
+# ``job_id IN (...)`` watcher SELECT) stays bounded at this many
+# candidates. Rows beyond the cap are old receipts whose watchers —
+# if any rows exist at all — are typically already claimed.
+MISSION_RECEIPT_SCAN_CAP = 128
+
+# Canonical QA status tokens (fix-cycle-2 polish, 2026-10-05, item 6).
+# The values MUST stay in lockstep with the keys of
+# ``work_notifier._STATUS_DISPLAY_MAP`` — a typo here used to
+# silently miss the membership check in
+# ``notify_mission_qa_watchers`` and recreate the silent-wedge
+# defect (the lane's fail-closed check refused the call, but the
+# caller thought it had fired). The work_notifier's
+# ``_MISSION_SCOPED_QA_STATUSES`` set is built FROM these constants
+# at module load, so a single typo here is loud at import time.
+QA_STATUS_QUESTION_REQUESTED = "question_requested"
+QA_STATUS_STUCK_AWAITING_ANSWER = "stuck_awaiting_answer"
+QA_STATUS_QUESTION_ESCALATION = "question_escalation"
+
+
+def enumerate_mission_work_ids(
+    manager: "InstanceManager", instance_id: str
+) -> list[str]:
+    """Resolve the asking instance's MISSION receipt set (bounded).
+
+    Emission-time mission scope for the QA fan-out
+    (``feature/question-watch-fanout``): the question/stuck emission
+    must reach every watcher holding an unclaimed row on ANY receipt
+    ever associated with the asking instance's mission — not only the
+    receipts the current turn rides (spontaneous receipts such as the
+    child-report wake mint carry zero watch coverage) and not only the
+    asking instance's own rows (a descendant's ask belongs to the root
+    mission).
+
+    Composition (newest-live first, then recent mission receipts):
+
+    * ``enumerate_live_work_ids(manager, instance_id)`` — the asking
+      turn's live work_ids stay the PRIMARY candidates (the envelope
+      prefers them, so the answer route keys on the freshest identity).
+    * ``TaskRepository.get_recent_work_ids(mission_id, cap)`` — one
+      bounded SELECT (projects work_id only, LIMIT cap) over the
+      mission root's Task rows: the settled receipts whose
+      ``mission_terminal``-only watcher rows are still unclaimed.
+    * JobItem ids for the mission root — the same single-row seams
+      ``enumerate_live_work_ids`` uses (active-then-fallback).
+
+    The mission root resolves via ``InstanceRepository.get_tree_root_id``
+    (best-effort; falls back to the asking instance itself).
+
+    Returns:
+        Deduplicated candidate list, live receipts first, capped at
+        :data:`MISSION_RECEIPT_SCAN_CAP`. May be empty (no receipts at
+        all — the emission still rides EventBus + LiveEventHub).
+    """
+    instance_repo = getattr(manager, "_instance_repository", None)
+    mission_id = instance_id
+    if instance_repo is not None:
+        try:
+            root_id = instance_repo.get_tree_root_id(instance_id)
+            if root_id:
+                mission_id = root_id
+        except Exception as e:  # noqa: BLE001 — scope resolution is best-effort
+            logger.warning(
+                "midflight_qa: mission-root resolution failed for "
+                "instance %s — scoping to the asking instance: %s",
+                instance_id[:8] if instance_id else "<none>",
+                e,
+            )
+
+    work_ids = enumerate_live_work_ids(manager, instance_id)
+
+    task_repo = getattr(manager, "_task_repo", None)
+    if task_repo is not None:
+        try:
+            work_ids.extend(
+                task_repo.get_recent_work_ids(
+                    mission_id, MISSION_RECEIPT_SCAN_CAP
+                )
+            )
+        except Exception as e:  # noqa: BLE001 — enumeration is best-effort
+            logger.warning(
+                "midflight_qa: mission Task-receipt scan failed for "
+                "mission %s: %s",
+                mission_id[:8] if mission_id else "<none>",
+                e,
+            )
+
+    work_resolver = getattr(manager, "_work_resolver", None)
+    job_repo = (
+        getattr(work_resolver, "_job_repo", None)
+        if work_resolver is not None
+        else None
+    )
+    if job_repo is not None:
+        try:
+            active_job = job_repo.get_active_by_instance(mission_id)
+            if active_job is not None:
+                work_ids.append(active_job.job_id)
+            else:
+                fallback_job = job_repo.get_by_instance(mission_id)
+                if fallback_job is not None:
+                    work_ids.append(fallback_job.job_id)
+        except Exception as e:  # noqa: BLE001 — enumeration is best-effort
+            logger.warning(
+                "midflight_qa: mission JobItem scan failed for mission "
+                "%s: %s",
+                mission_id[:8] if mission_id else "<none>",
+                e,
+            )
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for wid in work_ids:
+        if wid and wid not in seen:
+            seen.add(wid)
+            ordered.append(wid)
+    return ordered[:MISSION_RECEIPT_SCAN_CAP]
+
+
 def _asker_display_name(instance: Any) -> str:
     """Concrete asker_instance_name derivation (H6)."""
     if instance is None:
@@ -202,11 +353,18 @@ def build_question_requested_payload(
                 e,
             )
 
-    work_ids = enumerate_live_work_ids(manager, instance_id)
+    # Mission-scoped receipt set (feature/question-watch-fanout,
+    # 2026-10-05): the payload's job_id array lists every receipt the
+    # emission resolves watchers against — the asking turn's live ids
+    # first, then the mission's recent receipts. Any of them resolves
+    # back to the asker for the answer route (pack resolution is
+    # watcher-independent — the pack lives on the asker).
+    work_ids = enumerate_mission_work_ids(manager, instance_id)
 
     return {
         "instance_id": instance_id,
-        # ARRAY (MAJOR-1) — every live work_id that maps to the asker.
+        # ARRAY (MAJOR-1) — every mission-associated receipt the emission
+        # fans out over (live asking-turn receipts first).
         "job_id": work_ids,
         "mission_id": mission_id,
         "parent_id": parent_id,
@@ -311,15 +469,32 @@ async def emit_question_requested(
 
     1. ``EventBus.create_event`` — persists to the ``event`` table +
        broadcasts to global subscribers.
-    2. ``notify_work_watchers`` per live work_id — the ``[JOB_EVENT]
-       Job {work_id}... question requested ❓`` line into every
-       watcher's instance, with the pack payload as the ``Result:``-
-       style body (``result_summary=pack_to_dict(pack)``). Non-terminal
-       → watcher rows are PRESERVED (no CAS claim).
+    2. Mission-scoped watcher fan-out (``feature/question-watch-fanout``,
+       2026-10-05) — ONE ``notify_mission_qa_watchers`` delivery keyed
+       on the asker's MISSION receipt set (``enumerate_mission_work_ids``):
+       every watcher holding an unclaimed row on ANY associated receipt
+       receives the ``[JOB_EVENT] Job {receipt}... question requested ❓``
+       line with the pack payload as the ``Result:``-style body —
+       regardless of which receipt the asking turn rides and regardless
+       of the row's ``watch_events`` (events-filter-EXEMPT). Delivery is
+       NON-CLAIMING (rows preserved; the ``mission_live`` HOLD governs
+       the terminal fire only) and deduped per watcher (rows on multiple
+       receipts → ONE emission). This replaces the former per-live-work-id
+       ``notify_work_watchers`` loop, which missed both spontaneous
+       receipts (zero coverage) and ``mission_terminal``-only rows
+       (held_for_mission) — the mission e71d133d silent wedge.
 
-    Returns the total number of watcher notifications delivered.
+    Returns the total number of watcher emissions delivered.
     """
-    from daemon.services.work_notifier import notify_work_watchers
+    # CYCLE-TRAP (2026-10-05, fix-cycle-2 polish): deferred import —
+    # ``work_notifier`` imports the ``QA_STATUS_*`` constants back
+    # from THIS module (its top-level frozenset is built from them),
+    # so a top-level import here would create a module-load cycle.
+    # The package init order keeps the deferred import safe.
+    from daemon.services.work_notifier import (
+        NotifyQAPayload,
+        notify_mission_qa_watchers,
+    )
 
     payload = build_question_requested_payload(manager, instance_id, pack)
     work_ids: list[str] = list(payload["job_id"])
@@ -341,22 +516,23 @@ async def emit_question_requested(
             )
 
     notified = 0
-    for work_id in work_ids:
+    if work_ids:
         try:
-            notified += await notify_work_watchers(
-                work_id=work_id,
-                status="question_requested",
-                instance_manager=manager,
-                work_resolver=getattr(manager, "_work_resolver", None),
-                watcher_repo=getattr(manager, "_watcher_repo", None),
-                progress=None,
-                result_summary=pack_to_dict(pack),
+            notified = await notify_mission_qa_watchers(
+                NotifyQAPayload(
+                    work_id=work_ids[0],
+                    status=QA_STATUS_QUESTION_REQUESTED,
+                    mission_work_ids=work_ids,
+                    instance_manager=manager,
+                    work_resolver=getattr(manager, "_work_resolver", None),
+                    watcher_repo=getattr(manager, "_watcher_repo", None),
+                    result_summary=pack_to_dict(pack),
+                )
             )
         except Exception as e:  # noqa: BLE001 — §8.6
             logger.warning(
-                "midflight_qa: question_requested work_notifier fan-out "
-                "failed for work_id=%s instance=%s: %s",
-                work_id[:8] if work_id else "<none>",
+                "midflight_qa: question_requested mission-scoped fan-out "
+                "failed for instance=%s: %s",
                 instance_id[:8],
                 e,
             )
@@ -378,6 +554,10 @@ async def emit_midflight_report(
     """
     import uuid as _uuid
 
+    # CYCLE-TRAP (2026-10-05, fix-cycle-2 polish): deferred import —
+    # ``work_notifier`` imports the ``MISSION_RECEIPT_SCAN_CAP`` /
+    # ``QA_STATUS_*`` constants back from THIS module, so a top-level
+    # import here would create a module-load cycle.
     from daemon.services.work_notifier import notify_work_watchers
 
     work_ids = enumerate_live_work_ids(manager, instance_id)
@@ -545,18 +725,30 @@ async def emit_stuck_awaiting_answer(
 ) -> tuple[int, int]:
     """Emit ``STUCK_AWAITING_ANSWER`` (transition-time or one-shot wake).
 
-    Lanes: EventBus → LiveEventHub banner → work_notifier
-    (``status="stuck_awaiting_answer"``, non-terminal — watcher rows
-    preserved) per live work_id. The ``emission_index`` is derived from
-    persisted event history inside this helper and stamped on the
-    payload so consumers can distinguish reminder cadence.
+    Lanes: EventBus → LiveEventHub banner → mission-scoped watcher
+    fan-out (``notify_mission_qa_watchers``, status
+    ``stuck_awaiting_answer`` — NON-claiming, events-filter-exempt,
+    deduped per watcher over the mission receipt set). The
+    ``emission_index`` is derived from persisted event history inside
+    this helper and stamped on the payload so consumers can distinguish
+    reminder cadence. Mission scope means the pause-time emission #1,
+    every 1800s heartbeat, and the escalated emission all reach mission
+    watchers even when the asking turn rides a spontaneous (unwatched)
+    receipt.
 
-    Returns ``(emission_index, watchers_notified)``.
+    Returns ``(emission_index, watcher_emissions_delivered)``.
     """
-    from daemon.services.work_notifier import notify_work_watchers
+    # CYCLE-TRAP (2026-10-05, fix-cycle-2 polish): deferred import —
+    # ``work_notifier`` imports the ``QA_STATUS_*`` constants back
+    # from THIS module, so a top-level import here would create a
+    # module-load cycle.
+    from daemon.services.work_notifier import (
+        NotifyQAPayload,
+        notify_mission_qa_watchers,
+    )
 
     emission_index = derive_emission_index(manager, asker_instance_id, question_pack_id)
-    work_ids = enumerate_live_work_ids(manager, asker_instance_id)
+    work_ids = enumerate_mission_work_ids(manager, asker_instance_id)
     wedge_chain = compute_wedge_chain(manager, asker_instance_id)
     payload: dict[str, Any] = {
         "instance_id": asker_instance_id,
@@ -597,24 +789,33 @@ async def emit_stuck_awaiting_answer(
             )
 
     notified = 0
-    for work_id in work_ids:
+    if work_ids:
         try:
-            notified += await notify_work_watchers(
-                work_id=work_id,
-                status="stuck_awaiting_answer",
-                instance_manager=manager,
-                work_resolver=getattr(manager, "_work_resolver", None),
-                watcher_repo=getattr(manager, "_watcher_repo", None),
-                progress=(
-                    f"paused awaiting answer for {waiting_for_seconds}s "
-                    f"(emission {emission_index})"
-                ),
+            notified = await notify_mission_qa_watchers(
+                NotifyQAPayload(
+                    work_id=work_ids[0],
+                    status=QA_STATUS_STUCK_AWAITING_ANSWER,
+                    mission_work_ids=work_ids,
+                    instance_manager=manager,
+                    work_resolver=getattr(manager, "_work_resolver", None),
+                    watcher_repo=getattr(manager, "_watcher_repo", None),
+                    # The prior ``progress=`` kwarg was structurally dead
+                    # (the QA lane's ``_MISSION_SCOPED_QA_STATUSES`` excludes
+                    # ``in_progress``; the envelope's in_progress branch is
+                    # the only consumer of ``progress``). Route the
+                    # heartbeat text through ``result_summary`` so it now
+                    # renders in the ``Result:`` body — same intent, non-
+                    # discarded (fix-cycle-2 polish, item 1).
+                    result_summary=(
+                        f"paused awaiting answer for {waiting_for_seconds}s "
+                        f"(emission {emission_index})"
+                    ),
+                )
             )
         except Exception as e:  # noqa: BLE001 — §8.6
             logger.warning(
-                "midflight_qa: stuck_awaiting_answer fan-out failed for "
-                "work_id=%s asker=%s: %s",
-                work_id[:8] if work_id else "<none>",
+                "midflight_qa: stuck_awaiting_answer mission-scoped fan-out "
+                "failed for asker=%s: %s",
                 asker_instance_id[:8],
                 e,
             )
@@ -684,35 +885,121 @@ async def emit_question_escalation_notification(
     asker_agent_id: str | None,
     question_pack_id: str | None,
     emission_index: int,
+    mission_work_ids: list[str],
 ) -> int:
-    """Fan out the wedge escalation to ALL SSE clients (NotificationBroadcaster).
+    """Fan out the wedge escalation to FE SSE + mission watchers.
 
     Design §8.7: at ``emission_index=3`` the escalation fans out
     UNCONDITIONALLY to NotificationBroadcaster (parallel to
     ``emit_root_completion``) so operators see it even when no
     ``watch_job`` row survives. Fires ONLY at escalation — never on
     the normal question/report paths.
+
+    Mission-watcher delivery (``feature/question-watch-fanout``,
+    2026-10-05): IN ADDITION to the FE SSE broadcast, ONE
+    ``[JOB_EVENT] Job {receipt}... question escalation ⚠`` envelope is
+    enqueued per mission watcher holding an unclaimed row on any
+    mission receipt (same bounded, events-exempt, non-claiming,
+    deduped lane as the QA emissions). The FE-SSE-only escalation gap
+    is closed: the mission watcher — the agent that can relay to the
+    human — now hears about it too.
+
+    Terminate-flip ordering (review blocker, iteration 1): the caller
+    (``HeartbeatEmitStuckProcessor``) escalates by terminating the
+    asker, and the terminate cascade DELETES the asker's ``task`` rows
+    UNCONDITIONALLY (``instance_lifecycle`` Step 4b) while the
+    instances row survives status-only. For a ROOT-asker mission a
+    post-flip receipt scan finds NO Task rows.
+
+    ``mission_work_ids`` is REQUIRED at the in-tree call site
+    (fix-cycle-2 polish, item 4): the caller MUST pass the receipt
+    set as a PRE-FLIP SNAPSHOT — ``enumerate_mission_work_ids(...)``
+    resolved BEFORE the terminate flip (watcher rows themselves
+    survive — the terminate cleanup only removes watches OWNED by
+    the terminated instance). The pre-cycle-2 default + best-effort
+    call-time ``enumerate_mission_work_ids`` fallback was
+    structurally the silent-wedge defect: a root-asker escalation
+    post-flip would resolve ZERO receipts and the mission watcher
+    would never hear about the asker. The default and the fallback
+    are GONE (fix-cycle-3): the signature is strict-required and the
+    in-tree call site (sole production: ``task_processor.py``:1646)
+    passes the snapshot explicitly — no degraded lane.
+
+    Returns the combined total (SSE clients reached + watcher
+    emissions delivered).
     """
     broadcaster = getattr(manager, "_notification_broadcaster", None)
-    if broadcaster is None:
-        return 0
+    sse_reached = 0
+    if broadcaster is not None:
+        try:
+            sse_reached = await broadcaster.emit_question_escalation(
+                instance_id=asker_instance_id,
+                agent_id=asker_agent_id,
+                question_pack_id=question_pack_id,
+                emission_index=emission_index,
+            )
+        except Exception as e:  # noqa: BLE001 — MINOR-7: escalation emit failures are WARN-logged
+            logger.warning(
+                "midflight_qa: question escalation broadcast failed for asker=%s "
+                "pack_id=%s emission_index=%s: %s",
+                asker_instance_id[:8] if asker_instance_id else "<none>",
+                question_pack_id,
+                emission_index,
+                e,
+            )
+
+    # Mission-watcher escalation envelope (design item 2): keyed on
+    # the caller's PRE-FLIP receipt snapshot (REQUIRED — terminate
+    # Step 4b deletes the asker's Task rows, so a post-flip scan
+    # cannot be trusted for a root-asker mission; the type system
+    # now enforces the snapshot at the call site, no degraded
+    # fallback here — fix-cycle-2 polish, item 4).
+    # CYCLE-TRAP (2026-10-05, fix-cycle-2 polish): deferred import on
+    # purpose. ``work_notifier`` imports ``mission_work_ids`` /
+    # ``QA_STATUS_*`` constants back from THIS module, so a top-level
+    # import here would create a module-load cycle (midflight_qa →
+    # work_notifier → midflight_qa). The package init order
+    # (``midflight_qa`` loaded before ``work_notifier``) makes the
+    # deferred import safe; do not hoist.
+    from daemon.services.work_notifier import (
+        NotifyQAPayload,
+        notify_mission_qa_watchers,
+    )
+
+    watcher_delivered = 0
     try:
-        return await broadcaster.emit_question_escalation(
-            instance_id=asker_instance_id,
-            agent_id=asker_agent_id,
-            question_pack_id=question_pack_id,
-            emission_index=emission_index,
-        )
+        if mission_work_ids:
+            watcher_delivered = await notify_mission_qa_watchers(
+                NotifyQAPayload(
+                    work_id=mission_work_ids[0],
+                    status=QA_STATUS_QUESTION_ESCALATION,
+                    mission_work_ids=mission_work_ids,
+                    instance_manager=manager,
+                    work_resolver=getattr(manager, "_work_resolver", None),
+                    watcher_repo=getattr(manager, "_watcher_repo", None),
+                    result_summary=(
+                        f"wedge escalation: instance {asker_instance_id[:8]}... "
+                        f"still awaiting a human answer after {emission_index} "
+                        f"emissions; asker terminated "
+                        f"(terminal_reason=wedge_guard_terminated). "
+                        f"Operator alert: a fresh mission may relay "
+                        f"this to a human via the next agent run; the "
+                        f"watcher is a stand-in relay only — the asker "
+                        f"is already terminal (job_answer() returns "
+                        f"410/404 on a terminated asker; revive the "
+                        f"asker or open a new mission if the question "
+                        f"is still relevant)."
+                    ),
+                )
+            )
     except Exception as e:  # noqa: BLE001 — MINOR-7: escalation emit failures are WARN-logged
         logger.warning(
-            "midflight_qa: question escalation broadcast failed for asker=%s "
-            "pack_id=%s emission_index=%s: %s",
+            "midflight_qa: question escalation mission-watcher delivery "
+            "failed for asker=%s: %s",
             asker_instance_id[:8] if asker_instance_id else "<none>",
-            question_pack_id,
-            emission_index,
             e,
         )
-        return 0
+    return sse_reached + watcher_delivered
 
 
 def mint_stuck_heartbeat_one_shot(
@@ -798,6 +1085,10 @@ def mint_stuck_heartbeat_one_shot(
 
 __all__ = [
     "ANSWER_TERMINAL_STATUSES",
+    "MISSION_RECEIPT_SCAN_CAP",
+    "QA_STATUS_QUESTION_ESCALATION",
+    "QA_STATUS_QUESTION_REQUESTED",
+    "QA_STATUS_STUCK_AWAITING_ANSWER",
     "QUESTION_PACK_ID_METADATA_KEY",
     "QUESTION_PACK_PAYLOAD_METADATA_KEY",
     "build_question_requested_payload",
@@ -810,6 +1101,7 @@ __all__ = [
     "emit_question_requested",
     "emit_stuck_awaiting_answer",
     "enumerate_live_work_ids",
+    "enumerate_mission_work_ids",
     "mint_stuck_heartbeat_one_shot",
     "read_question_pack_id_from_metadata",
     "stamp_question_pack_metadata",

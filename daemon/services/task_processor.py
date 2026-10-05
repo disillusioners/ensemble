@@ -1472,6 +1472,7 @@ class HeartbeatEmitStuckProcessor(BaseProcessor):
         from daemon.services.midflight_qa import (
             emit_question_escalation_notification,
             emit_stuck_awaiting_answer,
+            enumerate_mission_work_ids,
             mint_stuck_heartbeat_one_shot,
             read_question_pack_id_from_metadata,
         )
@@ -1571,6 +1572,30 @@ class HeartbeatEmitStuckProcessor(BaseProcessor):
                 f"{emission_index} emissions; terminating asker and "
                 f"broadcasting operator escalation"
             )
+            # PRE-FLIP receipt snapshot (question-watch-fanout iteration
+            # 1, review blocker): the terminate cascade DELETES the
+            # asker's ``task`` rows UNCONDITIONALLY (Step 4b,
+            # ``DELETE FROM task WHERE instance_id = :iid``) while the
+            # instances row survives status-only. For a ROOT-asker
+            # mission (the canonical wedge geometry — the asker IS the
+            # chat-mission leader) a POST-flip receipt scan finds NO
+            # Task rows, so mission watchers armed on Task receipts
+            # would be unreachable for the escalation envelope. Resolve
+            # the mission receipt set HERE, before the flip, and pass
+            # it through to the escalation emission. Watcher ROWS are
+            # safe: terminate only removes watches OWNED by the
+            # terminated instance.
+            escalation_mission_work_ids: list[str] = []
+            try:
+                escalation_mission_work_ids = enumerate_mission_work_ids(
+                    self._manager, asker_id
+                )
+            except Exception as e:  # noqa: BLE001 — snapshot is best-effort
+                logger.warning(
+                    f"HeartbeatEmitStuck task {task.id}: pre-flip mission "
+                    f"receipt snapshot failed for asker "
+                    f"{asker_id[:8]}...: {type(e).__name__}: {e}"
+                )
             try:
                 await asyncio.to_thread(
                     self._task_repo.complete_task,
@@ -1602,7 +1627,8 @@ class HeartbeatEmitStuckProcessor(BaseProcessor):
                     f"{type(e).__name__}: {e}"
                 )
             # Unconditional NotificationBroadcaster fan-out (MINOR-7:
-            # WARN-carried, never raises).
+            # WARN-carried, never raises) + mission-watcher delivery
+            # keyed on the PRE-FLIP receipt snapshot.
             asker_agent_id = None
             try:
                 instance = await asyncio.to_thread(
@@ -1617,6 +1643,7 @@ class HeartbeatEmitStuckProcessor(BaseProcessor):
                 asker_agent_id,
                 pack_id,
                 emission_index,
+                mission_work_ids=escalation_mission_work_ids,
             )
             return {
                 "success": True,

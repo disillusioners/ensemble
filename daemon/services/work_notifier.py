@@ -75,10 +75,14 @@ orchestrator's parsing contract in
 * ``paused``     → ``"paused ⏸"``
 * anything else  → status string verbatim (identity)
 
-The ``source`` parameter on ``enqueue_message`` is fixed at
-``f"internal_agent:job_event:{work_id}:{status}"`` — the orchestrator
-treats the ``job_event`` tag as the trigger to look up the work
-record again from its own side.
+The ``source`` parameter on ``enqueue_message`` is built by the
+private :func:`_job_event_source` helper → the canonical
+``f"internal_agent:job_event:{work_id}:{status}"`` shape — the
+orchestrator treats the ``job_event`` tag as the trigger to look up
+the work record again from its own side. ANY divergence in this
+string silently drops the orchestrator's terminal handler; if a new
+caller needs a different source token, route a NEW helper, do not
+fork the f-string.
 """
 
 from __future__ import annotations
@@ -87,10 +91,26 @@ import asyncio
 import logging
 import time
 import traceback
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from daemon.services.mission_live_guard import (
     evaluate_mission_live,
+)
+# CYCLE-TRAP (2026-10-05, fix-cycle-2 polish): this is a DEFERRED
+# import on purpose. ``work_notifier`` is imported by
+# ``midflight_qa`` (its top-of-module ``from daemon.services.work_notifier
+# import notify_mission_qa_watchers`` is the canonical home per the
+# mission-scoped QA fan-out), so a top-level import here would create
+# a module-load cycle (midflight_qa → work_notifier → midflight_qa).
+# The earlier module-load order guarantees the constant is bound by
+# the time any function in this module runs; do not hoist without
+# auditing both call sites and the package init.
+from daemon.services.midflight_qa import (
+    MISSION_RECEIPT_SCAN_CAP,
+    QA_STATUS_QUESTION_ESCALATION,
+    QA_STATUS_QUESTION_REQUESTED,
+    QA_STATUS_STUCK_AWAITING_ANSWER,
 )
 from daemon.services.work_status import is_terminal as _is_terminal
 
@@ -177,13 +197,21 @@ _STATUS_DISPLAY_MAP: dict[str, str] = {
     # branch (:417-447 area) which NEVER claims (no CAS DELETE...
     # RETURNING), so the watcher row survives for the eventual
     # terminal event. Icon glyphs match the existing vocabulary
-    # (✓ ✗ ⟳ ⏸ ❓ ⏳). The parser keys off the ``[JOB_EVENT] Job
+    # (✓ ✗ ⟳ ⏸ ❓ ⏳ ⚠). The parser keys off the ``[JOB_EVENT] Job
     # {work_id}... {status_display}`` header; these are additive
     # words inside that header (byte-compatible with the parser).
     "question_requested": "question requested ❓",
     "answer_received": "answer received ✓",
     "midflight_report": "mid-flight report ⟳",
     "stuck_awaiting_answer": "stuck awaiting answer ⏳",
+    # Mission-scoped escalation envelope (feature/question-watch-fanout,
+    # 2026-10-05): the wedge-guard escalation (emission_index >= 3)
+    # delivers to mission watchers in ADDITION to the FE SSE broadcast.
+    # Additive words inside the parser's header prefix — byte-compatible.
+    # Glyph ⚠ (fix-cycle-3, closes cycle-2 item 12): must not collide with
+    # ``stuck_awaiting_answer``'s ⏳ — escalation ≠ third stuck heartbeat;
+    # ⚠ stays inside the file's text-presentation glyph vocabulary.
+    "question_escalation": "question escalation ⚠",
 }
 
 
@@ -193,6 +221,66 @@ def _format_status_display(status: str) -> str:
     Unknown statuses pass through unchanged (the prior behaviour).
     """
     return _STATUS_DISPLAY_MAP.get(status, status)
+
+
+def _job_event_source(work_id: str, status: str) -> str:
+    """Return the canonical ``[JOB_EVENT]`` enqueue ``source`` string.
+
+    Canonical home for the source-string contract documented in the
+    module docstring. Every ``enqueue_message(..., source=...)`` call
+    that targets the orchestrator's job-event handler MUST go through
+    this helper — the orchestrator's parser keys off the ``job_event``
+    tag, so a literal divergence silently drops the terminal handler.
+
+    Args:
+        work_id: The work_id stamped into the source token.
+        status: The status token stamped into the source token.
+
+    Returns:
+        The ``f"internal_agent:job_event:{work_id}:{status}"`` string.
+    """
+    return f"internal_agent:job_event:{work_id}:{status}"
+
+
+def _build_event_envelope(
+    *,
+    work_id: str,
+    status: str,
+    status_display: str,
+    agent_id: str,
+    progress: str | None = None,
+    result_summary: str | None = None,
+    error: str | None = None,
+) -> str:
+    """Build the ``[JOB_EVENT]`` envelope — the SINGLE body builder.
+
+    Extracted (feature/question-watch-fanout, 2026-10-05) from the
+    ``notify_work_watchers`` notify loop so the mission-scoped QA lane
+    (``notify_mission_qa_watchers``) renders byte-identical envelopes
+    from the same code. The parser contract keys off the
+    ``[JOB_EVENT] Job {work_id[:8]}... {status_display}`` header and
+    the ``  Agent:`` / ``  Progress:`` / ``  Result:`` / ``  Error:``
+    line shapes — do not reformat.
+
+    The ``in_progress`` branch is keyed on the raw ``status`` token
+    (progress line only for progress events); every other status
+    renders ``Result:`` / ``Error:`` blocks from the provided content.
+    """
+    notification_parts = [
+        f"[JOB_EVENT] Job {work_id[:8]}... {status_display}",
+        f"  Agent: {agent_id}",
+    ]
+
+    if status == "in_progress":
+        if progress:
+            notification_parts.append(f"  Progress:\n{progress}")
+    else:
+        if result_summary:
+            notification_parts.append(f"  Result:\n{result_summary}")
+        if error:
+            notification_parts.append(f"  Error: {error}")
+
+    return "\n".join(notification_parts)
 
 
 async def notify_work_watchers(
@@ -911,21 +999,18 @@ async def notify_work_watchers(
         notified = 0
         failed_claimed: list[JobWatcher] = []  # S15: per-watch failures → compensation
         for watcher in notify_list:
-            notification_parts = [
-                f"[JOB_EVENT] Job {work_id[:8]}... {status_display}",
-                f"  Agent: {agent_id}",
-            ]
-
-            if status == "in_progress":
-                if progress:
-                    notification_parts.append(f"  Progress:\n{progress}")
-            else:
-                if effective_result:
-                    notification_parts.append(f"  Result:\n{effective_result}")
-                if effective_error:
-                    notification_parts.append(f"  Error: {effective_error}")
-
-            notification = "\n".join(notification_parts)
+            # Envelope build extracted to ``_build_event_envelope`` (the
+            # single body builder — the mission-scoped QA lane renders
+            # byte-identical envelopes from the same code).
+            notification = _build_event_envelope(
+                work_id=work_id,
+                status=status,
+                status_display=status_display,
+                agent_id=agent_id,
+                progress=progress,
+                result_summary=effective_result,
+                error=effective_error,
+            )
 
             # DEFECT-1 round-3 arbitration instrumentation: full body at
             # DEBUG so the delivered envelope can be byte-discriminated
@@ -980,7 +1065,7 @@ async def notify_work_watchers(
                 await instance_manager.enqueue_message(
                     instance_id=watcher.instance_id,
                     message=notification,
-                    source=f"internal_agent:job_event:{work_id}:{status}",
+                    source=_job_event_source(work_id, status),
                 )
                 notified += 1
             except Exception as enq_err:  # noqa: BLE001
@@ -1098,4 +1183,418 @@ async def notify_work_watchers(
         return 0
 
 
-__all__ = ["notify_work_watchers"]
+# =============================================================================
+# Mission-scoped, EMISSION-TIME QA fan-out
+# (feature/question-watch-fanout, 2026-10-05)
+# =============================================================================
+#
+# RCA (ratified): QA fan-out was recipient-addressed PER RECEIPT, so
+# (1) spontaneous receipts (child-report wake mints a new Task row)
+# carried ZERO watch coverage and the asking turn rode a receipt nobody
+# watched, and (2) ``mission_terminal``-only rows never matched QA
+# statuses (standard_match=False → held_for_mission) — the mission
+# e71d133d incident: watcher armed on settled receipt 4d31ddbe, wake
+# minted 6d8765f2, ask on that turn → ZERO emissions.
+#
+# The fix resolves recipients at EMISSION TIME by MISSION SCOPE: every
+# watcher holding an UNCLAIMED row on ANY receipt associated with the
+# asking instance's mission, regardless of (i) which receipt the asking
+# turn rides and (ii) the row's ``watch_events`` (events-filter-EXEMPT
+# — a mission blocked awaiting a human answer is state every mission
+# watcher needs; filtering it recreates the silent wedge).
+#
+# Invariants (do not regress):
+# * NON-CLAIMING — this lane never claims/transitions watcher rows; the
+#   three-bucket partition (claimable / readonly / held_for_mission),
+#   the C1 ``evaluate_mission_live`` gate, the N1 claim-first CAS, the
+#   C3 fail-CLOSED direction, and the F1 no-replay registration filter
+#   are untouched (the 36be8aef family). The ``mission_live`` HOLD
+#   governs the TERMINAL fire only — QA delivers while the mission is
+#   live (PAUSED is live) and never consumes a row.
+# * ``mission_terminal`` stays receipt-keyed via ``notify_work_watchers``
+#   — spontaneous receipts still need a ``watch_mission`` re-arm for
+#   TERMINAL coverage; QA reach does NOT create terminal coverage.
+# * BOUNDED — the recipient query is ONE ``job_id IN (...)`` SELECT with
+#   a defensive LIMIT over a capped receipt set (see
+#   ``daemon.services.midflight_qa.enumerate_mission_work_ids``); dedupe
+#   is per watcher instance (rows on multiple receipts → ONE emission).
+
+# Built from the canonical constants in ``daemon.services.midflight_qa``
+# (fix-cycle-2 polish, item 6) — typo-safety: a constant name drift
+# fails loud at module load, not silently at emission time. The set
+# stays a frozenset (immutable; safe to share across the deferred-
+# import boundary).
+_MISSION_SCOPED_QA_STATUSES: frozenset[str] = frozenset(
+    {
+        QA_STATUS_QUESTION_REQUESTED,
+        QA_STATUS_STUCK_AWAITING_ANSWER,
+        QA_STATUS_QUESTION_ESCALATION,
+    }
+)
+
+# Defensive row cap on the multi-receipt watcher SELECT (pairs with the
+# ``JobWatcherRepository.get_watchers_for_jobs`` limit parameter).
+# PUBLIC (fix-cycle-2 polish, 2026-10-05): the cap is the
+# service-canonical home — cross-referenced by name in
+# ``daemon/repositories/job_queue/watcher_repository.py`` and pinned
+# for equality in ``test_question_watch_fanout.py`` (cap-equality pin).
+QA_WATCHER_ROW_CAP = 256
+
+
+@dataclass(frozen=True)
+class NotifyQAPayload:
+    """Atomic payload for :func:`notify_mission_qa_watchers`.
+
+    Collapses the helper's 8-caller-kwarg surface into a single value
+    object (fix-cycle-2 polish, 2026-10-05) so the public function
+    signature stays minimal: ``notify_mission_qa_watchers(payload)``.
+    The dataclass carries NO behavior - pure value object consumed by
+    the private helpers below.
+
+    Field semantics:
+
+    * ``work_id``: Primary envelope candidate (the asking-turn receipt
+      when one exists) and the fallback ``Agent:`` identity source
+      via ``work_resolver.resolve_work``. A resolve miss degrades to
+      ``"unknown"`` and STILL delivers: dropping the question would
+      recreate the silent wedge this lane closes.
+    * ``status``: One of :data:`_MISSION_SCOPED_QA_STATUSES`. Anything
+      else (transport kinds, ``mission_terminal``) is REFUSED
+      fail-closed at the public entry - terminal delivery stays
+      exclusively on :func:`notify_work_watchers` C1/N1 machinery.
+    * ``mission_work_ids``: The mission's bounded receipt set
+      (newest-live first). Callers build it with
+      :func:`midflight_qa.enumerate_mission_work_ids`. REQUIRED
+      (positional-no-default) - the call-site contract owns the
+      pre-flip snapshot semantics (terminate-flip cascades delete
+      Task rows; the public helper refuses a degraded fallback).
+    * ``instance_manager``: The :class:`InstanceManager` whose
+      :meth:`enqueue_message` delivers the envelope.
+    * ``work_resolver``: :class:`WorkResolverService` - Agent-line
+      identity.
+    * ``watcher_repo``: The :class:`JobWatcherRepository` whose
+      :meth:`get_watchers_for_jobs` performs the read-only IN-select.
+    * ``result_summary``: Optional ``Result:`` body (pack payload /
+      escalation description). The ``progress`` kwarg that used to
+      ride here was STRUCTURALLY DEAD (the QA lane's
+      ``_MISSION_SCOPED_QA_STATUSES`` excludes ``in_progress``, so
+      callers' content was silently discarded by
+      :func:`_build_event_envelope`); callers route any text they
+      need rendered through ``result_summary``.
+    * ``error``: Optional ``Error:`` body.
+    """
+
+    work_id: str
+    status: str
+    mission_work_ids: list[str]
+    instance_manager: Any  # InstanceManager - typed loosely to avoid an import cycle
+    work_resolver: "WorkResolverService"
+    watcher_repo: Any  # JobWatcherRepository - typed loosely to avoid an import cycle
+    result_summary: str | None = None
+    error: str | None = None
+
+
+def _build_candidate_ids(payload: NotifyQAPayload) -> list[str]:
+    """Build the deduped + capped receipt candidate set for the IN-select.
+
+    Order: ``work_id`` (the primary envelope candidate) first, then
+    ``mission_work_ids`` (the mission's receipt set, newest-live
+    first). Defensive re-cap at :data:`MISSION_RECEIPT_SCAN_CAP` - the
+    caller should have already capped, but a cap here keeps the
+    bounded guarantee under any future caller regression.
+    """
+    candidate_ids: list[str] = []
+    seen: set[str] = set()
+    for rid in [payload.work_id, *(payload.mission_work_ids or [])]:
+        if rid and rid not in seen:
+            seen.add(rid)
+            candidate_ids.append(rid)
+    return candidate_ids[:MISSION_RECEIPT_SCAN_CAP]
+
+
+async def _select_watchers(
+    payload: NotifyQAPayload, candidate_ids: list[str]
+) -> list[JobWatcher]:
+    """Read-only multi-receipt watcher SELECT (best-effort, warns on failure).
+
+    Returns an empty list on a repository failure (the emission must
+    not break the asker - the orchestrator's parsing is
+    fire-and-forget from the helper's perspective). The cap-hit
+    observability (DESC ordering + WARN listing dropped watcher ids)
+    is the repository's responsibility - see
+    :meth:`JobWatcherRepository.get_watchers_for_jobs`.
+    """
+    try:
+        return await asyncio.to_thread(
+            payload.watcher_repo.get_watchers_for_jobs,
+            candidate_ids,
+            QA_WATCHER_ROW_CAP,
+        )
+    except Exception as sel_err:  # noqa: BLE001 - emission must not break the asker
+        logger.warning(
+            "notify_mission_qa_watchers: receipt-select failed for "
+            "status=%s work_id=%s (%d candidates): %s",
+            payload.status,
+            payload.work_id[:8] if payload.work_id else "<none>",
+            len(candidate_ids),
+            sel_err,
+        )
+        return []
+
+
+async def _resolve_agent_id(payload: NotifyQAPayload) -> str:
+    """Resolve the Agent-line identity for the envelope ONCE.
+
+    The asker is the same for every recipient, so a single resolve
+    suffices. A resolve failure degrades to ``"unknown"`` - QA
+    delivery never depends on the resolver.
+    """
+    if payload.work_resolver is None:
+        return "unknown"
+    try:
+        work_record = await asyncio.to_thread(
+            payload.work_resolver.resolve_work, payload.work_id
+        )
+        if work_record is not None:
+            return work_record.agent_id or "unknown"
+    except Exception as res_err:  # noqa: BLE001
+        logger.debug(
+            "notify_mission_qa_watchers: agent resolve failed for "
+            "work_id=%s (%s) - delivering with unknown identity",
+            payload.work_id[:8] if payload.work_id else "<none>",
+            res_err,
+        )
+    return "unknown"
+
+
+def _group_rows_by_instance(
+    watchers: list[JobWatcher],
+) -> dict[str, list[JobWatcher]]:
+    """Bucket ``watchers`` by ``instance_id`` for the per-watcher dedupe."""
+    rows_by_instance: dict[str, list[JobWatcher]] = {}
+    for watcher in watchers:
+        rows_by_instance.setdefault(watcher.instance_id, []).append(watcher)
+    return rows_by_instance
+
+
+def _pick_envelope_receipt(
+    rows: list[JobWatcher], candidate_ids: list[str]
+) -> str:
+    """Pick the envelope's receipt key for ``rows``.
+
+    Prefers the first candidate in priority order that the watcher
+    holds a row on (live asking-turn receipts first, then newest
+    mission receipts - mirrors :func:`_build_candidate_ids` order).
+    Falls back to the watcher's first row's ``job_id`` (deterministic
+    - the watcher is the source of truth for its own armed identity).
+    """
+    row_ids = {r.job_id for r in rows}
+    for rid in candidate_ids:
+        if rid in row_ids:
+            return rid
+    return rows[0].job_id
+
+
+async def _enqueue_for_watchers(
+    payload: NotifyQAPayload,
+    candidate_ids: list[str],
+    rows_by_instance: dict[str, list[JobWatcher]],
+    agent_id: str,
+    status_display: str,
+) -> int:
+    """Enqueue the envelope to every deduped watcher (S15 per-watch boundary).
+
+    NON-CLAIMING: rows survive intact (no CAS, no row transition,
+    no ``evaluate_mission_live`` call). A per-watcher enqueue failure
+    is WARN-logged and does not break the other recipients - no
+    compensation is needed (nothing was deleted).
+    """
+    notified = 0
+    for instance_id, rows in rows_by_instance.items():
+        key_work_id = _pick_envelope_receipt(rows, candidate_ids)
+        envelope = _build_event_envelope(
+            work_id=key_work_id,
+            status=payload.status,
+            status_display=status_display,
+            agent_id=agent_id,
+            result_summary=payload.result_summary,
+            error=payload.error,
+        )
+        try:
+            await payload.instance_manager.enqueue_message(
+                instance_id=instance_id,
+                message=envelope,
+                source=_job_event_source(key_work_id, payload.status),
+            )
+            notified += 1
+        except Exception as enq_err:  # noqa: BLE001
+            logger.warning(
+                "notify_mission_qa_watchers: enqueue failed for watcher "
+                "status=%s key_work_id=%s to=%s (%s: %s) - row untouched "
+                "(non-claiming lane)",
+                payload.status,
+                key_work_id[:8] if key_work_id else "<none>",
+                instance_id[:8],
+                type(enq_err).__name__,
+                enq_err,
+            )
+    return notified
+
+
+def _pack_legacy_kwargs(
+    *,
+    work_id: str | None,
+    status: str | None,
+    mission_work_ids: list[str] | None,
+    instance_manager: Any,
+    work_resolver: "WorkResolverService" | None,
+    watcher_repo: Any,
+    progress: str | None,
+    result_summary: str | None,
+    error: str | None,
+) -> NotifyQAPayload:
+    """Build a :class:`NotifyQAPayload` from the legacy 8-kwarg surface.
+
+    Backward-compat shim (fix-cycle-2 polish): the original 8-kwarg
+    signature is retained for the regression test surface
+    (``test_question_watch_fanout.py``:745-753, 820-827). The shim
+    packs the kwargs into the canonical payload; ``progress`` is
+    accepted-but-ignored (the QA lane's
+    ``_MISSION_SCOPED_QA_STATUSES`` excludes ``in_progress``;
+    ``_build_event_envelope`` would silently discard the content).
+    """
+    if progress is not None:
+        logger.debug(
+            "notify_mission_qa_watchers: legacy 'progress' kwarg is "
+            "structurally dead in the QA lane (statuses exclude "
+            "in_progress); caller's content is discarded. Route "
+            "through 'result_summary' instead."
+        )
+    return NotifyQAPayload(
+        work_id=work_id or "",
+        status=status or "",
+        mission_work_ids=mission_work_ids or [],
+        instance_manager=instance_manager,
+        work_resolver=work_resolver,
+        watcher_repo=watcher_repo,
+        result_summary=result_summary,
+        error=error,
+    )
+
+
+async def notify_mission_qa_watchers(
+    payload: NotifyQAPayload | None = None,
+    *,
+    work_id: str | None = None,
+    status: str | None = None,
+    mission_work_ids: list[str] | None = None,
+    instance_manager: Any = None,
+    work_resolver: "WorkResolverService" | None = None,
+    watcher_repo: Any = None,
+    progress: str | None = None,
+    result_summary: str | None = None,
+    error: str | None = None,
+) -> int:
+    """Deliver one QA event to every mission watcher - non-claiming.
+
+    Recipient resolution is EMISSION-TIME and MISSION-SCOPED: one
+    bounded ``job_id IN (...)`` SELECT over the mission's receipt set
+    (capped + deduped by the caller's
+    :func:`midflight_qa.enumerate_mission_work_ids`) finds every
+    watcher holding an UNCLAIMED row on ANY associated receipt. QA
+    events are EVENTS-FILTER-EXEMPT - the row's ``watch_events``
+    subscription does not gate delivery (a ``mission_terminal``-only
+    row DOES receive QA events). Dedupe is per watcher instance: rows
+    on multiple receipts yield ONE emission, whose envelope names the
+    watcher's highest-priority receipt (its own armed identity - the
+    asking-turn live receipt when it holds a row there, else the
+    newest mission receipt it holds). Any mission receipt resolves
+    back to the asker through the WorkResolver, so the answer route
+    (``POST /api/jobs/{work_id}/answer`` / ``job_answer``) needs no
+    watch row - the pack lives on the asker.
+
+    Delivery is NON-CLAIMING (readonly): no CAS, no row transition, no
+    ``evaluate_mission_live`` call - the mission_live HOLD governs
+    the terminal fire only. Rows survive this delivery intact for
+    their own subscribed events.
+
+    Caller surface (fix-cycle-2 polish, item 3):
+
+    * **NEW (canonical):** pass a single :class:`NotifyQAPayload`
+      value object - ``await notify_mission_qa_watchers(payload)``.
+      This is the surface all in-tree callers use.
+    * **LEGACY (backward-compat):** the original 8-kwarg surface is
+      STILL ACCEPTED for backward-compat with the regression test
+      surface; the kwargs are packed into a :class:`NotifyQAPayload`
+      via :func:`_pack_legacy_kwargs` before the helper dispatch.
+
+    Returns:
+        Number of watcher emissions delivered (deduped per watcher).
+    """
+    if payload is None:
+        payload = _pack_legacy_kwargs(
+            work_id=work_id,
+            status=status,
+            mission_work_ids=mission_work_ids,
+            instance_manager=instance_manager,
+            work_resolver=work_resolver,
+            watcher_repo=watcher_repo,
+            progress=progress,
+            result_summary=result_summary,
+            error=error,
+        )
+    if payload.status not in _MISSION_SCOPED_QA_STATUSES:
+        logger.warning(
+            "notify_mission_qa_watchers: refused non-QA status=%s for "
+            "work_id=%s - mission-scoped QA lane is events-exempt and "
+            "non-claiming by contract; terminal delivery stays on "
+            "notify_work_watchers",
+            payload.status,
+            payload.work_id[:8] if payload.work_id else "<none>",
+        )
+        return 0
+    if payload.instance_manager is None or payload.watcher_repo is None:
+        logger.debug(
+            "notify_mission_qa_watchers: missing dependency for "
+            "work_id=%s status=%s - skipping (instance_manager=%s, "
+            "watcher_repo=%s)",
+            payload.work_id[:8] if payload.work_id else "<none>",
+            payload.status,
+            payload.instance_manager is not None,
+            payload.watcher_repo is not None,
+        )
+        return 0
+    candidate_ids = _build_candidate_ids(payload)
+    watchers = await _select_watchers(payload, candidate_ids)
+    if not watchers:
+        return 0
+    agent_id = await _resolve_agent_id(payload)
+    rows_by_instance = _group_rows_by_instance(watchers)
+    status_display = _format_status_display(payload.status)
+    notified = await _enqueue_for_watchers(
+        payload=payload,
+        candidate_ids=candidate_ids,
+        rows_by_instance=rows_by_instance,
+        agent_id=agent_id,
+        status_display=status_display,
+    )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[qa-fanout] ts=%d status=%s primary=%s candidates=%d "
+            "rows=%d watchers=%d delivered=%d",
+            time.time_ns(),
+            payload.status,
+            payload.work_id[:8] if payload.work_id else "<none>",
+            len(candidate_ids),
+            len(watchers),
+            len(rows_by_instance),
+            notified,
+        )
+    return notified
+
+__all__ = [
+    "NotifyQAPayload",
+    "QA_WATCHER_ROW_CAP",
+    "notify_mission_qa_watchers",
+    "notify_work_watchers",
+]

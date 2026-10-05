@@ -609,6 +609,44 @@ class TaskRepository:
             )
             return list(db_session.exec(stmt))
 
+    def get_recent_work_ids(
+        self, instance_id: str, limit: int = 128
+    ) -> list[str]:
+        """Bounded newest-first work_id scan for one instance.
+
+        Mission-scoped QA fan-out seam
+        (``feature/question-watch-fanout``, 2026-10-05): resolves the
+        receipt set of a mission instance with a single indexed SELECT
+        that projects ONLY ``work_id`` and caps rows at ``limit`` — a
+        long-lived mission (one Task row per turn) can never turn an
+        emission into an unbounded scan.
+
+        Cap canonical home (fix-cycle-2 polish, item 8): the
+        service-side ``MISSION_RECEIPT_SCAN_CAP`` constant in
+        :mod:`daemon.services.midflight_qa` is the canonical
+        cap-for-the-lane value. The repository's ``limit=`` parameter
+        default is a backstop; callers should pass the service
+        constant explicitly. The cap-equality pin in
+        ``test_question_watch_fanout.py`` keeps the two in sync.
+
+        Args:
+            instance_id: The mission instance whose receipts to scan.
+            limit: Maximum work_ids returned (default 128; backstop —
+                see cap canonical home note above).
+
+        Returns:
+            Work_ids newest-first, capped at ``limit``.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task.work_id)
+                .where(Task.instance_id == instance_id)
+                .order_by(col(Task.created_at).desc())
+                .limit(limit)
+            )
+            return [row for row in db_session.exec(stmt).all()]
+
+
     def get_by_message(self, message_id: str) -> Task | None:
         """Get task by associated message ID.
 

@@ -35,7 +35,11 @@ from daemon.services.mission_live_guard import (
     evaluate_mission_live,
 )
 from daemon.services.project_normalizer import normalize_project_id
-from daemon.services.work_notifier import _format_status_display, notify_work_watchers
+from daemon.services.work_notifier import (
+    _format_status_display,
+    _job_event_source,
+    notify_work_watchers,
+)
 from daemon.services.work_status import (
     _derive_legacy_status,
     is_terminal as _work_status_is_terminal,
@@ -447,7 +451,7 @@ class JobQueueService:
                 await self._instance_manager.enqueue_message(
                     instance_id=watcher.instance_id,
                     message=notification,
-                    source=f"internal_agent:job_event:{job_id}:{status}",
+                    source=_job_event_source(job_id, status),
                 )
                 notified += 1
 

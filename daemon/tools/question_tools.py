@@ -19,12 +19,21 @@ Lifecycle:
        graph task mid-execution and skips any post-commit SSE code
        (F3 / SSE-timing note).
     3b. Mid-flight QA channel (2026-09-21): the tool ALSO emits
-       ``EventKind.QUESTION_REQUESTED`` on the EventBus and fans
-       ``notify_work_watchers(status="question_requested")`` out over
-       every live work_id (``daemon/services/midflight_qa.py``) so
-       job watchers / orchestrators receive a
-       ``[JOB_EVENT] Job {work_id}... question requested ❓`` line
-       with the pack payload — still BEFORE the pause flag (F3).
+       ``EventKind.QUESTION_REQUESTED`` on the EventBus and fans the
+       watcher notification out MISSION-SCOPED
+       (``notify_mission_qa_watchers`` over
+       ``enumerate_mission_work_ids`` — ``daemon/services/midflight_qa.py``):
+       every watcher holding an unclaimed row on ANY receipt associated
+       with the asking instance's mission receives a
+       ``[JOB_EVENT] Job {receipt}... question requested ❓`` line with
+       the pack payload — regardless of which receipt the asking turn
+       rides (spontaneous receipts such as child-report wakes carry no
+       watch coverage) and regardless of the row's ``watch_events``
+       subscription (QA events are events-filter-exempt). Delivery is
+       non-claiming (rows preserved) and deduped per watcher — still
+       BEFORE the pause flag (F3). Note: this QA reach does NOT create
+       TERMINAL coverage — ``mission_terminal`` stays per-receipt
+       delta-arm; re-call ``watch_mission`` after new receipts mint.
     4. Tool sets the pause flag via
        ``manager.set_question_pause_requested(current_instance_id)``.
     5. Tool returns a string that ECHOES the question text (F7
@@ -535,11 +544,13 @@ def create_question_tools(
 
         # 3b. MID-FLIGHT QA CHANNEL (design §4.1 steps [3]+[4]):
         #     emit ``QUESTION_REQUESTED`` on the load-bearing push lanes
-        #     — EventBus (persists + global broadcast) and
-        #     ``notify_work_watchers`` fanned out over EVERY live
-        #     work_id (MAJOR-1) so every watcher's instance receives
-        #     ``[JOB_EVENT] Job {work_id}... question requested ❓``
-        #     with the pack payload in the body. These MUST run BEFORE
+        #     — EventBus (persists + global broadcast) and the
+        #     MISSION-SCOPED watcher fan-out (``notify_mission_qa_watchers``
+        #     over ``enumerate_mission_work_ids``): every watcher holding
+        #     an unclaimed row on ANY mission-associated receipt receives
+        #     ``[JOB_EVENT] Job {receipt}... question requested ❓``
+        #     with the pack payload in the body — events-filter-exempt,
+        #     non-claiming, deduped per watcher. These MUST run BEFORE
         #     the pause flag (step 5) — the pause cascade cancels the
         #     graph task and any post-pause tool-side code is moot (F3
         #     timing constraint, §8.6). All emissions are best-effort
