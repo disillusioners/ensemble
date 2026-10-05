@@ -471,7 +471,7 @@ class TestEscalationReachesMissionWatcher:
         assert len(calls) == 1
         msg = calls[0].kwargs["message"]
         assert "[JOB_EVENT] Job" in msg
-        assert "question escalation ⏳" in msg
+        assert "question escalation ⚠" in msg
         assert calls[0].kwargs["source"] == (
             f"internal_agent:job_event:{r1_settled}:question_escalation"
         )
@@ -540,7 +540,7 @@ class TestEscalationReachesMissionWatcher:
         assert len(calls) == 2  # stuck emission + escalation envelope
         bodies = [c.kwargs["message"] for c in calls]
         assert any("stuck awaiting answer ⏳" in b for b in bodies)
-        assert any("question escalation ⏳" in b for b in bodies)
+        assert any("question escalation ⚠" in b for b in bodies)
         # The mission_terminal row SURVIVES the escalation deliveries.
         assert len(harness.watcher_repo.get_watchers_for_job(r1_settled)) == 1
 
@@ -635,7 +635,7 @@ class TestEscalationReachesMissionWatcher:
         # even though every Task receipt was deleted by the flip.
         calls = _enqueues_for(harness, watcher)
         bodies = [c.kwargs["message"] for c in calls]
-        assert any("question escalation ⏳" in b for b in bodies), bodies
+        assert any("question escalation ⚠" in b for b in bodies), bodies
         assert len(calls) == 2  # pre-flip stuck emission + escalation
 
 

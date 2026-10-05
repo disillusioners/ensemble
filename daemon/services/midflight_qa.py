@@ -897,7 +897,7 @@ async def emit_question_escalation_notification(
 
     Mission-watcher delivery (``feature/question-watch-fanout``,
     2026-10-05): IN ADDITION to the FE SSE broadcast, ONE
-    ``[JOB_EVENT] Job {receipt}... question escalation ⏳`` envelope is
+    ``[JOB_EVENT] Job {receipt}... question escalation ⚠`` envelope is
     enqueued per mission watcher holding an unclaimed row on any
     mission receipt (same bounded, events-exempt, non-claiming,
     deduped lane as the QA emissions). The FE-SSE-only escalation gap

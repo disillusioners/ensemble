@@ -197,7 +197,7 @@ _STATUS_DISPLAY_MAP: dict[str, str] = {
     # branch (:417-447 area) which NEVER claims (no CAS DELETE...
     # RETURNING), so the watcher row survives for the eventual
     # terminal event. Icon glyphs match the existing vocabulary
-    # (✓ ✗ ⟳ ⏸ ❓ ⏳). The parser keys off the ``[JOB_EVENT] Job
+    # (✓ ✗ ⟳ ⏸ ❓ ⏳ ⚠). The parser keys off the ``[JOB_EVENT] Job
     # {work_id}... {status_display}`` header; these are additive
     # words inside that header (byte-compatible with the parser).
     "question_requested": "question requested ❓",
@@ -208,14 +208,10 @@ _STATUS_DISPLAY_MAP: dict[str, str] = {
     # 2026-10-05): the wedge-guard escalation (emission_index >= 3)
     # delivers to mission watchers in ADDITION to the FE SSE broadcast.
     # Additive words inside the parser's header prefix — byte-compatible.
-    # GLYPH COLLISION (fix-cycle-2 polish, item 12): escalation and
-    # ``stuck_awaiting_answer`` share the ⏳ icon. A distinct glyph
-    # would be visually cleaner but the existing regression test
-    # contract (``test_question_watch_fanout.py``:474,543,638) pins
-    # the literal ``"question escalation ⏳"`` token — changing the
-    # icon requires a paired test edit outside this cycle's allowed
-    # scope. Deferred to a follow-up commission.
-    "question_escalation": "question escalation ⏳",
+    # Glyph ⚠ (fix-cycle-3, closes cycle-2 item 12): must not collide with
+    # ``stuck_awaiting_answer``'s ⏳ — escalation ≠ third stuck heartbeat;
+    # ⚠ stays inside the file's text-presentation glyph vocabulary.
+    "question_escalation": "question escalation ⚠",
 }
 
 
