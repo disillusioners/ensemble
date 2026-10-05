@@ -288,6 +288,11 @@ class TestSweepServiceShape:
         assert "pending_age" in result.lanes
         assert "recovery_retry" in result.lanes
         assert "orphan" not in result.lanes  # lane_orphan disabled
+        # Block-1 G4 lane is enabled by default; on an empty DB
+        # the candidate query returns 0 rows and the lane
+        # self-records as present (zero recovered) — asserting the
+        # key is in the dict is the post-fix contract.
+        assert "stuck_wake" in result.lanes
         for name, lane in result.lanes.items():
             assert isinstance(lane, LaneResult)
             assert lane.recovered == 0
@@ -313,6 +318,9 @@ class TestSweepServiceShape:
             lane_pending_age=False,
             lane_recovery_retry=False,
             lane_orphan=False,
+            # Block-1 G4 lane: must be disabled too for the
+            # empty-lane-dict assertion.
+            lane_stuck_wake=False,
         )
         result = svc.recover_now()
         assert result.lanes == {}

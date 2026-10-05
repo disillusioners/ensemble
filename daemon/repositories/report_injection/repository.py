@@ -117,7 +117,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
-from sqlalchemy import literal, true, update as sa_update
+from sqlalchemy import literal, text, true, update as sa_update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
@@ -1967,6 +1967,135 @@ class ReportInjectionRepository:
                 "child_instance_id": r.child_instance_id,
                 "state": r.state,
                 "child_terminal_status": r.child_terminal_status,
+            }
+            for r in rows
+        ]
+
+    def find_stuck_wake_candidates(
+        self,
+        *,
+        heartbeat_stale_threshold_seconds: int = 90,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Find PENDING-marker obligations whose wake row is wedged.
+
+        Block 1 G4 wedge (durability-f1-f2 / merge-gate G4 main
+        leg, evidence in
+        ``.agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/db-assertions/``).
+        The captured wedge state — PENDING marker minted pre-crash,
+        wake row in ``message_queue`` status ``ready`` preserved
+        by the F-1 epoch-belt, wake ``task`` row still ``running``
+        (claimed by the dead worker), parent in
+        ``waiting_children`` — is unreachable by every existing
+        RDRS lane:
+
+        * Lane 1 (DEFERRED) skips: row is PENDING, not DEFERRED.
+        * Lane 2 (no-row backstop) skips: the marker exists (the
+          ``has_injection_row`` exclusion matches).
+        * Lane 3 + 4 (pending-age) skip: ``age_bound_minutes=10``
+          (the F-1-frozen in-flight protection) blocks the
+          young-from-creation row for the first 10 minutes after
+          boot — but the parent is wedged NOW, and the
+          ``stale_task_recovery`` F-1 amendment (r-20260929) defers
+          the dead-worker's wake task reap by another 15 minutes.
+        * Lane 5 (orphan) skips: parent is waiting_children, not
+          TERMINAL.
+
+        This helper exposes the captured state to a NEW RDRS lane
+        (``_run_stuck_wake_lane``) so the wedge heals within one
+        sweep cadence via the existing
+        ``TaskRepository.force_cancel_and_schedule_retry``
+        primitive — the retry wakes the worker pool's per-instance
+        claim (no RUNNING task for the parent), the worker reads
+        the preserved wake row, instance_messaging flips the parent
+        from waiting_children to RUNNING, and the child's report
+        lands in the parent's graph state.
+
+        Args:
+            heartbeat_stale_threshold_seconds: A wake task whose
+                ``last_heartbeat_at`` is older than this is treated
+                as dead-worker (the worker's heartbeat thread
+                updates ``last_heartbeat_at`` every
+                ``DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30.0s``
+                — see ``worker_pool.py:45``). Default 90s = 3x the
+                heartbeat interval, comfortably larger than a
+                single missed tick while smaller than the
+                F-1 15-minute ``DEFAULT_STALE_THRESHOLD_MINUTES``.
+            limit: Batch cap.
+
+        Returns:
+            List of
+            ``{"injection_id", "parent_instance_id",
+            "child_instance_id", "wake_task_id", "wake_message_id"}``
+            dicts. The caller (``_run_stuck_wake_lane``) passes
+            ``wake_task_id`` to ``force_cancel_and_schedule_retry``.
+        """
+        # Naive-UTC frame (DC-A fix) — mirrors
+        # ``find_stale_running_tasks`` (which the production
+        # ``stale_task_recovery`` consumes) so the heartbeat
+        # comparison uses the same clock frame the worker's
+        # heartbeat thread writes.
+        threshold_iso = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            - timedelta(seconds=heartbeat_stale_threshold_seconds)
+        ).isoformat()
+
+        # Join order:
+        #   report_injections (PENDING marker)
+        #   → message_queue   (wake row in 'ready', anchored to
+        #                       parent via instance_id)
+        #   → task            (wake PROCESS_REPORT task in
+        #                       'running', claimed by the dead
+        #                       worker, instance_id=parent)
+        # The linkage contract (per the natural-completion path at
+        # ``child_reports.py``): the marker's ``child_message_id``
+        # is the wake row's ``message_id`` AND the wake task's
+        # ``message_id``; the wake row + wake task both anchor to
+        # the parent's instance_id.
+        sql = text(
+            """
+            SELECT
+                ri.injection_id,
+                ri.parent_instance_id,
+                ri.child_instance_id,
+                ri.child_message_id,
+                tk.id AS wake_task_id,
+                mq.message_id AS wake_message_id
+            FROM report_injections ri
+            JOIN message_queue mq
+              ON mq.message_id = ri.child_message_id
+             AND mq.instance_id = ri.parent_instance_id
+            JOIN task tk
+              ON tk.message_id = mq.message_id
+             AND tk.instance_id = ri.parent_instance_id
+             AND tk.task_type = :process_report_type
+            WHERE ri.state = :state_pending
+              AND mq.status = :status_ready
+              AND tk.status = :status_running
+              AND tk.last_heartbeat_at IS NOT NULL
+              AND tk.last_heartbeat_at < :heartbeat_threshold
+            LIMIT :limit
+        """
+        )
+        with Session(self.engine) as session:
+            rows = session.execute(
+                sql,
+                {
+                    "state_pending": _PENDING_STATE,
+                    "status_ready": "ready",
+                    "status_running": "running",
+                    "process_report_type": "process_report",
+                    "heartbeat_threshold": threshold_iso,
+                    "limit": limit,
+                },
+            ).all()
+        return [
+            {
+                "injection_id": r.injection_id,
+                "parent_instance_id": r.parent_instance_id,
+                "child_instance_id": r.child_instance_id,
+                "wake_task_id": int(r.wake_task_id),
+                "wake_message_id": r.wake_message_id,
             }
             for r in rows
         ]

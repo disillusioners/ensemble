@@ -389,6 +389,7 @@ class ReportDeliveryRecoveryService:
         lane_pending_age: bool = True,
         lane_recovery_retry: bool = True,
         lane_orphan: bool = True,
+        lane_stuck_wake: bool = True,
     ) -> None:
         """Initialize the recovery service.
 
@@ -438,6 +439,7 @@ class ReportDeliveryRecoveryService:
         self._lane_pending_age = bool(lane_pending_age)
         self._lane_recovery_retry = bool(lane_recovery_retry)
         self._lane_orphan = bool(lane_orphan)
+        self._lane_stuck_wake = bool(lane_stuck_wake)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -478,7 +480,8 @@ class ReportDeliveryRecoveryService:
             f"no_row_backstop={self._lane_no_row_backstop}, "
             f"pending_age={self._lane_pending_age}, "
             f"recovery_retry={self._lane_recovery_retry}, "
-            f"orphan={self._lane_orphan}]"
+            f"orphan={self._lane_orphan}, "
+            f"stuck_wake={self._lane_stuck_wake}]"
         )
 
     def stop(self, timeout: float | None = None) -> None:
@@ -665,6 +668,20 @@ class ReportDeliveryRecoveryService:
                 return result
         if self._lane_orphan:
             result.lanes["orphan"] = self._run_orphan_lane()
+            if self._stop_event.is_set():
+                self._finalize_sweep_result(result)
+                return result
+        # Lane 6 (Block-1 G4): the stuck-wake heal. Sits AFTER the
+        # marker-targeted lanes (1/3/4) because the heal action —
+        # ``force_cancel_and_schedule_retry`` on the dead-worker
+        # wake task — is destructive (cancels the running task)
+        # and the lanes above own any prior obligation. Also sits
+        # AFTER Lane 2 (no-row backstop) because Lane 2's
+        # anchor-less admission is for the post-wipe window where
+        # the marker does not exist; here the marker DOES exist
+        # (state='PENDING') and the wake is preserved.
+        if self._lane_stuck_wake:
+            result.lanes["stuck_wake"] = self._run_stuck_wake_lane()
         self._finalize_sweep_result(result)
         return result
 
@@ -822,6 +839,109 @@ class ReportDeliveryRecoveryService:
             )
             return True
         return False
+
+    # --------------------------------------------------------
+    # Lane 6 — stuck-wake heal (Block-1 G4, merge gate)
+    # --------------------------------------------------------
+
+    def _run_stuck_wake_lane(self) -> LaneResult:
+        """Heal PENDING-marker + preserved-ready-wake wedges.
+
+        Block-1 G4 (durability-f1-f2 / merge-gate G4 main leg,
+        evidence in
+        ``.agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/db-assertions/d1-pre-kill-assertion.txt``).
+        The captured wedge — PENDING marker, wake row in
+        ``message_queue`` status ``ready`` (preserved by the F-1
+        epoch-belt), wake ``task`` still ``running`` (dead worker),
+        parent in ``waiting_children`` — is unreachable by every
+        existing RDRS lane (the design review's own §12a claim that
+        "marker-minted pre-restart" cases are handled by Lanes
+        1/3/4 is contradicted by observation). This lane is the
+        unfrozen alternative: detect the captured state via a
+        dedicated query (no existing lane predicate is touched) +
+        invoke the existing ``TaskRepository.force_cancel_and_
+        schedule_retry`` primitive on the dead-worker wake task.
+        The retry task has no ``worker_id`` and status ``PENDING``,
+        so the worker pool's per-instance busy guard (the only
+        guard blocking the claim — see
+        ``task/repository.py:2648-2650`` + :2789-2830) no longer
+        matches; the worker claims, reads the preserved wake row,
+        and ``instance_messaging`` flips the parent from
+        ``waiting_children`` to ``RUNNING``.
+
+        Per-row counters:
+        * ``recovered``: ``force_cancel_and_schedule_retry`` returned
+          a retry task (the wake task was successfully cancelled
+          and a new pending task minted).
+        * ``errors``: anything that went wrong — logged + counted;
+          per-row ``except`` absorbs so the sweeper continues.
+
+        Duck-typed on ``force_cancel_and_schedule_retry`` (mirrors
+        the W-4 duck-typed queue-repo gate): a task-repo mock that
+        lacks the method is treated as "no heal available" and the
+        lane records zero recovered (never crashes the sweep).
+        """
+        out = LaneResult()
+        candidates = self._report_injection_repo.find_stuck_wake_candidates(
+            limit=self._batch_cap,
+        )
+        force_cancel_fn = getattr(
+            self._task_repo, "force_cancel_and_schedule_retry", None
+        )
+        if not callable(force_cancel_fn):
+            # Duck-typed: a test double without the heal primitive.
+            # Log once at INFO so a misconfigured wiring is visible,
+            # then return — the sweep continues (zero recovered).
+            logger.info(
+                "stuck_wake lane: task_repo has no "
+                "force_cancel_and_schedule_retry (duck-typed); "
+                "skipping the heal — wired task_repo must be a "
+                "real TaskRepository"
+            )
+            return out
+
+        for cand in candidates:
+            if self._stop_event.is_set():
+                break
+            wake_task_id = cand["wake_task_id"]
+            parent_id = cand["parent_instance_id"]
+            child_id = cand["child_instance_id"]
+            try:
+                retry_task = force_cancel_fn(
+                    task_id=wake_task_id,
+                    max_retries=3,
+                    reason=(
+                        "RDRS lane 6 stuck-wake heal: dead-worker "
+                        "wake task + preserved wake row + PENDING "
+                        "marker (Block-1 G4 wedge; "
+                        "durability-f1-f2 merge gate)"
+                    ),
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"sweep stuck_wake force_cancel failed "
+                    f"wake_task_id={wake_task_id} "
+                    f"parent={parent_id[:8]}... "
+                    f"child={child_id[:8]}...: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                out.errors += 1
+                continue
+            if retry_task is None:
+                # The retry gate refused — another actor owns the
+                # obligation, or the task is no longer a force-
+                # cancel candidate (e.g. its worker may have updated
+                # the heartbeat between query and force_cancel).
+                out.skipped_busy += 1
+                continue
+            logger.info(
+                "sweep stuck_wake heal: dead-worker wake task "
+                f"id={wake_task_id} → retry id={retry_task.id} "
+                f"parent={parent_id[:8]}... "
+                f"child={child_id[:8]}..."
+            )
+            out.recovered += 1
+        return out
 
     def _recover_one_deferred_row(
         self,
