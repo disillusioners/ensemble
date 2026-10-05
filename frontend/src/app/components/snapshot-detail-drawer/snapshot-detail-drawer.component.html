@@ -197,8 +197,10 @@
         </div>
       </section>
 
-      <!-- Digest (lazy, render-only guard at 200KB) -->
-      <section class="detail-section digest-section" data-test="drawer-section">
+      <!-- Digest (lazy, render-only guard at 200KB) — NOT counted among
+           the 7 fixed sections per the test-hook contract; the digest
+           is a separate, on-demand panel. -->
+      <section class="detail-section digest-section">
         <div class="digest-header">
           <h3>Digest</h3>
           <button

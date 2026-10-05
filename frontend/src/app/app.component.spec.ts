@@ -2059,3 +2059,58 @@ describe('App constructor — regression: tabs not remembered on reload (cold-re
     expect(restoreIdx).toBeLessThan(syncIdx);
   });
 });
+
+// ===========================================================================
+// Regression — snapshot-uiux v1 (fe-plan §8.3)
+//
+// The /snapshots route and the Snapshots gear-menu item are owned by this
+// branch. The two-file regression pins the route registration against
+// accidental deletion in `app.routes.ts` and the menu item ordering in
+// `app.ts` against accidental reorder. The page is otherwise covered by
+// its own spec.
+//
+// File-based assertions match the existing "App constructor — regression"
+// pattern (file contents → executable assertion). The intent is to catch
+// a deletion of the route or the menu item at PR review time, not at
+// runtime.
+// ===========================================================================
+
+describe('snapshot-uiux route + menu wiring', () => {
+  const appTsPath = path.resolve(__dirname, 'app.ts');
+  const routesTsPath = path.resolve(__dirname, 'app.routes.ts');
+
+  it('app.routes.ts registers the /snapshots route with title "Snapshots"', () => {
+    const source = fs.readFileSync(routesTsPath, 'utf8');
+    // The exact registration shape mirrors the other lazy routes
+    // (loadComponent + title).
+    const routeMatch = source.match(
+      /path:\s*'snapshots'[\s\S]*?title:\s*'Snapshots'/,
+    );
+    expect(routeMatch).not.toBeNull();
+  });
+
+  it('app.ts settingsMenuItems includes the Snapshots item placed AFTER Settings and BEFORE the conditional Database/Maintenance appends', () => {
+    const source = fs.readFileSync(appTsPath, 'utf8');
+
+    // Pin the menu item shape: { label: 'Snapshots', icon: 'bookmarks', route: '/snapshots' }
+    const itemMatch = source.match(
+      /\{ label:\s*'Snapshots',\s*icon:\s*'bookmarks',\s*route:\s*'\/snapshots'\s*\}/,
+    );
+    expect(itemMatch).not.toBeNull();
+
+    // Pin the order: Settings → Snapshots → (the conditional Database/Maintenance
+    // update() calls that append at the tail).
+    const settingsIdx = source.indexOf("{ label: 'Settings', icon: 'language', route: '/settings' }");
+    const snapshotsIdx = source.indexOf(
+      "{ label: 'Snapshots', icon: 'bookmarks', route: '/snapshots' }",
+    );
+    const dbUpdateIdx = source.indexOf("settingsMenuItems.update(items => [");
+    expect(settingsIdx).toBeGreaterThan(-1);
+    expect(snapshotsIdx).toBeGreaterThan(-1);
+    expect(dbUpdateIdx).toBeGreaterThan(-1);
+    // Settings → Snapshots → Database update() (the conditional append).
+    expect(settingsIdx).toBeLessThan(snapshotsIdx);
+    expect(snapshotsIdx).toBeLessThan(dbUpdateIdx);
+  });
+});
+});

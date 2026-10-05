@@ -19,7 +19,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
 import { MatSidenavModule } from '@angular/material/sidenav';
-import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatInputModule } from '@angular/material/input';
 import { PageEvent } from '@angular/material/paginator';
@@ -111,7 +111,6 @@ const DEFAULT_LIMIT = 25;
     MatProgressSpinnerModule,
     MatSelectModule,
     MatSidenavModule,
-    MatSnackBarModule,
     MatTooltipModule,
     SearchableSelectComponent,
     SnapshotsTableComponent,
@@ -264,6 +263,17 @@ export class SnapshotsComponent implements OnInit {
   // The host owns the fetch lifecycle. We watch the union of all
   // filter signals + paginator + the debounced tags; any change
   // fires a `list()` call (with the pageIndex-reset rule below).
+  //
+  // The effect is gated on the filter / paginator / debouncedTags
+  // signals only — it does NOT track the request-state signals
+  // (records / total / listLoading / listError / seenAgents) so the
+  // effect's own response handler does not re-trigger the effect
+  // (otherwise the list fetch would loop forever).
+  //
+  // `untracked()` inside the read paths below keeps Angular from
+  // adding the request-state signals to the dep graph during the
+  // call (defence in depth — the read paths don't subscribe
+  // either way; this just makes the intent explicit).
   constructor() {
     effect(() => {
       // touch all the reactive sources to track them
@@ -277,7 +287,7 @@ export class SnapshotsComponent implements OnInit {
       this.pageIndex();
       this.pageSize();
       // fire the fetch (pageIndex-reset handled by callers, not here)
-      this.fetchList();
+      untracked(() => this.fetchList());
     });
   }
 

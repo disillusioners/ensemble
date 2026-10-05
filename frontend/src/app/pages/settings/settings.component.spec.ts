@@ -1800,3 +1800,72 @@ describe('Timezone preference (user-timezone-setting)', () => {
     expect(section!.querySelector('app-searchable-select')).toBeNull();
   });
 });
+
+// ===========================================================================
+// Settings-clean regression (snapshot-uiux v1 — fe-plan §8.2)
+//
+// The Agent Snapshots toggle and the Snapshot Usage Metrics block have been
+// relocated to the new /snapshots page. The settings page must no longer
+// render either section. This test guards the deletion in settings.component.html
+// and the deleted members in settings.component.ts from accidental re-merge.
+// ===========================================================================
+
+describe('Settings page does not render relocated snapshot blocks', () => {
+  let fixture: ComponentFixture<SettingsComponent>;
+
+  beforeEach(async () => {
+    const settingsServiceMock = {
+      getLanguagePreference: jest.fn().mockReturnValue(of({ language: 'Auto' })),
+      setLanguagePreference: jest.fn().mockReturnValue(of({ language: 'Auto' })),
+      getTimezonePreference: jest
+        .fn()
+        .mockReturnValue(of({ timezone: null, utc_offset: null })),
+      setTimezonePreference: jest
+        .fn()
+        .mockReturnValue(of({ timezone: null, utc_offset: null })),
+      getTimezoneOptions: jest.fn().mockReturnValue(of({ timezones: [] })),
+      getEditorPreference: jest.fn().mockReturnValue(of({ editor: 'builtin' })),
+      setEditorPreference: jest.fn().mockReturnValue(of({ editor: 'builtin' })),
+      getVscodeStatus: jest.fn().mockReturnValue(of({ status: 'starting' })),
+      startVscodeServer: jest.fn().mockReturnValue(of({})),
+      stopVscodeServer: jest.fn().mockReturnValue(of({})),
+      getBlueprintPeakHours: jest
+        .fn()
+        .mockReturnValue(of({ start: 12, end: 20, tz_offset: 7 })),
+      setBlueprintPeakHours: jest
+        .fn()
+        .mockReturnValue(of({ start: 12, end: 20, tz_offset: 7 })),
+    };
+    const workspaceServiceMock = { setEditorMode: jest.fn() };
+
+    await TestBed.configureTestingModule({
+      imports: [SettingsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: SettingsService, useValue: settingsServiceMock },
+        { provide: WorkspaceService, useValue: workspaceServiceMock },
+        { provide: MatSnackBar, useValue: { open: jest.fn() } },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(SettingsComponent);
+    fixture.detectChanges();
+  });
+
+  afterEach(() => fixture.destroy());
+
+  it('does not render the Agent Snapshots section (R15 relocated to /snapshots)', () => {
+    const compiled = fixture.nativeElement as HTMLElement;
+    const headings = Array.from(compiled.querySelectorAll('h2')).map((h) =>
+      h.textContent?.trim() ?? '',
+    );
+    expect(headings).not.toContain('Agent Snapshots');
+  });
+
+  it('does not render the Snapshot Usage Metrics section (R16 relocated to /snapshots)', () => {
+    const compiled = fixture.nativeElement as HTMLElement;
+    const headings = Array.from(compiled.querySelectorAll('h2')).map((h) =>
+      h.textContent?.trim() ?? '',
+    );
+    expect(headings).not.toContain('Snapshot Usage Metrics');
+  });
+});

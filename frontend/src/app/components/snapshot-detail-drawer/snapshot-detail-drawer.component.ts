@@ -16,7 +16,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Clipboard } from '@angular/cdk/clipboard';
-import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatSnackBar } from '@angular/material/snack-bar';
 
 import { SnapshotService } from '../../services/snapshot.service';
 import {
@@ -70,7 +70,6 @@ const DIGEST_GUARD_BYTES = 200 * 1024;
     MatIconModule,
     MatProgressSpinnerModule,
     MatTooltipModule,
-    MatSnackBarModule,
   ],
   templateUrl: './snapshot-detail-drawer.component.html',
   styleUrl: './snapshot-detail-drawer.component.scss',
