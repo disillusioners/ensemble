@@ -1,7 +1,7 @@
 # Design Spec — Snapshots Page
 
 > **Status**: `approved`
-> **pinned_spec_sha**: *(set after spec is frozen — see `git rev-parse HEAD` at approval time)*
+> **pinned_spec_sha**: `2ca69147b51383e452ba9d4185cb43b573ee5575`
 > **mockup_lane**: `text` (hand-authored HTML; OD lane not engaged — see Tradeoffs §6.1)
 > **scope_id**: `snapshot-uiux`
 
@@ -18,7 +18,7 @@
 | worktree | `/home/nea/ensemble-src-wt-snapshot-uiux` |
 | plan_ref | `.agents/shared/planning/snapshot-uiux/` |
 | status | `approved` |
-| pinned_spec_sha | (to be filled at freeze — `git rev-parse HEAD:<file>`) |
+| pinned_spec_sha | `2ca69147b51383e452ba9d4185cb43b573ee5575` (set at freeze; this SHA is the conformance reference) |
 | mockup_lane | `text` |
 | lint_verdict | n/a (text lane — no OD lint) |
 | inputs (in-scope) | `frontend/src/app/pages/settings/settings.component.{ts,html}` (relocated blocks), `frontend/src/app/app.{ts,html}` (gear menu add), `frontend/src/app/app.routes.ts` (new route) |
@@ -742,12 +742,13 @@ When removing the two snapshot sections from `settings.component.html`:
 
 ## 9 · Freeze
 
-**Status: `approved`** (effective at SHA freeze below).
+**Status: `approved`** (effective at SHA freeze: `2ca69147b51383e452ba9d4185cb43b573ee5575`).
 
 The spec is FROZEN at the moment the `pinned_spec_sha` is filled in. From that point, this file is immutable — future changes ride a new spec (new SHA) or an amendment file (`design-spec-amendment-<reason>.md`).
 
-**Approval ceremony:**
-1. `git add` this file + the mockup + the implementation hand-off notes.
-2. `git commit` on `feature/snapshot-uiux`.
-3. `git rev-parse HEAD` → record as `pinned_spec_sha`.
-4. Surface to leader with artifacts + 3-5 bullet walkthrough.
+**Approval ceremony (executed):**
+
+1. ✅ `git add` the spec file → commit on `feature/snapshot-uiux` → SHA `2ca69147`.
+2. ✅ `pinned_spec_sha` recorded in this file's front-matter and §9.
+3. ✅ Hand-authored `mockups/snapshots-page.html` written and added in a follow-up commit (this commit).
+4. → Surface the artifacts to the leader with the 3-5 bullet walkthrough in the report.
