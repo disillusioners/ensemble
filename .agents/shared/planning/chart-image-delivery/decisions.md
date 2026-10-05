@@ -1122,7 +1122,7 @@ The two `<this-commit>` placeholders in `decisions.md` §phase-b-impl-1 (rows fo
 **Audit + tests:**
 
 - `tests/test_chart_tools.py` — added `TestGenerateChartRenderImageOptIn` (6 new cases: default + explicit-False → 600s + directive `false`; True → 1200s on fresh AND reuse paths; default reuse timeout pins the 600.0 literal in the timeout-error string; constant module-level pin)
-- `tests/test_charter_render_capture.py` — added 14 new cases pinning the workflow.md conditional-gate function (default-False, false-False, true-True, Project-line ordering, 8 parametrized malformed-value cases all fail-closed; byte-stable directive in chart_tools.py dispatch message; param default False; workflow Step 5+6 conditional headings; Summary conditional; chart skill opt-in section + signature row + opt-in section table; d5_timeout constants)
+- `tests/test_charter_render_capture.py` — added 13 new test functions (20 cases with parametrize expansion) pinning the workflow.md conditional-gate function (default-False, false-False, true-True, Project-line ordering, 8 parametrized malformed-value cases all fail-closed; byte-stable directive in chart_tools.py dispatch message; param default False; workflow Step 5+6 conditional headings; Summary conditional; chart skill opt-in section + signature row + opt-in section table; d5_timeout constants)
 - `tools/audit-chart-image-delivery.sh` — grew from 24 to 31 pins; added 7 new feature-class pins (#25–#31) covering the opt-in contract
 - All 24 prior pins remain GREEN (preservation 9/9, feature 15/15)
 
