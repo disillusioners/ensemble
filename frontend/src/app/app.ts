@@ -555,7 +555,13 @@ export class App implements OnInit {
   readonly settingsMenuItems = signal<SettingsMenuItem[]>([
     { label: 'Blueprints', icon: 'architecture', route: '/projects/all/blueprints' },
     { label: 'MCP Servers', icon: 'settings_input_hdmi', route: '/mcp-servers' },
-    { label: 'Settings', icon: 'language', route: '/settings' }
+    { label: 'Settings', icon: 'language', route: '/settings' },
+    // Snapshots — first-class peer of Settings/Schedules. Placed
+    // directly after Settings so the conditional Database / Maintenance
+    // appends (checkMigrationAvailability / checkMaintenanceAvailability
+    // via settingsMenuItems.update(...)) stay at the tail of the menu
+    // (snapshot-uiux §1.1 / amendment #7).
+    { label: 'Snapshots', icon: 'bookmarks', route: '/snapshots' }
   ]);
 
   constructor() {
