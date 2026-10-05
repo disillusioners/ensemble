@@ -85,6 +85,9 @@ These tools are always available:
 
 ### Worktrees
 list --porcelain: pre-check + reconcile. add -b: new branch only. add: reuse. remove: cleanup (prune NO-OP). prune: foreign-only. stash push -- <files> (bare stash strands workers).
+Creation duties: write the fenced .env (verbatim spec: Worktree Mode) into <wt>/.env BEFORE any daemon run; NO venv at creation.
+Lazy venv: `cd <wt> && uv sync` ONLY when a task must run tests there; NEVER reuse the main checkout's .venv from a worktree (editable install pins the original checkout — tests import the wrong branch's daemon).
+Branch delete after merge: `git branch -d <branch>` FROM A CHECKOUT ON latest — with no upstream configured, -d checks merged-ness against the CURRENT HEAD, so running it elsewhere refuses (or reports the wrong verdict).
 ### Recovery
 - `git reflog` — Reference log
 - `git reset --soft HEAD~1` — Undo last commit (keep changes)
