@@ -63,6 +63,46 @@ if [ -f ".env" ]; then
     set +a
 fi
 
+# --- Worktree env-fence guard (2026-10-05) -----------------------------------
+# WHY: six env-poison incidents trace to daemon boots inside linked git
+# worktrees inheriting AMBIENT environment (or sourcing no local .env at
+# all) and silently targeting LIVE. ENSEMBLE_SELF_ENV resolution order is:
+# explicit assignment > explicit opt-out > auto-derive (install-dir + DB
+# heuristic -> live). An explicit assignment in the worktree's own .env
+# pins identity and kills the ambient live-default inherit path.
+# RULE: booting inside a linked worktree requires that worktree to carry a
+# local .env with an explicit non-empty ENSEMBLE_SELF_ENV assignment
+# (giter writes ENSEMBLE_SELF_ENV=dev into every worktree fence — see
+# agents/giter "Worktree Mode"). Main checkout / non-worktree: pass
+# through unconditionally (no false positives).
+# NOTE: this script pins CWD to SCRIPT_DIR above, so the check inspects
+# the script's own tree, not the caller's cwd. If git is absent or errors
+# we warn loudly and proceed — refusing to boot the MAIN checkout on a
+# git hiccup would be a false positive (fail-open for detection only; the
+# fence itself remains the load-bearing guard). Resolution captures each
+# path BEFORE cd-ing into it: bash `cd ""` is a successful no-op, so a
+# failed rev-parse must be caught on emptiness, not on cd failure.
+GIT_DIR_RES="$(git rev-parse --git-dir 2>/dev/null)" || GIT_DIR_RES=""
+GIT_COMMON_RES="$(git rev-parse --git-common-dir 2>/dev/null)" || GIT_COMMON_RES=""
+if [ -n "$GIT_DIR_RES" ] && [ -n "$GIT_COMMON_RES" ] \
+   && GIT_DIR_ABS="$(cd "$GIT_DIR_RES" 2>/dev/null && pwd)" \
+   && GIT_COMMON_ABS="$(cd "$GIT_COMMON_RES" 2>/dev/null && pwd)" \
+   && [ -n "$GIT_DIR_ABS" ] && [ -n "$GIT_COMMON_ABS" ]; then
+    if [ "$GIT_DIR_ABS" != "$GIT_COMMON_ABS" ]; then
+        # Linked worktree: --git-dir points at <main>/.git/worktrees/<name>
+        # while --git-common-dir points at the shared <main>/.git.
+        if ! grep -Eq '^[[:space:]]*ENSEMBLE_SELF_ENV[[:space:]]*=[[:space:]]*[^[:space:]#]+' .env 2>/dev/null; then
+            echo -e "${RED}Error: linked git worktree detected without a fenced .env${NC}"
+            echo -e "${RED}Refusing to boot: ambient environment would be inherited and may target LIVE.${NC}"
+            echo -e "${YELLOW}Fix: create .env in this worktree root with an explicit identity pin, e.g.:${NC}"
+            echo -e "${YELLOW}  ENSEMBLE_SELF_ENV=dev   (dev DB; ask giter to write the full fence)${NC}"
+            exit 1
+        fi
+    fi
+else
+    echo -e "${YELLOW}Warning: could not determine worktree status (git unavailable or not a repo) — proceeding WITHOUT the worktree env-fence check.${NC}"
+fi
+
 # Check required environment variables
 if [ -z "$OPENAI_API_KEY" ]; then
     echo -e "${RED}Error: OPENAI_API_KEY is not set${NC}"
