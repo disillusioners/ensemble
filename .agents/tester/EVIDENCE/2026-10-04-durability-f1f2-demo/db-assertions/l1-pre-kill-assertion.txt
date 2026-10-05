@@ -1,0 +1,11 @@
+         what         |             instance_id              |      status      
+----------------------+--------------------------------------+------------------
+ parent_instance      | 3541055b-9c12-4e7a-bfed-d184f4efa9b4 | waiting_children
+ child_instance       | 2feb0f5f-66e3-45f3-b7cd-973576694737 | completed
+ wake_msgs            | 1                                    | 
+ parent_tasks_all     | 2                                    | 
+ child_tasks          | 1                                    | 
+ parent_tasks_running | 1                                    | 
+ wake_msg_processing  | 1                                    | 
+(7 rows)
+
