@@ -20,7 +20,7 @@
 ### Passing Task Context (optional)
 
 - I may pass `context={...}` on `send_message(...)` — supplementary info beyond the task message. **USE** for file paths, my own findings, or a plan/convention reference the child needs; **SKIP** when the message already carries everything.
-- **Keys:** `files` (list), `notes` (str), `plan_ref` (str) — any key passes through. Worktree hand-offs additionally carry `wt_path`/`wt_slug`/`wt_branch` and REQUIRE non-empty context (≥ `wt_path`). See giter's Worktree Mode.
+- **Keys:** `files` (list), `notes` (str), `plan_ref` (str) — any key passes through. Worktree hand-offs (the default for committing tasks) additionally carry `wt_path`/`wt_slug`/`wt_branch` and REQUIRE non-empty context (≥ `wt_path`). See giter's Worktree Mode.
 
 ```python
 send_message(
