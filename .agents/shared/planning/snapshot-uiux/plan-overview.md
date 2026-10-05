@@ -31,6 +31,16 @@
 >   placement ruling, drawer-ownership + page-owned-list rulings (2 new spec cases),
 >   §3.5 mirrored contingency (their 2 commits), 13–14.5h pair figures, c0 plan-docs
 >   commit; overview synced (44/38/41 counts, 21.75h serial, P2.5, informational gate 3).
+> - **Amended (iter 005, FINAL e2e-gate rework):** worker `45088db8` — §4.3.1 rebuilt on the
+>   maintenance precedent (boot-script mirror + `proxy.conf.snapshots.json` → :18079
+>   [superseded :18279 in iter 006], dead env
+>   vars removed, dev.sh untouched); fe-plan §5.6 test-hook contract (13 selectors, dev-FE unblocked);
+>   step-4 assertion fix + clipboard permissions + end-matter dedup; `_proxy_to_snapshots_metrics`
+>   inlined in be-plan §7; explicit 38+3=41 sum. Overview synced (mechanics, counts).
+> - **Amended (iter 006, micro-round to CLEARED):** worker `99130479` — canary → `GET /readyz`
+>   (route + shape cited); five e2e files manifested (fe-plan 13-row manifest + Tester-authored,
+>   commit **c8**); exec-bit note; daemon port re-virginized **18079→18279** (collision:
+>   `lcau_boot_smoke_test.sh:43`). Overview synced (c8 gate, port, counts).
 
 ---
 
@@ -67,9 +77,9 @@ schema work, writes stay tool-only.
 
 | File | Author | Lines | Contents |
 |------|--------|-------|----------|
-| `be-plan.md` | plan-worker-snapshot-be (`plan-creation`) | 1157 | 10 decisions (D1–D10), API contract tables, `list_with_filters` repo spec + compat wrapper, router skeleton, 44 unique BE test cases, task breakdown ~12h |
-| `fe-plan.md` | plan-worker-snapshot-fe (`plan-creation`) | 883 | 5 new + 5 edited files, dangling-reference checklist, component/service structure (page-owned list fetch, presentational table, stateful drawer), UX states, 38 FE spec cases + 3 regression pins, task breakdown ~8.25h |
-| `sequencing.md` | plan-worker-snapshot-seq (`roadmap-strategy`) | 833 | Binding contract reconciliation (D-1…D-7, OK-1…OK-4, A-1/A-2), phase plan + wall-clock math + P2.5 toolchain bootstrap, §3.5 mirrored rebase contingency, consolidated risks, automated Playwright e2e plan (§4.3 + §4.3.1 dedicated config), §7 run brief (pair mode), c0+c1–c7 commit slicing + CHANGELOG |
+| `be-plan.md` | plan-worker-snapshot-be (`plan-creation`) | 1179 | 10 decisions (D1–D10), API contract tables, `list_with_filters` repo spec + compat wrapper, router skeleton, 44 unique BE test cases, task breakdown ~12h |
+| `fe-plan.md` | plan-worker-snapshot-fe (`plan-creation`) | 940 | 5 new + 5 edited files, dangling-reference checklist, component/service structure (page-owned list fetch, presentational table, stateful drawer), UX states, §5.6 test-hook contract (13 `data-test` selectors), 13-row new-file manifest (10 app + 5 e2e), 38 FE spec cases + 3 regression pins = 41, task breakdown ~8.25h |
+| `sequencing.md` | plan-worker-snapshot-seq (`roadmap-strategy`) | 1246 | Binding contract reconciliation (D-1…D-7, OK-1…OK-4, A-1/A-2), phase plan + wall-clock math + P2.5 toolchain bootstrap, §3.5 mirrored rebase contingency, consolidated risks, automated Playwright e2e plan (§4.3 + §4.3.1 dedicated config mirroring the maintenance e2e precedent), §7 run brief (pair mode), c0+c1–c8 (9-commit) slicing + CHANGELOG |
 
 ## 4. Locked decisions (cross-cutting)
 
@@ -98,7 +108,7 @@ schema work, writes stay tool-only.
 | P3 | FE scaffold + service + route + menu (parallel with P1+P2) | 2.5 |
 | P4 | FE table + drawer + filters + toggle + relocation (**atomic**: the Settings deletion rides the SAME commit as the functional page — P4 owns it) | 4.5 |
 | P5 | FE specs + tsc/jest green (38 cases + 3 regression pins = 41) | 1.5 |
-| P6 | Automated Playwright e2e — `frontend/e2e/snapshots.spec.ts` via dedicated `playwright.snapshots.config.ts` (strict ports, `reuseExistingServer: false`); steps 1–10 + 11a–11c; 11c via route-interception | 1.0 |
+| P6 | Automated Playwright e2e — `frontend/e2e/snapshots.spec.ts` via `playwright.snapshots.config.ts` mirroring the maintenance precedent (`frontend/scripts/boot-e2e-snapshots-daemon.sh`: disposable PG :15532 + daemon :18279; ng serve :14199 + `proxy.conf.snapshots.json`; `reuseExistingServer: false`; canary on `GET /readyz`); steps 1–10 + 11a–11c; 11c via route-interception | 1.0 |
 
 **Wall-clock verdict (seq §2.3):** single engineer serial = **21.75h (phase-sum
 0.5+0.25+7.0+4.5+2.5+4.5+1.5+1.0 incl. P2.5) — does NOT
@@ -154,9 +164,12 @@ metrics UI exists nowhere); everything else is merge-blocking.
 - **Automated Playwright e2e (P6, replaces manual browser steps):** 13 steps
   (1–10 + 11a Escape-close, 11b backdrop-close, 11c drawer-error via
   route-interception) as automated assertions + design-spec AC citations
-  (seq §4.3) — run via `frontend/playwright.snapshots.config.ts` (dedicated
-  worktree backend+frontend pair, strict ports, `reuseExistingServer: false` —
-  never the 8079 main-checkout daemon) — gear-menu load, per-filter wire-param verification, filtered-empty
+  (seq §4.3; selectors per fe-plan §5.6 — 13 `data-test` hooks) — run via
+  `frontend/playwright.snapshots.config.ts` MIRRORING the maintenance e2e
+  precedent: `frontend/scripts/boot-e2e-snapshots-daemon.sh` boots disposable
+  PG :15532 + daemon :18279, ng serve :14199 + `proxy.conf.snapshots.json`,
+  `reuseExistingServer: false`, canary `GET /readyz` — never the 8079 main-checkout
+  daemon; the FIVE e2e files are authored by the Tester as P6's first step (c8) — gear-menu load, per-filter wire-param verification, filtered-empty
   CTA, drawer + lazy digest + copy, metrics strip, toggle persistence,
   settings-clean, legacy deprecation headers. **Merge gate = 4-GREEN: tsc + jest +
   pytest (`uv run pytest`, worktree-rooted after `uv sync`) + Playwright e2e**; post-merge manual eyeball optional,
@@ -170,8 +183,9 @@ metrics UI exists nowhere); everything else is merge-blocking.
 3. `unify-spawn-tools` rebase handshake — **INFORMATIONAL: do NOT block** (their
    branch is 2 commits + a dirty tree; the seq §3.5 mirrored contingency covers
    either merge order).
-4. c0+c1–c7 phase-sliced PR plan accepted (no squash-merge; the relocation
-   rides ONE atomic commit per seq §6.1 as amended). **c0 = plan docs commit,
+4. c0+c1–c8 (9-commit) phase-sliced PR plan accepted (no squash-merge; the
+   relocation rides ONE atomic commit; c8 = Tester-authored e2e quintet — per
+   seq §6.1 as amended). **c0 = plan docs commit,
    lands FIRST (giter task; no dev races it).**
 
 **Top risks:** RX-1 contract deltas unread (mitigated: seq §1 read-first rule),

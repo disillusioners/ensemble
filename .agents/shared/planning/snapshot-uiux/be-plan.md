@@ -282,18 +282,14 @@ async def get_snapshot_usage_metrics_deprecated(request: Request, response: Resp
 > router) and IMPORTED by `daemon/routers/settings.py`. The
 > `daemon/routers/settings.py` handler above calls
 > `await _proxy_to_snapshots_metrics(request)` — the symbol resolves
-> via the import added in §5.2. The helper itself is a 3-line
-> private function in `snapshots.py`:
+> via the import added in §5.2.
 >
-> ```python
-> # in daemon/routers/snapshots.py
-> async def _proxy_to_snapshots_metrics(request: Request) -> SnapshotUsageMetricsResponse:
->     """Deprecated-path proxy — delegates to the canonical
->     `get_snapshot_metrics` handler in this module. Imported by
->     `daemon/routers/settings.py` for the legacy endpoint.
->     """
->     return await get_snapshot_metrics(request)
-> ```
+> **The canonical definition is in §7 router skeleton** (the
+> `_proxy_to_snapshots_metrics` async helper between `get_snapshot`
+> and the closing fence at be-plan §7) — that is the code a
+> developer copies; this §4.3 narrative is **placement RULE + import
+> contract ONLY** (no duplicate definition here). The helper is a
+> 3-line private function in `snapshots.py`:
 >
 > Rationale (LEADER RULING): the proxy is a one-line delegation to
 > the canonical `get_snapshot_metrics` handler; keeping it in the
@@ -730,6 +726,32 @@ async def get_snapshot(
     if "digest" not in (include or "").split(","):
         d["digest"] = {}  # D7: present-but-empty, not absent
     return SnapshotResponse(**d)
+
+
+# ── Helper for the deprecated metrics proxy (LEADER RULING, pass 4
+#    amendment blocker #6 — placement rule see §4.3; this is the
+#    CANONICAL DEFINITION — `settings.py` IMPORTS this symbol) ───
+async def _proxy_to_snapshots_metrics(request: Request) -> SnapshotUsageMetricsResponse:
+    """Deprecated-path proxy — delegates to the canonical
+    `get_snapshot_metrics` handler in this module. Imported by
+    `daemon/routers/settings.py` for the legacy endpoint.
+
+    Placement rule (LEADER RULING, pass 4 amendment blocker #6):
+    this helper lives in `daemon/routers/snapshots.py`, not in
+    `settings.py`, to avoid the circular import that would result
+    if `settings.py → snapshots.py` were reversed. The deprecated
+    proxy handler at `daemon/routers/settings.py:702-738` calls
+    `await _proxy_to_snapshots_metrics(request)` after setting the
+    `Deprecation` / `Sunset` / `Link` response headers — the symbol
+    resolves via the import added at the top of `settings.py` next
+    to the existing snapshots-router import:
+
+        from daemon.routers.snapshots import _proxy_to_snapshots_metrics
+
+    The settings.py import surface (added in §5.2 row) is the
+    single source of truth for the deprecated-proxy wiring.
+    """
+    return await get_snapshot_metrics(request)
 ```
 
 > **Note on `manager._snapshot_repo` access:** the manager exposes

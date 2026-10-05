@@ -151,7 +151,7 @@ Reuse `ProjectService.listProjects()` for the project filter dropdown. Verified 
 
 ## 4 · File-by-file change list
 
-### 4.1 NEW files (8 total)
+### 4.1 NEW files (13 total — pass 6 amendment #2: +5 Tester-owned e2e rows)
 
 | Path | Purpose |
 |---|---|
@@ -163,8 +163,13 @@ Reuse `ProjectService.listProjects()` for the project filter dropdown. Verified 
 | `frontend/src/app/pages/snapshots/snapshots-table.component.ts` | **Presentational** table sub-component (pass 4 amendment #8 — was self-fetching; now receives `rows / total / loading / error / hasActiveFilters / pageIndex / pageSize` as inputs; emits `rowClick` + `pageChange` + `retry` outputs ONLY; **no service injection, no fetch effect**). |
 | `frontend/src/app/pages/snapshots/snapshots-table.component.html` | Table template (`<mat-table>` + paginator + skeletons + states). |
 | `frontend/src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.{ts,html,scss}` | **Stateful** drawer host (pass 4 amendment #7 — was pure presentational; now owns its own detail fetch + digest + 200KB guard + retry lifecycle). 3 files. Standalone. Receives `(snapshotId, isDrawerMode)` inputs; emits `(close)`, `(navigateToPredecessor)`. Folder placement matches `frontend/src/app/components/schedule-detail-drawer/` but the input contract is different (this drawer fetches; the schedule drawer is host-fed). |
+| `frontend/playwright.snapshots.config.ts` | Dedicated Playwright config for the snapshots e2e (strict ports 18279/14199, `reuseExistingServer: false`, globalTeardown backstop; loaded via `--config` — base config untouched). Full mechanic: sequencing.md §4.3.1. **Owner: Tester, P6 first step** (commit `c8`). |
+| `frontend/scripts/boot-e2e-snapshots-daemon.sh` | Disposable-PG + daemon bootstrap mirroring `boot-e2e-maintenance-daemon.sh` (PG :15532, daemon :18279, canary `GET /readyz` → `status == "ready"`). **Commit mode 100755 (`chmod +x` after authoring)** — the mirror `boot-e2e-maintenance-daemon.sh` is `-rwxr-xr-x`/100755 and Playwright's webServer execs it directly. **Owner: Tester, P6 first step** (commit `c8`). |
+| `frontend/proxy.conf.snapshots.json` | Angular proxy config: `/api` → `http://localhost:18279`, `/ws` → `ws://localhost:18279` (mirrors `proxy.conf.e2e.json` shape; read directly by `ng serve --proxy-config`). **Owner: Tester, P6 first step** (commit `c8`). |
+| `frontend/e2e/snapshots.spec.ts` | The automated e2e spec — 10 numbered steps + 11a-11c (sequencing.md §4.3); `data-test` selectors per fe-plan §5.6. **Owner: Tester, P6 first step** (commit `c8`). |
+| `frontend/e2e/global-teardown-snapshots.ts` | Race-loser teardown backstop wired at `globalTeardown` in the snapshots config (mirrors `global-teardown-maintenance.ts`, maintenance config `:52`). **Owner: Tester, P6 first step** (commit `c8`). |
 
-> **Component count: 2 components in `pages/snapshots/` (page + table), 1 component in `components/snapshot-detail-drawer/`, 1 service, 1 model.** Total: **5 new files** + 2 colocated templates/styles. This is fewer than the design-spec §7.1 suggests because the metrics strip and filter bar are sections inside the page template (per design-spec §2.4 — only the drawer warrants its own folder).
+> **Component count: 2 components in `pages/snapshots/` (page + table), 1 component in `components/snapshot-detail-drawer/`, 1 service, 1 model — plus the Tester-owned e2e quintet (pass 6 amendment #2).** Total: **13 manifest rows = 15 files** (10 app files — 5 TS sources + 5 colocated templates/styles, the drawer row bundling its 3 — plus the 5 e2e files; manifest row count is the unit the header counts, pass 6 amendment #2). The app-file count is fewer than the design-spec §7.1 suggests because the metrics strip and filter bar are sections inside the page template (per design-spec §2.4 — only the drawer warrants its own folder).
 
 ### 4.2 EDITED files (5 total)
 
@@ -567,6 +572,42 @@ Use **one container + table child + drawer child** (NOT the maintenance-style `s
 
 The drawer is extracted into its own component (not into the page template) because it has internal state (copy-id handler, predecessor navigation, scroll position) — same justification design-spec.md §6.6 gave. The table is extracted into its own component because it has its own data-fetching + paginator lifecycle — mirrors the `SkillUsageTableComponent` precedent.
 
+### 5.6 Test-hook contract — canonical `data-test` selectors (13)
+
+> **Purpose (pass 5 FINAL, item #3).** This section is the **contract
+> surface** between dev-FE (who binds the selectors in component
+> templates) and the e2e spec (`frontend/e2e/snapshots.spec.ts`,
+> sequencing §4.3 — each step's Playwright assertion references these
+> 13 selectors by name). The list is **closed**: exactly 13 selectors,
+> named here, bound by dev-FE in the file column, asserted by the
+> tester in the sequencing §4.3 step column. Any selector not on this
+> list is OUT OF CONTRACT — dev-FE may add `data-test` attributes for
+> internal Jest specs but the e2e spec only consumes these 13. Any
+> selector the e2e spec needs that is not here is a plan-amendment-
+> grade change (add to this table FIRST, then bind).
+
+| # | Selector | Host element / template file | Binding site |
+|---|----------|-------------------------------|--------------|
+| 1 | `gear-menu` | `frontend/src/app/app.html` (app shell) | The gear-menu icon button (parent of `menu-snapshots`); bound once at app-shell level. |
+| 2 | `menu-snapshots` | `frontend/src/app/app.html` (app shell) | The "Snapshots" item inside the gear menu — `app.ts:747`/`:792` per amendment finding #7 (after Settings, before conditional Database/Maintenance appends). |
+| 3 | `paginator` | `frontend/src/app/pages/snapshots/snapshots-table.component.html` | The `<mat-paginator>` element wrapper inside `SnapshotsTableComponent` (asserted visible on every step-2 page-load assertion). |
+| 4 | `paginator-page-1` | `frontend/src/app/pages/snapshots/snapshots-table.component.html` | The page-1 button on the `<mat-paginator>`; asserted visible on every step-3 filter-change (asserts `pageIndex` resets to 0). |
+| 5 | `filter-tag-input` | `frontend/src/app/pages/snapshots/snapshots.component.html` | The tag text-input control in the filter bar (the only filter asserted via direct `fill()` in step 4). |
+| 6 | `snapshot-drawer` | `frontend/src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html` | The `<mat-drawer>` root container; asserted visible on row-click (step 5 + 11a) and not-visible after Escape (11a) / backdrop-click (11b). |
+| 7 | `drawer-section` | `frontend/src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html` | Each of the 7 section cards (Task summary, Git anchor, Runtime / Model, Supersedes chain, Tags, Timestamps, Context); asserted via `[data-test="drawer-section"] h3` count == 7. |
+| 8 | `digest-pre` | `frontend/src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html` | The `<pre>` element rendering the pretty-printed digest JSON (rendered collapsed by default, expanded only after "Show digest" click per §6.4). |
+| 9 | `metrics-capture-card` | `frontend/src/app/pages/snapshots/snapshots.component.html` | The "Capture counts" card in the metrics strip (asserted visible on step 6; asserted ≥1 row when `capture_counts` non-empty). |
+| 10 | `drawer-backdrop` | `frontend/src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html` | The backdrop element rendered behind the open drawer; click on it closes the drawer (step 11b). |
+| 11 | `drawer-close` | `frontend/src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html` | The close (×) button on the drawer header; click emits `close` output (asserted works "at any point in the sequence" per step 11c). |
+| 12 | `drawer-error` | `frontend/src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html` | The "Failed to load snapshot details" error block; rendered on detail fetch abort (step 11c via `page.route('**/api/snapshots/*', route => route.abort())`). |
+| 13 | `drawer-retry` | `frontend/src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html` | The Retry button inside the drawer-error block; click re-fires the detail fetch (step 11c final assertion — drawer recovers after route restored). |
+
+**Cross-reference:** the 10 numbered steps + 11a-11c of the e2e spec
+in sequencing §4.3 each reference these selectors by name. The spec
+does NOT hardcode any other selector string; the dev-FE binding is
+therefore unblocked once the test-hook contract lands in this
+section.
+
 ---
 
 ## 6 · Decisions and conventions
@@ -678,6 +719,22 @@ The drawer is extracted into its own component (not into the page template) beca
 | `frontend/src/app/services/snapshot.service.spec.ts` | (a) `buildParams` encodes single + repeated `tags` and `status` correctly, and maps `filters.agent_id` to the `agent` wire param (D-2 — asserts the param NAME is `agent`, not `agent_id`); (b) `tag_mode=all\|any` toggling produces the right param (🟢 amendment: was `tag_mode=all\|99` — typo); (c) `computeAgeCutoff('24h')` returns ISO 24h ago, `computeAgeCutoff('all')` returns null; (d) `list()` calls `LIST_URL` with the encoded params; (e) `getById(id, {includeDigest: true})` appends `?include=digest`; `includeDigest: false` omits; (f) `getMetrics()` calls `METRICS_URL`. |
 | `frontend/src/app/models/snapshot.model.spec.ts` | Optional — type-only file; covered by the consumer specs above. Skip if no runtime behavior to test. |
 
+**Per-file case counts (PINNED for the record, pass 5 FINAL item #7b):**
+- `snapshots.component.spec.ts` — 13 cases (a-m).
+- `snapshots-table.component.spec.ts` — 9 cases (a-i).
+- `snapshot-detail-drawer.component.spec.ts` — 10 cases (a-j).
+- `snapshot.service.spec.ts` — 6 cases (a-f).
+- (Optional `snapshot.model.spec.ts` — 0 cases; type-only.)
+
+**Subtotal of new specs = 13 + 9 + 10 + 6 = 38 cases** (per the
+four spec-file rows in the table above; the optional model-spec
+contributes 0). Plus **3 regression pins** (settings-clean = 1,
+route = 1, menu = 1 — see §8.2 + §8.3). Total = **38 + 3
+regression pins = 41 cases** that `cd frontend && npm test`
+exercises. Sequencing §4.2 mirrors this same rollup; this row
+exists here as the binding arithmetic against the four spec-file
+rows above.
+
 ### 8.2 Settings-clean regression spec (in `settings.component.spec.ts`)
 
 After removing the snapshot blocks, add ONE test to ensure the regression stays clean:
@@ -750,7 +807,7 @@ Sized so BE + FE together fit **one overnight implementation sitting** (per brie
 
 | # | Task | Files | Acceptance | Est |
 |---|---|---|---|---|
-| 1 | Create empty page + table + drawer + service + model files | all NEW files in §4.1 | All files exist, `tsc --noEmit` passes (compiles only — no logic yet) | 10m |
+| 1 | Create empty page + table + drawer + service + model files | all NEW files in §4.1 (app files only — the 5 e2e rows are Tester-owned, authored as its first P6 step / commit c8, pass 6 amendment #2) | All files exist, `tsc --noEmit` passes (compiles only — no logic yet) | 10m |
 | 2 | Add `/snapshots` route to `app.routes.ts` (line 82 above wildcard) | `app.routes.ts` | Route registered, title='Snapshots' | 5m |
 | 3 | Add `{ label: 'Snapshots', icon: 'bookmarks', route: '/snapshots' }` to `settingsMenuItems` (directly after Settings, BEFORE the conditional Database/Maintenance appends at `app.ts:747`/`:792` — amendment #7) | `app.ts:555-559` | Gear menu shows new item, navigating reaches the (empty) page | 10m |
 | 4 | Verify with `cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` | — | tsc green | 5m |

@@ -83,7 +83,7 @@ serial work; the cut line is identified at §2.3.
 | **P3** | FE scaffold + service (ADDITIVE-ONLY — no deletions) | 2.5 | **parallel with P1+P2** (does not need BE running); depends on P0 only | New files: `frontend/src/app/models/snapshot.model.ts`; `frontend/src/app/services/snapshot.service.ts` (URL constants only + `buildParams` + `computeAgeCutoff` helpers — HTTP calls can be stubbed during P3). Per fe-plan T1-T9 (scaffold+route+menu+service) = 0.45+1.0+0.75+0.25 = **2.45h** rounded. **Deletion ownership: NONE in P3** — the Settings deletion is **P4-owned** and rides the SAME commit as the functional page (atomicity mandate, §6.1 `c6`; fe-plan §10 preamble). | `cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` green; navigating to `/snapshots` renders an empty page; gear menu shows the Snapshots item directly after Settings, BEFORE the conditional Database/Maintenance appends (`app.ts:747`, `:792` — amendment finding #7). |
 | **P4** | FE table + drawer + metrics + filters + relocation (**P4 OWNS the Settings deletion**) | 4.5 | sequential after P3; **requires P1 endpoints up** for end-to-end smoke | Wire `SnapshotService` to real HTTP; implement `SnapshotsComponent` filter bar + header toggle; `SnapshotsTableComponent` (8 columns, paginator, skeleton, states); `SnapshotDetailDrawerComponent` (7 sections — D-5: warm-spawn-count section OMITTED; copy-id, Show-digest lazy-load); relocation (**P4-owned, SAME COMMIT as the functional page** — atomicity mandate): delete `settings.component.html:242-321 + :323-358`; `settings.component.ts:12, 107-142, 278-279, 715-810`; `settings.component.spec.ts:1345-1533` (snapshot banner + mock classes + the ONE describe block, ~190 lines) **PLUS the 3 snapshot mock lines at `:1566-1570`** inside the Timezone suite's `TimezoneTestBedService` (amendment finding #1 — the original `:1346-1985` / "~640 lines" range wrongly swallowed ~450 lines of the unrelated `:1535-1996` Timezone suite; none of that may be deleted). Per fe-plan T14-T21 = 1.5+2.0+0.75 = **4.25h** rounded to **4.5h**. | Browser: page loads, table renders, filters work, drawer opens, copy-id works, `/settings` no longer shows the two snapshot sections, and the full Timezone spec suite still passes. |
 | **P5** | FE specs + final green | 1.5 | sequential after P4 | `snapshots.component.spec.ts` (**13 cases** per fe-plan §8.1 row 1 — incl. pass 4 amendment adds (l) + (m) for agent-filter population; amendment pass 4 #8 restructure); `snapshots-table.component.spec.ts` (**9 cases** per §8.1 row 2 — now PRESENTATIONAL, no fetch); `snapshot-detail-drawer.component.spec.ts` (**10 cases** per §8.1 row 3 — incl. lazy digest, 200KB guard, retry, plus (a) updated to reflect drawer's own fetch lifecycle); `snapshot.service.spec.ts` (**6 cases** per §8.1 row 4); `settings.component.spec.ts` settings-clean regression (1 case per §8.2); route + menu regression in `app.component.spec.ts` (2 cases per §8.3). **Subtotal = 38 new + 3 regression = 41 cases** (§4.2). `cd frontend && ./node_modules/.bin/tsc --noEmit` + `cd frontend && npm test` final pass. Per fe-plan T22-T26 = 0.5+0.4+0.3+0.1+0.1+0.15 = **1.55h** rounded. | `tsc` and `jest` both green; no `--bail` failures. |
-| **P6** | E2E smoke (tester handoff) | 1.0 | sequential after P5 | Execute the ordered checklist in §4.3 of this file (steps 1-10 + 11a-11c per amendment finding #8); sign off the design-spec ACs cited. | Tester E2E sign-off. |
+| **P6** | E2E smoke (tester handoff) | 1.0 | sequential after P5 | Tester AUTHORS these five files per §4.3/§4.3.1 as its first P6 step (`playwright.snapshots.config.ts`, `boot-e2e-snapshots-daemon.sh`, `proxy.conf.snapshots.json`, `e2e/snapshots.spec.ts`, `e2e/global-teardown-snapshots.ts` — commit `c8`, pass 6 amendment #2); then execute the ordered checklist in §4.3 of this file (steps 1-10 + 11a-11c per amendment finding #8); sign off the design-spec ACs cited. | Tester E2E sign-off. |
 
 **Subtotals:**
 - Serial (P0 → P2.5 → P1 → P2 → P3 → P4 → P5 → P6): **21.75h** (0.5 + 0.25 + 7.0 + 4.5 + 2.5 + 4.5 + 1.5 + 1.0)
@@ -386,9 +386,28 @@ be-plan §8.6 ("§8.6 IS case 23 of §8.1, NOT a new case").
 > (`page.route('**/api/snapshots/*', route => route.abort())`),
 > not by stopping the daemon.
 >
+> **File authorship (pass 6 amendment #2).** Tester AUTHORS these
+> five files per §4.3/§4.3.1 as its first P6 step:
+> `frontend/playwright.snapshots.config.ts`,
+> `frontend/scripts/boot-e2e-snapshots-daemon.sh` (commit mode
+> 100755 — `chmod +x`), `frontend/proxy.conf.snapshots.json`,
+> `frontend/e2e/snapshots.spec.ts`,
+> `frontend/e2e/global-teardown-snapshots.ts` — manifested in fe-plan
+> §4.1, committed as `c8` (§6.1).
+>
 > **Post-merge manual eyeball is NON-GATING.** It is optional and
 > runs only if a developer wants human confirmation; it does NOT
 > block merge.
+>
+> **Test-hook contract (pass 5 FINAL, item #3).** Every `data-test`
+> selector consumed by the 10 numbered steps + 11a-11c below is
+> enumerated, named, and bound to a host template in **fe-plan
+> §5.6 — exactly 13 selectors** (`gear-menu`, `menu-snapshots`,
+> `paginator`, `paginator-page-1`, `filter-tag-input`, `snapshot-drawer`,
+> `drawer-section`, `digest-pre`, `metrics-capture-card`,
+> `drawer-backdrop`, `drawer-close`, `drawer-error`, `drawer-retry`).
+> This table references fe-plan §5.6 by name; the e2e spec MUST NOT
+> introduce selectors outside that closed set.
 
 **File:** `frontend/e2e/snapshots.spec.ts` (new — Playwright spec; lives
 under the FE test surface per fe-plan §8.5 BUILD/TEST DISCIPLINE
@@ -419,7 +438,7 @@ verified present in `frontend/package.json`).
 | 1 | Open `/snapshots` via the gear menu (item "Snapshots" with bookmarks icon, AFTER Settings, BEFORE conditional Database/Maintenance appends at `app.ts:747`/`:792`). | `await page.goto('/snapshots')` after navigating from gear menu (click `[data-test="gear-menu"]` → `[data-test="menu-snapshots"]`); assert `page.url() === '/snapshots'`; `await expect(page).toHaveTitle(/Snapshots/)`; assert no `page.on('pageerror')` fires. | URL is `/snapshots`; `document.title` contains "Snapshots"; no console errors. | AC-1.1, AC-1.2, AC-1.3 |
 | 2 | Confirm the page renders the header (H1 "Snapshots"), header toggle (Enabled/Disabled radio + Apply), metrics strip, filter bar, table with 8 column headers (Title, Project, Agent, Status, Tags, Created, Warm, Actions), and paginator. | `await expect(page.locator('h1')).toHaveText('Snapshots')`; `expect(page.getByRole('radio', { name: /Enabled/i })).toBeVisible()`; assert 8 `<th>` cells with the expected text via `page.locator('table thead th')`; paginator `expect(page.locator('[data-test="paginator"]')).toBeVisible()`. Empty state path: `expect(page.getByText(/No snapshots yet/i)).toBeVisible()` when API returns `total: 0`. | All sections present; paginator shows "1 – N of M" where M > 0 if any snapshots exist; otherwise the "No snapshots yet" empty state. | AC-2.1, AC-4.1, AC-5.1, AC-7.1 / AC-7.3 |
 | 3 | Exercise each filter one at a time, asserting the request URL contains the expected param AND the table re-fetches: (a) Project → a known project id; (b) Agent → "coder"; (c) Tags → `kind:implementation`; (d) Status multi → 2 chips; (e) Age → "24h"; (f) Sort → "Oldest first". After each: assert 200 response, list re-renders, `pageIndex` reset to 0. | Use `page.waitForRequest(req => req.url().includes('/api/snapshots?'))` after each control interaction; capture `req.url()` and assert it contains the right param name (`project_id`, `agent`, `tags=...&tags=...`, `status=...&status=...`, `created_after=...`, `sort=created_at_asc`); assert `req.response()?.status() === 200`; assert `expect(page.locator('[data-test="paginator-page-1"]')).toBeVisible()` (pageIndex back to 0). | Each filter change produces a single `GET /api/snapshots?...` with the right param; 200 response; pageIndex resets to 0. | AC-4.1, AC-4.4, AC-4.5 |
-| 4 | Apply a filter combination that returns 0 rows (e.g. nonexistent tag); confirm the "Clear filters" CTA appears inline; click it; confirm all filters reset and the list re-fetches with defaults. | Inject a filter via `page.locator('[data-test="filter-tag-input"]').fill('nonexistent:tag')`; `expect(page.getByRole('button', { name: /Clear filters/i })).toBeVisible()`; click; assert request URL drops all filter params (`req.url() === /\/api\/snapshots\?/`) and the table re-renders with non-empty defaults if any snapshots exist. | Table shows filtered-empty state with a "Clear filters" button; click resets every control to its default; request URL drops all filter params. | AC-4.2, AC-7.4 |
+| 4 | Apply a filter combination that returns 0 rows (e.g. nonexistent tag); confirm the "Clear filters" CTA appears inline; click it; confirm all filters reset and the list re-fetches with defaults. | Inject a filter via `page.locator('[data-test="filter-tag-input"]').fill('nonexistent:tag')`; `expect(page.getByRole('button', { name: /Clear filters/i })).toBeVisible()`; click; assert request URL drops all filter params (`expect(req.url()).toMatch(/\/api\/snapshots\?$/)`) and the table re-renders with non-empty defaults if any snapshots exist. | Table shows filtered-empty state with a "Clear filters" button; click resets every control to its default; request URL drops all filter params. | AC-4.2, AC-7.4 |
 | 5 | Click a table row; confirm the detail drawer slides in from the right; verify 7 section headers are present in order (Task summary, Git anchor, Runtime / Model, Supersedes chain, Tags, Timestamps, Context) — **D-5: the "Warm-spawn count" section is OMITTED in v1** (the TABLE's "Warm" column stays, rendering `—`; the warm-spawn-count drawer section is removed per amendment D-5); click "Show digest"; confirm a second `GET /api/snapshots/{id}?include=digest` request fires AND the digest renders as a pretty-printed `<pre>` block. Click the Copy ID button; confirm clipboard contains the full UUID. | `await page.locator('table tbody tr').first().click()`; `expect(page.locator('[data-test="snapshot-drawer"]')).toBeVisible()`; assert the 7 section headers via `page.locator('[data-test="drawer-section"] h3')`; click "Show digest" → `await page.waitForRequest(req => req.url().includes('/api/snapshots/') && req.url().includes('include=digest'))`; assert 200; `expect(page.locator('[data-test="digest-pre"]')).toBeVisible()`; click "Copy ID" → assert `await page.evaluate(() => navigator.clipboard.readText())` matches the row's `id`. | Drawer open; 7 sections visible; digest section lazy-loaded; clipboard API called with the row's `id`. | AC-6.1, AC-6.2, AC-6.3, AC-6.4, AC-6.5, AC-6.6, AC-6.7, AC-6.8, AC-6.9 |
 | 6 | Scroll to the metrics strip; confirm the "Capture counts" card renders ≥1 row when the metrics endpoint returns data, AND the "Warmed snapshots" card renders ≥1 row when `spawn_counts_per_snapshot` is non-empty. If the warmed card is empty, confirm it is hidden (not blank). | `expect(page.locator('[data-test="metrics-capture-card"]')).toBeVisible()`; assert ≥1 row via `page.locator('[data-test="metrics-capture-card"] tbody tr')` when `capture_counts` non-empty; same for `metrics-warmed-card`; assert warmed card NOT in DOM when `spawn_counts_per_snapshot` is empty. | Both cards visible when data exists; Warmed card absent when empty; capture card shows "No captures yet" when empty. | AC-3.1, AC-3.2, AC-3.3 |
 | 7 | Toggle the header radio from "Enabled" to "Disabled"; confirm "Unsaved changes" hint appears and Apply becomes enabled; click Apply; confirm a `PUT /api/settings/snapshot-create` with `{"enabled": false}` fires; on 200, confirm the hint hides. Reload the page; confirm the toggle reflects the new state. | `await page.getByRole('radio', { name: /Disabled/i }).check()`; `expect(page.getByText(/Unsaved changes/i)).toBeVisible()`; `await page.waitForRequest(req => req.method() === 'PUT' && req.url().endsWith('/api/settings/snapshot-create'))`; click Apply; assert request body is `{"enabled": false}` via `req.postDataJSON()`; assert response `200`; `expect(page.getByText(/Unsaved changes/i)).not.toBeVisible()`; `await page.reload()`; re-assert radio state. | PUT fires, 200 response, hint hides, reload persists. | AC-2.1, AC-2.2, AC-2.3, AC-2.4 |
@@ -440,7 +459,7 @@ on the runner image; the project precedent is
 `frontend/playwright.config.ts`). This is a one-time bootstrap, NOT
 part of the per-PR pipeline cost.
 
-### 4.3.1 Dedicated Playwright config — port hygiene (pass 4 amendment, blocker #3c)
+### 4.3.1 Dedicated Playwright config — port hygiene (pass 5 FINAL amendment)
 
 > **Why a dedicated config.** The base `frontend/playwright.config.ts`
 > mounts a `webServer` array (`:17-37`) that runs `cd .. && bash dev.sh`
@@ -450,20 +469,158 @@ part of the per-PR pipeline cost.
 > the live 8079 main-checkout daemon, not the worktree's. The branch
 > MUST launch a DEDICATED backend+frontend pair FROM THE WORKTREE on
 > distinct strict ports, with `reuseExistingServer: false`, the API
-> target set via env override, and zero collision with the live
-> 8079/4199.
+> target routed through a dedicated Angular proxy config, and zero
+> collision with the live 8079/4199.
+>
+> **Port re-virginized (pass 6 amendment #4).** The dedicated daemon
+> port is now **18279** everywhere in §4.3.1 — re-virginized from
+> 18079 (collision: `test/packs/lcau_boot_smoke_test.sh:43` binds
+> `DAEMON_PORT=18079`, verified 2026-10-05; the old pick could
+> collide with that pack's boot-smoke daemon). FE 14199 and PG 15532
+> are UNCHANGED.
+>
+> **RULING (amendment pass 5 FINAL, blocker #1).** Mirror the
+> **maintenance precedent** end-to-end: the dedicated config
+> `frontend/playwright.maintenance.config.ts` and its boot script
+> `frontend/scripts/boot-e2e-maintenance-daemon.sh` are the proven
+> in-repo precedent for "run a disposable second daemon against a
+> disposable PG on a strict port pair". Citations:
+> - `frontend/playwright.maintenance.config.ts:42` — `BOOT_SCRIPT =
+>   join(HERE, 'scripts', 'boot-e2e-maintenance-daemon.sh')` (path
+>   under `frontend/scripts/`, NOT repo root `scripts/`).
+> - `frontend/playwright.maintenance.config.ts:43` — `PROXY_E2E =
+>   join(HERE, 'proxy.conf.e2e.json')`.
+> - `frontend/playwright.maintenance.config.ts:52` —
+>   `globalTeardown: './e2e/global-teardown-maintenance.ts'` (the
+>   race-loser backstop when Playwright force-kills the webServer
+>   group before the boot script's trap fires).
+> - `frontend/playwright.maintenance.config.ts:60` — `baseURL:
+>   'http://localhost:4299'`.
+> - `frontend/playwright.maintenance.config.ts:69-75` — `command:
+>   ${BOOT_SCRIPT} start`, `port: 8099`, `reuseExistingServer: false`,
+>   `timeout: 120_000`.
+> - `frontend/playwright.maintenance.config.ts:86-90` — webServer[0]
+>   env: `OPENAI_API_KEY`, `LOG_LEVEL`, plus the maintenance-specific
+>   `MAINTENANCE_ENDPOINTS_ENABLED` (snapshots have NO equivalent
+>   flag — see omission justification below).
+> - `frontend/playwright.maintenance.config.ts:95-98` — `command: npx
+>   ng serve --port 4299 --proxy-config ${PROXY_E2E}`, `port: 4299`,
+>   `reuseExistingServer: false`, `timeout: 180_000`.
+> - `frontend/scripts/boot-e2e-maintenance-daemon.sh` — the
+>   initdb/pg_ctl/createdb mechanics, TERM/INT+EXIT trap pair, the
+>   `cleanup()` function (kill daemon → stop PG → remove cluster + data
+>   dir, with `ENSEMBLE_E2E_KEEP=1` to skip the rm), the `127.0.0.1`
+>   host (NOT /tmp — Unix-socket mis-parse trap), the OPENAI_API_KEY
+>   gate, and the 60-iter canary wait for state='ready'.
 
-**Recommended dedicated config — `frontend/playwright.snapshots.config.ts`**
-(new file; loaded via `--config` flag, leaves the base config
-untouched for sibling specs):
+**Five new files (pass 6 amendment #2 — config + boot script + proxy
++ spec + teardown; ALL Tester-authored as its first P6 step, commit
+`c8` per §6.1):**
+
+1. **`frontend/playwright.snapshots.config.ts`** — dedicated config
+   (loaded via `--config` flag, base `playwright.config.ts` untouched).
+2. **`frontend/scripts/boot-e2e-snapshots-daemon.sh`** — disposable-PG
+   + daemon bootstrap (mirrors `boot-e2e-maintenance-daemon.sh`
+   line-for-line; the daemon port (18279), PG port (15532, distinct
+   from maintenance's 15432), FE port (14199, distinct from
+   maintenance's 4299), DATA_DIR (default `/tmp/pg_e2e_snap_$$`),
+   DISPOSABLE_DB (default `ensemble_e2e_snap_$$`), LOG_DIR (default
+   `/tmp/e2e_snapshots_logs`), and DATA_DIR_E2E
+   (`$REPO_ROOT/data_e2e_snapshots`). All other mechanics — `initdb
+   -A trust -D "$DATA_DIR" --no-locale -E UTF8`, `pg_ctl -D "$DATA_DIR"
+   -l "$LOG_DIR/pg.log" -o "-p $PG_PORT -k /tmp" start`,
+   `POSTGRES_HOST=127.0.0.1` (NOT /tmp), the dual `trap 'cleanup'
+   TERM INT` + `trap 'cleanup' EXIT` wiring, the `cleanup()` factored
+   teardown, the `OPENAI_API_KEY` early-exit guard — copied verbatim
+   from the maintenance script; only the port numbers + DATA_DIR +
+   DISPOSABLE_DB + DATA_DIR_E2E + LOG_DIR + the canary endpoint
+   differ — the canary is `GET /readyz` asserting `status == "ready"`
+   (pass 6 amendment #1: `/availability` is not a daemon route; the
+   60-iter wait SHAPE is still mirrored)). **This script is what
+   actually sets the daemon port
+   (18279 via `export PORT="$DAEMON_PORT"` at boot-e2e-maintenance-
+   daemon.sh:139 — the same line in the snapshots script) — that is
+   WHY the old `ENSEMBLE_PORT` env knob on `dev.sh:128` (`export
+   PORT=8079` unconditional) was dead and the boot-script port-set is
+   the canonical path.** **Exec-bit (pass 6 amendment #3): the script
+   MUST be committed mode 100755 (`chmod +x` after authoring) — the
+   maintenance mirror `frontend/scripts/boot-e2e-maintenance-daemon.sh`
+   is `-rwxr-xr-x` (100755, verified via `ls -l` 2026-10-05), and
+   Playwright's webServer execs the boot script DIRECTLY, so a 100644
+   commit breaks the e2e boot.**
+
+3. **`frontend/proxy.conf.snapshots.json`** — Angular proxy config
+   mirroring `frontend/proxy.conf.e2e.json` exactly: `/api` →
+   `http://localhost:18279` (secure:false, changeOrigin:true,
+   logLevel:warn) and `/ws` → `ws://localhost:18279` (secure:false,
+   ws:true). The FE→BE path in e2e is therefore: browser → ng serve
+   :14199 → proxy.conf.snapshots.json → daemon :18279. **No env
+   override is needed** (unlike the dead plan-3 design that routed
+   via `SNAPSHOTS_API_BASE` / `API_TARGET`) — the proxy file is a
+   committed JSON, read directly by `ng serve --proxy-config`.
+
+4. **`frontend/e2e/snapshots.spec.ts`** — the automated e2e spec
+   itself (10 numbered steps + 11a-11c, §4.3; testDir anchor
+   `playwright.config.ts:4`). Owner: Tester, P6 first step.
+5. **`frontend/e2e/global-teardown-snapshots.ts`** — race-loser
+   teardown backstop wired at `globalTeardown` in the config above
+   (mirrors maintenance:52). Owner: Tester, P6 first step.
+
+All five are Tester-authored files — they appear in the fe-plan §4.1
+manifest (pass 6 amendment #2) and ride commit `c8` (§6.1).
+
+**Omission of the `ENSEMBLE_DB_DSN` destructive-refusal guard.**
+`playwright.maintenance.config.ts:18-29` documents the
+`ENSEMBLE_DB_DSN` requirement for the maintenance spec
+(`maintenance-checkpoint-cleanup.spec.ts` — destructive spec refuses
+to run without a confirmed DB target; refuses any DSN matching
+`/ensemble_prod/i`). The snapshots spec is **read-only** against a
+disposable PG already provisioned by the boot script (the spec
+exercises GETs and asserts response shapes — no DELETE, no TRUNCATE,
+no destructive SQL). The `ENSEMBLE_DB_DSN` guard is therefore
+**intentionally omitted** for snapshots (one-line justification:
+"the snapshots spec is read-only against a disposable PG; the
+destructive-refusal guard is maintenance-specific"). The boot
+script's own refusal-to-silently-adopt-foreign-cluster guard
+(`boot-e2e-maintenance-daemon.sh:102-107` — refuse if `$PG_PORT` is
+up and `$DATA_DIR` is empty) still applies and is mirrored in the
+snapshots boot script.
+
+**`reuseExistingServer: false` (pass 4 amendment, blocker #3c).** A
+reused foreign daemon would point the spec at an unknown DB — same
+invariant as `playwright.maintenance.config.ts:9-11` (cited). Both
+webServer entries use `reuseExistingServer: false`.
+
+**Recommended dedicated config — `frontend/playwright.snapshots.config.ts`:**
 
 ```ts
 // frontend/playwright.snapshots.config.ts
 //
-// Amendment pass 4 (blocker #3c): dedicated port pair for the
-// snapshot-uiux e2e. Loaded via:
+// Amendment pass 5 FINAL (blocker #1) — MIRRORS the in-repo
+// maintenance precedent end-to-end. Loaded via:
 //   cd frontend && npx playwright test \
 //     --config playwright.snapshots.config.ts e2e/snapshots.spec.ts
+//
+// Mechanics mirrored from frontend/playwright.maintenance.config.ts:
+//   - dedicated daemon port 18279 (vs maintenance's 8099,
+//     dev.sh's 8079)
+//   - dedicated FE port 14199 (vs maintenance's 4299, dev's 4199)
+//   - BOOT_SCRIPT path under frontend/scripts/ (NOT repo root
+//     scripts/) — verified at maintenance:42
+//   - PROXY_SNAPSHOTS = frontend/proxy.conf.snapshots.json (mirrors
+//     maintenance's PROXY_E2E at :43)
+//   - testDir './e2e' + testMatch snapshots.spec.ts (mirrors
+//     maintenance's :46-47 base testDir)
+//   - globalTeardown backstop at './e2e/global-teardown-snapshots.ts'
+//     (mirrors maintenance:52 — optional-but-recommended for the
+//     SIGKILL race-loser against the boot script's trap)
+//   - workers 1, timeout 90000 (mirrors maintenance:56-58 — second-
+//     daemon boot + canary)
+//   - webServer[0]: BOOT_SCRIPT start, reuseExistingServer: false,
+//     timeout 120_000 (mirrors maintenance:69-72)
+//   - webServer[1]: npx ng serve --port 14199 --proxy-config
+//     proxy.conf.snapshots.json, reuseExistingServer: false,
+//     timeout 180_000 (mirrors maintenance:95-98)
 //
 // Citations to the base config being overridden:
 //   - testDir: './e2e'                       (playwright.config.ts:4)
@@ -472,67 +629,313 @@ untouched for sibling specs):
 //   - webServer[1].port: 4199                (playwright.config.ts:33)
 //   - webServer[1].reuseExistingServer: true (playwright.config.ts:34)
 //
-// This dedicated file:
-//   - extends the base so all reporters / projects / devices inherit
-//   - narrows testMatch to e2e/snapshots.spec.ts ONLY
-//   - launches a dedicated backend on 18079 (uvicorn against the
-//     worktree .venv) with reuseExistingServer: false
-//   - launches a dedicated frontend on 14199 (ng serve against the
-//     worktree node_modules) with reuseExistingServer: false
-//   - sets SNAPSHOTS_API_BASE env so the FE points at 18079
+// `dev.sh` is NOT edited (pass 5 FINAL blocker #1 — `dev.sh:128` is
+// `export PORT=8079` unconditional; the port comes from the boot
+// script's own `export PORT="$DAEMON_PORT"` line, which mirrors
+// maintenance's boot-e2e-maintenance-daemon.sh:139). The dead
+// `ENSEMBLE_PORT` / `SNAPSHOTS_API_BASE` / `API_TARGET` env knobs
+// from amendment pass 3/4 are REMOVED (grep-evidenced in §7 run
+// brief — 0 hits).
+//
+// `permissions: ['clipboard-read', 'clipboard-write']` is added to
+// the `use:` block so the Playwright context can exercise the
+// copy-id assertion at e2e step 5 (clipboard.readText() requires
+// the browser context to grant clipboard-read permission).
 //
 import { defineConfig, devices } from '@playwright/test';
-import baseConfig from './playwright.config';
+import { join } from 'path';
+
+const HERE = __dirname;
+const REPO_ROOT = join(HERE, '..', '..');
+const BOOT_SCRIPT = join(HERE, 'scripts', 'boot-e2e-snapshots-daemon.sh');
+const PROXY_SNAPSHOTS = join(HERE, 'proxy.conf.snapshots.json');
 
 export default defineConfig({
-  ...baseConfig,
   testDir: './e2e',
-  testMatch: /snapshots\.spec\.ts$/,
-  // Override the webServer array: dedicated ports, no reuse.
+  // Race-loser backstop — mirrors playwright.maintenance.config.ts:52.
+  // The boot script's TERM/INT+EXIT trap is the primary path; this
+  // is the deterministic backstop when Playwright force-kills the
+  // webServer group before pg_ctl stop finishes.
+  globalTeardown: './e2e/global-teardown-snapshots.ts',
+  fullyParallel: false,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: 1,
+  reporter: 'html',
+  timeout: 90000, // Mirrors maintenance:58 — second-daemon boot + canary
+  use: {
+    baseURL: 'http://localhost:14199',
+    trace: 'on-first-retry',
+    actionTimeout: 20000,
+    // pass 5 FINAL item #5 — clipboard perms for step 5 copy-id
+    // assertion (the drawer's copy-id button writes the UUID to
+    // navigator.clipboard; the spec reads it back via
+    // page.evaluate(() => navigator.clipboard.readText()) — the
+    // Playwright context must grant both permissions for the read
+    // to succeed without a permission prompt race).
+    permissions: ['clipboard-read', 'clipboard-write'],
+  },
+  // Dedicated second-daemon (mirrors playwright.maintenance.config.ts:67-101).
+  // Boots: disposable PG (port 15532) → ensemble daemon (port 18279).
+  // The FE dev server proxies /api + /ws → 18279 via
+  // frontend/proxy.conf.snapshots.json (mirrors
+  // frontend/proxy.conf.e2e.json shape exactly; only the target port
+  // differs — 18279 vs 8099).
   webServer: [
     {
-      // Worktree-rooted dev.sh on port 18079 (NOT 8079).
-      // SNAPSHOTS_API_BASE is forwarded so the FE proxy can route
-      // /api → 18079 instead of 8079.
-      command: `cd .. && SNAPSHOTS_API_BASE=http://localhost:18079 bash dev.sh`,
-      port: 18079,
-      reuseExistingServer: false,
-      timeout: 60000,
+      command: `${BOOT_SCRIPT} start`,
+      port: 18279,
+      reuseExistingServer: false, // [R-11] refuse foreign daemon
+      timeout: 120_000,
       stdout: 'pipe',
       stderr: 'pipe',
       env: {
         OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
-        LOG_LEVEL: 'info',
-        ENSEMBLE_PORT: '18079',  // dev.sh honors this knob
+        LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+        // NOTE: snapshots has NO equivalent of
+        // MAINTENANCE_ENDPOINTS_ENABLED — the snapshots router is
+        // unconditional in this branch (no env gate; the toggle is
+        // UI-only and routes /api/settings/snapshot-create, not
+        // /api/snapshots). Deliberately omitted (mirrors maintenance
+        // shape minus the maintenance-specific flag).
       },
     },
     {
-      // Worktree-rooted ng serve on port 14199 (NOT 4199), with the
-      // proxy /api target overridden via env to hit 18079.
-      command: 'ng serve --port 14199',
+      // FE dev server bound to a dedicated port (NOT 4199 — that's
+      // the dev project). The proxy file points /api + /ws → 18279.
+      command: `npx ng serve --port 14199 --proxy-config ${PROXY_SNAPSHOTS}`,
       port: 14199,
       reuseExistingServer: false,
-      timeout: 120000,
-      env: {
-        // The project's dev proxy reads this; check the proxy.conf.js
-        // at the worktree root for the exact env name (likely
-        // API_TARGET or PROXY_API_TARGET). Exact name verified at
-        // implementation time against the live proxy config.
-        API_TARGET: 'http://localhost:18079',
-      },
+      timeout: 180_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
     },
   ],
-  use: {
-    ...baseConfig.use,
-    baseURL: 'http://localhost:14199',
-  },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    {
+      name: 'snapshots',
+      use: { ...devices['Desktop Chrome'] },
+    },
   ],
 });
 ```
 
-**Invocation (pass 4 amendment, blocker #3a + #3c):**
+**`frontend/proxy.conf.snapshots.json`** (mirrors
+`frontend/proxy.conf.e2e.json` exactly; only target port differs):
+
+```json
+{
+  "/api": {
+    "target": "http://localhost:18279",
+    "secure": false,
+    "changeOrigin": true,
+    "logLevel": "warn"
+  },
+  "/ws": {
+    "target": "ws://localhost:18279",
+    "secure": false,
+    "ws": true
+  }
+}
+```
+
+**`frontend/scripts/boot-e2e-snapshots-daemon.sh`** — mirrors
+`frontend/scripts/boot-e2e-maintenance-daemon.sh` line-for-line; the
+following shell excerpt pins ONLY the differing constants (the
+initdb/pg_ctl/createdb block, the cleanup() function, the trap pair,
+and the OPENAI_API_KEY gate are copied verbatim from the maintenance
+script; the 60-iter canary wait is mirrored in SHAPE only — the
+endpoint is `GET /readyz` per pass 6 amendment #1 — see the
+maintenance file in full for the canonical shape):
+
+```bash
+#!/usr/bin/env bash
+# Disposable-PG dev daemon for the Snapshots Page e2e suite.
+#
+# Mirrors frontend/scripts/boot-e2e-maintenance-daemon.sh (the
+# in-repo precedent for second-daemon disposable-PG bootstrap).
+# Only the ports + data dir + disposable DB name + log dir +
+# DATA_DIR_E2E + canary endpoint differ; all other mechanics
+# (initdb -A trust, pg_ctl -o "-p $PG_PORT -k /tmp" start, 127.0.0.1
+# host NOT /tmp, POSTGRES_* env scrub + rebuild, OPENAI_API_KEY
+# early-exit guard, dual TERM/INT+EXIT trap wired into the same
+# cleanup() function, 60-iter canary wait, ENSEMBLE_E2E_KEEP=1 skip
+# for the rm) are copied verbatim from the maintenance script.
+#
+# Usage:
+#   ENSEMBLE_E2E_KEEP=1 ./scripts/boot-e2e-snapshots-daemon.sh start
+#   ./scripts/boot-e2e-snapshots-daemon.sh stop
+#
+# Env vars (all optional):
+#   PG_PORT       — local PG port (default 15532 — distinct from
+#                   maintenance's 15432 AND dev :5432)
+#   DAEMON_PORT   — daemon port (default 18279 — distinct from
+#                   maintenance's 8099 AND dev :8079)
+#   DATA_DIR      — PG cluster data dir (default /tmp/pg_e2e_snap_$$)
+#   DISPOSABLE_DB — disposable DB name (default ensemble_e2e_snap_$$)
+#   OPENAI_API_KEY — must be set; the daemon's lifespan requires it
+#
+# This script is paired with `playwright.snapshots.config.ts`.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+PG_PORT="${PG_PORT:-15532}"
+DAEMON_PORT="${DAEMON_PORT:-18279}"
+DATA_DIR="${DATA_DIR:-/tmp/pg_e2e_snap_$$}"
+DISPOSABLE_DB="${DISPOSABLE_DB:-ensemble_e2e_snap_$$}"
+LOG_DIR="${LOG_DIR:-/tmp/e2e_snapshots_logs}"
+DATA_DIR_E2E="$REPO_ROOT/data_e2e_snapshots"
+
+mkdir -p "$LOG_DIR"
+
+action="${1:-start}"
+
+# cleanup() — mirrors maintenance:54-89 verbatim, only DATA_DIR +
+# DATA_DIR_E2E + LOG_DIR differ (resolved above). Kills daemon, stops
+# PG (foreign-cluster refusal preserved), rm cluster + data_e2e dir
+# unless ENSEMBLE_E2E_KEEP=1.
+cleanup() {
+  echo "[cleanup] teardown start (DAEMON pid file=$LOG_DIR/daemon.pid, PG_PORT=$PG_PORT, DATA_DIR=$DATA_DIR)" | tee -a "$LOG_DIR/boot.log"
+  if [ -f "$LOG_DIR/daemon.pid" ]; then
+    local pid
+    pid="$(cat "$LOG_DIR/daemon.pid")"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+    fi
+    rm -f "$LOG_DIR/daemon.pid"
+  fi
+  if pg_isready -h 127.0.0.1 -p "$PG_PORT" >/dev/null 2>&1; then
+    if [ -d "$DATA_DIR" ]; then
+      pg_ctl -D "$DATA_DIR" stop >> "$LOG_DIR/boot.log" 2>&1 || true
+    else
+      echo "[cleanup] WARN: $PG_PORT is up but $DATA_DIR is absent — refusing to stop a foreign cluster" | tee -a "$LOG_DIR/boot.log"
+    fi
+  fi
+  if [ -z "${ENSEMBLE_E2E_KEEP:-}" ]; then
+    rm -rf "$DATA_DIR" "$DATA_DIR_E2E" 2>/dev/null || true
+  else
+    echo "[cleanup] ENSEMBLE_E2E_KEEP=1 — keeping $DATA_DIR and $DATA_DIR_E2E" | tee -a "$LOG_DIR/boot.log"
+  fi
+  echo "[cleanup] teardown complete" | tee -a "$LOG_DIR/boot.log"
+}
+
+action_start() {
+  # Scrub inherited POSTGRES_* env so operator's prod settings
+  # cannot bleed through — mirrors maintenance:96-97 verbatim.
+  unset POSTGRES_HOST POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD POSTGRES_URL
+  unset ENSEMBLE_DB_DSN
+
+  # Foreign-cluster refusal — mirrors maintenance:102-107.
+  if pg_isready -h 127.0.0.1 -p "$PG_PORT" >/dev/null 2>&1; then
+    if [ ! -d "$DATA_DIR" ]; then
+      echo "[boot] ERROR: port $PG_PORT is in use by a foreign PG cluster (no $DATA_DIR)." >&2
+      echo "[boot] Refusing to silently adopt a stale cluster. Set PG_PORT to a free port." >&2
+      exit 1
+    fi
+  fi
+
+  echo "[boot] Initializing PostgreSQL cluster at $DATA_DIR on port $PG_PORT..." | tee -a "$LOG_DIR/boot.log"
+  if [ ! -d "$DATA_DIR" ]; then
+    initdb -A trust -D "$DATA_DIR" --no-locale -E UTF8 >> "$LOG_DIR/boot.log" 2>&1
+  fi
+  if ! pg_isready -h 127.0.0.1 -p "$PG_PORT" >/dev/null 2>&1; then
+    pg_ctl -D "$DATA_DIR" -l "$LOG_DIR/pg.log" -o "-p $PG_PORT -k /tmp" start >> "$LOG_DIR/boot.log" 2>&1
+    sleep 1
+  fi
+
+  echo "[boot] Creating disposable database: $DISPOSABLE_DB" | tee -a "$LOG_DIR/boot.log"
+  if ! psql -h 127.0.0.1 -p "$PG_PORT" -d postgres -c "SELECT 1 FROM pg_database WHERE datname='$DISPOSABLE_DB'" -tA 2>/dev/null | grep -q 1; then
+    createdb -h 127.0.0.1 -p "$PG_PORT" "$DISPOSABLE_DB" >> "$LOG_DIR/boot.log" 2>&1
+  fi
+
+  # POSTGRES_* env block — mirrors maintenance:131-135 verbatim.
+  # NOTE: use `127.0.0.1` (not `/tmp`) — Unix-socket path is host-only
+  # and PG_PORT must apply via the network.
+  export POSTGRES_HOST="127.0.0.1"
+  export POSTGRES_PORT="$PG_PORT"
+  export POSTGRES_DB="$DISPOSABLE_DB"
+  export POSTGRES_USER="$(whoami)"
+  unset POSTGRES_PASSWORD
+
+  # Force the daemon's lifespan port to 18279 — mirrors
+  # maintenance:138-142 verbatim (the canonical port-set; the old
+  # `dev.sh:128 export PORT=8079` is the dead knob this script
+  # replaces for the e2e lane).
+  export DAEMON_PORT="$DAEMON_PORT"
+  export PORT="$DAEMON_PORT"
+  export DATA_DIR_E2E="$REPO_ROOT/data_e2e_snapshots"
+  export ENSEMBLE_DATA_DIR="$DATA_DIR_E2E"
+  mkdir -p "$DATA_DIR_E2E"
+
+  # OPENAI_API_KEY gate — mirrors maintenance:147-150 verbatim.
+  if [ -z "${OPENAI_API_KEY:-}" ]; then
+    echo "[boot] ERROR: OPENAI_API_KEY must be set for the daemon lifespan." >&2
+    exit 1
+  fi
+
+  echo "[boot] Starting daemon on port $DAEMON_PORT..." | tee -a "$LOG_DIR/boot.log"
+  cd "$REPO_ROOT"
+  # Dual trap — mirrors maintenance:160 + :168.
+  trap 'cleanup' TERM INT
+  trap 'cleanup' EXIT
+  uv run python -m uvicorn daemon.api:app \
+    --host 127.0.0.1 --port "$DAEMON_PORT" \
+    --log-level info --timeout-graceful-shutdown 10 \
+    >> "$LOG_DIR/daemon.log" 2>&1 &
+  DAEMON_PID=$!
+  echo "$DAEMON_PID" > "$LOG_DIR/daemon.pid"
+  echo "[boot] daemon pid=$DAEMON_PID, log=$LOG_DIR/daemon.log" | tee -a "$LOG_DIR/boot.log"
+
+  # 60-iter canary wait — mirrors maintenance:178-205 in SHAPE (60 ×
+  # 1s curl poll), NOT in endpoint (pass 6 amendment #1): we poll the
+  # REAL GET /readyz route (mounted at daemon/api.py:3064 —
+  # `@app.get("/readyz", response_model=ReadyzResponse)`) and assert
+  # the JSON body `status == "ready"` (ReadyzResponse shape at
+  # daemon/models/common.py:150-158: `status` = 'ready' when all
+  # components pass, 'degraded' otherwise; 200 vs 503 + Retry-After).
+  # The handler is an O(1) cached-composite read (ADR-003 — zero DB
+  # access per request), so polling it at 1 Hz is safe. The
+  # previously specified GET /availability DOES NOT EXIST as a daemon
+  # route — it would hit the SPA catch-all and serve HTML, failing
+  # all 60 polls deterministically. DIVERGENCE NOTE (do NOT "fix"
+  # back): the maintenance boot script polls its own maintenance-
+  # specific /api/maintenance/checkpoint-cleanup/availability
+  # endpoint (shape `state`) — that is deliberate and stays.
+  echo "[boot] Waiting for daemon canary (/readyz → status:'ready')..." | tee -a "$LOG_DIR/boot.log"
+  for i in $(seq 1 60); do
+    if curl -fsS "http://127.0.0.1:$DAEMON_PORT/readyz" > "$LOG_DIR/canary.json" 2>/dev/null; then
+      state=$(python3 -c "import json,sys; d=json.load(open('$LOG_DIR/canary.json')); print(d.get('status','?'))" 2>/dev/null || echo "?")
+      echo "[boot] Canary response: status='$state'" | tee -a "$LOG_DIR/boot.log"
+      if [ "$state" = "ready" ]; then
+        echo "[boot] OK — daemon is READY on :$DAEMON_PORT (DB $DISPOSABLE_DB) — blocking on daemon pid=$DAEMON_PID" | tee -a "$LOG_DIR/boot.log"
+        wait "$DAEMON_PID"
+        cleanup
+        exit 0
+      fi
+    fi
+    sleep 1
+  done
+  echo "[boot] ERROR: daemon did not reach status=ready within 60s" >&2
+  tail -20 "$LOG_DIR/daemon.log" >&2 || true
+  cleanup
+  exit 1
+}
+
+action_stop() {
+  cleanup
+}
+
+case "$action" in
+  start) action_start ;;
+  stop)  action_stop  ;;
+  *)     echo "Usage: $0 {start|stop}" >&2; exit 2 ;;
+esac
+```
+
+**Invocation (pass 4 amendment, blocker #3a + #3c; refined pass 5):**
 
 ```bash
 cd frontend && npx playwright test \
@@ -543,8 +946,25 @@ The `cd frontend` is non-negotiable (npx inside a package dir
 resolves the local devDependency; bare npx outside is the prior-
 incident pattern). The `--config` flag loads the dedicated config;
 no merge into the base config is required. After the e2e passes,
-the dedicated config is REUSABLE for the next snapshot-uiux e2e
-PR and any other test that needs a dedicated daemon.
+the dedicated config + boot script + proxy file are REUSABLE for
+the next snapshot-uiux e2e PR and any other test that needs a
+dedicated daemon. The `dev.sh` script is **NOT touched** — its
+`export PORT=8079` unconditional line at `:128` stays untouched
+because the snapshots e2e lane never invokes `dev.sh`; it invokes
+`frontend/scripts/boot-e2e-snapshots-daemon.sh` instead, which
+sets `PORT=18279` itself.
+
+**Dead env vars REMOVED (pass 5 FINAL blocker #1 ruling).** The
+following knobs from amendment pass 3/4 are removed EVERYWHERE in
+this plan package (greps in §7 run-brief VERIFY = 0 hits):
+- `SNAPSHOTS_API_BASE` (was meant to override the FE proxy target)
+- `API_TARGET` (was meant to override the FE proxy target)
+- `ENSEMBLE_PORT` (was meant to override `dev.sh` daemon port;
+  `dev.sh:128 export PORT=8079` is unconditional, so the knob was
+  dead on arrival)
+The new FE→BE path is browser → ng serve :14199 → committed
+`proxy.conf.snapshots.json` → daemon :18279 — no env override
+needed.
 
 ### 4.3.2 FE toolchain bootstrap (pass 4 amendment, blocker #3b)
 
@@ -634,6 +1054,7 @@ ONE PR, with commits sequenced per phase so review is phase-sliced.**
 | `c5` | `fe(routing): register /snapshots route + gear menu Snapshots item after Settings (before conditional appends — app.ts:747/:792, amendment #7)` | `frontend/src/app/app.routes.ts`, `frontend/src/app/app.ts` | P3 |
 | `c6` | `fe(relocation): add functional /snapshots page (toggle + metrics strip + table + drawer) AND remove the snapshot blocks from /settings — ONE commit (atomicity mandate, amendment #6d)` | `frontend/src/app/pages/snapshots/*`, `frontend/src/app/components/snapshot-detail-drawer/*`, `frontend/src/app/pages/settings/settings.component.html` (delete :242-321, :323-358), `settings.component.ts` (delete :12, :107-142, :278-279, :715-810), `settings.component.spec.ts` (delete :1345-1533 + the 3 mock lines at :1566-1570 — amendment #1) | P3 + P4 — **combined commit covers the P3+P4 relocation; review it as one atomic unit** |
 | `c7` | `fe(tests): 4 new spec files + settings-clean regression + route/menu regression` | `frontend/src/app/pages/snapshots/snapshots.component.spec.ts`, `snapshots-table.component.spec.ts`, `frontend/src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.spec.ts`, `frontend/src/app/services/snapshot.service.spec.ts`, `settings.component.spec.ts` (extend), `app.component.spec.ts` (extend) | P5 |
+| **`c8`** | **`fe(e2e): snapshots playwright config + boot script + proxy + spec + teardown`** (pass 6 amendment #2) | `frontend/playwright.snapshots.config.ts`, `frontend/scripts/boot-e2e-snapshots-daemon.sh` (**committed mode 100755 — `chmod +x` after authoring; the mirror `boot-e2e-maintenance-daemon.sh` is `-rwxr-xr-x`/100755 and Playwright's webServer execs it directly** — pass 6 amendment #3), `frontend/proxy.conf.snapshots.json`, `frontend/e2e/snapshots.spec.ts`, `frontend/e2e/global-teardown-snapshots.ts` | **P6** — authored by the Tester as its first P6 step (per §4.3/§4.3.1) |
 
 The split-PR alternative is rejected because: the relocation (now
 combined into `c6` per the atomicity mandate — amendment finding #6d)
@@ -644,7 +1065,10 @@ relocation) preserves phase-slice reviewability without ever leaving
 the toggle/metrics UI homeless; a single PR keeps the deprecation
 cycle honest and avoids 2 reviewer handoffs. *(Amendment note: the
 original c6+c7 split was merged into the new c6 per finding #6d; the
-test commit was renumbered c8 → c7.)*
+test commit was renumbered c8 → c7. Pass 6 amendment #2: a NEW `c8`
+is added for the Tester-authored e2e quintet — unrelated to the
+historical pre-pass-4 c8 that was renumbered. Commit split is now
+**c0 + c1–c8 = 9 commits**.)*
 
 ### 6.2 CHANGELOG entry content
 
@@ -715,10 +1139,11 @@ is gone, otherwise the deprecation cycle is broken.
 >    in the run-brief §7 as INFORMATIONAL (their branch is now
 >    2 commits + a dirty tree per pass 4 note #9; no live ack needed
 >    before we start).
-> 4. Branch protection rules allow the 8-commit split per §6.1
->    (**c0 + c1–c7**; was 7 commits before pass 4 note #12 added c0
->    for the plan docs; the 7 implementation commits c1-c7 are
->    unchanged in shape — only renumbered c0 + c1-c7).
+> 4. Branch protection rules allow the 9-commit split per §6.1
+>    (**c0 + c1–c8**; was 8 commits before pass 6 amendment #2 added
+>    c8 = the Tester-authored e2e quintet; was 7 commits before pass 4
+>    note #12 added c0 for the plan docs; the 7 implementation commits
+>    c1-c7 are unchanged in shape — only renumbered c0 + c1-c8).
 >    (No squash, no rebase-on-merge — preserves the phase boundary.)
 
 **Merge gate (PINNED — 4-GREEN):** PR is mergeable when ALL FOUR
@@ -734,7 +1159,7 @@ of these pass in CI on the tip of `feature/snapshot-uiux`:
    returns 0 (covers the §4.3 automated Playwright spec — all 10
    steps + 11a-11c; the drawer-error path uses route-interception
    `page.route('**/api/snapshots/*', route => route.abort())` to
-   force the failure deterministically). **Playwright gate idiom (pass 4 amendment, blocker #3a + #3c):** invoked from INSIDE `frontend/`; spec path is `e2e/snapshots.spec.ts` (relative to `frontend/`; the base `playwright.config.ts:4 testDir: './e2e'` is the anchor); the dedicated `--config playwright.snapshots.config.ts` (per §4.3.1) launches a worktree-rooted daemon on strict ports 18079/14199 with `reuseExistingServer: false` — NEVER silently e2e the live 8079/4199.
+   force the failure deterministically). **Playwright gate idiom (pass 4 amendment, blocker #3a + #3c; refined pass 5):** invoked from INSIDE `frontend/`; spec path is `e2e/snapshots.spec.ts` (relative to `frontend/`; the base `playwright.config.ts:4 testDir: './e2e'` is the anchor); the dedicated `--config playwright.snapshots.config.ts` (per §4.3.1) launches a worktree-rooted daemon on strict ports 18279/14199 with `reuseExistingServer: false` (boot via `frontend/scripts/boot-e2e-snapshots-daemon.sh` against a disposable PG on :15532; FE proxies `/api`+`/ws` → 18279 via the committed `frontend/proxy.conf.snapshots.json`) — NEVER silently e2e the live 8079/4199.
 
 Post-merge manual eyeball is **NON-GATING** (amendment pass 3 blocker #2).
 
@@ -804,30 +1229,18 @@ cd frontend && npx playwright test \
   --config playwright.snapshots.config.ts e2e/snapshots.spec.ts
 ```
 
-The dedicated config is `frontend/playwright.snapshots.config.ts` (new file per §4.3.1; launches worktree-rooted backend on port 18079 + frontend on 14199 with `reuseExistingServer: false`; API target overridden via env). Path `e2e/snapshots.spec.ts` is relative to `frontend/` (the base `playwright.config.ts:4 testDir: './e2e'` is the anchor).
+The dedicated config is `frontend/playwright.snapshots.config.ts` (new file per §4.3.1; launches worktree-rooted backend on port 18279 + frontend on 14199 with `reuseExistingServer: false`; backend port comes from `frontend/scripts/boot-e2e-snapshots-daemon.sh` `export PORT="$DAEMON_PORT"` line, and FE routes `/api`+`/ws` → 18279 via the committed `frontend/proxy.conf.snapshots.json` — NO env override on the FE side). Path `e2e/snapshots.spec.ts` is relative to `frontend/` (the base `playwright.config.ts:4 testDir: './e2e'` is the anchor).
 
 **Flaky-test rule.** **1 retry then halt with a handoff note.** Any test that fails twice across the 4-GREEN merge gate (§6.4) after a clean re-run halts the commission; the agent writes a handoff note into `agents/shared/handoff/` (project standard) and surfaces it on completion.
 
-**§6.4 gate acks:** (a) §1 contract reconciliation — user signed off; (b) §2.3 wall-clock — user confirmed pair mode (refined pass 4 note #11: ≈13–14.5h wall-clock, 14.5h fits a long night); (c) **§3.2 rebase handshake with `feature/unify-spawn-tools` is INFORMATIONAL only** — their branch is now 2 commits on `ac399874` (`62c33c40` + `2fa92fa8` per pass 4 note #9) plus a residual dirty tree; we do NOT block on their ack, the §3.4 side-by-side table is enough when they eventually carry commits, AND the §3.5 mirrored contingency (rebase-onto-them if they land first) covers the inverse order; (d) §6.1 commit split — now **c0 (plan docs) + c1–c7** (was 7 commits before; pass 4 note #12 adds c0 for plan docs as the first commit, BEFORE any implementation begins — giter task; no dev races it) — branch protection must allow it (no squash, no rebase-on-merge).
+**§6.4 gate acks:** (a) §1 contract reconciliation — user signed off; (b) §2.3 wall-clock — user confirmed pair mode (refined pass 4 note #11: ≈13–14.5h wall-clock, 14.5h fits a long night); (c) **§3.2 rebase handshake with `feature/unify-spawn-tools` is INFORMATIONAL only** — their branch is now 2 commits on `ac399874` (`62c33c40` + `2fa92fa8` per pass 4 note #9) plus a residual dirty tree; we do NOT block on their ack, the §3.4 side-by-side table is enough when they eventually carry commits, AND the §3.5 mirrored contingency (rebase-onto-them if they land first) covers the inverse order; (d) §6.1 commit split — now **c0 (plan docs) + c1–c8** (was 8 commits before pass 6 amendment #2, which adds c8 = the five e2e files authored by the Tester as its first P6 step; was 7 commits before pass 4 note #12 adds c0 for plan docs as the first commit, BEFORE any implementation begins — giter task; no dev races it) — branch protection must allow it (no squash, no rebase-on-merge).
 
 **Digest-fetch ownership pin (resolves fe-plan §5.4 vs §6.4).** **The DRAWER component (`SnapshotDetailDrawerComponent`) owns the lazy digest fetch** — it fires `getById(id, { includeDigest: true })` ONLY on the explicit user "Show digest" click (`onToggleDigest()` handler per fe-plan §5.4; "lazy on explicit user action" rule per §6.4). **The host (`SnapshotsComponent`) NEVER pre-fetches the digest** — no `getById(..., { includeDigest: true })` on `ngOnInit` / row-click; only the drawer's user-driven toggle does. Pinned by drawer spec case (h) "lazy digest — NO digest request fires on drawer open" (fe-plan §8.1 row 3).
 
-**P6 + 4-GREEN merge gate.** P6 = `frontend/e2e/snapshots.spec.ts` (Playwright spec plan, 10 numbered steps + 11a-11c; §4.3; **path corrected in pass 4 amendment blocker #3a** — the base `playwright.config.ts:4 testDir: './e2e'` is relative to `frontend/`, so the spec lives at `frontend/e2e/snapshots.spec.ts`, NOT `tests/e2e/...`). Step 11c forces the drawer-error path deterministically via `page.route('**/api/snapshots/*', route => route.abort())`. Invocation is `cd frontend && npx playwright test --config playwright.snapshots.config.ts e2e/snapshots.spec.ts` (dedicated config per §4.3.1 — port hygiene, worktree-rooted daemon, strict ports 18079/14199 with `reuseExistingServer: false`). Merge gate = **tsc + jest + pytest + Playwright e2e ALL GREEN** (§6.4; pytest gate idiom per blocker #2: worktree-rooted + `uv run pytest`); post-merge manual eyeball is **NON-GATING** (blocker #2).
+**P6 + 4-GREEN merge gate.** P6 = `frontend/e2e/snapshots.spec.ts` (Playwright spec plan, 10 numbered steps + 11a-11c; §4.3; **path corrected in pass 4 amendment blocker #3a** — the base `playwright.config.ts:4 testDir: './e2e'` is relative to `frontend/`, so the spec lives at `frontend/e2e/snapshots.spec.ts`, NOT `tests/e2e/...`). Step 11c forces the drawer-error path deterministically via `page.route('**/api/snapshots/*', route => route.abort())`. Invocation is `cd frontend && npx playwright test --config playwright.snapshots.config.ts e2e/snapshots.spec.ts` (dedicated config per §4.3.1 — port hygiene, worktree-rooted daemon, strict ports 18279/14199 with `reuseExistingServer: false`; the boot script `frontend/scripts/boot-e2e-snapshots-daemon.sh` is what actually sets the daemon port to 18279 against a disposable PG on :15532, and the FE proxies `/api`+`/ws` → 18279 via `frontend/proxy.conf.snapshots.json` — see §4.3.1 for the full mechanic). Merge gate = **tsc + jest + pytest + Playwright e2e ALL GREEN** (§6.4; pytest gate idiom per blocker #2: worktree-rooted + `uv run pytest`); post-merge manual eyeball is **NON-GATING** (blocker #2).
 
 ---
 
 **End of sequencing.md.** Coordination document only. The two
-specialist plans (`be-plan.md`, `fe-plan.md`) remain the source of
-truth for their respective lanes; this file is the bridge.
-etById(..., { includeDigest: true })` on `ngOnInit` / row-click; only the drawer's user-driven toggle does. Pinned by drawer spec case (h) "lazy digest — NO digest request fires on drawer open" (fe-plan §8.1 row 3).
-
-**P6 + 4-GREEN merge gate.** P6 = `frontend/e2e/snapshots.spec.ts` (Playwright spec plan, 10 numbered steps + 11a-11c; §4.3; **path corrected in pass 4 amendment blocker #3a** — the base `playwright.config.ts:4 testDir: './e2e'` is relative to `frontend/`, so the spec lives at `frontend/e2e/snapshots.spec.ts`, NOT `tests/e2e/...`). Step 11c forces the drawer-error path deterministically via `page.route('**/api/snapshots/*', route => route.abort())`. Invocation is `cd frontend && npx playwright test --config playwright.snapshots.config.ts e2e/snapshots.spec.ts` (dedicated config per §4.3.1 — port hygiene, worktree-rooted daemon, strict ports 18079/14199 with `reuseExistingServer: false`). Merge gate = **tsc + jest + pytest + Playwright e2e ALL GREEN** (§6.4; pytest gate idiom per blocker #2: worktree-rooted + `uv run pytest`); post-merge manual eyeball is **NON-GATING** (blocker #2).
-
----
-
-**End of sequencing.md.** Coordination document only. The two
-specialist plans (`be-plan.md`, `fe-plan.md`) remain the source of
-truth for their respective lanes; this file is the bridge.
-only. The two
 specialist plans (`be-plan.md`, `fe-plan.md`) remain the source of
 truth for their respective lanes; this file is the bridge.
