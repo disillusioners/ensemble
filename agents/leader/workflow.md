@@ -50,17 +50,17 @@ I support three workflows. The user may invoke them sequentially within a single
 ```raw
 1. BEFORE any workflow:
    - Spawn giter instance (dedicated, reused for all git operations)
-   - giter: "Ensure base branch exists. DEFAULT base is 'latest' (create from main if needed) — check for explicit user command or critical note specifying a different base. Create feature branch '[branch-name]' from the resolved base. If branch exists, switch to it."
-   - ⛔ WAIT for git branch creation to COMPLETE before proceeding
+   - giter: "Ensure base branch exists. DEFAULT base is 'latest' (create from main if needed) — check for explicit user command or critical note specifying a different base. Create feature branch '[branch-name]' from the resolved base and its worktree (your Worktree Mode: fenced .env, no venv at creation). If branch exists, switch to it."
+   - ⛔ WAIT for git branch + worktree creation to COMPLETE before proceeding
 
 2. DURING workflows:
    - Other agents (developer, reviewer, tester) work normally
-   - They may commit as needed (their own logic, not leader's concern)
+   - They may commit as needed (their own logic, not leader's concern) — inside the worktree; each editor's context carries wt_path
 
 3. AFTER everything completed:
-   - giter: "Check git status. Commit any uncommitted changes with message '[type]: [summary]'."
+   - giter: "Check git status in the worktree. Commit any uncommitted changes with message '[type]: [summary]'."
    - Wait for result
-   - giter: "Merge feature branch into latest. Push latest and feature branch to remote."
+   - giter: "Verify the worktree is clean (quiescence gate: WIP committed / stash-by-sha / discarded), then merge feature branch into latest and run the chained cleanup as ONE atomic sequence: remove worktree -> delete branch -> delete KV census/claim rows. No lingering between steps. Push latest and feature branch to remote."
    - Wait for result
 ```
 
@@ -91,7 +91,7 @@ I support three workflows. The user may invoke them sequentially within a single
 - **ALWAYS merge to latest after feature is done** — this keeps latest as the current state
 - Push both `latest` and the feature branch to keep them in sync
 - `latest` should always contain the latest completed features
-Fan-out >=2 committing editors: pre-write wt.active.<branch>.<task-id> rows -> spawn giter FIRST -> on its report spawn each editor with non-empty context={"wt_path":...}.
+Worktree mode is the DEFAULT for committing tasks, any scope that commits (the table below governs branch/merge ceremony only): pre-write wt.active.<branch>.<task-id> census rows -> spawn giter FIRST -> on its report spawn each editor with non-empty context={"wt_path":...}. "Continue working" after a merge = a NEW worktree (giter crafts it); never resurrect the old one.
 
 ### When Git Flow Applies
 | Scope | Git Flow |

@@ -17,6 +17,12 @@ Consequences:
 
 ---
 
+## Worktree Discipline (where my work happens)
+
+Committing tasks run inside a worktree. When my dispatch context carries `wt_path`, ALL my work — reads, edits, runs, commits, and worker dispatch instructions — happens inside that worktree. I never commit on the main checkout; if a commit is required and no `wt_path` is present, I ask the dispatcher for the worktree before committing anywhere. I never merge from the coder role — merge and the chained cleanup (remove worktree → delete branch → delete KV rows) are giter's; when I am done I report completion so leader/giter can run them. See giter's Worktree Mode.
+
+---
+
 ## Phase 1: Understand
 
 - Read the request carefully — what is being asked, what is the success criterion
