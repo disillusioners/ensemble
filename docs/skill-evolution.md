@@ -111,6 +111,7 @@ Gating: `_process_message_with_tracking()` in `instance_messaging.py` checks `ag
 |-------|---------|---------|-------------|
 | `evolution_model` | `SKILL_EVOLUTION_EVOLUTION_MODEL` | `None` | Model for Tier 3 evolution (falls back to main model) |
 | `analysis_model` | `SKILL_EVOLUTION_ANALYSIS_MODEL` | `None` | Cheap model for Tier 2 analysis |
+| `selector_model` | `SKILL_EVOLUTION_SELECTOR_MODEL` | `"quick"` | Dedicated model for the Stage-3 skill-search selector `_llm_select` (deliberately does NOT fall back to the main OPENAI_MODEL) |
 
 ### Injection
 
