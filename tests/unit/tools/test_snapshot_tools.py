@@ -47,6 +47,37 @@ the proven send_message/spawn test seam) with a MagicMock manager
 that carries the snapshot seams + spawn/metadata/enqueue recorders
 (``_unified_spawn_manager``) — so the ordering and output-shape pins
 exercise the production call path, not a re-implementation.
+
+File-size rationale (band obligation: 1000-3000):
+    This pack currently runs ~1850 lines (post-unify-spawn-tools
+    tidy pass; +150 since the unify-spawn-tools commit because the
+    format_snapshot_citation pin set + the fault-path warning pin
+    both landed here). We are inside the 1000-3000 band — the band
+    obligation is preserved. Concrete triggers that would push the
+    pack past the 3000 ceiling and require an extraction PR:
+
+      * Adding a NEW full-class pin set (e.g. a third
+        ``TestSnapshotSearchTool``-shaped contract class, ~150+
+        lines).
+      * Pinning every individual ``create_snapshot_tools`` output
+        variant (the current pack pins the function-level contracts;
+        a per-variant grid would roughly triple the test count).
+
+    Triggers that DO NOT require extraction (these stay co-located
+    even past 3000 because the alternative — splitting per
+    ``Test*`` class — destroys the cross-class fixture-sharing
+    seam):
+
+      * Pinning new edge cases on the SAME ``Test*`` class
+        (``test_*`` methods, not new classes).
+      * Pinning helpers in the same file as the tests that use them
+        (the ``_unified_spawn_manager`` / ``_spawn_tool`` /
+        ``_snapshot_gate`` trio — extraction belongs in a
+        ``tests/helpers/unified_spawn_fixtures.py`` module if the
+        trio is needed by ≥3 test packs, see
+        tests/helpers/unified_spawn_fixtures.py for the canonical
+        home).
+
 """
 
 from __future__ import annotations
@@ -73,12 +104,20 @@ from daemon.repositories.snapshot.repository import SnapshotRepository
 from daemon.services.snapshot_executor import SnapshotExecutor
 from daemon.tools.snapshot_tools import (
     SNAPSHOT_STEERING_IGNORED_LINE,
+    SpawnSnapshotResolution,
     create_snapshot_tools,
+    format_snapshot_citation,
     is_snapshot_create_enabled,
 )
+from types import SimpleNamespace
 from tests.helpers.send_message_fixtures import (
     make_spawn_manager,
     patch_heavy_helpers,
+)
+from tests.helpers.unified_spawn_fixtures import (
+    build_spawn_tool as _build_spawn_tool,
+    make_unified_spawn_manager as _make_unified_spawn_manager,
+    steer_snapshot_gate as _snapshot_gate,
 )
 from tests.unit.tools._fakes import FakeAsyncMessageResult
 
@@ -310,7 +349,18 @@ def _run(coro: Any) -> Any:
 
 
 # ============================================================================
-# Unified-spawn helpers (unify-spawn-tools) — real factory, recorded manager
+# Unified-spawn helpers (unify-spawn-tools) — canonical home:
+# tests.helpers.unified_spawn_fixtures (extracted in the
+# unify-spawn-tools tidy pass, P4 #13). The pack's local
+# FakeCaptureService / FakeSearchService carry richer per-pack
+# fields (``calls`` list, capture_status override, etc.) that the
+# test assertions depend on, so we thread them through the helper's
+# ``capture_service`` / ``search_service`` kwargs. The local
+# ``_unified_spawn_manager`` / ``_spawn_tool`` / ``_snapshot_gate``
+# names are kept as thin wrappers so existing call-sites stay
+# byte-identical. The actual imports were hoisted to the top of
+# this file (with the other test helpers) — see the
+# ``tests.helpers.unified_spawn_fixtures`` import block.
 # ============================================================================
 
 
@@ -318,89 +368,26 @@ def _unified_spawn_manager(
     rows: dict[str, Any],
     repo: SnapshotRepository,
 ) -> Any:
-    """MagicMock manager wired for the UNIFIED ``spawn_instance`` tool.
-
-    Baseline: ``tests.helpers.send_message_fixtures.make_spawn_manager``
-    (the proven surface against the real ``create_instance_tools``
-    factory). Snapshot seams + the instance repo ride over in
-    FakeManager shapes; the spawn / metadata / enqueue recorders
-    append to ``m.events`` so the R6b+R18 ordering pins
-    (spawn → metadata → enqueue) stay assertable.
+    """Pack-specific thin wrapper — threads the local capture /
+    search fakes through the canonical helper. Kept under the
+    original underscore-prefixed name so existing call-sites are
+    byte-identical.
     """
-    m = make_spawn_manager()
-    m._snapshot_repo = repo
-    m._snapshot_service = FakeCaptureService()
-    m._snapshot_search_service = FakeSearchService()
-    m._snapshot_metrics_service = None
-    m._instance_repository = FakeInstanceRepo(rows)
-    m._project_repository = None
-    m.events = []
-    m.spawn_calls = []
-    m.metadata_calls = []
-    m.enqueue_calls = []
-    m.enqueue_raise: BaseException | None = None
-    m.enqueue_result: Any = _FakeAsyncMessageResult()
-
-    def _spawn(**kw: Any) -> tuple[str, str | None]:
-        m.events.append("spawn")
-        m.spawn_calls.append(dict(kw))
-        return ("new-inst-1", None)
-
-    def _meta(instance_id: str, updates: dict[str, Any]) -> None:
-        m.events.append("metadata")
-        m.metadata_calls.append((instance_id, dict(updates)))
-
-    async def _enqueue(**kw: Any) -> Any:
-        m.events.append("enqueue")
-        m.enqueue_calls.append(dict(kw))
-        if m.enqueue_raise is not None:
-            raise m.enqueue_raise
-        return m.enqueue_result
-
-    m.spawn_instance = _spawn
-    m.set_metadata_many = _meta
-    m.enqueue_message = _enqueue
-    return m
+    return _make_unified_spawn_manager(
+        rows,
+        repo,
+        capture_service=FakeCaptureService(),
+        search_service=FakeSearchService(),
+        async_message_result=_FakeAsyncMessageResult(),
+    )
 
 
 def _spawn_tool(manager: Any, caller_id: str = "caller-1", agent_id: str = "coder") -> Any:
-    """Build the unified ``spawn_instance`` tool bound to ``manager``.
-
-    Drives the REAL ``create_instance_tools`` factory under the shared
-    heavy-helper patch stack (RAG / MCP / project / job / … factories
-    disabled) and returns just the spawn_instance tool.
+    """Pack-specific thin wrapper — kept under the original
+    underscore-prefixed name so existing call-sites are
+    byte-identical.
     """
-    from daemon.tools.instance import create_instance_tools
-
-    patches = patch_heavy_helpers()
-    for _p in patches:
-        _p.start()
-    try:
-        all_tools = create_instance_tools(
-            manager, caller_id, agent_id=agent_id, version_tag=None
-        )
-    finally:
-        for _p in reversed(patches):
-            _p.stop()
-    for _t in all_tools:
-        if getattr(_t, "name", None) == "spawn_instance":
-            return _t
-    raise RuntimeError("spawn_instance tool not found")
-
-
-def _snapshot_gate(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
-    """Steer the TARGET-agent snapshot gate at its real seam.
-
-    The unified spawn body consults
-    ``daemon.tools.instance._target_snapshot_enabled``; tests steer
-    that module attribute directly. Gate-OFF tests that do NOT call
-    this helper go through the REAL registry consult (worker has no
-    ``snapshot_enabled`` → fail-closed False).
-    """
-    monkeypatch.setattr(
-        "daemon.tools.instance._target_snapshot_enabled",
-        lambda agent_id, version_tag=None: enabled,
-    )
+    return _build_spawn_tool(manager, caller_id=caller_id, agent_id=agent_id)
 
 
 def _gate(monkeypatch, enabled: bool) -> None:
@@ -1054,6 +1041,125 @@ class TestUnifiedSpawnSnapshot:
         assert "reason: verify-failed" in result
         assert "digest stamp write failed" in result
 
+    # ── composite-return byte-identity pins ────────────────────────────
+    # The unify-spawn-tools tidy pass replaced a 5-segment f-string
+    # concat with a ``"\n".join(...)`` protocol. Two segment-payload
+    # shapes were missed on the first cut (review finding #1 critical
+    # + #2 warning) — these pins lock the 2fa92fa8 (pre-tidy) byte
+    # shape so any future re-tidy can't silently reintroduce the
+    # deviation. The 145/145 happy-path suite never covered these
+    # seams because they only manifest on the parent→child + task
+    # composite path.
+
+    def test_pin_a_child_count_single_newline_legacy_shape(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Pin A — parent spawn with children: exactly ONE ``\n``
+        before ``"Child N of …"``.
+
+        Pre-tidy (2fa92fa8) contract:
+          ``Successfully spawned instance: <id>\\nChild 1 of 50\\n…``
+        The tidy pass naively made ``child_count_line`` its own
+        segment in ``"\\n".join(...)`` while it still carried a
+        leading ``\\n``, so every parent spawn emitted ``\\n\\nChild``
+        (double newline). Mirrors the existing ``fallback_notice``
+        treatment (``lstrip("\\n")``) to fix.
+        """
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        # ``caller_rows`` already contains ``inst-1`` with
+        # ``parent_id="caller-1"`` → ``child_count=1, limit=50``.
+        # The fixture's ``_FakeInstanceRepoShim`` only carries
+        # ``get()``; ``count_children`` is missing → ``_child_cap_status``
+        # swallows AttributeError → ``(None, limit)`` → no child line.
+        # Pin the count explicitly so we exercise the line. Also
+        # set the cap (the MagicMock-based manager's
+        # ``config.limits.max_children_per_instance`` returns 1 via
+        # MagicMock's default ``__int__`` — the real config has 50).
+        m.config.limits = SimpleNamespace(max_children_per_instance=50)
+        monkeypatch.setattr(
+            m._instance_repository,
+            "count_children",
+            lambda _parent_id: 1,
+            raising=False,
+        )
+        self._auth_ok(monkeypatch)
+        # Gate OFF (worker has no flag) keeps the output minimal —
+        # no snapshot line muddies the byte shape. Empty task to
+        # avoid the SKIPPED-branch noise (Pin B covers the task
+        # case).
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": None, "project_id": "p1"}
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert "Child 1 of 50" in result, (
+            f"child count line missing; got result:\n{result!r}"
+        )
+        # The fix: ONE newline before "Child" — never TWO.
+        assert "\n\nChild" not in result, (
+            "Pin A regressed: double newline before 'Child 1 of 50'. "
+            "child_count_line carried a leading \\n AND was its own "
+            "segment in the join protocol — fix is .lstrip('\\n') on "
+            "the segment value (see daemon/tools/instance.py "
+            "segments tuple)."
+        )
+        # Sanity: the header's own trailing \\n + child_count still
+        # produces the legacy two-line header shape.
+        assert (
+            "Successfully spawned instance: new-inst-1\nChild 1 of 50"
+            in result
+        ), (
+            "expected legacy 2fa92fa8 header shape "
+            f"<id>\\nChild 1 of 50\\n…; got:\n{result!r}"
+        )
+
+    def test_pin_b_dispatch_tail_glued_to_instruction_line(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Pin B — task-bearing spawn: ``dispatch_tail`` rides the
+        SAME line as the send_message instruction.
+
+        Pre-tidy (2fa92fa8) contract:
+          ``…message=\\"your message here\\") — auto-dispatched as
+            first turn …``
+        The tidy pass made ``dispatch_tail`` its own segment in the
+        join protocol, so the tail landed on its own line and the
+        seam emitted ``…\\n — auto-dispatched…`` (spurious newline).
+        Fix: glue ``{dispatch_tail}`` inline to the instruction
+        segment in the SAME tuple slot.
+        """
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        self._auth_ok(monkeypatch)
+        # Gate OFF, no snapshot, NO parent → minimal output: header
+        # + send_message instruction + R18 dispatch tail, nothing
+        # else. The dispatch tail MUST be glued to the instruction
+        # line.
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": "t", "project_id": "p1"}
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        # Task given + default auto_dispatch=True ⇒ the loud
+        # ``auto-dispatched as first turn`` tail.
+        assert "auto-dispatched as first turn" in result
+        # The fix: instruction's closing ``)`` glued DIRECTLY to the
+        # dispatch tail — NEVER a newline between them.
+        assert ') — auto-dispatched' in result, (
+            "Pin B regressed: dispatch tail lost its glue. "
+            "Expected `) — auto-dispatched…` substring (instruction "
+            "closing immediately followed by ' — auto-dispatched'). "
+            f"Got:\n{result!r}"
+        )
+        assert ')\n — auto-dispatched' not in result, (
+            "Pin B regressed: dispatch tail rendered on its own "
+            "line. dispatch_tail is a separate segment in the join "
+            "protocol — fix is to inline {dispatch_tail} into the "
+            "send_message instruction segment (see "
+            "daemon/tools/instance.py segments tuple)."
+        )
+
 
 # ============================================================================
 # R18 (2026-10-04) auto-dispatch — now carried by the unified
@@ -1161,7 +1267,6 @@ class TestR18AutoDispatch:
         )
         assert m.enqueue_calls == []
         assert "auto-dispatch" not in result
-        assert "auto_dispatch" not in result
         # The success prefix is byte-identical to the pre-unification
         # contract (modulo the child-cap line from the mock baseline).
         assert "Successfully spawned instance: new-inst-1" in result
@@ -1218,7 +1323,6 @@ class TestR18AutoDispatch:
     ):
         """Auth denial MUST NOT trigger an enqueue (no child exists)."""
         m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
-        self._auth_denied = None  # unused; local patch below
         monkeypatch.setattr(
             "daemon.tools.instance._check_team_membership",
             lambda caller, requested, tag=None: "agent 'x' is not in caller's team",
@@ -1343,6 +1447,114 @@ class TestR18AutoDispatch:
 # ============================================================================
 # R6b warm-path ordering + stamp content (unified spawn)
 # ============================================================================
+
+
+class TestFormatSnapshotCitationPins:
+    """unify-spawn-tools tidy pass (P2 #4 + #5).
+
+    Both pins are pure-unit: drive :func:`format_snapshot_citation`
+    directly with a hand-built :class:`SpawnSnapshotResolution`,
+    no manager / DB / fixture machinery required.
+    """
+
+    def test_non_str_domain_tags_render_belt_does_not_raise(self):
+        """Non-str elements in ``domain_tags`` must NOT raise
+        ``TypeError`` — the citation is rendered verbatim AFTER the
+        spawn succeeds, so a TypeError would mask success as
+        ``ERROR:``. The fix is a ``str(t)`` belt over the slice.
+
+        Pin integrity note: the previous tidy-pass shape assigned the
+        mixed list as a ``_FakeConsumed`` CLASS attribute AFTER
+        ``@dataclass`` decoration. The generated ``__init__`` had
+        ALREADY baked in the original default (``None``) at
+        decoration time, so ``_FakeConsumed()`` carried
+        ``domain_tags=None`` — the belt never ran and the test was
+        vacuous (passed because the tags slot was empty, not because
+        the str-coercion protected it). The repair sets the mixed
+        list on the INSTANCE (which is mutable post-construction
+        regardless of the dataclass default), so the tags
+        unambiguously reach ``format_snapshot_citation``'s
+        ``getattr(...) or []`` slice and the ``str(t)`` belt is
+        exercised for real.
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class _FakeConsumed:
+            id: str = "snap-x"
+            project_id: str = "p1"
+            domain_tags: list = None  # type: ignore[assignment]
+
+        # Mix str + int + None — would crash a bare ", ".join(...).
+        # Set on the INSTANCE so the str-coercion belt sees them;
+        # see the pin-integrity note above.
+        fake = _FakeConsumed()
+        fake.domain_tags = [
+            "kind:implementation",
+            42,
+            None,
+            "subsystem:upgrade-pipeline",
+        ]
+        resolution = SpawnSnapshotResolution(
+            consumed=fake,
+            staleness={"snapshot_age_days": 5, "freshness": "fresh"},
+        )
+        line = format_snapshot_citation(resolution)
+        # Success framing — no "ERROR" prefix, citation is the
+        # canonical warm line, and the warm path is byte-identical
+        # to the pre-tidy contract.
+        assert line.startswith("[snapshot] started: warm")
+        assert "ERROR" not in line
+        # Belt actually exercised — the integer 42 and None must be
+        # str-coerced and surface as "42" and "None" lexemes; if
+        # either is missing the belt was bypassed (vacuous pin) or
+        # a TypeError leaked.
+        assert "42" in line, f"str-coerced int missing from line: {line!r}"
+        assert "None" in line, f"str-coerced None missing from line: {line!r}"
+        # TypeError must not leak into the rendered text (would mask
+        # success as a fake error to the agent).
+        assert "TypeError" not in line
+
+    def test_unknown_age_when_staleness_is_none_or_age_missing(self):
+        """``age`` is ``None`` on unwired-service / staleness-raised
+        fail-soft paths. The fix substitutes ``"unknown"`` so the
+        line prints ``age unknown;`` instead of ``age None;``
+        (the trailing ``;`` comes from the staleness tuple format
+        — NOT a stray ``d`` from the original ``f"{age}d"``
+        template, which is dropped with the substitution).
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class _FakeConsumed:
+            id: str = "snap-x"
+            project_id: str = "p1"
+            domain_tags: list = None  # type: ignore[assignment]
+
+        _FakeConsumed.domain_tags = ["kind:implementation"]
+
+        # (a) staleness=None (unwired service)
+        r_none = SpawnSnapshotResolution(
+            consumed=_FakeConsumed(), staleness=None
+        )
+        line_none = format_snapshot_citation(r_none)
+        # The ``unknown`` lexeme replaces the bare ``age`` int; the
+        # trailing ``d`` from the original ``f"{age}d"`` template is
+        # dropped with the substitution (it's part of the int → text
+        # suffix, not a literal "d" character after the value).
+        assert "age unknown;" in line_none
+        assert "age None" not in line_none
+        assert "age Noned" not in line_none
+
+        # (b) staleness present but no snapshot_age_days (fail-soft path)
+        r_missing = SpawnSnapshotResolution(
+            consumed=_FakeConsumed(),
+            staleness={"freshness": "fresh"},
+        )
+        line_missing = format_snapshot_citation(r_missing)
+        assert "age unknown;" in line_missing
+        assert "age None" not in line_missing
+        assert "age Noned" not in line_missing
 
 
 class TestWarmPathOrdering:
@@ -1730,6 +1942,50 @@ class TestTargetSnapshotEnabledConsult:
         from daemon.tools.instance import _target_snapshot_enabled
 
         assert _target_snapshot_enabled("no-such-agent-xyz", None) is False
+
+    def test_fault_path_emits_warning_fail_closed(self, monkeypatch, caplog):
+        """unify-spawn-tools tidy pass (P2 #6) — silent sibling.
+
+        ``_target_snapshot_enabled`` had two silent ``except Exception``
+        belts that swallowed registry faults without a log line.
+        Sibling code paths (``_child_cap_status``,
+        ``resolve_spawn_snapshot``) all log; this consult is the
+        only outlier. Pin: an injected registry fault on BOTH
+        ``get_version`` AND ``get_resolved`` (the inner belt covers
+        only the versioned consult; the outer belt covers the
+        fallback too) emits a ``logger.warning`` naming the agent +
+        cause, AND the fail-closed semantics still hold (``False``).
+        """
+        from daemon.registry import get_registry
+        from daemon.tools.instance import _target_snapshot_enabled
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("simulated registry fault")
+
+        registry = get_registry()
+        monkeypatch.setattr(registry, "get_version", _boom)
+        monkeypatch.setattr(registry, "get_resolved", _boom)
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.tools.instance"
+        ):
+            result = _target_snapshot_enabled("tester", None)
+
+        # Fail-closed semantics preserved.
+        assert result is False
+        # Loud flag: WARNING landed naming the agent + cause.
+        matched = [
+            rec
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and "_target_snapshot_enabled" in rec.getMessage()
+            and "tester" in rec.getMessage()
+            and "simulated registry fault" in rec.getMessage()
+        ]
+        assert matched, (
+            "P2 #6 regression: expected WARNING naming agent + cause; "
+            f"got: {[r.getMessage() for r in caplog.records]}"
+        )
 
     def test_end_to_end_gate_off_via_real_registry(self, engine, caller_rows, monkeypatch):
         """Full-path gate OFF: NO monkeypatched gate — the real consult

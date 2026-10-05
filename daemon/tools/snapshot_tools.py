@@ -1086,17 +1086,32 @@ def format_snapshot_citation(
     """
     if resolution.started == "warm":
         consumed = resolution.consumed
+        # Defensive str-coercion belt: ``domain_tags`` is typed
+        # ``list[str]`` on the model, but ``Snapshot`` rows can come
+        # from search hits or stored JSONB that round-trip with
+        # mixed primitives. A bare ``", ".join(...)`` would raise
+        # ``TypeError`` on a non-str element AFTER a successful
+        # spawn, masking success — cast each item so the citation
+        # always renders. The first 8 are surfaced; cap stays the
+        # same.
         tags_text = ", ".join(
-            list(getattr(consumed, "domain_tags", None) or [])[:8]
+            str(t)
+            for t in list(getattr(consumed, "domain_tags", None) or [])[:8]
         )
         age = (
             resolution.staleness.get("snapshot_age_days")
             if resolution.staleness is not None
             else None
         )
+        # ``age`` stays ``None`` on unwired-service / staleness-raised
+        # fail-soft paths; rendering it bare would emit
+        # ``age Noned``. Substitute a stable lexeme instead.
+        age_text = (
+            f"{age}d" if isinstance(age, (int, float)) else "unknown"
+        )
         line = (
             f"[snapshot] started: warm — Warm-started from snapshot "
-            f"{consumed.id} (age {age}d; tags {tags_text})"
+            f"{consumed.id} (age {age_text}; tags {tags_text})"
         )
         # D8 cross-project marker — when the caller explicitly opted
         # in via ``allow_cross_project=True``, surface the

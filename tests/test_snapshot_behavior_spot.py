@@ -11,13 +11,16 @@ Spec contracts pinned here:
 * **R14 auto-fallback** (§4.3 / §6.3) — UPDATED by unify-spawn-tools
   (2026-10-05): the consumption surface is the unified
   ``spawn_instance`` tool (TARGET-agent ``snapshot_enabled`` gate);
-  the former 6-key dict / ``started: "blocked"`` contract is now the
-  ``[snapshot] started: warm|cold — …`` citation LINE on the tool's
-  STRING return (auth denials are the tool's plain ERROR strings).
-  The citation format is pinned:
-  - warm: ``"[snapshot] started: warm — Warm-started from snapshot {id} (age {n}d; tags …)…"``
+  the citation format is pinned:
+  - warm: ``"[snapshot] started: warm — Warm-started from snapshot {id} (age {n}; tags …)…"``
   - cold: ``"[snapshot] started: cold — No matching snapshot
     (searched: …; reason: no-hit | expired | verify-failed)…"``
+
+  Historical context (REMOVED contract): the pre-unification
+  ``spawn_hot_instance`` returned a 6-key dict whose ``started``
+  field was the citation source; that contract is gone — the
+  canonical surface is now the citation LINE on the tool's STRING
+  return (auth denials are the tool's plain ERROR strings).
 
 * **R12 supersession** (§6.3) — a SUPERSEDED snapshot is NEVER
   returned as a candidate. The explicit-id verify branch refuses
@@ -65,7 +68,6 @@ from daemon.repositories.snapshot.models import (
 )
 from daemon.repositories.snapshot.repository import SnapshotRepository
 from daemon.tools.snapshot_tools import (
-    SNAPSHOT_STEERING_IGNORED_LINE,
     create_snapshot_tools,
     is_snapshot_create_enabled,
 )
@@ -105,9 +107,15 @@ VALID_TAGS = [
     "subsystem:upgrade-pipeline",
 ]
 
-# The R14 result contract surface after unify-spawn-tools: the
-# ``[snapshot] started: …`` citation LINE (the 6-key dict contract
-# was removed with spawn_hot_instance).
+# Historical contract surface (REMOVED 2026-10-05 unify-spawn-tools):
+# the pre-unification ``spawn_hot_instance`` returned a 6-key dict
+# (``RESULT_KEYS``) whose ``started`` field was the citation source.
+# That contract is gone — the canonical surface is now the
+# ``[snapshot] started: warm|cold — …`` citation LINE appended to the
+# unified ``spawn_instance`` tool's STRING return (see the
+# spawn_instance tool docstring for the precise line shapes). The
+# citation prefixes below are the only surviving pinned surface;
+# the legacy RESULT_KEYS prose is intentionally dropped here.
 WARM_CITATION_PREFIX = "[snapshot] started: warm — Warm-started from snapshot "
 COLD_CITATION_PREFIX = "[snapshot] started: cold — No matching snapshot"
 
@@ -325,77 +333,49 @@ def _run(coro: Any) -> Any:
 
 
 def _snapshot_gate(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
-    """Steer the TARGET-agent snapshot gate at its real seam
-    (unify-spawn-tools) — ``daemon.tools.instance._target_snapshot_enabled``."""
-    monkeypatch.setattr(
-        "daemon.tools.instance._target_snapshot_enabled",
-        lambda agent_id, version_tag=None: enabled,
-    )
+    """Steer the TARGET-agent snapshot gate at its real seam.
+
+    Re-exported from the canonical helper
+    (``tests.helpers.unified_spawn_fixtures.steer_snapshot_gate``,
+    extracted in the unify-spawn-tools tidy pass, P4 #13). The
+    local definition is kept as a thin alias so existing
+    call-sites stay byte-identical.
+    """
+    from tests.helpers.unified_spawn_fixtures import steer_snapshot_gate
+
+    steer_snapshot_gate(monkeypatch, enabled)
 
 
 def _unified_spawn_manager(
     rows: dict[str, Any],
     repo: SnapshotRepository,
 ) -> Any:
-    """MagicMock manager wired for the UNIFIED ``spawn_instance`` tool.
-
-    Baseline: ``tests.helpers.send_message_fixtures.make_spawn_manager``.
-    Snapshot seams + the instance repo ride over in FakeManager shapes;
-    the spawn / metadata / enqueue recorders append to ``m.events``.
+    """Pack-specific thin wrapper — threads the local capture /
+    search fakes through the canonical helper. Kept under the
+    original underscore-prefixed name so existing call-sites are
+    byte-identical.
     """
-    m = make_spawn_manager()
-    m._snapshot_repo = repo
-    m._snapshot_service = FakeCaptureService()
-    m._snapshot_search_service = FakeSearchService()
-    m._snapshot_metrics_service = None
-    m._instance_repository = FakeInstanceRepo(rows)
-    m._project_repository = None
-    m.events = []
-    m.spawn_calls = []
-    m.metadata_calls = []
-    m.enqueue_calls = []
-    m.enqueue_result: Any = _FakeAsyncMessageResult()
+    from tests.helpers.unified_spawn_fixtures import (
+        make_unified_spawn_manager,
+    )
 
-    def _spawn(**kw: Any) -> tuple[str, str | None]:
-        m.events.append("spawn")
-        m.spawn_calls.append(dict(kw))
-        return ("new-inst-1", None)
-
-    def _meta(instance_id: str, updates: dict[str, Any]) -> None:
-        m.events.append("metadata")
-        m.metadata_calls.append((instance_id, dict(updates)))
-
-    async def _enqueue(**kw: Any) -> Any:
-        m.events.append("enqueue")
-        m.enqueue_calls.append(dict(kw))
-        return m.enqueue_result
-
-    m.spawn_instance = _spawn
-    m.set_metadata_many = _meta
-    m.enqueue_message = _enqueue
-    return m
+    return make_unified_spawn_manager(
+        rows,
+        repo,
+        capture_service=FakeCaptureService(),
+        search_service=FakeSearchService(),
+        async_message_result=_FakeAsyncMessageResult(),
+    )
 
 
 def _spawn_tool(manager: Any, caller_id: str = "caller-1", agent_id: str = "coder") -> Any:
-    """Build the unified ``spawn_instance`` tool bound to ``manager``
-    via the REAL ``create_instance_tools`` factory (heavy helpers
-    patched out)."""
-    from daemon.tools.instance import create_instance_tools
+    """Pack-specific thin wrapper — kept under the original
+    underscore-prefixed name so existing call-sites are
+    byte-identical.
+    """
+    from tests.helpers.unified_spawn_fixtures import build_spawn_tool
 
-    patches = patch_heavy_helpers()
-    for _p in patches:
-        _p.start()
-    try:
-        all_tools = create_instance_tools(
-            manager, caller_id, agent_id=agent_id, version_tag=None
-        )
-    finally:
-        for _p in reversed(patches):
-            _p.stop()
-    for _t in all_tools:
-        if getattr(_t, "name", None) == "spawn_instance":
-            return _t
-    raise RuntimeError("spawn_instance tool not found")
+    return build_spawn_tool(manager, caller_id=caller_id, agent_id=agent_id)
 
 
 def _gate(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:

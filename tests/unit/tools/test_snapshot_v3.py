@@ -84,6 +84,11 @@ from daemon.tools.snapshot_tools import (
     create_snapshot_tools,
     is_snapshot_create_enabled,
 )
+from tests.helpers.unified_spawn_fixtures import (
+    build_spawn_tool as _build_spawn_tool,
+    make_unified_spawn_manager as _make_unified_spawn_manager,
+    steer_snapshot_gate as _snapshot_gate,
+)
 from tests.unit.tools._fakes import FakeAsyncMessageResult
 
 
@@ -341,85 +346,46 @@ def _gate(monkeypatch, enabled: bool) -> None:
     )
 
 
-def _snapshot_gate(monkeypatch, enabled: bool) -> None:
-    """Steer the TARGET-agent snapshot gate at its real seam
-    (unify-spawn-tools) — ``daemon.tools.instance._target_snapshot_enabled``."""
-    monkeypatch.setattr(
-        "daemon.tools.instance._target_snapshot_enabled",
-        lambda agent_id, version_tag=None: enabled,
-    )
+# ============================================================================
+# Unified-spawn helpers (unify-spawn-tools) — canonical home:
+# tests.helpers.unified_spawn_fixtures (extracted in the
+# unify-spawn-tools tidy pass, P4 #13). The pack's local
+# FakeCaptureService / FakeSearchService carry richer per-pack
+# fields (``calls`` list, capture_status override, Wave-3 metrics
+# shape) that the test assertions depend on, so we thread them
+# through the helper's kwargs. The local
+# ``_unified_spawn_manager`` / ``_spawn_tool`` / ``_snapshot_gate``
+# names are kept as thin wrappers so existing call-sites stay
+# byte-identical. The actual imports were hoisted to the top of
+# this file (with the other test helpers) — see the
+# ``tests.helpers.unified_spawn_fixtures`` import block.
+# ============================================================================
 
 
 def _unified_spawn_manager(
     rows: dict[str, Any],
     repo: SnapshotRepository,
 ) -> Any:
-    """MagicMock manager wired for the UNIFIED ``spawn_instance`` tool.
-
-    Baseline: ``tests.helpers.send_message_fixtures.make_spawn_manager``.
-    Snapshot seams + the instance repo ride over in FakeManager shapes;
-    the spawn / metadata / enqueue recorders append to ``m.events`` so
-    the R6b+R18 ordering pins stay assertable.
+    """Pack-specific thin wrapper — threads the local capture /
+    search fakes through the canonical helper. Kept under the
+    original underscore-prefixed name so existing call-sites are
+    byte-identical.
     """
-    from tests.helpers.send_message_fixtures import make_spawn_manager
-
-    m = make_spawn_manager()
-    m._snapshot_repo = repo
-    m._snapshot_service = FakeCaptureService()
-    m._snapshot_search_service = FakeSearchService()
-    m._snapshot_metrics_service = None
-    m._instance_repository = FakeInstanceRepo(rows)
-    m._project_repository = None
-    m.events = []
-    m.spawn_calls = []
-    m.metadata_calls = []
-    m.enqueue_calls = []
-    m.enqueue_raise: BaseException | None = None
-    m.enqueue_result: Any = _FakeAsyncMessageResult()
-
-    def _spawn(**kw: Any) -> tuple[str, str | None]:
-        m.events.append("spawn")
-        m.spawn_calls.append(dict(kw))
-        return ("new-inst-1", None)
-
-    def _meta(instance_id: str, updates: dict[str, Any]) -> None:
-        m.events.append("metadata")
-        m.metadata_calls.append((instance_id, dict(updates)))
-
-    async def _enqueue(**kw: Any) -> Any:
-        m.events.append("enqueue")
-        m.enqueue_calls.append(dict(kw))
-        if m.enqueue_raise is not None:
-            raise m.enqueue_raise
-        return m.enqueue_result
-
-    m.spawn_instance = _spawn
-    m.set_metadata_many = _meta
-    m.enqueue_message = _enqueue
-    return m
+    return _make_unified_spawn_manager(
+        rows,
+        repo,
+        capture_service=FakeCaptureService(),
+        search_service=FakeSearchService(),
+        async_message_result=_FakeAsyncMessageResult(),
+    )
 
 
 def _spawn_tool(manager: Any, caller_id: str = "caller-1", agent_id: str = "coder") -> Any:
-    """Build the unified ``spawn_instance`` tool bound to ``manager``
-    via the REAL ``create_instance_tools`` factory (heavy helpers
-    patched out)."""
-    from daemon.tools.instance import create_instance_tools
-    from tests.helpers.send_message_fixtures import patch_heavy_helpers
-
-    patches = patch_heavy_helpers()
-    for _p in patches:
-        _p.start()
-    try:
-        all_tools = create_instance_tools(
-            manager, caller_id, agent_id=agent_id, version_tag=None
-        )
-    finally:
-        for _p in reversed(patches):
-            _p.stop()
-    for _t in all_tools:
-        if getattr(_t, "name", None) == "spawn_instance":
-            return _t
-    raise RuntimeError("spawn_instance tool not found")
+    """Pack-specific thin wrapper — kept under the original
+    underscore-prefixed name so existing call-sites are
+    byte-identical.
+    """
+    return _build_spawn_tool(manager, caller_id=caller_id, agent_id=agent_id)
 
 
 # ============================================================================

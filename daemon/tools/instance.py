@@ -1,11 +1,12 @@
 """Instance management tools for multi-agent orchestration.
 
-Module size: 5357 lines (2026-09-14 dispatch-lane stranding fix;
-+354 from agent-pause-resume-tools, 2026-09-24).
-Originally aimed for the 1000-3000 line band; post-move we are ~1600
-lines over the band. Routing logic (``_route_send_message``,
-``_make_workdir_aware``, ``_make_instance_id_aware``) and the tool
-factory (``create_instance_tools`` + its per-tool wrappers) remain
+Module size: ~6100 lines (post-unify-spawn-tools tidy pass,
+2026-10-05; +749 since the 2026-09-14 dispatch-lane stranding fix).
+Originally aimed for the 1000-3000 line band; post-move we are
+~3000 lines over the band (the >3000 band obligation applies).
+Routing logic (``_route_send_message``, ``_make_workdir_aware``,
+``_make_instance_id_aware``) and the tool factory
+(``create_instance_tools`` + its per-tool wrappers) remain
 co-located here for diff-review locality. The phase-3
 ``set_instance_tunable`` parent tool was extracted to
 ``daemon/tools/tunables.py`` (2026-09-13, M6 + size) — the tool's
@@ -15,7 +16,8 @@ two validation gates) and the move also let the write route through
 ``manager._instance_repository`` directly (D14 violation). A deeper
 structural split into ``daemon/tools/instance_routing.py`` +
 ``daemon/tools/instance_factory.py`` remains a ticketed follow-up;
-not done here.
+NOT done in the unify-spawn-tools tidy pass (deferred to a
+dedicated extraction PR).
 """
 
 import asyncio
@@ -816,12 +818,35 @@ def _target_snapshot_enabled(agent_id: str, version_tag: str | None) -> bool:
         meta = None
         try:
             meta = registry.get_version(agent_id, version_tag)
-        except Exception:  # noqa: BLE001 — registry faults fail closed
+        except Exception as exc:  # noqa: BLE001 — registry faults fail closed
+            # Log-only; sibling code paths (_child_cap_status,
+            # resolve_spawn_snapshot) all log on the fault path so
+            # operators can diagnose a misconfigured agent meta
+            # without giving up the fail-closed semantics.
+            logger.debug(
+                "_target_snapshot_enabled: get_version(%r, %r) raised: %s",
+                agent_id,
+                version_tag,
+                exc,
+            )
             meta = None
         if meta is None:
             meta = registry.get_resolved(agent_id)
         return bool(getattr(meta, "snapshot_enabled", False))
-    except Exception:  # noqa: BLE001 — fail-closed belt
+    except Exception as exc:  # noqa: BLE001 — fail-closed belt
+        # Loud flag (unify-spawn-tools tidy pass): the inner
+        # get_version fallback already swallows + logs at debug
+        # level. The outer belt was the silent sibling — surface a
+        # WARNING so an operator chasing a "snapshot_enabled
+        # ignored" symptom sees the actual cause. Behavior stays
+        # fail-closed (return False) so live callers are unaffected.
+        logger.warning(
+            "_target_snapshot_enabled(%r, %r) failed: %s — "
+            "snapshot warm-start gates remain closed (fail-closed belt)",
+            agent_id,
+            version_tag,
+            exc,
+        )
         return False
 
 
@@ -2405,14 +2430,38 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         default ``auto_dispatch=True``, the task is enqueued as the child's first
         turn automatically — do NOT send it again.)
 
-        Snapshot warm start (unify-spawn-tools): when the TARGET agent's meta.json
-        sets ``"snapshot_enabled": true``, you may pass ``snapshot_id``/``tags``/
-        ``verify``/``allow_cross_project`` to warm-start the child from a matching
-        snapshot; any miss/expiry/verify-failure degrades to a plain cold spawn and
-        the result carries a ``[snapshot] started: warm|cold — …`` citation line to
-        cite in your report. When the gate is off (default for most agents), those
-        params are ignored with a one-line notice and the spawn is a plain cold
-        spawn.
+        Snapshot warm start (unify-spawn-tools, canonical contract — every
+        prompt surface cites THIS paragraph; do not re-state it elsewhere):
+        when the TARGET agent is enabled for snapshot warm-starts (today:
+        tester + developer[v2]), you may pass ``snapshot_id``/``tags``/
+        ``verify``/``allow_cross_project`` to warm-start the child from a
+        matching snapshot; any miss / expiry / verify-failure degrades to
+        a plain cold spawn and the result carries a ``[snapshot] started:
+        warm|cold — …`` citation line to cite in your report.
+
+        Two-outcome precision for the return contract:
+
+        * gate OFF, NO ``snapshot_id``/``tags`` passed ⇒ NO
+          ``[snapshot] started:`` line is appended at all (plain
+          legacy cold spawn — exactly the pre-unification contract).
+        * gate OFF, ``snapshot_id``/``tags`` passed ⇒ exactly ONE
+          informational line (``[snapshot] ignored: …``) and the
+          spawn stays a plain cold spawn (steering is silently
+          dropped, never an error).
+        * gate ON, warm/cold ⇒ the ``[snapshot] started: warm|cold —
+          …`` citation line is appended (warm = snapshot id + age +
+          tags; cold = ``searched``/``reason``).
+        * auth/membership denials ⇒ plain ``ERROR: ...`` string (no
+          citation line — the spawn never happened).
+
+        The R18 auto-dispatch tail semantics (``auto-dispatched as
+        first turn`` on success; ``auto-dispatch SKIPPED: task was
+        empty`` when the task was whitespace; ``auto_dispatch=False:
+        caller MUST call send_message(...)`` on the legacy ritual;
+        ``auto-dispatch ERROR: ...`` on enqueue failure) are
+        documented in the per-tool ``_auto_dispatch_tail`` helper
+        alongside this docstring — the prompt surfaces link here for
+        the canonical statement of the citation / tail contract.
 
         Args:
             agent_id: Agent ID to spawn (e.g., 'developer', 'leader').
@@ -2722,10 +2771,6 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             #       given); the ``[snapshot] …`` citation line (gate on)
             #       or the steering-ignored notice is the FINAL line.
             # Legacy/no-tier/no-task return stays byte-identical.
-            tier_tail = ""
-            if tier_visibility_line:
-                tier_tail = f"\n{tier_visibility_line}"
-            note_tail = f"\n{note_supersede}" if note_supersede else ""
             dispatch_tail = _auto_dispatch_tail(
                 auto_dispatch=auto_dispatch,
                 task=task,
@@ -2737,13 +2782,58 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 snapshot_line = format_snapshot_citation(resolution)
             elif steering_note:
                 snapshot_line = steering_note
-            snapshot_tail = f"\n{snapshot_line}" if snapshot_line else ""
-            return (
-                f"Successfully spawned instance: {new_instance_id}{child_count_line}\n"
-                f"To communicate with this instance, use: send_message(instance_id=\"{new_instance_id}\", message=\"your message here\")"
-                f"{dispatch_tail}"
-                f"{fallback_notice or ''}{tier_tail}{note_tail}"
-                f"{snapshot_tail}"
+            # unify-spawn-tools tidy pass (P2 #7): replace the 5-segment
+            # f-string concat with a ``"\n".join(...)`` protocol so empty
+            # optional tails NEVER glue two rendered segments together.
+            # Each segment carries the exact byte shape from the
+            # 2fa92fa8 (pre-tidy) contract:
+            #
+            #   * ``child_count_line`` is ``.lstrip("\n")``'d before
+            #     joining so the rendered string has exactly ONE ``\n``
+            #     before "Child N of …" (not the double ``\n`` a naive
+            #     own-segment treatment would emit).
+            #   * ``dispatch_tail`` starts with ``" — "`` and is glued
+            #     inline to the send_message instruction segment (it
+            #     was always on the same line in 2fa92fa8, never its
+            #     own line — the join protocol would otherwise add a
+            #     spurious newline before the tail).
+            #   * The plain legacy path (gate-off, no task) still
+            #     renders only the two header lines — byte-identical
+            #     to the pre-tidy contract.
+            #
+            # ``join`` adds exactly one ``\n`` between segments so a
+            # missing tail (dispatch=="" / snapshot=="" /
+            # fallback_notice is None / …) leaves no separator gap to
+            # splice.
+            segments: tuple[str | None, ...] = (
+                # Header — always rendered.
+                f"Successfully spawned instance: {new_instance_id}",
+                # ``child_count_line`` carries a leading ``\n`` when
+                # non-empty; strip it so the join protocol controls
+                # separators and the rendered string stays
+                # byte-identical to 2fa92fa8.
+                child_count_line.lstrip("\n") or None,
+                # ``dispatch_tail`` glued inline so it stays on the
+                # SAME line as the send_message instruction (matches
+                # the 2fa92fa8 contract — the composite-return spec
+                # comment above already states this).
+                f"To communicate with this instance, use: "
+                f'send_message(instance_id="{new_instance_id}", '
+                f'message="your message here"){dispatch_tail}',
+                # ``fallback_notice`` (when set) carries a leading
+                # ``\n`` from ``_format_model_fallback_notice``;
+                # strip it so the join protocol controls separators.
+                fallback_notice.lstrip("\n") if fallback_notice else None,
+                tier_visibility_line or None,
+                note_supersede or None,
+                # ``snapshot_line`` (when set) is either
+                # ``format_snapshot_citation(...)`` (already
+                # bracketed as a single line, no leading ``\n``) or
+                # ``steering_note`` (already a single line).
+                snapshot_line or None,
+            )
+            return "\n".join(
+                line for line in segments if line
             )
         except ValueError as e:
             # Return text guidance instead of raising - agent can self-correct
