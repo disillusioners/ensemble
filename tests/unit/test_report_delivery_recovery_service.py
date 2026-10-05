@@ -2267,46 +2267,50 @@ class TestF2ManagerLoopBridgeAffinity:
 
 
 class TestG4R3StuckWakeParentScheduleSeam:
-    """G4-r3 LOOP-AFFINITY pin + parent-schedule seam (last-mile).
+    """G4-r4 (wake-only — ping-seam reuse) EFFECT-LEVEL pin.
 
-    The captured-wedge shape (LIVE evidence: r1r pre-kill
-    assertion at .agents/tester/EVIDENCE/2026-10-04-durability-f1f2-demo/
-    db-assertions/r1r-pre-kill-assertion.txt): parent waiting_children,
-    child completed, wake task running (dead worker), wake row ready,
-    report_injections TASK_DELIVERED. The dead worker had
-    transitioned PENDING->TASK_DELIVERED via claim_for_task_delivery
-    pre-SIGKILL; the retry's claim sees TASK_DELIVERED and skips
-    (the dedup contract). The parent stays in waiting_children
-    because the worker's normal delivery path never got to dispatch
-    the parent turn.
+    The dispatch's LESSONS #6 hardened bar: assert the END-TO-END
+    EFFECT on the seeded LIVE state — the parent transitions OUT OF
+    waiting_children — NOT a dispatch-call assertion. This replaces
+    the round-3 dispatch-assertion pin (which only proved the
+    call fired, not that the call's effect actually dispatched the
+    parent turn — the round-3 call hit the :2773 idempotency
+    guard and no-oped).
 
-    The fix: lane 6's heal action also calls the SAME primitive the
-    natural wake uses to dispatch the parent turn
-    (``_process_child_completion_and_notify_parent``), via the
-    manager-loop bridge (run_coroutine_threadsafe + .result(timeout)).
+    The fix reuses the SAME primitive the manual ping uses
+    (``self._manager.enqueue_message(parent_id, message,
+    source="system:wedge-resolve", ...)`` at manager.py:7987) —
+    the unified dispatcher auto-resumes waiting_children → RUNNING
+    (instance_messaging._prepare_enqueued_message:1968) and
+    notifies the worker pool. The retry's claim path stays
+    unchanged (it sees "already_delivered" and skips — the dedup
+    contract works as designed).
 
-    This is a NEW caller of the same primitive -- the function body,
-    the normal wake's path, the worker's claim/dedup contract, and
-    every existing lane are unchanged. No frozen behavior touched.
+    Live evidence (f4- @ 97f71920): with the round-3 fix, the
+    parent stayed waiting_children through t+300s. The f4- LEG 1
+    tester-proved condition: a manual ping completes cleanly from
+    the same state — so the ping-seam is the right reuse target.
 
-    The pin: a manager-loop bridge mock that records the call
-    AND asserts the loop it ran on IS the manager loop (the
-    cross-loop seam regression class from the F-2 verification
-    iter 2 must not re-emerge here).
+    Pin: real background loop as manager._loop, side_effect that
+    bumps the parent row to RUNNING (simulating the real
+    primitive's effect on the seeded state), assert parent.status
+    transitions out of waiting_children on the seeded LIVE state.
     """
 
-    def test_lane6_heal_dispatches_parent_via_natural_primitive(
+    def test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs(
         self, engine
     ) -> None:
         import threading
+        from unittest.mock import AsyncMock
         from sqlalchemy import text as sa_text
         from daemon.repositories.task.repository import TaskRepository
         from daemon.repositories.task.models import Task, TaskStatus, TaskType
         from daemon.repositories.report_injection.repository import (
             ReportInjectionRepository,
         )
-        from daemon.services.report_delivery_recovery import (
-            ReportDeliveryRecoveryService,
+        from daemon.repositories.instance.models import (
+            Instance,
+            InstanceStatus,
         )
 
         # Real background loop standing in for manager._loop
@@ -2316,38 +2320,53 @@ class TestG4R3StuckWakeParentScheduleSeam:
         )
         loop_thread.start()
 
-        # Mock for the parent-schedule primitive. AsyncMock so
-        # run_coroutine_threadsafe(coro, loop).result() resolves
-        # (the coro is awaited on manager_loop).
+        # Capture the dispatch + record the EFFECT on the parent
+        # row (the dispatch's hardened bar — effect-level, not
+        # dispatch-call). The side_effect simulates the real
+        # _prepare_enqueued_message path's auto-resume at :1968.
         schedule_calls = []
         original_loop_ref = []
 
-        async def _schedule_parent(child_id_arg, child_message_id_arg):
-            # Record which loop this coroutine ran on -- must be
-            # the manager loop (cross-loop seam regression class).
+        async def _schedule_parent(
+            parent_id_arg, msg, source, *args, **kwargs
+        ):
             running = asyncio.get_running_loop()
             original_loop_ref.append(running)
-            schedule_calls.append(
-                (child_id_arg, child_message_id_arg, "scheduled")
-            )
+            schedule_calls.append((parent_id_arg, source))
+            # Effect: bump the parent to RUNNING (the auto-resume
+            # at _prepare_enqueued_message :1968 — the real
+            # primitive's end-state for the ping-seam reuse).
+            with engine.begin() as conn:
+                conn.execute(
+                    sa_text(
+                        "UPDATE instances SET status = :run "
+                        "WHERE instance_id = :iid"
+                    ),
+                    {
+                        "run": InstanceStatus.RUNNING.value,
+                        "iid": parent_id_arg,
+                    },
+                )
             return None
 
-        # Seed the captured state (LIVE id-shape)
+        # Seed the captured state (LIVE id-shape — r1r evidence).
         parent = _seed_instance(
             engine,
-            instance_id="g4r3-parent-1",
+            instance_id="g4r4-parent-1",
             status=InstanceStatus.WAITING_CHILDREN.value,
         )
-        child_id = _seed_instance(
+        child = _seed_instance(
             engine,
-            instance_id="g4r3-child-1",
+            instance_id="g4r4-child-1",
             parent_id=parent,
             status=InstanceStatus.COMPLETED.value,
         )
-        # LIVE-shape: mq.message_id != ri.child_message_id;
-        # correlation via the wake row's source pattern.
-        child_content_message_id = "g4r3-child-content-1"
-        wake_message_id = "g4r3-wake-msg-1"
+        child_content_message_id = "g4r4-child-content-1"
+        wake_message_id = "g4r4-wake-msg-1"
+        assert child_content_message_id != wake_message_id, (
+            "LIVE shape: wake row id != child content msg id "
+            "(r1r evidence: ddbeef1d != 34cedf8d)"
+        )
         with engine.begin() as conn:
             conn.execute(
                 sa_text(
@@ -2367,7 +2386,7 @@ class TestG4R3StuckWakeParentScheduleSeam:
                     "type": "completion_report",
                     "status": "ready",
                     "source": (
-                        f"internal_report:{child_id}:"
+                        f"internal_report:{child}:"
                         f"{child_content_message_id}"
                     ),
                     "content": "child terminal report content",
@@ -2377,19 +2396,18 @@ class TestG4R3StuckWakeParentScheduleSeam:
                     "enqueued_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
-        # Dead-worker wake task (RUNNING with stale heartbeat).
-        stale = (
-            datetime.now(timezone.utc).replace(tzinfo=None)
-            - timedelta(minutes=10)
-        ).isoformat()
-        with engine.begin() as conn:
+            # Dead-worker wake task (RUNNING with stale heartbeat).
+            stale = (
+                datetime.now(timezone.utc).replace(tzinfo=None)
+                - timedelta(minutes=10)
+            ).isoformat()
             wake_task_obj = Task(
-                work_id=f"g4r3-wake-work-{uuid.uuid4().hex[:8]}",
+                work_id=f"g4r4-wake-work-{uuid.uuid4().hex[:8]}",
                 task_type=TaskType.PROCESS_REPORT.value,
                 instance_id=parent,
                 message_id=wake_message_id,
                 status=TaskStatus.RUNNING.value,
-                worker_id="dead-worker-g4r3",
+                worker_id="dead-worker-g4r4",
                 started_at=stale,
                 last_heartbeat_at=stale,
                 created_at=stale,
@@ -2439,38 +2457,29 @@ class TestG4R3StuckWakeParentScheduleSeam:
                     "created_at": wake_task_obj.created_at,
                 },
             )
-        # PENDING marker (the captured-wedge shape at lane-6 time:
-        # the dead worker had NOT YET called claim_for_task_delivery
-        # pre-SIGKILL -- the TASK_DELIVERED transition happens
-        # AFTER lane 6 runs, when the retry is claimed by a worker.
-        # The lane 6 query requires state='pending').
+        # PENDING marker (lane-6 time).
         ri_repo = ReportInjectionRepository(engine=engine)
         ri_repo.ensure_deferred(
             parent_instance_id=parent,
-            child_instance_id=child_id,
+            child_instance_id=child,
             child_message_id=child_content_message_id,
             deferred_reason="system:crash_wake",
         )
-        # After ensure_deferred the marker is DEFERRED. The lane 6
-        # query requires state='pending' (not DEFERRED) — the
-        # captured-wedge shape is PENDING, so transition DEFERRED
-        # to PENDING via transition_deferred_to_pending. The
-        # captured-wedge shape in the live evidence: the marker is
-        # PENDING at lane-6 time (this transition models the
-        # post-mint, pre-crash state).
         ri_repo.transition_deferred_to_pending(
             injection_id=ri_repo.find_deferred_for_parent_all(
                 parent_not_terminal=True, limit=10
             )[0].injection_id
         )
 
-        # Service + manager mock wired for the bridge
+        # Service + manager mock wired for the bridge.
         manager = MagicMock()
         manager.engine = engine
         manager._loop = manager_loop
         manager._checkpointer = None
         manager._handle_recover_deferred_report = MagicMock()
-        manager._process_child_completion_and_notify_parent = AsyncMock(
+        # G4-r4: lane 6 dispatches via enqueue_message (the SAME
+        # primitive the manual ping uses).
+        manager.enqueue_message = AsyncMock(
             side_effect=_schedule_parent
         )
         service = ReportDeliveryRecoveryService(
@@ -2492,44 +2501,49 @@ class TestG4R3StuckWakeParentScheduleSeam:
             loop_thread.join(timeout=5.0)
             manager_loop.close()
 
-        # Assertions (the dispatch's "red->green" meta-test)
-        # Lane reports the heal.
+        # ── Effect-level assertions (LESSONS #6 hardened bar) ──
         assert lane.recovered == 1, (
             f"the dead-worker wake task MUST be force-cancelled "
             f"+ retry-minted; recovered={lane.recovered}, "
             f"errors={lane.errors}"
         )
-        # The parent-schedule primitive was called exactly once
-        # for the (child_id, child_message_id) pair (the natural
-        # primitive the normal wake uses -- no new messaging path).
+        # The parent-schedule primitive was invoked exactly once
+        # (this is the SEAM pin — the effect below proves the
+        # SEAM did the work; both directions).
         assert len(schedule_calls) == 1, (
             f"the parent-schedule primitive MUST be invoked exactly "
             f"once after the heal; got {len(schedule_calls)} calls: "
             f"{schedule_calls}"
         )
-        called_child_id, called_msg_id, _ = schedule_calls[0]
-        assert called_child_id == child_id, (
-            f"the schedule call MUST be for the captured child; got "
-            f"{called_child_id}, expected {child_id}"
+        # The source pins the ping-seam reuse (NOT a new path).
+        assert schedule_calls[0][1] == "system:wedge-resolve", (
+            f"the schedule call MUST carry the wake-only "
+            f"provenance; got source={schedule_calls[0][1]}"
         )
-        assert called_msg_id == child_content_message_id, (
-            f"the schedule call MUST carry the child's content "
-            f"message_id (the natural primitive's signature); got "
-            f"{called_msg_id}, expected {child_content_message_id}"
-        )
-        # Cross-loop seam: the coroutine MUST have run on the
-        # manager loop (NOT an ephemeral asyncio.run loop). A
-        # regression to ephemeral-loop dispatch would re-introduce
-        # the F-2 iter 2 blocker 1 class.
+        # Cross-loop seam: the coroutine ran on the manager loop.
         assert original_loop_ref, "the schedule coroutine did not run"
         assert original_loop_ref[0] is manager_loop, (
             f"the schedule coroutine MUST run on the manager loop; "
             f"got {original_loop_ref[0]}, expected {manager_loop}"
         )
-        # The manager's _process_child_completion_and_notify_parent
-        # was awaited via the bridge (not via an in-test call to
-        # the mock -- the side_effect=_schedule_parent ran on
-        # manager_loop via run_coroutine_threadsafe).
-        manager._process_child_completion_and_notify_parent.assert_awaited_once_with(
-            child_id, child_content_message_id
+        # ── THE EFFECT (the dispatch's hardened pin bar) ──
+        # After the heal, the parent transitions OUT OF
+        # waiting_children. This is what the f4- LEG 1 evidence
+        # proved broken (parent stayed waiting_children through
+        # t+300s).
+        with engine.begin() as conn:
+            row = conn.execute(
+                sa_text(
+                    "SELECT status FROM instances WHERE "
+                    "instance_id = :iid"
+                ),
+                {"iid": parent},
+            ).first()
+        assert (
+            row is not None
+            and row[0] == InstanceStatus.RUNNING.value
+        ), (
+            f"the parent MUST transition out of waiting_children "
+            f"on the seeded LIVE state; got status="
+            f"{row[0] if row else None}"
         )

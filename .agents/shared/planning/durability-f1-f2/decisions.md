@@ -998,19 +998,95 @@ The following seams are documented as **NEVER** direct-call entry points from an
 
 **Settling citation.** Explorer A W-1 CONFIRMED + W-5 CONFIRMED; Explorer B Q1-Q4; Explorer C Q1-Q4; the deferred-marker path's documented caller census at `report_delivery_recovery.py:735/:1016/:1119` + `manager.py:10780` (RESUME ROUTER revival-first precedent at `:10716-10753`).
 
-**§12d companion note — Lane-6 exception (G4-r3, 2026-10-05; commit ``4b601955``).** The seam-(a) blanket prohibition above is UNCHANGED for every other caller. **The ONE explicit exception is `_run_stuck_wake_lane`** (at `daemon/services/report_delivery_recovery.py:985` in the 4b601955 snapshot), which calls `self._manager._process_child_completion_and_notify_parent(child_id, child_message_id)` DIRECTLY, POST-materialization, from the sweep thread via the sanctioned manager-loop bridge (`run_coroutine_threadsafe(...).result(8.0)` — the same pattern as `_handle_recover_deferred_report` at `manager.py:8586-8596` and the revival seam at `manager.py:9118`).
+**§12d companion note — Lane-6 exception (G4-r4, 2026-10-05;
+ commit this commit; supersedes the G4-r3 note at commit
+ ``4b601955``).** The seam-(a) blanket prohibition above is
+ UNCHANGED for every other caller. **The ONE explicit
+ exception is `_run_stuck_wake_lane`** (at
+ `daemon/services/report_delivery_recovery.py:1041` — the
+ dispatch site in the 4b601955/b1d222e6 snapshot), which
+ calls `self._manager.enqueue_message(parent_id, message,
+ source="system:wedge-resolve", priority=1)` DIRECTLY from
+ the sweep thread via the sanctioned manager-loop bridge
+ (`run_coroutine_threadsafe(...).result(8.0)` — the same
+ pattern as `_handle_recover_deferred_report` at
+ `manager.py:8586-8596` and the revival seam at
+ `manager.py:9118`).
+
+  **Why `enqueue_message` (supersedes the round-3 call to
+  `_process_child_completion_and_notify_parent`):** the
+  round-3 primitive short-circuits on the FROZEN
+  `child_reports.py:2773-2787` idempotency guard (the child
+  is ALREADY terminal — completed naturally pre-kill — so
+  the guard returns `idempotency_skip` and the primitive's
+  step-3 wake row is never created; live-proven by the F-4
+  LEG 1 log at 07:13:24:
+  `_process_child_completion_and_notify_parent called:`
+  `instance=fb23ca4f..., message_id=334e080b` →
+  `already in terminal state (completed), skipping...`). The
+  wake-only primitive (`enqueue_message`) does NOT hit that
+  guard: it auto-resumes the parent to RUNNING via
+  `instance_messaging._prepare_enqueued_message` at `:1968`
+  (`waiting_children → RUNNING`) and notifies the worker
+  pool via `safe_notify_all_pools` — exactly the seam the
+  MANUAL PING uses (the F-4 LEG 1 tester evidence proved a
+  manual ping completes cleanly from this exact state).
 
   **Sanctioned because:**
 
-  (i) The artifacts already exist — minted by the NATURAL flow pre-crash and preserved across the wipe (the `report_injections` row is in state `task_delivered` / `pending`; the wake row is in `message_queue` with status `ready` preserved by the F-1 epoch-belt; the wake task is in `task` with status `running` preserved by the same F-1 amendment). This call does NOT mint new artifacts — it dispatches the parent graph turn for the artifacts the natural flow already created and the dead worker died before delivering.
+  (i) The artifacts already exist — minted by the NATURAL
+      flow pre-crash and preserved across the wipe (the
+      `report_injections` row is in state `task_delivered` /
+      `pending`; the wake row is in `message_queue` with
+      status `ready` preserved by the F-1 epoch-belt). This
+      call does NOT mint new artifacts — it dispatches the
+      parent graph turn for the artifacts the natural flow
+      already created and the dead worker died before
+      delivering.
 
-  (ii) The argument order is test-locked — the child-id-first hazard is pinned by `tests/unit/test_report_delivery_recovery_service.py::TestG4R3StuckWakeParentScheduleSeam::test_lane6_heal_dispatches_parent_via_natural_primitive` which asserts `assert_awaited_once_with(child_id, child_content_message_id)` and the cross-loop seam pin (the coroutine must run on the manager loop, not an ephemeral `asyncio.run` loop — the F-2 iter 2 blocker 1 class must not re-emerge).
+  (ii) The `enqueue_message` call is test-locked by
+       `tests/unit/test_report_delivery_recovery_service.py::
+       TestG4R3StuckWakeParentScheduleSeam::
+       test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs`
+       — the EFFECT-level pin (per LESSONS #6 hardened bar,
+       replacing the round-3 dispatch-call assertion which
+       was the 4th consecutive LESSONS-#6 instance). The pin
+       asserts: (a) the call fires exactly once with source
+       `system:wedge-resolve` (the manual-ping provenance);
+       (b) the cross-loop seam (the coroutine runs on the
+       manager loop, not an ephemeral `asyncio.run` loop);
+       (c) the parent's `instances.status` row transitions
+       OUT OF `waiting_children` on the seeded LIVE state.
+       Meta-test BOTH directions verified (revert → RED;
+       restore → GREEN).
 
-  (iii) The primitive is idempotent / dedup-absorbing (W6 marker absorb on the obligation-triple unique index; wake-row dedup via `message_id` / `work_id`; the `child_reports.py:2773-2787` child-status guard returns `idempotency_skip` on re-entry — no exception, no erase, no duplicate). A second invocation is a no-op.
+  (iii) The primitive is idempotent — `enqueue_message`
+        mints a fresh UUID for every new message; the wake
+        row's original UUID is preserved. The retry's claim
+        path stays unchanged (the parent's RUNNING transition
+        unblocks the per-instance busy guard; the worker's
+        `already_delivered` skip is the dedup contract
+        working as designed).
 
-  (iv) The round-3 leader commission explicitly authorized this seam ("schedule the parent's graph turn upon lane-6 injection delivery" — see the G4-r3 commission brief).
+  (iv) The round-4 leader commission explicitly authorized
+       this seam ("wake-only dispatch via the ping seam" —
+       see the G4-r4 commission brief + the
+       manual-ping-seam identification at
+       `instance_messaging.py:2108` / `manager.py:7987`).
 
-  **Without this exception, the captured-wedge shape (marker TASK_DELIVERED + wake row ready + dead-worker wake task — the F-3 LEG 1 evidence) is unreachable: the worker's claim path sees `already_delivered` and correctly skips the parent-schedule step per the dedup contract. The next review would flag this call as a seam-(a) violation; a future cleanup would remove the heal.** Cross-reference: the module-head W-2 block at `daemon/services/report_delivery_recovery.py:55+` carries the same dated exception text; live proof lands at the tester's LEG-1 re-gate (their scope after the fix = LEG 1 only per the merge-gate record).
+  **Without this exception, the captured-wedge shape (marker
+  TASK_DELIVERED + wake row ready + dead-worker wake task +
+  parent waiting_children — the F-4 LEG 1 evidence) is
+  unreachable: the retry's claim sees `already_delivered` and
+  skips per the dedup contract, and the round-3 primitive's
+  idempotency guard short-circuits before the wake row is
+  created. The next review would flag this call as a
+  seam-(a) violation; a future cleanup would remove the heal.**
+  Cross-reference: the module-head W-2 block at
+  `daemon/services/report_delivery_recovery.py:68+` carries
+  the same dated exception text. Live proof lands at the
+  tester's LEG-1 re-gate (their scope after the fix = LEG 1
+  only per the merge-gate record).
 
 ---
 

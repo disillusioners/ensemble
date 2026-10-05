@@ -380,22 +380,20 @@ def _build_pg_service(
     # tests wire a real checkpointer + manager loop explicitly.
     manager._checkpointer = None
     manager._handle_recover_deferred_report = MagicMock()
-    # G4-r3 last-mile seam: lane 6 bridges to the manager's
-    # event loop and invokes the SAME primitive the natural wake
-    # uses to dispatch the parent turn
-    # (``_process_child_completion_and_notify_parent``). The
-    # test infrastructure here is mechanical (no PG-side check
-    # that the parent is actually scheduled — that is pinned by
-    # the unit test in
-    # tests/unit/test_report_delivery_recovery_service.py::
-    # TestG4R3StuckWakeParentScheduleSeam). Wire the mock to a
-    # no-op coroutine so the bridge call resolves without raising;
-    # the unit test pins the actual call shape.
-    async def _no_op_schedule(_child_id, _child_message_id):
+    # G4-r4 last-mile seam: lane 6 bridges to the manager's
+    # event loop and invokes ``enqueue_message`` (the SAME
+    # primitive the manual ping uses — the unified dispatcher
+    # auto-resumes waiting_children → RUNNING at :1968).
+    # The test infrastructure here is mechanical (no PG-side
+    # check that the parent is actually scheduled — the EFFECT
+    # pin lives at tests/unit/test_report_delivery_recovery_
+    # service.py::TestG4R3StuckWakeParentScheduleSeam).
+    # Wire the mock to a no-op coroutine so the bridge call
+    # resolves without raising; the unit test pins the
+    # schedule call shape + the effect.
+    async def _no_op_enqueue(_instance_id, _message, **kwargs):
         return None
-    manager._process_child_completion_and_notify_parent = (
-        AsyncMock(side_effect=_no_op_schedule)
-    )
+    manager.enqueue_message = AsyncMock(side_effect=_no_op_enqueue)
 
     service = ReportDeliveryRecoveryService(
         task_repo=task_repo,
@@ -2357,20 +2355,21 @@ class TestBlock1G4StuckWakeHealOnPG:
         manager.engine = pg_engine_3_6
         manager._checkpointer = None
         manager._handle_recover_deferred_report = MagicMock()
-        # G4-r3 last-mile: lane 6 calls the SAME primitive the
-        # normal wake uses to dispatch the parent turn
-        # (``_process_child_completion_and_notify_parent``) via the
-        # manager-loop bridge. The unit test
+        # G4-r4 last-mile: lane 6 dispatches the parent-schedule
+        # via enqueue_message (the SAME primitive the manual
+        # ping uses; the auto-resume bumps waiting_children →
+        # RUNNING at instance_messaging.py:1968). The unit test
         # tests/unit/test_report_delivery_recovery_service.py::
-        # TestG4R3StuckWakeParentScheduleSeam pins the call shape +
-        # loop affinity. Wire the PG-test manager to a no-op
-        # coroutine so the bridge resolves without raising; this
-        # test focuses on the heal mechanics (cancel + retry +
-        # preserve), not the schedule primitive.
-        async def _no_op_schedule(_child_id, _child_message_id):
+        # TestG4R3StuckWakeParentScheduleSeam pins the schedule
+        # call + the EFFECT on the seeded state. Wire the
+        # PG-test manager to a no-op coroutine so the bridge
+        # resolves without raising; this test focuses on the
+        # heal mechanics (cancel + retry + preserve), not the
+        # schedule primitive.
+        async def _no_op_enqueue(_instance_id, _message, **kwargs):
             return None
-        manager._process_child_completion_and_notify_parent = (
-            AsyncMock(side_effect=_no_op_schedule)
+        manager.enqueue_message = AsyncMock(
+            side_effect=_no_op_enqueue
         )
         service = ReportDeliveryRecoveryService(
             task_repo=task_repo,
@@ -2400,10 +2399,16 @@ class TestBlock1G4StuckWakeHealOnPG:
         assert cand["child_message_id"] == child_content_message_id
 
         # ── The heal ─────────────────────────────────────────────────
-        # G4-r3: lane 6 bridges to a real background loop standing
+        # G4-r4: lane 6 bridges to a real background loop standing
         # in for ``manager._loop`` so the parent-schedule call
         # resolves (the loop must be LIVE on a background thread
         # or the bridge's ``.result(timeout=8)`` never resolves).
+        # The PG test focuses on the heal mechanics (cancel +
+        # retry + preserve), not the schedule primitive (the
+        # unit test in
+        # tests/unit/test_report_delivery_recovery_service.py::
+        # TestG4R3StuckWakeParentScheduleSeam pins the schedule
+        # call + the EFFECT on the seeded state).
         with _manager_loop() as loop:
             service._manager._loop = loop
             lane = service._run_stuck_wake_lane()

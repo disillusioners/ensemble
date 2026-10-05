@@ -65,62 +65,88 @@ above is a deterministic deadlock (b), a silent no-op or
 wrong-grandparent mint (a), an asyncio loop violation (c), or a
 context-less dispatcher call (d).
 
-**LANE-6 EXCEPTION (G4-r3, 2026-10-05; commit ``4b601955``,
-``decisions.md §12d`` companion note).** The seam-(a) blanket
-prohibition above is UNCHANGED for every other caller. **The
-ONE explicit exception is ``_run_stuck_wake_lane``** (this
-module, at :985), which calls
-``self._manager._process_child_completion_and_notify_parent(
-child_id, child_message_id)`` DIRECTLY, POST-materialization,
-from the sweep thread via the sanctioned manager-loop bridge
-(``run_coroutine_threadsafe(...).result(8.0)`` — the same
-pattern as ``_handle_recover_deferred_report`` at
-``manager.py:8586-8596`` and the revival seam at
-``manager.py:9118``).
+**LANE-6 EXCEPTION (G4-r4, 2026-10-05; commit this commit,
+ ``decisions.md §12d`` companion note; supersedes the
+ G4-r3 exception at commit ``4b601955``).** The seam-(a)
+ blanket prohibition above is UNCHANGED for every other
+ caller. **The ONE explicit exception is
+ ``_run_stuck_wake_lane``** (this module, at :1041 —
+ the dispatch site), which calls
+ ``self._manager.enqueue_message(parent_id, message,
+ source="system:wedge-resolve", priority=1)`` DIRECTLY from
+ the sweep thread via the sanctioned manager-loop bridge
+ (``run_coroutine_threadsafe(...).result(8.0)`` — the same
+ pattern as ``_handle_recover_deferred_report`` at
+ ``manager.py:8586-8596`` and the revival seam at
+ ``manager.py:9118``).
+
+  **Why ``enqueue_message`` (and not the G4-r3 call to
+  ``_process_child_completion_and_notify_parent``):** the
+  round-3 primitive short-circuits on the FROZEN
+  ``child_reports.py:2773-2787`` idempotency guard (the
+  child is ALREADY terminal — completed naturally pre-kill
+  — so the guard returns ``idempotency_skip`` and the
+  primitive's step-3 wake row is never created). The
+  wake-only primitive (``enqueue_message``) does NOT hit
+  that guard: it auto-resumes the parent to RUNNING via
+  ``instance_messaging._prepare_enqueued_message`` at
+  ``:1968`` (``waiting_children → RUNNING``) and notifies
+  the worker pool via ``safe_notify_all_pools`` — exactly
+  the seam the MANUAL PING uses (the F-3 LEG 1 tester
+  evidence proved a manual ping completes cleanly from this
+  exact state).
 
   **Sanctioned because:**
 
-  (i) The artifacts already exist — minted by the NATURAL flow
-      pre-crash and preserved across the wipe (the
-      ``report_injections`` row is in state `task_delivered` /
-      `pending`; the wake row is in ``message_queue`` with status
-      ``ready`` preserved by the F-1 epoch-belt; the wake task is
-      in ``task`` with status ``running`` preserved by the same
-      F-1 amendment). This call does NOT mint new artifacts —
-      it dispatches the parent graph turn for the artifacts the
-      natural flow already created and the dead worker died
-      before delivering.
+  (i) The artifacts already exist — minted by the NATURAL
+      flow pre-crash and preserved across the wipe (the
+      ``report_injections`` row is in state ``task_delivered``
+      / ``pending``; the wake row is in ``message_queue`` with
+      status ``ready`` preserved by the F-1 epoch-belt). This
+      call does NOT mint new artifacts — it dispatches the
+      parent graph turn for the artifacts the natural flow
+      already created and the dead worker died before
+      delivering.
 
-  (ii) The argument order is test-locked — the child-id-first
-       hazard is pinned by
+  (ii) The ``enqueue_message`` call is test-locked —
        ``tests/unit/test_report_delivery_recovery_service.py::
        TestG4R3StuckWakeParentScheduleSeam::
-       test_lane6_heal_dispatches_parent_via_natural_primitive``
-       which asserts
-       ``assert_awaited_once_with(child_id, child_content_message_id)``
-       and the cross-loop seam pin (the coroutine must run on
-       the manager loop, not an ephemeral ``asyncio.run`` loop —
-       the F-2 iter 2 blocker 1 class must not re-emerge).
+       test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs``
+       asserts (a) the call fires exactly once with source
+       ``system:wedge-resolve`` (the manual-ping provenance);
+       (b) the cross-loop seam (the coroutine runs on the
+       manager loop, not an ephemeral ``asyncio.run`` loop);
+       (c) the parent's ``instances.status`` row transitions
+       OUT OF ``waiting_children`` on the seeded LIVE state
+       (the EFFECT-level pin — the dispatch says NOT a
+       dispatch-call assertion, the round-3 pin was the
+       4th consecutive LESSONS-#6 instance; this one is
+       effect-level).
 
-  (iii) The primitive is idempotent / dedup-absorbing (W6 marker
-        absorb on the obligation-triple unique index; wake-row
-        dedup via ``message_id`` / ``work_id``; the
-        ``child_reports.py:2773-2787`` child-status guard returns
-        ``idempotency_skip`` on re-entry — no exception, no
-        erase, no duplicate). A second invocation is a no-op.
+  (iii) The primitive is idempotent / dedup-absorbing —
+        ``enqueue_message`` mints a fresh UUID for every new
+        message; the wake row's original UUID is preserved.
+        The retry's claim path stays unchanged (the parent's
+        RUNNING transition unblocks the per-instance busy
+        guard; the worker's ``already_delivered`` skip is the
+        dedup contract working as designed).
 
-  (iv) The round-3 leader commission explicitly authorized this
-       seam ("schedule the parent's graph turn upon lane-6
-       injection delivery" — see the G4-r3 commission brief).
+  (iv) The round-4 leader commission explicitly authorized
+       this seam ("wake-only dispatch via the ping seam" —
+       see the G4-r4 commission brief + the manual-ping-seam
+       identification at
+       ``instance_messaging.py:2108`` / ``manager.py:7987``).
 
   **Without this exception, the captured-wedge shape (marker
-  TASK_DELIVERED + wake row ready + dead-worker wake task — the
-  F-3 LEG 1 evidence) is unreachable: the worker's claim path
-  sees ``already_delivered`` and correctly skips the parent-
-  schedule step per the dedup contract. The next review would
-  flag this call as a seam-(a) violation; a future cleanup would
-  remove the heal. This exception keeps the doc in lockstep with
-  the G4-r3 sanctioned behavior.**
+  TASK_DELIVERED + wake row ready + dead-worker wake task +
+  parent waiting_children — the F-4 LEG 1 evidence) is
+  unreachable: the retry's claim sees ``already_delivered``
+  and skips per the dedup contract, and the round-3
+  primitive's idempotency guard short-circuits before the
+  wake row is created. The next review would flag this call
+  as a seam-(a) violation; a future cleanup would remove the
+  heal. This exception keeps the doc in lockstep with the
+  G4-r4 sanctioned behavior.**
 
 ════════════════════════════════════════════════════════════════════
 
@@ -999,62 +1025,85 @@ class ReportDeliveryRecoveryService:
                 f"child={child_id[:8]}..."
             )
             out.recovered += 1
-            # ── Last-mile parent-schedule seam (G4-r3) ───────────────
-            # The captured wedge shape: the dead worker had
-            # already transitioned the marker PENDING→TASK_DELIVERED
-            # (the worker's claim_for_task_delivery call ran pre-
-            # SIGKILL), but the daemon died BEFORE the worker's
-            # normal delivery path dispatched the parent's graph
-            # turn. The retry's claim now sees TASK_DELIVERED and
-            # returns "already_delivered" → the worker's drain
-            # path correctly skips (the dedup contract) — but the
-            # parent is still wedged in waiting_children.
+            # ── Last-mile parent-schedule seam (G4-r4 — wake-only) ───
+            # The captured-wedge shape (LIVE F-4 evidence): the
+            # dead worker had already transitioned the marker
+            # PENDING→TASK_DELIVERED (its claim_for_task_delivery
+            # call ran pre-SIGKILL), so the retry's claim now
+            # sees TASK_DELIVERED → returns "already_delivered" →
+            # the worker's drain path correctly skips (the
+            # dedup contract) — but the parent is still wedged
+            # in waiting_children because the dead worker never
+            # dispatched the parent turn before the kill.
             #
-            # Close the gap by calling the SAME primitive the
-            # natural wake uses to dispatch the parent turn:
-            # ``_process_child_completion_and_notify_parent`` on the
-            # manager. The function:
-            #   1. Re-fetches the child's last assistant content
-            #      (idempotent — content is in the child checkpoint).
-            #   2. Re-creates the report_injection marker (W6
-            #      dedup handles the duplicate — returns None on
-            #      conflict).
-            #   3. Re-creates the wake row + task (deduped via
-            #      message_id / work_id).
-            #   4. Either fires the bus watcher for the parent
-            #      (re-arming the dep watch the bus rebuild dropped)
-            #      OR triggers the cascade transition (parent
-            #      waiting_children → RUNNING) when no more
-            #      pending children remain.
-            # The function's body is unchanged — this is a NEW
-            # caller. No new messaging paths; the retry is still
-            # useful as the process_report fallback.
+            # The round-3 fix
+            # (``_process_child_completion_and_notify_parent``)
+            # ALSO short-circuited: the primitive's :2773-2787
+            # idempotency guard sees the terminal child and
+            # returns early as ``idempotency_skip`` — the wake
+            # row (the primitive's step 3) is never created. The
+            # function does NOT dispatch a parent turn in the
+            # skip branch.
+            #
+            # Close the gap with the WAKE-ONLY primitive: the
+            # SAME primitive the manual ping uses to schedule
+            # a parent turn —
+            # ``self._manager.enqueue_message(parent_id, message,
+            # source="system:wedge-resolve", ...)`` at
+            # ``daemon/manager.py:7987``. The unified dispatcher
+            # (``instance_messaging._prepare_enqueued_message``)
+            # writes a fresh MessageQueue + Task
+            # (process_message) AND auto-resumes the parent to
+            # RUNNING (the auto-resume at :1968 transitions
+            # waiting_children → RUNNING) AND notifies the
+            # worker pool via ``safe_notify_all_pools``. The
+            # worker's normal pipeline then processes the
+            # sentinel and dispatches the parent's graph turn.
+            #
+            # Frozen-behavior discipline: the primitive is the
+            # EXISTING ping-seam (not a new path). The :2773
+            # idempotency guard stays untouched (the wake-only
+            # dispatch is a NEW caller of an EXISTING primitive,
+            # not a change to the frozen guard). The retry's
+            # claim path is unchanged (the parent's RUNNING
+            # transition unblocks the per-instance busy guard;
+            # the worker's "already_delivered" skip is the
+            # dedup contract working as designed).
             #
             # Bridge to the manager's event loop using the
-            # module's own sanctioned step-4 pattern (the
-            # run_coroutine_threadsafe(...).result(timeout)
-            # bridge used by _handle_recover_deferred_report at
-            # manager.py:8612 and the revival seam).
+            # module's own sanctioned step-4 pattern
+            # (``asyncio.run_coroutine_threadsafe(...).result(
+            # timeout=8.0)`` — same as
+            # ``_handle_recover_deferred_report`` at
+            # ``manager.py:8586-8596`` and the revival seam
+            # at ``manager.py:9118``).
             try:
                 loop = self._get_event_loop()
-                coroutine = (
-                    self._manager
-                    ._process_child_completion_and_notify_parent
-                )
+                coroutine = self._manager.enqueue_message
                 future = asyncio.run_coroutine_threadsafe(
-                    coroutine(child_id, child_message_id),
+                    coroutine(
+                        parent_id,
+                        (
+                            "[system:wedge-resolve] Your child "
+                            "has completed. The pending report "
+                            "is preserved in your message queue; "
+                            "process it to continue."
+                        ),
+                        source="system:wedge-resolve",
+                        priority=1,
+                    ),
                     loop,
                 )
                 future.result(timeout=8.0)
             except Exception as exc:
-                # Per-row fail-safe — log + count, sweep continues.
-                # The retry is still pending; the worker will retry
-                # the delivery on next claim cycle.
+                # Per-row fail-safe — log + count, sweep
+                # continues. The retry is still pending; the
+                # worker will retry the delivery on next claim
+                # cycle.
                 logger.warning(
                     f"sweep stuck_wake parent-schedule failed "
                     f"parent={parent_id[:8]}... "
-                    f"child={child_id[:8]}... "
-                    f"msg={(child_message_id or 'NONE')[:8]}...: "
+                    f"child={child_id[:8]}...: "
                     f"{type(exc).__name__}: {exc}"
                 )
                 out.errors += 1
