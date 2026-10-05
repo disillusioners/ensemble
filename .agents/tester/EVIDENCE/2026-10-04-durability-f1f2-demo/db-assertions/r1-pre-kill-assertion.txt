@@ -1,0 +1,9 @@
+      what       |             instance_id              |      status      
+-----------------+--------------------------------------+------------------
+ parent_instance | c50a22ae-b8a0-4d65-bbad-ed73c05fc318 | waiting_children
+ child_instance  | 2bd3ea4e-49a9-43fc-9fab-e41fd56c9a7f | completed
+ wake_task       | running                              | process_report
+ wake_msg_status | ready                                | 
+ inj_state       | PENDING                              | 
+(5 rows)
+

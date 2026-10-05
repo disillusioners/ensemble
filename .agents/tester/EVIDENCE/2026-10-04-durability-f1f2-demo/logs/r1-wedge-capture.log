@@ -1,0 +1,60 @@
+2026-10-05T01:00:47.093Z R1_POLLER_START parent=c50a22ae-b8a0-4d65-bbad-ed73c05fc318 child=2bd3ea4e-49a9-43fc-9fab-e41fd56c9a7f daemon=447736
+2026-10-05T01:00:47.332Z i=47 t=203ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:47.533Z i=98 t=404ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:47.736Z i=149 t=608ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:47.937Z i=199 t=808ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:48.138Z i=249 t=1009ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:48.339Z i=299 t=1211ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:48.542Z i=350 t=1414ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:48.743Z i=400 t=1614ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:48.947Z i=451 t=1818ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:49.147Z i=501 t=2018ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:49.351Z i=552 t=2222ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:49.554Z i=603 t=2426ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:49.758Z i=654 t=2629ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:49.962Z i=705 t=2833ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:50.162Z i=755 t=3034ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:50.363Z i=805 t=3234ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:50.566Z i=856 t=3437ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:50.769Z i=907 t=3640ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:50.969Z i=957 t=3841ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:51.170Z i=1007 t=4042ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:51.372Z i=1057 t=4244ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:51.576Z i=1108 t=4448ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:51.777Z i=1158 t=4648ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:51.980Z i=1209 t=4852ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:52.183Z i=1261 t=5055ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:52.384Z i=1313 t=5256ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:52.586Z i=1365 t=5457ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:52.788Z i=1417 t=5659ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:52.991Z i=1468 t=5862ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:53.192Z i=1518 t=6064ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:53.394Z i=1570 t=6266ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:53.594Z i=1621 t=6466ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:53.797Z i=1673 t=6668ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:54.001Z i=1724 t=6872ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:54.201Z i=1774 t=7073ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:54.405Z i=1825 t=7277ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:54.608Z i=1876 t=7479ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:54.812Z i=1927 t=7683ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:55.013Z i=1976 t=7884ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:55.214Z i=2027 t=8086ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:55.415Z i=2077 t=8286ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:55.619Z i=2128 t=8490ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:55.821Z i=2179 t=8693ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:56.024Z i=2230 t=8896ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:56.227Z i=2281 t=9099ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:56.431Z i=2332 t=9302ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:56.633Z i=2383 t=9505ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:56.836Z i=2434 t=9708ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:57.039Z i=2486 t=9911ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:57.243Z i=2537 t=10114ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:57.445Z i=2588 t=10317ms child_task=running parent=waiting_children wake_task=None wake_msg=None inj_state=None
+2026-10-05T01:00:57.647Z i=2639 t=10519ms child_task=running parent=waiting_children wake_task=pending wake_msg=ready inj_state=PENDING
+2026-10-05T01:00:57.694Z PERFECT_WEDGE_OBSERVED at i=2651 t=10566ms: child_task=completed parent=waiting_children wake_task=running wake_msg=ready inj_state=PENDING
+2026-10-05T01:00:57.694Z SIGSTOP_SENT at t=10566ms
+2026-10-05T01:00:57.796Z VERIFY_AFTER_STOP: child_task=completed parent=waiting_children wake_task=running wake_msg=ready inj_state=PENDING
+2026-10-05T01:00:57.796Z PRECONDITION_CHECK: wake_not_claimed=True no_task_delivered=True
+2026-10-05T01:00:57.796Z PRECONDITION_MET — proceeding to SIGKILL
+2026-10-05T01:00:57.796Z SIGKILL_SENT
+2026-10-05T01:00:57.797Z R1_DONE t_kill=10668ms
