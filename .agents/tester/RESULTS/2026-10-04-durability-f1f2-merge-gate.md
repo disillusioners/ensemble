@@ -196,3 +196,30 @@ F-2 family **143/143**: service 40/40 (+1 = the schedule-pin `TestG4R3StuckWakeP
 **Root cause (fourth narrowing, live-proven):** the wake-through's `_process_child_completion_and_notify_parent(child_id, child_message_id)` dispatch (`asyncio.run_coroutine_threadsafe(...).result(8.0)` at report_delivery_recovery.py:985+) hits the primitive's idempotency guard (child_reports.py:2773-2787): the child is ALREADY terminal (completed naturally pre-kill) → early return `idempotency_skip` → **the wake row (the primitive's step 3) is never created** → parent unwakeable without a manual ping. The guard is doing its designed job — the flaw is dispatching the FULL completion-processing primitive when only the parent-wake half is needed. Fix shape: a wake-only dispatch (bypass/branch the guard for the terminal-child + marker-delivered + parent-waiting case), or have the guard distinguish "already notified" from "never notified". The unit pin passes because it asserts the dispatch, not the primitive's effect on an already-terminal child — the seeded-vs-live pattern (LESSONS #6) for the fourth consecutive round.
 
 Post-fix re-gate scope: **LEG 1 only** (harness committed; ~10 min). Manual-ping deadlock remains gone (iter=16, 32s post-ping completion).
+
+---
+
+# LEG-1 ROUND 5 (2026-10-05, fix HEAD `3c7c4df6`) — ✅ PASS per the commissioned bar → overall verdict FLIPS TO READY
+
+Delta: `3c7c4df6` ping-seam wake (daemon/tests = 3 files +283/−215; the "4 files +369/−225" figure = the pin commit incl. decisions.md). Lane-6 dispatch replaced (round-4 natural-primitive →) `manager.enqueue_message(parent_id, "[system:wedge-resolve] …", source="system:wedge-resolve", priority=1)` over the sanctioned bridge; auto-resume seam at instance_messaging.py:1968 (WAITING_CHILDREN→RUNNING); `:2773` guard untouched. Round-4 dispatch-pin swapped for effect-pin `test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs` (asserts the instances.status transition; meta-tested red/green).
+
+## Suites @ 3c7c4df6 — ALL GREEN
+F-2 family **143/143** (service 40/40 with the effect-pin swap, PG 26/26, lane-6 quartet green, all other files unchanged). F-1 15/15 + auto-continue 56/56 + interleaving 14/14 standing from prior pins (surfaces untouched by the delta). G1-r 0-branch-caused standing.
+
+## LEG 1 live (zero-ping, SIGSTOP recipe, evidence f5- @ `aa6206d9`)
+| Criterion | Status |
+|---|---|
+| a. lane 6 recovers via source correlation | PASS (recovered=1; task 1761→retry 1762) |
+| b. parent LEAVES waiting_children, ZERO pings, synthesizes the child word | **PASS — left WC at t+40s; api_msgs=0 proven; helloF5 verbatim in the final reply** |
+| c. exactly one internal_report row | PASS |
+| d. child not re-executed | PASS (single task row, checkpoint unchanged) |
+| e. no double-retry | PASS (retry_count=1; same-message_id 44181c6f) |
+| f. wedge-resolve dispatch observable | PASS (source=system:wedge-resolve row in parent history) |
+
+Informational (commissioned): the `[system:wedge-resolve]` message IS in the parent transcript — **benign**: no marker leakage into the reply; the parent synthesizes the child's report cleanly (verbatim reply in EVIDENCE).
+
+## Residual (documented, NOT in the commissioned bar, adjudicated PRE-EXISTING → separate follow-up)
+Parent instance ends at `running` (not `completed`): the F14 pending-tasks guard deferred the terminal transition at 07:51:26 because retry task 1762 was still PENDING; after the retry completed, no event re-fired the terminal transition. Same gap existed in round 4 (masked by the worse waiting_children wedge). Zero user-facing impact for the wedge scenario (synthesis delivered, parent responsive, manual-ping path clean). → Follow-up ledger: F14 terminal-transition re-fire after pending-retry completion (separate commission; completion-authority/event-driven re-evaluation family).
+
+## ROUND-5 VERDICT: LEG 1 ✅ PASS (all seven commissioned criteria) — G1-r ✅ · G2 ✅ · G3 ✅ · G4 LEG-1 ✅ (+LEG-2 ✅ LEG-3 ✅ from round 3) · suites ✅ at every pin
+**Overall merge-gate verdict: ✅ READY — merge may proceed**, with one non-blocking follow-up ledger item (F14 re-fire, pre-existing). Five-round progression, every defect found live and every fix verified live: no-lane-admits → join-key-mismatch → no-parent-schedule → dispatch-no-ops-on-terminal-child → **healed (ping-seam wake, zero-ping, t+40s)**.

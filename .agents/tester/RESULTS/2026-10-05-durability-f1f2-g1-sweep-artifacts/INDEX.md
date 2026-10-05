@@ -88,3 +88,10 @@
 |---|---|
 | `f4-f2-batch1.log` | LEG-1 FINAL F-2 batch-1 re-run: lane-6 quartet + 26/26 PG green. Final proof @ b1d222e6 |
 | `f4-f2-batch2.log` | LEG-1 FINAL F-2 batch-2 re-run: F-2 family 143/143 incl. schedule-pin; wake-through dispatch present but no-op. Final proof @ b1d222e6 |
+
+## LEG-1 round 5 @ 3c7c4df6 (2026-10-05)
+
+| File | Provenance |
+|---|---|
+| `f5-f2-batch1.log` | LEG-1 round-5 F-2 batch-1 re-run: lane-6 quartet + 26/26 PG green. Round 5 @ 3c7c4df6 |
+| `f5-f2-batch2.log` | LEG-1 round-5 F-2 batch-2 re-run: F-2 family 143/143 with the ping-seam effect-pin swap. Round 5 @ 3c7c4df6 |
