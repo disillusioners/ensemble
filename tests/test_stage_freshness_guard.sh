@@ -780,6 +780,30 @@ cat > "$FIXTURE/mal-m1-dirty.json" <<EOF
 }
 EOF
 _malformed_case "viii-i invalid-JSON decoy git_dirty" "$FIXTURE/mal-m1-dirty.json"
+# d-1 REGRESSION PIN (review round 3): the specific laundering message
+# MUST appear. If this assertion ever fails, d-1 has regressed — the
+# case dispatch is dead again and the shape gate is reaching operators
+# for a laundering failure (the exact d-1 symptom). Asserts on the
+# per-state MESSAGE, not just the token — the pre-d-1 pack asserted
+# tokens only, which is precisely why d-1 went undetected.
+_malformed_msg() {  # <name> <sidecar-body-file>
+    local name="$1" body="$2"
+    cp "$body" "$FIXTURE/stub-prod.build-provenance.json"
+    local sbx="$FIXTURE/d1-sbx"
+    rm -rf "$sbx" && mkdir -p "$sbx"
+    local o rc
+    o="$(HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$sbx" PORT="$SBX_PORT" \
+        VERSION="$SBX_V1" bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox \
+        --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+    assert_eq "($name d-1) exit 78" "78" "$rc"
+    assert_contains "($name d-1) reaches the MALFORMED branch" \
+        "is MALFORMED" "$o"
+    assert_contains "($name d-1) carries the laundering-signature text" \
+        "laundering signature" "$o"
+    assert_not_contains "($name d-1) does NOT fall back to the shape-gate message" \
+        "git_head missing/empty" "$o"
+}
+_malformed_msg "viii-i" "$FIXTURE/mal-m1-dirty.json"
 # Sanity: python3 ALSO rejects this content (independent ground truth).
 if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$FIXTURE/mal-m1-dirty.json" 2>/dev/null; then
     _fail "(viii-i) fixture sanity: python3 must reject the laundering shape" "rejected" "accepted"
@@ -807,6 +831,7 @@ cat > "$FIXTURE/mal-m1-head.json" <<EOF
 }
 EOF
 _malformed_case "viii-ii invalid-JSON decoy git_head" "$FIXTURE/mal-m1-head.json"
+_malformed_msg "viii-ii" "$FIXTURE/mal-m1-head.json"
 _stamp_fresh
 
 # (viii-iii) M1 regression: balanced-and-semantic-wrong sidecar still
@@ -828,8 +853,104 @@ cat > "$FIXTURE/mal-m1-regression.json" <<EOF
 EOF
 # Expect the same token as viii-b (garbage git_dirty) — proves the M1
 # gate doesn't interfere with the existing shape-gate rejection of
-# balanced-but-semantic-wrong sidecars.
+# balanced-but-semantic-wrong sidecars. CRITICAL: the shape-gate message
+# is the EXPECTED diagnostic here (M1's balance+uniqueness gate accepts
+# balanced content; the shape gate's "git_dirty not a recognized
+# boolean" message is the operator-visible reason). This is the
+# inversion of viii-i: viii-i MUST hit laundering; viii-iii MUST hit
+# the shape gate.
 _malformed_case "viii-iii balanced garbage git_dirty (M1 regression)" "$FIXTURE/mal-m1-regression.json"
+out="$(HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$FIXTURE/d1-sbx" PORT="$SBX_PORT" \
+    VERSION="$SBX_V1" bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox \
+    --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+assert_eq "(viii-iii d-1 inversion) balanced-garbage → exit 78" "78" "$rc"
+assert_contains "(viii-iii d-1 inversion) shape-gate diagnostic (NOT laundering)" \
+    "git_dirty not a recognized boolean" "$out"
+assert_not_contains "(viii-iii d-1 inversion) does NOT misroute to laundering branch" \
+    "laundering signature" "$out"
+_stamp_fresh
+
+# (viii-iv) M1 unreadable-state pin (review round 3). Pin the SPECIFIC
+#     unreadable-branch MESSAGE so a regression of d-1 (or a future
+#     refactor that confuses unreadable with malformed) is caught
+#     loudly. The state is reached by chmod 000 on the sidecar: `[ -f
+#     "$prov" ]` returns TRUE (regular file, no permission check), but
+#     `cat "$prov"` returns EACCES → reader sets status=unreadable. (The
+#     reviewer noted root-bypass — on a root test run, chmod 000 doesn't
+#     deny. This host is non-root, so the state is genuinely reached;
+#     CI under root would need a different mechanism, out of scope
+#     for this round.)
+cp "$FIXTURE/mal-m1-regression.json" "$FIXTURE/stub-prod.build-provenance.json"
+chmod 000 "$FIXTURE/stub-prod.build-provenance.json"
+[ -f "$FIXTURE/stub-prod.build-provenance.json" ] \
+    && _pass || _fail "(viii-iv) fixture sanity: file present under chmod 000" "present" "absent"
+UNR_SBX="$FIXTURE/unr-sbx"
+rm -rf "$UNR_SBX" && mkdir -p "$UNR_SBX"
+out="$(HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$UNR_SBX" PORT="$SBX_PORT" \
+    VERSION="$SBX_V1" bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox \
+    --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+chmod 644 "$FIXTURE/stub-prod.build-provenance.json"   # restore before any subsequent touch
+assert_eq "(viii-iv unreadable) chmod-000 sidecar → exit 78" "78" "$rc"
+# Token: the reader can't distinguish "absent" from "unreadable" by
+# status alone — both the missing and unreadable branches carry the
+# provenance-missing token (one is a file-presence failure class;
+# the other is a file-readability failure class). The DISCRIMINATOR
+# is the message — the unreadable branch specifically says "exists but
+# is unreadable" while the absent branch says "no build provenance".
+assert_contains "(viii-iv unreadable) reaches the unreadable branch message" \
+    "exists but is unreadable" "$out"
+assert_not_contains "(viii-iv unreadable) does NOT misroute to the absent branch" \
+    "no build provenance for" "$out"
+assert_not_contains "(viii-iv unreadable) does NOT misroute to the shape gate" \
+    "git_head missing/empty" "$out"
+_stamp_fresh
+
+# ─── 10c. scenario (xii): G3 guard (review round 3) — the bare rm -f at ─────
+#   stage.sh :392 that excludes the FE provenance sidecar from the release
+#   payload must be guarded with the same `|| { rm -rf STAGE_TMP; exit 1; }`
+#   pattern as its neighbors (:379/:381/:393/:394). Without the guard, a
+#   rm failure would silently ship the sidecar inside the web-servable
+#   payload and perturb the FE tree hash.
+#
+#   PIN DESIGN (FE verifier precedes the cp+rm at :381/:392, so the
+#   guard's failure case can't be reached end-to-end via stage.sh with
+#   the verifier passing — the verifier would refuse provenance-missing
+#   on a missing/malformed sidecar BEFORE the cp runs). The reviewer's
+#   allowed approaches are "chmod-000 the parent dir or make the sidecar
+#   path a directory" — the directory path is the portable one (no
+#   root). We test the guard PATTERN in isolation: the exact 4-line
+#   fragment stage.sh uses at :392, run on a path that is a directory
+#   (rm -f fails with "Is a directory"). The guard's `if !` branch
+#   fires — exit code != 0, the cleanup message lands on stderr.
+section "(xii) G3 guard catches rm -f failure on a directory sidecar path"
+G3_TMP="$(mktemp -d)"
+mkdir -p "$G3_TMP/frontend/dist/frontend/browser"
+mkdir "$G3_TMP/frontend/dist/frontend/browser/index.html.build-provenance.json"   # dir — rm fails
+G3_OUT="$(bash -c '
+    G3_TMP="$1"
+    # Verbatim fragment of stage.sh:392 (the guard body) — call it in a
+    # subshell so we can capture the exit code without aborting the test.
+    STAGE_TMP="$G3_TMP"
+    rm -f "$STAGE_TMP/frontend/dist/frontend/browser/index.html.build-provenance.json" || {
+        _warn() { printf "WARN: %s\n" "$*" >&2; }
+        _warn "stage: FAILED to remove the FE provenance sidecar (target was a directory; the sidecar would ship inside the web-servable payload). Aborting stage to keep the release payload consistent."
+        rm -rf "$STAGE_TMP"
+        exit 1
+    }
+    echo "GUARD DID NOT FIRE — BUG"
+' _ "$G3_TMP" 2>&1)"; G3_RC=$?
+assert_eq "(xii G3) guard rc=1 on rm -f failure" "1" "$G3_RC"
+assert_contains "(xii G3) guard's WARN names the failure" \
+    "FAILED to remove the FE provenance sidecar" "$G3_OUT"
+assert_contains "(xii G3) guard's WARN explains the payload risk" \
+    "web-servable payload" "$G3_OUT"
+# Cleanup happened (the STAGE_TMP dir is gone after the guard's cleanup).
+if [ -d "$G3_TMP" ]; then
+    _fail "(xii G3) guard's cleanup removed STAGE_TMP" "absent" "present"
+else
+    _pass
+fi
+rm -rf "$G3_TMP"
 _stamp_fresh
 
 # ─── 11. scenario (ix): S3 — a TAG named latest must NOT satisfy the tip ─────

@@ -1932,8 +1932,28 @@ _verify_artifact_provenance() {
     # → provenance-missing; malformed (empty / torn / quote-imbalance /
     # laundering signature — see _provenance_read + _provenance_sidecar_ok)
     # → provenance-malformed; ok → fall through to the shape gate.
-    json="$(_provenance_read "$art" 2>/dev/null)"
-    case "$_PROVENANCE_READ_STATUS" in
+    #
+    # Call _provenance_read DIRECTLY (no command substitution) and capture
+    # stdout via a temp file. The _PROVENANCE_READ_STATUS /
+    # _PROVENANCE_READ_DETAIL globals are set by _provenance_read IN the
+    # caller's scope this way — a previous `json="$(...)"` subshell
+    # silently dropped the mutations and the case dispatch below never
+    # fired (review round 3 d-1: the 4-state routing was DEAD CODE; the
+    # shape-gate "missing" message was reaching operators for the
+    # laundering class). rc 0 means the sidecar passed the sidecar_ok
+    # gate (status=ok, content on stdout); rc 1 means one of the three
+    # failure states — read the globals to learn which.
+    local _pr_tmp _pr_status _pr_detail _pr_json=""
+    _pr_tmp="$(mktemp)"
+    if _provenance_read "$art" > "$_pr_tmp" 2>/dev/null; then
+        _pr_status="ok"
+        _pr_json="$(cat "$_pr_tmp")"
+    else
+        _pr_status="$_PROVENANCE_READ_STATUS"
+        _pr_detail="$_PROVENANCE_READ_DETAIL"
+    fi
+    rm -f "$_pr_tmp"
+    case "$_pr_status" in
         absent)
             _freshness_refuse provenance-missing \
                 "stale-artifact stage refused: no build provenance for $art (looked for $prov). " \
@@ -1953,7 +1973,7 @@ _verify_artifact_provenance() {
             ;;
         malformed)
             _freshness_refuse provenance-malformed \
-                "stale-artifact stage refused: provenance sidecar for $art is MALFORMED (${_PROVENANCE_READ_DETAIL}). " \
+                "stale-artifact stage refused: provenance sidecar for $art is MALFORMED (${_pr_detail}). " \
                 "A sidecar that exists must carry all three load-bearing fields, syntactically valid, AND be well-formed enough " \
                 "that the field extractor can trust it (no quote/brace imbalance, no laundering signature — a decoy key in a " \
                 "non-key field's value would otherwise win the textual first-occurrence race and let a dirty build pass as clean). " \
@@ -1963,16 +1983,16 @@ _verify_artifact_provenance() {
                 "  3) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
             ;;
     esac
-    # ok → $json holds the validated content; fall through to the shape gate.
+    # ok → _pr_json holds the validated content; fall through to the shape gate.
     # Field extraction uses the QUOTED-key form (_json_field_quoted): the
     # bare-substring _json_field would match the "git_head" INSIDE
     # "git_head_short" when the real "git_head" key is absent — turning a
     # provenance-malformed case into a bogus stale-provenance (found by
     # scenario viii-d). Anchoring on `"key":` defeats the aliasing.
-    git_head="$(_json_field_quoted "$json" '"git_head":' 2>/dev/null)" || git_head=""
-    git_head_short="$(_json_field_quoted "$json" '"git_head_short":' 2>/dev/null)" || git_head_short=""
-    git_dirty="$(_json_field_quoted "$json" '"git_dirty":' 2>/dev/null)" || git_dirty=""
-    art_sha="$(_json_field_quoted "$json" '"artifact_sha256":' 2>/dev/null)" || art_sha=""
+    git_head="$(_json_field_quoted "$_pr_json" '"git_head":' 2>/dev/null)" || git_head=""
+    git_head_short="$(_json_field_quoted "$_pr_json" '"git_head_short":' 2>/dev/null)" || git_head_short=""
+    git_dirty="$(_json_field_quoted "$_pr_json" '"git_dirty":' 2>/dev/null)" || git_dirty=""
+    art_sha="$(_json_field_quoted "$_pr_json" '"artifact_sha256":' 2>/dev/null)" || art_sha=""
     current_sha="$(_sha256 "$art")"
     # ── Shape gate (C2): every load-bearing field present + syntactically
     #    valid, BEFORE any comparison runs. Empty no longer means skip.

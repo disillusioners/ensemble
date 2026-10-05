@@ -389,7 +389,11 @@ cp -R "$REPO_ROOT/frontend/dist/frontend/browser" "$STAGE_TMP/frontend/dist/fron
 # does not affect stage-time checks. The manifest per-file map is
 # computed AFTER this rm and therefore does not include the sidecar →
 # the sidecar is not part of the release's integrity contract either.
-rm -f "$STAGE_TMP/frontend/dist/frontend/browser/index.html.build-provenance.json"
+rm -f "$STAGE_TMP/frontend/dist/frontend/browser/index.html.build-provenance.json" || {
+    _warn "stage: FAILED to remove the FE provenance sidecar from $STAGE_TMP/.../browser/ (FE sidecar would ship inside the web-servable payload and perturb the FE tree hash). Aborting stage to keep the release payload consistent with the verifier's expectations; the assemble-into-temp + rename-aside swap is atomic only as long as the assembly is clean."
+    rm -rf "$STAGE_TMP"
+    exit 1
+}
 cp "$REPO_ROOT/config.yaml" "$STAGE_TMP/config.yaml" || { rm -rf "$STAGE_TMP"; exit 1; }
 cp "$REPO_ROOT/launcher.sh" "$STAGE_TMP/launcher.sh" || { rm -rf "$STAGE_TMP"; exit 1; }
 chmod +x "$STAGE_TMP/launcher.sh"
