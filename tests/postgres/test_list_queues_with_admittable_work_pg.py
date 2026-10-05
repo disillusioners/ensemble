@@ -163,8 +163,17 @@ def _insert_job_item(
     admission_state: str,
     deleted_at: str | None = None,
     created_at: str | None = None,
+    insert_lock_for_active: bool = True,
 ) -> str:
-    """Insert a single ``job_queue_items`` row and return its ``job_id``."""
+    """Insert a single ``job_queue_items`` row and return its ``job_id``.
+
+    PG invariant: ``admission_state='active'`` requires a paired
+    ``job_locks`` row (the ``trg_job_locks_active_guard`` trigger).
+    The pre-fix fixture raised on the very insert because the
+    trigger fires at COMMIT — every test that seeds an active
+    JobItem now pairs a lock row via
+    ``_insert_job_lock_for_active``.
+    """
     job_id = str(uuid.uuid4())
     conn.execute(
         text(
@@ -189,7 +198,52 @@ def _insert_job_item(
             "deleted_at": deleted_at,
         },
     )
+    if insert_lock_for_active and admission_state == STATE_ACTIVE:
+        _insert_job_lock_for_active(
+            conn,
+            job_id=job_id,
+            queue_id=queue_id,
+            project_id=project_id,
+        )
     return job_id
+
+
+def _insert_job_lock_for_active(
+    conn, *, job_id: str, queue_id: str, project_id: str
+) -> str:
+    """Pair an active JobItem with the required ``job_locks`` row.
+
+    PG ``trg_job_locks_active_guard`` enforces the invariant at
+    COMMIT time; without this row, the JobItem INSERT itself
+    raises ``psycopg.errors.IntegrityConstraintViolation:
+    admission_state=active requires a job_locks row``. The slot
+    is 0 (any slot is fine — only the existence of a row
+    matters for the active-guard). The ``(project_id,
+    queue_id, lock_slot)`` UNIQUE constraint allows sibling
+    rows on the same queue (distinct job_ids).
+    """
+    lock_id = str(uuid.uuid4())
+    conn.execute(
+        text(
+            """
+            INSERT INTO job_locks (
+                lock_id, project_id, queue_id, job_id, instance_id,
+                lock_slot, acquired_at
+            ) VALUES (
+                :lock_id, :project_id, :queue_id, :job_id, NULL,
+                0, :acquired_at
+            ) ON CONFLICT (project_id, queue_id, lock_slot) DO NOTHING
+            """
+        ),
+        {
+            "lock_id": lock_id,
+            "project_id": project_id,
+            "queue_id": queue_id,
+            "job_id": job_id,
+            "acquired_at": _now_iso(),
+        },
+    )
+    return lock_id
 
 
 def test_list_queues_with_admittable_work_includes_queued_and_active(

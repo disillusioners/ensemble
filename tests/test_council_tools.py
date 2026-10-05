@@ -79,7 +79,22 @@ def _make_manager(
         ``(instance_id, validated_model_override)``.
     """
     if allowed_models is None:
-        allowed_models = ["gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro"]
+        # ``vision`` is the comparator model alias consumed by
+        # ``daemon/tools/compare_tools.py``'s
+        # ``_verify_vision_allowed`` factory-init gate. The
+        # 5 TestSpawnCouncilor tests below are the canonical
+        # target for the AB-verdict identity-line parse artifact
+        # (BRANCH-CAUSED #4) and were failing with
+        # ``VisionModelNotAllowedError`` from the comparator's
+        # init gate when ``allowed_models`` lacked the alias —
+        # mirroring the production-shape ``OPENAI_SELECTABLE_MODELS``
+        # env that includes ``vision``.
+        allowed_models = [
+            "gpt-4o",
+            "claude-3-5-sonnet",
+            "gemini-1.5-pro",
+            "vision",
+        ]
 
     manager = MagicMock()
     manager.config = MagicMock()
@@ -374,7 +389,9 @@ class TestSpawnCouncilor:
         behavior, which silently falls back).
         """
         manager = _make_manager(
-            allowed_models=["gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro"],
+            allowed_models=[
+                "gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro", "vision"
+            ],
         )
         spawn_councilor, _ = _get_council_tools(manager, caller_agent_id="governor")
 
@@ -403,7 +420,9 @@ class TestSpawnCouncilor:
     async def test_valid_agent_and_model_succeeds(self):
         """Happy path: governor spawns 'developer' with 'gpt-4o' → success."""
         manager = _make_manager(
-            allowed_models=["gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro"],
+            allowed_models=[
+                "gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro", "vision"
+            ],
             spawn_result=("new-developer-councilor-id", "gpt-4o"),
         )
         spawn_councilor, _ = _get_council_tools(manager, caller_agent_id="governor")
@@ -442,7 +461,9 @@ class TestSpawnCouncilor:
         via case-insensitive lookup in allowed_models before spawn.
         """
         manager = _make_manager(
-            allowed_models=["gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro"],
+            allowed_models=[
+                "gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro", "vision"
+            ],
             spawn_result=("instance-id", "gpt-4o"),
         )
         spawn_councilor, _ = _get_council_tools(manager, caller_agent_id="governor")

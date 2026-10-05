@@ -1463,21 +1463,24 @@ class TestErrorPropagation:
         assert error_after is None
 
     @pytest.mark.asyncio
-    async def test_error_flag_uses_fallback_when_message_missing(self, engine, bus):
-        """The override returns a non-None error string even when the bus
-        did not capture a specific error message. Guards against the
-        override silently returning ``None`` and breaking the finalize
-        call's ``error=`` argument.
+    async def test_error_flag_uses_fallback_when_message_missing(
+        self, engine, bus, caplog
+    ):
+        """Post-F-1 contract: the ``error=None`` outcome does NOT flip
+        ``_parent_errored`` (the truthy-error gate at
+        ``daemon/services/dependency_bus.py:_`` — introduced in F-1
+        — prevents the pre-fix class where ``status='error'`` with
+        a ``None``-capable error poisoned the parent flag). The
+        §1a defensive WARNING fires verbatim (asserts via
+        ``caplog``) so the None-capable producer remains
+        operator-visible.
 
-        Note: the bus's ``emit_terminal`` itself populates a "child
-        agent error" fallback via ``setdefault`` when ``outcome.error``
-        is empty, so in practice ``parent_error_message`` is always
-        non-None when ``had_parent_error`` is True. The helper's own
-        ``or CHILD_AGENT_ERROR_FALLBACK`` is a second line of defense
-        against that fallback being cleared (e.g. on a stop+restart
-        that wiped the message dict but not the flag — impossible
-        with the current ``stop()`` implementation, but the helper
-        stays conservative).
+        Companion to the test's original intent (``parent_error_message``
+        is non-None when ``had_parent_error`` is True): post-F-1
+        the test of the helper's ``or CHILD_AGENT_ERROR_FALLBACK``
+        second line of defense is exercised by an
+        ``Outcome(status='error', error='some message')`` outcome
+        that flips the flag — see the helper-test below.
         """
         from daemon.services.job_feedback_observer import (
             CHILD_AGENT_ERROR_FALLBACK,
@@ -1488,21 +1491,79 @@ class TestErrorPropagation:
         child_id = _seed_instance(engine, parent_id=parent_id)
         child_task_id = _seed_child_task(engine, child_instance_id=child_id)
 
-        await bus.watch(str(child_task_id), FollowUp(target_instance_id=parent_id, message="c", source="t"))
-        # status="error" with error=None — the bus sets the flag AND
-        # populates the message dict with its own "child agent error"
-        # fallback via setdefault.
-        await bus.emit_terminal(str(child_task_id), Outcome(status="error"))
+        await bus.watch(
+            str(child_task_id),
+            FollowUp(target_instance_id=parent_id, message="c", source="t"),
+        )
+        # status="error" with error=None — the F-1 truthy-error
+        # gate refuses to flip the parent flag (the None-capable
+        # producer shape — terminated branch or §1a defensive
+        # WARNING) and the §1a WARNING fires verbatim via the
+        # ``logger.warning`` path (the bus module's logger).
+        import logging as _logging
+
+        with caplog.at_level(
+            _logging.WARNING, logger="daemon.services.dependency_bus"
+        ):
+            await bus.emit_terminal(
+                str(child_task_id), Outcome(status="error")
+            )
+        assert any(
+            "status='error' but error=None" in rec.getMessage()
+            for rec in caplog.records
+            if rec.name == "daemon.services.dependency_bus"
+        ), (
+            "§1a defensive WARNING must fire verbatim at "
+            "dependency_bus.py:693 when status='error' arrives "
+            "with error=None"
+        )
+
+        # Post-F-1: the flip did NOT happen (the gate's whole
+        # point — prevent the pre-fix None-poisoning class).
+        assert bus.had_parent_error(parent_id) is False, (
+            "F-1 truthy-error gate: status='error' with error=None "
+            "MUST NOT flip the parent flag (the pre-fix class "
+            "poisoned the parent's finalize path)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_flag_flip_with_truthy_error_sets_fallback(
+        self, engine, bus
+    ):
+        """Companion to the post-F-1 None-handling test above.
+        Carries the original test's intent (parent_error_message
+        is non-None when had_parent_error is True and the helper
+        resolves the fallback) — but with a TRUTHY error so the
+        F-1 gate actually flips the flag.
+        """
+        from daemon.services.job_feedback_observer import (
+            CHILD_AGENT_ERROR_FALLBACK,
+            _resolve_finalize_status,
+        )
+
+        parent_id = _seed_instance(engine)
+        child_id = _seed_instance(engine, parent_id=parent_id)
+        child_task_id = _seed_child_task(engine, child_instance_id=child_id)
+
+        await bus.watch(
+            str(child_task_id),
+            FollowUp(target_instance_id=parent_id, message="c", source="t"),
+        )
+        # Post-F-1: status="error" with a TRUTHY error flips the
+        # parent flag (the gate requires both — see
+        # ``_has_truthy_error`` at dependency_bus.py:_).
+        await bus.emit_terminal(
+            str(child_task_id), Outcome(status="error", error="boom")
+        )
 
         assert bus.had_parent_error(parent_id) is True
-        assert bus.parent_error_message(parent_id) == CHILD_AGENT_ERROR_FALLBACK
+        assert bus.parent_error_message(parent_id) == "boom"
 
-        # Helper returns ERROR + a non-None error string (the bus's
-        # own fallback, which equals CHILD_AGENT_ERROR_FALLBACK).
+        # Helper returns ERROR + a non-None error string.
         status, error = _resolve_finalize_status(
             bus, parent_id,
             default_status=InstanceStatus.COMPLETED.value,
             default_error=None,
         )
         assert status == InstanceStatus.ERROR.value
-        assert error == CHILD_AGENT_ERROR_FALLBACK
+        assert error == "boom"

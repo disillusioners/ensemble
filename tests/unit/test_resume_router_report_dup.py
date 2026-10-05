@@ -336,11 +336,21 @@ def _build_service(
     manager = MagicMock()
     manager.engine = engine
     manager._handle_recover_deferred_report = MagicMock()
+    # Iteration-2 W-4: the per-row pass duck-types the
+    # ``find_wake_already_delivered_evidence`` ledger method
+    # (no isinstance gate). The mock must declare it returning
+    # False (no evidence) -- an unconfigured MagicMock's
+    # auto-attr is a truthy MagicMock that would fake a
+    # ledger match and skip every lane-2 candidate.
+    queue_repo = MagicMock()
+    queue_repo.find_wake_already_delivered_evidence = MagicMock(
+        return_value=False
+    )
 
     service = ReportDeliveryRecoveryService(
         task_repo=task_repo,
         report_injection_repo=ri_repo,
-        queue_repo=MagicMock(),
+        queue_repo=queue_repo,
         instance_repo=MagicMock(),
         manager_ref=manager,
         interval_seconds=300,
