@@ -40,9 +40,8 @@ no-PG safety net had to live outside the PG-marked file.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.dialects import postgresql
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import SQLModel, create_engine
 
 from daemon.repositories.instance import (
     CHAT_SOURCE_TYPES,
@@ -474,9 +473,8 @@ class TestBuildSourceConditionHelper:
         from sqlmodel import Session
         with Session(repo.engine) as s:
             # Helper does not raise on a non-string; it passes the value
-            # verbatim into expr.in_(values) (see repository.py:381).
-            # This keeps
-            # the helper's contract simple: ``source`` is a value, the
+            # verbatim into expr.in_(values) (see repository.py:382). This
+            # keeps the helper's contract simple: ``source`` is a value, the
             # caller is responsible for typing it.
             cond = repo._build_source_condition(s, 42)  # type: ignore[arg-type]
             assert cond is not None
@@ -528,6 +526,7 @@ class TestSourceConditionCompileDialect:
             "postgresql+psycopg://stub:stub@127.0.0.1:1/stub"
         )
         repo = SQLModelInstanceRepository(stub_engine)
+        from sqlmodel import Session
         with Session(stub_engine) as session:
             cond = repo._build_source_condition(session, "telegram")
         assert cond is not None
@@ -562,6 +561,7 @@ class TestSourceConditionCompileDialect:
             "postgresql+psycopg://stub:stub@127.0.0.1:1/stub"
         )
         repo = SQLModelInstanceRepository(stub_engine)
+        from sqlmodel import Session
         with Session(stub_engine) as session:
             cond = repo._build_source_condition(session, "chat")
         assert cond is not None

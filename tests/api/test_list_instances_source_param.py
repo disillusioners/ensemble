@@ -41,7 +41,6 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine

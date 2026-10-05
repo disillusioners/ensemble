@@ -67,15 +67,11 @@ Out of scope (covered in the SQLite test)
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.dialects import postgresql
-from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance  # noqa: F401  (registers table)
 from daemon.repositories.instance.repository import (
     SQLModelInstanceRepository,
 )
-from daemon.repositories.instance import CHAT_SOURCE_TYPES
 
 
 # ---------------------------------------------------------------------------

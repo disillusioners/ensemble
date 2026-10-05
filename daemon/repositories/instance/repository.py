@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy import bindparam, case, delete as sql_delete, exists, func, literal, not_, or_, String, text
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.engine import Engine
-from sqlalchemy.sql.elements import TextClause
+from sqlalchemy.sql.elements import ColumnElement, TextClause
 from sqlmodel import Session as SQLModelSession, select, col
 
 from .models import Instance, InstanceHierarchy, InstanceStatus
@@ -319,7 +319,7 @@ class SQLModelInstanceRepository:
             Instance.agent_id.ilike(search_term, escape="\\"),
         )
 
-    def _build_source_condition(self, db_session: SQLModelSession, source: str | None):
+    def _build_source_condition(self, db_session: SQLModelSession, source: str | None) -> ColumnElement[bool] | None:
         """Build a dialect-aware predicate for the source-type filter.
 
         Translates the public ``source`` parameter into an ``IN`` predicate
