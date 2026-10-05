@@ -1,5 +1,5 @@
 ---
-version: 1.0.0
+version: 1.1.0
 category: execution
 auto_load: false
 ---
@@ -39,11 +39,11 @@ charter's first chart on a fresh host depends on which path runs:
    render path acquires the advisory install lock, invokes THIS
    skill, and re-probes after the install releases the lock. This
    path can ride inside a `generate_chart` call only when
-   `render_image=True` (the 1200s tool-call timeout absorbs a cold
-   chromium download); on the validate-only default path
-   (`render_image=False`, 600s timeout) the install is too slow to
-   ride in-band and the render degrades to text-only Mermaid until
-   the next turn re-fires it.
+   `render_image=True` (the `_RENDER_TIMEOUT_S` `1200`s tool-call
+   timeout absorbs a cold chromium download); on the validate-only
+   default path (`render_image=False`, `_DEFAULT_TIMEOUT_S` `600`s
+   timeout) the install is too slow to ride in-band and the render
+   degrades to text-only Mermaid until the next turn re-fires it.
 2. **Provisioning / pre-warm (deploy step)** — see
    [Provisioning / pre-warm invocation](#provisioning--pre-warm-invocation)
    below. This is the path the operator (or `ari` / `commissioner`
@@ -64,8 +64,8 @@ below). A maintainer who edits this skill without reading the
 a fresh host, run this skill as a **deploy step**, not as a
 self-heal. Cold chromium download is multi-minute (puppeteer
 downloads ~150 MB) and the chart-render contract will not ride it
-inside a validate-only `generate_chart` call (the 600s default
-timeout is too short).
+inside a validate-only `generate_chart` call (the
+`_DEFAULT_TIMEOUT_S` `600`s default timeout is too short).
 
 ### When to pre-warm
 
@@ -95,7 +95,7 @@ same fences/steps/verify/reversal shape):
    (nvm bootstrap + Node 24 install + `npm i -g @mermaid-js/mermaid-cli@12`
    + `@puppeteer/browsers@3 install chrome@<pinned-major>` +
    chromium download); the verify step adds ~10s. Do NOT time out
-   the dispatch under 600s.
+   the dispatch under `_DEFAULT_TIMEOUT_S` `600`s.
 3. **Verify the probe returns warm.** After the skill reports
    `install-mermaid-cli: OK (mmdc=..., chromium=..., observedInstallSec=...)`,
    re-run `charter_readiness_probe` against the host (or just
@@ -112,8 +112,9 @@ incidental cold-detects that slip past pre-warm (cache evict,
 manual config clear, etc.). It is NOT a substitute for pre-warm:
 
 - The cold path can take minutes; it MUST NOT ride inside
-  `generate_chart`'s default 600s validate-only timeout. Even with
-  `render_image=True` and the 1200s timeout, a fresh-host cold
+  `generate_chart`'s default `_DEFAULT_TIMEOUT_S` `600`s
+  validate-only timeout. Even with `render_image=True` and the
+  `_RENDER_TIMEOUT_S` `1200`s timeout, a fresh-host cold
   download can blow the budget.
 - The `cold_misses_in_session` cap (default 2) is the structural
   brake that stops a permanently-broken host from flailing the
@@ -157,9 +158,9 @@ AND this section must change in lock-step.**
 | 1 | mmdc 12.x removed `-w`/`--width` (the prior CLI flag). | Render with `--size 1200` (the v12 flag) on every mmdc invocation. | `-w` and `--width` both exit non-zero in 12.x; the silent fallback is "no width pin", which the test fixture does not detect. |
 | 2 | mmdc 12.x `-c`/`--configFile` takes a FILE PATH ONLY — inline JSON is no longer accepted. | Stage the security-pin JSON to a per-render temp file and pass `-c "$mmd_json"`. | The lib does this in `_charter_mmdc_render`. The temp file is cleaned up on both success and failure paths. |
 | 3 | chromium 154 cannot launch under any practical VA cap (fails even 8 GB). The failure masks the chromium sandbox signature so the `--no-sandbox` fallback never fires. | NO `ulimit -v` wrapper in the render invocation. `timeout 60` stays as the only wall-clock bound. | Documented in `.agents/charter/memories/2026-10-05-mermaid-cli-12-toolchain-fixes.md`. The `ulimit -v` removal is the single most non-obvious fix — a maintainer who adds it "for memory safety" will silently break every cold launch. |
-| 4 | The mmdc shim's shebang is `#!/usr/bin/env node`. Non-interactive shells (the charter's render path) do NOT have the nvm bin dir on `$PATH`, so a system Node (22.x on Ubuntu 24.04) would run the nvm-24 toolchain — wrong ABI, WASM init OOM. | Before invoking mmdc, prepend `dirname "$mmdc_bin"` to `PATH` so the recorded toolchain's Node 24 runs the shim. | The lib does this in `_charter_mmdc_render` as the first line of the function. A maintainer who extracts the mmdc invocation into a sub-shell and forgets this prepend will see "works on dev box, breaks on every prod box that has system Node 22". |
-| 5 | mmdc's `--puppeteerConfigFile` expects `executablePath`/`args` at the TOP level of the config. The probe's 4-signal config file is NESTED (`puppeteerConfig.executablePath`, `puppeteerConfig.args`). Passing the staged file directly to mmdc silently drops `executablePath` AND `args` — chromium launches with the wrong binary (or none) and no `--no-sandbox` escape. | The verify function (`charter_verify_toolchain`) derives a TOP-LEVEL mmdc-shaped config via `jq '{executablePath: .puppeteerConfig.executablePath, args: .puppeteerConfig.args}' "$staged_cfg" > "$pptr_cfg"` and passes `$pptr_cfg` to mmdc. | The probe-shape is the contract for `charter_readiness_probe`; the mmdc-shape is the contract for mmdc/puppeteer. The lib mediates between the two. |
-| 6 | The `--no-sandbox` fallback (logged single retry after a sandbox launch failure) must override `args` at the TOP level of the config — NOT inside `puppeteerConfig.args`, which is never read by puppeteer. | Fallback jq: `jq '.args = ["--no-sandbox"]' "$pptr_cfg" > "$pptr_cfg_fb"` and pass `$pptr_cfg_fb` to the retry invocation. | Without this fix, a sandboxed launch failure (e.g. Ubuntu 23.10+ AppArmor userns restriction) would never recover — the user gets text-only Mermaid forever, even though a one-line config change would unblock them. |
+| 4 | The mmdc shim's shebang is `#!/usr/bin/env node`. Non-interactive shells (the charter's render path) do NOT have the nvm bin dir on `$PATH`, so a system Node (22.x on Ubuntu 24.04) would run the nvm-24 toolchain — wrong ABI, WASM init OOM. | Before invoking mmdc, prepend `dirname "$mmdc_bin"` to `PATH` so the recorded toolchain's Node 24 runs the shim. | The lib does this in `_charter_mmdc_render` immediately after staging the security-pin JSON (lib.sh:218-219 → `:224`); the prepend precedes the first mmdc invocation. A maintainer who extracts the mmdc invocation into a sub-shell and forgets this prepend will see "works on dev box, breaks on every prod box that has system Node 22". |
+| 5 | mmdc's `--puppeteerConfigFile` expects `executablePath`/`args` at the TOP level of the config. The probe's 4-signal config file is NESTED (`puppeteerConfig.executablePath`, `puppeteerConfig.args`). Passing the staged file directly to mmdc silently drops `executablePath` AND `args` — chromium launches with the wrong binary (or none) and no `--no-sandbox` escape. | The verify function (`charter_verify_toolchain`) derives a TOP-LEVEL mmdc-shaped config via `jq '{executablePath: .puppeteerConfig.executablePath, args: .puppeteerConfig.args}' "$cfg" > "$pptr_cfg"` (lib.sh:297-298, VERBATIM) and passes `$pptr_cfg` to mmdc. | The probe-shape is the contract for `charter_readiness_probe`; the mmdc-shape is the contract for mmdc/puppeteer. The lib mediates between the two. The variable name `$cfg` in the jq input is the *staged* (4-signal) config the verify function receives as `$2`; `$pptr_cfg` is the *derived* mmdc-shaped file written to `$vdir/pptr.json`. |
+| 6 | The `--no-sandbox` fallback (logged single retry after a sandbox launch failure) must override `args` at the TOP level of the config — NOT inside `puppeteerConfig.args`, which is never read by puppeteer. | Fallback jq (lib.sh:250, VERBATIM): `jq '.args = ["--no-sandbox"]' "$cfg" > "$cfg_fb"`; pass `$cfg_fb` to the retry invocation (line 251-258). | Without this fix, a sandboxed launch failure (e.g. Ubuntu 23.10+ AppArmor userns restriction) would never recover — the user gets text-only Mermaid forever, even though a one-line config change would unblock them. The `$cfg` and `$cfg_fb` names match `_charter_mmdc_render`'s locals (lib.sh:215); the verify-path `$pptr_cfg` is NOT used here — the render function receives the staged config directly. |
 
 **The six fixes are coupled:** any one of them broken means the
 render path silently degrades. The lib encodes all six in
@@ -472,9 +473,14 @@ Cold chromium download is multi-minute (puppeteer downloads ~150 MB
 chromium on first install). The hybrid executor's lock-guarded
 self-heal + async queue marker is the structural answer — the install
 runs in the background or on the next pre-warm, NEVER inside
-`generate_chart`'s 600s `invoke_and_wait` budget. The user's first
-chart on a cold host returns text-only Mermaid immediately; the
-next render (likely minutes later) is warm.
+`generate_chart`'s `_DEFAULT_TIMEOUT_S` (`600`s) `invoke_and_wait`
+budget (the validate-only default). On `render_image=True` the
+chart tool uses the longer `_RENDER_TIMEOUT_S` (`1200`s) budget
+so a cold chromium/puppeteer bootstrap can fit inside the call —
+but even there, the pre-warm deploy-step is the structural
+answer (the render budget is a budget, not an install policy).
+The user's first chart on a cold host returns text-only Mermaid
+immediately; the next render (likely minutes later) is warm.
 
 ### Self-heal cap and lock lifecycle (amendment #18, as wired)
 
@@ -501,3 +507,4 @@ the render bash block"): the install either runs as this skill behind
 the lock, or it does not run. The verify-gated promotion (Step 5 →
 Step 6) plus the fast path (Step 0) are the complete idempotency
 contract.
+.

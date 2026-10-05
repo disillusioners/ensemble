@@ -411,13 +411,55 @@ def test_render_pre_sanitizer_strips_init_and_frontmatter():
 # =========================================================================
 
 def test_render_ulimit_and_timeout_wrap_invocation():
-    """workflow.md mmdc invocation must be wrapped in
-    ( ulimit -v 2097152; timeout 60 ... ) — memory + wall-clock bounds.
+    """workflow.md Step 5.5 mmdc invocation must mirror lib.sh:_charter_mmdc_render
+    byte-for-byte — the load-bearing canonical-form contract a fresh-host
+    charter follows when the lib is NOT preloaded.
+
+    Pinned: the four canonical elements of the render invocation
+    (per the post-smoke 6-fix fold into workflow.md + lib.sh):
+      1. `timeout 60` wrap (the ONLY wall-clock bound — no ulimit -v)
+      2. `--size 1200` (v12 flag; NOT `-w 1200` which exits non-zero)
+      3. `-c "$MMD_JSON"` (a mktemp-staged security-pin file, NOT
+         inline JSON — inline-JSON support was removed in mmdc 12.x)
+      4. `PATH="$(dirname "$MMDC_BIN"):$PATH"` prepend so the nvm Node
+         24 (not system Node 22) runs the `#!/usr/bin/env node` shim.
     """
     body = WORKFLOW_MD.read_text()
-    # The wrapper pattern
-    assert re.search(r"\( ulimit -v 2097152;\s*timeout 60", body), (
-        "workflow.md mmdc invocation must be wrapped in ( ulimit -v 2097152; timeout 60 ... )"
+    # 1. timeout 60 wrap, NO ulimit -v wrapper (chromium 154 cannot
+    #    launch under VA cap). The prose MAY discuss `ulimit -v` in the
+    #    negative ("NO `ulimit -v` wrapper"); what we pin is the
+    #    absence of the actual `( ulimit -v ...` wrapper form.
+    assert not re.search(r"\(\s*ulimit\s+-v", body), (
+        "workflow.md must NOT wrap the mmdc invocation in `( ulimit -v ... )` "
+        "(chromium 154 cannot launch under VA cap; the failure masks the "
+        "sandbox signature so the --no-sandbox fallback never fires)"
+    )
+    assert re.search(r"\( timeout 60 \"\$MMDC_BIN\"", body), (
+        "workflow.md Step 5.5 must wrap mmdc in `( timeout 60 \"$MMDC_BIN\" ... )`"
+    )
+    # 2. --size 1200 (v12 flag); `-w 1200` / `--width 1200` is wrong (12.x removed it).
+    assert "--size 1200" in body, (
+        "workflow.md Step 5.5 must pin `--size 1200` (the mmdc v12 width flag; "
+        "the legacy `-w` / `--width` was removed in 12.x and exits non-zero)"
+    )
+    assert not re.search(r"(^|[\s])-w\s+1200", body, re.MULTILINE), (
+        "workflow.md must NOT carry the legacy `-w 1200` mmdc flag (12.x removed it)"
+    )
+    # 3. -c takes a FILE PATH ONLY (staged mktemp); inline JSON is gone in 12.x.
+    assert re.search(r'-c\s+"\$\s*MMD_JSON\s*"', body), (
+        "workflow.md Step 5.5 must stage the security-pin JSON to a mktemp and "
+        "pass `-c \"$MMD_JSON\"` (mmdc 12.x `-c` takes a file path only — "
+        "inline JSON is no longer accepted)"
+    )
+    assert not re.search(r"-c\s+'\{", body), (
+        "workflow.md must NOT inline the security-pin JSON via `-c '{...}'` "
+        "(12.x removed inline-JSON support; the staged-temp-file form is canonical)"
+    )
+    # 4. PATH prepend so the nvm Node 24 runs the `#!/usr/bin/env node` shim.
+    assert re.search(r'PATH="\$\(dirname\s+"\$\s*MMDC_BIN\s*"\):\$PATH"', body), (
+        "workflow.md Step 5.5 must prepend the mmdc bin's dir to PATH "
+        "(`PATH=\"$(dirname \"$MMDC_BIN\"):$PATH\"`) so the recorded "
+        "nvm Node 24 runs the shim, not whatever system Node is first on PATH"
     )
 
 

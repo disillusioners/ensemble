@@ -539,7 +539,13 @@ pin_31_agents_render_image_qualifier() {
 # skill/doc improvements so the next fresh-host first render is BORING.
 # Pins 32–34 form the durable doc-encodes-the-fix contract; without them
 # the committed lib fixes are SYMPTOM PATCHES if the .md doc still
-# teaches the broken procedure.
+# teaches the broken procedure. These pins are GREP-based (keyword
+# phrases and `grep -qF` / `grep -qE` patterns) — NOT SHA256 hashes
+# (the seal tripwire in `test_chart_image_delivery_e2e.py` is the
+# hash-based backstop for full-file integrity; the audit pins are
+# the "section present + canonical content" assertion class). A
+# refactor that moves the keyword phrase but preserves the contract
+# is fine; a refactor that drops the contract is not.
 # ============================================================================
 
 # Pin 32 — install-mermaid-cli.md carries a "Provisioning / pre-warm
