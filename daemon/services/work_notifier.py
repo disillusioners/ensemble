@@ -1445,6 +1445,47 @@ async def _enqueue_for_watchers(
     return notified
 
 
+def _pack_legacy_kwargs(
+    *,
+    work_id: str | None,
+    status: str | None,
+    mission_work_ids: list[str] | None,
+    instance_manager: Any,
+    work_resolver: "WorkResolverService" | None,
+    watcher_repo: Any,
+    progress: str | None,
+    result_summary: str | None,
+    error: str | None,
+) -> NotifyQAPayload:
+    """Build a :class:`NotifyQAPayload` from the legacy 8-kwarg surface.
+
+    Backward-compat shim (fix-cycle-2 polish): the original 8-kwarg
+    signature is retained for the regression test surface
+    (``test_question_watch_fanout.py``:745-753, 820-827). The shim
+    packs the kwargs into the canonical payload; ``progress`` is
+    accepted-but-ignored (the QA lane's
+    ``_MISSION_SCOPED_QA_STATUSES`` excludes ``in_progress``;
+    ``_build_event_envelope`` would silently discard the content).
+    """
+    if progress is not None:
+        logger.debug(
+            "notify_mission_qa_watchers: legacy 'progress' kwarg is "
+            "structurally dead in the QA lane (statuses exclude "
+            "in_progress); caller's content is discarded. Route "
+            "through 'result_summary' instead."
+        )
+    return NotifyQAPayload(
+        work_id=work_id or "",
+        status=status or "",
+        mission_work_ids=mission_work_ids or [],
+        instance_manager=instance_manager,
+        work_resolver=work_resolver,
+        watcher_repo=watcher_repo,
+        result_summary=result_summary,
+        error=error,
+    )
+
+
 async def notify_mission_qa_watchers(
     payload: NotifyQAPayload | None = None,
     *,
@@ -1462,7 +1503,7 @@ async def notify_mission_qa_watchers(
 
     Recipient resolution is EMISSION-TIME and MISSION-SCOPED: one
     bounded ``job_id IN (...)`` SELECT over the mission's receipt set
-    (``payload.mission_work_ids``, capped + deduped by the caller's
+    (capped + deduped by the caller's
     :func:`midflight_qa.enumerate_mission_work_ids`) finds every
     watcher holding an UNCLAIMED row on ANY associated receipt. QA
     events are EVENTS-FILTER-EXEMPT - the row's ``watch_events``
@@ -1481,46 +1522,32 @@ async def notify_mission_qa_watchers(
     the terminal fire only. Rows survive this delivery intact for
     their own subscribed events.
 
-    Args:
-        payload: :class:`NotifyQAPayload` - the atomic caller surface
-            (collapses the prior 8-kwarg signature into a single
-            value object). The pre-flip receipt-snapshot semantics
-            are the caller's responsibility (terminate-flip cascades
-            delete Task rows; the public entry does NOT degrade to a
-            best-effort call-time enumeration).
+    Caller surface (fix-cycle-2 polish, item 3):
+
+    * **NEW (canonical):** pass a single :class:`NotifyQAPayload`
+      value object - ``await notify_mission_qa_watchers(payload)``.
+      This is the surface all in-tree callers use.
+    * **LEGACY (backward-compat):** the original 8-kwarg surface is
+      STILL ACCEPTED for backward-compat with the regression test
+      surface; the kwargs are packed into a :class:`NotifyQAPayload`
+      via :func:`_pack_legacy_kwargs` before the helper dispatch.
 
     Returns:
         Number of watcher emissions delivered (deduped per watcher).
     """
-    # Backward-compat (fix-cycle-2 polish): pack the legacy kwargs into
-    # the canonical payload when the caller did not pass one (the
-    # regression test surface still uses the original 8-kwarg form).
-    # ``progress`` is accepted-but-ignored - the QA lane structurally
-    # cannot render it (``_MISSION_SCOPED_QA_STATUSES`` excludes
-    # ``in_progress``; ``_build_event_envelope`` would silently discard
-    # the content). Callers route any text through ``result_summary``.
     if payload is None:
-        if progress is not None:
-            logger.debug(
-                "notify_mission_qa_watchers: legacy 'progress' kwarg is "
-                "structurally dead in the QA lane (statuses exclude "
-                "in_progress); caller's content is discarded. Route "
-                "through 'result_summary' instead."
-            )
-        payload = NotifyQAPayload(
-            work_id=work_id or "",
-            status=status or "",
-            mission_work_ids=mission_work_ids or [],
+        payload = _pack_legacy_kwargs(
+            work_id=work_id,
+            status=status,
+            mission_work_ids=mission_work_ids,
             instance_manager=instance_manager,
             work_resolver=work_resolver,
             watcher_repo=watcher_repo,
+            progress=progress,
             result_summary=result_summary,
             error=error,
         )
     if payload.status not in _MISSION_SCOPED_QA_STATUSES:
-        # Fail-closed: this lane must never become a side door for
-        # terminal/transport delivery - the C1/N1/C3 machinery in
-        # ``notify_work_watchers`` is the ONLY terminal path.
         logger.warning(
             "notify_mission_qa_watchers: refused non-QA status=%s for "
             "work_id=%s - mission-scoped QA lane is events-exempt and "
@@ -1530,7 +1557,6 @@ async def notify_mission_qa_watchers(
             payload.work_id[:8] if payload.work_id else "<none>",
         )
         return 0
-
     if payload.instance_manager is None or payload.watcher_repo is None:
         logger.debug(
             "notify_mission_qa_watchers: missing dependency for "
@@ -1542,7 +1568,6 @@ async def notify_mission_qa_watchers(
             payload.watcher_repo is not None,
         )
         return 0
-
     candidate_ids = _build_candidate_ids(payload)
     watchers = await _select_watchers(payload, candidate_ids)
     if not watchers:
@@ -1557,7 +1582,6 @@ async def notify_mission_qa_watchers(
         agent_id=agent_id,
         status_display=status_display,
     )
-
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "[qa-fanout] ts=%d status=%s primary=%s candidates=%d "
@@ -1571,7 +1595,6 @@ async def notify_mission_qa_watchers(
             notified,
         )
     return notified
-
 
 __all__ = [
     "NotifyQAPayload",
