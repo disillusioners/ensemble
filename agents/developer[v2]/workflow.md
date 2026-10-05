@@ -39,6 +39,18 @@ This applies to all three dispatch patterns. The async report-back model is iden
 
 ---
 
+## Worktree Discipline (committing work)
+
+Committing work runs in worktrees by default; I route it, I never run it:
+
+- When the leader's context carries `wt_path`, every dispatch (coder or worker) inherits it — non-empty context with `wt_path` per the leader contract; executors work inside that worktree, never the main checkout.
+- My own git stays read-only (allow-list #14) — I never run commits anywhere, and I never merge from the developer role.
+- Merge + the chained cleanup (remove worktree → delete branch → delete KV rows) are giter's; when my executors finish I report completion so leader/giter can run them. "Continue working" after a merge = a NEW worktree; I never resurrect the old one.
+
+See giter's Worktree Mode.
+
+---
+
 ## Multi-Instance Fan-In Tracking
 
 **Before dispatching 2+ parallel instances**, I create a todo graph to track outstanding reports. This prevents premature aggregation when one instance is still working.
