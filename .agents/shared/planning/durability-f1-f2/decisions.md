@@ -998,6 +998,20 @@ The following seams are documented as **NEVER** direct-call entry points from an
 
 **Settling citation.** Explorer A W-1 CONFIRMED + W-5 CONFIRMED; Explorer B Q1-Q4; Explorer C Q1-Q4; the deferred-marker path's documented caller census at `report_delivery_recovery.py:735/:1016/:1119` + `manager.py:10780` (RESUME ROUTER revival-first precedent at `:10716-10753`).
 
+**§12d companion note — Lane-6 exception (G4-r3, 2026-10-05; commit ``4b601955``).** The seam-(a) blanket prohibition above is UNCHANGED for every other caller. **The ONE explicit exception is `_run_stuck_wake_lane`** (at `daemon/services/report_delivery_recovery.py:985` in the 4b601955 snapshot), which calls `self._manager._process_child_completion_and_notify_parent(child_id, child_message_id)` DIRECTLY, POST-materialization, from the sweep thread via the sanctioned manager-loop bridge (`run_coroutine_threadsafe(...).result(8.0)` — the same pattern as `_handle_recover_deferred_report` at `manager.py:8586-8596` and the revival seam at `manager.py:9118`).
+
+  **Sanctioned because:**
+
+  (i) The artifacts already exist — minted by the NATURAL flow pre-crash and preserved across the wipe (the `report_injections` row is in state `task_delivered` / `pending`; the wake row is in `message_queue` with status `ready` preserved by the F-1 epoch-belt; the wake task is in `task` with status `running` preserved by the same F-1 amendment). This call does NOT mint new artifacts — it dispatches the parent graph turn for the artifacts the natural flow already created and the dead worker died before delivering.
+
+  (ii) The argument order is test-locked — the child-id-first hazard is pinned by `tests/unit/test_report_delivery_recovery_service.py::TestG4R3StuckWakeParentScheduleSeam::test_lane6_heal_dispatches_parent_via_natural_primitive` which asserts `assert_awaited_once_with(child_id, child_content_message_id)` and the cross-loop seam pin (the coroutine must run on the manager loop, not an ephemeral `asyncio.run` loop — the F-2 iter 2 blocker 1 class must not re-emerge).
+
+  (iii) The primitive is idempotent / dedup-absorbing (W6 marker absorb on the obligation-triple unique index; wake-row dedup via `message_id` / `work_id`; the `child_reports.py:2773-2787` child-status guard returns `idempotency_skip` on re-entry — no exception, no erase, no duplicate). A second invocation is a no-op.
+
+  (iv) The round-3 leader commission explicitly authorized this seam ("schedule the parent's graph turn upon lane-6 injection delivery" — see the G4-r3 commission brief).
+
+  **Without this exception, the captured-wedge shape (marker TASK_DELIVERED + wake row ready + dead-worker wake task — the F-3 LEG 1 evidence) is unreachable: the worker's claim path sees `already_delivered` and correctly skips the parent-schedule step per the dedup contract. The next review would flag this call as a seam-(a) violation; a future cleanup would remove the heal.** Cross-reference: the module-head W-2 block at `daemon/services/report_delivery_recovery.py:55+` carries the same dated exception text; live proof lands at the tester's LEG-1 re-gate (their scope after the fix = LEG 1 only per the merge-gate record).
+
 ---
 
 ## §13 — W-3: arm-3 lifecycle bound (REVISION CYCLE 2)
