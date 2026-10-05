@@ -20,7 +20,7 @@
 #   PUPPETEER_EXECUTABLE_PATH — absolute path to chromium (set on success/rc=0)
 #   charter_verify_toolchain  — evidence-gate for the install skill: renders a
 #                               minimal diagram under the exact render contract
-#                               (sanitizer + ulimit -v + timeout 60 + security
+#                               (sanitizer + timeout 60 + security
 #                               pin + sandboxed-first launch); returns 0 only on
 #                               real non-empty SVG+PNG evidence
 #
@@ -199,7 +199,10 @@ charter_clear_install_session_state() {
 # Single home of the VERIFY render contract (mirrors workflow.md Step 5.5
 # byte-for-byte — when one changes, the other must change with it):
 #   - sanitized .mmd input (the caller sanitizes; see workflow.md Step 5.3)
-#   - ( ulimit -v 2097152; timeout 60 ... ) memory + wall-clock bounds
+#   - ( timeout 60 ... ) wall-clock bound — NO ulimit -v VA cap:
+#     chromium 154's VA reservations exceed any practical cap (launch
+#     fails even at 8 GB, and the failure masks the sandbox signature
+#     so the --no-sandbox fallback cannot fire)
 #   - -c security pin strict + htmlLabels:false
 #   - sandboxed launch is the DEFAULT; --no-sandbox is applied ONLY as a
 #     logged single fallback when the sandboxed launch fails with the
@@ -209,18 +212,30 @@ charter_clear_install_session_state() {
 # Prints the render log; returns the render rc.
 _charter_mmdc_render() {
     local mmdc_bin="$1" cfg="$2" in_mmd="$3" out_file="$4"
-    local log rc cfg_fb
-    log=$( ( ulimit -v 2097152 2>/dev/null; timeout 60 "$mmdc_bin" \
+    local log rc cfg_fb mmd_json
+    # mmdc v12 -c/--configFile takes a FILE PATH (inline-JSON support
+    # removed in 12.x) — stage the security pin to a per-render temp file.
+    mmd_json=$(mktemp "${TMPDIR:-/tmp}/charter-mmdc-cfg.XXXXXX.json")
+    printf '%s\n' '{"securityLevel":"strict","htmlLabels":false}' > "$mmd_json"
+    # The mmdc shim's shebang is `#!/usr/bin/env node`; non-interactive
+    # shells do NOT have the nvm bin dir on PATH. Prepend the mmdc bin's
+    # own dir so the recorded toolchain's Node 24 runs it (not whatever
+    # system Node happens to be first on PATH).
+    PATH="$(dirname "$mmdc_bin"):$PATH"; export PATH
+    log=$( ( timeout 60 "$mmdc_bin" \
         -i "$in_mmd" \
         -o "$out_file" \
-        -t default -b white -w 1200 -s 2 \
-        -c '{"securityLevel":"strict","htmlLabels":false}' \
+        -t default -b white --size 1200 -s 2 \
+        -c "$mmd_json" \
         --puppeteerConfigFile "$cfg" \
         --quiet \
     ) 2>&1 )
     rc=$?
     printf '%s\n' "$log"
-    [ "$rc" -eq 0 ] && return 0
+    if [ "$rc" -eq 0 ]; then
+        rm -f "$mmd_json" 2>/dev/null || true
+        return 0
+    fi
 
     # Sandbox launch-failure fallback — ONE retry with --no-sandbox,
     # logged. This is the ONLY sanctioned render-side retry (launch
@@ -229,18 +244,22 @@ _charter_mmdc_render() {
         "no usable sandbox\|sandbox was unable\|running as root without --no-sandbox"; then
         echo "WARN: sandboxed launch failed — retrying once WITH --no-sandbox (logged fallback, amendment #15)"
         cfg_fb=$(mktemp "${TMPDIR:-/tmp}/charter-verify-cfg.XXXXXX") || return "$rc"
-        jq '.puppeteerConfig.args = ["--no-sandbox"]' "$cfg" > "$cfg_fb" 2>/dev/null
-        ( ulimit -v 2097152 2>/dev/null; timeout 60 "$mmdc_bin" \
+        # puppeteer reads executablePath/args at the TOP level of the
+        # config file (mmdc passes it through verbatim) — override the
+        # top-level `.args` key.
+        jq '.args = ["--no-sandbox"]' "$cfg" > "$cfg_fb" 2>/dev/null
+        ( timeout 60 "$mmdc_bin" \
             -i "$in_mmd" \
             -o "$out_file" \
-            -t default -b white -w 1200 -s 2 \
-            -c '{"securityLevel":"strict","htmlLabels":false}' \
+            -t default -b white --size 1200 -s 2 \
+            -c "$mmd_json" \
             --puppeteerConfigFile "$cfg_fb" \
             --quiet \
         ) 2>&1
         rc=$?
         rm -f "$cfg_fb" 2>/dev/null || true
     fi
+    rm -f "$mmd_json" 2>/dev/null || true
     return "$rc"
 }
 
@@ -268,6 +287,17 @@ charter_verify_toolchain() {
 
     local vdir
     vdir=$(mktemp -d) || return 1
+    # mmdc's --puppeteerConfigFile expects executablePath/args at TOP
+    # level; the staged/promoted config nests them under .puppeteerConfig
+    # (the probe's 4-signal contract shape). Derive the mmdc-shaped file
+    # — passing the staged file directly silently drops executablePath
+    # AND args, so the --no-sandbox fallback never reaches chromium.
+    local pptr_cfg
+    pptr_cfg="$vdir/pptr.json"
+    jq '{executablePath: .puppeteerConfig.executablePath, args: .puppeteerConfig.args}' \
+        "$cfg" > "$pptr_cfg" 2>/dev/null
+    [ -s "$pptr_cfg" ] || { rm -rf "$vdir"; return 1; }
+
     printf 'flowchart TD\n    A-->B\n' > "$vdir/test.mmd"
 
     # Sanitize — same pass as the render path (workflow.md Step 5.3).
@@ -277,9 +307,9 @@ charter_verify_toolchain() {
         "$vdir/test.mmd" > "$vdir/test.san.mmd" \
         && mv "$vdir/test.san.mmd" "$vdir/test.mmd"
 
-    _charter_mmdc_render "$mmdc_bin" "$cfg" "$vdir/test.mmd" "$vdir/out.svg" \
+    _charter_mmdc_render "$mmdc_bin" "$pptr_cfg" "$vdir/test.mmd" "$vdir/out.svg" \
         || { rm -rf "$vdir"; return 1; }
-    _charter_mmdc_render "$mmdc_bin" "$cfg" "$vdir/test.mmd" "$vdir/out.png" \
+    _charter_mmdc_render "$mmdc_bin" "$pptr_cfg" "$vdir/test.mmd" "$vdir/out.png" \
         || { rm -rf "$vdir"; return 1; }
 
     if [ ! -s "$vdir/out.svg" ] || [ ! -s "$vdir/out.png" ]; then

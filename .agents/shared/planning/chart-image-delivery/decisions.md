@@ -1186,6 +1186,7 @@ timeout_s = _RENDER_TIMEOUT_S if render_image else _DEFAULT_TIMEOUT_S
 1. **Smoke on a real chat source** — confirm a Discord (or Slack / Telegram) user explicitly asking for a chart still gets the PNG attached. The opt-in flip is structural; a real-channel e2e is the only way to prove the chat lane still works end-to-end. Plan N6-equivalent: env-poison contingency, interim gate = the new test cases (default + True paths) + the audit pins.
 2. **Charter-side refactor** — the conditional gate is a test-pinnable Python block embedded in workflow.md. If the opt-in contract stabilizes, the gate function could move to `agents/charter/skills-template/` and be sourced from workflow.md (mirroring `install-mermaid-cli.lib.sh`). Deferred: not in this patch's scope.
 3. **Per-source `render_image` defaults** — a chat-source agent (e.g. a Discord-native leader) could default `render_image=True` automatically based on source identity. Deferred: caller-side concern; this patch ships the opt-in flag and the skill guidance; per-agent default wiring is each agent's call.
+4. **BACKLOG: image_save transport corruption** — agent-facing image_save lane corrupts ~75KB base64 through LLM tokens (observed smoke 38e63961); fix candidate = direct file-path save path for renders — out of chart-render-opt-in scope.
 
 ---
 

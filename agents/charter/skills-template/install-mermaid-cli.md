@@ -215,10 +215,11 @@ probe time), cache eviction is survived.
 
 ```bash
 # 10. Verify against the STAGED config. charter_verify_toolchain runs
-#     the exact render contract (sanitized input, ulimit -v 2 GB,
-#     timeout 60, security pin, sandboxed-first launch with one logged
-#     --no-sandbox fallback) and requires real evidence: non-empty SVG
-#     AND PNG, and file(1) reporting PNG image data.
+#     the exact render contract (sanitized input, timeout 60 wall-clock,
+#     security pin, sandboxed-first launch with one logged
+#     --no-sandbox fallback; NO ulimit -v VA cap — chromium 154 cannot
+#     launch under any practical VA cap) and requires real evidence:
+#     non-empty SVG AND PNG, and file(1) reporting PNG image data.
 #
 #     ANY verify failure exits non-zero WITHOUT promoting the staged
 #     config — the probe stays cold and the next render re-fires this
