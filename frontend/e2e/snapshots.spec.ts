@@ -288,7 +288,7 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
 
   test('step 2 — page renders header, toggle, metrics strip, filter bar, 8-column table, paginator', async ({ page }) => {
     await openSnapshotsWithRows(page);
-    await expect(page.locator('h1')).toHaveText('Snapshots');
+    await expect(page.getByRole('heading', { name: 'Snapshots', exact: true })).toHaveText('Snapshots');
     await expect(page.getByRole('radio', { name: 'Enabled' })).toBeVisible();
     await expect(page.getByRole('radio', { name: 'Disabled' })).toBeVisible();
     await expect(page.locator('[data-test="metrics-capture-card"]')).toBeVisible();
@@ -313,7 +313,7 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     let [resp] = await Promise.all([
       nextListResponse(page),
       (async () => {
-        await page.getByPlaceholder('Search projects…').click();
+        await page.locator('app-searchable-select input[placeholder="Search projects…"]').click();
         await page.getByRole('option', { name: 'e2e-snapshots-alpha' }).click();
       })(),
     ]);
@@ -545,6 +545,11 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     await page.locator('table tbody tr').first().click();
     await expect(page.locator('[data-test="snapshot-drawer"]')).toBeVisible();
 
+    // Focus the drawer pane (the <mat-drawer> element itself, which carries
+    // tabindex="-1") so Material's CdkTrapFocus Escape handler is the active
+    // listener when the key reaches the page. Without this, the keypress
+    // lands on the document and the mat-drawer-open state does not flip.
+    await page.locator('[data-test="snapshot-drawer"]').focus();
     await page.keyboard.press('Escape');
     await expect(page.locator('[data-test="snapshot-drawer"]')).not.toBeVisible();
     await expect(page.locator('table tbody tr').first()).toBeVisible();
