@@ -7,10 +7,11 @@ Light usage counters, MONITORING ONLY. The R16 contract:
   CREATE-FRESH all count). The key is the caller agent id (``scope
   = "capture:agent:<agent_id>"``) so the FE surfaces a per-agent
   breakdown.
-* **Spawn-warm counts** — incremented on the ``spawn_hot_instance``
-  WARM path ONLY. Cold / no-hit / expired / verify-failed spawns
-  are NOT counted (R16 rider j). The key is the consumed snapshot
-  id (``scope = "spawn:snapshot:<snapshot_id>"``).
+* **Spawn-warm counts** — incremented on the warm-start path of
+  the unified ``spawn_instance`` tool ONLY (formerly the removed
+  ``spawn_hot_instance``). Cold / no-hit / expired / verify-failed
+  spawns are NOT counted (R16 rider j). The key is the consumed
+  snapshot id (``scope = "spawn:snapshot:<snapshot_id>"``).
 
 **Guarantees**:
 
@@ -104,7 +105,7 @@ class SnapshotMetricsService:
     def inc_spawn(self, snapshot_id: str) -> None:
         """Increment the spawn-warm counter for one snapshot id.
 
-        Called on the ``spawn_hot_instance`` WARM path ONLY. Cold /
+        Called on the unified ``spawn_instance`` WARM path ONLY. Cold /
         no-hit / expired / verify-failed spawns DO NOT increment
         (R16 rider j).
 

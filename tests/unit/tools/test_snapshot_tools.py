@@ -1,10 +1,14 @@
-"""Agent Snapshot tool-surface tests (Wave 2b, PR6).
+"""Agent Snapshot tool-surface tests (Wave 2b, PR6 + unify-spawn-tools).
 
-Covers the commissioned Wave 2b contracts at the TOOL level:
+Covers the commissioned Wave 2b contracts at the TOOL level, updated
+for unify-spawn-tools (2026-10-05 — ``spawn_hot_instance`` removed;
+the warm-start flow rides the unified ``spawn_instance`` tool, gated
+by the TARGET agent's ``snapshot_enabled`` meta flag):
 
 * **R15 gate** — ``snapshot_create`` disabled by default (single
   helper seam ``is_snapshot_create_enabled``); ``snapshot_search`` and
-  ``spawn_hot_instance`` NEVER gated (rider (i) isolation).
+  the spawn-consumption path are NEVER R15-gated (rider (i)
+  isolation).
 * **R9 search-before-create** — the four verdicts (REUSE / SUPERSEDE /
   NEW / CREATE-FRESH) decided deterministically inside the tool.
 * **R12 tool-level supersession** — SUPERSEDE threads
@@ -12,35 +16,68 @@ Covers the commissioned Wave 2b contracts at the TOOL level:
   successor); REUSE returns the existing id without a capture. The
   lane-level atomic flip (executor terminal write →
   ``create_successor``) is pinned at the repository boundary.
-* **R14 auto-fallback** — expired → cold, stale-not-expired → warm +
-  drift warnings (hint AND ``staleness.warnings``), no-hit → cold,
-  verify-fail → cold + warning, and the fail-soft invariant: never an
-  error on miss — errors reserved for auth failure / system fault
-  (rider (h)). Result-contract shape pinned exactly (§4.3).
+* **R14 auto-fallback via the unified spawn** — expired → cold,
+  stale-not-expired → warm + drift warnings, no-hit → cold,
+  verify-fail → cold + warning; the fail-soft invariant holds: never
+  an error on miss. The former 6-key dict contract is now the
+  ``[snapshot] started: warm|cold — …`` citation LINE appended to
+  spawn_instance's STRING return.
+* **Unified-spawn gate** — TARGET-agent ``snapshot_enabled`` consult
+  (fail-closed; steering params on a gate-off target are ignored with
+  ONE informational line; the versioned developer[v2] shape resolves).
 * **R6b warm-path ordering** — ``spawn_instance`` THEN the atomic
   ``set_metadata_many({snapshot_digest, spawned_from_snapshot_id})``
-  BEFORE the instance_id is returned; the cold path writes nothing.
-* **Registration chain** (rider (d)) — all three names in
-  ``DYNAMIC_TOOL_NAMES``, the ``snapshot`` category module entry, the
-  loader warm-list, the ``instance.py`` factory call, and
-  ``KNOWN_TOOL_NAMES``/source-discovery agreement.
-* **Grants** — worker/coder/tester gain the two per-tool names;
-  ``spawn_hot_instance`` resolves via the ``instance`` category for a
-  holder; ari gains NOTHING (permanent exclusion).
+  BEFORE the R18 enqueue; the cold path writes nothing.
+* **R18 auto-dispatch** — default-on enqueue of ``task`` as the
+  child's first turn, opt-out, empty-task loud skip, enqueue-failure
+  loud ERROR tail, and the non-queued/None tripwire pins.
+* **Registration chain** (rider (d)) — both snapshot names in
+  ``DYNAMIC_TOOL_NAMES`` (``spawn_hot_instance`` GONE), the
+  ``snapshot`` category module entry, the loader warm-list, the
+  ``instance.py`` factory call, and ``KNOWN_TOOL_NAMES``/source-
+  discovery agreement.
 
-Rider (e): every regex/grep assertion on the hot-spawn tool name in
-this file uses the ``\\bhot\\b`` / ``\\bspawn_hot_instance\\b``
-word-boundary forms — substring matching collides with ``snapshot`` /
-``shot``.
+Rider (e): every regex/grep assertion on the removed hot-spawn tool
+name uses word-boundary forms — substring matching collides with
+``snapshot`` / ``shot``.
 
-Size rationale (2026-10-04): the file is ~1350 lines because it pins the
-Wave-2b + R18 + D8 contracts at the TOOL seam (47+ classes / 100+
-test methods) on top of FakeManager / FakeSearchService /
-FakeCaptureService / FakeInstanceRepo / FakeAsyncMessageResult
-fakes + a ResultKeys / RESULT_KEYS contract constant. The >3000 refactor watch band is documented here so the next hygiene pass knows
-when the fixture divergence justifies a split: split if a SINGLE test
-class exceeds 700 lines, or if a fake's import list exceeds 12 names —
-neither is close today.
+The spawn-path tests drive the REAL ``create_instance_tools``
+factory (via ``tests.helpers.send_message_fixtures.patch_heavy_helpers``,
+the proven send_message/spawn test seam) with a MagicMock manager
+that carries the snapshot seams + spawn/metadata/enqueue recorders
+(``_unified_spawn_manager``) — so the ordering and output-shape pins
+exercise the production call path, not a re-implementation.
+
+File-size rationale (band obligation: 1000-3000):
+    This pack currently runs ~1850 lines (post-unify-spawn-tools
+    tidy pass; +150 since the unify-spawn-tools commit because the
+    format_snapshot_citation pin set + the fault-path warning pin
+    both landed here). We are inside the 1000-3000 band — the band
+    obligation is preserved. Concrete triggers that would push the
+    pack past the 3000 ceiling and require an extraction PR:
+
+      * Adding a NEW full-class pin set (e.g. a third
+        ``TestSnapshotSearchTool``-shaped contract class, ~150+
+        lines).
+      * Pinning every individual ``create_snapshot_tools`` output
+        variant (the current pack pins the function-level contracts;
+        a per-variant grid would roughly triple the test count).
+
+    Triggers that DO NOT require extraction (these stay co-located
+    even past 3000 because the alternative — splitting per
+    ``Test*`` class — destroys the cross-class fixture-sharing
+    seam):
+
+      * Pinning new edge cases on the SAME ``Test*`` class
+        (``test_*`` methods, not new classes).
+      * Pinning helpers in the same file as the tests that use them
+        (the ``_unified_spawn_manager`` / ``_spawn_tool`` /
+        ``_snapshot_gate`` trio — extraction belongs in a
+        ``tests/helpers/unified_spawn_fixtures.py`` module if the
+        trio is needed by ≥3 test packs, see
+        tests/helpers/unified_spawn_fixtures.py for the canonical
+        home).
+
 """
 
 from __future__ import annotations
@@ -66,9 +103,21 @@ from daemon.repositories.snapshot.models import (
 from daemon.repositories.snapshot.repository import SnapshotRepository
 from daemon.services.snapshot_executor import SnapshotExecutor
 from daemon.tools.snapshot_tools import (
-    _denied_result,
+    SNAPSHOT_STEERING_IGNORED_LINE,
+    SpawnSnapshotResolution,
     create_snapshot_tools,
+    format_snapshot_citation,
     is_snapshot_create_enabled,
+)
+from types import SimpleNamespace
+from tests.helpers.send_message_fixtures import (
+    make_spawn_manager,
+    patch_heavy_helpers,
+)
+from tests.helpers.unified_spawn_fixtures import (
+    build_spawn_tool as _build_spawn_tool,
+    make_unified_spawn_manager as _make_unified_spawn_manager,
+    steer_snapshot_gate as _snapshot_gate,
 )
 from tests.unit.tools._fakes import FakeAsyncMessageResult
 
@@ -204,14 +253,32 @@ class _FakeAsyncMessageResult(FakeAsyncMessageResult):
 
 
 class FakeManager:
-    """Records the spawn / metadata-write ordering (R6b) + R18 enqueue."""
+    """Records the spawn / metadata-write ordering (R6b) + R18 enqueue.
+
+    Used directly by the snapshot_create / snapshot_search tool tests.
+    The unified ``spawn_instance`` tests use :func:`_unified_spawn_manager`
+    instead (MagicMock baseline — the real ``create_instance_tools``
+    factory touches a wider manager surface).
+    """
 
     def __init__(self, rows: dict[str, Any], repo: SnapshotRepository):
+        from types import SimpleNamespace
+
         self._instance_repository = FakeInstanceRepo(rows)
         self._snapshot_repo = repo
         self._snapshot_service = FakeCaptureService()
         self._snapshot_search_service = FakeSearchService()
         self._project_repository = None
+        # Unified-spawn surface (child cap + tier config + fallback
+        # notice) — inert for the create/search tools, required when
+        # this fake is adapted for spawn tests.
+        self.config = SimpleNamespace(
+            llm=SimpleNamespace(allowed_models=["agentic"]),
+            limits=SimpleNamespace(max_children_per_instance=50),
+        )
+        self._lifecycle_service = SimpleNamespace(
+            _format_model_fallback_notice=lambda model, validated: ""
+        )
         self.events: list[str] = []
         self.spawn_calls: list[dict[str, Any]] = []
         self.metadata_calls: list[tuple[str, dict[str, Any]]] = []
@@ -281,6 +348,48 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+# ============================================================================
+# Unified-spawn helpers (unify-spawn-tools) — canonical home:
+# tests.helpers.unified_spawn_fixtures (extracted in the
+# unify-spawn-tools tidy pass, P4 #13). The pack's local
+# FakeCaptureService / FakeSearchService carry richer per-pack
+# fields (``calls`` list, capture_status override, etc.) that the
+# test assertions depend on, so we thread them through the helper's
+# ``capture_service`` / ``search_service`` kwargs. The local
+# ``_unified_spawn_manager`` / ``_spawn_tool`` / ``_snapshot_gate``
+# names are kept as thin wrappers so existing call-sites stay
+# byte-identical. The actual imports were hoisted to the top of
+# this file (with the other test helpers) — see the
+# ``tests.helpers.unified_spawn_fixtures`` import block.
+# ============================================================================
+
+
+def _unified_spawn_manager(
+    rows: dict[str, Any],
+    repo: SnapshotRepository,
+) -> Any:
+    """Pack-specific thin wrapper — threads the local capture /
+    search fakes through the canonical helper. Kept under the
+    original underscore-prefixed name so existing call-sites are
+    byte-identical.
+    """
+    return _make_unified_spawn_manager(
+        rows,
+        repo,
+        capture_service=FakeCaptureService(),
+        search_service=FakeSearchService(),
+        async_message_result=_FakeAsyncMessageResult(),
+    )
+
+
+def _spawn_tool(manager: Any, caller_id: str = "caller-1", agent_id: str = "coder") -> Any:
+    """Pack-specific thin wrapper — kept under the original
+    underscore-prefixed name so existing call-sites are
+    byte-identical.
+    """
+    return _build_spawn_tool(manager, caller_id=caller_id, agent_id=agent_id)
+
+
 def _gate(monkeypatch, enabled: bool) -> None:
     """Steer the R15 gate at its REAL seam.
 
@@ -336,11 +445,32 @@ class TestR15Gate:
         result = _run(tools[1].ainvoke({"query": "anything"}))
         assert result == {"results": [], "error": None}
 
-    def test_spawn_never_gated(self, tools, manager):
-        """R15 OFF must NOT block consumption — spawn resolves cold."""
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert result["error"] is None
-        assert result["started"] == "cold"
+    def test_spawn_consumption_never_r15_gated(self, engine, caller_rows, monkeypatch):
+        """R15 OFF must NOT block consumption (rider (i), renamed for
+        unify-spawn-tools): with the R15 toggle steered OFF at its real
+        seam and the TARGET gate ON, an explicit-id warm start still
+        succeeds — consumption is gated by ``snapshot_enabled`` only.
+        """
+        _gate(monkeypatch, False)  # R15 OFF (capture disabled)
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        m._snapshot_repo.create_with_embeddings(
+            _snapshot(snapshot_id="snap-r15", target="inst-1")
+        )
+        _snapshot_gate(monkeypatch, True)
+        _auth = lambda c, r, tag=None: None  # noqa: E731 — auth open
+        monkeypatch.setattr("daemon.tools.instance._check_team_membership", _auth)
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-r15",
+                }
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert "[snapshot] started: warm" in result
 
 
 # ============================================================================
@@ -474,14 +604,26 @@ class TestSnapshotSearchTool:
 
 
 # ============================================================================
-# spawn_hot_instance — R14 auto-fallback contract (rider (h) fail-soft)
+# Unified-spawn snapshot flow — R14 auto-fallback contract (rider (h)
+# fail-soft), carried by ``spawn_instance`` since unify-spawn-tools.
+# The former 6-key dict contract (RESULT_KEYS) is gone with the
+# removed tool; the live surface is the ``[snapshot] started: …``
+# citation line.
 # ============================================================================
 
 
-RESULT_KEYS = {"instance_id", "started", "snapshot_id", "staleness", "hint", "error"}
+class TestUnifiedSpawnSnapshot:
+    """The R14 warm/cold state machine, now riding the unified
+    ``spawn_instance`` tool behind the TARGET-agent ``snapshot_enabled``
+    gate (unify-spawn-tools, 2026-10-05).
 
+    The former 6-key dict contract is gone with the removed tool; the
+    observable surface is the STRING return with the ``[snapshot]
+    started: warm|cold — …`` citation line. Auth denials are the
+    tool's plain ERROR strings (the ``started: "blocked"`` dict shape
+    is gone too).
+    """
 
-class TestSpawnHotInstance:
     def _auth_ok(self, monkeypatch):
         monkeypatch.setattr(
             "daemon.tools.instance._check_team_membership", lambda caller, requested, tag=None: None
@@ -493,255 +635,314 @@ class TestSpawnHotInstance:
             lambda caller, requested, tag=None: "agent 'x' is not in caller's team",
         )
 
-    def test_result_contract_keys_exact(self, tools, monkeypatch):
+    # ── gate OFF (the default for most agents) ────────────────────────
+
+    def test_gate_off_plain_cold_no_snapshot_work(self, engine, caller_rows, monkeypatch):
+        """Gate OFF (real registry consult — worker has no flag) ⇒
+        exactly the pre-unification plain cold spawn: NO snapshot
+        search, NO repo reads, NO stamp, NO [snapshot] line."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
         self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
-        assert set(result.keys()) == RESULT_KEYS
-
-    def test_no_hit_cold_with_reason(self, tools, monkeypatch):
-        self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
-        assert result["started"] == "cold"
-        assert result["snapshot_id"] is None
-        assert result["instance_id"] == "new-inst-1"
-        assert "reason: no-hit" in result["hint"]
-        assert "No matching snapshot — spawned cold" in result["hint"]
-        assert result["error"] is None
-
-    def test_auth_failure_is_an_error_not_a_spawn(self, tools, manager, monkeypatch):
-        self._auth_denied(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        # Silent-failure fix (2026-10-04 E2E finding #1): an
-        # authorization denial MUST return ``started: "blocked"``,
-        # NOT ``"cold"`` — the previous shape let callers confuse
-        # "spawned cold" with "spawn refused". The error field
-        # already carried the membership message; the
-        # ``started == "blocked"`` value is the loud, machine-
-        # readable differentiator the contract was missing.
-        assert result["started"] == "blocked"
-        assert result["instance_id"] is None
-        assert result["snapshot_id"] is None
-        assert result["staleness"] == {}
-        assert "Permission denied" in result["hint"]
-        assert "is not in caller's team" in result["error"]
-        assert manager.events == []  # nothing spawned
-
-    def test_auth_failure_result_keys_match_cold_contract(
-        self, tools, monkeypatch
-    ):
-        """R14 6-key contract (§4.3) is preserved on the BLOCKED path."""
-        self._auth_denied(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert set(result.keys()) == RESULT_KEYS
-
-    def test_auth_failure_hint_is_actionable(
-        self, tools, monkeypatch
-    ):
-        """The hint must name the refusal + how to resolve it (caller
-        cannot otherwise self-correct from the result alone)."""
-        self._auth_denied(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        # The actionable direction: add the requested agent to the
-        # caller's team_members. Caller-facing language, not internal
-        # implementation detail.
-        assert "team_members" in result["hint"]
-        # The underlying error is surfaced so the caller knows WHO
-        # is missing the requested agent.
-        assert "is not in caller's team" in result["hint"]
-
-    def test_denied_result_helper_shape(self):
-        """Unit-level pin on ``_denied_result`` itself — guards the
-        helper against future drift independent of the tool's wiring."""
-        result = _denied_result(
-            error="Agent 'leader' is not allowed to spawn 'worker'. "
-            "Allowed team members: []"
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": "t", "project_id": "p1"}
+            )
         )
-        assert result == {
-            "instance_id": None,
-            "started": "blocked",
-            "snapshot_id": None,
-            "staleness": {},
-            "hint": (
-                "Permission denied — spawn blocked "
-                "(reason: permission-denied). Nothing was spawned. "
-                "Resolve the authorization problem (e.g. add the "
-                "requested agent to the caller's team_members) and "
-                "retry. Detail: Agent 'leader' is not allowed to "
-                "spawn 'worker'. Allowed team members: []"
-            ),
-            "error": (
-                "Agent 'leader' is not allowed to spawn 'worker'. "
-                "Allowed team members: []"
-            ),
-        }
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert "[snapshot]" not in result
+        assert m._snapshot_search_service.calls == []  # no snapshot search
+        assert m.metadata_calls == []  # no stamp
+        assert m.spawn_calls, "the spawn itself must still happen"
 
-    def test_no_caller_returns_blocked_not_cold(self, manager, monkeypatch):
-        """Same-class fix for the wiring-bug branch: when
-        ``caller_agent_id`` is empty (the tool was created without
-        an agent binding), the refusal MUST surface as
-        ``started: "blocked"`` too — NOT as a cold-fallback shape
-        that pretends the spawn was a snapshot miss.
-
-        The ``create_snapshot_tools`` signature is ``(manager,
-        current_instance_id, agent_id, version_tag)`` — we pass an
-        empty ``agent_id`` (3rd positional) to trigger the
-        ``caller_agent_id = ""`` branch at the wiring guard.
-        """
-        tools = create_snapshot_tools(manager, "caller-1", "", None)
-        # Belt-and-braces: keep auth-ok monkeypatch in place so a
-        # regression in the wiring-branch order would still fail
-        # this test (auth would mask the no-caller path).
+    def test_gate_off_steering_params_ignored_with_one_line(self, engine, caller_rows, monkeypatch):
+        """snapshot_id/tags on a gate-OFF target: ONE informational
+        line, then a plain cold spawn (fail-closed, never an error)."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
         self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert result["started"] == "blocked"
-        assert result["instance_id"] is None
-        assert result["snapshot_id"] is None
-        assert result["staleness"] == {}
-        assert "Permission denied" in result["hint"]
-        assert "wiring/configuration bug" in result["error"]
-        assert manager.events == []  # nothing spawned
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-1",
+                    "tags": ["kind:implementation"],
+                }
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert SNAPSHOT_STEERING_IGNORED_LINE in result
+        assert "[snapshot] started:" not in result
+        assert m._snapshot_search_service.calls == []  # never searched
+        assert m.metadata_calls == []
 
-    def test_explicit_warm(self, engine, caller_rows, monkeypatch):
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        repo: SnapshotRepository = manager._snapshot_repo
+    # ── auth (unchanged spawn_instance ERROR behavior — NOT a dict) ──
+
+    def test_auth_failure_is_plain_error_string_no_spawn(self, engine, caller_rows, monkeypatch):
+        """Membership denial: the unified tool's plain ERROR string
+        (NOT the removed ``started: "blocked"`` dict); nothing spawns."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        self._auth_denied(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": "t", "project_id": "p1"}
+            )
+        )
+        assert result.startswith("ERROR:")
+        assert "is not in caller's team" in result
+        assert m.events == []  # nothing spawned, no enqueue
+
+    def test_no_caller_is_wiring_error_string(self, engine, caller_rows, monkeypatch):
+        """Empty caller agent_id: the tool's wiring-bug ERROR string."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        self._auth_ok(monkeypatch)
+        result = _run(
+            _spawn_tool(m, agent_id="").ainvoke(
+                {"agent_id": "worker", "task": "t", "project_id": "p1"}
+            )
+        )
+        assert result.startswith("ERROR: spawn_instance invoked without a caller agent_id")
+        assert m.events == []
+
+    # ── warm paths (gate ON) ─────────────────────────────────────────
+
+    def test_explicit_warm_citation_line(self, engine, caller_rows, monkeypatch):
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = m._snapshot_repo
         repo.create_with_embeddings(
             _snapshot(
                 snapshot_id="snap-1",
                 tags=["kind:implementation", "subsystem:upgrade-pipeline"],
             )
         )
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
         self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "snap-1"}))
-        assert result["started"] == "warm"
-        assert result["snapshot_id"] == "snap-1"
-        assert result["instance_id"] == "new-inst-1"
-        assert result["hint"].startswith("Warm-started from snapshot snap-1")
-        # R18 (2026-10-04): the hint now carries the auto-dispatch
-        # tail AFTER the warm-start lineage text. The tags fragment
-        # is still present in the warm-start prefix — assert it as
-        # a substring instead of as a hard suffix.
-        assert "tags kind:implementation, subsystem:upgrade-pipeline)" in result["hint"]
-        assert "auto-dispatched as first turn" in result["hint"]
-        assert result["error"] is None
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-1",
+                }
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert (
+            "[snapshot] started: warm — Warm-started from snapshot snap-1 "
+            "(age 1.0d; tags kind:implementation, subsystem:upgrade-pipeline)"
+            in result
+        )
+        assert "auto-dispatched as first turn" in result  # task given
 
-    def test_explicit_missing_snapshot_cold_verify_failed(self, tools, manager, monkeypatch):
+    def test_explicit_missing_snapshot_cold_verify_failed(self, engine, caller_rows, monkeypatch):
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
         self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "nope"}))
-        assert result["started"] == "cold"
-        assert "reason: verify-failed" in result["hint"]
-        assert result["error"] is None  # fail-soft, NEVER an error
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "nope",
+                }
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert "[snapshot] started: cold" in result
+        assert "reason: verify-failed" in result
 
-    def test_superseded_never_spawns(self, engine, caller_rows, monkeypatch):
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        manager._snapshot_repo.create_with_embeddings(
+    def test_superseded_never_spawns_warm(self, engine, caller_rows, monkeypatch):
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        m._snapshot_repo.create_with_embeddings(
             _snapshot(snapshot_id="snap-old", status=SNAPSHOT_STATUS_SUPERSEDED)
         )
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
         self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "snap-old"}))
-        assert result["started"] == "cold"
-        assert "reason: verify-failed" in result["hint"]
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-old",
+                }
+            )
+        )
+        assert "[snapshot] started: cold" in result
+        assert "reason: verify-failed" in result
+        assert m.metadata_calls == []  # no digest stamp on cold
 
     def test_project_mismatch_cold_verify_failed(self, engine, caller_rows, monkeypatch):
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        manager._snapshot_repo.create_with_embeddings(
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        m._snapshot_repo.create_with_embeddings(
             _snapshot(snapshot_id="snap-other", project_id="other-project")
         )
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
         self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "snap-other"}))
-        assert result["started"] == "cold"
-        assert "reason: verify-failed" in result["hint"]
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-other",
+                }
+            )
+        )
+        assert "[snapshot] started: cold" in result
+        assert "reason: verify-failed" in result
+
+    def test_cross_project_optin_consumes_warm(self, engine, caller_rows, monkeypatch):
+        """D8 explicit opt-in: allow_cross_project=True consumes the
+        foreign snapshot; the citation line records the consent."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        m._snapshot_repo.create_with_embeddings(
+            _snapshot(snapshot_id="snap-xp", project_id="p2")
+        )
+        self._auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-xp",
+                    "allow_cross_project": True,
+                }
+            )
+        )
+        assert "[snapshot] started: warm" in result
+        assert "cross-project consume from p2" in result
+        assert "(allow_cross_project=True)" in result
 
     def test_expired_top_match_cold(self, engine, caller_rows, monkeypatch):
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        repo: SnapshotRepository = manager._snapshot_repo
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = m._snapshot_repo
         repo.create_with_embeddings(_snapshot(snapshot_id="snap-stale", target="inst-1"))
-        manager._snapshot_search_service = FakeSearchService(
+        m._snapshot_search_service = FakeSearchService(
             [_candidate("snap-stale", [], freshness="expired", age=40.0)]
         )
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
         self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert result["started"] == "cold"
-        assert "reason: expired" in result["hint"]
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {"agent_id": "worker", "task": "t", "project_id": "p1"}
+            )
+        )
+        assert "[snapshot] started: cold" in result
+        assert "reason: expired" in result
 
-    def test_stale_warm_carries_drift_warnings(self, engine, caller_rows, monkeypatch):
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        repo: SnapshotRepository = manager._snapshot_repo
+    def test_internal_search_hit_warms(self, engine, caller_rows, monkeypatch):
+        """Gate ON + no explicit id: the task-based internal search
+        top hit warms the spawn (the R14 default path)."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = m._snapshot_repo
+        repo.create_with_embeddings(_snapshot(snapshot_id="snap-hit", target="inst-1"))
+        m._snapshot_search_service = FakeSearchService(
+            [_candidate("snap-hit", [], freshness="fresh", age=1.0)]
+        )
+        self._auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {"agent_id": "worker", "task": "find it", "project_id": "p1"}
+            )
+        )
+        assert "[snapshot] started: warm — Warm-started from snapshot snap-hit" in result
+        # The search consumed the task as its query, scoped to the
+        # caller's project, limit=1 (R14 internal-search contract).
+        call = m._snapshot_search_service.calls[0]
+        assert call["query"] == "find it"
+        assert call["limit"] == 1
+
+    def test_internal_search_no_hit_cold(self, engine, caller_rows, monkeypatch):
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        m._snapshot_search_service = FakeSearchService([])
+        self._auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {"agent_id": "worker", "task": "t", "project_id": "p1"}
+            )
+        )
+        assert "[snapshot] started: cold" in result
+        assert "reason: no-hit" in result
+        assert "No matching snapshot" in result
+
+    def test_gate_on_no_task_no_snapshot_id_cold_spawns(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Pin: gate ON, no task, no snapshot_id ⇒ COLD spawn via the
+        BM25 empty-query ``[]`` guard (snapshot_tools.py:875 — the
+        ``search_service.search(task or "", ...)`` call surfaces an
+        empty results list, so the resolver falls through to
+        ``cold_reason = "no-hit"``). The child must still spawn
+        successfully (R14 fail-soft contract: a snapshot-system
+        state must never block spawning).
+        """
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        # FakeSearchService() defaults to results=[] — the exact shape
+        # the BM25 empty-query guard returns for "".
+        m._snapshot_search_service = FakeSearchService([])
+        self._auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {"agent_id": "worker", "project_id": "p1"}
+            )
+        )
+        # Child still spawned — snapshot-system state must never block.
+        assert "Successfully spawned instance: new-inst-1" in result
+        # COLD citation line, no-hit reason, no searched: fragment
+        # (resolution.searched_desc is None when task is absent).
+        assert "[snapshot] started: cold" in result
+        assert "reason: no-hit" in result
+        assert "No matching snapshot" in result
+        assert "searched:" not in result
+        # BM25 empty-query guard exercised: the search service was
+        # called with the empty string ("task or ''" seam).
+        assert m._snapshot_search_service.calls, (
+            "search service was not consulted on the no-task arm"
+        )
+        assert m._snapshot_search_service.calls[0]["query"] == ""
+        # Cold path ⇒ no snapshot digest stamp written.
+        assert m.metadata_calls == []
+        # No enqueue (task is absent — R18 legacy two-step shape).
+        assert m.enqueue_calls == []
+        assert m.events == ["spawn"]
+
+    def test_stale_warm_carries_drift_note_in_citation(self, engine, caller_rows, monkeypatch):
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = m._snapshot_repo
         repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
-        manager._snapshot_service.staleness = {
+        m._snapshot_service.staleness = {
             "snapshot_age_days": 9.0,
             "freshness": "stale",
             "warnings": [],
             "repo_state": None,
         }
-        manager._snapshot_search_service = FakeSearchService(
+        m._snapshot_search_service = FakeSearchService(
             [_candidate("snap-1", [], freshness="stale", age=9.0)]
         )
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
         self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert result["started"] == "warm"
-        assert "STALE" in result["hint"]
-        assert result["staleness"]["freshness"] == "stale"
-        assert any("stale" in w for w in result["staleness"]["warnings"])
-
-    # ── Wave 2b review FIX 3 — §4.3: staleness is ALWAYS a dict ────
-
-    def test_staleness_is_dict_on_cold_no_hit(self, tools, monkeypatch):
-        self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert result["started"] == "cold"
-        assert isinstance(result["staleness"], dict)
-
-    def test_staleness_is_dict_on_cold_expired(self, engine, caller_rows, monkeypatch):
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        repo: SnapshotRepository = manager._snapshot_repo
-        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
-        manager._snapshot_search_service = FakeSearchService(
-            [_candidate("snap-1", [], freshness="expired", age=30.0)]
-        )
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
-        self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert result["started"] == "cold"
-        assert "expired" in result["hint"]
-        assert isinstance(result["staleness"], dict)
-
-    def test_staleness_is_dict_on_cold_verify_failed(self, tools, manager, monkeypatch):
-        self._auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
         result = _run(
-            tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "missing"})
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {"agent_id": "worker", "task": "t", "project_id": "p1"}
+            )
         )
-        assert result["started"] == "cold"
-        assert isinstance(result["staleness"], dict)
+        assert "[snapshot] started: warm" in result
+        assert "snapshot is STALE" in result
+        assert "verify digest assumptions" in result
 
-    def test_staleness_is_dict_when_service_unavailable(self, engine, caller_rows, monkeypatch):
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        manager._snapshot_service = None  # staleness seam unavailable
-        repo: SnapshotRepository = manager._snapshot_repo
+    def test_git_verify_warning_surfaces_in_citation(self, engine, caller_rows, monkeypatch):
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = m._snapshot_repo
         repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
-        self._auth_ok(monkeypatch)
-        result = _run(
-            tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "snap-1"})
-        )
-        assert result["started"] == "warm"  # warm start, no staleness report
-        assert isinstance(result["staleness"], dict)
-        assert result["staleness"] == {}
-
-    # ── Wave 2b review FIX 4 — exactly 6 keys; warnings ride
-    #    ``staleness.warnings`` on the warm + verify=git path ────────
-
-    def test_git_verify_warnings_surface_in_staleness_no_top_level_key(
-        self, engine, caller_rows, monkeypatch
-    ):
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        repo: SnapshotRepository = manager._snapshot_repo
-        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
         monkeypatch.setattr(
             "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
         )
@@ -753,52 +954,658 @@ class TestSpawnHotInstance:
                 "diverged_files": 3,
             },
         )
+        _snapshot_gate(monkeypatch, True)
         result = _run(
-            tools[2].ainvoke(
-                {"agent_id": "worker", "task": "t", "snapshot_id": "snap-1", "verify": "git"}
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-1",
+                    "verify": "git",
+                }
             )
         )
-        assert result["started"] == "warm"
-        # §4.3 contract: EXACTLY 6 keys — no top-level ``warnings``.
-        assert set(result.keys()) == RESULT_KEYS
-        assert result["staleness"]["repo_state"]["diverged_files"] == 3
-        # The git-anchor warning surfaces via staleness.warnings.
-        assert any(
-            "repo diverged" in w for w in result["staleness"]["warnings"]
-        )
+        assert "[snapshot] started: warm" in result
+        assert "repo diverged 3 file(s)" in result
 
     def test_internal_search_crash_still_spawns_cold(self, engine, caller_rows, monkeypatch):
         """Rider (h): a search-system fault must NEVER raise — cold spawn."""
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
 
         class ExplodingSearch(FakeSearchService):
             async def search(self, *a: Any, **kw: Any) -> dict[str, Any]:
                 raise RuntimeError("search backend down")
 
-        manager._snapshot_search_service = ExplodingSearch()
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
+        m._snapshot_search_service = ExplodingSearch()
         self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert result["started"] == "cold"
-        assert result["instance_id"] == "new-inst-1"
-        assert result["error"] is None
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {"agent_id": "worker", "task": "t", "project_id": "p1"}
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert "[snapshot] started: cold" in result
+        assert "reason: no-hit" in result
+        # fail-soft: the fault is contained (search-level try inside
+        # resolve_spawn_snapshot) — the spawn proceeds, no error text.
 
-    def test_spawn_system_fault_reports_error(self, engine, caller_rows, monkeypatch):
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
+    def test_spawn_system_fault_reports_error_string(self, engine, caller_rows, monkeypatch):
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
 
         def boom(**kw: Any):
             raise ValueError("Agent not found")
 
-        manager.spawn_instance = boom  # type: ignore[method-assign]
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
+        m.spawn_instance = boom
         self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "ghost", "task": "t"}))
-        assert result["error"] is not None
-        assert "spawn failed" in result["error"]
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {"agent_id": "ghost", "task": "t", "project_id": "p1"}
+            )
+        )
+        assert result.startswith("ERROR:")
+        assert "Agent not found" in result
+        assert "[snapshot]" not in result  # nothing spawned — no citation
+
+    def test_stamp_failure_downgrades_warm_to_cold_in_citation(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """R6b: a failed digest stamp degrades the warm start to cold
+        (verify-failed) in the citation line — the spawn still
+        succeeds, the failure is a warning, never an error."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = m._snapshot_repo
+        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
+
+        def stamp_boom(instance_id, updates):
+            m.events.append("metadata")
+            raise RuntimeError("metadata write down")
+
+        m.set_metadata_many = stamp_boom
+        self._auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-1",
+                }
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert "[snapshot] started: cold" in result
+        assert "reason: verify-failed" in result
+        assert "digest stamp write failed" in result
+
+    # ── composite-return byte-identity pins ────────────────────────────
+    # The unify-spawn-tools tidy pass replaced a 5-segment f-string
+    # concat with a ``"\n".join(...)`` protocol. Two segment-payload
+    # shapes were missed on the first cut (review finding #1 critical
+    # + #2 warning) — these pins lock the 2fa92fa8 (pre-tidy) byte
+    # shape so any future re-tidy can't silently reintroduce the
+    # deviation. The 145/145 happy-path suite never covered these
+    # seams because they only manifest on the parent→child + task
+    # composite path.
+
+    def test_pin_a_child_count_single_newline_legacy_shape(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Pin A — parent spawn with children: exactly ONE ``\n``
+        before ``"Child N of …"``.
+
+        Pre-tidy (2fa92fa8) contract:
+          ``Successfully spawned instance: <id>\\nChild 1 of 50\\n…``
+        The tidy pass naively made ``child_count_line`` its own
+        segment in ``"\\n".join(...)`` while it still carried a
+        leading ``\\n``, so every parent spawn emitted ``\\n\\nChild``
+        (double newline). Mirrors the existing ``fallback_notice``
+        treatment (``lstrip("\\n")``) to fix.
+        """
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        # ``caller_rows`` already contains ``inst-1`` with
+        # ``parent_id="caller-1"`` → ``child_count=1, limit=50``.
+        # The fixture's ``_FakeInstanceRepoShim`` only carries
+        # ``get()``; ``count_children`` is missing → ``_child_cap_status``
+        # swallows AttributeError → ``(None, limit)`` → no child line.
+        # Pin the count explicitly so we exercise the line. Also
+        # set the cap (the MagicMock-based manager's
+        # ``config.limits.max_children_per_instance`` returns 1 via
+        # MagicMock's default ``__int__`` — the real config has 50).
+        m.config.limits = SimpleNamespace(max_children_per_instance=50)
+        monkeypatch.setattr(
+            m._instance_repository,
+            "count_children",
+            lambda _parent_id: 1,
+            raising=False,
+        )
+        self._auth_ok(monkeypatch)
+        # Gate OFF (worker has no flag) keeps the output minimal —
+        # no snapshot line muddies the byte shape. Empty task to
+        # avoid the SKIPPED-branch noise (Pin B covers the task
+        # case).
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": None, "project_id": "p1"}
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert "Child 1 of 50" in result, (
+            f"child count line missing; got result:\n{result!r}"
+        )
+        # The fix: ONE newline before "Child" — never TWO.
+        assert "\n\nChild" not in result, (
+            "Pin A regressed: double newline before 'Child 1 of 50'. "
+            "child_count_line carried a leading \\n AND was its own "
+            "segment in the join protocol — fix is .lstrip('\\n') on "
+            "the segment value (see daemon/tools/instance.py "
+            "segments tuple)."
+        )
+        # Sanity: the header's own trailing \\n + child_count still
+        # produces the legacy two-line header shape.
+        assert (
+            "Successfully spawned instance: new-inst-1\nChild 1 of 50"
+            in result
+        ), (
+            "expected legacy 2fa92fa8 header shape "
+            f"<id>\\nChild 1 of 50\\n…; got:\n{result!r}"
+        )
+
+    def test_pin_b_dispatch_tail_glued_to_instruction_line(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Pin B — task-bearing spawn: ``dispatch_tail`` rides the
+        SAME line as the send_message instruction.
+
+        Pre-tidy (2fa92fa8) contract:
+          ``…message=\\"your message here\\") — auto-dispatched as
+            first turn …``
+        The tidy pass made ``dispatch_tail`` its own segment in the
+        join protocol, so the tail landed on its own line and the
+        seam emitted ``…\\n — auto-dispatched…`` (spurious newline).
+        Fix: glue ``{dispatch_tail}`` inline to the instruction
+        segment in the SAME tuple slot.
+        """
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        self._auth_ok(monkeypatch)
+        # Gate OFF, no snapshot, NO parent → minimal output: header
+        # + send_message instruction + R18 dispatch tail, nothing
+        # else. The dispatch tail MUST be glued to the instruction
+        # line.
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": "t", "project_id": "p1"}
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        # Task given + default auto_dispatch=True ⇒ the loud
+        # ``auto-dispatched as first turn`` tail.
+        assert "auto-dispatched as first turn" in result
+        # The fix: instruction's closing ``)`` glued DIRECTLY to the
+        # dispatch tail — NEVER a newline between them.
+        assert ') — auto-dispatched' in result, (
+            "Pin B regressed: dispatch tail lost its glue. "
+            "Expected `) — auto-dispatched…` substring (instruction "
+            "closing immediately followed by ' — auto-dispatched'). "
+            f"Got:\n{result!r}"
+        )
+        assert ')\n — auto-dispatched' not in result, (
+            "Pin B regressed: dispatch tail rendered on its own "
+            "line. dispatch_tail is a separate segment in the join "
+            "protocol — fix is to inline {dispatch_tail} into the "
+            "send_message instruction segment (see "
+            "daemon/tools/instance.py segments tuple)."
+        )
 
 
 # ============================================================================
-# R18 (2026-10-04) auto-dispatch — the spawn_hot_instance contract trap fix
+# R18 (2026-10-04) auto-dispatch — now carried by the unified
+# ``spawn_instance`` tool (unify-spawn-tools, 2026-10-05). The
+# forensic-audit lineage (audit-doc 6e75621b) is unchanged: default
+# ``auto_dispatch=True`` enqueues ``task`` as the child's first turn
+# INSIDE the tool; opt-out restores the two-step ritual; an empty
+# task is a loud skip; the non-queued/None tripwires route into the
+# loud ERROR tail.
+# ============================================================================
+
+
+class TestR18AutoDispatch:
+    """Pins the R18 contract on the unified spawn tool."""
+
+    def _auth_ok(self, monkeypatch):
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda caller, requested, tag=None: None
+        )
+
+    def test_default_auto_dispatches_task_as_first_turn(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Default behavior: task IS enqueued as the child's first turn."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        self._auth_ok(monkeypatch)
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": "do the thing", "project_id": "p1"}
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert m.enqueue_calls, "task was NOT auto-dispatched (the trap)"
+        kwargs = m.enqueue_calls[0]
+        assert kwargs["instance_id"] == "new-inst-1"
+        assert kwargs["message"] == "do the thing"
+        # Provenance: matches send_message's source marker.
+        assert kwargs["source"] == "internal_agent:caller-1"
+        assert "auto-dispatched as first turn" in result
+        assert "do NOT call send_message again" in result
+        # R6b ordering: spawn → enqueue (no metadata write on cold).
+        assert m.events == ["spawn", "enqueue"]
+
+    def test_auto_dispatch_warm_writes_metadata_then_enqueues(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """R6b ordering is preserved: spawn → metadata → enqueue."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = m._snapshot_repo
+        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
+        self._auth_ok(monkeypatch)
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "warm task",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-1",
+                }
+            )
+        )
+        assert "[snapshot] started: warm" in result
+        # The exact R6b+R18 ordering: spawn, metadata stamp, enqueue.
+        assert m.events == ["spawn", "metadata", "enqueue"]
+        assert m.enqueue_calls[0]["instance_id"] == "new-inst-1"
+        assert m.enqueue_calls[0]["message"] == "warm task"
+        assert m.enqueue_calls[0]["source"] == "internal_agent:leader-1"
+        assert "Warm-started from snapshot snap-1" in result
+        assert "auto-dispatched as first turn" in result
+
+    def test_auto_dispatch_false_skips_enqueue(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Opt-out: auto_dispatch=False restores the legacy two-step ritual."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        self._auth_ok(monkeypatch)
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "do it",
+                    "project_id": "p1",
+                    "auto_dispatch": False,
+                }
+            )
+        )
+        assert m.enqueue_calls == [], "opt-out was IGNORED — auto-enqueued anyway"
+        assert "auto_dispatch=False" in result
+        assert "caller MUST call" in result
+        assert "send_message" in result
+        assert m.events == ["spawn"]
+
+    def test_task_absent_is_legacy_two_step_no_tail(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """task absent (None): exactly today's two-step behavior — no
+        enqueue, NO dispatch tail, byte-stable success prefix."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        self._auth_ok(monkeypatch)
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "project_id": "p1"}
+            )
+        )
+        assert m.enqueue_calls == []
+        assert "auto-dispatch" not in result
+        assert "auto_dispatch" not in result
+        # The success prefix is byte-identical to the pre-unification
+        # contract (modulo the child-cap line from the mock baseline).
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert 'To communicate with this instance, use: send_message(instance_id="new-inst-1"' in result
+        assert m.events == ["spawn"]
+        assert "enqueue" not in m.events
+
+    def test_auto_dispatch_skipped_when_task_empty(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Explicitly empty/whitespace task: no enqueue, loud SKIPPED note."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        self._auth_ok(monkeypatch)
+        for empty_task in ("", "   ", "\n\t  \n"):
+            result = _run(
+                _spawn_tool(m).ainvoke(
+                    {
+                        "agent_id": "worker",
+                        "task": empty_task,
+                        "project_id": "p1",
+                    }
+                )
+            )
+            assert m.enqueue_calls == [], (
+                f"empty task={empty_task!r} should NOT enqueue"
+            )
+            assert "auto-dispatch SKIPPED: task was empty" in result
+            assert "caller MUST call send_message" in result
+            m.enqueue_calls.clear()
+            m.events.clear()
+
+    def test_auto_dispatch_failure_surfaces_as_error_not_silent(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Enqueue failure after successful spawn: NEVER silent."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        m.enqueue_raise = RuntimeError("enqueue lane down (test injected)")
+        self._auth_ok(monkeypatch)
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": "do it", "project_id": "p1"}
+            )
+        )
+        # The spawn succeeded; the failure rides the loud tail.
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert "auto-dispatch ERROR" in result
+        assert "auto-dispatch failed" in result
+        assert "RuntimeError" in result
+        assert "send_message" in result
+        assert "new-inst-1" in result
+
+    def test_auto_dispatch_does_not_run_on_auth_denial(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Auth denial MUST NOT trigger an enqueue (no child exists)."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership",
+            lambda caller, requested, tag=None: "agent 'x' is not in caller's team",
+        )
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": "do it", "project_id": "p1"}
+            )
+        )
+        assert result.startswith("ERROR:")
+        assert m.enqueue_calls == []
+        assert m.events == []
+
+    def test_r18_invariant_pin_non_queued_result_routes_failure_surface(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """R18 result-inspection invariant: a non-raising non-queued
+        enqueue result MUST route into the loud lane (tripwire)."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        m.enqueue_result = _FakeAsyncMessageResult(
+            message_id="", queued=False, status="rejected"
+        )
+        self._auth_ok(monkeypatch)
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": "do it", "project_id": "p1"}
+            )
+        )
+        assert "Successfully spawned instance: new-inst-1" in result
+        assert "auto-dispatch ERROR" in result
+        assert "auto-dispatch failed" in result
+        assert "RuntimeError" in result
+        assert "non-queued result" in result
+        assert "status='rejected'" in result
+        assert "send_message" in result
+
+    def test_r18_invariant_pin_enqueue_returning_none_routes_failure_surface(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """Defensive sibling: a None enqueue return surfaces the loud lane."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        m.enqueue_result = None
+        self._auth_ok(monkeypatch)
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {"agent_id": "worker", "task": "do it", "project_id": "p1"}
+            )
+        )
+        assert "auto-dispatch ERROR" in result
+        assert "auto-dispatch failed" in result
+        assert "RuntimeError" in result
+        assert "R18 invariant is non-None on success" in result
+        assert "send_message" in result
+
+    def test_dispatch_log_carries_authoritative_message_id(
+        self, engine, caller_rows, monkeypatch, caplog
+    ):
+        """F2 INFO log carries the daemon-minted ``message_id`` (event
+        renamed to ``spawn_instance_auto_dispatch`` per decision 7)."""
+        import json as _json
+
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        m.enqueue_result = _FakeAsyncMessageResult(message_id="mid-pinned-001")
+        self._auth_ok(monkeypatch)
+
+        with caplog.at_level(logging.INFO, logger="daemon.tools.instance"):
+            result = _run(
+                _spawn_tool(m).ainvoke(
+                    {"agent_id": "worker", "task": "x", "project_id": "p1"}
+                )
+            )
+
+        assert "Successfully spawned instance: new-inst-1" in result
+        matched = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.INFO
+            and rec.getMessage().startswith("[SpawnAutoDispatch] ")
+        ]
+        assert len(matched) == 1, (
+            f"expected exactly one [SpawnAutoDispatch] INFO line; "
+            f"got {len(matched)}: {[r.getMessage() for r in matched]}"
+        )
+        payload = _json.loads(
+            matched[0].getMessage()[len("[SpawnAutoDispatch] "):]
+        )
+        assert payload["event"] == "spawn_instance_auto_dispatch"
+        assert payload["caller_iid"] == "caller-1"
+        assert payload["target_iid"] == "new-inst-1"
+        assert payload["content_len"] == 1  # "x"
+        assert payload["message_id"] == "mid-pinned-001"
+
+    def test_dispatch_failure_logs_warning_with_instance_id(
+        self, engine, caller_rows, monkeypatch, caplog
+    ):
+        """F1 — enqueue failure MUST emit a WARNING log line naming
+        the target instance (log lives on the unified module now)."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        m.enqueue_raise = RuntimeError("enqueue lane down (test injected)")
+        self._auth_ok(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="daemon.tools.instance"):
+            result = _run(
+                _spawn_tool(m).ainvoke(
+                    {"agent_id": "worker", "task": "do it", "project_id": "p1"}
+                )
+            )
+
+        assert "auto-dispatch ERROR" in result
+        matched = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and "[Spawn] spawn_instance auto-dispatch "
+            "enqueue failed for new-inst-1" in rec.getMessage()
+        ]
+        assert matched, (
+            "F1 regression: expected the auto-dispatch enqueue-failure "
+            f"WARNING; got records: {[r.getMessage() for r in caplog.records]}"
+        )
+        assert "enqueue lane down (test injected)" in matched[0].getMessage()
+
+
+# ============================================================================
+# R6b warm-path ordering + stamp content (unified spawn)
+# ============================================================================
+
+
+class TestFormatSnapshotCitationPins:
+    """unify-spawn-tools tidy pass (P2 #4 + #5).
+
+    Both pins are pure-unit: drive :func:`format_snapshot_citation`
+    directly with a hand-built :class:`SpawnSnapshotResolution`,
+    no manager / DB / fixture machinery required.
+    """
+
+    def test_non_str_domain_tags_render_belt_does_not_raise(self):
+        """Non-str elements in ``domain_tags`` must NOT raise
+        ``TypeError`` — the citation is rendered verbatim AFTER the
+        spawn succeeds, so a TypeError would mask success as
+        ``ERROR:``. The fix is a ``str(t)`` belt over the slice.
+
+        Pin integrity note: the previous tidy-pass shape assigned the
+        mixed list as a ``_FakeConsumed`` CLASS attribute AFTER
+        ``@dataclass`` decoration. The generated ``__init__`` had
+        ALREADY baked in the original default (``None``) at
+        decoration time, so ``_FakeConsumed()`` carried
+        ``domain_tags=None`` — the belt never ran and the test was
+        vacuous (passed because the tags slot was empty, not because
+        the str-coercion protected it). The repair sets the mixed
+        list on the INSTANCE (which is mutable post-construction
+        regardless of the dataclass default), so the tags
+        unambiguously reach ``format_snapshot_citation``'s
+        ``getattr(...) or []`` slice and the ``str(t)`` belt is
+        exercised for real.
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class _FakeConsumed:
+            id: str = "snap-x"
+            project_id: str = "p1"
+            domain_tags: list = None  # type: ignore[assignment]
+
+        # Mix str + int + None — would crash a bare ", ".join(...).
+        # Set on the INSTANCE so the str-coercion belt sees them;
+        # see the pin-integrity note above.
+        fake = _FakeConsumed()
+        fake.domain_tags = [
+            "kind:implementation",
+            42,
+            None,
+            "subsystem:upgrade-pipeline",
+        ]
+        resolution = SpawnSnapshotResolution(
+            consumed=fake,
+            staleness={"snapshot_age_days": 5, "freshness": "fresh"},
+        )
+        line = format_snapshot_citation(resolution)
+        # Success framing — no "ERROR" prefix, citation is the
+        # canonical warm line, and the warm path is byte-identical
+        # to the pre-tidy contract.
+        assert line.startswith("[snapshot] started: warm")
+        assert "ERROR" not in line
+        # Belt actually exercised — the integer 42 and None must be
+        # str-coerced and surface as "42" and "None" lexemes; if
+        # either is missing the belt was bypassed (vacuous pin) or
+        # a TypeError leaked.
+        assert "42" in line, f"str-coerced int missing from line: {line!r}"
+        assert "None" in line, f"str-coerced None missing from line: {line!r}"
+        # TypeError must not leak into the rendered text (would mask
+        # success as a fake error to the agent).
+        assert "TypeError" not in line
+
+    def test_unknown_age_when_staleness_is_none_or_age_missing(self):
+        """``age`` is ``None`` on unwired-service / staleness-raised
+        fail-soft paths. The fix substitutes ``"unknown"`` so the
+        line prints ``age unknown;`` instead of ``age None;``
+        (the trailing ``;`` comes from the staleness tuple format
+        — NOT a stray ``d`` from the original ``f"{age}d"``
+        template, which is dropped with the substitution).
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class _FakeConsumed:
+            id: str = "snap-x"
+            project_id: str = "p1"
+            domain_tags: list = None  # type: ignore[assignment]
+
+        _FakeConsumed.domain_tags = ["kind:implementation"]
+
+        # (a) staleness=None (unwired service)
+        r_none = SpawnSnapshotResolution(
+            consumed=_FakeConsumed(), staleness=None
+        )
+        line_none = format_snapshot_citation(r_none)
+        # The ``unknown`` lexeme replaces the bare ``age`` int; the
+        # trailing ``d`` from the original ``f"{age}d"`` template is
+        # dropped with the substitution (it's part of the int → text
+        # suffix, not a literal "d" character after the value).
+        assert "age unknown;" in line_none
+        assert "age None" not in line_none
+        assert "age Noned" not in line_none
+
+        # (b) staleness present but no snapshot_age_days (fail-soft path)
+        r_missing = SpawnSnapshotResolution(
+            consumed=_FakeConsumed(),
+            staleness={"freshness": "fresh"},
+        )
+        line_missing = format_snapshot_citation(r_missing)
+        assert "age unknown;" in line_missing
+        assert "age None" not in line_missing
+        assert "age Noned" not in line_missing
+
+
+class TestWarmPathOrdering:
+    def test_metadata_written_after_spawn_before_enqueue(self, engine, caller_rows, monkeypatch):
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        repo: SnapshotRepository = m._snapshot_repo
+        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        _snapshot_gate(monkeypatch, True)
+        result = _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-1",
+                }
+            )
+        )
+        # R6b ordering: spawn FIRST, atomic metadata write SECOND,
+        # enqueue THIRD (the digest stamp MUST land before the enqueue
+        # so the first turn sees the digest).
+        assert m.events == ["spawn", "metadata", "enqueue"]
+        assert "Successfully spawned instance: new-inst-1" in result
+        instance_id, updates = m.metadata_calls[0]
+        assert instance_id == "new-inst-1"
+        assert updates["spawned_from_snapshot_id"] == "snap-1"
+        assert updates["snapshot_digest"] == {"task_summary_text": "did the thing"}
+
+    def test_cold_path_writes_no_stamp(self, engine, caller_rows, monkeypatch):
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        _snapshot_gate(monkeypatch, True)
+        _run(
+            _spawn_tool(m, caller_id="leader-1", agent_id="leader").ainvoke(
+                {"agent_id": "worker", "task": "t", "project_id": "p1"}
+            )
+        )
+        # Cold path writes no metadata stamp: spawn + enqueue only.
+        assert m.events == ["spawn", "enqueue"]
+        assert m.metadata_calls == []  # NO metadata write on cold
+
+
+# ============================================================================
+# R18 (2026-10-04) auto-dispatch — the contract trap fix (born on the
+# removed spawn_hot_instance; now carried by the unified spawn tool)
 #
 # The forensic audit (2026-10-04, evidence file
 # .agents/tester/RESULTS/2026-10-04-v01612-spawn-enqueue-forensic-audit.md)
@@ -811,469 +1618,14 @@ class TestSpawnHotInstance:
 # R18 default: `auto_dispatch=True` enqueues `task` as the child's
 # first turn INSIDE the tool. The trap is structurally impossible.
 # Opt-out: `auto_dispatch=False` restores the legacy two-step
-# ritual. The `started` contract is preserved at {warm, cold, blocked}
-# — 1090f308's 3-value envelope still holds.
+# ritual. The citation line is {warm, cold}; auth denials surface as
+# plain ERROR strings (the 1090f308 dict shape is gone with the removed tool).
 # ============================================================================
-
-
-class TestR18AutoDispatch:
-    """Pins the R18 contract: auto-dispatch + opt-out + failure surface."""
-
-    def _auth_ok(self, monkeypatch):
-        monkeypatch.setattr(
-            "daemon.tools.instance._check_team_membership", lambda caller, requested, tag=None: None
-        )
-
-    def _auth_denied(self, monkeypatch):
-        monkeypatch.setattr(
-            "daemon.tools.instance._check_team_membership",
-            lambda caller, requested, tag=None: "agent 'x' is not in caller's team",
-        )
-
-    def test_default_auto_dispatches_task_as_first_turn(
-        self, tools, manager, monkeypatch
-    ):
-        """Default behavior: task IS enqueued as the child's first turn.
-
-        Pre-R18 trap: the row was created but the child never received
-        the task. R18 default = the trap is structurally impossible.
-        """
-        self._auth_ok(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do the thing"}))
-        # The spawn succeeded (started=cold; no-hit default), and the
-        # task was auto-dispatched.
-        assert result["started"] == "cold"
-        assert result["error"] is None
-        assert manager.enqueue_calls, "task was NOT auto-dispatched (the trap)"
-        kwargs = manager.enqueue_calls[0]
-        assert kwargs["instance_id"] == "new-inst-1"
-        assert kwargs["message"] == "do the thing"
-        # Provenance: matches send_message's source marker
-        # (instance.py:3566 — f"internal_agent:{caller}").
-        assert kwargs["source"] == "internal_agent:caller-1"
-        # The hint states the dispatch outcome at-a-glance.
-        assert "auto-dispatched as first turn" in result["hint"]
-        # R6b ordering: spawn → enqueue (no metadata write on cold).
-        assert manager.events == ["spawn", "enqueue"]
-
-    def test_auto_dispatch_warm_writes_metadata_then_enqueues(
-        self, engine, caller_rows, monkeypatch
-    ):
-        """R6b ordering is preserved: spawn → metadata → enqueue.
-
-        The metadata write MUST happen BEFORE the enqueue so the
-        snapshot digest is available to ``assemble_context_messages``
-        when the worker picks up the first-turn message. Audit
-        flagged this as a potential race — the order below proves it
-        is held.
-        """
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        repo: SnapshotRepository = manager._snapshot_repo
-        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
-        self._auth_ok(monkeypatch)
-        result = _run(
-            tools[2].ainvoke({"agent_id": "worker", "task": "warm task", "snapshot_id": "snap-1"})
-        )
-        assert result["started"] == "warm"
-        # The exact R6b+R18 ordering: spawn, metadata stamp, enqueue.
-        assert manager.events == ["spawn", "metadata", "enqueue"]
-        assert manager.enqueue_calls
-        assert manager.enqueue_calls[0]["instance_id"] == "new-inst-1"
-        assert manager.enqueue_calls[0]["message"] == "warm task"
-        assert manager.enqueue_calls[0]["source"] == "internal_agent:leader-1"
-        # The hint carries BOTH the warm-start lineage AND the
-        # auto-dispatch note — callers can read both from a single
-        # string.
-        assert "Warm-started from snapshot snap-1" in result["hint"]
-        assert "auto-dispatched as first turn" in result["hint"]
-
-    def test_auto_dispatch_false_skips_enqueue(
-        self, tools, manager, monkeypatch
-    ):
-        """Opt-out: auto_dispatch=False restores the legacy two-step ritual.
-
-        Caller is now responsible for the follow-up send_message.
-        The hint explicitly states the requirement so the trap is at
-        least loudly visible (vs. pre-R18's silent omission).
-        """
-        self._auth_ok(monkeypatch)
-        result = _run(
-            tools[2].ainvoke(
-                {"agent_id": "worker", "task": "do it", "auto_dispatch": False}
-            )
-        )
-        assert result["started"] == "cold"
-        assert result["error"] is None
-        assert manager.enqueue_calls == [], "opt-out was IGNORED — auto-enqueued anyway"
-        # The hint carries the explicit next-step instruction so
-        # callers who opt out can still see what they must do.
-        assert "auto_dispatch=False" in result["hint"]
-        assert "caller MUST call send_message" in result["hint"]
-        # Order: spawn only (no metadata on cold, no enqueue on opt-out).
-        assert manager.events == ["spawn"]
-
-    def test_auto_dispatch_skipped_when_task_empty(
-        self, tools, manager, monkeypatch
-    ):
-        """Empty/whitespace task: no enqueue, hint says so.
-
-        Backward compat: a caller who passes ``task=""`` (e.g. for a
-        snapshot-verify-only test shape) should NOT trigger an
-        enqueue — the row is created but the caller is told they
-        MUST send the first message themselves.
-        """
-        self._auth_ok(monkeypatch)
-        for empty_task in ("", "   ", "\n\t  \n"):
-            result = _run(tools[2].ainvoke({"agent_id": "worker", "task": empty_task}))
-            assert result["started"] == "cold", f"task={empty_task!r} should be cold"
-            assert result["error"] is None, f"task={empty_task!r} should be error-free"
-            assert manager.enqueue_calls == [], (
-                f"empty task={empty_task!r} should NOT enqueue; got "
-                f"{manager.enqueue_calls}"
-            )
-            assert "auto-dispatch SKIPPED: task was empty" in result["hint"]
-            assert "caller MUST call send_message" in result["hint"]
-            # Reset recorder for the next iteration.
-            manager.enqueue_calls.clear()
-            manager.events.clear()
-
-    def test_auto_dispatch_failure_surfaces_as_error_not_silent(
-        self, tools, manager, monkeypatch
-    ):
-        """Enqueue failure after successful spawn: NEVER silent.
-
-        Audit requirement (item A, failure-mode clause): "enqueue
-        fails after row created → surface as `blocked` or clear
-        error, never silent death". R18 chose: keep the spawn
-        result truthful (started reflects what actually happened in
-        the DB), but populate ``error`` with the loud failure and
-        name the manual recovery path in the hint.
-        """
-        self._auth_ok(monkeypatch)
-        manager.enqueue_raise = RuntimeError("enqueue lane down (test injected)")
-
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
-
-        # Spawn succeeded (truthful result); started preserves the
-        # actual DB outcome — NOT downgraded to "blocked" (the
-        # spawn DID happen). The error field carries the loud failure.
-        assert result["started"] == "cold"
-        assert result["error"] is not None
-        assert "auto-dispatch failed" in result["error"]
-        assert "RuntimeError" in result["error"]
-        assert "send_message" in result["error"]
-        # The hint carries the recovery path AND the failure detail.
-        assert "auto-dispatch ERROR" in result["hint"]
-        assert "new-inst-1" in result["hint"]
-
-    def test_auto_dispatch_failure_preserves_six_key_contract(
-        self, tools, manager, monkeypatch
-    ):
-        """The §4.3 6-key contract is preserved even on enqueue failure.
-
-        Adding the error field MUST NOT introduce a 7th top-level
-        key. The contract is exactly 6 keys; failure detail rides
-        the existing ``error`` field and the ``hint`` text.
-        """
-        self._auth_ok(monkeypatch)
-        manager.enqueue_raise = RuntimeError("enqueue lane down")
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
-        assert set(result.keys()) == RESULT_KEYS
-        assert result["error"] is not None
-        # No top-level "auto_dispatch" key — the result shape is
-        # backward compatible with the pre-R18 6-key envelope.
-        assert "auto_dispatch" not in result
-        assert "auto_dispatch_status" not in result
-
-    def test_auto_dispatch_failure_logs_warning_with_instance_id(
-        self, tools, manager, monkeypatch, caplog
-    ):
-        """Review F1 — enqueue failure MUST emit a WARNING log line.
-
-        Pre-F1: the ``except`` block surfaced the failure to the
-        caller's ``error`` field but logged NOTHING — operators
-        triaging a stranded child from logs alone had no breadcrumb.
-        Post-F1: a ``[Snapshot] spawn_hot_instance auto-dispatch
-        enqueue failed for <id>: <exc>`` line lands in the
-        ``daemon.tools.snapshot_tools`` logger at WARNING. Same logger
-        + sibling f-string style as the internal-search failure path
-        (:1066) so log tooling treats both uniformly.
-        """
-        self._auth_ok(monkeypatch)
-        manager.enqueue_raise = RuntimeError(
-            "enqueue lane down (test injected)"
-        )
-
-        with caplog.at_level(
-            logging.WARNING, logger="daemon.tools.snapshot_tools"
-        ):
-            result = _run(
-                tools[2].ainvoke({"agent_id": "worker", "task": "do it"})
-            )
-
-        # Sanity: the failure still surfaces in the loud lane.
-        assert result["error"] is not None
-        assert "auto-dispatch failed" in result["error"]
-
-        # The log assertion: at least one warning carries the
-        # `[Snapshot]` prefix and names the target instance so an
-        # operator can grep from logs alone. The full message format
-        # is anchored so the test fails if the log text drifts from
-        # the F1 contract.
-        matched = [
-            rec for rec in caplog.records
-            if rec.levelno == logging.WARNING
-            and "[Snapshot] spawn_hot_instance auto-dispatch "
-            "enqueue failed for new-inst-1" in rec.getMessage()
-        ]
-        assert matched, (
-            "F1 regression: expected a `[Snapshot] spawn_hot_instance "
-            "auto-dispatch enqueue failed for new-inst-1: ...` WARNING; "
-            f"got records: {[r.getMessage() for r in caplog.records]}"
-        )
-        # The exception text MUST ride the message so operators can
-        # diagnose from logs alone (the sibling pattern at :1066
-        # embeds ``str(exc)`` verbatim — matches the F1 contract:
-        # f"[Snapshot] spawn_hot_instance auto-dispatch enqueue
-        # failed for {new_instance_id}: {exc}"). The class name rides
-        # the loud ``error`` field on the result, not the log line.
-        assert (
-            "enqueue lane down (test injected)" in matched[0].getMessage()
-        )
-
-    def test_auto_dispatch_does_not_run_on_blocked_spawn(
-        self, tools, manager, monkeypatch
-    ):
-        """Blocked spawn (auth denial) MUST NOT trigger an enqueue.
-
-        The team-membership check runs BEFORE the spawn — there is
-        no new instance to enqueue against. R18 must not regress
-        this invariant.
-        """
-        self._auth_denied(monkeypatch)
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
-        assert result["started"] == "blocked"
-        assert result["instance_id"] is None
-        # The FakeManager MUST not have seen any spawn or enqueue
-        # call — assert on the closed-over manager directly (the
-        # ``manager`` fixture shares the FakeManager instance with
-        # ``tools``).
-        assert manager.enqueue_calls == [], (
-            f"enqueue called on a blocked spawn: {manager.enqueue_calls}"
-        )
-        assert manager.events == [], (
-            f"manager.events should be empty on a blocked spawn; "
-            f"got {manager.events}"
-        )
-        # Belt-and-braces: the blocked result shape itself proves
-        # the auth gate fired first.
-        assert "Permission denied" in result["hint"]
-        assert result["error"] is not None
-
-    def test_3_value_started_contract_preserved(
-        self, tools, manager, monkeypatch, engine, caller_rows
-    ):
-        """R18 does NOT regress the 3-value ``started`` envelope
-        (1090f308, 2026-10-04). All three values are still reachable
-        via the documented paths.
-        """
-        # cold (no-hit default)
-        self._auth_ok(monkeypatch)
-        r_cold = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert r_cold["started"] == "cold"
-        # warm (explicit snapshot) — needs its own manager+fresh tools
-        warm_manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        warm_manager._snapshot_repo.create_with_embeddings(
-            _snapshot(snapshot_id="snap-warm", target="inst-1")
-        )
-        warm_tools = create_snapshot_tools(warm_manager, "leader-1", "leader", None)
-        self._auth_ok(monkeypatch)
-        r_warm = _run(
-            warm_tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "snap-warm"})
-        )
-        assert r_warm["started"] == "warm"
-        # blocked (auth denial)
-        self._auth_denied(monkeypatch)
-        r_blocked = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        assert r_blocked["started"] == "blocked"
-        # All three values are reachable; the 1090f308 3-value
-        # envelope is preserved.
-        assert {r_cold["started"], r_warm["started"], r_blocked["started"]} == {
-            "cold",
-            "warm",
-            "blocked",
-        }
-        # The R18 default is auto_dispatch=True, so the warm and
-        # cold paths both made the enqueue call; the blocked path
-        # did not.
-        assert len(manager.enqueue_calls) >= 1  # cold
-        assert len(warm_manager.enqueue_calls) == 1  # warm
-
-    def test_r18_invariant_pin_non_queued_result_routes_failure_surface(
-        self, tools, manager, monkeypatch
-    ):
-        """Commit 1 (2026-10-04) — R18 result-inspection invariant pin.
-
-       Verification proved ``manager.enqueue_message`` cannot carry a
-        non-queued non-raising signal (the only return path hardcodes
-        ``status='queued'`` and defaults ``queued=False``), so the
-        escape hatch applies: we DO NOT branch on ``result.queued``
-        (dead code); we DO pin the result invariants via an assertion
-        that fires the loud lane on a future regression. This test
-        exercises the regression tripwire by injecting a fake that
-        returns a non-queued non-raising result — the loud surface
-        MUST fire (started preserved; error populated; hint names the
-        manual recovery path), exactly like the exception case.
-        """
-        self._auth_ok(monkeypatch)
-        # Inject a fake AsyncMessageResult that mimics a future
-        # non-raising non-queued branch (status != "queued", no message_id).
-        # The defensive block MUST route this into the same failure surface
-        # as exceptions — never silent success.
-        manager.enqueue_result = _FakeAsyncMessageResult(
-            message_id="", queued=False, status="rejected"
-        )
-
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
-
-        # Spawn succeeded (truthful result); started preserved.
-        assert result["started"] == "cold"
-        # Loud lane fires — the F1-style error surfaces the regression with
-        # the audit-trail wording (RuntimeError + tripwire text) plus the
-        # manual-recovery hint the same as the exception path.
-        assert result["error"] is not None
-        assert "auto-dispatch failed" in result["error"]
-        assert "RuntimeError" in result["error"]
-        assert "non-queued result" in result["error"]
-        assert "status='rejected'" in result["error"]
-        assert "send_message" in result["error"]
-        # The hint carries the recovery path AND the failure detail.
-        assert "auto-dispatch ERROR" in result["hint"]
-        assert "new-inst-1" in result["hint"]
-        # The §4.3 6-key contract is preserved.
-        assert set(result.keys()) == RESULT_KEYS
-
-    def test_r18_invariant_pin_enqueue_returning_none_routes_failure_surface(
-        self, tools, manager, monkeypatch
-    ):
-        """Defensive sibling: a None return (the escape hatch's "must not
-        happen but we pin it anyway" branch) MUST surface the loud lane.
-
-        The real path NEVER returns None (a successful enqueue always
-        returns a populated ``AsyncMessageResult``), but a defensive
-        assertion guards against a regression that accidentally drops
-        the return.
-        """
-        self._auth_ok(monkeypatch)
-        manager.enqueue_result = None
-
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "do it"}))
-
-        assert result["started"] == "cold"
-        assert result["error"] is not None
-        assert "auto-dispatch failed" in result["error"]
-        assert "RuntimeError" in result["error"]
-        assert "R18 invariant is non-None on success" in result["error"]
-        assert "send_message" in result["error"]
-        assert "auto-dispatch ERROR" in result["hint"]
-        assert set(result.keys()) == RESULT_KEYS
-
-    def test_r18_f2_log_carries_authoritative_message_id(
-        self, tools, manager, monkeypatch, caplog
-    ):
-        """F2 INFO log carries the daemon-minted ``message_id``.
-
-        The forensic-audit methodology counts enqueue log lines and
-        parents reuse the same ``task`` across many children, so the
-        task text alone is not enough to correlate census. Commit 1
-        surfaces the authoritative ``message_id`` the daemon minted
-        on the enqueue so downstream tooling (grep / census) can
-        cross-reference the same way it already does for the warm-spawn line.
-        """
-        import json as _json
-
-        self._auth_ok(monkeypatch)
-        # Pin a deterministic message_id so the log-line assertion is
-        # stable; the fake's default 'msg-auto-1' would also work but
-        # a custom value makes the correlation explicit.
-        manager.enqueue_result = _FakeAsyncMessageResult(
-            message_id="mid-pinned-001"
-        )
-
-        with caplog.at_level(logging.INFO, logger="daemon.tools.snapshot_tools"):
-            result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "x"}))
-
-        # The success path still produces a started=cold result; the F2 log
-        # is the observability surface, not the result envelope.
-        assert result["started"] == "cold"
-        assert result["error"] is None
-        matched = [
-            rec for rec in caplog.records
-            if rec.levelno == logging.INFO
-            and rec.getMessage().startswith("[SnapshotAutoDispatch] ")
-        ]
-        assert len(matched) == 1, (
-            f"expected exactly one [SnapshotAutoDispatch] INFO line; "
-            f"got {len(matched)}: {[r.getMessage() for r in matched]}"
-        )
-        payload = _json.loads(
-            matched[0].getMessage()[len("[SnapshotAutoDispatch] "):]
-        )
-        assert payload["event"] == "spawn_hot_auto_dispatch"
-        assert payload["caller_iid"] == "caller-1"
-        assert payload["target_iid"] == "new-inst-1"
-        assert payload["content_len"] == 1  # "x"
-        # The Commit 1 F2 message_id surfacing — the authoritative daemon-
-        # minted enqueue id — is pinned here because census tooling (the
-        # forensic-audit P2 methodology) counts enqueue log lines and the
-        # auto-dispatch traffic must stay visible and attributable by
-        # message_id.
-        assert payload["message_id"] == "mid-pinned-001"
 
 
 # ============================================================================
 # R6b warm-path ordering + stamp content
 # ============================================================================
-
-
-class TestWarmPathOrdering:
-    def test_metadata_written_after_spawn_before_return(self, engine, caller_rows, monkeypatch):
-        manager = FakeManager(caller_rows, SnapshotRepository(engine))
-        repo: SnapshotRepository = manager._snapshot_repo
-        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
-        monkeypatch.setattr(
-            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
-        )
-        result = _run(tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "snap-1"}))
-        # R6b ordering: spawn FIRST, atomic metadata write SECOND, both
-        # BEFORE the instance_id is returned. R18 (2026-10-04) added
-        # the auto-dispatch enqueue as the THIRD step (the digest
-        # stamp MUST land before the enqueue so the first turn sees
-        # the digest — see test_r18_warm_writes_metadata_then_enqueues).
-        assert manager.events == ["spawn", "metadata", "enqueue"]
-        assert result["instance_id"] == "new-inst-1"
-        instance_id, updates = manager.metadata_calls[0]
-        assert instance_id == "new-inst-1"
-        assert updates["spawned_from_snapshot_id"] == "snap-1"
-        assert updates["snapshot_digest"] == {"task_summary_text": "did the thing"}
-        # The R18 enqueue ran third; the metadata write did land
-        # before the enqueue (the order assertion above proves it).
-
-    def test_cold_path_writes_no_stamp(self, tools, manager, monkeypatch):
-        monkeypatch.setattr(
-            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
-        )
-        _run(tools[2].ainvoke({"agent_id": "worker", "task": "t"}))
-        # R18 (2026-10-04): cold path still writes no metadata
-        # stamp; the only events on a cold spawn are "spawn" (the
-        # row) + "enqueue" (the auto-dispatched first turn). The
-        # NO-METADATA-WRITE invariant is preserved — assert it
-        # explicitly (it was the load-bearing claim of the original
-        # R6b test, and it must not regress).
-        assert manager.events == ["spawn", "enqueue"]  # no "metadata" on cold
-        assert manager.metadata_calls == []  # NO metadata write on cold
 
 
 # ============================================================================
@@ -1364,16 +1716,24 @@ class TestR12LaneMint:
         # Terminal row: column carries the pointer, digest does not.
         assert updated.supersedes_snapshot_id == "prev"
         assert "supersedes_snapshot_id" not in updated.digest
-        # Warm spawn from the completed row → clean metadata stamp.
-        manager = FakeManager(caller_rows, repo)
-        tools = create_snapshot_tools(manager, "leader-1", "leader", None)
+        # Warm spawn from the completed row → clean metadata stamp
+        # (via the unified spawn_instance tool, gate ON).
+        manager = _unified_spawn_manager(caller_rows, repo)
         monkeypatch.setattr(
             "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
         )
+        _snapshot_gate(monkeypatch, True)
         result = _run(
-            tools[2].ainvoke({"agent_id": "worker", "task": "t", "snapshot_id": "succ"})
+            _spawn_tool(manager, caller_id="leader-1", agent_id="leader").ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "succ",
+                }
+            )
         )
-        assert result["started"] == "warm"
+        assert "[snapshot] started: warm" in result
         instance_id, metadata_updates = manager.metadata_calls[0]
         assert instance_id == "new-inst-1"
         assert metadata_updates["spawned_from_snapshot_id"] == "succ"
@@ -1387,28 +1747,31 @@ class TestR12LaneMint:
 
 
 class TestRegistrationChain:
-    def test_dynamic_tool_names_contains_all_three(self):
+    """Registration chain after unify-spawn-tools: TWO snapshot tools
+    + the gate flag on the TARGET agents' meta.json."""
+
+    def test_dynamic_tool_names_contains_both(self):
         from daemon.tools._tool_registry import DYNAMIC_TOOL_NAMES
 
-        for name in ("snapshot_create", "snapshot_search", "spawn_hot_instance"):
-            assert name in DYNAMIC_TOOL_NAMES
+        assert "snapshot_create" in DYNAMIC_TOOL_NAMES
+        assert "snapshot_search" in DYNAMIC_TOOL_NAMES
+        # unify-spawn-tools: the standalone hot-spawn tool is GONE.
+        assert "spawn_hot_instance" not in DYNAMIC_TOOL_NAMES
 
     def test_category_modules_entry(self):
         from daemon.tools._tool_registry import CATEGORY_MODULES
 
         assert CATEGORY_MODULES["snapshot"] == "daemon.tools.snapshot_tools"
 
-    def test_factory_returns_three_tools_with_categories(self):
+    def test_factory_returns_two_tools_with_categories(self):
         tools = create_snapshot_tools(None, "", "", None)
         by_name = {t.name: getattr(t, "_tool_category", None) for t in tools}
         assert by_name == {
             "snapshot_create": "snapshot",
             "snapshot_search": "snapshot",
-            # Consumption ships via the instance category (auto-grant).
-            "spawn_hot_instance": "instance",
         }
 
-    def test_source_discovery_includes_all_three_word_boundary(self):
+    def test_source_discovery_matches_word_boundary(self):
         """Rider (e): source-discovery + \\b-bounded grep, never substring."""
         from daemon.tools._tool_registry import (
             KNOWN_TOOL_NAMES,
@@ -1416,14 +1779,15 @@ class TestRegistrationChain:
         )
 
         discovered = discover_source_only_tool_names()
-        for name in ("snapshot_create", "snapshot_search", "spawn_hot_instance"):
+        for name in ("snapshot_create", "snapshot_search"):
             assert name in discovered
             assert name in KNOWN_TOOL_NAMES
         source = (TOOLS_DIR / "snapshot_tools.py").read_text(encoding="utf-8")
-        # \b-bounded greps ONLY (rider (e)): substring 'hot' collides
-        # with 'snapshot' / 'shot' — the bounded forms are the
-        # discipline this suite pins.
-        assert re.search(r"\bspawn_hot_instance\b", source)
+        # The removed tool name survives ONLY as historical prose —
+        # as a callable/registered surface it is gone.
+        assert not re.search(r"async def spawn_hot_instance\b", source)
+        assert "spawn_hot_instance" not in KNOWN_TOOL_NAMES
+        assert "spawn_hot_instance" not in discovered
 
     def test_loader_warm_list_wires_snapshot_factory(self):
         """Warm-list step: the scan registers the snapshot categories
@@ -1434,13 +1798,18 @@ class TestRegistrationChain:
         _ensure_tool_metadata_populated()
         assert _tool_metadata["snapshot_create"]["category"] == "snapshot"
         assert _tool_metadata["snapshot_search"]["category"] == "snapshot"
-        assert _tool_metadata["spawn_hot_instance"]["category"] == "instance"
+        assert "spawn_hot_instance" not in _tool_metadata
 
     def test_instance_factory_call_present(self):
         """Chain step 3: create_instance_tools extends with the factory."""
         source = (TOOLS_DIR / "instance.py").read_text(encoding="utf-8")
         assert re.search(r"\bcreate_snapshot_tools\b", source)
         assert "snapshot_tool_list" in source
+        # And consumes the unified-spawn helpers directly.
+        assert "resolve_spawn_snapshot" in source
+        assert "finalize_spawn_snapshot" in source
+        assert "format_snapshot_citation" in source
+        assert "_target_snapshot_enabled" in source
 
     def test_grants_meta_json_allow_entries(self):
         import json
@@ -1452,9 +1821,30 @@ class TestRegistrationChain:
             assert "snapshot_create" in allow, agent
             assert "snapshot_search" in allow, agent
 
+    def test_gate_flag_enabled_on_targets(self):
+        """unify-spawn-tools decision 10: tester + developer[v2] carry
+        ``"snapshot_enabled": true``; no other agent meta.json does."""
+        import json
+
+        agents_dir = TOOLS_DIR.parents[1] / "agents"
+        enabled = []
+        for meta_path in sorted(agents_dir.glob("*/meta.json")):
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("snapshot_enabled") is True:
+                enabled.append(meta.get("id") or meta_path.parent.name)
+        assert sorted(enabled) == ["developer", "tester"], (
+            f"snapshot_enabled targets drifted: {enabled}"
+        )
+        # The versioned developer[v2] directory is the ONLY developer
+        # meta — the flag must live on the versioned variant.
+        dev_meta = json.loads(
+            (agents_dir / "developer[v2]" / "meta.json").read_text(encoding="utf-8")
+        )
+        assert dev_meta["snapshot_enabled"] is True
+
     def test_grants_resolution_matrix(self):
-        """worker/coder/tester gain the 2 tools; spawn ships via the
-        instance category for holders; ari gains NOTHING."""
+        """worker/coder/tester gain the 2 tools; the removed
+        hot-spawn name resolves NOWHERE; ari gains NOTHING."""
         from daemon.loader import _ensure_tool_metadata_populated
         from daemon.registry import get_registry
         from daemon.tools.instance import resolve_tool_filter
@@ -1462,14 +1852,14 @@ class TestRegistrationChain:
         _ensure_tool_metadata_populated()
         registry = get_registry()
         expectations = {
-            # (agent): (create, search, hot-spawn)
-            "worker": (True, True, False),  # leaf: excluded architecturally
-            "coder": (True, True, True),
-            "tester": (True, True, True),
-            "leader": (False, False, True),  # consumer only
-            "ari": (False, False, False),  # PERMANENT exclusion
+            # (agent): (create, search)
+            "worker": (True, True),  # leaf: excluded from consumption
+            "coder": (True, True),
+            "tester": (True, True),
+            "leader": (False, False),  # consumer via the gate, not grants
+            "ari": (False, False),  # PERMANENT exclusion
         }
-        for agent, (create, search, hot) in expectations.items():
+        for agent, (create, search) in expectations.items():
             meta = registry.get_resolved(agent)
             allow = list(meta.tools.allow) if meta and meta.tools and meta.tools.allow else None
             deny = list(meta.tools.deny) if meta and meta.tools and meta.tools.deny else None
@@ -1477,4 +1867,144 @@ class TestRegistrationChain:
             assert allowed is not None, agent
             assert ("snapshot_create" in allowed) == create, agent
             assert ("snapshot_search" in allowed) == search, agent
-            assert ("spawn_hot_instance" in allowed) == hot, agent
+            assert "spawn_hot_instance" not in allowed, agent
+
+    def test_instance_category_no_longer_grants_removed_tool(
+        self, engine, caller_rows, monkeypatch
+    ):
+        """The 'instance' category decorates the unified spawn tool —
+        and NO tool named spawn_hot_instance exists anywhere in the
+        factory output (the removed ride-along is gone).
+
+        Deterministic: ``@register_tool_category('instance')`` sets the
+        ``_tool_category`` attribute on the factory-built tool object,
+        so the assertion reads the factory output directly instead of
+        the ambient global registry (which depends on scan ordering).
+        """
+        from daemon.tools.instance import create_instance_tools
+
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        patches = patch_heavy_helpers()
+        for _p in patches:
+            _p.start()
+        try:
+            all_tools = create_instance_tools(
+                m, "caller-1", agent_id="coder", version_tag=None
+            )
+        finally:
+            for _p in reversed(patches):
+                _p.stop()
+        by_name = {getattr(t, "name", None): t for t in all_tools}
+        assert "spawn_instance" in by_name
+        assert "spawn_hot_instance" not in by_name
+        assert getattr(by_name["spawn_instance"], "_tool_category", None) == "instance"
+
+
+# ============================================================================
+# Unified-spawn gate consult (unify-spawn-tools decisions 3 + 11)
+# ============================================================================
+
+
+class TestTargetSnapshotEnabledConsult:
+    """The TARGET-agent gate consult: versioned resolution, fail-closed.
+
+    The consult mirrors ``_apply_tool_filter``'s
+    ``get_version(agent_id, version_tag) or get_resolved(agent_id)``
+    fallback so versioned agents (developer[v2]) gate on THEIR flag.
+    """
+
+    def _registry(self):
+        from daemon.registry import get_registry
+
+        return get_registry()
+
+    def test_tester_enabled_via_resolved_meta(self):
+        from daemon.tools.instance import _target_snapshot_enabled
+
+        assert _target_snapshot_enabled("tester", None) is True
+
+    def test_developer_v2_enabled_via_versioned_resolution(self):
+        """developer[v2] shape: the flag lives on the VERSIONED meta —
+        the consult must resolve it via the version tag."""
+        from daemon.tools.instance import _target_snapshot_enabled
+
+        registry = self._registry()
+        versioned = registry.get_version("developer", "v2")
+        assert versioned is not None, "developer[v2] must resolve"
+        assert getattr(versioned, "snapshot_enabled") is True
+        assert _target_snapshot_enabled("developer", "v2") is True
+
+    def test_worker_disabled_fail_closed(self):
+        from daemon.tools.instance import _target_snapshot_enabled
+
+        assert _target_snapshot_enabled("worker", None) is False
+
+    def test_unknown_agent_fail_closed(self):
+        from daemon.tools.instance import _target_snapshot_enabled
+
+        assert _target_snapshot_enabled("no-such-agent-xyz", None) is False
+
+    def test_fault_path_emits_warning_fail_closed(self, monkeypatch, caplog):
+        """unify-spawn-tools tidy pass (P2 #6) — silent sibling.
+
+        ``_target_snapshot_enabled`` had two silent ``except Exception``
+        belts that swallowed registry faults without a log line.
+        Sibling code paths (``_child_cap_status``,
+        ``resolve_spawn_snapshot``) all log; this consult is the
+        only outlier. Pin: an injected registry fault on BOTH
+        ``get_version`` AND ``get_resolved`` (the inner belt covers
+        only the versioned consult; the outer belt covers the
+        fallback too) emits a ``logger.warning`` naming the agent +
+        cause, AND the fail-closed semantics still hold (``False``).
+        """
+        from daemon.registry import get_registry
+        from daemon.tools.instance import _target_snapshot_enabled
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("simulated registry fault")
+
+        registry = get_registry()
+        monkeypatch.setattr(registry, "get_version", _boom)
+        monkeypatch.setattr(registry, "get_resolved", _boom)
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.tools.instance"
+        ):
+            result = _target_snapshot_enabled("tester", None)
+
+        # Fail-closed semantics preserved.
+        assert result is False
+        # Loud flag: WARNING landed naming the agent + cause.
+        matched = [
+            rec
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and "_target_snapshot_enabled" in rec.getMessage()
+            and "tester" in rec.getMessage()
+            and "simulated registry fault" in rec.getMessage()
+        ]
+        assert matched, (
+            "P2 #6 regression: expected WARNING naming agent + cause; "
+            f"got: {[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_end_to_end_gate_off_via_real_registry(self, engine, caller_rows, monkeypatch):
+        """Full-path gate OFF: NO monkeypatched gate — the real consult
+        resolves worker (no flag) → plain cold spawn, no snapshot work."""
+        m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
+        monkeypatch.setattr(
+            "daemon.tools.instance._check_team_membership", lambda c, r, tag=None: None
+        )
+        result = _run(
+            _spawn_tool(m).ainvoke(
+                {
+                    "agent_id": "worker",
+                    "task": "t",
+                    "project_id": "p1",
+                    "snapshot_id": "snap-ghost",
+                }
+            )
+        )
+        assert SNAPSHOT_STEERING_IGNORED_LINE in result
+        assert "[snapshot] started:" not in result
+        assert m.metadata_calls == []

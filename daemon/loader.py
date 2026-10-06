@@ -121,9 +121,9 @@ def _ensure_tool_metadata_populated() -> None:
     service_tools = create_service_tools(None, "metadata-scan")
     # Snapshot tools (Wave 2b): construction only builds closures
     # (manager / services dereferenced at CALL time) — the
-    # @register_tool_category("snapshot") / ("instance") decorators
-    # must run HERE so the cold-boot metadata scan registers the
-    # category before the no-TTL prompt cache pins tool docs.
+    # @register_tool_category("snapshot") decorator must run HERE so
+    # the cold-boot metadata scan registers the category before the
+    # no-TTL prompt cache pins tool docs.
     snapshot_tools = create_snapshot_tools(None, "", "")
     # create_db_tools reads manager.credential_manager at construction
     # (N1 — shared Fernet handle), so it needs a minimal attribute stub;

@@ -246,11 +246,17 @@
       (R14 auto-fallback). The <strong>write side</strong>
       (<code>snapshot_create</code>) is gated by this toggle; the read
       (<code>snapshot_search</code>) and consumption
-      (<code>spawn_hot_instance</code>) tools are always-on (R15 rider
-      isolation). Default: <strong>off</strong> (opt-in rollout). When
-      off, <code>snapshot_create</code> calls return a clean disabled
-      result and <code>spawn_hot_instance</code> falls back to a cold
-      spawn whenever no snapshot was found. Snapshots capture only what
+      (<code>spawn_instance</code>) tools are always-on (R15 rider
+      isolation). The warm-start path of <code>spawn_instance</code> is
+      additionally gated per target agent by
+      <code>meta.json</code> <code>snapshot_enabled: true</code> (enabled
+      for tester + developer[v2]); targets without the gate cold-spawn
+      regardless of any matching snapshot. Default:
+      <strong>off</strong> (opt-in rollout). When off,
+      <code>snapshot_create</code> calls return a clean disabled result
+      and the warm-start path of <code>spawn_instance</code> falls back
+      to a cold spawn whenever no snapshot was found. Snapshots capture
+      only what
       still exists at creation time — instance context expires after
       about 168 hours (the checkpoint TTL), so long-off periods mean
       older completed work is no longer snapshotable.
@@ -290,8 +296,10 @@
         />
         <span class="editor-option-label">Disabled (default)</span>
         <span class="editor-option-hint">
-          <code>snapshot_create</code> returns disabled; spawn_hot_instance
-          goes cold whenever no captured snapshot is found.
+          <code>snapshot_create</code> returns disabled; the warm-start
+          path of <code>spawn_instance</code> goes cold whenever no
+          captured snapshot is found (and stays cold for agents without
+          <code>snapshot_enabled</code> in their <code>meta.json</code>).
         </span>
       </label>
     </div>
@@ -327,9 +335,10 @@
         Per-agent capture counts (incremented on every
         <code>snapshot_create</code>, regardless of REUSE / NEW /
         SUPERSEDE / CREATE-FRESH verdict) and per-snapshot spawn-warm
-        counts (incremented only when <code>spawn_hot_instance</code>
-        consumes a snapshot). <strong>Monitoring only</strong> — these
-        counters never feed the search ranking.
+        counts (incremented only when the warm-start path of
+        <code>spawn_instance</code> consumes a snapshot).
+        <strong>Monitoring only</strong> — these counters never feed the
+        search ranking.
       </p>
       @if (snapshotMetricsCaptureEntries().length === 0) {
         <span class="setting-description">No usage recorded yet.</span>

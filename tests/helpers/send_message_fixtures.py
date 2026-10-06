@@ -266,7 +266,11 @@ def make_spawn_manager(
             DB rows in the pin path).
     """
     if allowed_models is None:
-        allowed_models = ["agentic", "coding", "coding2"]
+        # "vision" rides the default allow-list because the factory's
+        # compare_tools builder HARD-REQUIRES a 'vision' model
+        # (VisionModelNotAllowedError, arch §8 — no silent default).
+        # Callers overriding allowed_models must include it too.
+        allowed_models = ["agentic", "coding", "coding2", "vision"]
 
     manager = MagicMock()
     manager.config = MagicMock()

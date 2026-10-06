@@ -1862,7 +1862,7 @@ class InstanceManager:
         # service holds no expensive state and the row count is the
         # source of truth). The tool surface consults it on every
         # ``snapshot_create`` (capture path) and the WARM branch of
-        # ``spawn_hot_instance`` (spawn path); the surface endpoint
+        # the unified ``spawn_instance`` spawn path; the surface endpoint
         # ``GET /api/settings/snapshot-usage-metrics`` reads it for
         # the FE.
         from .services.snapshot_metrics_service import SnapshotMetricsService
