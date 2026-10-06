@@ -1008,3 +1008,59 @@ class TestRealPluginSync:
             assert "delta" in entry
             assert "rationale" in entry
             assert "pinning_test" in entry
+
+
+class TestLicensePreservationThroughPullPath:
+    """CC-BY-4.0 attribution lives in per-item `source.license` fields
+    in the prompt-templates JSONs (od-resource-layer §0).  A sync
+    that overwrites or strips those fields would break the
+    attribution chain.  The sync-runner must preserve them
+    byte-for-byte."""
+
+    def test_per_item_source_license_survives_pull(self, tmp_path):
+        """Build a fixture upstream with a JSON that has a per-item
+        `source.license` field; verify the field survives a full
+        clean_pulled (real pull, not dry-run)."""
+        import json
+        repo = tmp_path / "upstream"
+        json_content = json.dumps({
+            "id": "test-item",
+            "title": "Test Item",
+            "source": {
+                "repo": "test/repo",
+                "license": "CC-BY-4.0",
+                "author": "Test Author",
+                "url": "https://example.com/test",
+            },
+        }, indent=2)
+        _init_git_repo(repo, {"data/item.json": json_content})
+        _tag(repo, "v1.0.0")
+        plugin_dir = _make_minimal_plugin(
+            tmp_path / "demo",
+            upstream_repo=str(repo),
+            class_paths=["copy_freely/data/"],
+        )
+        # Real pull
+        result = sync(
+            "demo", "copy_freely",
+            upstream_repo=str(repo), upstream_tag="v1.0.0",
+            plugin_dir=plugin_dir, dry_run=False,
+        )
+        assert result.action == "clean_pulled"
+        # Verify the per-item source.license is preserved byte-for-byte
+        local = plugin_dir / "copy_freely" / "data" / "item.json"
+        local_content = local.read_text(encoding="utf-8")
+        assert "CC-BY-4.0" in local_content
+        local_json = json.loads(local_content)
+        assert local_json["source"]["license"] == "CC-BY-4.0"
+        assert local_json["source"]["repo"] == "test/repo"
+        assert local_json["source"]["author"] == "Test Author"
+        # Byte-exact match with upstream
+        upstream_content = subprocess.run(
+            ["git", "-C", str(repo), "show", "v1.0.0:data/item.json"],
+            capture_output=True, check=True,
+        ).stdout.decode("utf-8")
+        assert local_content == upstream_content, (
+            "per-item source.license must be preserved byte-for-byte "
+            "(CC-BY-4.0 attribution chain would break otherwise)"
+        )
