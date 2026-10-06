@@ -37,19 +37,19 @@ from tests.unit.plugin_subsystem._manifest_fixtures import (
 
 class TestPluginRegistryBasics:
     def test_empty_registry_constructs(self):
-        reg = PluginRegistry({}, {})
+        reg = PluginRegistry({}, {}, {})
         assert len(reg) == 0
         assert reg.names() == ()
         assert reg.refused_names() == ()
         assert reg.has_failures() is False
 
     def test_get_raises_for_unknown_name(self):
-        reg = PluginRegistry({}, {})
+        reg = PluginRegistry({}, {}, {})
         with pytest.raises(KeyError):
             reg.get("absent")
 
     def test_try_get_returns_none_for_unknown(self):
-        reg = PluginRegistry({}, {})
+        reg = PluginRegistry({}, {}, {})
         assert reg.try_get("absent") is None
 
     def test_contains(self):
@@ -65,7 +65,7 @@ class TestPluginRegistryBasics:
             execution_mode="resource-only",
             source_dir=None,
         )
-        reg = PluginRegistry({"a": decl}, {})
+        reg = PluginRegistry({"a": decl}, {}, {})
         assert "a" in reg
         assert "b" not in reg
 
@@ -80,7 +80,7 @@ class TestPluginRegistryBasics:
             name="alpha", license="MIT", upstream_repo="x", tag_pin_per_class={"copy_freely": "v1.0.0"},
             integration_path="C", execution_mode="resource-only", source_dir=None,
         )
-        reg = PluginRegistry({"zeta": decl_a, "alpha": decl_b}, {})
+        reg = PluginRegistry({"zeta": decl_a, "alpha": decl_b}, {}, {})
         assert reg.names() == ("alpha", "zeta")
 
     def test_as_dict_round_trippable_via_json(self):
@@ -91,7 +91,7 @@ class TestPluginRegistryBasics:
             tag_pin_per_class={"copy_freely": "v1.0.0"},
             integration_path="C", execution_mode="resource-only", source_dir=None,
         )
-        reg = PluginRegistry({"rd": decl}, {})
+        reg = PluginRegistry({"rd": decl}, {}, {})
         import json
         json.dumps(reg.as_dict())  # must not raise
 
@@ -103,7 +103,7 @@ class TestScanPluginsRoot:
     def test_scan_finds_valid_minimal_plugin(self, tmp_path: Path):
         # Real tag-shaped pin: v1.0.0 (carry-forward 6).
         plugin = build_plugin(tmp_path, VALID_MINIMAL_MANIFEST, name="valid-plugin")
-        decls, refusals = scan_plugins_root(tmp_path)
+        decls, _skills, refusals = scan_plugins_root(tmp_path)
         assert "valid-plugin" in decls
         assert decls["valid-plugin"].integration_path == "C"
         assert decls["valid-plugin"].execution_mode == "resource-only"
@@ -117,13 +117,13 @@ class TestScanPluginsRoot:
         # make the tree-level check pass).
         (plugin / "adapter").mkdir()
         (plugin / "adapter" / "entry.ts").write_text("// stub\n", encoding="utf-8")
-        decls, refusals = scan_plugins_root(tmp_path)
+        decls, _skills, refusals = scan_plugins_root(tmp_path)
         assert "b-plugin" in decls
         assert "b-plugin" not in refusals
 
     def test_scan_records_refusal_for_missing_manifest(self, tmp_path: Path):
         (tmp_path / "no-manifest").mkdir()
-        decls, refusals = scan_plugins_root(tmp_path)
+        decls, _skills, refusals = scan_plugins_root(tmp_path)
         assert "no-manifest" not in decls
         assert "no-manifest" in refusals
         assert refusals["no-manifest"][0].code == "manifest_missing"
@@ -131,7 +131,7 @@ class TestScanPluginsRoot:
     def test_scan_records_refusal_for_invalid_manifest(self, tmp_path: Path):
         (tmp_path / "broken").mkdir()
         (tmp_path / "broken" / "MANIFEST.yaml").write_text("not: [valid", encoding="utf-8")
-        decls, refusals = scan_plugins_root(tmp_path)
+        decls, _skills, refusals = scan_plugins_root(tmp_path)
         assert "broken" not in decls
         assert "broken" in refusals
         assert refusals["broken"][0].code == "manifest_unparseable"
@@ -140,12 +140,12 @@ class TestScanPluginsRoot:
         # A loose file at the plugins root (e.g. a README) is not a plugin.
         (tmp_path / "README.md").write_text("hi", encoding="utf-8")
         build_plugin(tmp_path, VALID_MINIMAL_MANIFEST, name="real")
-        decls, refusals = scan_plugins_root(tmp_path)
+        decls, _skills, refusals = scan_plugins_root(tmp_path)
         assert "README.md" not in decls
         assert "real" in decls
 
     def test_scan_missing_root_is_empty(self, tmp_path: Path):
-        decls, refusals = scan_plugins_root(tmp_path / "does-not-exist")
+        decls, _skills, refusals = scan_plugins_root(tmp_path / "does-not-exist")
         assert decls == {}
         assert refusals == {}
 
@@ -153,7 +153,7 @@ class TestScanPluginsRoot:
         build_plugin(tmp_path, VALID_MINIMAL_MANIFEST, name="good")
         (tmp_path / "bad").mkdir()
         (tmp_path / "bad" / "MANIFEST.yaml").write_text(":", encoding="utf-8")
-        decls, refusals = scan_plugins_root(tmp_path)
+        decls, _skills, refusals = scan_plugins_root(tmp_path)
         assert "good" in decls
         assert "bad" in refusals
 
@@ -184,11 +184,15 @@ class TestLoadRegistry:
         assert isinstance(ei.value, ManifestRefusal)
 
     def test_default_plugins_root_is_repo_plugins_dir(self):
-        # The module-level default points at <repo-root>/plugins/. Slice ②
-        # ships the first concrete plugin tree there; later slices can
-        # override via an explicit ``plugins_root`` argument.
+        # The module-level default points at <repo-root>/plugins/ (the
+        # dir whose NAME is "plugins" — its parent is the repo root in
+        # every worktree, so this assertion is portable).  Slice ②
+        # ships the first concrete plugin tree there; later slices
+        # can override via an explicit ``plugins_root`` argument.
         assert DEFAULT_PLUGINS_ROOT.name == "plugins"
-        assert DEFAULT_PLUGINS_ROOT.parent.name == "ensemble-src-wt-plugin-subsystem-02"
+        assert DEFAULT_PLUGINS_ROOT.is_dir(), (
+            f"DEFAULT_PLUGINS_ROOT points at a non-directory: {DEFAULT_PLUGINS_ROOT}"
+        )
 
 
 # -- skeleton convention tests ------------------------------------------------
@@ -205,7 +209,7 @@ class TestSkeletonConventions:
             import shutil
             shutil.rmtree(copy_freely)
         copy_freely.write_text("not a dir", encoding="utf-8")
-        decls, refusals = scan_plugins_root(tmp_path)
+        decls, _skills, refusals = scan_plugins_root(tmp_path)
         # Manifest is still valid; the class_subdir_not_a_directory
         # violation is recorded as a refusal.
         codes = [r.code for r in refusals.get("sk1", ())]
@@ -218,7 +222,7 @@ class TestSkeletonConventions:
             (plugin / "current").symlink_to(plugin / "MANIFEST.yaml")
         except OSError:  # pragma: no cover - filesystem may forbid
             pytest.skip("symlink not supported on this filesystem")
-        decls, refusals = scan_plugins_root(tmp_path)
+        decls, _skills, refusals = scan_plugins_root(tmp_path)
         codes = [r.code for r in refusals.get("sk2", ())]
         assert "root_symlink" in codes
 
@@ -234,7 +238,7 @@ class TestSkeletonConventions:
         )
         (plugin / "own_outright" / "compose_brief").mkdir(parents=True, exist_ok=True)
         (plugin / "own_outright" / "compose_brief" / "README.md").write_text("# local\n", encoding="utf-8")
-        decls, refusals = scan_plugins_root(tmp_path)
+        decls, _skills, refusals = scan_plugins_root(tmp_path)
         # No skeleton violation; manifest is valid (we mutated it carefully).
         codes = [r.code for r in refusals.get("sk3", ())]
         assert codes == []

@@ -218,6 +218,34 @@
           }
         }
       }
+    },
+    "skills": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "description": "Optional plugin-skill section (CON \u00a76; slice \u2463). When present, declares the named plugin-skills the plugin contributes to the registration path. Each entry's per-skill contract (plugin_ref, vendored_references, consumption.by) lives in the SKILL YAML at plugins/<name>/skills/<skill_id>.yaml and is validated by the slice-\u2463 skill loader \u2014 the manifest only NAMES the skills here so a missing skill YAML surfaces as a refusal at scan time (not at consumer query time).",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["skill_id", "path"],
+            "additionalProperties": false,
+            "properties": {
+              "skill_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Skill identifier (kebab / dotted). Must equal the source file's stem at plugins/<name>/skills/<skill_id>.yaml."
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Relative path to the skill YAML inside the plugin tree (CON \u00a76: typically 'skills/<skill_id>.yaml'). Refused if it escapes the plugin tree ('..' / absolute)."
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

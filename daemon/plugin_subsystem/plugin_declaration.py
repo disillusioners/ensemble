@@ -55,6 +55,12 @@ class PluginDeclaration:
     parity_intentionally_not_vendored: Sequence[Mapping[str, str]] = field(default_factory=tuple)
     parity_not_executed: Sequence[Mapping[str, str]] = field(default_factory=tuple)
 
+    # plugin-skill section (CON §6; slice ④)
+    # The manifest only NAMES the skill files; the registry reads each
+    # file via plugin_skill.read_skill_file. Empty tuple = no skills
+    # declared (or section absent entirely).
+    manifest_skills_entries: Sequence[Mapping[str, str]] = field(default_factory=tuple)
+
     # context
     source_dir: Optional[Path] = None
     schema_version: str = "1.0.0"
@@ -76,3 +82,10 @@ class PluginDeclaration:
         """True iff the execution mode requires an ``adapter/`` subtree
         (CON §1: required iff lifted-symbol | hosted-runtime)."""
         return self.execution_mode in ("lifted-symbol", "hosted-runtime")
+
+    @property
+    def declared_skill_ids(self) -> Sequence[str]:
+        """Skill IDs declared in the manifest's ``skills.entries`` (CON §6).
+        The actual skill YAML validation happens in the registry scan;
+        the manifest's role is the DECLARATIVE enumeration."""
+        return tuple(entry.get("skill_id", "") for entry in self.manifest_skills_entries)

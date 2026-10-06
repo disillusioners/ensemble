@@ -1,4 +1,4 @@
-"""Plugin registry — boot-scan map (REC §1.2 component 3; built in ①②).
+"""Plugin registry — boot-scan map (REC §1.2 component 3; built in ①②④).
 
 DATA discovery/registration for the plugin subsystem.  Scans a plugins root
 directory, reads each immediate child dir's ``MANIFEST.yaml`` via the
@@ -12,6 +12,16 @@ no entry-point scanning, no runtime plugin code loads here.  The registry
 is plain directory scanning + the slice-① manifest reader.  Skeleton
 conventions enforced here are the CON §1 layout invariants; per-class
 content rules live in the manifest reader.
+
+**Slice ④ addition (CON §6).**  The registry also reads each plugin's
+declared skill files (``plugins/<name>/skills/<skill_id>.yaml``) and
+produces validated :class:`PluginSkill` objects that consumers can
+query by skill ID.  A skill-file validation failure is recorded as a
+refusal on the parent plugin — the registry never silently drops a
+failure.  The skill content is DATA: no plugin code is imported, no
+plugin classes are instantiated, no entry points are scanned.  The
+lookup API is :meth:`PluginRegistry.iter_skills` (all skills across
+all plugins) and :meth:`PluginRegistry.get_skill` (by id).
 
 **Scope discipline (slice ②).**  Boot-scan wiring at ``daemon/manager.py``
 boot is a tier-1 touch that REC §1.2 does NOT explicitly assign to slice
@@ -27,15 +37,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from daemon.plugin_subsystem.manifest_reader import (
     MANIFEST_FILENAME,
     ManifestRefusal,
-    PluginDeclaration,
     read_manifest,
 )
 from daemon.plugin_subsystem.plugin_declaration import PluginDeclaration
+from daemon.plugin_subsystem.plugin_skill import (
+    PluginSkill,
+    PluginSkillRefusal,
+    read_skill_file,
+)
 
 __all__ = [
     "PluginRegistry",
@@ -87,7 +101,7 @@ class SkeletonViolation(Exception):
 
 
 class PluginRegistry:
-    """Immutable lookup table over validated plugin declarations.
+    """Immutable lookup table over validated plugin declarations + skills.
 
     Build via :func:`load_registry` or :func:`scan_plugins_root` — direct
     construction is supported (tests use it for fixture injection) but the
@@ -97,20 +111,25 @@ class PluginRegistry:
 
     - ``declarations`` — name → :class:`PluginDeclaration` for plugins whose
       ``MANIFEST.yaml`` validated cleanly. Lookup is here.
+    - ``skills`` — skill-id → :class:`PluginSkill` for every plugin-skill
+      whose YAML validated cleanly across all loaded plugins (CON §6).
     - ``refusals`` — name → tuple of :class:`ManifestRefusal` /
-      :class:`SkeletonViolation` for plugins that failed validation. The
-      registry never silently drops a failure; tests and CI iterate
-      ``all_refusals()`` to assert fail-closed behaviour.
+      :class:`PluginSkillRefusal` / :class:`SkeletonViolation` for plugins
+      or skills that failed validation. The registry never silently drops
+      a failure; tests and CI iterate ``all_refusals()`` to assert
+      fail-closed behaviour.
     """
 
     def __init__(
         self,
         declarations: Mapping[str, PluginDeclaration],
+        skills: Mapping[str, PluginSkill],
         refusals: Mapping[str, Sequence[Exception]],
     ) -> None:
         # Frozen copies: the registry is immutable; callers that want a
         # fresh scan call ``discover()``.
         self._declarations: Dict[str, PluginDeclaration] = dict(declarations)
+        self._skills: Dict[str, PluginSkill] = dict(skills)
         self._refusals: Dict[str, Tuple[Exception, ...]] = {
             name: tuple(refs) for name, refs in refusals.items()
         }
@@ -138,10 +157,31 @@ class PluginRegistry:
         """Sorted tuple of all valid plugin names."""
         return tuple(sorted(self._declarations))
 
+    # -- skill lookup (CON §6; slice ④) -----------------------------------------
+
+    def get_skill(self, skill_id: str) -> PluginSkill:
+        """Lookup a validated plugin-skill by ID (CON §6)."""
+        try:
+            return self._skills[skill_id]
+        except KeyError as exc:
+            raise KeyError(f"plugin-skill {skill_id!r} not found in registry") from exc
+
+    def try_get_skill(self, skill_id: str) -> PluginSkill | None:
+        """Lookup-or-None helper for skill queries."""
+        return self._skills.get(skill_id)
+
+    def iter_skills(self) -> Tuple[PluginSkill, ...]:
+        """Tuple of all validated plugin-skills, sorted by ``skill_id``."""
+        return tuple(self._skills[skill_id] for skill_id in sorted(self._skills))
+
+    def skill_ids(self) -> Tuple[str, ...]:
+        """Sorted tuple of every registered plugin-skill ID."""
+        return tuple(sorted(self._skills))
+
     # -- refusal surface -------------------------------------------------------
 
     def refusals(self, name: str) -> Tuple[Exception, ...]:
-        """All refusals (manifest reader + skeleton) recorded for ``name``."""
+        """All refusals (manifest reader + skeleton + skill) recorded for ``name``."""
         return self._refusals.get(name, ())
 
     def all_refusals(self) -> Mapping[str, Tuple[Exception, ...]]:
@@ -149,7 +189,7 @@ class PluginRegistry:
         return dict(self._refusals)
 
     def refused_names(self) -> Tuple[str, ...]:
-        """Sorted tuple of plugin names whose manifest/skeleton did not pass."""
+        """Sorted tuple of plugin names whose manifest/skeleton/skills did not pass."""
         return tuple(sorted(self._refusals))
 
     def has_failures(self) -> bool:
@@ -177,6 +217,20 @@ class PluginRegistry:
                 }
                 for name, decl in sorted(self._declarations.items())
             },
+            "skills": {
+                sid: {
+                    "skill_id": sk.skill_id,
+                    "plugin_name": sk.plugin_name,
+                    "schema_version": sk.schema_version,
+                    "upstream_tag": dict(sk.upstream_tag),
+                    "license": sk.license,
+                    "vendored_references": [
+                        {"alias": r.alias, "path": r.path} for r in sk.vendored_references
+                    ],
+                    "consumers": list(sk.consumers),
+                }
+                for sid, sk in sorted(self._skills.items())
+            },
             "refusals": {
                 name: [_refusal_to_dict(r) for r in refs]
                 for name, refs in sorted(self._refusals.items())
@@ -185,7 +239,7 @@ class PluginRegistry:
 
 
 def _refusal_to_dict(refusal: Exception) -> Dict[str, Any]:
-    """Normalize a refusal (manifest reader + skeleton) to a JSON dict."""
+    """Normalize a refusal (manifest reader + skeleton + skill) to a JSON dict."""
     if isinstance(refusal, ManifestRefusal):
         return {"code": refusal.code, "message": refusal.message, "location": refusal.location}
     if isinstance(refusal, SkeletonViolation):
@@ -194,6 +248,8 @@ def _refusal_to_dict(refusal: Exception) -> Dict[str, Any]:
             "message": refusal.message,
             "location": refusal.location,
         }
+    if isinstance(refusal, PluginSkillRefusal):
+        return {"code": refusal.code, "message": refusal.message, "location": refusal.location}
     return {"code": "unknown", "message": str(refusal), "location": ""}
 
 
@@ -265,65 +321,220 @@ def _check_skeleton(plugin_dir: Path) -> List[SkeletonViolation]:
     return violations
 
 
+# -- per-plugin skill loading (CON §6; slice ④) ------------------------------------
+
+
+def _load_plugin_skills(
+    declaration: PluginDeclaration,
+    plugin_dir: Path,
+) -> Tuple[Dict[str, PluginSkill], Tuple[PluginSkillRefusal, ...]]:
+    """Load and validate the plugin-skills declared by ``declaration``.
+
+    Iterates ``declaration.manifest_skills_entries`` (the manifest's
+    declarative list).  For each entry, calls
+    :func:`read_skill_file` which enforces the CON §6 contract
+    (plugin_ref, vendored_references, consumption.by).
+
+    Returns ``(skills_by_id, refusals)``.  Refusals NEVER abort the load
+    loop — the registry records them per plugin so CI / tests iterate
+    ``all_refusals()`` and the user sees the full set in one report.
+
+    Per-plugin skill-id duplicates (the manifest declaring the same
+    skill_id twice in one plugin) are caught by ``read_skill_file``
+    indirectly via the alias-uniqueness check; explicit duplicate-id
+    checks live in the cross-plugin pass in :func:`scan_plugins_root`.
+    """
+    skills: Dict[str, PluginSkill] = {}
+    refusals: List[PluginSkillRefusal] = []
+
+    for index, entry in enumerate(declaration.manifest_skills_entries):
+        skill_id = entry.get("skill_id", "")
+        rel_path = entry.get("path", "")
+        skill_file = plugin_dir / rel_path
+        try:
+            skill = read_skill_file(
+                skill_file,
+                plugin_root=plugin_dir,
+                plugin_name=declaration.name,
+                plugin_license=declaration.license,
+            )
+        except PluginSkillRefusal as exc:
+            refusals.append(exc)
+            continue
+        skills[skill.skill_id] = skill
+
+    return skills, tuple(refusals)
+
+
 # -- scan / load factories --------------------------------------------------------
+
+
+def _resolve_plugin(
+    plugin_dir: Path,
+    *,
+    validate_tree: bool,
+) -> Tuple[Optional[PluginDeclaration], List[Exception]]:
+    """Run skeleton + manifest validation for one plugin; return the
+    declaration (or None on refusal) and the full list of refusals
+    (skeleton + manifest).
+
+    Splitting this out from the scan loop lets the cross-plugin
+    skill-id-collision pass build on a clean per-plugin record without
+    re-running the manifest reader (a duplicate read would double-count
+    schema-version-mismatch refusals, etc.).  The function is private —
+    the public surface is :func:`scan_plugins_root`.
+    """
+    collected: List[Exception] = []
+
+    # Skeleton (layout) checks first — these fail independently of any
+    # manifest content and are surfaced with dedicated codes.
+    for violation in _check_skeleton(plugin_dir):
+        collected.append(violation)
+
+    # Manifest read.
+    try:
+        declaration = read_manifest(plugin_dir, validate_tree=validate_tree)
+    except ManifestRefusal as exc:
+        collected.append(exc)
+        return None, collected
+    except Exception as exc:  # noqa: BLE001 - other I/O / parse errors land here
+        collected.append(
+            ManifestRefusal(
+                code="manifest_unreadable",
+                message=f"unexpected error reading manifest: {exc}",
+                location=str(plugin_dir / MANIFEST_FILENAME),
+            )
+        )
+        return None, collected
+
+    return declaration, collected
 
 
 def scan_plugins_root(
     plugins_root: Path,
     *,
     validate_tree: bool = True,
-) -> Tuple[Dict[str, PluginDeclaration], Dict[str, Tuple[Exception, ...]]]:
-    """Scan ``plugins_root`` (one level deep) and return (declarations, refusals).
+) -> Tuple[Dict[str, PluginDeclaration], Dict[str, PluginSkill], Dict[str, Tuple[Exception, ...]]]:
+    """Scan ``plugins_root`` (one level deep) and return (declarations, skills, refusals).
 
     Each immediate child directory is treated as a plugin tree; the
-    scan invokes the slice-① manifest reader for the manifest and the
-    registry's own skeleton checks.  A plugin whose manifest fails
-    validation is NOT silently dropped — it lands in ``refusals``.
-    Missing manifests also land in ``refusals`` (consistent with the
-    schema-CI runner's fail-closed behaviour).
+    scan invokes the slice-① manifest reader for the manifest, the
+    registry's own skeleton checks, AND the slice-④ skill loader for
+    each declared plugin-skill.  A plugin whose manifest or skills fail
+    validation is NOT silently dropped — the per-plugin refusal list
+    captures every failure for the CI / operator report.
+
+    Returns three dicts:
+
+    - ``declarations`` — plugin-name → :class:`PluginDeclaration` for
+      plugins whose manifest validated cleanly.  Skill files may still
+      fail in a plugin whose manifest passed; the manifest pass is
+      independent of the skill pass.
+    - ``skills`` — skill-id → :class:`PluginSkill` for every validated
+      plugin-skill across all plugins.  Skill IDs are global (a skill-id
+      is a stable consumer-facing handle); duplicates across plugins
+      are refused and recorded under BOTH plugins so the report is
+      symmetric.
+    - ``refusals`` — plugin-name → tuple of refusal exceptions
+      (manifest / skeleton / skill).  A clean scan produces empty dicts.
     """
     plugins_root = Path(plugins_root)
     declarations: Dict[str, PluginDeclaration] = {}
+    skills_by_id: Dict[str, PluginSkill] = {}
     refusals: Dict[str, Tuple[Exception, ...]] = {}
 
     if not plugins_root.is_dir():
         # An absent plugins root is itself a registry condition; we return
         # an empty registry rather than raise so callers (CI / test packs)
         # can distinguish "no plugins/ yet" from "scan failed".
-        return declarations, refusals
+        return declarations, skills_by_id, refusals
 
+    # First pass: per-plugin skeleton + manifest + skill validation.
+    # We collect the per-plugin records in a list so the second pass
+    # (cross-plugin skill-id collision detection) can iterate without
+    # re-running any I/O.
+    per_plugin_records: List[Tuple[str, Path, Optional[PluginDeclaration], List[Exception], Dict[str, PluginSkill]]] = []
     for child in sorted(plugins_root.iterdir()):
         if not child.is_dir():
             continue
         name = child.name
-        collected: List[Exception] = []
+        declaration, collected = _resolve_plugin(child, validate_tree=validate_tree)
+        if declaration is not None:
+            plugin_skills, skill_refusals = _load_plugin_skills(declaration, child)
+            for sr in skill_refusals:
+                collected.append(sr)
+        else:
+            plugin_skills = {}
+        per_plugin_records.append((name, child, declaration, collected, plugin_skills))
 
-        # Skeleton (layout) checks first — these fail independently of any
-        # manifest content and are surfaced with dedicated codes.
-        for violation in _check_skeleton(child):
-            collected.append(violation)
+    # Second pass: detect cross-plugin skill-id collisions.  When two
+    # plugins declare the same skill_id, both plugins see the SAME
+    # refusal code so the report is symmetric (no "winner / loser"
+    # asymmetry).  We refuse BOTH the colliding entries (CON §6: skill
+    # IDs are global consumer-facing handles; duplicates would silently
+    # break the registry's lookup).
+    skill_id_to_plugin: Dict[str, str] = {}
+    collision_pairs: Dict[str, List[str]] = {}  # plugin_name -> list of colliding skill_ids
+    for name, _, declaration, _collected, plugin_skills in per_plugin_records:
+        if declaration is None:
+            continue
+        for sid in list(plugin_skills.keys()):
+            prior = skill_id_to_plugin.get(sid)
+            if prior is None:
+                skill_id_to_plugin[sid] = name
+                continue
+            # Collision: refuse on BOTH plugins.  The skill file IS
+            # syntactically valid (it parsed), but the cross-plugin
+            # collision is a global registration error.  Pop the loser's
+            # entry so the third pass only registers the collision-free
+            # set.
+            plugin_skills.pop(sid, None)
+            collision_pairs.setdefault(prior, []).append(sid)
+            collision_pairs.setdefault(name, []).append(sid)
 
-        # Manifest read — wrap any refusal so the registry can record it.
-        try:
-            declarations[name] = read_manifest(child, validate_tree=validate_tree)
-        except ManifestRefusal as exc:
-            collected.append(exc)
-        except Exception as exc:  # noqa: BLE001 - other I/O / parse errors land here
-            collected.append(
-                ManifestRefusal(
-                    code="manifest_unreadable",
-                    message=f"unexpected error reading manifest: {exc}",
-                    location=str(child / MANIFEST_FILENAME),
+    # Third pass: build the final maps.  At this point every plugin's
+    # ``plugin_skills`` is collision-free; the only refusal additions
+    # are the per-plugin collision-pair records.
+    for name, child, declaration, collected, plugin_skills in per_plugin_records:
+        # Surface the cross-plugin collision refusals (one per
+        # collision, one per plugin involved).
+        if name in collision_pairs:
+            for sid in collision_pairs[name]:
+                # Find the OTHER plugin involved (the partner in the
+                # collision) so the message is symmetric.
+                partner = next(
+                    (other for other, sids in collision_pairs.items() if sid in sids and other != name),
+                    "?",
                 )
-            )
-
+                collected.append(
+                    PluginSkillRefusal(
+                        "skills_entry_duplicate",
+                        f"plugin-skill {sid!r} is declared by both {name!r} and {partner!r}; "
+                        "skill IDs are global consumer-facing handles (CON §6)",
+                        "skills.entries",
+                    )
+                )
+        if declaration is not None:
+            declarations[name] = declaration
+            for sid, skill in plugin_skills.items():
+                skills_by_id[sid] = skill
         if collected:
-            refusals[name] = tuple(collected)
+            # Dedup identical refusal exceptions (same type+code+message+location)
+            # so the report is stable across re-reads.
+            seen = set()
+            deduped: List[Exception] = []
+            for r in collected:
+                key = (type(r).__name__, getattr(r, "code", ""), str(r))
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(r)
+            refusals[name] = tuple(deduped)
 
-    return declarations, refusals
+    return declarations, skills_by_id, refusals
 
 
 def load_registry(plugins_root: Path, *, validate_tree: bool = True) -> PluginRegistry:
     """Build a :class:`PluginRegistry` from ``plugins_root``."""
-    declarations, refusals = scan_plugins_root(plugins_root, validate_tree=validate_tree)
-    return PluginRegistry(declarations, refusals)
+    declarations, skills, refusals = scan_plugins_root(plugins_root, validate_tree=validate_tree)
+    return PluginRegistry(declarations, skills, refusals)

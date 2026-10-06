@@ -61,7 +61,7 @@ class TestRealPluginManifest:
 
     def test_plugin_registry_loads(self):
         # Single-plugin tree: registry should contain "opendesign" with no refusals.
-        declarations, refusals = scan_plugins_root(PLUGIN_ROOT.parent)
+        declarations, _skills, refusals = scan_plugins_root(PLUGIN_ROOT.parent)
         assert "opendesign" in declarations
         assert "opendesign" not in refusals
 

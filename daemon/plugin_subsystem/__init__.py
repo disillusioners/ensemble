@@ -41,6 +41,17 @@ from daemon.plugin_subsystem.plugin_registry import (
     load_registry,
     scan_plugins_root,
 )
+from daemon.plugin_subsystem.plugin_skill import (
+    SCHEMA_VERSION as PLUGIN_SKILL_SCHEMA_VERSION,
+    SKILL_FILE_SUFFIX,
+    SKILL_SIZE_CAP_BYTES as PLUGIN_SKILL_SIZE_CAP_BYTES,
+    PluginSkill,
+    PluginSkillRefusal,
+    VendoredReference,
+    list_skill_files,
+    read_skill_file,
+    validate_skill_doc,
+)
 from daemon.plugin_subsystem.schema_ci import run_ci, validate_plugin_dir
 
 __all__ = [
@@ -49,21 +60,30 @@ __all__ = [
     "EntrypointCheckResult",
     "MANIFEST_FILENAME",
     "MANIFEST_SIZE_CAP_BYTES",
+    "PLUGIN_SKILL_SCHEMA_VERSION",
+    "PLUGIN_SKILL_SIZE_CAP_BYTES",
     "ManifestRefusal",
     "ManifestValidation",
     "PathTypeRegistry",
     "PathTypeRegistryError",
     "PluginDeclaration",
     "PluginRegistry",
+    "PluginSkill",
+    "PluginSkillRefusal",
     "REFUSE_THRESHOLD",
+    "SKILL_FILE_SUFFIX",
     "SkeletonViolation",
+    "VendoredReference",
     "check_entrypoint",
+    "list_skill_files",
     "load_default_registry",
     "load_registry",
     "read_manifest",
+    "read_skill_file",
     "run_ci",
     "run_entrypoint_tripwire",
     "scan_plugins_root",
     "validate_manifest",
     "validate_plugin_dir",
+    "validate_skill_doc",
 ]
