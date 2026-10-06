@@ -106,6 +106,11 @@ class Port:
     after the structural + semantic gates pass. Consumers of this class
     (the plugin tool factory, the schema-CI runner) treat it as the
     authoritative data contract for one Port.
+
+    The ``frozen=True`` dataclass wraps ``Mapping`` fields (which are
+    unhashable); ``__hash__`` is overridden to hash on the stable
+    identity tuple (port_id, version) so Port objects are valid dict /
+    set members while equality remains structural.
     """
 
     port_id: str
@@ -126,6 +131,16 @@ class Port:
 
     # Optional provenance: where this Port is declared.
     declared_in: Optional[str] = None  # e.g. "plugins/opendesign/MANIFEST.yaml"
+
+    def __hash__(self) -> int:  # noqa: D401 — dataclass __hash__ override
+        """Hash on (port_id, version) — the stable identity tuple.
+
+        The dataclass auto-generated ``__hash__`` would attempt to hash
+        the Mapping fields (unhashable); we override with the stable
+        identity tuple so Port objects are valid set / dict members.
+        Equality remains structural (dataclass ``__eq__``).
+        """
+        return hash((self.port_id, self.version))
 
     # Error-envelope key expectations — the canonical three keys per CON §3.
     # The Port must include all three keys (ok:false, code, message); details is

@@ -550,7 +550,16 @@ class OdGenerate:
                 finish_reason="other",
             )
 
-        client, model = cls._CLIENT_FACTORY(env)
+        try:
+            client, model = cls._CLIENT_FACTORY(env)
+        except Exception as exc:  # noqa: BLE001 - any factory failure becomes a typed envelope
+            logger.warning("od.generate: client factory failed: %s", exc)
+            return cls._error_envelope(
+                "byok_not_configured",
+                f"client factory failed: {exc}",
+                details={"max_tokens": args.max_tokens},
+                finish_reason="other",
+            )
 
         system_prompt = cls._COMPOSER(args)
 
