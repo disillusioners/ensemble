@@ -206,9 +206,16 @@ class PluginSkill:
 
 
 def _load_spdx_ids() -> FrozenSet[str]:
-    """Re-read the vendored SPDX list (same file the manifest reader uses)."""
+    """Re-read the vendored SPDX list (same file the manifest reader uses).
+
+    The file is a JSON object with an ``ids`` key carrying the
+    authoritative allowlist; the surrounding metadata keys
+    (``list_name`` / ``list_version`` / ``match_rule`` / ``evolvability``)
+    are operational notes and are NOT SPDX ids.
+    """
     spdx_path = Path(__file__).resolve().parents[2] / "plugins-convention" / "spdx_ids.json"
-    return frozenset(json.loads(spdx_path.read_text(encoding="utf-8")))
+    data = json.loads(spdx_path.read_text(encoding="utf-8"))
+    return frozenset(data["ids"])
 
 
 def _looks_like_range(value: str) -> bool:

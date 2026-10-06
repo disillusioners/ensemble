@@ -1,0 +1,91 @@
+# Plugin Subsystem v1 — opendesign.list_systems (CON §6; slice ④)
+#
+# This is the FIRST plugin-skill the slice-④ plan consumes (REC §4.3
+# row ④).  It is DATA (CON §7 no-runtime-loading sentinel): the YAML
+# declares the version-visibility surface (plugin_ref), the vendored
+# tree alias (content.vendored_references), and the named consumers
+# (consumption.by) — no code, no class definitions, no entry points.
+#
+# The agent that loads this skill sees the upstream pin at load time
+# (CON §6 invariant: "plugin_ref.upstream_tag MUST be present at load")
+# and a body that lets it answer the count query
+# "how many design systems does opendesign carry?" by reading the
+# vendored tree the skill references.  The answer is derivable: the
+# vendored tree is plugins/opendesign/copy_freely/design-systems/, and
+# the count = 154 top-level entries per CURATION.md §2 (152 brand
+# DIRS + 1 design-systems/_schema/ + 1 design-systems/README.md).
+#
+# Source of truth: .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md
+# (CON §6); .agents/shared/planning/plugin-subsystem/architecture-recommendation.md
+# (REC §4.3 row ④); CURATION.md §2 (entry counts).
+
+skill_id: "opendesign.list_systems"
+schema_version: "1.0.0"
+
+plugin_ref:
+  # CON §6: name MUST equal the parent plugin's plugin.name (the loader
+  # checks this at load — name_mismatch is a hard refusal).
+  name: "opendesign"
+  manifest_schema_version: "1.0.0"
+  # CON §6: upstream_tag MUST be present at load (the worker sees
+  # "data=vX, prompt=vY" — read-your-writes, never eventual).  At
+  # slice ④ opendesign only carries copy_freely data; the
+  # snapshot_with_drift_alarm and own_outright pins land at slice ⑤
+  # alongside the B-element and Turn-3 orchestration.  Documenting
+  # the current truth here, not the future shape.
+  upstream_tag:
+    copy_freely: "open-design-v0.23.0"
+  # CON §6: license is part of the version-visibility surface.  The
+  # loader refuses a skill whose license diverges from the parent
+  # plugin's plugin.license (defense in depth — a ref-data mistake
+  # is a load-time refusal, not a silent mis-display).
+  license: "Apache-2.0"
+
+content:
+  description: >-
+    Enumerate the design systems the opendesign plugin carries (per
+    CURATION.md §2: 154 top-level entries under
+    copy_freely/design-systems/ — 152 brand DIRS + 1
+    design-systems/_schema/ + 1 design-systems/README.md).
+  body_markdown: |
+    # opendesign.list_systems
+
+    Authoritative count source: `plugins/opendesign/copy_freely/design-systems/`
+    at the pinned upstream tag (`open-design-v0.23.0` per MANIFEST.yaml
+    `plugin.upstream.tag_pin_per_class.copy_freely`).
+
+    Per CURATION.md §2 finding F-1, the top-level entry count is **154**:
+    152 brand directories (e.g. `airbnb/`, `apple/`, `agentic/`, …) +
+    `design-systems/_schema/` (the schema description for the design
+    system data class) + `design-systems/README.md` (the upstream class
+    doc).  The slice ② planning doc's loose "154 dirs" wording is
+    off-by-2 from the actual brand-dir count (152), but matches the
+    top-level entry count of `copy_freely/design-systems/`.  This
+    skill treats the **top-level entry count (154)** as the canonical
+    "design systems carried" answer; the brand-only count (152) is
+    derivable by reading the README and skipping the `_schema/` dir.
+
+    To enumerate: read the immediate children of the `systems`
+    vendored reference (the path this skill exposes via
+    `content.vendored_references[0].path`).  The count is the number
+    of entries returned by a directory listing of that path
+    (dirs + the README + `_schema/`).  No database lookup, no
+    LLM-driven counting — the value is a deterministic file-system
+    read.
+  vendored_references:
+    - alias: "systems"
+      # CON §6: relative to the plugin tree root; traversal outside
+      # the tree is refused at load.  The loader double-checks the
+      # resolved path still lives under plugins/opendesign/ before
+      # accepting the reference.
+      path: "copy_freely/design-systems/"
+
+consumption:
+  # CON §6: NAMED consumers only — anonymous `["*"]` or any globbed
+  # form (e.g. `worker/*`) is refused at load (fail-closed, tested).
+  # At slice ④ the named consumer is the test surface; slice ⑤
+  # widens this to the designer agent's actual skill-set.yaml
+  # registration when the generation B-element lands.
+  by:
+    - "worker/designer"
+    - "test/opendesign.list_systems"

@@ -85,6 +85,22 @@ parity_boundary:
       reason: "Internal lint / parse5 EOF / truncation detectors — own-outright, ported into the generate adapter at slice ⑤ (REC §4.1 row 4)"
     - path: "templates/"
       reason: "Top-level HTML templates (3 entries) — STANDALONE but ORPHANED on upstream main (od-resource-layer §2); deprecated, not vendored"
+    # W5 carry-forward (slice-② review): upstream at
+    # /home/nea/opt/open-design/assets/prompt-templates/image/ contains
+    # 11 preview JPGs (one per major image-prompt template) that are
+    # the rendered previews of the JSON prompt templates.  The
+    # vendored copy_freely/prompt-templates/image/ subtree vendors the
+    # 48 JSON files only; the 11 JPGs are excluded because (a) they
+    # are preview assets (not prompt data — they are RENDITIONS of
+    # what the prompt generates, not inputs to generation) and (b) the
+    # slice-② planning count spec was "106 JSON" (class-entry count
+    # per the JSON file).  The 11 JPGs exist ONLY upstream at
+    # /home/nea/opt/open-design/assets/prompt-templates/image/*.jpg
+    # (read-only reference; do NOT modify upstream).  Slice ④ adds
+    # this row so the W5 disposition is recorded in the manifest's
+    # parity_boundary section (CON §2), not just CURATION.md.
+    - path: "assets/prompt-templates/image/*.jpg"
+      reason: "11 preview JPGs (W5 carry-forward from slice ②): rendered previews, not prompt data; vendored set is the 48 JSON files only; upstream at /home/nea/opt/open-design/assets/prompt-templates/image/ is READ-ONLY reference"
   # not_executed: every vendored byte is inert under resource-only.
   # We declare the broad class so the slice-① reader's `not_executed`
   # parity check has a concrete target; specific per-file entries
@@ -92,3 +108,21 @@ parity_boundary:
   not_executed:
     - path: "copy_freely/"
       reason: "All vendored bytes under copy_freely/ are inert data under resource-only; no subtree executes (CON §1, CON §7 no-runtime-loading sentinel)"
+
+# skills: CON §6 plugin-skill declarations.  The manifest NAMES the
+# skill files; the slice-④ registration path
+# (daemon/plugin_subsystem/plugin_skill.py + plugin_registry._load_plugin_skills)
+# reads each file at scan time and refuses the plugin if a declared
+# file is missing or its content violates the CON §6 contract
+# (plugin_ref version-visibility, vendored_references inside-tree,
+# consumption.by named-only).  At slice ④ the only declared skill is
+# the opendesign.list_systems count query (REC §4.3 row ④).
+# Additional skills (e.g. opendesign.list_templates at slice ⑤ when
+# the generation B-element lands) will be appended to this list with
+# their own entries.  Slice ③/④ DAG: ②→④→⑤; giter's eventual merge
+# with slice ③'s class sections is a byte-exact union of both sides'
+# added sections.
+skills:
+  entries:
+    - skill_id: "opendesign.list_systems"
+      path: "skills/opendesign.list_systems.yaml"

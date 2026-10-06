@@ -473,8 +473,20 @@ def scan_plugins_root(
     # asymmetry).  We refuse BOTH the colliding entries (CON §6: skill
     # IDs are global consumer-facing handles; duplicates would silently
     # break the registry's lookup).
+    #
+    # The pop happens on BOTH plugins' skills dicts: when plugin-b is
+    # the iter-current plugin, the prior plugin's record is reached
+    # via the per_plugin_records list (looked up by name).  Without
+    # this, the "winner" plugin's skill would still land in
+    # skills_by_id at the third pass — the registry would surface a
+    # half-state where the consumer finds the skill but BOTH plugins
+    # carry the collision refusal.
     skill_id_to_plugin: Dict[str, str] = {}
     collision_pairs: Dict[str, List[str]] = {}  # plugin_name -> list of colliding skill_ids
+    plugin_skills_by_name: Dict[str, Dict[str, PluginSkill]] = {}
+    for name, _, declaration, _collected, plugin_skills in per_plugin_records:
+        if declaration is not None:
+            plugin_skills_by_name[name] = plugin_skills
     for name, _, declaration, _collected, plugin_skills in per_plugin_records:
         if declaration is None:
             continue
@@ -483,12 +495,13 @@ def scan_plugins_root(
             if prior is None:
                 skill_id_to_plugin[sid] = name
                 continue
-            # Collision: refuse on BOTH plugins.  The skill file IS
-            # syntactically valid (it parsed), but the cross-plugin
-            # collision is a global registration error.  Pop the loser's
-            # entry so the third pass only registers the collision-free
-            # set.
+            # Collision: pop the SID from BOTH plugins' per-plugin
+            # skills dicts (the prior one and the current one).  The
+            # current one is `plugin_skills`; the prior is reached via
+            # plugin_skills_by_name.
             plugin_skills.pop(sid, None)
+            prior_skills = plugin_skills_by_name.get(prior, {})
+            prior_skills.pop(sid, None)
             collision_pairs.setdefault(prior, []).append(sid)
             collision_pairs.setdefault(name, []).append(sid)
 
