@@ -17,6 +17,15 @@ the v1 vocabulary uses (``type`` / ``required`` / ``properties`` /
 table — is the single structural authority in both paths, so the two paths
 cannot drift.
 
+**Shape vs policy.** The schema expresses vocabulary SHAPE (allowed keys,
+types, enums; ``additionalProperties: false`` everywhere). Policy checks
+whose refusal codes are semantically demanded (kebab name, execution_mode
+positivity, alarm_owner presence, parity section presence, divergence-entry
+well-formedness, fence completeness, tag-only pins) carry NO structural
+constraint in the schema — otherwise the generic structural code would fire
+before the dedicated semantic code. See ``plugins-convention/manifest.schema.json``
+top-level description for the same statement from the schema side.
+
 **Refusal codes** (``ManifestRefusal.code``; snake_case; CON §5 codes reused
 where they map):
 
@@ -96,10 +105,9 @@ from __future__ import annotations
 
 import json
 import re
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Union
 
 import yaml
 
@@ -202,11 +210,13 @@ def _validate_structural_mini(doc: Any, schema: Mapping[str, Any]) -> List[_Stru
                 return
             props = sch.get("properties", {})
             declared = set(props)
+            # Reporting convention matches jsonschema: violations anchor at the
+            # CONTAINING object, with the offending key named in the message.
             for key in node:
                 if key not in declared and sch.get("additionalProperties") is False:
                     errors.append(
                         _StructuralError(
-                            _dotted(path + [key]),
+                            _dotted(path),
                             "unknown_field",
                             f"field {key!r} is not part of the frozen v1 vocabulary",
                         )
@@ -215,7 +225,7 @@ def _validate_structural_mini(doc: Any, schema: Mapping[str, Any]) -> List[_Stru
                 if req not in node:
                     errors.append(
                         _StructuralError(
-                            _dotted(path + [req]), "required_field_missing", f"required field {req!r} is absent"
+                            _dotted(path), "required_field_missing", f"required field {req!r} is absent"
                         )
                     )
             for key, value in node.items():
@@ -458,7 +468,7 @@ def _check_semantics(
             malformed = [
                 field_name
                 for field_name in _DIVERGENCE_REQUIRED_FIELDS
-                if field_name not in entry or entry[field_name] in (None, "")
+                if field_name not in entry or entry[field_name] in (None, "", [])
             ]
             if malformed:
                 return ManifestRefusal(
