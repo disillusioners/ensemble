@@ -146,3 +146,15 @@ a migration plan AND user ratification. The first additive change is
 the literal `1.0.0` and the additive `1.0.x` family; anything ≥ `1.1.0` or a
 different major is refused (`schema_version_unsupported`) until the runner
 carries the newer schema.
+
+### Additive epoch log
+
+Each `1.0.x` lift is recorded here so reviewers can see the change chain at
+a glance.  Entries are ADDITIVE ONLY — fields removed, enum values deleted,
+or sections renamed belong in `x.0.0` and require a user-ratified migration
+plan.
+
+| Epoch | Slice | Change | Surface touched |
+|---|---|---|---|
+| `1.0.0` | ①, ② | Initial schema + 3-class vocabulary + frozen refusal set | (baseline) |
+| `1.0.1` | ④ | Admits the top-level `skills` section (CON §6 plugin-skill declaration) | NEW `skills.entries[]` (top-level, optional); no existing field changes; no enum tightening; no section rename |

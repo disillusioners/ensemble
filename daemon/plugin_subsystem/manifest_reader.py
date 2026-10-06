@@ -560,6 +560,55 @@ def _check_semantics(
                     f"parity_boundary.{subsection}[{index}]",
                 )
 
+    # -- skills section (CON §6; slice ④) ---------------------------------------
+    skills_section = doc.get("skills")
+    if skills_section is not None:
+        entries = skills_section.get("entries")
+        if not isinstance(entries, list) or not entries:
+            return ManifestRefusal(
+                "skills_entries_empty",
+                "skills.entries must be a non-empty list when the skills section is present "
+                "(CON §6: each declared skill must carry a concrete file path; "
+                "declaring an empty skills section is refused)",
+                "skills.entries",
+            )
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, Mapping):
+                return ManifestRefusal(
+                    "skills_entry_malformed",
+                    f"skills.entries[{index}] must be a mapping with non-empty skill_id and path",
+                    f"skills.entries[{index}]",
+                )
+            skill_id = entry.get("skill_id")
+            entry_path = entry.get("path")
+            if not isinstance(skill_id, str) or not skill_id.strip():
+                return ManifestRefusal(
+                    "skills_entry_malformed",
+                    f"skills.entries[{index}].skill_id must be a non-empty string",
+                    f"skills.entries[{index}].skill_id",
+                )
+            if not isinstance(entry_path, str) or not entry_path.strip():
+                return ManifestRefusal(
+                    "skills_entry_malformed",
+                    f"skills.entries[{index}].path must be a non-empty string",
+                    f"skills.entries[{index}].path",
+                )
+            path_obj = Path(entry_path)
+            if path_obj.is_absolute():
+                return ManifestRefusal(
+                    "skills_entry_path_outside_tree",
+                    f"skills.entries[{index}].path {entry_path!r} is an absolute path; "
+                    "paths must be relative to the plugin tree root (CON §6)",
+                    f"skills.entries[{index}].path",
+                )
+            if ".." in path_obj.parts:
+                return ManifestRefusal(
+                    "skills_entry_path_outside_tree",
+                    f"skills.entries[{index}].path {entry_path!r} contains '..'; "
+                    "traversal outside the plugin tree is refused (CON §6)",
+                    f"skills.entries[{index}].path",
+                )
+
     return None
 
 
@@ -634,6 +683,13 @@ def _build_declaration(doc: Mapping[str, Any], plugin_dir: Path) -> PluginDeclar
             doc.get("parity_boundary", {}).get("intentionally_not_vendored", [])
         ),
         parity_not_executed=tuple(doc.get("parity_boundary", {}).get("not_executed", [])),
+        # CON §6: the manifest NAMES plugin-skills here; the registry
+        # reads each file.  An absent ``skills`` section is normal
+        # (every plugin does not have to ship skills) — empty tuple
+        # captures the "no skills declared" state.
+        manifest_skills_entries=tuple(
+            doc.get("skills", {}).get("entries", [])
+        ),
         source_dir=plugin_dir,
         schema_version=doc["schema_version"],
     )

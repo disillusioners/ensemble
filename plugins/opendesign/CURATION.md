@@ -244,9 +244,32 @@ excluded from `prompt-templates/image/` — not a class-entry; deliberate
 deviation, recorded in the vendoring script's `skipped_entries` and
 in this document's finding F-3.
 
+**W5 carry-forward (slice-④ added):** 11 preview JPGs under
+upstream `assets/prompt-templates/image/` (the rendered previews of
+the major image prompt templates) are excluded from the vendored set.
+Per the slice-② review (W5: "11 preview JPGs ... are excluded from
+the vendored set but undocumented"), this deviation is now recorded in
+`MANIFEST.yaml`'s `parity_boundary.intentionally_not_vendored` row
+referencing `assets/prompt-templates/image/*.jpg`.  The vendored
+subtree is the 48 JSON files only; the 11 JPGs live ONLY upstream at
+`/home/nea/opt/open-design/assets/prompt-templates/image/` (read-only
+reference; do NOT modify upstream).  The slice-② planning count spec
+was "106 JSON" (the JSON class-entry count); the JPGs are rendered
+previews (renditions of what the prompt generates, not inputs to
+generation) and are out of scope for the JSON-only vendoring policy
+set in §2 above.  The JPG filenames (one per major image prompt
+template) are listed in the manifest's parity row's reason for audit.
+
 **Manifest:** `plugins/opendesign/MANIFEST.yaml` validates against the
 slice-① reader (`validate_manifest(..., validate_tree=True)` returns
-`ok=True`).  Single class section (`copy_freely`); `parity_boundary`
-present with 7 `intentionally_not_vendored` rows + 1 `not_executed`
-row; SPDX `Apache-2.0`; execution_mode `resource-only`; pin
-`open-design-v0.23.0`; integration_path `C`.
+`ok=True`).  At slice ②: single class section (`copy_freely`);
+`parity_boundary` with 7 `intentionally_not_vendored` rows +
+1 `not_executed` row; SPDX `Apache-2.0`; execution_mode
+`resource-only`; pin `open-design-v0.23.0`; integration_path `C`.
+At slice ④ (this update): `parity_boundary.intentionally_not_vendored`
+gains the W5 row (above) and the manifest gains a `skills` section
+declaring `opendesign.list_systems` (CON §6) at
+`skills/opendesign.list_systems.yaml` — the slice-④ plugin-skill
+proves skill↔tree references and pin-visible-at-load end-to-end
+(REC §4.3 row ④).  The skills-section addition is the ONLY other
+manifest change; everything else is byte-exact to slice ②.
