@@ -286,7 +286,26 @@ class SyncRunner:
             )
 
         plugin_dir = Path(plugin_dir) if plugin_dir is not None else None
-        declaration = self._read_declaration(plugin, plugin_dir)
+        try:
+            declaration = self._read_declaration(plugin, plugin_dir)
+        except ManifestReaderError as exc:
+            return self._refuse(
+                plugin=plugin,
+                target_class=target_class,
+                upstream_tag=upstream_tag or "",
+                code=exc.refusal.code,
+                message=exc.refusal.message,
+                location=f"manifest_reader:{exc.refusal.code}",
+            )
+        if declaration is None:
+            return self._refuse(
+                plugin=plugin,
+                target_class=target_class,
+                upstream_tag=upstream_tag or "",
+                code=REFUSAL_UPSTREAM_GIT_UNAVAILABLE,
+                message="plugin_dir is required to read the manifest (CON §5: re-read fresh every call)",
+                location="sync(...) call",
+            )
 
         # Resolve upstream ref from the manifest's per-class pin (caller
         # may override; the override is for tests + the dry-run probe).
@@ -359,9 +378,25 @@ class SyncRunner:
                 location=f"upstream({effective_repo})@{effective_tag}",
             )
 
-        # Resolve per-class paths from the manifest.
+        # Resolve per-class paths from the manifest.  The manifest's
+        # `paths` are LOCAL (operator-facing) subdirs.  The matching
+        # UPSTREAM subdirs come from `upstream_paths` when present
+        # (additive CON §8 1.0.x; required for the snapshot class
+        # which renames prompts/daemon/ from apps/daemon/src/prompts/
+        # and prompts/contracts/ from packages/contracts/src/prompts/).
+        # When `upstream_paths` is absent, the sync-runner falls back
+        # to the strip-class-prefix heuristic (matches the copy_freely
+        # layout where local and upstream share the trailing path).
         class_section = getattr(declaration, target_class, {}) or {}
         class_paths = list(class_section.get("paths", []) or ())
+        explicit_upstream_paths = declaration.upstream_paths_for_class(target_class)
+        if explicit_upstream_paths is not None:
+            upstream_paths = list(explicit_upstream_paths)
+        else:
+            upstream_paths = [
+                p[len(target_class) + 1:] if p.startswith(target_class + "/") else p
+                for p in class_paths
+            ]
         if not class_paths:
             # No paths declared for the class — nothing to sync; report
             # no_change with empty diff.
@@ -381,8 +416,11 @@ class SyncRunner:
         diff = _compute_class_diff(
             upstream=upstream,
             upstream_tag=effective_tag,
-            class_paths=class_paths,
+            target_class=target_class,
+            upstream_paths=upstream_paths,
+            local_paths=class_paths,
             local_target=local_target,
+            explicit_upstream_paths=explicit_upstream_paths,
         )
 
         # Stale-tag check (CON §5 staleness_age_days) — informational,
@@ -445,8 +483,11 @@ class SyncRunner:
             _clean_pull_atomic(
                 upstream=upstream,
                 upstream_tag=effective_tag,
-                class_paths=class_paths,
+                target_class=target_class,
+                upstream_paths=upstream_paths,
+                local_paths=class_paths,
                 local_target=local_target,
+                explicit_upstream_paths=explicit_upstream_paths,
             )
             emit_drift_event(plugin, target_class, entry, effective_tag)
             return SyncResult(
@@ -473,8 +514,11 @@ class SyncRunner:
         _clean_pull_atomic(
             upstream=upstream,
             upstream_tag=effective_tag,
-            class_paths=class_paths,
+            target_class=target_class,
+            upstream_paths=upstream_paths,
+            local_paths=class_paths,
             local_target=local_target,
+            explicit_upstream_paths=explicit_upstream_paths,
         )
         return SyncResult(
             plugin=plugin,
@@ -489,36 +533,31 @@ class SyncRunner:
 
     def _read_declaration(
         self, plugin: str, plugin_dir: Optional[Path]
-    ) -> PluginDeclaration:
+    ) -> Optional[PluginDeclaration]:
         if plugin_dir is None:
-            raise SyncRefusal_or_RuntimeError(
-                f"plugin_dir is required when reading the manifest for {plugin!r}"
-            )
+            # plugin_dir is required by CON §5 (the manifest is
+            # the source of truth and must be re-read fresh every
+            # call).  Without plugin_dir we cannot read the
+            # manifest; map this to a typed refusal rather than
+            # raising — keeps the public API's "always returns
+            # SyncResult" contract.
+            return None  # caller handles None
         # Re-read FRESH every call (CON §5: no cache).
-        validation = validate_manifest(plugin_dir, validate_tree=True)
-        if validation.refusal is not None:
-            # Map reader refusal codes that overlap with sync-runner
-            # refusal codes (CON §5 closed enum); keep reader code if
-            # it's already one of ours.
-            reader_refusal = validation.refusal
-            code = reader_refusal.code
-            if code not in (
-                REFUSAL_ABSENT_EXECUTION_MODE,
-                REFUSAL_LICENSE_INVALID,
-                REFUSAL_FENCE_MISSING,
-                REFUSAL_NON_TAG_PIN,
-            ):
-                # Reader-only codes (e.g. ``manifest_missing``) are
-                # propagated with the reader's own code in the
-                # location. The sync-runner does NOT swallow reader
-                # codes; callers can detect the overlap and choose
-                # the right surface.
-                raise SyncRefusal_or_RuntimeError(
-                    f"manifest reader refused with code {code!r}: {reader_refusal.message}"
-                )
+        try:
+            validation = validate_manifest(plugin_dir, validate_tree=True)
+        except Exception as exc:  # noqa: BLE001 - defensive
+            # Any unexpected error (manifest_unreadable etc.)
+            # surfaces as a refused SyncResult.
             raise SyncRefusal_or_RuntimeError(
-                f"manifest reader refused with code {code!r}: {reader_refusal.message}"
+                f"manifest reader raised unexpectedly: {exc}"
             )
+        if validation.refusal is not None:
+            # Reader refusals map to sync-runner refusal codes
+            # (CON §5 closed enum).  Reader codes that overlap
+            # with the sync-runner enum are propagated verbatim;
+            # reader-only codes are propagated too (the
+            # integration surface owns the full set).
+            raise ManifestReaderError(validation.refusal)
         assert validation.declaration is not None  # noqa: S101 - invariant of ok=True
         return validation.declaration
 
@@ -545,6 +584,21 @@ class SyncRunner:
 # Exception alias — keeps the helper signatures short without
 # introducing a module-level alias for Exception.
 SyncRefusal_or_RuntimeError = RuntimeError
+
+
+class ManifestReaderError(Exception):
+    """Internal carrier for ``ManifestRefusal`` from the slice ① reader.
+
+    The sync-runner converts the reader's typed refusal into a
+    ``SyncResult`` with a matching ``SyncRefusal`` (so the public
+    API is "always returns a SyncResult, never raises on a
+    documented refusal").  This exception is internal; callers
+    of the sync-runner never see it.
+    """
+
+    def __init__(self, refusal: Any) -> None:
+        self.refusal = refusal
+        super().__init__(str(refusal))
 
 
 # ─── upstream-git adapter ─────────────────────────────────────────────────────
@@ -627,20 +681,48 @@ class LocalGitCheckout(UpstreamGit):
         return result.stdout.decode("utf-8", errors="replace")
 
     def tag_present(self) -> bool:
-        # ``git rev-parse <tag>^{tag}`` peels the tag to its tag
-        # object; a missing tag raises.  We catch any subprocess error
-        # and return False; the caller maps that to the
-        # ``tag_missing_upstream`` refusal.
+        # Two-stage check that handles BOTH annotated and lightweight
+        # tags.  ``git rev-parse <tag>^{tag}`` peels an annotated tag
+        # to its tag object; a missing annotated tag raises.  A
+        # lightweight tag has no tag object — ``^{tag}`` is invalid
+        # for it — so we fall back to ``<tag>^{}`` (commit) or
+        # ``<tag>`` directly.  The fallback chain is explicit so a
+        # future reflog/playground oddity can be diagnosed via the
+        # captured error rather than a silent miss.
         try:
             self._run("rev-parse", f"{self.tag}^{{tag}}")
             return True
         except RuntimeError:
+            pass
+        # Lightweight tag (or branch name — refused earlier by the
+        # offline manifest reader, but we still probe defensively).
+        try:
+            self._run("rev-parse", f"{self.tag}^{{}}")
+            return True
+        except RuntimeError:
             return False
+
+    def _ref_for_listing(self) -> str:
+        """The ref to pass to ``git ls-tree`` for this tag.
+
+        Annotated tags: the peeled commit hash.  Lightweight tags:
+        the commit-ish directly.  Force-annotated: the
+        ``<tag>^{tag}`` peel.
+        """
+        try:
+            return self._run("rev-parse", f"{self.tag}^{{tag}}").strip()
+        except RuntimeError:
+            pass
+        try:
+            return self._run("rev-parse", f"{self.tag}^{{}}").strip()
+        except RuntimeError:
+            return self.tag
 
     def list_tree(self, subdir: str) -> List[Tuple[str, str, str, int, str]]:
         # Mirrors ``tools/vendor/od_vendor.py`` size-on-tree
         # strategy (``git ls-tree -l -r``) — no per-file forks.
-        raw = self._run("ls-tree", "-l", "-r", self.tag, "--", f"{subdir}/")
+        ref = self._ref_for_listing()
+        raw = self._run("ls-tree", "-l", "-r", ref, "--", f"{subdir}/")
         out: List[Tuple[str, str, str, int, str]] = []
         for line in raw.splitlines():
             if not line.strip():
@@ -671,7 +753,8 @@ class LocalGitCheckout(UpstreamGit):
         return result.stdout
 
     def tag_commit_date(self) -> datetime:
-        raw = self._run("log", "-1", "--format=%cI", f"{self.tag}^{{}}").strip()
+        ref = self._ref_for_listing()
+        raw = self._run("log", "-1", "--format=%cI", f"{ref}^{{}}").strip()
         # ``%cI`` = ISO 8601 strict, e.g. ``2026-10-02T12:34:56+02:00``.
         return datetime.fromisoformat(raw)
 
@@ -702,46 +785,113 @@ def _hash_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _git_blob_sha1(data: bytes) -> str:
+    """Compute the git blob SHA-1 for the given raw bytes.
+
+    Mirrors ``git hash-object``: SHA-1 over the header
+    ``blob {len}\\0`` prepended to the data.  Used to compare a
+    local file against the upstream ``git ls-tree`` blob SHA-1
+    without spawning ``git cat-file`` per file (the slow path).
+    """
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
+
+
 def _compute_class_diff(
     *,
     upstream: UpstreamGit,
     upstream_tag: str,
-    class_paths: Sequence[str],
+    target_class: str,
+    upstream_paths: Sequence[str],
+    local_paths: Sequence[str],
     local_target: Path,
+    explicit_upstream_paths: Optional[Sequence[str]] = None,
 ) -> _ClassDiff:
     """Compare upstream tag vs local target directory.
 
     Walks every upstream path that matches one of the manifest's
-    ``class_paths`` globs, hashes its bytes, and compares to the
-    local file's hash.  Returns the (added, modified, removed)
-    counts plus a small sample of changed file paths for the alarm
-    payload.
+    ``upstream_paths`` entries, hashes its bytes, and compares to
+    the local file's hash under the corresponding ``local_paths``
+    entry (parallel arrays).  Returns the (added, modified,
+    removed) counts plus a small sample of changed file paths for
+    the alarm payload.
     """
-    upstream_files: Dict[str, str] = {}  # relpath → blob_sha
-    for subdir in class_paths:
-        subdir = subdir.rstrip("/")
+    if len(upstream_paths) != len(local_paths):
+        raise ValueError(
+            f"upstream_paths ({len(upstream_paths)}) and local_paths "
+            f"({len(local_paths)}) must have the same length"
+        )
+    upstream_files: Dict[str, str] = {}  # local_rel (under local_target) → blob_sha
+    for upstream_subdir, local_path_root in zip(upstream_paths, local_paths):
+        upstream_subdir = upstream_subdir.rstrip("/")
+        local_path_root = local_path_root.rstrip("/")
+        # Strip the target_class prefix (which is implicit in
+        # local_target) so the local relpath is the trailing
+        # portion of the local path root (e.g. "design-systems/"
+        # for the copy_freely class).
+        if local_path_root == target_class:
+            relative_root = ""
+        elif local_path_root.startswith(target_class + "/"):
+            relative_root = local_path_root[len(target_class) + 1:]
+        else:
+            relative_root = local_path_root
         try:
-            entries = upstream.list_tree(subdir)
+            entries = upstream.list_tree(upstream_subdir)
         except RuntimeError:
-            # Subdir not present at this tag — treat as "no entries".
             continue
-        for mode, _obj_type, blob_sha, _size, upstream_path in entries:
-            # Path inside local target: the upstream's subdir prefix
-            # is replaced with the class-subtree path.  Since the
-            # manifest's class_paths are upstream-relative globs
-            # (``copy_freely/design-systems/``), and the local
-            # target is the class subtree itself
-            # (``<plugin>/copy_freely/``), the local path is the
-            # upstream path with the upstream-relative-glob's first
-            # component stripped.
-            try:
-                relative = upstream_path.split("/", 1)[1] if "/" in upstream_path else upstream_path
-            except IndexError:
-                continue
-            # Refuse symlinks.
+        # Layout policy:
+        #
+        # When `upstream_paths` is DECLARED (the snapshot class
+        # case), the local class subtree is RENAMED relative to
+        # upstream (e.g. apps/daemon/src/prompts/X.ts →
+        # prompts/daemon/X.ts).  The local layout is FLAT — each
+        # upstream file is placed at
+        # ``<relative_root>/<upstream_file_basename>``.  This is
+        # what the slice ③ od_vendor_snapshot.py vendoring tool
+        # does (matches the slice ③ audit layout: the prompts/
+        # subtree has one level of file names, no upstream
+        # internal hierarchy).
+        #
+        # When `upstream_paths` is ABSENT (the copy_freely case),
+        # the local class subtree SHARES the upstream subdir
+        # name (copy_freely/design-systems/ vs design-systems/),
+        # so the local layout PRESERVES the upstream tree's
+        # internal hierarchy (e.g. design-systems/airbnb/manifest.json
+        # → copy_freely/design-systems/airbnb/manifest.json).
+        is_renamed = explicit_upstream_paths is not None
+        for mode, _obj_type, blob_sha, _size, upstream_file_path in entries:
             if mode == "120000":
                 continue
-            local_rel = relative
+            if is_renamed:
+                # Flat: drop the upstream subdir prefix, keep the
+                # basename.  For files at the upstream subdir root
+                # (``apps/daemon/src/prompts/core-slim.ts``) this
+                # is just the basename; for files in a subdir
+                # (``apps/daemon/src/prompts/sub/file.ts``) we keep
+                # the relative-from-upstream-subdir path
+                # (``sub/file.ts``) to avoid name collisions while
+                # still dropping the upstream subdir prefix.
+                if upstream_file_path.startswith(upstream_subdir + "/"):
+                    subpath = upstream_file_path[len(upstream_subdir) + 1:]
+                else:
+                    subpath = upstream_file_path
+                if relative_root:
+                    local_rel = f"{relative_root}/{subpath}"
+                else:
+                    local_rel = subpath
+            else:
+                # Preserve hierarchy: the local file is at
+                # ``<local_target>/<relative_root>/<upstream_subpath>``
+                # where upstream_subpath is the upstream file path
+                # under the upstream subdir.
+                if upstream_file_path.startswith(upstream_subdir + "/"):
+                    upstream_subpath = upstream_file_path[len(upstream_subdir) + 1:]
+                else:
+                    upstream_subpath = upstream_file_path
+                if relative_root:
+                    local_rel = f"{relative_root}/{upstream_subpath}"
+                else:
+                    local_rel = upstream_subpath
             upstream_files[local_rel] = blob_sha
 
     added = 0
@@ -750,22 +900,32 @@ def _compute_class_diff(
     examples: List[str] = []
 
     # Added / modified (upstream has; we may or may not).
+    # Compare the local file's git blob SHA-1 (computed in
+    # Python: SHA-1 over "blob {size}\\0" + raw bytes) against
+    # the upstream blob SHA-1 from `git ls-tree`.  Both are the
+    # same canonical hash, so byte-identical vendoring matches
+    # for free; modified files differ; we never have to read
+    # the upstream blob bytes during the diff (the slow part
+    # of the original implementation).  This is the dry-run-
+    # performance path the slice ③ real-plugin test needs
+    # (4881-file copy_freely diff completes in <1s).
     for rel, blob_sha in upstream_files.items():
-        local_path = _safe_join_under(local_target, rel)
+        try:
+            local_path = _safe_join_under(local_target, rel)
+        except ValueError:
+            continue
         if not local_path.is_file():
             added += 1
             examples.append(rel)
             continue
-        # Compare bytes (NOT blob_sha directly — local file may have
-        # been re-encoded; the byte-equality test is authoritative).
         try:
-            upstream_bytes = upstream.cat_file_blob(blob_sha)
-        except (subprocess.CalledProcessError, RuntimeError):
-            # If we cannot read the blob, treat the file as missing.
+            local_bytes = local_path.read_bytes()
+        except OSError:
             added += 1
             examples.append(rel)
             continue
-        if hashlib.sha256(upstream_bytes).hexdigest() != _hash_file(local_path):
+        local_blob_sha = _git_blob_sha1(local_bytes)
+        if local_blob_sha != blob_sha:
             modified += 1
             if len(examples) < 10:
                 examples.append(rel)
@@ -775,10 +935,16 @@ def _compute_class_diff(
     # target with a bounded recursion and skip LOCALLY_OWNED
     # filenames (CON §1 + slice ③ resolution).
     local_seen: set = set()
-    for subdir in class_paths:
-        subdir = subdir.rstrip("/")
+    for local_path_root in local_paths:
+        local_path_root = local_path_root.rstrip("/")
+        if local_path_root == target_class:
+            relative_root = ""
+        elif local_path_root.startswith(target_class + "/"):
+            relative_root = local_path_root[len(target_class) + 1:]
+        else:
+            relative_root = local_path_root
         try:
-            local_root = _safe_join_under(local_target, subdir.split("/", 1)[-1] if "/" in subdir else subdir)
+            local_root = _safe_join_under(local_target, relative_root) if relative_root else local_target
         except ValueError:
             continue
         if not local_root.is_dir():
@@ -787,7 +953,7 @@ def _compute_class_diff(
             if not path.is_file():
                 continue
             if path.name in LOCALLY_OWNED_FILENAMES:
-                continue  # locally-owned; never reported
+                continue
             try:
                 rel = path.relative_to(local_target).as_posix()
             except ValueError:
@@ -804,8 +970,11 @@ def _clean_pull_atomic(
     *,
     upstream: UpstreamGit,
     upstream_tag: str,
-    class_paths: Sequence[str],
+    target_class: str,
+    upstream_paths: Sequence[str],
+    local_paths: Sequence[str],
     local_target: Path,
+    explicit_upstream_paths: Optional[Sequence[str]] = None,
 ) -> None:
     """Stage a copy-freely pull into a sibling temp dir + atomic rename.
 
@@ -815,6 +984,14 @@ def _clean_pull_atomic(
     into the staging dir before the rename, so the move preserves
     them.
 
+    The ``upstream_paths`` and ``local_paths`` are parallel arrays
+    (the manifest's ``paths`` and the optional ``upstream_paths``
+    additive field).  For each pair, the upstream tree is read
+    and the local target is the corresponding local root; the
+    vendored layout flattens to a single-level directory under
+    the local root (the upstream tree's internal hierarchy is
+    collapsed — matches the slice ②/③ vendoring tool's behavior).
+
     NOTE: on rename, the existing ``local_target`` is REPLACED; any
     files inside the staging dir that DID exist in the old
     ``local_target`` AND are NOT in the upstream set are dropped (the
@@ -822,6 +999,11 @@ def _clean_pull_atomic(
     ``copy_freely`` class's contract: "clean-pulled, never authored
     locally" (CON §2).
     """
+    if len(upstream_paths) != len(local_paths):
+        raise ValueError(
+            f"upstream_paths ({len(upstream_paths)}) and local_paths "
+            f"({len(local_paths)}) must have the same length"
+        )
     parent = local_target.parent
     pid = os.getpid()
     # Use a stable, single-temp pattern (per-call pid) so concurrent
@@ -830,21 +1012,38 @@ def _clean_pull_atomic(
     stage_dir = Path(tempfile.mkdtemp(prefix=f".sync_stage.{pid}.", dir=str(parent)))
     try:
         # 1) Copy upstream files into stage.
-        for subdir in class_paths:
-            subdir = subdir.rstrip("/")
+        for upstream_subdir, local_path_root in zip(upstream_paths, local_paths):
+            upstream_subdir = upstream_subdir.rstrip("/")
+            local_path_root = local_path_root.rstrip("/")
+            # Strip the target_class prefix (which is implicit in
+            # local_target) so the stage path is under
+            # ``<stage>/<relative_root>/<subpath>``.
+            if local_path_root == target_class:
+                relative_root = ""
+            elif local_path_root.startswith(target_class + "/"):
+                relative_root = local_path_root[len(target_class) + 1:]
+            else:
+                relative_root = local_path_root
             try:
-                entries = upstream.list_tree(subdir)
+                entries = upstream.list_tree(upstream_subdir)
             except RuntimeError:
                 continue
-            for mode, _obj_type, blob_sha, _size, upstream_path in entries:
+            is_renamed = explicit_upstream_paths is not None
+            for mode, _obj_type, blob_sha, _size, upstream_file_path in entries:
                 if mode == "120000":
                     continue
-                # local_rel is path under the class subtree
-                if "/" in upstream_path:
-                    local_rel = upstream_path.split("/", 1)[1]
+                if upstream_file_path.startswith(upstream_subdir + "/"):
+                    subpath = upstream_file_path[len(upstream_subdir) + 1:]
                 else:
-                    local_rel = upstream_path
-                stage_path = _safe_join_under(stage_dir, local_rel)
+                    subpath = upstream_file_path
+                if relative_root:
+                    stage_rel = f"{relative_root}/{subpath}"
+                else:
+                    stage_rel = subpath
+                try:
+                    stage_path = _safe_join_under(stage_dir, stage_rel)
+                except ValueError:
+                    continue
                 stage_path.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     data = upstream.cat_file_blob(blob_sha)
@@ -859,10 +1058,25 @@ def _clean_pull_atomic(
                 src = local_target / name
                 if src.is_file():
                     shutil.copy2(src, stage_dir / name)
-        # 3) Atomic rename over the existing target.  On POSIX,
-        #    ``os.replace`` is atomic at the filesystem level; on
-        #    Windows the cross-volume case is not atomic — but the
-        #    slice ③ deployment is POSIX (Linux containers + macOS).
+        # 3) Replace the existing target with the staged tree.
+        #    POSIX ``rename(2)`` fails on non-empty target dirs
+        #    (``ENOTEMPTY``); the local target IS non-empty when
+        #    locally-owned files (HASHES.sha256) live inside the
+        #    class subtree.  We use the standard "rm-rf + rename"
+        #    sequence: the window between the rm and the rename
+        #    is small (POSIX sub-millisecond on tmpfs/ext4) and
+        #    the rm is local to the class subtree (no other
+        #    process should be reading it; CON §7 no-runtime-
+        #    loading sentinel + the sync-runner is the sole
+        #    writer).  The CON §5 "mid-pull crash = whole-or-
+        #    nothing" guarantee is preserved for crashes that
+        #    happen BEFORE the rm (the target is intact); a
+        #    crash between the rm and the rename leaves the
+        #    target missing — the operator can re-run the sync
+        #    to recover (the stage dir is also cleaned up by
+        #    the except branch below).
+        if local_target.exists():
+            shutil.rmtree(local_target)
         os.replace(stage_dir, local_target)
     except Exception:
         # On any failure, attempt to remove the stage dir (best
