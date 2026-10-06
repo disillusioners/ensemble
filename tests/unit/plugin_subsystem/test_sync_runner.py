@@ -62,13 +62,11 @@ from daemon.plugin_subsystem.sync_runner import (
     LOCALLY_OWNED_FILENAMES,
     REFUSAL_ABSENT_EXECUTION_MODE,
     REFUSAL_FENCE_MISSING,
-    REFUSAL_INVALID_TARGET_CLASS,
     REFUSAL_LICENSE_INVALID,
     REFUSAL_MISCLASSIFIED_AT_VENDORING,
     REFUSAL_NON_TAG_PIN,
     REFUSAL_OWN_OUTRIGHT_MUTATION,
     REFUSAL_TAG_MISSING_UPSTREAM,
-    REFUSAL_UPSTREAM_GIT_UNAVAILABLE,
     DiffSummary,
     DriftAlarm,
 )
@@ -451,7 +449,10 @@ class TestSyncActions:
         assert (local / "file1.txt").read_text(encoding="utf-8") == "hello v1\n"
         assert (local / "file2.txt").read_text(encoding="utf-8") == "world v1\n"
 
-    def test_invalid_target_class_refused(self, tmp_path):
+    def test_own_outright_mutation_refused(self, tmp_path):
+        """CON §5 reachability: sync(..., target_class="own_outright")
+        refuses with the §5 enum code own_outright_mutation (the hard
+        rule — sync NEVER writes own_outright/; no override flag)."""
         plugin_dir = _make_minimal_plugin(tmp_path / "demo")
         result = sync(
             "demo", "own_outright",
@@ -459,18 +460,21 @@ class TestSyncActions:
         )
         assert result.action == "refused"
         assert result.refusal is not None
-        assert result.refusal.code == "invalid_target_class"
+        assert result.refusal.code == "own_outright_mutation"
+        assert "own_outright" in result.refusal.message
 
-    def test_own_outright_is_invalid_target_class(self, tmp_path):
-        """CON §5: own_outright is never written by sync. The target_class
-        'own_outright' is rejected up-front as invalid_target_class
-        (the refusal code 'own_outright_mutation' is in the enum but
-        unreachable via the public API — see module docstring)."""
+    def test_target_class_outside_domain_raises_value_error(self, tmp_path):
+        """A target_class outside the declared domain
+        (copy_freely | snapshot_with_drift_alarm | own_outright) is an
+        API-signature misuse — a programmer error, NOT a §5 contract
+        refusal — so it raises ValueError instead of returning a
+        refusal (review ruling: the refusal enum stays EXACTLY §5's 7).
+        own_outright itself does NOT raise: it refuses (above)."""
         plugin_dir = _make_minimal_plugin(tmp_path / "demo")
-        for cls in ("own_outright", "garbage", ""):
-            result = sync("demo", cls, plugin_dir=plugin_dir, dry_run=True)
-            assert result.action == "refused", f"{cls!r} should be refused"
-            assert result.refusal.code == "invalid_target_class"
+        with pytest.raises(ValueError, match="target_class"):
+            sync("demo", "garbage", plugin_dir=plugin_dir, dry_run=True)
+        with pytest.raises(ValueError, match="target_class"):
+            sync("demo", "", plugin_dir=plugin_dir, dry_run=True)
 
 
 # ─── Refusal codes (every CON §5 closed-enum code) ───────────────────────────
@@ -479,10 +483,12 @@ class TestSyncActions:
 class TestSyncRefusalCodes:
     """Every refusal code in the CON §5 closed enum is exercised."""
 
-    def test_invalid_target_class_code(self, tmp_path):
+    def test_own_outright_mutation_code(self, tmp_path):
         plugin_dir = _make_minimal_plugin(tmp_path / "demo")
-        result = sync("demo", "invalid_class", plugin_dir=plugin_dir, dry_run=True)
-        assert result.refusal.code == REFUSAL_INVALID_TARGET_CLASS
+        result = sync("demo", "own_outright", plugin_dir=plugin_dir, dry_run=True)
+        assert result.action == "refused"
+        assert result.refusal is not None
+        assert result.refusal.code == REFUSAL_OWN_OUTRIGHT_MUTATION
 
     def test_tag_missing_upstream_code(self, tmp_path):
         repo = tmp_path / "upstream"
@@ -499,7 +505,11 @@ class TestSyncRefusalCodes:
         assert result.action == "refused"
         assert result.refusal.code == REFUSAL_TAG_MISSING_UPSTREAM
 
-    def test_upstream_git_unavailable_code(self, tmp_path):
+    def test_upstream_unavailable_fails_closed_as_tag_missing(self, tmp_path):
+        """Unopenable upstream (absent dir / not a git repository) ⇒
+        refused as tag_missing_upstream — fail-closed: an unobservable
+        tag IS a missing tag (CON §5 line 196 + review ruling).  The
+        message names the actual cause for diagnostics."""
         plugin_dir = _make_minimal_plugin(
             tmp_path / "demo",
             upstream_repo="/tmp/definitely-not-a-git-repo-12345",
@@ -512,7 +522,12 @@ class TestSyncRefusalCodes:
             plugin_dir=plugin_dir, dry_run=True,
         )
         assert result.action == "refused"
-        assert result.refusal.code == REFUSAL_UPSTREAM_GIT_UNAVAILABLE
+        assert result.refusal is not None
+        assert result.refusal.code == REFUSAL_TAG_MISSING_UPSTREAM
+        assert (
+            "not a git checkout" in result.refusal.message
+            or "not a local directory" in result.refusal.message
+        )
 
     def test_misclassified_at_vendoring_code(self, tmp_path):
         repo = tmp_path / "upstream"

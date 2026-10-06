@@ -520,6 +520,12 @@ def _check_semantics(
         # have the same length as paths; each entry MUST be a non-empty
         # string.  Mismatched lengths are a vendoring-time refusal
         # (the sync-runner cannot pair them up).
+        #
+        # Refusal-code pairing note (slice ③ review clarification):
+        # the two codes emitted below — upstream_paths_malformed and
+        # upstream_paths_length_mismatch — belong 1:1 to THIS field's
+        # introduction (the slice-③ additive upstream_paths field);
+        # the code/field pairing is intentional, not vocabulary drift.
         explicit = section.get("upstream_paths")
         if explicit is not None:
             paths = section.get("paths", []) or []

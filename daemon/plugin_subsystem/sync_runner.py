@@ -17,12 +17,16 @@ stage into temp + atomic rename (mid-pull crash = whole-or-nothing).
 Divergence-register update is ATOMIC with the manifest (temp + rename;
 never a torn manifest).
 
-**Refusal-codes (CON §5 closed enum; refused ⇒ ``sync_result.refusal``):**
+**Refusal-codes (CON §5 closed enum — EXACTLY these 7; refused ⇒
+``sync_result.refusal``):**
 
 - ``absent_execution_mode`` — manifest has no ``execution_mode`` (silence
   is not permission, CON §2)
 - ``own_outright_mutation`` — caller asked sync to write to
-  ``own_outright/`` (the hard rule; no override flag exists)
+  ``own_outright/`` (the hard rule; no override flag exists).
+  REACHABLE via the public API: ``sync(..., target_class="own_outright")``
+  refuses up-front with this code (CON §5: "sync into own_outright/
+  ⇒ refuse")
 - ``license_invalid`` — manifest's SPDX is not in the vendored validator
   list
 - ``fence_missing`` — A-path without a complete ``fence_grant`` block
@@ -31,15 +35,29 @@ never a torn manifest).
   rides the git consultation in this module)
 - ``tag_missing_upstream`` — the upstream tag is absent at the
   remote (deleted) OR the local fetch disagrees with the manifest's
-  expected commit (force-push); refuse + alert
+  expected commit (force-push); refuse + alert.  Fail-closed
+  extension (CON §5 line 196 + review ruling): an UNOBSERVABLE tag
+  IS a missing tag — a missing/unusable ``plugin_dir``, an empty
+  upstream repo URL, or an unopenable upstream checkout (absent /
+  not a git repository) all refuse with this code, the message
+  naming the actual cause
 - ``misclassified_at_vendoring`` — vendoring_classifier refuses
   (e.g. path letter not registered, execution_mode not in row's
   allowlist, fence-stripped A); VENDORING is refused, never runtime
-- ``upstream_git_unavailable`` — the upstream git repo is not
-  reachable (no network, no local checkout) — different from
-  ``tag_missing_upstream`` (which is a tag-state disagreement)
-- ``invalid_target_class`` — caller passed a class other than
-  ``copy_freely`` or ``snapshot_with_drift_alarm``
+
+**Operational mappings (deliberately OUTSIDE the refusal enum):**
+
+- ``target_class="own_outright"`` → the ``own_outright_mutation``
+  refusal above (a §5 contract refusal — reachable, tested)
+- any other ``target_class`` outside the declared domain
+  (``copy_freely`` | ``snapshot_with_drift_alarm`` |
+  ``own_outright``) → :class:`ValueError` — API-signature misuse
+  (a programmer error, not a §5 contract refusal); the diagnostic
+  rides the exception message, never a refusal code
+
+Enum additions require a 1.x.0 minor bump (CON §8 row 11) — none
+were added here: this restores the §5 exact 7 (review ruling,
+council-od-slice4-20261006-201428, 2026-10-06).
 
 **Drift-alarm emission (CON §5; REC §9 trigger-engine probe):**
 
@@ -117,8 +135,6 @@ REFUSAL_FENCE_MISSING = "fence_missing"
 REFUSAL_NON_TAG_PIN = "non_tag_pin"
 REFUSAL_TAG_MISSING_UPSTREAM = "tag_missing_upstream"
 REFUSAL_MISCLASSIFIED_AT_VENDORING = "misclassified_at_vendoring"
-REFUSAL_UPSTREAM_GIT_UNAVAILABLE = "upstream_git_unavailable"
-REFUSAL_INVALID_TARGET_CLASS = "invalid_target_class"
 
 
 # Locally-owned filenames inside any class subtree that the sync-runner
@@ -268,21 +284,32 @@ class SyncRunner:
         dry_run: bool = True,
     ) -> SyncResult:
         """One sync call.  See module docstring for the frozen contract."""
-        if target_class not in ("copy_freely", "snapshot_with_drift_alarm"):
-            return SyncResult(
+        if target_class == "own_outright":
+            # CON §5: "sync into own_outright/ ⇒ refuse" — the hard
+            # rule (REC §1.4, no override flag exists).  This is the
+            # §5 enum code's REACHABLE emission site.
+            return self._refuse(
                 plugin=plugin,
                 target_class=target_class,
                 upstream_tag=upstream_tag or "",
-                action="refused",
-                diff_summary=DiffSummary(),
-                refusal=SyncRefusal(
-                    code=REFUSAL_INVALID_TARGET_CLASS,
-                    message=(
-                        f"target_class {target_class!r} is not a sync-managed class "
-                        "(allowed: copy_freely, snapshot_with_drift_alarm)"
-                    ),
-                    location="sync(...) call",
+                code=REFUSAL_OWN_OUTRIGHT_MUTATION,
+                message=(
+                    "refusing sync into own_outright/: own-outright content is "
+                    "authored in-place and NEVER written by sync "
+                    "(CON §5 hard rule; no override flag exists)"
                 ),
+                location="sync(...) call",
+            )
+        if target_class not in ("copy_freely", "snapshot_with_drift_alarm"):
+            # Outside the declared domain = API-signature misuse (a
+            # programmer error, not a §5 contract refusal) — raised,
+            # never mapped onto the frozen refusal surface (review
+            # ruling: the refusal enum stays EXACTLY CON §5's 7).
+            raise ValueError(
+                f"target_class {target_class!r} is outside the declared domain "
+                "(copy_freely | snapshot_with_drift_alarm | own_outright); "
+                "sync() refuses own_outright and syncs the other two — "
+                "anything else is a caller bug, not a sync refusal"
             )
 
         plugin_dir = Path(plugin_dir) if plugin_dir is not None else None
@@ -298,12 +325,19 @@ class SyncRunner:
                 location=f"manifest_reader:{exc.refusal.code}",
             )
         if declaration is None:
+            # Fail-closed (CON §5 line 196 + review ruling): with no
+            # readable manifest the tag is unobservable, and an
+            # unobservable tag IS a missing tag on the refusal
+            # surface; the message keeps the actual cause.
             return self._refuse(
                 plugin=plugin,
                 target_class=target_class,
                 upstream_tag=upstream_tag or "",
-                code=REFUSAL_UPSTREAM_GIT_UNAVAILABLE,
-                message="plugin_dir is required to read the manifest (CON §5: re-read fresh every call)",
+                code=REFUSAL_TAG_MISSING_UPSTREAM,
+                message=(
+                    "upstream tag unobservable: plugin_dir is required to read "
+                    "the manifest (CON §5: re-read fresh every call)"
+                ),
                 location="sync(...) call",
             )
 
@@ -341,16 +375,24 @@ class SyncRunner:
         # Resolve upstream repo.
         effective_repo = upstream_repo or declaration.upstream_repo
         if not effective_repo:
+            # Fail-closed: no repo ⇒ tag unobservable ⇒ tag-missing
+            # (CON §5 line 196 + review ruling); message keeps the cause.
             return self._refuse(
                 plugin=plugin,
                 target_class=target_class,
                 upstream_tag=effective_tag,
-                code=REFUSAL_UPSTREAM_GIT_UNAVAILABLE,
-                message="upstream repo URL is empty (manifest plugin.upstream.repo)",
+                code=REFUSAL_TAG_MISSING_UPSTREAM,
+                message=(
+                    "upstream tag unobservable: upstream repo URL is empty "
+                    "(manifest plugin.upstream.repo)"
+                ),
                 location=f"{plugin}/{MANIFEST_FILENAME}#upstream.repo",
             )
 
-        # Open upstream git adapter.
+        # Open upstream git adapter.  Fail-closed (CON §5 line 196 +
+        # review ruling): checkout absent / not a git repository ⇒
+        # the tag is unobservable ⇒ refused as tag-missing; the
+        # message names the actual cause.
         try:
             upstream = self._upstream_git_factory(effective_repo, effective_tag)
         except Exception as exc:  # noqa: BLE001 - adapter errors land here
@@ -358,8 +400,11 @@ class SyncRunner:
                 plugin=plugin,
                 target_class=target_class,
                 upstream_tag=effective_tag,
-                code=REFUSAL_UPSTREAM_GIT_UNAVAILABLE,
-                message=f"could not open upstream git: {exc}",
+                code=REFUSAL_TAG_MISSING_UPSTREAM,
+                message=(
+                    f"upstream tag unobservable (could not open upstream git: {exc}); "
+                    "an unobservable tag is refused as tag-missing (fail-closed)"
+                ),
                 location=f"upstream({effective_repo})@{effective_tag}",
             )
 

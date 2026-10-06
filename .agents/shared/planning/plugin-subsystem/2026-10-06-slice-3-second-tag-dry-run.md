@@ -133,6 +133,13 @@ filter excluded it.  This is NOT a v0.23.0 → v0.24.1 data-layer
 churn finding; it is a vendoring-scope finding that pre-existed
 slice ②.
 
+Scope note (review clarification): the git-diff cross-check above
+is UPSTREAM-vs-UPSTREAM (tag-to-tag), while the sync
+`diff_summary` is LOCAL-vs-upstream@tag — both are true, hence the
+PNG appears in one (the sync diff, because slice ② excluded it
+locally) and not the other (upstream never added it between the
+two tags).
+
 ### 3.3. Verdict
 
 The dry-run PROVES the copy_freely pull at v0.23.0 → v0.24.1 is
