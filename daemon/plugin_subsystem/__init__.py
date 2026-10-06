@@ -5,8 +5,16 @@ The ONLY package inside the daemon where manifest vocabulary
 ``hosted_runtime_deps``) may appear (CON §7 vocabulary-confinement sentinel).
 Tier-1 modules stay structurally blind to plugin internals.
 
-Slice ① scope (REC §4.3 row ①): manifest vocab v1 — declaration dataclass,
-manifest reader, path-type registry, schema-CI manifests entry point.
+Slice scope (REC §4.3):
+
+- ① manifest vocab v1 — declaration dataclass, manifest reader, path-type
+  registry, schema-CI manifests entry point.
+- ② vendoring tool + plugin_registry + 388-file copy-freely set @ pinned
+  tag (od_vendor.py) + carry-forwards (1)-(6).
+- ③ sync-runner MVP — vendoring_classifier (comp 5), sync_runner (comp 6),
+  full 3-class manifest for plugins/opendesign, §8.5 second-tag clean-pull
+  dry-run, trigger-engine payload probe.
+
 NO runtime loading anywhere: no importlib, no entry-point scanning
 (CON §7 no-runtime-loading sentinel).
 """
@@ -53,11 +61,38 @@ from daemon.plugin_subsystem.plugin_skill import (
     validate_skill_doc,
 )
 from daemon.plugin_subsystem.schema_ci import run_ci, validate_plugin_dir
+from daemon.plugin_subsystem.sync_runner import (
+    DEFAULT_GIT_REMOTE_NAME,
+    LOCALLY_OWNED_FILENAMES,
+    DiffSummary,
+    DriftAlarm,
+    LocalGitCheckout,
+    SyncRefusal,
+    SyncResult,
+    SyncRunner,
+    UpstreamGit,
+    build_drift_event_payload,
+    emit_drift_event,
+    sync,
+)
+from daemon.plugin_subsystem.vendoring_classifier import (
+    ClassifiedFor,
+    ClassificationRefusal,
+    ROUTING_LADDER_STEPS,
+    classify,
+)
 
 __all__ = [
     "ALARM_THRESHOLD",
+    "DEFAULT_GIT_REMOTE_NAME",
     "DEFAULT_PLUGINS_ROOT",
+    "ClassifiedFor",
+    "ClassificationRefusal",
+    "DiffSummary",
+    "DriftAlarm",
     "EntrypointCheckResult",
+    "LOCALLY_OWNED_FILENAMES",
+    "LocalGitCheckout",
     "MANIFEST_FILENAME",
     "MANIFEST_SIZE_CAP_BYTES",
     "PLUGIN_SKILL_SCHEMA_VERSION",
@@ -71,10 +106,18 @@ __all__ = [
     "PluginSkill",
     "PluginSkillRefusal",
     "REFUSE_THRESHOLD",
+    "ROUTING_LADDER_STEPS",
     "SKILL_FILE_SUFFIX",
     "SkeletonViolation",
+    "SyncRefusal",
+    "SyncResult",
+    "SyncRunner",
+    "UpstreamGit",
     "VendoredReference",
+    "build_drift_event_payload",
     "check_entrypoint",
+    "classify",
+    "emit_drift_event",
     "list_skill_files",
     "load_default_registry",
     "load_registry",
@@ -83,6 +126,7 @@ __all__ = [
     "run_ci",
     "run_entrypoint_tripwire",
     "scan_plugins_root",
+    "sync",
     "validate_manifest",
     "validate_plugin_dir",
     "validate_skill_doc",

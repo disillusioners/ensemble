@@ -186,12 +186,29 @@ class TestLoadRegistry:
     def test_default_plugins_root_is_repo_plugins_dir(self):
         # The module-level default points at <repo-root>/plugins/ (the
         # dir whose NAME is "plugins" — its parent is the repo root in
-        # every worktree, so this assertion is portable).  Slice ②
+        # every checkout, so this assertion is portable).  Slice ②
         # ships the first concrete plugin tree there; later slices
         # can override via an explicit ``plugins_root`` argument.
+        #
+        # Cross-lane portability (slice ③ carry-forward): the parent
+        # name is the checkout name; we assert the family prefix
+        # (``ensemble-src`` main checkout or ``ensemble-src-wt-*``
+        # worktree) rather than the specific name, so the test is
+        # portable across the main checkout and all worktrees (the
+        # wt-01 / wt-02 / wt-03 worktree name is not load-bearing for
+        # the invariant).  Union-merge note (giter, ③∧④ merge):
+        # ③'s original regex ``^ensemble-src-wt-[a-z0-9-]+$`` matched
+        # worktrees only and would have failed in the main checkout
+        # (``/home/nea/ensemble-src``); widened to the family regex
+        # below so BOTH the main checkout and worktrees pass.
+        import re
         assert DEFAULT_PLUGINS_ROOT.name == "plugins"
         assert DEFAULT_PLUGINS_ROOT.is_dir(), (
             f"DEFAULT_PLUGINS_ROOT points at a non-directory: {DEFAULT_PLUGINS_ROOT}"
+        )
+        assert re.match(r"^ensemble-src(-wt-[a-z0-9-]+)?$", DEFAULT_PLUGINS_ROOT.parent.name), (
+            f"plugins root parent {DEFAULT_PLUGINS_ROOT.parent.name!r} does not match the "
+            f"ensemble-src / ensemble-src-wt-* checkout family"
         )
 
 

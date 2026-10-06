@@ -1,17 +1,13 @@
-# Plugin Subsystem v1 — opendesign plugin manifest (slice ②)
+# Plugin Subsystem v1 — opendesign plugin manifest (slice ③)
 #
 # This manifest declares the vendoring-time shape of the opendesign plugin.
-# At slice ② the plugin is resource-only: every vendored byte under
-# copy_freely/ is DATA and NEVER executes (CON §7 no-execution sentinel;
-# REC §1.4 forbidden edges; CON §1 "not_executed" parity section).  The
-# B-element for generation (the compose/compose-brief orchestration) lands
-# at slice ⑤ — at that slice the manifest will gain the
-# `snapshot_with_drift_alarm` section, the divergence register, and the
-# execution_mode may be promoted to `lifted-symbol` for the lifted-symbol
-# path.  Until then this manifest is a pure C-path resource-only declaration.
+# Slice ③ extends slice ② to the FULL 3-class provenance layout per
+# REC §4.1 layer→class mapping: copy_freely (data, slice ②) +
+# snapshot_with_drift_alarm (prompt code, slice ③) + own_outright
+# (Turn-3 orchestration + lint/parse5 ports, declared at ③ / authored at ⑤).
 #
 # Source of truth: .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md
-# Pin rationale: see CURATION.md and tools/vendor/od_vendor.py.
+# Pin rationale: see CURATION.md and tools/vendor/{od_vendor,od_vendor_snapshot}.py.
 #
 # CON §8 additive-epoch rule: 1.0.0 → 1.0.1 lifts at slice ④ to admit the
 # new ``skills`` section (CON §6 plugin-skill declaration).  The bump is
@@ -21,6 +17,8 @@
 # valid because the runner carries both schemas for one minor cycle
 # (CON §8 migration window).
 
+# 1.0.1 — additive: snapshot_with_drift_alarm.upstream_paths (slice ③;
+# CON §8: first additive change is 1.0.1, never v2).
 schema_version: "1.0.1"
 plugin:
   name: "opendesign"
@@ -28,7 +26,15 @@ plugin:
   upstream:
     repo: "https://github.com/nexu-io/open-design.git"
     tag_pin_per_class:
+      # copy_freely: the data layer (design systems, templates, craft,
+      # prompt-templates) — slice ② vendored @ open-design-v0.23.0.
       copy_freely: "open-design-v0.23.0"
+      # snapshot_with_drift_alarm: the prompt code layer (10 daemon
+      # TS composer modules + 17 contracts mirror files) — slice ③
+      # vendored @ open-design-v0.23.0; the per-class pin inherits
+      # copy_freely's pin (CON §2 line 47) and is declared explicitly
+      # here so the slice ③ tag-diff has a concrete anchor.
+      snapshot_with_drift_alarm: "open-design-v0.23.0"
   # integration_path: opendesign is C-dominant with a B element for
   # generation arriving at slice ⑤ (REC §4.1 row 1; ADR-PLUG-001 §3).
   # The manifest can declare only ONE integration_path; we declare the
@@ -41,7 +47,7 @@ plugin:
   # C-dominant+B-element plugin, choose the minimal faithful reading
   # (likely 'C') and flag it in your report."
   integration_path: "C"
-  # execution_mode: resource-only at slice ②.  Truthful pre-⑤ state:
+  # execution_mode: resource-only at slice ③.  Truthful pre-⑤ state:
   # every vendored byte is inert data; no adapter/ subtree exists; the
   # Port + generate adapter lands at ⑤.  Positive declaration (silence
   # is not permission, CON §2) — the value is `resource-only`, the only
@@ -66,17 +72,108 @@ copy_freely:
   alarm_owner: "plugin-opendesign-data"
   escalation: "block-promote-after-days"
 
-# snapshot_with_drift_alarm: lands at slice ⑤ alongside the B-element for
-# generation (REC §4.1 row 2; ADR-PLUG-001 §3).  Not declared at slice ②.
+# snapshot_with_drift_alarm: the prompt code layer (CON §2).  The
+# 10 daemon TS composer modules + 17 contracts mirror files are
+# vendored under snapshot_with_drift_alarm/prompts/{daemon,contracts}/
+# (REC §4.1 row 2).  These are SNAPSHOTTED — not executed under
+# resource-only (CON §7 no-runtime-loading sentinel); the slice ⑤
+# Mode-P Provider re-expresses them in Python.  The divergence
+# register is REQUIRED from day one (CON §2: non-empty register on
+# non-empty paths); 4 SEEDED entries below document KNOWN planned
+# divergence points in the upstream two-tree (od-resource-layer §1.B)
+# so a future sync-runner pull that surfaces a byte change in any
+# of these files lands on a pre-registered entry (re-apply or drop,
+# update the log either way, CON §2).
+#
+# The `upstream_paths` field (additive, CON §8 — 1.0.x allows
+# additive fields) is the parallel mapping: paths[i] is the LOCAL
+# subtree, upstream_paths[i] is the corresponding UPSTREAM subtree.
+# For copy_freely the default strip-class-prefix heuristic works
+# because the upstream and local share the trailing path; for
+# snapshot the local tree is renamed (prompts/{daemon,contracts}/
+# instead of apps/.../prompts/, packages/.../prompts/) so the
+# explicit override is REQUIRED.  When upstream_paths is absent,
+# the sync-runner falls back to the strip-class-prefix heuristic
+# (matches the copy_freely layout).
+snapshot_with_drift_alarm:
+  paths:
+    - "snapshot_with_drift_alarm/prompts/daemon/"
+    - "snapshot_with_drift_alarm/prompts/contracts/"
+  upstream_paths:
+    - "apps/daemon/src/prompts/"
+    - "packages/contracts/src/prompts/"
+  # alarm_owner: required by CON §2.  Prompt code churns actively
+  # (od-resource-layer §0: 106 commits in 7wk for contracts); the
+  # owner is the prompt-Port maintenance role (the slice ⑤ B-element
+  # owner).
+  alarm_owner: "plugin-opendesign-prompts"
+  escalation: "block-promote-after-days"
+  # Divergence register — slice ③ minimal-faithful reading.  At ③
+  # the vendored bytes are BYTE-FAITHFUL to upstream @ open-design-v0.23.0
+  # (zero on-disk modifications), so the literal CON §5 "divergence
+  # between vendored snapshot content and what ③ actually ships" is
+  # zero entries.  However, the planning docs (od-resource-layer §1.B)
+  # name KNOWN planned divergence points in the upstream two-tree —
+  # the SEEDED entries below pre-register those points so the next
+  # sync-runner pull lands on them and the operator can apply the
+  # CON §2 re-apply-or-drop rule explicitly.  When byte changes do
+  # arrive in any of these files, the corresponding entry is updated
+  # with the actual delta; entries that never fire remain as
+  # pre-registered markers (the register grows monotonically until
+  # retired by user-ratified drop, never shrinks silently).
+  divergence_register:
+    - id: 1
+      files: ["snapshot_with_drift_alarm/prompts/daemon/system.ts"]
+      delta: "daemon system.ts is the full composer (~135KB); contracts mirror is the exported subset (~74KB); upstream two-tree drift documented at od-resource-layer §1.B"
+      rationale: "Pre-registered divergence point: future sync will surface the upstream delta; re-apply (port upstream changes into the Python Mode-P compose Provider at slice ⑤) or drop (decline the upstream change with a manifest rationale)"
+      upstream_ref: "od-resource-layer.md#1.B"
+      pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_1_daemon_system_two_tree_drift"
+    - id: 2
+      files: ["snapshot_with_drift_alarm/prompts/daemon/media-contract.ts"]
+      delta: "daemon media-contract.ts is the full module (~33KB); contracts mirror is the API subset (~9.8KB); upstream two-tree drift"
+      rationale: "Pre-registered divergence point: media contract shell-out (image/video/audio) diverges; future sync will surface the upstream delta; re-apply or drop"
+      upstream_ref: "od-resource-layer.md#1.B"
+      pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_2_daemon_media_contract_two_tree_drift"
+    - id: 3
+      files: ["snapshot_with_drift_alarm/prompts/daemon/core-slim.ts"]
+      delta: "daemon core-slim.ts (438 lines) has NO contracts mirror; the contracts package cannot receive the slim charter (asymmetry documented at od-resource-layer §1.B)"
+      rationale: "Pre-registered asymmetry: core-slim lives daemon-only; future sync will not surface a contracts-side delta to track; this entry exists to mark the asymmetry in the register so a future contributor does not 'fix' it by adding a mirror"
+      upstream_ref: "od-resource-layer.md#1.B (core-slim contracts-mirror absence)"
+      pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_3_daemon_core_slim_contracts_mirror_absence"
+    - id: 4
+      files:
+        - "snapshot_with_drift_alarm/prompts/daemon/directions.ts"
+        - "snapshot_with_drift_alarm/prompts/daemon/discovery.ts"
+        - "snapshot_with_drift_alarm/prompts/daemon/official-system.ts"
+      delta: "daemon/contracts two-tree drift documented at od-resource-layer §1.B; per-file parity enforced by mirror tests only (not byte-fidelity)"
+      rationale: "Pre-registered divergence points: 3 files where the daemon/contracts two-tree drift is real; future sync will surface upstream deltas; re-apply or drop per CON §2 rule"
+      upstream_ref: "od-resource-layer.md#1.B"
+      pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_4_three_files_two_tree_drift"
 
-# own_outright: lands at slice ⑤ for the Turn-3 / compose-brief orchestration
-# (REC §4.1 row 3; ADR-PLUG-001 §3).  Not declared at slice ②.
+# own_outright: DECLARED-NOT-AUTHORED at slice ③.  REC §4.1 rows 3+4
+# assign Turn-3 / compose-brief orchestration + lint/parse5 ports to
+# the own_outright class; the actual content is authored at slice ⑤
+# (the B-element for generation).  Per the slice ③ dispatch:
+# "Content authorship that belongs to ⑤ stays DECLARED-NOT-AUTHORED
+# (manifest declares the section/paths; the actual own_outright/
+# content dir may remain empty or absent per the ① reader's rules —
+# the reader owns the truth; document what you did)."  CON §2's
+# own_outright block carries only paths[] (no required fields, no
+# alarm_owner), so an absent content dir is structurally fine.
+own_outright:
+  paths:
+    - "own_outright/turn3_orchestration/"
+    - "own_outright/lint/"
+    - "own_outright/parse5_eof_gate/"
 
 # parity_boundary: REQUIRED section (CON §2).  Documents what the plugin
 # deliberately does NOT carry from upstream.  Per od-resource-layer §5
 # coupling table, opendesign's OD daemon, brand presets (entangled),
-# and functional skill stubs (entangled) are excluded; the prompt-code
-# layer will be handled at slice ⑤ (snapshot_with_drift_alarm class).
+# and functional skill stubs (entangled) are excluded.  Slice ③
+# updates the prompt-stack and contracts-mirror entries: the 10
+# daemon composer modules and 17 contracts files are NOW vendored
+# (snapshot_with_drift_alarm layer above); the rest of apps/daemon/
+# remains excluded.
 parity_boundary:
   intentionally_not_vendored:
     - path: "apps/daemon/"
@@ -84,9 +181,9 @@ parity_boundary:
     - path: "apps/daemon/src/brands/"
       reason: "Brand presets (19 modules + extraction loop + browser); ENTANGLED (od-resource-layer §5 row 9) — design systems cover brand styling; brand flow out of scope for v1"
     - path: "apps/daemon/src/prompts/"
-      reason: "Daemon prompt stack (10 TS composer modules) — LIGHTLY COUPLED (od-resource-layer §5 row 10); snapshot_with_drift_alarm lands at slice ⑤ with divergence register; the Python-native compose Provider (Mode P) is the recommended default"
+      reason: "Daemon prompt stack (10 TS composer modules); LIGHTLY COUPLED (od-resource-layer §5 row 10); the 10 composer modules are NOW vendored as snapshot_with_drift_alarm/prompts/daemon/ @ open-design-v0.23.0; the remainder of apps/daemon/src/prompts/ stays excluded until re-evaluated; the Python-native compose Provider (Mode P) is the recommended default at slice ⑤"
     - path: "packages/contracts/src/prompts/"
-      reason: "Published prompt mirror (17 files) — mirror of daemon prompt stack; two-tree drift is real (od-resource-layer §1.B) and committed in the divergence register at ⑤; not vendored at ②"
+      reason: "Published prompt mirror (17 files); mirror of daemon prompt stack; two-tree drift is real (od-resource-layer §1.B) and the 4 seeded divergence-register entries track the daemon/contracts asymmetry; the 17 contracts files are NOW vendored as snapshot_with_drift_alarm/prompts/contracts/ @ open-design-v0.23.0; the daemon-only modules (core-slim) stay asymmetric and register entry id=3 documents that asymmetry"
     - path: "apps/daemon/src/skills/"
       reason: "Functional skills (165 dirs) — STANDALONE-as-catalogue but execution requires upstream bundles (od-resource-layer §5 row 8); plugin-skill landing at slice ④ owns the slice-①-aligned consumption path"
     - path: "apps/daemon/src/artifacts/"
@@ -110,12 +207,18 @@ parity_boundary:
     - path: "assets/prompt-templates/image/*.jpg"
       reason: "11 preview JPGs (W5 carry-forward from slice ②): rendered previews, not prompt data; vendored set is the 48 JSON files only; upstream at /home/nea/opt/open-design/assets/prompt-templates/image/ is READ-ONLY reference"
   # not_executed: every vendored byte is inert under resource-only.
-  # We declare the broad class so the slice-① reader's `not_executed`
-  # parity check has a concrete target; specific per-file entries
-  # would be 388 lines and are not load-bearing.
+  # Slice ③ expands the class-wide declarations to all three classes
+  # (copy_freely + snapshot_with_drift_alarm + own_outright).  The
+  # specific per-file entries would be 4881 + 27 + 0 = 4908 lines
+  # and are not load-bearing; the class-wide rows are the operator-
+  # readable shape.
   not_executed:
     - path: "copy_freely/"
       reason: "All vendored bytes under copy_freely/ are inert data under resource-only; no subtree executes (CON §1, CON §7 no-runtime-loading sentinel)"
+    - path: "snapshot_with_drift_alarm/"
+      reason: "All vendored bytes under snapshot_with_drift_alarm/ are inert data; no subtree executes (CON §1, CON §7 no-runtime-loading sentinel); the Python Mode-P compose Provider (slice ⑤) re-expresses the composer in Python, not via these vendored TS bytes"
+    - path: "own_outright/"
+      reason: "own_outright/ contents are authored locally and not vendored; this manifest at slice ③ declares the section/paths only; slice ⑤ authors the actual content (Turn-3/compose-brief orchestration, lint port, parse5 EOF gate port)"
 
 # skills: CON §6 plugin-skill declarations.  The manifest NAMES the
 # skill files; the slice-④ registration path

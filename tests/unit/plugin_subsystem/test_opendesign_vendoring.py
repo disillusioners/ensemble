@@ -2,7 +2,9 @@
 
 Proves the vendored ``plugins/opendesign/copy_freely/`` tree is intact
 by re-hashing every file and comparing to the recorded manifest at
-``plugins/opendesign/copy_freely.HASHES.sha256``.  No network; the
+``plugins/opendesign/copy_freely/HASHES.sha256`` (the file lives INSIDE
+``copy_freely/`` so the obvious ``cd copy_freely && sha256sum -c HASHES.sha256``
+works; see CURATION.md §5).  No network; the
 recorded manifest is the fixture.
 
 Also asserts the class-entry counts (154 / 115 / 13 / 106) against the
@@ -12,6 +14,7 @@ vendored tree to lock the OQ3 record.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from pathlib import Path
 
@@ -20,7 +23,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "opendesign"
 COPY_FREELY = PLUGIN_ROOT / "copy_freely"
-HASHES_FILE = PLUGIN_ROOT / "copy_freely.HASHES.sha256"
+HASHES_FILE = PLUGIN_ROOT / "copy_freely" / "HASHES.sha256"
 
 # Class-entry counts per the slice ② dispatch.
 EXPECTED_DS_COUNT = 154
@@ -85,6 +88,15 @@ class TestVendoredTreeByteFidelity:
             if not f.is_file():
                 continue
             rel = f.relative_to(COPY_FREELY).as_posix()
+            # HASHES.sha256 is a locally-owned file (slice ③ resolution
+            # for the carry-forward 1 relocation: it lives INSIDE
+            # copy_freely/ for the obvious ``cd copy_freely && sha256sum
+            # -c HASHES.sha256`` audit; the sync-runner treats it as
+            # invisible to the vendor set).  Skip it here too — it is
+            # NOT a vendored file and must not appear in the recorded
+            # hash manifest.
+            if rel == "HASHES.sha256":
+                continue
             data = f.read_bytes()
             sha = hashlib.sha256(data).hexdigest()
             checked += 1
@@ -104,6 +116,17 @@ class TestVendoredTreeByteFidelity:
         assert extra == [], f"vendored files not in manifest: {extra[:3]}"
         assert checked == len(recorded), (
             f"file count {checked} != manifest entries {len(recorded)}"
+        )
+
+    def test_hashes_file_is_not_listed_in_its_own_manifest(self):
+        # The HASHES.sha256 file lives inside copy_freely/ (slice ③
+        # relocation).  It is a locally-owned file and must NOT appear
+        # as a vendored entry in the manifest.  This guards against
+        # accidental self-listing (which would make `sha256sum -c`
+        # chown-mismatch on a re-run).
+        recorded = _parse_sha256sum_file(HASHES_FILE)
+        assert "HASHES.sha256" not in recorded, (
+            "HASHES.sha256 is locally-owned; it must not appear in its own manifest"
         )
 
 
@@ -187,6 +210,12 @@ class TestPluginLicenseCarry:
         assert "Attribution" in text
         assert "Change-statement" in text
 
+    @pytest.mark.skipif(
+        not Path("/home/nea/opt/open-design").is_dir()
+        or not (Path("/home/nea/opt/open-design") / ".git").exists(),
+        reason="upstream OD checkout absent (set OD_UPSTREAM_DIR or check out "
+        "/home/nea/opt/open-design for byte-match verification — slice ③ carry-forward 3)",
+    )
     def test_license_body_byte_matches_upstream(self):
         # The Apache body is vendored byte-for-byte from upstream
         # /home/nea/opt/open-design:LICENSE @ open-design-v0.23.0.
@@ -195,11 +224,12 @@ class TestPluginLicenseCarry:
         # separator should be byte-identical to upstream.
         import subprocess
 
+        upstream_dir = os.environ.get("OD_UPSTREAM_DIR", "/home/nea/opt/open-design")
         upstream = subprocess.run(
             [
                 "git",
                 "-C",
-                "/home/nea/opt/open-design",
+                upstream_dir,
                 "show",
                 "open-design-v0.23.0:LICENSE",
             ],

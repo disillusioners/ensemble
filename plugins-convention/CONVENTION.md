@@ -157,4 +157,9 @@ plan.
 | Epoch | Slice | Change | Surface touched |
 |---|---|---|---|
 | `1.0.0` | ①, ② | Initial schema + 3-class vocabulary + frozen refusal set | (baseline) |
+| `1.0.1` | ③ | `snapshot_with_drift_alarm.upstream_paths` (per-class upstream path mapping; optional — absent falls back to the strip-class-prefix heuristic) | NEW `snapshot_with_drift_alarm.upstream_paths` (per-class, optional); no existing field changes; no enum tightening; no section rename |
 | `1.0.1` | ④ | Admits the top-level `skills` section (CON §6 plugin-skill declaration) | NEW `skills.entries[]` (top-level, optional); no existing field changes; no enum tightening; no section rename |
+
+`plugins/opendesign/MANIFEST.yaml` declares `1.0.1` from slice ③ onward;
+the reader still accepts the whole `1.0.x` family, so `1.0.0` declarations
+remain valid.

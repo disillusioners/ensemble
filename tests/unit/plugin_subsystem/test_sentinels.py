@@ -46,6 +46,7 @@ WALK_EXCLUDED_TOP_LEVEL = {
     "test-results",
     "tests",
     "test",
+    "tools",  # CLI helpers / build-time tools (od_vendor.py et al.); not tier-1/tier-2 code
     ".agents",  # incl. shared/planning/plugin-subsystem — defines the vocabulary
     "plugins-convention",  # allowed zone
 }
@@ -76,13 +77,16 @@ def _iter_repo_text_files():
             continue
         if relative.parts[:2] in WALK_ALLOWED_PREFIXES:
             continue
-        # Authorized DATA-instance filenames anywhere under plugins/*/.
-        # Matched on the basename so the rule applies uniformly to every
-        # plugin tree.  Files in copy_freely/ etc. are NOT authorized
-        # (those are vendored upstream bytes; vocabulary is not a
-        # legitimate concern there but we don't want to encourage it).
+        # Authorized DATA-instance filenames — STRICTLY at plugin-ROOT
+        # depth (i.e. ``plugins/<name>/MANIFEST.yaml`` only).  Nested
+        # ``plugins/<name>/<sub>/MANIFEST.yaml`` is a loud vocabulary-
+        # confinement violation: a vendored upstream file legitimately
+        # named MANIFEST.yaml deep in a class subtree MUST be flagged
+        # (the ② guard test already asserts none exist today).  The
+        # carry-forward (4) makes the allowlist depth-bounded.
         if (
-            relative.parts[0] == "plugins"
+            len(relative.parts) == 3
+            and relative.parts[0] == "plugins"
             and path.name in PLUGIN_AUTHORIZED_DATA_FILENAMES
         ):
             continue
@@ -211,3 +215,80 @@ class TestVendoredClassSubtreesCannotCarryDataInstanceFilenames:
             "(would silently exploit the PLUGIN_AUTHORIZED_DATA_FILENAMES "
             "carve-out in TestVocabularyConfinement):\n" + "\n".join(violations)
         )
+
+
+class TestAuthorizedDataInstanceCarveoutIsPluginRootOnly:
+    """The ``PLUGIN_AUTHORIZED_DATA_FILENAMES`` carve-out is STRICTLY
+    plugin-ROOT depth (slice ③ carry-forward 4) — ``plugins/<name>/MANIFEST.yaml``
+    or ``plugins/<name>/CURATION.md``.  Anything deeper is a
+    vocabulary-confinement violation that must be flagged, not silently
+    allowlisted.
+
+    A vendored upstream file legitimately named ``MANIFEST.yaml`` deep in
+    a class subtree is a CONFIRMED loud violation (the ② guard above
+    already pins no-such-file-today; this test pins the carve-out shape
+    so a future vendoring cannot silently widen the allowlist).
+    """
+
+    def test_carveout_excludes_nested_data_instance_paths(self):
+        # Build a synthetic repo tree on tmp_path, point REPO_ROOT at it,
+        # and assert the carve-out refuses a nested file while accepting
+        # the same filename at plugin-ROOT depth.
+        from tempfile import TemporaryDirectory
+        from unittest import mock
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "daemon" / "plugin_subsystem").mkdir(parents=True)
+            (root / "plugins-convention").mkdir(parents=True)
+            plugins = root / "plugins"
+            plugins.mkdir()
+            # Plugin-ROOT MANIFEST.yaml — allowed
+            plugin_dir = plugins / "opendesign"
+            plugin_dir.mkdir()
+            (plugin_dir / "MANIFEST.yaml").write_text("schema_version: '1.0.0'\n", encoding="utf-8")
+            # Nested vendored class subtree with a same-named file — disallowed
+            nested = plugin_dir / "copy_freely" / "design-systems" / "airbnb"
+            nested.mkdir(parents=True)
+            nested_file = nested / "MANIFEST.yaml"
+            nested_file.write_text("schema_version: '1.0.0'\n", encoding="utf-8")
+
+            with mock.patch.object(__import__("tests.unit.plugin_subsystem.test_sentinels", fromlist=["REPO_ROOT"]), "REPO_ROOT", root):
+                violations = []
+                for relative, path in _iter_repo_text_files():
+                    try:
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    for needle in VOCABULARY_STRINGS:
+                        if needle in text:
+                            violations.append(f"{relative} contains {needle!r}")
+                # The nested MANIFEST.yaml DOES contain the literal text
+                # "schema_version" — wait, that's a STRUCTURAL field, not
+                # a vocabulary string.  Use the actual vocabulary instead.
+                assert violations == [], f"unexpected vocabulary leak: {violations}"
+
+            # Re-assert the depth-bound: a nested MANIFEST.yaml with
+            # vocabulary content must be flagged.  Use 'execution_mode'
+            # because it IS a vocabulary string and the nested file's
+            # content can carry it.
+            nested_file.write_text("execution_mode: 'resource-only'\n", encoding="utf-8")
+            with mock.patch.object(__import__("tests.unit.plugin_subsystem.test_sentinels", fromlist=["REPO_ROOT"]), "REPO_ROOT", root):
+                violations = []
+                for relative, path in _iter_repo_text_files():
+                    try:
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    for needle in VOCABULARY_STRINGS:
+                        if needle in text:
+                            violations.append(f"{relative} contains {needle!r}")
+                # The nested file is flagged; the plugin-root one is allowed.
+                nested_violations = [v for v in violations if "copy_freely" in v]
+                root_allowed = not any("plugins/opendesign/MANIFEST.yaml" in v for v in violations)
+                assert nested_violations != [], (
+                    f"nested MANIFEST.yaml with vocabulary content must be flagged; got: {violations}"
+                )
+                assert root_allowed, (
+                    f"plugin-ROOT MANIFEST.yaml was wrongly flagged: {violations}"
+                )

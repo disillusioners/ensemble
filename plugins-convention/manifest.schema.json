@@ -10,7 +10,7 @@
     "schema_version": {
       "type": "string",
       "minLength": 1,
-      "description": "SemVer. Plugin #1 authors against the literal \"1.0.0\". 1.0.x = additive only; the validator accepts the 1.0.x family and refuses anything else until the runner carries the newer schema."
+      "description": "SemVer. Plugin #1 authors against the literal \"1.0.0\". 1.0.x = additive only; the validator accepts the 1.0.x family and refuses anything else until the runner carries the newer schema. Current additive epoch: 1.0.1 (snapshot_with_drift_alarm.upstream_paths, slice \u00b3)."
     },
     "plugin": {
       "type": "object",
@@ -139,11 +139,16 @@
       "type": "object",
       "required": ["paths"],
       "additionalProperties": false,
-      "description": "Hot upstream content snapshotted with drift alarms + reconcile. Non-empty paths REQUIRE a non-empty, well-formed divergence_register (semantic codes empty_divergence_register / divergence_entry_malformed) \u2014 deliberately not schema-required.",
+      "description": "Hot upstream content snapshotted with drift alarms + reconcile. Non-empty paths REQUIRE a non-empty, well-formed divergence_register (semantic codes empty_divergence_register / divergence_entry_malformed) \u2014 deliberately not schema-required. The optional `upstream_paths` field (additive per CON \u00a78 1.0.x rule) is the parallel mapping: paths[i] is the LOCAL subtree, upstream_paths[i] is the corresponding UPSTREAM subtree. When absent, the sync-runner falls back to the strip-class-prefix heuristic (matches the copy_freely layout where local and upstream share the trailing path).",
       "properties": {
         "paths": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
+        },
+        "upstream_paths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Optional additive field (CON \u00a78 1.0.x): parallel to paths. paths[i] is the LOCAL subtree; upstream_paths[i] is the corresponding UPSTREAM subtree. Same length as paths. Required when the local class subtree is renamed relative to the upstream tree (e.g. the snapshot class renames apps/daemon/src/prompts/ \u2192 prompts/daemon/ for the local audit layout)."
         },
         "alarm_owner": {
           "type": "string",
