@@ -277,6 +277,14 @@ async def get_snapshot_metrics(
     manager = request.app.state.manager
     service = getattr(manager, "_snapshot_metrics_service", None)
     if service is None:
+        # Service unavailable (pre-init or background deinit) — return
+        # the empty shape but log a WARNING so the failure is
+        # observable, not silent (deep-review 🟡#4). Mirrors the
+        # warning emitted on the surface()-raises branch below.
+        logger.warning(
+            "[SnapshotsRouter] metrics service unavailable; "
+            "returning empty shape (manager._snapshot_metrics_service is None)",
+        )
         return SnapshotUsageMetricsResponse(
             capture_counts={},
             spawn_counts_per_snapshot=[],

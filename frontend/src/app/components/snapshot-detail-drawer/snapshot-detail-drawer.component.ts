@@ -96,6 +96,12 @@ export class SnapshotDetailDrawerComponent {
   readonly detail = signal<SnapshotDetailResponse | null>(null);
   readonly detailLoading = signal(false);
   readonly detailError = signal<string | null>(null);
+  // Stale-response guard (deep-review 🟡#3) — mirrors digestRequestId
+  // below. The detail fetch fires on every `snapshotId` input swap; a
+  // slow response for snapshot A must NOT overwrite the drawer after
+  // the user has navigated to snapshot B. Increment-and-capture, then
+  // compare on resolve; a stale response is silently discarded.
+  private detailRequestId = 0;
 
   // ── Digest state (drawer-owned; lazy) ───────────────────────
   readonly digest = signal<Record<string, unknown> | null>(null);
@@ -120,14 +126,24 @@ export class SnapshotDetailDrawerComponent {
       this.digestError.set(null);
       this.showDigest.set(false);
 
+      // Increment-and-capture the request id BEFORE subscribing so a
+      // late-resolving response for an older snapshotId is discarded
+      // (deep-review 🟡#3 — mirrors digestRequestId below).
+      const detailReqId = ++this.detailRequestId;
       this.snapshotService
         .getById(id, { includeDigest: false })
         .subscribe({
           next: (resp) => {
+            if (this.detailRequestId !== detailReqId) {
+              return; // stale — a newer request has already started
+            }
             this.detail.set(resp);
             this.detailLoading.set(false);
           },
           error: (err: { message?: string }) => {
+            if (this.detailRequestId !== detailReqId) {
+              return; // stale
+            }
             this.detailError.set(
               this.toMessage(err?.message || 'Failed to load snapshot details'),
             );
@@ -231,12 +247,22 @@ export class SnapshotDetailDrawerComponent {
     if (!id) return;
     this.detailLoading.set(true);
     this.detailError.set(null);
+    // Same staleness guard as the constructor effect (deep-review 🟡#3):
+    // a rapid retry on snapshot A followed by a navigation to B must
+    // not let A's late response overwrite B.
+    const detailReqId = ++this.detailRequestId;
     this.snapshotService.getById(id, { includeDigest: false }).subscribe({
       next: (resp) => {
+        if (this.detailRequestId !== detailReqId) {
+          return; // stale
+        }
         this.detail.set(resp);
         this.detailLoading.set(false);
       },
       error: (err: { message?: string }) => {
+        if (this.detailRequestId !== detailReqId) {
+          return; // stale
+        }
         this.detailError.set(
           this.toMessage(err?.message || 'Failed to load snapshot details'),
         );
