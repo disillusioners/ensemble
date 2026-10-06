@@ -516,6 +516,28 @@ def _check_semantics(
                 "(own_outright carries no alarm_owner by design)",
                 f"{class_name}.alarm_owner",
             )
+        # upstream_paths (additive CON §8 1.0.x): when declared, MUST
+        # have the same length as paths; each entry MUST be a non-empty
+        # string.  Mismatched lengths are a vendoring-time refusal
+        # (the sync-runner cannot pair them up).
+        explicit = section.get("upstream_paths")
+        if explicit is not None:
+            paths = section.get("paths", []) or []
+            if not isinstance(explicit, list) or any(
+                not isinstance(p, str) or not p.strip() for p in explicit
+            ):
+                return ManifestRefusal(
+                    "upstream_paths_malformed",
+                    f"{class_name}.upstream_paths must be a list of non-empty strings when present",
+                    f"{class_name}.upstream_paths",
+                )
+            if len(explicit) != len(paths):
+                return ManifestRefusal(
+                    "upstream_paths_length_mismatch",
+                    f"{class_name}.upstream_paths length ({len(explicit)}) must match "
+                    f"paths length ({len(paths)})",
+                    f"{class_name}.upstream_paths",
+                )
 
     # -- divergence register on non-empty snapshot paths ---------------------------
     snapshot = doc.get("snapshot_with_drift_alarm")
@@ -615,6 +637,15 @@ def _check_tree(doc: Mapping[str, Any], plugin_dir: Path) -> Optional[ManifestRe
 
 def _build_declaration(doc: Mapping[str, Any], plugin_dir: Path) -> PluginDeclaration:
     plugin = doc["plugin"]
+    # Collect upstream_paths per class (additive CON §8 1.0.x).
+    upstream_paths_per_class: Dict[str, Sequence[str]] = {}
+    for class_name in ("copy_freely", "snapshot_with_drift_alarm", "own_outright"):
+        section = doc.get(class_name)
+        if not isinstance(section, Mapping):
+            continue
+        explicit = section.get("upstream_paths")
+        if isinstance(explicit, list) and explicit:
+            upstream_paths_per_class[class_name] = tuple(explicit)
     return PluginDeclaration(
         name=plugin["name"],
         license=plugin["license"],
@@ -630,6 +661,7 @@ def _build_declaration(doc: Mapping[str, Any], plugin_dir: Path) -> PluginDeclar
         copy_freely=dict(doc.get("copy_freely", {})),
         snapshot_with_drift_alarm=dict(doc.get("snapshot_with_drift_alarm", {})),
         own_outright=dict(doc.get("own_outright", {})),
+        upstream_paths_per_class=upstream_paths_per_class,
         parity_intentionally_not_vendored=tuple(
             doc.get("parity_boundary", {}).get("intentionally_not_vendored", [])
         ),

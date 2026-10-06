@@ -88,7 +88,13 @@ class TestRealPluginManifest:
 
     def test_plugin_registry_loads(self):
         # Single-plugin tree: registry should contain "opendesign" with no refusals.
-        declarations, refusals = scan_plugins_root(PLUGIN_ROOT.parent)
+        # Cross-lane coupling: use arity-safe positional access (result[0]
+        # is always declarations; result[-1] is always refusals on both
+        # ②'s 2-tuple and ④'s 3-tuple; result[1] would mean different
+        # things on each side).  Per the slice ③ cross-lane steer.
+        scan_result = scan_plugins_root(PLUGIN_ROOT.parent)
+        declarations = scan_result[0]
+        refusals = scan_result[-1]
         assert "opendesign" in declarations
         assert "opendesign" not in refusals
 

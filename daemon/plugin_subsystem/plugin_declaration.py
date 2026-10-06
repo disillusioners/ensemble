@@ -51,6 +51,12 @@ class PluginDeclaration:
     snapshot_with_drift_alarm: Mapping[str, Any] = field(default_factory=dict)
     own_outright: Mapping[str, Any] = field(default_factory=dict)
 
+    # parallel upstream subdir mapping (additive, CON §8 1.0.x);
+    # when present, the sync-runner uses these instead of the
+    # strip-class-prefix heuristic. The mapping is per-class;
+    # absent upstream_paths for a class means the heuristic applies.
+    upstream_paths_per_class: Mapping[str, Sequence[str]] = field(default_factory=dict)
+
     # parity boundary (required section; subsections may be empty)
     parity_intentionally_not_vendored: Sequence[Mapping[str, str]] = field(default_factory=tuple)
     parity_not_executed: Sequence[Mapping[str, str]] = field(default_factory=tuple)
@@ -66,6 +72,17 @@ class PluginDeclaration:
         if pin is None and class_name == "snapshot_with_drift_alarm":
             pin = self.tag_pin_per_class.get("copy_freely")
         return pin
+
+    def upstream_paths_for_class(self, class_name: str) -> Optional[Sequence[str]]:
+        """Parallel upstream-subdir list for ``class_name`` (additive).
+
+        Returns ``None`` when no explicit mapping is declared (the
+        sync-runner falls back to the strip-class-prefix heuristic).
+        When the list is declared, ``upstream_paths_for_class[i]`` is
+        the upstream subtree corresponding to ``paths[i]`` of the
+        class section.
+        """
+        return self.upstream_paths_per_class.get(class_name)
 
     @property
     def divergence_register(self) -> Sequence[Mapping[str, Any]]:

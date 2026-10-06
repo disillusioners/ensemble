@@ -120,8 +120,30 @@ class VendorSummary:
 
 def _run_git(source: Path, *args: str) -> str:
     cmd = ["git", "-C", str(source)] + list(args)
-    result = subprocess.run(cmd, capture_output=True, check=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed: {exc.stderr.decode('utf-8', errors='replace').strip()}"
+        ) from exc
     return result.stdout.decode("utf-8", errors="replace")
+
+
+def _resolve_tag_sha(source: Path, tag: str) -> str:
+    # Try annotated-tag peel first (``<tag>^{tag}``); fall back to
+    # lightweight-tag commit (``<tag>^{}``); fall back to the
+    # literal tag string.  The slice ③ second-tag dry-run
+    # (REC §8.5) found that v0.24.1 is a LIGHTWEIGHT tag, so this
+    # fall-through chain is the slice-③ hardening for both vendoring
+    # tools and the sync-runner.
+    last_err: Optional[RuntimeError] = None
+    for ref in (f"{tag}^{{tag}}", f"{tag}^{{}}", tag):
+        try:
+            return _run_git(source, "rev-parse", ref).strip()
+        except RuntimeError as exc:
+            last_err = exc
+            continue
+    raise last_err or RuntimeError(f"tag {tag!r} not resolvable in {source}")
 
 
 def _list_tree_paths(source: Path, ref: str, subdir: str) -> List[Tuple[str, str, str, int, str]]:
@@ -195,8 +217,8 @@ def vendor(
     if not (source / ".git").exists():
         raise SystemExit(f"ERROR: source is not a git checkout: {source}")
     try:
-        ref_sha = _run_git(source, "rev-parse", f"{tag}^{{}}").strip()
-    except subprocess.CalledProcessError as exc:
+        ref_sha = _resolve_tag_sha(source, tag)
+    except RuntimeError as exc:
         raise SystemExit(f"ERROR: cannot resolve tag {tag!r} in {source}: {exc}") from exc
 
     dest.mkdir(parents=True, exist_ok=True)

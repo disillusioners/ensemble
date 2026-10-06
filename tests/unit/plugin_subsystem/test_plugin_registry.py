@@ -187,8 +187,18 @@ class TestLoadRegistry:
         # The module-level default points at <repo-root>/plugins/. Slice ②
         # ships the first concrete plugin tree there; later slices can
         # override via an explicit ``plugins_root`` argument.
+        #
+        # Cross-lane portability (slice ③ carry-forward): the parent
+        # name is the worktree name; we assert the family prefix
+        # (``ensemble-src-wt-*``) rather than the specific name, so
+        # the test is portable across worktrees (the wt-01 / wt-02 /
+        # wt-03 worktree name is not load-bearing for the invariant).
+        import re
         assert DEFAULT_PLUGINS_ROOT.name == "plugins"
-        assert DEFAULT_PLUGINS_ROOT.parent.name == "ensemble-src-wt-plugin-subsystem-03"
+        assert re.match(r"^ensemble-src-wt-[a-z0-9-]+$", DEFAULT_PLUGINS_ROOT.parent.name), (
+            f"plugins root parent {DEFAULT_PLUGINS_ROOT.parent.name!r} does not match the "
+            f"ensemble-src-wt-* worktree family"
+        )
 
 
 # -- skeleton convention tests ------------------------------------------------

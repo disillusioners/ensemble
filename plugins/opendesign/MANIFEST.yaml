@@ -74,10 +74,24 @@ copy_freely:
 # so a future sync-runner pull that surfaces a byte change in any
 # of these files lands on a pre-registered entry (re-apply or drop,
 # update the log either way, CON §2).
+#
+# The `upstream_paths` field (additive, CON §8 — 1.0.x allows
+# additive fields) is the parallel mapping: paths[i] is the LOCAL
+# subtree, upstream_paths[i] is the corresponding UPSTREAM subtree.
+# For copy_freely the default strip-class-prefix heuristic works
+# because the upstream and local share the trailing path; for
+# snapshot the local tree is renamed (prompts/{daemon,contracts}/
+# instead of apps/.../prompts/, packages/.../prompts/) so the
+# explicit override is REQUIRED.  When upstream_paths is absent,
+# the sync-runner falls back to the strip-class-prefix heuristic
+# (matches the copy_freely layout).
 snapshot_with_drift_alarm:
   paths:
     - "snapshot_with_drift_alarm/prompts/daemon/"
     - "snapshot_with_drift_alarm/prompts/contracts/"
+  upstream_paths:
+    - "apps/daemon/src/prompts/"
+    - "packages/contracts/src/prompts/"
   # alarm_owner: required by CON §2.  Prompt code churns actively
   # (od-resource-layer §0: 106 commits in 7wk for contracts); the
   # owner is the prompt-Port maintenance role (the slice ⑤ B-element
