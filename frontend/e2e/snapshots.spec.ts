@@ -165,12 +165,12 @@ async function seedSnapshots(): Promise<void> {
 
   // Single implicit transaction (psql -c multi-statement) — atomic seed.
   psql(db, `
-    INSERT INTO projects (project_id, name, project_type, status, description, created_at, updated_at)
+    INSERT INTO projects (project_id, name, project_type, status, description, job_queue_paused, created_at, updated_at)
     VALUES
       ('${PROJECT_ALPHA_ID}', 'e2e-snapshots-alpha', 'software', 'active',
-       'Seed project alpha for the snapshots e2e suite', '${iso(4 * DAY)}', '${iso(4 * DAY)}'),
+       'Seed project alpha for the snapshots e2e suite', false, '${iso(4 * DAY)}', '${iso(4 * DAY)}'),
       ('${PROJECT_BETA_ID}', 'e2e-snapshots-beta', 'software', 'active',
-       'Seed project beta for the snapshots e2e suite', '${iso(4 * DAY)}', '${iso(4 * DAY)}')
+       'Seed project beta for the snapshots e2e suite', false, '${iso(4 * DAY)}', '${iso(4 * DAY)}')
     ON CONFLICT (project_id) DO NOTHING;
 
     INSERT INTO snapshots (
