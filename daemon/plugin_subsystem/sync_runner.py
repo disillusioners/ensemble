@@ -40,10 +40,33 @@ never a torn manifest).
   IS a missing tag — a missing/unusable ``plugin_dir``, an empty
   upstream repo URL, or an unopenable upstream checkout (absent /
   not a git repository) all refuse with this code, the message
-  naming the actual cause
+  naming the actual cause.  Further fail-closed extension (council
+  ③ fix, 2026-10-06): an unobservable BLOB or SUBDIR at the pinned
+  tag (e.g. ``git cat-file blob <sha>`` fails, ``git ls-tree <ref>:<subdir>/``
+  fails) is the same family — refuse with this code, the message
+  naming the cause.  **Dry-run parity is mandatory**: a dry_run
+  call that would refuse under non-dry MUST also return
+  action=refused with the same code (a dry-run is a truthful
+  report of what the non-dry run would do).
 - ``misclassified_at_vendoring`` — vendoring_classifier refuses
   (e.g. path letter not registered, execution_mode not in row's
   allowlist, fence-stripped A); VENDORING is refused, never runtime
+
+**Adjudication flag (council ③ fix, 2026-10-06 — deferred to
+reviewer):**
+
+The fail-closed ``tag_missing_upstream`` mapping for "upstream
+content incomplete at the pinned tag" (subdir or blob
+unreadable) is intentionally NOT a new refusal code.  The
+council question — "should ``upstream_content_incomplete`` become
+an additive refusal code at the next 1.0.x epoch?" — is
+**flagged for reviewer; NOT unilaterally added** here.  A new code
+requires CON §8 row 11 (enum additions require a 1.x.0 minor
+bump).  Until adjudicated, the existing 7-code enum is preserved
+and the content-incomplete case rides ``tag_missing_upstream``
+with a cause-bearing message.  Reviewer can promote the
+additive code in a follow-up if they concur the diagnostic
+distinctness warrants a separate surface.
 
 **Operational mappings (deliberately OUTSIDE the refusal enum):**
 
@@ -84,6 +107,22 @@ flag, not via any combination of arguments. The only way to
 write to ``own_outright/`` is to edit it by hand. The
 ``own_outright_mutation`` refusal is the corresponding gate
 (this module does the check up-front; the filesystem also
+
+**Reader-passthrough namespacing (council ③ item (a), 2026-10-06):**
+
+The ① manifest reader carries its own typed-refusal surface
+(21 codes; ``manifest_reader.py``).  Earlier the sync-runner
+passthrough at ``sync()`` returned the reader's bare code,
+widening the observable ``SyncResult.refusal.code`` surface
+beyond the CON §5 sync 7.  The ③ fix is a **clean, lossless
+wrap**: if the reader's code IS one of the sync 7, pass
+through verbatim (the overlap is intentional — the reader
+re-uses the sync names when the diagnostic is the same
+logical failure); otherwise namespace as
+``manifest_reader:<code>``.  The sync 7 enum stays observably
+closed; the reader's diagnostic distinctness is preserved
+in the namespaced suffix.  See ``_SYNC_ENUM_7`` and the
+reader-passthrough site for the discriminator.
 refuses via the ``own_outright/`` directory being outside the
 sync's write scope).
 """
@@ -123,6 +162,7 @@ __all__ = [
     "emit_drift_event",
     "LOCALLY_OWNED_FILENAMES",
     "DEFAULT_GIT_REMOTE_NAME",
+    "UpstreamContentIncompleteError",
 ]
 
 
@@ -135,6 +175,23 @@ REFUSAL_FENCE_MISSING = "fence_missing"
 REFUSAL_NON_TAG_PIN = "non_tag_pin"
 REFUSAL_TAG_MISSING_UPSTREAM = "tag_missing_upstream"
 REFUSAL_MISCLASSIFIED_AT_VENDORING = "misclassified_at_vendoring"
+
+
+# The CON §5 sync-runner closed-enum 7.  Used at the
+# reader-passthrough seam to decide whether a reader's typed
+# refusal code is a same-named overlap (pass through verbatim)
+# or a reader-only code (namespace as ``manifest_reader:<code>``).
+# Kept as a frozenset for O(1) membership check and to make
+# the closed-enum invariant explicit at the call site.
+_SYNC_ENUM_7: frozenset = frozenset({
+    REFUSAL_ABSENT_EXECUTION_MODE,
+    REFUSAL_OWN_OUTRIGHT_MUTATION,
+    REFUSAL_LICENSE_INVALID,
+    REFUSAL_FENCE_MISSING,
+    REFUSAL_NON_TAG_PIN,
+    REFUSAL_TAG_MISSING_UPSTREAM,
+    REFUSAL_MISCLASSIFIED_AT_VENDORING,
+})
 
 
 # Locally-owned filenames inside any class subtree that the sync-runner
@@ -316,13 +373,52 @@ class SyncRunner:
         try:
             declaration = self._read_declaration(plugin, plugin_dir)
         except ManifestReaderError as exc:
+            # Reader-passthrough seam (council ③ warning
+            # adjudication, 2026-10-06).  The slice ① reader
+            # carries its own typed-refusal surface (21 codes;
+            # see ``manifest_reader.py``); the sync-runner
+            # surface is the CON §5 closed-enum 7.  Without
+            # this namespacing the passthrough widens the
+            # observable ``SyncResult.refusal.code`` beyond the
+            # sync 7 (e.g. ``manifest_unparseable``,
+            # ``name_invalid``, ``upstream_paths_malformed``
+            # leak through as bare values).  We use a lossless
+            # overlap / namespace split:
+            #
+            # - If the reader's code is ALSO one of the
+            #   CON §5 sync 7, pass through verbatim.  The
+            #   reader intentionally re-uses the sync names
+            #   (e.g. ``non_tag_pin``, ``license_invalid``,
+            #   ``fence_missing``, ``absent_execution_mode``)
+            #   when the diagnostic is the same logical
+            #   failure — collapsing them to a single bare
+            #   value is correct and lossless.
+            # - Otherwise, namespace as
+            #   ``manifest_reader:<code>`` to keep the
+            #   reader's diagnostic distinct on the sync
+            #   surface while preserving the full code
+            #   string for the operator.
+            #
+            # Two frozen surfaces: sync 7-code enum (CON §5)
+            # + reader manifest codes (①).  The passthrough
+            # below is 1:1 by design; the namespacing is the
+            # lossless discriminator that keeps the sync
+            # surface observably closed.  (CON §8 row 11:
+            # enum additions require a 1.x.0 minor bump —
+            # the same flag applies to a future
+            # "unify the two surfaces" move.)
+            reader_code = exc.refusal.code
+            if reader_code in _SYNC_ENUM_7:
+                out_code = reader_code
+            else:
+                out_code = f"manifest_reader:{reader_code}"
             return self._refuse(
                 plugin=plugin,
                 target_class=target_class,
                 upstream_tag=upstream_tag or "",
-                code=exc.refusal.code,
+                code=out_code,
                 message=exc.refusal.message,
-                location=f"manifest_reader:{exc.refusal.code}",
+                location=f"manifest_reader:{reader_code}",
             )
         if declaration is None:
             # Fail-closed (CON §5 line 196 + review ruling): with no
@@ -458,15 +554,37 @@ class SyncRunner:
         local_target = (plugin_dir or declaration.source_dir) / target_class
         if not local_target.is_dir():
             local_target.mkdir(parents=True, exist_ok=True)
-        diff = _compute_class_diff(
-            upstream=upstream,
-            upstream_tag=effective_tag,
-            target_class=target_class,
-            upstream_paths=upstream_paths,
-            local_paths=class_paths,
-            local_target=local_target,
-            explicit_upstream_paths=explicit_upstream_paths,
-        )
+        # Fail-closed (council ③ fix, 2026-10-06): the diff
+        # helper now PROPAGATES ``UpstreamContentIncompleteError``
+        # (a subdir list_tree error or a stage-path escape —
+        # both signal the upstream content at the pinned tag is
+        # unobservable / untrustworthy).  We catch it here and
+        # refuse; the dry-run parity rule (a dry-run is a
+        # truthful report of what the non-dry run would do) is
+        # preserved by handling BOTH dry-run and non-dry paths
+        # the same way.  Earlier code (pre-③-fix) would have
+        # silently swallowed the error inside the helper,
+        # produced a partial diff, and reported ``clean_pulled``
+        # — the CRITICAL #2 silent-partial-data-loss illusion.
+        try:
+            diff = _compute_class_diff(
+                upstream=upstream,
+                upstream_tag=effective_tag,
+                target_class=target_class,
+                upstream_paths=upstream_paths,
+                local_paths=class_paths,
+                local_target=local_target,
+                explicit_upstream_paths=explicit_upstream_paths,
+            )
+        except UpstreamContentIncompleteError as exc:
+            return self._refuse(
+                plugin=plugin,
+                target_class=target_class,
+                upstream_tag=effective_tag,
+                code=REFUSAL_TAG_MISSING_UPSTREAM,
+                message=str(exc),
+                location=f"upstream({declaration.upstream_repo})@{effective_tag}",
+            )
 
         # Stale-tag check (CON §5 staleness_age_days) — informational,
         # not a refusal; surfaces via the result for promote-gate use.
@@ -525,15 +643,33 @@ class SyncRunner:
                     staleness_age_days=staleness,
                 )
             # Not dry-run: pull + alarm.
-            _clean_pull_atomic(
-                upstream=upstream,
-                upstream_tag=effective_tag,
-                target_class=target_class,
-                upstream_paths=upstream_paths,
-                local_paths=class_paths,
-                local_target=local_target,
-                explicit_upstream_paths=explicit_upstream_paths,
-            )
+            # Fail-closed (council ③ fix, 2026-10-06): the
+            # pull helper now propagates
+            # ``UpstreamContentIncompleteError`` (a subdir
+            # list_tree error, a blob cat_file_blob error, or
+            # a stage-path escape).  We catch it here and
+            # refuse — the staged temp dir is discarded by
+            # the helper's own cleanup branch and the live
+            # tree is unchanged (whole-or-nothing).
+            try:
+                _clean_pull_atomic(
+                    upstream=upstream,
+                    upstream_tag=effective_tag,
+                    target_class=target_class,
+                    upstream_paths=upstream_paths,
+                    local_paths=class_paths,
+                    local_target=local_target,
+                    explicit_upstream_paths=explicit_upstream_paths,
+                )
+            except UpstreamContentIncompleteError as exc:
+                return self._refuse(
+                    plugin=plugin,
+                    target_class=target_class,
+                    upstream_tag=effective_tag,
+                    code=REFUSAL_TAG_MISSING_UPSTREAM,
+                    message=str(exc),
+                    location=f"upstream({declaration.upstream_repo})@{effective_tag}",
+                )
             emit_drift_event(plugin, target_class, entry, effective_tag)
             return SyncResult(
                 plugin=plugin,
@@ -556,15 +692,31 @@ class SyncRunner:
                 staleness_age_days=staleness,
             )
         # Real pull: atomic stage + rename.
-        _clean_pull_atomic(
-            upstream=upstream,
-            upstream_tag=effective_tag,
-            target_class=target_class,
-            upstream_paths=upstream_paths,
-            local_paths=class_paths,
-            local_target=local_target,
-            explicit_upstream_paths=explicit_upstream_paths,
-        )
+        # Fail-closed (council ③ fix, 2026-10-06): same
+        # treatment as the snapshot-class pull above — any
+        # upstream-content-incomplete condition is converted
+        # to a refused SyncResult.  The helper's rename-aside
+        # atomicity (W3 fix) preserves the live tree on
+        # failure.
+        try:
+            _clean_pull_atomic(
+                upstream=upstream,
+                upstream_tag=effective_tag,
+                target_class=target_class,
+                upstream_paths=upstream_paths,
+                local_paths=class_paths,
+                local_target=local_target,
+                explicit_upstream_paths=explicit_upstream_paths,
+            )
+        except UpstreamContentIncompleteError as exc:
+            return self._refuse(
+                plugin=plugin,
+                target_class=target_class,
+                upstream_tag=effective_tag,
+                code=REFUSAL_TAG_MISSING_UPSTREAM,
+                message=str(exc),
+                location=f"upstream({declaration.upstream_repo})@{effective_tag}",
+            )
         return SyncResult(
             plugin=plugin,
             target_class=target_class,
@@ -644,6 +796,26 @@ class ManifestReaderError(Exception):
     def __init__(self, refusal: Any) -> None:
         self.refusal = refusal
         super().__init__(str(refusal))
+
+
+class UpstreamContentIncompleteError(RuntimeError):
+    """Internal carrier for "upstream content at the pinned tag is
+    unobservable" (subdir tree listing failed, blob fetch failed,
+    or the upstream ref's blob is missing/unreadable).
+
+    This is a ``RuntimeError`` subclass so the existing generic
+    ``except RuntimeError`` safety nets in callers do NOT fire on
+    it (those nets are reserved for *expected* operational
+    failures like a missing tag or unopenable checkout — the
+    callers convert them to ``tag_missing_upstream`` refusals;
+    they must NOT swallow a content-incomplete error silently).
+
+    The :meth:`SyncRunner.sync` entry point catches this
+    exception and converts it to a refused ``SyncResult`` with
+    code ``tag_missing_upstream`` and a cause-bearing message
+    naming the failing path or blob.  The exception is
+    INTERNAL — callers of the public API never see it raised.
+    """
 
 
 # ─── upstream-git adapter ─────────────────────────────────────────────────────
@@ -766,8 +938,38 @@ class LocalGitCheckout(UpstreamGit):
     def list_tree(self, subdir: str) -> List[Tuple[str, str, str, int, str]]:
         # Mirrors ``tools/vendor/od_vendor.py`` size-on-tree
         # strategy (``git ls-tree -l -r``) — no per-file forks.
+        #
+        # Fail-closed (council ③ fix, 2026-10-06): a RuntimeError
+        # from ``_run`` here means the upstream SUB-DIRECTORY at
+        # the pinned tag is unobservable (e.g. the path doesn't
+        # exist in the upstream tree, or ``git ls-tree`` itself
+        # fails).  Re-raise as ``UpstreamContentIncompleteError``
+        # so the sync-runner aborts the diff or the pull rather
+        # than silently skipping the subdir and reporting a
+        # partial diff / swapping in a partial tree.
+        #
+        # Dry-run parity (council ③ fix, 2026-10-06): after
+        # listing, the diff path does NOT call ``cat_file_blob``
+        # (the comment at the diff site documents the
+        # "no-per-blob-forks" optimization).  A missing blob
+        # would therefore NOT be detected by the diff alone,
+        # violating the "dry-run is a truthful report of what
+        # the non-dry run would do" rule.  We close that gap
+        # here with a single ``git cat-file --batch-check``
+        # call (streaming protocol: O(1) subprocess, O(N) SHA
+        # parse) that asserts every SHA in the listing is
+        # present in the upstream object store.  Any "missing"
+        # answer raises ``UpstreamContentIncompleteError`` —
+        # the same refusal both diff and pull would otherwise
+        # see, so dry-run and non-dry are parity-clean.
         ref = self._ref_for_listing()
-        raw = self._run("ls-tree", "-l", "-r", ref, "--", f"{subdir}/")
+        try:
+            raw = self._run("ls-tree", "-l", "-r", ref, "--", f"{subdir}/")
+        except RuntimeError as exc:
+            raise UpstreamContentIncompleteError(
+                f"upstream tag content incomplete: subdir {subdir!r} "
+                f"unreadable at {self.tag!r} ({exc})"
+            ) from exc
         out: List[Tuple[str, str, str, int, str]] = []
         for line in raw.splitlines():
             if not line.strip():
@@ -787,14 +989,72 @@ class LocalGitCheckout(UpstreamGit):
             except ValueError:
                 size = 0
             out.append((mode, obj_type, sha, size, path))
+        # Dry-run parity check: assert every SHA in the listing
+        # is present in the object store.  Skipped if the
+        # listing is empty (no blobs to check).
+        if out:
+            self._assert_blobs_present([sha for _m, _t, sha, _s, _p in out])
         return out
 
+    def _assert_blobs_present(self, shas: Sequence[str]) -> None:
+        """Batch-verify every SHA exists in the upstream object
+        store (dry-run parity gate, council ③ fix 2026-10-06).
+
+        Uses ``git cat-file --batch-check``: a streaming protocol
+        that takes SHAs from stdin and writes ``<sha> <type> <size>``
+        to stdout.  Cost is one subprocess call regardless of
+        SHA count; missing objects produce a ``missing`` line
+        (vs ``blob`` for present blobs).  Raises
+        :class:`UpstreamContentIncompleteError` on the first
+        missing SHA.
+        """
+        if not shas:
+            return
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(self._source), "cat-file", "--batch-check"],
+                input=("\n".join(shas) + "\n").encode("utf-8"),
+                capture_output=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise UpstreamContentIncompleteError(
+                f"upstream tag content incomplete: cat-file --batch-check "
+                f"failed at {self.tag!r} ({(exc.stderr or b'').decode('utf-8', errors='replace').strip() or exc})"
+            ) from exc
+        # Parse the batch output; the first line of stdout that
+        # is "missing" (or any line whose type column is not
+        # "blob") indicates a content-incomplete condition.
+        for line in proc.stdout.decode("utf-8", errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            sha, obj_type = parts[0], parts[1]
+            if obj_type != "blob":
+                raise UpstreamContentIncompleteError(
+                    f"upstream tag content incomplete: blob {sha!r} "
+                    f"missing or unreadable at {self.tag!r} (cat-file --batch-check: {line})"
+                )
+
     def cat_file_blob(self, blob_sha: str) -> bytes:
-        result = subprocess.run(
-            ["git", "-C", str(self._source), "cat-file", "blob", blob_sha],
-            capture_output=True,
-            check=True,
-        )
+        # Fail-closed (council ③ fix, 2026-10-06): a missing or
+        # unreadable BLOB at the pinned tag is the same family as
+        # an unobservable subdir (above) — the upstream content
+        # is incomplete.  Re-raise as ``UpstreamContentIncompleteError``
+        # so the sync-runner aborts the pull rather than silently
+        # skipping the blob and swapping in a partial tree.
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self._source), "cat-file", "blob", blob_sha],
+                capture_output=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+            raise UpstreamContentIncompleteError(
+                f"upstream tag content incomplete: blob {blob_sha!r} "
+                f"unreadable at {self.tag!r} ({stderr or exc})"
+            ) from exc
         return result.stdout
 
     def tag_commit_date(self) -> datetime:
@@ -880,10 +1140,35 @@ def _compute_class_diff(
             relative_root = local_path_root[len(target_class) + 1:]
         else:
             relative_root = local_path_root
+        # Fail-closed (council ③ fix, 2026-10-06): a RuntimeError
+        # from ``list_tree`` here is now an
+        # ``UpstreamContentIncompleteError`` (the ``list_tree``
+        # adapter re-raises it) — the upstream subdir at the
+        # pinned tag is unobservable.  We PROPAGATE (no silent
+        # skip): a partial diff that swallows a subdir would
+        # understate the file count and let a partial pull pass
+        # the dry-run check while leaving files missing on disk.
+        # ``UpstreamContentIncompleteError`` is a ``RuntimeError``
+        # subclass; a bare ``except RuntimeError: continue`` here
+        # would catch it and re-introduce the bug.  We catch ONLY
+        # the upgradable RuntimeError from older callers, and let
+        # the new content-incomplete error propagate.
         try:
             entries = upstream.list_tree(upstream_subdir)
-        except RuntimeError:
-            continue
+        except UpstreamContentIncompleteError:
+            # Re-raise verbatim; the sync() entry point catches
+            # this and refuses with tag_missing_upstream.
+            raise
+        except RuntimeError as exc:
+            # Backstop for non-upgraded adapters (or for an
+            # unanticipated RuntimeError source): fail-closed by
+            # re-raising as the same content-incomplete family
+            # rather than silently skipping.  The message names
+            # the cause for operator diagnostics.
+            raise UpstreamContentIncompleteError(
+                f"upstream tag content incomplete: subdir {upstream_subdir!r} "
+                f"unreadable at {upstream_tag!r} ({exc})"
+            ) from exc
         # Layout policy:
         #
         # When `upstream_paths` is DECLARED (the snapshot class
@@ -957,8 +1242,22 @@ def _compute_class_diff(
     for rel, blob_sha in upstream_files.items():
         try:
             local_path = _safe_join_under(local_target, rel)
-        except ValueError:
-            continue
+        except ValueError as exc:
+            # Fail-closed (council ③ fix, 2026-10-06): the
+            # ``rel`` is constructed from upstream's tree path
+            # (we strip the upstream subdir prefix and join to
+            # the local root).  A path that ESCAPES the local
+            # target means upstream's content layout is bad
+            # (e.g. a path with traversal segments).  Earlier
+            # code swallowed this with ``continue`` — a silent
+            # skip that would understate the diff and let a
+            # pathological pull pass dry-run while leaving
+            # files unhandled.  Re-raise as content-incomplete
+            # so sync() refuses.
+            raise UpstreamContentIncompleteError(
+                f"upstream tag content incomplete: file path {rel!r} "
+                f"escapes local target {local_target} ({exc})"
+            ) from exc
         if not local_path.is_file():
             added += 1
             examples.append(rel)
@@ -966,6 +1265,16 @@ def _compute_class_diff(
         try:
             local_bytes = local_path.read_bytes()
         except OSError:
+            # A local file we cannot read (permissions,
+            # vanished mid-walk) is treated as "different" for
+            # diff purposes: the upstream version will need to
+            # be written.  This is NOT a content-incomplete
+            # condition (the upstream is intact) — it's a
+            # transient local-IO problem that the next pull
+            # will resolve.  Council ③ review: this exception
+            # is documented and judged acceptable (NOT a
+            # silent-skip; the "added" counting is the
+            # truthful diff for the operator).
             added += 1
             examples.append(rel)
             continue
@@ -990,8 +1299,20 @@ def _compute_class_diff(
             relative_root = local_path_root
         try:
             local_root = _safe_join_under(local_target, relative_root) if relative_root else local_target
-        except ValueError:
-            continue
+        except ValueError as exc:
+            # Fail-closed (council ③ fix, 2026-10-06): the
+            # ``local_path_root`` comes from the manifest's
+            # ``class_paths`` (operator-authored).  A path
+            # that escapes the local target is a manifest
+            # bug, but the truthful fail-closed response is
+            # to refuse rather than silently understate the
+            # removed count.  Re-raise as content-incomplete
+            # (the operator-facing surface is the same:
+            # refuse, don't continue with a partial diff).
+            raise UpstreamContentIncompleteError(
+                f"upstream tag content incomplete: manifest local path "
+                f"{local_path_root!r} escapes local target {local_target} ({exc})"
+            ) from exc
         if not local_root.is_dir():
             continue
         for path in local_root.rglob("*"):
@@ -1001,8 +1322,20 @@ def _compute_class_diff(
                 continue
             try:
                 rel = path.relative_to(local_target).as_posix()
-            except ValueError:
-                continue
+            except ValueError as exc:
+                # Defensive: ``path`` came from
+                # ``local_root.rglob()`` and ``local_root``
+                # was resolved under ``local_target``, so a
+                # path that is NOT under ``local_target`` is
+                # truly impossible.  Council ③ review: re-
+                # raise as content-incomplete (fail-closed)
+                # rather than silent-skip — preserves the
+                # invariant that we never understate the
+                # diff.
+                raise UpstreamContentIncompleteError(
+                    f"upstream tag content incomplete: local walk path "
+                    f"{path!r} escapes local target {local_target} ({exc})"
+                ) from exc
             local_seen.add(rel)
             if rel not in upstream_files:
                 removed += 1
@@ -1055,8 +1388,28 @@ def _clean_pull_atomic(
     # syncs don't clobber each other.  ``mkdtemp`` is atomic at the
     # filesystem level.
     stage_dir = Path(tempfile.mkdtemp(prefix=f".sync_stage.{pid}.", dir=str(parent)))
+    # ``aside_dir`` is set in the rename-aside sequence below (W3
+    # fix, 2026-10-06 — closes the rmtree→replace window where
+    # ``local_target`` is briefly absent).  None while the
+    # existing-target is being staged, set once the old tree is
+    # moved aside atomically.
+    aside_dir: Optional[Path] = None
     try:
         # 1) Copy upstream files into stage.
+        #
+        # Fail-closed (council ③ fix, 2026-10-06): a subdir listing
+        # error, a blob fetch error, or a stage-path traversal
+        # escape here is the upstream content being unobservable /
+        # untrustworthy at the pinned tag.  Earlier code swallowed
+        # each of these with ``continue`` — a partial stage would
+        # then be renamed over ``local_target`` (CRITICAL #2:
+        # silent partial-data-loss illusion).  We PROPAGATE
+        # (UpstreamContentIncompleteError re-raises from the
+        # adapter and is caught by sync()'s refusal path; the
+        # ``except (subprocess.CalledProcessError, RuntimeError)``
+        # that was here would have caught the new
+        # UpstreamContentIncompleteError — we removed it to fix
+        # the silent-skip).
         for upstream_subdir, local_path_root in zip(upstream_paths, local_paths):
             upstream_subdir = upstream_subdir.rstrip("/")
             local_path_root = local_path_root.rstrip("/")
@@ -1071,8 +1424,17 @@ def _clean_pull_atomic(
                 relative_root = local_path_root
             try:
                 entries = upstream.list_tree(upstream_subdir)
-            except RuntimeError:
-                continue
+            except UpstreamContentIncompleteError:
+                # Re-raise verbatim; sync() catches and refuses.
+                raise
+            except RuntimeError as exc:
+                # Backstop for non-upgraded adapters: refuse
+                # fail-closed rather than silently skipping the
+                # subdir.
+                raise UpstreamContentIncompleteError(
+                    f"upstream tag content incomplete: subdir {upstream_subdir!r} "
+                    f"unreadable at {upstream_tag!r} ({exc})"
+                ) from exc
             is_renamed = explicit_upstream_paths is not None
             for mode, _obj_type, blob_sha, _size, upstream_file_path in entries:
                 if mode == "120000":
@@ -1087,13 +1449,22 @@ def _clean_pull_atomic(
                     stage_rel = subpath
                 try:
                     stage_path = _safe_join_under(stage_dir, stage_rel)
-                except ValueError:
-                    continue
+                except ValueError as exc:
+                    # Fail-closed: an upstream-derived stage
+                    # path that escapes the staging dir is
+                    # pathological.  Earlier code skipped with
+                    # ``continue``; we refuse instead.
+                    raise UpstreamContentIncompleteError(
+                        f"upstream tag content incomplete: file path "
+                        f"{stage_rel!r} escapes stage dir {stage_dir} ({exc})"
+                    ) from exc
                 stage_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    data = upstream.cat_file_blob(blob_sha)
-                except (subprocess.CalledProcessError, RuntimeError):
-                    continue
+                # ``cat_file_blob`` re-raises
+                # ``UpstreamContentIncompleteError`` for
+                # ``subprocess.CalledProcessError``; we let it
+                # propagate (the bare ``except (...)`` that
+                # silently swallowed it is GONE).
+                data = upstream.cat_file_blob(blob_sha)
                 with open(stage_path, "wb") as fh:
                     fh.write(data)
         # 2) Preserve locally-owned files (HASHES.sha256, ...) by
@@ -1103,29 +1474,65 @@ def _clean_pull_atomic(
                 src = local_target / name
                 if src.is_file():
                     shutil.copy2(src, stage_dir / name)
-        # 3) Replace the existing target with the staged tree.
-        #    POSIX ``rename(2)`` fails on non-empty target dirs
-        #    (``ENOTEMPTY``); the local target IS non-empty when
-        #    locally-owned files (HASHES.sha256) live inside the
-        #    class subtree.  We use the standard "rm-rf + rename"
-        #    sequence: the window between the rm and the rename
-        #    is small (POSIX sub-millisecond on tmpfs/ext4) and
-        #    the rm is local to the class subtree (no other
-        #    process should be reading it; CON §7 no-runtime-
-        #    loading sentinel + the sync-runner is the sole
-        #    writer).  The CON §5 "mid-pull crash = whole-or-
-        #    nothing" guarantee is preserved for crashes that
-        #    happen BEFORE the rm (the target is intact); a
-        #    crash between the rm and the rename leaves the
-        #    target missing — the operator can re-run the sync
-        #    to recover (the stage dir is also cleaned up by
-        #    the except branch below).
+        # 3) Replace the existing target with the staged tree
+        #    using the rename-aside pattern (W3 fix,
+        #    2026-10-06).
+        #
+        # Earlier code did ``shutil.rmtree(local_target)`` then
+        # ``os.replace(stage_dir, local_target)`` — leaving a
+        # brief window where ``local_target`` did not exist on
+        # disk.  A crash in that window (or an external process
+        # reading the target) would observe a missing tree.
+        # The new sequence is:
+        #
+        #   a) ``os.replace(local_target, aside_dir)`` — ATOMIC
+        #      on POSIX, never absent; if it fails, ``local_target``
+        #      is unchanged and we propagate the failure.
+        #   b) ``os.replace(stage_dir, local_target)`` — ATOMIC;
+        #      if it fails, we restore ``aside_dir → local_target``
+        #      so the operator sees the old tree.
+        #   c) success path: rmtree ``aside_dir``.
+        #
+        # POSIX guarantees ``rename(2)`` is atomic on the same
+        # filesystem; the stage dir is created in ``parent`` (the
+        # same parent as ``local_target``) so this holds.
         if local_target.exists():
-            shutil.rmtree(local_target)
-        os.replace(stage_dir, local_target)
+            aside_dir = local_target.parent / (
+                f".{local_target.name}.sync_aside.{pid}"
+            )
+            os.replace(local_target, aside_dir)
+        try:
+            os.replace(stage_dir, local_target)
+        except Exception:
+            # Restore aside → target so the operator's tree
+            # is intact.  Best-effort: if this restore
+            # itself fails (filesystem-level catastrophe),
+            # the original target is lost — but the
+            # earlier rm+replace had the same risk profile
+            # (the data is just in a different name), and
+            # the operator can re-run the sync against the
+            # stage dir if the rmtree cleanup below left
+            # it.  Stage cleanup below.
+            if aside_dir is not None and aside_dir.is_dir() and not local_target.exists():
+                try:
+                    os.replace(aside_dir, local_target)
+                except Exception:  # pragma: no cover - best-effort
+                    pass
+            raise
+        # Success path — clean up the aside.
+        if aside_dir is not None:
+            shutil.rmtree(aside_dir, ignore_errors=True)
+            aside_dir = None
     except Exception:
         # On any failure, attempt to remove the stage dir (best
-        # effort) so it doesn't accumulate.
+        # effort) so it doesn't accumulate.  If the
+        # rename-aside sequence already ran (aside_dir is set
+        # and target is restored) we still try to remove the
+        # aside; the success path is unreachable from this
+        # except branch because the success path's os.replace
+        # raised and the restore happened inside its inner
+        # try/except — by the time we reach THIS except,
+        # aside_dir has been consumed (restored to target).
         try:
             if stage_dir.is_dir():
                 shutil.rmtree(stage_dir, ignore_errors=True)

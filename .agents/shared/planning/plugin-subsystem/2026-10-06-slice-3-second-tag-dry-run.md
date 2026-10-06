@@ -315,7 +315,7 @@ end-to-end:
 staleness_age_days: 12
 ```
 
-`open-design-v0.23.0` tag date vs dry-run date: 12 days.  The
+`open-design-v0.24.1` tag date vs dry-run date: 12 days.  The
 escalation default N=14 (CON §2 placeholder) means a single
 tag's staleness alone does not yet trigger block-promote.  The
 `staleness_age_days` field in `sync_result` is the surface the

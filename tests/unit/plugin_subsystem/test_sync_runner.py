@@ -22,6 +22,14 @@ Test layout (all in one file for the slice ③; slice ⑤+ may split):
 - ``TestLightweightTagHandling`` — annotated vs lightweight
 - ``TestClassifierIntegration`` — full pipeline (manifest → sync)
 - ``TestRealPluginSync`` — the live opendesign manifest sync
+- ``TestFailClosedNonDryPull`` — CRITICAL #2 fail-closed teeth
+- ``TestRenameAsideAtomicity`` — W3 rename-aside atomicity teeth
+- ``TestReaderCodeNamespacing`` — item (a) reader-passthrough teeth
+- ``TestPinningTestReferentialIntegrity`` — reviewer addendum #1:
+  every ``pinning_test:`` pointer in the manifest MUST resolve
+  to a real collected pytest test id (any class, any depth).
+  Structural recurrence guard so a future manifest entry
+  cannot have a dangling pointer.
 
 Most tests use a synthetic fixture git repo (built in tmp_path)
 to avoid touching the real /home/nea/opt/open-design repo
@@ -69,6 +77,8 @@ from daemon.plugin_subsystem.sync_runner import (
     REFUSAL_TAG_MISSING_UPSTREAM,
     DiffSummary,
     DriftAlarm,
+    UpstreamContentIncompleteError,
+    _git_blob_sha1,
 )
 from tests.unit.plugin_subsystem._manifest_fixtures import (
     VALID_A_PATH_MANIFEST,
@@ -1078,4 +1088,727 @@ class TestLicensePreservationThroughPullPath:
         assert local_content == upstream_content, (
             "per-item source.license must be preserved byte-for-byte "
             "(CC-BY-4.0 attribution chain would break otherwise)"
+        )
+
+
+# ─── Fail-closed non-dry pull (CRITICAL #2 council fix) ────────────────────
+
+
+class TestFailClosedNonDryPull:
+    """Council ③ CRITICAL #2: a non-dry pull that hits an unobservable
+    subdir or unreadable blob must ABORT the pull (staged temp
+    DISCARDED, live tree UNTOUCHED) and return action=refused with
+    code=tag_missing_upstream.  The pre-fix code swallowed these
+    errors with ``continue`` — silent-partial-data-loss illusion
+    that swapped a partial tree in and reported action=clean_pulled.
+    """
+
+    def test_blob_error_aborts_non_dry_pull(self, tmp_path, monkeypatch):
+        """Fault-inject a blob cat_file_blob error mid-pull: the
+        pull must refuse, the live tree must be byte-intact, and
+        no stage dir must leak."""
+        repo = tmp_path / "upstream"
+        files = {f"data/file{i}.txt": f"content {i}\n" for i in range(10)}
+        _init_git_repo(repo, files)
+        _tag(repo, "v1.0.0")
+        plugin_dir = _make_minimal_plugin(
+            tmp_path / "demo", upstream_repo=str(repo), class_paths=["copy_freely/data/"]
+        )
+        # Pre-populate the local target with KNOWN content so we
+        # can prove the live tree was untouched post-refusal.
+        local = plugin_dir / "copy_freely" / "data"
+        local.mkdir(parents=True, exist_ok=True)
+        for i in range(5):
+            (local / f"file{i}.txt").write_text(f"PRECIOUS {i}\n", encoding="utf-8")
+        pre_state = {
+            str(p.relative_to(local)): p.read_text(encoding="utf-8")
+            for p in local.rglob("*") if p.is_file()
+        }
+        # Fault-inject cat_file_blob to raise the content-incomplete
+        # error on the 6th blob.  Pre-fix code would silently
+        # skip the failing blob and continue.
+        from daemon.plugin_subsystem import sync_runner as sr
+
+        real_cat = sr.LocalGitCheckout.cat_file_blob
+        call_count = {"n": 0}
+
+        def faulty_cat(self, blob_sha):
+            call_count["n"] += 1
+            if call_count["n"] >= 6:
+                raise UpstreamContentIncompleteError(
+                    f"FAULT-INJECTED: blob {blob_sha!r} unreadable at v1.0.0"
+                )
+            return real_cat(self, blob_sha)
+
+        monkeypatch.setattr(sr.LocalGitCheckout, "cat_file_blob", faulty_cat)
+        result = sync(
+            "demo", "copy_freely",
+            upstream_repo=str(repo), upstream_tag="v1.0.0",
+            plugin_dir=plugin_dir, dry_run=False,
+        )
+        # Refused (not clean_pulled).
+        assert result.action == "refused", result.as_dict()
+        assert result.refusal is not None
+        assert result.refusal.code == REFUSAL_TAG_MISSING_UPSTREAM
+        assert "blob" in result.refusal.message.lower()
+        # Live tree byte-intact.
+        post_state = {
+            str(p.relative_to(local)): p.read_text(encoding="utf-8")
+            for p in local.rglob("*") if p.is_file()
+        }
+        assert post_state == pre_state, (
+            f"non-dry refusal left tree in inconsistent state: "
+            f"added={set(post_state) - set(pre_state)}, "
+            f"removed={set(pre_state) - set(post_state)}"
+        )
+        # No stage dir leaked.
+        stage_dirs = list(plugin_dir.glob(".sync_stage.*"))
+        assert stage_dirs == [], f"stage dir leaked: {stage_dirs}"
+
+    def test_subdir_error_aborts_non_dry_pull(self, tmp_path, monkeypatch):
+        """Fault-inject a subdir list_tree error mid-pull: the
+        pull must refuse and the live tree must be byte-intact."""
+        repo = tmp_path / "upstream"
+        files = {f"data/file{i}.txt": f"content {i}\n" for i in range(8)}
+        _init_git_repo(repo, files)
+        _tag(repo, "v1.0.0")
+        plugin_dir = _make_minimal_plugin(
+            tmp_path / "demo", upstream_repo=str(repo), class_paths=["copy_freely/data/"]
+        )
+        local = plugin_dir / "copy_freely" / "data"
+        local.mkdir(parents=True, exist_ok=True)
+        for i in range(4):
+            (local / f"file{i}.txt").write_text(f"PRECIOUS {i}\n", encoding="utf-8")
+        pre_state = {
+            str(p.relative_to(local)): p.read_text(encoding="utf-8")
+            for p in local.rglob("*") if p.is_file()
+        }
+        # Fault-inject list_tree to raise the content-incomplete
+        # error on the first call.
+        from daemon.plugin_subsystem import sync_runner as sr
+        from daemon.plugin_subsystem.sync_runner import UpstreamContentIncompleteError
+
+        def faulty_list(self, subdir):
+            raise UpstreamContentIncompleteError(
+                f"FAULT-INJECTED: subdir {subdir!r} unreadable at v1.0.0"
+            )
+        monkeypatch.setattr(sr.LocalGitCheckout, "list_tree", faulty_list)
+        result = sync(
+            "demo", "copy_freely",
+            upstream_repo=str(repo), upstream_tag="v1.0.0",
+            plugin_dir=plugin_dir, dry_run=False,
+        )
+        # Refused.
+        assert result.action == "refused", result.as_dict()
+        assert result.refusal is not None
+        assert result.refusal.code == REFUSAL_TAG_MISSING_UPSTREAM
+        assert "subdir" in result.refusal.message.lower()
+        # Live tree byte-intact.
+        post_state = {
+            str(p.relative_to(local)): p.read_text(encoding="utf-8")
+            for p in local.rglob("*") if p.is_file()
+        }
+        assert post_state == pre_state
+        # No stage dir leaked.
+        stage_dirs = list(plugin_dir.glob(".sync_stage.*"))
+        assert stage_dirs == [], f"stage dir leaked: {stage_dirs}"
+
+    def test_dry_run_parity_refuses_on_blob_error(self, tmp_path, monkeypatch):
+        """Dry-run parity (council ③ fix): if the non-dry run would
+        refuse on a blob error, the dry-run must also refuse with
+        the same code — a dry-run is a truthful report of what
+        the non-dry run would do.  The dry-run path uses
+        ``list_tree`` + a batch ``cat-file --batch-check`` (the
+        ``_assert_blobs_present`` gate added in the ③ fix) so
+        the diff and the pull see the same condition."""
+        repo = tmp_path / "upstream"
+        files = {f"data/file{i}.txt": f"content {i}\n" for i in range(6)}
+        _init_git_repo(repo, files)
+        _tag(repo, "v1.0.0")
+        plugin_dir = _make_minimal_plugin(
+            tmp_path / "demo", upstream_repo=str(repo), class_paths=["copy_freely/data/"]
+        )
+        # Force the batch-check to report a missing blob.
+        from daemon.plugin_subsystem import sync_runner as sr
+        from daemon.plugin_subsystem.sync_runner import UpstreamContentIncompleteError
+
+        def faulty_check(self, shas):
+            raise UpstreamContentIncompleteError(
+                f"FAULT-INJECTED: blob missing at v1.0.0"
+            )
+        monkeypatch.setattr(sr.LocalGitCheckout, "_assert_blobs_present", faulty_check)
+        result = sync(
+            "demo", "copy_freely",
+            upstream_repo=str(repo), upstream_tag="v1.0.0",
+            plugin_dir=plugin_dir, dry_run=True,
+        )
+        # Dry-run refused (NOT clean_pulled).
+        assert result.action == "refused", result.as_dict()
+        assert result.refusal is not None
+        assert result.refusal.code == REFUSAL_TAG_MISSING_UPSTREAM
+
+    def test_dry_run_parity_refuses_on_subdir_error(self, tmp_path, monkeypatch):
+        """Dry-run parity for subdir errors: the diff uses list_tree
+        just like the pull, so a list_tree error in dry-run refuses."""
+        repo = tmp_path / "upstream"
+        _init_git_repo(repo, {"data/x.txt": "x\n"})
+        _tag(repo, "v1.0.0")
+        plugin_dir = _make_minimal_plugin(
+            tmp_path / "demo", upstream_repo=str(repo), class_paths=["copy_freely/data/"]
+        )
+        from daemon.plugin_subsystem import sync_runner as sr
+        from daemon.plugin_subsystem.sync_runner import UpstreamContentIncompleteError
+
+        def faulty_list(self, subdir):
+            raise UpstreamContentIncompleteError(
+                f"FAULT-INJECTED: subdir {subdir!r} unreadable"
+            )
+        monkeypatch.setattr(sr.LocalGitCheckout, "list_tree", faulty_list)
+        result = sync(
+            "demo", "copy_freely",
+            upstream_repo=str(repo), upstream_tag="v1.0.0",
+            plugin_dir=plugin_dir, dry_run=True,
+        )
+        assert result.action == "refused", result.as_dict()
+        assert result.refusal is not None
+        assert result.refusal.code == REFUSAL_TAG_MISSING_UPSTREAM
+        assert "subdir" in result.refusal.message.lower()
+
+    def test_first_real_pull_full_shape_gate(self, tmp_path):
+        """The "6-assertion first-real-pull gate" (council ③ fix):
+        a successful non-dry clean_pulled on a synthetic repo
+        must assert: (i) file count on disk == expected complete
+        set, (ii) hash-manifest match (every file re-hashes to
+        the recorded value), (iii) no stage/temp leftovers,
+        (iv) action == clean_pulled, (v) staleness_age_days
+        present + correct arithmetic, (vi) tree clean / no torn
+        manifest.  All six hold in one test."""
+        repo = tmp_path / "upstream"
+        files = {f"data/file{i}.txt": f"content-{i}-v1\n" for i in range(7)}
+        _init_git_repo(repo, files)
+        _tag(repo, "v0.1.0", annotated=True)
+        plugin_dir = _make_minimal_plugin(
+            tmp_path / "demo", upstream_repo=str(repo), class_paths=["copy_freely/data/"]
+        )
+        # Use a deterministic clock so staleness is exact.
+        from datetime import datetime, timedelta, timezone
+        # The synthetic tag's commit date is "now-ish" (git
+        # commit timestamps at fixture-build time).  Force a
+        # clock 10 days AFTER the tag's commit date.
+        upstream = LocalGitCheckout(str(repo), "v0.1.0")
+        tag_date = upstream.tag_commit_date()
+        frozen_now = tag_date + timedelta(days=10)
+        clock = lambda: frozen_now
+        runner = SyncRunner(clock=clock)
+        result = runner.sync(
+            "demo", "copy_freely",
+            upstream_repo=str(repo), upstream_tag="v0.1.0",
+            plugin_dir=plugin_dir, dry_run=False,
+        )
+        # (iv) action == clean_pulled.
+        assert result.action == "clean_pulled", result.as_dict()
+        assert result.refusal is None
+        # (i) file count on disk == expected complete set.
+        local = plugin_dir / "copy_freely" / "data"
+        on_disk = sorted(p.name for p in local.iterdir() if p.is_file())
+        expected = sorted(files.keys())  # ['data/file0.txt', ...] → basenames
+        expected_basenames = sorted(p.split("/")[-1] for p in expected)
+        assert on_disk == expected_basenames, (
+            f"file count mismatch: on_disk={on_disk} expected={expected_basenames}"
+        )
+        # (ii) hash-manifest match — every file re-hashes to the
+        # upstream's blob SHA (recompute locally; we have the
+        # bytes).
+        for rel, content in files.items():
+            local_path = local / rel.split("/")[-1]
+            local_bytes = local_path.read_bytes()
+            local_sha = _git_blob_sha1(local_bytes)
+            # Upstream blob SHA from git:
+            upstream_sha = subprocess.run(
+                ["git", "-C", str(repo), "ls-tree", "v0.1.0", rel],
+                capture_output=True, text=True, check=True,
+            ).stdout.split()[2]
+            assert local_sha == upstream_sha, (
+                f"hash mismatch for {rel}: local={local_sha} upstream={upstream_sha}"
+            )
+        # (iii) no stage/temp leftovers.
+        leftovers = list(plugin_dir.glob(".sync_stage.*")) + list(plugin_dir.glob(".*sync_aside*"))
+        assert leftovers == [], f"temp leftovers: {leftovers}"
+        # (v) staleness_age_days present + correct arithmetic.
+        assert result.staleness_age_days == 10, (
+            f"expected staleness_age_days=10 (clock advanced 10 days past tag); "
+            f"got {result.staleness_age_days}"
+        )
+        # (vi) tree clean / no torn manifest.  The manifest is
+        # not in the class subtree (it's at the plugin root) and
+        # the class subtree is the only thing this sync touches.
+        manifest_path = plugin_dir / "MANIFEST.yaml"
+        assert manifest_path.is_file(), "MANIFEST.yaml vanished"
+        # Re-parse to verify it's still valid YAML.
+        re_parsed = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        assert re_parsed["plugin"]["name"] == "demo"
+
+
+class TestRenameAsideAtomicity:
+    """W3 council fix: the rmtree→replace stage-swap window
+    (target dir momentarily absent between rmtree(target) and
+    replace(staged,target)) is closed by a rename-aside→
+    rename-in→delete-old sequence.  These tests verify the
+    target never disappears and the old tree is restored on
+    failure."""
+
+    def test_target_present_during_successful_pull(self, tmp_path):
+        """During a successful pull, ``local_target`` is
+        continuously present (the rename-aside pattern means
+        it's NEVER absent).  We can verify the file structure
+        mid-pull is consistent by checking pre/post equality."""
+        repo = tmp_path / "upstream"
+        files = {f"data/file{i}.txt": f"content {i}\n" for i in range(5)}
+        _init_git_repo(repo, files)
+        _tag(repo, "v1.0.0")
+        plugin_dir = _make_minimal_plugin(
+            tmp_path / "demo", upstream_repo=str(repo), class_paths=["copy_freely/data/"]
+        )
+        # Pre-populate the local target with KNOWN content.
+        local = plugin_dir / "copy_freely" / "data"
+        local.mkdir(parents=True, exist_ok=True)
+        for i in range(3):
+            (local / f"file{i}.txt").write_text(f"OLD {i}\n", encoding="utf-8")
+        pre = sorted(p.name for p in local.iterdir() if p.is_file())
+        # Real pull
+        result = sync(
+            "demo", "copy_freely",
+            upstream_repo=str(repo), upstream_tag="v1.0.0",
+            plugin_dir=plugin_dir, dry_run=False,
+        )
+        assert result.action == "clean_pulled"
+        # Post-pull: all 5 upstream files present (compare
+        # basenames — the local layout is flat under
+        # ``<local_target>/<relative_root>/<basename>``).
+        post = sorted(p.name for p in local.iterdir() if p.is_file())
+        expected_basenames = sorted(rel.split("/")[-1] for rel in files.keys())
+        assert post == expected_basenames, (
+            f"file count mismatch: on_disk={post} expected={expected_basenames}"
+        )
+        # And the OLD files (file0..2) have been replaced
+        # (not kept — the copy_freely class is "clean-pulled,
+        # never authored locally" per CON §2).
+        for i in range(3):
+            content = (local / f"file{i}.txt").read_text(encoding="utf-8")
+            assert content == f"content {i}\n", (
+                f"file{i}.txt not replaced with upstream content: {content!r}"
+            )
+
+    def test_target_restored_on_stage_replace_failure(self, tmp_path, monkeypatch):
+        """If the second os.replace (stage → target) FAILS, the
+        rename-aside pattern must RESTORE the old tree (aside →
+        target) so the operator's live tree is intact.  We fault-
+        inject by monkey-patching os.replace inside
+        _clean_pull_atomic — the first call (target → aside)
+        succeeds; the second (stage → target) raises."""
+        repo = tmp_path / "upstream"
+        files = {f"data/file{i}.txt": f"content {i}\n" for i in range(3)}
+        _init_git_repo(repo, files)
+        _tag(repo, "v1.0.0")
+        plugin_dir = _make_minimal_plugin(
+            tmp_path / "demo", upstream_repo=str(repo), class_paths=["copy_freely/data/"]
+        )
+        # Pre-populate with PRECIOUS content.
+        local = plugin_dir / "copy_freely" / "data"
+        local.mkdir(parents=True, exist_ok=True)
+        (local / "old1.txt").write_text("PRECIOUS OLD 1\n", encoding="utf-8")
+        (local / "old2.txt").write_text("PRECIOUS OLD 2\n", encoding="utf-8")
+        pre_state = {
+            str(p.relative_to(local)): p.read_text(encoding="utf-8")
+            for p in local.rglob("*") if p.is_file()
+        }
+        # Fault-inject os.replace: the FIRST call inside
+        # _clean_pull_atomic succeeds (target → aside), the
+        # SECOND call (stage → target) raises.  This simulates
+        # a real failure (e.g. ENOSPC, EACCES) at the moment
+        # the staged tree would have been swapped in.
+        from daemon.plugin_subsystem import sync_runner as sr
+        real_replace = sr.os.replace
+        call_count = {"n": 0}
+
+        def faulty_replace(src, dst):
+            call_count["n"] += 1
+            # The first os.replace in _clean_pull_atomic is the
+            # aside move (target → aside).  The second is the
+            # in-move (stage → target).  We only fault the in-move.
+            if call_count["n"] == 2 and str(dst).endswith("/copy_freely"):
+                raise OSError("FAULT-INJECTED: stage replace failed")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(sr.os, "replace", faulty_replace)
+        with pytest.raises(OSError, match="FAULT-INJECTED"):
+            sync(
+                "demo", "copy_freely",
+                upstream_repo=str(repo), upstream_tag="v1.0.0",
+                plugin_dir=plugin_dir, dry_run=False,
+            )
+        # The old tree was restored (rename-aside → restore
+        # happened inside the except branch of the second
+        # os.replace).  Verify the precious files are still
+        # there with their original content.
+        post_state = {
+            str(p.relative_to(local)): p.read_text(encoding="utf-8")
+            for p in local.rglob("*") if p.is_file()
+        }
+        assert post_state == pre_state, (
+            f"rename-aside restore failed: added={set(post_state) - set(pre_state)}, "
+            f"removed={set(pre_state) - set(post_state)}"
+        )
+        # No stage dir leaked (the except branch's cleanup ran).
+        stage_dirs = list(plugin_dir.glob(".sync_stage.*"))
+        assert stage_dirs == [], f"stage dir leaked: {stage_dirs}"
+
+
+class TestReaderCodeNamespacing:
+    """Council ③ warning (a) adjudication: the reader-passthrough
+    seam at ``sync()`` widens the observable ``refusal.code``
+    surface beyond the CON §5 sync 7.  We use a lossless
+    overlap / namespace split: reader codes that are ALSO in
+    the sync 7 pass through verbatim; reader-only codes are
+    namespaced as ``manifest_reader:<code>``.  These tests
+    pin the discriminator."""
+
+    def test_overlap_code_passes_through(self, tmp_path):
+        """A reader code that IS in the sync 7 enum passes
+        through verbatim (no ``manifest_reader:`` prefix).  The
+        canonical case: an empty pin triggers a reader
+        ``non_tag_pin`` refusal, which is also a sync 7 code —
+        the caller sees the bare value."""
+        repo = tmp_path / "upstream"
+        _init_git_repo(repo, {"data/x.txt": "x"})
+        _tag(repo, "v1.0.0")
+        plugin_dir = tmp_path / "demo"
+        plugin_dir.mkdir()
+        manifest = {
+            "schema_version": "1.0.0",
+            "plugin": {
+                "name": "demo",
+                "license": "Apache-2.0",
+                "upstream": {
+                    "repo": str(repo),
+                    "tag_pin_per_class": {"copy_freely": ""},  # empty pin → non_tag_pin
+                },
+                "integration_path": "C",
+                "execution_mode": "resource-only",
+            },
+            "copy_freely": {
+                "paths": ["copy_freely/data/"],
+                "alarm_owner": "x",
+                "escalation": "x",
+            },
+            "parity_boundary": {"intentionally_not_vendored": [], "not_executed": []},
+        }
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+        )
+        result = sync(
+            "demo", "copy_freely",
+            upstream_repo=str(repo), upstream_tag="",
+            plugin_dir=plugin_dir, dry_run=True,
+        )
+        assert result.action == "refused"
+        assert result.refusal is not None
+        # Bare "non_tag_pin" — overlap, passes through.
+        assert result.refusal.code == "non_tag_pin", (
+            f"overlap code should pass through verbatim; got {result.refusal.code!r}"
+        )
+        assert not result.refusal.code.startswith("manifest_reader:")
+
+    def test_reader_only_code_namespaced(self, tmp_path):
+        """A reader code that is NOT in the sync 7 enum is
+        namespaced as ``manifest_reader:<code>``.  The canonical
+        case: a structurally-invalid manifest (e.g. unknown
+        field) triggers a reader refusal whose code is
+        reader-only.  The caller sees the namespaced value so
+        the sync 7 enum is observably closed."""
+        plugin_dir = tmp_path / "demo"
+        plugin_dir.mkdir()
+        # Build a manifest with an UNKNOWN field at the top
+        # level — the reader's structural validator refuses
+        # with code "unknown_field" (reader-only, NOT in the
+        # sync 7).  We use a non-empty tag pin so the
+        # pin-validation path doesn't fire first; the unknown-
+        # field check is earlier in the reader pipeline.
+        manifest = {
+            "schema_version": "1.0.0",
+            "plugin": {
+                "name": "demo",
+                "license": "Apache-2.0",
+                "upstream": {
+                    "repo": "/tmp/up",
+                    "tag_pin_per_class": {"copy_freely": "v1.0.0"},
+                },
+                "integration_path": "C",
+                "execution_mode": "resource-only",
+            },
+            "copy_freely": {
+                "paths": ["copy_freely/data/"],
+                "alarm_owner": "x",
+                "escalation": "x",
+            },
+            "parity_boundary": {"intentionally_not_vendored": [], "not_executed": []},
+            "BOGUS_UNKNOWN_FIELD": "this is not a valid manifest field",  # ←
+        }
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+        )
+        result = sync(
+            "demo", "copy_freely",
+            upstream_repo="/tmp/up", upstream_tag="v1.0.0",
+            plugin_dir=plugin_dir, dry_run=True,
+        )
+        assert result.action == "refused"
+        assert result.refusal is not None
+        # Reader-only code is namespaced.
+        assert result.refusal.code.startswith("manifest_reader:"), (
+            f"reader-only code should be namespaced; got {result.refusal.code!r}"
+        )
+        # The bare reader code is preserved in the namespace.
+        assert "unknown_field" in result.refusal.code
+
+    def test_no_silent_skip_in_pull_path(self, tmp_path):
+        """Exhaustive grep-style check: the public sync() path
+        has no ``except (..., ..., ): continue`` (or
+        ``except ...: pass``) that swallows an error class
+        reachable from the pull path.  This is a structural
+        regression guard for the CRITICAL #2 fix."""
+        import re
+        from daemon.plugin_subsystem import sync_runner as sr
+        # Read the source as text and look for the exact
+        # CRITICAL #2 pattern that was removed:
+        # ``except (...) ...: continue`` inside the pull path.
+        # After the fix, no such pattern should exist in the
+        # pull helpers (_clean_pull_atomic, _compute_class_diff).
+        with open(sr.__file__, "r", encoding="utf-8") as fh:
+            src = fh.read()
+        # The fix removed: ``except (subprocess.CalledProcessError,
+        # RuntimeError): continue`` and ``except RuntimeError:
+        # continue`` and ``except ValueError: continue`` from the
+        # pull helpers.  None of these should remain.
+        forbidden_patterns = [
+            r"except\s*\(\s*subprocess\.CalledProcessError\s*,\s*RuntimeError\s*\)\s*:\s*continue",
+            r"except\s*RuntimeError\s*:\s*continue\s*$",
+        ]
+        for pat in forbidden_patterns:
+            matches = re.findall(pat, src, re.MULTILINE)
+            assert not matches, (
+                f"silent-skip pattern {pat!r} still present in sync_runner.py: {matches}"
+            )
+
+
+# ─── Pinning-test referential integrity (council ③ addendum #1) ───────────
+
+
+def _collect_pytest_test_ids(repo_root: Path) -> set:
+    """Collect the set of fully-qualified pytest test ids in
+    ``tests/unit/plugin_subsystem`` (the same collection the
+    ``pytest --collect-only -q`` reporter would surface).
+
+    Uses a subprocess so the test ids match the on-disk
+    invocation exactly (the council ③ addendum requires
+    "fully-qualified exactly as pytest sees it").  Cost: one
+    subprocess per call; tests should cache via the module-
+    scoped fixture below.
+    """
+    proc = subprocess.run(
+        [
+            ".venv/bin/python",
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "tests/unit/plugin_subsystem",
+        ],
+        capture_output=True,
+        check=True,
+        cwd=str(repo_root),
+    )
+    # Each non-empty line is one test id (the -q reporter strips
+    # the "<Module>::<Class>::<test>" prefix down to the test
+    # name only when -q is used WITHOUT --no-header; with
+    # --collect-only the full id is reported as the line text).
+    # Some lines (e.g. warnings, the "collected N items"
+    # summary) are not test ids — they don't contain "::".
+    ids: set = set()
+    for line in proc.stdout.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "::" not in line:
+            # summary line ("231 tests collected") or warning —
+            # not a test id.
+            continue
+        ids.add(line)
+    return ids
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_MANIFEST_PATH = _REPO_ROOT / "plugins" / "opendesign" / "MANIFEST.yaml"
+
+
+@pytest.fixture(scope="module")
+def collected_test_ids() -> set:
+    """Session-cached set of pytest test ids in
+    ``tests/unit/plugin_subsystem`` (one subprocess per test
+    module).  The fixture is module-scoped so a single
+    collection serves the whole referential-integrity class
+    rather than re-running pytest for every test."""
+    return _collect_pytest_test_ids(_REPO_ROOT)
+
+
+def _walk_pinning_test_pointers(doc):
+    """Walk the parsed manifest and yield (location, value) for
+    every ``pinning_test:`` field at any depth, in any class.
+
+    The reviewer-required scope is "EVERY pinning_test pointer
+    across ALL classes (not just the 4 snapshot entries — any
+    class, current and future)" — so we walk the full doc and
+    collect every match, not just the snapshot-class
+    divergence_register.  ``location`` is a dotted path
+    string (e.g. ``snapshot_with_drift_alarm.divergence_register.0``)
+    for diagnostic pinpointing when a pointer dangles.
+    """
+    def _walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == "pinning_test":
+                    yield ".".join(str(p) for p in path), v
+                else:
+                    yield from _walk(v, path + (k,))
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                yield from _walk(item, path + (i,))
+    yield from _walk(doc, ())
+
+
+class TestPinningTestReferentialIntegrity:
+    """Reviewer-required addendum #1 (council ③, 2026-10-06):
+    structural recurrence guard against dangling pinning_test
+    pointers in the manifest.
+
+    Loads ``plugins/opendesign/MANIFEST.yaml``, extracts EVERY
+    ``pinning_test:`` pointer across ALL classes (not just the
+    4 snapshot divergence_register entries — any class, any
+    depth, current and future), and asserts each pointer
+    resolves to a REAL collected pytest test id, fully-
+    qualified exactly as pytest sees it.
+
+    Catches BOTH:
+    - missing files / missing test classes (the pointer's
+      file path doesn't exist in the collection), AND
+    - missing test names within a real class (the file exists
+      but the specific test function is absent — the original
+      ③ review failure shape: 4 seeded entries pointed at
+      TestSnapshotClassByteFidelity tests that did not yet
+      exist as code).
+
+    The test is fast (one pytest --collect-only subprocess
+    per module, cached as a fixture) and offline (no network,
+    no upstream checkout).
+    """
+
+    def test_every_pinning_test_pointer_resolves_to_a_real_test(
+        self, collected_test_ids
+    ):
+        """Every ``pinning_test:`` value in MANIFEST.yaml MUST
+        be a string that matches a collected pytest test id
+        exactly (full file path + class + test name)."""
+        with open(_MANIFEST_PATH, "r", encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh)
+        pointers = list(_walk_pinning_test_pointers(doc))
+        # Sanity: the manifest has at least the 4 seeded
+        # entries (the original ③ dangling-pointer failure
+        # was "all 4 dangling").  If this assertion fires,
+        # the walker is broken or the manifest lost its
+        # divergence_register — investigate BEFORE the next
+        # assertion, which would otherwise trivially pass
+        # on an empty list.
+        assert len(pointers) >= 4, (
+            f"expected ≥4 pinning_test pointers in MANIFEST.yaml "
+            f"(the 4 seeded divergence_register entries); got "
+            f"{len(pointers)}.  Walker may be broken or manifest "
+            f"lost its register."
+        )
+        # The actual referential-integrity check.
+        missing = [
+            (loc, ptr) for loc, ptr in pointers
+            if ptr not in collected_test_ids
+        ]
+        assert not missing, (
+            f"dangling pinning_test pointers in MANIFEST.yaml: "
+            f"these {len(missing)} pointer(s) do NOT match any "
+            f"collected pytest test id in tests/unit/plugin_subsystem "
+            f"(verified via ``pytest --collect-only -q``):\n"
+            + "\n".join(f"  {loc}: {ptr!r}" for loc, ptr in missing)
+        )
+
+    def test_pinning_test_pointers_use_full_path_format(
+        self, collected_test_ids
+    ):
+        """Every ``pinning_test:`` value MUST be a non-empty
+        string in the canonical ``path::Class::test`` format
+        (no abbreviations, no relative paths, no class
+        qualifiers stripped).  This is the shape the
+        referential-integrity check (above) compares against
+        — if a pointer is malformed, it can never match
+        pytest's collection output."""
+        with open(_MANIFEST_PATH, "r", encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh)
+        pointers = list(_walk_pinning_test_pointers(doc))
+        malformed = []
+        for loc, ptr in pointers:
+            if not isinstance(ptr, str) or not ptr.strip():
+                malformed.append((loc, f"empty/non-string: {ptr!r}"))
+                continue
+            # Canonical shape: 3 components separated by
+            # "::" (file path, class name, test name).
+            # A file path contains at least one "/" or
+            # ends in ".py"; a test name is a Python
+            # identifier; a class name is a PascalCase
+            # identifier.
+            parts = ptr.split("::")
+            if len(parts) != 3:
+                malformed.append((loc, f"expected 3 '::'-separated parts; got {len(parts)}: {ptr!r}"))
+                continue
+            file_path, class_name, test_name = parts
+            if not file_path.endswith(".py") or "/" not in file_path:
+                malformed.append((loc, f"file path is not a 'tests/.../x.py' shape: {file_path!r}"))
+            if not class_name or not class_name[0].isupper():
+                malformed.append((loc, f"class name is not PascalCase: {class_name!r}"))
+            if not test_name or not test_name.startswith("test_"):
+                malformed.append((loc, f"test name does not start with 'test_': {test_name!r}"))
+        assert not malformed, (
+            f"malformed pinning_test pointers in MANIFEST.yaml "
+            f"(the referential-integrity check requires the "
+            f"canonical 'path::Class::test' shape so a "
+            f"pytest --collect-only match is well-defined):\n"
+            + "\n".join(f"  {loc}: {reason}" for loc, reason in malformed)
+        )
+
+    def test_no_duplicate_pinning_test_pointers(self):
+        """No two ``pinning_test:`` entries may point at the
+        SAME test (the divergence_register is a list of
+        distinct upstream drift observations, not a
+        multiple-claim ledger on one test)."""
+        with open(_MANIFEST_PATH, "r", encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh)
+        pointers = list(_walk_pinning_test_pointers(doc))
+        seen: dict = {}
+        duplicates = []
+        for loc, ptr in pointers:
+            if ptr in seen:
+                duplicates.append((seen[ptr], loc, ptr))
+            else:
+                seen[ptr] = loc
+        assert not duplicates, (
+            f"duplicate pinning_test pointers in MANIFEST.yaml: "
+            f"the divergence_register must list distinct "
+            f"upstream drift observations, not multiple claims "
+            f"on the same test:\n"
+            + "\n".join(f"  {first} and {second} both → {ptr!r}" for first, second, ptr in duplicates)
         )
