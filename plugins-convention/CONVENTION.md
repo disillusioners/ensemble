@@ -1,5 +1,10 @@
 # plugins-convention — Frozen Convention Assets (Plugin Subsystem v1)
 
+<!-- Slice ① provenance (carry-forward 5): schema + 3-class vocab + 131-test
+suite landed on feature/plugin-subsystem-01 (merged to latest as 8be590c0).
+The four assets in this directory (manifest.schema.json, execution_mode.enum.json,
+path_types.yaml, ci_runner.py) are FROZEN; changes follow CON §8. -->
+
 This directory holds the **frozen convention assets** for the ensemble plugin
 subsystem (tier 2): the manifest JSON-Schema, the execution-mode enum, the
 path-type registry data, the vendored SPDX validator list, and the CI runner

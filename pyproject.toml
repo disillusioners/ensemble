@@ -47,6 +47,11 @@ dependencies = [
     # `Accept-Encoding: br, gzip` round-trip is the canonical
     # browser→proxy→upstream wire form.
     "brotli>=1.0",
+    # Plugin Subsystem slice ② carry-forward (3): jsonschema was transitive
+    # only. Declare it explicitly so a future silent upgrade / removal of a
+    # transitive path cannot silently downgrade the manifest validation
+    # pipeline (daemon.plugin_subsystem.manifest_reader dual-path primary).
+    "jsonschema>=4.0.0",
 ]
 
 [project.scripts]

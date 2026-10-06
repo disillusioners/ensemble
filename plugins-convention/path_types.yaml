@@ -1,5 +1,10 @@
 # Plugin Subsystem v1 — Path-Type Registry (THE extension point, frozen in v1)
 #
+# Slice ① provenance (carry-forward 5): schema + 3-class vocab +
+# 131-test suite landed on feature/plugin-subsystem-01 (merged to latest as
+# 8be590c0).  This file is FROZEN; row ADDITIONS are the only non-breaking
+# change (CON §4).
+#
 # Source of truth: .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md §4
 # (lines 131–162, values verbatim).
 #

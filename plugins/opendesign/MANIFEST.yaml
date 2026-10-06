@@ -1,0 +1,94 @@
+# Plugin Subsystem v1 — opendesign plugin manifest (slice ②)
+#
+# This manifest declares the vendoring-time shape of the opendesign plugin.
+# At slice ② the plugin is resource-only: every vendored byte under
+# copy_freely/ is DATA and NEVER executes (CON §7 no-execution sentinel;
+# REC §1.4 forbidden edges; CON §1 "not_executed" parity section).  The
+# B-element for generation (the compose/compose-brief orchestration) lands
+# at slice ⑤ — at that slice the manifest will gain the
+# `snapshot_with_drift_alarm` section, the divergence register, and the
+# execution_mode may be promoted to `lifted-symbol` for the lifted-symbol
+# path.  Until then this manifest is a pure C-path resource-only declaration.
+#
+# Source of truth: .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md
+# Pin rationale: see CURATION.md and tools/vendor/od_vendor.py.
+
+schema_version: "1.0.0"
+plugin:
+  name: "opendesign"
+  license: "Apache-2.0"
+  upstream:
+    repo: "https://github.com/nexu-io/open-design.git"
+    tag_pin_per_class:
+      copy_freely: "open-design-v0.23.0"
+  # integration_path: opendesign is C-dominant with a B element for
+  # generation arriving at slice ⑤ (REC §4.1 row 1; ADR-PLUG-001 §3).
+  # The manifest can declare only ONE integration_path; we declare the
+  # dominant class.  The future B-element for the generate Port will
+  # NOT change this field — the B element rides the frozen Port contract
+  # (REC §1.2 comp 9) and Provider internals are EVOLVABLE behind the
+  # Port; the C-path class declaration remains the structural fact about
+  # how the plugin's data is consumed.  Documented here per the slice ②
+  # dispatch: "if §4.1 is ambiguous about single-path declaration for a
+  # C-dominant+B-element plugin, choose the minimal faithful reading
+  # (likely 'C') and flag it in your report."
+  integration_path: "C"
+  # execution_mode: resource-only at slice ②.  Truthful pre-⑤ state:
+  # every vendored byte is inert data; no adapter/ subtree exists; the
+  # Port + generate adapter lands at ⑤.  Positive declaration (silence
+  # is not permission, CON §2) — the value is `resource-only`, the only
+  # value allowed for path C (path_types.yaml row C).
+  execution_mode: "resource-only"
+
+# copy_freely: the four vendored data classes (CON §2).  All four are
+# subdirs under copy_freely/ that the sync-runner (slice ③) will clean-pull
+# at the pinned tag; this manifest's paths are the upstream-relative globs
+# (REC §4.3 row ②; CON §1).
+copy_freely:
+  paths:
+    - "copy_freely/design-systems/"
+    - "copy_freely/design-templates/"
+    - "copy_freely/craft/"
+    - "copy_freely/prompt-templates/"
+  # alarm_owner: required by CON §2.  The data classes are at the high-
+  # end of the stable/minor-churn spectrum (od-resource-layer §0: zero
+  # churn across full v0.23.0 → v0.24.1) so the owner is the plugin-
+  # maintenance role in charge of upstream-data refresh; N=14 default
+  # escalation per CON §2 placeholder.
+  alarm_owner: "plugin-opendesign-data"
+  escalation: "block-promote-after-days"
+
+# snapshot_with_drift_alarm: lands at slice ⑤ alongside the B-element for
+# generation (REC §4.1 row 2; ADR-PLUG-001 §3).  Not declared at slice ②.
+
+# own_outright: lands at slice ⑤ for the Turn-3 / compose-brief orchestration
+# (REC §4.1 row 3; ADR-PLUG-001 §3).  Not declared at slice ②.
+
+# parity_boundary: REQUIRED section (CON §2).  Documents what the plugin
+# deliberately does NOT carry from upstream.  Per od-resource-layer §5
+# coupling table, opendesign's OD daemon, brand presets (entangled),
+# and functional skill stubs (entangled) are excluded; the prompt-code
+# layer will be handled at slice ⑤ (snapshot_with_drift_alarm class).
+parity_boundary:
+  intentionally_not_vendored:
+    - path: "apps/daemon/"
+      reason: "OD daemon + in-repo MCP forwarder; entangled (od-resource-layer §5 row 9) — not vendored; retired entirely at slice ⑦ (ADR-PLUG-001 §4)"
+    - path: "apps/daemon/src/brands/"
+      reason: "Brand presets (19 modules + extraction loop + browser); ENTANGLED (od-resource-layer §5 row 9) — design systems cover brand styling; brand flow out of scope for v1"
+    - path: "apps/daemon/src/prompts/"
+      reason: "Daemon prompt stack (10 TS composer modules) — LIGHTLY COUPLED (od-resource-layer §5 row 10); snapshot_with_drift_alarm lands at slice ⑤ with divergence register; the Python-native compose Provider (Mode P) is the recommended default"
+    - path: "packages/contracts/src/prompts/"
+      reason: "Published prompt mirror (17 files) — mirror of daemon prompt stack; two-tree drift is real (od-resource-layer §1.B) and committed in the divergence register at ⑤; not vendored at ②"
+    - path: "apps/daemon/src/skills/"
+      reason: "Functional skills (165 dirs) — STANDALONE-as-catalogue but execution requires upstream bundles (od-resource-layer §5 row 8); plugin-skill landing at slice ④ owns the slice-①-aligned consumption path"
+    - path: "apps/daemon/src/artifacts/"
+      reason: "Internal lint / parse5 EOF / truncation detectors — own-outright, ported into the generate adapter at slice ⑤ (REC §4.1 row 4)"
+    - path: "templates/"
+      reason: "Top-level HTML templates (3 entries) — STANDALONE but ORPHANED on upstream main (od-resource-layer §2); deprecated, not vendored"
+  # not_executed: every vendored byte is inert under resource-only.
+  # We declare the broad class so the slice-① reader's `not_executed`
+  # parity check has a concrete target; specific per-file entries
+  # would be 388 lines and are not load-bearing.
+  not_executed:
+    - path: "copy_freely/"
+      reason: "All vendored bytes under copy_freely/ are inert data under resource-only; no subtree executes (CON §1, CON §7 no-runtime-loading sentinel)"

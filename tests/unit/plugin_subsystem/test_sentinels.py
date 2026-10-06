@@ -4,7 +4,10 @@
   ``daemon/plugin_subsystem/**`` and ``plugins-convention/**`` — a SCOPED
   walk of the repo (tier-2 legitimately lives inside the daemon repo; the
   invariant is that tier-1 modules stay structurally blind). Excluded: the
-  tests' own fixtures and the plugin-subsystem planning dir.
+  tests' own fixtures, the plugin-subsystem planning dir, and the
+  authorized DATA-instance locations under ``plugins/*/`` (see
+  ``PLUGIN_AUTHORIZED_DATA_FILES`` below — the manifest + curation record
+  are CON §1 + REC §9 mandated, not vocabulary definition sites).
 - No-import invariant: no module outside ``daemon/plugin_subsystem/``
   imports from ``plugins/``.
 - No-runtime-loading: no ``importlib`` import / entry-point scanning in the
@@ -49,6 +52,20 @@ WALK_EXCLUDED_TOP_LEVEL = {
 WALK_ALLOWED_PREFIXES = {("daemon", "plugin_subsystem")}  # allowed zone (tier-2 home)
 WALK_EXCLUDED_FILES = {"package-lock.json", "uv.lock"}
 
+# Authorized DATA-instance filenames ANYWHERE under ``plugins/*/`` (CON §7
+# last paragraph + the slice ② dispatch: "plugins/opendesign/MANIFEST.yaml
+# is a DATA instance of the vocabulary, not a definition site").  These
+# files are CON §1 / REC §9 mandated; they legitimately reference the
+# vocabulary by name.  The set is matched on ``path.name`` so the rule
+# applies uniformly to every plugin tree (``plugins/<name>/MANIFEST.yaml``,
+# ``plugins/<name>/CURATION.md``).
+PLUGIN_AUTHORIZED_DATA_FILENAMES = frozenset(
+    {
+        "MANIFEST.yaml",  # CON §1: every plugin tree has one
+        "CURATION.md",  # REC §9: OQ3 record per plugin
+    }
+)
+
 
 def _iter_repo_text_files():
     for path in REPO_ROOT.rglob("*"):
@@ -58,6 +75,16 @@ def _iter_repo_text_files():
         if relative.parts[0] in WALK_EXCLUDED_TOP_LEVEL:
             continue
         if relative.parts[:2] in WALK_ALLOWED_PREFIXES:
+            continue
+        # Authorized DATA-instance filenames anywhere under plugins/*/.
+        # Matched on the basename so the rule applies uniformly to every
+        # plugin tree.  Files in copy_freely/ etc. are NOT authorized
+        # (those are vendored upstream bytes; vocabulary is not a
+        # legitimate concern there but we don't want to encourage it).
+        if (
+            relative.parts[0] == "plugins"
+            and path.name in PLUGIN_AUTHORIZED_DATA_FILENAMES
+        ):
             continue
         if path.name in WALK_EXCLUDED_FILES:
             continue
@@ -136,3 +163,51 @@ class TestNoRuntimeLoading:
         text = (REPO_ROOT / "plugins-convention" / "ci_runner.py").read_text(encoding="utf-8")
         assert "importlib" not in text
         assert "entry_point" not in text
+
+
+class TestVendoredClassSubtreesCannotCarryDataInstanceFilenames:
+    """The ``PLUGIN_AUTHORIZED_DATA_FILENAMES`` carve-out in
+    :class:`TestVocabularyConfinement` matches DATA-instance filenames
+    (``MANIFEST.yaml``, ``CURATION.md``) by basename at ANY depth under
+    ``plugins/*/``.  That breadth is safe today — no vendored file
+    shares those names — but a future vendored tree that drops one of
+    those filenames deep inside a vendored class subtree would
+    silently skip vocabulary confinement (the carve-out could be
+    exploited by vendored data).  This guard pins the property:
+    vendored class subtrees (``copy_freely/``,
+    ``snapshot_with_drift_alarm/``, ``own_outright/``) cannot carry
+    DATA-instance filenames.
+    """
+
+    # Vendored class subtree names per CON §2 — the three classes whose
+    # contents are vendored upstream bytes, not plugin-authored data.
+    VENDORED_CLASS_SUBDIRS = (
+        "copy_freely",
+        "snapshot_with_drift_alarm",
+        "own_outright",
+    )
+    FORBIDDEN_NAMES_IN_VENDORED = frozenset({"MANIFEST.yaml", "CURATION.md"})
+
+    def test_vendored_class_subtrees_cannot_carry_data_instance_filenames(self):
+        plugins_root = REPO_ROOT / "plugins"
+        if not plugins_root.is_dir():
+            # CI portability: pass trivially if no plugins/ tree is
+            # present yet (e.g. fresh checkout on a branch that hasn't
+            # landed a plugin yet).
+            return
+        violations: list = []
+        for plugin_dir in sorted(p for p in plugins_root.iterdir() if p.is_dir()):
+            for class_subdir in self.VENDORED_CLASS_SUBDIRS:
+                vendored_root = plugin_dir / class_subdir
+                if not vendored_root.is_dir():
+                    continue  # class subtree not yet populated — fine
+                for path in vendored_root.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    if path.name in self.FORBIDDEN_NAMES_IN_VENDORED:
+                        violations.append(str(path.relative_to(REPO_ROOT)))
+        assert violations == [], (
+            "vendored class subtrees must not carry DATA-instance filenames "
+            "(would silently exploit the PLUGIN_AUTHORIZED_DATA_FILENAMES "
+            "carve-out in TestVocabularyConfinement):\n" + "\n".join(violations)
+        )
