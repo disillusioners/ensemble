@@ -146,3 +146,16 @@ a migration plan AND user ratification. The first additive change is
 the literal `1.0.0` and the additive `1.0.x` family; anything ≥ `1.1.0` or a
 different major is refused (`schema_version_unsupported`) until the runner
 carries the newer schema.
+
+**Additive epoch log.** Each accepted additive change to the manifest
+vocabulary is recorded here and MUST bump the shipped manifest's
+`schema_version` to the next `1.0.x` patch — the first additive change is
+`1.0.1`, never v2 (CON §8):
+
+| Version | Additive change | Source |
+|---------|-----------------|--------|
+| `1.0.1` | `snapshot_with_drift_alarm.upstream_paths` (per-class upstream path mapping; optional — absent falls back to the strip-class-prefix heuristic) | slice ③ |
+
+`plugins/opendesign/MANIFEST.yaml` declares `1.0.1` from slice ③ onward;
+the reader still accepts the whole `1.0.x` family, so `1.0.0` declarations
+remain valid.

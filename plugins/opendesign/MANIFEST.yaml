@@ -9,7 +9,9 @@
 # Source of truth: .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md
 # Pin rationale: see CURATION.md and tools/vendor/{od_vendor,od_vendor_snapshot}.py.
 
-schema_version: "1.0.0"
+# 1.0.1 — additive: snapshot_with_drift_alarm.upstream_paths (slice ③;
+# CON §8: first additive change is 1.0.1, never v2).
+schema_version: "1.0.1"
 plugin:
   name: "opendesign"
   license: "Apache-2.0"

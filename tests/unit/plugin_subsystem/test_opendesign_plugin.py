@@ -40,6 +40,12 @@ class TestRealPluginManifest:
         assert result.declaration.license == "Apache-2.0"
         assert result.declaration.integration_path == "C"
         assert result.declaration.execution_mode == "resource-only"
+        # Additive epoch (review council adjudication council-od-slice4-
+        # 20261006): the shipped manifest MUST declare 1.0.1 — slice ③
+        # added snapshot_with_drift_alarm.upstream_paths and CON §8 says
+        # the first additive change is 1.0.1, never v2.  A silent
+        # regression to "1.0.0" fails here.
+        assert result.declaration.schema_version == "1.0.1"
         # Pins: slice ③ added the snapshot_with_drift_alarm layer
         # (REC §4.1 row 2); the per-class pin for snapshot inherits
         # copy_freely's pin by default (CON §2 line 47) and is

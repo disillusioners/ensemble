@@ -10,7 +10,7 @@
     "schema_version": {
       "type": "string",
       "minLength": 1,
-      "description": "SemVer. Plugin #1 authors against the literal \"1.0.0\". 1.0.x = additive only; the validator accepts the 1.0.x family and refuses anything else until the runner carries the newer schema."
+      "description": "SemVer. Plugin #1 authors against the literal \"1.0.0\". 1.0.x = additive only; the validator accepts the 1.0.x family and refuses anything else until the runner carries the newer schema. Current additive epoch: 1.0.1 (snapshot_with_drift_alarm.upstream_paths, slice \u00b3)."
     },
     "plugin": {
       "type": "object",
