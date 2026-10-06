@@ -1,5 +1,18 @@
 # Test Packs
 
+## Completed commission — SNAPSHOT-UIUX P6 4-GREEN MERGE GATE @ afcf0cbc (2026-10-06) — 🟢 FINAL VERDICT: 4-GREEN, MERGE-READY
+
+Worktree `/home/nea/ensemble-src-wt-snapshot-uiux`, branch `feature/snapshot-uiux` (base `ac399874`), tips `2ee644b7` (c8 e2e quintet) → `b87e20a8` (boot PATH hardening) → `11a203f9` (router-pin admission). Tester authored the 5-file e2e quintet (c8); **A tsc EXIT:0 · B jest 107 suites/3731 tests 3727P+4F EXACT documented baseline, snapshots suites 100% · C pytest full-tree sharded: snapshot suites 110/110 strict green, 216 reds → 1 branch-caused (FIXED+verified) + 3 env-shaped (fence-proven) + 3 already-documented + 209 machine-proven pre-existing at base (7 attribution legs) · D Playwright FAIL+HALT: deterministic NG8002 `backdropClass` on `mat-drawer-container` @ snapshots.component.html:306 (dev-FE `abeb5229`), zero browser tests ran; deferred (e) Deprecation/Sunset/Link 3/3 + (f) `{items,total}` shape PASS**. Full evidence: RESULTS/2026-10-06-snapshot-uiux-p6-4green-merge-gate.md; handoff: .agents/shared/handoff/2026-10-06-snapshot-uiux-gate-d-halt-backdropclass.md. 33 workers.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `snapshots_suites_strict` (ad-hoc) | 4 files: tests/unit/routers/test_snapshots.py + test_snapshot_list_with_filters.py + test_snapshot_repository.py + test_snapshot_search_service.py | BE feature suites | <1 min | 2026-10-06 @ 2ee644b7 | ✅ PASS 110/110 (21.1s) |
+| `frontend_full_jest` (tracked invocation) | `CI=true timeout 300 npm test -- --watch=false` | full FE | ~1 min | 2026-10-06 @ 2ee644b7 | ✅ PASS-with-baseline 3727P/4F exact (20.4s) |
+| `snapshots_playwright_e2e` (new, c8) | `cd frontend && npx playwright test --config playwright.snapshots.config.ts e2e/snapshots.spec.ts` | 12 browser steps, strict ports 18279/14199/15532 | 3-5 min | 2026-10-06 @ 2ee644b7 | ❌ FAIL+HALT — NG8002 FE compile (dev-FE); boot chain + canary proven green; (e)/(f) PASS via standalone boot |
+| `be_sweep_*` (ad-hoc ×20 shards) | env-fenced `timeout 300 uv run pytest <dir/slice>` — routers, job_queue ×3, services, tools ×2, unit-rest ×4, misc ×2, oc+mqr, integration B×2 + A×5+tail+solo | full BE tree (tests/packs companions + postgres-by-policy + perf-matrix excluded, disclosed) | 8–300s each | 2026-10-06 @ 2ee644b7→11a203f9 | ⚠️ 216F/25E total — 0 new-at-delta (attribution legs at base ac399874) |
+| `base_attribution_legs` (ad-hoc ×7) | detached worktrees @ ac399874, uv-synced, import-verified, removed after | red-at-base proofs | <4 min/leg | 2026-10-06 | ✅ 209 pre-existing / 1 branch-caused (pin, fixed 11a203f9) / 3 env-shaped (fence cross-check HEAD+hardened 3/3 PASS) |
+
+
 ## Completed commission — QUESTION-WATCH-FANOUT VERIFICATION GATE @ c7862368 (2026-10-05) — 🟢 VERDICT: SHIP
 
 Worktree `/home/nea/ensemble-src-wt-question-watch-fanout`, branch `feature/question-watch-fanout` @ `c7862368` (base `52ab3b6e`, 10 commits, 11 files +2064/−115). READ-ONLY gate: zero repo code changes/commits/push; no :9797/:7979/:8088 contact; artifacts `/tmp/qwf/`. New suite 19/19 with real-side-effect evidence (incident geometry, non-claiming, dedupe, events-exemption, reconcile-mint, Step-4b DELETE-fidelity); 4 scoped packs green (44+55+4+4); 36be8aef family 30/30 + mission_pins exact 3F/34P parity; job_queue 4-quarter sweep (2024 tests) + adjacent 61-file sweep (1733 tests): **43 unique reds → 40 machine-proven pre-existing @ 52ab3b6e + 3 documented family, 0 new-at-delta**; concurrency pack 99P/0F/74S; full-chain in-process harness PASS (❓ + ⏳×3 + ⚠ verbatim to mission watcher). Full evidence: RESULTS/2026-10-05-question-watch-fanout-verification-gate.md. 18 workers.

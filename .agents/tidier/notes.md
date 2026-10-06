@@ -1,5 +1,17 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-10-06 — snapshot-uiux tidy pass (worktree feature/snapshot-uiux, range ac399874..HEAD, 14 scoped files +3550/−55), Iteration 001
+- Commission asked Tidier to edit+commit+run-gates → 4th occurrence of the edit-commission pattern; fixes routed to Developer per Cardinal #5 (precedent 2026-10-04, 09-26).
+- Dispatch: 2 parallel read-only workers (readable ddbbc60e, hygiene 5d94c3f1). Both reported fully; no gaps; 6 cross-worker merges (col nit, table chips/divider/spinner modules, page progress-bar, service rxjs imports).
+- Verdict: NEEDS WORK — mechanical zero-behavior manifest. 1 High / 6 Medium / 3 Low after dedup.
+- Only High: table's 7 dead filter signal-inputs + false "table reads them" comment (snapshots-table.component.ts:111-121); parent binds only 7 of 14 inputs (page html:310-321). Developer must grep BOTH spec files for bindings before deleting.
+- Mandated nit CONFIRMED by both workers (snapshots.py:52 `from sqlmodel import col`, zero refs).
+- Severity normalization (stated): production-file dead imports → 🟡 Medium per canonical dead-code row; spec-file dead imports → 🟢 Low (test-only lint noise). Table Material dead modules merged 3-in-1 (chips/divider both workers; spinner hygiene-only — coupled to deferred bar issue).
+- NG0303 `backdropClass` spec noise: verdict SKIP — no trivial zero-behavior fix exists (explicit spec imports = test-contract change; CUSTOM_ELEMENTS_SCHEMA too broad; root cause unpinnable without running under exact NG21 versions). Caller's "fix if trivial" condition not met.
+- Deferred to Reviewer: table template uses `<mat-progress-bar>` (html:56,60) WITHOUT importing MatProgressBarModule; parent page imports it and never uses it (probable spinner↔bar authoring swap). FE gate `tsc --noEmit` CANNOT catch template-compile errors — only ng build/e2e can. Reviewer Deep-Review (parallel) must adjudicate; Developer coordinates the swap with that lane.
+- Clean zones (both concur): BE `__future__`/annotation hygiene, bounded `Any`, zero TS any/cast-bypass, OnPush both components, no template subscribe, file sizes in-band with rationale docstrings (594L page component covered by 36L module docstring), spec naming matches skill-usage-table precedent, deprecation-proxy + manual RFC 8594/8288 headers exemplary.
+- Process nit (6th consecutive pass): neither relayed report visibly evidenced the skill_feedback-first tool call.
+
 ## 2026-10-04 — fix/claim-gate-sibling-deadlock FINAL quality cycle (main checkout @ 30e1c7a4, range 2ae91046..HEAD), Iteration 001
 - Commission: quality/maintainability/comment-accuracy ONLY; correctness settled (Reviewer r2 APPROVED); caller pre-identified 1 item + 7 reviewer 🟢 candidates to adjudicate fix-now vs defer; combined budget 2/3 used.
 - Dispatch: 2 parallel read-only workers (readable 1964b16a, hygiene 4ed42678), 6 files +2169/−49. Both reported fully; no gaps; 3 cross-worker merges (INSTR comment, both unused-import findings).
