@@ -35,6 +35,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# PG server binaries (initdb, pg_ctl) often live outside the default
+# non-interactive PATH on Linux PG installs (typically
+# /usr/lib/postgresql/<ver>/bin). Prepend every installed version's
+# bin so the script works regardless of the operator's shell PATH.
+# The glob is safe under `set -u` — an unmatched pattern fails the
+# -d test and skips silently; multiple installed versions stack with
+# the highest version taking precedence.
+for _pgbin in /usr/lib/postgresql/*/bin; do
+  [ -d "$_pgbin" ] && export PATH="$_pgbin:$PATH"
+done
+
 PG_PORT="${PG_PORT:-15532}"
 DAEMON_PORT="${DAEMON_PORT:-18279}"
 DATA_DIR="${DATA_DIR:-/tmp/pg_e2e_snap_$$}"

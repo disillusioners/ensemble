@@ -35,7 +35,7 @@
  */
 
 import { execSync } from 'child_process';
-import { existsSync, readdirSync, readFileSync, rmSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'fs';
 import { join } from 'path';
 
 const LOG_DIR = '/tmp/e2e_snapshots_logs';
@@ -43,9 +43,30 @@ const PG_PORT = 15532;
 const PG_DIR_PREFIX = 'pg_e2e_snap_';
 const REPO_ROOT = join(__dirname, '..', '..');
 
+// PG server binaries (initdb, pg_ctl) often live outside the default
+// non-interactive PATH on Linux PG installs (typically
+// /usr/lib/postgresql/<ver>/bin); augment PATH so child_process
+// resolves them. Mirrors the boot script's PATH hardening
+// (test-lane fix only — production code unchanged).
+const AUGMENTED_PATH: string = (() => {
+  const base = process.env.PATH ?? '';
+  try {
+    const bins = readdirSync('/usr/lib/postgresql')
+      .map((v) => join('/usr/lib/postgresql', v, 'bin'))
+      .filter((b) => { try { return statSync(b).isDirectory(); } catch { return false; } });
+    return bins.length ? `${bins.join(':')}:${base}` : base;
+  } catch {
+    return base;
+  }
+})();
+
 function safeExec(cmd: string): string {
   try {
-    return execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000 })
+    return execSync(cmd, {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 30_000,
+      env: { ...process.env, PATH: AUGMENTED_PATH },
+    })
       .toString()
       .trim();
   } catch {
