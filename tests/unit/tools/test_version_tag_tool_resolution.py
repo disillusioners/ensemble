@@ -1054,6 +1054,9 @@ class TestClosureLevelSpawnInstanceUsesVersionedMeta:
         # Manager wired per tests/test_spawn_team_members.py so the
         # spawn_instance closure reaches manager.spawn_instance(...).
         manager = MagicMock()
+        # MCP preload seam (designer OD-lane fix, 2026-10-06): the tool
+        # body awaits ensure_mcp_preloaded before the sync spawn.
+        manager.ensure_mcp_preloaded = AsyncMock(return_value=None)
         # Real-shaped LLMConfig default: the documented default for
         # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
         # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
@@ -1245,6 +1248,9 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
         # Manager: spawn_instance returns a tuple; enqueue_message is an
         # AsyncMock because the closure awaits it.
         manager = MagicMock()
+        # MCP preload seam (designer OD-lane fix, 2026-10-06): the tool
+        # body awaits ensure_mcp_preloaded before the sync spawn.
+        manager.ensure_mcp_preloaded = AsyncMock(return_value=None)
         # Real-shaped LLMConfig default: the documented default for
         # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
         # compare-tools vision gate (``compare_tools._verify_vision_allowed``,

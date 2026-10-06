@@ -97,6 +97,9 @@ def _make_manager(
         ]
 
     manager = MagicMock()
+    # MCP preload seam (designer OD-lane fix, 2026-10-06): the tool body
+    # awaits ensure_mcp_preloaded before the sync spawn.
+    manager.ensure_mcp_preloaded = AsyncMock(return_value=None)
     manager.config = MagicMock()
     manager.config.llm = MagicMock()
     manager.config.llm.allowed_models = list(allowed_models)
