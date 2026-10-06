@@ -4,7 +4,10 @@
   ``daemon/plugin_subsystem/**`` and ``plugins-convention/**`` — a SCOPED
   walk of the repo (tier-2 legitimately lives inside the daemon repo; the
   invariant is that tier-1 modules stay structurally blind). Excluded: the
-  tests' own fixtures and the plugin-subsystem planning dir.
+  tests' own fixtures, the plugin-subsystem planning dir, and the
+  authorized DATA-instance locations under ``plugins/*/`` (see
+  ``PLUGIN_AUTHORIZED_DATA_FILES`` below — the manifest + curation record
+  are CON §1 + REC §9 mandated, not vocabulary definition sites).
 - No-import invariant: no module outside ``daemon/plugin_subsystem/``
   imports from ``plugins/``.
 - No-runtime-loading: no ``importlib`` import / entry-point scanning in the
@@ -49,6 +52,20 @@ WALK_EXCLUDED_TOP_LEVEL = {
 WALK_ALLOWED_PREFIXES = {("daemon", "plugin_subsystem")}  # allowed zone (tier-2 home)
 WALK_EXCLUDED_FILES = {"package-lock.json", "uv.lock"}
 
+# Authorized DATA-instance filenames ANYWHERE under ``plugins/*/`` (CON §7
+# last paragraph + the slice ② dispatch: "plugins/opendesign/MANIFEST.yaml
+# is a DATA instance of the vocabulary, not a definition site").  These
+# files are CON §1 / REC §9 mandated; they legitimately reference the
+# vocabulary by name.  The set is matched on ``path.name`` so the rule
+# applies uniformly to every plugin tree (``plugins/<name>/MANIFEST.yaml``,
+# ``plugins/<name>/CURATION.md``).
+PLUGIN_AUTHORIZED_DATA_FILENAMES = frozenset(
+    {
+        "MANIFEST.yaml",  # CON §1: every plugin tree has one
+        "CURATION.md",  # REC §9: OQ3 record per plugin
+    }
+)
+
 
 def _iter_repo_text_files():
     for path in REPO_ROOT.rglob("*"):
@@ -58,6 +75,16 @@ def _iter_repo_text_files():
         if relative.parts[0] in WALK_EXCLUDED_TOP_LEVEL:
             continue
         if relative.parts[:2] in WALK_ALLOWED_PREFIXES:
+            continue
+        # Authorized DATA-instance filenames anywhere under plugins/*/.
+        # Matched on the basename so the rule applies uniformly to every
+        # plugin tree.  Files in copy_freely/ etc. are NOT authorized
+        # (those are vendored upstream bytes; vocabulary is not a
+        # legitimate concern there but we don't want to encourage it).
+        if (
+            relative.parts[0] == "plugins"
+            and path.name in PLUGIN_AUTHORIZED_DATA_FILENAMES
+        ):
             continue
         if path.name in WALK_EXCLUDED_FILES:
             continue
