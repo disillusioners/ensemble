@@ -14,7 +14,8 @@
     "allow": ["bash", "proc", "filesystem", "time", "self", "help",
               "image", "knowledge", "mcp", "context", "shared_meta_kv",
               "instance", "service", "midflight", "dynamic-skill",
-              "design"]
+              "design",
+              "od.generate", "od.compose_brief", "od.save", "od.lint"]
   },
   "context_injection": { "heuristic_match_shared_md_files": true },
   "team_members": ["worker"]

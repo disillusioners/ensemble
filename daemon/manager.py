@@ -1482,6 +1482,16 @@ class InstanceManager:
         # subsequent startups so schema drift propagates safely.
         self._bootstrap_infra_types()
 
+        # Bootstrap the plugin registry (slice ⑤ tier-1 wiring; the
+        # slice-③ "standalone+CI, consumer lands at ⑤" decision — THIS
+        # is that consumer). Scans the plugins root via
+        # ``plugin_registry.load_registry`` and populates
+        # ``self._plugin_registry``. Graceful degradation is
+        # contractual: an absent/invalid plugins tree never blocks
+        # boot — refusals are logged per plugin and the daemon
+        # continues with whatever validated (possibly nothing).
+        self._bootstrap_plugin_registry()
+
         # ── Initialize Services ──────────────────────────────────────────────────
         # Services are initialized after all internal state is set up.
         # They receive references to the manager facade and required state.
@@ -2326,6 +2336,55 @@ class InstanceManager:
                 f"Infra asset types already registered: "
                 f"{len(result.registered)} total, {result.updated_count} updated"
             )
+
+    def _bootstrap_plugin_registry(self) -> None:
+        """Scan the plugins root and populate the plugin registry (slice ⑤).
+
+        Boot-scan wiring for the slice-③ ``plugin_registry`` module (REC
+        §1.2 component 3; the "standalone+CI, consumer lands at ⑤"
+        decision — this method is that consumer). Delegates to
+        :func:`daemon.plugin_subsystem.plugin_registry.load_registry`,
+        which never raises for absent/invalid plugin trees (an absent
+        root scans empty; per-plugin validation failures land in the
+        registry's refusal surface).
+
+        Fault-tolerant (mirrors :meth:`_bootstrap_infra_types`): a
+        failure here is logged but does not block daemon startup —
+        the tool lane (``create_instance_tools``) binds plugin Port
+        tools independently of this registry, and both surfaces
+        degrade to "not bound" when the plugin tree is absent or
+        invalid.
+        """
+        # None until a scan succeeds — consumers treat None as "no
+        # plugins" (same read as an empty registry).
+        self._plugin_registry = None
+        try:
+            from .plugin_subsystem.plugin_registry import (
+                DEFAULT_PLUGINS_ROOT,
+                load_registry,
+            )
+
+            registry = load_registry(DEFAULT_PLUGINS_ROOT)
+        except Exception as e:  # noqa: BLE001 — boot must not crash on plugin-tree problems
+            logger.warning(
+                f"Plugin registry boot-scan failed; continuing without "
+                f"plugins: {e}"
+            )
+            return
+
+        self._plugin_registry = registry
+        declared = registry.names()
+        refused = registry.refused_names()
+        logger.info(
+            f"Plugin registry boot-scan: {len(declared)} plugin(s) "
+            f"({', '.join(declared) if declared else 'none'}), "
+            f"{len(registry.skill_ids())} plugin-skill(s)"
+        )
+        for name in refused:
+            for refusal in registry.refusals(name):
+                logger.warning(
+                    f"Plugin {name!r} refused at boot-scan: {refusal}"
+                )
 
     def _init_warmup_pool(self) -> None:
         """Initialize and warm up the MCP connection pool.
