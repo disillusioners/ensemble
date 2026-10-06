@@ -291,6 +291,12 @@ def make_spawn_manager(
     # The SYNC facade method. Returns (instance_id, validated_model_override).
     manager.spawn_instance = MagicMock(return_value=spawn_result)
 
+    # MCP preload seam (designer OD-lane fix, 2026-10-06): the tool body
+    # now awaits ``ensure_mcp_preloaded`` before the sync spawn. Async
+    # no-op — the preload lane itself is pinned in
+    # tests/unit/test_spawn_lane_mcp_preload.py.
+    manager.ensure_mcp_preloaded = AsyncMock(return_value=None)
+
     # Async DB-touching helpers used by the tool body.
     manager._instance_repository = MagicMock()
     manager._instance_repository.get.return_value = None

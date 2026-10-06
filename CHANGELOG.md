@@ -52,6 +52,29 @@ FE additions:
 
 ---
 
+## [0.17.2] — 2026-10-06
+
+### Fixed — Designer OD-lane: MCP preload at all bare spawn lanes (`feature/designer-od-lane-fix`)
+
+> **CHANGELOG (fix release):** *Spawns that went through any bare `manager.spawn_instance()` call site — the `spawn_instance` agent-tool lane included — skipped MCP preloading, so designer (and planner) children bound ZERO MCP tools on live (RCA 2026-10-05: 4/4 designer dispatches since Oct 1 fell back text-first). The fix preloads MCP at the lane, before the spawn, on every path.*
+
+- **At-lane MCP preload** — `daemon/tools/instance.py` now pre-generates the child UUID, awaits `manager.ensure_mcp_preloaded(instance_id, …)`, and passes the `instance_id` into the sync spawn at all 4 bare sites (`spawn_instance` tool lane, `spawn_councilor`, `convene_council` ×2); same treatment at `daemon/routers/mappings.py` (HTTP lane) and `daemon/sources/adapters/slack/thread_manager.py` (Slack thread lane, including repair of a latent await-TypeError on the preload call). The defect was class-independent — every bare lane was affected; designer/planner merely surfaced it via the leader's bare-tool dispatch.
+- **`McpService.is_preloaded()` + warn-once cache-miss guard** — new introspection predicate, plus a per-instance warn-once WARNING when a spawn lane's allow-list advertises MCP but the preload cache misses. Never raises; silent on legit-empty caches; allow-gated.
+
+### Changed — Designer agent: OD-first by construction
+
+- **Prompt default flipped to OD-first** — `agents/designer/` soul/workflow/rule/tools_note now make the OpenDesign MCP lane the primary mockup path, with a **mandatory `fallback_reason` enum** (`tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>`) recorded on every text-first fallback, a **lane-start probe** (one `od_list_projects` call before the mockup lane), a `mockup_lane` column in the design-spec template, and the npx-safety rider (TypeScript only via `frontend/`'s local devDependency — never bare `tsc`/`npx tsc` outside a package dir). Prompt stream ships in the same release so behavior and prompts land together.
+
+### Added
+
+- **Pinned behavioral spawn-lane MCP-preload suite** (`tests/unit/test_spawn_lane_mcp_preload.py`) — fails at base (`is_preloaded` never written for the child UUID; warn-once symbol absent), passes at fix; plus an **AST census probe** (`tests/unit/probe_designer_od_lane_binding.py`) enumerating bare `spawn_instance` call sites (fail@base → pass@fix). Test-double hardening across the spawn surface: `AsyncMock` `ensure_mcp_preloaded` seams (WalkerManager double included) and `instance_id=ANY` assertion tracking on spawn calls.
+
+### Deferred (F1 follow-up ledger)
+
+- F2 allow-all warn-gate gap; F3 behavioral pins sites 2-6; F4-F8; HTTP-lane path-shaped `agent_id` normalization; `plane_http_client` 409 logging-arity; child `instance_name: None` in the detail API; `dev.sh` PORT knob; `test_loaded_line` docstring overstatement.
+
+---
+
 ## [0.17.1] — 2026-10-05
 
 ### Changed — Chart render is now opt-in (`render_image: bool = False` on `generate_chart`; user directive via Discord 2026-10-05)

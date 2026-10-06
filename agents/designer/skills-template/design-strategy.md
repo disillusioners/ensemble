@@ -1,5 +1,5 @@
 ---
-version: 1.2.0
+version: 1.3.0
 category: planning
 auto_load: true
 ---
@@ -45,9 +45,9 @@ Open a fresh `design-spec.md` from the canonical template. Front-matter carries 
 2. **Components** — each names purpose / behavior / states / a11y / wireframe path.
 3. **Tokens** — every color/space/typography reference traces to the design-token canonical path; no bare hex or pixel sizes.
 4. **A11y** — roles, labels, focus order, contrast. Even a "standard" note is required.
-5. **Wireframe** — ASCII or mermaid for every component with a layout. Text-native default; HTML fragment only when pixel intent justifies the capture cost. **Source comes from the mockup lane (see Mockup Lane) — the repo copy at `.agents/shared/planning/{feature}/design/mockups/{page}.{ext}` is the developer deliverable.**
+5. **Wireframe** — wireframe artifacts come from the **mockup lane** (see Mockup Lane). OD is the default; text-native is the last-effort fallback only when OD genuinely fails or is verifiably unavailable (see Mockup Lane). The repo copy at `.agents/shared/planning/{feature}/design/mockups/{page}.{ext}` is the developer deliverable in either lane.
 6. **Tradeoffs** — alternatives considered + the decision + the reason.
-7. **Design artifacts** — table mapping each renderable artifact (page → canonical path → kind → AC refs → OD-UI URL → lint). Lane marker (`mockup_lane: opendesign | text`) declares which lane actually shipped.
+7. **Design artifacts** — table mapping each renderable artifact (page → canonical path → kind → AC refs → OD-UI URL → lint). Lane marker (`mockup_lane: opendesign | text`) declares which lane actually shipped. Whenever any row is `mockup_lane: text`, the spec MUST also record `fallback_reason` with one of the exact tokens `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>` (Cardinal #7; tester gates on these exact strings). A text-lane spec missing `fallback_reason` is SPEC INCOMPLETE — conformance MUST reject it.
 
 **Self-review (five passes, no second agent needed) before pinning:**
 
@@ -58,18 +58,19 @@ Open a fresh `design-spec.md` from the canonical template. Front-matter carries 
 - [ ] A11y + tradeoffs captured
 - [ ] Design artifacts table filled in with concrete canonical paths under `mockups/`
 - [ ] Lane marker (`mockup_lane: opendesign | text`) recorded
+- [ ] If `mockup_lane: text` for any row: `fallback_reason` recorded with one of `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>` (Cardinal #7)
 
 ---
 
-## Mockup Lane (OD-first, graceful degradation)
+## Mockup Lane (OD-first; text only as last-effort fallback)
 
 The Wireframe section and the Design artifacts table are fed by one of two lanes. **The repo copy under `.agents/shared/planning/{feature}/design/mockups/` is the contract of record** — the developer reads from disk, not from prose or OD-UI. The lane marker records which lane actually shipped; conformance treats the lane + lint verdict as the quality bar.
 
-**Concept.** OD-first: default to the OpenDesign lane whenever the MCP is registered, licensed, and reachable; graceful degradation: any OD-side failure (tool error, daemon unreachable, license/BYOK unconfigured, page outside the per-call ceiling) routes back to the text-native lane for that page — the workflow never blocks on OD availability. Per the v0.16.1 capability ceiling, OD produces exactly one HTML per call, inline, at generation time — tokens, component scaffolds, and TS templates remain v0.17.0 scope and are not promised.
+**Concept.** OD-first: the OpenDesign lane is the default whenever the MCP is registered, licensed, and reachable. Text-native / hand-authored / self-do is a last-effort fallback only — permitted when OD has genuinely failed or is verifiably unavailable (probe not bound, call error, daemon unreachable, BYOK/timeout/lane-ceiling failure). The workflow never blocks on OD availability, but a text-lane fallback MUST record `fallback_reason` (see Cardinal #7) with one of the exact tokens `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>` — a text-lane fallback without `fallback_reason` is SPEC INCOMPLETE and conformance MUST reject it. Per the v0.16.1 capability ceiling, OD produces exactly one HTML per call, inline, at generation time — tokens, component scaffolds, and TS templates remain v0.17.0 scope and are not promised.
 
-**Design-artifacts table contract.** Each row in the spec's Design artifacts table carries the full edge shape developer consumes: `path` (the canonical repo-relative path under `mockups/`, daemon-independent), `kind` (`html-mockup` | `text-mockup` | `render`), `ac_refs` (the AC IDs that row serves), `od_url` (OD-UI provenance — reference only, present only on `mockup_lane: opendesign` rows; `render` rows carry an `od_url` and no mockup path), and `lint` (`pass` | `fail-N` | `n/a`). The lane marker (`mockup_lane: opendesign | text`) declares which lane actually shipped; the `kind` column carries the per-row kind.
+**Design-artifacts table contract.** Each row in the spec's Design artifacts table carries the full edge shape developer consumes: `path` (the canonical repo-relative path under `mockups/`, daemon-independent), `kind` (`html-mockup` | `text-mockup` | `render`), `ac_refs` (the AC IDs that row serves), `od_url` (OD-UI provenance — reference only, present only on `mockup_lane: opendesign` rows; `render` rows carry an `od_url` and no mockup path), `lint` (`pass` | `fail-N` | `n/a`), `mockup_lane` (`opendesign` | `text`), and `fallback_reason` (one of `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>` — REQUIRED when `mockup_lane: text`, must be `n/a` when `mockup_lane: opendesign`).
 
-**Procedure (full step list).** The five-step procedure — `od_compose_brief` → `od_generate_design` → `od_lint_artifact` → write-through to canonical `mockups/` path → record OD-UI provenance — lives canonically in **Mockup lane** of the designer's workflow file. See Mockup lane for the executable steps.
+**Procedure (full step list).** The five-step procedure — Step 0 lane-start probe (`od_list_projects`) → Step 1 OD lane (`od_compose_brief` → `od_generate_design` → `od_lint_artifact` → write-through to canonical `mockups/` path → record OD-UI provenance) → Step 2 text fallback (with `fallback_reason`) — lives canonically in **Mockup lane** of the designer's workflow file. See Mockup lane for the executable steps.
 
 **Implement-brief relay.** The developer's implement-brief carries the `design_artifacts` list (one row per artifact with concrete path, kind, AC refs, OD-UI URL, lint) plus the `mockup_lane` marker — see architecture §4.5 for the full edge field shape. v1 developer reads each path from disk and ports the DOM/structure/CSS intent into components; v2 developer relays the field verbatim to the executor.
 

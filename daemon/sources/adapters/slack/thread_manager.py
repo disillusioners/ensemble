@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -207,7 +208,16 @@ class ThreadManager:
                 self._threads[workspace_id].move_to_end(thread_ts)
                 return thread.instance_id
             
-            instance_id, _validated_model_override = await self._manager.spawn_instance(agent_id=agent_id)
+            # Pre-generate the UUID and preload MCP before the sync spawn
+            # (designer OD-lane fix, 2026-10-06). ALSO fixes a latent
+            # TypeError: the facade ``spawn_instance`` is sync and returns
+            # a tuple — ``await`` on it would raise if this path ever ran.
+            instance_id = str(uuid.uuid4())
+            await self._manager.ensure_mcp_preloaded(instance_id, agent_id=agent_id)
+            instance_id, _validated_model_override = self._manager.spawn_instance(
+                agent_id=agent_id,
+                instance_id=instance_id,
+            )
             await self._register_thread_unlocked(workspace_id, channel_id, thread_ts, instance_id)
             return instance_id
 

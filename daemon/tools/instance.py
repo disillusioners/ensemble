@@ -23,6 +23,7 @@ dedicated extraction PR).
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal
@@ -288,6 +289,66 @@ from daemon.rag.config import is_rag_enabled
 from daemon.governor.contracts import SpawnCouncilorInput  # Phase 2: council tool schema (Phase 0 frozen)
 
 
+# (c) silence-killer (designer OD-lane fix, 2026-10-06): warn ONCE per
+# instance when its spawn lane skipped MCP preload while the agent's
+# tools.allow includes "mcp" — the defect class that left live designer
+# instances with zero bound mcp_* tools and zero log output. Process-
+# lifetime set, bounded by instance count, cleared on restart.
+_MCP_PRELOAD_MISS_WARNED: set[str] = set()
+
+
+def _resolve_tools_allow_for_instance(manager: Any, instance_id: str) -> list[str] | None:
+    """Best-effort resolve the agent's ``tools.allow`` for an instance.
+
+    Mirrors the identity fallback in ``ensure_mcp_preloaded``: read the
+    instance row for ``agent_id`` / ``agent_tag``, then resolve the
+    versioned agent meta. Any failure → ``None`` (a diagnostic path must
+    never raise).
+    """
+    try:
+        row = manager._instance_repository.get(instance_id)
+        if row is None:
+            return None
+        agent_id = getattr(row, "agent_id", None)
+        if not agent_id:
+            return None
+        version_tag = getattr(row, "agent_tag", None)
+        from ..registry import get_registry
+
+        registry = get_registry()
+        meta = registry.get_version(agent_id, version_tag)
+        if meta is None:
+            meta = registry.get_resolved(agent_id)
+        if meta is None or meta.tools is None:
+            return None
+        return list(meta.tools.allow or [])
+    except Exception:
+        return None
+
+
+def _warn_once_mcp_preload_miss(manager: Any, instance_id: str) -> None:
+    """Warn once per instance on MCP preload cache-miss (allow-gated).
+
+    Fires only when the resolved allow-list contains "mcp" — agents that
+    never asked for MCP stay silent. Mark-before-warn guarantees at-most-
+    one warning per instance even under concurrent dispatches. Never
+    raises.
+    """
+    if instance_id in _MCP_PRELOAD_MISS_WARNED:
+        return
+    _MCP_PRELOAD_MISS_WARNED.add(instance_id)
+    allow = _resolve_tools_allow_for_instance(manager, instance_id)
+    if allow is None or "mcp" not in allow:
+        return
+    logger.warning(
+        f"MCP preload cache miss for instance {instance_id[:8]} while "
+        f"tools.allow includes 'mcp' — its spawn lane skipped MCP preload; "
+        f"binding 0 MCP tools this dispatch. Persistent misses mean the "
+        f"spawn lane lacks the ensure_mcp_preloaded fix (designer OD-lane, "
+        f"2026-10-06)."
+    )
+
+
 def _load_mcp_tools(manager: Any, instance_id: str) -> list[Any]:
     """Load MCP tools from preloaded cache.
 
@@ -295,11 +356,19 @@ def _load_mcp_tools(manager: Any, instance_id: str) -> list[Any]:
         List of LangChain tools from MCP servers. Empty list if
         not preloaded or on error.
     """
-    try:
-        if hasattr(manager, '_mcp_service') and manager._mcp_service:
-            return manager._mcp_service.get_mcp_tools(instance_id)
-    except Exception as e:
-        logger.warning(f"Failed to load MCP tools: {e}")
+    service = getattr(manager, "_mcp_service", None)
+    if service:
+        try:
+            tools = service.get_mcp_tools(instance_id)
+            if not service.is_preloaded(instance_id):
+                # Cache MISS (no entry at all) ≠ legit-empty (a [] entry
+                # written by a completed preload, e.g. zero active
+                # servers). Only a miss indicates a spawn lane skipped
+                # preload.
+                _warn_once_mcp_preload_miss(manager, instance_id)
+            return tools
+        except Exception as e:
+            logger.warning(f"Failed to load MCP tools: {e}")
     return []
 
 
@@ -2694,9 +2763,27 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 # (fail-closed, never an error).
                 steering_note = SNAPSHOT_STEERING_IGNORED_LINE
 
+            # MCP preload (designer OD-lane fix, 2026-10-06): pre-generate
+            # the child UUID and populate the MCP tool cache BEFORE the
+            # sync spawn. The sync facade ``manager.spawn_instance`` cannot
+            # preload itself (the preload seams are async); every healthy
+            # lane routes through ``spawn_instance_with_mcp``, which awaits
+            # ``ensure_mcp_preloaded`` first — this tool lane was the one
+            # bypass, leaving leader-dispatched MCP-dependent children
+            # (designer/planner) with zero bound mcp_* tools. Best-effort
+            # and bounded: ``ensure_mcp_preloaded`` never raises and the
+            # lazy preload opens no connections. Fresh UUID ⇒ empty cache
+            # ⇒ exactly one preload write; return contract unchanged (the
+            # (instance_id, validated_model_override) tuple is preserved).
+            child_uuid = str(uuid.uuid4())
+            await manager.ensure_mcp_preloaded(
+                child_uuid,
+                agent_id=agent_id,
+                version_tag=version_tag,
+            )
             new_instance_id, validated_model_override = manager.spawn_instance(
                 agent_id=agent_id,
-                instance_id=None,
+                instance_id=child_uuid,
                 parent_id=current_instance_id,
                 project_id=project_id,
                 instance_name=instance_name,
@@ -3006,9 +3093,18 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # visible in the same project-scoped instance list.
         councilor_project_id = _get_instance_project_id(manager, current_instance_id)
         try:
+            # MCP preload — lane parity with the spawn_instance tool (see
+            # the detailed comment there). Councilors are MCP-consumers too
+            # (od_* design review); preload is best-effort and never raises.
+            councilor_uuid = str(uuid.uuid4())
+            await manager.ensure_mcp_preloaded(
+                councilor_uuid,
+                agent_id=resolved_agent_id,
+                version_tag=version_tag,
+            )
             new_instance_id, _returned_model = manager.spawn_instance(
                 agent_id=resolved_agent_id,
-                instance_id=None,
+                instance_id=councilor_uuid,
                 parent_id=current_instance_id,
                 project_id=councilor_project_id,
                 instance_name=instance_name,
@@ -3185,7 +3281,16 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # are visible in the same project-scoped instance list (mirrors the
         # spawn_instance tool's auto-inherit at the top of this file).
         gov_project_id = _get_instance_project_id(manager, current_instance_id)
+        # MCP preload — lane parity with the spawn_instance tool (see the
+        # detailed comment there). Best-effort, never raises.
+        gov_uuid = str(uuid.uuid4())
+        await manager.ensure_mcp_preloaded(
+            gov_uuid,
+            agent_id="governor",
+            version_tag=gov_version_tag,
+        )
         gov_instance_id, _ = manager.spawn_instance(
+            instance_id=gov_uuid,
             agent_id="governor",
             parent_id=current_instance_id,
             project_id=gov_project_id,
@@ -3380,7 +3485,16 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # are visible in the same project-scoped instance list (mirrors the
         # spawn_instance tool's auto-inherit at the top of this file).
         gov_project_id = _get_instance_project_id(manager, current_instance_id)
+        # MCP preload — lane parity with the spawn_instance tool (see the
+        # detailed comment there). Best-effort, never raises.
+        gov_uuid = str(uuid.uuid4())
+        await manager.ensure_mcp_preloaded(
+            gov_uuid,
+            agent_id="governor",
+            version_tag=gov_version_tag,
+        )
         gov_instance_id, _ = manager.spawn_instance(
+            instance_id=gov_uuid,
             agent_id="governor",
             parent_id=current_instance_id,
             project_id=gov_project_id,

@@ -1140,6 +1140,16 @@ class McpService:
         """
         return self._tools_cache.get(instance_id, [])
 
+    def is_preloaded(self, instance_id: str) -> bool:
+        """True once ``preload_mcp_tools`` has run for this instance.
+
+        Distinguishes a cache MISS (no entry at all — some spawn lane
+        skipped preload) from a legit-empty result (a ``[]`` entry written
+        by a completed preload, e.g. zero active MCP servers or every
+        server filtered). Never raises.
+        """
+        return instance_id in self._tools_cache
+
     async def close_connections(self, instance_id: str) -> None:
         """Close all MCP connections for an instance.
 

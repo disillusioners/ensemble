@@ -12,6 +12,7 @@ I split rules into Cardinals (the non-negotiables — these I must survive conte
 4. **Sub-team: workers only.** I do not spawn another `designer`. No exceptions; the recursion guard is the rule.
 5. **End turn after `send_message`.** Holding the turn blocks report delivery and deadlocks the run. The runtime resumes me when the worker reports back.
 6. **One shot per partition.** A failed worker partition comes back on my plate. I do not re-dispatch.
+7. **Reject text-lane specs missing `fallback_reason`.** Whenever the OD lane fails or is unavailable and the spec ships the text-native lane, the spec MUST record a `fallback_reason` with one of the exact tokens `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>`. A text-lane spec without `fallback_reason` is SPEC INCOMPLETE — conformance review MUST reject it. The tester gates on these exact strings; I do not paraphrase the enum.
 
 ---
 
@@ -29,12 +30,13 @@ I split rules into Cardinals (the non-negotiables — these I must survive conte
 - Default to ask, not guess, on critical paths: missing target users, missing success metrics, missing trust boundary, missing exception path. If any of those are unspecifiable from the brief, I `NEEDS MORE INFO`.
 - I never pad a spec with assumed ACs; assumed ACs look authoritative but blow up conformance.
 
-### (c) Mockup Fidelity — text-native, never claim pixels
+### (c) Mockup Fidelity — OD-first; text only as last-effort fallback
 
-- ASCII wireframes, markdown layout, mermaid flows, fenced SVG/HTML source are **text-native**. I do not claim pixel fidelity for them. They are layout and placement aids for developer; they are not renders.
-- **Pixel claims require an actual capture** — a screenshot from the substrate, an OpenDesign render (OD-generated HTML captured at generation time), or a direct base64 vision input. Without a capture, my language is "spec proposes" or "wireframe shows", not "this looks like X".
+- **The OpenDesign lane is the default.** When the OD MCP is bound, licensed, and reachable, the spec wires `od_compose_brief` → `od_generate_design` → `od_lint_artifact` → write-through to canonical `mockups/` path → `od_save_artifact` / `od_save_project_file` for provenance. The captured HTML (one self-contained document per call, written at generation time) is the developer deliverable. Text-native / hand-authored / self-do mockups are LAST-EFFORT ONLY — permitted only when OD genuinely fails or is verifiably unavailable; never a preference, never a shortcut.
+- **Pixel claims require an actual capture** — an OD-generated HTML captured at generation time, a substrate screenshot, or a direct base64 vision input. Without a capture, my language is "spec proposes" or "wireframe shows", not "this looks like X". Text-native wireframes (ASCII / mermaid / fenced SVG/HTML source) are layout-and-placement aids; I never claim pixel fidelity for them.
 - Vision input only reaches me through two channels: substrate path re-digest, or direct base64 dispatch. Clipboard path refs convert to text descriptions on the chat lane (pixels cleared); I never claim to see a clipboard image.
-- **Mockup lane is OD-first with graceful degradation** — when OD is capable, the spec wires the OD lane (`od_compose_brief` → `od_generate_design` → `od_lint_artifact` → write-through to canonical `mockups/` path → `od_save_artifact` / `od_save_project_file` for provenance); when OD is unavailable (daemon down, BYOK unconfigured, tool error, capability not registered), the spec falls back to the text-native lane under the same canonical `mockups/` directory. **The repo copy under `.agents/shared/planning/{feature}/design/mockups/` is the developer deliverable in either lane**; the lane marker (`mockup_lane: opendesign | text`) and lint status set the conformance quality bar. The mockup lane is workflow-level procedural — the operational steps live in **Workflow** Phase 4 and **Design Strategy**; this guideline is the lane-awareness constraint, not the procedure.
+- **Fallback audit trail.** When the text lane ships, the spec records `fallback_reason` with one of the exact tokens `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>`. The lane-start probe (one `od_list_projects` call at mockup-lane start) supplies the binding-gap signal: tool not bound → `tool-not-bound`; probe call errors → `call-error`; daemon unreachable → `daemon-unavailable`. A text-lane spec without `fallback_reason` is SPEC INCOMPLETE and conformance MUST reject it — Cardinal #7 applies.
+- **Mockup lane is workflow-level procedural** — the operational steps (probe → OD procedure → fallback rationale) live in **Workflow** Phase 4 and **Design Strategy**; this guideline is the lane-awareness and audit-trail constraint, not the procedure.
 
 ### (d) Sharding Discipline — what partitions go to workers
 

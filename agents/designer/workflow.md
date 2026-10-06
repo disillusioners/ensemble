@@ -47,7 +47,7 @@ I map each AC to a `Validation:` block (the agent-searchable shape — `Validati
 
 I pick the spec sections that apply. Empty sections get a one-line skip-with-reason in the spec body — silent omission is not acceptable.
 
-I decide shape: text-native default (markdown spec + ASCII wireframe + optional mermaid). HTML fragment only when pixel intent justifies the capture cost.
+I decide shape: spec body is text-native (markdown + ASCII wireframe + optional mermaid — these are layout-and-placement aids inside the spec body, not the developer deliverable). The wireframe artifacts (the developer-deliverable HTML at canonical `mockups/` paths) are produced by the OD lane — see Phase 4. Text-native wireframe artifacts are last-effort only when the OD lane genuinely fails or is verifiably unavailable.
 
 I decide partition: direct work vs shard to the worker sub-team. I shard a partition only when it clears the offload gate (bulk + low-coupling + no-judgment + disjoint-files). Coupled or judgment work stays mine.
 
@@ -55,27 +55,47 @@ I decide partition: direct work vs shard to the worker sub-team. I shard a parti
 
 ## Phase 4 — Author the Spec
 
-Open a fresh `design-spec.md` from the canonical template. Front-matter carries `spec_id`, `status` (`draft` at this point), and the advisory fields — `pinned_spec_sha` is **only set at `status: approved`**, never earlier.
+Open a fresh `design-spec.md` from the canonical template. Front-matter carries `spec_id`, `status` (`draft` at this point), and the advisory fields — `pinned_spec_sha` is **only set at `status: approved`**, never earlier. The Design artifacts table records `mockup_lane: opendesign | text` for every row; whenever `mockup_lane: text` ships for any row, the spec MUST also record `fallback_reason` with one of the exact tokens `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>` (Cardinal #7; the tester gates on these exact strings). A text-lane spec missing `fallback_reason` is SPEC INCOMPLETE — conformance MUST reject it.
 
 Body sections, in order: **IA → Components → Tokens → A11y → Wireframe → Tradeoffs**. Each component section names purpose / behavior / states / a11y / wireframe path.
 
 When I'm done I update the spec to `status: draft` and write the in-flight state.
 
-### Mockup lane (OD-first, graceful degradation)
+### Mockup lane (OD-first; text only as last-effort fallback)
 
 The Wireframe section of the spec is fed by one of two lanes. **The repo copy at `.agents/shared/planning/{feature}/design/mockups/{page}.{ext}` is the developer deliverable** — either lane writes through to that canonical path. The lane marker (`mockup_lane: opendesign | text`) records which lane actually shipped; conformance treats the lane + lint verdict as the quality bar.
 
-**Default lane: `opendesign`.** When the OpenDesign MCP is registered, licensed, and reachable:
+**Default lane: `opendesign`.** The OD lane is the default; text is the fallback.
+
+#### Step 0 — Lane-start availability probe (BEFORE any spec authoring for mockups)
+
+Run ONE `od_list_projects` call at the start of the mockup lane. Purpose: binding gaps surface at dispatch time, not after a hand-authored HTML. The probe result drives the lane decision and, when text is selected, supplies the `fallback_reason` evidence:
+
+- Probe succeeds → OD lane is available → proceed to Step 1 (default `opendesign` lane).
+- Probe returns "tool not bound" / not in my tool surface → record `mockup_lane: text` + `fallback_reason: tool-not-bound` in the spec's Design artifacts table.
+- Probe call errors (any other failure, including empty result, transport failure) → record `mockup_lane: text` + `fallback_reason: call-error` in the spec's Design artifacts table.
+- Daemon unreachable on the probe → record `mockup_lane: text` + `fallback_reason: daemon-unavailable` in the spec's Design artifacts table.
+- Probe returns but `od_generate_design` itself hits `timeout` mid-call → record `mockup_lane: text` + `fallback_reason: timeout` (text fallback for that page only; other pages may stay on the OD lane). Per Cardinal #7, a text-lane fallback without a recorded `fallback_reason` is SPEC INCOMPLETE — conformance MUST reject it.
+
+The probe is cheap (a list call) and runs once per spec. Do not retry-storm it; one call, wait it out.
+
+#### Step 1 — OD lane (default when probe succeeds)
+
+When the OpenDesign MCP is registered, licensed, and reachable:
 
 1. `od_compose_brief` — assemble the design brief from the spec sections in scope.
-2. `od_generate_design` — produce **one self-contained HTML document per call, inline, at generation time**. Treat the returned HTML as the contract of record for that page.
+2. `od_generate_design` — produce **one self-contained HTML document per call, inline, at generation time**. Treat the returned HTML as the contract of record for that page. **`od_generate_design` runs 130–170s** — one call, wait it out, no retry-storm.
 3. `od_lint_artifact` — run as a quality gate against the AC and pages in scope. If lint returns `fail-N`, fix the underlying issue (re-call `od_generate_design` with a corrected brief) **before** freezing the spec. A `fail` verdict never rides into the developer's brief.
 4. **Write through to the canonical path.** Capture the HTML at generation time and write it to `.agents/shared/planning/{feature}/design/mockups/{page}.html` (the repo copy = developer deliverable, daemon-independent — survives an OD outage after spec freeze).
 5. **Record OD-UI provenance** (reference only, never the developer deliverable): `od_save_artifact` and/or `od_save_project_file` for the same design; record the returned URL/path as `od_url` in the spec's Design artifacts table.
 
-**Fallback lane: `text`.** When OD is unavailable — daemon down, BYOK unconfigured, tool error, capability not registered, or a page outside OD's per-call ceiling — fall back to the existing text-native mockup lane (`.asc` ASCII wireframe, `.mmd` mermaid flow, or hand-authored `.html` fragment under the same canonical `mockups/` directory). Per architecture §4.1: text mockups never claim pixel fidelity. Mark the lane `text` and `lint` = `n/a` in the spec.
+Record `mockup_lane: opendesign` in the spec's Design artifacts table; `fallback_reason` is `n/a` on this lane.
 
-**Graceful degradation is mandatory — the workflow never blocks or fails on OD unavailability.** Any OD-side error mid-call routes the spec back to the text lane for that page; `mockup_lane` records what actually shipped. Defensive dispatch: every `od_*` call is wrapped so an exception or empty result triggers the text-lane fallback automatically, without re-asking the leader. Per the v0.16.1 capability ceiling, OD produces exactly one HTML per call, inline, at generation time — no tokens, no component scaffolds, no TS templates; that trio is v0.17.0 scope.
+#### Step 2 — Text fallback (last-effort; `fallback_reason` MANDATORY)
+
+When the probe in Step 0 signaled text — or when an OD call errors mid-flight — fall back to the existing text-native mockup lane (`.asc` ASCII wireframe, `.mmd` mermaid flow, or hand-authored `.html` fragment under the same canonical `mockups/` directory). Per architecture §4.1: text mockups never claim pixel fidelity. Mark the lane `text` in the spec's Design artifacts table AND record `fallback_reason` with one of the exact tokens `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>` (Cardinal #7). Lint status = `n/a`. A text-lane spec missing `fallback_reason` is SPEC INCOMPLETE — conformance review MUST reject it.
+
+**Graceful degradation is mandatory — the workflow never blocks or fails on OD unavailability.** Any OD-side error mid-call routes the spec back to the text lane for that page; `mockup_lane` and `fallback_reason` record what actually shipped. Defensive dispatch: every `od_*` call is wrapped so an exception or empty result triggers the text-lane fallback automatically, without re-asking the leader. Per the v0.16.1 capability ceiling, OD produces exactly one HTML per call, inline, at generation time — no tokens, no component scaffolds, no TS templates; that trio is v0.17.0 scope.
 
 The implement-brief carries one structured artifact field for developer consumption — see `architecture` §4.5: `design_artifacts` list with concrete repo-relative paths mapped to ACs, plus `mockup_lane` marker. Developer reads the HTML at the path, not prose.
 

@@ -97,6 +97,9 @@ def _make_manager(
         ]
 
     manager = MagicMock()
+    # MCP preload seam (designer OD-lane fix, 2026-10-06): the tool body
+    # awaits ensure_mcp_preloaded before the sync spawn.
+    manager.ensure_mcp_preloaded = AsyncMock(return_value=None)
     manager.config = MagicMock()
     manager.config.llm = MagicMock()
     manager.config.llm.allowed_models = list(allowed_models)
@@ -228,6 +231,7 @@ class TestConveneCouncil:
         # ``default_agent_versions`` metadata, so resolution returns ``None``
         # and the tool forwards ``version_tag=None`` to the manager.
         manager.spawn_instance.assert_called_once_with(
+            instance_id=ANY,
             agent_id="governor",
             parent_id="parent-instance-id",
             project_id=ANY,
@@ -705,6 +709,7 @@ class TestConveneCouncilWithSkill:
             )
 
         manager.spawn_instance.assert_called_once_with(
+            instance_id=ANY,
             agent_id="governor",
             parent_id="parent-instance-id",
             project_id=ANY,
@@ -897,6 +902,7 @@ class TestConveneCouncilWithSkill:
             )
 
         manager.spawn_instance.assert_called_once_with(
+            instance_id=ANY,
             agent_id="governor",
             parent_id="parent-instance-id",
             project_id=ANY,

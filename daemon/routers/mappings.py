@@ -97,11 +97,16 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate, 
     
     # Generate IDs (use standard UUID format for consistency)
     mapping_id = f"{source_id}:{mapping_create.external_user_id}"
-    # Let manager auto-generate a valid UUID instance_id
-    instance_id = None
+    # Pre-generate the child UUID so MCP preload can use it (designer
+    # OD-lane fix, 2026-10-06): the sync facade cannot preload itself —
+    # lane parity with spawn_instance_with_mcp, which preloads first.
+    instance_id = str(uuid.uuid4())
     
     # Spawn the agent instance
     try:
+        # MCP preload: best-effort, never raises (lazy wrapper build,
+        # no connections opened). Fresh UUID ⇒ exactly one write.
+        await manager.ensure_mcp_preloaded(instance_id, agent_id=resolved_agent_id)
         # Unpack the (instance_id, validated_model_override) tuple — the
         # router only needs the instance_id; the validated override is
         # consumed by tool-layer callers that emit a fallback notice.
