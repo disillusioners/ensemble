@@ -123,7 +123,7 @@ result."
    (`plugins/opendesign/copy_freely/<upstream_path>`) using
    `open(target, "wb")`.
 5. **Record** the `(sha256, relpath)` pair in
-   `plugins/opendesign/copy_freely.HASHES.sha256` in standard
+   `plugins/opendesign/copy_freely/HASHES.sha256` in standard
    `sha256sum` format, sorted by relpath for stability.
 
 The vendoring script lives at `tools/vendor/od_vendor.py` and is
@@ -153,46 +153,58 @@ file inside those entries (e.g. each design system has its own
 
 ---
 
-## 5. Hash manifest location — `copy_freely.HASHES.sha256`
+## 5. Hash manifest location — `copy_freely/HASHES.sha256`
 
 The dispatch says: "Write the hash manifest to a file under the plugin
 tree (e.g. `plugins/opendesign/copy_freely.HASHES.sha256` or per
 convention — pick a name + location that does NOT pollute the
 `copy_freely/` class subtree; justify)."
 
-We placed it at `plugins/opendesign/copy_freely.HASHES.sha256` — the
-dispatch's suggested name and location.  Justification:
+**Slice ③ (2026-10-06) relocation: moved inside the class subtree.**
+We previously placed the manifest at
+`plugins/opendesign/copy_freely.HASHES.sha256` (adjacent to the
+subtree) so sync-runner operations would never see it. The slice ③
+carry-forward requirement reverses that choice: the manifest now lives
+INSIDE the class subtree at `plugins/opendesign/copy_freely/HASHES.sha256`
+because (a) the obvious `cd copy_freely && sha256sum -c HASHES.sha256`
+audit command should work without path-munging, and (b) the slice-③
+sync-runner documents the resolution: the hash manifest is a
+**locally-owned file inside the sync tree** — sync treats it as a
+non-upstream preserved file, never overwrites it from upstream
+content, and never reports it in diff_summary (it is not part of the
+class vendor set). The file `git mv`'d preserves history.
 
-- **Adjacent to, not inside, the class subtree.**  The
-  `copy_freely.HASHES.sha256` filename uses a `.` separator (matching
-  the file naming convention used elsewhere in the repo) and sits at
-  the plugin root, NOT inside `copy_freely/`.  Sync-runner operations
-  (slice ③) will write to `copy_freely/`; the hash manifest is
-  unaffected.
-- **Discovers cleanly as the canonical "copy_freely verification
-  artifact".**  Reading the file name left-to-right: "copy_freely
-  hashes sha256" — the intent is unambiguous.
-- **Alternative considered and rejected:** `plugins/opendesign/HASHES.sha256`
-  (plugin-root, no class qualifier).  Rejected because the plugin
-  will gain `snapshot_with_drift_alarm.HASHES.sha256` and
-  `own_outright.HASHES.sha256` at slices ③ and ⑤ respectively;
-  class-qualified names scale without collisions.
+Justification (combined):
+
+- **Auditability: `cd copy_freely && sha256sum -c HASHES.sha256` works.**
+  The manifest records paths relative to `copy_freely/`, and now sits
+  inside that directory. The previous adjacent layout required running
+  `sha256sum -c ../copy_freely.HASHES.sha256` from inside `copy_freely/`,
+  which is non-obvious.
+- **Sync-runner resolution (slice ③):** the manifest is a
+  locally-owned file (not part of the upstream vendor set); the
+  sync-runner explicitly preserves it across pulls (treats
+  `HASHES.sha256` as a non-upstream file in `copy_freely/`, never
+  overwrites it from upstream content, never reports it in
+  `diff_summary`). The hash manifest is therefore a
+  second-class-residency file: it lives inside the class subtree for
+  auditability but the sync-runner treats it as invisible to the
+  vendor set.
+- **Naming:** `HASHES.sha256` (uppercase, no class prefix) is the
+  recommended name inside the class subtree; `snapshot_with_drift_alarm/`
+  and `own_outright/` will gain their own `HASHES.sha256` files at
+  slices ③ and ⑤ respectively. The class-prefix is implicit in the
+  enclosing directory; per-class files do not collide.
 
 ### 5.1. Verifying the manifest offline
 
 The hash manifest records paths relative to `copy_freely/`, so the
-audit command must be run **from inside `copy_freely/`** with a path
-to the adjacent manifest.  The obvious `cd plugins/opendesign && sha256sum -c
-copy_freely.HASHES.sha256` invocation fails with `4881 listed files
-could not be read` and exit code 1 (paths are resolved relative to
-the cwd, so `craft/FUTURE_SECTIONS.md` is looked up at
-`plugins/opendesign/craft/FUTURE_SECTIONS.md`, which does not exist).
-
-The correct, offline audit command:
+audit command runs **from inside `copy_freely/`** and references the
+adjacent manifest directly. The natural command:
 
 ```
 cd plugins/opendesign/copy_freely \
-    && sha256sum -c ../copy_freely.HASHES.sha256 --quiet
+    && sha256sum -c HASHES.sha256 --quiet
 echo exit=$?
 ```
 

@@ -188,7 +188,7 @@ class TestLoadRegistry:
         # ships the first concrete plugin tree there; later slices can
         # override via an explicit ``plugins_root`` argument.
         assert DEFAULT_PLUGINS_ROOT.name == "plugins"
-        assert DEFAULT_PLUGINS_ROOT.parent.name == "ensemble-src-wt-plugin-subsystem-02"
+        assert DEFAULT_PLUGINS_ROOT.parent.name == "ensemble-src-wt-plugin-subsystem-03"
 
 
 # -- skeleton convention tests ------------------------------------------------

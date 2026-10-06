@@ -13,8 +13,14 @@ Byte-fidelity model.  Files are copied blob-by-blob through ``git cat-file``
 so the vendored bytes are EQUAL to the upstream-tag bytes (no CRLF
 translation, no re-encoding, no symlink resolution surprises).  After
 copy, a sha256 is computed per file and the list is written to a
-``sha256sum``-format file (default: ``plugins/<plugin>/copy_freely.HASHES.sha256``,
-adjacent to — not inside — the copy_freely/ class subtree).
+``sha256sum``-format file (default: ``plugins/<plugin>/copy_freely/HASHES.sha256``,
+INSIDE the class subtree so the obvious ``cd copy_freely && sha256sum -c
+HASHES.sha256`` audit command works).  The hash manifest is a
+locally-owned file inside the sync tree — the slice-③ sync-runner
+treats it as a non-upstream preserved file (preserved across pulls,
+never overwritten from upstream content, never reported in
+``diff_summary``).  No symlinks (git mode 120000) are vendored: the
+script filters them out by construction (CON §1 invariant).
 
 The hash file is the OFFLINE round-trip fixture for tests: re-hashing
 the vendored tree and comparing to the recorded list proves the tree
@@ -32,22 +38,22 @@ Usage (slice ②, from the worktree root):
         --source /home/nea/opt/open-design \\
         --tag open-design-v0.23.0 \\
         --dest plugins/opendesign/copy_freely \\
-        --hashes-out plugins/opendesign/copy_freely.HASHES.sha256 \\
+        --hashes-out plugins/opendesign/copy_freely/HASHES.sha256 \\
         --json-summary /tmp/od-vendor-summary.json
 
-    # or via env vars (defaults match the slice ② dispatch):
+    # or via env vars (no host-specific defaults; one of --source or
+    # OD_VENDOR_SOURCE is REQUIRED — the script refuses to run with a
+    # built-in default for portability):
     OD_VENDOR_SOURCE=/home/nea/opt/open-design \\
     OD_VENDOR_TAG=open-design-v0.23.0 \\
     python tools/vendor/od_vendor.py
 
 Verify the vendored tree (offline audit — exits 0 on clean tree,
-exits 1 + `4881 listed files could not be read` on the obvious
-mistake of running from `plugins/opendesign/` instead of
-`plugins/opendesign/copy_freely/`):
+exits 1 on a torn tree):
 
     cd plugins/opendesign/copy_freely \\
-        && sha256sum -c ../copy_freely.HASHES.sha256 --quiet \\
-        && echo "OK: $(wc -l < ../copy_freely.HASHES.sha256) files verified"
+        && sha256sum -c HASHES.sha256 --quiet \\
+        && echo "OK: $(wc -l < HASHES.sha256) files verified"
 """
 
 from __future__ import annotations
@@ -135,17 +141,19 @@ def _resolve_tag_sha(source: Path, tag: str) -> str:
     return _run_git(source, "rev-parse", f"{tag}^{{}}").strip()
 
 
-def _list_tree_paths(source: Path, ref: str, subdir: str) -> List[Tuple[str, str, str, int]]:
-    """List every file under ``<ref>:<subdir>/`` as (mode, type, blob_sha, relpath).
+def _list_tree_paths(source: Path, ref: str, subdir: str) -> List[Tuple[str, str, str, int, int]]:
+    """List every file under ``<ref>:<subdir>/`` as (mode, type, blob_sha, size, relpath).
 
-    The output excludes subdirectories (only blobs are returned, so the
-    caller can iterate files without recursing).  We use ``git ls-tree -r``
-    for completeness — non-recursive listing would miss nested files.
+    Uses ``git ls-tree -l -r`` so the size column is captured in the
+    same pass (no separate ``git cat-file -s`` fork per file — a 4881-file
+    tree would otherwise spawn 4881 subprocesses).  Subdirectories and
+    symlinks (mode 120000) are filtered by the caller; here we return
+    all rows and let the caller decide.
     """
-    raw = _run_git(source, "ls-tree", "-r", ref, "--", f"{subdir}/")
-    out: List[Tuple[str, str, str, int]] = []
+    raw = _run_git(source, "ls-tree", "-l", "-r", ref, "--", f"{subdir}/")
+    out: List[Tuple[str, str, str, int, int]] = []
     for line in raw.splitlines():
-        # Format: "<mode> <type> <object>\t<path>"
+        # Format with -l: "<mode> <type> <object> <size>\t<path>"
         if not line.strip():
             continue
         try:
@@ -153,16 +161,16 @@ def _list_tree_paths(source: Path, ref: str, subdir: str) -> List[Tuple[str, str
         except ValueError:
             continue
         parts = head.split()
-        if len(parts) != 3:
+        if len(parts) != 4:
             continue
-        mode, obj_type, sha = parts
+        mode, obj_type, sha, size_str = parts
         if obj_type != "blob":
-            continue  # skip subtrees, symlinks (CON §1: no symlinks)
+            continue  # skip subtrees (only blobs have a size)
         try:
-            size = int(_run_git(source, "cat-file", "-s", sha).strip())
-        except (subprocess.CalledProcessError, ValueError):
+            size = int(size_str)
+        except ValueError:
             size = 0
-        out.append((mode, obj_type, sha, path))
+        out.append((mode, obj_type, sha, size, path))
     return out
 
 
@@ -249,7 +257,21 @@ def vendor(
             entries = _list_tree_paths(source, ref_sha, cls)
         except subprocess.CalledProcessError as exc:
             raise SystemExit(f"ERROR: cannot list {cls} at {tag}: {exc}")
-        for mode, _obj_type, blob_sha, upstream_path in entries:
+        for mode, _obj_type, blob_sha, upstream_size, upstream_path in entries:
+            # Symlink guard (CON §1 invariant: no symlinks inside the
+            # vendored tree).  git mode 120000 = symlink; refuse explicitly
+            # with a recorded skip reason.  We treat symlinks as
+            # class-incompatible (CON §1) and refuse silently by
+            # construction — same path as the prompt-templates/ JSON-only
+            # filter, but a distinct reason code.
+            if mode == "120000":
+                summary.skipped_entries.append(
+                    (
+                        upstream_path,
+                        "symlink (git mode 120000) excluded — vendored trees must not contain symlinks (CON §1)",
+                    )
+                )
+                continue
             # Class-entry filter: prompt-templates/ is the JSON-only class
             # (od-resource-layer §2: 106 JSON). Any non-JSON asset in that
             # subtree (e.g. a stray preview PNG) is NOT a class-entry and
@@ -271,6 +293,11 @@ def vendor(
                 summary.skipped_entries.append((upstream_path, f"cat-file failed: {exc}"))
                 continue
             sha = _hash_bytes(data)
+            # Prefer the byte-counted size (definitive; verifies we got
+            # the bytes we expected) — fall back to the ls-tree size on
+            # any anomaly so the summary still has a number.
+            byte_size = len(data)
+            size = byte_size if byte_size else upstream_size
             # relpath under dest = full upstream path
             relpath = upstream_path
             # Refuse any path that tries to escape the dest via "..".
@@ -288,7 +315,7 @@ def vendor(
                     relpath=relpath,
                     upstream_relpath=upstream_path,
                     sha256=sha,
-                    size_bytes=len(data),
+                    size_bytes=size,
                 )
             )
         if progress:
@@ -317,8 +344,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--source",
-        default=os.environ.get("OD_VENDOR_SOURCE", "/home/nea/opt/open-design"),
-        help="path to the local OD git checkout (default: $OD_VENDOR_SOURCE)",
+        default=os.environ.get("OD_VENDOR_SOURCE"),
+        help="path to the local OD git checkout (REQUIRED: --source or "
+        "$OD_VENDOR_SOURCE; no host-specific default for portability)",
     )
     parser.add_argument(
         "--tag",
@@ -334,9 +362,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--hashes-out",
         default=os.environ.get(
             "OD_VENDOR_HASHES",
-            "plugins/opendesign/copy_freely.HASHES.sha256",
+            "plugins/opendesign/copy_freely/HASHES.sha256",
         ),
-        help="hash manifest path (sha256sum format; default: $OD_VENDOR_HASHES)",
+        help="hash manifest path INSIDE the class subtree "
+        "(sha256sum format; default: $OD_VENDOR_HASHES). Locally-owned file; "
+        "the slice-③ sync-runner preserves it across pulls.",
     )
     parser.add_argument(
         "--json-summary",
@@ -344,6 +374,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="optional path to also write a JSON summary of the vendoring run",
     )
     args = parser.parse_args(argv)
+
+    if not args.source:
+        raise SystemExit(
+            "ERROR: --source is REQUIRED (or set $OD_VENDOR_SOURCE). "
+            "No host-specific default — the script is portable."
+        )
 
     summary = vendor(
         source=Path(args.source),
