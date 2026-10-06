@@ -1,29 +1,42 @@
 """Agent Snapshot tools (agent-snapshot v1 — Wave 2b, PR6).
 
 The tool surface for the snapshot subsystem: creation (R9
-search-before-create protocol + R12 supersession), read-only search,
-and warm-start consumption (R14 auto-fallback). Conventions follow the
-house tool shape:
+search-before-create protocol + R12 supersession) and read-only
+search, plus the warm-start consumption flow that backs the UNIFIED
+``spawn_instance`` tool. Conventions follow the house tool shape:
 
 * Pydantic ``BaseModel`` + ``Annotated[..., Field]`` inputs (mirror
   ``SpawnInstanceInput``, ``daemon/tools/instance.py``).
 * dict-with-``error`` returns (mirror ``critical_notes.py``).
-* Error strings, never raises (mirror the ``spawn_instance`` error
-  path).
+* Error strings, never raises.
 
-Category layout — one module, two grant categories:
+**Unify-spawn-tools (2026-10-05):** ``spawn_hot_instance`` was
+REMOVED as a standalone tool. Warm-start consumption now rides
+``spawn_instance`` (``daemon/tools/instance.py``), gated by the
+TARGET (being-spawned) agent's ``snapshot_enabled: true`` meta.json
+flag. The ~500-line resolution state machine was NOT duplicated —
+it lives HERE as module-level helpers with a single source of
+truth, imported by the unified spawn tool:
+
+* :func:`resolve_spawn_snapshot` — pre-spawn: explicit-id verify →
+  internal search → staleness → ``verify=git`` anchor (R14
+  §4.3/§5.2). Never raises: any fault degrades to a ``no-hit`` cold.
+* :func:`finalize_spawn_snapshot` — post-spawn: the R6b atomic
+  digest stamp BEFORE any enqueue, then the R16 warm counter +
+  ``[SnapshotSpawnWarm]`` observability line.
+* :func:`format_snapshot_citation` — the ``[snapshot] started:
+  warm|cold — …`` citation line appended to the unified tool's
+  STRING return.
+
+Category layout — one module, one grant category:
 
 * ``snapshot`` — ``snapshot_create`` + ``snapshot_search``. The
   category exists for CATEGORY_DOC grouping and per-tool grant
   targets; creator agents (worker/coder/tester) hold the two tool
   NAMES via per-tool ``tools.allow`` entries (Rev 5 P2-v1).
-* ``instance`` — ``spawn_hot_instance``. Consumption ships via the
-  ``instance`` category (mirroring how one module can host tools of
-  different categories — precedent: ``council`` tools inside
-  ``daemon/tools/instance.py``) so every ``instance``-category holder
-  gets it with ZERO per-agent meta.json edits. ``ari`` holds no
-  ``instance`` category — PERMANENT user exclusion (job-routing
-  rationale); worker/explorer excluded architecturally (leaf/latency).
+  Consumption is gated per-agent by ``snapshot_enabled`` (registry
+  field consulted against the TARGET's resolved meta), not by a
+  tool grant — the former ``instance``-category ride-along is gone.
 
 R15 settings toggle (write side ONLY): ``snapshot_create`` consults
 the async :func:`daemon.services.snapshot_settings_utils.get_snapshot_create_enabled`
@@ -31,55 +44,39 @@ directly on the loop (default OFF — opt-in rollout). The module-level
 ``is_snapshot_create_enabled`` sync stub remains ONLY for genuine sync
 contexts (metadata-scan stubs / boot probes) and always answers the
 fail-closed default.
-``snapshot_search`` (read-only) and ``spawn_hot_instance``
-(consumption) are NEVER gated.
+``snapshot_search`` (read-only) is NEVER gated, and the warm-start
+consumption path inside ``spawn_instance`` is NEVER gated by R15
+either — consumption is gated ONLY by the target agent's
+``snapshot_enabled`` flag.
 
-R14 fail-soft contract: ``spawn_hot_instance`` NEVER raises on a
-snapshot miss — expired/stale/no-hit/verify-failed all spawn cold.
-Errors are reserved for authorization failure or system fault.
+R14 fail-soft contract (preserved under the unified tool):
+consumption NEVER turns a snapshot miss into an error —
+expired/stale/no-hit/verify-failed all degrade to a plain cold
+spawn with a ``[snapshot] started: cold`` citation line. Errors are
+reserved for authorization failure or system fault (surfaced by the
+unified tool's own string error ladder). The former ``started:
+"blocked"`` dict shape is gone with the tool: a team-membership
+denial returns spawn_instance's plain ERROR string (unchanged
+behavior).
 
-**Authorization outcomes are NOT cold fallbacks** (silent-failure fix,
-2026-10-04). When the team-membership check or the missing-caller
-wiring branch refuses a spawn, the result is a BLOCKED outcome:
-``started: "blocked"`` (NEW third value, alongside ``"warm"`` /
-``"cold"``), ``instance_id: None``, ``hint`` names the permission
-problem and how to resolve it. Callers can then separate "spawned
-cold" from "spawn refused" without parsing the ``error`` string.
-Genuine snapshot misses / verify-fails / expired fallbacks keep
-returning ``started: "cold"`` with the existing R14 hint shape.
+R18 auto-dispatch (2026-10-04 — contract trap fix) now lives in
+``daemon/tools/instance.py`` (``_auto_dispatch_first_turn``): the
+``task`` argument is enqueued as the child's first turn by default
+so callers do NOT need a follow-up ``send_message(instance_id,
+task)`` call. The enqueue tripwire (non-queued / None result ⇒ loud
+ERROR tail) moved with it — see that module for the invariant
+pins.
 
-R18 auto-dispatch (2026-10-04 — contract trap fix): by default
-``spawn_hot_instance`` enqueues the supplied ``task`` as the new
-instance's first turn INSIDE the tool, so callers do NOT need a
-follow-up ``send_message(instance_id, task)`` call. The forensic
-audit (2026-10-04, evidence
-``.agents/tester/RESULTS/2026-10-04-v01612-spawn-enqueue-forensic-audit.md``)
-proved the previous contract was "accepted-but-never-delivered" —
-agents uniformly missed the follow-up requirement, so spawned
-children sat idle until manually POSTed. The ``auto_dispatch`` flag
-defaults to ``True`` to make the trap structurally impossible; opt
-out with ``auto_dispatch=False`` to restore the legacy two-step
-ritual (callers MUST then call ``send_message`` themselves). The
-hint line on every result states the dispatch outcome ("auto-
-dispatched", "skipped: task was empty", "auto_dispatch=False", or
-"auto-dispatch ERROR" on enqueue failure), so a caller can always
-see at-a-glance whether the child is working on the task. The
-``error`` field carries the loud failure detail when the enqueue
-fails after a successful spawn (never silent).
-
-Size rationale (2026-10-04): the module is ~1440 lines because it
-hosts three tightly-coupled Wave-2b tools (snapshot_create,
-snapshot_search, spawn_hot_instance) plus the Wave-3 settings gate,
-R16 monitoring counters, R12 supersession, R14 auto-fallback, R18
-auto-dispatch, and D8 cross-project handoff — each is a non-trivial
-state machine with its own helper surface (R9 verdict, R6b ordering,
-auto-dispatch invariants, verify=git anchor). A split would force
-shared helpers (e.g. _cold_result, _denied_result, _safe_inc_*,
-_staleness_report plumbing) into a third module and add import-order
-complexity without reducing the per-tool surface. The trigger to split
-would be the addition of a FOURTH tool surface (e.g. an authoring
-sub-tool) or the comment block for a single tool exceeding ~500
-lines — neither condition is close today.
+Size rationale (2026-10-04, updated 2026-10-05): the module hosts
+two tightly-coupled Wave-2b tools (snapshot_create, snapshot_search)
+plus the Wave-3 settings gate, R16 monitoring counters, R12
+supersession, and the unified-spawn helper surface (R9 verdict, R6b
+ordering, staleness, verify=git anchor, D8 cross-project handoff) —
+each is a non-trivial state machine. A split would force shared
+helpers (``_overlapping_tags``, ``_git_repo_state``, the
+``_safe_inc_*`` wrappers) into a third module and add import-order
+complexity. The trigger to split remains the addition of a FOURTH
+tool surface or a single tool's comment block exceeding ~500 lines.
 """
 
 from __future__ import annotations
@@ -87,6 +84,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 
 from langchain_core.tools import tool
@@ -110,7 +108,7 @@ CATEGORY_DOC = """\
 Agent Snapshot — task-scoped working-state captures for warm starts.
 
 A snapshot is a distilled digest of one instance's working experience
-(decisions, gotchas, conventions, artifact refs). Three tools:
+(decisions, gotchas, conventions, artifact refs). Two tools:
 
 - `snapshot_create` — capture a target instance's experience as a
   snapshot (subject to the daemon settings toggle). Runs the
@@ -123,27 +121,19 @@ A snapshot is a distilled digest of one instance's working experience
 - `snapshot_search` — read-only search over active snapshots in a
   project. Returns metadata + a digest preview; the full body is
   consumed at warm start.
-- `spawn_hot_instance` — spawn an agent instance and warm-start it
-  from the best matching snapshot (digest injected as turn-1
-  context). Falls back to a normal cold spawn when no snapshot is
-  found, expired, or verification fails — the result's
-  "started": "warm"|"cold"|"blocked" line says which happened; cite
-  it in your dispatch/report. **Authorization failures** (e.g. the
-  caller's `team_members` does not include the requested agent)
-  return `"started": "blocked"` instead — distinct from a cold
-  fallback so callers can separate "spawned cold" from "spawn
-  refused" without parsing `error`. **R18 auto-dispatch
-  (2026-10-04)**: by default the supplied `task` is enqueued as the
-  child's first turn INSIDE the tool, so callers do NOT need a
-  follow-up `send_message` — the result's hint line states the
-  dispatch outcome ("auto-dispatched", "skipped: task was empty",
-  "auto_dispatch=False", or "auto-dispatch ERROR" on enqueue
-  failure). Opt out with `auto_dispatch=False` to restore the
-  legacy two-step ritual. Pass `allow_cross_project=True` to consume
-  a cross-project snapshot explicitly (off by default — fail-closed
-  D8 isolation). Project-less callers (e.g. an instance whose
-  project is unknown) always get a cold spawn — the internal search
-  has no project to scope against (D8, permanent).
+
+Warm-start CONSUMPTION is not a tool here: the unified
+`spawn_instance` tool (daemon/tools/instance.py) carries it, gated
+by the TARGET agent's `"snapshot_enabled": true` meta.json flag
+(unify-spawn-tools, 2026-10-05 — `spawn_hot_instance` was removed).
+When the gate is on, callers pass `snapshot_id` / `tags` /
+`verify` / `allow_cross_project` to `spawn_instance` and the result
+string carries a `[snapshot] started: warm|cold — …` citation line
+(cold fallback on any miss/expiry/verify-failure — never an error).
+`task` + `auto_dispatch` (R18) auto-enqueue the task as the child's
+first turn. Project-less callers (e.g. an instance whose project is
+unknown) always get a cold spawn — the internal search has no
+project to scope against (D8, permanent).
 
 Judgment tags are typed `dim:value` strings — `kind:` from the fixed
 enum (investigation, defect-verification, implementation, review,
@@ -273,113 +263,6 @@ class SnapshotSearchInput(BaseModel):
     )] = 10
 
 
-class SpawnHotInstanceInput(BaseModel):
-    """Input model for spawn_hot_instance tool (R13 + R14)."""
-
-    agent_id: Annotated[str, Field(
-        description="Agent ID to spawn (e.g. 'developer', 'worker').",
-    )]
-
-    task: Annotated[str, Field(
-        description=(
-            "Self-contained task description. On a warm start the "
-            "snapshot digest lands in the new instance's turn-1 "
-            "context BEFORE this task; on a cold start this is the "
-            "whole context. By default (auto_dispatch=True) the tool "
-            "enqueues this task as the child's first turn — callers "
-            "do NOT need a follow-up send_message. When the task is "
-            "empty/whitespace the auto-dispatch is a no-op (the row "
-            "is created but no first-turn message is enqueued; the "
-            "caller MUST send the first message themselves in that "
-            "case — the warm-cold hint line states this explicitly)."
-        ),
-    )]
-
-    snapshot_id: Annotated[str | None, Field(
-        default=None,
-        description=(
-            "Explicit snapshot to warm-start from — verified "
-            "(exists, project match, status active, staleness) and a "
-            "failed verification falls back to a cold spawn with a "
-            "warning (never an error). Omit to let the tool search "
-            "for the best active match itself."
-        ),
-    )] = None
-
-    tags: Annotated[list[str], Field(
-        description=(
-            "Optional R8 `dim:value` tags steering the internal "
-            "search when snapshot_id is omitted."
-        ),
-    )] = []
-
-    instance_name: Annotated[str | None, Field(
-        default=None,
-        description=(
-            "Optional short name for the instance (used in completion "
-            "reports)."
-        ),
-    )] = None
-
-    model: Annotated[str | None, Field(
-        default=None,
-        description=(
-            "Optional LLM model override — mirrors spawn_instance "
-            "fallback semantics (silently ignored when not in "
-            "allowed_models)."
-        ),
-    )] = None
-
-    verify: Annotated[Literal["metadata", "git"], Field(
-        description=(
-            "Staleness check depth. 'metadata' (default): age + "
-            "runtime version + post-capture advance — no subprocess. "
-            "'git': additionally counts how far the repo diverged "
-            "since the snapshot's recorded commit (opt-in; requires "
-            "the snapshot to carry a repo path + sha)."
-        ),
-    )] = "metadata"
-
-    allow_cross_project: Annotated[bool, Field(
-        default=False,
-        description=(
-            "D8/Wave 2b handoff — explicit cross-project override. "
-            "Default ``false`` (fail-closed): a snapshot from a "
-            "different project than the spawn's project triggers a "
-            "R14 verify-fail cold fallback with a warning, "
-            "preventing cross-project digest leakage through a "
-            "shared leader. Set to ``true`` to consume a "
-            "cross-project snapshot anyway — staleness is still "
-            "computed; the hint notes the cross-project origin "
-            "(``hint`` carries a 'cross-project' marker so the "
-            "caller records the consent). Only meaningful when "
-            "``snapshot_id`` is supplied; internal-search results "
-            "are always project-scoped (D8 permanent)."
-        ),
-    )] = False
-
-    auto_dispatch: Annotated[bool, Field(
-        default=True,
-        description=(
-            "Auto-dispatch the task as the child's first turn (R18, "
-            "2026-10-04 — the spawn_hot_instance contract trap fix). "
-            "Default ``True``: the tool enqueues ``task`` as the new "
-            "instance's first message itself, so callers do NOT need "
-            "a follow-up ``send_message(instance_id, task)`` call. "
-            "The hint line on success notes "
-            "``auto-dispatched as first turn`` so the caller can see "
-            "what happened. Set to ``False`` ONLY when the caller "
-            "wants manual control (e.g. batching multiple children "
-            "behind a barrier, or the caller prefers the legacy "
-            "two-step ``spawn_hot_instance`` + ``send_message`` "
-            "ritual for symmetric reasoning). When ``False`` is "
-            "passed, the tool does NOT enqueue anything and the "
-            "caller MUST follow up with ``send_message`` — same "
-            "trap as the pre-R18 spawn_instance contract."
-        ),
-    )] = True
-
-
 # ── module-level helpers (pure, testable) ──────────────────────────────
 
 _GIT_SUBPROCESS_TIMEOUT_S = 10
@@ -466,81 +349,6 @@ def _trim_query_for_hint(query: str, width: int = 80) -> str:
     return flat if len(flat) <= width else flat[: width - 1] + "…"
 
 
-def _cold_result(
-    *,
-    reason: str,
-    searched: str | None,
-    instance_id: str | None = None,
-    staleness: dict[str, Any] | None = None,
-    error: str | None = None,
-    snapshot_id: str | None = None,
-) -> dict[str, Any]:
-    """Assemble the R14 result contract for a cold (or failed) spawn."""
-    searched_part = (
-        f"searched: {_trim_query_for_hint(searched)}; " if searched else ""
-    )
-    return {
-        "instance_id": instance_id,
-        "started": "cold",
-        "snapshot_id": snapshot_id,
-        # Wave 2b review FIX 3 — spec §4.3: staleness is ALWAYS a
-        # dict; the service-unavailable / no-consumed-snapshot paths
-        # pass None here, which must not leak into the result.
-        "staleness": staleness if isinstance(staleness, dict) else {},
-        "hint": (
-            f"No matching snapshot — spawned cold ({searched_part}"
-            f"reason: {reason})"
-        ),
-        "error": error,
-    }
-
-
-def _denied_result(
-    *,
-    error: str,
-    reason: str = "permission-denied",
-) -> dict[str, Any]:
-    """Assemble the R14 result contract for a BLOCKED spawn.
-
-    Distinct from :func:`_cold_result`: nothing was spawned
-    (correct), but the refusal was an authorization gate — a
-    team-membership denial or a missing-caller wiring bug — not a
-    snapshot miss / verify-failed / expired. Returning the cold
-    shape here was a silent-failure class bug (2026-10-04 E2E
-    finding #1): callers saw ``started: "cold"`` + ``instance_id:
-    None`` + the misleading ``reason: verify-failed`` hint and
-    could not distinguish "spawned cold" from "spawn refused"
-    without parsing ``error``.
-
-    Same 6-key contract as the R14 cold result
-    (``instance_id`` / ``started`` / ``snapshot_id`` / ``staleness``
-    / ``hint`` / ``error``). ``started`` is the NEW third value
-    ``"blocked"`` — equality checks against ``"cold"`` / ``"warm"``
-    on real cold/warm paths continue to hold; the blocker-flag is
-    reserved for this authorization outcome. The ``hint`` names
-    the refusal, the action (resolve the authorization), and the
-    underlying error so the caller can self-correct.
-
-    Per the repo convention (authorization helpers fail closed for
-    agent-backed operations) the helper never relaxes the gate;
-    it only changes how the refusal is surfaced.
-    """
-    return {
-        "instance_id": None,
-        "started": "blocked",
-        "snapshot_id": None,
-        "staleness": {},
-        "hint": (
-            f"Permission denied — spawn blocked (reason: {reason}). "
-            "Nothing was spawned. Resolve the authorization problem "
-            "(e.g. add the requested agent to the caller's "
-            "team_members) and retry. "
-            f"Detail: {error}"
-        ),
-        "error": error,
-    }
-
-
 def _git_repo_state(repo_path: str | None, git_sha: str | None) -> dict[str, Any]:
     """verify=git anchor (§5.2 opt-in) — contained + fail-soft.
 
@@ -600,7 +408,12 @@ def create_snapshot_tools(
     agent_id: str,
     version_tag: str | None = None,
 ) -> list:
-    """Create the three snapshot tools bound to a manager + caller.
+    """Create the two snapshot tools bound to a manager + caller.
+
+    Warm-start consumption is NOT a tool here — the unified
+    ``spawn_instance`` tool consumes :func:`resolve_spawn_snapshot` /
+    :func:`finalize_spawn_snapshot` / :func:`format_snapshot_citation`
+    directly (gated by the TARGET agent's ``snapshot_enabled`` flag).
 
     Args:
         manager: The :class:`InstanceManager` — dereferenced at CALL
@@ -629,44 +442,9 @@ def create_snapshot_tools(
     def _search_service() -> SnapshotSearchService | None:
         return getattr(manager, "_snapshot_search_service", None)
 
-    def _metrics_service() -> Any | None:
-        """R16 — accessor for the monitoring counters service.
-
-        Returns ``None`` when the manager has no metrics wiring
-        (e.g. boot probes / metadata scan stubs) so the counters
-        no-op cleanly. Production managers always wire one — see
-        ``daemon/manager.py`` for the wiring line.
-        """
-        return getattr(manager, "_snapshot_metrics_service", None)
-
-    # R16 — fail-soft helpers for the snapshot_create and
-    # spawn_hot_instance counter increments. Wrapped in safe
-    # wrappers so a counter write failure NEVER bubbles up to the
-    # tool (R16 rider j: increments fail-soft — log, never raise,
-    # never fail the spawn/create).
-    def _safe_inc_capture(agent_id: str) -> None:
-        svc = _metrics_service()
-        if svc is None:
-            return
-        try:
-            svc.inc_capture(agent_id)
-        except Exception as exc:  # pragma: no cover — defensive belt
-            logger.warning(
-                f"[Snapshot] R16 capture counter increment failed: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
-    def _safe_inc_spawn(snapshot_id: str) -> None:
-        svc = _metrics_service()
-        if svc is None:
-            return
-        try:
-            svc.inc_spawn(snapshot_id)
-        except Exception as exc:  # pragma: no cover — defensive belt
-            logger.warning(
-                f"[Snapshot] R16 spawn counter increment failed: "
-                f"{type(exc).__name__}: {exc}"
-            )
+    # R16 counter increments are module-level, fail-soft helpers now
+    # (``_safe_inc_capture`` / ``_safe_inc_spawn`` below) — shared by
+    # ``snapshot_create`` and the unified-spawn warm finalize.
 
     @register_tool_category(CATEGORY_NAME)
     @tool(args_schema=SnapshotCreateInput)
@@ -790,7 +568,7 @@ def create_snapshot_tools(
                     # all count). REUSE = the creator exercised the
                     # search-before-create protocol and chose to
                     # reuse; that decision IS a capture event.
-                    _safe_inc_capture(caller_agent_id or "unknown")
+                    _safe_inc_capture(manager, caller_agent_id or "unknown")
                     return {
                         "snapshot_id": reuse_id,
                         "status": "reused-existing-snapshot-id",
@@ -855,7 +633,7 @@ def create_snapshot_tools(
         # non-null); a failed ``capture_async`` does NOT count
         # (the capture never made it to storage).
         if snapshot_id and not capture_error:
-            _safe_inc_capture(caller_agent_id or "unknown")
+            _safe_inc_capture(manager, caller_agent_id or "unknown")
         return {
             "snapshot_id": snapshot_id,
             "status": capture.get("status") or "running",
@@ -912,85 +690,111 @@ def create_snapshot_tools(
 
         return {"results": results, "error": error}
 
-    @register_tool_category("instance")
-    @tool(args_schema=SpawnHotInstanceInput)
-    async def spawn_hot_instance(
-        agent_id: Annotated[str, Field(description="Agent ID to spawn (e.g. 'developer', 'worker').")],
-        task: Annotated[str, Field(description="Self-contained task description; a warm-start digest lands BEFORE it in turn-1 context.")],
-        snapshot_id: Annotated[str | None, Field(description="Explicit snapshot to warm-start from; omit to search. Verify-fail falls back to cold + warning.")] = None,
-        tags: Annotated[list[str], Field(description="Optional R8 tags steering the internal search when snapshot_id is omitted.")] = [],
-        instance_name: Annotated[str | None, Field(description="Optional short name for the instance.")] = None,
-        model: Annotated[str | None, Field(description="Optional LLM model override (spawn_instance fallback semantics).")] = None,
-        verify: Annotated[Literal["metadata", "git"], Field(description="Staleness depth: 'metadata' (default) or 'git' repo-divergence anchor.")] = "metadata",
-        allow_cross_project: Annotated[bool, Field(description="D8/Wave 2b handoff: explicit cross-project override. False (default) → mismatch is a verify-fail cold fallback. True → consume the cross-project snapshot anyway (staleness still computed; hint notes the cross-project origin). Only meaningful when snapshot_id is supplied.")] = False,
-        auto_dispatch: Annotated[bool, Field(description="Auto-enqueue ``task`` as the child's first turn (R18, 2026-10-04). Default True eliminates the spawn_hot_instance contract trap; False restores the legacy two-step ritual (caller MUST then call send_message). When task is empty/whitespace the auto-dispatch is a no-op regardless.")] = True,
-    ) -> dict:
-        """Spawn an instance warm-started from the best matching snapshot; cold fallback on any miss. Use tool_help("spawn_hot_instance") for details.
+    return [snapshot_create, snapshot_search]
 
-        R18 (2026-10-04) — auto-dispatch. The ``task`` argument is
-        enqueued as the child's first turn by default, so callers do
-        NOT need a follow-up ``send_message(instance_id, task)`` call.
-        Set ``auto_dispatch=False`` to opt out (legacy two-step ritual).
-        When ``task`` is empty/whitespace the auto-dispatch is a
-        no-op (a row is still created, but the caller must send the
-        first message themselves — the hint line states this).
-        """
-        # ── Auth: team membership (same gate as spawn_instance) ───────
-        # Per the repo convention (authorization helpers fail closed for
-        # agent-backed operations) the membership gate here is the SAME
-        # chokepoint spawn_instance uses; the difference is only the
-        # RESULT SHAPE on denial — see _denied_result docstring.
-        if not caller_agent_id:
-            return _denied_result(
-                error=(
-                    "ERROR: spawn_hot_instance invoked without a caller "
-                    "agent_id — wiring/configuration bug, spawn denied."
-                ),
-            )
-        from .instance import _check_team_membership
 
-        membership_error = _check_team_membership(
-            caller_agent_id, agent_id, caller_version_tag
-        )
-        if membership_error is not None:
-            return _denied_result(
-                error=f"ERROR: {membership_error}",
-            )
+# ═══════════════════════════════════════════════════════════════════════
+# Unified-spawn consumption helpers (unify-spawn-tools, 2026-10-05)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# ``spawn_hot_instance`` was removed as a standalone tool. Warm-start
+# consumption now rides ``spawn_instance`` (``daemon/tools/instance.py``),
+# gated by the TARGET agent's ``snapshot_enabled`` meta.json flag. The
+# R14 state machine below is the SAME code that used to live inside the
+# removed tool (explicit-id verify → internal search → staleness →
+# verify=git → R6b stamp → R16 counter), factored into module-level
+# helpers so there is exactly ONE copy of the resolution logic
+# (decision 1 of unify-spawn-tools). Ordering contract (R6b + R18):
+# resolve → manager.spawn_instance → finalize (stamp BEFORE enqueue) →
+# the unified tool's R18 auto-dispatch (which lives in instance.py —
+# it must run even when the snapshot gate is OFF).
 
-        # ── Resolve the consumed snapshot (None on cold) ──────────────
-        repo = _snapshot_repo()
-        service = _snapshot_service()
-        search_service = _search_service()
 
-        consumed: Any | None = None
-        staleness: dict[str, Any] | None = None
-        cold_reason: str | None = None
-        warnings: list[str] = []
-        searched_desc: str | None = None
-        # D8 cross-project consume flag — flipped to True when the
-        # caller explicitly opted in via ``allow_cross_project=True``;
-        # threaded into the spawn-hot hint so the recorded consent
-        # is visible at-a-glance.
-        cross_project_consumed: bool = False
+@dataclass
+class SpawnSnapshotResolution:
+    """Mutable outcome of the pre-spawn snapshot resolution (§4.3/§5.2).
 
-        project_id = _caller_project_id(manager, caller_instance_id)
+    ``consumed`` is the snapshot row the spawn will warm-start from
+    (``None`` ⇒ cold). ``cold_reason`` ∈ {``no-hit``, ``expired``,
+    ``verify-failed``} mirrors the R14 reason lexemes; ``warnings``
+    accumulates the fail-soft diagnostics that surface in the
+    citation line. :func:`finalize_spawn_snapshot` mutates the
+    instance on a stamp failure (warm → cold downgrade).
+    """
+
+    consumed: Any | None = None
+    staleness: dict[str, Any] | None = None
+    cold_reason: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    searched_desc: str | None = None
+    cross_project_consumed: bool = False
+
+    @property
+    def started(self) -> str:
+        """``"warm"`` when a snapshot survived resolution + stamping."""
+        return "warm" if self.consumed is not None else "cold"
+
+
+SNAPSHOT_STEERING_IGNORED_LINE = (
+    '[snapshot] ignored: snapshot_id/tags steering requires the target '
+    'agent to have "snapshot_enabled": true in its meta.json — '
+    "spawned plain cold."
+)
+
+
+async def resolve_spawn_snapshot(
+    manager: Any,
+    *,
+    task: str | None,
+    snapshot_id: str | None,
+    tags: list[str] | None,
+    verify: str,
+    allow_cross_project: bool,
+    caller_project_id: str | None,
+) -> SpawnSnapshotResolution:
+    """Resolve the snapshot to warm-start from (``consumed=None`` ⇒ cold).
+
+    The R14 fail-soft state machine, preserved from the removed
+    ``spawn_hot_instance``: explicit-id verify-then-warm (missing /
+    non-active / project-mismatch ⇒ ``verify-failed`` cold + warning;
+    ``allow_cross_project=True`` consumes a mismatch anyway), else the
+    task-based internal search (ACTIVE-only top hit, ``limit=1``;
+    search fault / empty results / inactive / expired ⇒ ``no-hit`` /
+    ``expired`` cold), then the §5.2 staleness report (expired ⇒ cold)
+    and the opt-in ``verify=git`` anchor (warnings ride
+    ``staleness.warnings``). D8: ``caller_project_id=None``
+    (project-less caller) fails closed on any snapshot that HAS a
+    project.
+
+    NEVER raises: an unexpected fault in this phase degrades to a
+    ``no-hit`` cold with a warning so the unified spawn still
+    proceeds plain-cold (R14 rider h — a snapshot-system fault must
+    never break spawning).
+    """
+    resolution = SpawnSnapshotResolution()
+    try:
+        repo = getattr(manager, "_snapshot_repo", None)
+        service = getattr(manager, "_snapshot_service", None)
+        search_service = getattr(manager, "_snapshot_search_service", None)
+        project_id = caller_project_id
 
         if snapshot_id:
             # R14 explicit branch — verify-then-warm; ANY failure is a
             # cold fallback with a warning, NEVER an error.
             if repo is None:
-                cold_reason = "verify-failed"
-                warnings.append("snapshot repository not wired")
+                resolution.cold_reason = "verify-failed"
+                resolution.warnings.append("snapshot repository not wired")
             else:
                 consumed = await asyncio.to_thread(repo.get, snapshot_id)
                 if consumed is None:
-                    cold_reason = "verify-failed"
-                    warnings.append(f"snapshot {snapshot_id} not found")
-                    consumed = None
+                    resolution.cold_reason = "verify-failed"
+                    resolution.warnings.append(
+                        f"snapshot {snapshot_id} not found"
+                    )
                 elif getattr(consumed, "status", None) != "active":
                     # Superseded (or failed/interrupted) rows NEVER spawn.
-                    cold_reason = "verify-failed"
-                    warnings.append(
+                    resolution.cold_reason = "verify-failed"
+                    resolution.warnings.append(
                         f"snapshot {snapshot_id} status is "
                         f"{getattr(consumed, 'status', None)!r} — only "
                         "'active' snapshots spawn"
@@ -1006,16 +810,16 @@ def create_snapshot_tools(
                     # only an explicit ``allow_cross_project=True``
                     # consumes.
                     if allow_cross_project:
-                        cross_project_consumed = True
-                        warnings.append(
+                        resolution.cross_project_consumed = True
+                        resolution.warnings.append(
                             f"snapshot {snapshot_id} belongs to "
                             f"project {consumed.project_id} — "
                             f"cross-project consume opted in via "
                             f"allow_cross_project=True"
                         )
                     else:
-                        cold_reason = "verify-failed"
-                        warnings.append(
+                        resolution.cold_reason = "verify-failed"
+                        resolution.warnings.append(
                             f"snapshot {snapshot_id} belongs to "
                             f"project {consumed.project_id} — "
                             f"caller instance has no project to "
@@ -1031,44 +835,45 @@ def create_snapshot_tools(
                     # (D8 handoff) added an explicit opt-in param
                     # — ``allow_cross_project=True`` lets the caller
                     # consume a cross-project snapshot anyway
-                    # (staleness is still computed; the
-                    # ``hint`` notes the cross-project origin so
-                    # the caller records the consent). The default
+                    # (staleness is still computed; the citation
+                    # line notes the cross-project origin so the
+                    # caller records the consent). The default
                     # ``False`` preserves the Wave 2b fail-closed
                     # behavior — a mismatch is a verify-fail cold
                     # fallback with a warning (prevents digest
                     # leakage through a shared leader).
                     if allow_cross_project:
-                        cross_project_consumed = True
-                        warnings.append(
+                        resolution.cross_project_consumed = True
+                        resolution.warnings.append(
                             f"snapshot {snapshot_id} belongs to "
                             f"project {consumed.project_id} — "
                             f"cross-project consume opted in via "
                             f"allow_cross_project=True"
                         )
                     else:
-                        cold_reason = "verify-failed"
-                        warnings.append(
+                        resolution.cold_reason = "verify-failed"
+                        resolution.warnings.append(
                             f"snapshot {snapshot_id} belongs to "
                             f"project {consumed.project_id}, not "
                             f"this instance's project {project_id}"
                         )
                         consumed = None
-            searched_desc = f"snapshot {snapshot_id}"
+                resolution.consumed = consumed
+                resolution.searched_desc = f"snapshot {snapshot_id}"
         else:
             # R14 internal search — ACTIVE-only candidates (the search
             # service filters status='active' + project).
             if search_service is None or repo is None:
-                cold_reason = "no-hit"
-                warnings.append("snapshot services not wired")
+                resolution.cold_reason = "no-hit"
+                resolution.warnings.append("snapshot services not wired")
             else:
-                searched_desc = task
+                resolution.searched_desc = task
                 search_tags = [
                     t for t in (tags or []) if isinstance(t, str) and t
                 ]
                 try:
                     search_result = await search_service.search(
-                        task,
+                        task or "",
                         project_id=project_id or "",
                         tags=search_tags,
                         # FIXME(ledger): tag_mode=any unwired — see follow-up ledger
@@ -1078,12 +883,12 @@ def create_snapshot_tools(
                     results = list(search_result.get("results") or [])
                 except Exception as exc:
                     logger.warning(
-                        f"[Snapshot] spawn_hot_instance internal search "
-                        f"failed: {exc}"
+                        f"[Snapshot] spawn_instance internal snapshot "
+                        f"search failed: {exc}"
                     )
                     results = []
                 if not results:
-                    cold_reason = "no-hit"
+                    resolution.cold_reason = "no-hit"
                 else:
                     top = results[0]
                     consumed = await asyncio.to_thread(
@@ -1093,45 +898,49 @@ def create_snapshot_tools(
                         consumed is None
                         or getattr(consumed, "status", None) != "active"
                     ):
-                        cold_reason = "no-hit"
-                        consumed = None
+                        resolution.cold_reason = "no-hit"
                     elif top.get("freshness") == "expired":
-                        cold_reason = "expired"
-                        warnings.append(
+                        resolution.cold_reason = "expired"
+                        resolution.warnings.append(
                             f"top match {top.get('snapshot_id')} is "
                             "expired — expired digests never warm-start"
                         )
-                        consumed = None
+                    else:
+                        resolution.consumed = consumed
 
         # ── Staleness (§5.2) for the consumed snapshot ────────────────
-        if consumed is not None and service is not None:
+        if resolution.consumed is not None and service is not None:
             try:
-                staleness = await service.staleness_report(consumed.id)
+                resolution.staleness = await service.staleness_report(
+                    resolution.consumed.id
+                )
             except Exception as exc:
-                staleness = None
-                warnings.append(
+                resolution.staleness = None
+                resolution.warnings.append(
                     f"staleness check failed: {type(exc).__name__}"
                 )
-            if staleness is not None and staleness.get("freshness") == "expired":
-                cold_reason = "expired"
-                warnings.append(
+            if (
+                resolution.staleness is not None
+                and resolution.staleness.get("freshness") == "expired"
+            ):
+                resolution.cold_reason = "expired"
+                resolution.warnings.append(
                     "snapshot expired — expired digests never warm-start"
                 )
-                consumed = None
+                resolution.consumed = None
 
         # ── verify=git opt-in (§5.2 anchor — contained + fail-soft) ───
-        if consumed is not None and verify == "git":
+        if resolution.consumed is not None and verify == "git":
             git_state = await asyncio.to_thread(
                 _git_repo_state,
-                getattr(consumed, "repo_path", None),
-                getattr(consumed, "git_sha", None),
+                getattr(resolution.consumed, "repo_path", None),
+                getattr(resolution.consumed, "git_sha", None),
             )
-            if staleness is None:
-                staleness = {}
-            staleness["repo_state"] = git_state
+            if resolution.staleness is None:
+                resolution.staleness = {}
+            resolution.staleness["repo_state"] = git_state
             # Wave 2b review FIX 4 — git-anchor warnings ride inside
-            # ``staleness.warnings`` (the R14 result contract is
-            # exactly 6 keys — no top-level ``warnings`` key).
+            # ``staleness.warnings``.
             git_warnings: list[str] = []
             if isinstance(git_state, dict) and git_state.get("error"):
                 git_warnings.append(
@@ -1145,368 +954,234 @@ def create_snapshot_tools(
                     "since the snapshot commit"
                 )
             if git_warnings:
-                warnings.extend(git_warnings)
-                warnings_list = list(staleness.get("warnings") or [])
+                resolution.warnings.extend(git_warnings)
+                warnings_list = list(
+                    resolution.staleness.get("warnings") or []
+                )
                 warnings_list.extend(git_warnings)
-                staleness["warnings"] = warnings_list
+                resolution.staleness["warnings"] = warnings_list
 
-        started = "warm" if consumed is not None else "cold"
-        if started == "warm" and staleness is not None:
-            if staleness.get("freshness") == "stale":
-                drift_note = (
-                    f"snapshot is stale (age "
-                    f"{staleness.get('snapshot_age_days')}d > "
-                    f"{SNAPSHOT_FRESH_MAX_AGE_DAYS}d) — verify digest "
-                    "assumptions against the current state before "
-                    "acting on them"
-                )
-                warnings.append(drift_note)
-                warnings_list = list(staleness.get("warnings") or [])
-                warnings_list.append(drift_note)
-                staleness["warnings"] = warnings_list
-
-        # ── Spawn (existing lane — D1: manager.spawn_instance) ────────
-        try:
-            from .instance import _resolve_default_version_tag
-            from ..registry import get_registry
-            from ..services.project_normalizer import normalize_project_id
-
-            registry = get_registry()
-            version_tag = await _resolve_default_version_tag(
-                getattr(manager, "_project_repository", None),
-                agent_id,
-                registry,
+        # ── R14 drift-note mandate — stale-not-expired warm start ────
+        if (
+            resolution.consumed is not None
+            and resolution.staleness is not None
+            and resolution.staleness.get("freshness") == "stale"
+        ):
+            drift_note = (
+                f"snapshot is stale (age "
+                f"{resolution.staleness.get('snapshot_age_days')}d > "
+                f"{SNAPSHOT_FRESH_MAX_AGE_DAYS}d) — verify digest "
+                "assumptions against the current state before "
+                "acting on them"
             )
-            # Parity with the spawn_instance tool (instance.py:2211):
-            # normalize UNCONDITIONALLY — a None/empty caller project
-            # (and "null"/"none" strings) resolves to the system
-            # default project, exactly as the spawn path does after
-            # parent auto-inherit (the caller project was already
-            # inherited at the top of this tool). No pre-guard shim:
-            # a RuntimeError from the pre-startup guard
-            # (SYSTEM_DEFAULT_PROJECT_ID unset) surfaces through the
-            # spawn except below as a cold error — the same loud lane
-            # instance.py's generic ``except Exception`` handler uses.
-            resolved_project_id = normalize_project_id(project_id)
-            new_instance_id, validated_model_override = manager.spawn_instance(
-                agent_id=agent_id,
-                instance_id=None,
-                parent_id=caller_instance_id or None,
-                project_id=resolved_project_id,
-                instance_name=instance_name,
-                model=model,
-                version_tag=version_tag,
+            resolution.warnings.append(drift_note)
+            warnings_list = list(
+                resolution.staleness.get("warnings") or []
             )
-        except Exception as exc:
-            # System fault — the R14 contract's error lane.
-            return _cold_result(
-                reason=cold_reason or "no-hit",
-                searched=searched_desc,
-                error=f"ERROR: spawn failed: {type(exc).__name__}: {exc}",
-                staleness=staleness,
-                snapshot_id=getattr(consumed, "id", None) if consumed else None,
-            )
+            warnings_list.append(drift_note)
+            resolution.staleness["warnings"] = warnings_list
+    except Exception as exc:  # noqa: BLE001 — fail-soft belt (R14 rider h)
+        # The resolve phase must NEVER break the spawn. A fault here
+        # (repo.get raising, a malformed row, …) degrades to a
+        # no-hit cold; the unified spawn proceeds plain-cold.
+        logger.warning(
+            f"[Snapshot] resolve_spawn_snapshot fault — degrading to "
+            f"cold: {type(exc).__name__}: {exc}"
+        )
+        resolution.consumed = None
+        if resolution.cold_reason is None:
+            resolution.cold_reason = "no-hit"
+        resolution.warnings.append(
+            f"snapshot resolve failed: {type(exc).__name__}"
+        )
+    return resolution
 
-        # ── R6b warm-path ordering: atomic metadata write BEFORE the
-        # return — turn-1 ordering is fully under the tool's control.
-        # The injection seam (assemble_context_messages) reads
-        # instance_metadata["snapshot_digest"] on TURN 1. Cold path
-        # writes NOTHING (no stamp, spawned_from None).
-        if started == "warm" and consumed is not None:
-            try:
-                manager.set_metadata_many(
-                    new_instance_id,
-                    {
-                        "snapshot_digest": consumed.digest or {},
-                        "spawned_from_snapshot_id": consumed.id,
-                    },
-                )
-            except Exception as exc:
-                # The instance exists; a failed stamp degrades to a
-                # cold-context instance — surface it, never raise.
-                warnings.append(
-                    f"digest stamp write failed: {type(exc).__name__}: {exc}"
-                )
-                started = "cold"
-                consumed = None
-                cold_reason = "verify-failed"
 
-            else:
-                # R16 — spawn-warm counter, MONITORING ONLY. Fires
-                # ONLY on the WARM path: cold / no-hit / expired /
-                # verify-failed spawns (R14 cold results, captured by
-                # the ``started == "cold"`` branch above and by the
-                # ``started == "cold"`` flip on stamp failure) do NOT
-                # count (rider j). Placement: AFTER the stamp
-                # succeeds, so a counter write failure can NEVER
-                # cause the warm spawn to downgrade to cold (the
-                # ordering is one-way: success-of-stamp first, then
-                # counter as observability).
-                if consumed is not None:
-                    _safe_inc_spawn(getattr(consumed, "id", "") or "")
-                    # R16 observability floor (Wave 3 rider j):
-                    # emit a structured line per WARM spawn with
-                    # the counter increment as the load-bearing
-                    # payload. Mirrors the executor's existing
-                    # capture log line shape
-                    # (``[SnapshotCapture]`` JSON payload) so
-                    # downstream tools can grep both uniformly.
-                    try:
-                        import json as _json
+async def finalize_spawn_snapshot(
+    manager: Any,
+    resolution: SpawnSnapshotResolution,
+    *,
+    new_instance_id: str,
+) -> SpawnSnapshotResolution:
+    """R6b warm-path stamp + R16 counter (POST-spawn, PRE-enqueue).
 
-                        logger.info(
-                            "[SnapshotSpawnWarm] "
-                            + _json.dumps(
-                                {
-                                    "snapshot_id": getattr(consumed, "id", None),
-                                    "new_instance_id": new_instance_id,
-                                    "counter": "spawn_warm",
-                                    "project_id": getattr(
-                                        consumed, "project_id", None
-                                    ),
-                                }
-                            )
-                        )
-                    except Exception:  # pragma: no cover — defensive belt
-                        logger.warning(
-                            "[Snapshot] R16 spawn warm log line "
-                            "encoding failed (non-fatal)"
-                        )
+    The unified spawn tool calls this AFTER ``manager.spawn_instance``
+    and BEFORE its R18 auto-dispatch enqueue so the snapshot digest is
+    already stamped when the worker picks up the first-turn message
+    (``assemble_context_messages`` reads
+    ``instance_metadata["snapshot_digest"]`` on turn 1).
 
-        # ── R18 (2026-10-04) auto-dispatch — eliminate the contract trap.
-        # Forensic-audit lineage: commissions cfded28b / da8e4809
-        # (leader-synthesized verdict bb100883; audit-doc 6e75621b)
-        # proved that `task` was "accepted-but-never-delivered" —
-        # agents uniformly missed the follow-up send_message
-        # requirement. Default behavior now: if `auto_dispatch=True`
-        # AND `task` is non-empty, enqueue `task` as the child's
-        # first turn INSIDE this tool so the trap is structurally
-        # impossible. Ordering: AFTER the R6b warm-path metadata
-        # write so the snapshot digest is already stamped when the
-        # worker picks up the message
-        # (`assemble_context_messages` reads
-        # `instance_metadata["snapshot_digest"]` on turn 1). On any
-        # enqueue failure the spawn result is preserved but the
-        # `error` field surfaces the failure and the hint names the
-        # manual recovery path — never silent.
-        auto_dispatch_enqueued: bool = False
-        auto_dispatch_error: str | None = None
-        auto_dispatch_message_id: str | None = None
-        if auto_dispatch and task and task.strip():
-            try:
-                # Same provenance as send_message (instance.py:3566)
-                # so downstream tooling sees the parent-id-minted
-                # source and the existing internal_agent:<caller>
-                # source taxonomy continues to apply.
-                enqueue_result = await manager.enqueue_message(
-                    instance_id=new_instance_id,
-                    message=task,
-                    source=(
-                        f"internal_agent:{caller_instance_id}"
-                        if caller_instance_id
-                        else "api"
+    Mutates + returns ``resolution``: on a stamp failure the warm
+    start downgrades to cold (``cold_reason="verify-failed"`` plus a
+    warning) — the instance exists but carries no digest. A counter /
+    log-line failure NEVER downgrades (R16 rider j ordering:
+    success-of-stamp first, then counter as observability).
+    """
+    if resolution.consumed is None:
+        return resolution
+    try:
+        manager.set_metadata_many(
+            new_instance_id,
+            {
+                "snapshot_digest": resolution.consumed.digest or {},
+                "spawned_from_snapshot_id": resolution.consumed.id,
+            },
+        )
+    except Exception as exc:
+        # The instance exists; a failed stamp degrades to a
+        # cold-context instance — surface it, never raise.
+        resolution.warnings.append(
+            f"digest stamp write failed: {type(exc).__name__}: {exc}"
+        )
+        resolution.consumed = None
+        resolution.cold_reason = "verify-failed"
+        return resolution
+
+    # R16 — spawn-warm counter, MONITORING ONLY. Fires ONLY on the
+    # WARM path (the stamp succeeded); placement AFTER the stamp so a
+    # counter write failure can NEVER downgrade the warm spawn.
+    _safe_inc_spawn(manager, getattr(resolution.consumed, "id", "") or "")
+    # R16 observability floor (Wave 3 rider j): emit a structured line
+    # per WARM spawn with the counter increment as the load-bearing
+    # payload. Mirrors the executor's ``[SnapshotCapture]`` JSON
+    # payload shape so downstream tools can grep both uniformly.
+    try:
+        import json as _json
+
+        logger.info(
+            "[SnapshotSpawnWarm] "
+            + _json.dumps(
+                {
+                    "snapshot_id": getattr(resolution.consumed, "id", None),
+                    "new_instance_id": new_instance_id,
+                    "counter": "spawn_warm",
+                    "project_id": getattr(
+                        resolution.consumed, "project_id", None
                     ),
-                )
-                # ── R18 result-inspection invariant (2026-10-04) ──
-                # The defensive contract: any non-queued outcome from
-                # the internal enqueue path MUST route into the SAME
-                # failure/hint surface as exceptions (F1-style). After
-                # verifying
-                # ``daemon.services.instance_messaging.enqueue_message``
-                # (the path this tool uses — distinct from the HTTP
-                # ``enqueue_message_job`` variant), the escape hatch
-                # applies: this path has EXACTLY ONE non-raising return
-                # (``AsyncMessageResult(message_id=…, instance_id=…,
-                # status='queued', job_id=…)`` at
-                # ``instance_messaging.py:2257``) and every failure mode
-                # raises (e.g. ``RuntimeError("Manager is shutting
-                # down…")`` at :1694; the inner ``session.commit()`` /
-                # ``session.refresh(task)`` block at :2071 / :2079 raises
-                # on DB faults). There is NO non-raising non-queued
-                # outcome on this path; the ``queued`` field is hardcoded
-                # to the dataclass default (``False``) and ``status`` is
-                # hardcoded to the literal ``"queued"`` on the only
-                # return site, so a ``result.queued == False`` check
-                # would be dead code that mis-fires on every successful
-                # enqueue. Pin the invariants instead of branching on a
-                # signal that cannot discriminate — a regression here
-                # (e.g. a future ``return AsyncMessageResult(…,
-                # status='rejected')`` branch) MUST update this block,
-                # not silently slip through.
-                if enqueue_result is None:
-                    raise RuntimeError(
-                        "manager.enqueue_message returned None for "
-                        f"new_instance_id={new_instance_id}; the "
-                        "R18 invariant is non-None on success"
-                    )
-                result_message_id = getattr(
-                    enqueue_result, "message_id", None
-                )
-                result_status = getattr(enqueue_result, "status", None)
-                if not result_message_id or result_status != "queued":
-                    # Regression-ladder tripwire. If this ever fires,
-                    # a new non-raising non-queued branch was added
-                    # upstream; route the loud surface here so the
-                    # caller can self-recover. Today this is
-                    # unreachable on the only return path (:2257
-                    # above) — the assertion is a guard against
-                    # silent-failure regressions on the exact contract
-                    # this commission closes.
-                    raise RuntimeError(
-                        f"manager.enqueue_message returned a "
-                        f"non-queued result: status={result_status!r} "
-                        f"message_id={result_message_id!r} "
-                        f"new_instance_id={new_instance_id}"
-                    )
-                auto_dispatch_message_id = result_message_id
-                auto_dispatch_enqueued = True
-                # R18 traffic visibility (review F2) — the forensic-
-                # audit methodology counts enqueue log lines; auto-
-                # dispatch traffic MUST be countable the same way.
-                # Mirrors the warm-spawn JSON log shape at :1243 so
-                # downstream tooling (grep / census) treats both
-                # uniformly. Same `import json as _json` local pattern
-                # to keep the surface minimal and avoid dragging the
-                # module-level namespace.
-                try:
-                    import json as _json
+                }
+            )
+        )
+    except Exception:  # pragma: no cover — defensive belt
+        logger.warning(
+            "[Snapshot] R16 spawn warm log line encoding failed (non-fatal)"
+        )
+    return resolution
 
-                    logger.info(
-                        "[SnapshotAutoDispatch] "
-                        + _json.dumps(
-                            {
-                                "event": "spawn_hot_auto_dispatch",
-                                "caller_iid": caller_instance_id,
-                                "target_iid": new_instance_id,
-                                "content_len": len(task),
-                                "message_id": result_message_id,
-                            }
-                        )
-                    )
-                except Exception:  # noqa: BLE001 — defensive belt: log-line JSON encoding failure MUST NOT mask the successful enqueue above
-                    logger.warning(
-                        "[Snapshot] R18 auto-dispatch log line "
-                        "encoding failed (non-fatal)"
-                    )
-            except Exception as exc:  # noqa: BLE001 — enqueue lane raises arbitrary transport/DB errors; F1 contract surfaces them
-                # Review F1 — log the failure (was silent before).
-                # Same `logger` + same f-string sibling style as the
-                # internal-search failure path at :1066 — diagnostics
-                # come from logs alone when a caller reports a
-                # stranded child without preserving the result. The
-                # ``auto_dispatch_message_id`` is preserved on the
-                # result side (None when the enqueue never reached
-                # the dispatch — see the success-path assignment
-                # above) so a future tool consumer can still
-                # distinguish "enqueue never returned an id" from
-                # "enqueue succeeded but downstream tool surface
-                # corrupted".
-                logger.warning(
-                    f"[Snapshot] spawn_hot_instance auto-dispatch "
-                    f"enqueue failed for {new_instance_id}: {exc}"
-                )
-                # Never silent — surface as a clear error so the
-                # caller can self-correct via a follow-up
-                # send_message. We do NOT downgrade `started` to
-                # "blocked" because the spawn DID succeed; the
-                # `error` field is the loud lane.
-                auto_dispatch_error = (
-                    f"ERROR: spawn succeeded but auto-dispatch "
-                    f"failed: {type(exc).__name__}: {exc}. "
-                    f"Call send_message(instance_id="
-                    f"\"{new_instance_id}\", message=<your task>) "
-                    f"explicitly to deliver the first turn."
-                )
 
-        if started == "warm":
-            tags_text = ", ".join(list(getattr(consumed, "domain_tags", None) or [])[:8])
-            age = (
-                staleness.get("snapshot_age_days")
-                if staleness is not None
-                else None
-            )
-            hint = (
-                f"Warm-started from snapshot {consumed.id} "
-                f"(age {age}d; tags {tags_text})"
-            )
-            # D8 cross-project marker — when the caller explicitly
-            # opted in via ``allow_cross_project=True``, surface
-            # the cross-project origin in the hint so the caller
-            # records the consent (digest provenance includes the
-            # consumed snapshot's project).
-            if cross_project_consumed:
-                hint += (
-                    f" — cross-project consume from "
-                    f"{getattr(consumed, 'project_id', None)} "
-                    f"(allow_cross_project=True)"
-                )
-            # R14 drift-note mandate — a stale-not-expired warm start
-            # carries the drift note in the hint AND in
-            # staleness.warnings (appended above).
-            if staleness is not None and staleness.get("freshness") == "stale":
-                hint += " — snapshot is STALE: verify digest assumptions against the current state before acting on them"
-            if warnings:
-                hint += f" — warnings: {'; '.join(warnings)}"
-        else:
-            fallback = _cold_result(
-                reason=cold_reason or "no-hit",
-                searched=searched_desc,
-                instance_id=new_instance_id,
-                staleness=staleness,
-            )
-            hint = fallback["hint"]
-            if warnings:
-                hint += f" — warnings: {'; '.join(warnings)}"
+def format_snapshot_citation(
+    resolution: SpawnSnapshotResolution,
+) -> str:
+    """Assemble the ``[snapshot] started: …`` citation line.
 
-        # ── R18 auto-dispatch tail: append the dispatch-status note
-        # to the hint so the caller can see at-a-glance whether the
-        # task was enqueued automatically, was skipped (opt-out or
-        # empty task), or failed. The error field carries the loud
-        # failure detail; the hint is the visible contract line.
-        if auto_dispatch_enqueued:
-            hint += (
-                " — auto-dispatched as first turn "
-                "(do NOT call send_message again — the child is "
-                "already working on this task)"
-            )
-        elif auto_dispatch and not (task and task.strip()):
-            # auto_dispatch=True but the task was empty/whitespace —
-            # we did not enqueue anything. Tell the caller loudly so
-            # they know they must send the first message themselves.
-            hint += (
-                f" — auto-dispatch SKIPPED: task was empty; caller "
-                f"MUST call send_message(instance_id="
-                f"\"{new_instance_id}\", message=<task>) to start "
-                f"the child"
-            )
-        elif not auto_dispatch:
-            # Legacy two-step ritual. Same hint text as the
-            # pre-R18 contract so a caller who opts out gets the
-            # explicit next-step instruction (and the docstring /
-            # agent-prompt teaching continues to apply).
-            hint += (
-                f" — auto_dispatch=False: caller MUST call "
-                f"send_message(instance_id=\"{new_instance_id}\", "
-                f"message=<task>) to deliver the first turn"
-            )
-        if auto_dispatch_error:
-            hint += f" — auto-dispatch ERROR: {auto_dispatch_error}"
+    Appended verbatim as ONE line of the unified ``spawn_instance``
+    STRING return (the established citation phrasing — callers cite
+    the ``started`` value + snapshot lineage in their reports):
 
-        result = {
-            "instance_id": new_instance_id,
-            "started": started,
-            "snapshot_id": consumed.id if (started == "warm" and consumed is not None) else None,
-            # Wave 2b review FIX 3 — spec §4.3: staleness is a dict on
-            # every result path (a warm start with the staleness
-            # service unavailable would otherwise emit None).
-            "staleness": staleness if isinstance(staleness, dict) else {},
-            "hint": hint,
-            "error": auto_dispatch_error,
-        }
-        # Wave 2b review FIX 4 — the conditional top-level
-        # ``result["warnings"]`` key (7th key) was REMOVED: the §4.3
-        # contract is exactly 6 keys; warnings surface via
-        # ``staleness.warnings`` and the ``hint`` text only.
-        return result
+    * warm — ``[snapshot] started: warm — Warm-started from snapshot
+      {id} (age {age}d; tags {tags})`` plus the cross-project /
+      STALE / warnings tails.
+    * cold — ``[snapshot] started: cold — No matching snapshot
+      (searched: {q}; reason: {reason})`` (the ``searched:`` fragment
+      is omitted when nothing was searched) plus the warnings tail.
+    """
+    if resolution.started == "warm":
+        consumed = resolution.consumed
+        # Defensive str-coercion belt: ``domain_tags`` is typed
+        # ``list[str]`` on the model, but ``Snapshot`` rows can come
+        # from search hits or stored JSONB that round-trip with
+        # mixed primitives. A bare ``", ".join(...)`` would raise
+        # ``TypeError`` on a non-str element AFTER a successful
+        # spawn, masking success — cast each item so the citation
+        # always renders. The first 8 are surfaced; cap stays the
+        # same.
+        tags_text = ", ".join(
+            str(t)
+            for t in list(getattr(consumed, "domain_tags", None) or [])[:8]
+        )
+        age = (
+            resolution.staleness.get("snapshot_age_days")
+            if resolution.staleness is not None
+            else None
+        )
+        # ``age`` stays ``None`` on unwired-service / staleness-raised
+        # fail-soft paths; rendering it bare would emit
+        # ``age Noned``. Substitute a stable lexeme instead.
+        age_text = (
+            f"{age}d" if isinstance(age, (int, float)) else "unknown"
+        )
+        line = (
+            f"[snapshot] started: warm — Warm-started from snapshot "
+            f"{consumed.id} (age {age_text}; tags {tags_text})"
+        )
+        # D8 cross-project marker — when the caller explicitly opted
+        # in via ``allow_cross_project=True``, surface the
+        # cross-project origin so the caller records the consent.
+        if resolution.cross_project_consumed:
+            line += (
+                f" — cross-project consume from "
+                f"{getattr(consumed, 'project_id', None)} "
+                f"(allow_cross_project=True)"
+            )
+        # R14 drift-note mandate — a stale-not-expired warm start
+        # carries the STALE note in the citation line AND in
+        # staleness.warnings (appended in resolve).
+        if (
+            resolution.staleness is not None
+            and resolution.staleness.get("freshness") == "stale"
+        ):
+            line += (
+                " — snapshot is STALE: verify digest assumptions "
+                "against the current state before acting on them"
+            )
+    else:
+        searched_part = (
+            f"searched: {_trim_query_for_hint(resolution.searched_desc)}; "
+            if resolution.searched_desc
+            else ""
+        )
+        line = (
+            f"[snapshot] started: cold — No matching snapshot "
+            f"({searched_part}reason: "
+            f"{resolution.cold_reason or 'no-hit'})"
+        )
+    if resolution.warnings:
+        line += f" — warnings: {'; '.join(resolution.warnings)}"
+    return line
 
-    return [snapshot_create, snapshot_search, spawn_hot_instance]
+
+def _metrics_service(manager: Any) -> Any | None:
+    """R16 — module-level accessor for the monitoring counters service.
+
+    Returns ``None`` when the manager has no metrics wiring (e.g.
+    boot probes / metadata scan stubs) so the counters no-op cleanly.
+    Production managers always wire one — see ``daemon/manager.py``.
+    """
+    return getattr(manager, "_snapshot_metrics_service", None)
+
+
+def _safe_inc_spawn(manager: Any, snapshot_id: str) -> None:
+    """R16 spawn-warm counter increment, fail-soft (never raises)."""
+    svc = _metrics_service(manager)
+    if svc is None:
+        return
+    try:
+        svc.inc_spawn(snapshot_id)
+    except Exception as exc:  # pragma: no cover — defensive belt
+        logger.warning(
+            f"[Snapshot] R16 spawn counter increment failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+def _safe_inc_capture(manager: Any, agent_id: str) -> None:
+    """R16 capture counter increment, fail-soft (never raises)."""
+    svc = _metrics_service(manager)
+    if svc is None:
+        return
+    try:
+        svc.inc_capture(agent_id)
+    except Exception as exc:  # pragma: no cover — defensive belt
+        logger.warning(
+            f"[Snapshot] R16 capture counter increment failed: "
+            f"{type(exc).__name__}: {exc}"
+        )

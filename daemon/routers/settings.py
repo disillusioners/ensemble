@@ -647,7 +647,9 @@ async def get_plane_config():
 
 # ==================== Agent Snapshot — R15 Toggle (write side ONLY) ====================
 # Gates ONLY ``snapshot_create`` (rider (i) isolation —
-# ``snapshot_search`` and ``spawn_hot_instance`` are NEVER gated).
+# ``snapshot_search`` and the warm-start consumption path inside
+# ``spawn_instance`` are NEVER gated; consumption is gated per-agent
+# by the TARGET's ``snapshot_enabled`` meta flag instead).
 # Default OFF — unset / missing / unknown values all read as False
 # (fail-closed opt-in rollout). Storage shape mirrors
 # ``editor_preference`` (R2: ``set_metadata`` opens its own Session).
@@ -738,6 +740,16 @@ async def get_snapshot_usage_metrics_deprecated(
     at ``daemon/routers/blueprints.py:551-557``. The ``Link`` header
     points at the successor ``/api/snapshots/metrics`` route per
     RFC 8288.
+
+    **Counting semantics** (unify-spawn-tools):
+
+    * capture counts — incremented on every ``snapshot_create``
+      invocation regardless of R9 verdict (REUSE + NEW + SUPERSEDE +
+      CREATE-FRESH all count);
+    * per-snapshot spawn counts — incremented on the warm-start
+      path of ``spawn_instance`` (the unified spawn tool; formerly the
+      removed ``spawn_hot_instance``) only — cold / no-hit / expired /
+      verify-failed paths DO NOT count (R16 rider j).
 
     The body delegates to the canonical handler via
     :func:`daemon.routers.snapshots._proxy_to_snapshots_metrics`

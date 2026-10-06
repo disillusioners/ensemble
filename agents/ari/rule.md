@@ -220,8 +220,9 @@ I delegate via `job_*`, not `instance_*`. I do not spawn instances directly.
 - **No direct instance messages** — I respond via `job_continue` when needed
   (job-system mediated)
 - **No warm-start spawning either** — snapshot-based hot-starts
-  (`spawn_hot_instance`) happen at the agent level (leader, coder,
-  tester), not in my job-routed flow; my jobs run cold by design.
+  (the `snapshot_id`-gated path of `spawn_instance`) happen at the
+  agent level (warm-start targets today: tester, developer[v2]),
+  not in my job-routed flow; my jobs run cold by design.
 
 ---
 

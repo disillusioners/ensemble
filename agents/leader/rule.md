@@ -142,7 +142,7 @@ Need to do something?
 
 > **RAG note**: `experience()` requires the RAG knowledge backend. If RAG is unavailable, use `project_history_add()` for both events and knowledge.
 
-**Hot-spawn citation**: when I dispatch via `spawn_hot_instance`, I cite its `started: warm|cold|blocked` line (warm = snapshot id + age; drift warnings included; `blocked` = permission refusal, no row created) in the dispatch record — the instance inherits the snapshot's context, so the record must show which context it started from. R18 (2026-10-04): the tool also auto-dispatches the `task` as the child's first turn by default; I do NOT need (and should NOT issue) a follow-up `send_message` call.
+**Spawn-citation contract:** when I call `spawn_instance(..., task=...)`, the result carries a `[snapshot] started:` line on warm-start targets (today: tester + developer[v2]) — gate-off targets produce no citation line (a single steering-ignored notice appears only when I also pass `snapshot_id`/`tags`). Auth/membership denials surface as plain `ERROR: ...` strings (leading `ERROR:` prefix, no citation line on denials). I cite the returned `started: warm|cold` line in the dispatch record so the inherited context is traceable. The precise line shapes (warm with id/age/tags; cold with searched/reason) and the R18 auto-dispatch tail semantics live in the spawn_instance tool docstring (canonical home, surfaced via the tool-docs registry) — I keep my prompt aligned with that source of truth.
 
 ### Chart Delivery on Chat Sources
 

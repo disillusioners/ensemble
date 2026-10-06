@@ -48,7 +48,8 @@ Pipeline constraints (design §3.4 — PR5 binding contract):
   ``warnings`` (per §5.2). The freshness signal NEVER demotes
   candidates in v1 (R14: only the agent decides whether to trust).
 * **Returns metadata + digest preview ONLY.** The full body
-  is read at spawn time (Wave 2b's ``spawn_hot_instance``).
+  is read at spawn time (the unified ``spawn_instance`` warm
+  start; formerly Wave 2b's ``spawn_hot_instance``).
 
 Sibling-drift hazard (§3.4 rider — pinned by tests)
 ----------------------------------------------------

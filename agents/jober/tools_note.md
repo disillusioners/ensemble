@@ -105,6 +105,19 @@ rest are echoes of the same mission. Act once.**
 For waiting in-turn, use `await_mission` (timeout returns a snapshot,
 not an error).
 
+> **Question/stuck notifications are events-filter-exempt and
+> non-claiming.** When a mission's agent asks a question (`question
+> requested ❓`), sits stuck awaiting an answer (`stuck awaiting answer
+> ⏳`), or the ≥3-heartbeat wedge escalation fires, the QA fan-out notifies
+> every watcher holding an unclaimed row on ANY receipt of that mission —
+> including `mission_terminal`-only `watch_mission` rows, and including
+> spontaneous turns whose receipt was minted after your watch (e.g. you
+> were woken by a child report). These QA notifications ride the same
+> `[JOB_EVENT]` header, do NOT consume the watch row, and are deduped per
+> watcher — your watch survives and the mission-terminal event still
+> arrives afterward. The FIRST QA event is the signal; events on the
+> mission's other receipts are echoes — act once.
+
 ---
 
 ### list_watched_jobs

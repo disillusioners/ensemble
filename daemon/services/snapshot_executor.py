@@ -1184,9 +1184,10 @@ class SnapshotService:
         CURRENT status) and delegates to
         :func:`compute_staleness_report`.
 
-        The report propagates to the ``spawn_hot_instance`` result
-        wrapper (``daemon/tools/snapshot_tools.py``) as the
-        ``staleness`` field of the R14 contract.
+        The report propagates to the unified ``spawn_instance``
+        warm-start flow (via the ``daemon/tools/snapshot_tools.py``
+        helpers) as the staleness report behind the ``[snapshot]``
+        citation line.
         """
         snapshot = await asyncio.to_thread(self._snapshots.get, snapshot_id)
         if snapshot is None:

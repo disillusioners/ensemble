@@ -1745,7 +1745,9 @@ class SnapshotCreatePreferenceResponse(BaseModel):
 
     Surfaced to the FE settings menu — the toggle is R15 (gates the
     ``snapshot_create`` WRITE side ONLY; ``snapshot_search`` and
-    ``spawn_hot_instance`` are NEVER gated). When ``enabled=False``
+    the warm-start consumption path inside ``spawn_instance`` are
+    NEVER gated — consumption is per-agent ``snapshot_enabled``
+    instead). When ``enabled=False``
     the operator has chosen opt-out (default, fail-closed); a
     snapshot_create tool call returns the canonical
     ``{"disabled": True, "error": "snapshot_create disabled by settings

@@ -32,7 +32,13 @@ from tests.helpers.send_message_fixtures import (
 
 def _build_spawn_instance_tool():
     """Drive ``create_instance_tools`` to find the ``spawn_instance`` tool."""
-    manager = make_spawn_manager(allowed_models=["agentic", "coding"])
+    # "vision" rides the allow-list because the factory's compare_tools
+    # builder now HARD-REQUIRES a 'vision' model (VisionModelNotAllowedError,
+    # arch §8 — no silent default). The pins here are docstring pins; the
+    # allow-list content is irrelevant to them.
+    manager = make_spawn_manager(
+        allowed_models=["agentic", "coding", "vision"]
+    )
 
     patches = patch_heavy_helpers()
     for p in patches:
@@ -123,4 +129,39 @@ def test_spawn_instance_docstring_mentions_asymmetry():
     assert "silent" in doc_blob.lower(), (
         f"docstring must mention 'silent' for the legacy path; got: "
         f"{doc_blob[:200]!r}..."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pin R — Docstring covers the unified-spawn snapshot surface (unify-spawn-tools)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_spawn_instance_docstring_covers_snapshot_gate_and_dispatch():
+    """Pin R (unify-spawn-tools discoverability): the runtime
+    ``spawn_instance`` docstring documents the snapshot warm-start
+    gate (``snapshot_enabled``, TARGET-agent), the ``[snapshot]
+    started: warm|cold`` citation line, AND the R18 auto-dispatch
+    ``task``/``auto_dispatch`` pair — so the parent LLM can find the
+    unified capability at tool-discovery time.
+    """
+    tool = _build_spawn_instance_tool()
+    candidates = []
+    if hasattr(tool, "description") and tool.description:
+        candidates.append(tool.description)
+    if hasattr(tool, "func") and tool.func.__doc__:
+        candidates.append(tool.func.__doc__)
+    doc_blob = "\n".join(candidates)
+
+    assert "snapshot_enabled" in doc_blob, (
+        f"docstring must mention the snapshot_enabled gate; got: {doc_blob[:200]!r}..."
+    )
+    assert "[snapshot] started:" in doc_blob, (
+        f"docstring must mention the [snapshot] citation line; got: {doc_blob[:200]!r}..."
+    )
+    assert "auto_dispatch" in doc_blob, (
+        f"docstring must mention auto_dispatch; got: {doc_blob[:200]!r}..."
+    )
+    assert "task" in doc_blob, (
+        f"docstring must mention task; got: {doc_blob[:200]!r}..."
     )

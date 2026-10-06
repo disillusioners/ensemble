@@ -1233,6 +1233,23 @@ class TestInstallerSkillHygiene:
 #     "Phase A — charter agent + install skill + chart innate
 #     skill + ari workflow" header) and tripwire correctness
 #     requires the new SHAs.
+#   - 2026-10-05 unify-spawn-tools pre-merge disposition (seal-owner
+#     sign-off riding this commission: leader; accepted-via
+#     developer[v2] dispatch per leader-directed pre-merge
+#     disposition): daemon/constants.py, agents/ari/rule.md,
+#     agents/leader/rule.md re-pinned to the post-unify-spawn-tools
+#     tree. Deltas are EXACTLY the unify-spawn-tools edits and
+#     NOTHING in charter/render-pipeline semantics changed —
+#     constants.py = comment-only (spawn_hot_instance → warm-start
+#     path inside spawn_instance; above SNAPSHOT_CREATE_METADATA_KEY);
+#     ari/rule.md = spawn-tool teaching hunk (spawn_hot_instance →
+#     snapshot_id-gated path of spawn_instance; roster "today:
+#     tester, developer[v2]"); leader/rule.md = spawn-citation
+#     contract hunk (canonical-home reference to spawn_instance
+#     docstring). Evidence pointer: .agents/tester/RESULTS/
+#     2026-10-05-unify-spawn-tools-acceptance.md §2 (A/B: PASS@base
+#     ×3 / FAIL@feature ×3; sha256-corroborated against pinned
+#     baselines at ac399874).
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "870ec32faf071cc1478c0540690381ef46c0bd1ae6667163215845ad39992581",
@@ -1254,19 +1271,19 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # to this file still trips the tripwire.
     "daemon/sources/adapters/slack/adapter.py": "476ba0b5a17a297f652125ab9060af125ba3955d4b71e324e3de3bf177e1ef1e",
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
-    "daemon/constants.py": "fc806c87cdad099283f39b6d69326a059786b4ad233782f1a4a4a67145858a1e",
+    "daemon/constants.py": "64c1dbe3336c0e5e4289a8bf44ed6731a3badd1f5989bc11c120ed5097ad4b9b",
     # Phase C — 20 agent canonical-home files
     "agents/approver/rule.md": "f8282f54a253540042874c1ed7690758aa2c9391a0568967fa427ef2f90b24f6",
     "agents/approver[v2]/rule.md": "f70d2a0b64332aab40445211437e8e29bb9860cb7996e9e09f28587427dfce3a",
     "agents/architect/rule.md": "ebabdd952b136eae155b27f412a989e7d9c6e548c6a821e52865e5830ed0c306",
-    "agents/ari/rule.md": "6f5999cb62f58f7e9f7c9fd20c3f30cdd5c74740e7da19f7e720e16e778d1062",
+    "agents/ari/rule.md": "bb784e8c41afc913bccf1873bfd5cb8943e5b1e17daacc6936efa08a31d26b68",
     "agents/coder/soul.md": "0fa7fb9e875203ff9d2b8a14bdd3cdcabce24a44f8a89a0031a6a33123196201",
     "agents/developer/rule.md": "dba24812288634cd5c31e8e78ba8c95e664a37549f49b0feb56fabd099b4c260",
     "agents/developer[v2]/tools_note.md": "f8df81327f6553e169b583ea58dc10dbe4a8340d3e1405d4d1afabc84089988e",
     "agents/devops/rule.md": "889e52842c0d4c562ad18d27364f9a7ea0223453df4a6659c11995d631996b78",
     "agents/doc-writer/rule.md": "7897c461b8e9a2b748ec03500ac88be942845642bdd1fc3c0fef5444935152c7",
     "agents/governor/rule.md": "84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5",
-    "agents/leader/rule.md": "f0b4184381e0638632f3af5faa9da79f4329337bbd2975797a0d28909d0de4f7",
+    "agents/leader/rule.md": "11affca67d4c5dcaafd3543714fbde5ae469990f8574d826f67705579c1a8d48",
     "agents/maintenancer/rule.md": "386a63731eef798fcdaf7181c5e275f8d396eee458bbb7009f2406cf060a6737",
     "agents/planner/rule.md": "135bc320974a464420ab161bae13979642fc3241596280c6b7d69094eb1bda73",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
