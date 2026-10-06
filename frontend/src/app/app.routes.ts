@@ -55,6 +55,7 @@ export const routes: Routes = [
   { path: 'skills/triggers', loadComponent: () => import('./pages/skills/skill-triggers/skill-triggers.page.component').then(m => m.SkillTriggersPageComponent), title: 'Skill Triggers' },
   { path: 'skills/:id', loadComponent: () => import('./pages/skills/skill-detail/skill-detail.component').then(m => m.SkillDetailComponent) },
   { path: 'schedules', loadComponent: () => import('./pages/schedules/schedules.component').then(m => m.SchedulesComponent) },
+  { path: 'snapshots', loadComponent: () => import('./pages/snapshots/snapshots.component').then(m => m.SnapshotsComponent), title: 'Snapshots' },
   { path: 'mcp-servers', loadComponent: () => import('./components/mcp-server-list/mcp-server-list.component').then(m => m.McpServerListComponent) },
   { path: 'migration', loadComponent: () => import('./components/migration/migration.component').then(m => m.MigrationComponent) },
   // /plan is a thin route whose content is rendered by the root-mounted

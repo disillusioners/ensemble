@@ -1,0 +1,364 @@
+@use '@angular/material' as mat;
+
+:host {
+  display: block;
+  width: 100%;
+  min-height: 100%;
+  background: var(--app-bg, #0d1117);
+  color: rgba(255, 255, 255, 0.87);
+}
+
+.snapshots-container {
+  display: flex;
+  flex-direction: column;
+  padding: 24px 32px;
+  gap: 16px;
+  min-width: 1100px; // desktop-first (fe-plan §2.2 item 4)
+}
+
+// ── Header ────────────────────────────────────────────────────
+.snapshots-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+
+  .page-title {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 600;
+  }
+
+  .page-subtitle {
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.55);
+    max-width: 700px;
+  }
+}
+
+// ── Toggle section (header R15 toggle) ───────────────────────
+.toggle-section {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 16px 20px;
+}
+
+.toggle-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 24px;
+}
+
+.toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  .toggle-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.92);
+  }
+
+  .toggle-hint {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.55);
+    line-height: 1.4;
+
+    code {
+      background: rgba(255, 255, 255, 0.08);
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+  }
+}
+
+.toggle-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.editor-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background-color 100ms ease, border-color 100ms ease;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  &.selected {
+    background: rgba(100, 150, 255, 0.15);
+    border-color: rgba(100, 150, 255, 0.5);
+  }
+
+  input[type="radio"] {
+    accent-color: rgba(100, 150, 255, 0.9);
+  }
+}
+
+.toggle-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .apply-spinner {
+    margin-right: 4px;
+  }
+
+  .dirty-hint {
+    font-size: 12px;
+    color: #ffb74d;
+  }
+}
+
+// ── Metrics strip (R16) ──────────────────────────────────────
+.metrics-strip {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 16px 20px;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.metric-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 12px 16px;
+}
+
+.metric-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+
+  h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.85);
+  }
+
+  mat-icon {
+    color: rgba(100, 150, 255, 0.85);
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+  }
+}
+
+.metrics-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  li {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  .metrics-agent {
+    font-family: 'JetBrains Mono', 'Menlo', monospace;
+  }
+
+  .metrics-count {
+    color: rgba(255, 255, 255, 0.55);
+  }
+}
+
+.metrics-subheading {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 8px 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.metric-empty {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  font-style: italic;
+}
+
+.metric-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #e57373;
+}
+
+.metric-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+
+  .skeleton-line {
+    height: 12px;
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.05) 0%,
+      rgba(255, 255, 255, 0.1) 50%,
+      rgba(255, 255, 255, 0.05) 100%
+    );
+    background-size: 200% 100%;
+    border-radius: 3px;
+    animation: m-shimmer 1.5s infinite;
+
+    &.short { width: 60%; }
+  }
+}
+
+.metrics-footer {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  font-style: italic;
+}
+
+@keyframes m-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+// ── Filter bar ───────────────────────────────────────────────
+.filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-field {
+  width: 220px;
+}
+
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sort-field {
+  margin-bottom: -1.25em; // align with searchable-select baseline
+}
+
+.tag-mode-btn {
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
+}
+
+.tag-input-group {
+  flex: 1;
+  min-width: 320px;
+}
+
+.tag-input-field {
+  width: 280px;
+}
+
+.tag-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.filter-tag-chip {
+  background: rgba(100, 150, 255, 0.12);
+  color: rgba(150, 180, 255, 0.95);
+  font-family: 'JetBrains Mono', 'Menlo', monospace;
+  font-size: 11px;
+}
+
+.actions-row {
+  justify-content: flex-end;
+  min-height: 32px;
+}
+
+.active-filter-badge {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  background: rgba(100, 150, 255, 0.1);
+  border: 1px solid rgba(100, 150, 255, 0.3);
+  border-radius: 10px;
+  padding: 2px 8px;
+}
+
+.clear-filters-btn {
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
+}
+
+// ── Drawer container ──────────────────────────────────────────
+.snapshots-drawer-container {
+  min-height: 600px;
+  background: transparent;
+}
+
+.snapshots-content {
+  background: transparent;
+}
+
+.snapshot-detail-drawer-panel {
+  width: 520px;
+  max-width: 90vw;
+  background: #161b22;
+  color: rgba(255, 255, 255, 0.87);
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+}

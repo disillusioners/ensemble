@@ -89,6 +89,7 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     "migration_router",     # /api/migration
     "database_router",      # /api/database
     "settings_router",      # /api/settings
+    "snapshots_router",     # /api/snapshots (snapshot-uiux v1: reviewed 28th router admission)
     "skill_bank_router",    # /api/skill-bank
     "blueprints_router",    # /api/projects/{project_id}/blueprints
     "workspace_router",     # /api/workspace

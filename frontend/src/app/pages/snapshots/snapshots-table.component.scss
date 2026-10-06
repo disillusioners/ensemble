@@ -1,0 +1,249 @@
+@use '@angular/material' as mat;
+
+:host {
+  display: block;
+  width: 100%;
+}
+
+.snapshots-table {
+  display: block;
+  width: 100%;
+
+  // ── Skeleton (initial loading) ─────────────────────────────────
+  .skeleton-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 16px 0;
+  }
+
+  .skeleton-row {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr 1.5fr 1fr 60px;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: 6px;
+  }
+
+  .skeleton-bar {
+    height: 14px;
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.05) 0%,
+      rgba(255, 255, 255, 0.1) 50%,
+      rgba(255, 255, 255, 0.05) 100%
+    );
+    background-size: 200% 100%;
+    border-radius: 4px;
+    animation: shimmer 1.5s infinite;
+
+    &.short { width: 60%; }
+    &.medium { width: 80%; }
+    &.tiny { width: 30px; }
+    &.title { width: 90%; }
+    &.chip { width: 70px; height: 22px; border-radius: 11px; }
+  }
+
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  // ── Re-loading bar (subsequent page fetches) ──────────────────
+  .reloading-bar {
+    height: 2px;
+    margin-bottom: 4px;
+  }
+
+  // ── State blocks (empty / filtered-empty / error) ─────────────
+  .state-block {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 16px;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.7);
+
+    mat-icon {
+      font-size: 48px;
+      width: 48px;
+      height: 48px;
+      margin-bottom: 8px;
+      opacity: 0.6;
+    }
+
+    p {
+      font-size: 16px;
+      margin: 0 0 4px 0;
+      color: rgba(255, 255, 255, 0.85);
+    }
+
+    .hint {
+      font-size: 13px;
+      max-width: 400px;
+      color: rgba(255, 255, 255, 0.5);
+    }
+  }
+
+  .error-state {
+    mat-icon { color: #f44336; opacity: 0.9; }
+    .error-message {
+      color: #f44336;
+      margin-bottom: 16px;
+    }
+  }
+
+  // ── Table proper ──────────────────────────────────────────────
+  .snapshots-mat-table {
+    width: 100%;
+    background: transparent;
+
+    .mat-mdc-header-cell {
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .mat-mdc-cell {
+      color: rgba(255, 255, 255, 0.85);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      padding: 8px 12px;
+    }
+  }
+
+  .snapshots-row {
+    cursor: pointer;
+    transition: background-color 100ms ease;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    &:focus-visible {
+      outline: 2px solid rgba(100, 150, 255, 0.6);
+      outline-offset: -2px;
+    }
+  }
+
+  // ── Cell helpers ──────────────────────────────────────────────
+  .title-cell {
+    max-width: 320px;
+  }
+
+  .title-truncate {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .mono {
+    font-family: 'JetBrains Mono', 'Menlo', 'Monaco', monospace;
+    font-size: 12px;
+  }
+
+  .muted {
+    color: rgba(255, 255, 255, 0.5);
+  }
+
+  .agent-cell {
+    font-weight: 500;
+  }
+
+  // ── Status chips (5 variants per fe-plan §5.3) ────────────────
+  .status-chip {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .status-active {
+    background: rgba(76, 175, 80, 0.15);
+    color: #81c784;
+    font-weight: 600; // R3 forward-compat — fe-plan §11 R3
+  }
+
+  .status-superseded {
+    background: rgba(158, 158, 158, 0.15);
+    color: #bdbdbd;
+  }
+
+  .status-running {
+    background: rgba(33, 150, 243, 0.15);
+    color: #64b5f6;
+    font-weight: 600; // R3 forward-compat — fe-plan §11 R3
+  }
+
+  .status-failed {
+    background: rgba(244, 67, 54, 0.15);
+    color: #e57373;
+  }
+
+  .status-interrupted {
+    background: rgba(255, 152, 0, 0.15);
+    color: #ffb74d;
+  }
+
+  // ── Tags cell ─────────────────────────────────────────────────
+  .tags-cell {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    max-width: 220px;
+  }
+
+  .tag-chip {
+    display: inline-block;
+    padding: 1px 6px;
+    background: rgba(100, 150, 255, 0.12);
+    color: rgba(150, 180, 255, 0.95);
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', 'Menlo', monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100px;
+  }
+
+  .tag-overflow {
+    display: inline-block;
+    padding: 1px 6px;
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.6);
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: help;
+  }
+
+  // ── Paginator (data-test="paginator") ─────────────────────────
+  .snapshots-paginator {
+    background: transparent;
+    color: rgba(255, 255, 255, 0.85);
+  }
+}
+
+// ── Visually-hidden helper (a11y — skeleton "Loading…" span) ─────
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

@@ -1,9 +1,9 @@
 # Approver Active State
 
-Plan: Scheduled Tasks Feature (agent-facing wall-clock job scheduling) — plan package .agents/shared/planning/scheduled-tasks/ (plan-overview, decisions, phase1–phase5, architecture-recommendation), worktree /home/nea/ensemble-src-wt-scheduled-tasks, branch feature/scheduled-tasks
-Slug: scheduled-tasks
-Status: APPROVED
-Iteration: 001 (001 APPROVED 2026-10-01 — 3 section-parallel workers, plan-approval skill each, 0 blocking; notes in scheduled-tasks-tracking.md)
-Started: 2026-10-01T23:40:00Z
-Last Verdict: APPROVED (iteration 001, 2026-10-01 — workers 7295d6d3 (framing) / 56887f85 (phases 1-3) / 0ea870f0 (phases 4-5), all plan-approval; 0 blocking; implementer-facing notes: record_execution_complete signature, to_thread-on-async frozen skeletons, source_id==label contradiction, Test-prefix typo in phase5 skeleton, unverified integration-test helpers)
-Note: closed APPROVED iteration 001. Previous: maintenance-console APPROVED 001 2026-09-26; midflight-qa-channel APPROVED 001 2026-09-21; clipboard-image-chat APPROVED 001 2026-09-19 (history in their tracking files).
+Plan: Snapshot UI/UX Dedicated Page (dedicated /snapshots page: relocate snapshot-creation toggle + usage metrics out of Settings; new server-paginated snapshot list filterable by project/agent/tag/status/age with detail drawer; read-only BE list/detail/metrics endpoints per existing API conventions) — plan package .agents/shared/planning/snapshot-uiux/ (plan-overview, be-plan, fe-plan, sequencing, design/ spec+amendment+mockup), worktree /home/nea/ensemble-src-wt-snapshot-uiux, branch feature/snapshot-uiux
+Slug: snapshot-uiux
+Status: ESCALATED
+Iteration: 003 (001 REJECTED 10-05 · 002 REJECTED 10-05 · 003 REJECTED 10-05 → ESCALATED)
+Started: 2026-10-05T20:05:38Z
+Last Verdict: REJECTED (iteration 003, 2026-10-05 — MAX ITERATIONS REACHED (3), ESCALATED. Fresh workers: A f4b99283 REJECTED 3 blocking / B 6b89ca00 REJECTED 4 blocking / C 5da65cf2 REJECTED 2 blocking → 8 blocking after merge. All iter-002 fixes verified applied; residual defects: 1 stale count word (overview:47 "36" vs pinned 44 — 3rd recurrence of the class), 2 non-executable gate commands (pytest cwd/venv; playwright testDir + missing npm bootstrap + port hygiene), 3 BE skeleton symbol-surface gaps (imports Snapshot/SnapshotUsageMetricsResponse/Response + undefined _proxy helper), 2 FE wiring contradictions (drawer data-flow owner; seenAgents unwirable+untested). Full detail: snapshot-uiux-tracking.md)
+Note: ESCALATED after 3 rejections — no further approver iterations without user/Leader direction (re-approval would require explicit reset to Iteration 001). Prior: scheduled-tasks APPROVED 001 2026-10-01; maintenance-console APPROVED 001 2026-09-26; midflight-qa-channel APPROVED 001 2026-09-21; clipboard-image-chat APPROVED 001 2026-09-19.

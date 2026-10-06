@@ -128,6 +128,7 @@ from daemon.routers import (
     skill_bank_router,        # /api/skill-bank (Skill Bank CRUD)
     blueprints_router,        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     recovery_router,          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
+    snapshots_router,         # /api/snapshots (snapshot-uiux v1: read-only list/detail/metrics)
     maintenance_router,        # /api/maintenance (Section 1: checkpoint cleanup — Phase 1)
     missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
@@ -2989,6 +2990,7 @@ def create_app() -> FastAPI:
     api_router.include_router(migration_router)       # /api/migration
     api_router.include_router(database_router)        # /api/database
     api_router.include_router(settings_router)       # /api/settings (Phase 1: user language preference)
+    api_router.include_router(snapshots_router)        # /api/snapshots (snapshot-uiux v1: read-only list/detail/metrics)
     api_router.include_router(skill_bank_router)        # /api/skill-bank (Skill Bank CRUD)
     api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)

@@ -23,6 +23,7 @@ from .skill_bank import router as skill_bank_router
 from .workspace import router as workspace_router
 from .blueprints import router as blueprints_router
 from .recovery import router as recovery_router
+from .snapshots import router as snapshots_router  # /api/snapshots (snapshot-uiux v1: read-only list/detail/metrics)
 from .missions import router as missions_router
 from .tmp_images import router as tmp_images_router  # Phase 1: clipboard-image-chat
 from .maintenance import router as maintenance_router  # Section 1: checkpoint cleanup
@@ -51,6 +52,7 @@ __all__ = [
     "workspace_router",
     "blueprints_router",
     "recovery_router",
+    "snapshots_router",
     "missions_router",
     "tmp_images_router",
     "maintenance_router",

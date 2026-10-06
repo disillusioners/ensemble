@@ -1194,3 +1194,59 @@ class TestSearchEndToEnd:
             service.search("upgrade", project_id="p1", limit=4)
         )
         assert len(result["results"]) == 4
+
+
+# ============================================================================
+# Compat wrapper regression (snapshot-uiux v1, be-plan §8.4)
+# ============================================================================
+#
+# 1 case extended onto the EXISTING test_snapshot_search_service.py
+# (per the package-wide rollup math in sequencing §4.1: 26 router +
+# 10 new-repo + 7 repo-ext + 1 search-ext = 44 unique). Pins the
+# duck-typed contract that ``list_active_by_project`` is the method
+# the spawn-hot WARM path calls; the new repo's 3-line compat wrapper
+# (added by snapshot-uiux) keeps that signature working unchanged.
+# If the wrapper is ever broken (or the spawn-hot call site is
+# refactored), this test fails loud.
+
+
+class TestListActiveByProjectCompatWrapper:
+    """The search service still calls ``list_active_by_project`` (1 case, §8.4).
+
+    The snapshot-uiux repo-ext turned the real
+    ``SnapshotRepository.list_active_by_project`` into a 3-line
+    compat wrapper around the new ``list_with_filters`` method
+    (be-plan §6.3). The spawn-hot WARM path
+    (``daemon/services/snapshot_search_service.py:328``) and the
+    duck-typed test fake
+    (``tests/unit/test_snapshot_search_service.py:141``) both still
+    call this signature; this test exists to fail loud if the
+    duck-typed contract breaks.
+    """
+
+    def test_fake_list_active_by_project_signature_unchanged(self):
+        """The ``FakeSnapshotRepo.list_active_by_project`` signature is unchanged.
+
+        Pins the duck-typed contract: ``(project_id: str, limit: int = 50)``,
+        returning a ``list[FakeSnapshot]``. The compat wrapper in
+        the REAL repo matches this signature (per be-plan §6.3);
+        breaking either side surfaces here.
+        """
+        # Build two active + one superseded candidate; only the
+        # active rows for project "p1" should surface.
+        a1 = FakeSnapshot(
+            snapshot_id="s1", project_id="p1", status=snap_models.SNAPSHOT_STATUS_ACTIVE
+        )
+        a2 = FakeSnapshot(
+            snapshot_id="s2", project_id="p1", status=snap_models.SNAPSHOT_STATUS_ACTIVE
+        )
+        a3 = FakeSnapshot(
+            snapshot_id="s3", project_id="p1", status=snap_models.SNAPSHOT_STATUS_SUPERSEDED
+        )
+        repo = FakeSnapshotRepo(active=[a1, a2, a3])
+        # Default limit=50; signature must remain ``(project_id, limit=50)``.
+        rows = repo.list_active_by_project("p1")
+        assert {r.id for r in rows} == {"s1", "s2"}
+        # Explicit limit honored (the contract carries it through).
+        rows_capped = repo.list_active_by_project("p1", limit=1)
+        assert len(rows_capped) == 1

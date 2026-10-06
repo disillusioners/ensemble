@@ -81,11 +81,18 @@ def _snapshot(
     tags: list[str] | None = None,
     supersedes: str | None = None,
     summary: str = "did the thing",
+    agent: str = "coder",
+    created_at: str | None = None,
 ) -> Snapshot:
-    """Build a minimal valid Snapshot row for tests."""
-    return Snapshot(
+    """Build a minimal valid Snapshot row for tests.
+
+    ``agent`` and ``created_at`` were added for the snapshot-uiux
+    repo-ext coverage (TestListWithFilters, be-plan §8.3) — the
+    earlier cases never varied the agent or the creation timestamp.
+    """
+    row = Snapshot(
         project_id=project_id,
-        created_by_agent_id="coder",
+        created_by_agent_id=agent,
         target_instance_id=target,
         title=title,
         task_summary=summary,
@@ -101,6 +108,9 @@ def _snapshot(
         effective_model="cheap-model",
         digest={"task_summary_text": "did the thing", "refs": {"commits": ["abc1234"]}},
     )
+    if created_at is not None:
+        row.created_at = created_at
+    return row
 
 
 # ============================================================================
@@ -545,3 +555,166 @@ class TestMigrationFile:
         assert "CREATE TABLE IF NOT EXISTS snapshot_embeddings" in body
         # No `truncated` column (Rev 5 deletion — freshness is computed).
         assert "truncated" not in body.lower()
+
+
+# ============================================================================
+# list_with_filters — repo-ext coverage (snapshot-uiux v1, be-plan §8.3)
+# ============================================================================
+#
+# 7 cases extended onto the EXISTING test_snapshot_repository.py
+# (per the package-wide rollup math in sequencing §4.1: 26 router + 10
+# new-repo + 7 repo-ext + 1 search-ext = 44 unique). These reuse the
+# module's ``_snapshot`` factory and ``repo`` fixture; the
+# ``test_snapshot_list_with_filters.py`` file holds the FULL 10-case
+# generic-list suite — the cases here are a focused 7-case subset
+# keeping the existing file's surface comprehensive.
+#
+# Reuses the test_snapshot_list_with_filters.py helper layout: same
+# engine, same factory, same tag/status seeds. Pinned by sequencing
+# §4.1 + amendment pass 3 (the count is exact, NOT an estimate).
+
+
+class TestListWithFilters:
+    """Repo-ext coverage for ``list_with_filters`` (7 cases, §8.3).
+
+    See ``tests/unit/test_snapshot_list_with_filters.py`` for the
+    full 10-case suite. This class extends the EXISTING
+    ``test_snapshot_repository.py`` (per the §8.3 instruction: "add
+    a ``TestListWithFilters`` class at the end ... Cases 1–7 from
+    §8.2 above") so the package-wide BE count rollup = 26 + 10 + 7
+    + 1 = 44 unique.
+    """
+
+    def test_filters_compose(self, repo: SnapshotRepository):
+        """§8.2 case 1 — project_id + agent + statuses + age window compose.
+
+        Post-filter ``total`` reflects the entire WHERE + tag pipeline,
+        not the SQL-only candidate count.
+        """
+        for i, ts in enumerate([
+            "2026-10-01T00:00:00+00:00",
+            "2026-10-05T00:00:00+00:00",
+            "2026-10-10T00:00:00+00:00",
+        ]):
+            repo.create_with_embeddings(
+                _snapshot(
+                    project_id="p1", agent="coder", title=f"p1c-{i}",
+                    created_at=ts,
+                )
+            )
+            repo.create_with_embeddings(
+                _snapshot(
+                    project_id="p1", agent="tester", title=f"p1t-{i}",
+                    created_at=ts,
+                )
+            )
+        items, total = repo.list_with_filters(
+            project_id="p1",
+            agent_id="coder",
+            statuses=(SNAPSHOT_STATUS_ACTIVE,),
+            created_after="2026-10-04T00:00:00+00:00",
+            created_before="2026-10-06T00:00:00+00:00",
+        )
+        assert total == 1
+        assert [s.title for s in items] == ["p1c-1"]
+
+    def test_default_sort_created_at_desc(self, repo: SnapshotRepository):
+        """§8.2 case 2 — no ``sort`` arg → newest first."""
+        repo.create_with_embeddings(
+            _snapshot(title="a", created_at="2026-10-05T01:00:00+00:00")
+        )
+        repo.create_with_embeddings(
+            _snapshot(title="b", created_at="2026-10-05T03:00:00+00:00")
+        )
+        repo.create_with_embeddings(
+            _snapshot(title="c", created_at="2026-10-05T02:00:00+00:00")
+        )
+        items, _ = repo.list_with_filters()
+        assert [s.title for s in items] == ["b", "c", "a"]
+
+    def test_pagination_offset(self, repo: SnapshotRepository):
+        """§8.2 case 4 — ``limit=2, offset=2`` returns rows 3-4 of 5."""
+        for i in range(5):
+            repo.create_with_embeddings(
+                _snapshot(
+                    title=f"snap-{i}",
+                    created_at=f"2026-10-05T0{i}:00:00+00:00",
+                )
+            )
+        items, total = repo.list_with_filters(limit=2, offset=2)
+        # total = 5 (post-filter), items = rows 3-4 of the desc list
+        # [snap-4, snap-3, snap-2, snap-1, snap-0].
+        assert total == 5
+        assert [s.title for s in items] == ["snap-2", "snap-1"]
+
+    def test_tags_all_mode_sqlite(self, repo: SnapshotRepository):
+        """§8.2 case 5 — SQLite path: ``tag_mode='all'`` intersects."""
+        repo.create_with_embeddings(
+            _snapshot(
+                title="both",
+                tags=["kind:implementation", "subsystem:upgrade-pipeline"],
+            )
+        )
+        repo.create_with_embeddings(
+            _snapshot(title="only-kind", tags=["kind:implementation"])
+        )
+        items, total = repo.list_with_filters(
+            tags=["kind:implementation", "subsystem:upgrade-pipeline"],
+            tag_mode="all",
+        )
+        assert total == 1
+        assert [s.title for s in items] == ["both"]
+
+    def test_tags_any_mode_sqlite(self, repo: SnapshotRepository):
+        """§8.2 case 6 — SQLite path: ``tag_mode='any'`` unions."""
+        repo.create_with_embeddings(
+            _snapshot(title="a-row", tags=["a", "x"])
+        )
+        repo.create_with_embeddings(
+            _snapshot(title="b-row", tags=["b", "y"])
+        )
+        repo.create_with_embeddings(
+            _snapshot(title="c-row", tags=["c"])
+        )
+        items, total = repo.list_with_filters(
+            tags=["a", "b"],
+            tag_mode="any",
+        )
+        assert total == 2
+        assert {s.title for s in items} == {"a-row", "b-row"}
+
+    def test_compat_wrapper_list_active_by_project(
+        self, repo: SnapshotRepository
+    ):
+        """§8.2 case 9 — ``list_active_by_project`` compat wrapper.
+
+        The spawn-hot WARM path (``snapshot_search_service.py:328``)
+        and the duck-typed test fakes call this signature; the
+        3-line wrapper must remain byte-compatible.
+        """
+        a1 = repo.create_with_embeddings(_snapshot(title="a1"))
+        a2 = repo.create_with_embeddings(_snapshot(title="a2"))
+        repo.create_with_embeddings(
+            _snapshot(title="superseded", status=SNAPSHOT_STATUS_SUPERSEDED)
+        )
+        repo.create_with_embeddings(
+            _snapshot(title="other-project", project_id="p2")
+        )
+        rows = repo.list_active_by_project("p1")
+        assert all(r.project_id == "p1" for r in rows)
+        assert all(r.status == SNAPSHOT_STATUS_ACTIVE for r in rows)
+        assert {r.id for r in rows} == {a1.id, a2.id}
+        # Newest first.
+        assert rows[0].id == a2.id
+
+    def test_value_error_on_bad_tag_mode(self, repo: SnapshotRepository):
+        """§8.2 case 10 — ``tag_mode='xor'`` → ``ValueError``.
+
+        The router's pattern check fires first on the HTTP path
+        (422), but the repo's own belt is non-negotiable for direct
+        callers — the validation must run even when ``tags`` is
+        empty.
+        """
+        repo.create_with_embeddings(_snapshot(title="a"))
+        with pytest.raises(ValueError, match="tag_mode"):
+            repo.list_with_filters(tag_mode="xor")

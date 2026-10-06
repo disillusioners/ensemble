@@ -427,26 +427,130 @@ class SnapshotRepository:
     ) -> list[Snapshot]:
         """Active-status candidates for project-scoped search (PR5).
 
-        Args:
-            project_id: Owning project (design D8 — search is
-                project-scoped, PERMANENT stance).
-            limit: Row cap (search LLM-selection is bounded to
-                top-20 later; the SQL cap is the outer bound).
-
-        Returns:
-            Active snapshots, newest first.
+        Compat wrapper — delegates to :meth:`list_with_filters` so the
+        spawn-hot WARM path (``snapshot_search_service.py:328``) and
+        the duck-typed test fakes
+        (``tests/unit/test_snapshot_search_service.py:141``) keep their
+        existing call shape. The 3-line delegation is the only
+        behaviour delta from the original implementation; zero
+        observable change at any call site.
         """
-        with Session(self.engine) as session:
-            stmt = (
-                select(Snapshot)  # type: ignore[arg-type]
-                .where(
-                    col(Snapshot.project_id) == project_id,
-                    col(Snapshot.status) == SNAPSHOT_STATUS_ACTIVE,
-                )
-                .order_by(col(Snapshot.created_at).desc())
-                .limit(limit)
+        items, _total = self.list_with_filters(
+            project_id=project_id,
+            statuses=(SNAPSHOT_STATUS_ACTIVE,),
+            limit=limit,
+        )
+        return items
+
+    def list_with_filters(
+        self,
+        *,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        statuses: Sequence[str] | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        tags: Sequence[str] | None = None,
+        tag_mode: Literal["all", "any"] = "all",
+        sort: Literal[
+            "created_at_desc", "created_at_asc",
+            "title_asc", "title_desc",
+            "status_asc", "status_desc",
+            "project_id_asc", "project_id_desc",
+        ] = "created_at_desc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[Snapshot], int]:
+        """Generic filterable list for the HTTP ``/api/snapshots`` surface.
+
+        Returns ``(items, total)``. Both PG and SQLite are supported;
+        the tag filter is applied via the existing ``filter_by_tags``
+        post-pass to keep PG/SQLite containment parity (see pipeline
+        step 2 below).
+
+        Each param mirrors a single filter dimension on the list
+        endpoint. ``None`` / empty-list / empty-string means "no
+        filter". The ``total`` is the post-filter count so the FE can
+        render pagination correctly; pagination itself happens via
+        Python slice in pipeline step 4 — NOT via SQL
+        ``.limit()``/``.offset()`` — so the tag post-pass can still
+        narrow the candidate set.
+
+        Pinned pipeline (be-plan §6.2):
+
+        1. SQL: SELECT … FROM snapshots WHERE <project_id?> AND
+           <agent_id?> AND <statuses?> AND <created_after?> AND
+           <created_before?> ORDER BY <sort> (no SQL ``.limit()`` /
+           ``.offset()`` — UNPAGINATED).
+        2. POST: ``filter_by_tags(candidates, tags, tag_mode)``.
+        3. COUNT: ``total = len(filtered)`` — post-filter list length.
+        4. SLICE: ``items = filtered[offset : offset + limit]``.
+        5. RETURN: ``(items, total)``.
+        """
+        # Belt: validate tag_mode unconditionally so the repo's own
+        # defense is non-negotiable even when ``tags`` is empty (the
+        # router's pattern check fires first on the HTTP path, but a
+        # direct repo caller would otherwise slip through). Mirrors
+        # the belt at ``filter_by_tags:525-528``.
+        if tag_mode not in ("all", "any"):
+            raise ValueError(
+                f"Unknown tag_mode {tag_mode!r}; expected 'all' or 'any'"
             )
-            return list(session.exec(stmt).all())
+
+        # Step 1 — SQL (UNPAGINATED)
+        order_columns = {
+            "created_at_desc": col(Snapshot.created_at).desc(),
+            "created_at_asc": col(Snapshot.created_at).asc(),
+            "title_asc": col(Snapshot.title).asc(),
+            "title_desc": col(Snapshot.title).desc(),
+            "status_asc": col(Snapshot.status).asc(),
+            "status_desc": col(Snapshot.status).desc(),
+            "project_id_asc": col(Snapshot.project_id).asc(),
+            "project_id_desc": col(Snapshot.project_id).desc(),
+        }
+        order_clause = order_columns[sort]
+        conditions = []
+        if project_id is not None:
+            conditions.append(col(Snapshot.project_id) == project_id)
+        if agent_id is not None:
+            conditions.append(col(Snapshot.created_by_agent_id) == agent_id)
+        if statuses:
+            conditions.append(col(Snapshot.status).in_(list(statuses)))
+        if created_after is not None:
+            conditions.append(col(Snapshot.created_at) >= created_after)
+        if created_before is not None:
+            conditions.append(col(Snapshot.created_at) <= created_before)
+
+        with Session(self.engine) as session:
+            stmt = select(Snapshot)  # type: ignore[arg-type]
+            if conditions:
+                stmt = stmt.where(*conditions)
+            stmt = stmt.order_by(order_clause)
+            candidates = list(session.exec(stmt).all())
+
+        # Step 2 — POST-pass tag filter (PG/SQLite parity via filter_by_tags)
+        effective_tags = [t for t in (tags or []) if t]
+        if effective_tags:
+            filtered = self.filter_by_tags(
+                candidates, effective_tags, tag_mode=tag_mode,
+            )
+        else:
+            filtered = candidates
+
+        # Step 3 — COUNT (post-filter)
+        total = len(filtered)
+
+        # Step 4 — Python slice (NOT SQL .limit() / .offset())
+        # Defensive clamps: out-of-range values for direct repo callers
+        # are silent (matches `daemon/routers/skills.py` double-clamp
+        # idiom; HTTP path validates FIRST via Query(ge=…, le=…) and
+        # 422s before this method ever runs).
+        safe_offset = max(int(offset), 0)
+        safe_limit = min(max(int(limit), 0), 200)
+        items = filtered[safe_offset : safe_offset + safe_limit]
+
+        # Step 5 — RETURN
+        return items, total
 
     def latest_for_target(
         self,

@@ -24,6 +24,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **manual_execute run-summary projection echo block** — two-field additive `{"projection": {"bytes_reclaimable_now_at_dry_run": N, "bytes_reclaimable_after_row_prune_at_dry_run": N}}` sourced from the snapshotted `dry_run_summary_json` (NOT recomputed at execute). Auto rows: projection block ABSENT (R-5).
 - **Operator runbook** (`docs/runbooks/maintenance-console.md`): added "Two-pass reality on a never-pruned database" section explaining the two-run journey for first-time manual cleanups.
 
+### Added — `/api/snapshots` read surface (`feature/snapshot-uiux`)
+
+New canonical HTTP surface for snapshot reads (relocated from `/api/settings/*` per the v0.16 R15/R16 follow-up). Three endpoints ship in this change:
+
+- **`GET /api/snapshots`** — paginated, filterable list of snapshots. Filters: `project_id` / `agent` / `status` (multi) / `tags` (multi) / `created_after` / `created_before` / `limit` / `offset`. Eight sort keys (pattern-validated at the FastAPI layer; 422 on any out-of-set value). Response envelope: `{"items": [...], "total": N}`. Envelope key is `items` (D-1 binding — `snapshots` is reserved for a future wire contract).
+- **`GET /api/snapshots/{snapshot_id}`** — single snapshot detail. `?include=digest` opts into the unbounded JSONB digest payload (default: `digest: {}`, present-but-empty so the FE can branch on presence without `undefined`-guards).
+- **`GET /api/snapshots/metrics`** — R16 monitoring counters (capture counts by agent + warm-spawn counts per snapshot). New canonical home for the metrics surface; replaces the old settings-router endpoint.
+
+FE additions:
+
+- **New global `/snapshots` page** — gear menu entry, bookmarks icon, peer of `/settings` and `/schedules`. Hosts the snapshot-creation toggle (R15 — relocated from `/settings`), the snapshot usage metrics strip (R16 — relocated from `/settings`), the filter bar + paginator, the table, and the detail drawer. The page owns the list fetch + paginator state + filter signals (amendments #8, #10). The table is a pure presentational surface; the drawer component owns its own detail + lazy-digest fetch (amendment #7).
+- **`SnapshotService`** (`providedIn: 'root'`) — single source for the FE↔BE surface (URL constants live on the service class). Owns `list(filters)` / `getById(id, opts)` / `getMetrics()` / `buildParams(f)` / `computeAgeCutoff(preset)`.
+
+### Deprecated
+
+- **`GET /api/settings/snapshot-usage-metrics`** — kept as a 1-line re-export for one release window. The legacy handler emits three deprecation response headers on every response: `Deprecation: true`, `Sunset: Sun, 31 Dec 2026 23:59:59 GMT`, and `Link: </api/snapshots/metrics>; rel="successor-version"` (RFC 8594 Deprecation + RFC 8288 Link; hard Sunset date per the deprecation cycle). Removal planned for the next minor release (follow-up ticket to be filed at end of deprecation cycle).
+
+### Fixed
+
+- **Drawer detail-fetch staleness guard** — the detail fetch fires on every `snapshotId` input swap; a slow response for snapshot A no longer overwrites the drawer after the user navigates to snapshot B. Increment-and-capture request id, compare on resolve, silently discard stale responses (mirrors the existing `digestRequestId` pattern). Applied to both the constructor effect and the manual retry path.
+- **`/api/snapshots/metrics` fail-soft observability** — when the metrics service is unavailable (pre-init or background deinit), the endpoint returns the empty shape (`capture_counts={}`, `spawn_counts_per_snapshot=[]`) with HTTP 200 instead of 500. The degraded state is now visible via a `WARNING` log line so operators can detect the failure mode without a caller-side regression. No caller-visible contract change.
+
+### Migration
+
+- External callers of the deprecated `GET /api/settings/snapshot-usage-metrics` should migrate to `GET /api/snapshots/metrics`. The response body is identical; the URL is the only change. New callers should target `/api/snapshots/metrics` directly and ignore the `Deprecation: true` / `Sunset: Sun, 31 Dec 2026 23:59:59 GMT` / `Link: </api/snapshots/metrics>; rel="successor-version"` headers on the legacy path.
+
 ---
 
 ## [0.17.1] — 2026-10-05
