@@ -85,6 +85,16 @@ B-path only:
   tripwire (CI alarm 220 / refuse 300) operates on real adapter files which
   do not exist until slice ② ships plugin trees — DEFERRED until then.
 
+**Fence-routing (mirrors CONVENTION.md §Fence-routing contract).** The
+``fence_grant`` field-set is checked in two stages and the refusal codes
+split accordingly so the dedicated code wins over the generic missing-field
+code: an A-path plugin with ``fence_grant`` ABSENT ⇒
+``missing_required_manifest_fields`` (the registry row's
+``required_manifest_fields`` set lists ``fence_grant``, so its absence fires
+the row-required-fields refusal first); ``fence_grant`` PRESENT but
+INCOMPLETE (any of ``rationale`` / ``granted_by`` / ``granted_at`` missing
+or empty-string) ⇒ ``fence_missing``. Callers MUST handle both.
+
 **Interpretations documented (minimal faithful readings):**
 - *schema_version rule:* accepts the literal ``1.0.0`` and the additive
   ``1.0.x`` family (``^1\\.0\\.\\d+$``). Anything ≥1.1.0 (not-yet-carried
@@ -134,7 +144,11 @@ _SPDX_PATH = _CONVENTION_DIR / "spdx_ids.json"
 _KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 _SCHEMA_VERSION_RE = re.compile(r"^1\.0\.(\d+)$")  # 1.0.x additive family only (see docstring)
 _HEX_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
-_RANGE_PIN_CHARS = ("^", "~", ">=", "<=", ">", "<", "*", "x", "X")
+# `..` is added per slice ② carry-forward (1): a parent-directory refname is
+# provably never a valid git refname (git ref-format rules reject `..` as a
+# path-traversal marker). The existing parametrized range-marker test
+# auto-covers the addition.
+_RANGE_PIN_CHARS = ("^", "~", ">=", "<=", ">", "<", "*", "x", "X", "..")
 # Conservative blocklist of reserved git literals that are PROVABLY never tags.
 # Full branch-vs-tag discrimination (e.g. arbitrary branch names, hex-named
 # tags, reflog inspection) lands at slice ③ via git consultation — until
@@ -145,6 +159,14 @@ _RESERVED_PIN_LITERALS = frozenset({"HEAD", "main", "master", "develop", "latest
 
 _PROVENANCE_CLASSES = ("copy_freely", "snapshot_with_drift_alarm", "own_outright")
 _DIVERGENCE_REQUIRED_FIELDS = ("id", "files", "delta", "rationale", "pinning_test")
+
+
+def _looks_like_range(value: str) -> bool:
+    """True iff ``value`` carries any range-expression marker from
+    ``_RANGE_PIN_CHARS`` (extracted per slice ② carry-forward (2) to dedupe
+    the two offline-provable call sites: the A-path ``runtime_pin`` check
+    and the per-class ``tag_pin_per_class`` check)."""
+    return any(marker in value for marker in _RANGE_PIN_CHARS)
 
 
 # ─── refusal type ─────────────────────────────────────────────────────────────
@@ -411,7 +433,7 @@ def _check_semantics(
             )
         deps = plugin.get("hosted_runtime_deps") or {}
         runtime_pin = deps.get("runtime_pin", "")
-        if any(marker in runtime_pin for marker in _RANGE_PIN_CHARS):
+        if _looks_like_range(runtime_pin):
             return ManifestRefusal(
                 "runtime_pin_not_exact",
                 f"hosted_runtime_deps.runtime_pin {runtime_pin!r} looks like a range; exact pins only",
@@ -449,7 +471,7 @@ def _check_semantics(
                 "(empty pins are refused offline in v1)",
                 f"plugin.upstream.tag_pin_per_class.{class_name}",
             )
-        if any(marker in stripped for marker in _RANGE_PIN_CHARS):
+        if _looks_like_range(stripped):
             return ManifestRefusal(
                 "non_tag_pin",
                 f"tag pin for {class_name!r} {pin!r} looks like a range expression; "
