@@ -46,6 +46,7 @@ WALK_EXCLUDED_TOP_LEVEL = {
     "test-results",
     "tests",
     "test",
+    "tools",  # CLI helpers / build-time tools (od_vendor.py et al.); not tier-1/tier-2 code
     ".agents",  # incl. shared/planning/plugin-subsystem — defines the vocabulary
     "plugins-convention",  # allowed zone
 }

@@ -40,8 +40,35 @@ class TestRealPluginManifest:
         assert result.declaration.license == "Apache-2.0"
         assert result.declaration.integration_path == "C"
         assert result.declaration.execution_mode == "resource-only"
-        # Pin: the actual upstream tag name is `open-design-v0.23.0`.
-        assert result.declaration.tag_pin_per_class == {"copy_freely": "open-design-v0.23.0"}
+        # Pins: slice ③ added the snapshot_with_drift_alarm layer
+        # (REC §4.1 row 2); the per-class pin for snapshot inherits
+        # copy_freely's pin by default (CON §2 line 47) and is
+        # declared explicitly here so the slice ③ tag-diff has a
+        # concrete anchor.
+        assert result.declaration.tag_pin_per_class == {
+            "copy_freely": "open-design-v0.23.0",
+            "snapshot_with_drift_alarm": "open-design-v0.23.0",
+        }
+        # 3-class provenance layout (slice ③; REC §4.1):
+        #   copy_freely — data layer (slice ②, unchanged)
+        #   snapshot_with_drift_alarm — prompt code (slice ③ NEW)
+        #   own_outright — Turn-3 + lint/parse5 ports (slice ③
+        #     DECLARED-NOT-AUTHORED; ⑤ authors content)
+        snap = result.declaration.snapshot_with_drift_alarm
+        assert "paths" in snap and len(snap["paths"]) >= 1, (
+            f"snapshot_with_drift_alarm.paths must be non-empty (CON §2); got {snap}"
+        )
+        assert snap.get("alarm_owner"), "snapshot_with_drift_alarm.alarm_owner is required (CON §2)"
+        # Divergence register is REQUIRED from day one (CON §2: non-empty
+        # register on non-empty paths); 4 SEEDED entries per slice ③
+        # minimal-faithful reading.
+        register = result.declaration.divergence_register
+        assert len(register) >= 1, "divergence_register must be non-empty on non-empty snapshot paths"
+        for entry in register:
+            for f in ("id", "files", "delta", "rationale", "pinning_test"):
+                assert f in entry, f"divergence entry missing {f!r}: {entry}"
+        own = result.declaration.own_outright
+        assert "paths" in own, "own_outright.paths declared at slice ③"
 
     def test_read_manifest_returns_declaration(self):
         declaration = read_manifest(PLUGIN_ROOT, validate_tree=True)
