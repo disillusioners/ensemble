@@ -105,6 +105,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Union
@@ -134,6 +135,13 @@ _KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 _SCHEMA_VERSION_RE = re.compile(r"^1\.0\.(\d+)$")  # 1.0.x additive family only (see docstring)
 _HEX_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 _RANGE_PIN_CHARS = ("^", "~", ">=", "<=", ">", "<", "*", "x", "X")
+# Conservative blocklist of reserved git literals that are PROVABLY never tags.
+# Full branch-vs-tag discrimination (e.g. arbitrary branch names, hex-named
+# tags, reflog inspection) lands at slice ③ via git consultation — until
+# then, the only way a real tag genuinely named "main" could slip through
+# is if a maintainer publishes a tag whose exact literal collides here, which
+# we treat as a near-impossible convention violation worth the safety margin.
+_RESERVED_PIN_LITERALS = frozenset({"HEAD", "main", "master", "develop", "latest"})
 
 _PROVENANCE_CLASSES = ("copy_freely", "snapshot_with_drift_alarm", "own_outright")
 _DIVERGENCE_REQUIRED_FIELDS = ("id", "files", "delta", "rationale", "pinning_test")
@@ -290,6 +298,12 @@ def _validate_structural(doc: Any) -> List[_StructuralError]:
                 code = "type_mismatch"
             errors.append(_StructuralError(location, code, err.message))
         return errors
+    warnings.warn(
+        "manifest_reader: jsonschema unavailable — engaging bounded mini-validator fallback "
+        "(degraded mode; dual-path equivalence is pinned by test_dual_path_equivalence.py)",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     return _validate_structural_mini(doc, schema)
 
 
@@ -419,15 +433,42 @@ def _check_semantics(
                 "plugin.entrypoint",
             )
 
-    # -- tag pins: tag-only (SHA-shape + emptiness guard; branch-vs-tag defers
-    #    to vendoring-time sync checks, slice ③) --------------------------------
+    # -- tag pins: OFFLINE-PROVABLE refusals enforced in v1; full branch-vs-tag
+    #    discrimination (hex-named tags, arbitrary branch names) defers to
+    #    vendoring-time sync checks at slice ③ via git consultation. The
+    #    conservative blocklist below is intentional — a real tag literally
+    #    named "main" upstream is indistinguishable offline and we refuse
+    #    until ③ rather than risk it.
     pins = plugin["upstream"]["tag_pin_per_class"]
     for class_name, pin in pins.items():
-        if not pin.strip() or _HEX_SHA_RE.match(pin.strip()):
+        stripped = pin.strip()
+        if not stripped:
             return ManifestRefusal(
                 "non_tag_pin",
-                f"tag pin for {class_name!r} must be a git tag, not a bare SHA or empty value "
-                "(full branch-vs-tag discrimination rides vendoring-time sync checks, slice ③)",
+                f"tag pin for {class_name!r} must be a git tag, not an empty value "
+                "(empty pins are refused offline in v1)",
+                f"plugin.upstream.tag_pin_per_class.{class_name}",
+            )
+        if any(marker in stripped for marker in _RANGE_PIN_CHARS):
+            return ManifestRefusal(
+                "non_tag_pin",
+                f"tag pin for {class_name!r} {pin!r} looks like a range expression; "
+                "range markers are provably never tags (refused offline in v1)",
+                f"plugin.upstream.tag_pin_per_class.{class_name}",
+            )
+        if stripped in _RESERVED_PIN_LITERALS:
+            return ManifestRefusal(
+                "non_tag_pin",
+                f"tag pin for {class_name!r} {pin!r} is a reserved git literal "
+                "(HEAD/main/master/develop/latest are provably never tags; refused offline in v1; "
+                "full branch-vs-tag discrimination lands at slice ③)",
+                f"plugin.upstream.tag_pin_per_class.{class_name}",
+            )
+        if _HEX_SHA_RE.match(stripped):
+            return ManifestRefusal(
+                "non_tag_pin",
+                f"tag pin for {class_name!r} must be a git tag, not a bare SHA "
+                "(bare hex SHAs are refused offline in v1)",
                 f"plugin.upstream.tag_pin_per_class.{class_name}",
             )
 

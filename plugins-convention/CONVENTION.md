@@ -77,11 +77,24 @@ itself is FROZEN.
 
 ## Tag-only pins
 
-`upstream.tag_pin_per_class` pins are TAG-ONLY. The v1 validator refuses
-bare hex SHAs (7–40 hex chars) and empty values (`non_tag_pin`); full
-branch-vs-tag discrimination rides the vendoring-time sync checks (slice ③),
-where the upstream git is actually consulted. `own_outright` carries no pin
-(it is never synced).
+`upstream.tag_pin_per_class` pins are TAG-ONLY. The v1 validator enforces the
+**OFFLINE-PROVABLE** refusals inline (`non_tag_pin`):
+
+- empty values;
+- range-expression markers from `_RANGE_PIN_CHARS` (`^`, `~`, `>=`, `<=`,
+  `>`, `<`, `*`, `x`, `X`) — range expressions are provably never tags;
+- the reserved-git-literal blocklist `{HEAD, main, master, develop, latest}`
+  — each is provably never a tag;
+- bare hex SHAs (7–40 hex chars).
+
+**FULL** discrimination (e.g. a tag genuinely named `main`, arbitrary branch
+names, reflog inspection) lands at slice ③ where the upstream git is
+actually consulted as part of vendoring-time sync. Until then, the
+conservative blocklist refuses even a real upstream tag that collides with
+one of the reserved literals — the safety margin is intentional, and the
+docstring in `manifest_reader.py` carries the same caveat.
+
+`own_outright` carries no pin (it is never synced).
 
 ## License carry
 
@@ -100,6 +113,19 @@ Path A (host-shim adapter) is the ENGINE-ONLY FENCED exception:
   to the path-type registrar role**;
 - `integration_path: "A"` requires a complete `fence_grant` block
   (`rationale`, `granted_by`, `granted_at`) in the manifest (`fence_missing`).
+
+**Fence-routing contract (refusal-code split, matches `manifest_reader`):**
+
+- `fence_grant` ABSENT on an A-path plugin ⇒ `missing_required_manifest_fields`
+  (the registry row lists `fence_grant` as a required manifest field, so its
+  absence fires the row-required-fields refusal first);
+- `fence_grant` PRESENT but INCOMPLETE (any of `rationale` / `granted_by` /
+  `granted_at` missing or empty-string) ⇒ `fence_missing`.
+
+The two refusals map to distinct points in the validator: the row-required
+absence fires from `_check_semantics`'s `missing_required_manifest_fields`
+path (CON §4 cross-check); the incompleteness check fires from the A-path
+fence-grant block of `_check_semantics`. Callers MUST handle both.
 
 ## Versioning rule (CON §8, verbatim)
 

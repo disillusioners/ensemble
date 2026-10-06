@@ -18,7 +18,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-VOCABULARY_STRINGS = ("execution_mode", "lifted_symbol", "ipc_version", "hosted_runtime_deps")
+VOCABULARY_STRINGS = (
+    "execution_mode",
+    "lifted_symbol",
+    "ipc_version",
+    "hosted_runtime_deps",
+    "fence_grant",
+    "divergence_register",
+)
 TEXT_SUFFIXES = {".py", ".yaml", ".yml", ".json", ".sh", ".md", ".ts", ".js", ".toml"}
 
 # Scoped-walk exclusions: build/venv artifacts, the tests' own fixtures, and

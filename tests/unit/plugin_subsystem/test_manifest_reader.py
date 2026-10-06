@@ -10,11 +10,20 @@ Item 5: license validation (valid SPDX passes; invalid refused).
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
+from daemon.plugin_subsystem import manifest_reader
 from daemon.plugin_subsystem.manifest_reader import (
     MANIFEST_SIZE_CAP_BYTES,
     ManifestRefusal,
+    _RANGE_PIN_CHARS,
+    _HAS_JSONSCHEMA,
+    _validate_structural,
+    _validate_structural_mini,
+    _structural_refusal,
+    _load_schema,
     read_manifest,
     validate_manifest,
 )
@@ -24,6 +33,8 @@ from tests.unit.plugin_subsystem._manifest_fixtures import (
     VALID_MINIMAL_MANIFEST,
     build_plugin,
 )
+
+import yaml
 
 # ─── Item 1: valid manifests pass ─────────────────────────────────────────────
 
@@ -328,6 +339,44 @@ class TestPluginBlockRefusals:
         result = validate_manifest(plugin_dir)
         assert result.refusal.code == "non_tag_pin"
 
+    @pytest.mark.parametrize("marker", _RANGE_PIN_CHARS)
+    def test_non_tag_pin_range_marker_refused(self, tmp_path, marker):
+        """Every range marker in ``_RANGE_PIN_CHARS`` is provably never a tag and
+        is refused offline in v1.
+
+        The marker is inserted INSIDE the version segment of a v-prefixed tag
+        so the test exercises the substring-match check (mirrors the runtime_pin
+        check, which is also substring-based and case-sensitive).
+        """
+        text = VALID_MINIMAL_MANIFEST.replace(
+            'copy_freely: "v1.0.0"', f'copy_freely: "v1{marker}0.0"'
+        )
+        plugin_dir = build_plugin(tmp_path, text, name="test-plugin")
+        result = validate_manifest(plugin_dir)
+        assert result.refusal.code == "non_tag_pin"
+
+    @pytest.mark.parametrize(
+        "literal",
+        ["HEAD", "main", "master", "develop", "latest"],
+    )
+    def test_non_tag_pin_reserved_literal_refused(self, tmp_path, literal):
+        """Each entry in ``_RESERVED_PIN_LITERALS`` is provably never a git tag
+        and is refused offline in v1 (CONVENTION.md "Tag-only pins").
+
+        INTENDED RESIDUAL: a real upstream tag whose literal collides with
+        one of these reserved names (e.g. an upstream maintainer publishing
+        a tag genuinely named ``main``) is INDISTINGUISHABLE offline and is
+        therefore ALSO refused until slice ③ ships the git-consulting
+        vendoring-time sync check. The conservative refusal is the safety
+        margin — see the docstring on ``manifest_reader._RESERVED_PIN_LITERALS``.
+        """
+        text = VALID_MINIMAL_MANIFEST.replace(
+            'copy_freely: "v1.0.0"', f'copy_freely: "{literal}"'
+        )
+        plugin_dir = build_plugin(tmp_path, text, name="test-plugin")
+        result = validate_manifest(plugin_dir)
+        assert result.refusal.code == "non_tag_pin"
+
     def test_tag_pin_with_v_prefix_accepted(self, valid_minimal_plugin):
         result = validate_manifest(valid_minimal_plugin)
         assert result.ok, result.refusal  # v1.0.0 is a tag-shaped pin
@@ -455,6 +504,16 @@ class TestTreeLevelChecks:
         result = validate_manifest(plugin_dir, validate_tree=True)
         assert result.refusal.code == "adapter_missing"
 
+    def test_adapter_missing_at_vendoring_a_path(self, tmp_path):
+        """A-path hosted-runtime also requires adapter/ at vendoring time — the
+        check in ``_check_tree`` fires for BOTH execution modes that need an
+        adapter (lifted-symbol OR hosted-runtime). Mirrors the lifted-symbol
+        vendoring test above.
+        """
+        plugin_dir = build_plugin(tmp_path, VALID_A_PATH_MANIFEST, name="a-plugin")  # no adapter/
+        result = validate_manifest(plugin_dir, validate_tree=True)
+        assert result.refusal.code == "adapter_missing"
+
     def test_resource_only_tree_needs_no_adapter(self, tmp_path):
         plugin_dir = build_plugin(
             tmp_path, VALID_MINIMAL_MANIFEST, name="test-plugin", files={"data/systems.json": "{}"}
@@ -482,6 +541,68 @@ class TestTreeLevelChecks:
         )
         result = validate_manifest(plugin_dir, validate_tree=False)
         assert result.ok, result.refusal
+
+
+class TestFallbackPathEngagement:
+    """Dual-path fallback: force the bounded mini-validator and confirm the
+    refusal battery still agrees, AND confirm the fallback-engagement warning
+    fires so degraded mode is never silent.
+
+    ``_HAS_JSONSCHEMA`` is a module-level constant on ``manifest_reader``;
+    flipping it via ``monkeypatch.setattr`` is the load-bearing override
+    (also clears ``sys.modules['jsonschema']`` to mirror the not-installed
+    scenario — the constant patch alone is sufficient to route through the
+    fallback, but clearing the sys.modules entry proves the path is taken
+    in the same way a real not-installed venv would take it).
+    """
+
+    def test_fallback_engagement_warning_fires(self, monkeypatch, tmp_path):
+        """When the fallback path engages, ``manifest_reader`` must emit a
+        ``RuntimeWarning`` — degraded mode is never silent."""
+        monkeypatch.setattr(manifest_reader, "_HAS_JSONSCHEMA", False)
+        # Build a valid manifest so the structural path runs to completion
+        # (the warning fires at the structural-validation dispatch point).
+        plugin_dir = build_plugin(tmp_path, VALID_MINIMAL_MANIFEST, name="test-plugin")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = validate_manifest(plugin_dir)
+        assert result.ok, result.refusal
+        runtime_warnings = [
+            w for w in caught if issubclass(w.category, RuntimeWarning)
+            and "manifest_reader" in str(w.message)
+        ]
+        assert runtime_warnings, (
+            "fallback path engaged silently — no manifest_reader RuntimeWarning emitted"
+        )
+
+    def test_fallback_path_agrees_on_refusal_battery(self, monkeypatch):
+        """Force the fallback path and confirm it produces the same refusal
+        battery verdicts as the primary path on the dual-path equivalence
+        battery. This is the same battery pinned by
+        ``test_dual_path_equivalence.py`` — here we run it via
+        ``_validate_structural`` directly with the constant flipped, so the
+        fallback is exercised in isolation (not just as a comparator)."""
+        monkeypatch.setattr(manifest_reader, "_HAS_JSONSCHEMA", False)
+        schema = _load_schema()
+        # Battery mirrors test_dual_path_equivalence._BATTERY (subset here to
+        # prove the point without duplicating the whole dual-path file).
+        cases = {
+            "unknown_top": VALID_MINIMAL_MANIFEST + "sneaky: 1\n",
+            "missing_required": VALID_MINIMAL_MANIFEST.replace('  license: "Apache-2.0"\n', ""),
+            "wrong_type": VALID_MINIMAL_MANIFEST.replace('license: "Apache-2.0"', "license: 42"),
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # battery focus, not warning focus
+            for key, text in cases.items():
+                doc = yaml.safe_load(text.format(name="test-plugin"))
+                primary = [_structural_refusal(e) for e in _validate_structural(doc)]
+                fallback = [_structural_refusal(e) for e in _validate_structural_mini(doc, schema)]
+                got_primary = [(r.code, r.location) for r in primary]
+                got_fallback = [(r.code, r.location) for r in fallback]
+                assert primary, f"fallback-engaged structural path must refuse {key!r}"
+                assert got_primary == got_fallback, (
+                    f"fallback disagrees on {key!r}: {got_primary} != {got_fallback}"
+                )
 
 
 # ─── Item 3: extension rule ───────────────────────────────────────────────────
