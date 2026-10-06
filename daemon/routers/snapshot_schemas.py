@@ -29,6 +29,18 @@ from pydantic import BaseModel, Field
 # model wiring.
 from daemon.routers.schemas import SnapshotUsageMetricsResponse  # noqa: F401
 
+# Public re-export surface for the snapshots router siblings. The
+# canonical `SnapshotUsageMetricsResponse` model lives in
+# `daemon/routers/schemas.py:1781`; the three siblings are declared
+# below. `__all__` pins the names so `from daemon.routers.snapshot_schemas
+# import *` and IDE auto-import both stay deterministic.
+__all__ = [
+    "SnapshotResponse",
+    "SnapshotListItem",
+    "SnapshotListResponse",
+    "SnapshotUsageMetricsResponse",
+]
+
 
 class SnapshotResponse(BaseModel):
     """Detail-endpoint body for ``GET /api/snapshots/{id}``.

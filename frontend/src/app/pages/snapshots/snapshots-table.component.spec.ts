@@ -1,7 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { PageEvent } from '@angular/material/paginator';
-import { of } from 'rxjs';
 
 import { SnapshotsTableComponent } from './snapshots-table.component';
 import { SnapshotRow } from '../../models/snapshot.model';

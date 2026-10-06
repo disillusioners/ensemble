@@ -12,21 +12,11 @@ import {
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
-import {
-  MatPaginator,
-  MatPaginatorModule,
-  PageEvent,
-} from '@angular/material/paginator';
-import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatPaginator, MatPaginatorModule, PageEvent } from '@angular/material/paginator';
+import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTableModule } from '@angular/material/table';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { MatChipsModule } from '@angular/material/chips';
-import { MatDividerModule } from '@angular/material/divider';
-import {
-  SnapshotRow,
-  SnapshotStatus,
-  SnapshotFilters,
-} from '../../models/snapshot.model';
+import { SnapshotStatus, SnapshotRow } from '../../models/snapshot.model';
 
 /**
  * PRESENTATIONAL (pass 4 amendment #8 — leader ruling) — the
@@ -69,11 +59,9 @@ import {
   imports: [
     CommonModule,
     MatButtonModule,
-    MatChipsModule,
-    MatDividerModule,
     MatIconModule,
     MatPaginatorModule,
-    MatProgressSpinnerModule,
+    MatProgressBarModule,
     MatTableModule,
     MatTooltipModule,
   ],
@@ -107,18 +95,6 @@ export class SnapshotsTableComponent {
         ?.setAttribute('data-test', 'paginator-page-1');
     });
   }
-
-  // ── Filter inputs (the table reads them to re-render the column
-  //    headers' active state — e.g. the tag-chip overflow count). The
-  //    host owns the actual filter signals. The table does NOT mutate
-  //    them. Inputs are read-only (signal inputs).
-  readonly filterProjectId = input<string | null>(null);
-  readonly filterAgentId = input<string | null>(null);
-  readonly filterStatus = input<SnapshotStatus[]>([]);
-  readonly filterTags = input<string[]>([]);
-  readonly filterTagMode = input<'all' | 'any'>('all');
-  readonly filterAge = input<'24h' | '7d' | '30d' | 'all'>('all');
-  readonly filterSort = input<SnapshotFilters['sort']>('created_at_desc');
 
   // Paginator inputs — HOST-OWNED (amendment #10). The table never
   // resets pageIndex; it only re-emits the user's paginator click to

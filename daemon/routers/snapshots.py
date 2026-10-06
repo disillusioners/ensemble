@@ -49,7 +49,6 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from sqlmodel import col
 
 from daemon.repositories.snapshot.models import SNAPSHOT_STATUSES
 from .snapshot_schemas import (
@@ -271,11 +270,9 @@ async def get_snapshot_metrics(
 
     * ``manager._snapshot_metrics_service is None`` (pre-init) ⇒
       return the empty shape (``capture_counts={}``,
-      ``spawn_counts_per_snapshot=[]``), NOT 503. Mirrors the
-      ``getattr(_project_repo, "engine", None)`` pattern at
-      ``daemon/routers/settings.py:727-732``.
+      ``spawn_counts_per_snapshot=[]``), NOT 503.
     * ``service.surface()`` raises ⇒ log + return the empty shape
-      (fail-soft; ``daemon/routers/settings.py:737`` precedent).
+      (fail-soft; degraded metrics are observable, not blocking).
     """
     manager = request.app.state.manager
     service = getattr(manager, "_snapshot_metrics_service", None)
@@ -286,7 +283,7 @@ async def get_snapshot_metrics(
         )
     try:
         data = await service.surface()
-    except Exception as exc:  # fail-soft per settings.py:737
+    except Exception as exc:  # fail-soft: log + return empty shape
         logger.warning("[SnapshotsRouter] metrics degraded: %s", exc)
         return SnapshotUsageMetricsResponse(
             capture_counts={},

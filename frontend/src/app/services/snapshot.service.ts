@@ -1,11 +1,10 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable, tap, catchError, of, map } from 'rxjs';
+import { Observable, tap, catchError } from 'rxjs';
 import {
   SnapshotFilters,
   SnapshotListResponse,
   SnapshotDetailResponse,
-  SnapshotRow,
   SnapshotUsageMetrics,
 } from '../models/snapshot.model';
 
