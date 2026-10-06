@@ -39,6 +39,15 @@ Usage (slice ②, from the worktree root):
     OD_VENDOR_SOURCE=/home/nea/opt/open-design \\
     OD_VENDOR_TAG=open-design-v0.23.0 \\
     python tools/vendor/od_vendor.py
+
+Verify the vendored tree (offline audit — exits 0 on clean tree,
+exits 1 + `4881 listed files could not be read` on the obvious
+mistake of running from `plugins/opendesign/` instead of
+`plugins/opendesign/copy_freely/`):
+
+    cd plugins/opendesign/copy_freely \\
+        && sha256sum -c ../copy_freely.HASHES.sha256 --quiet \\
+        && echo "OK: $(wc -l < ../copy_freely.HASHES.sha256) files verified"
 """
 
 from __future__ import annotations

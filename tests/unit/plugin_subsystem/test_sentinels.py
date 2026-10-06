@@ -163,3 +163,51 @@ class TestNoRuntimeLoading:
         text = (REPO_ROOT / "plugins-convention" / "ci_runner.py").read_text(encoding="utf-8")
         assert "importlib" not in text
         assert "entry_point" not in text
+
+
+class TestVendoredClassSubtreesCannotCarryDataInstanceFilenames:
+    """The ``PLUGIN_AUTHORIZED_DATA_FILENAMES`` carve-out in
+    :class:`TestVocabularyConfinement` matches DATA-instance filenames
+    (``MANIFEST.yaml``, ``CURATION.md``) by basename at ANY depth under
+    ``plugins/*/``.  That breadth is safe today — no vendored file
+    shares those names — but a future vendored tree that drops one of
+    those filenames deep inside a vendored class subtree would
+    silently skip vocabulary confinement (the carve-out could be
+    exploited by vendored data).  This guard pins the property:
+    vendored class subtrees (``copy_freely/``,
+    ``snapshot_with_drift_alarm/``, ``own_outright/``) cannot carry
+    DATA-instance filenames.
+    """
+
+    # Vendored class subtree names per CON §2 — the three classes whose
+    # contents are vendored upstream bytes, not plugin-authored data.
+    VENDORED_CLASS_SUBDIRS = (
+        "copy_freely",
+        "snapshot_with_drift_alarm",
+        "own_outright",
+    )
+    FORBIDDEN_NAMES_IN_VENDORED = frozenset({"MANIFEST.yaml", "CURATION.md"})
+
+    def test_vendored_class_subtrees_cannot_carry_data_instance_filenames(self):
+        plugins_root = REPO_ROOT / "plugins"
+        if not plugins_root.is_dir():
+            # CI portability: pass trivially if no plugins/ tree is
+            # present yet (e.g. fresh checkout on a branch that hasn't
+            # landed a plugin yet).
+            return
+        violations: list = []
+        for plugin_dir in sorted(p for p in plugins_root.iterdir() if p.is_dir()):
+            for class_subdir in self.VENDORED_CLASS_SUBDIRS:
+                vendored_root = plugin_dir / class_subdir
+                if not vendored_root.is_dir():
+                    continue  # class subtree not yet populated — fine
+                for path in vendored_root.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    if path.name in self.FORBIDDEN_NAMES_IN_VENDORED:
+                        violations.append(str(path.relative_to(REPO_ROOT)))
+        assert violations == [], (
+            "vendored class subtrees must not carry DATA-instance filenames "
+            "(would silently exploit the PLUGIN_AUTHORIZED_DATA_FILENAMES "
+            "carve-out in TestVocabularyConfinement):\n" + "\n".join(violations)
+        )

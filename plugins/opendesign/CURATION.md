@@ -178,6 +178,30 @@ dispatch's suggested name and location.  Justification:
   `own_outright.HASHES.sha256` at slices ③ and ⑤ respectively;
   class-qualified names scale without collisions.
 
+### 5.1. Verifying the manifest offline
+
+The hash manifest records paths relative to `copy_freely/`, so the
+audit command must be run **from inside `copy_freely/`** with a path
+to the adjacent manifest.  The obvious `cd plugins/opendesign && sha256sum -c
+copy_freely.HASHES.sha256` invocation fails with `4881 listed files
+could not be read` and exit code 1 (paths are resolved relative to
+the cwd, so `craft/FUTURE_SECTIONS.md` is looked up at
+`plugins/opendesign/craft/FUTURE_SECTIONS.md`, which does not exist).
+
+The correct, offline audit command:
+
+```
+cd plugins/opendesign/copy_freely \
+    && sha256sum -c ../copy_freely.HASHES.sha256 --quiet
+echo exit=$?
+```
+
+Expected result: silent success (no output), `exit=0`, all **4881**
+files verified clean.  Non-zero exit or any `FAILED` line means the
+vendored tree drifted from the pinned tag and slice ③'s clean-pull
+dry-run / sync workflow must investigate before any further sync
+action.
+
 ---
 
 ## 6. Sentinel compliance (CON §7)
