@@ -225,4 +225,48 @@ describe('SnapshotsTableComponent', () => {
     component.onRowClick(row);
     expect(spy).toHaveBeenCalledWith(row);
   });
+
+  // ── (j) FIX 1 review pass 1 — REAL first-page button carries the
+  //        e2e hook (the old hidden marker button was deleted)
+  it('(j) stamps data-test="paginator-page-1" on Material\'s rendered first-page button', () => {
+    bindInputs({ rows: [makeRow()], total: 75, pageIndex: 0 });
+    const compiled = fixture.nativeElement as HTMLElement;
+    const btn = compiled.querySelector<HTMLButtonElement>(
+      'button[data-test="paginator-page-1"]',
+    );
+    // The hook must be on the Material paginator's own navigation
+    // button — visible, inside <mat-paginator> — NOT on a hidden
+    // marker element.
+    expect(btn).not.toBeNull();
+    expect(btn!.closest('mat-paginator')).not.toBeNull();
+    expect(btn!.classList.contains('mat-mdc-paginator-navigation-first')).toBe(
+      true,
+    );
+    // The old hidden marker must be gone.
+    expect(compiled.querySelector('button.visually-hidden[data-test]')).toBeNull();
+  });
+
+  it('(j-extra) the page-1 hook button is state-coupled — disabled at pageIndex=0, enabled at pageIndex=2', () => {
+    // total=75 / pageSize=25 → 3 pages; pageIndex 0 and 2 both valid.
+    // Material 21's nav buttons use `disabledInteractive`: the disabled
+    // state is conveyed via aria-disabled + mat-mdc-button-disabled
+    // (NOT the native disabled attribute) — Playwright's toBeDisabled()
+    // honors aria-disabled, so the e2e signal is real.
+    bindInputs({ rows: [makeRow()], total: 75, pageIndex: 0 });
+    const compiled = fixture.nativeElement as HTMLElement;
+    const btnAt0 = compiled.querySelector<HTMLButtonElement>(
+      'button[data-test="paginator-page-1"]',
+    );
+    expect(btnAt0).not.toBeNull();
+    expect(btnAt0!.getAttribute('aria-disabled')).toBe('true');
+    expect(btnAt0!.classList.contains('mat-mdc-button-disabled')).toBe(true);
+
+    bindInputs({ rows: [makeRow()], total: 75, pageIndex: 2 });
+    const btnAt2 = compiled.querySelector<HTMLButtonElement>(
+      'button[data-test="paginator-page-1"]',
+    );
+    expect(btnAt2).not.toBeNull();
+    expect(btnAt2!.getAttribute('aria-disabled')).toBeNull();
+    expect(btnAt2!.classList.contains('mat-mdc-button-disabled')).toBe(false);
+  });
 });

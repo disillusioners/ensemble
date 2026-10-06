@@ -179,27 +179,20 @@
       ></tr>
     </table>
 
-    <!-- Paginator (data-test="paginator") -->
+    <!-- Paginator (data-test="paginator"). The e2e hook
+         data-test="paginator-page-1" is stamped by the component onto
+         Material's rendered first-page button (review pass 1 FIX 1:
+         Material's paginator has NO per-page buttons — only
+         first/prev/next/last + range label + page-size selector). -->
     <mat-paginator
       [length]="total()"
       [pageSize]="pageSize()"
       [pageIndex]="pageIndex()"
       [pageSizeOptions]="[10, 25, 50]"
+      [showFirstLastButtons]="true"
       (page)="onPageChange($event)"
       data-test="paginator"
       class="snapshots-paginator">
     </mat-paginator>
-
-    <!-- Hidden marker so the e2e spec can assert pageIndex reset to 0
-         (data-test="paginator-page-1") — exposed as the FIRST option
-         button. Material's mat-paginator renders a button per page; the
-         first page button has aria-label="Page 1" which we mirror. -->
-    <button
-      type="button"
-      class="visually-hidden"
-      data-test="paginator-page-1"
-      aria-hidden="true"
-      tabindex="-1"
-    ></button>
   }
 </div>

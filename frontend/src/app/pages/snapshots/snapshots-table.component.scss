@@ -235,7 +235,7 @@
   }
 }
 
-// ── Visually-hidden helper (used for a11y + e2e marker) ─────────
+// ── Visually-hidden helper (a11y — skeleton "Loading…" span) ─────
 .visually-hidden {
   position: absolute;
   width: 1px;

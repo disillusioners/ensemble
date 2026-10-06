@@ -1,14 +1,22 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  ElementRef,
   computed,
+  effect,
+  inject,
   input,
   output,
+  viewChild,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
-import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
+import {
+  MatPaginator,
+  MatPaginatorModule,
+  PageEvent,
+} from '@angular/material/paginator';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTableModule } from '@angular/material/table';
 import { MatTooltipModule } from '@angular/material/tooltip';
@@ -73,6 +81,33 @@ import {
   styleUrl: './snapshots-table.component.scss',
 })
 export class SnapshotsTableComponent {
+  // ── E2E hook stamping (review pass 1 FIX 1) ──────────────────────
+  // Material's paginator has NO per-page buttons — only first/prev/
+  // next/last navigation + range label + page-size selector. The e2e
+  // hook `data-test="paginator-page-1"` is therefore stamped onto the
+  // REAL Material-rendered first-page button after view init: it is
+  // genuinely visible, clickable (returns to page 1), and disabled by
+  // Material exactly when `pageIndex === 0` (total > 0), which gives
+  // the e2e a true pageIndex-reset signal.
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
+
+  /** The Material paginator instance — resolves once the loaded
+   *  branch (`@else`) renders; re-resolves when the block toggles. */
+  private readonly paginator = viewChild(MatPaginator);
+
+  constructor() {
+    effect(() => {
+      if (!this.paginator()) return;
+      // Stable hook: Material's first-page button class. Guarded — if
+      // Material's internal DOM drifts, no-op instead of crashing.
+      this.host.nativeElement
+        .querySelector<HTMLButtonElement>(
+          'mat-paginator button.mat-mdc-paginator-navigation-first',
+        )
+        ?.setAttribute('data-test', 'paginator-page-1');
+    });
+  }
+
   // ── Filter inputs (the table reads them to re-render the column
   //    headers' active state — e.g. the tag-chip overflow count). The
   //    host owns the actual filter signals. The table does NOT mutate
