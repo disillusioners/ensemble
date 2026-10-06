@@ -1,10 +1,10 @@
-"""Schema-CI entry point — manifest validation for test-pack / promote wiring
-(REC §1.2 component 18, manifests portion).
+"""Schema-CI entry point — manifest + Port validation for test-pack /
+promote wiring (REC §1.2 component 18 — manifests at ①, ports at ⑤).
 
 Exposes manifest validation as a JSON-serializable report so test packs and
 the promote gate can consume it without importing the reader directly.
-Port-definition CI (JSON-serializability negative tests) is slice ⑤ —
-deferred here by design.
+Port-definition CI (JSON-serializability negative tests + three-role seam
+gate) lands at slice ⑤ alongside the first real Ports.
 
 Usage:
 
@@ -25,9 +25,22 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
+from daemon.plugin_subsystem.capability_seam_gate import (
+    is_three_role_complete,
+    seam_gate_check,
+)
 from daemon.plugin_subsystem.manifest_reader import validate_manifest
+from daemon.plugin_subsystem.port_registry import (
+    build_default_port_registry,
+    validate_ports,
+)
 
-__all__ = ["validate_plugin_dir", "run_ci", "main"]
+__all__ = [
+    "validate_plugin_dir",
+    "validate_ports_report",
+    "run_ci",
+    "main",
+]
 
 
 def validate_plugin_dir(plugin_dir: Path) -> Dict[str, Any]:
@@ -54,24 +67,91 @@ def validate_plugin_dir(plugin_dir: Path) -> Dict[str, Any]:
     return report
 
 
+def validate_ports_report() -> Dict[str, Any]:
+    """Validate the boot-time Port registry (CON §3 negative tests + three-role seam).
+
+    Aggregates over the four opendesign Ports declared at
+    :mod:`daemon.plugin_subsystem.opendesign.ports`; the same gate will
+    apply to plugin #2+ when declared. Returns a JSON-serializable
+    report so the test pack and the promote gate consume it uniformly
+    with :func:`validate_plugin_dir`.
+    """
+    from daemon.plugin_subsystem.opendesign.ports import declared_opendesign_ports
+
+    raw_ports = declared_opendesign_ports()
+    ports, refusals = validate_ports(raw_ports, declared_in="plugins/opendesign/MANIFEST.yaml")
+    gate_verdicts = [seam_gate_check(p) for p in ports] if ports else []
+    # A refusal in validation refuses the entire batch (the adapter is
+    # not built). The seam-gate verdict is per-Port and provides a
+    # second layer of evidence.
+    refused_refusals = [r.as_dict() for r in refusals]
+    refused_gates = [
+        v.as_dict()
+        for v in gate_verdicts
+        if not v.ok
+    ]
+    ok = not refused_refusals and not refused_gates
+    return {
+        "ok": ok,
+        "checked": len(raw_ports),
+        "passed": sum(1 for v in gate_verdicts if v.ok) - len(refusals),
+        "refused_validation": refused_refusals,
+        "refused_seam_gate": refused_gates,
+        "ports": [
+            {
+                "port_id": p.port_id,
+                "version": p.version,
+                "adapter_id": p.adapter_id,
+                "provider_path": p.provider_path,
+                "consumers": list(p.consumers),
+                "capability_tags": sorted(p.capability_tags),
+            }
+            for p in ports
+        ],
+    }
+
+
 def run_ci(plugins_root: Path) -> Dict[str, Any]:
     """Validate every plugin dir under ``plugins_root`` (one level deep).
 
     A directory counts as a plugin dir if it exists; missing manifests are
     reported as per-plugin refusals (``manifest_missing``), not skipped —
-    fail-closed by construction. Returns an aggregate report.
+    fail-closed by construction. Returns an aggregate report that
+    includes the Port-validation sibling step (slice ⑤).
     """
     plugins_root = Path(plugins_root)
     plugin_dirs = sorted(d for d in plugins_root.iterdir() if d.is_dir()) if plugins_root.is_dir() else []
     plugin_reports = [validate_plugin_dir(d) for d in plugin_dirs]
     failed = [r for r in plugin_reports if not r["ok"]]
+
+    # Port sibling step (slice ⑤) — runs over the in-process declared
+    # Ports (the first plugin with declared Ports is opendesign).
+    # The build of the boot registry is exercised through this call;
+    # a construction refusal surfaces here.
+    ports_report: Dict[str, Any]
+    try:
+        ports_report = validate_ports_report()
+    except Exception as exc:  # noqa: BLE001 - report-shaped surface
+        ports_report = {
+            "ok": False,
+            "checked": 0,
+            "passed": 0,
+            "refused_validation": [
+                {"code": "port_registry_construction_failed", "message": str(exc)}
+            ],
+            "refused_seam_gate": [],
+            "ports": [],
+        }
+    failed.append({"ok": ports_report["ok"], "name": "<ports>"})
+
     return {
         "plugins_root": str(plugins_root),
         "checked": len(plugin_reports),
-        "passed": len(plugin_reports) - len(failed),
-        "failed": len(failed),
-        "ok": not failed,
+        "passed": len(plugin_reports) - len([r for r in plugin_reports if not r["ok"]]),
+        "failed": len([r for r in plugin_reports if not r["ok"]]),
+        "ok": not [r for r in plugin_reports if not r["ok"]] and ports_report["ok"],
         "plugins": plugin_reports,
+        "ports": ports_report,
     }
 
 

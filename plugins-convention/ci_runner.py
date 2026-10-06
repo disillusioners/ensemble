@@ -40,6 +40,7 @@ from daemon.plugin_subsystem.entrypoint_tripwire import run_tripwire  # noqa: E4
 from daemon.plugin_subsystem.manifest_reader import read_manifest  # noqa: E402
 from daemon.plugin_subsystem.plugin_declaration import PluginDeclaration  # noqa: E402
 from daemon.plugin_subsystem.schema_ci import run_ci as _schema_ci_run  # noqa: E402
+from daemon.plugin_subsystem.schema_ci import validate_ports_report  # noqa: E402
 
 
 def _discover_declarations(plugins_root: Path) -> dict[str, PluginDeclaration]:
