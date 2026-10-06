@@ -14,6 +14,7 @@ import { InstanceService } from '../../services/instance.service';
 import { InstancePrefsService, COLOR_OPTIONS, ICON_OPTIONS } from '../../services/instance-prefs.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { InstanceDeleteDialogComponent, InstanceDeleteDialogData } from '../instance-delete-dialog/instance-delete-dialog.component';
+import { InstanceIdCopyComponent } from '../instance-id-copy/instance-id-copy.component';
 
 export interface InstanceTreeNode {
   instance: InstanceInfo;
@@ -65,7 +66,7 @@ function sortNodesPinnedFirst(nodes: InstanceTreeNode[]): void {
 @Component({
   selector: 'app-instance-list',
   standalone: true,
-  imports: [CommonModule, RouterModule, MatButtonModule, MatIconModule, MatListModule, MatMenuModule, AgentSwitcherComponent],
+  imports: [CommonModule, RouterModule, MatButtonModule, MatIconModule, MatListModule, MatMenuModule, AgentSwitcherComponent, InstanceIdCopyComponent],
   templateUrl: './instance-list.html',
   styleUrl: './instance-list.scss'
 })
