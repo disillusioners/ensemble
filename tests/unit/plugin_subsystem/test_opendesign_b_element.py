@@ -501,6 +501,143 @@ class TestOdGenerateInputValidation:
         assert "byok_not_configured" in result["error"]["message"] or "upstream_http_error" in result["error"]["code"]
 
 
+class TestOdGenerateTimeoutFormula:
+    """Pins the request_timeout budget derived from the live lane's 130-170 s
+    observation at 64K tokens (tools_note.md:49).
+
+    Formula: ``max(120.0, max_tokens / 370.0)`` seconds.
+    Derivation: 64K tokens observed in 130-170 s ⇒ 376-492 tok/s; 370 = conservative
+    divisor (64000/370 ≈ 173 s; 200000/370 ≈ 540 s); 120 s floor guards against
+    a sub-120 s budget firing on successful calls.
+
+    The prior formula ``max(60.0, max_tokens / 800.0)`` returned 80 s at the
+    default 64K tokens — well below the live observation — and would fire
+    ``upstream_http_error`` on most SUCCESSFUL generations (slice-⑤ review
+    finding #2).
+    """
+
+    @staticmethod
+    def _make_capturing_client(captured: dict, finish_reason: str = "stop", content: str = "<!doctype html><html><head></head><body>OK</body></html>") -> object:
+        """Build a fake OpenAI client that records kwargs passed to ``create()``.
+
+        Uses the ``__init__``-based pattern (matching the file's existing
+        ``_make_response`` helper) to avoid class-body name-resolution quirks
+        on the test's Python interpreter.
+        """
+
+        class _Msg:
+            def __init__(self, c):
+                self.content = c
+
+        class _Choice:
+            def __init__(self, fr, msg):
+                self.finish_reason = fr
+                self.message = msg
+
+        class _Usage:
+            def __init__(self):
+                self.prompt_tokens = 100
+                self.completion_tokens = 200
+                self.total_tokens = 300
+
+            class completion_tokens_details:
+                reasoning_tokens = 0
+
+        class _R:
+            def __init__(self):
+                self.choices = [_Choice(finish_reason, _Msg(content))]
+                self.usage = _Usage()
+
+        class _Comps:
+            def create(self, **kwargs):
+                captured.update(kwargs)
+                return _R()
+
+        class _Chat:
+            def __init__(self):
+                self.completions = _Comps()
+
+        class _Client:
+            def __init__(self):
+                self.chat = _Chat()
+
+        return _Client()
+
+    def test_timeout_at_default_64k_is_about_173s(self, env, fake_client_factory):
+        """The default max_tokens=64000 yields timeout ≈ 173 s (64000 / 370 = 172.97...)."""
+        captured: dict = {}
+        cli = self._make_capturing_client(captured)
+        fake_client_factory(lambda env: (cli, "vision"))
+
+        result = OdGenerate.execute(
+            GenerateInput(prompt="x", kind="prototype"),
+            env=env,
+        )
+        assert result["error"] is None
+        assert "timeout" in captured, "upstream call must carry an explicit timeout kwarg"
+        # 64000 / 370 = 172.9729... — well above the 120 s floor.
+        assert captured["timeout"] == pytest.approx(64000 / 370.0, rel=1e-9)
+        # Floor guard: must be strictly > 120 s at the default budget.
+        assert captured["timeout"] > 120.0
+
+    def test_timeout_at_200k_is_about_540s(self, env, fake_client_factory):
+        """The maximum allowed max_tokens=200000 yields timeout ≈ 540 s (200000/370)."""
+        captured: dict = {}
+        cli = self._make_capturing_client(captured)
+        fake_client_factory(lambda env: (cli, "vision"))
+
+        # max_tokens=200000 is within range (1..200000) so the clamp-to-default
+        # path doesn't fire — we exercise the upper-bound budget.
+        result = OdGenerate.execute_dict(
+            {"prompt": "x", "max_tokens": 200000},
+            env=env,
+        )
+        assert result["error"] is None
+        assert "timeout" in captured
+        assert captured["timeout"] == pytest.approx(200000 / 370.0, rel=1e-9)
+
+    def test_timeout_floor_120s_for_low_max_tokens(self, env, fake_client_factory):
+        """The 120 s floor wins over the divisor when max_tokens is small enough
+        that ``max_tokens / 370 < 120``. We exercise this by setting a small
+        max_tokens (post-clamp-to-default behavior is tested separately; this
+        test focuses on the floor's existence).
+        """
+        captured: dict = {}
+        cli = self._make_capturing_client(captured)
+        fake_client_factory(lambda env: (cli, "vision"))
+
+        # 200 * 370 = 74000 ⇒ 200/370 = 0.54; floor must clamp to 120.
+        result = OdGenerate.execute_dict(
+            {"prompt": "x", "max_tokens": 200},
+            env=env,
+        )
+        assert result["error"] is None
+        assert "timeout" in captured
+        assert captured["timeout"] == pytest.approx(120.0, rel=1e-9)
+
+    def test_timeout_uses_370_divisor_not_800(self, env, fake_client_factory):
+        """Pin: the divisor is 370 (not the prior 800). At 64K tokens this
+        yields 173 s, NOT 80 s (the old /800 result).
+        """
+        captured: dict = {}
+        cli = self._make_capturing_client(captured)
+        fake_client_factory(lambda env: (cli, "vision"))
+
+        OdGenerate.execute(
+            GenerateInput(prompt="x", kind="prototype"),
+            env=env,
+        )
+        # 800 would give 80 s; 370 gives 173 s. The floor is 120 s, so an 80 s
+        # result would ONLY occur under the OLD /800 formula.
+        assert captured["timeout"] > 120.0, (
+            f"timeout {captured['timeout']} would have fired under the prior "
+            f"60s floor with /800 divisor; the /370 divisor + 120s floor "
+            f"must produce a value > 120s at 64K tokens"
+        )
+        # 800 / 370 ≈ 2.16; the new budget must be at least 2× the old budget.
+        assert captured["timeout"] > 80.0  # guard: definitely not the old result
+
+
 # ---------------------------------------------------------------------------
 # Generate — composer chain (smoke; lazy-loaded vendored strings)
 # ---------------------------------------------------------------------------

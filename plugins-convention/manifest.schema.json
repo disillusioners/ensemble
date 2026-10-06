@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "plugins-convention/manifest.schema.json",
   "title": "Plugin Manifest v1",
-  "description": "Plugin Subsystem v1 manifest vocabulary (MANIFEST.yaml). Additive epoch 1.0.1 (CON \u00a78). FROZEN surface per .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md \u00a72. Unknown fields are refused by construction (additionalProperties: false at every level). Division of labor: THIS SCHEMA expresses vocabulary SHAPE (types, enums, allowed keys); policy checks whose refusal codes are semantically demanded by the validation matrix (kebab name, alarm_owner presence, parity section presence, divergence-entry well-formedness, fence completeness, tag-only pins) live in daemon/plugin_subsystem/manifest_reader.py and deliberately carry no structural constraint here, so the dedicated code always wins over a generic structural code. Epoch history: 1.0.0 (slice \u2460+\u2460\u2460 baseline: schema + 3-class vocab); 1.0.1 (slice \u2463 lift: admits the new top-level ``skills`` section per CON \u00a76 plugin-skill declaration; ADDITIVE on no frozen surface \u2014 no field removed, no enum tightened, no section renamed).",
+  "description": "Plugin Subsystem v1 manifest vocabulary (MANIFEST.yaml). Additive epoch 1.0.2 (CON \u00a78). FROZEN surface per .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md \u00a72. Unknown fields are refused by construction (additionalProperties: false at every level). Division of labor: THIS SCHEMA expresses vocabulary SHAPE (types, enums, allowed keys); policy checks whose refusal codes are semantically demanded by the validation matrix (kebab name, alarm_owner presence, parity section presence, divergence-entry well-formedness, fence completeness, tag-only pins) live in daemon/plugin_subsystem/manifest_reader.py and deliberately carry no structural constraint here, so the dedicated code always wins over a generic structural code. Epoch history: 1.0.0 (slice \u2460+\u2460\u2460 baseline: schema + 3-class vocab); 1.0.1 (slice \u2463 lift: admits the new top-level ``skills`` section per CON \u00a76 plugin-skill declaration; ADDITIVE on no frozen surface \u2014 no field removed, no enum tightened, no section renamed); 1.0.2 (slice \u2465 lift: C\u2192B element + ports section + own_outright.attribution; ADDITIVE on no frozen surface \u2014 no field removed, no enum tightened, no section renamed).",
   "type": "object",
   "required": ["schema_version", "plugin"],
   "additionalProperties": false,
@@ -10,7 +10,7 @@
     "schema_version": {
       "type": "string",
       "minLength": 1,
-      "description": "SemVer. Plugin #1 authors against the literal \"1.0.0\". 1.0.x = additive only; the validator accepts the 1.0.x family and refuses anything else until the runner carries the newer schema. Current additive epoch: 1.0.1 (snapshot_with_drift_alarm.upstream_paths, slice \u00b3)."
+      "description": "SemVer. Plugin #1 authors against the literal \"1.0.0\". 1.0.x = additive only; the validator accepts the 1.0.x family and refuses anything else until the runner carries the newer schema. Current additive epoch: 1.0.2 (C\u2192B element + ports section + own_outright.attribution, slice \u2465)."
     },
     "plugin": {
       "type": "object",

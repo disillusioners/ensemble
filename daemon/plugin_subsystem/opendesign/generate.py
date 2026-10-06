@@ -446,7 +446,6 @@ def _compose_system_prompt(args: GenerateInput) -> str:
 
 
 _HTML_EOF_MARKERS: Tuple[str, ...] = ("</html>", "</body>")
-_HTML_OPEN_MARKERS: Tuple[str, ...] = ("<!doctype", "<html", "<body")
 
 
 def _gate_html(html: str, finish_reason: str) -> Tuple[bool, Optional[str]]:
@@ -567,9 +566,13 @@ class OdGenerate:
         # usage). The retry discipline is the openai SDK's
         # ``request_timeout`` plus ``max_retries`` (default 2); for
         # this adapter we set ``timeout`` to the max_tokens-derived
-        # wall-clock budget (the live lane's 130-170s observation is
-        # the budget-shaped latency, not a timeout-shaped one).
-        timeout = max(60.0, args.max_tokens / 800.0)  # ~800 tok/s budget
+        # wall-clock budget. Derivation: the live lane observed 130-170s at
+        # 64K tokens (tools_note.md:49 + workflow.md:77), giving ~376-492 tok/s.
+        # We use a CONSERVATIVE divisor 370 tok/s (64000/370 ~= 173s;
+        # 200000/370 ~= 540s) with a 120s floor (a sub-120s budget is never
+        # right for generation — the prior 60s floor was below the live
+        # observation and would fire upstream_http_error on SUCCESSFUL calls).
+        timeout = max(120.0, args.max_tokens / 370.0)  # 370 tok/s conservative
         try:
             response = client.chat.completions.create(
                 model=model,

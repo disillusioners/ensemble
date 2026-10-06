@@ -55,6 +55,19 @@ LIVE_OD_TOOLS = (
     "od_lint_artifact",     # Step 3 (replaced by od.lint)
 )
 
+# The 6 rare tools dropped at slice ⑤ (REC §4.3 row ⑤; OD-UI retires at slice ⑦).
+# These must NOT appear as LIVE call sites in any designer .md file. Mentions
+# in clearly historical context ("dropped at slice ⑤", "previous", "retire")
+# remain acceptable; the discrimination is documented inline below.
+RARE_OD_TOOLS = (
+    "od_save_artifact",        # slice ⑤: dropped; OD-UI provenance retires ⑦
+    "od_save_project_file",    # slice ⑤: dropped; OD-UI provenance retires ⑦
+    "od_get_project",          # slice ⑤: dropped (project admin surface not needed)
+    "od_create_project",       # slice ⑤: dropped (project admin surface not needed)
+    "od_update_project",       # slice ⑤: dropped (project admin surface not needed)
+    "od_delete_project",       # slice ⑤: dropped (project admin surface not needed)
+)
+
 # The 4 new Port-style tools that MUST appear as live call sites.
 NEW_OD_PORTS = (
     "od.compose_brief",
@@ -127,6 +140,54 @@ class TestDesignerNoLiveLegacyOdTools:
         assert "opendesign.list_systems" in step0, (
             "Step 0 probe should use the opendesign.list_systems skill "
             "(per the slice-⑤ rewire)"
+        )
+
+    def test_no_rare_od_tools_as_live_call_sites(self):
+        """The 6 rare tools dropped at slice ⑤ must NOT appear as LIVE call
+        sites in any designer .md file.
+
+        Discrimination: a mention is EXEMPT iff its containing line contains
+        one of the historical-context tokens (``dropped``, ``previous``,
+        ``retir``, ``removed``) — those are the slice-⑤/⑦ retirement
+        annotations, not live call-site references. Mentions in step /
+        procedure sections OR in numbered procedural lists, when not exempted,
+        fail the test.
+
+        Scope: ALL designer ``.md`` files (soul, rule, workflow, tools_note,
+        skills-template/design-strategy). The existing ``LIVE_OD_TOOLS``
+        test covers the 4 happy-path tools in Step 1; this test pins the
+        6 dropped-at-⑤ tools across the whole designer surface.
+        """
+        designer_files = [
+            DESIGNER_ROOT / "soul.md",
+            DESIGNER_ROOT / "rule.md",
+            DESIGNER_ROOT / "workflow.md",
+            DESIGNER_ROOT / "tools_note.md",
+            DESIGNER_ROOT / "skills-template" / "design-strategy.md",
+        ]
+        # Historical-context exemption tokens. Matched case-insensitively
+        # against the line containing the tool name.
+        HISTORICAL_TOKENS = re.compile(
+            r"dropped|previous|retir|removed|legacy", re.IGNORECASE
+        )
+
+        violations: list = []
+        for fp in designer_files:
+            if not fp.exists():
+                continue
+            text = fp.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                for rare_tool in RARE_OD_TOOLS:
+                    if rare_tool not in line:
+                        continue
+                    # Exempt historical mentions.
+                    if HISTORICAL_TOKENS.search(line):
+                        continue
+                    violations.append(f"{fp.name}: {line.strip()!r} (tool {rare_tool!r})")
+        assert violations == [], (
+            "Rare OD tools appear as live call sites in designer docs "
+            "(slice ⑤ dropped them — any actionable mention is a rewire regression):\n"
+            + "\n".join(violations)
         )
 
 
