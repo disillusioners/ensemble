@@ -30,7 +30,7 @@ FE additions:
 
 ### Deprecated
 
-- **`GET /api/settings/snapshot-usage-metrics`** — kept as a 1-line re-export for one release window. `Deprecation: true` response header set on every response. Removal planned for the next minor release (follow-up ticket to be filed at end of deprecation cycle).
+- **`GET /api/settings/snapshot-usage-metrics`** — kept as a 1-line re-export for one release window. The legacy handler emits three deprecation response headers on every response: `Deprecation: true`, `Sunset: Sun, 31 Dec 2026 23:59:59 GMT`, and `Link: </api/snapshots/metrics>; rel="successor-version"` (RFC 8594 Deprecation + RFC 8288 Link; hard Sunset date per the deprecation cycle). Removal planned for the next minor release (follow-up ticket to be filed at end of deprecation cycle).
 
 ### Fixed
 
@@ -39,7 +39,7 @@ FE additions:
 
 ### Migration
 
-- External callers of the deprecated `GET /api/settings/snapshot-usage-metrics` should migrate to `GET /api/snapshots/metrics`. The response body is identical; the URL is the only change. New callers should target `/api/snapshots/metrics` directly and ignore the `Deprecation: true` header on the legacy path.
+- External callers of the deprecated `GET /api/settings/snapshot-usage-metrics` should migrate to `GET /api/snapshots/metrics`. The response body is identical; the URL is the only change. New callers should target `/api/snapshots/metrics` directly and ignore the `Deprecation: true` / `Sunset: Sun, 31 Dec 2026 23:59:59 GMT` / `Link: </api/snapshots/metrics>; rel="successor-version"` headers on the legacy path.
 
 ---
 
