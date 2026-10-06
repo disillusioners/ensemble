@@ -1,0 +1,48 @@
+# Plugin Subsystem v1 — Path-Type Registry (THE extension point, frozen in v1)
+#
+# Source of truth: .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md §4
+# (lines 131–162, values verbatim).
+#
+# This file is DATA, not code: no executable back-edge, no runtime loading, no
+# importlib, no entry-point scanning (CON §7 no-runtime-loading sentinel).
+# Adding D/E/F later = author a row + register the check-function name and
+# fixture. No tier-1 code changes; the three tiers do not reshape (CON §4).
+#
+# A path-type declaration MUST provide (CON §4 list a–f): vendoring_check,
+# smoke_fixture, allowed_execution_modes, required_manifest_fields,
+# fence: bool, sync_default. display_name and classification ride the rows
+# as declared data.
+#
+# Fence semantics (CON §4 refusal rules):
+#   - fence:true row MUST carry fence_evidence_required:true (else registry refusal).
+#   - fence-STRIPPING (editing fence:false onto a v1-fenced path letter) =>
+#     registry refusal + alarm to the path-type registrar role.
+path_types:
+  B:
+    display_name: "Port-wrapping"
+    fence: false
+    allowed_execution_modes: ["lifted-symbol"]
+    required_manifest_fields: ["lifted_symbol", "entrypoint", "ipc_version"]
+    vendoring_check: "importable_ctx_free"      # registered check NAME (declarative)
+    smoke_fixture: "fixtures/path_b_smoke.yaml"
+    sync_default: "snapshot_with_drift_alarm"
+    classification: "vendoring-time"            # NEVER runtime
+  C:
+    display_name: "Resource-izing"
+    fence: false
+    allowed_execution_modes: ["resource-only"]
+    required_manifest_fields: []
+    vendoring_check: "resource_only_purity"
+    smoke_fixture: "fixtures/path_c_smoke.yaml"
+    sync_default: "copy_freely"
+    classification: "vendoring-time"
+  A:
+    display_name: "Host-shim adapter"
+    fence: true                                  # ENGINE-ONLY EXCEPTION
+    fence_evidence_required: true
+    allowed_execution_modes: ["hosted-runtime"]
+    required_manifest_fields: ["hosted_runtime_deps", "fence_grant"]
+    vendoring_check: "hosted_runtime_validated"
+    smoke_fixture: "fixtures/path_a_smoke.yaml"
+    sync_default: "snapshot_with_drift_alarm"
+    classification: "vendoring-time"

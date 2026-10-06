@@ -1,0 +1,23 @@
+{
+  "enum_name": "execution_mode",
+  "schema_version": "1.0.0",
+  "values": [
+    {
+      "value": "resource-only",
+      "applies_to_integration_paths": ["C"],
+      "description": "Vendored bytes are inert resources; ensemble code never executes plugin content. No adapter/ subtree."
+    },
+    {
+      "value": "lifted-symbol",
+      "applies_to_integration_paths": ["B"],
+      "description": "One symbol is lifted behind a Port wrapper; plugin code is never imported directly (adapter/ subtree required)."
+    },
+    {
+      "value": "hosted-runtime",
+      "applies_to_integration_paths": ["A"],
+      "description": "FENCED engine-only exception; requires hosted_runtime_deps + a user-ratified fence_grant. Zero code in v1."
+    }
+  ],
+  "status": "FROZEN \u2014 new value = minor bump + migration window (CON \u00a78)",
+  "source_of_truth": ".agents/shared/planning/plugin-subsystem/v1-interface-contracts.md \u00a72 line 49"
+}
