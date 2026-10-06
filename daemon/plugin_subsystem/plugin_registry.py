@@ -215,10 +215,15 @@ def _check_skeleton(plugin_dir: Path) -> List[SkeletonViolation]:
     - No symlinks at the plugin root (CON §1 "no symlinks inside
       copy_freely/" is the canonical example; we generalize to the root
       to keep the rule trivially expressible at scan time).
-    - ``MANIFEST.yaml`` lives at the plugin root (the reader enforces the
-      name via MANIFEST_FILENAME; the registry double-checks the location
-      to surface "manifest nested under copy_freely/" style mistakes at
-      scan time, before the reader is even invoked).
+    - ``MANIFEST.yaml`` lives at the plugin root: name is enforced by
+      the slice-① manifest reader (MANIFEST_FILENAME constant).  The
+      PLUGIN_AUTHORIZED_DATA_FILENAMES carve-out's plugin-ROOT depth
+      boundary is enforced by the W4 sentinel
+      ``tests/unit/plugin_subsystem/test_sentinels.py::
+      TestAuthorizedDataInstanceCarveoutIsPluginRootOnly``, NOT by
+      a scan-time check here — the carve-out's depth-bound is a
+      vocabulary-confinement property, not a layout invariant, so
+      it lives with the vocabulary sentinels (slice ③ carry-forward 4).
     """
     violations: List[SkeletonViolation] = []
 
