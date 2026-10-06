@@ -1366,6 +1366,7 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
         # non-block dispatch path. If the membership gate had rejected,
         # the closure would have raised ValueError BEFORE this call.
         manager.spawn_instance.assert_called_once_with(
+            instance_id=ANY,
             agent_id="governor",
             parent_id="parent-iid",
             project_id=ANY,

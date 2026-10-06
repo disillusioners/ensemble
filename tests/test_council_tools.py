@@ -231,6 +231,7 @@ class TestConveneCouncil:
         # ``default_agent_versions`` metadata, so resolution returns ``None``
         # and the tool forwards ``version_tag=None`` to the manager.
         manager.spawn_instance.assert_called_once_with(
+            instance_id=ANY,
             agent_id="governor",
             parent_id="parent-instance-id",
             project_id=ANY,
@@ -708,6 +709,7 @@ class TestConveneCouncilWithSkill:
             )
 
         manager.spawn_instance.assert_called_once_with(
+            instance_id=ANY,
             agent_id="governor",
             parent_id="parent-instance-id",
             project_id=ANY,
@@ -900,6 +902,7 @@ class TestConveneCouncilWithSkill:
             )
 
         manager.spawn_instance.assert_called_once_with(
+            instance_id=ANY,
             agent_id="governor",
             parent_id="parent-instance-id",
             project_id=ANY,
