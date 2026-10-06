@@ -1080,3 +1080,313 @@ class TestManifestSkillsSection:
         assert result.ok is False
         assert isinstance(result.refusal, ManifestRefusal)
         assert result.refusal.code == "skills_entry_path_outside_tree"
+
+
+# ─── W1: parent-pin cross-check (slice ④ council fix) ─────────────────────────
+
+
+class TestParentPinCrossCheck:
+    """W1 fix: the loader cross-checks the skill's
+    ``plugin_ref.upstream_tag`` (per-class pin) AND its
+    ``plugin_ref.manifest_schema_version`` against the parent manifest.
+
+    Council probe: a skill with ``upstream_tag.copy_freely: v9.9.9``
+    under a manifest pinned to ``copy_freely: v1.0.0`` USED to load
+    clean.  After W1 the loader refuses the lie (the worker's
+    version-visibility surface must match the parent's data version —
+    CON §6: "read-your-writes, never eventual").
+
+    Also covered here: the C1.3 widening of
+    ``plugin_ref.manifest_schema_version`` (was a literal "1.0.0"
+    check; now family-match-or-parent-equality)."""
+
+    def test_v9_9_9_skill_under_v1_0_0_manifest_refused(self, tmp_path: Path):
+        """The exact council probe case: skill pin v9.9.9, parent pin
+        v1.0.0.  Pre-W1 this loaded clean; post-W1 it refuses with
+        ``plugin_ref_pin_mismatch``."""
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            VALID_MINIMAL_MANIFEST.format(name="test-plugin"), encoding="utf-8"
+        )
+        _make_data_dir(plugin_dir, "copy_freely/data/")
+        skills_dir = plugin_dir / "skills"
+        skills_dir.mkdir()
+        skill_file = skills_dir / "test.skill.yaml"
+        text = VALID_SKILL_TEMPLATE.format(
+            skill_id="test.skill", plugin_name="test-plugin", data_path="copy_freely/data/"
+        )
+        # The fixture uses v1.0.0 as the skill's tag pin; replace with
+        # the council-probed v9.9.9 to make the divergence explicit.
+        text = text.replace('copy_freely: "v1.0.0"', 'copy_freely: "v9.9.9"')
+        skill_file.write_text(text, encoding="utf-8")
+        with pytest.raises(PluginSkillRefusal) as ei:
+            read_skill_file(
+                skill_file,
+                plugin_root=plugin_dir,
+                plugin_name="test-plugin",
+                plugin_license="Apache-2.0",
+                parent_schema_version="1.0.0",
+                parent_tag_pins={"copy_freely": "v1.0.0"},
+            )
+        assert ei.value.code == "plugin_ref_pin_mismatch"
+
+    def test_v9_9_9_skill_refused_via_registry_scan(self, tmp_path: Path):
+        """Same probe, end-to-end through the registry scan: the
+        manifest's tag pin is v1.0.0 (carried from VALID_MINIMAL_MANIFEST),
+        the skill lies with v9.9.9, the registry records the refusal
+        under the parent plugin (no skill surfaces in skills_by_id)."""
+        plugin_dir = build_plugin(tmp_path, VALID_MINIMAL_MANIFEST, name="test-plugin")
+        (plugin_dir / "skills").mkdir(exist_ok=True)
+        # Make the data dir so the vendored reference resolves.
+        _make_data_dir(plugin_dir, "copy_freely/data/")
+        skill_file = plugin_dir / "skills" / "test.skill.yaml"
+        text = VALID_SKILL_TEMPLATE.format(
+            skill_id="test.skill", plugin_name="test-plugin", data_path="copy_freely/data/"
+        )
+        text = text.replace('copy_freely: "v1.0.0"', 'copy_freely: "v9.9.9"')
+        skill_file.write_text(text, encoding="utf-8")
+        # Update the manifest to declare the skill.
+        manifest_text = (plugin_dir / "MANIFEST.yaml").read_text(encoding="utf-8")
+        manifest_text += (
+            '\nskills:\n  entries:\n'
+            '    - skill_id: "test.skill"\n'
+            '      path: "skills/test.skill.yaml"\n'
+        )
+        (plugin_dir / "MANIFEST.yaml").write_text(manifest_text, encoding="utf-8")
+        decls, skills, refusals = scan_plugins_root(tmp_path)
+        assert "test.skill" not in skills
+        codes = [r.code for r in refusals.get("test-plugin", ())]
+        assert "plugin_ref_pin_mismatch" in codes
+
+    def test_pin_match_accepted(self, tmp_path: Path):
+        """Sanity: when the skill's pin EQUALS the parent's pin, the
+        loader accepts (no false positive on the new cross-check).
+        We replace the skill's pin to match the parent (v1.0.0) so
+        the cross-check passes."""
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            VALID_MINIMAL_MANIFEST.format(name="test-plugin"), encoding="utf-8"
+        )
+        _make_data_dir(plugin_dir, "copy_freely/data/")
+        skills_dir = plugin_dir / "skills"
+        skills_dir.mkdir()
+        skill_file = skills_dir / "test.skill.yaml"
+        # VALID_SKILL_TEMPLATE ships with copy_freely: v1.0.0; parent
+        # also says v1.0.0 — match.
+        skill_file.write_text(
+            VALID_SKILL_TEMPLATE.format(
+                skill_id="test.skill", plugin_name="test-plugin", data_path="copy_freely/data/"
+            ),
+            encoding="utf-8",
+        )
+        skill = read_skill_file(
+            skill_file,
+            plugin_root=plugin_dir,
+            plugin_name="test-plugin",
+            plugin_license="Apache-2.0",
+            parent_schema_version="1.0.0",
+            parent_tag_pins={"copy_freely": "v1.0.0"},
+        )
+        assert skill.upstream_tag["copy_freely"] == "v1.0.0"
+
+    def test_no_parent_context_skips_cross_check(self, tmp_path: Path):
+        """When ``parent_tag_pins=None`` (e.g. a stand-alone test
+        fixture that doesn't carry parent context), the per-class
+        cross-check is SKIPPED.  Offline-provable gates still run."""
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            VALID_MINIMAL_MANIFEST.format(name="test-plugin"), encoding="utf-8"
+        )
+        _make_data_dir(plugin_dir, "copy_freely/data/")
+        skills_dir = plugin_dir / "skills"
+        skills_dir.mkdir()
+        skill_file = skills_dir / "test.skill.yaml"
+        skill_file.write_text(
+            VALID_SKILL_TEMPLATE.format(
+                skill_id="test.skill", plugin_name="test-plugin", data_path="copy_freely/data/"
+            ),
+            encoding="utf-8",
+        )
+        skill = read_skill_file(
+            skill_file,
+            plugin_root=plugin_dir,
+            plugin_name="test-plugin",
+            plugin_license="Apache-2.0",
+            # Note: parent_tag_pins omitted
+        )
+        assert skill.upstream_tag["copy_freely"] == "v1.0.0"
+
+
+# ─── C1.3 cascade: manifest_schema_version family-match-or-parent-equality ──
+
+
+class TestManifestSchemaVersionFamilyMatch:
+    """The v1.0.1 additive lift widens the
+    ``plugin_ref.manifest_schema_version`` gate from a literal "1.0.0"
+    check to family-match-or-parent-equality.  Tests pin both the
+    widening (1.0.0 + 1.0.1 + 1.0.x family all accepted) and the
+    refusal (different major, different minor, non-string)."""
+
+    def test_1_0_0_under_1_0_1_parent_accepted(self, tmp_path: Path):
+        # A skill authored against the 1.0.0 baseline must load under
+        # a 1.0.1 parent (C1.3 cascade; the family-match widening
+        # closes the false-negative path).
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            VALID_MINIMAL_MANIFEST.format(name="test-plugin"), encoding="utf-8"
+        )
+        _make_data_dir(plugin_dir, "copy_freely/data/")
+        skills_dir = plugin_dir / "skills"
+        skills_dir.mkdir()
+        skill_file = skills_dir / "test.skill.yaml"
+        skill_file.write_text(
+            VALID_SKILL_TEMPLATE.format(
+                skill_id="test.skill", plugin_name="test-plugin", data_path="copy_freely/data/"
+            ),
+            encoding="utf-8",
+        )
+        skill = read_skill_file(
+            skill_file,
+            plugin_root=plugin_dir,
+            plugin_name="test-plugin",
+            plugin_license="Apache-2.0",
+            parent_schema_version="1.0.1",
+        )
+        assert skill.plugin_manifest_schema_version == "1.0.0"
+
+    def test_1_0_1_skill_under_1_0_1_parent_accepted(self, tmp_path: Path):
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            VALID_MINIMAL_MANIFEST.format(name="test-plugin"), encoding="utf-8"
+        )
+        _make_data_dir(plugin_dir, "copy_freely/data/")
+        skills_dir = plugin_dir / "skills"
+        skills_dir.mkdir()
+        skill_file = skills_dir / "test.skill.yaml"
+        text = VALID_SKILL_TEMPLATE.format(
+            skill_id="test.skill", plugin_name="test-plugin", data_path="copy_freely/data/"
+        )
+        text = text.replace('manifest_schema_version: "1.0.0"', 'manifest_schema_version: "1.0.1"')
+        skill_file.write_text(text, encoding="utf-8")
+        skill = read_skill_file(
+            skill_file,
+            plugin_root=plugin_dir,
+            plugin_name="test-plugin",
+            plugin_license="Apache-2.0",
+            parent_schema_version="1.0.1",
+        )
+        assert skill.plugin_manifest_schema_version == "1.0.1"
+
+    def test_1_0_5_skill_under_1_0_1_parent_accepted_via_family_match(self, tmp_path: Path):
+        # Same major.minor ("1.0") as the parent — accepted via
+        # family-match, even though the patch is higher.
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            VALID_MINIMAL_MANIFEST.format(name="test-plugin"), encoding="utf-8"
+        )
+        _make_data_dir(plugin_dir, "copy_freely/data/")
+        skills_dir = plugin_dir / "skills"
+        skills_dir.mkdir()
+        skill_file = skills_dir / "test.skill.yaml"
+        text = VALID_SKILL_TEMPLATE.format(
+            skill_id="test.skill", plugin_name="test-plugin", data_path="copy_freely/data/"
+        )
+        text = text.replace('manifest_schema_version: "1.0.0"', 'manifest_schema_version: "1.0.5"')
+        skill_file.write_text(text, encoding="utf-8")
+        skill = read_skill_file(
+            skill_file,
+            plugin_root=plugin_dir,
+            plugin_name="test-plugin",
+            plugin_license="Apache-2.0",
+            parent_schema_version="1.0.1",
+        )
+        assert skill.plugin_manifest_schema_version == "1.0.5"
+
+    def test_1_1_0_skill_under_1_0_1_parent_refused_pin_mismatch(self, tmp_path: Path):
+        # Different minor ("1.1") is a different minor cycle, NOT a
+        # 1.0.x additive — refused.  This is the "different minor"
+        # boundary case the council asked about.
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            VALID_MINIMAL_MANIFEST.format(name="test-plugin"), encoding="utf-8"
+        )
+        _make_data_dir(plugin_dir, "copy_freely/data/")
+        skills_dir = plugin_dir / "skills"
+        skills_dir.mkdir()
+        skill_file = skills_dir / "test.skill.yaml"
+        text = VALID_SKILL_TEMPLATE.format(
+            skill_id="test.skill", plugin_name="test-plugin", data_path="copy_freely/data/"
+        )
+        text = text.replace('manifest_schema_version: "1.0.0"', 'manifest_schema_version: "1.1.0"')
+        skill_file.write_text(text, encoding="utf-8")
+        with pytest.raises(PluginSkillRefusal) as ei:
+            read_skill_file(
+                skill_file,
+                plugin_root=plugin_dir,
+                plugin_name="test-plugin",
+                plugin_license="Apache-2.0",
+                parent_schema_version="1.0.1",
+            )
+        assert ei.value.code == "plugin_ref_pin_mismatch"
+
+    def test_2_0_0_skill_under_1_0_1_parent_refused_pin_mismatch(self, tmp_path: Path):
+        # Different major — refused.
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            VALID_MINIMAL_MANIFEST.format(name="test-plugin"), encoding="utf-8"
+        )
+        _make_data_dir(plugin_dir, "copy_freely/data/")
+        skills_dir = plugin_dir / "skills"
+        skills_dir.mkdir()
+        skill_file = skills_dir / "test.skill.yaml"
+        text = VALID_SKILL_TEMPLATE.format(
+            skill_id="test.skill", plugin_name="test-plugin", data_path="copy_freely/data/"
+        )
+        text = text.replace('manifest_schema_version: "1.0.0"', 'manifest_schema_version: "2.0.0"')
+        skill_file.write_text(text, encoding="utf-8")
+        with pytest.raises(PluginSkillRefusal) as ei:
+            read_skill_file(
+                skill_file,
+                plugin_root=plugin_dir,
+                plugin_name="test-plugin",
+                plugin_license="Apache-2.0",
+                parent_schema_version="1.0.1",
+            )
+        assert ei.value.code == "plugin_ref_pin_mismatch"
+
+    def test_no_parent_context_falls_back_to_1_0_0_anchor(self, tmp_path: Path):
+        # Backward compat: a stand-alone test fixture that does not
+        # pass parent_schema_version falls back to the v1-epoch
+        # "1.0.0" anchor (so the original test fixtures keep working).
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "MANIFEST.yaml").write_text(
+            VALID_MINIMAL_MANIFEST.format(name="test-plugin"), encoding="utf-8"
+        )
+        _make_data_dir(plugin_dir, "copy_freely/data/")
+        skills_dir = plugin_dir / "skills"
+        skills_dir.mkdir()
+        skill_file = skills_dir / "test.skill.yaml"
+        skill_file.write_text(
+            VALID_SKILL_TEMPLATE.format(
+                skill_id="test.skill", plugin_name="test-plugin", data_path="copy_freely/data/"
+            ),
+            encoding="utf-8",
+        )
+        # No parent_schema_version: the "1.0.0" anchor applies;
+        # VALID_SKILL_TEMPLATE uses "1.0.0" so it matches.
+        skill = read_skill_file(
+            skill_file,
+            plugin_root=plugin_dir,
+            plugin_name="test-plugin",
+            plugin_license="Apache-2.0",
+        )
+        assert skill.plugin_manifest_schema_version == "1.0.0"

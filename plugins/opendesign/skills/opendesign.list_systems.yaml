@@ -26,7 +26,14 @@ plugin_ref:
   # CON §6: name MUST equal the parent plugin's plugin.name (the loader
   # checks this at load — name_mismatch is a hard refusal).
   name: "opendesign"
-  manifest_schema_version: "1.0.0"
+  # CON §8 / C1.3: parent-equality with the parent manifest's
+  # schema_version (1.0.1).  The skill rides the skills-section
+  # vocabulary admitted AT the 1.0.1 epoch, so the literal parent
+  # value is the clean shape.  The family-match widening in
+  # plugin_skill.validate_skill_doc remains valid for genuinely-older
+  # skills under newer parents (the loader note belongs there, not
+  # in this data instance).
+  manifest_schema_version: "1.0.1"
   # CON §6: upstream_tag MUST be present at load (the worker sees
   # "data=vX, prompt=vY" — read-your-writes, never eventual).  At
   # slice ④ opendesign only carries copy_freely data; the

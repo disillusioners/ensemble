@@ -44,33 +44,81 @@ Each skill YAML at ``plugins/<name>/skills/<skill_id>.yaml`` carries:
 Failure modes (closed enum, all raised as :class:`PluginSkillRefusal`)
 --------------------------------------------------------------------
 
+The refusal codes form a closed enum.  Every code below is emitted
+from somewhere in ``daemon/plugin_subsystem/**``; the docstring is the
+audit surface, not a wishlist.  When the registry-side code
+``skills_entry_duplicate`` (CON §6 cross-plugin collision) is raised
+from ``plugin_registry.py``, it is included here for completeness.
+
 - ``skill_missing`` — file not found at the expected path.
-- ``skill_unparseable`` — invalid YAML or non-mapping root.
-- ``skill_size_exceeded`` — file larger than the 64 KB hard-cap (matches
-  the manifest cap; skill files are tiny by design).
-- ``schema_version_missing`` / ``schema_version_unsupported`` —
-  mirrors the manifest reader's gate (same ``1.0.x`` additive family).
-- ``plugin_ref_missing`` / ``plugin_ref_malformed`` — the version-
-  visibility block absent or missing required keys.
+- ``skill_unparseable`` — invalid YAML, non-mapping root, or I/O
+  failure reading the file (one site; raised from three file-read
+  failure modes that share the same code so callers can switch on it
+  without caring about the underlying I/O reason).
+- ``skill_size_exceeded`` — file larger than the 64 KB hard-cap
+  (matches the manifest cap; skill files are tiny by design).
+- ``schema_version_unsupported`` — skill's own ``schema_version``
+  outside the accepted 1.0.x additive family (CON §8).
+- ``plugin_ref_missing`` — the version-visibility block absent.
+- ``plugin_ref_malformed`` — required sub-key of ``plugin_ref``
+  missing or wrong shape (raised from the ``name`` /
+  ``manifest_schema_version`` gates; the loader does NOT raise this
+  for ``license`` mismatches — those are ``license_invalid``).
 - ``plugin_name_mismatch`` — ``plugin_ref.name`` ≠ parent plugin's
   ``plugin.name`` (skills are anchored to one plugin tree).
-- ``upstream_tag_missing`` — no class pin in ``plugin_ref.upstream_tag``
-  (CON §6 invariant).
-- ``license_invalid`` — license not in the vendored SPDX list.
-- ``content_missing`` / ``content_field_malformed`` — content block
-  absent or required field wrong shape.
-- ``vendored_reference_malformed`` — entry missing ``alias``/``path``
-  or empty fields.
-- ``vendored_reference_outside_tree`` — path escapes the parent plugin
-  directory (CON §6 "traversal OUTSIDE the plugin tree is REFUSED
+- ``plugin_ref_pin_mismatch`` — a per-class tag pin in
+  ``plugin_ref.upstream_tag`` does not equal the parent manifest's
+  ``plugin.upstream.tag_pin_per_class`` pin (CON §6 invariant: the
+  skill's data version is the parent's data version — read-your-writes,
+  never eventual).  Also raised when the skill's
+  ``plugin_ref.manifest_schema_version`` does not match the parent
+  manifest's ``schema_version`` AND does not family-match the 1.0.x
+  additive family of the parent's version.  Council-probed v9.9.9
+  skill under a v1.0.x manifest would previously load clean; this
+  refusal closes that gap (slice ④ W1).
+- ``upstream_tag_missing`` — no class pin in
+  ``plugin_ref.upstream_tag`` (CON §6 invariant), OR a per-class
+  pin is empty.
+- ``upstream_tag_unknown_class`` — ``plugin_ref.upstream_tag``
+  carries a class key outside the allowed
+  ``{copy_freely, snapshot_with_drift_alarm, own_outright}`` set.
+- ``non_tag_pin`` — a per-class pin looks like a range expression,
+  is a reserved git literal (``HEAD``/``main``/``master``/``develop``/
+  ``latest``), or is a bare hex SHA (offline-provable tag refusal
+  set; CON §2).
+- ``license_invalid`` — the skill's ``plugin_ref.license`` is not
+  in the vendored SPDX list, OR diverges from the parent plugin's
+  ``plugin.license`` (CON §6 invariant; license is part of the
+  version-visibility surface).
+- ``content_missing`` — the ``content`` block is absent or empty.
+- ``content_field_malformed`` — ``content.description`` empty or
+  non-string, or ``content.body_markdown`` non-string.
+- ``vendored_reference_malformed`` — entry missing ``alias`` /
+  ``path``, empty fields, OR duplicate alias within one skill (raised
+  from five distinct failure modes that share the code so callers
+  can switch on it without parsing the message).
+- ``vendored_reference_outside_tree`` — path is absolute, contains
+  ``..`` segments, or resolves outside the parent plugin tree root
+  (CON §6 invariant: "traversal OUTSIDE the plugin tree is REFUSED
   (fail closed, tested)").
-- ``vendored_reference_unresolved`` — path does not exist at load time
-  (CON §6 "MUST resolve at load").
-- ``consumption_missing`` / ``consumption_by_anonymous`` /
-  ``consumption_by_empty`` — consumers block absent, ``["*"]`` (or any
-  globbed value), or empty list.
-- ``skill_id_mismatch`` — the YAML's ``skill_id`` does not match the
-  expected ``<id>.yaml`` filename.
+- ``vendored_reference_unresolved`` — path is inside the tree but
+  does not exist on disk at load time (CON §6 invariant:
+  "MUST resolve at load").
+- ``consumption_missing`` — ``consumption`` block absent or empty.
+- ``consumption_by_anonymous`` — ``consumption.by`` carries a
+  bare ``"*"`` or a globbed segment (e.g. ``"worker/*"``); CON §6
+  requires NAMED consumers (anonymous ``["*"]`` refused, fail closed).
+- ``consumption_by_empty`` — ``consumption.by`` is empty, or a
+  list element is empty / non-string.
+- ``skill_id_missing`` — ``skill_id`` absent or empty.
+- ``skill_id_mismatch`` — ``skill_id`` does not equal the
+  ``<id>.yaml`` filename stem.
+- ``skills_entry_duplicate`` — REGISTRY-SIDE: two plugins declare
+  the same ``skill_id`` in their manifests; refused symmetrically on
+  both plugins (CON §6: skill IDs are global consumer-facing
+  handles).  Raised by ``plugin_registry._scan_plugins_root`` in the
+  cross-plugin collision pass; surfaced in the per-plugin refusal
+  list.
 
 Vocabulary confinement (CON §7)
 -------------------------------
@@ -92,9 +140,9 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, FrozenSet, List, Mapping, Optional, Sequence, Union
+from typing import Any, FrozenSet, List, Mapping, Optional, Sequence
 
 import yaml
 
@@ -108,6 +156,23 @@ SKILL_SIZE_CAP_BYTES: int = 64 * 1024  # matches the manifest hard-cap (CON §1)
 # Skills and manifests share the same versioning rule (CON §6 carries
 # the same ``schema_version: "1.0.0"`` family).
 _SKILL_SCHEMA_VERSION_RE = re.compile(r"^1\.0\.(\d+)$")
+
+# Family-match helper for the C1.3 widening: a skill's
+# ``plugin_ref.manifest_schema_version`` is in the 1.0.x additive
+# family of the parent's ``schema_version`` iff the skill's version
+# has the same major and minor as the parent's.  For example, with
+# parent = "1.0.1", the skill may be "1.0.0", "1.0.1", "1.0.2", etc.
+# but NOT "1.1.0" (different minor) or "2.0.0" (different major).
+def _family_match(skill_version: str, parent_version: str) -> bool:
+    """True iff ``skill_version`` is in the 1.0.x additive family of
+    ``parent_version`` (same ``major.minor``, any patch)."""
+    if not isinstance(skill_version, str) or not isinstance(parent_version, str):
+        return False
+    if _SKILL_SCHEMA_VERSION_RE.match(skill_version) is None:
+        return False
+    if _SKILL_SCHEMA_VERSION_RE.match(parent_version) is None:
+        return False
+    return skill_version.split(".")[:2] == parent_version.split(".")[:2]
 
 # Per CON §2 / CON §6 / path_types.yaml C row: the three provenance
 # classes whose pins may appear in ``plugin_ref.upstream_tag``.
@@ -230,8 +295,24 @@ _RESERVED_PIN_LITERALS = frozenset({"HEAD", "main", "master", "develop", "latest
 _HEX_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
-def _check_upstream_tag(upstream_tag: Any, location: str) -> Optional[PluginSkillRefusal]:
-    """Per-class tag-pin validation (CON §2 + CON §6 invariants)."""
+def _check_upstream_tag(
+    upstream_tag: Any,
+    location: str,
+    *,
+    parent_tag_pins: Optional[Mapping[str, str]] = None,
+) -> Optional[PluginSkillRefusal]:
+    """Per-class tag-pin validation (CON §2 + CON §6 invariants).
+
+    When ``parent_tag_pins`` is supplied (W1 fix), each per-class pin in
+    ``upstream_tag`` is cross-checked against the parent manifest's
+    ``plugin.upstream.tag_pin_per_class`` for the same class.  A
+    divergence fires ``plugin_ref_pin_mismatch`` (CON §6: skill's
+    data version is the parent's data version — read-your-writes,
+    never eventual).  When ``parent_tag_pins`` is ``None`` the
+    per-class offline-provable gates still run; the cross-check is
+    skipped (the loader is being called without parent context, e.g.
+    by a stand-alone test fixture).
+    """
     if not isinstance(upstream_tag, Mapping) or not upstream_tag:
         return PluginSkillRefusal(
             "upstream_tag_missing",
@@ -275,6 +356,24 @@ def _check_upstream_tag(upstream_tag: Any, location: str) -> Optional[PluginSkil
                 f"plugin_ref.upstream_tag.{class_name} must be a git tag, not a bare SHA",
                 f"{location}.{class_name}",
             )
+        # W1: cross-check against the parent manifest's tag pin for
+        # this class.  CON §6 invariant: the skill's data version is
+        # the parent's data version; a divergence means the skill was
+        # authored against a different upstream tree than the
+        # manifest vendors.  Council-probed v9.9.9 under v1.0.0 used
+        # to load clean; this refusal closes that gap.
+        if parent_tag_pins is not None:
+            parent_pin = parent_tag_pins.get(class_name)
+            if parent_pin is not None and stripped != parent_pin:
+                return PluginSkillRefusal(
+                    "plugin_ref_pin_mismatch",
+                    f"plugin_ref.upstream_tag.{class_name}={stripped!r} does not match the parent "
+                    f"manifest's plugin.upstream.tag_pin_per_class.{class_name}={parent_pin!r} "
+                    "(CON §6: skill data version is the parent data version — read-your-writes, "
+                    "never eventual; council-probed v9.9.9 under v1.0.0 used to load clean, this "
+                    "refusal closes the gap)",
+                    f"{location}.{class_name}",
+                )
     return None
 
 
@@ -288,6 +387,8 @@ def validate_skill_doc(
     plugin_name: str,
     plugin_license: str,
     source_path: Optional[Path] = None,
+    parent_schema_version: Optional[str] = None,
+    parent_tag_pins: Optional[Mapping[str, str]] = None,
 ) -> PluginSkill:
     """Validate one parsed skill YAML document (CON §6).
 
@@ -300,6 +401,19 @@ def validate_skill_doc(
         plugin_license: The parent plugin's ``plugin.license`` (SPDX id).
         source_path: Optional path the doc was loaded from; recorded on
             the returned :class:`PluginSkill` for audit/registration.
+        parent_schema_version: The parent manifest's ``schema_version``
+            (e.g. ``"1.0.1"``).  When supplied, the skill's
+            ``plugin_ref.manifest_schema_version`` must EQUAL this
+            value OR family-match the 1.0.x additive family rooted at
+            it (C1.3 cascade).  When ``None``, the loader falls back
+            to the v1-epoch default (``"1.0.0"``) — useful for
+            stand-alone test fixtures that don't carry parent context.
+        parent_tag_pins: The parent manifest's
+            ``plugin.upstream.tag_pin_per_class`` mapping (per-class
+            tag pin).  When supplied, each per-class pin in
+            ``plugin_ref.upstream_tag`` is cross-checked for
+            equality; a divergence fires ``plugin_ref_pin_mismatch``
+            (W1 fix).  When ``None``, the cross-check is skipped.
 
     Returns:
         A validated :class:`PluginSkill` carrying the typed fields the
@@ -362,10 +476,37 @@ def validate_skill_doc(
             f"{location_prefix}.plugin_ref.name",
         )
     ref_manifest_schema = plugin_ref.get("manifest_schema_version")
-    if ref_manifest_schema != "1.0.0":
+    # C1.3: the skill's plugin_ref.manifest_schema_version may EQUAL
+    # the parent manifest's schema_version OR family-match the 1.0.x
+    # additive family of the parent's version.  "Family-match the
+    # additive family of X" means: the skill's version has the same
+    # major and minor as X (X itself or any later 1.0.x additive on
+    # the same major.minor base).  The literal-only check at v1.0.0
+    # is too strict: a skill authored against the 1.0.1 manifest
+    # (which adds the skills section) would refuse; that is a false
+    # negative.  The parent-equality-or-family-match widening closes
+    # the false-negative path while still refusing a skill that
+    # claims a different major.minor (e.g. skill says "2.0.0" while
+    # parent is "1.0.1") or an out-of-family literal (e.g. skill
+    # says "1.1.0" — that's a different minor, not a 1.0.x additive).
+    if not isinstance(ref_manifest_schema, str):
         raise PluginSkillRefusal(
             "plugin_ref_malformed",
-            f"plugin_ref.manifest_schema_version must be the literal \"1.0.0\" at v1; got {ref_manifest_schema!r}",
+            "plugin_ref.manifest_schema_version is required and must be a string",
+            f"{location_prefix}.plugin_ref.manifest_schema_version",
+        )
+    _parent_anchor = parent_schema_version if parent_schema_version is not None else "1.0.0"
+    _parent_match = (
+        ref_manifest_schema == _parent_anchor
+        or _family_match(ref_manifest_schema, _parent_anchor)
+    )
+    if not _parent_match:
+        raise PluginSkillRefusal(
+            "plugin_ref_pin_mismatch",
+            f"plugin_ref.manifest_schema_version {ref_manifest_schema!r} is not in the 1.0.x additive "
+            f"family of the parent manifest's schema_version {_parent_anchor!r} "
+            "(CON §6 + CON §8: skill's manifest_schema_version must equal the parent's or family-match "
+            "the 1.0.x additive family of the parent's)",
             f"{location_prefix}.plugin_ref.manifest_schema_version",
         )
     ref_license = plugin_ref.get("license")
@@ -389,6 +530,7 @@ def validate_skill_doc(
     upstream_refusal = _check_upstream_tag(
         plugin_ref.get("upstream_tag"),
         f"{location_prefix}.plugin_ref.upstream_tag",
+        parent_tag_pins=parent_tag_pins,
     )
     if upstream_refusal is not None:
         raise upstream_refusal
@@ -579,6 +721,8 @@ def read_skill_file(
     plugin_root: Path,
     plugin_name: str,
     plugin_license: str,
+    parent_schema_version: Optional[str] = None,
+    parent_tag_pins: Optional[Mapping[str, str]] = None,
 ) -> PluginSkill:
     """Read + validate one skill YAML at ``skill_file``.
 
@@ -589,6 +733,13 @@ def read_skill_file(
         plugin_name: The parent plugin's ``plugin.name`` (kebab; must
             equal the skill's ``plugin_ref.name``).
         plugin_license: The parent plugin's ``plugin.license`` (SPDX id).
+        parent_schema_version: The parent manifest's ``schema_version``
+            (forwarded to :func:`validate_skill_doc`; see that function
+            for the family-match-or-parent-equality rule).
+        parent_tag_pins: The parent manifest's
+            ``plugin.upstream.tag_pin_per_class`` mapping (forwarded
+            to :func:`validate_skill_doc`; per-class pin cross-check,
+            W1 fix).
 
     Returns:
         A validated :class:`PluginSkill` (see :func:`validate_skill_doc`).
@@ -639,4 +790,6 @@ def read_skill_file(
         plugin_name=plugin_name,
         plugin_license=plugin_license,
         source_path=skill_file,
+        parent_schema_version=parent_schema_version,
+        parent_tag_pins=parent_tag_pins,
     )

@@ -357,6 +357,12 @@ def _load_plugin_skills(
                 plugin_root=plugin_dir,
                 plugin_name=declaration.name,
                 plugin_license=declaration.license,
+                # W1: pass the parent manifest's schema_version + tag
+                # pin set so the loader can refuse a skill that lies
+                # about its data version (council-probed v9.9.9 under
+                # v1.0.0 used to load clean; this closes that gap).
+                parent_schema_version=declaration.schema_version,
+                parent_tag_pins=dict(declaration.tag_pin_per_class),
             )
         except PluginSkillRefusal as exc:
             refusals.append(exc)

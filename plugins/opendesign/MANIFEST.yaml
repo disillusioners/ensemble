@@ -12,8 +12,16 @@
 #
 # Source of truth: .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md
 # Pin rationale: see CURATION.md and tools/vendor/od_vendor.py.
+#
+# CON §8 additive-epoch rule: 1.0.0 → 1.0.1 lifts at slice ④ to admit the
+# new ``skills`` section (CON §6 plugin-skill declaration).  The bump is
+# ADDITIVE on no frozen surface: the existing fields are unchanged, no
+# field is removed, no enum value is deleted.  Plugin #1's
+# `schema_version: "1.0.0"`-authored manifest (slice ② baseline) stays
+# valid because the runner carries both schemas for one minor cycle
+# (CON §8 migration window).
 
-schema_version: "1.0.0"
+schema_version: "1.0.1"
 plugin:
   name: "opendesign"
   license: "Apache-2.0"
