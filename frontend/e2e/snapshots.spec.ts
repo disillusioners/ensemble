@@ -286,7 +286,7 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     // overlay-driven navigation; the menu items themselves are unchanged.
     await expect(page.locator('[data-test="menu-snapshots"]')).toBeVisible();
     await page.locator('[data-test="menu-snapshots"]').click();
-    expect(new URL(page.url()).pathname).toBe('/snapshots');
+    await expect(page).toHaveURL(/\/snapshots$/, { timeout: 5000 });
     await expect(page).toHaveTitle(/Snapshots/);
     await expect(page.getByRole('heading', { name: 'Snapshots', exact: true })).toHaveText('Snapshots');
     expect(pageErrors).toEqual([]);
