@@ -1,0 +1,231 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "plugins-convention/manifest.schema.json",
+  "title": "Plugin Manifest v1",
+  "description": "Plugin Subsystem v1 manifest vocabulary (MANIFEST.yaml). FROZEN surface per .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md \u00a72. Unknown fields are refused by construction (additionalProperties: false at every level). Additive evolution is 1.0.x only (see \u00a88 versioning rule in CONVENTION.md).",
+  "type": "object",
+  "required": ["schema_version", "plugin", "parity_boundary"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "SemVer. Plugin #1 authors against the literal \"1.0.0\". 1.0.x = additive only; the validator accepts the 1.0.x family and refuses anything else until the runner carries the newer schema."
+    },
+    "plugin": {
+      "type": "object",
+      "required": ["name", "license", "upstream", "integration_path"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "description": "kebab-case; MUST match the plugin directory name (semantic check in manifest_reader)."
+        },
+        "license": {
+          "type": "string",
+          "minLength": 1,
+          "description": "SPDX id; validated exact-match against plugins-convention/spdx_ids.json (validator list is EVOLVABLE; the field carry is FROZEN)."
+        },
+        "upstream": {
+          "type": "object",
+          "required": ["repo", "tag_pin_per_class"],
+          "additionalProperties": false,
+          "properties": {
+            "repo": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Upstream repository URL."
+            },
+            "tag_pin_per_class": {
+              "type": "object",
+              "required": ["copy_freely"],
+              "additionalProperties": false,
+              "description": "TAG-ONLY pins per provenance class (bare SHAs and empty values refused). snapshot_with_drift_alarm absent => inherit copy_freely pin. own_outright is never synced, so it carries no pin.",
+              "properties": {
+                "copy_freely": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "snapshot_with_drift_alarm": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        "integration_path": {
+          "type": "string",
+          "enum": ["B", "C", "A"],
+          "description": "\"A\" only with a complete fence_grant block (semantic check)."
+        },
+        "execution_mode": {
+          "type": "string",
+          "enum": ["resource-only", "lifted-symbol", "hosted-runtime"],
+          "description": "POSITIVE declaration; absent => REFUSE (silence is not permission). Enforced semantically with refusal code absent_execution_mode, hence not listed in the schema-level required set."
+        },
+        "lifted_symbol": {
+          "type": "string",
+          "minLength": 1,
+          "description": "B-path field (required iff execution_mode=lifted-symbol)."
+        },
+        "entrypoint": {
+          "type": "string",
+          "minLength": 1,
+          "description": "B-path field; relative path rooted under adapter/ (semantic check). <=200-line tripwire numeric CI lands with the first real plugin trees (slice 2)."
+        },
+        "ipc_version": {
+          "type": "integer",
+          "description": "B-path field."
+        },
+        "hosted_runtime_deps": {
+          "type": "object",
+          "required": ["runtime_pin", "profile_id", "ipc_schema_pin", "capability_allowlist"],
+          "additionalProperties": false,
+          "description": "A-path fields (FENCED; required iff execution_mode=hosted-runtime).",
+          "properties": {
+            "runtime_pin": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact version pin; ranges refused (semantic check, strict peer-dep)."
+            },
+            "profile_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "ipc_schema_pin": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Semver pin of the IPC schema."
+            },
+            "capability_allowlist": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Static port-id allowlist; never runtime-open."
+            }
+          }
+        },
+        "fence_grant": {
+          "type": "object",
+          "required": ["rationale", "granted_by", "granted_at"],
+          "additionalProperties": false,
+          "description": "FROZEN block; required iff integration_path=A (semantic refusal fence_missing).",
+          "properties": {
+            "rationale": { "type": "string", "minLength": 1 },
+            "granted_by": { "type": "string", "minLength": 1, "description": "user-confirmation-or-job-id" },
+            "granted_at": { "type": "string", "minLength": 1, "description": "ISO-8601 timestamp" }
+          }
+        }
+      }
+    },
+    "copy_freely": {
+      "type": "object",
+      "required": ["paths", "alarm_owner"],
+      "additionalProperties": false,
+      "description": "Clean-pulled upstream data; never authored locally. alarm_owner REQUIRED (empty => refused manifest).",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Globs relative to the plugin tree root."
+        },
+        "alarm_owner": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Role-or-team that owns this class's drift alarms."
+        },
+        "escalation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "EVOLVABLE placeholder; v1 default semantics: block-promote-after-days with N=14."
+        }
+      }
+    },
+    "snapshot_with_drift_alarm": {
+      "type": "object",
+      "required": ["paths", "alarm_owner", "divergence_register"],
+      "additionalProperties": false,
+      "description": "Hot upstream content snapshotted with drift alarms + reconcile. Non-empty paths REQUIRE a non-empty divergence_register (empty register on non-empty path = refused).",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "alarm_owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "escalation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "divergence_register": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "files", "delta", "rationale", "pinning_test"],
+            "additionalProperties": false,
+            "description": "Numbered, exhaustive. upstream_ref is the one optional field per the CON \u00a72 vocabulary.",
+            "properties": {
+              "id": { "type": "integer" },
+              "files": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "delta": { "type": "string", "minLength": 1, "description": "one-line delta description" },
+              "rationale": { "type": "string", "minLength": 1, "description": "one-line rationale" },
+              "upstream_ref": { "type": "string", "minLength": 1, "description": "optional; PR-or-commit the divergence tracks" },
+              "pinning_test": { "type": "string", "minLength": 1, "description": "test-name-or-path pinning the divergence" }
+            }
+          }
+        }
+      }
+    },
+    "own_outright": {
+      "type": "object",
+      "required": ["paths"],
+      "additionalProperties": false,
+      "description": "Ensemble-authored, never synced, invisible to the sync-runner. Deliberately carries NO alarm_owner (authored locally \u2014 there is nothing upstream to alarm on) and NO divergence_register; declaring either here is a vocabulary refusal by construction.",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "parity_boundary": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "description": "REQUIRED SECTION (semantic check missing_parity_boundary). Subsections are lists that may be empty; any row present must carry exactly {path, reason}.",
+      "properties": {
+        "intentionally_not_vendored": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "not_executed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}
