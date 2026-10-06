@@ -62,7 +62,7 @@ import os
 import re
 from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlmodel import Session, SQLModel, create_engine
@@ -284,6 +284,9 @@ def build_manager(engine):
     # REAL lifecycle spawn (the guard lives here). Called through the same
     # ``manager.spawn_instance`` facade name the tools use.
     mgr.spawn_instance = mgr._lifecycle_service.spawn_instance
+    # MCP preload seam (designer OD-lane fix, 2026-10-06): the council
+    # tool lanes await ensure_mcp_preloaded before the sync spawn.
+    mgr.ensure_mcp_preloaded = AsyncMock(return_value=None)
 
     async def _enqueue_message(instance_id, message, source, **_kw):
         # External: message queue insert + worker notification. The tools
