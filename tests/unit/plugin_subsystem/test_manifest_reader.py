@@ -14,6 +14,7 @@ import pytest
 
 from daemon.plugin_subsystem.manifest_reader import (
     MANIFEST_SIZE_CAP_BYTES,
+    ManifestRefusal,
     read_manifest,
     validate_manifest,
 )
@@ -251,6 +252,15 @@ class TestPluginBlockRefusals:
         result = validate_manifest(plugin_dir)
         assert result.refusal.code == "absent_execution_mode"
 
+    def test_read_manifest_raises_on_refusal(self, tmp_path):
+        """read_manifest raises ManifestRefusal directly (catchable by callers);
+        all other refusal tests go through validate_manifest."""
+        text = VALID_MINIMAL_MANIFEST.replace('  execution_mode: "resource-only"\n', "")
+        plugin_dir = build_plugin(tmp_path, text, name="test-plugin")
+        with pytest.raises(ManifestRefusal) as excinfo:
+            read_manifest(plugin_dir)
+        assert excinfo.value.code == "absent_execution_mode"
+
     def test_execution_mode_not_allowed(self, tmp_path):
         text = VALID_MINIMAL_MANIFEST.replace(
             '  execution_mode: "resource-only"', '  execution_mode: "lifted-symbol"'
@@ -367,9 +377,6 @@ class TestProvenanceClassRefusals:
         assert result.refusal.code == "unknown_field"
 
     def test_empty_divergence_register_on_non_empty_paths(self, tmp_path):
-        text = VALID_B_PATH_MANIFEST.replace(
-            "  divergence_register:\n    - id: 1", "  divergence_register: []\n    - id: 1"
-        )
         # cleaner: replace the whole register block
         text = VALID_B_PATH_MANIFEST.split("  divergence_register:")[0]
         text += "  divergence_register: []\nparity_boundary:\n  intentionally_not_vendored: []\n  not_executed: []\n"

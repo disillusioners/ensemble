@@ -38,6 +38,7 @@ _BATTERY = {
     ),
     "missing_required": VALID_MINIMAL_MANIFEST.replace('  license: "Apache-2.0"\n', ""),
     "wrong_type": VALID_MINIMAL_MANIFEST.replace('license: "Apache-2.0"', "license: 42"),
+    "empty_name": VALID_MINIMAL_MANIFEST.replace('name: "{name}"', 'name: ""'),  # minLength: 1
     "enum_violation": VALID_MINIMAL_MANIFEST.replace('integration_path: "C"', 'integration_path: "Q"'),
     "array_item_type": VALID_MINIMAL_MANIFEST.replace('paths: ["data/", "presets/"]', 'paths: [3, 4]'),
     "divergence_extra_field": VALID_B_PATH_MANIFEST.replace(
@@ -45,9 +46,10 @@ _BATTERY = {
         '      pinning_test: "tests/unit/plugin_subsystem/test_manifest_reader.py"\n      extra: 1',
     ),
 }
-# NOTE: pattern/minLength policy (kebab name, non-empty alarm_owner, …) is
-# deliberately NOT structural anymore — those carry dedicated semantic codes
-# owned by manifest_reader._check_semantics and are covered there.
+# NOTE: pattern policy (kebab name) is deliberately NOT structural — it carries
+# a dedicated semantic code owned by manifest_reader._check_semantics and is
+# covered there. minLength IS structural (schema carries minLength: 1 on
+# plugin.name and path items) and is pinned by the `empty_name` battery case.
 
 
 def _doc(key: str) -> dict:

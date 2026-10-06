@@ -23,7 +23,11 @@ TEXT_SUFFIXES = {".py", ".yaml", ".yml", ".json", ".sh", ".md", ".ts", ".js", ".
 
 # Scoped-walk exclusions: build/venv artifacts, the tests' own fixtures, and
 # the planning source-of-truth dir (which DEFINES the vocabulary).
-WALK_EXCLUDED_PARTS = {
+# Exclusions are TOP-LEVEL anchored (matched against the FIRST relative path
+# component only — a nested dir named e.g. `tests/` deep in some tree is
+# NOT excluded). The two allowed zones are excluded explicitly below:
+# plugins-convention/ top-level, daemon/plugin_subsystem/ via prefix match.
+WALK_EXCLUDED_TOP_LEVEL = {
     ".venv",
     ".git",
     "node_modules",
@@ -32,10 +36,10 @@ WALK_EXCLUDED_PARTS = {
     "test-results",
     "tests",
     "test",
-    "plugin-subsystem",  # .agents/shared/planning/plugin-subsystem
+    ".agents",  # incl. shared/planning/plugin-subsystem — defines the vocabulary
     "plugins-convention",  # allowed zone
-    "plugin_subsystem",  # allowed zone (handled explicitly below)
 }
+WALK_ALLOWED_PREFIXES = {("daemon", "plugin_subsystem")}  # allowed zone (tier-2 home)
 WALK_EXCLUDED_FILES = {"package-lock.json", "uv.lock"}
 
 
@@ -44,7 +48,9 @@ def _iter_repo_text_files():
         if path.is_dir() or path.suffix not in TEXT_SUFFIXES:
             continue
         relative = path.relative_to(REPO_ROOT)
-        if any(part in WALK_EXCLUDED_PARTS for part in relative.parts):
+        if relative.parts[0] in WALK_EXCLUDED_TOP_LEVEL:
+            continue
+        if relative.parts[:2] in WALK_ALLOWED_PREFIXES:
             continue
         if path.name in WALK_EXCLUDED_FILES:
             continue

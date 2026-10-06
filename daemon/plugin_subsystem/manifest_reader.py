@@ -294,9 +294,10 @@ def _validate_structural(doc: Any) -> List[_StructuralError]:
 
 
 def _structural_refusal(err: _StructuralError) -> ManifestRefusal:
-    # name kebab violations surface with their dedicated semantic code
-    if err.code == "type_mismatch" and err.location == "plugin.name" and "pattern" in err.message:
-        return ManifestRefusal("name_invalid", "plugin.name must be kebab-case", err.location)
+    # name kebab violations surface with their dedicated semantic code from
+    # _check_semantics — the schema carries no `pattern` on plugin.name, so
+    # no structural error can ever be a name violation (name_invalid is
+    # semantic-only).
     return ManifestRefusal(err.code, err.message, err.location)
 
 
