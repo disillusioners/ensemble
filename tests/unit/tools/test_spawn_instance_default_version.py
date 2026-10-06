@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -309,6 +309,9 @@ class TestSpawnInstanceForwardsTag:
         # reads actual metadata), stubbed ``spawn_instance`` so we can
         # capture the kwargs, and a no-op fallback-notice helper.
         manager = MagicMock()
+        # MCP preload seam (designer OD-lane fix, 2026-10-06): the tool
+        # body awaits ensure_mcp_preloaded before the sync spawn.
+        manager.ensure_mcp_preloaded = AsyncMock(return_value=None)
         # Real-shaped LLMConfig default: the documented default for
         # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
         # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
@@ -388,6 +391,9 @@ class TestSpawnInstanceForwardsTag:
         # No metadata seeded.
 
         manager = MagicMock()
+        # MCP preload seam (designer OD-lane fix, 2026-10-06): the tool
+        # body awaits ensure_mcp_preloaded before the sync spawn.
+        manager.ensure_mcp_preloaded = AsyncMock(return_value=None)
         # Real-shaped LLMConfig default: the documented default for
         # ``allowed_models`` is ``[]`` (= "all models allowed"), and the
         # compare-tools vision gate (``compare_tools._verify_vision_allowed``,
