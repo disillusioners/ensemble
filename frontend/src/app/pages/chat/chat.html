@@ -111,9 +111,13 @@
               </span>
             }
           </div>
-          @if (renderedInstance()) {
+          @if (renderedInstance(); as rendered) {
             <span class="instance-id">
-              {{ renderedInstance()!.instance_id.slice(0, 8) }}...
+              <!-- Truncated-id chip: whole value is a click-to-copy
+                   button for the FULL instance UUID (toast confirms). -->
+              <app-instance-id-copy [instanceId]="rendered.instance_id">
+                {{ rendered.instance_id.slice(0, 8) }}...
+              </app-instance-id-copy>
             </span>
           }
         </div>

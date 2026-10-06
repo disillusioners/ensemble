@@ -188,7 +188,17 @@
               ></span>
             }
           </p>
-          <p class="instance-id">{{ instance.title || getInstanceIdShort(instance.instance_id) }}</p>
+          <p class="instance-id">
+            @if (instance.title) {
+              {{ instance.title }}
+            } @else {
+              <!-- Truncated-id fallback: whole chip is a click-to-copy
+                   button for the FULL instance UUID (toast confirms). -->
+              <app-instance-id-copy [instanceId]="instance.instance_id">
+                {{ getInstanceIdShort(instance.instance_id) }}
+              </app-instance-id-copy>
+            }
+          </p>
         </div>
       </div>
 

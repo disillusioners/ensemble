@@ -1,0 +1,32 @@
+// Click-to-copy instance-ID chip. Visuals stay close to plain text —
+// the surrounding element owns the typography (the list styles
+// ``.instance-id``; the chat header inherits its own), and the
+// affordance is cursor + hover/focus, not heavy chrome.
+.instance-id-copy {
+  font: inherit;
+  font-family: monospace;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  border-radius: 4px;
+  transition: color 0.15s ease;
+}
+
+.instance-id-copy:hover {
+  color: #94a3b8; // slate-400 — brighter than the list's slate-500 id text
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.instance-id-copy:focus-visible {
+  outline: 2px solid #94a3b8;
+  outline-offset: 1px;
+}

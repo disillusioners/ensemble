@@ -37,6 +37,7 @@ import { InstancesViewStateService } from '../../services/instances-view-state.s
 import { InstanceService, sortByCreatedAtDesc } from '../../services/instance.service';
 import { ProjectService } from '../../services/project.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
+import { InstanceIdCopyComponent } from '../../components/instance-id-copy/instance-id-copy.component';
 import { ProjectTabBarComponent } from '../../components/project-tab-bar/project-tab-bar.component';
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
 import { MessageInputComponent, MessagePayload } from '../../components/message-input/message-input.component';
@@ -62,6 +63,7 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
     MatTooltipModule,
     MatDialogModule,
     InstanceListComponent,
+    InstanceIdCopyComponent,
     ProjectTabBarComponent,
     ChatInterfaceComponent,
     MessageInputComponent,
