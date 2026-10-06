@@ -279,10 +279,16 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     const pageErrors = trackPageErrors(page);
     await page.goto('/');
     await page.locator('[data-test="gear-menu"]').click();
+    // Wait for the menu overlay to render before clicking the item — without
+    // this the second click can race the mat-menu open animation and the
+    // routerLink never fires (the menu closes itself before the click
+    // reaches the item). This is the standard Playwright pattern for
+    // overlay-driven navigation; the menu items themselves are unchanged.
+    await expect(page.locator('[data-test="menu-snapshots"]')).toBeVisible();
     await page.locator('[data-test="menu-snapshots"]').click();
     expect(new URL(page.url()).pathname).toBe('/snapshots');
     await expect(page).toHaveTitle(/Snapshots/);
-    await expect(page.locator('h1')).toHaveText('Snapshots');
+    await expect(page.getByRole('heading', { name: 'Snapshots', exact: true })).toHaveText('Snapshots');
     expect(pageErrors).toEqual([]);
   });
 
@@ -325,7 +331,7 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     [resp] = await Promise.all([
       nextListResponse(page),
       (async () => {
-        await page.getByPlaceholder('Search agents…').click();
+        await page.locator('app-searchable-select input[placeholder="Search agents…"]').click();
         await page.getByRole('option', { name: 'coder', exact: true }).click();
       })(),
     ]);
