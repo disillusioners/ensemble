@@ -111,36 +111,56 @@ The OD-UI provenance (`od_url`) is recorded for reference only.
     for the AC and pages in scope (pass | fail-N | n/a).
 
   - `text` — OD was unavailable (daemon down, BYOK unconfigured, tool error,
-    or page outside OD's per-call ceiling). The mockup at the canonical path
-    is the existing text-native form (`.asc` / `.mmd` / hand-authored `.html`
-    fragment per architecture §4.1). No `od_url`. `lint` = `n/a`.
+    probe not bound, or page outside OD's per-call ceiling). The mockup at the
+    canonical path is the existing text-native form (`.asc` / `.mmd` /
+    hand-authored `.html` fragment per architecture §4.1). No `od_url`.
+    `lint` = `n/a`. **`fallback_reason` is MANDATORY on this lane** — the
+    lane-start probe (one `od_list_projects` call at the start of the mockup
+    lane) supplies the evidence token; see Cardinal #7 in rule.md and
+    `mockup_lane` section below for the enum. A text-lane spec without
+    `fallback_reason` is SPEC INCOMPLETE — conformance MUST reject it.
 
 Either lane ships the same developer deliverable: a concrete file path under
 the canonical `mockups/` directory that developer reads directly. The lane
-marker + lint status inform the conformance quality bar — `text` mockups
-never claim pixel fidelity; `opendesign` mockups claim what the lint verdict
-supports.
+marker + `fallback_reason` + lint status inform the conformance quality bar —
+`text` mockups never claim pixel fidelity; `opendesign` mockups claim what
+the lint verdict supports.
 
 `render` rows are provenance-only — they carry an `od_url` (OD-UI reference)
 and no mockup path under `mockups/`. Use them when OD produced only an
 OD-UI-hosted render that the conformance loop reads from `od_url` rather
 than from a repo copy.
+
+**`fallback_reason` enum (verbatim — tester gates on these exact tokens):**
+
+  - `tool-not-bound`     — lane-start probe returned "tool not bound" / OD MCP not in my tool surface
+  - `call-error`        — probe call errored (transport failure, exception, empty result)
+  - `timeout`           — `od_generate_design` hit its timeout mid-call; text fallback for that page
+  - `daemon-unavailable` — OD daemon unreachable on the probe (probe → connect failure)
+  - `other:<detail>`    — anything else, with `<detail>` filled in (one short phrase)
+
+A spec row with `mockup_lane: text` and an empty or absent `fallback_reason`
+is SPEC INCOMPLETE. Conformance review MUST reject it on this basis.
 -->
 
-| Page | Artifact path (canonical) | Kind | AC refs | OD-UI URL | Lint |
-|------|---------------------------|------|---------|-----------|------|
-| `<page>` | `.agents/shared/planning/<feature>/design/mockups/<page>.html` | `html-mockup` | AC-A1, AC-A2 | `<od_url or —>` | `pass` / `fail-N` / `n/a` |
-| `<page>` | `.agents/shared/planning/<feature>/design/mockups/<page>.asc` | `text-mockup` | AC-B1 | — | `n/a` |
-| `<page>` | — | `render` | AC-C1 | `<od_url>` | — |
+| Page | Artifact path (canonical) | Kind | AC refs | OD-UI URL | Lint | `mockup_lane` | `fallback_reason` |
+|------|---------------------------|------|---------|-----------|------|---------------|-------------------|
+| `<page>` | `.agents/shared/planning/<feature>/design/mockups/<page>.html` | `html-mockup` | AC-A1, AC-A2 | `<od_url or —>` | `pass` / `fail-N` / `n/a` | `opendesign` | `n/a` |
+| `<page>` | `.agents/shared/planning/<feature>/design/mockups/<page>.asc` | `text-mockup` | AC-B1 | — | `n/a` | `text` | `<one of: tool-not-bound \| call-error \| timeout \| daemon-unavailable \| other:<detail>>` |
+| `<page>` | — | `render` | AC-C1 | `<od_url>` | — | `opendesign` | `n/a` |
 
 **Lane used:** `mockup_lane: opendesign` | `mockup_lane: text`
+
+**`fallback_reason` (REQUIRED when `mockup_lane: text`):** `<tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>>`
 
 <!--
 If a page has BOTH an OD-generated HTML AND a text-native mockup (lane hybrid
 during graceful degradation — OD was up for some pages, down for others),
 list each row under its own kind and repeat the page in two rows. The lane
 marker above is the aggregate verdict (any OD-capable page → `opendesign`);
-a per-page lane can live in the row's Kind column if needed.
+a per-page lane can live in the row's `mockup_lane` column if needed. The
+`fallback_reason` field is required per row on the text lane; the aggregate
+`fallback_reason` line below the table reflects the dominant fallback token.
 -->
 
 ## Token / style references (flow c — design-system maintenance)
@@ -221,3 +241,25 @@ Before transitioning from `draft` to `approved`:
 - [ ] `pinned_spec_sha` line is uncommented and ready to be set at approval.
 - [ ] Spec has been read by the `implement` and `check` owners (soul-level
       convention — D6 does not enforce reading; conformance findings do).
+- [ ] Design artifacts table filled in with concrete canonical paths under `mockups/`.
+- [ ] Lane marker (`mockup_lane: opendesign | text`) recorded.
+- [ ] If any row is `mockup_lane: text`: `fallback_reason` recorded with one of
+      `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>`
+      (Cardinal #7; tester gates on these exact strings). Spec is SPEC INCOMPLETE
+      if `fallback_reason` is missing on a text-lane row — conformance MUST
+      reject it.
+
+# Conformance review discipline — text-lane fallback check (Cardinal #7)
+
+When conformance review reads a text-lane spec row (`mockup_lane: text`), the
+review MUST verify:
+
+1. `fallback_reason` is populated with one of the exact tokens
+   `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>`.
+2. The token is justified by the lane-start probe result (workflow Phase 4 Step 0).
+3. `mockup_lane: opendesign` rows carry `fallback_reason: n/a` (or omit the field).
+
+A text-lane spec that fails check 1 or 2 is SPEC INCOMPLETE — the conformance
+verdict is FAIL with the finding `missing required field: Fallback reason required
+on text-lane mockup per Cardinal #7`. This is a conformance discipline rule, not
+a lint hard check (D6 keeps lint's hard surface minimal — see lint-spec.md §4).

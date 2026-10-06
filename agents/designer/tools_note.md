@@ -34,6 +34,29 @@ The store lives in a daemon data directory — not the project workdir. My subst
 
 ---
 
+## OpenDesign MCP — OD Lane (default mockup source)
+
+The OpenDesign MCP (`opendesign` builtin server, OD lane v0.16.1) is my **default** source for mockup artifacts. I bind ten `od_*` tools; the per-tool surface is:
+
+- **`od_list_projects`** — list OD projects. Used as the **lane-start probe** at the very start of the mockup lane (Phase 4 Step 0 in workflow) to determine whether the OD MCP is bound and reachable. One call, no retry-storm. Probe result drives the lane decision and supplies the `fallback_reason` evidence when text is selected (probe not bound → `tool-not-bound`; probe call error → `call-error`; daemon unreachable → `daemon-unavailable`).
+- **`od_get_project`** — fetch one OD project's metadata (id, files, urls). Used to inspect an existing project before composing a brief or saving artifacts.
+- **`od_create_project`** — create a new OD project. Used when no project exists for the feature slug; the project carries the canonical `mockups/` source-of-truth linkage.
+- **`od_update_project`** — patch an existing project's metadata (name, description, links). Rare; only when project-level metadata drifts.
+- **`od_save_artifact`** — record OD-UI provenance for a generated design. Reference only — the captured HTML written through to canonical `mockups/` is the developer deliverable; this tool just records the OD-UI URL for traceability.
+- **`od_lint_artifact`** — quality gate against the AC and pages in scope. Returns `pass | fail-N`; a `fail` verdict must be fixed (re-call `od_generate_design` with a corrected brief) **before** freezing the spec — a `fail` never rides into the developer's brief.
+- **`od_compose_brief`** — assemble the design brief from the spec sections in scope. Single-page operation.
+- **`od_generate_design`** — produce **one self-contained HTML document per call, inline, at generation time**. Treat the returned HTML as the contract of record for that page. **Latency 130–170s** — one call, wait it out, no retry-storm. A `timeout` mid-call triggers text fallback for that page (record `fallback_reason: timeout`); other pages may stay on the OD lane.
+- **`od_save_project_file`** — record the HTML file inside the OD project for OD-UI provenance. Like `od_save_artifact`, reference only — never the developer deliverable.
+- **`od_delete_project`** — delete an OD project. Rare; only on spec cancellation or feature rollback.
+
+**Operational boundary.** The `od_*` tools are bound only when the `opendesign` MCP server is configured and the lane-start probe succeeds. When the probe fails (binding gap surfaces at dispatch time, not after a hand-authored HTML), the text-native lane fires with a recorded `fallback_reason` — Cardinal #7 applies. I do not assume the tools are available; the probe confirms it before any spec authoring for mockups.
+
+**Latency discipline.** `od_generate_design` is the long pole. One call, wait it out — do not retry-storm. The MCP pool timeout for opendesign is 600s (vs the global 120s) precisely because this tool routinely overruns the global cap. Don't route `od_generate_design` through any wrapper that would timeout below 300s.
+
+**Provenance vs deliverable.** The repo copy at `.agents/shared/planning/{feature}/design/mockups/{page}.html` (written at generation time) is the developer deliverable. OD-UI provenance (`od_url`, `od_save_artifact` / `od_save_project_file` results) is reference only. Per §4.1: text mockups never claim pixel fidelity; OD mockups claim what `od_lint_artifact` supports.
+
+---
+
 ## Capture Procedure (agent-browser → substrate)
 
 A canonical recipe for landing an external page capture onto the substrate with full provenance so the comparator and downstream consumers can re-find it by path. Use this whenever a workflow needs a routed frontend page captured into a trackable, durable form.
@@ -54,7 +77,7 @@ It does **not** apply to:
 
 This is the path my own `image_save` tool takes; it carries the full provenance sidecar in one call.
 
-1. **Confirm agent-browser is installed.** The CLI lives at `~/services/agent-browser/` with Chrome for Testing under `~/.agent-browser/browsers/`. On this VM the CLI also needs `--args "--no-sandbox"` (rootless container constraint). A missing install means `npm install -g agent-browser` (or the project's local install under `~/services/agent-browser/`).
+1. **Confirm agent-browser is installed.** The CLI lives at `~/services/agent-browser/` with Chrome for Testing under `~/.agent-browser/browsers/`. On this VM the CLI also needs `--args "--no-sandbox"` (rootless container constraint). A missing install means install from a local checkout (e.g. `cd ~/services/agent-browser && npm install`) — **never** bare `npm install -g` or unconstrained `npx` (remote-fetch + execute is a security trap; package `tsc` from npm registry is not TypeScript). Outside a package dir, `npx --no-install` is the loud-refusal idiom if a one-off binary is genuinely needed.
 2. **Pick a routed target.** A real page the frontend serves (e.g. `/`, `/jobs`, a settings-style view). Confirm the route returns 200 first — `curl -sI <origin><route>` is enough; the capture will fail silently if the page 404s.
 3. **Capture to an explicit ops-lane path.** Invocation shape:
    ```
@@ -113,7 +136,7 @@ For ops-lane or scratch runs where the LLM agent turn is not available (e.g. pro
 
 ### Failure modes I expect
 
-- **`agent-browser` install missing.** First-time ops runs need `npm install -g agent-browser` (or `npm install agent-browser` under `~/services/agent-browser/`). The tool errors loudly on invocation; the fix is the install, not a fallback capture.
+- **`agent-browser` install missing.** First-time ops runs need to install from the local checkout at `~/services/agent-browser/` (`cd ~/services/agent-browser && npm install`). The tool errors loudly on invocation; the fix is the local install, not a remote fetch. **Never** teach `npm install -g <pkg>` or bare `npx <pkg>` as a remedy — both fetch from the registry and execute, which is the 2026-10-03 incident pattern (npm `tsc` package is a community tombstone, not TypeScript). The safe idiom is the package-local binary: `cd <pkg-dir> && ./node_modules/.bin/<bin> ...`; outside any package dir, `npx --no-install` (loud refusal, never fetches code).
 - **`--no-sandbox` needed on this VM.** Rootless containers cannot let Chrome drop privileges; the CLI flag is `--args "--no-sandbox"`. A capture that returns blank pixels with no error usually means the sandbox drop failed and Chrome refused to start.
 - **POST `extra="forbid"` 422.** Sending an extra field in the POST body (e.g. `provenance: {...}`) gets a 422 — the contract is locked. The mechanical-path sidecar write step is the documented workaround.
 - **GET 404 after POST.** The blob write is `O_CREAT|O_EXCL` atomic, but a torn sidecar (write interrupted mid-rename) makes the GET 404. Re-running the sidecar write with the same `<image_id>` does not retry — uuid4 ids are not reusable; the capture has to be re-POSTed and a new id assigned. The sweep will reap the orphan blob on its next tick.
