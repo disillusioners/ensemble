@@ -184,11 +184,47 @@
       "type": "object",
       "required": ["paths"],
       "additionalProperties": false,
-      "description": "Ensemble-authored, never synced, invisible to the sync-runner. Deliberately carries NO alarm_owner (authored locally \u2014 there is nothing upstream to alarm on) and NO divergence_register; declaring either here is a vocabulary refusal by construction.",
+      "description": "Ensemble-authored, never synced, invisible to the sync-runner. Deliberately carries NO alarm_owner (authored locally \u2014 there is nothing upstream to alarm on) and NO divergence_register; declaring either here is a vocabulary refusal by construction. ADDITIVE 1.0.2 (slice \u2465): an optional ``attribution`` array carries license-carried-from metadata for any own_outright subtree that ports from a permissive upstream source (e.g. Apache-2.0 \u00a74(d) attribution obligation). Schema-level shape only \u2014 the semantic check on attribution rows lives in manifest_reader.",
       "properties": {
         "paths": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
+        },
+        "attribution": {
+          "type": "array",
+          "description": "ADDITIVE 1.0.2 (slice \u2465). Per-subtree attribution metadata for own_outright content that ports from a permissive upstream source. Each entry documents the upstream license, source, and rationale. Schema-level shape only; semantic check (SPDX id, license-carried-from token present, etc.) lives in manifest_reader.",
+          "items": {
+            "type": "object",
+            "required": ["path", "license_carried_from", "upstream_source", "rationale"],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Subtree path relative to own_outright/ that this attribution row covers."
+              },
+              "license_carried_from": {
+                "type": "string",
+                "minLength": 1,
+                "description": "SPDX id (e.g. 'Apache-2.0') of the upstream source this subtree ports from."
+              },
+              "upstream_source": {
+                "type": "string",
+                "minLength": 1,
+                "description": "URL of the upstream source (commit-pinned where possible; the canonical example is the open-design-mcp@0.16.1 source repo)."
+              },
+              "upstream_commit": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional commit SHA / tag of the upstream source at the time of port."
+              },
+              "rationale": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Plain-language rationale for the port (e.g. 'Apache-2.0 \u00a74(d) \u2014 copy + attribution + state of changes; the orchestration is pure formatting')."
+              }
+            }
+          }
         }
       }
     },
@@ -246,6 +282,63 @@
                 "type": "string",
                 "minLength": 1,
                 "description": "Relative path to the skill YAML inside the plugin tree (CON \u00a76: typically 'skills/<skill_id>.yaml'). Refused if it escapes the plugin tree ('..' / absolute)."
+              }
+            }
+          }
+        }
+      }
+    },
+    "ports": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "description": "ADDITIVE 1.0.2 (slice \u2465). Reference surface for the plugin's Port declarations (CON \u00a73 FROZEN Port data-contract schema). The actual Port data contracts live in Python code at daemon/plugin_subsystem/<plugin>/ports.py; this manifest section carries ONLY the reference (port_id + version + adapter_id + consumers + capability_tags) so a reviewer can see the surface at a glance and so the schema-CI runner can validate without re-encoding the schemas. The frozen Port schema surface (inputs_schema / outputs_schema / errors.envelope) is NOT duplicated here \u2014 duplicated YAML would inflate the manifest past the 64 KB hard-cap (CON \u00a71) by the time 4 ports \u00d7 4 large fields are present. When absent, the plugin has no declared Ports (C-path resource-only plugins without Ports).",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["port_id", "version", "adapter_id", "consumers"],
+            "additionalProperties": false,
+            "properties": {
+              "port_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Stable dotted-kebab Port identifier (e.g. 'od.generate'). Must match the dotted-kebab pattern (CON \u00a73, FROZEN)."
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Port-level version; bumped per-Port."
+              },
+              "adapter_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Stable wrapper identifier (e.g. 'opendesign.generate.v1') matching the Port's provider.adapter_id exactly. The plugin_tool_factory's ADAPTER_REGISTRY maps this to the Python module + class implementing the Port."
+              },
+              "consumers": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "NAMED consumers only (CON \u00a73 \u2014 anonymous '[\"*\"]' is refused at the seam gate). At least one consumer required."
+              },
+              "declared_in": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Reference path to the Python module where the Port's full data contract is declared (the single source of truth for inputs_schema / outputs_schema / errors.envelope)."
+              },
+              "capability_tags": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "description": "Catalog-only tags (CON \u00a73 \u2014 not for routing)."
+              },
+              "notes": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Free-form reviewer note (the schema-CI runner does not inspect this field; it's documentation only)."
               }
             }
           }

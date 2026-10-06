@@ -1021,11 +1021,23 @@ class TestRealPluginSync:
         assert validation.ok, f"manifest refused: {validation.refusal}"
         decl = validation.declaration
         assert decl.name == "opendesign"
-        assert decl.execution_mode == "resource-only"
+        # Slice ⑤: integration_path C → B; execution_mode resource-only
+        # → lifted-symbol (B-element for the per-capability Port tool
+        # family). The test is updated to reflect the slice-⑤ state; the
+        # prior C-only assertion lived pre-⑤.
+        assert decl.execution_mode == "lifted-symbol"
+        assert decl.integration_path == "B"
+        assert decl.lifted_symbol is not None
+        assert decl.entrypoint is not None
+        assert decl.ipc_version is not None
         assert decl.copy_freely["paths"]
         assert decl.snapshot_with_drift_alarm["paths"]
         assert decl.own_outright["paths"]
-        # 4 SEEDED divergence-register entries
+        # Slice ⑤: the 4 own_outright attribution rows (own_outright is
+        # AUTHORED at slice ⑤; the prior slice-③ state was declared-
+        # not-authored with no attribution).
+        assert decl.own_outright.get("attribution"), "own_outright attribution rows required at slice ⑤"
+        # 4 SEEDED divergence-register entries (unchanged from slice ③)
         assert len(decl.divergence_register) == 4
         for entry in decl.divergence_register:
             assert "id" in entry

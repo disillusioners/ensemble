@@ -34,26 +34,21 @@ The store lives in a daemon data directory — not the project workdir. My subst
 
 ---
 
-## OpenDesign MCP — OD Lane (default mockup source)
+## OpenDesign Plugin — OD Lane (default mockup source)
 
-The OpenDesign MCP (`opendesign` builtin server, OD lane v0.16.1) is my **default** source for mockup artifacts. I bind ten `od_*` tools; the per-tool surface is:
+The OpenDesign plugin (`plugins/opendesign/`, tier-2 plugin subsystem first instance; slice ⑤ native tool family; upstream `open-design-mcp@0.16.1` retired at slice ⑦) is my **default** source for mockup artifacts. I bind four native `od.*` Port tools + the `opendesign.list_systems` plugin-skill (slice ④); the per-tool surface is:
 
-- **`od_list_projects`** — list OD projects. Used as the **lane-start probe** at the very start of the mockup lane (Phase 4 Step 0 in workflow) to determine whether the OD MCP is bound and reachable. One call, no retry-storm. Probe result drives the lane decision and supplies the `fallback_reason` evidence when text is selected (probe not bound → `tool-not-bound`; probe call error → `call-error`; daemon unreachable → `daemon-unavailable`).
-- **`od_get_project`** — fetch one OD project's metadata (id, files, urls). Used to inspect an existing project before composing a brief or saving artifacts.
-- **`od_create_project`** — create a new OD project. Used when no project exists for the feature slug; the project carries the canonical `mockups/` source-of-truth linkage.
-- **`od_update_project`** — patch an existing project's metadata (name, description, links). Rare; only when project-level metadata drifts.
-- **`od_save_artifact`** — record OD-UI provenance for a generated design. Reference only — the captured HTML written through to canonical `mockups/` is the developer deliverable; this tool just records the OD-UI URL for traceability.
-- **`od_lint_artifact`** — quality gate against the AC and pages in scope. Returns `pass | fail-N`; a `fail` verdict must be fixed (re-call `od_generate_design` with a corrected brief) **before** freezing the spec — a `fail` never rides into the developer's brief.
-- **`od_compose_brief`** — assemble the design brief from the spec sections in scope. Single-page operation.
-- **`od_generate_design`** — produce **one self-contained HTML document per call, inline, at generation time**. Treat the returned HTML as the contract of record for that page. **Latency 130–170s** — one call, wait it out, no retry-storm. A `timeout` mid-call triggers text fallback for that page (record `fallback_reason: timeout`); other pages may stay on the OD lane.
-- **`od_save_project_file`** — record the HTML file inside the OD project for OD-UI provenance. Like `od_save_artifact`, reference only — never the developer deliverable.
-- **`od_delete_project`** — delete an OD project. Rare; only on spec cancellation or feature rollback.
+- **`opendesign.list_systems`** — plugin-skill (slice ④). Used as the **lane-start probe** at the very start of the mockup lane (Phase 4 Step 0 in workflow) to determine whether the OD plugin is loaded and the BYOK lane is reachable. One skill lookup, no retry-storm. Probe result drives the lane decision and supplies the `fallback_reason` evidence when text is selected (skill not loaded → `tool-not-bound`; `od.generate` call error → `call-error`; BYOK env vars missing → `daemon-unavailable`).
+- **`od.compose_brief`** — assemble the design brief from the spec sections in scope. Pure formatter (no network, no env vars). Pass the same `brief_answers` + `brand_spec` to every per-page generate call to enforce multi-page consistency.
+- **`od.generate`** — produce **one self-contained HTML document per call, inline, at generation time**. Treat the returned HTML as the contract of record for that page. **Latency 130–170s** — one call, wait it out, no retry-storm. A `timeout` mid-call triggers text fallback for that page (record `fallback_reason: timeout`); other pages may stay on the OD lane. The Port's `finish_reason` + `usage` are visible to the caller; the inline completeness gates refuse to return a success on partial / empty / structurally-incomplete HTML.
+- **`od.lint`** — quality gate against the AC and pages in scope. Returns `pass | fail-N`; a `fail` verdict must be fixed (re-call `od.generate` with a corrected brief) **before** freezing the spec — a `fail` never rides into the developer's brief.
+- **`od.save`** — capture the generated HTML at the canonical mockup path (`.agents/shared/planning/{feature}/design/mockups/{page}.html`). This is the developer deliverable; the repo copy is daemon-independent and survives an OD outage after spec freeze.
 
-**Operational boundary.** The `od_*` tools are bound only when the `opendesign` MCP server is configured and the lane-start probe succeeds. When the probe fails (binding gap surfaces at dispatch time, not after a hand-authored HTML), the text-native lane fires with a recorded `fallback_reason` — Cardinal #7 applies. I do not assume the tools are available; the probe confirms it before any spec authoring for mockups.
+**Operational boundary.** The `od.*` tools are bound only when the `opendesign` plugin is loaded (the `od.generate` Port tool is in my toolset, the `opendesign.list_systems` skill is loaded) AND the BYOK env vars (OPENAI_BASE_URL / OPENAI_API_KEY) are set. When the probe fails (binding gap surfaces at dispatch time, not after a hand-authored HTML), the text-native lane fires with a recorded `fallback_reason` — Cardinal #7 applies. I do not assume the tools are available; the probe confirms it before any spec authoring for mockups.
 
-**Latency discipline.** `od_generate_design` is the long pole. One call, wait it out — do not retry-storm. The MCP pool timeout for opendesign is 600s (vs the global 120s) precisely because this tool routinely overruns the global cap. Don't route `od_generate_design` through any wrapper that would timeout below 300s.
+**Latency discipline.** `od.generate` is the long pole. One call, wait it out — do not retry-storm. The tool's internal timeout is calibrated to the max_tokens budget (≈ max_tokens / 800 tok/s ≈ the live lane's 130-170 s observation). The legacy 600s MCP-pool ceiling is no longer load-bearing (the native tool's request_timeout is the bound).
 
-**Provenance vs deliverable.** The repo copy at `.agents/shared/planning/{feature}/design/mockups/{page}.html` (written at generation time) is the developer deliverable. OD-UI provenance (`od_url`, `od_save_artifact` / `od_save_project_file` results) is reference only. Per §4.1: text mockups never claim pixel fidelity; OD mockups claim what `od_lint_artifact` supports.
+**Provenance vs deliverable.** The repo copy at `.agents/shared/planning/{feature}/design/mockups/{page}.html` (written at generation time) is the developer deliverable. Per §4.1: text mockups never claim pixel fidelity; OD mockups claim what `od.lint` supports. OD-UI provenance from the previous `od_save_artifact` / `od_save_project_file` MCP tools is dropped at slice ⑤ (REC §4.3 row ⑤); the OD-UI reference retires entirely at slice ⑦.
 
 ---
 

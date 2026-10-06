@@ -13,15 +13,17 @@ slice ⑤, flagged in the report). The factory consumes the global Port
 registry (:func:`build_default_port_registry`) plus the per-plugin
 adapter classes (``daemon/plugin_subsystem/opendesign/{generate,
 compose_brief, save, lint}.py``); each Port's ``adapter_id`` field
-selects the adapter via :func:`ADAPTER_REGISTRY`.
+selects the adapter via the explicit imports below.
 
-**No runtime loading (CON §7 sentinel).** The factory imports the
-adapter modules explicitly (via the in-process ``ADAPTER_REGISTRY``
-table). No ``importlib`` / entry-point scan. Plugin #2+ registers a
-new ``adapter_id`` → module binding by appending to ``ADAPTER_REGISTRY``
-at the bottom of this file (a sibling file lives at
-``daemon/plugin_subsystem/opendesign/<capability>.py`` for the
-opendesign adapters, all eagerly imported so the binding is static).
+**No runtime loading (CON §7 sentinel).** The factory binds adapter
+classes via EXPLICIT imports at module top — no dynamic module
+loading machinery in this package. Plugin #2+ adds a new
+``adapter_id`` → class binding by appending an explicit import +
+an entry in :data:`ADAPTER_CLASS_TABLE` (both at the bottom of this
+file). The CON §7 sentinel is the load-bearing guarantee that keeps
+the wrapper surface auditable; the test
+``tests/unit/plugin_subsystem/test_sentinels.py::TestNoRuntimeLoading
+::test_no_importlib_in_plugin_subsystem`` enforces it.
 
 **Three-role seam (CON §3).** The factory refuses to build a tool for
 any Port that fails the seam gate
@@ -32,25 +34,26 @@ and continues; the tool simply does not exist for that Port — the
 agent sees a "tool not bound" probe result, exactly as if the upstream
 MCP server were absent).
 
-**Adapter dispatch.** :data:`ADAPTER_REGISTRY` maps ``adapter_id`` →
-``(module_path, callable_name)``. The factory imports the module via
-``importlib.import_module`` (the sanctioned use — explicit module
-imports, not entry-point scanning) and grabs the callable by name.
-This is the single sanctioned runtime-loading surface in the plugin
-subsystem (CON §7 — the sentinel forbids ``importlib`` /
-``pkg_resources`` / entry-point scans; the adapter-id → module binding
-table is the structured override).
+**Adapter dispatch.** :data:`ADAPTER_CLASS_TABLE` maps ``adapter_id``
+→ the adapter class (an explicit import binding). The factory looks
+up the class by ``adapter_id`` and dispatches to the appropriate
+``<ClassName>.execute_dict`` / ``compose_dict`` / ``save_dict`` /
+``lint`` callable per the stable per-capability convention.
 """
 
 from __future__ import annotations
 
-import importlib
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from daemon.plugin_subsystem.capability_seam_gate import (
+    _has_role_consumer,  # noqa: F401 — re-exported via is_three_role_complete
     is_three_role_complete,
     seam_gate_check,
 )
+from daemon.plugin_subsystem.opendesign.compose_brief import OdComposeBrief
+from daemon.plugin_subsystem.opendesign.generate import OdGenerate
+from daemon.plugin_subsystem.opendesign.lint import OdLint
+from daemon.plugin_subsystem.opendesign.save import OdSave
 from daemon.plugin_subsystem.port_registry import (
     Port,
     PortRegistry,
@@ -58,6 +61,7 @@ from daemon.plugin_subsystem.port_registry import (
 )
 
 __all__ = [
+    "ADAPTER_CLASS_TABLE",
     "ADAPTER_REGISTRY",
     "build_tools_for_port",
     "build_plugin_tools",
@@ -66,71 +70,89 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Adapter registry (data table — no entry-point scan, no importlib on disk)
+# Adapter class table (explicit imports; no dynamic module loading — CON §7)
 # ---------------------------------------------------------------------------
 #
-# Each entry maps an adapter_id (the ``Port.provider.adapter_id`` field)
-# to the (module, callable) tuple that implements the adapter. The
-# adapter module exposes a top-level callable that accepts the Port's
-# inputs_schema-shaped dict and returns the outputs_schema-shaped dict.
+# Each entry maps an ``adapter_id`` (the ``Port.provider.adapter_id``
+# field) to the adapter class object. The adapter module imports live
+# at the top of this file (an explicit, statically-discoverable binding)
+# so the runtime never loads plugin code via dynamic mechanisms — CON §7
+# sentinel preserved.
 #
-# Adding a new plugin: append a new entry here. The adapter_id MUST
-# match the Port's ``provider.adapter_id`` exactly. The factory refuses
-# to build a tool when the adapter_id is not registered (the caller
+# Adding a new plugin: (a) add an explicit import at the top of this
+# file, (b) append a new entry here. The ``adapter_id`` MUST match the
+# Port's ``provider.adapter_id`` exactly. The factory refuses to build
+# a tool when the ``adapter_id`` is not in this table (the caller
 # catches the refusal at boot time).
 #
-# Plugin #1 (opendesign) ships with four adapters; the slice-⑤ opendesign
-# B-element implements each as a class-level static ``execute_dict`` /
-# ``compose_dict`` / ``save_dict`` / ``lint`` entrypoint.
+# Plugin #1 (opendesign) ships with four adapters; the slice-⑤
+# opendesign B-element implements each as a class-level static
+# ``execute_dict`` / ``compose_dict`` / ``save_dict`` / ``lint``
+# entrypoint.
 
-ADAPTER_REGISTRY: Dict[str, Tuple[str, str]] = {
-    "opendesign.generate.v1": ("daemon.plugin_subsystem.opendesign.generate", "OdGenerate"),
-    "opendesign.compose_brief.v1": ("daemon.plugin_subsystem.opendesign.compose_brief", "OdComposeBrief"),
-    "opendesign.save.v1": ("daemon.plugin_subsystem.opendesign.save", "OdSave"),
-    "opendesign.lint.v1": ("daemon.plugin_subsystem.opendesign.lint", "OdLint"),
+ADAPTER_CLASS_TABLE: Dict[str, type] = {
+    "opendesign.generate.v1": OdGenerate,
+    "opendesign.compose_brief.v1": OdComposeBrief,
+    "opendesign.save.v1": OdSave,
+    "opendesign.lint.v1": OdLint,
 }
 
 
-def register_adapter(adapter_id: str, module_path: str, class_name: str) -> None:
-    """Register an adapter binding at runtime.
+# Mirror table used by external readers (introspection / tooling) —
+# keeps a single source of truth while preserving the original dict name.
+ADAPTER_REGISTRY: Dict[str, type] = ADAPTER_CLASS_TABLE
 
-    Plugin #2+ uses this to declare new ``adapter_id`` → module
-    bindings. Boot wiring at ``daemon/manager.py`` calls this in the
-    same order as the plugin registration (no side-effects; the
-    table is consulted at tool-build time).
+
+def register_adapter(adapter_id: str, adapter_cls: type) -> None:
+    """Register an adapter class binding at runtime.
+
+    Plugin #2+ uses this to declare new ``adapter_id`` → class
+    bindings WITHOUT adding an import at the top of this file (the
+    class is provided by the plugin's own module; this function
+    accepts the class object directly). Boot wiring at
+    ``daemon/manager.py`` calls this in the same order as the plugin
+    registration (no side-effects; the table is consulted at tool-
+    build time).
 
     A duplicate ``adapter_id`` overwrites the prior binding (the
     last registration wins) — useful for test fixtures that swap the
     adapter; production callers should register exactly once per
     ``adapter_id``.
+
+    Note: this function binds a CLASS, not a (module, callable)
+    tuple. Plugin #2+ passes ``OdSomething`` directly. The legacy
+    ``(module_path, class_name)`` shape is no longer accepted (CON §7
+    forbids dynamic module loading; the explicit import at the top
+    of this file is the only sanctioned binding for plugin #1).
     """
-    ADAPTER_REGISTRY[adapter_id] = (module_path, class_name)
+    if not isinstance(adapter_cls, type):
+        raise TypeError(
+            f"plugin_tool_factory.register_adapter: expected a class, got "
+            f"{type(adapter_cls).__name__}"
+        )
+    ADAPTER_CLASS_TABLE[adapter_id] = adapter_cls
 
 
 # ---------------------------------------------------------------------------
-# Adapter dispatch — import the adapter module and grab the class
+# Adapter dispatch — look up the adapter class and grab the right method
 # ---------------------------------------------------------------------------
 
 
-def _resolve_adapter(adapter_id: str) -> Any:
-    """Resolve an ``adapter_id`` → adapter class via :data:`ADAPTER_REGISTRY`.
+def _resolve_adapter(adapter_id: str) -> type:
+    """Resolve an ``adapter_id`` → adapter class via :data:`ADAPTER_CLASS_TABLE`.
 
     Returns the class object; raises ``KeyError`` when the
-    ``adapter_id`` is not registered, ``ImportError`` /
-    ``AttributeError`` when the binding is malformed (test fixtures
-    catch both).
+    ``adapter_id`` is not registered.
     """
-    if adapter_id not in ADAPTER_REGISTRY:
+    if adapter_id not in ADAPTER_CLASS_TABLE:
         raise KeyError(
             f"plugin_tool_factory: adapter_id {adapter_id!r} is not registered "
-            f"(ADAPTER_REGISTRY keys: {sorted(ADAPTER_REGISTRY)})"
+            f"(ADAPTER_CLASS_TABLE keys: {sorted(ADAPTER_CLASS_TABLE)})"
         )
-    module_path, class_name = ADAPTER_REGISTRY[adapter_id]
-    module = importlib.import_module(module_path)
-    return getattr(module, class_name)
+    return ADAPTER_CLASS_TABLE[adapter_id]
 
 
-def _adapter_callable(adapter_cls: Any, port: Port) -> Callable[..., Dict[str, Any]]:
+def _adapter_callable(adapter_cls: type, port: Port) -> Callable[..., Dict[str, Any]]:
     """Resolve the adapter's per-Port callable.
 
     Convention: adapters expose ``<ClassName>.execute_dict(raw: dict,
@@ -179,7 +201,7 @@ def build_tools_for_port(
     The factory refuses to build when:
 
     - The three-role seam gate fails (CON §3).
-    - The ``adapter_id`` is not in :data:`ADAPTER_REGISTRY`.
+    - The ``adapter_id`` is not in :data:`ADAPTER_CLASS_TABLE`.
 
     Refusal surfaces as a raised ``ValueError`` (caller catches; the
     boot scan logs the refusal and continues — the tool simply does
@@ -210,13 +232,7 @@ def build_tools_for_port(
     except ImportError:  # pragma: no cover - langchain_core is a project dependency
         raise RuntimeError("langchain_core is required for the plugin tool factory")
 
-    # The tool's ``func`` is a closure over the adapter callable +
-    # port_id + env/project_root. The agent invokes the tool with
-    # keyword-arg named fields (langchain_core maps the args_schema to
-    # the tool's input).
-    from daemon.plugin_subsystem.capability_seam_gate import _has_role_consumer  # noqa: PLC0415
-
-    if not _has_role_consumer(port):
+    if not is_three_role_complete(port):
         # Defense-in-depth; the seam gate already covered it.
         raise ValueError(
             f"plugin_tool_factory: port {port.port_id!r} has no consumer — refusing"
