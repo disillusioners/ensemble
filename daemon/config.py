@@ -2114,6 +2114,22 @@ class LiveViewsRootConfig(BaseModel):
         default="filesystem",
         description="One of 'filesystem' | 'project_scoped' | 'tmp_images'.",
     )
+    # Operator-UX (B4-9.1, 2026-10-07): the dict key under
+    # ``LiveViewsConfig.roots`` is the canonical root name; the
+    # field_validator(mode="before") on the parent injects it here
+    # BEFORE pydantic constructs each entry, so the per-root
+    # validation errors below can name the offending entry. Direct
+    # constructors (``LiveViewsRootConfig(type=..., path=...)``)
+    # leave it None — the validator is only useful when the entry
+    # has a registry identity, which direct constructions don't.
+    name: str | None = Field(
+        default=None,
+        description=(
+            "Registry name (the dict key under LiveViewsConfig.roots). "
+            "Set automatically by the parent field_validator; do not "
+            "write this from config.yaml. None on direct construction."
+        ),
+    )
     path: str | None = Field(
         default=None,
         description=(
@@ -2204,12 +2220,23 @@ class LiveViewsRootConfig(BaseModel):
             return self
         if self.type in ("filesystem", "project_scoped"):
             if not self.path or not self.path.strip():
+                # Operator-UX (B4-9.1, 2026-10-07): include the
+                # registry name so the operator can locate the
+                # offending entry from a single log line. The
+                # parent field_validator stamps ``self.name`` from
+                # the dict key; direct constructors (tests, the
+                # seed builder) leave it None and we fall back to
+                # the bare class+type tag.
+                _id = (
+                    f"LiveViewsRootConfig(name={self.name!r}, type={self.type!r})"
+                    if self.name is not None
+                    else f"LiveViewsRootConfig(type={self.type!r})"
+                )
                 raise ValueError(
-                    f"LiveViewsRootConfig(type={self.type!r}) requires a "
-                    f"non-empty 'path' (the literal directory for "
-                    f"filesystem, or the per-project subdirectory "
-                    f"template for project_scoped). Got path="
-                    f"{self.path!r}."
+                    f"{_id} requires a non-empty 'path' (the literal "
+                    f"directory for filesystem, or the per-project "
+                    f"subdirectory template for project_scoped). Got "
+                    f"path={self.path!r}."
                 )
         elif self.type == "tmp_images":
             # ``path`` is a tri-state here: None (the seeded
@@ -2220,13 +2247,19 @@ class LiveViewsRootConfig(BaseModel):
             # two is a misconfig we want to surface at load
             # time.
             if self.path is not None:
+                # Operator-UX (B4-9.1, 2026-10-07): same naming
+                # rule as the path-required branch above.
+                _id = (
+                    f"LiveViewsRootConfig(name={self.name!r}, type='tmp_images')"
+                    if self.name is not None
+                    else "LiveViewsRootConfig(type='tmp_images')"
+                )
                 raise ValueError(
-                    f"LiveViewsRootConfig(type='tmp_images') must NOT "
-                    f"set 'path' — the resolver delegates to the "
-                    f"per-app TmpImageStore substrate. Got path="
-                    f"{self.path!r}. If you meant a directory-backed "
-                    f"root, change type to 'filesystem' or "
-                    f"'project_scoped'."
+                    f"{_id} must NOT set 'path' — the resolver "
+                    f"delegates to the per-app TmpImageStore "
+                    f"substrate. Got path={self.path!r}. If you "
+                    f"meant a directory-backed root, change type "
+                    f"to 'filesystem' or 'project_scoped'."
                 )
         if self.required_rel_subpath is not None:
             if self.type != "project_scoped":
@@ -2379,6 +2412,33 @@ class LiveViewsConfig(BaseSettings):
             "the full list and the operator-override model."
         ),
     )
+
+    @field_validator("roots", mode="before")
+    @classmethod
+    def _stamp_root_names(
+        cls, v: object
+    ) -> object:
+        """Operator-UX (B4-9.1, 2026-10-07): stamp each root's
+        dict key into the inner ``name`` field BEFORE pydantic
+        constructs each ``LiveViewsRootConfig``, so the per-root
+        validation errors can name the offending entry.
+
+        Runs on the raw input shape: for operator config the
+        value is ``dict[str, dict]`` (we stamp the inner dicts);
+        for ``default_factory=_seed_phase1_roots`` the value is
+        already ``dict[str, LiveViewsRootConfig]`` (we pass it
+        through — the seeds don't need stamping and re-stamping
+        them would mask the seed-construction validation).
+        """
+        if not isinstance(v, dict):
+            return v
+        out: dict[str, object] = {}
+        for k, inner in v.items():
+            if isinstance(inner, dict) and "name" not in inner:
+                out[k] = {**inner, "name": k}
+            else:
+                out[k] = inner
+        return out
 
 
 class EmbeddingConfig(BaseSettings):

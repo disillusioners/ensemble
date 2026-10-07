@@ -613,6 +613,24 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # designer's ``tools.allow: ["design"]`` entry emits the
     # "neither a known category nor a known tool" WARNING (WP8 G2-A3).
     "design": "daemon.tools.compare_tools",
+    # Live-views subsystem (Phase 1, 2026-10-07) — single-tool
+    # category exposing ``view_link`` (URL minter over the
+    # ``/views/<root>/<path>`` route family). Category key MUST
+    # byte-match ``@register_tool_category("view-views")`` in
+    # ``daemon/tools/live_views.py``, the three commissioned
+    # ``tools.allow`` entries in ``agents/{ari,leader,designer}/
+    # meta.json``, and the ``PRIVILEGED_TOOL_CATEGORIES`` row
+    # in ``daemon/tools/_tool_registry.py``. Row is load-bearing
+    # for boot-time allow-list validation — without it ari /
+    # leader / designer emit three benign
+    # "neither a known category nor a known tool" WARNINGS
+    # (B3-F1, 2026-10-07) on every boot. Runtime is correct
+    # (the warnings are noise; the per-tool allow-list
+    # resolution still works because ``view_link`` IS the
+    # only ``view-views`` tool and the category's privilege
+    # gate fires downstream), but the warnings are visible
+    # boot noise we want gone.
+    "view-views": "daemon.tools.live_views",
     "infra": "daemon.tools.infra",
     "system": "daemon.tools.system",
     "skill-evolution": "daemon.tools.skill_evolution_tools",
