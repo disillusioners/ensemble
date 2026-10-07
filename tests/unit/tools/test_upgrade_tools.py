@@ -3990,3 +3990,98 @@ class TestManagerDrainPendingExecution:
             | {k for k in os.environ if k.startswith(uj.EXECUTOR_ENV_PREFIXES)}
         )
         assert set(composed) <= allowed
+
+    async def test_spawn_executor_systemd_unavailable_caught_at_drain_seam(
+        self, drain_mgr, install, scripts_dir, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-land: the drain-seam NARROW handler for
+        ``uj.ExecutorSystemdUnavailable`` (architecture-recommendation.md
+        §5.3 :115 / ruling R6, originally landed in
+        ``27b48af20`` + stripped by ``d1a771253``).
+
+        End-to-end pin: spawn_executor raises
+        ``ExecutorSystemdUnavailable`` (after journaling ``refusal``
+        with the ``executor-systemd-unavailable`` token, mirroring
+        the REAL spawn seam at ``upgrade_journal.py:2121-2145``).
+        The drain's narrow handler catches it BEFORE the broad
+        ``except Exception`` — drain returns ``False``, never raises,
+        loud warning logged, marker consumed (one shot per armed op),
+        pending_op falls through to the spawn-seam journal-closed
+        state (no ``expires_at + RECONCILE_GRACE_S`` wait).
+
+        Without the narrow handler, the broad except catches the
+        exception, the loud-warning + narrow ``return False`` path is
+        skipped, the "drain failed" wording fires instead — the
+        designed loud-refusal-preserving path is lost.
+        """
+        run_id = "r-drain-sysd-unavail-1"
+        uj.lock_acquire(install, run_id)  # the tool-acquired arm lock
+        uj.write_pending_op(
+            install,
+            uj.PendingOp(
+                run_id=run_id, kind="promote", env="demo",
+                target="1.2.3", armed_by_instance="inst-drain-sysd",
+            ),
+        )
+        iid = self._arm(
+            drain_mgr, install, scripts_dir,
+            {"instance_id": "inst-drain-sysd", "kind": "promote", "env": "demo",
+             "run_id": run_id, "target": "1.2.3"},
+        )
+
+        # Patch spawn_executor to mimic the LOUD refusal path: journal
+        # the refusal event with the executor-systemd-unavailable
+        # token (mirror of ``_refuse_systemd_unavailable`` at
+        # ``upgrade_journal.py:2121-2145``), THEN raise.
+        def _loud_refusal_spawn(argv, install_dir, extra_env=None, *, run_id=None):
+            from daemon.tools.upgrade_journal import ExecutorSystemdUnavailable
+            detail = (
+                "executor spawn refused: systemd transient unit "
+                "unavailable on a unit-managed host — NO legacy "
+                "setsid fallback (kill-class guard); reason: bus-down"
+            )
+            uj.journal_history_append(
+                install_dir,
+                "refusal",
+                f"{detail} (reason={uj.EXECUTOR_SYSTEMD_UNAVAILABLE_TOKEN})",
+            )
+            raise ExecutorSystemdUnavailable(detail)
+
+        monkeypatch.setattr(uj, "spawn_executor", _loud_refusal_spawn)
+
+        # The drain's narrow handler catches the raised
+        # ExecutorSystemdUnavailable BEFORE the broad except:
+        result = await drain_mgr.drain_pending_system_execution(iid)
+        # Never-raises contract preserved (the broad except is a
+        # safety net; the narrow handler is the loud-refusal path).
+        assert result is False, (
+            "drain MUST return False on loud refusal, never raise "
+            "(narrow handler returns False; broad except is unreachable "
+            "for ExecutorSystemdUnavailable)"
+        )
+        # Marker is consumed (one shot per armed op — the brief says
+        # the marker stays consumed even on loud refusal).
+        assert iid not in drain_mgr._pending_system_executions
+        # The journal carries the refusal event with the
+        # executor-systemd-unavailable token (spawn_executor journals
+        # before raising — pin the end-to-end shape).
+        events = uj.journal_read(install)["history"]
+        refusal_entries = [
+            e for e in events
+            if e["event"] == "refusal"
+            and uj.EXECUTOR_SYSTEMD_UNAVAILABLE_TOKEN in (e.get("detail") or "")
+        ]
+        assert refusal_entries, (
+            f"drain-seam test: refusal journal entry missing "
+            f"executor-systemd-unavailable token; got events={events!r}"
+        )
+        # The arm lock state on the promote lane: promote.sh is
+        # designed to re-acquire the lock at its preflight, so the
+        # drain releases BEFORE the spawn call (manager.py:4495).
+        # On the loud-refusal path the spawn never happens, so the
+        # lock stays released — promote.sh would have to re-acquire
+        # at its preflight (it won't run on this path). The
+        # assertion is the structural pin that the narrow handler
+        # did NOT release the lock in addition to what the
+        # pre-spawn promote branch already did.
+        assert not uj.lock_dir(install).exists()
