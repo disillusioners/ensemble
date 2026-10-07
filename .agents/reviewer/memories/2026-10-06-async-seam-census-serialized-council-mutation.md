@@ -1,0 +1,17 @@
+# Async-Seam Census + Serialized Council Mutation (designer-od-lane-fix review, 2026-10-06)
+
+## Lesson 1 — Adding `await` to shared tool bodies breaks MagicMock fixtures repo-wide
+When a commit introduces `await <manager method>(...)` into hot tool paths (e.g. `ensure_mcp_preloaded` added to all spawn tool bodies in 037adb83), EVERY test file that wires that manager method as a plain `MagicMock` now fails with `TypeError: 'MagicMock' object can't be awaited` — not just the "related" test files the developer ran. In this case: 3 fixtures got the `AsyncMock` seam in-commit, but 3 more manager constructions (`tests/test_council_tools.py:99`, `tests/unit/tools/test_version_tag_tool_resolution.py:1056/:1247`) were missed → 12 net-new red tests at branch HEAD while the developer claimed "zero net-new on wider surface".
+
+**Rule:** when reviewing a commit that adds an `await` on a manager method called from tool bodies, census the whole tests/ tree for `manager.<method> = MagicMock` wiring sites and check each has (or needs) an AsyncMock seam. Developer "wider surface" claims are claims — the delta run must be re-executed by the reviewer, not trusted.
+
+## Lesson 2 — Serialized-mutation council pattern works
+The 2026-10-05 shared-worktree interference rule (one mutation-authorized worker at a time, siblings briefed) was applied inside a council: councilor-A sole dynamic verifier (incl. sanctioned stash/revert dance), councilor-B strict static. Result: zero interference, byte-identical restoration, and — critically — the split surfaced F1 (dynamic evidence) that B's static-only scope could never see. Keep the pattern: in shared worktrees, exactly one councilor runs the mutation window, gated on `ps`-verified no sibling test in flight.
+
+## Lesson 3 — Verify-by-two-methods for fail@base→pass@fix
+The /tmp `git archive` mirror (zero worktree mutation) and the in-worktree stash dance agreed exactly. When the tree must stay pristine, the archive mirror alone is sufficient evidence — prefer it first, in-worktree dance only when runtime state matters.
+
+## Addendum (2026-10-06, F1 remediation round) — the two-mode unmasking pattern
+F1's 12 reds were TWO failure modes stacked: 8 seam-TypeErrors PLUS 4 strict `assert_called_once_with` sites pinning the pre-fix spawn signature — the TypeErrors MASKED the assertion failures until the seams landed (verified empirically: at seams-only commit e5af15ca, exactly 4 tests fail on signature mismatch). Rule: when adding AsyncMock seams to un-silence a MagicMock TypeError set, EXPECT newly-unmasked strict-assertion failures beneath; check whether those assertions pre-date the production change (`git log -S`) before treating them as defects. Pre-existing assertions that encoded the old call contract get updated with `<new_kwarg>=ANY,` as first expected kwarg — that preserves strictness on every other kwarg when the new argument is a call-time-generated value (UUID). This remediation class was accepted as merge-gate-clean (worker 109966c1, pr-review skill).
+
+Also: developer-scope number claims ("54 failed = 54 failed") may not reproduce under the reviewer's scope (32 failed on the 17-file surface) — what's load-bearing for a gate is "identical failure lists, ∅ net-new both directions", which is scope-checked by diffing the failed-test ID lists, not by matching headline counts. Ask devs to publish their exact surface definition when citing counts.
