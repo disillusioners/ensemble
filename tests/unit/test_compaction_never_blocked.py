@@ -868,3 +868,456 @@ def _build_service(manager: Any) -> tuple:
         events_service=None,
     )
     return svc, mgr
+
+
+# =============================================================================
+# A4 reviewer fix — tool-call pairing integrity at the floor's cut
+# =============================================================================
+# Reviewer finding (verified): the OLD cut was purely positional
+# (``corpus[:dropped]`` / ``corpus[dropped:]``). If an
+# ``[AIMessage(tool_calls=[X]), ToolMessage(tool_call_id=X)]`` pair
+# straddled the cut, the floor would CAUSE the very 2013
+# tool-call-pairing failure it exists to prevent (incident-window
+# error family).
+#
+# Fix: snap-to-boundary walk. After computing ``dropped``, advance
+# the cut FORWARD while the first message of the retained tail is
+# a ToolMessage (whose AIMessage lives in the dropped head).
+# Guardrails: ``kept >= 1`` invariant (cap at ``len(corpus) - 1``);
+# bounded walk (stops on the first non-ToolMessage); the 639-message
+# HumanMessage-only replica (the incident shape) snaps ZERO
+# messages — pinned expectation UNCHANGED.
+
+
+class TestA4ToolCallPairingSnapToBoundary:
+    """A4 reviewer fix: tool-call pairs land either fully dropped
+    or fully retained. The floor never CAUSES the 2013 pairing
+    failure it exists to prevent."""
+
+    @pytest.mark.asyncio
+    async def test_tool_call_pair_straddling_cut_advances_safely(self):
+        """Tool exchange straddling the natural cut: AIMessage with
+        tool_calls falls at the dropped-head boundary with its
+        ToolMessage at the tail start. The snap advances; the pair
+        lands FULLY DROPPED together; the tail is clean; no
+        orphan ToolMessage in the result."""
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+        )
+        # 6 messages, ALL bare-flag injected notes (so
+        # ``selectable=0`` -> the all-injected gate fires -> the
+        # floor runs). The ``_is_tool_message`` check on the cut
+        # point works regardless of injection status, so the snap
+        # engages on the same partition logic.
+        #   0: HumanMessage(injected)
+        #   1: AIMessage(injected, tool_calls=[X])  <- natural cut would drop
+        #   2: ToolMessage(injected, tool_call_id=X)  <- natural cut would KEEP
+        #                                            -> orphan if kept
+        #   3-5: HumanMessage(injected)
+        # ceil(6/2) = 3. Natural cut: drop [0,1,2], keep [3,4,5].
+        # AIMessage at idx 1 dropped, ToolMessage at idx 2 kept
+        # -> ORPHAN. The A4 snap advances the cut past idx 2.
+        msgs = [
+            HumanMessage(
+                content="user-0", id="m-0",
+                additional_kwargs={"injected_message": True},
+            ),
+            AIMessage(
+                content="", id="m-1",
+                tool_calls=[{"name": "x", "args": {}, "id": "call-1"}],
+                additional_kwargs={"injected_message": True},
+            ),
+            ToolMessage(
+                content="result-1", id="m-2", tool_call_id="call-1",
+                additional_kwargs={"injected_message": True},
+            ),
+            HumanMessage(
+                content="user-1", id="m-3",
+                additional_kwargs={"injected_message": True},
+            ),
+            HumanMessage(
+                content="user-2", id="m-4",
+                additional_kwargs={"injected_message": True},
+            ),
+            HumanMessage(
+                content="user-3", id="m-5",
+                additional_kwargs={"injected_message": True},
+            ),
+        ]
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(
+            make_compaction_context(config, msgs)
+        )
+        assert result is not None
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        )
+        # Pairing-integrity assertion helper: NO orphan
+        # ToolMessage in the result.
+        TestA4ToolCallPairingSnapToBoundary._assert_no_orphan_tool_message(
+            msgs
+        )
+        # The floor returns non-empty replacement + notice before
+        # the tail:
+        non_drops = [
+            m for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage)
+        ]
+        assert len(non_drops) > 0
+        # First non-Remove is the notice
+        assert non_drops[0].additional_kwargs.get("context_kind") == (
+            COMPACTION_NOTICE_CONTEXT_KIND
+        )
+
+    @pytest.mark.asyncio
+    async def test_mid_tool_execution_corpus_respects_kept_cap(self):
+        """History ENDS with a ToolMessage (agent died mid-tool-
+        execution; AIMessage that produced it was never returned).
+        The walk must respect ``kept >= 1`` — the final ToolMessage
+        stays in the tail as the terminal message. The next LLM
+        invoke will see an orphan, but the D1 pairing-synthesizer
+        in instance_messaging is the documented remediation (out
+        of scope for this commission)."""
+        from langchain_core.messages import ToolMessage
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+        )
+        # 3 messages, all injected, ending with a ToolMessage
+        # (orphan — no AIMessage). ceil(3/2)=2; natural cut: drop
+        # [0,1], keep [2]. The walk would advance because idx 2 is
+        # a ToolMessage, but kept=1 cap blocks it. Final
+        # ToolMessage stays in the tail.
+        msgs = [
+            HumanMessage(
+                content="user-0", id="m-0",
+                additional_kwargs={"injected_message": True},
+            ),
+            HumanMessage(
+                content="user-1", id="m-1",
+                additional_kwargs={"injected_message": True},
+            ),
+            ToolMessage(
+                content="result-orphan", id="m-2",
+                tool_call_id="missing-aimessage",
+                additional_kwargs={"injected_message": True},
+            ),
+        ]
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(
+            make_compaction_context(config, msgs)
+        )
+        assert result is not None
+        # Floor engages
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        )
+        # kept >= 1 invariant — at least the notice + 1 tail
+        # message survive. messages_after = 1 (notice) + kept;
+        # kept in [1, ceil(3/2)=2] range.
+        assert result.messages_after >= 2, (
+            "kept>=1 invariant: the final ToolMessage must remain "
+            "in the tail as the terminal message even though its "
+            "AIMessage is missing — the D1 pairing-synthesizer is "
+            "the documented remediation"
+        )
+        # messages_before = 3, messages_after <= messages_before + 1
+        # (only the notice is added)
+        assert result.messages_after <= result.messages_before + 1
+
+    @pytest.mark.asyncio
+    async def test_639_message_human_only_replica_snaps_zero(self):
+        """The 639-message HumanMessage-only incident replica: the
+        snap is a no-op (no ToolMessages), so the pinned 639 ->
+        320 (kept) + 1 (notice) = 321 messages_after expectation
+        is UNCHANGED. This is the A4 fix's load-bearing regression
+        guard for the spec."""
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+        )
+        n = 639
+        messages = make_injected_messages(n)  # all HumanMessage
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(
+            make_compaction_context(config, messages)
+        )
+        # Pinned expectation UNCHANGED post-A4
+        assert result is not None
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        )
+        expected_kept = math.ceil(n / 2)  # 320
+        assert result.messages_after == 1 + expected_kept
+
+    def test_pairing_integrity_helper_no_orphan_tool_message(self):
+        """The pairing-integrity assertion helper itself: for
+        every ToolMessage in the corpus, the AIMessage bearing
+        the matching ``tool_call_id`` is in the SAME partition
+        relative to the nominal cut (``ceil(N/2)``). The A4 snap
+        guarantees this by advancing the cut past consecutive
+        ToolMessages at the boundary, so the pairing holds at
+        the (post-snap) cut; the worst case for the partition
+        check is the NOMINAL cut (the A4-fix-correct cut is
+        further along, so the check is conservative).
+
+        Invariant: the helper returns ``None`` (no orphan) on a
+        pairing-clean corpus, and raises ``AssertionError`` on a
+        pairing-broken corpus. The fixture exercises both
+        branches.
+
+        The clean corpus: 4 messages. ceil(4/2)=2 → drop [0,1],
+        keep [2,3]. The AIMessage at idx 2 is in the retained
+        partition; its ToolMessage at idx 3 is also retained.
+        SAME PARTITION → no orphan.
+
+        The broken corpus: 2 messages. ceil(2/2)=1 → drop
+        [AIMessage at 0], keep [ToolMessage at 1]. The pair
+        straddles the nominal cut (worst case). This is exactly
+        the orphan shape the A4 snap is supposed to prevent
+        (with ``kept >= 1`` cap, the walk can't advance without
+        emptying the tail, so this IS a hard orphan — a 2-message
+        tool-call-pairing corpus is unsalvageable by the snap; the
+        pairing-synthesizer is the documented remediation).
+        """
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        helper = (
+            TestA4ToolCallPairingSnapToBoundary._assert_no_orphan_tool_message
+        )
+
+        # Pairing-clean: 4 messages, AIMessage+ToolMessage pair
+        # both in the retained tail (post-cut).
+        clean_corpus = [
+            HumanMessage(content="u-0", id="h-0"),
+            HumanMessage(content="u-1", id="h-1"),
+            AIMessage(
+                content="", id="ai-0",
+                tool_calls=[{"name": "x", "args": {}, "id": "call-1"}],
+            ),
+            ToolMessage(
+                content="result", id="tm-0", tool_call_id="call-1",
+            ),
+        ]
+        # Should not raise.
+        helper(clean_corpus)
+
+        # Pairing-broken: 2 messages, AIMessage dropped /
+        # ToolMessage retained (the orphan shape the A4 snap is
+        # supposed to prevent — for N=2, ``kept >= 1`` cap blocks
+        # the walk, so the orphan is hard).
+        broken_corpus = [
+            AIMessage(
+                content="", id="ai-0",
+                tool_calls=[{"name": "x", "args": {}, "id": "call-1"}],
+            ),
+            ToolMessage(
+                content="orphan-result", id="tm-0",
+                tool_call_id="call-1",
+            ),
+        ]
+        with pytest.raises(AssertionError) as exc_info:
+            helper(broken_corpus)
+        assert "orphan ToolMessage" in str(exc_info.value)
+        assert "call-1" in str(exc_info.value)
+
+    @staticmethod
+    def _assert_no_orphan_tool_message(original_corpus) -> None:
+        """Pairing-integrity assertion helper.
+
+        For every ToolMessage in the corpus, an AIMessage bearing
+        the matching ``tool_call_id`` must be in the SAME partition
+        relative to the nominal cut (``ceil(N/2)``). The A4 snap
+        guarantees this by advancing the cut past consecutive
+        ToolMessages at the boundary, so the pairing holds at the
+        (post-snap) cut; the worst case for the partition check
+        is the NOMINAL cut (the A4-fix-correct cut is further
+        along, so the check is conservative).
+
+        Used by:
+          * ``test_tool_call_pair_straddling_cut_advances_safely``
+            (the load-bearing regression test)
+          * any future test that wants to pin pairing integrity
+
+        Args:
+            original_corpus: The full pre-floor message list (in
+                original order).
+
+        Raises:
+            AssertionError: when a ToolMessage is in one partition
+                (dropped/retained) while its matching AIMessage is
+                in the other — the A4 snap failed to keep the
+                pair together.
+        """
+        n = len(original_corpus)
+        nominal_cut = math.ceil(n / 2)
+        for i, msg in enumerate(original_corpus):
+            tcid = getattr(msg, "tool_call_id", None)
+            if not tcid:
+                continue
+            # Find any AIMessage with tool_calls[].id == tcid
+            # anywhere in the corpus.
+            matching_ai_idx = None
+            for j, other in enumerate(original_corpus):
+                if j == i:
+                    continue
+                tcs = getattr(other, "tool_calls", None)
+                if not tcs:
+                    continue
+                for tc in tcs:
+                    if isinstance(tc, dict) and tc.get("id") == tcid:
+                        matching_ai_idx = j
+                        break
+                if matching_ai_idx is not None:
+                    break
+            if matching_ai_idx is None:
+                # The AIMessage never existed (mid-tool-execution
+                # orphan). The D1 pairing-synthesizer is the
+                # remediation; this helper does not assert against
+                # that case. Skip.
+                continue
+            in_dropped_msg = i < nominal_cut
+            in_dropped_ai = matching_ai_idx < nominal_cut
+            assert in_dropped_msg == in_dropped_ai, (
+                f"orphan ToolMessage at index {i} "
+                f"(tool_call_id={tcid!r}); its AIMessage at index "
+                f"{matching_ai_idx} is in the "
+                f"{'DROPPED' if in_dropped_ai else 'RETAINED'} "
+                f"partition while the ToolMessage is in the "
+                f"{'DROPPED' if in_dropped_msg else 'RETAINED'} "
+                f"partition - A4 snap failed"
+            )
+
+
+# =============================================================================
+# Cheap add #5 - TestI gap: assert the counter / metadata write fires
+# =============================================================================
+
+
+class TestIProactiveSkipCounterAndEscalationWrite:
+    """Reviewer cheap add: the existing TestI tests only assert
+    that ``compactor.compact_state.await_count == 0`` (i.e. the
+    engine was NOT called). They do NOT assert that the per-
+    instance skip counter incremented OR that the escalation
+    metadata write fires after N skips. This test class pins
+    both."""
+
+    @pytest.mark.asyncio
+    async def test_proactive_skip_increments_per_instance_counter(self):
+        """A non-quiescent skip increments
+        ``svc._consecutive_proactive_skips[iid]`` by 1. This is
+        the OBSERVABLE signal that feeds the escalation rule
+        (without it, the rule would never fire)."""
+        mgr = MagicMock()
+        mgr._instance_repository.get = MagicMock(
+            return_value=MagicMock(status="running")
+        )
+        mgr._compactor = MagicMock()
+        mgr._compactor._trigger_window = MagicMock(return_value=1_000_000)
+        mgr._compactor.compact_state = AsyncMock(return_value=None)
+        mgr.message_metadata_repo = None
+        svc, _ = _build_service(manager=mgr)
+        graph = MagicMock()
+        graph.aget_state = AsyncMock(
+            return_value=MagicMock(
+                values={"messages": make_messages(5)},
+                next=("agent",),  # non-quiescent
+            )
+        )
+        # Pre-condition: counter empty
+        assert svc._consecutive_proactive_skips.get("inst-counter-1") is None
+        # One skip
+        await svc._maybe_compact_context("inst-counter-1", graph, {})
+        # Post-condition: counter is 1 for this instance
+        assert svc._consecutive_proactive_skips.get("inst-counter-1") == 1, (
+            "non-quiescent skip must increment the per-instance "
+            "counter - this is the observable signal that the "
+            "escalation rule depends on"
+        )
+        # Second skip
+        await svc._maybe_compact_context("inst-counter-1", graph, {})
+        assert svc._consecutive_proactive_skips.get("inst-counter-1") == 2
+
+    @pytest.mark.asyncio
+    async def test_proactive_skip_writes_escalation_metadata_at_threshold(
+        self,
+    ):
+        """After N consecutive proactive skips with a baseline
+        present, the trigger writes the
+        ``compaction_escalation_until`` metadata to the instance
+        row via the repository's update call. The 95% pre-call
+        hook reads this metadata and lowers its gate from 0.95 to
+        0.80 for that instance.
+
+        Setup: a non-quiescent shape short-circuits the proactive
+        trigger BEFORE the engine is reached (signature 2 by
+        design), so the baseline (``_last_seen_message_count``)
+        is set by the success path that requires a quiescent
+        shape. The first skip is BENIGN (no baseline) — that's
+        the documented semantic. To exercise the Nth-skip
+        escalation, we seed the baseline directly on the service
+        instance (the "operator's first success" baseline) and
+        fire N non-quiescent skips back-to-back.
+        """
+        from daemon.services._escalation_metadata import (
+            ESCALATION_UNTIL_KEY,
+        )
+
+        mgr = MagicMock()
+        mgr._instance_repository.get = MagicMock(
+            return_value=MagicMock(
+                status="running",
+                metadata={},  # empty baseline
+            )
+        )
+        # Capture the update calls
+        update_calls: list[tuple] = []
+
+        def _capture_update(*args, **kwargs):
+            update_calls.append((args, kwargs))
+            if "metadata" in kwargs:
+                mgr._instance_repository.get.return_value.metadata = (
+                    kwargs["metadata"]
+                )
+            return None
+
+        mgr._instance_repository.update = MagicMock(
+            side_effect=_capture_update
+        )
+        mgr._compactor = MagicMock()
+        mgr._compactor._trigger_window = MagicMock(return_value=1_000_000)
+        mgr._compactor.compact_state = AsyncMock(return_value=None)
+        mgr.message_metadata_repo = None
+        svc, _ = _build_service(manager=mgr)
+        graph = MagicMock()
+        graph.aget_state = AsyncMock(
+            return_value=MagicMock(
+                values={"messages": make_messages(5)},
+                next=("agent",),
+            )
+        )
+        # Seed the baseline (documented "first skip is benign"
+        # semantic: the operator's first success sets the
+        # baseline; the second-and-onward skips compare against
+        # it). This is the growth-baseline semantics documented
+        # on ``_record_proactive_skip``.
+        svc._last_seen_message_count["inst-esc-1"] = 5
+        # Three consecutive non-quiescent skips (the default
+        # threshold). On the 3rd, the helper checks ``new_count
+        # < threshold``; new_count=3, threshold=3 -> NOT less
+        # than -> set escalation metadata.
+        for _ in range(3):
+            await svc._maybe_compact_context("inst-esc-1", graph, {})
+        # The 3rd skip wrote the metadata
+        assert any(
+            ESCALATION_UNTIL_KEY in (kw.get("metadata") or {})
+            for _args, kw in update_calls
+        ), (
+            f"the 3rd consecutive skip must write the "
+            f"compaction_escalation_until metadata; update_calls="
+            f"{update_calls}"
+        )

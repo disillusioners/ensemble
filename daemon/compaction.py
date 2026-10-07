@@ -1871,6 +1871,35 @@ COMPACTION_NOTICE_TEXT = (
 )
 
 
+def _is_tool_message(msg: BaseMessage) -> bool:
+    """True when ``msg`` is a langchain ``ToolMessage`` (the carrier
+    for a tool-execution result).
+
+    Used by the A4 reviewer fix in
+    :meth:`ContextCompactor._last_effort_tail_truncation`: the
+    snap-to-boundary walk detects a ``ToolMessage`` at the cut
+    point and advances the cut so the AIMessage(tool_calls) that
+    produced it stays in the dropped head (the AIMessage +
+    ToolMessage pair lands together).
+
+    Robust to:
+      * BaseMessage subclasses that don't expose a ``type`` attr
+        (default-False).
+      * langchain ``ToolMessage`` aliases: ``"tool"`` (canonical)
+        and ``"toolmessage"`` (older test fixture spelling).
+    """
+    if msg is None:
+        return False
+    type_attr = getattr(msg, "type", None)
+    if isinstance(type_attr, str):
+        return type_attr.lower() in ("tool", "toolmessage")
+    # Fallback: ToolMessage instances carry ``tool_call_id``; an
+    # AIMessage carries ``tool_calls`` (list). The presence of
+    # ``tool_call_id`` is the most reliable signal.
+    return bool(getattr(msg, "tool_call_id", None))
+
+
+
 def _build_last_effort_replacement(
     context: "CompactionContext",
     *,
@@ -2271,9 +2300,17 @@ class ContextCompactor:
     # Variant A/B path will persist as a REAL SHRINK. The floor of
     # the compaction ladder.
     #
-    # Retained-count rule (PIN — ODD COUNT):
-    #   kept = math.ceil(N / 2)
-    #   dropped = N - kept = math.floor(N / 2)
+    # Retained-count rule (PIN — A4 reviewer amendment):
+    #   NOMINAL: kept = ceil(N/2), dropped = floor(N/2)
+    #   AMENDED (post-A4 snap-to-boundary): kept >= ceil(N/2) is the
+    #     NOMINAL target; the A4 snap may reduce ``kept`` by a bounded
+    #     number of messages (one per consecutive ToolMessage at the
+    #     cut boundary) so an AIMessage(tool_calls) + ToolMessage
+    #     pair lands either FULLY dropped or FULLY retained. NEVER
+    #     below 1. The HumanMessage-only corpora (the 639-message
+    #     incident replica) snap ZERO messages — the pinned
+    #     639 → 320 (kept) + 1 (notice) = 321 messages_after
+    #     expectation is UNCHANGED.
     # The corpus is the FULL message channel (selectable + hoisted +
     # absorbed), in original order. For N=1 the helper keeps 1 and
     # drops 0 (defensive no-drop edge case — only the notice message
@@ -2351,6 +2388,68 @@ class ContextCompactor:
         dropped = n - kept  # floor(n/2)
         # The older ``dropped`` messages are the ones we drop; the
         # newer ``kept`` messages are the retained tail.
+        #
+        # ── A4 REVIEWER FIX: snap-to-boundary walk ──
+        # The OLD cut (``corpus[:dropped]`` / ``corpus[dropped:]``)
+        # was purely positional. If an
+        # ``[AIMessage(tool_calls=[X]), ToolMessage(tool_call_id=X)]``
+        # pair straddled the cut, the floor would CAUSE the very
+        # 2013 tool-call-pairing failure it exists to prevent:
+        #   * AIMessage dropped + ToolMessage retained → orphan
+        #     ToolMessage → next invoke 400s NON-RETRYABLE
+        #   * AIMessage retained + ToolMessage dropped → silent
+        #     tool-result loss
+        # The all-injected primary path is safe (HumanMessage-only),
+        # but the min-messages and preserved-within-threshold paths
+        # pass the FULL corpus, and the 95% pre-call hook can fire
+        # mid-tool-execution — same exposure. The walk advances the
+        # cut FORWARD while the first message of the retained tail
+        # is a ToolMessage (whose AIMessage lives in the dropped
+        # head). Adjacent tool results AFTER a tail-leading
+        # AIMessage(tool_calls) stay intact inside the tail.
+        #
+        # Guardrails:
+        #   1. ``kept >= 1`` is INVARIANT — the walk can advance
+        #      the cut but never past ``len(corpus) - 1`` (so at
+        #      least one message remains in the tail).
+        #   2. AMENDED retained-count rule: ``kept = ceil(N/2)``
+        #      MINUS a bounded pairing-snap adjustment (a few
+        #      messages), NEVER below 1. The 639-message
+        #      HumanMessage-only replica (the incident replica)
+        #      snaps ZERO messages, so the pinned 639→320+notice
+        #      expectation is UNCHANGED.
+        #   3. The walk is bounded — it never scans the entire
+        #      corpus; it advances at most until it hits a non-
+        #      ToolMessage (or the kept>=1 cap).
+        #
+        # Subtlety — mid-tool-execution history: if the FINAL
+        # message of the corpus is itself a ToolMessage (e.g. the
+        # agent died mid-tool-execution and the history ends with
+        # a result whose AIMessage was never returned), the walk
+        # cannot drop it (kept >= 1 cap), so it stays in the tail
+        # as the terminal message. The next LLM invoke will see
+        # an orphan ToolMessage and the pairing-synthesizer (D1
+        # seam in ``daemon/services/instance_messaging.py``) is
+        # the documented remediation — that seam is unchanged in
+        # this commission.
+        snap_adjust = 0
+        max_snap = kept - 1  # keep at least 1 in the tail
+        while snap_adjust < max_snap:
+            candidate_idx = dropped + snap_adjust
+            candidate = corpus[candidate_idx]
+            if not _is_tool_message(candidate):
+                break
+            snap_adjust += 1
+        if snap_adjust > 0:
+            dropped = dropped + snap_adjust
+            kept = n - dropped
+            logger.warning(
+                "[Compaction][obs] floor tool-call-pairing snap: "
+                "advanced cut by %d message(s) to keep tool_call "
+                "pairs intact; kept=%d, dropped=%d (n=%d, "
+                "amended retained-count rule)",
+                snap_adjust, kept, dropped, n,
+            )
         head_to_drop = corpus[:dropped]
         tail_to_keep = corpus[dropped:]
 
@@ -2385,14 +2484,18 @@ class ContextCompactor:
         # Log at WARN so operators triaging "compaction never fires"
         # can trace the floor landing. The skip_reason_label ties
         # back to the original gate that fired (the ladder step that
-        # the floor replaced).
+        # the floor replaced). A4 amendment: ``kept`` may be < the
+        # nominal ceil(N/2) target when a tool-call-pairing snap
+        # advanced the cut; log the NOMINAL target alongside the
+        # post-snap actual so operators can see the snap delta.
         logger.warning(
             "[Compaction] floor engaged: skip_reason=%s, "
-            "n=%d, kept=%d, dropped=%d (ceil(n/2) rule); "
+            "n=%d, kept=%d (nominal ceil(n/2)=%d), dropped=%d; "
             "compaction_type=%s",
             skip_reason_label,
             n,
             kept,
+            _math.ceil(n / 2),
             dropped,
             COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT,
         )

@@ -1495,6 +1495,30 @@ class InstanceMessagingService:
         metadata write is wrapped in try/except so a DB hiccup never
         crashes the proactive trigger; the RAM counter still records
         the skip for the next attempt.
+
+        Growth-baseline semantics (deliberate, NOT a bug — do not
+        tighten into an immediate-escalation):
+
+        * The very FIRST skip for an instance is BENIGN: there is no
+          prior message-count baseline (the instance was never
+          observed by the proactive trigger), so ``_last_seen_message_count.get``
+          returns ``None`` and the method returns immediately. The
+          skip is still recorded in the counter (so a subsequent
+          attempt with a baseline can compare), but no escalation
+          fires.
+        * The growth check is anchored on the LAST SEEN message
+          count from a previous SUCCESSFUL engine invocation (or a
+          successful proactive attempt). The counter itself does
+          not carry growth signal.
+        * Once a successful compaction (or any engine reach) sets
+          the baseline, subsequent skips compare against it. A
+          non-growing streak (stable count across skips) does NOT
+          escalate — the operator's intent: context is stable, just
+          non-quiescent; no urgency.
+        * A growing streak that reaches N escalates, regardless of
+          the exact current-vs-previous delta (the brief said "N
+          consecutive skips while context keeps growing"; the
+          growth check is binary).
         """
         # Threshold 0 disables escalation entirely (operator
         # preference; see CompactionConfig.proactive_escalate_after).
