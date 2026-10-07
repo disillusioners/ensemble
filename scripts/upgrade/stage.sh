@@ -445,42 +445,70 @@ AGENTS_TREE="$(_tree_hash_of_lines "$AGENTS_LINES")"
 FRONTEND_TREE="$(_tree_hash_of_lines "$FRONTEND_LINES")"
 PLUGINS_TREE="$(_tree_hash_of_lines "$PLUGINS_LINES")"
 
-agents_map=""
-first=1
+# ── per-file maps (linear streaming — 2026-10-07 O(n²) fix) ─────────────────
+# The previous construct appended each entry to a growing bash string
+# (map="$map, …") — quadratic copy cost per iteration, 140s measured on the
+# real 4929-file plugins/ tree (the same anti-pattern lib.sh documents at
+# :1597-1600 for its own JSON parser). Now: per-entry "\"path\":\"sha\""
+# fragments stream to a temp file under $STAGE_TMP (linear), then
+# _stage_join_map assembles the final map string with ONE python3 pass per
+# tree. Byte-compat with the old output: the fragment loop keeps the same
+# per-line parse (sha␠␠rel) and calls _json_escape verbatim, fragments land
+# in _tree_manifest's pre-sorted order, the separator is the same ", ", and
+# an empty tree produces an empty frag file → empty join → the same "{}"
+# the manifest heredoc below renders. Frag files live INSIDE $STAGE_TMP so
+# every existing `rm -rf "$STAGE_TMP"` failure path cleans them, and each
+# is removed right after its join — before the manifest heredoc + the
+# post-stage integrity phases ever see the tree root.
+_stage_join_map() {
+    python3 -c '
+import sys
+with open(sys.argv[1], "rb") as fh:
+    frags = fh.read().split(b"\n")
+if frags and frags[-1] == b"":
+    frags.pop()
+sys.stdout.buffer.write(b", ".join(frags))
+' "$1"
+}
+_agents_frag="$STAGE_TMP/.map_frag.agents"
+: > "$_agents_frag"
 while IFS= read -r line; do
     [ -n "$line" ] || continue
     sha="${line%%  *}"; rel="${line#*  }"
-    if [ $first = 1 ]; then agents_map="\"$(_json_escape "$rel")\":\"$sha\""; first=0
-    else agents_map="$agents_map, \"$(_json_escape "$rel")\":\"$sha\""; fi
+    printf '"%s":"%s"\n' "$(_json_escape "$rel")" "$sha" >> "$_agents_frag"
 done <<EOF
 $AGENTS_LINES
 EOF
-frontend_map=""
-first=1
+agents_map="$(_stage_join_map "$_agents_frag")" || { rm -rf "$STAGE_TMP"; exit 1; }
+rm -f "$_agents_frag"
+_frontend_frag="$STAGE_TMP/.map_frag.frontend"
+: > "$_frontend_frag"
 while IFS= read -r line; do
     [ -n "$line" ] || continue
     sha="${line%%  *}"; rel="${line#*  }"
-    if [ $first = 1 ]; then frontend_map="\"$(_json_escape "$rel")\":\"$sha\""; first=0
-    else frontend_map="$frontend_map, \"$(_json_escape "$rel")\":\"$sha\""; fi
+    printf '"%s":"%s"\n' "$(_json_escape "$rel")" "$sha" >> "$_frontend_frag"
 done <<EOF
 $FRONTEND_LINES
 EOF
+frontend_map="$(_stage_join_map "$_frontend_frag")" || { rm -rf "$STAGE_TMP"; exit 1; }
+rm -f "$_frontend_frag"
 # plugins/ per-file map — same shape as agents/frontend (flat
 # {path:sha256,…}); the per-file map lets a verifier pinpoint
-# any tampered/missing/extra file. Mirrors the agents/frontend block
-# above; no commas inside paths exist in the plugin tree (manifest
-# yaml keys + plain files), so the flat-map sed/tr conversion in
-# _manifest_map_lines works unchanged.
-plugins_map=""
-first=1
+# any tampered/missing/extra file. Same linear streaming construct as
+# the agents/frontend blocks above (the old growing-string loop was the
+# plugins-tree wedge; see the map-block header for the byte-compat
+# argument and the 2026-10-07 fix rationale).
+_plugins_frag="$STAGE_TMP/.map_frag.plugins"
+: > "$_plugins_frag"
 while IFS= read -r line; do
     [ -n "$line" ] || continue
     sha="${line%%  *}"; rel="${line#*  }"
-    if [ $first = 1 ]; then plugins_map="\"$(_json_escape "$rel")\":\"$sha\""; first=0
-    else plugins_map="$plugins_map, \"$(_json_escape "$rel")\":\"$sha\""; fi
+    printf '"%s":"%s"\n' "$(_json_escape "$rel")" "$sha" >> "$_plugins_frag"
 done <<EOF
 $PLUGINS_LINES
 EOF
+plugins_map="$(_stage_join_map "$_plugins_frag")" || { rm -rf "$STAGE_TMP"; exit 1; }
+rm -f "$_plugins_frag"
 
 # staged_at: REFRESHED on every stage (M6, commission v0.16.6 component 2).
 # Pre-rider behavior preserved the original timestamp across idempotent
