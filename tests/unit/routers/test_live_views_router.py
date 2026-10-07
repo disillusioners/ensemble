@@ -372,6 +372,180 @@ class TestHardeningHeaders:
 
 
 # ===========================================================================
+# Group 4b — MIME pins (REWORK 2026-10-07, m1)
+# ===========================================================================
+
+
+class TestMimePins:
+    """REWORK 2026-10-07 (m1): router-level MIME pins for SVG
+    and markdown. The MIME map at
+    ``daemon/services/live_views.py:_EXT_TO_MIME`` is the
+    single source of truth; these tests pin the
+    Content-Type the router ACTUALLY returns for the served
+    extensions, so a future map change that drifts the
+    response trips here.
+    """
+
+    def test_svg_served_as_image_svg_xml(
+        self, client_with_filesystem_root: TestClient,
+        filesystem_root_dir: pathlib.Path,
+    ):
+        # Stage an SVG file in the mockups subtree.
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "logo.svg").write_bytes(
+            b'<svg xmlns="http://www.w3.org/2000/svg" />'
+        )
+        # Need to widen the allowlist to include svg.
+        cfg = LiveViewsConfig()
+        cfg.roots["designer-artifact"] = LiveViewsRootConfig(
+            type="project_scoped",
+            path=".agents/shared/planning",
+            required_rel_subpath=["design", "mockups"],
+            allowed_extensions=["html", "svg"],
+        )
+        workdir = filesystem_root_dir
+        service = LiveViewsService(
+            config=cfg,
+            project_workdir_by_shortname_resolver=lambda shortname: (
+                str(workdir) if shortname == "ens" else None
+            ),
+        )
+        app = FastAPI()
+        app.include_router(build_router())
+        app.state.live_views_service = service
+        c = TestClient(app)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/logo.svg"
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/svg+xml; charset=utf-8"
+
+    def test_markdown_served_as_text_markdown(
+        self, client_with_filesystem_root: TestClient,
+        filesystem_root_dir: pathlib.Path,
+    ):
+        # Stage a markdown file in the mockups subtree.
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "notes.md").write_bytes(b"# Heading\n")
+        # The default allowlist is ["html"]; rebuild the
+        # service with markdown allowed too.
+        cfg = LiveViewsConfig()
+        cfg.roots["designer-artifact"] = LiveViewsRootConfig(
+            type="project_scoped",
+            path=".agents/shared/planning",
+            required_rel_subpath=["design", "mockups"],
+            allowed_extensions=["html", "md"],
+        )
+        workdir = filesystem_root_dir
+        service = LiveViewsService(
+            config=cfg,
+            project_workdir_by_shortname_resolver=lambda shortname: (
+                str(workdir) if shortname == "ens" else None
+            ),
+        )
+        app = FastAPI()
+        app.include_router(build_router())
+        app.state.live_views_service = service
+        c = TestClient(app)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/notes.md"
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/markdown; charset=utf-8"
+
+
+# ===========================================================================
+# Group 4c — m2 router pins (REWORK 2026-10-07)
+# ===========================================================================
+
+
+class TestRouterM2Pins:
+    """REWORK 2026-10-07 (m2 router pin set): extras beyond the
+    Phase 1 happy / 404 / 405 coverage.
+
+    * no-auto-index on a directory path (a GET on what would
+      resolve to a directory must return the uniform 404,
+      NOT a directory listing — the public-by-obscurity
+      file-serving shape forbids listing);
+    * image/* served at the filesystem root of a root
+      (the ``image/*`` family is the most common content
+      type after HTML — verify the MIME pin in the same
+      way the SVG / markdown pins do, but at the
+      filesystem-root of a generic root).
+    """
+
+    def test_no_auto_index_on_directory_path(
+        self, tmp_path: pathlib.Path
+    ):
+        # Stage a real directory at the root of a filesystem
+        # root. A GET on the directory path must NOT return a
+        # listing — uniform 404, same body as every other miss.
+        (tmp_path / "subdir").mkdir()
+        (tmp_path / "subdir" / "secret.html").write_text("nope")
+        cfg = LiveViewsConfig()
+        cfg.roots["docs"] = LiveViewsRootConfig(
+            type="filesystem", path=str(tmp_path)
+        )
+        service = LiveViewsService(config=cfg)
+        app = FastAPI()
+        app.include_router(build_router())
+        app.state.live_views_service = service
+        c = TestClient(app)
+        resp = c.get("/views/docs/subdir")
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "view not found"}
+        # Confirm a child of the directory also 404s (it would
+        # resolve, but the path-collapsing-for-200 vs the
+        # directory-test-for-404 split is the contract).
+        resp = c.get("/views/docs/subdir/secret.html")
+        # A regular file under the directory IS served — the
+        # auto-index contract is about the directory path
+        # itself, not its children.
+        assert resp.status_code == 200
+
+    def test_image_served_at_filesystem_root_of_root(
+        self, tmp_path: pathlib.Path
+    ):
+        # A PNG file directly under the filesystem root of
+        # a root must be served with ``image/png``. This
+        # pins the MIME map for the ``image/*`` family at
+        # the filesystem-root edge (no subtree prefix).
+        (tmp_path / "hero.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        cfg = LiveViewsConfig()
+        cfg.roots["docs"] = LiveViewsRootConfig(
+            type="filesystem", path=str(tmp_path)
+        )
+        service = LiveViewsService(config=cfg)
+        app = FastAPI()
+        app.include_router(build_router())
+        app.state.live_views_service = service
+        c = TestClient(app)
+        resp = c.get("/views/docs/hero.png")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/png"
+        # The body is the PNG bytes we wrote.
+        assert resp.content == b"\x89PNG\r\n\x1a\n"
+        # X-Content-Type-Options is on every served response.
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+
+# ===========================================================================
 # Group 5 — Method whitelist
 # ===========================================================================
 
