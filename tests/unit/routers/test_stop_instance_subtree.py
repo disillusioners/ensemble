@@ -268,6 +268,7 @@ def _build_pause_db_sync_mock(captured: dict) -> MagicMock:
         paused_at_iso,
         paused_instances_data,
         suspension_reason=None,
+        originator_instance_id=None,
     ):
         # The cascade loop appends ``(node_id, agent_id)`` 2-tuples
         # (the L14 capture at instance_lifecycle.py:2510-2512).
