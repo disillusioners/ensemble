@@ -38,14 +38,20 @@ class TestRealPluginManifest:
         assert result.declaration is not None
         assert result.declaration.name == "opendesign"
         assert result.declaration.license == "Apache-2.0"
-        assert result.declaration.integration_path == "C"
-        assert result.declaration.execution_mode == "resource-only"
-        # Additive epoch (review council adjudication council-od-slice4-
-        # 20261006): the shipped manifest MUST declare 1.0.1 — slice ③
-        # added snapshot_with_drift_alarm.upstream_paths and CON §8 says
-        # the first additive change is 1.0.1, never v2.  A silent
-        # regression to "1.0.0" fails here.
-        assert result.declaration.schema_version == "1.0.1"
+        # Slice ⑤: integration_path C → B (B-element for the per-capability
+        # Port tool family); execution_mode resource-only → lifted-symbol.
+        # The test is updated to reflect the slice-⑤ state.
+        assert result.declaration.integration_path == "B"
+        assert result.declaration.execution_mode == "lifted-symbol"
+        assert result.declaration.lifted_symbol is not None
+        assert result.declaration.entrypoint is not None
+        assert result.declaration.ipc_version is not None
+        # Slice ⑤: schema_version 1.0.0 → 1.0.2 (CON §8 additive epoch —
+        # 1.0.1 lift at slice ④ admitted the skills section; 1.0.2 lift at
+        # slice ⑤ admits the integration_path → B + ports section +
+        # own_outright.attribution). Each lift is ADDITIVE: no field is
+        # removed, no enum is tightened, no section is renamed.
+        assert result.declaration.schema_version == "1.0.2"
         # Pins: slice ③ added the snapshot_with_drift_alarm layer
         # (REC §4.1 row 2); the per-class pin for snapshot inherits
         # copy_freely's pin by default (CON §2 line 47) and is
@@ -122,4 +128,7 @@ class TestRealPluginManifest:
         assert report["ok"] is True
         assert report["plugin"] == "opendesign"
         assert report["declaration"]["license"] == "Apache-2.0"
-        assert report["declaration"]["integration_path"] == "C"
+        # Slice ⑤: integration_path C → B; schema_version 1.0.1 → 1.0.2.
+        assert report["declaration"]["integration_path"] == "B"
+        assert report["declaration"]["execution_mode"] == "lifted-symbol"
+        assert report["declaration"]["schema_version"] == "1.0.2"

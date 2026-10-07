@@ -78,3 +78,57 @@ class TestCli:
         assert exit_code == 0
         report = json.loads(capsys.readouterr().out)
         assert report["ok"] is True
+
+
+class TestCiRunnerEntrypointTripwireDefaultOn:
+    """Slice-⑤ fix-loop-3 fold-in: the ``plugins-convention/ci_runner.py``
+    wrapper runs the ≤200-line entrypoint tripwire BY DEFAULT.
+
+    The original default-off rationale ("would surface missing findings on
+    every C-path plugin we ship at slice ②") no longer holds: plugin #1
+    (opendesign) is B-path with real ``adapter/`` files, and
+    ``check_entrypoint`` returns ``not_applicable`` (not ``missing``) for
+    plugins that declare no entrypoint. A default-off tripwire let the
+    entrypoint guard silently rot. (Tripwire REFUSE-folding semantics on
+    synthetic B-path fixtures are covered by test_entrypoint_tripwire.py.)
+    """
+
+    @staticmethod
+    def _load_ci_runner():
+        import importlib.util
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[3]
+        path = repo_root / "plugins-convention" / "ci_runner.py"
+        spec = importlib.util.spec_from_file_location("ci_runner_under_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _plugins_root():
+        from pathlib import Path
+
+        return Path(__file__).resolve().parents[3] / "plugins"
+
+    def test_default_invocation_runs_tripwire(self, capsys, monkeypatch):
+        module = self._load_ci_runner()
+        monkeypatch.setattr("sys.argv", ["ci_runner", str(self._plugins_root())])
+        exit_code = module.main()
+        report = json.loads(capsys.readouterr().out)
+        assert "entrypoint_tripwire" in report, (
+            "ci_runner must run the entrypoint tripwire by DEFAULT"
+        )
+        assert report["entrypoint_tripwire"]["ok_overall"] is True
+        assert exit_code == 0
+
+    def test_opt_out_flag_skips_tripwire(self, capsys, monkeypatch):
+        module = self._load_ci_runner()
+        monkeypatch.setattr(
+            "sys.argv",
+            ["ci_runner", str(self._plugins_root()), "--no-entrypoint-tripwire"],
+        )
+        exit_code = module.main()
+        report = json.loads(capsys.readouterr().out)
+        assert "entrypoint_tripwire" not in report
+        assert exit_code == 0

@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "plugins-convention/port.schema.json",
+  "title": "Plugin Port v1",
+  "description": "Plugin Subsystem v1 Port data contract (CON §3 FROZEN). Unknown fields are refused by construction (additionalProperties: false at every level). The schema enforces SHAPE only (types, enums, required keys); the policy gates that demand semantically-rich refusal codes (kebab port_id, JSON-serializability negative tests, three-role seam) live in daemon/plugin_subsystem/port_registry.py and daemon/plugin_subsystem/capability_seam_gate.py and deliberately carry no structural constraint here, so the dedicated code always wins over a generic structural code.",
+  "type": "object",
+  "required": ["port_id", "version", "definition", "provider", "consumer"],
+  "additionalProperties": false,
+  "properties": {
+    "port_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$",
+      "description": "dotted-kebab stable identifier (e.g. 'od.generate'); semantic code port_id_invalid enforces the dotted-kebab shape in daemon/plugin_subsystem/port_registry.py"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Port-level version; bumped per-Port, never per manifest schema"
+    },
+    "definition": {
+      "type": "object",
+      "description": "Definition role (CON §3; owned by us)",
+      "required": ["inputs_schema", "outputs_schema", "errors"],
+      "additionalProperties": false,
+      "properties": {
+        "inputs_schema": {
+          "type": "object",
+          "description": "JSON-Schema for Port inputs; ALL fields must be JSON-serializable. The semantic gate (daemon/plugin_subsystem/port_registry.py:validate_port_serializability) refuses non-serializable shapes (raw object, callable, datetime-without-format, binary-without-contentEncoding)."
+        },
+        "outputs_schema": {
+          "type": "object",
+          "description": "JSON-Schema for Port outputs; same serializability rules as inputs_schema."
+        },
+        "errors": {
+          "type": "object",
+          "required": ["envelope"],
+          "additionalProperties": false,
+          "properties": {
+            "envelope": {
+              "type": "object",
+              "description": "CON §3 typed error envelope. MANDATORY at every Port. The ok key is a JSON-Schema const false (errors always report ok=false); code and message are mandatory; details is optional.",
+              "required": ["ok", "code", "message"],
+              "additionalProperties": false,
+              "properties": {
+                "ok": {
+                  "type": "object",
+                  "required": ["const"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "const": {
+                      "type": "boolean",
+                      "enum": [false]
+                    }
+                  },
+                  "description": "CON §3 mandates ok is a const false (the error envelope always reports ok=false). Any other shape is refused by the gate."
+                },
+                "code": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Machine-readable error code (one of the per-Port enumerated codes declared in the Port's outputs_schema; some conventions restrict codes further per Port — see opendesign.ports.py for the canonical codeset)"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Human-readable error message"
+                },
+                "details": {
+                  "type": "object",
+                  "description": "Optional structured error context (JSON object)"
+                }
+              }
+            }
+          }
+        },
+        "capability_tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Catalog-only tags (CON §3: not for routing). Examples: ['generation', 'design'], ['persistence']."
+        }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "description": "Provider role = OUR wrapper (CON §3; the plugin is a resource, never a Provider)",
+      "required": ["adapter_id", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "adapter_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable wrapper identifier (e.g. 'opendesign.generate.v1')"
+        },
+        "path": {
+          "type": "string",
+          "enum": ["B", "C", "A"],
+          "description": "Path-type letter per plugins-convention/path_types.yaml. A is fenced (engine-only exception); C is resource-only; B is lifted-symbol."
+        }
+      }
+    },
+    "consumer": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "NAMED consumers only (CON §3); anonymous '[\"*\"]' is refused at the semantic gate."
+    }
+  }
+}

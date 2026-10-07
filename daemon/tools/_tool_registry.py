@@ -126,6 +126,20 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "task_schedule_list",
     "task_schedule_cancel",
     "task_schedule_update",
+    # Plugin subsystem Port tools (slice ⑤ tier-1 wiring) — created by
+    # the build_plugin_tools() factory
+    # (daemon/plugin_subsystem/plugin_tool_factory.py) at instance-tool
+    # assembly. They are runtime StructuredTools, NOT ``@tool``
+    # functions in a category module, so they belong ONLY here: adding
+    # them to ``KNOWN_TOOL_NAMES`` would break the frozen-binary drift
+    # equality (test_known_tool_names_matches_source_exactly_no_drift
+    # compares KNOWN_TOOL_NAMES against the pure source-``@tool``
+    # universe). Per-agent visibility is the uniform tools.allow/deny
+    # gate — designer's meta.json allow list carries the names.
+    "od.generate",
+    "od.compose_brief",
+    "od.save",
+    "od.lint",
 })
 
 

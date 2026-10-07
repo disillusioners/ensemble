@@ -67,6 +67,27 @@ PLUGIN_AUTHORIZED_DATA_FILENAMES = frozenset(
     }
 )
 
+# CON §1 sanctioned carve-out: ``plugins/<name>/adapter/<filename>`` is the
+# executable surface for Mode-T (lifted-symbol) and port-bound Mode-P
+# adapters. A future Mode-T adapter legitimately carries
+# ``lifted_symbol`` / ``ipc_version`` / ``execution_mode`` vocabulary tokens
+# in its source — the sentinel walk MUST exempt that depth-bounded subtree
+# so an adapter's vocabulary-bearing source is not flagged as a leak.
+#
+# The carve-out is EXACT: depth-4 path = ``plugins/<name>/adapter/<file>``
+# (4 relative parts: plugins, <name>, adapter, <filename>). It does NOT
+# exempt:
+#   * ``plugins/<name>/copy_freely/adapter/<file>`` (vendored upstream
+#     bytes nested inside a class subtree — the carve-out must NOT
+#     silently widen over vendored content)
+#   * ``plugins/<name>/adapter/sub/<file>`` (deeper nesting — a future
+#     plugin's adapter subdirectory is NOT pre-sanctioned)
+#   * ``plugins/<name>/adapter`` itself (depth-3; that's a directory, not
+#     a file — directories aren't yielded by the walk anyway)
+PLUGIN_ADAPTER_CARVEOUT_DEPTH = 4  # plugins/<name>/adapter/<filename>
+PLUGIN_ADAPTER_CARVEOUT_ROOT = "plugins"
+PLUGIN_ADAPTER_CARVEOUT_MID = "adapter"
+
 
 def _iter_repo_text_files():
     for path in REPO_ROOT.rglob("*"):
@@ -88,6 +109,18 @@ def _iter_repo_text_files():
             len(relative.parts) == 3
             and relative.parts[0] == "plugins"
             and path.name in PLUGIN_AUTHORIZED_DATA_FILENAMES
+        ):
+            continue
+        # CON §1 sanctioned adapter/ carve-out (see
+        # ``PLUGIN_ADAPTER_CARVEOUT_*`` above). Depth-bounded to exactly
+        # ``plugins/<name>/adapter/<filename>`` (4 parts). Deeper paths
+        # and nested vendor-class paths (e.g.
+        # ``plugins/<name>/copy_freely/adapter/x.ts`` or
+        # ``plugins/<name>/adapter/sub/x.ts``) are NOT exempted.
+        if (
+            len(relative.parts) == PLUGIN_ADAPTER_CARVEOUT_DEPTH
+            and relative.parts[0] == PLUGIN_ADAPTER_CARVEOUT_ROOT
+            and relative.parts[2] == PLUGIN_ADAPTER_CARVEOUT_MID
         ):
             continue
         if path.name in WALK_EXCLUDED_FILES:
@@ -291,4 +324,101 @@ class TestAuthorizedDataInstanceCarveoutIsPluginRootOnly:
                 )
                 assert root_allowed, (
                     f"plugin-ROOT MANIFEST.yaml was wrongly flagged: {violations}"
+                )
+
+
+class TestPluginAdapterCarveoutIsDepthBounded:
+    """The CON §1 adapter/ carve-out (see ``PLUGIN_ADAPTER_CARVEOUT_*``) is
+    STRICTLY ``plugins/<name>/adapter/<filename>`` (4 relative parts).
+    A future Mode-T adapter legitimately carries ``lifted_symbol`` /
+    ``ipc_version`` / ``execution_mode`` vocabulary tokens in its source
+    and the sentinel MUST NOT flag those.
+
+    Scope: the carve-out covers EXACTLY ``plugins/<name>/adapter/<filename>``.
+    It does NOT cover:
+
+    * ``plugins/<name>/copy_freely/adapter/x.ts`` (vendored upstream bytes
+      nested inside a class subtree — a vendored file's vocabulary content
+      is still a leak).
+    * ``plugins/<name>/adapter/sub/x.ts`` (deeper nesting — the carve-out
+      is depth-bounded to a single level under ``plugins/<name>/adapter/``).
+    * ``plugins/<name>/adapter/`` itself (depth-3; directories aren't
+      yielded by the walk anyway, but the carve-out's depth check rejects
+      this as a defense-in-depth guard).
+    """
+
+    VOCABULARY_CONTENT = (
+        "execution_mode: lifted-symbol\n"
+        "lifted_symbol: generate\n"
+        "ipc_version: 1\n"
+    )
+
+    def test_carveout_exempts_plugins_name_adapter_file_only(self):
+        """Pins the carve-out shape: depth-4 ``plugins/<n>/adapter/<file>`` is
+        exempt; same filename at depth-5 (adapter/sub/) or nested inside a
+        vendored class subtree (copy_freely/adapter/) is NOT exempt.
+        """
+        from tempfile import TemporaryDirectory
+        from unittest import mock
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "daemon" / "plugin_subsystem").mkdir(parents=True)
+            (root / "plugins-convention").mkdir(parents=True)
+            plugins = root / "plugins"
+            plugins.mkdir()
+
+            plugin_dir = plugins / "fakeplug"
+            plugin_dir.mkdir()
+
+            # EXEMPT: depth-4 plugins/<n>/adapter/<file> — the carve-out.
+            adapter_root = plugin_dir / "adapter"
+            adapter_root.mkdir()
+            exempt_file = adapter_root / "entry.ts"
+            exempt_file.write_text(self.VOCABULARY_CONTENT, encoding="utf-8")
+
+            # NOT EXEMPT (depth-5): plugins/<n>/adapter/sub/<file> — deeper nesting.
+            adapter_sub = adapter_root / "sub"
+            adapter_sub.mkdir()
+            deeper_file = adapter_sub / "x.ts"
+            deeper_file.write_text(self.VOCABULARY_CONTENT, encoding="utf-8")
+
+            # NOT EXEMPT (vendored class subtree): plugins/<n>/copy_freely/adapter/<file>.
+            vendored = plugin_dir / "copy_freely" / "adapter"
+            vendored.mkdir(parents=True)
+            nested_in_class = vendored / "x.ts"
+            nested_in_class.write_text(self.VOCABULARY_CONTENT, encoding="utf-8")
+
+            with mock.patch.object(
+                __import__(
+                    "tests.unit.plugin_subsystem.test_sentinels", fromlist=["REPO_ROOT"]
+                ),
+                "REPO_ROOT",
+                root,
+            ):
+                violations: list = []
+                for relative, path in _iter_repo_text_files():
+                    try:
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    for needle in VOCABULARY_STRINGS:
+                        if needle in text:
+                            violations.append(f"{relative} contains {needle!r}")
+
+                # EXEMPT file: not in violations at all (carve-out fired).
+                assert not any("adapter/entry.ts" in v for v in violations), (
+                    f"carve-out failed — plugins/<n>/adapter/entry.ts should be "
+                    f"exempt; got violations: {violations}"
+                )
+                # NOT-EXEMPT deeper file: flagged.
+                assert any("adapter/sub/x.ts" in v for v in violations), (
+                    f"depth-5 path plugins/<n>/adapter/sub/x.ts must be flagged "
+                    f"(carve-out is depth-bounded); got: {violations}"
+                )
+                # NOT-EXEMPT nested-in-vendored-class file: flagged.
+                assert any("copy_freely/adapter/x.ts" in v for v in violations), (
+                    f"vendored-class-nested path plugins/<n>/copy_freely/adapter/x.ts "
+                    f"must be flagged (carve-out must not widen over vendored bytes); "
+                    f"got: {violations}"
                 )

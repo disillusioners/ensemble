@@ -162,10 +162,12 @@ class TestSnapshotClassByteFidelity:
         assert rels == sorted(rels), "hash manifest lines are not sorted by relpath"
 
     def test_hashes_file_count_matches_directory_entries(self):
-        # The manifest at slice ③ records 27 vendored files (10 daemon
-        # composer modules + 17 contracts mirror files); the vendored
-        # tree minus the locally-owned HASHES.sha256 itself must have
-        # the same count.
+        # The manifest at slice ③ recorded 27 vendored files (10 daemon
+        # composer modules + 17 contracts mirror files); slice ⑤'s F1
+        # fix vendored the pinned contracts runtime subtree (2 files:
+        # deck-protocol.ts + deck-stage-fallback.ts) so the deck-kind
+        # prompt template evaluates — the vendored tree minus the
+        # locally-owned HASHES.sha256 itself must have the same count.
         recorded = _parse_sha256sum_file(HASHES_FILE)
         vendored = [
             f.relative_to(SNAPSHOT_ROOT).as_posix()
@@ -175,9 +177,10 @@ class TestSnapshotClassByteFidelity:
         assert len(vendored) == len(recorded), (
             f"vendored file count {len(vendored)} != manifest entries {len(recorded)}"
         )
-        assert len(recorded) == 27, (
-            f"snapshot-class hash manifest must carry 27 entries "
-            f"(10 daemon + 17 contracts per slice ③ manifest); got {len(recorded)}"
+        assert len(recorded) == 29, (
+            f"snapshot-class hash manifest must carry 29 entries "
+            f"(10 daemon + 17 contracts + 2 runtime per slice-⑤ F1 vendoring); "
+            f"got {len(recorded)}"
         )
 
     def test_vendored_files_match_recorded_hashes(self):

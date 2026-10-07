@@ -268,6 +268,7 @@ from .system_log_tools import create_system_log_tools
 from .upgrade_tools import create_upgrade_tools
 from .attestation import create_attestation_tools
 from .ens_db_tools import create_ens_db_tools
+from ..plugin_subsystem.plugin_tool_factory import build_plugin_tools
 from .ens_env_tools import create_ens_env_tools
 from .service_tools import create_service_tools
 from .language_tools import create_language_tools
@@ -6071,6 +6072,35 @@ Returns:
     # required).
     ens_env_tool_list = create_ens_env_tools(manager, current_instance_id)
     tools.extend(ens_env_tool_list)
+
+    # ── Plugin subsystem Port tools (slice ⑤ tier-1 wiring; REC §4.3
+    # row ⑤ PROVES line + ⑤b native-lane-LIVE precondition) ──
+    # Native plugin tools (od.generate / od.compose_brief / od.save /
+    # od.lint) built from the Port registry by the plugin tool
+    # factory. UNIFORM binding — every instance's toolset carries
+    # them, and per-agent tools.allow/deny gating (the same
+    # _apply_tool_filter path as every other category) decides
+    # visibility; designer opts in via its meta.json allow list. NOT
+    # special-cased per agent. Graceful degradation is contractual:
+    # an absent/invalid plugin tree yields fewer/no tools (the
+    # factory's refused list) and ANY build failure lands in the
+    # except below — the instance still boots, the agent sees
+    # tool-not-bound, and the designer path falls back to its text
+    # lane. Refused Ports are logged and simply not bound.
+    try:
+        plugin_tool_list, plugin_refused = build_plugin_tools()
+    except Exception as exc:  # noqa: BLE001 — plugin problems must never block instance assembly
+        logger.warning(
+            f"Plugin tool binding failed; continuing without plugin "
+            f"tools: {exc}"
+        )
+        plugin_tool_list, plugin_refused = [], []
+    if plugin_refused:
+        logger.warning(
+            f"Plugin ports refused at tool build (not bound): "
+            f"{plugin_refused}"
+        )
+    tools.extend(plugin_tool_list)
 
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation
