@@ -1071,6 +1071,203 @@ class TestReconcilePendingOpCause1:
         ), f"genuine-orphan closure sweep must carry the cause ① reword; got {sweep_entries!r}"
 
 
+# ── reconcile_pending_op — boot_sweep_commit_and_continue (upgrade-resilience
+#    2026-10-07, dev2 d9d07bf0c) ───────────────────────────────────────────────
+#
+# dev2's d9d07bf0c added the boot-sweep commit-and-continue path at
+# ``launcher.sh:925-1042``: a verified-flip txn is committed and the
+# boot sweep continues, journaling ``boot_sweep_commit_and_continue``.
+# Without this kind in ``uj._TERMINAL_EVENTS``, a pending_op surviving
+# such a boot wedged the next tool-armed promote with
+# ``pipeline-busy`` until ``expires_at + RECONCILE_GRACE_S`` — a
+# real (not theoretical) gap.
+#
+# Fix: ``boot_sweep_commit_and_continue`` added to
+# ``uj._TERMINAL_EVENTS`` (8→9). The terminal-evidence branch at
+# ``upgrade_journal.py:1609-1625`` now closes the op immediately on
+# this event — pipeline NOT busy, NO expired-grace wait.
+#
+# These tests mirror ``TestReconcilePendingOpCause1``'s style — arm
+# an op whose expires_at is in the future (well past grace), journal
+# the terminal event, assert classification+closure; no wait.
+
+
+class TestReconcilePendingOpBootSweep:
+    """Cause ② pin — dev2's d9d07bf0c boot-sweep commit-and-continue
+    must close the op via the terminal-evidence branch, NOT the
+    expired-grace wait.
+
+    Live evidence: a fresh armed promote observed a stale pending_op
+    from the previous arm with a journal carrying only
+    ``boot_sweep_commit_and_continue`` (no ``commit``, no
+    ``refusal``, no ``executor_exit``). The reconcile's terminal
+    filter missed the kind; the op wedged until
+    ``expires_at + RECONCILE_GRACE_S`` with ``pipeline-busy``.
+
+    The new kind is structurally ``commit``-equivalent: verified-flip
+    txn closed, no live evidence, pipeline over. Membership in
+    ``uj._TERMINAL_EVENTS`` is the precise remedy.
+    """
+
+    def _arm_promote_future(self, install: Path, *, run_id: str = "r-bsweep-1") -> str:
+        """Arm a promote op whose expires_at is in the future — the
+        no-evidence branch would NOT fire (we are not past
+        expires_at + grace). If the terminal branch is broken, this
+        test would hang the full grace window before the no-evidence
+        branch finally classifies as expired.
+        """
+        op = PendingOp(
+            run_id=run_id,
+            kind="promote",
+            env="demo",
+            target="1.2.3",
+            owner_pid=os.getpid(),
+            expires_at=uj.iso_plus(uj.now_iso(), 24 * 3600),
+        )
+        uj.write_pending_op(install, op)
+        return op.run_id
+
+    def test_boot_sweep_commit_and_continue_closes_as_terminal(
+        self, install: Path
+    ) -> None:
+        """The 2026-10-07 dev2 d9d07bf0c shape: a verified-flip txn
+        closed-and-continued by the boot sweep (``launcher.sh:925-1042``)
+        with the journal carrying ``boot_sweep_commit_and_continue``
+        after armed_at. Reconcile classifies TERMINAL (NOT expired,
+        NOT pipeline-busy) — pipeline not wedged, no wait.
+
+        Without the fix, the reconcile's terminal filter missed the
+        kind (was only 8-member), the op survived until
+        ``expires_at + RECONCILE_GRACE_S``, and the next tool-armed
+        promote saw ``pipeline-busy`` for that whole interval.
+        """
+        self._arm_promote_future(install)
+        # Live journal shape (d9d07bf0c, dev2 boot sweep):
+        #   <ts>  boot_sweep_commit_and_continue  verified-flip commit
+        #         at launcher.sh:925-1042; txn closed and boot continued.
+        uj.journal_history_append(
+            install,
+            "boot_sweep_commit_and_continue",
+            "verified-flip txn closed at launcher.sh:925-1042; "
+            "boot sweep continued (dev2 d9d07bf0c)",
+        )
+
+        note = uj.reconcile_pending_op(install)
+        # Cause ② acceptance: terminal classification, NOT expired.
+        assert note is not None
+        assert "expired" not in note, (
+            f"cause ② regression: boot_sweep_commit_and_continue must NOT "
+            f"classify as expired; got note={note!r}"
+        )
+        assert "terminal" in note, (
+            f"cause ② regression: note must surface terminal classification; "
+            f"got note={note!r}"
+        )
+        # The terminal-evidence branch closes the op and journals a
+        # ``sweep`` closure event referencing the matching event name.
+        assert uj.read_pending_op(install) is None
+        events = [e["event"] for e in journal_read(install)["history"]]
+        assert "sweep" in events  # closure journaled
+        # The most recent sweep closure references the terminal event
+        # that closed it (boot_sweep_commit_and_continue is the only
+        # terminal in this scenario).
+        sweep_entries = [
+            e for e in journal_read(install)["history"] if e["event"] == "sweep"
+        ]
+        assert any(
+            "boot_sweep_commit_and_continue" in (e.get("detail") or "")
+            for e in sweep_entries
+        ), (
+            f"cause ② closure sweep must reference boot_sweep_commit_and_continue; "
+            f"got {sweep_entries!r}"
+        )
+
+    def test_boot_sweep_event_before_armed_does_not_close(
+        self, install: Path
+    ) -> None:
+        """Regression: a ``boot_sweep_commit_and_continue`` from a
+        previous boot (pre-armed) must NOT close a fresh op. Mirrors
+        ``_terminal_event_after``'s TS-scope (``entry.ts >= armed_at``).
+        Without the TS check, the cause ② fix would over-close
+        unrelated fresh ops that happen to share a journal.
+        """
+        # Journal a boot_sweep_commit_and_continue from "an hour ago" —
+        # clearly pre-armed.
+        uj.journal_history_append(
+            install,
+            "boot_sweep_commit_and_continue",
+            "an OLD boot sweep commit (previous boot cycle)",
+        )
+        data = journal_read(install)
+        data["history"][-1]["ts"] = uj.iso_plus(uj.now_iso(), -3600)
+        journal_write(install, data)
+
+        self._arm_promote_future(install)  # armed AFTER the boot event
+        # No in_flight, no post-armed terminal — must fall through
+        # to the no-evidence branch BUT the future expires_at means
+        # the no-evidence branch is also a no-op.
+        note = uj.reconcile_pending_op(install)
+        assert note is None
+        assert uj.read_pending_op(install) is not None
+
+    def test_boot_sweep_closes_pipeline_busy_pending_op(
+        self, install: Path
+    ) -> None:
+        """End-to-end shape of the live gap: a fresh op is armed while
+        a STALE op from a prior arm is still pending. The boot sweep
+        journals ``boot_sweep_commit_and_continue`` for the stale op.
+        The reconcile closes the stale op immediately (no wait) so the
+        pipeline is NOT busy.
+
+        This pins the exact failure mode the fix addresses — without
+        the kind in ``_TERMINAL_EVENTS``, this stale op would wedge
+        the next tool-armed promote for the full grace window.
+        """
+        # Stale op from a previous arm (expires_at far in the future
+        # so the no-evidence branch never fires; the boot sweep
+        # committed-and-continued in the interim).
+        stale = PendingOp(
+            run_id="r-bsweep-stale",
+            kind="promote",
+            env="demo",
+            target="0.9.0",
+            owner_pid=99999,  # dead pid — reaper sweep wouldn't catch it
+            expires_at=uj.iso_plus(uj.now_iso(), 24 * 3600),
+        )
+        uj.write_pending_op(install, stale)
+        # Boot sweep fires during the same boot cycle (the live gap
+        # shape — the prior flip txn was verified, the sweep commits
+        # it and continues with the new env).
+        uj.journal_history_append(
+            install,
+            "boot_sweep_commit_and_continue",
+            "verified-flip txn closed; env is current; boot continues",
+        )
+
+        # The first reconcile pass clears the stale op (cause ② fix):
+        note = uj.reconcile_pending_op(install)
+        assert note is not None and "terminal" in note
+        assert "expired" not in note
+        assert uj.read_pending_op(install) is None
+
+        # Now a fresh arm can take the pipeline without waiting for
+        # the stale op's expires_at + RECONCILE_GRACE_S — that is the
+        # exact gap the fix closes.
+        fresh = PendingOp(
+            run_id="r-bsweep-fresh",
+            kind="promote",
+            env="demo",
+            target="1.0.0",
+            owner_pid=os.getpid(),
+            expires_at=uj.iso_plus(uj.now_iso(), 600),
+        )
+        uj.write_pending_op(install, fresh)
+        assert uj.read_pending_op(install) is not None
+        # The fresh arm is NOT silently reaped by the prior closure —
+        # it persists, ready for the executor to take it.
+        assert uj.read_pending_op(install).run_id == "r-bsweep-fresh"
+
+
 # ── lib.sh interop — both directions ─────────────────────────────────────────
 
 

@@ -1489,7 +1489,19 @@ def consume_pending_action(
 # ``_refuse``, daemon-side carve-out at :1259-1258) and
 # ``executor_exit`` (reaper's journal write at
 # ``upgrade_journal_sweep.py:1776``; the paired pre-mutation exit
-# that completes the cause ① picture).
+# that completes the cause ① picture), plus
+# ``boot_sweep_commit_and_continue`` (boot sweep at
+# ``launcher.sh:925-1042`` — a verified-flip txn closed-and-continued
+# during boot; same shape as ``commit``: no live evidence, no in_flight,
+# pipeline is over — dev2 d9d07bf0c).
+#
+# Informational kinds (deliberately NOT in this tuple):
+# ``intent_flip`` (promote.sh:241-270 — flip-intent recorded, no
+# closure yet) and ``subprocess_wait_timeout`` (lib.sh sites — bounded
+# wait elapsed, no closure yet) are observability markers; they do
+# NOT close a pending_op. They ARE label-rendered as known kinds in
+# ``upgrade_tools._OUTCOME_LABELS`` so the consumer degrades them with
+# a human string instead of "unknown-kind".
 _TERMINAL_EVENTS: tuple[str, ...] = (
     "commit",
     "rollback",
@@ -1499,6 +1511,7 @@ _TERMINAL_EVENTS: tuple[str, ...] = (
     "quarantine",
     "refusal",
     "executor_exit",
+    "boot_sweep_commit_and_continue",
 )
 
 

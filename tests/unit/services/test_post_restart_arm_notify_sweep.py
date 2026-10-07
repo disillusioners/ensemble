@@ -838,10 +838,21 @@ class TestWakeTerminalEventAfter:
         78-exit) classifies TERMINAL, not "executor died pre-open".
         The T4.8 invariants ("restart" in WAKE / "restart" not in
         _TERMINAL_EVENTS / set-equality) are preserved; only the
-        cardinality pin changes (6 → 8)."""
+        cardinality pin changes (6 → 8).
+
+        Note (cause ②, upgrade-resilience 2026-10-07, dev2 d9d07bf0c):
+        the base set is 9-member, not 8 — ``boot_sweep_commit_and_continue``
+        was added so a verified-flip txn closed-and-continued by the
+        boot sweep (``launcher.sh:925-1042``) classifies TERMINAL via
+        the terminal-evidence branch (the armed op clears as closed,
+        not pipeline-busy until expires_at + RECONCILE_GRACE_S). The
+        T4.8 invariants ("restart" in WAKE / "restart" not in
+        _TERMINAL_EVENTS / set-equality / new-kind in both) are
+        preserved; only the cardinality pin changes (8 → 9).
+        """
         assert "restart" in WAKE_TERMINAL_EVENTS
         assert "restart" not in uj._TERMINAL_EVENTS
-        assert len(uj._TERMINAL_EVENTS) == 8
+        assert len(uj._TERMINAL_EVENTS) == 9
         assert set(WAKE_TERMINAL_EVENTS) == set(uj._TERMINAL_EVENTS) | {"restart"}
         # Cause ① invariant: refusal and executor_exit are terminal
         # (paired pre-mutation exit IS terminal evidence).
@@ -849,6 +860,13 @@ class TestWakeTerminalEventAfter:
         assert "executor_exit" in uj._TERMINAL_EVENTS
         assert "refusal" in WAKE_TERMINAL_EVENTS
         assert "executor_exit" in WAKE_TERMINAL_EVENTS
+        # Cause ② invariant: boot_sweep_commit_and_continue is terminal
+        # (verified-flip txn closed by the boot sweep IS terminal
+        # evidence — same shape as ``commit``; the wake sweep must
+        # fire for it so the close-out detector notifies the arming
+        # instance, same as for ``commit``/``rollback``).
+        assert "boot_sweep_commit_and_continue" in uj._TERMINAL_EVENTS
+        assert "boot_sweep_commit_and_continue" in WAKE_TERMINAL_EVENTS
 
 
 # ── Group 12 — grace-based wake abandonment (Phase 2 T14, ADR-042) ──────────
