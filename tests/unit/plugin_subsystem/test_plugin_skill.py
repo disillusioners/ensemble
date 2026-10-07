@@ -920,7 +920,7 @@ class TestCountQueryDerivableFromVendoredTree:
         assert "opendesign.list_systems" in skills
         assert refusals == {}  # the live tree is clean
         skill = skills["opendesign.list_systems"]
-        assert skill.upstream_tag["copy_freely"] == "open-design-v0.23.0"
+        assert skill.upstream_tag["copy_freely"] == "open-design-v0.24.1"
         assert skill.license == "Apache-2.0"
 
     def test_skill_resolves_systems_alias_to_real_path(self):
