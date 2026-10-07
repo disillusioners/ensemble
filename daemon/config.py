@@ -2085,6 +2085,106 @@ class McpPoolConfig(BaseSettings):
     )
 
 
+class LiveViewsRootConfig(BaseModel):
+    """One registered view-roots entry (Phase 1 of live-view subsystem).
+
+    A root maps a public name (used in the URL path) to a filesystem
+    directory the daemon is allowed to serve. Per the Phase 1
+    contract the registry is populated from ``config.yaml`` /
+    env (deployment-time config) — NOT a DB migration — so an
+    operator can add or disable a root via a config edit + restart
+    without a schema change. Restart to flip; values are read once
+    at lifespan start.
+
+    ``type`` discriminates the resolution contract:
+
+    * ``"filesystem"`` — ``path`` is a literal directory on disk.
+    * ``"project_scoped"`` — ``path`` is a SUBDIRECTORY TEMPLATE under
+      a project's workdir. The URL ``/views/<name>/<project_shortname>/<rel>``
+      resolves to ``<project_workdir>/<path>/<rel>`` where the project
+      is looked up by shortname at request time. Used for the
+      ``planning`` root where the data lives under each project's
+      ``.agents/shared/planning/`` tree.
+    * ``"tmp_images"`` — the daemon tmp-image substrate. No ``path``;
+      the resolver delegates to the per-app ``TmpImageStore`` via
+      the sidecar (extensionless blobs, MIME from sidecar record).
+    """
+
+    type: str = Field(
+        default="filesystem",
+        description="One of 'filesystem' | 'project_scoped' | 'tmp_images'.",
+    )
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Filesystem directory (filesystem) OR subdirectory template under "
+            "the project workdir (project_scoped). Required for filesystem + "
+            "project_scoped; ignored for tmp_images."
+        ),
+    )
+    enabled: bool = Field(
+        default=True,
+        description="When false, the root is registered but every request 404s.",
+    )
+    allowed_extensions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional lowercase extension allowlist (without leading dot). "
+            "None = no extension gate. Files whose extension is not in this "
+            "list are 404'd. Ignored for tmp_images (MIME from sidecar)."
+        ),
+    )
+    description: str = Field(
+        default="",
+        description="Free-form description (logs, agent docs).",
+    )
+
+
+class LiveViewsConfig(BaseSettings):
+    """Configuration for the live-view subsystem (Phase 1).
+
+    Owns the public surface:
+
+    * ``enabled`` — global kill-switch for the subsystem. When false
+      the ``/views/*`` route family is not mounted and ``view_link``
+      mints empty / refused URLs.
+    * ``external_base_url`` — when set, ``view_link`` mints
+      fully-qualified URLs (``https://example.com/views/<root>/<rel>``)
+      instead of path-relative (``/views/<root>/<rel>``). Path-relative
+      is the safe default because the daemon has no canonical
+      public hostname.
+    * ``roots`` — name → :class:`LiveViewsRootConfig` mapping. Seeded
+      with the three Phase-1 roots (``designer-artifact``,
+      ``planning``, ``tmp-images``) but every entry is operator-editable
+      via config.yaml. Unknown / disabled / removed roots return a
+      uniform 404 from the route family and an ``Error: ...`` from
+      ``view_link`` — never a partial URL.
+
+    Environment prefix ``ENSEMBLE_LIVE_VIEWS_`` — auto-covered by the
+    tests' ``_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")`` prefix
+    match in ``tests/conftest.py``.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_LIVE_VIEWS_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Global kill-switch for the live-view subsystem.",
+    )
+    external_base_url: str | None = Field(
+        default=None,
+        description=(
+            "When set, view_link mints fully-qualified URLs against this "
+            "base. When unset, mints path-relative /views/<root>/<rel> "
+            "URLs (recommended for behind-OAuth-proxy deployments)."
+        ),
+    )
+    roots: dict[str, LiveViewsRootConfig] = Field(
+        default_factory=dict,
+        description="Map of root-name → LiveViewsRootConfig.",
+    )
+
+
 class EmbeddingConfig(BaseSettings):
     """Shared embedding configuration for all subsystems (skills, blueprints, future).
 
@@ -2831,6 +2931,7 @@ class Config(BaseSettings):
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
     scheduling: SchedulingConfig = Field(default_factory=SchedulingConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
+    live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
     long_tool_nudge: LongToolCallNudgeConfig = Field(default_factory=LongToolCallNudgeConfig)

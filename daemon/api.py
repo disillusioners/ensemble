@@ -1017,6 +1017,80 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # live-view subsystem (Phase 1, 2026-10-07) — build the
+    # LiveViewsService NOW (after the manager is alive so the
+    # project-resolver closures can read the live project repo,
+    # and after the tmp_image_store is wired so the ``tmp-images``
+    # root can delegate to the existing substrate). The router
+    # is constructed in create_app() with the same service
+    # instance and mounted on the app BEFORE the SPA catch-all.
+    # No background service: the subsystem is request-only (the
+    # registry is read-only at request time, populated once
+    # here from ``config.live_views.roots``).
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.live_views import LiveViewsService
+
+    def _resolve_project_workdir_for_instance(instance_id: str | None) -> str | None:
+        """Return the main_directory of the project owning ``instance_id``.
+
+        Used to anchor the ``designer-artifact`` root. ``None`` on
+        missing instance, missing project row, or the instance
+        being project-less. Fail-closed — the router collapses
+        None to a uniform 404 (no path / no project-id leak).
+        """
+        if not instance_id:
+            return None
+        try:
+            instance_meta = manager._instance_repository.get(instance_id)
+        except Exception:
+            return None
+        if instance_meta is None or not instance_meta.project_id:
+            return None
+        try:
+            project = manager._project_repository.get(instance_meta.project_id)
+        except Exception:
+            return None
+        if project is None or not project.main_directory:
+            return None
+        return project.main_directory
+
+    def _resolve_project_workdir_by_shortname(shortname: str | None) -> str | None:
+        """Return the main_directory of the project matching ``shortname``.
+
+        Used to anchor the project-scoped ``planning`` root. The
+        shortname is the FIRST URL segment after ``/views/planning/``
+        — it MUST be a registered project shortname (any
+        ``Project.shortnames`` entry). Unknown / unregistered /
+        empty shortname → ``None`` → uniform 404.
+
+        This is a thin shim around the project repository: the
+        ``shortnames`` model field already maps every shortname
+        to its owning project_id
+        (``daemon/repositories/project/models.py:168-405``).
+        """
+        if not shortname:
+            return None
+        try:
+            project = manager._project_repository.get_by_shortname(shortname)
+        except Exception:
+            return None
+        if project is None or not project.main_directory:
+            return None
+        return project.main_directory
+
+    live_views_service = LiveViewsService(
+        config=config.live_views,
+        tmp_image_store=tmp_image_store,
+        project_workdir_resolver=_resolve_project_workdir_for_instance,
+        project_workdir_by_shortname_resolver=_resolve_project_workdir_by_shortname,
+    )
+    app.state.live_views_service = live_views_service
+    daemon_logger.info(
+        f"[LiveViews] subsystem ready: enabled={config.live_views.enabled} "
+        f"roots={live_views_service.root_names() or '[]'}"
+    )
+
+    # ─────────────────────────────────────────────────────────────
     # Phase 3 / plane-integration-revival — PlaneSyncWatchdogService.
     # Periodic sweep that re-drives Plane sync rows stuck in ``error``
     # or ``drift`` (the "never retries" class fix). ALWAYS-ON
@@ -3108,6 +3182,51 @@ def create_app() -> FastAPI:
             headers={"Retry-After": "5"},
         )
 
+    # ─────────────────────────────────────────────────────────────
+    # live-view subsystem (Phase 1, 2026-10-07) — ``/views/<root>/<rel>``
+    # route family. Read-only (GET/HEAD), uniform 404 envelope, no
+    # write/list/delete endpoints. Mounted on the APP (not
+    # ``api_router``) at the ``/views`` prefix and registered
+    # BEFORE the SPA catch-all below — Starlette first-match-wins
+    # would otherwise send ``GET /views/designer-artifact/foo``
+    # to the index.html fallback (architect risk #1 mirror of
+    # the tmp_images precedent at ``daemon/api.py:3012-3018``).
+    #
+    # The service is constructed in the lifespan (so it can carry
+    # the per-app ``TmpImageStore`` + the project-workdir
+    # resolvers); the handlers here resolve the service from
+    # ``app.state`` at request time. If the service is missing
+    # (lifespan did not run / subsystem disabled) the handlers
+    # return the uniform 404 — never a stack trace.
+    # ─────────────────────────────────────────────────────────────
+    from daemon.routers.live_views import build_router as _build_live_views_router
+
+    app.include_router(_build_live_views_router())
+
+    @app.get("/views/livez", include_in_schema=False)
+    async def live_views_livez(request: Request):
+        """Subsystem liveness — distinct from the daemon ``/livez`` probe.
+
+        Returns 200 + a small JSON envelope when the service is
+        wired AND the subsystem is enabled; 404 (the uniform
+        view-404) otherwise. Operators can use this as a
+        deployment-side smoke probe to confirm the
+        ``live_views`` block loaded without consulting the
+        daemon log.
+        """
+        from daemon.routers.live_views import _uniform_404
+        service = getattr(request.app.state, "live_views_service", None)
+        if service is None or not service.enabled():
+            return _uniform_404()
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "ok",
+                "enabled": True,
+                "roots": service.root_names(),
+            },
+        )
+
     @app.get("/{path:path}")
     async def serve_ui_assets(path: str):
         """Serve frontend assets and SPA routing."""
@@ -3116,7 +3235,8 @@ def create_app() -> FastAPI:
         # hitting SPA fallback. Starlette mount prefix matching does
         # NOT match /vscodefoo to the /vscode mount.
         if (path.startswith('api') or path.startswith('ws')
-                or path.startswith('vscode')):
+                or path.startswith('vscode')
+                or path.startswith('views')):
             return JSONResponse(
                 status_code=404,
                 content={"error": "Not found"}
