@@ -66,10 +66,10 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
-    from daemon.config import LiveViewsConfig
+    from daemon.config import LiveViewsConfig, LiveViewsRootConfig
     from daemon.services.tmp_image_store import TmpImageStore
 
 logger = logging.getLogger(__name__)
@@ -250,7 +250,7 @@ class ResolvedTarget:
     on_disk_path: Path
     content_type: str
     size_bytes: int
-    root_type: str  # "filesystem" | "project_scoped" | "tmp_images"
+    root_type: Literal["filesystem", "project_scoped", "tmp_images"]
 
     # REWORK 2026-10-07 (m5): ``raise_if_over_cap`` was dead
     # code — no caller ever invoked it (the router's
@@ -383,7 +383,7 @@ class LiveViewsService:
         self,
         root_name: str,
         rel_path: str,
-        entry,
+        entry: "LiveViewsRootConfig",
         *,
         calling_instance_id: str | None,
     ) -> ResolvedTarget:
@@ -414,7 +414,7 @@ class LiveViewsService:
         self,
         root_name: str,
         rel_path: str,
-        entry,
+        entry: "LiveViewsRootConfig",
     ) -> ResolvedTarget:
         # The URL pattern is:
         #   /views/<root>/<project_shortname>/<rel_path>
@@ -483,7 +483,7 @@ class LiveViewsService:
         self,
         root_name: str,
         rel_path: str,
-        entry,
+        entry: "LiveViewsRootConfig",
     ) -> ResolvedTarget:
         # The TmpImageStore is the substrate. ``rel_path`` is the
         # bare 32-hex image id; the store's stat_with_meta
@@ -569,9 +569,9 @@ class LiveViewsService:
         self,
         root_dir: Path,
         rel_path: str,
-        entry,
+        entry: "LiveViewsRootConfig",
         *,
-        root_type: str,
+        root_type: Literal["filesystem", "project_scoped", "tmp_images"],
     ) -> ResolvedTarget:
         """Containment-resolve a relative path under ``root_dir``.
 

@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any, Callable, Dict
+from typing import Annotated, Any, Callable, Dict, Literal
 
 import yaml
 from pydantic import AliasChoices, BaseModel, Field, ConfigDict, model_validator, field_validator
@@ -2110,7 +2110,7 @@ class LiveViewsRootConfig(BaseModel):
       the sidecar (extensionless blobs, MIME from sidecar record).
     """
 
-    type: str = Field(
+    type: Literal["filesystem", "project_scoped", "tmp_images"] = Field(
         default="filesystem",
         description="One of 'filesystem' | 'project_scoped' | 'tmp_images'.",
     )
