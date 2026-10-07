@@ -157,13 +157,13 @@ def _write_install_audit(
     """Best-effort §7.4 audit line for one configure-builtin mutation.
 
     The daemon writes the audit line server-side (single audit source
-    — the ``install-opendesign`` skill drives this route and surfaces
-    the same fields in its Result envelope). ``actor`` is the HTTP
-    client host day-1 (the API layer has no instance identity);
-    ``parent`` / ``trace_id`` are ``None`` — the skill's Result
-    envelope carries the mission-side correlation. Never fails the
-    request: :func:`append_install_audit` is itself never-raising and
-    this wrapper additionally guards the unexpected.
+    — install/configure skills drive this route and surface the same
+    fields in their Result envelope). ``actor`` is the HTTP client
+    host day-1 (the API layer has no instance identity); ``parent`` /
+    ``trace_id`` are ``None`` — the skill's Result envelope carries
+    the mission-side correlation. Never fails the request:
+    :func:`append_install_audit` is itself never-raising and this
+    wrapper additionally guards the unexpected.
     """
     try:
         result = append_install_audit(
@@ -197,8 +197,8 @@ def redact_secrets(config: dict) -> dict:
        are ALSO redacted here — ``*_API_BASE`` pins internal
        endpoints and ``*_EXTRA_HEADERS`` typically carries
        ``Authorization`` tokens — but they are deliberately NOT
-       write-gate words (``BYOK_BASE_URL`` is a legal non-secret
-       write via ``mcp_set_env``).
+       write-gate words (a ``*_BASE_URL``-shaped env is a legal
+       non-secret write via ``mcp_set_env``).
        Non-sensitive env keys such as ``MY_MCP_LOG_LEVEL`` and
        ``MY_MCP_TRANSPORT`` are preserved intact.
 

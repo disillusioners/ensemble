@@ -19,9 +19,9 @@ Write-side vs read-side scope
 
 * WRITE gate (``mcp_set_env``): uses :data:`SECRET_MARKER_WORDS` ONLY.
   ``BASE`` / ``HEADERS`` are deliberately NOT write-gate words — a
-  base URL is a non-secret value the tool is ALLOWED to write
-  (``BYOK_BASE_URL``), a stance documented at the tool since its
-  introduction.
+  base URL is a non-secret value the tool is ALLOWED to write (e.g.
+  a ``*_BASE_URL``-shaped env), a stance documented at the tool since
+  its introduction.
 * READ/redact (``redact_secrets``): uses :data:`SECRET_MARKER_WORDS`
   PLUS the two presentation-only extras ``BASE`` / ``HEADERS``
   (``*_API_BASE`` pins internal endpoints; ``*_EXTRA_HEADERS``

@@ -1023,9 +1023,9 @@ def create_kms_tools(
             * ``instance_metadata.env_refs`` ← ``{env_key, env_source,
               actor}``
 
-            This is the bridge for the OpenDesign BYOK chain: the
-            daemon reuses the existing ``OPENAI_API_KEY`` from its own
-            ``.env`` (no new key material, per user directive
+            This is the bridge for the self-provisioning BYOK chain:
+            the daemon reuses the existing ``OPENAI_API_KEY`` from its
+            own ``.env`` (no new key material, per user directive
             2026-10-02) by writing a pointer into the MCP server's
             ``config.env``. The resolver at
             ``daemon/services/kms_resolver.py`` substitutes the marker
@@ -1047,8 +1047,8 @@ def create_kms_tools(
         LANE-2 env-ref markers are restart-DURABLE (resolved fresh
         from the daemon env every spawn — no in-memory drain).
         LANE-1 minted handles are NOT (the day-1 KMS-Lite store is
-        in-memory and drains on daemon restart; the install-opendesign
-        skill's restart-drain self-heal covers that lane).
+        in-memory and drains on daemon restart; install skills that
+        use LANE-1 rely on a restart-drain self-heal path).
         """
         try:
             # ── Mode arbitration (exactly one of handle/env_source) ──
@@ -1375,8 +1375,8 @@ Co-ownership contract (load-bearing):
 #
 # Complement of ``kms_attach``: that tool owns the SECRET-shaped lane
 # (writes ``__KMS_REF__<handle>__`` markers into ``config.env`` via the
-# KMS-Lite store); this tool owns the NON-SECRET lane (``BYOK_BASE_URL``,
-# ``BYOK_MODEL``, log levels, URLs, model names). The split is the
+# KMS-Lite store); this tool owns the NON-SECRET lane (``*_BASE_URL``,
+# ``*_MODEL``, log levels, URLs, model names). The split is the
 # leader policy decision: this tool MUST NOT accept plaintext for
 # secret-shaped key names — it rejects them with an error that points
 # the caller at ``kms_request`` / ``kms_attach``.
@@ -1438,8 +1438,8 @@ def _refresh_pool_env(manager: Any, server_name: str, new_env: dict[str, str]) -
     env write; the pool's ``_configs[server_name]`` snapshot was
     never refreshed, so every ``acquire()`` + ``_replenish`` cycle
     spawned a fresh subprocess from the BUILTIN defaults rather than
-    the live row env. Live symptom: ``od_generate_design`` returned
-    "BYOK not configured" while the row held all 4 BYOK values.
+    the live row env. Live symptom: a server's tool calls returned
+    "config not configured" while the row held the values.
 
     This helper walks ``manager._mcp_service._warmup_pool`` (the same
     singleton the manager wired at boot) and calls
@@ -1548,7 +1548,7 @@ def create_mcp_env_tools(
             if not isinstance(env, dict) or not env:
                 return (
                     "ERROR: INVALID_ARGUMENT: 'env' must be a non-empty dict of "
-                    "{env_var_name: value} — e.g. {\"BYOK_BASE_URL\": \"https://...\"}."
+                    "{env_var_name: value} — e.g. {\"MY_LOG_LEVEL\": \"debug\"}."
                 )
 
             bad_types = sorted(
@@ -1619,7 +1619,7 @@ def create_mcp_env_tools(
                 return (
                     f"ERROR: SERVER_NOT_FOUND: no MCP server matches "
                     f"name-or-id={server!r}. Check the server name (e.g. "
-                    "'opendesign') and retry."
+                    "'context7', 'plane', 'webfetch') and retry."
                 )
 
             server_id = resolved.id
@@ -1645,13 +1645,13 @@ def create_mcp_env_tools(
             # snapshot must reflect the new env so the next
             # ``acquire()`` + ``_replenish`` cycle spawns a stdio
             # subprocess with the new values. Without this, a pooled
-            # opendesign connection keeps the env it was spawned
-            # with (definition defaults + pre-write row state) and
-            # every new connection also does — the BYOK keys never
-            # reach the subprocess. Read the row FRESH here (NOT from
-            # the stale ``updated`` object whose ``config`` is a
-            # Python dict we already mutated) so the overlay uses the
-            # exact stored env.
+            # connection keeps the env it was spawned with
+            # (definition defaults + pre-write row state) and every
+            # new connection also does — the env keys never reach
+            # the subprocess. Read the row FRESH here (NOT from the
+            # stale ``updated`` object whose ``config`` is a Python
+            # dict we already mutated) so the overlay uses the exact
+            # stored env.
             fresh_row = repo.get_mcp_server(server_id) if hasattr(repo, "get_mcp_server") else None
             fresh_env = ((fresh_row.config or {}).get("env") if fresh_row is not None else None) or {}
             _refresh_pool_env(manager, server_name, fresh_env)
@@ -1700,14 +1700,14 @@ def create_mcp_env_tools(
     mcp_set_env._full_doc_ = """Merge non-secret env vars into an MCP server's stored ``config.env``.
 
 The NON-SECRET half of the env-write surface (``kms_attach`` is the
-secret half). Purpose-built for the OpenDesign self-provisioning
-chain: after ``ens_env_read`` captures the daemon's LLM connection
-values, this tool writes ``BYOK_BASE_URL`` and ``BYOK_MODEL`` into the
-``opendesign`` server's ``config.env``. ``BYOK_API_KEY`` must NOT go
-through this tool — see the secret-shaped rejection below.
+secret half). Purpose-built for the self-provisioning chain: after
+``ens_env_read`` captures the daemon's LLM connection values, this
+tool writes non-secret LLM keys (e.g. ``*_BASE_URL`` and ``*_MODEL``)
+into a server's ``config.env``. A ``*_API_KEY``-shaped key must NOT
+go through this tool — see the secret-shaped rejection below.
 
 Args:
-    server: The MCP server NAME (e.g. ``"opendesign"``). As a
+    server: The MCP server NAME (e.g. ``"context7"``). As a
         convenience the server ID is also accepted — name is resolved
         first, id is the fallback (``kms_attach`` only takes the id;
         this tool's success result echoes ``server_id`` so a chained
@@ -1723,16 +1723,16 @@ Returns (success):
         {
           "ok": true,
           "server_id": "<uuid>",          // for the chained kms_attach flow
-          "server_name": "opendesign",
-          "env_keys_set": ["BYOK_BASE_URL", "BYOK_MODEL"],
+          "server_name": "<server-name>",
+          "env_keys_set": ["<key1>", "<key2>"],
           "note": "…reconnect semantics + reconfigure caution…"
         }
 
     Values are NEVER echoed back — the caller just supplied them, and
     tool results land in LangGraph checkpoints (PB-F1 family).
-    ``BYOK_BASE_URL`` additionally reads back ``[REDACTED]`` through
-    the HTTP API (presentation-layer redaction) — that is EXPECTED,
-    not a write failure.
+    ``*_BASE_URL``-shaped keys additionally read back ``[REDACTED]``
+    through the HTTP API (presentation-layer redaction) — that is
+    EXPECTED, not a write failure.
 
 Semantics:
     * MERGE, not replace: every existing ``config.env`` key survives,
@@ -1759,8 +1759,8 @@ Rejections:
       REFUSED with ``ERROR: SECRET_SHAPED_KEY`` pointing at
       ``kms_request`` → ``kms_attach``. This is the leader policy:
       plaintext credentials must never transit this tool. (``BASE``
-      is read-side redaction only — ``BYOK_BASE_URL`` is writable
-      here.)
+      is read-side redaction only — a ``*_BASE_URL``-shaped env is
+      writable here.)
     * Non-ASCII env KEY NAMES — keys must be ASCII identifiers
       (``[A-Za-z_][A-Za-z0-9_]*``); anything else is REFUSED with
       ``ERROR: INVALID_ENV_KEY``. Homoglyph/unicode names could dodge

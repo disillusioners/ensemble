@@ -1,7 +1,7 @@
 """KMS-Lite (P3-WP7 + P3-WP9 — designer-agent mission).
 
 Day-1 mint-only KMS primitive. No policy layer, no third-party brokering,
-no rotation/revocation surface (§7.5a deferred). Self-hosted OpenDesign
+no rotation/revocation surface (§7.5a deferred). Each install flow
 mints its own random credentials; the plaintext NEVER leaves the
 encrypted store except via the spawn-time resolver
 (:mod:`daemon.services.kms_resolver`) which substitutes markers to
@@ -413,8 +413,8 @@ def kms_request(
     """Mint a new KMS handle for ``service``.
 
     Args:
-        service: Logical service the credential is bound to (e.g.
-            ``"opendesign"``).
+        service: Logical service the credential is bound to (any
+            MCP-server / capability name).
         reason: Free-form reason for the mint (audit-side field).
         actor: Identity performing the mint. Defaults to ``"system"``
             because tool callers pass ``current_instance_id`` explicitly

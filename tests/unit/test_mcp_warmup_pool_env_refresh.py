@@ -13,9 +13,13 @@ Root cause (pinned):
    live write while the daemon was up did not reach a pooled
    connection's env.
 
-Live symptom (Stage-3 validation, 2026-10-02): ``od_generate_design``
-returned "BYOK not configured" while the row held all 4 BYOK values
-(BYOK_API_KEY stored as ``__KMS_ENV__`` marker).
+Live symptom (Stage-3 validation, 2026-10-02): a server's tool call
+returned "config not configured" while the row held the BYOK values
+(BYOK_API_KEY stored as ``__KMS_ENV__`` marker). After slice ⑦
+retired the opendesign MCP server, the live symptom is gone, but the
+warmup-pool / row-overlay mechanics are still load-bearing for every
+other stdio builtin (context7, plane, webfetch) and any future
+addition — the pin tests stand.
 
 What the pin tests cover (each MUST fail on the pre-fix base):
 
@@ -59,7 +63,6 @@ import pytest
 from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel, create_engine
 
-from daemon.mcp.builtin_servers import get_registry
 from daemon.mcp.config import McpStdioConfig
 from daemon.mcp.warmup_pool import (
     McpWarmupPool,
@@ -76,6 +79,24 @@ from daemon.tools.infra import (
 )
 
 
+# Synthetic definition for the env-merge pin tests. Post slice-⑦, no
+# production builtin carries the OD_DAEMON_URL / BYOK_* env schema
+# anymore — the row-overlay helper is exercised against a stand-in
+# whose ``build_config({})`` returns the same shape the production
+# registry used to produce for opendesign (the canonical regression
+# surface this fix pinned).
+def _synthetic_definition():
+    return SimpleNamespace(
+        build_config=lambda values: {
+            "transport": "stdio",
+            "command": "synthetic-mcp-server",
+            "args": [],
+            "env": {"OD_DAEMON_URL": "http://127.0.0.1:7456"},
+            "timeout": 120,
+        },
+    )
+
+
 SERVER_NAME = "opendesign"
 MARKER = "__KMS_REF__KMS_HANDLE_test1234__"
 
@@ -83,6 +104,11 @@ MARKER = "__KMS_REF__KMS_HANDLE_test1234__"
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def definition():
+    return _synthetic_definition()
 
 
 def _make_pool() -> McpWarmupPool:
@@ -317,15 +343,13 @@ class TestBuildPooledStdioConfig:
     Precedence (PINNED): row env wins on every key.
     """
 
-    def test_overlay_row_env_onto_definition_defaults(self) -> None:
+    def test_overlay_row_env_onto_definition_defaults(self, definition) -> None:
         """The row's env (post-``mcp_set_env`` state) is merged
         over the definition defaults. Pre-fix, the manager called
         ``build_config({})`` directly and dropped every row entry."""
-        definition = get_registry().get_by_name(SERVER_NAME)
-
         row_config = {
             "transport": "stdio",
-            "command": "open-design-mcp",
+            "command": "synthetic-mcp-server",
             "args": [],
             "env": {
                 "OD_DAEMON_URL": "http://127.0.0.1:7456",  # default
@@ -345,12 +369,10 @@ class TestBuildPooledStdioConfig:
         assert config.transport == "stdio"
         assert config.command  # non-empty
 
-    def test_row_env_wins_on_conflict(self) -> None:
+    def test_row_env_wins_on_conflict(self, definition) -> None:
         """PINNED precedence: row env wins on every key. The row is
         the live state post-bootstrap; a stale definition would
         silently drop KMS markers / operator-set values."""
-        definition = get_registry().get_by_name(SERVER_NAME)
-
         row_config = {
             "env": {
                 "OD_DAEMON_URL": "http://row-wins:9999",  # conflicts w/ definition default
@@ -362,13 +384,11 @@ class TestBuildPooledStdioConfig:
         assert config.env["OD_DAEMON_URL"] == "http://row-wins:9999"
         assert config.env["OD_API_TOKEN"] == "row-set-token"
 
-    def test_no_row_config_falls_back_to_definition_defaults(self) -> None:
+    def test_no_row_config_falls_back_to_definition_defaults(self, definition) -> None:
         """Missing / empty row config MUST leave the pre-fix behavior
         intact (other builtin servers without env writes still work).
         This is the "no regression for unrelated pooled servers"
         pin."""
-        definition = get_registry().get_by_name(SERVER_NAME)
-
         # No row at all.
         config = build_pooled_stdio_config(definition, None)
         assert config.env.get("OD_DAEMON_URL") == "http://127.0.0.1:7456"
@@ -381,13 +401,12 @@ class TestBuildPooledStdioConfig:
         config = build_pooled_stdio_config(definition, {"transport": "stdio"})
         assert config.env.get("OD_DAEMON_URL") == "http://127.0.0.1:7456"
 
-    def test_row_env_with_kms_marker_survives_overlay(self) -> None:
+    def test_row_env_with_kms_marker_survives_overlay(self, definition) -> None:
         """A KMS marker written by ``kms_attach`` flows through the
         overlay byte-identical — the resolver still expands it at
         spawn time. Pre-fix, the row was never read so this was
         a moot point; the pin guarantees the FIX does not silently
         drop the marker on the overlay path."""
-        definition = get_registry().get_by_name(SERVER_NAME)
         marker = "__KMS_ENV__OPENAI_API_KEY__"
 
         row_config = {
@@ -641,11 +660,10 @@ class TestBootRegistrationRowEnvReachesPool:
     env lands in ``pool._configs[server_name].env`` at boot.
     """
 
-    def test_row_env_lands_in_pooled_config(self) -> None:
-        definition = get_registry().get_by_name(SERVER_NAME)
+    def test_row_env_lands_in_pooled_config(self, definition) -> None:
         row_config = {
             "transport": "stdio",
-            "command": "open-design-mcp",
+            "command": "synthetic-mcp-server",
             "args": [],
             "env": {
                 "OD_DAEMON_URL": "http://127.0.0.1:7456",
@@ -664,13 +682,11 @@ class TestBootRegistrationRowEnvReachesPool:
         assert stored.env.get("BYOK_MODEL") == "vision"
         assert stored.env.get("OD_DAEMON_URL") == "http://127.0.0.1:7456"
 
-    def test_row_with_no_env_uses_definition_defaults(self) -> None:
+    def test_row_with_no_env_uses_definition_defaults(self, definition) -> None:
         """A row whose env block is missing or empty (e.g. user
         just provisioned the server and hasn't run mcp_set_env yet)
         MUST still register — the helper falls back to the
         definition's defaults so other pooled servers don't regress."""
-        definition = get_registry().get_by_name(SERVER_NAME)
-
         pool = McpWarmupPool()
         stdio_config = build_pooled_stdio_config(definition, None)
         pool.register_server(SERVER_NAME, stdio_config, pool_size=1)

@@ -323,9 +323,9 @@ class McpWarmupPool:
         boot; ``mcp_set_env`` and ``kms_attach`` writes land ONLY in
         the DB row. A subsequent ``acquire()`` + ``_replenish`` would
         re-spawn a subprocess from the stale ``_configs[server].env``,
-        so BYOK / KMS marker env never reached the pool's stdio
-        subprocesses (live symptom: ``od_generate_design`` failed with
-        "BYOK not configured" while the DB row held all 4 values).
+        so non-secret / KMS marker env never reached the pool's stdio
+        subprocesses (live symptom: a server's tool calls failed with
+        "config not configured" while the DB row held the values).
 
         The fix has two halves (see ``_init_warmup_pool`` in
         ``daemon/manager.py`` for the other half — the boot-time row
@@ -353,7 +353,7 @@ class McpWarmupPool:
             server_name: The pooled server whose env changed.
             new_env: The new env dict to store. Merged over any prior
                 env so a partial write (e.g. mcp_set_env only setting
-                ``BYOK_BASE_URL`` + ``BYOK_MODEL``) lands atomically
+                a few of the schema-declared env keys) lands atomically
                 alongside the pre-existing keys (incl. KMS markers).
 
         Returns:
@@ -739,9 +739,9 @@ def build_pooled_stdio_config(
       is the live state. Operators who want to reset a key must do it
       via the explicit writers (``mcp_set_env`` / ``kms_attach``);
       silently re-introducing a definition default on daemon restart
-      would break the OpenDesign BYOK self-provisioning chain
-      (markers in the row would be replaced by definition defaults
-      that have no value).
+      would break the ``mcp_set_env`` / ``kms_attach`` self-provisioning
+      chain (markers in the row would be replaced by definition
+      defaults that have no value).
 
     Command / args / timeout come from the definition (unchanged at
     runtime — env is the only mutable axis for stdio servers). The
@@ -754,7 +754,7 @@ def build_pooled_stdio_config(
     output.
 
     Args:
-        definition: A built-in server definition (e.g. ``OpenDesignMCP``).
+        definition: A built-in server definition.
             Used for ``build_config({})`` and the schema-derived env
             defaults.
         row_config: The live ``mcp_servers.config`` dict from the DB

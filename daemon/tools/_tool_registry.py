@@ -636,16 +636,15 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # exists (its capability rides spawn_instance, gated by the
     # TARGET agent's snapshot_enabled meta flag).
     "snapshot": "daemon.tools.snapshot_tools",
-    # ens-env category (Stage 1 of the OpenDesign self-provisioning
-    # chain, feature/od-self-provisioning, 2026-10-02) — single-tool
-    # category exposing ``ens_env_read`` so the install-opendesign
-    # worker skill can self-read the ensemble's live LLM connection
-    # values for the BYOK reuse contract. IN
-    # ``PRIVILEGED_TOOL_CATEGORIES`` since the W4 leader decision
-    # (reviewer council 2026-10-02): ``ens_env_read`` is
-    # key-returning, so the empty-allow inherit universe must NOT
-    # grant it — access requires an explicit ``tools.allow:
-    # ["ens-env"]`` entry (worker carries it). See
+    # ens-env category (Stage 1 of the self-provisioning chain,
+    # feature/od-self-provisioning, 2026-10-02) — single-tool
+    # category exposing ``ens_env_read`` so the install skills can
+    # self-read the ensemble's live LLM connection values for the
+    # BYOK reuse contract. IN ``PRIVILEGED_TOOL_CATEGORIES`` since the
+    # W4 leader decision (reviewer council 2026-10-02):
+    # ``ens_env_read`` is key-returning, so the empty-allow inherit
+    # universe must NOT grant it — access requires an explicit
+    # ``tools.allow: ["ens-env"]`` entry (worker carries it). See
     # ``daemon/tools/ens_env_tools.py`` module docstring for the full
     # contract (source-of-truth = env, no redaction in result,
     # audit-only log, PB-F1 checkpoint exposure scope).
