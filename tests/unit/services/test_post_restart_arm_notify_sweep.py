@@ -195,7 +195,16 @@ class TestTerminalStateGating:
     ) -> None:
         """T2.3: a pending wake with NO matching history event is held
         (``pending_at_end=1, delivered=0``); no ``enqueue_message`` call."""
-        _make_wake(install, run_id="r-aaa")
+        # Future expires_at → abandon_after computed at runtime stays in
+        # the future, so the ADR-042 grace pass HOLDS the wake instead of
+        # grace-abandoning it. The hold-invariant under test is only
+        # defined inside the grace window (the original static
+        # 2026-10-04 fixture dates aged past grace on 2026-10-07).
+        _make_wake(
+            install,
+            run_id="r-aaa",
+            expires_at=iso_plus(now_iso(), 3600),
+        )
         # No history event.
         manager = _mock_manager()
         service = UpgradeJournalSweepService(
@@ -219,11 +228,15 @@ class TestTerminalStateGating:
         # r-terminal: armed_at BEFORE the commit → in scope → fires.
         _make_wake(install, run_id="r-terminal", arming_instance_id="i-arm-1")
         # r-pending: armed_at AFTER the commit → out of scope → held.
+        # Future expires_at keeps abandon_after future — a past-grace
+        # no-terminal wake would be grace-abandoned (ADR-042), but this
+        # test pins the HOLD half of the mixed batch inside the window.
         _make_wake(
             install,
             run_id="r-pending",
             arming_instance_id="i-arm-2",
             armed_at="2026-10-04T00:05:00Z",
+            expires_at=iso_plus(now_iso(), 3600),
         )
         data = journal_read(install)
         data["history"] = [
