@@ -424,3 +424,64 @@ class TestCli:
         # the JSON verdict is followed by the human-readable line
         verdict, _ = json.JSONDecoder().raw_decode(out[out.index("{"):])
         assert verdict["ok"] is False
+
+
+class TestTagIdentityEvidence:
+    """A trail line recorded against a DIFFERENT tag (e.g. a second-tag
+    dry-run probe) is NOT pin evidence — the predicate must not let the
+    newest probe line masquerade as the pin's staleness."""
+
+    def test_probe_line_for_other_tag_is_ignored(self, tmp_path):
+        _write_manifest(tmp_path)  # pin: v1.0.0
+        _append_trail(
+            tmp_path,
+            [
+                # v1.0.0 evidence: 10 days old at record time, recorded
+                # 6 days ago -> pin age 16 (stale) — the TRUE evidence
+                _trail_line(target_class="copy_freely", staleness=10, recorded_days_ago=6),
+                _trail_line(target_class="snapshot_with_drift_alarm", staleness=10, recorded_days_ago=6),
+                # a NEWER line against a DIFFERENT tag (12d staleness,
+                # recorded NOW) — must NOT shadow the v1.0.0 evidence
+                {
+                    "recorded_at": NOW.isoformat(),
+                    "sync_result": {
+                        "plugin": "testplugin",
+                        "target_class": "copy_freely",
+                        "upstream_tag": "v2.0.0",
+                        "action": "clean_pulled",
+                        "diff_summary": {"files_added": 1, "files_modified": 0, "files_removed": 0},
+                        "staleness_age_days": 12,
+                    },
+                },
+            ],
+        )
+        verdict = evaluate_staleness(tmp_path, now=NOW)
+        assert "pin-stale" in _codes(verdict)  # the true v1.0.0 evidence wins
+        ages = verdict["checked"]["pin_ages"]
+        assert ages["copy_freely"]["upstream_tag"] == "v1.0.0"
+        assert ages["copy_freely"]["pin_age_days"] == 16
+
+    def test_pin_evidence_still_found_when_probe_lines_newer(self, tmp_path):
+        _write_manifest(tmp_path)
+        _append_trail(
+            tmp_path,
+            [
+                _trail_line(target_class="copy_freely", staleness=3, recorded_days_ago=1),
+                _trail_line(target_class="snapshot_with_drift_alarm", staleness=3, recorded_days_ago=1),
+                # fresher v2 probe — ignored for pin evidence
+                {
+                    "recorded_at": NOW.isoformat(),
+                    "sync_result": {
+                        "plugin": "testplugin",
+                        "target_class": "copy_freely",
+                        "upstream_tag": "v2.0.0",
+                        "action": "no_change",
+                        "diff_summary": {"files_added": 0, "files_modified": 0, "files_removed": 0},
+                        "staleness_age_days": 1,
+                    },
+                },
+            ],
+        )
+        verdict = evaluate_staleness(tmp_path, now=NOW)
+        assert verdict["ok"] is True, verdict["reasons"]
+        assert verdict["checked"]["pin_ages"]["copy_freely"]["pin_age_days"] == 4

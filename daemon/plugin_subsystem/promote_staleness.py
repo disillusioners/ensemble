@@ -209,6 +209,16 @@ def evaluate_staleness(
     stalest_class: Optional[str] = None
     stalest_age = -1
     for class_name, section in _class_sections(manifest).items():
+        # Tag identity: staleness evidence is only valid for THE pin the
+        # manifest declares — a trail line recorded against a different
+        # tag (e.g. a second-tag dry-run probe) says nothing about THIS
+        # pin's age.  (Slice-⑥ fix: without this filter the newest
+        # probe line could masquerade as pin evidence.)
+        class_pin = (
+            (manifest.get("plugin") or {}).get("upstream", {}).get(
+                "tag_pin_per_class", {}
+            ).get(class_name)
+        )
         evidence = None
         for entry in reversed(trail):  # newest-first
             result = entry.get("sync_result") or {}
@@ -216,6 +226,8 @@ def evaluate_staleness(
                 continue
             if result.get("action") not in _EVIDENCE_ACTIONS:
                 continue
+            if class_pin and result.get("upstream_tag") != class_pin:
+                continue  # different tag's evidence — not pin evidence
             evidence = entry
             break
         if evidence is None:

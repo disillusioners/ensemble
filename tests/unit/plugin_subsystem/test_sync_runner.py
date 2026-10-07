@@ -988,13 +988,31 @@ REAL_UPSTREAM = Path("/home/nea/opt/open-design")
 class TestRealPluginSync:
     """The real plugins/opendesign/ manifest is round-tripped
     through the sync-runner.  This is the live integration test
-    that complements the unit-level synthetic-fixture tests above."""
+    that complements the unit-level synthetic-fixture tests above.
 
-    def test_real_copy_freely_dry_run_against_v0_24_1(self):
+    Slice ⑥: the syncs run against a TEMP COPY of the real tree —
+    since ⑥ every completed sync appends to the plugin's
+    sync_trail.jsonl, and these v0.24.1 PROBE dry-runs must not
+    pollute the real tree's operator trail (the promote predicate
+    consumes that trail; a probe line carries a different tag's
+    staleness and would masquerade as pin evidence — the predicate's
+    tag-identity filter is the second layer of defense, see
+    test_promote_staleness.py)."""
+
+    @staticmethod
+    def _real_tree_copy(tmp_path):
+        import shutil
+
+        dest = tmp_path / "opendesign"
+        shutil.copytree(REAL_PLUGIN_ROOT, dest,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        return dest
+
+    def test_real_copy_freely_dry_run_against_v0_24_1(self, tmp_path):
         result = sync(
             "opendesign", "copy_freely",
             upstream_repo=str(REAL_UPSTREAM), upstream_tag="open-design-v0.24.1",
-            plugin_dir=REAL_PLUGIN_ROOT, dry_run=True,
+            plugin_dir=self._real_tree_copy(tmp_path), dry_run=True,
         )
         # action is either no_change (zero churn) or clean_pulled
         # (1 file: the PNG that slice ② excluded; see dry-run
@@ -1002,11 +1020,11 @@ class TestRealPluginSync:
         assert result.action in ("no_change", "clean_pulled"), result.as_dict()
         assert result.refusal is None
 
-    def test_real_snapshot_dry_run_against_v0_24_1(self):
+    def test_real_snapshot_dry_run_against_v0_24_1(self, tmp_path):
         result = sync(
             "opendesign", "snapshot_with_drift_alarm",
             upstream_repo=str(REAL_UPSTREAM), upstream_tag="open-design-v0.24.1",
-            plugin_dir=REAL_PLUGIN_ROOT, dry_run=True,
+            plugin_dir=self._real_tree_copy(tmp_path), dry_run=True,
         )
         # The snapshot class is expected to alarm (CON §5):
         # od-next-intent-resolution.ts is new, od-next-strategy.ts
