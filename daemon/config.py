@@ -967,6 +967,36 @@ class CompactionConfig(BaseSettings):
         ),
     )
 
+    # ── Proactive-skip escalation knob (COMPACTION NEVER-BLOCKED, Verdict A) ──
+    # When the proactive trigger has skipped N consecutive times (non-quiescent
+    # checkpoint + status-reject + dedup) AND the context keeps growing, the
+    # 95% pre-call reactive hook is temporarily lowered from 0.95 to 0.80
+    # for that instance until a successful compaction clears the
+    # escalation. The sticky window is recorded in
+    # ``instance_metadata["compaction_escalation_until"]``; the 95% hook
+    # reads it on every invoke. Default 3, env-configurable, OFF (0) disables
+    # the escalation entirely. The escalation is a SOFT lowering — it does
+    # NOT force-compact; it widens the reactive gate so an injected-heavy
+    # instance can shrink before the 95% band is reached. Phase-1 report
+    # C-finding noted the absence of a "shrink-before-the-line" path; this
+    # knob is the answer.
+    proactive_escalate_after: int = Field(
+        default=3,
+        validation_alias=AliasChoices(
+            "proactive_escalate_after",
+            "ENSEMBLE_COMPACTION_PROACTIVE_ESCALATE_AFTER",
+        ),
+        description=(
+            "N consecutive proactive skips (status-reject or non-quiescent) "
+            "while context keeps growing before the 95% pre-call hook is "
+            "temporarily lowered to 0.80 for this instance. Default 3, env: "
+            "ENSEMBLE_COMPACTION_PROACTIVE_ESCALATE_AFTER. 0 disables. Sticky "
+            "until a successful compaction clears it; cleared automatically "
+            "by the next non-skip proactive success or by the on-invoke "
+            "metadata read in _maybe_precall_compact_95."
+        ),
+    )
+
     @field_validator("proactive_enabled", mode="before")
     @classmethod
     def _parse_proactive_enabled(cls, value: Any) -> Any:

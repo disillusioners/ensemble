@@ -1786,6 +1786,228 @@ def _truncate_batch_to_fit(
     return truncated_groups
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPACTION NEVER-BLOCKED — last-effort tail-truncation floor
+# ─────────────────────────────────────────────────────────────────────────────
+# User-dictated hardening (2026-10-07, fix/compaction-never-blocked
+# commission, Verdict A framing). Phase-1 investigation disproved the
+# brief's incident narrative (see report's Phase-1 evidence chain) — the
+# 638/639-message 500s on instance 03d7657f were a transient proxy
+# window, not a context-window-driven permanent death-spiral — but the
+# HARDENING itself is still a real future-protection requirement for
+# instances that DO grow to 700k+ tokens with mostly-injected channels.
+# The shape of the engine-level guarantee stays the same as the original
+# design: the engine MUST be able to shrink ANY oversized context, and
+# the LLM-summarization + emergency_truncation paths stay as the
+# PREFERRED ladder. The floor of the ladder is a programmatic
+# 50%-tail truncation that explicitly applies to injected/unanswered
+# messages — the same condition the all-injected / min-messages /
+# preserved-within-threshold skip paths used to abort on. Pure code,
+# no LLM call, guaranteed to succeed.
+#
+# Retained-count rule (ODD COUNT PIN):
+#   kept = ceil(N / 2)
+#   dropped = floor(N / 2)
+# Rationale: the 50% rule rounded UP toward retention gives a stable
+# invariant (kept > dropped for N > 0) and matches the user-dictated
+# spec. For N=1, kept=1, dropped=0 (defensive no-drop edge case — only
+# the notice message is added; the original message keeps its slot via
+# re-id; the message COUNT grows by 1 but the token count shrinks
+# because the notice is short).
+#
+# The seam's stamp-only anti-refire path is RESERVED for cases where
+# the engine genuinely has nothing to write (a real no-op). The
+# last-effort result carries a non-empty ``replacement_messages``, so
+# it takes the standard Variant A/B persist path — the seam persists
+# the SHRINK RESULT, not just a stamp. Signature 3 of the original
+# commission is resolved BY CONSTRUCTION (no seam code change).
+#
+# Trigger taxonomy (Verdict A framing, in scope of this fix):
+#   * PROACTIVE: skippable by design. Non-quiescent / status-reject
+#     skips are legitimate; the brief's signature 2 stays as-is. The
+#     proactive trigger adds a per-instance consecutive-skip counter
+#     that escalates the 95% pre-call hook from 0.95 -> 0.80 once N
+#     consecutive skips occur while the context keeps growing. This
+#     is the "another trigger path fires" mechanism for the proactive
+#     skip case — the engine's never-blocked guarantee then ensures
+#     the next attempt (at the lower threshold) succeeds.
+#   * 95% PRE-CALL (REACTIVE): UNCHANGED trigger condition; the hook
+#     already exists at ``daemon/graph.py::_maybe_precall_compact_95``
+#     and fires before every LLM invoke. With the engine's skip paths
+#     now falling through to the last-effort, this reactive path
+#     becomes the never-blocked hardening (it cannot be skipped by
+#     the all-injected / min-messages / preserved-within-threshold
+#     conditions that previously blocked the engine).
+
+#: ``compaction_type`` stamped on the last-effort result. Distinct from
+#: ``emergency_truncation`` so operators can pin the failure mode in
+#: logs (``tail_truncation_last_effort`` = reached the floor; the better
+#: methods all failed or were ineligible).
+COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT = "tail_truncation_last_effort"
+
+#: ``context_kind`` enum value stamped on the notice ``HumanMessage``.
+#: Stable string used by downstream ``context_kind`` filters (FE
+#: styling, compaction re-append, ``GET /messages``) for
+#: identity-keyed lookup. New enum value added by this commission.
+COMPACTION_NOTICE_CONTEXT_KIND = "compaction_notice"
+
+#: Notice body text (verbatim). Leads with the canonical
+#: ``[SYSTEM CONTEXT: <title>]\n\n`` prefix so the LLM recognizes it
+#: as system-origin at parse time (mirrors
+#: ``daemon/services/context_messages._make_context_message`` style).
+#: Wording conveys the two required semantics per the commission:
+#: (1) this is a trimmed/compacted context, (2) prioritize the latest
+#: messages.
+COMPACTION_NOTICE_TEXT = (
+    "[SYSTEM CONTEXT: Compaction Notice]\n\n"
+    "Earlier context was compacted by trimming (last-effort 50%-tail "
+    "truncation; all better compaction methods were either ineligible "
+    "or failed on this conversation). The earlier half of the "
+    "conversation has been DROPPED. PRIORITIZE THE LATEST MESSAGES in "
+    "the channel — they are the most recent and most relevant context. "
+    "Do not try to reference, quote, or reason about content that "
+    "precedes this notice; it is no longer in the channel. If the "
+    "earlier context was important, the user/operator can re-inject it.\n"
+)
+
+
+def _build_last_effort_replacement(
+    context: "CompactionContext",
+    *,
+    drop_ids: list[str],
+    retained_tail: list[BaseMessage],
+    skip_reason_label: str,
+    timestamp: str,
+    retained_original_ids: list[str] | None = None,
+) -> CompactionResult:
+    """Build the last-effort ``CompactionResult`` for the standard
+    Variant A / Variant B persist path (NOT the seam's stamp-only arm).
+
+    The replacement channel value is:
+
+    * ``RemoveMessage(id=<id>)`` for every id in ``drop_ids`` (the older
+      half being trimmed), and
+    * a single ``[SYSTEM CONTEXT: Compaction Notice]`` ``HumanMessage``
+      with a fresh uuid id, stamped with
+      ``injected_message=True`` + ``context_kind=compaction_notice`` (so
+      the compaction three-bucket partition treats it as a system-
+      context block on the next pass), and
+    * the retained-tail messages, re-id'd as
+      ``last-effort-<uuid>`` so they don't collide with the
+      ``RemoveMessage`` targets (same pattern as the existing
+      ``emergency_truncation`` path uses ``truncated-<uuid>``).
+
+    The ``RemoveMessage`` ids in ``drop_ids`` cover EVERY original
+    pre-compaction message id that the engine intends to drop. The
+    retained-tail messages are NOT in ``drop_ids`` (they survive), so
+    the seam's engine-vs-site invariant
+    (``engine_compacted_ids <= site_compacted_ids``) is satisfied
+    by construction.
+
+    Args:
+        context: The active :class:`CompactionContext` (used for
+            before/after token accounting and the system prompt).
+        drop_ids: Pre-computed ordered list of message ids to drop
+            (the older half). May be empty (defensive — engine callers
+            must guarantee at least one id to drop OR call only with
+            ``retained_tail`` non-empty so the result is non-trivial).
+        retained_tail: Pre-computed list of the kept tail messages
+            (deep-copied, re-id'd by the caller).
+        skip_reason_label: The original skip reason that triggered the
+            last-effort (``skipped_injections_dominate``,
+            ``skipped_below_min_messages``,
+            ``skipped_preserved_within_threshold``). Logged at WARN so
+            operators triaging "compaction never fires" can trace the
+            ladder landing.
+        timestamp: ISO timestamp for the result's ``compacted_at``.
+
+    Returns:
+        A :class:`CompactionResult` with full ``replacement_messages``
+        (drop list + notice + retained tail) and
+        ``compaction_type=tail_truncation_last_effort`` so the seam
+        takes the standard Variant A / Variant B persist path (NOT
+        stamp-only). This is the constructor-of-record for signature
+        3 of the original commission — by returning a non-empty
+        ``replacement_messages``, the seam persists a real shrink
+        instead of a stamp-only no-op.
+    """
+    # Build the notice HumanMessage with the canonical prefix style and
+    # the dedicated ``compaction_notice`` ``context_kind`` so downstream
+    # ``context_kind`` filters recognize it as a system-context block
+    # on the next pass.
+    notice_id = f"compaction-notice-{uuid.uuid4()}"
+    notice_msg = HumanMessage(
+        content=COMPACTION_NOTICE_TEXT,
+        id=notice_id,
+        additional_kwargs={
+            "injected_message": True,
+            "context_kind": COMPACTION_NOTICE_CONTEXT_KIND,
+        },
+    )
+
+    replacement: list[BaseMessage] = []
+    for drop_id in drop_ids:
+        replacement.append(RemoveMessage(id=drop_id))
+    replacement.append(notice_msg)
+    # ``retained_tail`` was deep-copied and re-id'd by the caller; append
+    # as-is so their new ids land in the channel.
+    replacement.extend(retained_tail)
+
+    tokens_before = (
+        estimate_messages_tokens(context.messages)
+        + context.system_prompt_tokens
+    )
+    tokens_after = (
+        estimate_messages_tokens([notice_msg, *retained_tail])
+        + context.system_prompt_tokens
+    )
+    # B1 fix — engine-populated ``compacted_ids``. The set of snapshot
+    # message ids that were INTENTIONALLY removed by this last-effort
+    # (the drop list). The seam's pre-write guard validates this
+    # against the site-derived set; a stamp-only path has nothing to
+    # write, so this is the SOURCE OF TRUTH for what lands in the
+    # sentinel. W7 — the seam's pre-write guard computes
+    # ``snapshot - replacement`` and refuses the write on any
+    # unaccounted id. Because the retained tail was re-id'd
+    # (defensive collision-avoidance with ``RemoveMessage``), the
+    # original retained-tail ids are NOT in the replacement — they
+    # MUST land in ``compacted_ids`` to avoid a false-positive
+    # silent-loss refusal. The union (drop_ids ∪
+    # retained_original_ids) covers every original pre-compaction
+    # id; the seam accepts the write.
+    _retained_original = list(retained_original_ids or [])
+    compacted_ids = frozenset(
+        mid
+        for mid in (
+            *(drop_id for drop_id in drop_ids if drop_id),
+            *_retained_original,
+        )
+        if mid
+    )
+    return CompactionResult(
+        replacement_messages=replacement,
+        tokens_before=int(tokens_before),
+        tokens_after=int(tokens_after),
+        tokens_saved=int(tokens_before - tokens_after),
+        messages_before=len(context.messages),
+        messages_after=1 + len(retained_tail),  # notice + tail
+        compaction_type=COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT,
+        compacted_at=timestamp,
+        compacted_ids=compacted_ids,
+        # ``injected_preserved``/``injected_absorbed`` are zeroed on
+        # the last-effort path because the 50%-tail truncation cuts
+        # across the SELECTABLE + HOISTED partition without honoring
+        # it — exactly the property that makes it the floor. The
+        # retained tail's surviving injected share is reported via
+        # ``injected_preserved`` = 0 here for honesty (no selective
+        # hoisting on the last-effort path); the FE / executor should
+        # NOT interpret this as "no injections survived" — they may
+        # have, but the floor doesn't track them.
+        injected_preserved=0,
+        injected_absorbed=0,
+    )
+
+
 class ContextCompactor:
     """Main compaction engine that handles context window management.
     
@@ -1803,15 +2025,40 @@ class ContextCompactor:
             # Apply result.replacement_messages to LangGraph state
     """
     
-    def __init__(self, config: CompactionConfig, llm_config: dict):
+    def __init__(
+        self,
+        config: CompactionConfig,
+        llm_config: dict,
+        manager: Any = None,
+    ):
         """Initialize the compactor with configuration.
-        
+
         Args:
             config: CompactionConfig with threshold, window, and model settings.
             llm_config: LLM configuration dict for summarization calls.
+            manager: Optional reference to the InstanceManager
+                facade. COMPACTION NEVER-BLOCKED (Verdict A): the
+                95% pre-call hook reads the per-instance escalation
+                metadata off the instance row via
+                ``manager._instance_repository``. The reference is
+                optional so the compactor remains constructible in
+                isolation (tests, snapshot_executor, etc.). When
+                ``None``, the escalation-aware gate lowering in
+                ``_maybe_precall_compact_95`` is a no-op (the
+                standard 0.95 ratio applies). Default ``None``
+                preserves pre-Phase-2 call sites byte-equivalent.
         """
         self.config = config
         self.llm_config = llm_config
+        # Optional manager reference for the COMPACTION NEVER-BLOCKED
+        # escalation metadata read in the 95% pre-call hook. When set,
+        # the compactor participates in the proactive-skip escalation
+        # flow (see ``daemon/services/_escalation_metadata.py``). The
+        # attribute name ``_manager`` matches the rest of the
+        # codebase's instance-manager surfaces so the call site in
+        # ``_maybe_precall_compact_95`` (graph.py) can reach it
+        # without further wiring.
+        self._manager = manager
         self.llm_config_with_headers = {
             **llm_config,
             "default_headers": {
@@ -2016,6 +2263,153 @@ class ContextCompactor:
             context.model_name, context.config
         )
 
+    # ─── COMPACTION NEVER-BLOCKED — last-effort helper (Verdict A) ─────
+    #
+    # The 3 skip paths in :meth:`compact_state` (all-injected /
+    # min-messages / preserved-within-threshold) call this helper to
+    # produce a non-empty CompactionResult that the seam's standard
+    # Variant A/B path will persist as a REAL SHRINK. The floor of
+    # the compaction ladder.
+    #
+    # Retained-count rule (PIN — ODD COUNT):
+    #   kept = math.ceil(N / 2)
+    #   dropped = N - kept = math.floor(N / 2)
+    # The corpus is the FULL message channel (selectable + hoisted +
+    # absorbed), in original order. For N=1 the helper keeps 1 and
+    # drops 0 (defensive no-drop edge case — only the notice message
+    # is added; the original message keeps its slot via re-id; the
+    # message COUNT grows by 1 but the token count shrinks because
+    # the notice is short). The corpus is deep-copied and re-id'd
+    # with ``last-effort-<uuid>`` to avoid ``RemoveMessage`` target
+    # collisions — same pattern as ``emergency_truncation`` uses
+    # ``truncated-<uuid>``.
+
+    @staticmethod
+    def _last_effort_tail_truncation(
+        context: "CompactionContext",
+        *,
+        skip_reason_label: str,
+        timestamp: str,
+    ) -> CompactionResult:
+        """Build the last-effort floor: keep the most-recent
+        ``ceil(N/2)`` messages, drop the older half, inject a
+        ``[SYSTEM CONTEXT: Compaction Notice]`` HumanMessage
+        immediately before the retained tail.
+
+        This is the FLOOR of the compaction ladder. It applies even
+        to injected/unanswered messages (the exact condition the
+        all-injected skip used to abort on). Pure code, no LLM
+        call, guaranteed to succeed.
+
+        Args:
+            context: The active :class:`CompactionContext`.
+            skip_reason_label: The original skip-reason label that
+                triggered the floor (``skipped_injections_dominate``,
+                ``skipped_below_min_messages``,
+                ``skipped_preserved_within_threshold``). Stamped on
+                ``compaction_type`` so operators can trace which
+                ladder landing fired. Kept distinct from the canonical
+                ``compaction_type="tail_truncation_last_effort"``
+                (the persisted value) by writing it into the WARN
+                log line instead — the persisted value is the same
+                for all three skip reasons.
+            timestamp: ISO timestamp to stamp on the result.
+
+        Returns:
+            A :class:`CompactionResult` with non-empty
+            ``replacement_messages`` and
+            ``compaction_type=tail_truncation_last_effort``. The
+            seam's standard Variant A/B path persists it as a real
+            shrink. The seam's stamp-only arm is NOT engaged here
+            (that's signature 3 of the original commission,
+            resolved by construction).
+        """
+        import math as _math
+
+        corpus = list(context.messages)
+        n = len(corpus)
+        if n == 0:
+            # Defensive: the engine never gets called with 0 messages,
+            # but a stamp-only would be the only safe thing here. The
+            # floor still emits the notice as a single message so the
+            # result is non-trivial.
+            logger.warning(
+                "[Compaction][obs] last-effort floor engaged with "
+                "n=0 messages (skip_reason=%s) — emitting notice-only "
+                "result",
+                skip_reason_label,
+            )
+            return _build_last_effort_replacement(
+                context,
+                drop_ids=[],
+                retained_tail=[],
+                skip_reason_label=skip_reason_label,
+                timestamp=timestamp,
+            )
+
+        kept = _math.ceil(n / 2)
+        dropped = n - kept  # floor(n/2)
+        # The older ``dropped`` messages are the ones we drop; the
+        # newer ``kept`` messages are the retained tail.
+        head_to_drop = corpus[:dropped]
+        tail_to_keep = corpus[dropped:]
+
+        # Deep-copy + re-id the retained tail so it doesn't collide
+        # with the ``RemoveMessage`` targets (same defensive pattern
+        # as the existing ``emergency_truncation`` path uses
+        # ``truncated-<uuid>``). Track the ORIGINAL ids of the
+        # retained tail — they must land in ``compacted_ids`` so
+        # the seam's pre-write guard does not false-positive them
+        # as silent-loss targets (they are intentionally removed
+        # from the snapshot and re-inserted under new ids).
+        re_ided_tail: list[BaseMessage] = []
+        retained_original_ids: list[str] = []
+        for msg in tail_to_keep:
+            orig_id = getattr(msg, "id", None)
+            if orig_id:
+                retained_original_ids.append(orig_id)
+            new_msg = copy.deepcopy(msg)
+            new_id = f"last-effort-{uuid.uuid4()}"
+            try:
+                new_msg.id = new_id
+            except Exception:  # pragma: no cover — defensive
+                pass
+            re_ided_tail.append(new_msg)
+
+        drop_ids: list[str] = []
+        for msg in head_to_drop:
+            mid = getattr(msg, "id", None)
+            if mid:
+                drop_ids.append(mid)
+
+        # Log at WARN so operators triaging "compaction never fires"
+        # can trace the floor landing. The skip_reason_label ties
+        # back to the original gate that fired (the ladder step that
+        # the floor replaced).
+        logger.warning(
+            "[Compaction] floor engaged: skip_reason=%s, "
+            "n=%d, kept=%d, dropped=%d (ceil(n/2) rule); "
+            "compaction_type=%s",
+            skip_reason_label,
+            n,
+            kept,
+            dropped,
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT,
+        )
+        return _build_last_effort_replacement(
+            context,
+            drop_ids=drop_ids,
+            retained_tail=re_ided_tail,
+            # W7 — pass the retained tail's ORIGINAL ids so the
+            # seam's pre-write guard sees them as "intentionally
+            # removed and re-inserted under new ids" rather than
+            # "silently lost" (the re-id makes them unaccounted in
+            # the replacement alone).
+            retained_original_ids=retained_original_ids,
+            skip_reason_label=skip_reason_label,
+            timestamp=timestamp,
+        )
+
     async def compact_state(
         self,
         context: CompactionContext,
@@ -2055,6 +2449,37 @@ class ContextCompactor:
         if context.last_compacted_at and self._is_recently_compacted(context.last_compacted_at):
             logger.debug("Skipping compaction: recently compacted")
             return None
+
+        # ── OBSERVABILITY (Phase-1 C-finding follow-up, see report) ──
+        # Daemon logs recorded NO per-instance token usage prior to
+        # this commission — operators triaging "compaction never
+        # fires" had no prompt-token / headroom signal at the
+        # decision point. Add ONE INFO line at the engine entry
+        # (after dedup, before partition) with the measured numbers
+        # so the future verdict can be reproduced from logs alone.
+        # Two-line format: headroom = trigger_window - payload_tokens
+        # so the operator sees the margin against the
+        # 80% / 95% thresholds without doing arithmetic.
+        try:
+            _trigger_window_obs = self._trigger_window(context)
+            _payload_tokens_obs = estimate_messages_tokens(
+                context.messages
+            ) + context.system_prompt_tokens
+            _headroom_obs = _trigger_window_obs - _payload_tokens_obs
+            logger.info(
+                "[Compaction][obs] instance=%s messages=%d "
+                "payload_tokens=%d trigger_window=%d headroom=%d "
+                "threshold_pct=%.0f%% min_msgs=%d",
+                (context.instance_id or "")[:8] or "<no-iid>",
+                len(context.messages),
+                _payload_tokens_obs,
+                _trigger_window_obs,
+                _headroom_obs,
+                context.config.threshold * 100,
+                context.config.min_messages_before_compaction,
+            )
+        except Exception:  # pragma: no cover — observability must not crash
+            pass
 
         # C3 / Phase 1 + injected-notes hoisting fix: Partition the
         # channel into the selectable pool and the preserved injected
@@ -2116,52 +2541,55 @@ class ContextCompactor:
             )
         )
 
-        # If every message is a PERMANENT or UNANSWERED injection, there
-        # is nothing to compact (the preserved injections will be left
-        # in place by the unchanged conversation state). Answered bare
-        # notes and regular history are selectable, so their presence
-        # alone does NOT fire this skip. ANTI-REFIRE stamp engages the
-        # dedup so the gate does not re-fire every dispatch — the
-        # warning is rate-limited at the call site.
+        # COMPACTION NEVER-BLOCKED (Verdict A): the all-injected skip
+        # used to return ``anti_refire_skip`` (a stamp-only no-op that
+        # the seam persisted as ``compacted_at`` alone). That made the
+        # engine UNABLE to shrink an injected-dominated context. Per
+        # the commission, the engine MUST be able to shrink any
+        # oversized context — including the all-injected condition.
+        # The floor of the ladder is the 50%-tail last-effort, which
+        # explicitly applies to injected/unanswered messages.
         if not selectable_messages:
-            # Cycle 2 (review suggestion 4) — the
-            # injection-dominated skip log is now WARN, matching
-            # the 95% pre-call hook's skip-without-relief WARN
-            # (``daemon/graph.py``). Operators triaging
-            # "compaction never fires" alerts should see the
-            # skip in the WARN stream (was INFO, invisible in
-            # 6d of prod data prior to the L3 fix). The 95% site
-            # still has its own rate-limited WARN with a
-            # different message — this is a separate signal that
-            # fires for all call sites (proactive + 95% +
-            # /compact) so the WARN-level signal is uniform.
             logger.warning(
                 "[Compaction] skipping: every message carries the "
                 "injected_message flag and none are answered "
                 "(context_kind or unanswered bare notes; n=%d, "
-                "injected_tokens=%d); anti-refire stamp engaged",
+                "injected_tokens=%d); falling through to last-effort "
+                "floor (50%%-tail truncation) per never-blocked spec",
                 len(context.messages),
                 injected_tokens,
             )
-            return anti_refire_skip(
-                skip_reason="skipped_injections_dominate"
+            return self._last_effort_tail_truncation(
+                context,
+                skip_reason_label="skipped_injections_dominate",
+                timestamp=datetime.now(timezone.utc).isoformat(),
             )
 
         # 2. Eligibility: minimum messages check (against the SELECTABLE
         # subset — regular history plus answered notes — so a
         # preserved-injection-heavy conversation doesn't get spuriously
-        # compacted away). ANTI-REFIRE stamp engages the dedup so the
-        # gate does not re-fire every dispatch.
+        # compacted away). COMPACTION NEVER-BLOCKED (Verdict A): the
+        # floor now engages here too, instead of the anti-refire stamp
+        # alone. The min-messages gate is a per-design selectivity
+        # floor that says "not enough regular history to summarize
+        # safely" — but the never-blocked hardening says "shrink the
+        # whole context to 50% tail" when the proactive path triggers
+        # here. The two are reconciled: a skip here is still a
+        # no-summarize, but it IS a shrink (last-effort floor).
         if len(selectable_messages) < context.config.min_messages_before_compaction:
             logger.warning(
                 "[Compaction] skipping: %d selectable messages "
-                "(minimum: %d, preserved_injected=%d); anti-refire stamp engaged",
+                "(minimum: %d, preserved_injected=%d); falling through "
+                "to last-effort floor (50%%-tail truncation) per "
+                "never-blocked spec",
                 len(selectable_messages),
                 context.config.min_messages_before_compaction,
                 len(hoisted_injected),
             )
-            return anti_refire_skip(
-                skip_reason="skipped_below_min_messages"
+            return self._last_effort_tail_truncation(
+                context,
+                skip_reason_label="skipped_below_min_messages",
+                timestamp=datetime.now(timezone.utc).isoformat(),
             )
 
         # 3. Token calculation — NUMERATOR includes the preserved
@@ -2251,30 +2679,31 @@ class ContextCompactor:
                 + context.system_prompt_tokens
             )
 
-            # ANTI-REFIRE stamp engages the dedup so the emergency
-            # bail does not re-fire every dispatch. The engine
-            # stamps CompactionResult with empty replacement_messages
-            # for the proactive site to persist via the shared seam.
+            # COMPACTION NEVER-BLOCKED (Verdict A): this path is
+            # rare (the threshold gate at :2046-2057 already
+            # returned None for under-threshold contexts), but when
+            # the compactable span is empty AND the preserved +
+            # injected + system already fits under the threshold,
+            # the engine used to return a stamp-only no-op
+            # (``skipped_preserved_within_threshold``). The
+            # never-blocked hardening changes this to the
+            # last-effort floor: a 50%-tail truncation always
+            # succeeds regardless of the selectivity math, and
+            # the seam persists a real shrink.
             if preserved_tokens <= context_window * context.config.threshold:
                 logger.info(
                     "[Compaction] skipping: preserved (%d) + "
                     "injected_tokens=%d + system=%d still within "
-                    "threshold; anti-refire stamp engaged",
+                    "threshold; falling through to last-effort floor "
+                    "(50%%-tail truncation) per never-blocked spec",
                     estimate_messages_tokens(preserved_msgs),
                     injected_tokens,
                     context.system_prompt_tokens,
                 )
-                return CompactionResult(
-                    replacement_messages=[],
-                    tokens_before=total_tokens,
-                    tokens_after=preserved_tokens,
-                    tokens_saved=0,
-                    messages_before=len(context.messages),
-                    messages_after=len(context.messages),
-                    compaction_type="skipped_preserved_within_threshold",
-                    compacted_at=datetime.now(timezone.utc).isoformat(),
-                    injected_preserved=len(hoisted_injected),
-                    injected_absorbed=0,
+                return self._last_effort_tail_truncation(
+                    context,
+                    skip_reason_label="skipped_preserved_within_threshold",
+                    timestamp=datetime.now(timezone.utc).isoformat(),
                 )
 
             logger.warning(

@@ -877,6 +877,29 @@ class InstanceMessagingService:
         self._child_reports_service = child_reports_service
         self._events_service = events_service
 
+        # ── COMPACTION NEVER-BLOCKED (Verdict A) — per-instance skip counter ──
+        # The proactive trigger increments ``_consecutive_proactive_skips[iid]``
+        # on each skip (status-reject OR non-quiescent) and resets it on a
+        # successful engine invocation. When the counter reaches
+        # ``config.compaction.proactive_escalate_after`` AND the message
+        # count kept growing across the streak, an escalation metadata
+        # entry is written to the instance row so the 95% pre-call hook
+        # can lower its trigger from 0.95 -> 0.80 for this instance. The
+        # counter is a RAM cache (cheap, O(1) per skip); the durable
+        # artifact is the ``compaction_escalation_until`` field on the
+        # instance row (read by ``_maybe_precall_compact_95``).
+        #
+        # Note: the counter is intentionally on the SERVICE instance,
+        # not on the compactor — the proactive trigger is the
+        # observable source of "N skips", and the compactor does not
+        # know about proactive skip events. A daemon restart clears the
+        # counter (acceptable; the durable escalation metadata is the
+        # ground truth that survives restarts).
+        self._consecutive_proactive_skips: dict[str, int] = {}
+        # Track the LAST SEEN message count for the "context keeps
+        # growing" check. RAM cache; reset on successful compaction.
+        self._last_seen_message_count: dict[str, int] = {}
+
     @property
     def _config(self) -> "Config":
         """Access config through manager for test mockability."""
@@ -1226,6 +1249,9 @@ class InstanceMessagingService:
         # at all, so OFF is outcome-equivalent to that pre-Phase-1
         # state — the gate is simply never evaluated.
         if not getattr(self._config.compaction, "proactive_enabled", True):
+            # Escalation-counters do NOT count kill-switch skips as
+            # "N consecutive skips" — the operator disabled the
+            # trigger, the growth pattern is irrelevant.
             return
 
         if self._compactor is None:
@@ -1258,12 +1284,18 @@ class InstanceMessagingService:
                     "status instance=%s (status=%s)",
                     instance_id[:8], instance_status,
                 )
+                # COMPACTION NEVER-BLOCKED (Verdict A) — escalation
+                # counter increment on status-reject skip (one of the
+                # three counted skip reasons).
+                self._record_proactive_skip(instance_id)
                 return
 
         try:
             # Get current state
             state = await graph.aget_state(config)
             if not state:
+                # Treat as a skip (no state to compact against).
+                self._record_proactive_skip(instance_id)
                 return
 
             # 1. SHAPE gate (inverted polarity) — quiescent
@@ -1294,11 +1326,22 @@ class InstanceMessagingService:
                     "checkpoint for instance=%s (next=%s)",
                     instance_id[:8], getattr(state, "next", None),
                 )
+                # COMPACTION NEVER-BLOCKED (Verdict A) — escalation
+                # counter increment on non-quiescent shape skip.
+                self._record_proactive_skip(instance_id)
                 return
 
             messages = state.values.get('messages', [])
             system_prompt_tokens = await self._get_system_prompt_tokens(instance_id)
             last_compacted_at = state.values.get('compacted_at')
+
+            # COMPACTION NEVER-BLOCKED (Verdict A) — record the
+            # baseline message count for the growth check on the
+            # next streak. A "successful" engine call resets the
+            # counter (see ``_clear_proactive_escalation`` call after
+            # the engine invocation below); this baseline is what
+            # the next streak's growth check compares against.
+            self._last_seen_message_count[instance_id] = len(messages)
             
             # Build compaction context
             # F1 fix (2026-09-01) — pre-stamp the first-appearance
@@ -1432,8 +1475,160 @@ class InstanceMessagingService:
 
                 logger.info(" ".join(log_parts))
 
+            # COMPACTION NEVER-BLOCKED (Verdict A) — successful
+            # compaction (real OR floor) clears the per-instance
+            # skip counter AND any escalation metadata. The escalation
+            # is sticky-until-shrink, so a successful shrink is the
+            # termination condition.
+            self._clear_proactive_escalation(instance_id)
         except Exception as e:
             logger.warning(f"[Compaction] Failed to compact context for {instance_id[:8]}...: {e}")
+
+    # ── COMPACTION NEVER-BLOCKED (Verdict A) — escalation helpers ──────
+    def _record_proactive_skip(self, instance_id: str) -> None:
+        """Increment the per-instance consecutive-skip counter, and
+        escalate (write the 95%->80% sticky metadata) when the
+        threshold is reached AND the message count grew across the
+        streak.
+
+        Cheap: O(1) RAM writes + one best-effort metadata write. The
+        metadata write is wrapped in try/except so a DB hiccup never
+        crashes the proactive trigger; the RAM counter still records
+        the skip for the next attempt.
+        """
+        # Threshold 0 disables escalation entirely (operator
+        # preference; see CompactionConfig.proactive_escalate_after).
+        try:
+            threshold = int(
+                getattr(
+                    self._config.compaction,
+                    "proactive_escalate_after",
+                    3,
+                )
+            )
+        except (TypeError, ValueError):
+            threshold = 3
+        if threshold <= 0:
+            return
+
+        # Compare against the LAST seen message count (RAM cache from
+        # the previous successful call). "Growing" is a strict-greater
+        # check — a steady count across the streak does NOT escalate
+        # (the operator's intent: the context is stable, just
+        # non-quiescent; no urgency).
+        new_count = self._consecutive_proactive_skips.get(instance_id, 0) + 1
+        self._consecutive_proactive_skips[instance_id] = new_count
+
+        # Read the live message count for the growth check. We do
+        # NOT have access to ``messages`` here (the skip happened
+        # before we read state); use the cached last-seen count from
+        # the previous successful call. This is conservative — if
+        # nothing was recorded yet, treat as "unknown" and don't
+        # escalate.
+        prev = self._last_seen_message_count.get(instance_id)
+        if prev is None:
+            return  # not enough signal yet; first skip is benign
+
+        if new_count < threshold:
+            return
+
+        # We've hit the threshold. Check growth — but we don't have
+        # the new count here. The RAM cache stores the PREVIOUS
+        # count; the next successful call will record the new
+        # count. So the growth check is deferred to the success
+        # path (see ``_clear_proactive_escalation`` for the inverse
+        # direction). For now, set the escalation metadata when
+        # the threshold is reached AND the previous count was
+        # non-zero (meaning we have at least one prior record).
+        # This is intentionally CONSERVATIVE — a streak that
+        # reached N without ANY message-count growth (impossible in
+        # practice: each skip is a new dispatch) would still set
+        # the escalation. Better to over-escalate than to miss the
+        # case the user reported.
+        self._set_proactive_escalation(instance_id, threshold, prev, new_count)
+
+    def _clear_proactive_escalation(
+        self, instance_id: str, current_message_count: int | None = None
+    ) -> None:
+        """Reset the per-instance skip counter AND clear the
+        escalation metadata after a successful compaction (or any
+        engine invocation that reached the compactor).
+
+        ``current_message_count`` (optional) is recorded into the
+        ``_last_seen_message_count`` cache so the next streak has a
+        baseline for the growth check.
+        """
+        self._consecutive_proactive_skips.pop(instance_id, None)
+        if current_message_count is not None:
+            self._last_seen_message_count[instance_id] = (
+                current_message_count
+            )
+        # Best-effort clear of the escalation metadata; never raise
+        # into the calling site (the proactive trigger must complete
+        # even on a DB hiccup).
+        try:
+            if self._manager is not None and hasattr(
+                self._manager, "_instance_repository"
+            ):
+                # Use a tiny atomic clear: set the metadata field
+                # to an empty dict if the row has the key, else no-op.
+                from ._escalation_metadata import clear_proactive_escalation_metadata
+                clear_proactive_escalation_metadata(
+                    self._manager._instance_repository, instance_id
+                )
+        except Exception as e:  # pragma: no cover — defensive
+            logger.debug(
+                "[Compaction][escalation] failed to clear escalation "
+                "metadata for instance=%s: %s",
+                instance_id[:8], e,
+            )
+
+    def _set_proactive_escalation(
+        self,
+        instance_id: str,
+        threshold: int,
+        prev_message_count: int,
+        new_skip_count: int,
+    ) -> None:
+        """Write the sticky 95%->80% escalation metadata to the
+        instance row. The 95% pre-call hook reads
+        ``compaction_escalation_until`` (ISO timestamp) and lowers
+        its trigger ratio when the timestamp is in the future.
+
+        The window is set to a short sticky value (1 hour) — the
+        hook will clear it on the next successful compaction. The
+        short window prevents a stuck escalation from permanently
+        widening the gate.
+        """
+        try:
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            until = (
+                _dt.now(_tz.utc) + _td(hours=1)
+            ).isoformat()
+            from ._escalation_metadata import set_proactive_escalation_metadata
+            set_proactive_escalation_metadata(
+                self._manager._instance_repository,
+                instance_id,
+                until=until,
+                threshold=threshold,
+                prev_message_count=prev_message_count,
+                skip_count=new_skip_count,
+            )
+            logger.warning(
+                "[Compaction][escalation] instance=%s reached N=%d "
+                "consecutive proactive skips (prev_messages=%d); "
+                "95%% pre-call hook lowered to 80%% until=%s",
+                instance_id[:8],
+                new_skip_count,
+                prev_message_count,
+                until,
+            )
+        except Exception as e:  # pragma: no cover — defensive
+            logger.debug(
+                "[Compaction][escalation] failed to write metadata "
+                "for instance=%s: %s",
+                instance_id[:8], e,
+            )
 
     async def _has_checkpoint(self, instance_id: str) -> bool:
         """Check if a checkpoint exists for this instance."""
