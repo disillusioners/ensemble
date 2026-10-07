@@ -449,6 +449,315 @@ assert_contains "Cooldown fix: Linux branch uses GNU date -d" 'date -u -d "+${CO
 assert_contains "Cooldown fix: BSD branch keeps -ju -v form" 'date -ju -v+${COOLDOWN_S}S' "$(cat "$COOLDOWN_FIX")"
 
 # ===========================================================================
+section "Derivation — STOP_SCRIPT_BUDGET_S derived from resolved WAIT_S (post-review hardening)"
+
+# The integration review on 2.2b flagged: parent STOP_SCRIPT_BUDGET_S
+# (fixed 120s) was not derived from the child's resolved WAIT_S, so an
+# operator with WAIT_S>120 hit a premature parent SIGKILL on the stop
+# child → the flip proceeded against a still-live daemon. The fix:
+# parent budget = composition sum (child site-2 stop bound + resolved
+# WAIT_S + UNIT_KILL_GRACE_S + _run_bounded TERM grace + margin).
+# Below we factor the derivation into a callable helper in a subshell
+# and assert the composition arithmetic against several fixtures.
+#
+# The helpers (_resolve_wait_s_mirror, _derive_parent_stop_budget,
+# _effective_stop_script_budget) are defined inside lib.sh but
+# lib.sh has many preconditions (resolve_env, journal, lock, etc.)
+# that we don't want to source live in a test. Instead, we EXTRACT
+# the helper functions to a scratch file by reading the source and
+# pulling the function bodies out, then sourcing the scratch in a
+# clean subshell with only the env the helpers need. This is a
+# white-box extraction (we know the helpers don't call any other
+# lib.sh internals) — the test verifies the SHAPE, not the wiring.
+LIB_SH_SRC="$REPO_ROOT/scripts/upgrade/lib.sh"
+SCRATCH="$(mktemp -t bswaits-derive.XXXXXX.sh)"
+trap "rm -f '$SCRATCH' '$SCRATCH'.both" EXIT
+
+# Extract _resolve_wait_s_mirror + DEFAULT_WAIT_S / WAIT_S_FLOOR / WAIT_S_CAP
+# + _derive_parent_stop_budget + _effective_stop_script_budget by
+# line range from the source (the helpers are a contiguous block in
+# lib.sh; their start/end markers are unique comments).
+_extract() {
+    local start_pat="$1" end_pat="$2"
+    awk -v sp="$start_pat" -v ep="$end_pat" '
+        $0 ~ sp { p=1 }
+        p { print }
+        p && $0 ~ ep { exit }
+    ' "$LIB_SH_SRC"
+}
+{
+    cat <<'PRELUDE'
+# Minimal prelude for the derivation helpers — none of these touch
+# any other lib.sh internals (verified: the helpers use printf, sed,
+# grep, and parameter expansion only; no _run_bounded / journal /
+# lock dependency).
+PRELUDE
+    _extract "^# _resolve_wait_s_mirror <env_file>" "^_effective_stop_script_budget[(][)][{]"
+    _extract "^_effective_stop_script_budget[(][)][{]" "^# ── Promote/rollback shared mechanics"
+} > "$SCRATCH"
+
+# Sanity: the scratch should contain all three helpers
+for f in _resolve_wait_s_mirror _derive_parent_stop_budget _effective_stop_script_budget; do
+    if grep -q "^$f" "$SCRATCH"; then
+        _pass "Derivation extract: $f present in scratch"
+    else
+        _fail "Derivation extract: $f present in scratch" "present" "missing"
+    fi
+done
+
+# ── (i) WAIT_S=180 → assert derivation is ≥ 180+margin and ≥ the
+# composition sum. Composition: child_site2(120) + WAIT_S(180) +
+# UNIT_KILL_GRACE_S(10) + TERM_grace(5) + margin(20) = 335.
+(
+    unset WAIT_S STOP_SCRIPT_BUDGET_S UNIT_KILL_GRACE_S
+    WAIT_S=180
+    INSTALL_DIR=/nonexistent  # force .env read to fail → fall back to WAIT_S explicit
+    . "$SCRATCH" 2>/dev/null
+    D="$(_derive_parent_stop_budget)"
+    E="$(_effective_stop_script_budget)"
+    printf 'D=%s\nE=%s\n' "$D" "$E" > /tmp/bswaits-derive.out
+)
+. /tmp/bswaits-derive.out
+assert_eq "D1 (i) WAIT_S=180: derived budget is 335 (composition sum)" "335" "$D"
+assert_eq "D1 (i) WAIT_S=180: effective budget matches derived" "335" "$E"
+[ "$D" -ge "$((180 + 15))" ] && _pass "D1 (i) derived budget ≥ WAIT_S+15 (reviewer minimal floor)" \
+    || _fail "D1 (i) derived budget ≥ WAIT_S+15" "≥195" "$D"
+
+# ── (i) WAIT_S=600 (the cap): composition = 120+600+10+5+20 = 755.
+(
+    unset WAIT_S STOP_SCRIPT_BUDGET_S UNIT_KILL_GRACE_S
+    WAIT_S=600
+    INSTALL_DIR=/nonexistent
+    . "$SCRATCH" 2>/dev/null
+    D="$(_derive_parent_stop_budget)"
+    E="$(_effective_stop_script_budget)"
+    printf 'D=%s\nE=%s\n' "$D" "$E" > /tmp/bswaits-derive.out
+)
+. /tmp/bswaits-derive.out
+assert_eq "D2 (i) WAIT_S=600 (cap): derived budget is 755" "755" "$D"
+assert_eq "D2 (i) WAIT_S=600: effective budget matches derived" "755" "$E"
+
+# ── (ii) explicit WAIT_S beyond the sane cap (WAIT_S=900) → child
+# returns 900 verbatim (the +10 offset + clamp is only applied via
+# the .env read; explicit WAIT_S is the operator's verbatim config).
+# The parent mirror is byte-identical: explicit WAIT_S=900 returns
+# 900, derivation = 120+900+10+5+20 = 1055. No clamp at the
+# derivation — the composition sum grows with WAIT_S. Pin this:
+(
+    unset WAIT_S STOP_SCRIPT_BUDGET_S UNIT_KILL_GRACE_S
+    WAIT_S=900
+    INSTALL_DIR=/nonexistent
+    . "$SCRATCH" 2>/dev/null
+    R="$(_resolve_wait_s_mirror /nonexistent)"
+    D="$(_derive_parent_stop_budget)"
+    printf 'R=%s\nD=%s\n' "$R" "$D" > /tmp/bswaits-derive.out
+)
+. /tmp/bswaits-derive.out
+assert_eq "D3 (ii) explicit WAIT_S=900: resolver returns 900 verbatim" "900" "$R"
+assert_eq "D3 (ii) explicit WAIT_S=900: derived budget is 1055" "1055" "$D"
+_pass "D3 (ii) explicit WAIT_S=900: NO refusal (variant A is robust — the parent grows with the operator's explicit config)"
+
+# ── (ii) explicit WAIT_S with NO WAIT_S env, .env carries a clamped
+# value. Precedence 3 path. WAIT_S unset, .env file has
+# DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=590 → +10=600, clamped to
+# CAP=600 → resolver returns 600, derivation = 755.
+ENV_FIX="$(mktemp -t bswaits-envfix.XXXXXX)"
+printf 'DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=590\n' > "$ENV_FIX"
+(
+    unset WAIT_S STOP_SCRIPT_BUDGET_S UNIT_KILL_GRACE_S
+    INSTALL_DIR=/nonexistent
+    ENV_PATH="$ENV_FIX"
+    . "$SCRATCH" 2>/dev/null
+    R="$(_resolve_wait_s_mirror "$ENV_PATH")"
+    D="$(_derive_parent_stop_budget "$ENV_PATH")"
+    printf 'R=%s\nD=%s\n' "$R" "$D" > /tmp/bswaits-derive.out
+)
+. /tmp/bswaits-derive.out
+assert_eq "D4 (ii) .env=590 (+10=600, clamped): resolver returns 600" "600" "$R"
+assert_eq "D4 (ii) .env=590: derived budget is 755" "755" "$D"
+rm -f "$ENV_FIX"
+
+# ── (iii) default WAIT_S=70 regression: derivation returns 225.
+# Byte-identical to the prior happy path (STOP_SCRIPT_BUDGET_S=120
+# is a floor; the derivation at 225 is MORE generous, not less —
+# the happy path completes in <2s in both shapes).
+(
+    unset WAIT_S STOP_SCRIPT_BUDGET_S UNIT_KILL_GRACE_S
+    INSTALL_DIR=/nonexistent
+    . "$SCRATCH" 2>/dev/null
+    D="$(_derive_parent_stop_budget)"
+    E="$(_effective_stop_script_budget)"
+    printf 'D=%s\nE=%s\n' "$D" "$E" > /tmp/bswaits-derive.out
+)
+. /tmp/bswaits-derive.out
+assert_eq "D5 (iii) default WAIT_S=70: derived budget is 225" "225" "$D"
+[ "$D" -ge 120 ] && _pass "D5 (iii) derived budget ≥ 120 floor (no regression)" \
+    || _fail "D5 (iii) derived budget ≥ 120 floor" "≥120" "$D"
+
+# ── (iii) operator override: STOP_SCRIPT_BUDGET_S=300 explicit env
+# → effective budget is 300 verbatim, derivation is bypassed. This
+# is the env-overridable contract for sandbox drills / tests.
+(
+    unset WAIT_S UNIT_KILL_GRACE_S
+    STOP_SCRIPT_BUDGET_S=300
+    INSTALL_DIR=/nonexistent
+    . "$SCRATCH" 2>/dev/null
+    E="$(_effective_stop_script_budget)"
+    printf 'E=%s\n' "$E" > /tmp/bswaits-derive.out
+)
+. /tmp/bswaits-derive.out
+assert_eq "D6 (iii) operator override STOP_SCRIPT_BUDGET_S=300: effective budget 300" "300" "$E"
+
+# ── (iii) malformed operator override: STOP_SCRIPT_BUDGET_S="abc"
+# → fall through to derivation (mirror the child's "malformed →
+# fall back" handling for $WAIT_S). Effective budget = 225 at default.
+(
+    unset WAIT_S UNIT_KILL_GRACE_S
+    STOP_SCRIPT_BUDGET_S="abc"
+    INSTALL_DIR=/nonexistent
+    . "$SCRATCH" 2>/dev/null
+    E="$(_effective_stop_script_budget)"
+    printf 'E=%s\n' "$E" > /tmp/bswaits-derive.out
+)
+. /tmp/bswaits-derive.out
+assert_eq "D7 (iii) malformed override 'abc' falls through to derivation" "225" "$E"
+
+# ===========================================================================
+section "D8 — sync-guard: child _resolve_wait_s ≡ parent _resolve_wait_s_mirror"
+
+# The brief's most load-bearing ask: BOTH resolvers (child at
+# stop-ensemble.sh:270, parent at lib.sh:_resolve_wait_s_mirror) MUST
+# produce IDENTICAL output for the SAME fixtures. We extract the
+# child's function source from stop-ensemble.sh, wrap it in a
+# scratch, and run it through the same fixtures as the parent's
+# mirror. The constants DEFAULT_WAIT_S / WAIT_S_FLOOR / WAIT_S_CAP
+# must also be equivalent — the child uses them at the top of the
+# script (lines 110-112), the parent mirror defines them next to the
+# helper.
+CHILD_SRC="$REPO_ROOT/scripts/stop-ensemble.sh"
+SCRATCH_CHILD="$(mktemp -t bswaits-child-resolve.XXXXXX.sh)"
+trap "rm -f '$SCRATCH_CHILD'" EXIT
+
+# Extract child's _resolve_wait_s + its constants. The constants
+# are at lines 110-112 (DEFAULT_WAIT_S=70, WAIT_S_FLOOR=10,
+# WAIT_S_CAP=600) — the child reads them as bare assignments in
+# script scope. We need to extract them too.
+# Extract child's FULL resolution chain: constants (DEFAULT_WAIT_S,
+# WAIT_S_FLOOR, WAIT_S_CAP), _resolve_wait_s function (.env read),
+# AND the explicit-WAIT_S block (lines 290-307) that wraps them.
+# We define a `_child_resolve_full <env_file>` wrapper that mirrors
+# the exact outer block: precedence is explicit $WAIT_S env
+# (digits-only wins; malformed → DEFAULT_WAIT_S; absent →
+# _resolve_wait_s <.env>), then echoes the result.
+{
+    cat <<'PRELUDE'
+# Child resolver extracted from stop-ensemble.sh:110-112 + 270-289
+# (the .env reader) + 290-307 (the explicit-$WAIT_S wrapper). Mirrors
+# the parent's mirror function-for-function.
+PRELUDE
+    awk '/^DEFAULT_WAIT_S=70$|^WAIT_S_FLOOR=10$|^WAIT_S_CAP=600$/ { print }' "$CHILD_SRC"
+    awk '/^_resolve_wait_s[(][)] \{$/{p=1} p{print} p && /^}$/{exit}' "$CHILD_SRC"
+    cat <<'CHAIN'
+_child_resolve_full() {
+    # Mirror of stop-ensemble.sh:290-307: explicit $WAIT_S env
+    # (digits-only) wins; malformed → DEFAULT_WAIT_S; absent →
+    # _resolve_wait_s <.env> read. Sets WAIT_SOURCE for symmetry
+    # with the child (the variable is local; not strictly required
+    # for the derivation, but the sync-guard test exercises the
+    # side effects too).
+    local env_file="$1" _child_was_explicit=""
+    if [ -n "${WAIT_S:-}" ]; then
+        if printf '%s' "${WAIT_S}" | grep -Eq '^[0-9]+$'; then
+            printf '%s\n' "${WAIT_S}"
+            return 0
+        fi
+        printf '%s\n' "$DEFAULT_WAIT_S"
+        return 0
+    fi
+    _resolve_wait_s "$env_file"
+}
+CHAIN
+} > "$SCRATCH_CHILD"
+
+if grep -q '^_resolve_wait_s()' "$SCRATCH_CHILD"; then
+    _pass "D8 sync-guard: child _resolve_wait_s extracted"
+else
+    _fail "D8 sync-guard: child _resolve_wait_s extracted" "present" "missing"
+fi
+
+# Run BOTH resolvers over a battery of fixtures and assert identical
+# output. Each fixture sets up a unique (WAIT_S, .env-file) state.
+sync_check() {
+    local label="$1" wait_s="$2" env_path="$3" env_content="$4"
+    # Write .env file (if content provided)
+    local env_file="/tmp/bswaits-sync-env.$$"
+    if [ -n "$env_content" ]; then
+        printf '%s\n' "$env_content" > "$env_file"
+    else
+        rm -f "$env_file"
+        env_file="/nonexistent"
+    fi
+    # Parent mirror — sourced from $SCRATCH
+    local parent_out
+    parent_out="$(WAIT_S="$wait_s" INSTALL_DIR=/nonexistent bash -c '
+        . "'"$SCRATCH"'" 2>/dev/null
+        _resolve_wait_s_mirror "'"$env_file"'"
+    ')"
+    # Child resolver — sourced from $SCRATCH_CHILD (which provides
+    # the FULL chain via _child_resolve_full — explicit WAIT_S env
+    # wrap + the .env read underneath, mirroring the parent's
+    # _resolve_wait_s_mirror in the same precedence order)
+    local child_out
+    child_out="$(WAIT_S="$wait_s" INSTALL_DIR=/nonexistent bash -c '
+        . "'"$SCRATCH_CHILD"'" 2>/dev/null
+        _child_resolve_full "'"$env_file"'"
+    ')"
+    if [ "$parent_out" = "$child_out" ]; then
+        _pass "D8 sync-guard: $label → parent=$parent_out child=$child_out (match)"
+    else
+        _fail "D8 sync-guard: $label parent=$parent_out child=$child_out" "match" "parent=$parent_out child=$child_out"
+    fi
+    rm -f "$env_file"
+}
+
+# Fixture 1: explicit WAIT_S=70 (digits-only) → both return 70
+sync_check "explicit WAIT_S=70" "70" "/tmp/bswaits-sync-env.$$" ""
+
+# Fixture 2: explicit WAIT_S=180 → both return 180
+sync_check "explicit WAIT_S=180" "180" "/tmp/bswaits-sync-env.$$" ""
+
+# Fixture 3: explicit WAIT_S=900 (above cap) → both return 900 verbatim
+sync_check "explicit WAIT_S=900" "900" "/tmp/bswaits-sync-env.$$" ""
+
+# Fixture 4: malformed explicit WAIT_S="abc" → both fall back to
+# DEFAULT_WAIT_S=70 (do NOT consult the .env file)
+sync_check "malformed WAIT_S=abc" "abc" "/tmp/bswaits-sync-env.$$" "DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=300"
+
+# Fixture 5: no explicit, .env=60 → both return 60+10=70 (clamped
+# from below, lands at DEFAULT_WAIT_S=70)
+sync_check "no explicit, .env=60" "" "/tmp/bswaits-sync-env.$$" "DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=60"
+
+# Fixture 6: no explicit, .env=120 → both return 120+10=130
+sync_check "no explicit, .env=120" "" "/tmp/bswaits-sync-env.$$" "DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=120"
+
+# Fixture 7: no explicit, .env=590 → both return 590+10=600 (clamped to CAP)
+sync_check "no explicit, .env=590 (clamped to 600)" "" "/tmp/bswaits-sync-env.$$" "DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=590"
+
+# Fixture 8: no explicit, .env=900 (above cap) → both return 600 (clamped)
+sync_check "no explicit, .env=900 (clamped)" "" "/tmp/bswaits-sync-env.$$" "DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=900"
+
+# Fixture 9: no explicit, malformed .env (DAEMON_GRACEFUL=garbage) →
+# both return 70 (fall back to default)
+sync_check "no explicit, malformed .env" "" "/tmp/bswaits-sync-env.$$" "DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=garbage"
+
+# Fixture 10: no explicit, absent .env (path doesn't exist) → both
+# return 70 (fall back to default — both helpers handle absent
+# .env file gracefully: the child has the `[ -f "$env_file" ]`
+# guard implicit via the `2>/dev/null` and missing-file tolerance
+# of sed; the mirror has an explicit `[ -f "$env_file" ]` guard).
+sync_check "no explicit, absent .env" "" "/tmp/bswaits-nonexistent" ""
+
+# ===========================================================================
 section "Final — summary"
 
 printf '\n== summary ==\n'

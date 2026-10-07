@@ -91,7 +91,7 @@ READYZ_BUDGET_S="${READYZ_BUDGET_S:-120}"
 # defaults so the happy path NEVER trips them; env-overridable for
 # sandbox drills and tests. One event kind `subprocess_wait_timeout`
 # journals every site for forensic correlation.
-STOP_SCRIPT_BUDGET_S="${STOP_SCRIPT_BUDGET_S:-120}"     # stop_via_stop_script fork-exec (was unbounded)
+STOP_SCRIPT_BUDGET_S="${STOP_SCRIPT_BUDGET_S:-120}"     # placeholder; effective bound derived at call site (see _derive_parent_stop_budget)
 HANDBACK_START_BUDGET_S="${HANDBACK_START_BUDGET_S:-60}"  # unit hand-back start (the §9 culprit)
 SYSTEMCTL_PROBE_BUDGET_S="${SYSTEMCTL_PROBE_BUDGET_S:-5}"  # reset-failed / is-active probes
 SCOPE_START_BUDGET_S="${SCOPE_START_BUDGET_S:-10}"      # scope-arm/opt-in launcher start
@@ -2616,6 +2616,204 @@ _run_bounded() {
     return "$rc"
 }
 
+# _resolve_wait_s_mirror <env_file> — PARENT-SIDE mirror of the child's
+# WAIT_S resolution chain (scripts/stop-ensemble.sh:113 + 270-289 + 292-307).
+# SYNC-GUARD: this function MUST stay byte-identical in semantics to the
+# child's resolution — see the sync-guard comment at lib.sh:94+STOP_SCRIPT_BUDGET_S
+# for the full invariant. The brief calls for the parent to derive
+# STOP_SCRIPT_BUDGET_S from the SAME resolved WAIT_S the child uses; if
+# the two resolvers drift (e.g. one updates the +10 offset or the
+# floor/cap), the parent's derived budget silently under-covers the
+# child's legitimate worst-case → premature SIGKILL → flip against a
+# still-live daemon (the review finding this fix closes). The
+# tests/test_bounded_subprocess_waits.sh sync-guard case D5 runs BOTH
+# resolvers over the same fixtures and asserts identical output.
+#
+# Precedence (mirrors the child at stop-ensemble.sh:113, 292-307 + 270-289):
+#   1. explicit $WAIT_S env (digits-only) — wins
+#   2. malformed explicit $WAIT_S — fall back to DEFAULT_WAIT_S (NOT
+#      to the .env read; this is a SUBTLE child quirk the mirror
+#      preserves — a malformed operator config is treated as "no
+#      config at all, use the safe default", not "fall through to
+#      the .env read" which would silently honor an unrelated
+#      DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS the operator may
+#      have set for a different purpose).
+#   3. no explicit $WAIT_S — call _resolve_wait_s (which reads the
+#      env file, applies the +10 offset, clamps [FLOOR..CAP],
+#      falls back to DEFAULT_WAIT_S on absent/malformed)
+#
+# Side note: $WAIT_S is the caller's env value (CLI / exported) — the
+# SAME env the child sees (the parent fork-execs the child with
+# PIPELINE_LOCK_HELD_BY_CALLER=1, but the rest of env inherits). A
+# merely-set-but-empty $WAIT_S="" is NOT treated as explicit (it falls
+# through to the .env read), exactly like the child.
+DEFAULT_WAIT_S=70
+WAIT_S_FLOOR=10
+WAIT_S_CAP=600
+_resolve_wait_s_mirror() {
+    local env_file="$1" raw="" val=""
+    # Precedence 1+2: explicit $WAIT_S in the caller's env
+    # (digits-only → win; malformed → fall back to DEFAULT_WAIT_S
+    # without consulting the .env file — mirrors the child).
+    raw="${WAIT_S:-}"
+    if [ -n "$raw" ]; then
+        if printf '%s' "$raw" | grep -Eq '^[0-9]+$'; then
+            printf '%s\n' "$raw"
+            return 0
+        fi
+        # Malformed explicit — fall back to default, do NOT consult .env.
+        printf '%s\n' "$DEFAULT_WAIT_S"
+        return 0
+    fi
+    # Precedence 3: no explicit — read the .env file (sed-extract is
+    # byte-identical to the child's _resolve_wait_s at
+    # stop-ensemble.sh:270-289: same pattern, same handling of
+    # optional `export` prefix, same trailing-CARRIAGE-RETURN strip,
+    # same quote-strip, same digits-only validation, same +10 offset,
+    # same [FLOOR..CAP] clamp, same fallback to DEFAULT_WAIT_S).
+    if [ -n "$env_file" ] && [ -f "$env_file" ]; then
+        raw="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS[[:space:]]*=[[:space:]]*//p' "$env_file" 2>/dev/null | head -1)"
+        raw="${raw%$'\r'}"
+        case "$raw" in
+            \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+            \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+        esac
+    fi
+    if ! printf '%s' "$raw" | grep -Eq '^[0-9]+$'; then
+        printf '%s\n' "$DEFAULT_WAIT_S"
+        return 0
+    fi
+    val=$((raw + 10))
+    [ "$val" -lt "$WAIT_S_FLOOR" ] && val="$WAIT_S_FLOOR"
+    [ "$val" -gt "$WAIT_S_CAP" ] && val="$WAIT_S_CAP"
+    printf '%s\n' "$val"
+}
+
+# _derive_parent_stop_budget [<env_file>] — DERIVES the parent
+# (lib.sh) STOP_SCRIPT_BUDGET_S from the child's RESOLVED WAIT_S (and
+# the other timeouts in the child's stop span), instead of a fixed
+# 120s. Rationale (cite: integration review 2026-10-07, post-2.2b):
+# the parent bounds the `bash "$stop_script" ...` fork-exec; the child
+# (stop-ensemble.sh) can legitimately take its own site-2 stop bound +
+# resolved WAIT_S + UNIT_KILL_GRACE_S + internal _run_bounded TERM
+# grace to complete. A fixed parent budget of 120s under-covers
+# operators with WAIT_S>120 → the parent SIGKILLs the child
+# mid-graceful-wait → premature rc=0 fall-through → the flip may
+# proceed against a still-live daemon. The invariant we establish:
+# "parent budget ≥ child's legitimate worst-case runtime, always, by
+# construction — no fixed-constant coupling left."
+#
+# Composition sum (child's legitimate worst-case, IN-ORDER):
+#   1. child site-2 stop bound — the child's own STOP_SCRIPT_BUDGET_S
+#      (env-shared with the parent; same env inherits across the
+#      fork-exec). Default 120s.
+#   2. resolved WAIT_S — the child's poll loop after systemctl stop
+#      (stop-ensemble.sh:600-609: `while [ $WAITED -lt $WAIT_S ]`). The
+#      child can poll for the full WAIT_S window if the unit takes the
+#      full graceful timeout to drain. Resolved via
+#      _resolve_wait_s_mirror (the parent's mirror of the child's
+#      _resolve_wait_s; sync-guarded).
+#   3. UNIT_KILL_GRACE_S — the child's re-verify poll after
+#      `systemctl kill` SIGKILL escalation (stop-ensemble.sh:615-624).
+#      Default 10s.
+#   4. internal _run_bounded TERM-grace (5s) — the parent's helper
+#      itself takes 5s between TERM and KILL on its OWN bound, but
+#      since the parent bounds the WHOLE child fork-exec (not just the
+#      child's site-2 stop), the child's internal _run_bounded TERM
+#      grace is INSIDE the parent's bound. A hung child's site-2
+#      _run_bounded could legitimately occupy 5s of TERM-grace before
+#      KILL. Compose, don't double-count.
+#   5. margin (+20s) — startup overhead (process spawn, sed-extract,
+#      PID discovery), scheduler latency, and any clock skew between
+#      the two fork-execs. The child itself uses a +10s margin
+#      (stop-ensemble.sh:268: "Budget = graceful timeout + 10s margin");
+#      we use +20s for the cross-process bound (a slightly wider
+#      margin — the cross-process cost is higher than the
+#      intra-process cost).
+# Absolute floor: 120s — preserves the prior default at low WAIT_S
+# (no regression for the 70s-default case in the happy path; the
+# derived default at WAIT_S=70 is 120+70+10+5+20=225, which is MORE
+# generous than the prior 120, but still a tight bound — a healthy
+# stop completes in <2s).
+#
+# <env_file> optional override for the .env path (defaults to
+# $INSTALL_DIR/.env). The test pack passes an explicit path when
+# the caller is a test harness; production callers omit it and let
+# the helper pick up $INSTALL_DIR.
+#
+# Operator override: STOP_SCRIPT_BUDGET_S explicit env → use that value
+# verbatim (the call site never sees the derivation). This preserves
+# the env-overridable knob for sandbox drills + tests.
+#
+# SYNC-GUARD: this default and the child's STOP_SCRIPT_BUDGET_S at
+# stop-ensemble.sh:362 must move TOGETHER. The child's value is
+# 120-default; the parent's derivation picks up the SAME env (child
+# inherits the parent's env across the fork-exec). If you change the
+# child's default, change the child_site2 default here. Likewise,
+# _resolve_wait_s_mirror above MUST stay byte-identical to
+# stop-ensemble.sh:270 _resolve_wait_s; the D8 sync-guard test runs
+# BOTH resolvers over the same fixtures and asserts identical output.
+_derive_parent_stop_budget() {
+    local env_file="${1:-${INSTALL_DIR:-}/.env}"
+    # child_site2 — only honor an explicit STOP_SCRIPT_BUDGET_S env
+    # if it is digits-only. A malformed/non-digits override (e.g. "abc")
+    # falls back to the default; the arithmetic below REQUIRES a
+    # digits value (bash's (( )) triggers "unbound variable" on
+    # non-digits, and the test pack runs with `set -u` — the brief
+    # calls for fail-closed semantics, not silent arithmetic
+    # corruption). Mirrors the child's "malformed WAIT_S → fall back
+    # to default" contract.
+    local child_site2
+    if [ -n "${STOP_SCRIPT_BUDGET_S:-}" ] && printf '%s' "${STOP_SCRIPT_BUDGET_S}" | grep -Eq '^[0-9]+$'; then
+        child_site2="${STOP_SCRIPT_BUDGET_S}"
+    else
+        child_site2=120
+    fi
+    local resolved_ws ukg
+    resolved_ws="$(_resolve_wait_s_mirror "$env_file" 2>/dev/null || printf '%s' "$DEFAULT_WAIT_S")"
+    ukg="${UNIT_KILL_GRACE_S:-10}"
+    local term_grace=5
+    local margin=20
+    local derived
+    derived=$(( child_site2 + resolved_ws + ukg + term_grace + margin ))
+    if [ "$derived" -lt 120 ]; then derived=120; fi
+    printf '%s\n' "$derived"
+}
+
+# _effective_stop_script_budget [<env_file>] — the parent's EFFECTIVE
+# bound for the `bash "$stop_script" ...` fork-exec at the call site.
+# Honors an explicit STOP_SCRIPT_BUDGET_S env (operator override —
+# sandbox drills, tests, or a deliberately tighter bound for a
+# known-fast daemon); otherwise derives from the child's resolved
+# WAIT_S + composition sum. Computed at the call site (NOT at module
+# load) because the parent's `INSTALL_DIR` is per-target and may be
+# unset at lib.sh source-time. The default at lib.sh:94 is a fallback
+# (env-overridable); the DERIVED value here is the one actually used
+# at runtime.
+#
+# Malformed override handling: a STOP_SCRIPT_BUDGET_S that is NOT
+# digits-only (e.g. "" empty, "abc", unset) is treated as NO override —
+# the derivation runs. This mirrors the child's "malformed WAIT_S →
+# fall back to default" semantics: an operator typo cannot produce a
+# nonsense bound that breaks the recovery machinery.
+#
+# <env_file> optional override for the .env path (passed to
+# _derive_parent_stop_budget). Production callers omit it (defaults
+# to $INSTALL_DIR/.env); the test pack passes an explicit path.
+_effective_stop_script_budget() {
+    local env_file="${1:-}"
+    if [ -n "${STOP_SCRIPT_BUDGET_S:-}" ] && printf '%s' "${STOP_SCRIPT_BUDGET_S}" | grep -Eq '^[0-9]+$'; then
+        printf '%s\n' "${STOP_SCRIPT_BUDGET_S}"
+        return 0
+    fi
+    if [ -n "$env_file" ]; then
+        _derive_parent_stop_budget "$env_file"
+    else
+        _derive_parent_stop_budget
+    fi
+}
+
+
 # ── Promote/rollback shared mechanics (D6 + D-FA4.1 amendment) ──────────────
 # stop_via_stop_script — SIGTERM-bounded, ownership-scoped stop. ALWAYS via
 # scripts/stop-ensemble.sh (D6: reused, never duplicated; NEVER a raw kill).
@@ -2689,17 +2887,28 @@ stop_via_stop_script() {
         # stop-ensemble.sh MUST skip its own acquire (Layer ii — Layer i's
         # settle-check too: the pipeline is manifestly not settled while
         # the parent holds the lock).
-        local stop_rc=0
+        #
+        # POST-REVIEW HARDENING (2026-10-07): the bound here is the
+        # EFFECTIVE budget — env-overridden or derived from the child's
+        # resolved WAIT_S (see _effective_stop_script_budget and
+        # _derive_parent_stop_budget). The fixed 120 default at
+        # lib.sh:94 was the prior shape; the fixed-constant coupling
+        # was the review finding. The derived value at WAIT_S=70 is
+        # 225s; at WAIT_S=600 (the cap) it's 750s — both cover the
+        # child's legitimate worst-case runtime with the +20s margin
+        # (see _derive_parent_stop_budget for the composition).
+        local eff_budget stop_rc=0
+        eff_budget="$(_effective_stop_script_budget)"
         if PIPELINE_LOCK_HELD_BY_CALLER=1 \
             ENSEMBLE_SUPERVISION_RESULT="${SUPERVISION_STATE}:${SUPERVISION_UNIT}" \
-            _run_bounded "$STOP_SCRIPT_BUDGET_S" -- bash "$stop_script" "$INSTALL_DIR" "$PORT"; then
+            _run_bounded "$eff_budget" -- bash "$stop_script" "$INSTALL_DIR" "$PORT"; then
             stop_rc=0
         else
             local sbrc=$?
             if [ "$sbrc" = "124" ]; then
-                _warn "stop_script fork-exec timed out (budget=${STOP_SCRIPT_BUDGET_S}s) — falling through to caller's stop verification (child SIGTERM→SIGKILL'd by _run_bounded); function returns 0 (recovery proceeds)"
+                _warn "stop_script fork-exec timed out (budget=${eff_budget}s) — falling through to caller's stop verification (child SIGTERM→SIGKILL'd by _run_bounded); function returns 0 (recovery proceeds)"
                 journal_history_append subprocess_wait_timeout \
-                    "site=stop_via_stop_script_unit kind=budget reason=$(printf 'child: timeout(STOP_SCRIPT_BUDGET_S=%s)' "$STOP_SCRIPT_BUDGET_S") path=$stop_script unit=$SUPERVISION_UNIT rc=124 — SIGTERM→SIGKILL, falling through to recovery (rc=0)" \
+                    "site=stop_via_stop_script_unit kind=budget reason=$(printf 'child: timeout(eff_budget=%s)' "$eff_budget") path=$stop_script unit=$SUPERVISION_UNIT rc=124 — SIGTERM→SIGKILL, falling through to recovery (rc=0)" \
                     || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
                 stop_rc=0   # timeout = recovery continues; do NOT propagate
             else
@@ -2716,17 +2925,20 @@ stop_via_stop_script() {
         # 2.2b — same bound on the pid-scoped fork-exec (mirror of the
         # UNIT path above; same budget + timeout-vs-failure rc policy).
         # PIPELINE_LOCK_HELD_BY_CALLER=1 — same reason: the parent holds
-        # the lock; the child MUST NOT acquire (Layer ii).
-        local stop_rc=0
+        # the lock; the child MUST NOT acquire (Layer ii). POST-REVIEW
+        # HARDENING: the bound is the EFFECTIVE budget (env override or
+        # derived) — same derivation as the UNIT path above.
+        local eff_budget stop_rc=0
+        eff_budget="$(_effective_stop_script_budget)"
         if PIPELINE_LOCK_HELD_BY_CALLER=1 \
-            _run_bounded "$STOP_SCRIPT_BUDGET_S" -- bash "$stop_script" "$INSTALL_DIR" "$PORT"; then
+            _run_bounded "$eff_budget" -- bash "$stop_script" "$INSTALL_DIR" "$PORT"; then
             stop_rc=0
         else
             local sbrc=$?
             if [ "$sbrc" = "124" ]; then
-                _warn "stop_script fork-exec timed out (budget=${STOP_SCRIPT_BUDGET_S}s) — falling through to caller's stop verification (child SIGTERM→SIGKILL'd by _run_bounded); function returns 0 (recovery proceeds)"
+                _warn "stop_script fork-exec timed out (budget=${eff_budget}s) — falling through to caller's stop verification (child SIGTERM→SIGKILL'd by _run_bounded); function returns 0 (recovery proceeds)"
                 journal_history_append subprocess_wait_timeout \
-                    "site=stop_via_stop_script_pid kind=budget reason=$(printf 'child: timeout(STOP_SCRIPT_BUDGET_S=%s)' "$STOP_SCRIPT_BUDGET_S") path=$stop_script rc=124 — SIGTERM→SIGKILL, falling through to recovery (rc=0)" \
+                    "site=stop_via_stop_script_pid kind=budget reason=$(printf 'child: timeout(eff_budget=%s)' "$eff_budget") path=$stop_script rc=124 — SIGTERM→SIGKILL, falling through to recovery (rc=0)" \
                     || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
                 stop_rc=0
             else
