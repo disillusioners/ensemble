@@ -133,7 +133,11 @@ class TestRelPathShape:
             "foo/..",  # trailing traversal
             "..",  # bare traversal
             "foo\x00bar",  # null byte
-            "foo\x01bar",  # control char
+            "foo\x01bar",  # control char (C0)
+            "foo\x7Fbar",  # DEL (REWORK 2026-10-07 m3)
+            "foo\x80bar",  # C1 lower bound
+            "foo\x9Fbar",  # C1 upper bound
+            "foo\x9Bbar",  # C1 CSI
             "foo\\bar",  # backslash
         ],
     )

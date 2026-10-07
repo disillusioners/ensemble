@@ -166,8 +166,21 @@ def is_well_formed_rel_path(rel: str) -> bool:
     """
     if not rel:
         return False
-    # Null bytes / control chars — covered by ``any(ord(c) < 0x20 for c in rel)``
-    if any(ord(c) < 0x20 for c in rel):
+    # Null bytes / control chars — REWORK 2026-10-07 (m3):
+    # the C0 range (ord < 0x20) is rejected as before. The
+    # DEL char (0x7F) and the C1 range (U+0080–U+009F) are
+    # now ALSO rejected — they are control chars in disguise
+    # that survive a regex check on printable ASCII but a
+    # terminal or a misconfigured HTTP middlebox can render
+    # them as escape sequences (e.g. CSI 0x9B). The
+    # architectural rule is the same: the rel must be
+    # printable, no control chars at all.
+    if any(
+        (ord(c) < 0x20)
+        or (ord(c) == 0x7F)
+        or (0x80 <= ord(c) <= 0x9F)
+        for c in rel
+    ):
         return False
     if "\\" in rel:
         return False
@@ -239,17 +252,14 @@ class ResolvedTarget:
     size_bytes: int
     root_type: str  # "filesystem" | "project_scoped" | "tmp_images"
 
-    def raise_if_over_cap(self, max_bytes: int = _MAX_SERVED_BYTES) -> None:
-        """Raise ``ValueError`` if the size exceeds the cap.
-
-        Surfaced as a 404 by the router (uniform miss — never a
-        stack trace or a per-shape error message). The cap is a
-        soft guard against serving a multi-GB log by accident.
-        """
-        if self.size_bytes > max_bytes:
-            raise ValueError(
-                f"served file exceeds cap ({self.size_bytes} > {max_bytes})"
-            )
+    # REWORK 2026-10-07 (m5): ``raise_if_over_cap`` was dead
+    # code — no caller ever invoked it (the router's
+    # cap check is the service's ``size > _MAX_SERVED_BYTES``
+    # at resolve time, and the post-M4 router's
+    # ``_fd_read`` re-checks via fstat at the read layer).
+    # The size cap survives as a service-level guard on
+    # the resolve path AND as a router-level guard on the
+    # read path; this dataclass just carries the metadata.
 
 
 class LiveViewsServiceError(Exception):
@@ -480,9 +490,9 @@ class LiveViewsService:
         entry,
     ) -> ResolvedTarget:
         # The TmpImageStore is the substrate. ``rel_path`` is the
-        # bare 32-hex image id; the store's open_with_meta
-        # supplies the sidecar-MIME. We delegate entirely to
-        # the store — the same resolution logic that
+        # bare 32-hex image id; the store's stat_with_meta /
+        # open_with_meta supply the sidecar-MIME. We delegate
+        # the resolve to the store — the same shape that
         # ``daemon/routers/tmp_images.py:387`` uses, so a
         # ``/views/tmp-images/<id>`` URL and a
         # ``/api/tmp_images/<id>`` URL both serve the same bytes
@@ -497,7 +507,17 @@ class LiveViewsService:
         if not re.match(r"^[a-f0-9]{32}$", image_id):
             raise RootNotFoundError(root_name)
         try:
-            data, content_type, _sha = self._tmp_image_store.open_with_meta(image_id)
+            # REWORK 2026-10-07 (m4): use ``stat_with_meta`` so
+            # the resolve layer does NOT read the blob bytes
+            # (the prior ``open_with_meta`` call read the full
+            # blob just to populate ``size_bytes``, then the
+            # router's GET/HEAD layer read it again). The
+            # ``stat`` is a no-read kernel call; the sidecar
+            # is a small JSON read. The blob is read once, at
+            # the router layer.
+            size, content_type, _sha = self._tmp_image_store.stat_with_meta(
+                image_id
+            )
         except Exception as exc:
             # Any error from the store (TmpImageNotFound, torn
             # sidecar, OSError) maps to a uniform 404.
@@ -512,9 +532,35 @@ class LiveViewsService:
         return ResolvedTarget(
             on_disk_path=self._tmp_image_store.dir / image_id,
             content_type=content_type,
-            size_bytes=len(data),
+            size_bytes=size,
             root_type="tmp_images",
         )
+
+    # ────────────────── tmp-images public open (REWORK m4) ──────────────────
+
+    def open_tmp_image(self, image_id: str) -> tuple[bytes, str, str] | None:
+        """Read the bytes + content_type + sha for a tmp-image id.
+
+        REWORK 2026-10-07 (m4): the router previously reached
+        into ``self._tmp_image_store.open_with_meta`` (a
+        private-attr access from outside the service). The
+        public method on the service is the same wire with a
+        name that survives grep + review. Returns ``None``
+        on any store error (the router collapses ``None`` to
+        the uniform 404). The store is the one that owns the
+        read; the service is the seam the router reaches.
+        """
+        if self._tmp_image_store is None:
+            return None
+        try:
+            return self._tmp_image_store.open_with_meta(image_id)
+        except Exception as exc:
+            logger.debug(
+                "[LiveViews] tmp-images open miss for %s: %s",
+                image_id,
+                exc,
+            )
+            return None
 
     # ────────────────── shared containment check ──────────────────
 
