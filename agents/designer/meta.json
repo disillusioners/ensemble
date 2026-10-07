@@ -15,7 +15,8 @@
               "image", "knowledge", "mcp", "context", "shared_meta_kv",
               "instance", "service", "midflight", "dynamic-skill",
               "design",
-              "od.generate", "od.compose_brief", "od.save", "od.lint"]
+              "od.generate", "od.compose_brief", "od.save", "od.lint",
+              "view_link"]
   },
   "context_injection": { "heuristic_match_shared_md_files": true },
   "team_members": ["worker"]

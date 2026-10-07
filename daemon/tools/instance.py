@@ -241,6 +241,7 @@ from .doc_commit import create_doc_commit_tools
 from .chart_tools import create_chart_tools
 from .compare_tools import create_compare_tools
 from .image_tools import create_image_tools
+from .live_views import create_live_view_tools
 from .todo_tools import create_todo_tools
 from .question_tools import create_question_tools
 from .midflight_report import create_midflight_tools
@@ -5837,6 +5838,22 @@ Returns:
     # Image tools (always available, like chart tools)
     image_tools = create_image_tools(manager, current_instance_id)
     tools.extend(image_tools)
+
+    # ── Live-view URL minter (Phase 1, 2026-10-07) — the
+    # ``view_link`` tool mints URLs for the ``/views/<root>/<rel>``
+    # HTTP route family. Read-only, default-open universe (the
+    # tool name is in KNOWN_TOOL_NAMES, so per-agent visibility
+    # is the uniform allow/deny gate; no per-agent meta.json
+    # edits are required for non-designer agents). Designer adds
+    # the explicit allow entry for schema visibility — already-
+    # exhaustive in designer's meta.json. Service is read at
+    # request time via ``manager.live_views_service``; the
+    # factory does not capture a service reference, so a
+    # lifespan that fails to wire the service yields a typed
+    # "Error: live-views service not initialized" envelope
+    # rather than a crash.
+    live_view_tool_list = create_live_view_tools(manager, current_instance_id)
+    tools.extend(live_view_tool_list)
 
     # ── Todo tools (per-instance todo list with SSE emission, always available) ──
     # NOTE: NOT inside the is_rag_enabled() block — these are always available,

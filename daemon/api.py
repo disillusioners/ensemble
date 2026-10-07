@@ -396,6 +396,7 @@ async def lifespan(app: FastAPI):
         ensemble_config,
         credential_manager=credential_manager,
         tmp_image_store=tmp_image_store,
+        live_views_service=None,  # wired below after the manager is alive
     )
     await manager.initialize()
 
@@ -1085,6 +1086,14 @@ async def lifespan(app: FastAPI):
         project_workdir_by_shortname_resolver=_resolve_project_workdir_by_shortname,
     )
     app.state.live_views_service = live_views_service
+    # Thread the service onto the manager so the ``view_link``
+    # tool factory can read it via ``manager.live_views_service``
+    # (mirrors the tmp_image_store injection shape; the manager
+    # is the canonical seam tools reach shared per-app state
+    # through). Lazy direct attribute write is safe — the
+    # InstanceManager exposes the service through a public
+    # property; the backing field is a normal instance attr.
+    manager._live_views_service = live_views_service
     daemon_logger.info(
         f"[LiveViews] subsystem ready: enabled={config.live_views.enabled} "
         f"roots={live_views_service.root_names() or '[]'}"
