@@ -39,10 +39,19 @@ import inspect
 import logging
 import os
 import textwrap
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# Repo root used by the T6 anti-drift AST scans (test_one_frozenset_definition
+# and test_proactive_site_imports_frozenset). The original tests defaulted to
+# a hardcoded macOS checkout path which silently produced zero matches on any
+# other host; derive from the test-file location so the scans resolve to the
+# actual daemon source tree in any checkout. REPO_ROOT env override still wins
+# for cross-checkout CI runs.
+_DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 from daemon.compaction import (
     CompactionContext,
@@ -767,7 +776,7 @@ class TestT6AntiDrift:
         repo_root = Path(
             os.environ.get(
                 "REPO_ROOT",
-                "/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+                str(_DEFAULT_REPO_ROOT),
             )
         )
         import ast
@@ -803,7 +812,7 @@ class TestT6AntiDrift:
         repo_root = Path(
             os.environ.get(
                 "REPO_ROOT",
-                "/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+                str(_DEFAULT_REPO_ROOT),
             )
         )
         import ast
