@@ -187,6 +187,10 @@ class TestWatchJobMissionTerminalToolGate:
             job_type="message",
         )
         job_service.get_work.return_value = record
+        # Tool path awaits ``notify_watchers`` and compares the count
+        # against 0 — an unstubbed AsyncMock return raises
+        # TypeError ("'>' not supported between AsyncMock and int").
+        job_service.notify_watchers = AsyncMock(return_value=1)
 
         watch_job = tools[17]
         result = await watch_job.ainvoke({
@@ -265,7 +269,9 @@ class TestNotifyWatchersMissionTerminalGate:
     """
 
     @pytest.mark.asyncio
-    async def test_mission_terminal_watcher_held_when_mission_not_terminal(self) -> None:
+    async def test_mission_terminal_watcher_held_when_mission_not_terminal(
+        self, monkeypatch,
+    ) -> None:
         """A watcher that opted in via ``mission_terminal`` is held
         back when the linked instance is still in a non-terminal
         liveness. The watcher row stays in place — no
@@ -296,6 +302,21 @@ class TestNotifyWatchersMissionTerminalGate:
         watcher_repo.claim_watchers_for_job_for_instances = MagicMock(
             return_value=[]
         )
+
+        # C1 (2026-09-25) replaced the ``work_record.mission_liveness``
+        # proxy sniff with the canonical ``evaluate_mission_live``
+        # guard. Stub the guard to the LIVE verdict so this test
+        # exercises the real hold path (an unstubbed guard against
+        # MagicMock repositories returns an accidental not-live
+        # verdict and the watcher wrongly reaches the claim bucket).
+        from types import SimpleNamespace
+
+        import daemon.services.work_notifier as _wn
+
+        async def _stub_mission_live_guard(**kwargs):
+            return SimpleNamespace(live=True, reason="stub-mission-live")
+
+        monkeypatch.setattr(_wn, "evaluate_mission_live", _stub_mission_live_guard)
 
         notified = await notify_work_watchers(
             "job-1",
