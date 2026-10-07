@@ -404,8 +404,9 @@ An Ari interaction is successful when:
 
 When a new project is provisioned (or a fresh host comes online), the
 **charter** agent's render toolchain needs to be pre-warmed as a deploy
-step — invoking the `install-mermaid-cli` skill (sibling to the
-`install-opendesign` pattern) before the first chart is requested.
+step — invoking the `install-mermaid-cli` skill
+(`agents/charter/skills-template/install-mermaid-cli.md`) before the
+first chart is requested.
 This installs `mmdc` (mermaid-cli v12) + `puppeteer` + `chromium` in
 user space under nvm-managed Node 24, writes the config file the
 4-signal READINESS_PROBE reads (`~/.config/charter-mermaid-puppeteer.json`),
