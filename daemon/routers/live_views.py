@@ -114,12 +114,23 @@ def build_router() -> APIRouter:
         if service is None or not service.enabled():
             return _uniform_404()
         try:
+            # REWORK 2026-10-07 (M2): every registered root is
+            # now anonymous-resolvable (designer-artifact moved
+            # from filesystem-against-calling-instance to
+            # project_scoped, so the project is named in the URL,
+            # not pulled from ``request.state.instance_id``). The
+            # per-instance workdir argument is still accepted on
+            # the service signature for OPERATOR-supplied
+            # filesystem roots that opt into instance workdir
+            # resolution; the seeded three roots do not consult
+            # it. We pass ``None`` here — nothing in the daemon
+            # ever set ``request.state.instance_id`` anyway, so
+            # the prior wiring was a permanent 404 for every
+            # anonymous browser hit.
             resolved = service.resolve_for_instance(
                 root_name,
                 rel_path,
-                calling_instance_id=getattr(
-                    request.state, "instance_id", None
-                ),
+                calling_instance_id=None,
             )
         except (RootNotFoundError, TraversalError, PathNotFoundError):
             return _uniform_404()

@@ -98,27 +98,38 @@ def _build_service(  # pragma: no cover - kept for future tests
 
 @pytest.fixture
 def client_with_filesystem_root(filesystem_root_dir: pathlib.Path) -> TestClient:
-    """A client with a real ``designer-artifact`` filesystem root.
+    """A client with a real ``designer-artifact`` project-scoped root.
 
-    The root is anchored at the project workdir (mirrors the
-    production wiring shape). The mockup files are at
-    ``<workdir>/.agents/shared/planning/feat/design/mockups/``.
+    REWORK 2026-10-07 (M2): ``designer-artifact`` is
+    project_scoped (not filesystem-against-calling-instance),
+    so the URL pattern is
+    ``/views/designer-artifact/<shortname>/<rel>``. The
+    shortname ``ens`` maps to the test workdir; the rel must
+    include ``design/mockups`` as a contiguous subpath
+    (M3 structural gate). The mockup files are at
+    ``<workdir>/.agents/shared/planning/feat/design/mockups/``;
+    the URL is ``/views/designer-artifact/ens/feat/design/mockups/landing.html``.
     """
     cfg = LiveViewsConfig()
-    # ``designer-artifact`` is special: the service resolves
-    # ``path`` relative to the caller's project workdir. The
-    # project workdir is provided by the lifespan; the router
-    # looks it up via ``request.state.instance_id``. For the
-    # unit test we patch the resolver directly.
+    # REWORK 2026-10-07 (M2+M3): the root is project_scoped with
+    # the canonical ``design/mockups`` subpath enforcement. The
+    # test wires the per-shortname workdir resolver to the test
+    # workdir (the router's call to ``resolve_for_instance`` is
+    # anonymous — no ``request.state.instance_id``).
     workdir = filesystem_root_dir
     cfg.roots["designer-artifact"] = LiveViewsRootConfig(
-        type="filesystem",
+        type="project_scoped",
         path=".agents/shared/planning",
+        required_rel_subpath=["design", "mockups"],
+        # Kept for the extension-not-allowed 404 test below —
+        # only HTML is allowed under the mockups subtree.
         allowed_extensions=["html"],
     )
     service = LiveViewsService(
         config=cfg,
-        project_workdir_resolver=lambda _iid: str(workdir),
+        project_workdir_by_shortname_resolver=lambda shortname: (
+            str(workdir) if shortname == "ens" else None
+        ),
     )
     app = FastAPI()
     app.include_router(build_router())
@@ -159,7 +170,7 @@ class TestUniform404:
         self, client_with_filesystem_root: TestClient
     ):
         resp = client_with_filesystem_root.get(
-            "/views/designer-artifact/no-such.html"
+            "/views/designer-artifact/ens/no-such.html"
         )
         assert resp.status_code == 404
         assert resp.json() == {"error": "view not found"}
@@ -168,7 +179,7 @@ class TestUniform404:
         self, client_with_filesystem_root: TestClient
     ):
         resp = client_with_filesystem_root.get(
-            "/views/designer-artifact/../etc/passwd"
+            "/views/designer-artifact/ens/../etc/passwd"
         )
         assert resp.status_code == 404
         assert resp.json() == {"error": "view not found"}
@@ -179,7 +190,24 @@ class TestUniform404:
         # %2e%2e → '..' after URL decode (FastAPI decodes for
         # us). The shape check rejects.
         resp = client_with_filesystem_root.get(
-            "/views/designer-artifact/%2e%2e/etc/passwd"
+            "/views/designer-artifact/ens/%2e%2e/etc/passwd"
+        )
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "view not found"}
+
+    def test_double_double_encoded_traversal_returns_uniform_404(
+        self, client_with_filesystem_root: TestClient
+    ):
+        # REWORK 2026-10-07 (m2 router pin): %252e%252e →
+        # '%2e%2e' (literal three-char string) after one URL
+        # decode. The shape check does NOT trip on '%2e%2e'
+        # (that's not '..'), and the literal string cannot
+        # resolve to a file. The result MUST still be a uniform
+        # 404 — an attacker who can get the literal three-char
+        # string past the decoder must not see a path-disclosure
+        # or a different status code.
+        resp = client_with_filesystem_root.get(
+            "/views/designer-artifact/ens/%252e%252e/etc/passwd"
         )
         assert resp.status_code == 404
         assert resp.json() == {"error": "view not found"}
@@ -190,7 +218,7 @@ class TestUniform404:
         # The root's allowlist is ["html"]. A .exe file
         # (hypothetically present) would 404.
         resp = client_with_filesystem_root.get(
-            "/views/designer-artifact/feat/design/mockups/landing.exe"
+            "/views/designer-artifact/ens/feat/design/mockups/landing.exe"
         )
         assert resp.status_code == 404
         assert resp.json() == {"error": "view not found"}
@@ -231,7 +259,7 @@ class TestFilesystemRootHappy:
         self, client_with_filesystem_root: TestClient
     ):
         resp = client_with_filesystem_root.get(
-            "/views/designer-artifact/feat/design/mockups/landing.html"
+            "/views/designer-artifact/ens/feat/design/mockups/landing.html"
         )
         assert resp.status_code == 200
         assert resp.headers["x-content-type-options"] == "nosniff"
@@ -243,7 +271,7 @@ class TestFilesystemRootHappy:
         self, client_with_filesystem_root: TestClient
     ):
         resp = client_with_filesystem_root.head(
-            "/views/designer-artifact/feat/design/mockups/landing.html"
+            "/views/designer-artifact/ens/feat/design/mockups/landing.html"
         )
         assert resp.status_code == 200
         assert resp.headers["x-content-type-options"] == "nosniff"
@@ -318,7 +346,7 @@ class TestHardeningHeaders:
         self, client_with_filesystem_root: TestClient
     ):
         resp = client_with_filesystem_root.get(
-            "/views/designer-artifact/feat/design/mockups/landing.html"
+            "/views/designer-artifact/ens/feat/design/mockups/landing.html"
         )
         assert resp.headers["x-content-type-options"] == "nosniff"
 
@@ -327,7 +355,7 @@ class TestHardeningHeaders:
         # 404 to image/svg+xml (architect ruling, mirrors
         # /api/tmp_images/:430).
         resp = client_with_filesystem_root.get(
-            "/views/designer-artifact/no-such"
+            "/views/designer-artifact/ens/no-such"
         )
         assert resp.headers["x-content-type-options"] == "nosniff"
 
@@ -335,7 +363,7 @@ class TestHardeningHeaders:
         self, client_with_filesystem_root: TestClient
     ):
         resp = client_with_filesystem_root.get(
-            "/views/designer-artifact/feat/design/mockups/landing.html"
+            "/views/designer-artifact/ens/feat/design/mockups/landing.html"
         )
         # private caching, short TTL — the artifacts can change
         # (design revisions) so we don't want long browser caches.
@@ -359,7 +387,7 @@ class TestMethodWhitelist:
         # POST on /views/* doesn't match any declared method.
         # FastAPI returns 405 Method Not Allowed (NOT a 200).
         resp = client_with_filesystem_root.post(
-            "/views/designer-artifact/feat/design/mockups/landing.html"
+            "/views/designer-artifact/ens/feat/design/mockups/landing.html"
         )
         assert resp.status_code == 405
 
@@ -367,7 +395,7 @@ class TestMethodWhitelist:
         self, client_with_filesystem_root: TestClient
     ):
         resp = client_with_filesystem_root.delete(
-            "/views/designer-artifact/feat/design/mockups/landing.html"
+            "/views/designer-artifact/ens/feat/design/mockups/landing.html"
         )
         assert resp.status_code == 405
 
@@ -375,7 +403,7 @@ class TestMethodWhitelist:
         self, client_with_filesystem_root: TestClient
     ):
         resp = client_with_filesystem_root.put(
-            "/views/designer-artifact/feat/design/mockups/landing.html"
+            "/views/designer-artifact/ens/feat/design/mockups/landing.html"
         )
         assert resp.status_code == 405
 
@@ -418,14 +446,20 @@ class TestLivez:
         self, filesystem_root_dir: pathlib.Path
     ):
         cfg = LiveViewsConfig()
+        # REWORK 2026-10-07 (M2): designer-artifact is
+        # project_scoped. The livez probe only inspects the
+        # registry shape; the resolver is never called.
         cfg.roots["designer-artifact"] = LiveViewsRootConfig(
-            type="filesystem",
+            type="project_scoped",
             path=".agents/shared/planning",
+            required_rel_subpath=["design", "mockups"],
             allowed_extensions=["html"],
         )
         service = LiveViewsService(
             config=cfg,
-            project_workdir_resolver=lambda _iid: str(filesystem_root_dir),
+            project_workdir_by_shortname_resolver=lambda _s: str(
+                filesystem_root_dir
+            ),
         )
         c = self._build_app_with_livez(service)
         resp = c.get("/views/livez")

@@ -241,6 +241,19 @@ class TestPhase1SeedDefaults:
             "tmp-images",
         }
 
+    def test_seed_designer_artifact_is_project_scoped_with_mockups_gate(self):
+        # REWORK 2026-10-07 (M2+M3): the designer-artifact seed
+        # is project_scoped (anonymous-resolvable by shortname)
+        # and carries the ``required_rel_subpath`` gate that
+        # enforces the canonical mockups subtree shape by
+        # construction. The old filesystem-against-calling-instance
+        # wiring was a permanent 404 for anonymous browser hits
+        # (M2 finding).
+        cfg = LiveViewsConfig()
+        da = cfg.roots["designer-artifact"]
+        assert da.type == "project_scoped"
+        assert da.required_rel_subpath == ["design", "mockups"]
+
     def test_service_root_names_match_phase1(self, tmp_path: pathlib.Path):
         # Building the service with a default config + a live
         # TmpImageStore registers exactly the three names.
@@ -839,3 +852,128 @@ class TestProjectScopedRoot:
         )
         with pytest.raises(TraversalError):
             svc.resolve_for_instance("planning", "ens/../../etc/passwd")
+
+
+class TestProjectScopedMockupsSubtreeGate:
+    """REWORK 2026-10-07 (M2+M3): ``designer-artifact`` is a
+    project_scoped root with the canonical mockups subtree
+    prefix enforced structurally via the new
+    ``required_rel_subpath`` config field.
+
+    These tests pin the M2+M3 closure:
+    * the rel's parts must contain ``['design', 'mockups']`` as
+      a contiguous subsequence (M3 structural enforcement);
+    * the URL pattern ``<shortname>/<feature>/design/mockups/<file>``
+      resolves; arbitrary rels (e.g. ``<shortname>/spec.md``) do
+      not — the M3 closure in action.
+    """
+
+    def _service(
+        self,
+        shortname_map: dict[str, str | None],
+        required: list[str] | None,
+    ) -> LiveViewsService:
+        cfg = LiveViewsConfig()
+        cfg.roots["designer-artifact"] = LiveViewsRootConfig(
+            type="project_scoped",
+            path=".agents/shared/planning",
+            required_rel_subpath=required,
+        )
+
+        def resolver(shortname: str) -> str | None:
+            return shortname_map.get(shortname)
+
+        return LiveViewsService(
+            config=cfg,
+            project_workdir_by_shortname_resolver=resolver,
+        )
+
+    def test_happy_path_serves_under_mockups_subtree(
+        self, tmp_path: pathlib.Path
+    ):
+        workdir = tmp_path / "ens"
+        workdir.mkdir()
+        mockup = (
+            workdir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        mockup.mkdir(parents=True)
+        (mockup / "landing.html").write_text("<h1>OK</h1>")
+        svc = self._service(
+            {"ens": str(workdir)},
+            ["design", "mockups"],
+        )
+        resolved = svc.resolve_for_instance(
+            "designer-artifact", "ens/feat/design/mockups/landing.html"
+        )
+        assert (
+            resolved.on_disk_path
+            == workdir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+            / "landing.html"
+        )
+
+    def test_rel_outside_mockups_subtree_rejected(self, tmp_path: pathlib.Path):
+        workdir = tmp_path / "ens"
+        workdir.mkdir()
+        # A planning file OUTSIDE the mockups subtree — this
+        # is what M3 must NOT serve. The file exists; the
+        # M3 gate refuses the rel shape.
+        planning = workdir / ".agents" / "shared" / "planning"
+        planning.mkdir(parents=True)
+        (planning / "spec.md").write_text("LEAK")
+        svc = self._service(
+            {"ens": str(workdir)},
+            ["design", "mockups"],
+        )
+        with pytest.raises(RootNotFoundError):
+            svc.resolve_for_instance(
+                "designer-artifact", "ens/spec.md"
+            )
+
+    def test_rel_missing_contiguous_subpath_rejected(
+        self, tmp_path: pathlib.Path
+    ):
+        # A rel that contains 'design' but NOT contiguously
+        # followed by 'mockups' (e.g. 'design-foo/mockups/...')
+        # must be rejected — the structural gate requires
+        # CONTIGUITY, not just substring containment.
+        workdir = tmp_path / "ens"
+        workdir.mkdir()
+        (workdir / ".agents" / "shared" / "planning").mkdir(parents=True)
+        svc = self._service(
+            {"ens": str(workdir)},
+            ["design", "mockups"],
+        )
+        with pytest.raises(RootNotFoundError):
+            svc.resolve_for_instance(
+                "designer-artifact", "ens/design-foo/mockups/landing.html"
+            )
+
+    def test_no_required_rel_subpath_means_no_gate(self, tmp_path: pathlib.Path):
+        # An operator-supplied project_scoped root WITHOUT a
+        # required_rel_subpath does NOT enforce the mockups
+        # gate (the field is optional; absent = no gate).
+        workdir = tmp_path / "ens"
+        workdir.mkdir()
+        (workdir / ".agents" / "shared" / "planning").mkdir(parents=True)
+        (workdir / ".agents" / "shared" / "planning" / "spec.md").write_text(
+            "hi"
+        )
+        svc = self._service({"ens": str(workdir)}, None)
+        resolved = svc.resolve_for_instance(
+            "designer-artifact", "ens/spec.md"
+        )
+        assert resolved.on_disk_path == (
+            workdir / ".agents" / "shared" / "planning" / "spec.md"
+        )

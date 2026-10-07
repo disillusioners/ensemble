@@ -2134,6 +2134,20 @@ class LiveViewsRootConfig(BaseModel):
             "list are 404'd. Ignored for tmp_images (MIME from sidecar)."
         ),
     )
+    required_rel_subpath: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional structural gate for project_scoped roots. The rel "
+            "path's ``/``-separated parts must contain the listed segments "
+            "as a CONTIGUOUS subsequence (e.g. ``['design', 'mockups']`` "
+            "enforces the canonical mockups subtree prefix). When set, any "
+            "rel that does not contain the subpath as a contiguous "
+            "subsequence 404s uniformly — the operator cannot accidentally "
+            "expose the parent planning tree under a sub-scoped name. "
+            "Ignored for filesystem + tmp_images (they are entry-scoped, "
+            "not sub-scoped)."
+        ),
+    )
     description: str = Field(
         default="",
         description="Free-form description (logs, agent docs).",
@@ -2148,12 +2162,20 @@ def _seed_phase1_roots() -> dict[str, "LiveViewsRootConfig"]:
     ``view_link`` tool and ``/views/*`` route family are NOT
     inert on a default boot:
 
-    * ``designer-artifact`` (filesystem) — the canonical
-      ``.agents/shared/planning/<feature>/design/mockups/`` subtree
-      of the calling instance's project. Resolved RELATIVE to the
-      project workdir by the lifespan; ``allowed_extensions`` is
-      left at the default (no extension gate) so designers can ship
-      any artifact shape Phase 1 expects (HTML, MD, SVG, JSON, ...).
+    * ``designer-artifact`` (project_scoped) — the canonical
+      ``<workdir>/.agents/shared/planning/<feature>/design/mockups/``
+      subtree of the project named in the URL. REWORK 2026-10-07
+      (M2, user decision): the root is project_scoped, NOT
+      filesystem-against-calling-instance, so an anonymous
+      browser hit resolves by shortname lookup exactly like
+      ``planning``. The first URL segment after the root is the
+      project shortname; the rest is the path under
+      ``.agents/shared/planning/``. The mockups subtree
+      prefix is enforced by the ``required_rel_subpath``
+      structural gate (``['design', 'mockups']``) so the
+      URL cannot serve arbitrary planning files under the
+      ``designer-artifact`` name (M3: enforcement is
+      structural, not conventional).
     * ``planning`` (project_scoped) — the project workdir's
       ``.agents/shared/planning/`` tree, addressed via the
       project's registered shortname as the first URL segment.
@@ -2179,13 +2201,22 @@ def _seed_phase1_roots() -> dict[str, "LiveViewsRootConfig"]:
     """
     return {
         "designer-artifact": LiveViewsRootConfig(
-            type="filesystem",
+            type="project_scoped",
             path=".agents/shared/planning",
+            # REWORK 2026-10-07 (M3): structural mockups-subtree
+            # enforcement. The rel's ``/``-separated parts must
+            # contain ``design/mockups`` as a contiguous
+            # subsequence; ``feat/design/mockups/landing.html``
+            # passes (``design``+``mockups`` are adjacent parts),
+            # ``feat/random.html`` 404s uniformly.
+            required_rel_subpath=["design", "mockups"],
             description=(
                 "Designer mockups under "
-                ".agents/shared/planning/<feature>/design/mockups/. "
-                "Path is resolved relative to the calling instance's "
-                "project workdir at request time."
+                "<project_workdir>/.agents/shared/planning/<feature>/design/mockups/. "
+                "Project-scoped via shortname (REWORK M2 2026-10-07): "
+                "URL shape /views/designer-artifact/<project_shortname>/<feature>/design/mockups/<file>. "
+                "The required_rel_subpath gate enforces the canonical "
+                "mockups subtree shape by construction."
             ),
         ),
         "planning": LiveViewsRootConfig(

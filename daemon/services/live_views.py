@@ -32,12 +32,22 @@ SECURITY HARD REQUIREMENTS (architect ruling, 2026-10-07):
 
 Three seed roots ship by default (config-driven; operator-editable):
 
-* ``designer-artifact`` (filesystem) — the canonical
-  ``.agents/shared/planning/{feature}/design/mockups/`` subtree.
-  Resolved RELATIVE to the project workdir of the calling
-  instance (the designer writes here, so a per-instance workdir
-  resolution matches the existing image-tools pattern at
-  ``daemon/tools/image_tools.py:465-480``).
+* ``designer-artifact`` (project_scoped, REWORK 2026-10-07 M2) —
+  the canonical
+  ``<workdir>/.agents/shared/planning/<feature>/design/mockups/``
+  subtree of the project named in the URL. URL shape
+  ``/views/designer-artifact/<project_shortname>/<feature>/design/mockups/<file>``:
+  the first URL segment after the root is the project shortname
+  (anonymous-resolvable, exactly like ``planning``), and the
+  rel must include the ``design/mockups`` subpath as a
+  contiguous subsequence (REWORK M3, structural enforcement
+  via the new ``required_rel_subpath`` config field). The
+  pre-M2 design anchored the path on the calling instance's
+  project workdir via ``request.state.instance_id``; nothing in
+  the daemon ever set that attribute, so every anonymous
+  browser hit on ``/views/designer-artifact/<rel>`` was a
+  permanent 404. The project_scoped re-shape closes that gap
+  by making the URL pattern carry the project locator.
 * ``planning`` (project_scoped) — URL pattern
   ``/views/planning/<project_shortname>/<rel>`` resolves to
   ``<project_workdir>/.agents/shared/planning/<rel>``. This is
@@ -372,42 +382,25 @@ class LiveViewsService:
             # 404); no path disclosure.
             raise RootNotFoundError(root_name)
 
-        # The ``designer-artifact`` root is special: its ``path``
-        # is RELATIVE to the caller's project workdir. The
-        # operator typically writes
-        # ``.agents/shared/planning/{feature}/design/mockups``
-        # into the config — that is the per-project subdir, so
-        # we prefix it with the resolved workdir.
-        if root_name == "designer-artifact":
-            # The resolver is invoked for the caller's project
-            # workdir. ``calling_instance_id`` is a hint for
-            # per-instance resolution; when it's ``None`` (the
-            # router received an anonymous request, e.g. a curl
-            # from a test) the resolver still gets a chance to
-            # return the default workdir. A resolver that does
-            # not care about the instance id (the test shape)
-            # will return the same workdir regardless.
-            workdir = (
-                self._project_workdir_resolver(calling_instance_id)
-                if self._project_workdir_resolver is not None
-                else None
-            )
-            if not workdir:
-                # The operator enabled this root but no
-                # workdir could be resolved — uniform 404
-                # (no leak about the caller's project state).
-                raise RootNotFoundError(root_name)
-            root_dir = Path(workdir) / entry.path
-        else:
-            root_dir = Path(entry.path)
-
-        if not root_dir.is_absolute():
-            # Refuse relative roots that did not get resolved by
-            # a project context. An operator who configured a
-            # non-``designer-artifact`` filesystem root with a
-            # relative path will get a uniform 404 — no
-            # auto-resolve against CWD (path leak / test flake).
+        # The filesystem type is rooted at an ABSOLUTE path
+        # (``entry.path``). REWORK 2026-10-07 (M2): the
+        # ``designer-artifact`` root is no longer filesystem-typed
+        # — it is project_scoped now so the URL pattern
+        # ``/views/designer-artifact/<shortname>/<rel>`` resolves
+        # by shortname lookup, exactly like ``planning``. The
+        # per-instance ``project_workdir_resolver`` argument is
+        # still honored here for OPERATOR-supplied filesystem roots
+        # that need per-instance workdir resolution (the
+        # ``designer-artifact`` special case is GONE — those
+        # requests now flow through ``_resolve_project_scoped``).
+        if entry.path and not Path(entry.path).is_absolute():
+            # Refuse relative paths that did not get resolved by a
+            # project context. An operator who configured a
+            # filesystem root with a relative path will get a
+            # uniform 404 — no auto-resolve against CWD (path
+            # leak / test flake).
             raise RootNotFoundError(root_name)
+        root_dir = Path(entry.path)
 
         return self._resolve_under_root(root_dir, rel_path, entry, root_type="filesystem")
 
@@ -434,6 +427,34 @@ class LiveViewsService:
 
         if not is_well_formed_rel_path(sub_rel):
             raise TraversalError(sub_rel)
+
+        # REWORK 2026-10-07 (M3): structural enforcement of a
+        # required rel subpath. When the operator sets
+        # ``required_rel_subpath`` on a project_scoped root, the
+        # rel's ``/``-separated parts must contain that subpath
+        # as a CONTIGUOUS subsequence. For ``designer-artifact``
+        # the seeded subpath is ``['design', 'mockups']`` — a
+        # rel like ``feat/design/mockups/landing.html`` passes
+        # (``design``+``mockups`` are adjacent parts), but
+        # ``feat/random.html`` 404s uniformly. This is the M3
+        # closure: the operator cannot accidentally expose the
+        # parent planning tree under a sub-scoped name.
+        if entry.required_rel_subpath:
+            required = entry.required_rel_subpath
+            sub_parts = sub_rel.split("/")
+            # Sliding window over sub_parts; require each element
+            # of ``required`` to match in order, contiguously.
+            # Refuse if any part of ``required`` is empty.
+            if any(p == "" for p in required) or len(required) == 0:
+                # Misconfiguration — uniform 404, no leak.
+                raise RootNotFoundError(root_name)
+            match = False
+            for start in range(len(sub_parts) - len(required) + 1):
+                if sub_parts[start:start + len(required)] == required:
+                    match = True
+                    break
+            if not match:
+                raise RootNotFoundError(root_name)
 
         if self._project_workdir_by_shortname_resolver is None:
             # Lifespan forgot to wire the shortname resolver —
