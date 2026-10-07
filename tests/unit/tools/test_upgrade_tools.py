@@ -872,6 +872,36 @@ class TestTerminalOutcomeFilter:
         assert "PENDING" in result
         assert "TERMINAL" not in result
 
+    def test_outcome_labels_cover_all_terminal_outcome_events(self) -> None:
+        """Label-coverage guard (reviewer finding #1 acceptance test):
+        every key in ``_TERMINAL_OUTCOME_EVENTS`` MUST have a
+        ``_OUTCOME_LABELS`` entry. The next vocabulary growth fails loudly
+        here instead of silently leaking raw keys via
+        ``_OUTCOME_LABELS.get(event_key, event_key)`` at the consumer."""
+        missing = sorted(
+            k for k in ut._TERMINAL_OUTCOME_EVENTS
+            if k not in ut._OUTCOME_LABELS
+        )
+        assert missing == [], (
+            f"_OUTCOME_LABELS missing entries for terminal events: {missing!r}. "
+            "Every key in _TERMINAL_OUTCOME_EVENTS must have a label."
+        )
+
+    def test_terminal_outcome_refusal_event_labeled(self, install: Path) -> None:
+        """Cause ① added ``refusal`` to ``uj._TERMINAL_EVENTS``; the
+        derived ``_TERMINAL_OUTCOME_EVENTS`` grew silently. Pin: a
+        journal whose latest terminal event is ``refusal`` resolves via
+        ``_terminal_outcome`` AND the label maps to the human string
+        (not the raw key). The label-coverage guard above is the
+        cross-cut pin; this is the per-event behavioral pin for the
+        canonical pre-mutation case."""
+        uj.journal_history_append(
+            install, "refusal", "pre-mutation refusal (cause ①)"
+        )
+        event, _entry = ut._terminal_outcome(uj.journal_read(install))
+        assert event == "refusal"
+        assert ut._OUTCOME_LABELS[event] == "refused (pre-mutation)"
+
 
 # ── Read-pair refusals + fail-open ───────────────────────────────────────────
 

@@ -1068,6 +1068,14 @@ _OUTCOME_LABELS: dict[str, str] = {
     "sweep": "swept (orphaned pre-flip txn cleared)",
     "halt": "halted-for-human",
     "quarantine": "quarantine recorded",
+    # Cause ① (commit 57ca613bf) added "refusal" and "executor_exit" to
+    # ``uj._TERMINAL_EVENTS`` (6→8). The derived display tuple
+    # ``_TERMINAL_OUTCOME_EVENTS`` silently grew too — these journals ARE
+    # closed terminal runs (that is the point of cause ①), so we LABEL them
+    # rather than exclude them. Excluding them would reclassify clean
+    # pre-mutation closures back toward PENDING and contradict cause ①.
+    "refusal": "refused (pre-mutation)",
+    "executor_exit": "executor exited (pre-mutation)",
     "restart": "restarted (intentional)",
     # v0.15.3 P1 Item 5: nonce_consumed is a TRANSITION event (arm completed,
     # executor not yet observed) — it no longer flows out of
