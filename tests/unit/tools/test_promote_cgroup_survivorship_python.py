@@ -1,4 +1,5 @@
-"""Pin tests for the r-f82e cgroup-survivorship fix — Python-side helpers
+"""Pin tests for the r-f82e cgroup-survivorship fix + the Option D
+transient-SERVICE upgrade — Python-side helpers
 (daemon/tools/upgrade_journal.py + daemon/services/upgrade_journal_sweep.py).
 
 Run with:
@@ -7,23 +8,26 @@ Run with:
 Self-contained: NO daemon dependencies required. Uses importlib to load
 just the upgrade_journal.py module with a stubbed ``daemon.constants``.
 
-Coverage:
-  1. spawn_executor scope escape (3-branch pin via _scope_detect_fn stub)
-     - Linux+systemd → systemd-run --user --scope --unit=ensemble-upgrade-<run_id>
-     - Linux+systemd (system bus fallback) → systemd-run --scope --unit=...
-     - Linux no-systemd → start_new_session=True (legacy, byte-identical)
-     - non-Linux → start_new_session=True (legacy, byte-identical)
-  2. build_scope_argv pure-function correctness
-  3. Reaper signal surfacing (os.WIFSIGNALED + os.WTERMSIG → "SIGTERM (15)")
-  4. _scope_detect_real (real detector) never raises — fail-closed contract
-  5. _scope_detect_real never-raises: bare call (no env) returns a tuple
-     without raising on any host — even when the detector short-circuits
-     at the platform/systemd guards the contract is "return (False, "")",
-     never raise.
+Coverage (Option D era — the scope branch was REPLACED by the transient
+service branch; see test_upgrade_executor_systemd_service.py for the
+full ruling pack):
+  1. spawn_executor service-unit shape (build_service_argv pins via the
+     _service_detect_fn stub)
+     - Linux+systemd (user bus) → systemd-run --user --unit=ensemble-upgrade-<run_id>
+       --wait --collect --property=Restart=no --setenv=… -- <inner>
+     - Linux+systemd (system bus) → same minus --user
+     - non-Linux / no-systemd → detector returns ("legacy", "", reason);
+       legacy start_new_session=True path preserved byte-identically
+  2. build_service_argv inner argv byte-identical after the -- separator
+  3. UNIT_NAME_PREFIX pinned to 'ensemble-upgrade-' (scope-family name kept)
+  4. Reaper signal surfacing (os.WIFSIGNALED + os.WTERMSIG → "SIGTERM (15)")
+  5. _service_detect_real (real detector) never raises — fail-closed contract
   6. r-f82e fix cycle 1 — detection-env == spawn-env parity
      6a. detector probes with caller-supplied env (forwards to subprocess.run)
      6b. XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS survive executor_env
-     6c. ENSEMBLE_UPGRADE_LIVE STILL stripped (F2 fence holds post-widening)
+     6c. ENSEMBLE_UPGRADE_LIVE STILL stripped from the allowlist path
+         (F2 fence holds post-widening; verified-arm forwarding rides the
+         explicit-extra merge, pinned in the Option D pack)
 """
 from __future__ import annotations
 
@@ -67,45 +71,47 @@ def _load_uj_with_stubs() -> types.ModuleType:
 def main() -> None:
     uj = _load_uj_with_stubs()
 
-    # ── 1a. spawn_executor scope escape — 3-branch pin ─────────────────────
-    # Pin via the test seam (_scope_detect_fn). Real Popen is NOT invoked
-    # (would touch systemd). We test build_scope_argv pure-function shape
-    # + assert the detector was honored at the seam.
+    # ── 1a. spawn_executor service-unit shape — Option D pin ────────────────
+    # Pin via build_service_argv (the pure builder spawn_executor uses on
+    # the "service" branch). Real Popen is NOT invoked (would touch
+    # systemd). Full ruling pins (R1-R6) live in
+    # tests/unit/tools/test_upgrade_executor_systemd_service.py.
 
     # Branch A: Linux+systemd, user bus
-    def fake_user(*args, **kwargs):
-        return (True, "user")
-    uj._scope_detect_fn = fake_user
     argv = ["bash", "promote.sh", "live", "--run-id", "r-test-foo"]
-    scoped = uj.build_scope_argv(argv, "r-test-foo", "user")
-    expected_user = [
-        "systemd-run", "--user", "--scope",
-        "--unit=ensemble-upgrade-r-test-foo",
-        "--", "bash", "promote.sh", "live", "--run-id", "r-test-foo",
-    ]
-    assert scoped == expected_user, (scoped, expected_user)
-    print("PASS: 1a Linux+systemd (user bus) → systemd-run --user --scope --unit=ensemble-upgrade-r-test-foo")
+    svc_user = uj.build_service_argv(
+        argv, "r-test-foo", "user",
+        {"PATH": "/usr/bin:/bin", "INSTALL_DIR": "/i"},
+        Path("/i/data/upgrade.log"),
+    )
+    assert svc_user[0] == "systemd-run"
+    assert "--user" in svc_user[:svc_user.index("--")]
+    assert "--scope" not in svc_user, "scope flag must NOT survive Option D"
+    assert "--unit=ensemble-upgrade-r-test-foo" in svc_user[:svc_user.index("--")]
+    assert "--wait" in svc_user and "--collect" in svc_user
+    assert "--property=Restart=no" in svc_user
+    assert "--setenv=INSTALL_DIR=/i" in svc_user
+    print("PASS: 1a Linux+systemd (user bus) → systemd-run --user --unit=ensemble-upgrade-<run_id> --wait --collect --property=Restart=no")
 
-    # Branch B: Linux+systemd, system bus
-    def fake_system(*args, **kwargs):
-        return (True, "system")
-    uj._scope_detect_fn = fake_system
-    scoped_sys = uj.build_scope_argv(argv, "r-test-foo", "system")
-    assert scoped_sys == [
-        "systemd-run", "--scope", "--unit=ensemble-upgrade-r-test-foo",
-        "--", "bash", "promote.sh", "live", "--run-id", "r-test-foo",
-    ], scoped_sys
-    print("PASS: 1b Linux+systemd (system bus) → systemd-run --scope --unit=…")
+    # Branch B: Linux+systemd, system bus (no --user)
+    svc_sys = uj.build_service_argv(
+        argv, "r-test-foo", "system",
+        {"PATH": "/usr/bin:/bin"}, Path("/i/data/upgrade.log"),
+    )
+    assert "--user" not in svc_sys[:svc_sys.index("--")]
+    assert "--scope" not in svc_sys
+    assert "--unit=ensemble-upgrade-r-test-foo" in svc_sys
+    print("PASS: 1b Linux+systemd (system bus) → systemd-run --unit=… (no --user)")
 
-    # Branch C: non-Linux (detector returns (False, ""))
+    # Branch C: non-Linux (detector returns the legacy 3-tuple)
     def fake_legacy(*args, **kwargs):
-        return (False, "")
-    uj._scope_detect_fn = fake_legacy
-    use_scope, bus_kind = uj._scope_detect_fn()
-    assert (use_scope, bus_kind) == (False, "")
-    print("PASS: 1c non-Linux / no-systemd → detector returns (False, \"\"); legacy path preserved")
+        return (uj.SERVICE_BRANCH_LEGACY, "", "non-Linux (launchd semantics)")
+    uj._service_detect_fn = fake_legacy
+    branch, bus_kind, reason = uj._service_detect_fn()
+    assert branch == uj.SERVICE_BRANCH_LEGACY and bus_kind == ""
+    print("PASS: 1c non-Linux / no-systemd → detector returns ('legacy', '', reason); legacy path preserved")
 
-    # ── 2. build_scope_argv inner argv byte-identical ──────────────────────
+    # ── 2. build_service_argv inner argv byte-identical ────────────────────
     # The "--" separator is the boundary; the inner argv (after --) must
     # be BYTE-IDENTICAL to the input argv.
     for inner in [
@@ -113,20 +119,23 @@ def main() -> None:
         ["bash", "promote.sh", "live", "--version", "v1.2.3"],
         ["bash", "restart.sh", "live", "--run-id", "r-X", "--reason", "test"],
     ]:
-        scoped_x = uj.build_scope_argv(inner, "r-X", "user")
-        sep = scoped_x.index("--")
-        got = scoped_x[sep + 1:]
+        svc_x = uj.build_service_argv(
+            inner, "r-X", "user", {}, Path("/i/data/upgrade.log")
+        )
+        sep = svc_x.index("--")
+        got = svc_x[sep + 1:]
         assert got == inner, (got, inner)
-        # Prefix: systemd-run + --user + --scope + --unit=r-X + --
-        assert scoped_x[0] == "systemd-run"
-        assert "--user" in scoped_x[:sep]
-        assert "--scope" in scoped_x[:sep]
-        assert "--unit=ensemble-upgrade-r-X" in scoped_x[:sep]
-    print("PASS: 2 build_scope_argv inner argv byte-identical across run shapes")
+        # Prefix: systemd-run + --unit=r-X + --wait + --collect + Restart=no
+        assert svc_x[0] == "systemd-run"
+        assert "--unit=ensemble-upgrade-r-X" in svc_x[:sep]
+        assert "--wait" in svc_x[:sep]
+        assert "--collect" in svc_x[:sep]
+        assert "--property=Restart=no" in svc_x[:sep]
+    print("PASS: 2 build_scope_argv inner argv byte-identical across run shapes [stable scenario id; the executor builder is now build_service_argv — Option D replaced the scope branch]")
 
-    # ── 3. SCOPE_UNIT_PREFIX pinned ────────────────────────────────────────
-    assert uj.SCOPE_UNIT_PREFIX == "ensemble-upgrade-"
-    print("PASS: 3 SCOPE_UNIT_PREFIX pinned to 'ensemble-upgrade-'")
+    # ── 3. UNIT_NAME_PREFIX pinned ────────────────────────────────────────
+    assert uj.UNIT_NAME_PREFIX == "ensemble-upgrade-"
+    print("PASS: 3 SCOPE_UNIT_PREFIX pinned to 'ensemble-upgrade-' [stable scenario id; the constant is now UNIT_NAME_PREFIX — Option D]")
 
     # ── 4. Reaper signal surfacing — os.WIFSIGNALED + os.WTERMSIG ────────
     # Spawn a child, kill it with SIGTERM, capture waitpid status, and
@@ -187,15 +196,20 @@ def main() -> None:
         )
         print(f"INFO: 4b SIGTERM was NOT observed via WIFSIGNALED on this host (status={status2}); skipped (sandbox quirk)")
 
-    # ── 5. _scope_detect_real never raises — fail-closed contract ──────────
+    # ── 5. _service_detect_real never raises — fail-closed contract ──────────
     # The detector probes subprocess.run calls — ensure no exception escapes
-    # even on a hostile PATH.
+    # even on a hostile PATH. Returns the 3-tuple (branch, bus, reason).
     try:
-        res = uj._scope_detect_real()
-        assert isinstance(res, tuple) and len(res) == 2
-        print(f"PASS: 5 _scope_detect_real never raises; result on this host = {res}")
+        res = uj._service_detect_real()
+        assert isinstance(res, tuple) and len(res) == 3
+        assert res[0] in (
+            uj.SERVICE_BRANCH_SERVICE,
+            uj.SERVICE_BRANCH_LEGACY,
+            uj.SERVICE_BRANCH_UNAVAILABLE,
+        )
+        print(f"PASS: 5 _scope_detect_real never raises [stable scenario id; the detector is now _service_detect_real — Option D]; result on this host = {res}")
     except Exception as e:
-        print(f"FAIL: 5 _scope_detect_real raised {type(e).__name__}: {e}")
+        print(f"FAIL: 5 _service_detect_real raised {type(e).__name__}: {e}")
         sys.exit(1)
 
     # ── 6. r-f82e fix cycle 1 — detection-env == spawn-env parity ──────────
@@ -251,9 +265,13 @@ def main() -> None:
                 "XDG_RUNTIME_DIR": "/run/user/1000",
                 "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
             }
-            res6a = uj._scope_detect_real(probe_env)
-            assert isinstance(res6a, tuple) and len(res6a) == 2
-            assert res6a == (False, ""), res6a
+            res6a = uj._service_detect_real(probe_env)
+            assert isinstance(res6a, tuple) and len(res6a) == 3
+            # Both probes denied (rc=1) on a unit-managed host → the
+            # UNAVAILABLE branch (loud-refusal class), never a silent
+            # legacy downgrade (Option D ruling R6).
+            assert res6a[0] == uj.SERVICE_BRANCH_UNAVAILABLE, res6a
+            assert res6a[1] == "" and res6a[2], res6a
             # Every captured env= must be the SAME dict reference we passed —
             # not a copy, not None, not the daemon's full ambient. Verifies
             # the detector forwards the caller's env dict verbatim.

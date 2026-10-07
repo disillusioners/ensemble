@@ -1168,17 +1168,19 @@ class TestExecutorSpawn:
     ) -> None:
         """Spawn a REAL harmless fixture script via spawn_executor and verify
         (a) the child env contains the allowlist ONLY (poison vars absent),
-        (b) process-group behavior — MODE-AWARE (r-f82e fix cycle 2):
-            - LEGACY (start_new_session=True): the child leads its own group,
-              distinct from THIS test process's group.
-            - SCOPE (systemd-run --user/--scope, start_new_session=False on
-              the daemon side): the systemd-run wrapper stays in OUR group
-              (no setsid on daemon side; systemd-run is the new session
-              leader via --scope). Direct evidence of engagement = the bash
-              payload inside the scope inherits the wrapper's pgid (= our
-              pgid), so its self-reported PGID log line equals our pgid
-              rather than its own pid.
-        (c) stdio lands in <install>/data/upgrade.log."""
+        (b) process-group behavior — LEGACY branch (start_new_session=True):
+            the child leads its own group, distinct from THIS test
+            process's group.
+        (c) stdio lands in <install>/data/upgrade.log.
+
+        Option D note: this test pins the LEGACY branch end-to-end (the
+        byte-identical setsid path — non-Linux/no-systemd portability, doc
+        §5.1.5). The detector seam is FORCED to 'legacy' so the test is
+        deterministic and never mints a real transient unit in CI; the
+        service branch's spawn semantics are pinned hermetically in
+        test_upgrade_executor_systemd_service.py, and a REAL transient-unit
+        end-to-end smoke exists as the env-gated
+        test_real_service_branch_end_to_end (opt-in)."""
         install = tmp_path / "install"
         (install / "releases").mkdir(parents=True)
         dump_path = tmp_path / "child-env.txt"
@@ -1202,49 +1204,29 @@ class TestExecutorSpawn:
         ):
             monkeypatch.setenv(key, val)
 
-        # r-f82e fix cycle 2 (review-cycle-2 fixback): detect the mode via the
-        # SAME seam spawn_executor uses (_scope_detect_fn), so the test follows
-        # the host (legacy vs scope branch) without any platform branching.
-        env = uj.executor_env({"RUN_ID": "r-spawn"})
-        use_scope, _bus_kind = uj._scope_detect_fn(env)
+        # Force the LEGACY branch deterministically (byte-identity pin —
+        # see the docstring for the Option D division of labor).
+        monkeypatch.setattr(
+            uj, "_service_detect_fn",
+            lambda env=None: (
+                uj.SERVICE_BRANCH_LEGACY, "",
+                "test-forced legacy (byte-identity pin)",
+            ),
+        )
 
         pid, mode_note = uj.spawn_executor(
             ["bash", str(script)], install, {"RUN_ID": "r-spawn"},
             run_id="r-spawn",
         )
-        # spawn_executor returns (pid, mode_note) derived from the SAME
-        # detection call — the test follows the host via the returned
-        # note instead of re-running _scope_detect_fn. The detector's
-        # answer is observable end-to-end via the pgid assertions below.
-        if use_scope:
-            assert mode_note == "scope=ensemble-upgrade-r-spawn", (
-                f"scope mode: mode_note must carry run_id, got {mode_note!r}"
-            )
-        else:
-            assert mode_note == "(daemonized, start_new_session)", (
-                f"legacy mode: mode_note must be the legacy text, got {mode_note!r}"
-            )
+        assert mode_note == "(daemonized, start_new_session)", (
+            f"legacy mode: mode_note must be the legacy text, got {mode_note!r}"
+        )
         try:
-            # (b) process-group independence — mode-aware.
+            # (b) process-group independence — LEGACY semantics.
             child_pgid = os.getpgid(pid)
-            if use_scope:
-                # SCOPE mode: systemd-run wrapper is started with
-                # start_new_session=False (no setsid on the daemon side;
-                # systemd-run is the new session leader via --scope). The
-                # wrapper stays in OUR process group; the bash payload
-                # executes inside the scope cgroup but inherits our pgid.
-                assert child_pgid == os.getpgrp(), (
-                    "scope mode: executor wrapper must stay in our process group "
-                    "(start_new_session=False on daemon side)"
-                )
-                assert child_pgid != pid, (
-                    "scope mode: executor wrapper must NOT be its own session/group "
-                    "leader \u2014 systemd-run is the new session leader via --scope"
-                )
-            else:
-                # LEGACY mode: byte-identical to pre-r-f82e behavior.
-                assert child_pgid == pid, "executor must be its own group leader"
-                assert child_pgid != os.getpgrp(), "executor must leave our group"
+            # LEGACY mode: byte-identical to pre-r-f82e behavior.
+            assert child_pgid == pid, "executor must be its own group leader"
+            assert child_pgid != os.getpgrp(), "executor must leave our group"
 
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline and not dump_path.is_file():
@@ -1266,22 +1248,11 @@ class TestExecutorSpawn:
                 if ln.startswith("PGID=")
             ]
             assert pgid_line, "no PGID line in upgrade.log"
-            if use_scope:
-                # SCOPE mode direct evidence: the bash payload's self-reported
-                # PGID equals our pgid (it inherits the systemd-run wrapper's
-                # pgid). If the wrapper accidentally fell through to legacy,
-                # bash would be its own session leader and report its own pid.
-                assert pgid_line[0] == f"PGID={os.getpgrp()}", (
-                    f"scope mode: bash payload must inherit systemd-run pgid "
-                    f"(= our pgid {os.getpgrp()}); got {pgid_line[0]!r} \u2014 "
-                    "scope wrapper did not engage at runtime"
-                )
-            else:
-                # LEGACY mode: bash is its own session leader; pgid == pid.
-                assert pgid_line[0] == f"PGID={child_pgid}", (
-                    f"legacy mode: bash payload pgid ({pgid_line[0]!r}) must "
-                    f"equal child_pgid ({child_pgid})"
-                )
+            # LEGACY mode: bash is its own session leader; pgid == pid.
+            assert pgid_line[0] == f"PGID={child_pgid}", (
+                f"legacy mode: bash payload pgid ({pgid_line[0]!r}) must "
+                f"equal child_pgid ({child_pgid})"
+            )
         finally:
             # Reap the disowned child (spawn_executor deliberately does not).
             try:
@@ -1291,6 +1262,96 @@ class TestExecutorSpawn:
             try:
                 os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
+                pass
+
+    def test_real_service_branch_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OPT-IN real-transient-unit smoke (ENSEMBLE_UPGRADE_E2E_SERVICE=1):
+        spawn a fixture payload through the REAL service branch on this
+        host (requires Linux + systemd + a reachable bus) and verify the
+        Option D invariants for real:
+        - mode note names the unit (service=ensemble-upgrade-<run_id>);
+        - the payload's env was threaded via --setenv (INSTALL_DIR/RUN_ID
+          present, poisons absent);
+        - the payload runs in a systemd-OWNED session (its self-reported
+          PGID == its own pid — neither our group nor the client's);
+        - its stdio landed in <install>/data/upgrade.log via the append:
+          unit properties.
+        Skipped by default so hermetic CI never touches host systemd."""
+        if not os.environ.get("ENSEMBLE_UPGRADE_E2E_SERVICE"):
+            pytest.skip("set ENSEMBLE_UPGRADE_E2E_SERVICE=1 to run the real unit smoke")
+        if sys.platform != "linux" or not Path("/run/systemd/system").exists():
+            pytest.skip("host is not Linux+systemd")
+        install = tmp_path / "install"
+        (install / "releases").mkdir(parents=True)
+        dump_path = tmp_path / "svc-child-env.txt"
+        script = tmp_path / "svc-dump.sh"
+        script.write_text(
+            "#!/bin/bash\n"
+            "printf 'PGID=%s\\nPID=%s\\n' \"$(ps -o pgid= -p $$ | tr -d ' ')\" \"$$\"\n"
+            f"env | sort > {dump_path}\n"
+            f"printf 'PGID=%s\\nPID=%s\\n' \"$(ps -o pgid= -p $$ | tr -d ' ')\" \"$$\" >> {dump_path}\n"
+            "echo service-branch-executor-line\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        monkeypatch.setenv("INSTALL_DIR", str(install))
+        monkeypatch.delenv("ENSEMBLE_UPGRADE_LIVE", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        # REAL detector — this test exists to exercise it for real.
+        branch, _bus, _reason = uj._service_detect_fn(uj.executor_env({}))
+        if branch != uj.SERVICE_BRANCH_SERVICE:
+            pytest.skip(f"host detector says {branch!r} ({_reason}); no unit possible")
+        run_id = f"r-e2e-{os.getpid()}"
+        pid, note = uj.spawn_executor(
+            ["bash", str(script)], install, {"RUN_ID": run_id}, run_id=run_id,
+        )
+        try:
+            assert f"service=ensemble-upgrade-{run_id}" in note, note
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline and not dump_path.is_file():
+                time.sleep(0.1)
+            assert dump_path.is_file(), "fixture payload never ran inside the unit"
+            child_env = {}
+            for line in dump_path.read_text(encoding="utf-8").splitlines():
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    child_env[k] = v
+            assert child_env.get("INSTALL_DIR") == str(install)
+            assert child_env.get("RUN_ID") == run_id
+            assert "OPENAI_API_KEY" not in child_env
+            assert "ENSEMBLE_UPGRADE_LIVE" not in child_env
+            # systemd-owned session: payload pgid == its own pid (the
+            # PGID=/PID= lines were appended into the dump by the fixture).
+            pgid_line = next(
+                ln for ln in dump_path.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("PGID=")
+            )
+            pid_line = next(
+                ln for ln in dump_path.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("PID=")
+            )
+            assert pgid_line == f"PGID={pid_line.split('=', 1)[1]}", (
+                f"payload must run in a systemd-owned session (pgid==pid); "
+                f"got {pgid_line!r} vs {pid_line!r}"
+            )
+            log_text = (install / "data" / "upgrade.log").read_text(
+                encoding="utf-8", errors="replace")
+            assert "service-branch-executor-line" in log_text, (
+                "payload stdout must land in upgrade.log via the append: property"
+            )
+        finally:
+            # The client (--wait) may have already exited (fast fixture);
+            # the unit payload is short and self-collects (--collect).
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except OSError:
                 pass
 
     def test_static_no_bash_process_registry_reference(self) -> None:

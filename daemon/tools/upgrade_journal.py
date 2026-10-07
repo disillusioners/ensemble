@@ -57,15 +57,24 @@ refusal / auto-rollback). Best-effort, never-raises, terminal-class only —
 see the ALERT EVENT SET note at the emission section for the full
 contract (incl. why launcher burst-abort is deliberately NOT an SSE kind).
 
-Executor spawn (D-FA1.3 / D4):
-    :func:`spawn_executor` runs the payload via ``subprocess.Popen(...,
-    start_new_session=True)`` (≡ double-fork + ``setsid`` on macOS and
-    under PyInstaller — assumption #2 of the pre-freeze checklist, verified
-    by the Dispatch-B sandbox drill). The child is deliberately NOT
-    registered in ``BashProcessRegistry`` (or anywhere else): the tool
-    harness's SIGTERM teardown must never reach it. stdio →
+Executor spawn (D-FA1.3 / D4, Option D Stage-2.2a):
+    :func:`spawn_executor` runs the payload inside a systemd TRANSIENT
+    SERVICE unit on Linux+systemd hosts (``systemd-run --unit=ensemble-
+    upgrade-<run_id> --wait --collect`` — the unit has neither the
+    daemon's pgid lineage nor its cgroup, so it survives BOTH the
+    bash-tool killpg sweep AND KillMode=mixed unit teardown;
+    architecture-recommendation.md §5). On non-Linux / no-systemd hosts
+    it falls back to ``subprocess.Popen(..., start_new_session=True)``
+    (≡ double-fork + ``setsid`` — designed launchd-semantics behavior,
+    not a fallback). On a unit-managed host where the transient start is
+    unavailable it REFUSES LOUDLY (journal ``refusal`` event with
+    ``reason=executor-systemd-unavailable`` + :class:`ExecutorSystemdUnavailable`)
+    — never a silent setsid fallback. The spawned executor is deliberately
+    NOT registered in ``BashProcessRegistry`` (or anywhere else): the
+    tool harness's SIGTERM teardown must never reach it. stdio →
     ``<install_dir>/data/upgrade.log``; env is ALLOWLISTED (R-SR09 — no
-    ``.env`` passthrough, no API keys).
+    ``.env`` passthrough, no API keys), threaded into the unit via
+    ``--setenv``.
 
 L8 (tidier, P2.3 final batch): this module is deliberately large — the
 module split (journal / lock / nonce / alert) is fenced to the post-P2.3
@@ -89,9 +98,11 @@ import secrets
 import shutil
 import subprocess
 import sys  # r-f82e cycle 0 detector bug fix: bare `sys.platform` reference
-            # in _scope_detect_real raised NameError on every call, silently
+            # in the then-named _scope_detect_real (now _service_detect_real)
+            # raised NameError on every call, silently
             # swallowed by the broad `except Exception:` in the detector —
-            # the detector ALWAYS returned (False, "") regardless of host.
+            # the detector ALWAYS returned a fallback branch regardless of
+            # host.
             # cycle 1 fixback: this import is REQUIRED for Item 1(a) — the
             # env= kwarg forwarded to subprocess.run is meaningless if the
             # probe never runs. (Pre-existing; cycle 0 reviewer caught this
@@ -102,7 +113,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, NoReturn
 
 from daemon.constants import is_reserved_source
 
@@ -1249,7 +1260,13 @@ def latest_matching_event(
 # EXECUTOR_ENV_ALLOWLIST is NOT widened; the extras ride the pre-existing
 # ``executor_env`` explicit-extra merge (:1083-1084), which is per-call-site
 # and never ambient — an unverified arm's child env still strips
-# ENSEMBLE_UPGRADE_LIVE (poison tests pin that side).
+# ENSEMBLE_UPGRADE_LIVE (poison tests pin that side). Option D (transient
+# service executor) changes the TRANSPORT of the merged dict, not its
+# CONTENT: the same executor_env result is threaded into the unit verbatim
+# via ``--setenv=KEY=VALUE`` (ruling R3, build_service_argv), so the
+# verified arm's ENSEMBLE_UPGRADE_LIVE crosses the systemd boundary and
+# the unverified arm's stays absent — pinned end-to-end in
+# tests/unit/tools/test_upgrade_executor_systemd_service.py.
 
 
 def is_verified_arm(op: PendingOp | None) -> bool:
@@ -1664,7 +1681,13 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
 # ``XDG_RUNTIME_DIR`` + ``DBUS_SESSION_BUS_ADDRESS`` to locate the user
 # bus. They are non-secrets (only bus socket addresses, never keys) and
 # the F2 fence is preserved — ``ENSEMBLE_UPGRADE_LIVE`` and other
-# privileged/secret vars are NOT in this allowlist and stay stripped.
+# privileged/secret vars are NOT in this allowlist and stay stripped
+# from the ambient/allowlist path. (Nuance, Option D era: a 3-factor-
+# VERIFIED arm forwards ENSEMBLE_UPGRADE_LIVE via the explicit-extra
+# merge below — never via this allowlist — and the merged dict is then
+# threaded into the transient unit verbatim via ``--setenv``; the bus
+# vars must stay IN the threaded set because the payload's own
+# ``systemctl --user`` calls inside the pipeline need them.)
 # Pin: tests/unit/tools/test_promote_cgroup_survivorship_python.py
 # 6b + 6c (cycle-1 fixback).
 EXECUTOR_ENV_ALLOWLIST: tuple[str, ...] = (
@@ -1694,179 +1717,419 @@ def executor_log_path(install_dir: Path) -> Path:
     return install_dir / "data" / "upgrade.log"
 
 
-# ── systemd transient scope (r-20260928-005506-f82e; component 1 of 6) ────────
+# ── systemd transient SERVICE executor (Option D, Stage-2.2a) ────────────────
 #
-# INCIDENT (2026-09-28, ensemble-vm LIVE): the promote executor was spawned
-# with ``start_new_session=True`` (≡ setsid). That creates a new SESSION
-# — it does NOT leave the systemd unit's cgroup. When ``ensemble-live.service``
-# deactivated under KillMode=control-group, the cgroup teardown SIGTERMed
-# every process in the unit — including the executor — BEFORE the symlink
-# flip could run, leaving an orphaned ``in_flight`` txn the reaper had
-# stopped observing 2 seconds earlier.
+# HISTORY: r-f82e (2026-09-28, ensemble-vm LIVE) wrapped the executor in a
+# transient SCOPE unit (``systemd-run --scope``) after the setsid executor
+# was SIGTERMed by ensemble-live.service's cgroup teardown. The scope fixed
+# the cgroup escape but NOT the kill class: ``--scope`` shares the CALLER's
+# session/pgroup, so a ceremony launched through an agent bash tool stayed
+# registrable in BashProcessRegistry — the 2026-10-07 v0.18.0 chain killed
+# the 09:28 ceremony exactly that way (the daemon's own graceful stop swept
+# the ceremony's pgroup; §2.1-§2.2 of architecture-recommendation.md).
 #
-# FIX: on Linux+systemd hosts, wrap the executor in a transient SCOPE unit
-# (``systemd-run --scope --unit=ensemble-upgrade-<run_id> …``). The scope is
-# its OWN cgroup, outside ``ensemble-live.service`` — the unit teardown
-# cannot reach it, the executor survives to flip + close the txn.
+# OPTION D (ratified pattern, live-proven by the v0.18.0 service lane —
+# survivor unit v0180-promote-survivor): the executor runs as its own
+# systemd TRANSIENT SERVICE,
 #
-# BYTE-IDENTICALITY (macOS / no-systemd / Linux-no-systemd): today's
-# ``start_new_session=True`` path is preserved verbatim. Detection is
-# test-injectable via ``_scope_detect_fn`` so the three branches are
-# pinned deterministically (Linux+systemd, Linux-no-systemd, non-Linux).
+#     systemd-run [--user] --unit=ensemble-upgrade-<run_id> --wait --collect
+#         --property=Restart=no --property=StandardOutput=append:<log>
+#         --property=StandardError=append:<log>
+#         --setenv=KEY=VALUE … -- <inner argv>
 #
-# UNIT NAME: ``ensemble-upgrade-<run_id>`` — the polkit rule on
-# ensemble-vm (§3.4 of the incident doc) name-restricts scope creation
-# to ``^ensemble-[0-9A-Za-z@._-]+\.scope$`` via the detail-carrying
-# path; systemd 255's StartTransientUnit path carries no detail, so
-# the rule's detail-less branch (granted) covers us. The
-# ``ensemble-upgrade-`` prefix is conservative and matches the rule's
-# regex; future tightening to ``^ensemble-upgrade-`` is straightforward.
+# The unit has NEITHER the daemon's pgid lineage NOR its cgroup: unreachable
+# by BashProcessRegistry.cleanup_all (killpg is pgroup-scoped; the payload
+# is a child of systemd, not of any tracked group) AND by KillMode=mixed
+# straggler sweeps of the daemon's unit (sibling unit, own cgroup). The
+# Popen child is only the ``systemd-run --wait`` CLIENT — an operator
+# launching via an agent bash tool registers only that client, never the
+# payload (doc §5.1.2 "misuse becomes safe"). THE UNIT CARRIES
+# SURVIVABILITY, NOT AUTHORITY (doc :106): nonce / 3-factor LIVE arm / F2
+# fencing / staleness / cycle ledger are still verified at arm time in the
+# daemon, and the payload still hits require_live_guard fail-closed inside
+# the pipeline (lib.sh:327-341 — dev2's file, read-only here).
 #
-# USER vs SYSTEM bus: the daemon runs as the service user (no root).
-# A non-root process cannot create scope units on the system bus; we
-# therefore use the USER bus via ``systemd-run --user --scope`` when
-# available, falling back to the system bus when --user is unavailable
-# (daemons running as root in containers, etc.). Detection mirrors
-# the systemd-run helper's own logic: try ``--user`` first and watch
-# for a clear "not available" stderr; if it fails for any reason,
-# fall back to ``--scope`` (system bus).
+# IMPLEMENTATION RULINGS (doc §5.3 :113-116 — pinned in the test pack,
+# tests/unit/tools/test_upgrade_executor_systemd_service.py):
+#   (R1) Restart=no is LOAD-BEARING (:114): a promote unit that re-runs
+#        promote.sh after a non-78 crash would re-enter a partially
+#        completed ceremony against live lock/txn state — exactly what
+#        halt-for-human exists to prevent. RestartPreventExitStatus=78
+#        alone is INSUFFICIENT (it fences only the refusal exit class).
+#        build_service_argv appends Restart=no explicitly and REJECTS any
+#        unit_properties override setting Restart to anything else — even
+#        alongside RestartPreventExitStatus=78.
+#   (R2) Unique unit name per run_id (``ensemble-upgrade-<run_id>``;
+#        SCOPE_UNIT_PREFIX was the partial precedent) + a charset guard on
+#        run_id (systemd unit-name safe subset — the string lands inside a
+#        unit name).
+#   (R3) --setenv threads the FULL executor_env set: a transient service
+#        inherits the systemd MANAGER's environment, not the caller's, so
+#        unthreaded vars would vanish from the payload. The allowlist dict
+#        IS the intended payload env (R-SR09 holds — the dict is the
+#        allowlist RESULT; no .env passthrough, no API keys), and the
+#        verified-arm extras (ENSEMBLE_UPGRADE_LIVE + F2_VERIFIED_NOTE,
+#        post-gate) ride it across the systemd boundary. The bus vars stay
+#        in the set because the payload's own ``systemctl --user`` calls
+#        inside the pipeline need them.
+#   (R4) reset-failed hygiene: ``systemctl [--user] reset-failed <unit>``
+#        runs BEFORE the start so a stale failed unit from a prior
+#        same-name run cannot wedge the new start. Best-effort — the
+#        systemd-run start itself is the loud authority on bus/auth
+#        problems.
+#   (R5) --wait keeps the client attached for the unit's lifetime and
+#        propagates the unit's exit code, so the in-daemon reaper
+#        (UNCONDITIONAL enqueue at the manager drain — kept for
+#        unverified-arm observability) observes the UNIT exit, not a
+#        meaningless instant client exit. The JOURNAL stays authoritative
+#        either way (reaper executor_exit events + shell-lane terminal
+#        events; reconcile_pending_op is journal-truth — Stage 1's
+#        terminal set). Fast client exits (< window) are surfaced as
+#        "outcome is journal-truth" mode notes.
+#   (R6) FAILURE = LOUD REFUSAL, NEVER a silent setsid fallback: a
+#        unit-managed host where the transient start is unavailable (no
+#        systemd-run binary, bus down, polkit transient-unit minting
+#        denied — runbook systemd-adoption.md :91, a Stage-2 GATE
+#        deliberately excluded from this commission) journals a ``refusal``
+#        history event carrying ``reason=executor-systemd-unavailable``
+#        and RAISES :class:`ExecutorSystemdUnavailable`. A silent fallback
+#        to the legacy cgroup-coupled setsid path here would let the kill
+#        class survive silently on exactly the hosts that need the unit.
+#        The legacy branch remains ONLY for genuinely non-systemd hosts
+#        (non-Linux, no /run/systemd/system) — macOS/BSD launchd
+#        portability, doc §5.1.5. This REVERSES the old scope detector's
+#        "conservative (False, '') on ANY failure → byte-identical legacy"
+#        posture for unit-managed hosts — deliberate (hard rule 4).
 #
-# R-SR09 ENV ALLOWLIST PRESERVED: the scope wrapper's child inherits the
-# SAME allowlist as today's Popen — no .env passthrough, no API keys.
-# The wrapper argv carries the SAME inner argv; the env dict flows
-# through unchanged.
-
+# UNIT NAME: ``ensemble-upgrade-<run_id>.service`` (the scope naming family
+# kept for journal↔unit correlation; the ensemble-vm polkit rule's name
+# regex for transient units is a runbook/Stage-2-gate concern, not code).
 
 # Sentinel object the spawner uses to thread the run_id (and ONLY the
-# run_id) into the scope-unit name. Re-exported from upgrade_tools for
-# the test pin; production code passes the run_id via the existing
-# reaper-enqueue seam, NOT through argv mutation.
-SCOPE_UNIT_PREFIX = "ensemble-upgrade-"
+# run_id) into the unit name. Production code passes the run_id via the
+# existing reaper-enqueue seam, NOT through argv mutation.
+UNIT_NAME_PREFIX = "ensemble-upgrade-"
 
-# Test seam: ``_scope_detect_fn`` returns ``(use_scope, bus_kind)``
-# where ``bus_kind`` is ``"user"`` or ``"system"``. Default = the real
-# detector. Tests inject a stub returning deterministic values for
-# the three branches (Linux+systemd / Linux-no-systemd / non-Linux).
-# r-f82e fix cycle 1: the seam now accepts the spawn-time env dict
-# (executor_env shape) so detection sees exactly what the wrapper
-# inherits — pin 6a (Python) asserts the env dict is forwarded.
-def _scope_detect_real(env: dict[str, str] | None = None) -> tuple[bool, str]:
-    """Real detector — Linux+systemd → (True, "user"|"system") else
-    (False, ""). Conservative: returns ``(False, "")`` whenever ANY
-    detection step fails (no /run/systemd/system, no systemd-run on
-    PATH, uname != Linux, etc.) so a misconfigured host falls back
-    to the legacy ``start_new_session=True`` path byte-identically.
+# LOUD-refusal journal token (ruling R6 / hard rule 4 of the commission).
+# Journaled as a ``refusal`` history event detail suffix
+# ``(reason=<token>)`` — the D-FA2.2 reason-token convention — so
+# reconcile_pending_op closes the armed op immediately as refused (the
+# executor will NEVER run; leaving the op open until expiry would read as
+# a false in-flight promote) and the wake sweep notifies the arming
+# instance. Deliberately NOT added to _TERMINAL_EVENTS as its own event
+# class: the refusal CLASS is already terminal, and a new class would need
+# a shell twin (P5 constraint).
+EXECUTOR_SYSTEMD_UNAVAILABLE_TOKEN = "executor-systemd-unavailable"
 
-    The ``env`` arg, when supplied, is the EXACT env the scope wrapper
-    inherits from the caller (executor_env(extra_env)). Detection uses
-    THIS env, NOT the daemon's full ambient — on session-env Linux
-    hosts (r-f82e fix cycle 1), the bus-discovery vars
-    (XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS) are ambient in the
-    daemon process but the allowlist strips them from the wrapper, so
-    probing with ambient would falsely report "user bus available"
-    while the wrapper would lack the bus address and the payload
-    would never reach systemd-run. ``env=None`` preserves the
-    pre-cycle-1 probe (inherit ambient) for the existing pin 5 call
-    site that exercises "never raises" on a hostile PATH.
+# Bounded fast-fail window (seconds): a failed transient start (bus down,
+# polkit denial, invalid property) makes the systemd-run client exit well
+# under a second; a successful --wait client stays alive for the whole
+# ceremony. Waiting this long distinguishes the two without unbounded
+# blocking. Trade-off, documented: the drain seam runs on the event loop,
+# so this window IS the worst-case event-loop block at arm time —
+# promotes are operator-paced and rare; the legacy path keeps its 0s
+# fire-and-forget behavior on its branch.
+SERVICE_CLIENT_FAST_FAIL_S = 10.0
+
+# systemd client failure signatures (case-insensitive substring match on
+# the CLIENT's stderr). With --wait + StandardError=append: properties,
+# the payload's output is unit-owned — only systemd-run's own diagnostics
+# land on the client's stderr, so this is a small trusted surface. A fast
+# non-zero client exit carrying one of these means NO unit ever started
+# (the ruling-R6 loud-refusal class); any OTHER fast non-zero exit means
+# the payload itself ran and failed fast (e.g. a preflight exit-78
+# refusal) — journal-truth territory, not a systemd failure.
+_SYSTEMD_RUN_FAILURE_SIGNATURES: tuple[bytes, ...] = (
+    b"failed to start transient service",
+    b"failed to connect to bus",
+    b"failed to connect: ",
+    b"failed to allocate manager object",
+    b"access denied",
+    b"interactive authentication required",
+    b"connection refused",
+    b"already exists",
+)
+
+# Branch outcomes for the detector seam (values are the seam's contract —
+# pinned in the test pack):
+#   "service"     Linux + systemd + reachable bus (bus_kind "user"|"system")
+#   "legacy"      non-Linux OR no systemd PID1 — the setsid path is the
+#                 DESIGNED behavior there (launchd semantics), not a fallback
+#   "unavailable" systemd PID1 present but transient-unit minting is not
+#                 available to this process → caller MUST refuse loudly (R6)
+SERVICE_BRANCH_SERVICE = "service"
+SERVICE_BRANCH_LEGACY = "legacy"
+SERVICE_BRANCH_UNAVAILABLE = "unavailable"
+
+
+def _service_detect_real(env: dict[str, str] | None = None) -> tuple[str, str, str]:
+    """Real detector — returns ``(branch, bus_kind, reason)``.
+
+    ``reason`` is "" on success and a short evidence tail otherwise (it
+    feeds the loud-refusal journal detail on the unavailable branch).
+
+    The ``env`` arg, when supplied, is the EXACT env the spawn inherits
+    (executor_env shape). Detection probes with THIS env, not the daemon's
+    ambient — on session-env Linux hosts (r-f82e fix cycle 1) the
+    bus-discovery vars (XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS) are
+    ambient in the daemon process but the allowlist strips them from the
+    spawn env, so probing with ambient would falsely report "user bus
+    available" while the spawn would lack the bus address and the unit
+    would never start. ``env=None`` preserves the ambient probe for the
+    never-raises pin that exercises a hostile PATH.
+
+    Detection must NEVER raise: the catch-all returns ``unavailable``
+    (loud-refusal class) — on a unit-managed host a swallowed exception
+    must NOT silently downgrade to the cgroup-coupled setsid path (the
+    old scope detector's "conservative legacy" posture is reversed
+    deliberately, ruling R6 / hard rule 4).
     """
     try:
         if sys.platform != "linux":
-            return (False, "")
+            return (SERVICE_BRANCH_LEGACY, "", "non-Linux (launchd semantics)")
         # systemd's "I'm PID 1" mark — universal across distros.
         if not Path("/run/systemd/system").exists():
-            return (False, "")
+            return (SERVICE_BRANCH_LEGACY, "",
+                    "no systemd PID1 (/run/systemd/system absent)")
         # systemd-run must be on PATH (NOT just present elsewhere).
-        # shutil.which honors PATH and respects current env.
+        # shutil.which honors PATH and respects current env. A unit-managed
+        # host WITHOUT the client binary is the unavailable class — the
+        # legacy setsid path there would be cgroup-coupled (kill class).
         if shutil.which("systemd-run") is None:
-            return (False, "")
-        # We MUST know whether to use --user or --scope. The clean
-        # test: try ``systemd-run --user --scope --unit=… /bin/true``
-        # with stderr captured; an "not available" message means the
-        # user instance isn't running (the common case for service
-        # users). Anything else (success) → use --user. If --user
-        # fails for any OTHER reason we conservatively fall back to
-        # the system bus (--scope alone) — the unit-name match still
-        # passes the polkit rule's detail-less branch.
-        #
-        # r-f82e fix cycle 1: probe is run with ``env=env`` (the
-        # wrapper's env), NOT the daemon's full ambient. Without this
-        # gate, the probe inherits ambient XDG_RUNTIME_DIR +
-        # DBUS_SESSION_BUS_ADDRESS, decides "user bus OK", and the
-        # wrapper then lacks the bus address at spawn time — the
-        # payload never runs. Pin: tests/unit/tools/test_
-        # promote_cgroup_survivorship_python.py 6a.
+            return (SERVICE_BRANCH_UNAVAILABLE, "",
+                    "systemd PID1 present but systemd-run binary not on PATH")
+        # Probe exactly what we will do — a transient SERVICE start (the
+        # old scope probe tested --scope, a different unit class). Probe
+        # name carries pid+epoch: unique per call, no self-collision.
+        # Probes run with ``env=env`` (the spawn env), NOT the daemon's
+        # full ambient (r-f82e fix cycle 1 parity — pin 6a).
         probe_unit = f"ensemble-upgrade-detect-{os.getpid()}-{int(time.time())}"
-        try:
-            r = subprocess.run(
-                ["systemd-run", "--user", "--scope", f"--unit={probe_unit}",
-                 "/bin/true"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=5.0,
-                env=env,
-            )
-            if r.returncode == 0:
-                return (True, "user")
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        # Fall back to system bus: --scope alone (no --user). Still
-        # needs systemd-run AND the polkit grant for nea (live).
-        try:
-            r = subprocess.run(
-                ["systemd-run", "--scope", f"--unit={probe_unit}",
-                 "/bin/true"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=5.0,
-                env=env,
-            )
-            if r.returncode == 0:
-                return (True, "system")
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        return (False, "")
+        err_tail = ""
+        for probe_argv in (
+            ["systemd-run", "--user", f"--unit={probe_unit}", "/bin/true"],
+            ["systemd-run", f"--unit={probe_unit}", "/bin/true"],
+        ):
+            bus = "user" if "--user" in probe_argv else "system"
+            try:
+                r = subprocess.run(
+                    probe_argv,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=5.0,
+                    env=env,
+                )
+                if r.returncode == 0:
+                    return (SERVICE_BRANCH_SERVICE, bus, "")
+                err_tail = (r.stderr or b"").decode(
+                    "utf-8", errors="replace")[-300:]
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                err_tail = f"{type(exc).__name__}: {exc}"
+        # Both buses failed on a unit-managed host → loud-refusal class.
+        # The Stage-2 GATE (polkit transient-unit minting on remote VMs,
+        # runbook :91) lives HERE in production; this commission fails
+        # loud instead of gating.
+        return (SERVICE_BRANCH_UNAVAILABLE, "",
+                f"transient-unit probe failed on both buses: {err_tail}")
     except Exception as exc:  # noqa: BLE001 — detection must never raise
-        # r-f82e fix cycle 2 (review-cycle-2 fixback): one WARNING so a silent
-        # detector regression (e.g. a NameError from a typo'd import that the
-        # bare-except swallow hides for days) leaves a forensic breadcrumb.
-        # The 3-commit silent NameError is the dispositive cost-of-silence
-        # evidence; spawn rarity makes noise negligible. NO behavior change —
-        # detection still falls back to legacy path byte-identically.
+        # Unavailable (loud-refusal class), NOT legacy: a swallowed
+        # exception on a unit-managed host must not silently reopen the
+        # kill class (ruling R6). One WARNING so a detector regression
+        # (e.g. a NameError a bare-except would hide for days — the
+        # 3-commit silent NameError precedent) leaves a breadcrumb.
         logger.warning(
-            "upgrade_journal: _scope_detect_real swallowed exception — "
-            "falling back to legacy path: %s: %s",
+            "upgrade_journal: _service_detect_real swallowed exception — "
+            "classifying host as systemd-unavailable (loud refusal): "
+            "%s: %s",
             type(exc).__name__, exc,
         )
-        return (False, "")
+        return (SERVICE_BRANCH_UNAVAILABLE, "",
+                f"detector exception: {type(exc).__name__}: {exc}")
 
 
-_scope_detect_fn: Callable[[dict[str, str] | None], tuple[bool, str]] = _scope_detect_real
+_service_detect_fn: Callable[
+    [dict[str, str] | None], tuple[str, str, str]
+] = _service_detect_real
 
 
-def build_scope_argv(
-    inner_argv: list[str], run_id: str, bus_kind: str
+# run_id lands inside a systemd unit name — restrict to the unit-name
+# safe subset (matching the historical polkit rule's charset: the
+# ``ensemble-upgrade-`` prefix plus [A-Za-z0-9@._-]).
+_UNIT_NAME_SAFE_RE = re.compile(r"^[A-Za-z0-9@._-]+$")
+_RESTART_LOAD_BEARING = "no"  # ruling R1 (doc §5.3 :114)
+
+
+def build_service_argv(
+    inner_argv: list[str],
+    run_id: str,
+    bus_kind: str,
+    env: dict[str, str],
+    log_path: Path,
+    unit_properties: list[str] | None = None,
 ) -> list[str]:
-    """Build the systemd-run argv wrapping ``inner_argv`` in a transient
-    scope. The SCOPE UNIT NAME carries the run_id for observability
-    (visible via ``systemctl list-units ensemble-upgrade-*`` and in
-    the journal). Returns ``["systemd-run", "--user"|"--scope",
-    "--unit=ensemble-upgrade-<run_id>", "--", <inner_argv...>]``.
+    """Build the systemd-run argv running ``inner_argv`` inside a transient
+    SERVICE unit named ``ensemble-upgrade-<run_id>`` (rulings R1-R3).
 
-    Caller's responsibility: this helper does NO detection — pass the
-    result of ``_scope_detect_fn()`` directly. Pure function for test
-    injection; the detector itself has a test seam above.
+    Layout: ``["systemd-run", ("--user")?, "--unit=<unit>", "--wait",
+    "--collect", "--property=Restart=no", "--property=…" …,
+    "--setenv=K=V" …, "--", <inner_argv...>]``.
+
+    ``unit_properties`` is the extension point for future callers; ANY
+    attempt to override ``Restart`` to anything other than ``no`` raises
+    ValueError (R1: Restart=no is load-bearing — a restarted promote unit
+    would re-enter a partially-completed ceremony against live lock/txn
+    state; RestartPreventExitStatus=78 alone fences only the refusal exit
+    class and is NOT an acceptable substitute).
+
+    Payload stdio rides ``StandardOutput/StandardError=append:<log_path>``
+    (the payload's stdio is owned by systemd now — the Popen-side
+    ``stdout=log_fh`` of the scope/legacy paths does NOT reach it), and
+    the FULL ``env`` dict is threaded via ``--setenv=KEY=VALUE`` (R3: a
+    transient service inherits the systemd manager's environment, not the
+    caller's — the dict IS the allowlist result, verified-arm extras
+    included when the arm is verified).
+
+    Pure function (test-injectable); raises ValueError on an empty or
+    unit-unsafe ``run_id`` (R2 charset guard — the string lands inside a
+    unit name).
     """
-    unit = f"{SCOPE_UNIT_PREFIX}{run_id}"
-    # systemd-run args: --user/--scope first (mutually exclusive),
-    # --unit=NAME next, then -- (separator), then the inner argv.
+    if not run_id or not _UNIT_NAME_SAFE_RE.match(run_id):
+        raise ValueError(f"unsafe systemd unit run_id: {run_id!r}")
+    unit = f"{UNIT_NAME_PREFIX}{run_id}"
+    props: list[str] = [f"Restart={_RESTART_LOAD_BEARING}"]  # R1, always
+    for prop in (unit_properties or []):
+        key, _, val = prop.partition("=")
+        if key.strip() == "Restart" and val.strip().lower() != _RESTART_LOAD_BEARING:
+            raise ValueError(
+                "Restart=no is load-bearing on the executor unit "
+                "(architecture-recommendation.md §5.3 :114): a restarted "
+                "promote unit would re-enter a partially-completed ceremony; "
+                f"refusing override {prop!r} — RestartPreventExitStatus=78 "
+                "alone is insufficient (it fences only the refusal exit class)"
+            )
+        props.append(prop)
     head: list[str] = ["systemd-run"]
     if bus_kind == "user":
         head.append("--user")
-    # else "system" → just --scope (no --user)
-    head.append("--scope")
+    # else "system" → system bus (no --user flag)
     head.append(f"--unit={unit}")
+    head.append("--wait")     # R5: client observes the UNIT to its exit
+    head.append("--collect")  # GC the transient unit once it terminates
+    for prop in props:
+        head.append(f"--property={prop}")
+    log_str = str(Path(log_path).absolute())
+    head.append(f"--property=StandardOutput=append:{log_str}")
+    head.append(f"--property=StandardError=append:{log_str}")
+    # R3: thread the FULL env — sorted for a deterministic, pin-stable argv.
+    for key in sorted(env):
+        head.append(f"--setenv={key}={env[key]}")
     head.append("--")
     return head + list(inner_argv)
+
+
+class ExecutorSystemdUnavailable(RuntimeError):
+    """LOUD refusal (ruling R6 / hard rule 4): the host is unit-managed but
+    a transient executor unit cannot be started (no systemd-run binary,
+    bus down, polkit transient-unit minting denied — runbook :91).
+
+    Deliberately NEVER caught to fall back to the legacy cgroup-coupled
+    setsid path: a silent fallback here would let the kill class survive
+    silently on exactly the hosts that need the unit. The ONLY production
+    consumer (``InstanceManager.drain_pending_system_execution``) logs it
+    loudly and leaves the journal pending_op to its durable fallbacks (the
+    spawn seam has already journaled the ``refusal`` +
+    ``reason=executor-systemd-unavailable`` event before raising).
+    """
+
+
+def _resolve_run_id(argv: list[str], run_id: str | None) -> str:
+    """Prefer the explicit run_id kwarg (set by the manager drain seam —
+    promotion callers always have it), then argv extraction (restart argv
+    carries --run-id), then a pid+epoch sentinel as a last-resort unique
+    unit name. The unit MUST be unique per promote — systemd refuses a
+    second transient creation against an existing name (ruling R2)."""
+    if run_id:
+        return run_id
+    for i, tok in enumerate(argv[:-1]):
+        if tok == "--run-id" and i + 1 < len(argv):
+            return argv[i + 1]
+    return f"spawn-{os.getpid()}-{int(time.time())}"
+
+
+def _reset_failed_unit(run_id: str, bus_kind: str, env: dict[str, str]) -> None:
+    """Ruling R4 hygiene — ``systemctl [--user] reset-failed <unit>``
+    BEFORE the start, so a stale FAILED unit from a prior same-name run (a
+    crash without --collect, or a prior daemon generation) cannot wedge
+    the new transient start. Best-effort: any failure logs a warning and
+    continues — the systemd-run start itself is the loud authority on
+    bus/authorization problems."""
+    unit = f"{UNIT_NAME_PREFIX}{run_id}"
+    argv = ["systemctl"]
+    if bus_kind == "user":
+        argv.append("--user")
+    argv += ["reset-failed", unit]
+    try:
+        r = subprocess.run(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=5.0,
+            env=env,
+            check=False,
+        )
+        if r.returncode != 0:
+            logger.warning(
+                "upgrade_journal: reset-failed %s rc=%s (non-fatal): %s",
+                unit, r.returncode,
+                (r.stderr or b"").decode("utf-8", errors="replace")[-200:],
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            "upgrade_journal: reset-failed %s failed (non-fatal): %s",
+            unit, exc,
+        )
+
+
+def _is_systemd_run_failure(client_stderr: bytes) -> bool:
+    """True when the systemd-run CLIENT's stderr matches a transient-start
+    failure signature — no unit ever started (the ruling-R6 loud-refusal
+    class). Anything else on a fast non-zero exit is treated as a
+    fast-failed PAYLOAD (journal-truth). The client's stderr is a small
+    trusted surface: with --wait + StandardError=append: properties the
+    payload's output is unit-owned, so only systemd-run's own diagnostics
+    land here."""
+    if not client_stderr:
+        return False
+    # bytes.lower() is ASCII-only case folding — exactly right for the
+    # systemd client's ASCII diagnostics; keeps the whole match all-bytes.
+    blob = client_stderr.lower()
+    return any(sig in blob for sig in _SYSTEMD_RUN_FAILURE_SIGNATURES)
+
+
+def _refuse_systemd_unavailable(install_dir: Path, reason: str) -> NoReturn:
+    """LOUD refusal — journal ``refusal`` + raise (ruling R6). NEVER
+    returns: there is no silent fallback path by construction.
+
+    The journal append is best-effort (torn/absent journal → warning;
+    the raise still happens — the LOUD half of the contract is the
+    exception, the journal entry is the durable forensic record)."""
+    detail = (
+        "executor spawn refused: systemd transient unit unavailable on a "
+        "unit-managed host — NO legacy setsid fallback (kill-class guard, "
+        f"architecture-recommendation.md §5.3 :115); reason: {reason}"
+    )
+    try:
+        journal_history_append(
+            install_dir,
+            "refusal",
+            f"{detail} (reason={EXECUTOR_SYSTEMD_UNAVAILABLE_TOKEN})",
+        )
+    except (JournalTorn, OSError) as exc:
+        logger.warning(
+            "upgrade_journal: executor-systemd-unavailable refusal journal "
+            "append FAILED (best-effort — the loud refusal still raises): %s",
+            exc,
+        )
+    raise ExecutorSystemdUnavailable(detail)
 
 
 def spawn_executor(
@@ -1876,89 +2139,136 @@ def spawn_executor(
     *,
     run_id: str | None = None,
 ) -> tuple[int, str]:
-    """Daemonize the executor payload. THREE BRANCHES (r-f82e fix):
+    """Daemonize the executor payload. THREE BRANCHES (Option D):
 
-    1. Linux + systemd + polkit grant: wrap in a transient scope unit
-       (``systemd-run --user/--scope --unit=ensemble-upgrade-<run_id>``).
-       The scope is its OWN cgroup — unit teardown cannot reach it
-       (the live promote survives daemon shutdown, flips the symlink,
-       closes the txn). Detected via ``_scope_detect_fn`` (test-injectable).
-    2. Linux + no systemd / systemd-run denied: fall back to today's
-       ``start_new_session=True`` path BYTE-IDENTICALLY. The setsid
-       child shares the unit's cgroup — known-bad under KillMode=
-       control-group, but the only available option on a non-systemd
-       host.
-    3. Non-Linux (macOS, BSD): the legacy ``start_new_session=True``
-       path BYTE-IDENTICALLY. setsid works correctly on launchd —
-       the survivorship model was designed on macOS launchd semantics.
+    1. Linux + systemd + reachable bus (``_service_detect_fn`` →
+       ``"service"``): run the payload inside a transient SERVICE unit
+       (``systemd-run [--user] --unit=ensemble-upgrade-<run_id> --wait
+       --collect --property=Restart=no … --setenv=K=V …`` — argv built by
+       :func:`build_service_argv`). The unit has neither the daemon's pgid
+       lineage nor its cgroup — it survives BOTH tool-harness teardown AND
+       daemon death BY CONSTRUCTION, and is unreachable by KillMode=mixed
+       straggler sweeps of the daemon's unit. The ``Popen`` child is the
+       ``systemd-run --wait`` CLIENT only; the payload is systemd's child
+       inside its own unit (live-proven by the v0.18.0 service lane).
+       Payload stdio → ``data/upgrade.log`` via append: unit properties;
+       env via ``--setenv`` threading of the FULL allowlist dict (R3).
+       A stale failed unit of the same name is reset first (R4). The
+       client is observed through a bounded fast-fail window
+       (:data:`SERVICE_CLIENT_FAST_FAIL_S`): still alive ⇒ the unit
+       started and the ceremony is in flight (the reaper's waitpid on the
+       client observes the UNIT exit, R5); exited 0 fast ⇒ unit completed
+       within the window; exited non-zero fast ⇒ either a systemd-start
+       failure (signature-matched → LOUD refusal, R6) or a fast-failed
+       payload (journal-truth note — the shell lane journals its own
+       terminal evidence).
+    2. Non-Linux / no systemd PID1 (``"legacy"``): the
+       ``start_new_session=True`` path BYTE-IDENTICALLY to pre-r-f82e —
+       the DESIGNED launchd-semantics behavior, not a fallback
+       (doc §5.1.5: no host regresses).
+    3. Unit-managed host where the transient start is unavailable
+       (``"unavailable"`` — no systemd-run binary, bus down, polkit
+       transient-unit minting denied): LOUD refusal — best-effort
+       ``refusal`` journal event with
+       ``reason=executor-systemd-unavailable`` then RAISE
+       :class:`ExecutorSystemdUnavailable`. NEVER a silent legacy
+       fallback (R6 — the kill class must not survive silently).
 
     Returns ``(child_pid, mode_note)``. ``mode_note`` is derived from the
-    SAME internal detection result (``scope=ensemble-upgrade-<run_id>``
-    for the SCOPE branch, ``(daemonized, start_new_session)`` for the
-    legacy branch) so the caller never has to re-detect. Deliberately
-    NOT registered in ``BashProcessRegistry`` or any other teardown
-    registry (D4/T5 static-assertion target): the child must survive
-    BOTH tool-harness teardown AND daemon death. stdio →
-    ``data/upgrade.log`` (append). The child re-points its cwd at the
-    install dir so relative pipeline output lands in the right place.
-    Env: same allowlist semantics (R-SR09) — no .env passthrough, no
-    API keys. The scope-wrapper inherits the SAME env dict.
+    SAME internal detection result (``service=ensemble-upgrade-<run_id> …``
+    for the service branch, ``(daemonized, start_new_session)`` for the
+    legacy branch) so the caller never has to re-detect.
+    Deliberately NOT registered in ``BashProcessRegistry`` or any other
+    teardown registry (D4/T5 static-assertion target): the executor must
+    survive BOTH tool-harness teardown AND daemon death.
 
-    ``run_id`` (r-f82e fix cycle 1, kw-only): when supplied, the
-    SCOPE UNIT NAME carries it directly (``ensemble-upgrade-<run_id>``),
-    giving journal↔unit correlation and a stable per-promote unit
-    identity even when argv lacks ``--run-id`` (the promote argv today
-    carries ``--version`` only). When ``None``, falls back to argv
-    extraction (legacy behavior) and finally to a pid+epoch sentinel.
-    Manager's drain path threads ``run_id`` explicitly so the unit
-    name is reliable; tests and any future call site may omit it.
+    ``run_id`` (kw-only): when supplied, the UNIT NAME carries it directly
+    (``ensemble-upgrade-<run_id>``), giving journal↔unit correlation and a
+    stable per-promote unit identity even when argv lacks ``--run-id``.
+    When ``None``, falls back to argv extraction (legacy behavior) and
+    finally to a pid+epoch sentinel. The manager's drain path threads
+    ``run_id`` explicitly so the unit name is reliable; tests and any
+    future call site may omit it.
+
+    Raises:
+        ExecutorSystemdUnavailable: branch 3 only (loud refusal).
+        ValueError: (via build_service_argv) on an unsafe run_id.
     """
     log = executor_log_path(install_dir)
     log.parent.mkdir(parents=True, exist_ok=True)
 
-    # r-f82e fix cycle 1: build the env dict FIRST — detection must see
-    # exactly the env the wrapper inherits (executor_env shape).
-    # Without this gate the probe inherits ambient bus-discovery vars
-    # and decides "user bus OK"; the wrapper then lacks them and the
-    # payload never runs. Pin: 6a (Python).
+    # r-f82e fix cycle 1 parity: build the env dict FIRST — detection must
+    # probe with exactly the env the spawn inherits (executor_env shape).
     env = executor_env(extra_env)
-    use_scope, bus_kind = _scope_detect_fn(env)
+    branch, bus_kind, reason = _service_detect_fn(env)
 
-    if use_scope:
-        # r-f82e fix cycle 1: prefer the explicit run_id kwarg (set by
-        # the manager drain seam — promotion callers always have it),
-        # then argv extraction (restart argv carries --run-id), then
-        # the pid+epoch sentinel as a last-resort unique unit name.
-        # The scope unit MUST be unique per promote — systemd refuses
-        # the second transient creation against an existing name.
-        if not run_id:
-            run_id = ""
-            for i, tok in enumerate(argv[:-1]):
-                if tok == "--run-id" and i + 1 < len(argv):
-                    run_id = argv[i + 1]
-                    break
-            if not run_id:
-                run_id = f"spawn-{os.getpid()}-{int(time.time())}"
-        wrapped_argv = build_scope_argv(argv, run_id, bus_kind)
-        with log.open("ab") as log_fh:
-            proc = subprocess.Popen(
-                wrapped_argv,
-                stdin=subprocess.DEVNULL,
-                stdout=log_fh,
-                stderr=subprocess.STDOUT,
-                cwd=str(install_dir),
-                env=env,
-                # start_new_session MUST be False: systemd-run is the
-                # new session leader; setsid on the daemon side
-                # would put the systemd-run child in OUR cgroup,
-                # defeating the scope escape.
-                start_new_session=False,
-                close_fds=True,
+    if branch == SERVICE_BRANCH_UNAVAILABLE:
+        _refuse_systemd_unavailable(install_dir, reason)
+
+    if branch == SERVICE_BRANCH_SERVICE:
+        run_id = _resolve_run_id(argv, run_id)
+        wrapped_argv = build_service_argv(argv, run_id, bus_kind, env, log)
+        # R4 hygiene BEFORE the start (best-effort; see helper).
+        _reset_failed_unit(run_id, bus_kind, env)
+        proc = subprocess.Popen(
+            wrapped_argv,
+            stdin=subprocess.DEVNULL,
+            # The CLIENT's stdio is not the payload's stdio (unit-owned via
+            # append: properties). stdout is discarded; stderr is captured
+            # ONLY for the fast-fail signature triage below (systemd-run
+            # writes a bounded diagnostic — no pipe-fill deadlock risk).
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            cwd=str(install_dir),
+            env=env,
+            # start_new_session stays False (same reasoning as the scope
+            # path): the CLIENT may stay in our group — the PAYLOAD's
+            # survivability comes from the UNIT, not from setsid.
+            start_new_session=False,
+            close_fds=True,
+        )
+        note = f"service={UNIT_NAME_PREFIX}{run_id} (bus={bus_kind})"
+        try:
+            rc = proc.wait(timeout=SERVICE_CLIENT_FAST_FAIL_S)
+        except subprocess.TimeoutExpired:
+            # Client alive at the window ⇒ the unit STARTED; --wait keeps
+            # the client attached so the reaper's waitpid observes the
+            # UNIT exit (R5).
+            return proc.pid, note + (
+                " (unit in flight; reaper observes unit exit via --wait client)"
             )
-        return proc.pid, f"scope=ensemble-upgrade-{run_id}"
+        if rc == 0:
+            # Unit started AND reached exit within the window (fast
+            # payload/restart) — the journal is the outcome authority (R5,
+            # second half of the ruling).
+            return proc.pid, note + (
+                " (client exited rc=0 fast — outcome is journal-truth)"
+            )
+        err_tail = b""
+        if proc.stderr is not None:
+            try:
+                err_tail = proc.stderr.read() or b""
+            except OSError:
+                err_tail = b""
+        if _is_systemd_run_failure(err_tail):
+            _refuse_systemd_unavailable(
+                install_dir,
+                f"systemd-run client exited rc={rc}: "
+                f"{err_tail.decode('utf-8', errors='replace')[-300:]}",
+            )
+        # Fast non-zero WITHOUT a systemd failure signature ⇒ the payload
+        # itself ran and failed fast (e.g. a preflight exit-78 refusal) —
+        # the shell lane journals its own terminal evidence; journal is
+        # truth. The reaper will see the already-reaped pid as
+        # ChildProcessError → journals the gap loudly (pre-existing
+        # contract for reaped children).
+        return proc.pid, note + (
+            f" (client exited rc={rc} fast, no systemd failure signature"
+            " — outcome is journal-truth)"
+        )
 
-    # Legacy path: BYTE-IDENTICAL to pre-r-f82e behavior. Any host
-    # where the scope detector returns (False, "") lands here.
+    # Legacy path — BYTE-IDENTICAL to pre-r-f82e behavior. Any host where
+    # the detector returns "legacy" lands here (non-Linux / no systemd).
     with log.open("ab") as log_fh:
         proc = subprocess.Popen(
             argv,
@@ -2067,6 +2377,13 @@ def spawn_executor(
 SUPERVISION_STATE_SCRIPT = "SCRIPT_NOHUP"
 SUPERVISION_STATE_UNIT = "UNIT_MANAGED"
 SUPERVISION_STATE_SCOPE = "SCOPE_SURVIVOR"
+# Option D note (Stage-2.2a): the executor lane no longer CREATES scope
+# units (spawn_executor now mints transient SERVICE units), but this
+# classified state STAYS — the shell twin (lib.sh _supervision_handback /
+# scope_heal rungs) and historical journals still carry SCOPE_SURVIVOR,
+# and the cross-language twin must move together (P5 constraint; lib.sh is
+# another lane's file). Candidate for a coordinated twin retirement in a
+# follow-up commission (architecture-recommendation.md §7 Tier 2).
 # §6 DUAL_FIGHT is a supervision_dualfight_check VERDICT, not a classify
 # state — but it is a first-class VERIFIED input to the outcome map below
 # (twins-pinned vocabulary, shell twin literal "DUAL_FIGHT").
@@ -2252,7 +2569,8 @@ def _supervision_detect_real(
         return SupervisionDetection(SUPERVISION_STATE_SCRIPT)
 
 
-# Test seam (mirrors ``_scope_detect_fn``): tests inject a stub returning a
+# Test seam (mirrors ``_service_detect_fn``, the executor-unit detector):
+# tests inject a stub returning a
 # deterministic SupervisionDetection; production calls the real detector.
 _supervision_detect_fn: Callable[
     [dict[str, str] | None], SupervisionDetection
