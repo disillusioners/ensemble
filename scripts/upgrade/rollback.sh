@@ -136,6 +136,13 @@ journal_mark_supervision || _warn "supervision txn stamp failed (advisory — co
 
 # ── Stop → launcher swap → repoint → restart (D6 + amendment) ───────────────
 lock_heartbeat
+# 2.2b (upgrade-resilience 2026-10-07) — stop_via_stop_script is now
+# BOUNDED internally (lib.sh:2629 wraps the fork-exec at
+# STOP_SCRIPT_BUDGET_S=120s with a SIGTERM→SIGKILL watchdog). A hung
+# child (incident ④ freeze) can no longer wedge this caller — the
+# bound falls THROUGH to the B4 leave-txn-open policy below. The
+# `if ! stop_via_stop_script` shape is preserved: a real stop failure
+# (non-zero non-124 rc) still surfaces here for the B4 path.
 if ! stop_via_stop_script; then
     # B4 policy (leave-txn-open, same as promote's four abort sites): the
     # txn stays OPEN for sweep self-recovery. `current` is untouched at the
@@ -166,6 +173,13 @@ lock_heartbeat
 # unit-path hand-back failure returns nonzero (NO nohup fallback —
 # Amendment #1): halt journal event + B4 leave-txn-open (the open
 # flipped txn makes the next launcher start sweep-ROLL-BACK again).
+# 2.2b — restart_via_launcher's unit hand-back is BOUNDED internally
+# (lib.sh:2873 wraps `systemctl start` at HANDBACK_START_BUDGET_S=60s
+# with a SIGTERM→SIGKILL watchdog — the §9 reproduction site). A hung
+# child no longer wedges the post-flip window; the bound falls
+# THROUGH to the existing halt arm below. The `if !` shape is
+# preserved: a real hand-back failure (non-zero non-124 rc) still
+# surfaces here for the B4 leave-txn-open policy.
 if ! restart_via_launcher; then
     _warn "unit hand-back FAILED — halting rollback (txn left open for sweep recovery; NO nohup fallback, never a false success)"
     journal_history_append halt "manual rollback to $TO_VERSION: unit hand-back failed — halt-for-human, txn left open for sweep recovery (no nohup fallback — Amendment #1)" \
