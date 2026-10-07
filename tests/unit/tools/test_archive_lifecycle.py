@@ -34,6 +34,7 @@ class TestAccessMemoryArchive:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None  # 9c2d95ccd: version-aware resolution; fall through to get_resolved
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
@@ -59,6 +60,7 @@ class TestAccessMemoryArchive:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None  # 9c2d95ccd: version-aware resolution; fall through to get_resolved
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
@@ -89,6 +91,7 @@ class TestAccessMemoryArchive:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None  # 9c2d95ccd: version-aware resolution; fall through to get_resolved
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
@@ -121,6 +124,7 @@ class TestAccessMemoryArchive:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None  # 9c2d95ccd: version-aware resolution; fall through to get_resolved
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
@@ -149,6 +153,7 @@ class TestAccessMemoryArchive:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None  # 9c2d95ccd: version-aware resolution; fall through to get_resolved
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
@@ -182,6 +187,7 @@ class TestAccessMemoryArchive:
                 mock_registry = MagicMock()
                 mock_registry.get.return_value = mock_meta
                 mock_registry.get_resolved.return_value = mock_meta
+                mock_registry.get_version.return_value = None  # 9c2d95ccd: version-aware resolution; fall through to get_resolved
                 mock_get_registry.return_value = mock_registry
 
                 tool = create_access_memory_tool("test-agent")
@@ -210,6 +216,7 @@ class TestAccessMemoryArchive:
             mock_registry = MagicMock()
             mock_registry.get.return_value = mock_meta
             mock_registry.get_resolved.return_value = mock_meta
+            mock_registry.get_version.return_value = None  # 9c2d95ccd: version-aware resolution; fall through to get_resolved
             mock_get_registry.return_value = mock_registry
 
             tool = create_access_memory_tool("test-agent")
