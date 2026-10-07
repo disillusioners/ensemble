@@ -1,5 +1,42 @@
 # Test Packs
 
+## Completed commission — UPGRADE-RESILIENCE FINAL TEST PASS @ dc17a9142→b78c9fbba (2026-10-07) — verdict in RESULTS/2026-10-07-upgrade-resilience-final-gate.md
+
+Worktree `/home/nea/ensemble-src-wt-upgrade-resilience` (branch feature/upgrade-executor-resilience; commissioned tip dc17a9142 + 13 authorized test-lane commits); BASE scratch `/home/nea/ensemble-src-wt-test-base` @ 2753ee78d (removed post-gate). 30 workers (4 dispatch-loss replacements), every residual family BASE-discriminated. **Zero fix-range-caused failures**; 86-node release_journal cascade closed by fixture fix (f7db75ed4 contract change sans fixture update). Real-systemd kill evidence R1/R2/R6 on live-systemd host (disposable `ensemble-test-<uuid>` units, zero strays). Mid-gate concurrent-actor event: giter committed production `dc01af6a1` (STOP_SCRIPT_BUDGET_S derivation) + `83f0b53a5` mid-gate — bounded_waits re-run at new tip covers it (57/57 incl. D1-D8 sync-guard).
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `scen_abc_systemd_pack` | tests/unit/tools/test_upgrade_executor_systemd_service.py | Option D executor (a/b/c) | <1 min | 2026-10-07 @ dc17a9142 | ✅ PASS 32/32 (hermetic; real-systemd evidence separate) |
+| `scen_abc_real_kill` | /tmp/ensemble-kill-evidence/ (R1/R2/R6) | real pgroup-immunity + KillMode=mixed stragglers + loud refusal | ~15 min | 2026-10-07 host-live-systemd | ✅ PASS R1+R2 (journal smoking-guns) + R6 signatures; zero strays |
+| `scen_d_bounded_waits` | tests/test_bounded_subprocess_waits.sh | 7 bounded-wait sites + derivation D1-D8 | <1 min | 2026-10-07 @ c140f6053 (re-run post-dc01af6a1) | ✅ PASS 57/57 (29 original + 28 derivation/sync-guard) |
+| `scen_e_boot_sweep` | tests/test_boot_sweep_commit_and_continue.sh | C1-C7 stale-txn commit-and-continue | <1 min | 2026-10-07 @ dc17a9142 | ✅ PASS 27/27 |
+| `upgrade_family` (5 packs) | test_upgrade_{journal,tools,registration,executor_systemd}_service.py + test_post_restart_arm_notify_journal.py | journal 117/tools 173(+drain 13)/reg 21/sysd 32/notify 40 | ~1 min ea | 2026-10-07 @ dc17a9142 | ✅ PASS 382/383 (1 env-gated skip) |
+| `shell_stage_plugins` | tests/test_stage_plugins_tree.sh | plugins/ staging matrix | <1 min | 2026-10-07 @ dc17a9142 | ✅ PASS 31/31 |
+| `shell_stage_freshness` | tests/test_stage_freshness_guard.sh | freshness/provenance guard | ~1 min | 2026-10-07 @ dc17a9142 | ✅ PASS 118/0 |
+| `shell_atomic_flip` | tests/test_atomic_flip.sh | flip integrity + dispatch | <1 min | 2026-10-07 @ dc17a9142 | ✅ PASS 36/36 |
+| `shell_staleness` | tests/test_promote_plugin_staleness.sh | staleness predicate matrix (the commission's "61") | <1 min | 2026-10-07 @ dc17a9142 | ✅ PASS 61/61 |
+| `shell_release_journal` | tests/test_release_journal.sh | full journal regression | ~3 min | 2026-10-07 @ dbd37dbac | ✅ PASS-effectively 316/18 (18 pre-existing ×3-base-attributed; 86-cascade closed by dbd37dbac fixture fix) |
+| `plugin_dir` | tests/unit/plugin_subsystem/ | 563 plugin tests | <1 min | 2026-10-07 @ c140f6053 | ✅ PASS-effectively 559/563 (4 pre-existing: hash-count literal, policy no_change, MANIFEST dup ×2) |
+| `drift_parity` | tests/migration/test_drift_events_index_parity.py | PG-index parity (27b48af20) | <1 min | 2026-10-07 @ dbd37dbac | ✅ PASS 11/11 |
+| `sweep_small_dirs` | 10 dirs (repositories…sources) | 516 tests | ~2 min | 2026-10-07 @ dc17a9142 | ✅ PASS 516/516 |
+| `sweep_tools_A` | test_prompt_section_reference_integrity.py | 1371 | <1 min | 2026-10-07 | ✅ effectively 1365/1371 (6 pre-existing prompt debt, base-set-identical) |
+| `sweep_tools_B` | 12 soul/memory/snapshot files | 653 | ~1 min | 2026-10-07 | ✅ effectively 651/653 (2 owner-decision: knowledge-explore-caller spawn-seam) |
+| `sweep_tools_D` | tools dir remainder | 985 | ~4 min | 2026-10-07 | ✅ effectively 980/985 (5 skips; 2 fixed 61b8802a0) |
+| `sweep_routers` | tests/unit/routers/ | 505 | ~2 min | 2026-10-07 | ✅ PASS 505/505 (2 drift fixed a2a3691f7) |
+| `sweep_services_A` | a-f files | 835 | ~1 min | 2026-10-07 | ✅ PASS 834/834 (5 fixed 99de2756d) |
+| `sweep_services_B` | f-m files | 887 | ~1.5 min | 2026-10-07 | ✅ effectively 880/887 (7 in-file quarantined) |
+| `sweep_services_C` | p-z files | 730 | ~1.5 min | 2026-10-07 | ✅ effectively 728/730 (2 pre-existing: time-bomb + zombie-race) |
+| `sweep_top_ag` | tests/unit/test_[a-g]*.py | 2464 | ~2.5 min | 2026-10-07 | ✅ effectively 2403+13fixed/2464 (39F+21E ALL pre-existing, 9 families base-confirmed; 13 fixed 29fa31bbd) |
+| `sweep_top_hm` | tests/unit/test_[h-m]*.py | 2218 | ~5 min ⚠️288s | 2026-10-07 | ✅ effectively 2215/2218 (4 fixed 3c3b602f6; 1 KB-debt + 1 order-flake; ⚠️ near cap — split before re-run) |
+| `sweep_top_ns` | tests/unit/test_[n-s]*.py | 2325 | ~2 min | 2026-10-07 | ✅ effectively 2316+6fixed/2325 (9 pre-existing; 6 fixed 81962baf9) |
+| `sweep_top_tz` | tests/unit/test_[t-z]*.py | 847 | ~1 min | 2026-10-07 | ✅ effectively 835/847 effective (6 fixed inv3 4-commits; 1 pre-existing production-coordinated terminal_reason registry) |
+| `k1_supervision_fixture` | tests/test_supervision_{e2e,journal}.sh | stage.sh plugins/ precondition | ~2 min ea | 2026-10-07 @ b78c9fbba | ✅ e2e 52/0 + journal 39/0 (was 12/43 + 11/26; stop_handback 152/0 unaffected) |
+| `k2_terminal_gating` | tests/unit/services/test_post_restart_arm_notify_sweep.py | 33 | <1 min | 2026-10-07 @ 7166979dd | ✅ PASS 33/33 (2 time-bombed fixtures fixed; base-confirmed pre-existing) |
+| `k3_fe_static` | frontend/e2e/instances-state-cache-regression.spec.ts:685 | static confirm | <1 min | 2026-10-07 | ✅ :685=20000 @FIX vs 10000 @BASE (6e17c08f8); QUARANTINE wording MATCHES; NOT e2e-verified per commission |
+| `stage_dryrun` | scripts/upgrade/stage.sh sandbox (disposable INSTALL_DIR) | plugins payload + manifest hash | ~10 min | 2026-10-07 | see RESULTS (final gate section §4) |
+
+**Authorized test-lane commits this gate (13):** ff967acb6 · a2a3691f7 · 61b8802a0 · 99de2756d · 81962baf9 · 29fa31bbd · 3c3b602f6 · 7166979dd · c9c33e064e · 570145f3c · 94cce8c30 · 875770b0d · c5c5dc2fe · c140f6053 · dbd37dbac · b78c9fbba (16 total incl. K1/K2/W24/inv3/inv6 + sweep quick-fixes).
+
 ## Completed commission — PLUGIN SUBSYSTEM SLICE ⑦ (MCP RETIREMENT) @ fb6a2ed83 (2026-10-07) — 🟢 VERDICT: GREEN (6/6; GREEN + reviewer = merge → staging; overnight build test coverage COMPLETE)
 
 Worktree-07 (base `da81473d5`, 2 commits, 32-file diff zero live-install paths); :8079 daemon boots FROM this worktree — verified-against, never restarted. 3 reused workers. **Sentinel 3/3** (zero-refs / carve-out-exactly-3-files / vacuous-allowlist Apache guard; needle `open-design-mcp` ≠ `opendesign`; scratch injection unsupported → read-verified loop). Suites: plugin_subsystem **563/0** + sentinel 3 = 566/0 (commissioned minimum; the 1067/17 full selection >5-min — not reproducible under cap; family `TestRecordMetricsWiring` SimpleNamespace/priority fixture-rot **PROVEN pre-existing** via base-state rerun, same 10 ids at base+HEAD). **Restart evidence ×4**: log 0 open-design-mcp (1 sanctioned boot-scan line = new B-plugin); designer `7487dae3` **4-native/0-MCP** (set-computed from `Filtered tools 215→65` DEBUG line — pattern banked); honest envelope committed @ HEAD (smoke §4.2: finish_reason=length + empty_response refusal + no-laundering-to-lint); daemon/ grep = 4 Apache-attribution hits in the §4(d)-correct container. Other-MCP: context7 bound+healthy; plane degraded (pre-existing env family). **Fail-closed: ZERO residual od_* MCP traffic**; pool context7-only. Boundaries: OD pid 3288819 @7456 alive (deferral); 9797/7979 untouched; systemd probe env-unavailable (no DBUS). Full evidence: RESULTS/2026-10-07-plugin-slice07-fb6a2ed83.md.
