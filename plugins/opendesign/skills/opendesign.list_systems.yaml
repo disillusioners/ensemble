@@ -41,7 +41,14 @@ plugin_ref:
   # alongside the B-element and Turn-3 orchestration.  Documenting
   # the current truth here, not the future shape.
   upstream_tag:
-    copy_freely: "open-design-v0.23.0"
+    # Slice-⑥ promotion-remediation (2026-10-07): aligned with parent
+    # manifest tag_pin_per_class (advanced v0.23.0 → v0.24.1 per the
+    # §8.5 second-tag clean-pull procedure; pin-stale predicate
+    # cleared at age=13 ≤ 14). The loader enforces name+license+pin
+    # match against the parent manifest; an out-of-sync value here
+    # is a plugin_ref_pin_mismatch refusal at load time (test
+    # test_plugin_registry_loads).
+    copy_freely: "open-design-v0.24.1"
   # CON §6: license is part of the version-visibility surface.  The
   # loader refuses a skill whose license diverges from the parent
   # plugin's plugin.license (defense in depth — a ref-data mistake
@@ -58,7 +65,7 @@ content:
     # opendesign.list_systems
 
     Authoritative count source: `plugins/opendesign/copy_freely/design-systems/`
-    at the pinned upstream tag (`open-design-v0.23.0` per MANIFEST.yaml
+    at the pinned upstream tag (`open-design-v0.24.1` per MANIFEST.yaml
     `plugin.upstream.tag_pin_per_class.copy_freely`).
 
     Per CURATION.md §2 finding F-1, the top-level entry count is **154**:

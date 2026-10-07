@@ -1,366 +1,241 @@
-# Plugin Subsystem v1 — opendesign plugin manifest (slice ③)
-#
-# This manifest declares the vendoring-time shape of the opendesign plugin.
-# Slice ③ extends slice ② to the FULL 3-class provenance layout per
-# REC §4.1 layer→class mapping: copy_freely (data, slice ②) +
-# snapshot_with_drift_alarm (prompt code, slice ③) + own_outright
-# (Turn-3 orchestration + lint/parse5 ports, declared at ③ / authored at ⑤).
-#
-# Source of truth: .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md
-# Pin rationale: see CURATION.md and tools/vendor/{od_vendor,od_vendor_snapshot}.py.
-#
-# CON §8 additive-epoch rule: 1.0.0 → 1.0.1 lifts at slice ④ to admit the
-# new ``skills`` section (CON §6 plugin-skill declaration).  The bump is
-# ADDITIVE on no frozen surface: the existing fields are unchanged, no
-# field is removed, no enum value is deleted.  Plugin #1's
-# `schema_version: "1.0.0"`-authored manifest (slice ② baseline) stays
-# valid because the runner carries both schemas for one minor cycle
-# (CON §8 migration window).
-
-# 1.0.2 — additive: integration_path C→B element + ports section
-# (slice ⑤; CON §8: additive on no frozen surface — no field removed,
-# no enum tightened, no section renamed). The B-element is the
-# generate + compose_brief + save + lint Port-backed tool family
-# (REC §1.2 component 9, split per-capability per REC §7 risk note
-# "Component 9 becomes an OD monolith"); the C element (resource-only
-# data + prompt-code layers) is unchanged. The manifest declares ONE
-# integration_path; we declare "B" because at slice ⑤ the plugin has
-# runtime capability (the ports surface) and the prior C-only state
-# was truthful pre-⑤ but is no longer complete. The four Port
-# declarations themselves live in Python code at
-# ``daemon/plugin_subsystem/opendesign/ports.py`` (the single source
-# of truth); this manifest carries only the reference (port IDs +
-# adapter_ids + consumer names) so the schema-CI runner can validate
-# without re-encoding the schemas.
-
-# 1.0.3 — additive: divergence_register entry optional ``status``
-# disposition enum (registered/open/resolved, CON §5 entry shape)
-# (slice ⑥; CON §8: additive on no frozen surface — no field removed,
-# no enum tightened, no section renamed).  Reviewer merge-amendment
-# (slice-⑥ merge): the manifest already USED the ``status``
-# vocabulary on its register entries while declaring ``1.0.2``;
-# family acceptance made that valid, but the declaration is now
-# made explicit — ``1.0.3`` from the slice-⑥ merge onward.
-schema_version: "1.0.3"
+schema_version: 1.0.3
 plugin:
-  name: "opendesign"
-  license: "Apache-2.0"
+  name: opendesign
+  license: Apache-2.0
   upstream:
-    repo: "https://github.com/nexu-io/open-design.git"
+    repo: https://github.com/nexu-io/open-design.git
     tag_pin_per_class:
-      # copy_freely: the data layer (design systems, templates, craft,
-      # prompt-templates) — slice ② vendored @ open-design-v0.23.0.
-      copy_freely: "open-design-v0.23.0"
-      # snapshot_with_drift_alarm: the prompt code layer (10 daemon
-      # TS composer modules + 17 contracts mirror files) — slice ③
-      # vendored @ open-design-v0.23.0; the per-class pin inherits
-      # copy_freely's pin (CON §2 line 47) and is declared explicitly
-      # here so the slice ③ tag-diff has a concrete anchor.
-      snapshot_with_drift_alarm: "open-design-v0.23.0"
-  # integration_path: B at slice ⑤ — the per-capability B-port tool
-  # family (od.generate / od.compose_brief / od.save / od.lint) is
-  # the plugin's runtime capability surface. The C element (resource
-  # data) coexists and is still the dominant vendoring surface, but
-  # the integration_path declaration describes the runtime mode (CON §2
-  # "single integration_path; we declare the path the plugin EXECUTES
-  # under"). Plugin-internal class structure is unaffected (the
-  # copy_freely / snapshot_with_drift_alarm / own_outright sections
-  # below are unchanged). The frozen surface (CON §3) doesn't change.
-  integration_path: "B"
-  # execution_mode: lifted-symbol at slice ⑤ — the wrapper is our
-  # Python code (daemon/plugin_subsystem/opendesign/{generate,
-  # compose_brief, save, lint}.py), invoked via the Port → tool
-  # binding in plugin_tool_factory.py. The B-element "lifted symbol"
-  # idiom in CON §2 is the abstract noun for "our adapter invokes a
-  # capability"; the Per-Port adapter_id (opendesign.{generate,
-  # compose_brief, save, lint}.v1) is the concrete dispatch. The
-  # entrypoint (≤200-line tripwire alarm 220 / refuse 300) is the
-  # Port's ``compose_dict`` / ``execute_dict`` / ``save_dict`` /
-  # ``lint_dict`` callable; the actual files are well under the tripwire
-  # (the longest, generate.py, is <800 lines, with gates as the bulk).
-  execution_mode: "lifted-symbol"
-  lifted_symbol: "task.od.generate"
-  entrypoint: "adapter/entry.ts"  # the ≤200-line tripwire sentinel — Mode P holds the legacy field-shape
+      copy_freely: open-design-v0.24.1
+      snapshot_with_drift_alarm: open-design-v0.24.1
+  integration_path: B
+  execution_mode: lifted-symbol
+  lifted_symbol: task.od.generate
+  entrypoint: adapter/entry.ts
   ipc_version: 1
-
-# copy_freely: the four vendored data classes (CON §2).  All four are
-# subdirs under copy_freely/ that the sync-runner (slice ③) will clean-pull
-# at the pinned tag; this manifest's paths are the upstream-relative globs
-# (REC §4.3 row ②; CON §1).
 copy_freely:
   paths:
-    - "copy_freely/design-systems/"
-    - "copy_freely/design-templates/"
-    - "copy_freely/craft/"
-    - "copy_freely/prompt-templates/"
-  # alarm_owner: required by CON §2.  The data classes are at the high-
-  # end of the stable/minor-churn spectrum (od-resource-layer §0: zero
-  # churn across full v0.23.0 → v0.24.1) so the owner is the plugin-
-  # maintenance role in charge of upstream-data refresh; N=14 default
-  # escalation per CON §2 placeholder.
-  alarm_owner: "plugin-opendesign-data"
-  escalation: "block-promote-after-days"
-
-# snapshot_with_drift_alarm: the prompt code layer (CON §2).  The
-# 10 daemon TS composer modules + 17 contracts mirror files are
-# vendored under snapshot_with_drift_alarm/prompts/{daemon,contracts}/
-# (REC §4.1 row 2).  These are SNAPSHOTTED — not executed under
-# resource-only (CON §7 no-runtime-loading sentinel); the slice ⑤
-# Mode-P Provider re-expresses them in Python.  The divergence
-# register is REQUIRED from day one (CON §2: non-empty register on
-# non-empty paths); 4 SEEDED entries below document KNOWN planned
-# divergence points in the upstream two-tree (od-resource-layer §1.B)
-# so a future sync-runner pull that surfaces a byte change in any
-# of these files lands on a pre-registered entry (re-apply or drop,
-# update the log either way, CON §2).
-#
-# The `upstream_paths` field (additive, CON §8 — 1.0.x allows
-# additive fields) is the parallel mapping: paths[i] is the LOCAL
-# subtree, upstream_paths[i] is the corresponding UPSTREAM subtree.
-# For copy_freely the default strip-class-prefix heuristic works
-# because the upstream and local share the trailing path; for
-# snapshot the local tree is renamed (prompts/{daemon,contracts}/
-# instead of apps/.../prompts/, packages/.../prompts/) so the
-# explicit override is REQUIRED.  When upstream_paths is absent,
-# the sync-runner falls back to the strip-class-prefix heuristic
-# (matches the copy_freely layout).
+  - copy_freely/design-systems/
+  - copy_freely/design-templates/
+  - copy_freely/craft/
+  - copy_freely/prompt-templates/
+  alarm_owner: plugin-opendesign-data
+  escalation: block-promote-after-days
 snapshot_with_drift_alarm:
   paths:
-    - "snapshot_with_drift_alarm/prompts/daemon/"
-    - "snapshot_with_drift_alarm/prompts/contracts/"
-    # Slice-⑤ F1 fix: the contracts deck-framework.ts imports
-    # '../runtime/deck-protocol.js' — the runtime subtree is part of
-    # the same pinned contracts package and is required for the
-    # DECK_FRAMEWORK_DIRECTIVE template to evaluate (the deck-kind
-    # prompt embeds DECK_PROTOCOL_V1_INLINE_RUNTIME). Vendored at the
-    # same tag; HASHES.sha256 carries both files.
-    - "snapshot_with_drift_alarm/runtime/"
+  - snapshot_with_drift_alarm/prompts/daemon/
+  - snapshot_with_drift_alarm/prompts/contracts/
+  - snapshot_with_drift_alarm/runtime/
   upstream_paths:
-    - "apps/daemon/src/prompts/"
-    - "packages/contracts/src/prompts/"
-    - "packages/contracts/src/runtime/"
-  # alarm_owner: required by CON §2.  Prompt code churns actively
-  # (od-resource-layer §0: 106 commits in 7wk for contracts); the
-  # owner is the prompt-Port maintenance role (the slice ⑤ B-element
-  # owner).
-  alarm_owner: "plugin-opendesign-prompts"
-  escalation: "block-promote-after-days"
-  # Divergence register — slice ③ minimal-faithful reading.  At ③
-  # the vendored bytes are BYTE-FAITHFUL to upstream @ open-design-v0.23.0
-  # (zero on-disk modifications), so the literal CON §5 "divergence
-  # between vendored snapshot content and what ③ actually ships" is
-  # zero entries.  However, the planning docs (od-resource-layer §1.B)
-  # name KNOWN planned divergence points in the upstream two-tree —
-  # the SEEDED entries below pre-register those points so the next
-  # sync-runner pull lands on them and the operator can apply the
-  # CON §2 re-apply-or-drop rule explicitly.  When byte changes do
-  # arrive in any of these files, the corresponding entry is updated
-  # with the actual delta; entries that never fire remain as
-  # pre-registered markers (the register grows monotonically until
-  # retired by user-ratified drop, never shrinks silently).
+  - apps/daemon/src/prompts/
+  - packages/contracts/src/prompts/
+  - packages/contracts/src/runtime/
+  alarm_owner: plugin-opendesign-prompts
+  escalation: block-promote-after-days
   divergence_register:
-    # Slice ⑤: OQ7 disposition refreshes the rationale. The 4 entries
-    # remain pre-registered (the register is monotonic; entries are
-    # retired only by user-ratified drop). The OQ7 commitment: the
-    # Mode-P Python Provider reads contracts-mirror files as the
-    # primary source and falls back to the daemon copies when the
-    # mirror is absent (core-slim; entry id=3). The CON §2 "re-apply
-    # or drop, update the log either way" rule applies to every
-    # sync-runner pull that surfaces a byte change in any of these
-    # files.
-    - id: 1
-      files: ["snapshot_with_drift_alarm/prompts/daemon/system.ts"]
-      delta: "daemon system.ts is the full composer (~135KB); contracts mirror is the exported subset (~74KB); upstream two-tree drift documented at od-resource-layer §1.B"
-      rationale: "Pre-registered divergence point: future sync will surface the upstream delta; re-apply (port upstream changes into the Python Mode-P compose Provider at slice ⑤ — provider reads contracts-mirror primary, daemon-copy fallback per OQ7) or drop (decline the upstream change with a manifest rationale)"
-      upstream_ref: "od-resource-layer.md#1.B"
-      pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_1_daemon_system_two_tree_drift"
-      status: "registered"
-    - id: 2
-      files: ["snapshot_with_drift_alarm/prompts/daemon/media-contract.ts"]
-      delta: "daemon media-contract.ts is the full module (~33KB); contracts mirror is the API subset (~9.8KB); upstream two-tree drift"
-      rationale: "Pre-registered divergence point: media contract shell-out (image/video/audio) diverges; future sync will surface the upstream delta; re-apply or drop (Mode-P Provider reads contracts-mirror primary per OQ7)"
-      upstream_ref: "od-resource-layer.md#1.B"
-      pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_2_daemon_media_contract_two_tree_drift"
-      status: "registered"
-    - id: 3
-      files: ["snapshot_with_drift_alarm/prompts/daemon/core-slim.ts"]
-      delta: "daemon core-slim.ts (438 lines) has NO contracts mirror; the contracts package cannot receive the slim charter (asymmetry documented at od-resource-layer §1.B)"
-      rationale: "Pre-registered asymmetry: core-slim lives daemon-only; OQ7 disposition confirms the asymmetry — the Mode-P Provider reads the daemon copy directly when no contracts mirror is available. Future sync will not surface a contracts-side delta to track; this entry exists to mark the asymmetry so a future contributor does not 'fix' it by adding a mirror"
-      upstream_ref: "od-resource-layer.md#1.B (core-slim contracts-mirror absence)"
-      pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_3_daemon_core_slim_contracts_mirror_absence"
-      status: "registered"
-    - id: 4
-      files:
-        - "snapshot_with_drift_alarm/prompts/daemon/directions.ts"
-        - "snapshot_with_drift_alarm/prompts/daemon/discovery.ts"
-        - "snapshot_with_drift_alarm/prompts/daemon/official-system.ts"
-      delta: "daemon/contracts two-tree drift documented at od-resource-layer §1.B; per-file parity enforced by mirror tests only (not byte-fidelity)"
-      rationale: "Pre-registered divergence points: 3 files where the daemon/contracts two-tree drift is real; future sync will surface upstream deltas; re-apply or drop per CON §2 rule"
-      upstream_ref: "od-resource-layer.md#1.B"
-      pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_4_three_files_two_tree_drift"
-      status: "registered"
-
-    - id: 5
-      files:
-        - "snapshot_with_drift_alarm/runtime/html-injection-points.ts"
-        - "snapshot_with_drift_alarm/runtime/membership-concurrency-limit.ts"
-        - "snapshot_with_drift_alarm/runtime/model-window-limit.ts"
-        - "snapshot_with_drift_alarm/runtime/od-next-capability.ts"
-        - "snapshot_with_drift_alarm/runtime/preview-build-focus.ts"
-        - "snapshot_with_drift_alarm/runtime/preview-guards.ts"
-        - "snapshot_with_drift_alarm/runtime/preview-observability.ts"
-        - "snapshot_with_drift_alarm/runtime/preview-runtime-state.ts"
-      delta: "slice-⑥ real same-tag pull (2026-10-07): +8/~0/-0 — the 8 upstream packages/contracts/src/runtime/ files not vendored at ⑤ landed through the sync-runner"
-      rationale: "The pull IS the re-apply disposition (CON §2: re-apply or drop, update the log either way). Files landed byte-faithful to the pin (gate bar 1 green) and are hash-registered (HASHES 29→37, gate bar 2). Entry annotated from the sync-emitted status=open to resolved by this operator disposition — the sole-writer route (declare -> sync -> hash-register) completed the runtime/ membership."
-      upstream_ref: "open-design-v0.23.0 packages/contracts/src/runtime/ (8 files, sync-runner real pull)"
-      pinning_test: "tests/unit/plugin_subsystem/test_sync_runner.py::TestSnapshotClassDrift::test_drift_alarm_at_snapshot_with_drift_alarm"
-      status: "resolved"
-
-# own_outright: AUTHORED at slice ⑤ (REC §4.1 rows 3+4). REC §4.1
-# assigned Turn-3 / compose-brief orchestration + lint/parse5 ports to
-# the own_outright class; slice ⑤ authored the actual content. The
-# Turn-3 orchestration is a port-with-attribution (not clean-room)
-# from open-design-mcp@0.16.1 (Apache-2.0, OQ4 verified permissive —
-# see .agents/shared/planning/plugin-subsystem/2026-10-06-slice-5-probes.md
-# §OQ4 for the disposition + attribution). The 16-regex lint family +
-# parse5 EOF gate are ported from the OD daemon's lint-artifact.ts +
-# an EOF structural backstop; the upstream linter is deliberately
-# non-parsing (od-generation-engine.md §1 Component C) and the EOF
-# gate is the load-bearing reason this own_outright port exists.
+  - id: 1
+    files:
+    - snapshot_with_drift_alarm/prompts/daemon/system.ts
+    delta: "daemon system.ts is the full composer (~135KB); contracts mirror is the\
+      \ exported subset (~74KB); upstream two-tree drift documented at od-resource-layer\
+      \ \xA71.B"
+    rationale: "Pre-registered divergence point: future sync will surface the upstream\
+      \ delta; re-apply (port upstream changes into the Python Mode-P compose Provider\
+      \ at slice \u2464 \u2014 provider reads contracts-mirror primary, daemon-copy\
+      \ fallback per OQ7) or drop (decline the upstream change with a manifest rationale)"
+    upstream_ref: od-resource-layer.md#1.B
+    pinning_test: tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_1_daemon_system_two_tree_drift
+    status: registered
+  - id: 2
+    files:
+    - snapshot_with_drift_alarm/prompts/daemon/media-contract.ts
+    delta: daemon media-contract.ts is the full module (~33KB); contracts mirror is
+      the API subset (~9.8KB); upstream two-tree drift
+    rationale: 'Pre-registered divergence point: media contract shell-out (image/video/audio)
+      diverges; future sync will surface the upstream delta; re-apply or drop (Mode-P
+      Provider reads contracts-mirror primary per OQ7)'
+    upstream_ref: od-resource-layer.md#1.B
+    pinning_test: tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_2_daemon_media_contract_two_tree_drift
+    status: registered
+  - id: 3
+    files:
+    - snapshot_with_drift_alarm/prompts/daemon/core-slim.ts
+    delta: "daemon core-slim.ts (438 lines) has NO contracts mirror; the contracts\
+      \ package cannot receive the slim charter (asymmetry documented at od-resource-layer\
+      \ \xA71.B)"
+    rationale: "Pre-registered asymmetry: core-slim lives daemon-only; OQ7 disposition\
+      \ confirms the asymmetry \u2014 the Mode-P Provider reads the daemon copy directly\
+      \ when no contracts mirror is available. Future sync will not surface a contracts-side\
+      \ delta to track; this entry exists to mark the asymmetry so a future contributor\
+      \ does not 'fix' it by adding a mirror"
+    upstream_ref: od-resource-layer.md#1.B (core-slim contracts-mirror absence)
+    pinning_test: tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_3_daemon_core_slim_contracts_mirror_absence
+    status: registered
+  - id: 4
+    files:
+    - snapshot_with_drift_alarm/prompts/daemon/directions.ts
+    - snapshot_with_drift_alarm/prompts/daemon/discovery.ts
+    - snapshot_with_drift_alarm/prompts/daemon/official-system.ts
+    delta: "daemon/contracts two-tree drift documented at od-resource-layer \xA71.B;\
+      \ per-file parity enforced by mirror tests only (not byte-fidelity)"
+    rationale: "Pre-registered divergence points: 3 files where the daemon/contracts\
+      \ two-tree drift is real; future sync will surface upstream deltas; re-apply\
+      \ or drop per CON \xA72 rule"
+    upstream_ref: od-resource-layer.md#1.B
+    pinning_test: tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_4_three_files_two_tree_drift
+    status: registered
+  - id: 5
+    files:
+    - snapshot_with_drift_alarm/runtime/html-injection-points.ts
+    - snapshot_with_drift_alarm/runtime/membership-concurrency-limit.ts
+    - snapshot_with_drift_alarm/runtime/model-window-limit.ts
+    - snapshot_with_drift_alarm/runtime/od-next-capability.ts
+    - snapshot_with_drift_alarm/runtime/preview-build-focus.ts
+    - snapshot_with_drift_alarm/runtime/preview-guards.ts
+    - snapshot_with_drift_alarm/runtime/preview-observability.ts
+    - snapshot_with_drift_alarm/runtime/preview-runtime-state.ts
+    delta: "slice-\u2465 real same-tag pull (2026-10-07): +8/~0/-0 \u2014 the 8 upstream\
+      \ packages/contracts/src/runtime/ files not vendored at \u2464 landed through\
+      \ the sync-runner"
+    rationale: "The pull IS the re-apply disposition (CON \xA72: re-apply or drop,\
+      \ update the log either way). Files landed byte-faithful to the pin (gate bar\
+      \ 1 green) and are hash-registered (HASHES 29\u219237, gate bar 2). Entry annotated\
+      \ from the sync-emitted status=open to resolved by this operator disposition\
+      \ \u2014 the sole-writer route (declare -> sync -> hash-register) completed\
+      \ the runtime/ membership."
+    upstream_ref: open-design-v0.23.0 packages/contracts/src/runtime/ (8 files, sync-runner
+      real pull)
+    pinning_test: tests/unit/plugin_subsystem/test_sync_runner.py::TestSnapshotClassDrift::test_drift_alarm_at_snapshot_with_drift_alarm
+    status: resolved
+  - id: 6
+    files:
+    - prompts/contracts/od-next-intent-resolution.ts
+    - prompts/contracts/od-next-strategy.ts
+    delta: 'upstream drift observed on open-design-v0.24.1: +1/~1/-0'
+    rationale: "Snapshot pulled at sync time; divergence registered; re-apply or drop,\
+      \ update the log either way (CON \xA72)"
+    pinning_test: tests/unit/plugin_subsystem/test_sync_runner.py::TestSnapshotClassDrift::test_drift_alarm_at_snapshot_with_drift_alarm
+    status: resolved
 own_outright:
   paths:
-    - "own_outright/turn3_orchestration/"
-    - "own_outright/lint/"
-    - "own_outright/parse5_eof_gate/"
+  - own_outright/turn3_orchestration/
+  - own_outright/lint/
+  - own_outright/parse5_eof_gate/
   attribution:
-    - path: "turn3_orchestration/"
-      license_carried_from: "Apache-2.0 open-design-mcp@0.16.1"
-      upstream_source: "https://github.com/nano-step/open-design-mcp/blob/main/src/tools/compose-brief.js"
-      upstream_commit: "7766582f (vendored 2026-05-17; LICENSE preserved in own_outright/turn3_orchestration/LICENSE)"
-      rationale: "Apache-2.0 §4(d) — copy + attribution + state of changes; the orchestration is pure formatting (string concatenation), re-expressed in Python for the Mode-P Provider"
-    - path: "lint/"
-      license_carried_from: "Apache-2.0 open-design"
-      upstream_source: "https://github.com/nexu-io/open-design/blob/main/apps/daemon/src/lint-artifact.ts"
-      rationale: "The 16-regex family is re-expressed from lint-artifact.ts heuristics; Apache-2.0 preserves the freedom to port and relicense as ours"
-
-# ports: ADDITIVE section at slice ⑤ (CON §8 1.0.x allows additive
-# sections). The Port data-contract schema is FROZEN (CON §3) and the
-# full schemas live in Python code at
-# ``daemon/plugin_subsystem/opendesign/ports.py`` (the single source
-# of truth). This manifest carries only the REFERENCE (port IDs +
-# adapter_ids + consumer names + declared_in) so the schema-CI runner
-# can validate without re-encoding the schemas and so operator review
-# can see the surface at a glance. The frozen Port schema surface
-# (inputs_schema / outputs_schema / errors.envelope) is NOT duplicated
-# here — duplicated YAML would inflate the manifest past the 64 KB
-# hard-cap (CON §1) by the time 4 ports × 4 large fields are present.
-# Schema-CI walker: see tests/unit/plugin_subsystem/test_port_registry.py
-# for the validation suite.
+  - path: turn3_orchestration/
+    license_carried_from: Apache-2.0 open-design-mcp@0.16.1
+    upstream_source: https://github.com/nano-step/open-design-mcp/blob/main/src/tools/compose-brief.js
+    upstream_commit: 7766582f (vendored 2026-05-17; LICENSE preserved in own_outright/turn3_orchestration/LICENSE)
+    rationale: "Apache-2.0 \xA74(d) \u2014 copy + attribution + state of changes;\
+      \ the orchestration is pure formatting (string concatenation), re-expressed\
+      \ in Python for the Mode-P Provider"
+  - path: lint/
+    license_carried_from: Apache-2.0 open-design
+    upstream_source: https://github.com/nexu-io/open-design/blob/main/apps/daemon/src/lint-artifact.ts
+    rationale: The 16-regex family is re-expressed from lint-artifact.ts heuristics;
+      Apache-2.0 preserves the freedom to port and relicense as ours
 ports:
   entries:
-    - port_id: "od.generate"
-      version: 1
-      adapter_id: "opendesign.generate.v1"
-      consumers: ["designer.generate_draft", "designer.regenerate_after_lint_fail", "job.generate_mockup"]
-      declared_in: "daemon/plugin_subsystem/opendesign/ports.py"
-      capability_tags: ["generation", "design", "long-running"]
-      notes: "Mode P (Python-native); inline finish_reason + usage visibility; completeness gates INSIDE (the load-bearing fix for the 2026-10-06 2/2 live failure)"
-    - port_id: "od.compose_brief"
-      version: 1
-      adapter_id: "opendesign.compose_brief.v1"
-      consumers: ["designer.compose_brief", "designer.compose_brief_per_page"]
-      declared_in: "daemon/plugin_subsystem/opendesign/ports.py"
-      capability_tags: ["brief-composition", "pure-function"]
-      notes: "Turn-3 pure formatter (no network); ported from open-design-mcp@0.16.1 (Apache-2.0; OQ4 verified; see own_outright attribution above)"
-    - port_id: "od.save"
-      version: 1
-      adapter_id: "opendesign.save.v1"
-      consumers: ["designer.capture_mockup", "designer.write_through"]
-      declared_in: "daemon/plugin_subsystem/opendesign/ports.py"
-      capability_tags: ["persistence", "repo-write"]
-      notes: "Canonical mockup-path writer; atomic stage-and-rename; the repo copy = developer deliverable"
-    - port_id: "od.lint"
-      version: 1
-      adapter_id: "opendesign.lint.v1"
-      consumers: ["designer.lint_artifact", "designer.regenerate_after_lint_fail"]
-      declared_in: "daemon/plugin_subsystem/opendesign/ports.py"
-      capability_tags: ["quality-gate", "lint"]
-      notes: "16-regex family + parse5 EOF gate; own_outright ported from OD daemon lint-artifact.ts"
-
-# divergence_register: rationale update at slice ⑤ per OQ7 disposition.
-# The 4 entries (already-seeded at slice ③) get the rationale refreshed
-# to document the Mode-P Python-native Provider's contracts-mirror-
-# primary + daemon-copy-fallback commitment (OQ7). The register is
-# CON §2 monotonic — entries grow, never silently drop.
-
-# parity_boundary: REQUIRED section (CON §2).  Documents what the plugin
-# deliberately does NOT carry from upstream.  Per od-resource-layer §5
-# coupling table, opendesign's OD daemon, brand presets (entangled),
-# and functional skill stubs (entangled) are excluded.  Slice ③
-# updates the prompt-stack and contracts-mirror entries: the 10
-# daemon composer modules and 17 contracts files are NOW vendored
-# (snapshot_with_drift_alarm layer above); the rest of apps/daemon/
-# remains excluded.
+  - port_id: od.generate
+    version: 1
+    adapter_id: opendesign.generate.v1
+    consumers:
+    - designer.generate_draft
+    - designer.regenerate_after_lint_fail
+    - job.generate_mockup
+    declared_in: daemon/plugin_subsystem/opendesign/ports.py
+    capability_tags:
+    - generation
+    - design
+    - long-running
+    notes: Mode P (Python-native); inline finish_reason + usage visibility; completeness
+      gates INSIDE (the load-bearing fix for the 2026-10-06 2/2 live failure)
+  - port_id: od.compose_brief
+    version: 1
+    adapter_id: opendesign.compose_brief.v1
+    consumers:
+    - designer.compose_brief
+    - designer.compose_brief_per_page
+    declared_in: daemon/plugin_subsystem/opendesign/ports.py
+    capability_tags:
+    - brief-composition
+    - pure-function
+    notes: Turn-3 pure formatter (no network); ported from open-design-mcp@0.16.1
+      (Apache-2.0; OQ4 verified; see own_outright attribution above)
+  - port_id: od.save
+    version: 1
+    adapter_id: opendesign.save.v1
+    consumers:
+    - designer.capture_mockup
+    - designer.write_through
+    declared_in: daemon/plugin_subsystem/opendesign/ports.py
+    capability_tags:
+    - persistence
+    - repo-write
+    notes: Canonical mockup-path writer; atomic stage-and-rename; the repo copy =
+      developer deliverable
+  - port_id: od.lint
+    version: 1
+    adapter_id: opendesign.lint.v1
+    consumers:
+    - designer.lint_artifact
+    - designer.regenerate_after_lint_fail
+    declared_in: daemon/plugin_subsystem/opendesign/ports.py
+    capability_tags:
+    - quality-gate
+    - lint
+    notes: 16-regex family + parse5 EOF gate; own_outright ported from OD daemon lint-artifact.ts
 parity_boundary:
   intentionally_not_vendored:
-    - path: "apps/daemon/"
-      reason: "OD daemon + in-repo MCP forwarder; entangled (od-resource-layer §5 row 9) — not vendored; retired entirely at slice ⑦ (ADR-PLUG-001 §4)"
-    - path: "apps/daemon/src/brands/"
-      reason: "Brand presets (19 modules + extraction loop + browser); ENTANGLED (od-resource-layer §5 row 9) — design systems cover brand styling; brand flow out of scope for v1"
-    - path: "apps/daemon/src/prompts/"
-      reason: "Daemon prompt stack (10 TS composer modules); LIGHTLY COUPLED (od-resource-layer §5 row 10); the 10 composer modules are NOW vendored as snapshot_with_drift_alarm/prompts/daemon/ @ open-design-v0.23.0; the remainder of apps/daemon/src/prompts/ stays excluded until re-evaluated; the Python-native compose Provider (Mode P) is the recommended default at slice ⑤"
-    - path: "packages/contracts/src/prompts/"
-      reason: "Published prompt mirror (17 files); mirror of daemon prompt stack; two-tree drift is real (od-resource-layer §1.B) and the 4 seeded divergence-register entries track the daemon/contracts asymmetry; the 17 contracts files are NOW vendored as snapshot_with_drift_alarm/prompts/contracts/ @ open-design-v0.23.0; the daemon-only modules (core-slim) stay asymmetric and register entry id=3 documents that asymmetry"
-    - path: "apps/daemon/src/skills/"
-      reason: "Functional skills (165 dirs) — STANDALONE-as-catalogue but execution requires upstream bundles (od-resource-layer §5 row 8); plugin-skill landing at slice ④ owns the slice-①-aligned consumption path"
-    - path: "apps/daemon/src/artifacts/"
-      reason: "Internal lint / parse5 EOF / truncation detectors — own-outright, ported into the generate adapter at slice ⑤ (REC §4.1 row 4)"
-    - path: "templates/"
-      reason: "Top-level HTML templates (3 entries) — STANDALONE but ORPHANED on upstream main (od-resource-layer §2); deprecated, not vendored"
-    # W5 carry-forward (slice-② review): upstream at
-    # /home/nea/opt/open-design/assets/prompt-templates/image/ contains
-    # 11 preview JPGs (one per major image-prompt template) that are
-    # the rendered previews of the JSON prompt templates.  The
-    # vendored copy_freely/prompt-templates/image/ subtree vendors the
-    # 48 JSON files only; the 11 JPGs are excluded because (a) they
-    # are preview assets (not prompt data — they are RENDITIONS of
-    # what the prompt generates, not inputs to generation) and (b) the
-    # slice-② planning count spec was "106 JSON" (class-entry count
-    # per the JSON file).  The 11 JPGs exist ONLY upstream at
-    # /home/nea/opt/open-design/assets/prompt-templates/image/*.jpg
-    # (read-only reference; do NOT modify upstream).  Slice ④ adds
-    # this row so the W5 disposition is recorded in the manifest's
-    # parity_boundary section (CON §2), not just CURATION.md.
-    - path: "assets/prompt-templates/image/*.jpg"
-      reason: "11 preview JPGs (W5 carry-forward from slice ②): rendered previews, not prompt data; vendored set is the 48 JSON files only; upstream at /home/nea/opt/open-design/assets/prompt-templates/image/ is READ-ONLY reference"
-  # not_executed: every vendored byte is inert under resource-only.
-  # Slice ③ expands the class-wide declarations to all three classes
-  # (copy_freely + snapshot_with_drift_alarm + own_outright).  The
-  # specific per-file entries would be 4881 + 27 + 0 = 4908 lines
-  # and are not load-bearing; the class-wide rows are the operator-
-  # readable shape.
+  - path: apps/daemon/
+    reason: "OD daemon + in-repo MCP forwarder; entangled (od-resource-layer \xA7\
+      5 row 9) \u2014 not vendored; retired entirely at slice \u2466 (ADR-PLUG-001\
+      \ \xA74)"
+  - path: apps/daemon/src/brands/
+    reason: "Brand presets (19 modules + extraction loop + browser); ENTANGLED (od-resource-layer\
+      \ \xA75 row 9) \u2014 design systems cover brand styling; brand flow out of\
+      \ scope for v1"
+  - path: apps/daemon/src/prompts/
+    reason: "Daemon prompt stack (10 TS composer modules); LIGHTLY COUPLED (od-resource-layer\
+      \ \xA75 row 10); the 10 composer modules are NOW vendored as snapshot_with_drift_alarm/prompts/daemon/\
+      \ @ open-design-v0.23.0; the remainder of apps/daemon/src/prompts/ stays excluded\
+      \ until re-evaluated; the Python-native compose Provider (Mode P) is the recommended\
+      \ default at slice \u2464"
+  - path: packages/contracts/src/prompts/
+    reason: "Published prompt mirror (17 files); mirror of daemon prompt stack; two-tree\
+      \ drift is real (od-resource-layer \xA71.B) and the 4 seeded divergence-register\
+      \ entries track the daemon/contracts asymmetry; the 17 contracts files are NOW\
+      \ vendored as snapshot_with_drift_alarm/prompts/contracts/ @ open-design-v0.23.0;\
+      \ the daemon-only modules (core-slim) stay asymmetric and register entry id=3\
+      \ documents that asymmetry"
+  - path: apps/daemon/src/skills/
+    reason: "Functional skills (165 dirs) \u2014 STANDALONE-as-catalogue but execution\
+      \ requires upstream bundles (od-resource-layer \xA75 row 8); plugin-skill landing\
+      \ at slice \u2463 owns the slice-\u2460-aligned consumption path"
+  - path: apps/daemon/src/artifacts/
+    reason: "Internal lint / parse5 EOF / truncation detectors \u2014 own-outright,\
+      \ ported into the generate adapter at slice \u2464 (REC \xA74.1 row 4)"
+  - path: templates/
+    reason: "Top-level HTML templates (3 entries) \u2014 STANDALONE but ORPHANED on\
+      \ upstream main (od-resource-layer \xA72); deprecated, not vendored"
+  - path: assets/prompt-templates/image/*.jpg
+    reason: "11 preview JPGs (W5 carry-forward from slice \u2461): rendered previews,\
+      \ not prompt data; vendored set is the 48 JSON files only; upstream at /home/nea/opt/open-design/assets/prompt-templates/image/\
+      \ is READ-ONLY reference"
   not_executed:
-    - path: "copy_freely/"
-      reason: "All vendored bytes under copy_freely/ are inert data under resource-only; no subtree executes (CON §1, CON §7 no-runtime-loading sentinel)"
-    - path: "snapshot_with_drift_alarm/"
-      reason: "All vendored bytes under snapshot_with_drift_alarm/ are inert data; no subtree executes (CON §1, CON §7 no-runtime-loading sentinel); the Python Mode-P compose Provider (slice ⑤) re-expresses the composer in Python, not via these vendored TS bytes"
-    - path: "own_outright/"
-      reason: "own_outright/ contents are authored locally and not vendored; this manifest at slice ③ declares the section/paths only; slice ⑤ authors the actual content (Turn-3/compose-brief orchestration, lint port, parse5 EOF gate port)"
-
-# skills: CON §6 plugin-skill declarations.  The manifest NAMES the
-# skill files; the slice-④ registration path
-# (daemon/plugin_subsystem/plugin_skill.py + plugin_registry._load_plugin_skills)
-# reads each file at scan time and refuses the plugin if a declared
-# file is missing or its content violates the CON §6 contract
-# (plugin_ref version-visibility, vendored_references inside-tree,
-# consumption.by named-only).  At slice ④ the only declared skill is
-# the opendesign.list_systems count query (REC §4.3 row ④).
-# Additional skills (e.g. opendesign.list_templates at slice ⑤ when
-# the generation B-element lands) will be appended to this list with
-# their own entries.  Slice ③/④ DAG: ②→④→⑤; giter's eventual merge
-# with slice ③'s class sections is a byte-exact union of both sides'
-# added sections.
+  - path: copy_freely/
+    reason: "All vendored bytes under copy_freely/ are inert data under resource-only;\
+      \ no subtree executes (CON \xA71, CON \xA77 no-runtime-loading sentinel)"
+  - path: snapshot_with_drift_alarm/
+    reason: "All vendored bytes under snapshot_with_drift_alarm/ are inert data; no\
+      \ subtree executes (CON \xA71, CON \xA77 no-runtime-loading sentinel); the Python\
+      \ Mode-P compose Provider (slice \u2464) re-expresses the composer in Python,\
+      \ not via these vendored TS bytes"
+  - path: own_outright/
+    reason: "own_outright/ contents are authored locally and not vendored; this manifest\
+      \ at slice \u2462 declares the section/paths only; slice \u2464 authors the\
+      \ actual content (Turn-3/compose-brief orchestration, lint port, parse5 EOF\
+      \ gate port)"
 skills:
   entries:
-    - skill_id: "opendesign.list_systems"
-      path: "skills/opendesign.list_systems.yaml"
+  - skill_id: opendesign.list_systems
+    path: skills/opendesign.list_systems.yaml
