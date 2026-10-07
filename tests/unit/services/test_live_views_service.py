@@ -23,6 +23,7 @@ tmp_image_store precedent).
 
 from __future__ import annotations
 
+import errno
 import os
 import pathlib
 from typing import TYPE_CHECKING
@@ -981,3 +982,98 @@ class TestProjectScopedMockupsSubtreeGate:
         assert resolved.on_disk_path == (
             workdir / ".agents" / "shared" / "planning" / "spec.md"
         )
+
+
+class TestResolveOsErrorToUniform404:
+    """HARDENING (M10): ``Path.resolve()`` can raise OSError
+    (EACCES on a parent dir, ELOOP on a symlink loop the
+    shape-check didn't catch, ENOTCONN / EIO on network FS).
+    The router only catches the three typed errors
+    (RootNotFoundError, TraversalError, PathNotFoundError);
+    a leaked OSError surfaces as a FastAPI 500 — violating
+    the uniform-404 / no-disclosure contract.
+
+    The M10 service-side fix collapses OSError on the two
+    ``Path.resolve()`` calls in ``_resolve_under_root`` into
+    ``RootNotFoundError`` (chained ``from exc`` so the
+    daemon log still carries the errno). The router's
+    three-error catch then collapses to the uniform 404.
+
+    These tests pin the contract: any OSError-raising
+    resolve must surface as ``RootNotFoundError`` (NOT a
+    ``OSError`` leak), and the chained ``__cause__`` is the
+    original exception.
+    """
+
+    @staticmethod
+    def _service(tmp_path: pathlib.Path) -> LiveViewsService:
+        from daemon.config import LiveViewsConfig, LiveViewsRootConfig
+        from daemon.services.live_views import LiveViewsService
+
+        cfg = LiveViewsConfig(
+            enabled=True,
+            roots={
+                "fs-root": LiveViewsRootConfig(
+                    type="filesystem",
+                    path=str(tmp_path / "root"),
+                ),
+            },
+        )
+        (tmp_path / "root").mkdir()
+        (tmp_path / "root" / "ok.txt").write_text("hi")
+        return LiveViewsService(
+            config=cfg,
+            tmp_image_store=None,
+        )
+
+    def test_oserror_on_resolve_collapses_to_root_not_found(
+        self, tmp_path: pathlib.Path, monkeypatch
+    ):
+        from daemon.services.live_views import RootNotFoundError
+
+        svc = self._service(tmp_path)
+        # Patch ``Path.resolve`` to raise PermissionError (an
+        # OSError subclass) on the root_dir resolution. The
+        # service must catch it and raise RootNotFoundError.
+        real_resolve = pathlib.Path.resolve
+
+        def boom(self, *args, **kwargs):
+            # Raise on the FIRST resolve (the root_dir
+            # resolution). Subsequent resolves (the
+            # candidate path) are unmocked.
+            if str(self).endswith("/root") or str(self) == str(
+                tmp_path / "root"
+            ):
+                raise PermissionError(
+                    errno.EACCES, "Permission denied (test stub)"
+                )
+            return real_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "resolve", boom)
+        with pytest.raises(RootNotFoundError) as excinfo:
+            svc.resolve_for_instance("fs-root", "ok.txt")
+        # The chained ``__cause__`` carries the original
+        # OSError for the daemon log.
+        assert isinstance(excinfo.value.__cause__, PermissionError)
+
+    def test_oserror_on_candidate_resolve_collapses_to_root_not_found(
+        self, tmp_path: pathlib.Path, monkeypatch
+    ):
+        from daemon.services.live_views import RootNotFoundError
+
+        svc = self._service(tmp_path)
+        real_resolve = pathlib.Path.resolve
+        first_call = {"count": 0}
+
+        def boom(self, *args, **kwargs):
+            first_call["count"] += 1
+            # Raise on the SECOND resolve (the candidate
+            # path resolution), not the root_dir.
+            if first_call["count"] == 2:
+                raise OSError(errno.EACCES, "Permission denied (test stub)")
+            return real_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "resolve", boom)
+        with pytest.raises(RootNotFoundError) as excinfo:
+            svc.resolve_for_instance("fs-root", "ok.txt")
+        assert isinstance(excinfo.value.__cause__, OSError)

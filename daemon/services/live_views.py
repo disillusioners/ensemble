@@ -408,7 +408,9 @@ class LiveViewsService:
             raise RootNotFoundError(root_name)
         root_dir = Path(entry.path)
 
-        return self._resolve_under_root(root_dir, rel_path, entry, root_type="filesystem")
+        return self._resolve_under_root(
+            root_name, root_dir, rel_path, entry, root_type="filesystem"
+        )
 
     def _resolve_project_scoped(
         self,
@@ -476,7 +478,7 @@ class LiveViewsService:
             raise RootNotFoundError(root_name)
         root_dir = Path(workdir) / entry.path
         return self._resolve_under_root(
-            root_dir, sub_rel, entry, root_type="project_scoped"
+            root_name, root_dir, sub_rel, entry, root_type="project_scoped"
         )
 
     def _resolve_tmp_images(
@@ -567,6 +569,7 @@ class LiveViewsService:
 
     def _resolve_under_root(
         self,
+        root_name: str,
         root_dir: Path,
         rel_path: str,
         entry: "LiveViewsRootConfig",
@@ -592,8 +595,24 @@ class LiveViewsService:
            / fifos / device files — those 404 too).
         """
         # Containment under the resolved root_dir:
-        root_resolved = root_dir.resolve()
-        candidate = (root_resolved / rel_path).resolve()
+        # HARDENING (M10): ``Path.resolve()`` can raise OSError
+        # for EACCES / ELOOP / ENOTCONN (network FS) / EIO
+        # — these would otherwise escape the service's
+        # typed-error envelope and surface as a FastAPI 500
+        # from the router (which only catches the three typed
+        # errors). Collapse OSError into the uniform 404 here
+        # so the contract holds: a permission-denied
+        # containment check and a path-doesn't-exist are
+        # indistinguishable to the client.
+        try:
+            root_resolved = root_dir.resolve()
+            candidate = (root_resolved / rel_path).resolve()
+        except OSError as exc:
+            # ``raise RootNotFoundError from exc`` chains the
+            # original OSError for the daemon log; the
+            # client sees the uniform 404 (no errno leak,
+            # no path leak).
+            raise RootNotFoundError(root_name) from exc
         try:
             candidate.relative_to(root_resolved)
         except ValueError as exc:

@@ -2153,6 +2153,80 @@ class LiveViewsRootConfig(BaseModel):
         description="Free-form description (logs, agent docs).",
     )
 
+    @model_validator(mode="after")
+    def _validate_root_shape(self) -> "LiveViewsRootConfig":
+        """HARDENING (M11): fail loud at config load on a structurally
+        invalid root entry.
+
+        The resolver would catch most of these at request time
+        and serve the uniform 404 (no path disclosure), but a
+        config that boots with a broken root is operationally
+        worse than one that refuses to boot. First release has
+        no legacy configs to break; an operator that hits this
+        validator gets a single actionable error pointing at
+        the field + the type-specific reason.
+
+        Rules:
+
+        * ``filesystem`` / ``project_scoped`` roots MUST have
+          a non-empty ``path``. Empty / missing → fail loud.
+        * ``tmp_images`` roots MUST have ``path`` unset (the
+          store is the substrate, not a directory). Setting
+          a ``path`` on a ``tmp_images`` root is a likely
+          miscopy from one of the other two types.
+        * ``required_rel_subpath`` is only meaningful for
+          ``project_scoped``. Setting it on ``filesystem`` /
+          ``tmp_images`` is silently ignored at request time
+          and a config bug we want to surface now.
+        * ``required_rel_subpath`` elements must be non-empty
+          strings; an empty element can never match a real
+          path segment and would uniformly 404 the whole root.
+        """
+        if self.type in ("filesystem", "project_scoped"):
+            if not self.path or not self.path.strip():
+                raise ValueError(
+                    f"LiveViewsRootConfig(type={self.type!r}) requires a "
+                    f"non-empty 'path' (the literal directory for "
+                    f"filesystem, or the per-project subdirectory "
+                    f"template for project_scoped). Got path="
+                    f"{self.path!r}."
+                )
+        elif self.type == "tmp_images":
+            # ``path`` is a tri-state here: None (the seeded
+            # shape, store is the substrate), empty string
+            # (likely YAML miscopy / explicit ""), or
+            # non-empty (a real directory that should belong
+            # to a filesystem-typed root). Any of the last
+            # two is a misconfig we want to surface at load
+            # time.
+            if self.path is not None:
+                raise ValueError(
+                    f"LiveViewsRootConfig(type='tmp_images') must NOT "
+                    f"set 'path' — the resolver delegates to the "
+                    f"per-app TmpImageStore substrate. Got path="
+                    f"{self.path!r}. If you meant a directory-backed "
+                    f"root, change type to 'filesystem' or "
+                    f"'project_scoped'."
+                )
+        if self.required_rel_subpath is not None:
+            if self.type != "project_scoped":
+                raise ValueError(
+                    f"LiveViewsRootConfig(type={self.type!r}) cannot "
+                    f"set 'required_rel_subpath' — that gate is "
+                    f"project_scoped-only. Got required_rel_subpath="
+                    f"{self.required_rel_subpath!r}. Use 'type: "
+                    f"project_scoped' if you need the subpath gate."
+                )
+            if any(not seg or not seg.strip() for seg in self.required_rel_subpath):
+                raise ValueError(
+                    f"LiveViewsRootConfig.required_rel_subpath contains "
+                    f"an empty segment — the sliding-window gate can "
+                    f"never match a real path segment, so the root "
+                    f"would uniformly 404 every URL. Got "
+                    f"required_rel_subpath={self.required_rel_subpath!r}."
+                )
+        return self
+
 
 def _seed_phase1_roots() -> dict[str, "LiveViewsRootConfig"]:
     """Return the three Phase-1 root entries seeded by default.
