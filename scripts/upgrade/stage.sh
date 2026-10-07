@@ -258,6 +258,24 @@ for req in "$REPO_ROOT/agents" "$REPO_ROOT/config.yaml" "$REPO_ROOT/launcher.sh"
         exit 78
     fi
 done
+# plugins/ tree (tier-2 plugin subsystem) is a REQUIRED payload source.
+# The plugin registry boot-scans $CWD/plugins/<name>/MANIFEST.yaml at
+# daemon startup; an empty/absent plugins/ dir means the native lane
+# ships with zero plugin-skill(s). The v0.18.0 live regression bit
+# because stage.sh copied the agents/ + frontend/ payloads but omitted
+# the plugins/ tree — the v0.17.2 MCP lane's 10 od tools were
+# retired (slice ⑦) and the replacement native lane shipped empty
+# (live boot: "Plugin registry boot-scan: 0 plugin(s) (none), 0
+# plugin-skill(s)"). REFUSE to stage a release without the plugins/
+# tree — same exit-78 family as the agents/+config.yaml+launcher.sh
+# precondition above; a fresh-state promote on a repo with no
+# plugins/ (a pre-plugin-subsystem release) is the only legit
+# pass-through and that's a deliberate operator's-call to add later
+# (the subsystem landed on latest via slice ② commit ea1242201).
+if [ ! -d "$REPO_ROOT/plugins" ]; then
+    _warn "missing payload source: $REPO_ROOT/plugins (plugin subsystem tree required for native lane — refusing to stage a release that would ship with an empty plugin registry; the v0.18.0 regression was caused by this exact omission)"
+    exit 78
+fi
 if [ ! -d "$REPO_ROOT/frontend/dist/frontend/browser" ]; then
     # FE absent → the operator must build it (unchanged from the pre-guard
     # behavior). The FE provenance sidecar is written by the FE build
@@ -379,6 +397,14 @@ chmod +x "$STAGE_TMP/ensemble-prod"
 cp -R "$REPO_ROOT/agents" "$STAGE_TMP/agents" || { rm -rf "$STAGE_TMP"; exit 1; }
 mkdir -p "$STAGE_TMP/frontend/dist/frontend"
 cp -R "$REPO_ROOT/frontend/dist/frontend/browser" "$STAGE_TMP/frontend/dist/frontend/browser" || { rm -rf "$STAGE_TMP"; exit 1; }
+# plugins/ tree — tier-2 plugin subsystem payload. Carried verbatim
+# (each <name>/MANIFEST.yaml is the boot-scan source of truth; per-
+# plugin dirs are reference resources). The aggregate lands in the
+# manifest as `plugins_tree_sha256` and the per-file map as
+# `plugins_manifest` so an integrity check can prove the staged
+# tree matches what was on disk at stage time. Mirrors the
+# agents/ + frontend/ copy pattern above.
+cp -R "$REPO_ROOT/plugins" "$STAGE_TMP/plugins" || { rm -rf "$STAGE_TMP"; exit 1; }
 # G3 (review round 2): EXCLUDE the FE provenance sidecar from the release
 # payload (it is web-servable: the front-end container serves every file
 # under browser/). The sidecar is BUILD-TIME state, not a runtime
@@ -414,8 +440,10 @@ CONFIG_SHA="$(_sha256 "$STAGE_TMP/config.yaml")"
 # one walk per tree feeds BOTH the aggregate hash and the per-file map
 AGENTS_LINES="$(_tree_manifest "$STAGE_TMP/agents" "")"
 FRONTEND_LINES="$(_tree_manifest "$STAGE_TMP/frontend" "")"
+PLUGINS_LINES="$(_tree_manifest "$STAGE_TMP/plugins" "")"
 AGENTS_TREE="$(_tree_hash_of_lines "$AGENTS_LINES")"
 FRONTEND_TREE="$(_tree_hash_of_lines "$FRONTEND_LINES")"
+PLUGINS_TREE="$(_tree_hash_of_lines "$PLUGINS_LINES")"
 
 agents_map=""
 first=1
@@ -436,6 +464,22 @@ while IFS= read -r line; do
     else frontend_map="$frontend_map, \"$(_json_escape "$rel")\":\"$sha\""; fi
 done <<EOF
 $FRONTEND_LINES
+EOF
+# plugins/ per-file map — same shape as agents/frontend (flat
+# {path:sha256,…}); the per-file map lets a verifier pinpoint
+# any tampered/missing/extra file. Mirrors the agents/frontend block
+# above; no commas inside paths exist in the plugin tree (manifest
+# yaml keys + plain files), so the flat-map sed/tr conversion in
+# _manifest_map_lines works unchanged.
+plugins_map=""
+first=1
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    sha="${line%%  *}"; rel="${line#*  }"
+    if [ $first = 1 ]; then plugins_map="\"$(_json_escape "$rel")\":\"$sha\""; first=0
+    else plugins_map="$plugins_map, \"$(_json_escape "$rel")\":\"$sha\""; fi
+done <<EOF
+$PLUGINS_LINES
 EOF
 
 # staged_at: REFRESHED on every stage (M6, commission v0.16.6 component 2).
@@ -473,8 +517,10 @@ cat > "$STAGE_TMP/manifest.json" <<EOF
   "config_sha256": "$CONFIG_SHA",
   "agents_tree_sha256": "$AGENTS_TREE",
   "frontend_tree_sha256": "$FRONTEND_TREE",
+  "plugins_tree_sha256": "$PLUGINS_TREE",
   "agents_manifest": {$agents_map},
-  "frontend_manifest": {$frontend_map}
+  "frontend_manifest": {$frontend_map},
+  "plugins_manifest": {$plugins_map}
 }
 EOF
 
@@ -484,6 +530,26 @@ EOF
 lock_heartbeat   # full-tree verify walk (long phase)
 if ! integrity_verify ".staging.$VERSION.$$"; then
     _warn "post-stage integrity check FAILED on the temp assembly — not swapping in"
+    rm -rf "$STAGE_TMP"
+    exit 1
+fi
+# Local fail-closed re-hash for the plugins/ tree. lib.sh's
+# integrity_verify loops `for tree in agents frontend` (lib.sh:2424)
+# and does NOT yet know about the plugins/ tree — extending it
+# touches lib.sh which is fenced behind a concurrent dev1 commit.
+# The structural fix in lib.sh is an escalation item; the local
+# re-hash here closes the gap for this stage by re-walking the
+# staged plugins/ tree and refusing if the aggregate does not match
+# the manifest stamp. A copy glitch (rsync truncation, ENOSPC
+# mid-write, etc.) trips this immediately and aborts before the
+# rename-aside swap — never a silent ship with a half-staged
+# plugins/ tree. Pattern mirrors the agents/frontend check above:
+# the aggregate hash is the tree's identity; a mismatch on this
+# second walk is a hard fail.
+got_plugins_lines="$(_tree_manifest "$STAGE_TMP/plugins" "")"
+got_plugins_tree="$(_tree_hash_of_lines "$got_plugins_lines")"
+if [ "$got_plugins_tree" != "$PLUGINS_TREE" ]; then
+    _warn "post-stage plugins/ tree hash MISMATCH (want ${PLUGINS_TREE:0:12}… got ${got_plugins_tree:0:12}…) — refusing to swap in a payload whose plugins/ tree cannot be re-hashed to the manifest stamp (likely a copy glitch; the integrity check is local because lib.sh's integrity_verify doesn't yet cover plugins/ — that extension is an open escalation item)"
     rm -rf "$STAGE_TMP"
     exit 1
 fi
