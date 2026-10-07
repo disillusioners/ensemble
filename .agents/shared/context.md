@@ -105,3 +105,21 @@ intentional historical records.
 - `daemon/tools/instance.py` `_full_doc_` documents both flag states + D6 busy-gate consequence
 - `daemon/tools/job_queue.py` `_FULL_DOCS["job_inject"]` rewritten
 - `daemon/routers/messages.py` routing-table docstring updated
+
+## Live-view subsystem Phase 1 (2026-10-07)
+
+**Status**: Phase 1 SHIPPED on `feature/live-views` (not yet merged to `latest`). The next release vehicle post-v0.18.1 picks it up.
+
+**Surface**:
+- `GET/HEAD /views/<root>/<rel>` route family. Read-only. Uniform 404 envelope on every miss (no path disclosure, nosniff on every response).
+- `view_link` tool — agent-facing URL minter. Default-open universe (in `KNOWN_TOOL_NAMES`); explicit allow entry on `agents/designer/meta.json`. Path-relative URLs by default; fully-qualified when `live_views.external_base_url` is set.
+- Three seed roots: `designer-artifact` (filesystem, project-anchored), `planning` (project-scoped via shortname), `tmp-images` (sidecar-MIME, delegates to `TmpImageStore`).
+- Designer write-through: the design artifacts table contract (`agents/designer/skills-template/design-strategy.md:71`) gains a `view_url` column populated via `view_link('designer-artifact', <row.path>)`. LLM writes the column; the tool is the surface.
+
+**Key docs**:
+- `docs/runbooks/live-views.md` — operator runbook (edge rule, config knobs, troubleshooting, security notes).
+- `daemon/services/live_views.py` — registry + resolver (single source of truth).
+- `daemon/routers/live_views.py` — HTTP route family.
+- `daemon/tools/live_views.py` — `view_link` tool factory.
+
+**Security**: no auth at the daemon. Edge guard is the OAuth proxy. URL is "public-by-obscurity" per `.agents/shared/conventions.md`. **Do not expose `/views/*` to the internet without edge auth.**
