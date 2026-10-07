@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any, Callable, Dict
+from typing import Annotated, Any, Callable, Dict, Literal
 
 import yaml
 from pydantic import AliasChoices, BaseModel, Field, ConfigDict, model_validator, field_validator
@@ -2085,6 +2085,362 @@ class McpPoolConfig(BaseSettings):
     )
 
 
+class LiveViewsRootConfig(BaseModel):
+    """One registered view-roots entry (Phase 1 of live-view subsystem).
+
+    A root maps a public name (used in the URL path) to a filesystem
+    directory the daemon is allowed to serve. Per the Phase 1
+    contract the registry is populated from ``config.yaml`` /
+    env (deployment-time config) — NOT a DB migration — so an
+    operator can add or disable a root via a config edit + restart
+    without a schema change. Restart to flip; values are read once
+    at lifespan start.
+
+    ``type`` discriminates the resolution contract:
+
+    * ``"filesystem"`` — ``path`` is a literal directory on disk.
+    * ``"project_scoped"`` — ``path`` is a SUBDIRECTORY TEMPLATE under
+      a project's workdir. The URL ``/views/<name>/<project_shortname>/<rel>``
+      resolves to ``<project_workdir>/<path>/<rel>`` where the project
+      is looked up by shortname at request time. Used for the
+      ``planning`` root where the data lives under each project's
+      ``.agents/shared/planning/`` tree.
+    * ``"tmp_images"`` — the daemon tmp-image substrate. No ``path``;
+      the resolver delegates to the per-app ``TmpImageStore`` via
+      the sidecar (extensionless blobs, MIME from sidecar record).
+    """
+
+    type: Literal["filesystem", "project_scoped", "tmp_images"] = Field(
+        default="filesystem",
+        description="One of 'filesystem' | 'project_scoped' | 'tmp_images'.",
+    )
+    # Operator-UX (B4-9.1, 2026-10-07): the dict key under
+    # ``LiveViewsConfig.roots`` is the canonical root name; the
+    # field_validator(mode="before") on the parent injects it here
+    # BEFORE pydantic constructs each entry, so the per-root
+    # validation errors below can name the offending entry. Direct
+    # constructors (``LiveViewsRootConfig(type=..., path=...)``)
+    # leave it None — the validator is only useful when the entry
+    # has a registry identity, which direct constructions don't.
+    name: str | None = Field(
+        default=None,
+        description=(
+            "Registry name (the dict key under LiveViewsConfig.roots). "
+            "Set automatically by the parent field_validator; do not "
+            "write this from config.yaml. None on direct construction."
+        ),
+    )
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Filesystem directory (filesystem) OR subdirectory template under "
+            "the project workdir (project_scoped). Required for filesystem + "
+            "project_scoped; ignored for tmp_images."
+        ),
+    )
+    enabled: bool = Field(
+        default=True,
+        description="When false, the root is registered but every request 404s.",
+    )
+    allowed_extensions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional lowercase extension allowlist (without leading dot). "
+            "None = no extension gate. Files whose extension is not in this "
+            "list are 404'd. Ignored for tmp_images (MIME from sidecar)."
+        ),
+    )
+    required_rel_subpath: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional structural gate for project_scoped roots. The rel "
+            "path's ``/``-separated parts must contain the listed segments "
+            "as a CONTIGUOUS subsequence (e.g. ``['design', 'mockups']`` "
+            "enforces the canonical mockups subtree prefix). When set, any "
+            "rel that does not contain the subpath as a contiguous "
+            "subsequence 404s uniformly — the operator cannot accidentally "
+            "expose the parent planning tree under a sub-scoped name. "
+            "Ignored for filesystem + tmp_images (they are entry-scoped, "
+            "not sub-scoped)."
+        ),
+    )
+    description: str = Field(
+        default="",
+        description="Free-form description (logs, agent docs).",
+    )
+
+    @model_validator(mode="after")
+    def _validate_root_shape(self) -> "LiveViewsRootConfig":
+        """HARDENING (M11): fail loud at config load on a structurally
+        invalid root entry.
+
+        The resolver would catch most of these at request time
+        and serve the uniform 404 (no path disclosure), but a
+        config that boots with a broken root is operationally
+        worse than one that refuses to boot. First release has
+        no legacy configs to break; an operator that hits this
+        validator gets a single actionable error pointing at
+        the field + the type-specific reason.
+
+        A root with ``enabled=False`` SKIPS the shape checks
+        below: a disabled root never resolves, so the
+        ``type``/``path``/``required_rel_subpath`` shape is
+        moot. This restores the documented ``{enabled: false}``
+        disable shorthand (see ``_seed_phase1_roots`` docstring
+        above) that ``LiveViewsRootConfig()`` defaults to
+        ``type='filesystem'`` + ``path=None`` — a combination
+        the strict rules would otherwise reject at boot. The
+        shorthand is canonical: operators use it to disable a
+        single seeded root without writing a full type/path
+        triple.
+
+        Rules (enabled roots only — disabled roots skip
+        everything below):
+
+        * ``filesystem`` / ``project_scoped`` roots MUST have
+          a non-empty ``path``. Empty / missing → fail loud.
+        * ``tmp_images`` roots MUST have ``path`` unset (the
+          store is the substrate, not a directory). Setting
+          a ``path`` on a ``tmp_images`` root is a likely
+          miscopy from one of the other two types.
+        * ``required_rel_subpath`` is only meaningful for
+          ``project_scoped``. Setting it on ``filesystem`` /
+          ``tmp_images`` is silently ignored at request time
+          and a config bug we want to surface now.
+        * ``required_rel_subpath`` elements must be non-empty
+          strings; an empty element can never match a real
+          path segment and would uniformly 404 the whole root.
+        """
+        # Disabled root: skip all shape checks. A root that
+        # never resolves cannot have a "wrong" path/type/subpath
+        # — the operator's intent is the disable, not the shape.
+        # This is the documented ``{enabled: false}`` shorthand
+        # from the _seed_phase1_roots docstring.
+        if not self.enabled:
+            return self
+        if self.type in ("filesystem", "project_scoped"):
+            if not self.path or not self.path.strip():
+                # Operator-UX (B4-9.1, 2026-10-07): include the
+                # registry name so the operator can locate the
+                # offending entry from a single log line. The
+                # parent field_validator stamps ``self.name`` from
+                # the dict key; direct constructors (tests, the
+                # seed builder) leave it None and we fall back to
+                # the bare class+type tag.
+                _id = (
+                    f"LiveViewsRootConfig(name={self.name!r}, type={self.type!r})"
+                    if self.name is not None
+                    else f"LiveViewsRootConfig(type={self.type!r})"
+                )
+                raise ValueError(
+                    f"{_id} requires a non-empty 'path' (the literal "
+                    f"directory for filesystem, or the per-project "
+                    f"subdirectory template for project_scoped). Got "
+                    f"path={self.path!r}."
+                )
+        elif self.type == "tmp_images":
+            # ``path`` is a tri-state here: None (the seeded
+            # shape, store is the substrate), empty string
+            # (likely YAML miscopy / explicit ""), or
+            # non-empty (a real directory that should belong
+            # to a filesystem-typed root). Any of the last
+            # two is a misconfig we want to surface at load
+            # time.
+            if self.path is not None:
+                # Operator-UX (B4-9.1, 2026-10-07): same naming
+                # rule as the path-required branch above.
+                _id = (
+                    f"LiveViewsRootConfig(name={self.name!r}, type='tmp_images')"
+                    if self.name is not None
+                    else "LiveViewsRootConfig(type='tmp_images')"
+                )
+                raise ValueError(
+                    f"{_id} must NOT set 'path' — the resolver "
+                    f"delegates to the per-app TmpImageStore "
+                    f"substrate. Got path={self.path!r}. If you "
+                    f"meant a directory-backed root, change type "
+                    f"to 'filesystem' or 'project_scoped'."
+                )
+        if self.required_rel_subpath is not None:
+            if self.type != "project_scoped":
+                raise ValueError(
+                    f"LiveViewsRootConfig(type={self.type!r}) cannot "
+                    f"set 'required_rel_subpath' — that gate is "
+                    f"project_scoped-only. Got required_rel_subpath="
+                    f"{self.required_rel_subpath!r}. Use 'type: "
+                    f"project_scoped' if you need the subpath gate."
+                )
+            if any(not seg or not seg.strip() for seg in self.required_rel_subpath):
+                raise ValueError(
+                    f"LiveViewsRootConfig.required_rel_subpath contains "
+                    f"an empty segment — the sliding-window gate can "
+                    f"never match a real path segment, so the root "
+                    f"would uniformly 404 every URL. Got "
+                    f"required_rel_subpath={self.required_rel_subpath!r}."
+                )
+        return self
+
+
+def _seed_phase1_roots() -> dict[str, "LiveViewsRootConfig"]:
+    """Return the three Phase-1 root entries seeded by default.
+
+    Out of the box (no operator config, no env vars) the live-views
+    subsystem ships with these three roots registered so the
+    ``view_link`` tool and ``/views/*`` route family are NOT
+    inert on a default boot:
+
+    * ``designer-artifact`` (project_scoped) — the canonical
+      ``<workdir>/.agents/shared/planning/<feature>/design/mockups/``
+      subtree of the project named in the URL. REWORK 2026-10-07
+      (M2, user decision): the root is project_scoped, NOT
+      filesystem-against-calling-instance, so an anonymous
+      browser hit resolves by shortname lookup exactly like
+      ``planning``. The first URL segment after the root is the
+      project shortname; the rest is the path under
+      ``.agents/shared/planning/``. The mockups subtree
+      prefix is enforced by the ``required_rel_subpath``
+      structural gate (``['design', 'mockups']``) so the
+      URL cannot serve arbitrary planning files under the
+      ``designer-artifact`` name (M3: enforcement is
+      structural, not conventional).
+    * ``planning`` (project_scoped) — the project workdir's
+      ``.agents/shared/planning/`` tree, addressed via the
+      project's registered shortname as the first URL segment.
+    * ``tmp-images`` (tmp_images) — the daemon's existing
+      ``TmpImageStore`` substrate. The store's directory is bound
+      at service construction (the ``LiveViewsService`` reads
+      ``tmp_image_store.dir`` at request time); the root entry
+      itself has no path (MIME comes from the sidecar, not the
+      extension, per architect risk #7).
+
+    Operator override model: writing a ``live_views.roots:``
+    block in ``config.yaml`` REPLACES the seeded dict (pydantic
+    semantics — explicit operator config wins). To disable a
+    specific seed root, include the entry with ``enabled: false``:
+
+    ```yaml
+    live_views:
+      roots:
+        designer-artifact: {enabled: false}   # disables ONLY designer-artifact
+        planning: {type: project_scoped, path: .agents/shared/planning}
+        tmp-images: {type: tmp_images}
+    ```
+    """
+    return {
+        "designer-artifact": LiveViewsRootConfig(
+            type="project_scoped",
+            path=".agents/shared/planning",
+            # REWORK 2026-10-07 (M3): structural mockups-subtree
+            # enforcement. The rel's ``/``-separated parts must
+            # contain ``design/mockups`` as a contiguous
+            # subsequence; ``feat/design/mockups/landing.html``
+            # passes (``design``+``mockups`` are adjacent parts),
+            # ``feat/random.html`` 404s uniformly.
+            required_rel_subpath=["design", "mockups"],
+            description=(
+                "Designer mockups under "
+                "<project_workdir>/.agents/shared/planning/<feature>/design/mockups/. "
+                "Project-scoped via shortname (REWORK M2 2026-10-07): "
+                "URL shape /views/designer-artifact/<project_shortname>/<feature>/design/mockups/<file>. "
+                "The required_rel_subpath gate enforces the canonical "
+                "mockups subtree shape by construction."
+            ),
+        ),
+        "planning": LiveViewsRootConfig(
+            type="project_scoped",
+            path=".agents/shared/planning",
+            description=(
+                "Per-project planning tree. URL shape: "
+                "/views/planning/<project_shortname>/<rel>."
+            ),
+        ),
+        "tmp-images": LiveViewsRootConfig(
+            type="tmp_images",
+            description=(
+                "Daemon tmp-image substrate (TmpImageStore). "
+                "MIME from sidecar, not extension."
+            ),
+        ),
+    }
+
+
+class LiveViewsConfig(BaseSettings):
+    """Configuration for the live-view subsystem (Phase 1).
+
+    Owns the public surface:
+
+    * ``enabled`` — global kill-switch for the subsystem. When false
+      the ``/views/*`` route family is not mounted and ``view_link``
+      mints empty / refused URLs.
+    * ``external_base_url`` — when set, ``view_link`` mints
+      fully-qualified URLs (``https://example.com/views/<root>/<rel>``)
+      instead of path-relative (``/views/<root>/<rel>``). Path-relative
+      is the safe default because the daemon has no canonical
+      public hostname.
+    * ``roots`` — name → :class:`LiveViewsRootConfig` mapping. Seeded
+      with the three Phase-1 roots (``designer-artifact``,
+      ``planning``, ``tmp-images``) but every entry is operator-editable
+      via config.yaml. Unknown / disabled / removed roots return a
+      uniform 404 from the route family and an ``Error: ...`` from
+      ``view_link`` — never a partial URL.
+
+    Environment prefix ``ENSEMBLE_LIVE_VIEWS_`` — auto-covered by the
+    tests' ``_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")`` prefix
+    match in ``tests/conftest.py``.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_LIVE_VIEWS_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Global kill-switch for the live-view subsystem.",
+    )
+    external_base_url: str | None = Field(
+        default=None,
+        description=(
+            "When set, view_link mints fully-qualified URLs against this "
+            "base. When unset, mints path-relative /views/<root>/<rel> "
+            "URLs (recommended for behind-OAuth-proxy deployments)."
+        ),
+    )
+    roots: dict[str, LiveViewsRootConfig] = Field(
+        default_factory=_seed_phase1_roots,
+        description=(
+            "Map of root-name → LiveViewsRootConfig. Seeded with the "
+            "three Phase-1 roots (designer-artifact, planning, "
+            "tmp-images) by default — see ``_seed_phase1_roots`` for "
+            "the full list and the operator-override model."
+        ),
+    )
+
+    @field_validator("roots", mode="before")
+    @classmethod
+    def _stamp_root_names(
+        cls, v: object
+    ) -> object:
+        """Operator-UX (B4-9.1, 2026-10-07): stamp each root's
+        dict key into the inner ``name`` field BEFORE pydantic
+        constructs each ``LiveViewsRootConfig``, so the per-root
+        validation errors can name the offending entry.
+
+        Runs on the raw input shape: for operator config the
+        value is ``dict[str, dict]`` (we stamp the inner dicts);
+        for ``default_factory=_seed_phase1_roots`` the value is
+        already ``dict[str, LiveViewsRootConfig]`` (we pass it
+        through — the seeds don't need stamping and re-stamping
+        them would mask the seed-construction validation).
+        """
+        if not isinstance(v, dict):
+            return v
+        out: dict[str, object] = {}
+        for k, inner in v.items():
+            if isinstance(inner, dict) and "name" not in inner:
+                out[k] = {**inner, "name": k}
+            else:
+                out[k] = inner
+        return out
+
+
 class EmbeddingConfig(BaseSettings):
     """Shared embedding configuration for all subsystems (skills, blueprints, future).
 
@@ -2831,6 +3187,7 @@ class Config(BaseSettings):
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
     scheduling: SchedulingConfig = Field(default_factory=SchedulingConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
+    live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
     long_tool_nudge: LongToolCallNudgeConfig = Field(default_factory=LongToolCallNudgeConfig)
@@ -4503,6 +4860,15 @@ def load_config(config_path: str | None = None) -> Config:
         config_dict["scheduling"] = processed_config["scheduling"]
     if "mcp_pool" in processed_config:
         config_dict["mcp_pool"] = processed_config["mcp_pool"]
+    if "live_views" in processed_config:
+        # Operator can override / disable individual seed roots by
+        # writing a ``live_views.roots:`` block in config.yaml —
+        # pydantic REPLACES the default dict (the seeded
+        # ``designer-artifact`` / ``planning`` / ``tmp-images`` are
+        # the no-operator-config baseline). See
+        # ``_seed_phase1_roots`` for the full operator-override
+        # model.
+        config_dict["live_views"] = processed_config["live_views"]
     if "skill_evolution" in processed_config:
         # Drop keys whose YAML value is ``null`` (None). pydantic-settings
         # treats an explicitly-passed init kwarg — even ``None`` — as taking

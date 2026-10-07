@@ -454,6 +454,42 @@ class TmpImageStore:
         sha256_hex = meta.get("sha256_hex") or ""
         return blob_path.read_bytes(), meta["content_type"], sha256_hex
 
+    def stat_with_meta(
+        self, image_id: str
+    ) -> tuple[int, str, str]:
+        """Read an entry's SIZE (via ``stat``) + content_type + sha.
+
+        REWORK 2026-10-07 (m4): the prior shape called
+        ``open_with_meta`` to populate the
+        ``ResolvedTarget.size_bytes`` field at resolve time,
+        then called it AGAIN at the router's GET/HEAD layer
+        to actually read the bytes. Two blob reads per
+        request, one of which (the first, at the resolve
+        layer) was thrown away.
+
+        ``stat_with_meta`` reports the size via ``stat`` (a
+        no-read ``Path.stat()``) and the content_type +
+        sha from the sidecar (a tiny JSON read). The
+        expensive ``read_bytes`` happens once, at the
+        router's GET path, on the byte return.
+
+        Raises ``TmpImageNotFound`` per ``open()`` /
+        ``open_with_meta`` so the same uniform 404 logic
+        in the live-views router continues to fire.
+        """
+        blob_path = self._blob_path(image_id)
+        meta_path = self._metadata_path(image_id)
+        if not blob_path.exists() or not meta_path.exists():
+            raise TmpImageNotFound(f"tmp image not found: {image_id}")
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise TmpImageNotFound(
+                f"tmp image sidecar unreadable: {image_id} ({exc})"
+            ) from exc
+        sha256_hex = meta.get("sha256_hex") or ""
+        return blob_path.stat().st_size, meta["content_type"], sha256_hex
+
     def delete(self, image_id: str) -> bool:
         """Remove an entry. Idempotent — missing files are not errors.
 

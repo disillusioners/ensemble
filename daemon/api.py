@@ -396,6 +396,7 @@ async def lifespan(app: FastAPI):
         ensemble_config,
         credential_manager=credential_manager,
         tmp_image_store=tmp_image_store,
+        live_views_service=None,  # wired below after the manager is alive
     )
     await manager.initialize()
 
@@ -1014,6 +1015,75 @@ async def lifespan(app: FastAPI):
         f"{config.services.tmp_image_cleanup_interval_seconds}s "
         f"retention="
         f"{config.services.tmp_image_cleanup_retention_days}d"
+    )
+
+    # ─────────────────────────────────────────────────────────────
+    # live-view subsystem (Phase 1, 2026-10-07) — build the
+    # LiveViewsService NOW (after the manager is alive so the
+    # project-resolver closure can read the live project repo,
+    # and after the tmp_image_store is wired so the ``tmp-images``
+    # root can delegate to the existing substrate). The router
+    # is constructed in create_app() with the same service
+    # instance and mounted on the app BEFORE the SPA catch-all.
+    # No background service: the subsystem is request-only (the
+    # registry is read-only at request time, populated once
+    # here from ``config.live_views.roots``).
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.live_views import LiveViewsService
+
+    def _resolve_project_workdir_by_shortname(shortname: str | None) -> str | None:
+        """Return the main_directory of the project matching ``shortname``.
+
+        Used to anchor the project-scoped ``planning`` and
+        ``designer-artifact`` roots (REWORK 2026-10-07, M2). The
+        shortname is the FIRST URL segment after the root — it
+        MUST be a registered project shortname (any
+        ``Project.shortnames`` entry). Unknown / unregistered /
+        empty shortname → ``None`` → uniform 404.
+
+        This is a thin shim around the project repository: the
+        ``shortnames`` model field already maps every shortname
+        to its owning project_id
+        (``daemon/repositories/project/models.py:168-405``).
+        """
+        if not shortname:
+            return None
+        try:
+            project = manager._project_repository.get_by_shortname(shortname)
+        except Exception as exc:
+            # DEBUG breadcrumb: shortname resolver is the
+            # SOLE project-context seam after the M2 rework
+            # (the per-instance variant is gone). Silent
+            # swallow here would mask a misconfigured
+            # project repo; log at DEBUG so prod is quiet
+            # and dev / repro can see the failure.
+            daemon_logger.debug(
+                f"[LiveViews] shortname resolver failed for "
+                f"{shortname!r}: {type(exc).__name__}: {exc}"
+            )
+            return None
+        if project is None or not project.main_directory:
+            return None
+        return project.main_directory
+
+    live_views_service = LiveViewsService(
+        config=config.live_views,
+        tmp_image_store=tmp_image_store,
+        project_workdir_by_shortname_resolver=_resolve_project_workdir_by_shortname,
+    )
+    app.state.live_views_service = live_views_service
+    # Thread the service onto the manager so the ``view_link``
+    # tool factory can read it via ``manager.live_views_service``
+    # (mirrors the tmp_image_store injection shape; the manager
+    # is the canonical seam tools reach shared per-app state
+    # through). REWORK 2026-10-07 (m4): the lifespan used to
+    # write the private ``_live_views_service`` field directly;
+    # the public ``set_live_views_service`` setter is the same
+    # wire with a name that survives grep + review.
+    manager.set_live_views_service(live_views_service)
+    daemon_logger.info(
+        f"[LiveViews] subsystem ready: enabled={config.live_views.enabled} "
+        f"roots={live_views_service.root_names() or '[]'}"
     )
 
     # ─────────────────────────────────────────────────────────────
@@ -3108,6 +3178,51 @@ def create_app() -> FastAPI:
             headers={"Retry-After": "5"},
         )
 
+    # ─────────────────────────────────────────────────────────────
+    # live-view subsystem (Phase 1, 2026-10-07) — ``/views/<root>/<rel>``
+    # route family. Read-only (GET/HEAD), uniform 404 envelope, no
+    # write/list/delete endpoints. Mounted on the APP (not
+    # ``api_router``) at the ``/views`` prefix and registered
+    # BEFORE the SPA catch-all below — Starlette first-match-wins
+    # would otherwise send ``GET /views/designer-artifact/foo``
+    # to the index.html fallback (architect risk #1 mirror of
+    # the tmp_images precedent at ``daemon/api.py:3012-3018``).
+    #
+    # The service is constructed in the lifespan (so it can carry
+    # the per-app ``TmpImageStore`` + the project-workdir
+    # resolvers); the handlers here resolve the service from
+    # ``app.state`` at request time. If the service is missing
+    # (lifespan did not run / subsystem disabled) the handlers
+    # return the uniform 404 — never a stack trace.
+    # ─────────────────────────────────────────────────────────────
+    from daemon.routers.live_views import build_router as _build_live_views_router
+
+    app.include_router(_build_live_views_router())
+
+    @app.get("/views/livez", include_in_schema=False)
+    async def live_views_livez(request: Request):
+        """Subsystem liveness — distinct from the daemon ``/livez`` probe.
+
+        Returns 200 + a small JSON envelope when the service is
+        wired AND the subsystem is enabled; 404 (the uniform
+        view-404) otherwise. Operators can use this as a
+        deployment-side smoke probe to confirm the
+        ``live_views`` block loaded without consulting the
+        daemon log.
+        """
+        from daemon.routers.live_views import _uniform_404
+        service = getattr(request.app.state, "live_views_service", None)
+        if service is None or not service.enabled():
+            return _uniform_404()
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "ok",
+                "enabled": True,
+                "roots": service.root_names(),
+            },
+        )
+
     @app.get("/{path:path}")
     async def serve_ui_assets(path: str):
         """Serve frontend assets and SPA routing."""
@@ -3116,7 +3231,8 @@ def create_app() -> FastAPI:
         # hitting SPA fallback. Starlette mount prefix matching does
         # NOT match /vscodefoo to the /vscode mount.
         if (path.startswith('api') or path.startswith('ws')
-                or path.startswith('vscode')):
+                or path.startswith('vscode')
+                or path.startswith('views')):
             return JSONResponse(
                 status_code=404,
                 content={"error": "Not found"}

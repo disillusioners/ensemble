@@ -814,8 +814,16 @@ def test_privileged_category_set_is_pinned() -> None:
     a category universe where the trio is the canonical set.
     """
     assert PRIVILEGED_TOOL_CATEGORIES == frozenset(
-        {"system_upgrade", "system-log", "ens-db", "ens-env"}
+        {
+            "system_upgrade",
+            "system-log",
+            "ens-db",
+            "ens-env",
+            # REWORK 2026-10-07 (M1): view_link is restricted first-release;
+            # only ari / leader / designer opt in via tools.allow.
+            "view-views",
+        }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
-        f"trio + W4 ens-env; got {PRIVILEGED_TOOL_CATEGORIES}"
+        f"trio + W4 ens-env + REWORK view-views; got {PRIVILEGED_TOOL_CATEGORIES}"
     )

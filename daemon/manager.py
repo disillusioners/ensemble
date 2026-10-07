@@ -165,6 +165,13 @@ if TYPE_CHECKING:
     # image tools can write / list / read without re-deriving the
     # data_dir. Runtime import is inlined in ``__init__``.
     from .services.tmp_image_store import TmpImageStore
+    # live-view subsystem (Phase 1, 2026-10-07): the shared
+    # registry / URL-minter surfaced from
+    # ``app.state.live_views_service`` so the ``view_link`` tool
+    # can mint URLs without re-deriving the project-workdir
+    # resolvers. Runtime import is inlined in ``__init__`` next
+    # to the tmp_image_store one (same pattern).
+    from .services.live_views import LiveViewsService
 
 
 
@@ -431,6 +438,7 @@ class InstanceManager:
         ensemble_config: EnsembleConfig | None = None,
         credential_manager: "CredentialManager | None" = None,
         tmp_image_store: "TmpImageStore | None" = None,
+        live_views_service: "LiveViewsService | None" = None,
     ):
         """Initialize the instance manager.
 
@@ -455,6 +463,15 @@ class InstanceManager:
                 going through the lifespan — tools referencing it fall back
                 to a clean ``"Error: ..."`` string and never crash the agent
                 turn.
+            live_views_service: Optional shared :class:`LiveViewsService` used
+                by the ``view_link`` tool (Phase 1, 2026-10-07). Same
+                injection shape as ``tmp_image_store``: the lifespan
+                constructs the service once at boot (so it can carry the
+                per-app TmpImageStore + the project-workdir resolvers) and
+                threads it through; the tool factory reads it via the
+                public property ``manager.live_views_service``. Tests that
+                construct ``InstanceManager`` directly may pass ``None``
+                and the tool returns a typed error envelope.
         """
         self.config = config
         self._ensemble_config = ensemble_config
@@ -657,6 +674,18 @@ class InstanceManager:
         # direct ``InstanceManager(...)`` callers may leave ``None`` and
         # the public property returns ``None`` (tool-layer fails closed).
         self._tmp_image_store: "TmpImageStore | None" = tmp_image_store
+
+        # live-view subsystem (Phase 1, 2026-10-07) — same
+        # injection shape as ``_tmp_image_store``. The lifespan
+        # builds the service in daemon/api.py once the manager
+        # is alive (so the project-workdir resolvers can read
+        # the live project repo) and threads it through here; the
+        # ``view_link`` tool factory reads it via the public
+        # property ``manager.live_views_service``. Tests that
+        # construct ``InstanceManager`` directly may leave
+        # ``None`` and the tool returns a typed error envelope.
+        from .services.live_views import LiveViewsService
+        self._live_views_service: "LiveViewsService | None" = live_views_service
 
         from .sources.credentials import CredentialManager
         if credential_manager is None:
@@ -2709,6 +2738,38 @@ class InstanceManager:
         # tests), re-introduce the fallback with a real assignment
         # site — the dead branch masked a missing wiring step.
         return None
+
+    @property
+    def live_views_service(self) -> "LiveViewsService | None":
+        """Public read-only access to the shared :class:`LiveViewsService`.
+
+        live-view subsystem Phase 1 (2026-10-07) — the agent-facing
+        ``view_link`` tool reaches the registry through this seam
+        (mirrors the ``app.state.live_views_service`` the routers
+        also use). The lifespan constructs the service once at boot
+        and injects it via
+        ``InstanceManager.__init__(live_views_service=...)``. Tests
+        that construct ``InstanceManager`` directly may pass
+        ``None`` and the tool returns ``"Error: live-views service
+        not initialized"`` — never a crash, never a stack trace.
+        """
+        return self._live_views_service
+
+    def set_live_views_service(
+        self, service: "LiveViewsService | None"
+    ) -> None:
+        """Inject the shared :class:`LiveViewsService` post-construction.
+
+        REWORK 2026-10-07 (m4): the lifespan previously wrote
+        the private ``_live_views_service`` field directly. The
+        public setter is the same one-line wire with a name that
+        survives grep and code review (the prior private-attr
+        write looked like a typo in the call site). Idempotent;
+        the lifespan calls it exactly once at boot, but a
+        second call replaces the service reference (testing
+        seam only — production boot calls it once).
+        """
+        self._live_views_service = service
 
     @property
     def credential_manager(self):

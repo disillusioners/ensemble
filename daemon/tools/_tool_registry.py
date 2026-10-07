@@ -202,6 +202,21 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # meta.json entry) remains the only access path; privileged
     # default-deny makes that structural instead of conventional.
     "ens-env",
+    # REWORK 2026-10-07 (M1, user refinement #1): ``view-views``
+    # is the read-only ``view_link`` URL-minter category. The tool
+    # is a public-by-obscurity URL minter (no FS / DB side effects
+    # at the tool surface), but the user's first-release
+    # visibility decision (Discord, 2026-10-07) is RESTRICTED:
+    # only the three commissioned users (ari, leader, designer)
+    # opt in via ``tools.allow: ["view-views"]``. The empty-allow
+    # inherit universe must NOT auto-grant it; making the
+    # category privileged makes that structural instead of
+    # conventional. The designer-side schema entry in
+    # ``agents/designer/meta.json`` plus the new ari/leader
+    # entries are the only access paths. KNOWN_TOOL_NAMES still
+    # carries the tool name (inventory, not the gate); the gate
+    # is the privileged-category strip + per-agent allow entry.
+    "view-views",
 })
 
 
@@ -598,6 +613,24 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # designer's ``tools.allow: ["design"]`` entry emits the
     # "neither a known category nor a known tool" WARNING (WP8 G2-A3).
     "design": "daemon.tools.compare_tools",
+    # Live-views subsystem (Phase 1, 2026-10-07) — single-tool
+    # category exposing ``view_link`` (URL minter over the
+    # ``/views/<root>/<path>`` route family). Category key MUST
+    # byte-match ``@register_tool_category("view-views")`` in
+    # ``daemon/tools/live_views.py``, the three commissioned
+    # ``tools.allow`` entries in ``agents/{ari,leader,designer}/
+    # meta.json``, and the ``PRIVILEGED_TOOL_CATEGORIES`` row
+    # in ``daemon/tools/_tool_registry.py``. Row is load-bearing
+    # for boot-time allow-list validation — without it ari /
+    # leader / designer emit three benign
+    # "neither a known category nor a known tool" WARNINGS
+    # (B3-F1, 2026-10-07) on every boot. Runtime is correct
+    # (the warnings are noise; the per-tool allow-list
+    # resolution still works because ``view_link`` IS the
+    # only ``view-views`` tool and the category's privilege
+    # gate fires downstream), but the warnings are visible
+    # boot noise we want gone.
+    "view-views": "daemon.tools.live_views",
     "infra": "daemon.tools.infra",
     "system": "daemon.tools.system",
     "skill-evolution": "daemon.tools.skill_evolution_tools",
@@ -899,6 +932,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "tool_help",
     "unwatch_job",
     "upgrade_status",
+    "view_link",
     "watch_job",
     "watch_jobs",
     "watch_mission",

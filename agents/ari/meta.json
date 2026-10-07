@@ -28,7 +28,8 @@
       "system_upgrade",
       "mission",
       "service",
-      "scheduling"
+      "scheduling",
+      "view-views"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },
