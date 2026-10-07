@@ -262,3 +262,38 @@ cross-plugin path in `daemon/services/skill_trigger_seed.py`.
 REC §9 OQ "trigger-engine drift-payload acceptance".  No code
 changes to the trigger engine in ③; slice ⑥ executes the
 wire-up per this contract.*
+
+---
+
+## Slice-⑥ addendum: 12-sites cross-lane annotation table
+
+**Date:** 2026-10-07 (appended by slice ⑥ — sanctioned doc append, no
+rewrite of the probe text above). The condition-discriminator
+(`condition_type`) and drift-seam reference sites across lanes — the
+full set a future editor must keep coherent when the catalogue gains a
+condition. Composition: **11 pre-existing + 1 ③-modified-arity-safe**
+(the sync-runner emission seam, #12 — created at ③, stub-replaced at ⑥
+with ZERO signature change). Line anchors are as of slice-⑥ tip
+(e64e300dd); grep at use time — sites drift.
+
+| # | Lane | Site | Provenance | Arity-safe? | ⑥ action |
+|---|------|------|------------|-------------|----------|
+| 1 | seed | `daemon/services/skill_trigger_seed.py` `DEFAULT_TRIGGERS` catalogue (one entry shape per condition; the drift entry joins as the 7th) | pre-existing | yes — additive dict entries | + `drift_event_observed` entry (per-plugin v1; `*` sweep documented-deferred) |
+| 2 | seed | `skill_trigger_seed.py::seed_default_triggers` (generic row creation from the catalogue) | pre-existing | yes — iterates whatever the catalogue holds | none (drift rides the catalogue generically) |
+| 3 | seed | `skill_trigger_seed.py::_update_consecutive_failures_action` (type-specific row migration) | pre-existing | yes — matches its own type only | none (drift-independent) |
+| 4 | engine | `skill_trigger_engine.py::__init__` (`drift_event_repo` ctor param, `None` = inert) | pre-existing signature, ⑥-extended | yes — keyword default keeps every older call site valid | + param |
+| 5 | engine | `skill_trigger_engine.py::_get_skills_for_trigger` (candidate resolution — drift events ARE the candidates) | pre-existing, ⑥-branch | yes — early return on the drift type | + drift branch |
+| 6 | engine | `skill_trigger_engine.py::_evaluate_condition` (dispatch chain + early drift branch BEFORE the skill re-fetch) | pre-existing, ⑥-branch | yes — elif-family extension | + drift branch |
+| 7 | engine | `skill_trigger_engine.py::_eval_drift_event_observed` (the 7th evaluator: freshness + divergence-id floor + plugin filter; unparseable `observed_at` fails closed) | ⑥-new (the probe's mandated handler) | n/a (new leaf) | added |
+| 8 | engine | `skill_trigger_engine.py::_build_reason` (drift branch — reason carries the CON §5 verbatim payload fields) | pre-existing, ⑥-branch | yes — if-family extension | + drift branch |
+| 9 | composition | `daemon/manager.py` — `SkillTriggerEngine(...)` boot wiring (+ drift repo) + the publisher's `configure_drift_event_publisher` call + the `DriftEvent` create_all prelude import | pre-existing site, ⑥-extended | yes — additive kwargs/imports | + wiring |
+| 10 | persistence | `daemon/repositories/skill/models.py::SkillTrigger.condition_json` (free-form typed-by-discriminator body) | pre-existing | yes — JSON body, no per-type schema | none (verbatim payload rides it) |
+| 11 | api | `daemon/routers/skill_schemas.py` `condition_type` request/response fields (~:142–:180 — 5 literal occurrences, ONE logical pass-through site) | pre-existing | yes — opaque string passthrough | none |
+| 12 | **tier-2 seam** | `daemon/plugin_subsystem/sync_runner.py::emit_drift_event` + `build_drift_event_payload` (the publisher call site; the payload single-source-of-truth) | **③-modified-arity-safe** (③ created the stub + pinned the shape; ⑥ replaced the stub body; signature `(plugin, target_class, entry, observed_tag) -> None` UNCHANGED) | yes — the ③/⑥ contract | stub → real sink dispatch |
+
+Outside the count (structural siblings, not discriminator sites): the
+drift-event store/publisher module itself
+(`daemon/plugin_subsystem/drift_event_publisher.py`, REC comp 7) and
+the `drift_events` table (migration `20261007_000001` + the SQLModel on
+the shared metadata). The ⑥ trigger-side contract lives in this doc's
+"Payload shape pin" section — unchanged by ⑥.

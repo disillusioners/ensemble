@@ -164,7 +164,7 @@
             "type": "object",
             "required": [],
             "additionalProperties": false,
-            "description": "Numbered, exhaustive. Required fields {id, files, delta, rationale, pinning_test} enforced semantically (divergence_entry_malformed); upstream_ref is the one optional field per the CON \u00a72 vocabulary.",
+            "description": "Numbered, exhaustive. Required fields {id, files, delta, rationale, pinning_test} enforced semantically (divergence_entry_malformed); upstream_ref is the one optional field per the CON \u00a72 vocabulary. ADDITIVE 1.0.x (slice \u2465): optional ``status`` carries the disposition state (CON \u00a75 entry shape) \u2014 see the status property description.",
             "properties": {
               "id": { "type": "integer" },
               "files": {
@@ -174,7 +174,8 @@
               "delta": { "type": "string" },
               "rationale": { "type": "string" },
               "upstream_ref": { "type": "string", "description": "optional; PR-or-commit the divergence tracks" },
-              "pinning_test": { "type": "string", "description": "test-name-or-path pinning the divergence" }
+              "pinning_test": { "type": "string", "description": "test-name-or-path pinning the divergence" },
+              "status": { "type": "string", "enum": ["registered", "open", "resolved"], "description": "Optional; CON \u00a75 entry-shape disposition state (slice \u2465). registered = pre-registered divergence POINT, no observed delta yet (the default when absent, back-compat with pre-\u2465 entries); open = sync-observed, re-apply-or-drop disposition NOT yet landed (the state the sync-runner emits); resolved = disposition landed." }
             }
           }
         }

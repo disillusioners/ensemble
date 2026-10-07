@@ -30,6 +30,7 @@ from daemon.plugin_subsystem.capability_seam_gate import (
     seam_gate_check,
 )
 from daemon.plugin_subsystem.manifest_reader import validate_manifest
+from daemon.plugin_subsystem.sole_writer_gate import check_sole_writer
 from daemon.plugin_subsystem.port_registry import (
     build_default_port_registry,
     validate_ports,
@@ -111,13 +112,19 @@ def validate_ports_report() -> Dict[str, Any]:
     }
 
 
-def run_ci(plugins_root: Path) -> Dict[str, Any]:
+def run_ci(plugins_root: Path, *, sole_writer: bool = True) -> Dict[str, Any]:
     """Validate every plugin dir under ``plugins_root`` (one level deep).
 
     A directory counts as a plugin dir if it exists; missing manifests are
     reported as per-plugin refusals (``manifest_missing``), not skipped —
     fail-closed by construction. Returns an aggregate report that
-    includes the Port-validation sibling step (slice ⑤).
+    includes the Port-validation sibling step (slice ⑤) and, since
+    slice ⑥, the sole-writer mechanization gate (additive
+    ``sole_writer`` key; bars 1+4 consult the pinned upstream through
+    the manifest's repo — a URL-shaped/unopenable upstream yields a
+    VISIBLE ``skipped: upstream-unavailable`` per plugin, never a
+    silent pass, and never flips the aggregate ``ok`` on its own:
+    the gate's violations DO flip it, a skip does not).
     """
     plugins_root = Path(plugins_root)
     plugin_dirs = sorted(d for d in plugins_root.iterdir() if d.is_dir()) if plugins_root.is_dir() else []
@@ -144,14 +151,48 @@ def run_ci(plugins_root: Path) -> Dict[str, Any]:
         }
     failed.append({"ok": ports_report["ok"], "name": "<ports>"})
 
+    # Sole-writer mechanization gate (slice ⑥ — the ⑤ reviewer ruling,
+    # binding FROM ⑥): four bars over each manifest-bearing plugin dir.
+    # Additive report key; violations flip the aggregate, a
+    # skipped-upstream verdict does not (visible-skip discipline).
+    sole_writer_reports: Dict[str, Any] = {}
+    sole_writer_ok = True
+    if sole_writer:
+        for report in plugin_reports:
+            if report.get("refusal") is not None:
+                continue  # manifest already refused upstream of the gate
+            pdir = plugins_root / report["plugin"]
+            try:
+                sw = check_sole_writer(pdir)
+            except Exception as exc:  # noqa: BLE001 - report-shaped surface
+                sw = {
+                    "ok": False,
+                    "plugin": report["plugin"],
+                    "violations": [
+                        {
+                            "code": "sole-writer-gate-crashed",
+                            "detail": str(exc),
+                        }
+                    ],
+                    "skipped": None,
+                }
+            sole_writer_reports[report["plugin"]] = sw
+            if not sw.get("ok", False) and not sw.get("skipped"):
+                sole_writer_ok = False
+
     return {
         "plugins_root": str(plugins_root),
         "checked": len(plugin_reports),
         "passed": len(plugin_reports) - len([r for r in plugin_reports if not r["ok"]]),
         "failed": len([r for r in plugin_reports if not r["ok"]]),
-        "ok": not [r for r in plugin_reports if not r["ok"]] and ports_report["ok"],
+        "ok": (
+            not [r for r in plugin_reports if not r["ok"]]
+            and ports_report["ok"]
+            and sole_writer_ok
+        ),
         "plugins": plugin_reports,
         "ports": ports_report,
+        **({"sole_writer": sole_writer_reports} if sole_writer else {}),
     }
 
 
