@@ -13,12 +13,13 @@ Covers the user's mandatory list:
 * Registry behavior (resolve by name; unknown root → uniform
   404; enabled/disabled semantics).
 
-The service is constructed with ``tmp_image_store=None`` /
-``project_workdir_resolver=None`` etc. for the registry-shape
-tests, and a real ``TmpImageStore`` for the tmp-images root
-tests. Symlink-escape tests use ``tmp_path`` + an OS-level
-``os.symlink`` (POSIX-only — skipped on Windows per the
-tmp_image_store precedent).
+The service is constructed with ``tmp_image_store=None`` etc.
+for the registry-shape tests, and a real ``TmpImageStore`` for
+the tmp-images root tests. The project-scoped resolvers are
+passed per-test (the ``_service`` helper threads a
+``{"shortname": workdir}`` map in). Symlink-escape tests use
+``tmp_path`` + an OS-level ``os.symlink`` (POSIX-only —
+skipped on Windows per the tmp_image_store precedent).
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ from __future__ import annotations
 import errno
 import os
 import pathlib
-from typing import TYPE_CHECKING
 
 import pytest
 
@@ -43,9 +43,6 @@ from daemon.services.live_views import (
     mime_for_extension,
 )
 from daemon.services.tmp_image_store import TmpImageStore
-
-if TYPE_CHECKING:
-    pass
 
 
 # ===========================================================================

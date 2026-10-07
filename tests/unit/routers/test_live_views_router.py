@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import pathlib
-from typing import Callable
 
 import pytest
 from fastapi import FastAPI, Request
@@ -23,6 +22,17 @@ from daemon.config import LiveViewsConfig, LiveViewsRootConfig
 from daemon.routers.live_views import build_router
 from daemon.services.live_views import LiveViewsService
 from daemon.services.tmp_image_store import TmpImageStore
+
+
+# A generous test-only cap used in places where the production
+# cap (32 MiB, see ``MAX_SERVED_BYTES`` in ``daemon/services/live_views.py``)
+# would interfere with the test. 10 MiB is well under the production
+# cap (so the helper's over-cap branch is genuinely untested here, as
+# the existing 8-byte and 16-byte tests cover that path explicitly) and
+# well over any test fixture we'd write inline. Kept as a module-
+# level constant so the "10 MiB" choice is greppable in one place
+# rather than scattered as a magic number across the test cases.
+_TEST_MAX_BYTES: int = 10 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +49,7 @@ def store_dir(tmp_path: pathlib.Path) -> pathlib.Path:
 @pytest.fixture
 def tmp_store(store_dir: pathlib.Path) -> TmpImageStore:
     """A real ``TmpImageStore`` with a generous cap."""
-    s = TmpImageStore(store_dir.parent, max_bytes=10 * 1024 * 1024)
+    s = TmpImageStore(store_dir.parent, max_bytes=_TEST_MAX_BYTES)
     s.init()
     return s
 
@@ -692,14 +702,14 @@ class TestFdReadNoFollow:
             pytest.skip("symlink not supported here")
         # The O_NOFOLLOW open refuses to follow the final-
         # component symlink; the helper returns None.
-        assert _fd_read(target, max_bytes=10 * 1024 * 1024) is None
+        assert _fd_read(target, max_bytes=_TEST_MAX_BYTES) is None
 
     def test_regular_file_reads_bytes(self, tmp_path: pathlib.Path):
         from daemon.routers.live_views import _fd_read
 
         target = tmp_path / "regular.txt"
         target.write_bytes(b"BYTES")
-        data = _fd_read(target, max_bytes=10 * 1024 * 1024)
+        data = _fd_read(target, max_bytes=_TEST_MAX_BYTES)
         assert data == b"BYTES"
 
     def test_oversize_file_returns_none(self, tmp_path: pathlib.Path):
@@ -752,7 +762,7 @@ class TestFdReadNoFollow:
         target = tmp_path / "loop.txt"
         target.write_bytes(b"0123456789")  # 10 bytes; mock returns 5+EOF
         with patch("os.read", side_effect=[b"short", b""]) as mock_read:
-            data = _fd_read(target, max_bytes=10 * 1024 * 1024)
+            data = _fd_read(target, max_bytes=_TEST_MAX_BYTES)
         # Loop terminated on EOF, returned the accumulated
         # short chunk. The single-shot form would also
         # return ``b"short"`` (the first mock value) — the
@@ -784,5 +794,5 @@ class TestFdReadNoFollow:
         target = tmp_path / "loop2.txt"
         target.write_bytes(b"abcdefgh")
         with patch("os.read", side_effect=[b"abcd", b"efgh"]):
-            data = _fd_read(target, max_bytes=10 * 1024 * 1024)
+            data = _fd_read(target, max_bytes=_TEST_MAX_BYTES)
         assert data == b"abcdefgh"

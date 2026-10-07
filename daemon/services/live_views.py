@@ -85,8 +85,13 @@ _ROOT_NAME_REGEX = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 # Maximum file size we'll ever serve. Soft cap — anything above
 # this is 404'd to avoid serving large binaries through the daemon
 # (the architect note: the route is for artifacts and short-lived
-# text/markdown, not a generic file server).
-_MAX_SERVED_BYTES: int = 32 * 1024 * 1024  # 32 MiB
+# text/markdown, not a generic file server). PUBLIC name — the
+# router imports this directly (was module-private ``_MAX_SERVED_BYTES``
+# pre-hygiene round; both A and C workers flagged the import as
+# reaching into the private surface). The leading underscore
+# signaled "implementation detail" but the router is the canonical
+# consumer, so the public name is the right call.
+MAX_SERVED_BYTES: int = 32 * 1024 * 1024  # 32 MiB
 
 # Minimal extension→MIME map for the Phase 1 surface. Anything
 # not in this map returns ``application/octet-stream`` (the safe
@@ -254,7 +259,7 @@ class ResolvedTarget:
 
     # REWORK 2026-10-07 (m5): ``raise_if_over_cap`` was dead
     # code — no caller ever invoked it (the router's
-    # cap check is the service's ``size > _MAX_SERVED_BYTES``
+    # cap check is the service's ``size > MAX_SERVED_BYTES``
     # at resolve time, and the post-M4 router's
     # ``_fd_read`` re-checks via fstat at the read layer).
     # The size cap survives as a service-level guard on
@@ -633,7 +638,7 @@ class LiveViewsService:
             raise PathNotFoundError(rel_path)
 
         size = candidate.stat().st_size
-        if size > _MAX_SERVED_BYTES:
+        if size > MAX_SERVED_BYTES:
             # Soft cap — uniform miss, no path-disclosure error
             # message.
             raise PathNotFoundError(rel_path)

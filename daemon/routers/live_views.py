@@ -315,9 +315,9 @@ def build_router() -> APIRouter:
         # ``Path.read_bytes()`` shape exposed (the second open
         # could see a different file than the service's resolve
         # + stat + size-check saw).
-        from daemon.services.live_views import _MAX_SERVED_BYTES
+        from daemon.services.live_views import MAX_SERVED_BYTES
 
-        file_bytes = _fd_read(resolved.on_disk_path, _MAX_SERVED_BYTES)
+        file_bytes = _fd_read(resolved.on_disk_path, MAX_SERVED_BYTES)
         if file_bytes is None:
             # Vanishingly rare (concurrent swap, concurrent
             # unlink, race that the kernel rejected at
