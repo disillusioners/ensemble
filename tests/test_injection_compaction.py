@@ -224,9 +224,21 @@ class TestProactiveCompactionPreservesInjection:
     @pytest.mark.asyncio
     async def test_all_unanswered_injections_skip_with_anti_refire_stamp(self):
         """When every message is an UNANSWERED bare injection,
-        compaction is skipped — and per the anti-refire contract the
-        engine returns a STAMPED no-op result (NOT ``None``) so the
-        60s dedup engages on the next dispatch.
+        compaction falls through to the 50%-tail floor per the
+        COMPACTION NEVER-BLOCKED contract (Verdict A,
+        fix/compaction-never-blocked @ c600af60d).
+
+        **OLD expectation** (pre-Phase-2): the engine returned a
+        STAMPED no-op result (NOT ``None``) so the 60s dedup
+        engaged on the next dispatch — empty
+        ``replacement_messages``, ``compaction_type="skipped_injections_dominate"``.
+
+        **NEW expectation** (post-Phase-2): the all-injected skip
+        falls through to the 50%-tail last-effort floor. The engine
+        returns a real shrink — non-empty
+        ``replacement_messages`` (drop list + notice + retained
+        tail), ``compaction_type="tail_truncation_last_effort"``,
+        ``compacted_at`` set so the 60s dedup still engages.
 
         Migrated from the pre-anti-refire pin (``result is None``);
         the hoisting fix keeps this skip firing for
@@ -246,11 +258,18 @@ class TestProactiveCompactionPreservesInjection:
 
         result = await compactor.compact_state(ctx)
 
-        # No compaction should occur — there's nothing selectable —
-        # but the anti-refire stamp must still land.
+        # Phase-2: floor returns a real shrink (NOT stamp-only).
         assert result is not None
-        assert result.replacement_messages == []
-        assert result.compaction_type == "skipped_injections_dominate"
+        # OLD: assert result.replacement_messages == []
+        # OLD: assert result.compaction_type == "skipped_injections_dominate"
+        # NEW: floor engaged, real shrink.
+        assert len(result.replacement_messages) > 0, (
+            "floor result must carry replacement_messages (real shrink)"
+        )
+        assert result.compaction_type == "tail_truncation_last_effort", (
+            "all-injected skip must fall through to the 50%-tail floor"
+        )
+        # Anti-refire stamp still set.
         assert result.compacted_at is not None
 
 

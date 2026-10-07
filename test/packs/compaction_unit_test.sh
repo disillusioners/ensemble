@@ -12,6 +12,7 @@ cd "$PROJECT_DIR"
 
 timeout 120s .venv/bin/pytest \
   tests/unit/test_compaction.py \
+  tests/unit/test_compaction_never_blocked.py \
   tests/unit/test_find_near_instance.py \
   tests/unit/test_graph_retry_integration.py \
   tests/unit/test_llm_error_classifier.py \

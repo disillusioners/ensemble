@@ -397,7 +397,14 @@ class TestInjectionsDominateSkipScope:
     @pytest.mark.asyncio
     async def test_permanent_dominated_channel_skips(self):
         """ALL messages permanent (context_kind) → nothing selectable →
-        the skip fires with the anti-refire stamp.
+        COMPACTION NEVER-BLOCKED (Verdict A): the all-injected skip
+        now falls through to the 50%-tail last-effort floor.
+
+        **OLD expectation** (pre-Phase-2): ``compaction_type="skipped_injections_dominate"``,
+        empty ``replacement_messages``, stamp-only.
+        **NEW expectation** (post-Phase-2):
+        ``compaction_type="tail_truncation_last_effort"``, NON-empty
+        ``replacement_messages`` (real shrink).
         """
         compactor = _make_compactor()
         msgs = [_ctx_note(f"[SYSTEM CONTEXT: {i}]\nx", f"ctx-{i}") for i in range(5)]
@@ -406,16 +413,25 @@ class TestInjectionsDominateSkipScope:
         result = await compactor.compact_state(ctx)
 
         assert result is not None
-        assert result.compaction_type == "skipped_injections_dominate"
-        assert result.replacement_messages == []
+        # NEW (Phase-2 hardening): floor engaged
+        assert result.compaction_type == "tail_truncation_last_effort", (
+            "all-injected skip must fall through to the 50%-tail floor"
+        )
+        # NEW: floor result is NON-empty (real shrink, not stamp-only)
+        assert len(result.replacement_messages) > 0
+        # Anti-refire stamp still set
         assert result.compacted_at is not None
-        assert result.injected_preserved == 5
+        # injected_preserved/bsorbed on the floor are zeroed by design
+        # (the floor cuts across SELECTABLE+HOISTED without honoring the
+        # partition; see _last_effort_tail_truncation docstring)
+        assert result.injected_preserved == 0
         assert result.injected_absorbed == 0
 
     @pytest.mark.asyncio
     async def test_mixed_permanent_and_unanswered_bare_skips(self):
         """context_kind + UNANSWERED bare notes together with no
-        selectable content → skip fires (both classes preserved).
+        selectable content → COMPACTION NEVER-BLOCKED (Verdict A):
+        the all-injected skip now falls through to the 50%-tail floor.
         """
         compactor = _make_compactor()
         msgs = (
@@ -427,8 +443,15 @@ class TestInjectionsDominateSkipScope:
         result = await compactor.compact_state(ctx)
 
         assert result is not None
-        assert result.compaction_type == "skipped_injections_dominate"
-        assert result.injected_preserved == 5
+        # NEW (Phase-2 hardening): floor engaged
+        assert result.compaction_type == "tail_truncation_last_effort", (
+            "all-injected skip (mixed permanent + unanswered bare) must "
+            "fall through to the 50%-tail floor"
+        )
+        # Floor result is non-empty (real shrink)
+        assert len(result.replacement_messages) > 0
+        # Floor zeros injected_preserved/injected_absorbed by design
+        assert result.injected_preserved == 0
         assert result.injected_absorbed == 0
 
 
@@ -634,6 +657,11 @@ class TestAbsorbKillSwitchOffDegeneration:
     async def test_flag_off_all_bare_unanswered_channel_skips(self, monkeypatch):
         """(v, parity) An all-bare-injected channel (no AIMessage → all
         unanswered) skips under OFF exactly as legacy semantics did.
+
+        COMPACTION NEVER-BLOCKED (Verdict A): the all-injected skip
+        now falls through to the 50%-tail floor regardless of the
+        kill-switch (the kill-switch governs the TRIGGER, not the
+        FLOOR behavior).
         """
         monkeypatch.setenv(_FLAG, "0")
         compactor = _make_compactor()
@@ -643,9 +671,14 @@ class TestAbsorbKillSwitchOffDegeneration:
         result = await compactor.compact_state(ctx)
 
         assert result is not None
-        assert result.compaction_type == "skipped_injections_dominate"
-        assert result.replacement_messages == []
-        assert result.injected_preserved == 5
+        # NEW (Phase-2 hardening): floor engaged
+        assert result.compaction_type == "tail_truncation_last_effort", (
+            "all-injected skip (flag OFF) must fall through to the 50%-tail floor"
+        )
+        # NEW: non-empty replacement
+        assert len(result.replacement_messages) > 0
+        # Floor zeros injected_preserved/injected_absorbed by design
+        assert result.injected_preserved == 0
         assert result.injected_absorbed == 0
 
     @pytest.mark.asyncio
@@ -684,13 +717,21 @@ class TestAbsorbKillSwitchOffDegeneration:
         assert result_on.injected_absorbed >= 1
 
         # OFF ("0"): identical channel → nothing selectable → skip.
+        # COMPACTION NEVER-BLOCKED (Verdict A): the all-injected skip
+        # now falls through to the 50%-tail floor (flag OFF governs
+        # the TRIGGER but the floor engages regardless).
         monkeypatch.setenv(_FLAG, "0")
         compactor_off = _make_compactor()
         ctx_off = _build_context(list(msgs))
         result_off = await compactor_off.compact_state(ctx_off)
         assert result_off is not None
-        assert result_off.compaction_type == "skipped_injections_dominate"
-        assert result_off.injected_preserved == 5
+        # NEW (Phase-2 hardening): floor engaged
+        assert result_off.compaction_type == "tail_truncation_last_effort", (
+            "all-injected skip (flag OFF) must fall through to the 50%-tail floor"
+        )
+        assert len(result_off.replacement_messages) > 0
+        # Floor zeros injected_preserved/injected_absorbed by design
+        assert result_off.injected_preserved == 0
         assert result_off.injected_absorbed == 0
 
 

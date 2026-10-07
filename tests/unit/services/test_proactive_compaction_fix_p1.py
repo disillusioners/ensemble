@@ -689,8 +689,20 @@ class TestT4NumeratorBudgetAntiRefire:
 
     @pytest.mark.asyncio
     async def test_all_injected_anti_refire_stamps_compacted_at(self):
-        """All-injected skip path stamps ``compacted_at`` so the
-        60s dedup engages on the next dispatch.
+        """All-injected skip path: 60s dedup still engages after the floor.
+
+        COMPACTION NEVER-BLOCKED (Verdict A, fix/compaction-never-blocked
+        @ c600af60d). **OLD expectation** (pre-Phase-2): the engine
+        returned a stamp-only no-op (``compaction_type="skipped_injections_dominate"``,
+        empty ``replacement_messages``) for the all-injected case.
+        The seam persisted ONLY the stamp, the context never shrank.
+
+        **NEW expectation** (post-Phase-2): the all-injected skip falls
+        through to the 50%-tail last-effort floor
+        (``compaction_type="tail_truncation_last_effort"``, NON-empty
+        ``replacement_messages``). The seam persists a REAL shrink.
+        The 60s dedup still engages because the result carries
+        ``compacted_at`` — the dedup behavior is preserved.
         """
         config = make_compaction_config(
             min_messages_before_compaction=2,
@@ -699,16 +711,34 @@ class TestT4NumeratorBudgetAntiRefire:
         messages = _make_injected_messages(5)  # all injected
         compactor = ContextCompactor(config, {})
         result = await compactor.compact_state(_make_context(config, messages))
+        # Floor returns a real shrink — engine result is NON-None.
         assert result is not None, (
-            "anti-refire: engine must return a STAMPED no-op, NOT None"
+            "floor: engine must return a result (real shrink) — NOT None"
         )
-        assert result.compaction_type == "skipped_injections_dominate"
-        assert result.replacement_messages == []
+        # OLD: assert result.compaction_type == "skipped_injections_dominate"
+        # NEW: floor engaged
+        assert result.compaction_type == "tail_truncation_last_effort", (
+            "all-injected skip must fall through to the 50%-tail floor "
+            "(Phase-2 hardening, Verdict A framing)."
+        )
+        # OLD: assert result.replacement_messages == []
+        # NEW: replacement_messages is NON-empty (real shrink, not stamp-only)
+        assert len(result.replacement_messages) > 0, (
+            "floor result must carry replacement_messages so the seam's "
+            "standard Variant A/B path persists a real shrink."
+        )
+        # Anti-refire stamp still set — the 60s dedup is preserved.
         assert result.compacted_at is not None
 
     @pytest.mark.asyncio
     async def test_min_messages_anti_refire_stamps_compacted_at(self):
-        """min_messages skip path stamps ``compacted_at``."""
+        """min_messages skip path: floor + 60s dedup still engage.
+
+        COMPACTION NEVER-BLOCKED (Verdict A). **OLD expectation**
+        (pre-Phase-2): ``compaction_type="skipped_below_min_messages"``,
+        stamp-only. **NEW expectation**: falls through to
+        ``tail_truncation_last_effort`` floor, real shrink lands.
+        """
         config = make_compaction_config(
             min_messages_before_compaction=10,
             threshold=0.01,
@@ -718,7 +748,12 @@ class TestT4NumeratorBudgetAntiRefire:
             _make_context(config, make_messages(5))
         )
         assert result is not None
-        assert result.compaction_type == "skipped_below_min_messages"
+        # OLD: assert result.compaction_type == "skipped_below_min_messages"
+        # NEW: floor engaged
+        assert result.compaction_type == "tail_truncation_last_effort"
+        # NEW: non-empty replacement (real shrink, not stamp-only)
+        assert len(result.replacement_messages) > 0
+        # Anti-refire stamp still set.
         assert result.compacted_at is not None
 
     @pytest.mark.asyncio
@@ -726,6 +761,11 @@ class TestT4NumeratorBudgetAntiRefire:
         """A subsequent dispatch carrying the stamped ``compacted_at``
         within 60s hits the dedup and returns None un-stamped. This
         closes the per-dispatch refire loop the doc §3.5 names.
+
+        COMPACTION NEVER-BLOCKED (Verdict A): the floor carries
+        ``compacted_at`` (same as the old stamp-only path), so the
+        60s dedup behavior is PRESERVED. This test pins that the
+        dedup still works after the Phase-2 change.
         """
         config = make_compaction_config(
             min_messages_before_compaction=10,
@@ -738,8 +778,9 @@ class TestT4NumeratorBudgetAntiRefire:
             _make_context(config, msgs_inj)
         )
         assert first_result is not None
+        # NEW: floor result carries compacted_at (preserved across Phase-2)
         stamped = first_result.compacted_at
-        assert stamped, "anti-refire must stamp compacted_at"
+        assert stamped, "floor must stamp compacted_at for dedup engagement"
 
         msgs_regular = make_messages(20)
         second_result = await compactor.compact_state(
@@ -750,9 +791,9 @@ class TestT4NumeratorBudgetAntiRefire:
             )
         )
         assert second_result is None, (
-            "dedup must engage: the anti-refire stamp from the first "
-            "dispatch lands in last_compacted_at and the second "
-            "dispatch should be deduped within 60s"
+            "dedup must engage: the floor's compacted_at stamp lands in "
+            "last_compacted_at and the second dispatch should be deduped "
+            "within 60s"
         )
 
 
