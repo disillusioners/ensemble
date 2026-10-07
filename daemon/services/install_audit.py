@@ -135,8 +135,8 @@ def append_install_audit(
     Args:
         event: Event vocabulary string (``"mcp_install"`` day-1;
             ``"kms_issue"`` reserved for the KMS side).
-        name: Capability / server name the event is about (e.g.
-            ``"opendesign"``).
+        name: Capability / server name the event is about (any
+            builtin or user-defined MCP server name).
         actor: Instance id (or system identity) performing the event.
         parent: Optional parent instance id (who dispatched the actor).
         secret_ref: KMS handle ONLY (never plaintext). ``None`` when

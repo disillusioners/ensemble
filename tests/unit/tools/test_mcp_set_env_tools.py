@@ -589,9 +589,6 @@ class TestRegistrationSeam:
             # d4af89b3 — mcp_set_env
             "daemon/tools/infra.py",
             "tests/unit/tools/test_mcp_set_env_tools.py",
-            # a0100b0e — skill v1.3.0
-            "agents/worker/skill-set.yaml",
-            "agents/worker/skills-template/install-opendesign.md",
             # 878928e9 — env-ref bridge
             "daemon/services/kms_lite.py",
             "daemon/services/kms_resolver.py",

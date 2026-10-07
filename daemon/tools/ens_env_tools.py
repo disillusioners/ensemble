@@ -1,13 +1,13 @@
 """``ens_env_read`` — runtime self-read of the ensemble daemon's LIVE environment.
 
-Stage 1 of the OpenDesign self-provisioning chain (project
-``agents-ensemble``, feature/od-self-provisioning, 2026-10-02). The
-install-opendesign worker skill needs the ensemble's own LLM connection
-values (``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` / ``OPENAI_MODEL``) to
-reuse them downstream as the OpenDesign MCP ``BYOK_*`` fields. Per user
-directive: "the .env file is the reference for values" — and the ``.env``
-the running daemon loaded is exactly ``os.environ`` after
-``launcher.sh`` ``load_env_file`` finishes.
+Stage 1 of the self-provisioning chain (project ``agents-ensemble``,
+feature/od-self-provisioning, 2026-10-02). Install worker skills need
+the ensemble's own LLM connection values (``OPENAI_BASE_URL`` /
+``OPENAI_API_KEY`` / ``OPENAI_MODEL``) to reuse them downstream as
+``BYOK_*`` fields on a configured MCP server. Per user directive:
+"the .env file is the reference for values" — and the ``.env`` the
+running daemon loaded is exactly ``os.environ`` after ``launcher.sh``
+``load_env_file`` finishes.
 
 Design summary
 --------------
@@ -22,11 +22,11 @@ Design summary
 
 * **No redaction in the result** — the BYOK downstream writes the
   values verbatim (``configure-builtin`` payload carries the plaintext
-  ``BYOK_BASE_URL`` + ``BYOK_MODEL``; ``BYOK_API_KEY`` rides KMS-Lite
-  via ``kms_request`` / ``kms_attach``). The existing
+  ``*_BASE_URL`` + ``*_MODEL``; ``*_API_KEY`` rides KMS-Lite via
+  ``kms_request`` / ``kms_attach``). The existing
   :func:`daemon.tools.system.system_env` ``nomask=True`` escape hatch
-  is too narrow for the install-opendesign consumer: the worker skill
-  needs an explicit, by-design unmasked read keyed on
+  is too narrow for install consumers: the worker skill needs an
+  explicit, by-design unmasked read keyed on
   ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` / ``OPENAI_MODEL`` without
   relying on a side-channel flag that a less-careful agent could
   forget.
@@ -56,7 +56,7 @@ Category / visibility
 
 Single-tool category, opted into by listing ``"ens-env"`` in
 ``agents/<id>/meta.json`` ``tools.allow``. Worker opt-in lives in
-``agents/worker/meta.json`` (the install-opendesign consumer lane).
+``agents/worker/meta.json`` (the install consumer lane).
 The category IS in ``PRIVILEGED_TOOL_CATEGORIES`` since the W4
 leader decision (reviewer council 2026-10-02): ``ens_env_read`` is
 a key-returning tool, so the empty-allow inherit universe must NOT
@@ -88,8 +88,8 @@ Stage membership chain
 
 * Stage 1 (this tool) — read live env.
 * Stage 2 (separate) — system promote via Ari upgrade lane.
-* Stage 3 (separate) — install-opendesign skill v1.3.0 reads via
-  ``ens_env_read`` and writes ``BYOK_*`` into the seam.
+* Stage 3 (separate) — install skills read via ``ens_env_read`` and
+  write ``BYOK_*`` into the seam.
 """
 
 from __future__ import annotations
@@ -118,27 +118,28 @@ Self-read of the ensemble daemon's live process environment.
   process env the running daemon actually loaded (NOT a sibling
   checkout's ``.env`` and NOT stale ``ensemble.json`` values).
   Values are returned in the clear (no masking) because the
-  downstream BYOK writer (``configure-builtin`` for the
-  OpenDesign MCP seam) writes the values verbatim; an explicit
-  unmasked read keyed on ``OPENAI_BASE_URL`` /
-  ``OPENAI_API_KEY`` / ``OPENAI_MODEL`` is the install-opendesign
-  skill's contract.
+  downstream BYOK writer (``configure-builtin`` for an MCP server's
+  env seam) writes the values verbatim; an explicit unmasked read
+  keyed on ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` /
+  ``OPENAI_MODEL`` is the install skill's contract.
 """
 
 
 # Default BYOK-relevant key set returned when ``keys`` is None.
 #
-# Why this exact set (install-opendesign contract, v1.3.0):
+# Why this exact set (install-skill contract, v1.3.0):
 #
 # - ``OPENAI_BASE_URL`` — the primary LLM endpoint the daemon is
-#   calling. Maps to BYOK_BASE_URL.
+#   calling. Maps to a ``*_BASE_URL`` BYOK field.
 # - ``OPENAI_BASE_URL_BACKUP`` — the HA failover endpoint
 #   (``LLMConfig.base_url_backup``). Not strictly required by
 #   the BYOK contract but cheap to surface and useful when the
 #   operator needs to mirror the failover topology.
-# - ``OPENAI_API_KEY`` — the API credential. Maps to BYOK_API_KEY
-#   via ``kms_attach`` (the marker seam, NOT plaintext).
-# - ``OPENAI_MODEL`` — the default chat model. Maps to BYOK_MODEL.
+# - ``OPENAI_API_KEY`` — the API credential. Maps to a
+#   ``*_API_KEY`` BYOK field via ``kms_attach`` (the marker seam,
+#   NOT plaintext).
+# - ``OPENAI_MODEL`` — the default chat model. Maps to a
+#   ``*_MODEL`` BYOK field.
 # - ``OPENAI_MODEL_VISION`` — the vision model when set (helps
 #   the BYOK schema decide whether to claim the v-model lane).
 # - ENSEMBLE_SELF_ENV — the explicit self-env marker
@@ -150,7 +151,7 @@ Self-read of the ensemble daemon's live process environment.
 #   locate ``ensemble.json`` / mesh output if it ever needs to).
 #
 # The default set is intentionally narrow — it does NOT include
-# ``POSTGRES_*`` or any non-LLM key. The install-opendesign
+# ``POSTGRES_*`` or any non-LLM key. The install-skill
 # contract is LLM-connection-only; broadening the default set
 # leaks more than the consumer needs. Callers that want
 # additional keys pass them via ``keys=[...]``.
@@ -358,13 +359,13 @@ def create_ens_env_tools(
 
 **This tool returns REAL VALUES for the requested keys — no masking, no
 redaction.** The contract is intentional: the BYOK downstream writer
-(``configure-builtin`` for the OpenDesign MCP seam) writes
-``BYOK_BASE_URL`` + ``BYOK_MODEL`` plaintext and binds ``BYOK_API_KEY``
-via the KMS-Lite marker seam (``kms_request`` + ``kms_attach``). The
+(``configure-builtin`` for an MCP server's env seam) writes
+``*_BASE_URL`` + ``*_MODEL`` plaintext and binds ``*_API_KEY`` via
+the KMS-Lite marker seam (``kms_request`` + ``kms_attach``). The
 existing :func:`daemon.tools.system.system_env` masks secrets and the
-``nomask=True`` escape hatch is per-call brittle — the
-install-opendesign skill needs an explicit unmasked read of exactly
-the BYOK-relevant keys, every call.
+``nomask=True`` escape hatch is per-call brittle — install skills
+need an explicit unmasked read of exactly the BYOK-relevant keys,
+every call.
 
 Args:
     keys: Optional list of env var names (strings). When ``None``
@@ -430,7 +431,7 @@ Secret handling:
 
 Tool-call results land in LangGraph checkpoints (PB-F1 family
 exposure — known and accepted for this scoped contract). The
-install-opendesign consumer is the worker skill lane; only
+install-skill consumer is the worker skill lane; only
 agents that explicitly opt into the ``ens-env`` category in
 ``agents/<id>/meta.json`` ``tools.allow`` can call this tool.
 """

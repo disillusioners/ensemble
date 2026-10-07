@@ -1437,12 +1437,12 @@ DEFAULT_AGENTS_DIR = Path("agents")
 def _default_builtin_mcp_resolver(class_or_name: str) -> Any:
     """Resolve a ``builtin_mcp_class`` entry against the live registry.
 
-    ``capabilities.yaml`` stores the CLASS name (``OpenDesignMCP``)
+    ``capabilities.yaml`` stores the CLASS name (e.g. ``SomeMCPServer``)
     while :meth:`BuiltinServerRegistry.get_by_name` keys on the SERVER
-    name (``opendesign``). Production resolution therefore tries the
-    server-name lookup first, then a class-name scan — either match
-    counts as resolved; anything else returns ``None`` (which the
-    loader turns into a strict error).
+    name. Production resolution therefore tries the server-name lookup
+    first, then a class-name scan — either match counts as resolved;
+    anything else returns ``None`` (which the loader turns into a
+    strict error).
 
     Lazy import: keeps capability_resolver importable without the MCP
     subsystem (tests inject their own resolvers).
@@ -1466,8 +1466,8 @@ def load_production_capabilities_registry(
     """Load the capabilities registry the way PRODUCTION does — strict.
 
     This is the single production entry point for registry loads
-    (P3-WP5 strictness flip: the ``install-opendesign`` skill now
-    exists in ``agents/worker/skill-set.yaml``, so a dangling
+    (P3-WP5 strictness flip: install skills now exist in
+    ``agents/worker/skill-set.yaml``, so a dangling
     ``installer_skill`` reference is a real misconfiguration and MUST
     fail loud instead of silently loading as ``_pending``):
 

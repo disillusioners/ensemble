@@ -366,12 +366,13 @@ class TestPreloadMcpTools:
 
     @pytest.mark.asyncio
     async def test_opendesign_per_server_timeout_wins_over_global(self, service, manager):
-        """Real opendesign builtin: 600s per-server value WINS over the 120s global.
-
-        End-to-end through the REAL registry (no patching): the server
-        row is named ``opendesign``, ``McpPoolConfig.tool_call_timeout``
-        stays 120, and the resolution ternary must pick the definition's
-        600s for ``create_lazy_mcp_tools``.
+        """Post slice-⑦: opendesign is retired, so per-server resolution
+        for ``opendesign`` MUST return ``None`` (no override). The
+        warmup pool and preload layer fall back to the pool-wide
+        ``McpPoolConfig.tool_call_timeout`` default. This pins the
+        retirement is durable — a future re-registration would change
+        the answer to ``600`` and the sentinel + this test would
+        catch the regression.
         """
         server = _make_server(name="opendesign", is_builtin=True)
         manager._mcp_server_repository.list_mcp_servers.return_value = [server]
@@ -386,9 +387,14 @@ class TestPreloadMcpTools:
             await service.preload_mcp_tools("inst-1")
 
         call_kwargs = mock_create.call_args.kwargs
-        assert call_kwargs["tool_call_timeout"] == 600, (
-            f"Expected opendesign per-server override (600), "
-            f"got {call_kwargs['tool_call_timeout']}"
+        # No builtin definition → no per-server override → tool_call_timeout
+        # falls through to the pool-wide McpPoolConfig.tool_call_timeout
+        # default (120s). Pre-⑦ this asserted ``== 600``; the retirement
+        # changes the answer to ``== 120`` (the global default path).
+        assert call_kwargs.get("tool_call_timeout") == 120, (
+            f"Expected tool_call_timeout=120 (opendesign retired, falls "
+            f"back to the global 120s default), got "
+            f"{call_kwargs.get('tool_call_timeout')!r}"
         )
 
     @pytest.mark.asyncio
@@ -1737,16 +1743,18 @@ class TestSessionProviderHelpers:
         assert result is None
 
     # ------------------------------------------------------------------
-    # _get_per_server_timeout — REAL registry pins (opendesign contract)
+    # _get_per_server_timeout — REAL registry pins (opendesign retirement)
     # ------------------------------------------------------------------
 
-    def test_get_per_server_timeout_opendesign_returns_600(self, service):
-        """Real registry: opendesign's definition carries the 600s override.
-
-        Pins the production definition through the production registry —
-        the value both the warmup pool and the preload layer consume.
+    def test_get_per_server_timeout_opendesign_returns_none(self, service):
+        """Post slice-⑦: opendesign is retired, so the registry has no
+        definition for it. ``_get_per_server_timeout`` MUST return
+        ``None`` (fall back to the global default). This pins the
+        retirement — a future re-registration of the OpenDesignMCP
+        builtin would surface here and the sentinel test would catch
+        the daemon/ reference.
         """
-        assert service._get_per_server_timeout("opendesign") == 600
+        assert service._get_per_server_timeout("opendesign") is None
 
     def test_get_per_server_timeout_plane_returns_none(self, service):
         """Real registry: plane has NO ``tool_call_timeout`` override.

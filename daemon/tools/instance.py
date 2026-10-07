@@ -5949,8 +5949,9 @@ Returns:
     # ``kms_attach`` (which owns the secret/marker lane). Registered
     # under the ``infra`` category so agents opt in via the SAME
     # ``tools.allow`` entry as the KMS trio — ``agents/worker/meta.json``
-    # already carries ``infra``, so the install-opendesign worker skill
-    # lane can call it with NO meta.json change (KMS-trio precedent).
+    # already carries ``infra``, so install worker skills that need
+    # MCP env writes can call it with NO meta.json change (KMS-trio
+    # precedent).
     mcp_env_tool_list = create_mcp_env_tools(manager, current_instance_id)
     tools.extend(mcp_env_tool_list)
 
@@ -6055,11 +6056,11 @@ Returns:
     )
     tools.extend(service_tool_list)
 
-    # ── ens-env tools (Stage 1 of the OpenDesign self-provisioning
-    # chain, feature/od-self-provisioning, 2026-10-02) — single-tool
-    # category exposing ``ens_env_read`` so the install-opendesign
-    # worker skill can self-read the ensemble's live LLM connection
-    # values for the BYOK reuse chain. The factory tolerates a None-stub
+    # ── ens-env tools (Stage 1 of the self-provisioning chain,
+    # feature/od-self-provisioning, 2026-10-02) — single-tool
+    # category exposing ``ens_env_read`` so install worker skills
+    # can self-read the ensemble's live LLM connection values for
+    # the BYOK reuse chain. The factory tolerates a None-stub
     # manager for the loader warm-list — the tool reads ``os.environ``
     # directly at call time and never dereferences the manager. Like
     # ``service``, the category is NOT in PRIVILEGED_TOOL_CATEGORIES:

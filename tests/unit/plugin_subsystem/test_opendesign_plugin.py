@@ -49,9 +49,11 @@ class TestRealPluginManifest:
         # Slice ⑤: schema_version 1.0.0 → 1.0.2 (CON §8 additive epoch —
         # 1.0.1 lift at slice ④ admitted the skills section; 1.0.2 lift at
         # slice ⑤ admits the integration_path → B + ports section +
-        # own_outright.attribution). Each lift is ADDITIVE: no field is
-        # removed, no enum is tightened, no section is renamed.
-        assert result.declaration.schema_version == "1.0.2"
+        # own_outright.attribution). 1.0.3 lift at slice ⑥ admitted
+        # sole-writer + register status vocabulary. Each lift is
+        # ADDITIVE: no field is removed, no enum is tightened, no
+        # section is renamed.
+        assert result.declaration.schema_version == "1.0.3"
         # Pins: slice ③ added the snapshot_with_drift_alarm layer
         # (REC §4.1 row 2); the per-class pin for snapshot inherits
         # copy_freely's pin by default (CON §2 line 47) and is
@@ -131,4 +133,6 @@ class TestRealPluginManifest:
         # Slice ⑤: integration_path C → B; schema_version 1.0.1 → 1.0.2.
         assert report["declaration"]["integration_path"] == "B"
         assert report["declaration"]["execution_mode"] == "lifted-symbol"
-        assert report["declaration"]["schema_version"] == "1.0.2"
+        # 1.0.3 lift at slice ⑥ admitted sole-writer + register status
+        # vocabulary. Each lift is ADDITIVE.
+        assert report["declaration"]["schema_version"] == "1.0.3"

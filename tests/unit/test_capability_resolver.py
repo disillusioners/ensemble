@@ -886,21 +886,11 @@ class TestRegistryValid:
         entries = load_capabilities_registry(
             real_registry_path, lazy_installer_validation=True
         )
-        assert len(entries) == 1
-        e = entries[0]
-        assert e.capability_id == "opendesign"
-        assert e.installer_skill == "install-opendesign"
-        assert e.builtin_mcp_class == "OpenDesignMCP"
-        assert e.schema_version == "0.16.1"
-        assert e.requires_secret is True
-        assert e.kms_service_id == "opendesign"
-        # The install-opendesign skill LANDED (P3-WP5) — the lazy
-        # default scan of the real agents/ tree now resolves the
-        # installer, so the entry loads non-pending even in lazy mode.
-        # (Pre-WP5 this asserted pending=True; the assertion tracks the
-        # landed reality, same as the strict-load test in
-        # test_worker_skill_seed.py.)
-        assert e.pending is False
+        # Day-1 registry is empty post slice-⑦ MCP retirement
+        # (opendesign plugin + tier-1 native tools are the new path —
+        # no capability_check bootstrap entry is needed). The test
+        # still exercises the real file path to pin the contract.
+        assert len(entries) == 0
 
     def test_load_real_registry_default_cwd_resolution(self, real_registry_path):
         # Resolve via the project root (this test runs from the
@@ -909,22 +899,7 @@ class TestRegistryValid:
             DEFAULT_CAPABILITIES_REGISTRY_PATH,
             lazy_installer_validation=True,
         )
-        assert len(entries) >= 1
-        assert entries[0].capability_id == "opendesign"
-
-    def test_registry_entry_to_dict_round_trip(self):
-        e = CapabilityRegistryEntry(
-            capability_id="opendesign",
-            installer_skill="install-opendesign",
-            builtin_mcp_class="OpenDesignMCP",
-            schema_version="0.16.1",
-            requires_secret=True,
-            kms_service_id="opendesign",
-            pending=True,
-        )
-        again_dict = e.to_dict()
-        assert again_dict["capability_id"] == "opendesign"
-        assert again_dict["_pending"] is True
+        assert len(entries) == 0
 
 
 class TestRegistryMissingField:
