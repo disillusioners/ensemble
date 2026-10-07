@@ -2140,6 +2140,72 @@ class LiveViewsRootConfig(BaseModel):
     )
 
 
+def _seed_phase1_roots() -> dict[str, "LiveViewsRootConfig"]:
+    """Return the three Phase-1 root entries seeded by default.
+
+    Out of the box (no operator config, no env vars) the live-views
+    subsystem ships with these three roots registered so the
+    ``view_link`` tool and ``/views/*`` route family are NOT
+    inert on a default boot:
+
+    * ``designer-artifact`` (filesystem) — the canonical
+      ``.agents/shared/planning/<feature>/design/mockups/`` subtree
+      of the calling instance's project. Resolved RELATIVE to the
+      project workdir by the lifespan; ``allowed_extensions`` is
+      left at the default (no extension gate) so designers can ship
+      any artifact shape Phase 1 expects (HTML, MD, SVG, JSON, ...).
+    * ``planning`` (project_scoped) — the project workdir's
+      ``.agents/shared/planning/`` tree, addressed via the
+      project's registered shortname as the first URL segment.
+    * ``tmp-images`` (tmp_images) — the daemon's existing
+      ``TmpImageStore`` substrate. The store's directory is bound
+      at service construction (the ``LiveViewsService`` reads
+      ``tmp_image_store.dir`` at request time); the root entry
+      itself has no path (MIME comes from the sidecar, not the
+      extension, per architect risk #7).
+
+    Operator override model: writing a ``live_views.roots:``
+    block in ``config.yaml`` REPLACES the seeded dict (pydantic
+    semantics — explicit operator config wins). To disable a
+    specific seed root, include the entry with ``enabled: false``:
+
+    ```yaml
+    live_views:
+      roots:
+        designer-artifact: {enabled: false}   # disables ONLY designer-artifact
+        planning: {type: project_scoped, path: .agents/shared/planning}
+        tmp-images: {type: tmp_images}
+    ```
+    """
+    return {
+        "designer-artifact": LiveViewsRootConfig(
+            type="filesystem",
+            path=".agents/shared/planning",
+            description=(
+                "Designer mockups under "
+                ".agents/shared/planning/<feature>/design/mockups/. "
+                "Path is resolved relative to the calling instance's "
+                "project workdir at request time."
+            ),
+        ),
+        "planning": LiveViewsRootConfig(
+            type="project_scoped",
+            path=".agents/shared/planning",
+            description=(
+                "Per-project planning tree. URL shape: "
+                "/views/planning/<project_shortname>/<rel>."
+            ),
+        ),
+        "tmp-images": LiveViewsRootConfig(
+            type="tmp_images",
+            description=(
+                "Daemon tmp-image substrate (TmpImageStore). "
+                "MIME from sidecar, not extension."
+            ),
+        ),
+    }
+
+
 class LiveViewsConfig(BaseSettings):
     """Configuration for the live-view subsystem (Phase 1).
 
@@ -2180,8 +2246,13 @@ class LiveViewsConfig(BaseSettings):
         ),
     )
     roots: dict[str, LiveViewsRootConfig] = Field(
-        default_factory=dict,
-        description="Map of root-name → LiveViewsRootConfig.",
+        default_factory=_seed_phase1_roots,
+        description=(
+            "Map of root-name → LiveViewsRootConfig. Seeded with the "
+            "three Phase-1 roots (designer-artifact, planning, "
+            "tmp-images) by default — see ``_seed_phase1_roots`` for "
+            "the full list and the operator-override model."
+        ),
     )
 
 
@@ -4604,6 +4675,15 @@ def load_config(config_path: str | None = None) -> Config:
         config_dict["scheduling"] = processed_config["scheduling"]
     if "mcp_pool" in processed_config:
         config_dict["mcp_pool"] = processed_config["mcp_pool"]
+    if "live_views" in processed_config:
+        # Operator can override / disable individual seed roots by
+        # writing a ``live_views.roots:`` block in config.yaml —
+        # pydantic REPLACES the default dict (the seeded
+        # ``designer-artifact`` / ``planning`` / ``tmp-images`` are
+        # the no-operator-config baseline). See
+        # ``_seed_phase1_roots`` for the full operator-override
+        # model.
+        config_dict["live_views"] = processed_config["live_views"]
     if "skill_evolution" in processed_config:
         # Drop keys whose YAML value is ``null`` (None). pydantic-settings
         # treats an explicitly-passed init kwarg — even ``None`` — as taking

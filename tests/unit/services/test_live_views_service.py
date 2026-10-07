@@ -177,14 +177,16 @@ class TestContentType:
         assert mime_for_extension("qqqq") == "application/octet-stream"
 
     def test_stdlib_fallback_for_known_stdlib_extension(self):
-        # The service uses the stdlib mimetypes registry as a
-        # second pass. An extension known to the stdlib but not
-        # in our closed map returns the stdlib's guess.
-        # ``.json`` is in our map; pick an extension the stdlib
-        # knows but our map doesn't (e.g. "csv").
-        guessed, _ = __import__("mimetypes").guess_type("x.csv")
-        assert guessed is not None
-        assert mime_for_extension("csv") == guessed
+        # The service uses a CLOSED extension→MIME map. A
+        # stdlib-recognised extension that is NOT in our closed
+        # map (e.g. "csv") must fall to ``application/octet-stream``
+        # — we never consult the host ``/etc/mime.types`` registry,
+        # because that would let an operator / packager map an
+        # agent-authored extension to ``text/html`` and the browser
+        # would execute the result on the daemon origin. The safe
+        # default for any unknown extension is the spec's allowed
+        # ``application/octet-stream``.
+        assert mime_for_extension("csv") == "application/octet-stream"
 
     def test_empty_extension_returns_octet_stream(self):
         assert mime_for_extension("") == "application/octet-stream"
@@ -212,6 +214,95 @@ class TestContentType:
 # ===========================================================================
 # Group 4 — Registry behavior (filesystem root)
 # ===========================================================================
+
+
+class TestPhase1SeedDefaults:
+    """Acceptance test (review follow-up MAJOR, 2026-10-07).
+
+    Building the service from a default ``LiveViewsConfig()`` (no
+    operator config, no env vars) + a ``TmpImageStore`` MUST
+    register exactly the three Phase-1 roots by name and bind the
+    ``tmp-images`` root to the live store's directory.
+
+    The config path remains the authority when present: setting
+    a single root's ``enabled: False`` removes ONLY that root
+    from the resolvable set (the other seeds stay).
+    """
+
+    def test_default_config_registers_three_phase1_roots(self):
+        # No operator config: a default ``LiveViewsConfig()``
+        # must already carry the three Phase-1 seed roots. The
+        # service is request-only — building it is cheap; the
+        # assertion is on the registry state.
+        cfg = LiveViewsConfig()
+        assert set(cfg.roots.keys()) == {
+            "designer-artifact",
+            "planning",
+            "tmp-images",
+        }
+
+    def test_service_root_names_match_phase1(self, tmp_path: pathlib.Path):
+        # Building the service with a default config + a live
+        # TmpImageStore registers exactly the three names.
+        store = TmpImageStore(tmp_path, max_bytes=10 * 1024 * 1024)
+        store.init()
+        cfg = LiveViewsConfig()
+        svc = LiveViewsService(config=cfg, tmp_image_store=store)
+        assert svc.root_names() == [
+            "designer-artifact",
+            "planning",
+            "tmp-images",
+        ]
+        # And every seed is enabled (resolvable).
+        assert svc.has_root("designer-artifact") is True
+        assert svc.has_root("planning") is True
+        assert svc.has_root("tmp-images") is True
+
+    def test_tmp_images_root_path_binds_to_store_dir(
+        self, tmp_path: pathlib.Path
+    ):
+        # The tmp-images root's resolved path equals the live
+        # store's directory (no separate ``path`` config knob —
+        # the bind is at request time, via ``store.dir``).
+        store = TmpImageStore(tmp_path, max_bytes=10 * 1024 * 1024)
+        store.init()
+        cfg = LiveViewsConfig()
+        svc = LiveViewsService(config=cfg, tmp_image_store=store)
+        # Save + resolve to a known image id; the on_disk_path
+        # parent is the store dir.
+        rec = store.save(
+            image_id="abcdef0123456789abcdef0123456789",
+            content_bytes=b"X",
+            content_type="text/plain",
+        )
+        resolved = svc.resolve_for_instance("tmp-images", rec.image_id)
+        assert resolved.on_disk_path.parent == store.dir
+
+    def test_disabling_a_seed_root_removes_only_that_root(
+        self, tmp_path: pathlib.Path
+    ):
+        # Operator-override model: writing a config block with a
+        # single root's ``enabled: False`` removes ONLY that root
+        # from the resolvable set. The other two seeds stay.
+        # (In practice the operator writes a full roots block —
+        # this test pins the same behavior by mutating the
+        # seeded entry directly, which is what pydantic does
+        # when it constructs a config with operator-supplied
+        # init kwargs.)
+        store = TmpImageStore(tmp_path, max_bytes=10 * 1024 * 1024)
+        store.init()
+        cfg = LiveViewsConfig()
+        cfg.roots["tmp-images"] = LiveViewsRootConfig(
+            type="tmp_images", enabled=False
+        )
+        svc = LiveViewsService(config=cfg, tmp_image_store=store)
+        # The other two seeds are still resolvable.
+        assert svc.has_root("designer-artifact") is True
+        assert svc.has_root("planning") is True
+        # The disabled root is still KNOWN (operator-override
+        # model keeps the name) but NOT resolvable.
+        assert svc.is_known_root("tmp-images") is True
+        assert svc.has_root("tmp-images") is False
 
 
 class TestFilesystemRootRegistry:

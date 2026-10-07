@@ -51,7 +51,6 @@ Three seed roots ship by default (config-driven; operator-editable):
 from __future__ import annotations
 
 import logging
-import mimetypes
 import os
 import re
 import unicodedata
@@ -72,21 +71,6 @@ logger = logging.getLogger(__name__)
 # also rejects anything that does not match this regex before any
 # filesystem call.
 _ROOT_NAME_REGEX = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
-
-# Empty/encoded/mixed-segment guards. The router applies these
-# BEFORE the disk resolver; the resolver repeats them as a
-# defense-in-depth. The set is the architect-approved list (see
-# task brief §"SECURITY HARD REQUIREMENTS"):
-
-# - null bytes (anywhere in the path)
-# - control chars (0x00..0x1F except where URLs allow it)
-# - absolute segments (leading slash)
-# - backslash
-# - URL-encoded forms of the above
-_FORBIDDEN_PATH_FRAGMENTS: tuple[bytes, ...] = (
-    b"\x00",  # null byte
-    b"\\",    # backslash (POSIX treats it as a path char; we reject)
-)
 
 # Maximum file size we'll ever serve. Soft cap — anything above
 # this is 404'd to avoid serving large binaries through the daemon
@@ -210,22 +194,18 @@ def extension_for(rel: str) -> str:
 def mime_for_extension(ext: str) -> str:
     """Return the explicit MIME for ``ext`` or the safe fallback.
 
-    The map is small and closed: anything not in ``_EXT_TO_MIME``
+    The map is small and CLOSED — anything not in ``_EXT_TO_MIME``
     returns ``application/octet-stream``. We never sniff content
-    (architect ruling, mirrors the tmp-images path).
-
-    Also consults the stdlib ``mimetypes`` registry as a SECOND
-    PASS for extensions we don't explicitly enumerate, with the
-    same ``application/octet-stream`` fallback for the unknown
-    case. The stdlib result is only used when the explicit map
-    says no.
+    (architect ruling, mirrors the tmp-images path) AND we never
+    consult the stdlib ``mimetypes`` registry: a host
+    ``/etc/mime.types`` could map an agent-authored extension to
+    ``text/html`` and the browser would execute the result on the
+    daemon origin. The safe default for any unknown extension is
+    ``application/octet-stream`` (the spec's allowed default).
     """
     if not ext:
         return "application/octet-stream"
-    if ext in _EXT_TO_MIME:
-        return _EXT_TO_MIME[ext]
-    guessed, _ = mimetypes.guess_type(f"x.{ext}")
-    return guessed or "application/octet-stream"
+    return _EXT_TO_MIME.get(ext, "application/octet-stream")
 
 
 # ─────────────────────────────────────────────────────────────────

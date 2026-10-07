@@ -117,7 +117,7 @@ Likely causes, in order of frequency:
 
 ### 3.4 A specific URL returns the wrong MIME
 
-`/views/<root>/<rel>` uses an explicit extension→MIME map (see `daemon/services/live_views.py:108-130`). Anything not in the map returns `application/octet-stream`. The map is closed and intentionally small; if a deployment needs a new MIME for a common artifact, add it to `_EXT_TO_MIME` and file a PR — the map is shared with the upstream `mimetypes` registry as a second pass (so the answer for any extension in the stdlib registry is at least the stdlib's guess).
+`/views/<root>/<rel>` uses an explicit extension→MIME map (see `daemon/services/live_views.py:87-109`). Anything not in the map returns `application/octet-stream`. The map is **closed** — the daemon never consults the host `mimetypes` registry (`/etc/mime.types`): a packager who maps an agent-authored extension to `text/html` would let the browser execute the result on the daemon origin. The safe default for any extension outside the closed map is `application/octet-stream` (the spec's allowed fallback). If a deployment needs a new MIME for a common artifact, add it to `_EXT_TO_MIME` and file a PR.
 
 The exception is `/views/tmp-images/<id>` — that path uses the sidecar MIME (architect risk #7), not the extension. The blob is extensionless on disk; the sidecar is the only source of truth.
 
