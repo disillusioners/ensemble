@@ -399,14 +399,22 @@ class LiveViewsService:
         # into the config — that is the per-project subdir, so
         # we prefix it with the resolved workdir.
         if root_name == "designer-artifact":
+            # The resolver is invoked for the caller's project
+            # workdir. ``calling_instance_id`` is a hint for
+            # per-instance resolution; when it's ``None`` (the
+            # router received an anonymous request, e.g. a curl
+            # from a test) the resolver still gets a chance to
+            # return the default workdir. A resolver that does
+            # not care about the instance id (the test shape)
+            # will return the same workdir regardless.
             workdir = (
                 self._project_workdir_resolver(calling_instance_id)
-                if calling_instance_id is not None
+                if self._project_workdir_resolver is not None
                 else None
             )
             if not workdir:
-                # The operator enabled this root but the calling
-                # instance has no project workdir — uniform 404
+                # The operator enabled this root but no
+                # workdir could be resolved — uniform 404
                 # (no leak about the caller's project state).
                 raise RootNotFoundError(root_name)
             root_dir = Path(workdir) / entry.path
