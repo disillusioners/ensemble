@@ -743,6 +743,40 @@ _js_manifest_field() {
 }
 
 # ── The sweep itself ────────────────────────────────────────────────────────
+#
+# AXIS NOTE (cause ①, upgrade-resilience 2026-10-07): this sweep
+# operates on a DIFFERENT axis than the daemon's reconcile
+# (``reconcile_pending_op`` at ``daemon/tools/upgrade_journal.py``).
+# The shell sweep reads the journal's ``in_flight`` (and its
+# ``flipped`` marker) — the txn-level state owned by the pipeline
+# scripts (``promote.sh`` / ``rollback.sh`` / ``adopt_stale_txn``).
+# The daemon's reconcile reads the journal's ``pending_op`` and
+# walks ``history`` for terminal-class events. The two are layered
+# (the daemon's tool lane is ABOVE the shell pipeline, the shell
+# sweep is the BOOT-time backstop for orphaned in_flight records).
+#
+# Consequence: this sweep does NOT see — and does NOT need to
+# mirror — the daemon-side terminal events ``refusal`` and
+# ``executor_exit`` that were added to ``_TERMINAL_EVENTS`` by the
+# cause ① fix. Those events fire ONLY from the daemon's tool lane
+# (``upgrade_tools._refusal`` → ``_journal_refusal_event`` at
+# ``upgrade_tools.py:1268``) and the daemon's reaper
+# (``_journal_executor_exit`` at
+# ``upgrade_journal_sweep.py:1776``); they are observability-only
+# (no flip, no in_flight) so they never reach this sweep's input
+# axis. A clean pre-mutation exit-78 (the live 2026-10-07 06:45:43Z
+# + 06:46:34Z evidence) is correctly closed by the daemon's
+# reconcile via the terminal-evidence branch; the shell sweep has
+# no work to do because no in_flight was ever opened. Mirroring
+# here would be a false symmetry (the two sweeps solve different
+# failure modes; forcing them onto the same vocabulary would
+# conflate pipeline-flips with observability-only terminality).
+#
+# The shell-side sweep's terminal vocabulary is documented
+# separately: ``adopt_stale_txn`` (``lib.sh:3936``) and the journal
+# sweep-rolled-back path (``sweep_rollback`` event) — both produce
+# in_flight shape that this sweep reclaims. Do not extend this
+# comment to cover daemon-side events.
 _journal_sweep() {
     local install_dir="${1:-${INSTALL_DIR:-}}"
     [ -n "$install_dir" ] || return 0

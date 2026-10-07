@@ -850,6 +850,227 @@ class TestReconcilePendingOp:
         assert uj.journal_path(install).read_bytes() == before
 
 
+# ── reconcile_pending_op — cause ① (upgrade-resilience 2026-10-07) ───────────
+#
+# Cause ①: a clean pre-mutation exit-78 was mislabelled
+# "executor died pre-open". The live evidence was a tool ``refusal``
+# (``upgrade_tools._refusal`` → ``_journal_refusal_event`` at
+# ``upgrade_tools.py:1268``) followed by a reaper ``executor_exit``
+# with exit_code=78 (``upgrade_journal_sweep.py:1776``). Both are
+# observability-only, no flip, no in_flight; the pipeline is over.
+# The reconcile fell through the no-terminal-event branch because
+# ``refusal`` and ``executor_exit`` were not in ``_TERMINAL_EVENTS``.
+#
+# Fix: both events added to ``_TERMINAL_EVENTS`` (the 6 → 8
+# cardinality change). The terminal-evidence branch at
+# ``upgrade_journal.py:1591-1618`` now fires for the clean
+# pre-mutation exit; the no-evidence branch at :1619-1651 keeps the
+# genuine-orphan semantics.
+#
+# These tests pin BOTH directions:
+# (a) cause ①: refusal + executor_exit pair classifies TERMINAL,
+#     NOT "expired, executor died pre-open" — and does so WITHOUT
+#     waiting the full RECONCILE_GRACE_S;
+# (b) regression: a genuine orphan (no terminal evidence at all)
+#     still falls through to the no-evidence branch and clears as
+#     expired (covered by the existing
+#     ``test_expired_past_grace_cleared_as_died_pre_open`` above —
+#     the assertion is still "expired" in note; the cause ① fix did
+#     not change the no-evidence branch's outcome, only its wording).
+
+
+class TestReconcilePendingOpCause1:
+    """Cause ① pin: a tool refusal + reaper executor_exit pair must
+    close the pending_op via the terminal-evidence branch — the
+    pipeline is over, no expiry wait, no "died pre-open" mislabel.
+
+    The pair in the live journal (2026-10-07 06:45:43Z → 06:46:34Z)
+    was exit_code=78 with refusal=target-quarantined. The sweep at
+    07:04:05Z and 07:25:19Z mislabelled both runs. After the fix,
+    the FIRST sweep (T+~18 min, well within RECONCILE_GRACE_S) must
+    close the op as terminal, NOT wait for expiry.
+    """
+
+    def _arm_promote_future(self, install: Path) -> str:
+        """Arm a promote op whose expires_at is in the future (well
+        past the default 600s); the cause ① case had the sweep fire
+        at T+~18 min and the fix must NOT wait RECONCILE_GRACE_S=600s.
+        """
+        op = PendingOp(
+            run_id="r-cause1-1",
+            kind="promote",
+            env="demo",
+            target="1.2.3",
+            owner_pid=os.getpid(),
+            # Far in the future — the no-evidence branch would NOT
+            # fire (we are not past expires_at + grace). If the
+            # terminal branch is broken, this test hangs/fails.
+            expires_at=uj.iso_plus(uj.now_iso(), 24 * 3600),
+        )
+        uj.write_pending_op(install, op)
+        return op.run_id
+
+    def test_refusal_plus_executor_exit_closes_as_terminal(
+        self, install: Path
+    ) -> None:
+        """The live 2026-10-07 06:45:43Z + 06:46:34Z shape: a tool
+        refusal followed by a reaper executor_exit(exit_code=78)
+        pre-mutation. Reconcile classifies TERMINAL (NOT expired).
+
+        This is the cause ① acceptance pin — without the fix the
+        sweep would have fallen through to the no-evidence branch
+        and waited RECONCILE_GRACE_S before the mislabel appeared.
+        """
+        self._arm_promote_future(install)
+        # Live journal shape (truncated to the relevant fields):
+        #   2026-10-07T06:45:43Z  refusal  target-quarantined
+        #   2026-10-07T06:46:34Z  executor_exit  exit_code=78
+        uj.journal_history_append(
+            install,
+            "refusal",
+            "system_upgrade REFUSED — reason=target-quarantined: ...",
+        )
+        uj.journal_history_append(
+            install,
+            "executor_exit",
+            "run_id=r-cause1-1 pid=12345 exit_code=78 argv=[...] upgrade.log tail:\n...",
+        )
+
+        note = uj.reconcile_pending_op(install)
+        # Cause ① acceptance: terminal classification, NOT expired.
+        assert note is not None
+        assert "expired" not in note, (
+            f"cause ① regression: refusal+executor_exit must NOT classify "
+            f"as expired; got note={note!r}"
+        )
+        assert "terminal" in note, (
+            f"cause ① regression: note must surface terminal classification; "
+            f"got note={note!r}"
+        )
+        # The terminal-evidence branch closes the op and journals a
+        # ``sweep`` closure event referencing the matching event name.
+        assert uj.read_pending_op(install) is None
+        events = [e["event"] for e in journal_read(install)["history"]]
+        assert "sweep" in events  # closure journaled
+        # The most recent sweep closure references the terminal event
+        # that closed it (executor_exit is the latest terminal in
+        # this scenario).
+        sweep_entries = [
+            e for e in journal_read(install)["history"] if e["event"] == "sweep"
+        ]
+        assert any(
+            "executor_exit" in (e.get("detail") or "") for e in sweep_entries
+        ), f"cause ① closure sweep must reference the terminal event; got {sweep_entries!r}"
+
+    def test_refusal_alone_closes_as_terminal(self, install: Path) -> None:
+        """Edge: refusal WITHOUT executor_exit. The tool arm failed
+        before the executor was spawned (e.g. a precondition refusal
+        in the tool lane). Still terminal — the pipeline is over.
+        """
+        self._arm_promote_future(install)
+        uj.journal_history_append(
+            install,
+            "refusal",
+            "system_upgrade REFUSED — reason=cooldown-active: ...",
+        )
+
+        note = uj.reconcile_pending_op(install)
+        assert note is not None
+        assert "expired" not in note
+        assert "terminal" in note
+        assert uj.read_pending_op(install) is None
+
+    def test_executor_exit_alone_closes_as_terminal(self, install: Path) -> None:
+        """Edge: executor_exit WITHOUT a paired refusal (e.g. the
+        tool arm succeeded but the executor's preflight produced
+        exit-78 before any refusal was journaled). Still terminal
+        — the reaper observed the child exit, the pipeline is over.
+        """
+        self._arm_promote_future(install)
+        uj.journal_history_append(
+            install,
+            "executor_exit",
+            "run_id=r-cause1-1 pid=12345 exit_code=78 argv=[...] upgrade.log tail:\n...",
+        )
+
+        note = uj.reconcile_pending_op(install)
+        assert note is not None
+        assert "expired" not in note
+        assert "terminal" in note
+        assert uj.read_pending_op(install) is None
+
+    def test_refusal_before_armed_does_not_close(
+        self, install: Path
+    ) -> None:
+        """Regression: a refusal from a previous run (pre-armed) must
+        NOT close a fresh op. Mirrors ``_terminal_event_after``'s
+        TS-scope (``entry.ts >= armed_at``). Without the TS check,
+        the cause ① fix would over-close unrelated fresh ops that
+        happen to share a journal.
+        """
+        # Journal a refusal from "an hour ago" — clearly pre-armed.
+        uj.journal_history_append(
+            install, "refusal", "an OLD refusal"
+        )
+        data = journal_read(install)
+        data["history"][-1]["ts"] = uj.iso_plus(uj.now_iso(), -3600)
+        journal_write(install, data)
+
+        self._arm_promote_future(install)  # armed AFTER the refusal
+        # No in_flight, no post-armed terminal — must fall through
+        # to the no-evidence branch BUT the future expires_at means
+        # the no-evidence branch is also a no-op.
+        note = uj.reconcile_pending_op(install)
+        assert note is None
+        assert uj.read_pending_op(install) is not None
+
+    def test_regression_genuine_orphan_still_clears_as_expired(
+        self, install: Path
+    ) -> None:
+        """Regression: a genuine orphan — no refusal, no executor_exit,
+        no commit/rollback/etc — must still clear via the no-evidence
+        branch (cause ① fix only changed WHICH events count as
+        terminal; it did NOT change the no-evidence semantics).
+
+        The existing ``test_expired_past_grace_cleared_as_died_pre_open``
+        pins the assertion. This test re-pins it under the new wording
+        ("no executor evidence") to make the cause ① fix's
+        scope-of-change explicit in the test file.
+        """
+        # Arm a promote op already past expiry (2*RECONCILE_GRACE_S).
+        # No refusal, no executor_exit, no terminal event of any kind.
+        op = PendingOp(
+            run_id="r-cause1-orphan",
+            kind="promote",
+            env="demo",
+            target="1.2.3",
+            owner_pid=os.getpid(),
+            expires_at=uj.iso_plus(uj.now_iso(), -2 * uj.RECONCILE_GRACE_S),
+        )
+        uj.write_pending_op(install, op)
+        note = uj.reconcile_pending_op(install)
+        # The genuine-orphan branch is the no-evidence branch.
+        # Wording changed in the cause ① fix from
+        # "executor died pre-open" to "no executor evidence" — but
+        # the assertion target ("expired" + the closure happening) is
+        # preserved.
+        assert note is not None
+        assert "expired" in note
+        assert uj.read_pending_op(install) is None
+        events = [e["event"] for e in journal_read(install)["history"]]
+        assert "sweep" in events
+        # The closure sweep detail names the genuine-orphan shape
+        # (cause ① fix reworded the mislabel).
+        sweep_entries = [
+            e for e in journal_read(install)["history"] if e["event"] == "sweep"
+        ]
+        assert any(
+            "no executor evidence" in (e.get("detail") or "")
+            or "genuine orphan" in (e.get("detail") or "")
+            for e in sweep_entries
+        ), f"genuine-orphan closure sweep must carry the cause ① reword; got {sweep_entries!r}"
+
+
 # ── lib.sh interop — both directions ─────────────────────────────────────────
 
 

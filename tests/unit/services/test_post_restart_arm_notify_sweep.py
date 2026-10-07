@@ -829,12 +829,26 @@ class TestWakeTerminalEventAfter:
     def test_wake_terminal_events_mutation_guard(self) -> None:
         """T4.8 mutation guard (architecture delta #1, MUST):
         ``"restart" in WAKE_TERMINAL_EVENTS`` AND ``"restart" not in
-        _TERMINAL_EVENTS`` with the 6-member set intact. A mutation of
-        the shared constant OR a deletion of the sibling FAILS loudly."""
+        _TERMINAL_EVENTS`` with the set intact. A mutation of the
+        shared constant OR a deletion of the sibling FAILS loudly.
+
+        Note (cause ①, upgrade-resilience 2026-10-07): the base set is
+        8-member, not 6 — ``refusal`` and ``executor_exit`` were added
+        so a clean pre-mutation exit (tool refusal + executor child
+        78-exit) classifies TERMINAL, not "executor died pre-open".
+        The T4.8 invariants ("restart" in WAKE / "restart" not in
+        _TERMINAL_EVENTS / set-equality) are preserved; only the
+        cardinality pin changes (6 → 8)."""
         assert "restart" in WAKE_TERMINAL_EVENTS
         assert "restart" not in uj._TERMINAL_EVENTS
-        assert len(uj._TERMINAL_EVENTS) == 6
+        assert len(uj._TERMINAL_EVENTS) == 8
         assert set(WAKE_TERMINAL_EVENTS) == set(uj._TERMINAL_EVENTS) | {"restart"}
+        # Cause ① invariant: refusal and executor_exit are terminal
+        # (paired pre-mutation exit IS terminal evidence).
+        assert "refusal" in uj._TERMINAL_EVENTS
+        assert "executor_exit" in uj._TERMINAL_EVENTS
+        assert "refusal" in WAKE_TERMINAL_EVENTS
+        assert "executor_exit" in WAKE_TERMINAL_EVENTS
 
 
 # ── Group 12 — grace-based wake abandonment (Phase 2 T14, ADR-042) ──────────

@@ -1449,24 +1449,63 @@ def consume_pending_action(
 # boot sweep owns restart-kind convergence (D-FA4.3; P2.3 wires the boot
 # sweep).
 
-_TERMINAL_EVENTS = ("commit", "rollback", "halt", "sweep_rollback", "sweep", "quarantine")
+# Promote-reconcile terminal event set. Cause ① (upgrade-resilience,
+# 2026-10-07): a tool-armed promote whose tool-side precondition was
+# refused (``refusal`` event from ``upgrade_tools._refusal`` →
+# ``_journal_refusal_event`` at ``upgrade_tools.py:1268``) and whose
+# executor child exited cleanly (78) before mutating anything
+# (``executor_exit`` event from the reaper at
+# ``upgrade_journal_sweep.py:1776``) was a TERMINAL outcome — the
+# pipeline is done, no txn will ever be opened — but the reconcile
+# sweep fell through the no-terminal-event branch and labelled the
+# closure "executor died pre-open", a mislabel. Both events are
+# pure observability (no state mutation, no flip), so classifying
+# them as terminal here is the same shape as ``commit``/``rollback``/
+# ``halt``/``quarantine`` (also no-flip observability with no live
+# evidence to clear); the pipeline clearly is over.
+#
+# Membership: ``commit``, ``rollback``, ``halt``, ``sweep_rollback``,
+# ``sweep``, ``quarantine`` (the original 6 — promote-side terminal
+# outcomes, pipeline-flips-applied) plus ``refusal`` (tool lane
+# pre-mutation refusal — daemon-side journal write at
+# ``upgrade_tools.py:1268``; live refusals journal via shell
+# ``_refuse``, daemon-side carve-out at :1259-1258) and
+# ``executor_exit`` (reaper's journal write at
+# ``upgrade_journal_sweep.py:1776``; the paired pre-mutation exit
+# that completes the cause ① picture).
+_TERMINAL_EVENTS: tuple[str, ...] = (
+    "commit",
+    "rollback",
+    "halt",
+    "sweep_rollback",
+    "sweep",
+    "quarantine",
+    "refusal",
+    "executor_exit",
+)
 
 
 # ── Wake terminal event-set + wake-owned reader (Phase 2 T13, ADR-042) ─────────
 #
-# The PROMOTE-only reconcile (``reconcile_pending_op``) depends on the
-# strict 6-member ``_TERMINAL_EVENTS`` (a restart event MUST NEVER close a
-# promote pending_op — the intent-driven pipeline says so). The wake
-# sweep's terminal reader, by contrast, MUST fire for intentional
-# restarts (``restart.sh:262`` journals ``"restart"``); without
-# ``"restart"`` in the predicate the dominant wake case would never fire.
+# The PROMOTE-only reconcile (``reconcile_pending_op``) depends on
+# ``_TERMINAL_EVENTS`` (a restart event MUST NEVER close a promote
+# pending_op — the intent-driven pipeline says so). The wake sweep's
+# terminal reader, by contrast, MUST fire for intentional restarts
+# (``restart.sh:262`` journals ``"restart"``); without ``"restart"``
+# in the predicate the dominant wake case would never fire. Refusal
+# and executor_exit DO flow into the wake set too (via the tuple
+# concat) — a wake armed for an op that is then closed by a clean
+# pre-mutation refusal+executor_exit pair is correctly notified
+# (cause ① consistency).
 #
-# Architecture delta #1: SIBLING constant — NOT a mutation of the shared
-# 6-member set. The reconcile's semantics at ``:1016`` depend on the
-# 6-member tuple; mutating it would silently change PROMOTE reconcile
-# behavior. Phase 3 T4.8 (mutation guard) pins BOTH directions:
-# ``"restart" in WAKE_TERMINAL_EVENTS`` AND ``"restart" not in
-# _TERMINAL_EVENTS`` with the 6-member set intact.
+# Architecture delta #1: SIBLING constant — NOT a mutation of the
+# shared 8-member set. The reconcile's semantics at
+# ``upgrade_journal.py:1571-1652`` (function ``reconcile_pending_op``)
+# depend on the tuple; mutating it would silently change PROMOTE
+# reconcile behavior. Phase 3 T4.8 (mutation guard) pins BOTH
+# directions: ``"restart" in WAKE_TERMINAL_EVENTS`` AND
+# ``"restart" not in _TERMINAL_EVENTS`` with the set intact (length
+# pinned at the T4.8 site).
 #
 # Ride-along #2 (approve): single home — the constant is lifted into
 # ``upgrade_journal.py`` (the journal-protocol home). The old
@@ -1578,8 +1617,17 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
             f"pending_op run_id={op.run_id} closed — terminal event "
             f"'{event}' at {entry.get('ts', '?')}"
         )
-    # No txn, no terminal event: if well past expiry the executor died
-    # pre-open (before promote.sh opened its txn) — close as expired.
+    # No txn, no terminal event: this is the GENUINE died-pre-open
+    # case (the executor child produced no journal evidence at all —
+    # no ``refusal``, no ``executor_exit``, no commit/rollback/etc).
+    # Cause ① (upgrade-resilience 2026-10-07): a clean pre-mutation
+    # exit-78 was previously mislabelled this way because ``refusal``
+    # and ``executor_exit`` were not in ``_TERMINAL_EVENTS``; that
+    # path now closes via the terminal branch above. What remains
+    # here is a true orphan — the only way a tool-armed op reaches
+    # this branch is if the daemon died between the tool's arm write
+    # and the executor's first journal write (the reaper or the tool
+    # never got to journal anything). Close as expired.
     expires = parse_iso_utc(op.expires_at)
     if expires is not None and datetime.now(tz=timezone.utc) > expires + timedelta(
         seconds=RECONCILE_GRACE_S
@@ -1591,7 +1639,8 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
                 install_dir,
                 "sweep",
                 f"pending_op run_id={op.run_id} cleared by reconcile: no in_flight, no "
-                f"terminal event, past expires_at {op.expires_at}+grace (executor died pre-open?)",
+                f"terminal event, past expires_at {op.expires_at}+grace (genuine orphan: "
+                f"executor produced zero journal evidence — neither refusal nor executor_exit)",
             )
         except (JournalTorn, OSError) as exc:
             logger.warning(
@@ -1600,7 +1649,7 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
                 exc,
             )
             return None
-        return f"pending_op run_id={op.run_id} cleared (expired, executor died pre-open)"
+        return f"pending_op run_id={op.run_id} cleared (expired, no executor evidence)"
     return None
 
 
