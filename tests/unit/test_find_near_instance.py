@@ -71,7 +71,7 @@ class TestFindNearInstance:
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
             [self._create_mock_instance("abc-123-def"), self._create_mock_instance("xyz-789-ghi")],
-            2
+            2, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -87,7 +87,7 @@ class TestFindNearInstance:
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
             [self._create_mock_instance("abc-123-def"), self._create_mock_instance("xyz-789-ghi")],
-            2
+            2, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -104,7 +104,7 @@ class TestFindNearInstance:
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
             [self._create_mock_instance("abc-123-def"), self._create_mock_instance("xyz-789-ghi")],
-            2
+            2, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -121,7 +121,7 @@ class TestFindNearInstance:
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
             [self._create_mock_instance("abc-123-def"), self._create_mock_instance("xyz-789-ghi")],
-            2
+            2, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -138,7 +138,7 @@ class TestFindNearInstance:
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
             [self._create_mock_instance("ABC-123-DEF")],
-            1
+            1, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -155,7 +155,7 @@ class TestFindNearInstance:
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
             [self._create_mock_instance("abc-123-def")],
-            1
+            1, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -176,7 +176,7 @@ class TestFindNearInstance:
                 self._create_mock_instance("newer-id"),
                 self._create_mock_instance("older-id"),
             ],
-            2
+            2, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -193,7 +193,7 @@ class TestFindNearInstance:
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
             [self._create_mock_instance("abc-123-def")],
-            1
+            1, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -211,7 +211,7 @@ class TestFindNearInstance:
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
             [self._create_mock_instance(stored_id)],
-            1
+            1, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -231,7 +231,7 @@ class TestFindNearInstance:
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
             [self._create_mock_instance(stored_id)],
-            1
+            1, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -251,7 +251,7 @@ class TestFindNearInstance:
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
             [self._create_mock_instance(stored_id)],
-            1
+            1, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -276,7 +276,7 @@ class TestFindNearInstance:
                 self._create_mock_instance("abc-789"),  # distance 3
                 self._create_mock_instance("xyz-123"),  # distance 3
             ],
-            4
+            4, False
         )
         
         m = InstanceManager.__new__(InstanceManager)
@@ -297,7 +297,7 @@ class TestFindNearInstance:
                 self._create_mock_instance("abc-456"),  # distance 3
                 self._create_mock_instance("xyz-123"),  # distance 3
             ],
-            2
+            2, False
         )
         
         m = InstanceManager.__new__(InstanceManager)

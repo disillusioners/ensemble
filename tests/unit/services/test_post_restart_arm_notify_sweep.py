@@ -195,7 +195,16 @@ class TestTerminalStateGating:
     ) -> None:
         """T2.3: a pending wake with NO matching history event is held
         (``pending_at_end=1, delivered=0``); no ``enqueue_message`` call."""
-        _make_wake(install, run_id="r-aaa")
+        # Future expires_at → abandon_after computed at runtime stays in
+        # the future, so the ADR-042 grace pass HOLDS the wake instead of
+        # grace-abandoning it. The hold-invariant under test is only
+        # defined inside the grace window (the original static
+        # 2026-10-04 fixture dates aged past grace on 2026-10-07).
+        _make_wake(
+            install,
+            run_id="r-aaa",
+            expires_at=iso_plus(now_iso(), 3600),
+        )
         # No history event.
         manager = _mock_manager()
         service = UpgradeJournalSweepService(
@@ -219,11 +228,15 @@ class TestTerminalStateGating:
         # r-terminal: armed_at BEFORE the commit → in scope → fires.
         _make_wake(install, run_id="r-terminal", arming_instance_id="i-arm-1")
         # r-pending: armed_at AFTER the commit → out of scope → held.
+        # Future expires_at keeps abandon_after future — a past-grace
+        # no-terminal wake would be grace-abandoned (ADR-042), but this
+        # test pins the HOLD half of the mixed batch inside the window.
         _make_wake(
             install,
             run_id="r-pending",
             arming_instance_id="i-arm-2",
             armed_at="2026-10-04T00:05:00Z",
+            expires_at=iso_plus(now_iso(), 3600),
         )
         data = journal_read(install)
         data["history"] = [
@@ -829,12 +842,44 @@ class TestWakeTerminalEventAfter:
     def test_wake_terminal_events_mutation_guard(self) -> None:
         """T4.8 mutation guard (architecture delta #1, MUST):
         ``"restart" in WAKE_TERMINAL_EVENTS`` AND ``"restart" not in
-        _TERMINAL_EVENTS`` with the 6-member set intact. A mutation of
-        the shared constant OR a deletion of the sibling FAILS loudly."""
+        _TERMINAL_EVENTS`` with the set intact. A mutation of the
+        shared constant OR a deletion of the sibling FAILS loudly.
+
+        Note (cause ①, upgrade-resilience 2026-10-07): the base set is
+        8-member, not 6 — ``refusal`` and ``executor_exit`` were added
+        so a clean pre-mutation exit (tool refusal + executor child
+        78-exit) classifies TERMINAL, not "executor died pre-open".
+        The T4.8 invariants ("restart" in WAKE / "restart" not in
+        _TERMINAL_EVENTS / set-equality) are preserved; only the
+        cardinality pin changes (6 → 8).
+
+        Note (cause ②, upgrade-resilience 2026-10-07, dev2 d9d07bf0c):
+        the base set is 9-member, not 8 — ``boot_sweep_commit_and_continue``
+        was added so a verified-flip txn closed-and-continued by the
+        boot sweep (``launcher.sh:925-1042``) classifies TERMINAL via
+        the terminal-evidence branch (the armed op clears as closed,
+        not pipeline-busy until expires_at + RECONCILE_GRACE_S). The
+        T4.8 invariants ("restart" in WAKE / "restart" not in
+        _TERMINAL_EVENTS / set-equality / new-kind in both) are
+        preserved; only the cardinality pin changes (8 → 9).
+        """
         assert "restart" in WAKE_TERMINAL_EVENTS
         assert "restart" not in uj._TERMINAL_EVENTS
-        assert len(uj._TERMINAL_EVENTS) == 6
+        assert len(uj._TERMINAL_EVENTS) == 9
         assert set(WAKE_TERMINAL_EVENTS) == set(uj._TERMINAL_EVENTS) | {"restart"}
+        # Cause ① invariant: refusal and executor_exit are terminal
+        # (paired pre-mutation exit IS terminal evidence).
+        assert "refusal" in uj._TERMINAL_EVENTS
+        assert "executor_exit" in uj._TERMINAL_EVENTS
+        assert "refusal" in WAKE_TERMINAL_EVENTS
+        assert "executor_exit" in WAKE_TERMINAL_EVENTS
+        # Cause ② invariant: boot_sweep_commit_and_continue is terminal
+        # (verified-flip txn closed by the boot sweep IS terminal
+        # evidence — same shape as ``commit``; the wake sweep must
+        # fire for it so the close-out detector notifies the arming
+        # instance, same as for ``commit``/``rollback``).
+        assert "boot_sweep_commit_and_continue" in uj._TERMINAL_EVENTS
+        assert "boot_sweep_commit_and_continue" in WAKE_TERMINAL_EVENTS
 
 
 # ── Group 12 — grace-based wake abandonment (Phase 2 T14, ADR-042) ──────────

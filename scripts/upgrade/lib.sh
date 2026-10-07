@@ -77,6 +77,24 @@ LOG_TAG="${LOG_TAG:-upgrade}"
 # budget halt is a LIVE promote halt).
 LIVEZ_BUDGET_S="${LIVEZ_BUDGET_S:-180}"
 READYZ_BUDGET_S="${READYZ_BUDGET_S:-120}"
+# Subprocess-wait budgets (2.2b, upgrade-resilience 2026-10-07). Rationale
+# (cite: §9 manual-push reproduction + incident ④ 2026-10-07 forensics):
+# the ceremony has multiple sites where a hung subprocess (systemctl/dbus
+# call against a dead or wedged unit) could stall recovery forever — a
+# pre-flip freeze at the unbounded `systemctl stop` (stop-ensemble.sh:530,
+# incident ④) and a post-flip freeze at the unbounded `systemctl start`
+# in the unit hand-back (lib.sh:2751, §9 reproduction). Bounding these
+# waits means the ceremony PROGRESSES through the bounded timeout —
+# journal event + SIGTERM→SIGKILL the child + fall through to the next
+# recovery site (re-verify loop, nohup fallback, caller halt) — instead
+# of hanging in pipe_read for ~10+ min and wedging the parent. Generous
+# defaults so the happy path NEVER trips them; env-overridable for
+# sandbox drills and tests. One event kind `subprocess_wait_timeout`
+# journals every site for forensic correlation.
+STOP_SCRIPT_BUDGET_S="${STOP_SCRIPT_BUDGET_S:-120}"     # placeholder; effective bound derived at call site (see _derive_parent_stop_budget)
+HANDBACK_START_BUDGET_S="${HANDBACK_START_BUDGET_S:-60}"  # unit hand-back start (the §9 culprit)
+SYSTEMCTL_PROBE_BUDGET_S="${SYSTEMCTL_PROBE_BUDGET_S:-5}"  # reset-failed / is-active probes
+SCOPE_START_BUDGET_S="${SCOPE_START_BUDGET_S:-10}"      # scope-arm/opt-in launcher start
 # Post-flip soak (ADR-005 gate: 300s). Overridable for sandbox drills only
 # (ENSEMBLE_PROMOTE_SOAK_S); production default stays 300.
 SOAK_S_DEFAULT=300
@@ -978,9 +996,27 @@ journal_count_rollback() {
         "{\"24h\": $new_cnt, \"window_start\": \"$(_now_iso)\"}" || return 1
     if [ "$arm_cooldown" = "1" ]; then
         local until
-        # BSD date: -v adjustments must precede the [-f fmt date] operand
-        until="$(date -ju -v+${COOLDOWN_S}S -f '%Y-%m-%dT%H:%M:%SZ' "$(_now_iso)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
-            || until="$(_now_iso)"
+        # P2.1 debt — opportunistic fix (2.2b, upgrade-resilience 2026-10-07):
+        # the BSD-only ``date -ju -v+${COOLDOWN_S}S -f '%Y-%m-%dT%H:%M:%SZ'`` form
+        # FAILS on GNU coreutils (``-j`` rejected; ``-v`` unknown; ``-f``
+        # expects a DIFFERENT format ordering than BSD). The plain
+        # ``|| until=$(_now_iso)`` fallback silently DISARMS the anti-flapping
+        # window on Linux — a corrupt/disarmed cooldown on this host. Dispatch
+        # on ``uname -s`` (mirror of atomic_flip lib.sh:2602-2611 +
+        # _iso_to_epoch lib.sh:188-204 precedent). The fallback-to-now
+        # branch is kept ONLY for genuine failure on either branch (real
+        # date error, malformed input) — never for the wrong-platform path.
+        case "$(uname -s)" in
+            Darwin|*BSD*|*bsd*)
+                until="$(date -ju -v+${COOLDOWN_S}S -f '%Y-%m-%dT%H:%M:%SZ' "$(_now_iso)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+                    || until="$(_now_iso)" ;;
+            Linux|GNU*|*GNU*)
+                until="$(date -u -d "+${COOLDOWN_S} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+                    || until="$(_now_iso)" ;;
+            *)
+                echo "journal_rollback_count: unrecognized platform '$(uname -s)' — refusing (fail-closed; BSD or Linux required)" >&2
+                until="$(_now_iso)" ;;
+        esac
         journal_update "cooldown_until" "\"$until\"" || return 1
     fi
     printf '%s' "$new_cnt"
@@ -1906,9 +1942,31 @@ _freshness_refuse() {
 # DB, no daemon. A repo with NO plugins/ dir passes trivially (the
 # gate must not spuriously block plugin-less promotes).
 #
-# OVERRIDE: --allow-stale-plugins sets PROMOTE_STALENESS_OVERRIDE=1
-# (argv-only, mirrors --allow-stale-stage); every overridden refusal
-# is JOURNALED on the install dir (reason token + operator_accepted).
+# TRIAGE OUTCOMES (default changed at allow-stale flip 2026-10-07 —
+# stale pins are the steady state, NOT a promote-blocking anomaly):
+#   - predicate FRESH ⇒ proceed (rc=0).
+#   - predicate STALE ⇒ DEFAULT: journal `plugin_staleness_observed`
+#     + PROCEED (rc=0). STRICT (PROMOTE_STRICT_STALENESS=1 env or
+#     --block-on-stale argv, opt-in): refuse exit 78 (slice-⑥
+#     blocking restored — journaled as a `refusal` event with the
+#     predicate's code token). OVERRIDE (PROMOTE_STALENESS_OVERRIDE=1
+#     env or --allow-stale-plugins argv, audit-continuity back-compat):
+#     journal `plugin_staleness_override` + PROCEED. STRICT wins over
+#     OVERRIDE on conflict (strict is the "loud failure" choice).
+#   - predicate UNEVALUABLE (no interpreter, no module, predicate
+#     crash) ⇒ refuse exit 78 unless overridden (fail-closed — unknown
+#     tooling is LOUD; stale pins are the steady state).
+#
+# OVERRIDE / STRICT (argv-only, mirrors --allow-stale-stage argv-only
+# discipline): --allow-stale-plugins sets PROMOTE_STALENESS_OVERRIDE=1;
+# --block-on-stale sets PROMOTE_STRICT_STALENESS=1. Every override and
+# every observed event is JOURNALED on the install dir (reason token +
+# operator_accepted). The `plugin_staleness_observed` event is
+# JOURNAL-ONLY — explicitly NOT mapped in
+# daemon/tools/upgrade_journal.py:ALERT_KIND_BY_EVENT (stale is no
+# longer a refusal/rollback/halt-class event). The only SSE-mapped kinds
+# the gate may emit remain halt/refusal/rollback/sweep_rollback/
+# quarantine.
 #
 # IMPLEMENTATION NOTE: the predicate is a stdlib+PyYAML-only Python
 # module (daemon/plugin_subsystem/promote_staleness.py) invoked by
@@ -1919,9 +1977,10 @@ _freshness_refuse() {
 # unreadable) unless overridden — an unevaluable gate is a refused
 # gate, never a silent pass.
 #
-# Exit-code contract of THIS function: returns 0 = fresh/overridden;
-# every refusal path exits 78 itself (the promote_entry_check caller
-# convention — L11 tidier).
+# Exit-code contract of THIS function: returns 0 = fresh/observed/
+# overridden; every refusal path (strict refuse; unevaluable refuse)
+# exits 78 itself (the promote_entry_check caller convention — L11
+# tidier).
 
 _plugin_staleness_journal_override() {
     local reason="$1" detail="$2"
@@ -1932,6 +1991,30 @@ _plugin_staleness_journal_override() {
         "$detail (reason=$reason operator_accepted=true)" \
         >/dev/null 2>&1 \
         || _warn "plugin-staleness override journal append FAILED (best-effort) — override is taken but the audit trail is incomplete; reason=$reason"
+}
+
+# _plugin_staleness_journal_observed <plugin> <reasons_concat> — best-
+# effort journal append for a STALE verdict accepted under the new
+# default (allow-stale flip 2026-10-07 — stale pins are the steady
+# state, NOT a promote-blocking anomaly; the event is JOURNALED for
+# audit but the promote PROCEEDS unless strict mode opts back in).
+# Idempotent and unlocked (same durable-landing discipline as
+# _plugin_staleness_journal_override: journal_init first, then plain
+# journal_history_append). The new event kind
+# `plugin_staleness_observed` is journal-ONLY — explicitly NOT mapped
+# in daemon/tools/upgrade_journal.py:ALERT_KIND_BY_EVENT (stale is no
+# longer a refusal/rollback/halt-class event). STRICT refusals and
+# UNEVALUABLE refusals still flow through _freshness_refuse → `refusal`
+# (SSE-mapped).
+_plugin_staleness_journal_observed() {
+    local plugin="$1" reasons="$2"
+    if [ -d "${INSTALL_DIR:-}" ]; then
+        journal_init >/dev/null 2>&1 || true
+    fi
+    journal_history_append "plugin_staleness_observed" \
+        "plugin=$plugin reasons=$reasons" \
+        >/dev/null 2>&1 \
+        || _warn "plugin-staleness observed journal append FAILED (best-effort) — observed is taken but the audit trail is incomplete; plugin=$plugin"
 }
 
 promote_plugin_staleness_check() {
@@ -2040,17 +2123,35 @@ promote_plugin_staleness_check() {
         if [ "$rc" -ne 3 ] || [ -z "$code" ]; then
             code="plugin-staleness-unreadable"
         fi
-        if [ "${PROMOTE_STALENESS_OVERRIDE:-0}" = "1" ]; then
+        if [ "${PROMOTE_STRICT_STALENESS:-0}" = "1" ]; then
+            # Strict mode (opt-in to slice-⑥ blocking, 2026-10-07 flip
+            # flipped the DEFAULT — strict is the explicit "loud failure"
+            # choice now). The OVERRIDE flag does NOT bypass strict:
+            # strict and override are orthogonal, strict wins on
+            # conflict.
+            _freshness_refuse "$code" \
+                "promote refused (strict staleness mode): plugin $pdir failed the plugin-staleness predicate (rc=$rc): $(printf '%s\n' "$out" | head -n 8 | tr '\n' ' ') " \
+                "Strict staleness is an OPT-IN to the slice-⑥ refuse-on-stale behavior (PROMOTE_STRICT_STALENESS=1 env or --block-on-stale argv). " \
+                "Remedies, in order: " \
+                "  1) fix the named condition (refresh the pin via a real sync; land the divergence disposition; assign alarm_owner) " \
+                "  2) drop the strict env/argv to fall back to the default (stale observed + journaled, promote proceeds)"
+            # _freshness_refuse exits 78 — never reached.
+        elif [ "${PROMOTE_STALENESS_OVERRIDE:-0}" = "1" ]; then
             _warn "PLUGIN-STALENESS OVERRIDE: $pdir is stale ($code) — proceeding (operator accepted; journaled)"
             _plugin_staleness_journal_override "$code" \
                 "override: $pdir failed the plugin-staleness predicate (rc=$rc): $(printf '%s\n' "$out" | head -n 8 | tr '\n' ' ')"
             continue
         fi
-        _freshness_refuse "$code" \
-            "promote refused: plugin $pdir failed the plugin-staleness predicate (rc=$rc): $(printf '%s\n' "$out" | head -n 8 | tr '\n' ' ') " \
-            "Remedies, in order: " \
-            "  1) fix the named condition (refresh the pin via a real sync; land the divergence disposition; assign alarm_owner) " \
-            "  2) pass --allow-stale-plugins to override (JOURNALED on the install dir; unsafe on real rungs)"
+        # DEFAULT (allow-stale flip 2026-10-07): stale pins are the
+        # steady state. The predicate's verdict is JOURNALED for audit
+        # via `plugin_staleness_observed` and the promote PROCEEDS
+        # (return 0 at the function end). STRICT (above) opts back
+        # into the slice-⑥ blocking. OVERRIDE (above) is the explicit
+        # audit-continuity back-compat — it journaled the OLD
+        # `plugin_staleness_override` event on the install dir.
+        _warn "PLUGIN-STALENESS OBSERVED: $pdir is stale ($code) — proceeding (default; journaled for audit)"
+        _plugin_staleness_journal_observed "$pdir" \
+            "$(printf '%s\n' "$out" | tr '\n' '|')"
     done
     return 0
 }
@@ -2439,6 +2540,280 @@ _probe_once() {
     curl -fsS --max-time 5 "http://localhost:$2$1" 2>/dev/null
 }
 
+# _run_bounded <budget_s> [--] <cmd> [args...] — run a foreground command
+# with a wall-clock SIGTERM→SIGKILL deadline (2.2b, upgrade-resilience
+# 2026-10-07).
+#
+# Why NOT GNU `timeout(1)`: absent on BSD/macOS stock installs — the
+# pipeline is BSD+GNU portable (P2.1 debt family). Background + sleep
+# + kill is portable; bash builtin kill is a single syscall (no FS /
+# IPC dependency), safe to ignore if the watchdog itself races.
+#
+# Return codes (modelled on GNU `timeout(1)` for cross-tool consistency):
+#   0     → child exited cleanly within budget
+#   !=0   → child exited nonzero within budget (the child's own rc)
+#   124   → SIGTERM after TERM__1…_TERM_GRACE_S then SIGKILL fired
+#           (timed out — caller distinguishes via `case "$rc" in 124)`)
+#
+# The function NEVER aborts the script on a 124 — caller-side MUST
+# capture with `|| rc=$?` or `if _run_bounded ... ; then …` so a
+# bounded timeout falls through (these scripts run with `set -e`;
+# a bare `_run_bounded …` invocation would propagate the rc and
+# terminate the script on timeout, which is the wrong shape — the
+# recovery flow IS the fall-through). stdout/stderr is preserved
+# via temp-file (no FD inheritance issues across the background
+# fork).
+#
+# Implementation shape (mirror of launcher.sh:518 _js_run_bounded
+# precedent — same algorithm, separate copy because the launcher
+# is BOOT-path self-contained and does NOT source scripts/upgrade/lib.sh):
+#   "$@" &
+#   pid=$!
+#   (
+#       sleep "$timeout_s"
+#       kill -TERM "$pid" 2>/dev/null
+#       sleep TERM_GRACE_S
+#       kill -KILL "$pid" 2>/dev/null
+#   ) >/dev/null 2>&1 &
+#   watcher=$!
+#   if wait "$pid"; then rc=0; else rc=$?; fi
+#   case "$rc" in 137|143) rc=124 ;; esac
+#   kill -KILL "$watcher" 2>/dev/null || true
+#   wait "$watcher" 2>/dev/null || true
+#   return "$rc"
+#
+# Note: the watcher runs `sleep + kill TERM + sleep + kill KILL`. If
+# the child finishes FAST, the watcher is still sleeping and gets
+# SIGKILLed at the end — bash builtin kill is a single syscall, no
+# orphan risk on the SIGKILLed watcher (it cannot have FDs held
+# open by the watched child). Verified portable: bash 3.2 (macOS
+# stock), bash 5.x (GNU/Linux). NOT dependent on GNU `timeout(1)`.
+_run_bounded() {
+    local timeout_s="$1"; shift
+    [ "${1:-}" = "--" ] && shift
+    local pid watcher rc=0 TERM_GRACE_S=5
+    "$@" &
+    pid=$!
+    (
+        sleep "$timeout_s" 2>/dev/null
+        kill -TERM "$pid" 2>/dev/null
+        sleep "$TERM_GRACE_S" 2>/dev/null
+        kill -KILL "$pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    watcher=$!
+    if wait "$pid" 2>/dev/null; then
+        rc=0
+    else
+        rc=$?
+    fi
+    # SIGKILL = 137 (128+9), SIGTERM = 143 (128+15) → collapse to 124
+    # (GNU `timeout` convention).
+    case "$rc" in
+        137|143) rc=124 ;;
+    esac
+    kill -KILL "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    return "$rc"
+}
+
+# _resolve_wait_s_mirror <env_file> — PARENT-SIDE mirror of the child's
+# WAIT_S resolution chain (scripts/stop-ensemble.sh:113 + 270-289 + 292-307).
+# SYNC-GUARD: this function MUST stay byte-identical in semantics to the
+# child's resolution — see the sync-guard comment at lib.sh:94+STOP_SCRIPT_BUDGET_S
+# for the full invariant. The brief calls for the parent to derive
+# STOP_SCRIPT_BUDGET_S from the SAME resolved WAIT_S the child uses; if
+# the two resolvers drift (e.g. one updates the +10 offset or the
+# floor/cap), the parent's derived budget silently under-covers the
+# child's legitimate worst-case → premature SIGKILL → flip against a
+# still-live daemon (the review finding this fix closes). The
+# tests/test_bounded_subprocess_waits.sh sync-guard case D8 runs BOTH
+# resolvers over the same fixtures and asserts identical output.
+#
+# Precedence (mirrors the child at stop-ensemble.sh:113, 292-307 + 270-289):
+#   1. explicit $WAIT_S env (digits-only) — wins
+#   2. malformed explicit $WAIT_S — fall back to DEFAULT_WAIT_S (NOT
+#      to the .env read; this is a SUBTLE child quirk the mirror
+#      preserves — a malformed operator config is treated as "no
+#      config at all, use the safe default", not "fall through to
+#      the .env read" which would silently honor an unrelated
+#      DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS the operator may
+#      have set for a different purpose).
+#   3. no explicit $WAIT_S — call _resolve_wait_s (which reads the
+#      env file, applies the +10 offset, clamps [FLOOR..CAP],
+#      falls back to DEFAULT_WAIT_S on absent/malformed)
+#
+# Side note: $WAIT_S is the caller's env value (CLI / exported) — the
+# SAME env the child sees (the parent fork-execs the child with
+# PIPELINE_LOCK_HELD_BY_CALLER=1, but the rest of env inherits). A
+# merely-set-but-empty $WAIT_S="" is NOT treated as explicit (it falls
+# through to the .env read), exactly like the child.
+DEFAULT_WAIT_S=70
+WAIT_S_FLOOR=10
+WAIT_S_CAP=600
+_resolve_wait_s_mirror() {
+    local env_file="$1" raw="" val=""
+    # Precedence 1+2: explicit $WAIT_S in the caller's env
+    # (digits-only → win; malformed → fall back to DEFAULT_WAIT_S
+    # without consulting the .env file — mirrors the child).
+    raw="${WAIT_S:-}"
+    if [ -n "$raw" ]; then
+        if printf '%s' "$raw" | grep -Eq '^[0-9]+$'; then
+            printf '%s\n' "$raw"
+            return 0
+        fi
+        # Malformed explicit — fall back to default, do NOT consult .env.
+        printf '%s\n' "$DEFAULT_WAIT_S"
+        return 0
+    fi
+    # Precedence 3: no explicit — read the .env file (sed-extract is
+    # byte-identical to the child's _resolve_wait_s at
+    # stop-ensemble.sh:270-289: same pattern, same handling of
+    # optional `export` prefix, same trailing-CARRIAGE-RETURN strip,
+    # same quote-strip, same digits-only validation, same +10 offset,
+    # same [FLOOR..CAP] clamp, same fallback to DEFAULT_WAIT_S).
+    if [ -n "$env_file" ] && [ -f "$env_file" ]; then
+        raw="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS[[:space:]]*=[[:space:]]*//p' "$env_file" 2>/dev/null | head -1)"
+        raw="${raw%$'\r'}"
+        case "$raw" in
+            \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+            \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+        esac
+    fi
+    if ! printf '%s' "$raw" | grep -Eq '^[0-9]+$'; then
+        printf '%s\n' "$DEFAULT_WAIT_S"
+        return 0
+    fi
+    val=$((raw + 10))
+    [ "$val" -lt "$WAIT_S_FLOOR" ] && val="$WAIT_S_FLOOR"
+    [ "$val" -gt "$WAIT_S_CAP" ] && val="$WAIT_S_CAP"
+    printf '%s\n' "$val"
+}
+
+# _derive_parent_stop_budget [<env_file>] — DERIVES the parent
+# (lib.sh) STOP_SCRIPT_BUDGET_S from the child's RESOLVED WAIT_S (and
+# the other timeouts in the child's stop span), instead of a fixed
+# 120s. Rationale (cite: integration review 2026-10-07, post-2.2b):
+# the parent bounds the `bash "$stop_script" ...` fork-exec; the child
+# (stop-ensemble.sh) can legitimately take its own site-2 stop bound +
+# resolved WAIT_S + UNIT_KILL_GRACE_S + internal _run_bounded TERM
+# grace to complete. A fixed parent budget of 120s under-covers
+# operators with WAIT_S>120 → the parent SIGKILLs the child
+# mid-graceful-wait → premature rc=0 fall-through → the flip may
+# proceed against a still-live daemon. The invariant we establish:
+# "parent budget ≥ child's legitimate worst-case runtime, always, by
+# construction — no fixed-constant coupling left."
+#
+# Composition sum (child's legitimate worst-case, IN-ORDER):
+#   1. child site-2 stop bound — the child's own STOP_SCRIPT_BUDGET_S
+#      (env-shared with the parent; same env inherits across the
+#      fork-exec). Default 120s.
+#   2. resolved WAIT_S — the child's poll loop after systemctl stop
+#      (stop-ensemble.sh:600-609: `while [ $WAITED -lt $WAIT_S ]`). The
+#      child can poll for the full WAIT_S window if the unit takes the
+#      full graceful timeout to drain. Resolved via
+#      _resolve_wait_s_mirror (the parent's mirror of the child's
+#      _resolve_wait_s; sync-guarded).
+#   3. UNIT_KILL_GRACE_S — the child's re-verify poll after
+#      `systemctl kill` SIGKILL escalation (stop-ensemble.sh:615-624).
+#      Default 10s.
+#   4. internal _run_bounded TERM-grace (5s) — the parent's helper
+#      itself takes 5s between TERM and KILL on its OWN bound, but
+#      since the parent bounds the WHOLE child fork-exec (not just the
+#      child's site-2 stop), the child's internal _run_bounded TERM
+#      grace is INSIDE the parent's bound. A hung child's site-2
+#      _run_bounded could legitimately occupy 5s of TERM-grace before
+#      KILL. Compose, don't double-count.
+#   5. margin (+20s) — startup overhead (process spawn, sed-extract,
+#      PID discovery), scheduler latency, and any clock skew between
+#      the two fork-execs. The child itself uses a +10s margin
+#      (stop-ensemble.sh:268: "Budget = graceful timeout + 10s margin");
+#      we use +20s for the cross-process bound (a slightly wider
+#      margin — the cross-process cost is higher than the
+#      intra-process cost).
+# Absolute floor: 120s — preserves the prior default at low WAIT_S
+# (no regression for the 70s-default case in the happy path; the
+# derived default at WAIT_S=70 is 120+70+10+5+20=225, which is MORE
+# generous than the prior 120, but still a tight bound — a healthy
+# stop completes in <2s).
+#
+# <env_file> optional override for the .env path (defaults to
+# $INSTALL_DIR/.env). The test pack passes an explicit path when
+# the caller is a test harness; production callers omit it and let
+# the helper pick up $INSTALL_DIR.
+#
+# Operator override: STOP_SCRIPT_BUDGET_S explicit env → use that value
+# verbatim (the call site never sees the derivation). This preserves
+# the env-overridable knob for sandbox drills + tests.
+#
+# SYNC-GUARD: this default and the child's STOP_SCRIPT_BUDGET_S at
+# stop-ensemble.sh:362 must move TOGETHER. The child's value is
+# 120-default; the parent's derivation picks up the SAME env (child
+# inherits the parent's env across the fork-exec). If you change the
+# child's default, change the child_site2 default here. Likewise,
+# _resolve_wait_s_mirror above MUST stay byte-identical to
+# stop-ensemble.sh:270 _resolve_wait_s; the D8 sync-guard test runs
+# BOTH resolvers over the same fixtures and asserts identical output.
+_derive_parent_stop_budget() {
+    local env_file="${1:-${INSTALL_DIR:-}/.env}"
+    # child_site2 — only honor an explicit STOP_SCRIPT_BUDGET_S env
+    # if it is digits-only. A malformed/non-digits override (e.g. "abc")
+    # falls back to the default; the arithmetic below REQUIRES a
+    # digits value (bash's (( )) triggers "unbound variable" on
+    # non-digits, and the test pack runs with `set -u` — the brief
+    # calls for fail-closed semantics, not silent arithmetic
+    # corruption). Mirrors the child's "malformed WAIT_S → fall back
+    # to default" contract.
+    local child_site2
+    if [ -n "${STOP_SCRIPT_BUDGET_S:-}" ] && printf '%s' "${STOP_SCRIPT_BUDGET_S}" | grep -Eq '^[0-9]+$'; then
+        child_site2="${STOP_SCRIPT_BUDGET_S}"
+    else
+        child_site2=120
+    fi
+    local resolved_ws ukg
+    resolved_ws="$(_resolve_wait_s_mirror "$env_file" 2>/dev/null || printf '%s' "$DEFAULT_WAIT_S")"
+    ukg="${UNIT_KILL_GRACE_S:-10}"
+    local term_grace=5
+    local margin=20
+    local derived
+    derived=$(( child_site2 + resolved_ws + ukg + term_grace + margin ))
+    if [ "$derived" -lt 120 ]; then derived=120; fi
+    printf '%s\n' "$derived"
+}
+
+# _effective_stop_script_budget [<env_file>] — the parent's EFFECTIVE
+# bound for the `bash "$stop_script" ...` fork-exec at the call site.
+# Honors an explicit STOP_SCRIPT_BUDGET_S env (operator override —
+# sandbox drills, tests, or a deliberately tighter bound for a
+# known-fast daemon); otherwise derives from the child's resolved
+# WAIT_S + composition sum. Computed at the call site (NOT at module
+# load) because the parent's `INSTALL_DIR` is per-target and may be
+# unset at lib.sh source-time. The default at lib.sh:94 is a fallback
+# (env-overridable); the DERIVED value here is the one actually used
+# at runtime.
+#
+# Malformed override handling: a STOP_SCRIPT_BUDGET_S that is NOT
+# digits-only (e.g. "" empty, "abc", unset) is treated as NO override —
+# the derivation runs. This mirrors the child's "malformed WAIT_S →
+# fall back to default" semantics: an operator typo cannot produce a
+# nonsense bound that breaks the recovery machinery.
+#
+# <env_file> optional override for the .env path (passed to
+# _derive_parent_stop_budget). Production callers omit it (defaults
+# to $INSTALL_DIR/.env); the test pack passes an explicit path.
+_effective_stop_script_budget() {
+    local env_file="${1:-}"
+    if [ -n "${STOP_SCRIPT_BUDGET_S:-}" ] && printf '%s' "${STOP_SCRIPT_BUDGET_S}" | grep -Eq '^[0-9]+$'; then
+        printf '%s\n' "${STOP_SCRIPT_BUDGET_S}"
+        return 0
+    fi
+    if [ -n "$env_file" ]; then
+        _derive_parent_stop_budget "$env_file"
+    else
+        _derive_parent_stop_budget
+    fi
+}
+
+
 # ── Promote/rollback shared mechanics (D6 + D-FA4.1 amendment) ──────────────
 # stop_via_stop_script — SIGTERM-bounded, ownership-scoped stop. ALWAYS via
 # scripts/stop-ensemble.sh (D6: reused, never duplicated; NEVER a raw kill).
@@ -2481,7 +2856,7 @@ stop_via_stop_script() {
     # Every other shape keeps the byte-identical pid-scoped invocation —
     # no new env reaches the child on the script path.
     if [ "${SUPERVISION_STATE:-}" = "UNIT_MANAGED" ] && [ -n "${SUPERVISION_UNIT:-}" ]; then
-        _log "stop: UNIT path — systemctl stop ${SUPERVISION_UNIT} + unit-state poll via $stop_script (b″: respawn-invisible-to-pid-poll fix)"
+        _log "stop: UNIT path — systemctl stop ${SUPERVISION_UNIT} + unit-state poll via $stop_script (b″: respawn-invisible-to-policy-poll fix)"
         # P3: snapshot the unit's PRE-STOP MainPID (behind the same host
         # guard family as the hand-back; the daemon is still live HERE —
         # stop_via_stop_script runs pre-stop by contract) —
@@ -2493,20 +2868,88 @@ stop_via_stop_script() {
             SUPERVISION_PRESTOP_MAINPID="$("$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p MainPID --value 2>/dev/null || true)"
             [ -n "$SUPERVISION_PRESTOP_MAINPID" ] || SUPERVISION_PRESTOP_MAINPID=""
         fi
-        # PIPELINE_LOCK_HELD_BY_CALLER=1 — the parent caller (promote /
-        # rollback / restart) already holds the rollback.lock.d through
-        # soak+rollback; the child stop-ensemble.sh MUST skip its own
-        # acquire (Layer ii — Layer i's settle-check too: the pipeline
-        # is manifestly not settled while the parent holds the lock).
-        PIPELINE_LOCK_HELD_BY_CALLER=1 \
+        # 2.2b (upgrade-resilience 2026-10-07) — bound the child fork-exec.
+        # The old shape invoked `bash "$stop_script" …` directly; a hung
+        # child (kill -0 or wait blocked forever) could wedge this caller.
+        # _run_bounded waits at most STOP_SCRIPT_BUDGET_S (default 120s),
+        # then SIGTERMs the child, gives a 5s grace, and SIGKILLs — falling
+        # THROUGH to the caller's stop verification/re-verify machinery
+        # below (which already handles a still-running unit / pid). On
+        # timeout: loud warn + journal `subprocess_wait_timeout` event,
+        # then CONTINUE with rc=0 (recovery proceeds). The 2.2b invariant:
+        # bounded waits NEVER exit the script; falling through IS the path
+        # forward. On NON-timeout child failure (real nonzero rc), preserve
+        # that rc as the function's return so the caller's `if !`
+        # correctly takes the B4 leave-txn-open path (rollback.sh:139,
+        # promote's stop-failed halt). PIPELINE_LOCK_HELD_BY_CALLER=1 —
+        # the parent caller (promote / rollback / restart) already holds
+        # the rollback.lock.d through soak+rollback; the child
+        # stop-ensemble.sh MUST skip its own acquire (Layer ii — Layer i's
+        # settle-check too: the pipeline is manifestly not settled while
+        # the parent holds the lock).
+        #
+        # POST-REVIEW HARDENING (2026-10-07): the bound here is the
+        # EFFECTIVE budget — env-overridden or derived from the child's
+        # resolved WAIT_S (see _effective_stop_script_budget and
+        # _derive_parent_stop_budget). The fixed 120 default at
+        # lib.sh:94 was the prior shape; the fixed-constant coupling
+        # was the review finding. The derived value at WAIT_S=70 is
+        # 225s; at WAIT_S=600 (the cap) it's 755s — both cover the
+        # child's legitimate worst-case runtime with the +20s margin
+        # (see _derive_parent_stop_budget for the composition).
+        local eff_budget stop_rc=0
+        eff_budget="$(_effective_stop_script_budget)"
+        if PIPELINE_LOCK_HELD_BY_CALLER=1 \
             ENSEMBLE_SUPERVISION_RESULT="${SUPERVISION_STATE}:${SUPERVISION_UNIT}" \
-            bash "$stop_script" "$INSTALL_DIR" "$PORT"
+            _run_bounded "$eff_budget" -- bash "$stop_script" "$INSTALL_DIR" "$PORT"; then
+            stop_rc=0
+        else
+            local sbrc=$?
+            if [ "$sbrc" = "124" ]; then
+                _warn "stop_script fork-exec timed out (budget=${eff_budget}s) — falling through to caller's stop verification (child SIGTERM→SIGKILL'd by _run_bounded); function returns 0 (recovery proceeds)"
+                journal_history_append subprocess_wait_timeout \
+                    "site=stop_via_stop_script_unit kind=budget reason=$(printf 'child: timeout(eff_budget=%s)' "$eff_budget") path=$stop_script unit=$SUPERVISION_UNIT rc=124 — SIGTERM→SIGKILL, falling through to recovery (rc=0)" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+                stop_rc=0   # timeout = recovery continues; do NOT propagate
+            else
+                _warn "stop_script fork-exec FAILED (rc=$sbrc) — propagating nonzero rc to caller (B4 leave-txn-open path takes over)"
+                journal_history_append subprocess_wait_timeout \
+                    "site=stop_via_stop_script_unit kind=nonzero_exit reason=$(printf 'child: nonzero rc=%s' "$sbrc") path=$stop_script unit=$SUPERVISION_UNIT rc=$sbrc — propagating to caller" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+                stop_rc=$sbrc
+            fi
+        fi
+        return "$stop_rc"
     else
         _log "stop: ownership-scoped SINGLE-TERM via $stop_script"
+        # 2.2b — same bound on the pid-scoped fork-exec (mirror of the
+        # UNIT path above; same budget + timeout-vs-failure rc policy).
         # PIPELINE_LOCK_HELD_BY_CALLER=1 — same reason: the parent holds
-        # the lock; the child MUST NOT acquire (Layer ii).
-        PIPELINE_LOCK_HELD_BY_CALLER=1 \
-            bash "$stop_script" "$INSTALL_DIR" "$PORT"
+        # the lock; the child MUST NOT acquire (Layer ii). POST-REVIEW
+        # HARDENING: the bound is the EFFECTIVE budget (env override or
+        # derived) — same derivation as the UNIT path above.
+        local eff_budget stop_rc=0
+        eff_budget="$(_effective_stop_script_budget)"
+        if PIPELINE_LOCK_HELD_BY_CALLER=1 \
+            _run_bounded "$eff_budget" -- bash "$stop_script" "$INSTALL_DIR" "$PORT"; then
+            stop_rc=0
+        else
+            local sbrc=$?
+            if [ "$sbrc" = "124" ]; then
+                _warn "stop_script fork-exec timed out (budget=${eff_budget}s) — falling through to caller's stop verification (child SIGTERM→SIGKILL'd by _run_bounded); function returns 0 (recovery proceeds)"
+                journal_history_append subprocess_wait_timeout \
+                    "site=stop_via_stop_script_pid kind=budget reason=$(printf 'child: timeout(eff_budget=%s)' "$eff_budget") path=$stop_script rc=124 — SIGTERM→SIGKILL, falling through to recovery (rc=0)" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+                stop_rc=0
+            else
+                _warn "stop_script fork-exec FAILED (rc=$sbrc) — propagating nonzero rc to caller (B4 leave-txn-open path takes over)"
+                journal_history_append subprocess_wait_timeout \
+                    "site=stop_via_stop_script_pid kind=nonzero_exit reason=$(printf 'child: nonzero rc=%s' "$sbrc") path=$stop_script rc=$sbrc — propagating to caller" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+                stop_rc=$sbrc
+            fi
+        fi
+        return "$stop_rc"
     fi
 }
 
@@ -2672,21 +3115,73 @@ _supervision_handback_unit() {
     #    is-active preflight nor the start is poisoned by it
     #    (best-effort: a reset-failed failure is not itself fatal —
     #    the start below surfaces real problems).
-    "$SYSTEMCTL_BIN" reset-failed "$unit" >/dev/null 2>&1 || true
+    #
+    # 2.2b (upgrade-resilience 2026-10-07) — bound the probe: a hung
+    # systemctl/dbus call against a wedged unit could stall this site
+    # forever (the §9 reproduction cited a similar hang at the
+    # unbounded start at step 3 below). Bounded at
+    # SYSTEMCTL_PROBE_BUDGET_S (default 5s); on timeout journal the
+    # canonical event + loud stderr + CONTINUE (reset-failed is
+    # best-effort by its own comment).
+    if _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" reset-failed "$unit" >/dev/null 2>&1; then
+        :
+    else
+        local sbrc=$?
+        _warn "reset-failed probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — continuing (best-effort; child SIGTERM→SIGKILL'd)"
+        journal_history_append subprocess_wait_timeout \
+            "site=handback_reset_failed kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$unit rc=124 — SIGTERM→SIGKILL, continuing (best-effort)" \
+            || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+    fi
     # 2. is-active preflight — ALREADY-ACTIVE ≠ SUCCESS: a unit start on
     #    an active unit is a NO-OP that exits 0 (the false-success
     #    shape). The verdict comes from the MainPID/port verification
     #    below, NEVER from the start rc.
-    isact="$("$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null || true)"
+    #
+    # 2.2b — bound the probe (mirror of reset-failed above). On
+    # timeout: treat as NOT-active (continue into the start attempt; the
+    # MainPID/port verify below owns the verdict — never fail the
+    # hand-back on a probe timeout alone). CAREFUL: do NOT `|| true` the
+    # assignment — `|| true` would mask the rc 124 and the IF would
+    # always take the THEN branch (skipping the journal event). Capture
+    # via a temp var + explicit rc-test.
+    local isact_rc=0
+    isact="$(_run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null)"
+    isact_rc=$?
+    if [ "$isact_rc" -ne 0 ]; then
+        _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — treating as NOT-active; continuing into the start attempt (the MainPID/port verify owns the verdict)"
+        journal_history_append subprocess_wait_timeout \
+            "site=handback_is_active kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$unit rc=$isact_rc — treating as not-active, continuing" \
+            || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        isact=""
+    fi
     [ "$isact" = "active" ] \
         && _warn "unit $unit ALREADY ACTIVE at hand-back — a unit start on an active unit no-ops (exit 0); the MainPID/port verification decides, not the start rc"
     # 3. the start itself (pure command invocation — see the substring-
     #    trap guard at the top of this function).
+    #
+    # 2.2b — bound at HANDBACK_START_BUDGET_S (default 60s) — the
+    # §9-culprit site: manual-push reproduction froze POST-flip here
+    # with the parent wedged in pipe_read 10+ min while the child
+    # subshell spun in the unit hand-back. On timeout: journal +
+    # SIGTERM→SIGKILL the child (done by _run_bounded), then take
+    # the EXISTING failure path (return 1, caller journals halt +
+    # B4 leave-txn-open) — but now the ceremony PROGRESSES instead
+    # of hanging in pipe_read forever.
     errfile="$(mktemp /tmp/.ensemble-hb-sc.XXXXXX)"
-    if ! "$SYSTEMCTL_BIN" start "$unit" 2>"$errfile"; then
+    if _run_bounded "$HANDBACK_START_BUDGET_S" -- "$SYSTEMCTL_BIN" start "$unit" 2>"$errfile"; then
+        :
+    else
+        local sbrc=$?
         first="$(head -n1 "$errfile" 2>/dev/null || true)"
         rm -f "$errfile"
-        _warn "unit hand-back FAILED: unit $unit did not come up (${first:-no stderr}) — NO nohup fallback (Amendment #1: a fallback re-creates the survivor lineage and abandons Restart=/journald ownership) — halting for the caller's B4 policy"
+        if [ "$sbrc" = "124" ]; then
+            _warn "unit start exceeded budget — under-budget child (HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}s) was SIGTERM→SIGKILL'd; unit=$unit — halting for the caller's B4 policy (NO nohup fallback — Amendment #1)"
+            journal_history_append subprocess_wait_timeout \
+                "site=handback_start kind=budget reason=$(printf 'child: timeout(HANDBACK_START_BUDGET_S=%s)' "$HANDBACK_START_BUDGET_S") unit=$unit rc=124 — SIGTERM→SIGKILL, halting for caller's B4 policy" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        else
+            _warn "unit hand-back FAILED: unit $unit did not come up (${first:-no stderr}) — NO nohup fallback (Amendment #1: a fallback re-creates the survivor lineage and abandons Restart=/journald ownership) — halting for the caller's B4 policy"
+        fi
         return 1
     fi
     rm -f "$errfile"
@@ -2921,8 +3416,23 @@ restart_via_launcher() {
         # assert_not_contains 'systemctl start' on the success output,
         # not line-by-line byte identity. The FAILURE path alone carries
         # the frozen 7c wording (see the guard below).]
-        local _sc_isact _sc_skip_start=0
-        _sc_isact="$("$SYSTEMCTL_BIN" is-active "$ENSEMBLE_RESTART_UNIT" 2>/dev/null || true)"
+        local _sc_isact _sc_skip_start=0 _sc_rc=0
+        # 2.2b (upgrade-resilience 2026-10-07) — bound the probe at
+        # SYSTEMCTL_PROBE_BUDGET_S (5s); on timeout treat as NOT-active
+        # and continue into the start attempt (the MainPID/port verify
+        # and comp7 opt-in nohup fallback own the verdict). CAREFUL: do
+        # NOT `|| true` the assignment — `|| true` would mask the rc 124
+        # and the IF would always take the THEN branch (skipping the
+        # journal event). Capture via a temp var + explicit rc-test:
+        _sc_isact="$(_run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" is-active "$ENSEMBLE_RESTART_UNIT" 2>/dev/null)"
+        _sc_rc=$?
+        if [ "$_sc_rc" -ne 0 ]; then
+            _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $ENSEMBLE_RESTART_UNIT — treating as NOT-active; continuing (probe timeout never fails the launcher start on its own)"
+            journal_history_append subprocess_wait_timeout \
+                "site=scope_arm_is_active kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc — treating as not-active, continuing" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+            _sc_isact=""
+        fi
         if [ "$_sc_isact" = "active" ]; then
             if [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
                 if lsof -ti:"$PORT" >/dev/null 2>&1; then
@@ -2937,8 +3447,22 @@ restart_via_launcher() {
             fi
         fi
         if [ "$_sc_skip_start" = "0" ]; then
+            # 2.2b — bound the scope-arm start at SCOPE_START_BUDGET_S
+            # (default 10s). On timeout: journal + fall through to the
+            # EXISTING nohup fallback (:3208-3210) — this arm legitimately
+            # keeps its fallback (comp7 opt-in KEEPS the nohup fallback —
+            # the 7c contract). The frozen 7c wording below stays
+            # BYTE-IDENTICAL for non-timeout failures; on timeout the
+            # prefix changes to "timed out" (the literal "systemctl
+            # start" stays out of the success-path log lines per the 7b
+            # substring trap). CAPTURE rc into a var BEFORE the IF (bash
+            # `if …; then …; fi` always exits 0 when the body completes
+            # — `local _sbs=$?` after `fi` would silently capture 0).
             local _sc_errfile="/tmp/.ensemble-scerr.$$"
-            if "$SYSTEMCTL_BIN" start "$ENSEMBLE_RESTART_UNIT" 2>"$_sc_errfile"; then
+            local _sc_rc=0
+            _run_bounded "$SCOPE_START_BUDGET_S" -- "$SYSTEMCTL_BIN" start "$ENSEMBLE_RESTART_UNIT" 2>"$_sc_errfile"
+            _sc_rc=$?
+            if [ "$_sc_rc" = "0" ]; then
                 rm -f "$_sc_errfile"
                 _log "launcher started via systemd unit $ENSEMBLE_RESTART_UNIT (comp7: cgroup-bound; immune to setsid inheritance) — logs: journalctl -u $ENSEMBLE_RESTART_UNIT -f (unit journal) or $log (fallback file)"
                 return 0
@@ -2948,8 +3472,18 @@ restart_via_launcher() {
             rm -f "$_sc_errfile"
             # [7b substring-trap guard: this is the FAILURE path — the
             # FROZEN comp7 7c wording (pinned by assert_contains in the
-            # comp7 suite) lives ONLY here, never on a success line.]
-            _warn "systemctl start $ENSEMBLE_RESTART_UNIT failed: ${_sc_first:-no stderr} — falling back to nohup launcher (comp7 opt-in path)"
+            # comp7 suite) lives ONLY here, never on a success line.
+            # On timeout (rc 124) the wording PREFIXES a "timed out"
+            # marker; the frozen tail "falling back to nohup launcher
+            # (comp7 opt-in path)" stays byte-identical.
+            if [ "$_sc_rc" = "124" ]; then
+                _warn "$SYSTEMCTL_BIN start $ENSEMBLE_RESTART_UNIT timed out (budget=${SCOPE_START_BUDGET_S}s) — falling back to nohup launcher (comp7 opt-in path)"
+                journal_history_append subprocess_wait_timeout \
+                    "site=scope_arm_start kind=budget reason=$(printf 'child: timeout(SCOPE_START_BUDGET_S=%s)' "$SCOPE_START_BUDGET_S") unit=$ENSEMBLE_RESTART_UNIT rc=124 — SIGTERM→SIGKILL, falling back to nohup" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+            else
+                _warn "systemctl start $ENSEMBLE_RESTART_UNIT failed: ${_sc_first:-no stderr} — falling back to nohup launcher (comp7 opt-in path)"
+            fi
         fi
     fi
     ( cd "$INSTALL_DIR" && nohup ./launcher.sh >> data/launcher.log 2>&1 & )

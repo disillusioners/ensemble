@@ -247,6 +247,7 @@ class TestB1ConstitutionStatic:
         No new writer was added. The grep below is informational —
         no NEW pattern should have appeared since Batch A."""
         import subprocess
+        from pathlib import Path
 
         # The census is defined in daemon/job_state/constitution.py.
         # If B1 had introduced a new writer, the grep below would
@@ -262,7 +263,7 @@ class TestB1ConstitutionStatic:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble-wt-wc-wake-resilience",
+            cwd=str(Path(__file__).resolve().parents[3]),  # repo root (was a hardcoded dev-machine path)
         )
         # We don't assert the exact count here — that's owned by
         # the constitution test. Just confirm we haven't added new

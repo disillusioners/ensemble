@@ -115,6 +115,8 @@ class TestAllCompleteness:
             "ErrorCodes",
             "ErrorResponse",
             "DeleteResponse",
+            "LivezResponse",
+            "ReadyzResponse",
             # instance
             "InstanceStatus",
             "InstanceCreate",
@@ -163,6 +165,12 @@ class TestAllCompleteness:
             "BuiltinServerConfigure",
             "BuiltinServerTemplate",
             "BuiltinTemplateListResponse",
+            # tmp_image (Phase 1: clipboard-image-chat)
+            "TmpImageUpload",
+            "TmpImageUploadRequest",
+            "TmpImageUploadResponse",
+            "TmpImageUploadBatchResponse",
+            "TmpImageDebugListingResponse",
         ]
         
         actual_all = models.__all__

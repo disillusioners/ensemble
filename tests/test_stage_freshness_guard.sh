@@ -80,6 +80,7 @@ FAKE_HOME="$FIXTURE/home"
 mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \
          "$FAKE_REPO/daemon/migrations/versions" \
          "$FAKE_REPO/frontend/dist/frontend/browser" \
+         "$FAKE_REPO/plugins/stub_plugin" \
          "$FAKE_HOME/agents-ensemble"
 
 # Fake LIVE install under the fake HOME (PORT staged only) so the live
@@ -102,6 +103,12 @@ printf 'port: ${PORT:-8088}\n' > "$FAKE_REPO/config.yaml"
 printf 'stub-index\n' > "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 printf 'stub-app\n' > "$FAKE_REPO/frontend/dist/frontend/browser/main.js"
 printf 'CREATE TABLE x (id int);\n' > "$FAKE_REPO/daemon/migrations/versions/20260101_000001_init.sql"
+# Stub plugin payload (added 2026-10-07 for stage.sh's plugins/ precondition;
+# the tier-2 plugin subsystem is REQUIRED for native lane, so a stage fixture
+# without a plugins/ tree trips the v0.18.0 regression refusal before any
+# freshness-guard scenarios can run).
+printf 'plugin: stub_plugin\nlicense: Apache-2.0\n' > "$FAKE_REPO/plugins/stub_plugin/MANIFEST.yaml"
+printf 'stub-plugin-data\n' > "$FAKE_REPO/plugins/stub_plugin/data.txt"
 
 # A stub binary "serving" nothing — staging only, no daemon in unit tests.
 printf '#!/bin/bash\nexit 78\n' > "$FIXTURE/stub-prod"
@@ -159,7 +166,8 @@ _reset_fixture_repo() {
     rm -rf "$FAKE_REPO"
     mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \
              "$FAKE_REPO/daemon/migrations/versions" \
-             "$FAKE_REPO/frontend/dist/frontend/browser"
+             "$FAKE_REPO/frontend/dist/frontend/browser" \
+             "$FAKE_REPO/plugins/stub_plugin"
     cp "$UPGRADE_DIR/lib.sh"        "$FAKE_REPO/scripts/upgrade/lib.sh"
     cp "$UPGRADE_DIR/stage.sh"      "$FAKE_REPO/scripts/upgrade/stage.sh"
     cp "$UPGRADE_DIR/promote.sh"    "$FAKE_REPO/scripts/upgrade/promote.sh"
@@ -173,6 +181,11 @@ _reset_fixture_repo() {
     printf 'stub-index\n' > "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
     printf 'stub-app\n' > "$FAKE_REPO/frontend/dist/frontend/browser/main.js"
     printf 'CREATE TABLE x (id int);\n' > "$FAKE_REPO/daemon/migrations/versions/20260101_000001_init.sql"
+    # Stub plugin payload — see initial setup; the tier-2 plugin
+    # subsystem is now REQUIRED for stage.sh, so the reset must
+    # recreate it identically (mktemp fixture rebuild = clean slate).
+    printf 'plugin: stub_plugin\nlicense: Apache-2.0\n' > "$FAKE_REPO/plugins/stub_plugin/MANIFEST.yaml"
+    printf 'stub-plugin-data\n' > "$FAKE_REPO/plugins/stub_plugin/data.txt"
     # Mirror the REAL repo's ignore shape (root .gitignore `dist/` +
     # frontend/.gitignore `/dist`): the FE provenance sidecar written by
     # _stamp_fresh lives under frontend/dist/ and MUST be invisible to the
@@ -230,12 +243,19 @@ TIP_FIXTURE="$FIXTURE/tip-fixture"
 mkdir -p "$TIP_FIXTURE"
 git -C "$TIP_FIXTURE" init -q
 mkdir -p "$TIP_FIXTURE/agents/leader" "$TIP_FIXTURE/daemon/migrations/versions" \
-         "$TIP_FIXTURE/frontend/dist/frontend/browser"
+         "$TIP_FIXTURE/frontend/dist/frontend/browser" \
+         "$TIP_FIXTURE/plugins/stub_plugin"
 printf 'stub-agent\n' > "$TIP_FIXTURE/agents/leader/soul.md"
 printf 'port: 1\n' > "$TIP_FIXTURE/config.yaml"
 printf '#!/bin/bash\nexit 0\n' > "$TIP_FIXTURE/launcher.sh"
 printf 'CREATE TABLE x (id int);\n' > "$TIP_FIXTURE/daemon/migrations/versions/20260101_init.sql"
 printf 'stub-index\n' > "$TIP_FIXTURE/frontend/dist/frontend/browser/index.html"
+# plugins/ stub for the tip-identity fixture (mirrors the FAKE_REPO
+# stub — see initial setup). The tier-2 plugins/ precondition
+# fires before tip-identity / provenance, so the fixture must
+# carry a plugins/ dir for the override path to reach L1.
+printf 'plugin: stub_plugin\nlicense: Apache-2.0\n' > "$TIP_FIXTURE/plugins/stub_plugin/MANIFEST.yaml"
+printf 'stub-plugin-data\n' > "$TIP_FIXTURE/plugins/stub_plugin/data.txt"
 git -C "$TIP_FIXTURE" add -A
 git -C "$TIP_FIXTURE" -c user.email=t@t -c user.name=t commit -qm tip-base
 git -C "$TIP_FIXTURE" tag v0.0.1-base

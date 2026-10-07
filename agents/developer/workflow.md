@@ -707,3 +707,7 @@ Enforce these through opencode sessions:
 
 - Step 4: Review before responding
 - Step 4: Review before responding
+- Operational lesson (slice-① dispatch, 2026-10-06): `spawn_instance(..., task=...)` auto-dispatch CANNOT carry `load_skill` — that parameter exists only on `send_message`
+- For worker+skill dispatches (code-review, code-fix, git-commit…) ALWAYS use the legacy two-step ritual: spawn_instance(agent="worker") first, then send_message(instance_id, message, load_skill="<skill>")
+- Using task= for a skill worker silently degrades to a skill-less manual-prompt run (Guideline #19 fallback shape) and breaks skill-evolution attribution — must be flagged DEGRADED in the Dev Report
+- Coder dispatches and no-skill worker dispatches remain fine on task= (R18 fast path).

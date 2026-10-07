@@ -28,22 +28,10 @@ Bootstrap wall-clock (first render): ~18 min total (probe->warm), dominated by d
 the six defects; mechanics were fast (npm re-installs seconds, verify pass 10s, render 5s,
 chromium pre-cached). Verify+promote succeeded; probe now warm; session-state cleared.
 
-TRANSPORT LIMITATION (open; BACKLOGED 2026-10-05, charter-skill-improvement
-deliverable #3 — small shape exceeded the 150-LOC budget; see
-`.agents/shared/planning/chart-image-delivery/decisions.md` §opt-in-6
-backlog item 4 for the precise proposal with file:line anchors,
-proposed signature, exact test list, and LOC estimate):
-image_save content_b64 must pass through model output; a 56 KB PNG
-(75.7 KB base64) degenerated into repetition-garbage during emission
-on smoke job 38e63961 — the call failed (missing content_type saved us
-from persisting corrupt bytes; sha256 ground truth was on hand to
-detect it). chart-render PNGs of this size CANNOT be byte-exactly
-transported by model-echo in this configuration. Degrade path taken:
-text-only Mermaid, no ens-img marker. Candidate future fixes (priority
-order): (1) daemon-side path/file bridge on `image_save` (leading
-candidate per user framing — an optional `file_path: str | None`
-keyword-only param that reads server-side via the existing
-`_validate_local_path` + `_get_project_workdir()` pattern), (2)
-image_store ingest from a local path (separate ingest surface;
-probably bigger), (3) small-PNG lane (<= ~20 KB only — does NOT solve
-the general case; probably insufficient alone).
+TRANSPORT LIMITATION (open): image_save content_b64 must pass through model output; a 56 KB
+PNG (75.7 KB base64) degenerated into repetition-garbage during emission — the call failed
+(missing content_type saved us from persisting corrupt bytes; sha256 ground truth was on
+hand to detect it). chart-render PNGs of this size CANNOT be byte-exactly transported by
+model-echo in this configuration. Degrade path taken: text-only Mermaid, no ens-img marker.
+Candidate future fixes: small-PNG lane (<= ~20 KB), or a daemon-side path/file bridge for
+image_save, or image_store ingest from a local path.

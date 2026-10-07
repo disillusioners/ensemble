@@ -60,8 +60,8 @@ class TestRealPluginManifest:
         # declared explicitly here so the slice ③ tag-diff has a
         # concrete anchor.
         assert result.declaration.tag_pin_per_class == {
-            "copy_freely": "open-design-v0.23.0",
-            "snapshot_with_drift_alarm": "open-design-v0.23.0",
+            "copy_freely": "open-design-v0.24.1",
+            "snapshot_with_drift_alarm": "open-design-v0.24.1",
         }
         # 3-class provenance layout (slice ③; REC §4.1):
         #   copy_freely — data layer (slice ②, unchanged)

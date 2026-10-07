@@ -598,10 +598,7 @@ class TestTerminalGuardUsedByTwoSites:
         from pathlib import Path
 
         repo_root = Path(
-            os.environ.get(
-                "REPO_ROOT",
-                "/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
-            )
+            os.environ.get("REPO_ROOT", str(Path(__file__).resolve().parents[3]))
         )
         hits: list[tuple[str, int]] = []
         for py in (repo_root / "daemon").rglob("*.py"):

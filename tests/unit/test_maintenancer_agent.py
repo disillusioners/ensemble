@@ -478,11 +478,11 @@ class TestLeaderTeamMembership:
             f"Got: {team}"
         )
 
-    def test_leader_team_members_length_14(self) -> None:
-        """Spec — current length 13 → 14 after appending 'maintenancer'."""
+    def test_leader_team_members_length_15(self) -> None:
+        """Spec — current length 14 → 15 after appending 'designer'."""
         leader_meta = _load_leader_meta()
         team = leader_meta.get("team_members", [])
-        assert len(team) == 14, (
-            f"leader team_members length must be 14 after W1-P1 task 1.9 "
-            f"(was 13, +1 for 'maintenancer'). Got: {len(team)}"
+        assert len(team) == 15, (
+            f"leader team_members length must be 15 after W1-P1 task 1.9 "
+            f"(was 13, +1 'maintenancer', +1 'designer'). Got: {len(team)}"
         )

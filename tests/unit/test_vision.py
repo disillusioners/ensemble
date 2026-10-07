@@ -755,6 +755,18 @@ class TestImagesWithoutVisionConfig:
         mock_manager.enqueue_message_job = AsyncMock(return_value=mock_result)
         # Phase 3: routers check manager.is_write_paused; MagicMock auto-attr is truthy → 503.
         mock_manager.is_write_paused = False
+        # Slash-command intercept (Phase 1 / WS-1): ``command_dispatcher.dispatch``
+        # is awaited inside the router; a plain MagicMock dispatch would not be
+        # awaitable and the test would fail with ``'MagicMock' object can't be
+        # awaited``. Return a ``passthrough`` outcome so the message falls through
+        # to the normal enqueue path.
+        mock_command_outcome = MagicMock()
+        mock_command_outcome.kind = "passthrough"
+        mock_command_outcome.sanitized_text = None
+        mock_command_outcome.ack = None
+        mock_command_outcome.available = []
+        mock_manager.command_dispatcher = MagicMock()
+        mock_manager.command_dispatcher.dispatch = AsyncMock(return_value=mock_command_outcome)
 
         # Create mock request with app.state.manager
         mock_request = MagicMock()

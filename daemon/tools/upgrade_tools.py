@@ -1068,12 +1068,43 @@ _OUTCOME_LABELS: dict[str, str] = {
     "sweep": "swept (orphaned pre-flip txn cleared)",
     "halt": "halted-for-human",
     "quarantine": "quarantine recorded",
+    # Cause ① (commit 57ca613bf) added "refusal" and "executor_exit" to
+    # ``uj._TERMINAL_EVENTS`` (6→8). The derived display tuple
+    # ``_TERMINAL_OUTCOME_EVENTS`` silently grew too — these journals ARE
+    # closed terminal runs (that is the point of cause ①), so we LABEL them
+    # rather than exclude them. Excluding them would reclassify clean
+    # pre-mutation closures back toward PENDING and contradict cause ①.
+    "refusal": "refused (pre-mutation)",
+    "executor_exit": "executor exited (pre-mutation)",
     "restart": "restarted (intentional)",
     # v0.15.3 P1 Item 5: nonce_consumed is a TRANSITION event (arm completed,
     # executor not yet observed) — it no longer flows out of
     # _terminal_outcome as a terminal outcome; the label keeps the honest
     # "awaiting executor (pending)" wording.
     "nonce_consumed": "awaiting executor (pending)",
+    # upgrade-resilience 2026-10-07 (dev2 d9d07bf0c) — boot-sweep
+    # commit-and-continue added to ``uj._TERMINAL_EVENTS`` (8→9).
+    # A verified-flip txn closed by the boot sweep at
+    # ``launcher.sh:925-1042`` is the SAME shape as ``commit``: no
+    # live evidence, pipeline over. The terminal-evidence branch
+    # closes the op and journals ``sweep``; this label is the
+    # STATUS-view rendering when the boot sweep consumer surfaces the
+    # raw kind. (The label-coverage guard at
+    # ``test_outcome_labels_cover_all_terminal_outcome_events`` pins
+    # every key in the derived ``_TERMINAL_OUTCOME_EVENTS`` tuple
+    # has a label here.)
+    "boot_sweep_commit_and_continue": "boot sweep committed txn (continued)",
+    # Informational kinds (NOT in ``uj._TERMINAL_EVENTS`` — they do
+    # not close a pending_op). Listed here so the consumer's
+    # ``_OUTCOME_LABELS.get(event_key, event_key)`` fallback renders
+    # a human string instead of leaking raw keys on the
+    # status-display lane. They never appear via
+    # ``_terminal_outcome`` (which filters on the strict
+    # ``_TERMINAL_OUTCOME_EVENTS`` tuple) — this is purely cosmetic
+    # for any future direct-render surface that walks history
+    # outside the terminal filter.
+    "intent_flip": "flip intent recorded",
+    "subprocess_wait_timeout": "bounded wait timed out",
 }
 
 

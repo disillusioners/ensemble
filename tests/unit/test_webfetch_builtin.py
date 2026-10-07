@@ -498,6 +498,8 @@ class TestWebFetchBootstrapIntegration:
         config.llm.model_vision = None
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
+        config.llm.request_gzip = False
+        config.llm.buffer_response_header = False
 
         config.daemon = MagicMock(spec=DaemonConfig)
         config.daemon.host = "0.0.0.0"
@@ -531,6 +533,14 @@ class TestWebFetchBootstrapIntegration:
         config.services.task_retry_backoff_max = 3600
         config.services.stale_task_cancel_grace_seconds = 10
         config.services.graph_timeout_minutes = 55
+        # ``InstanceManager.__init__`` reads ``services.service_tool.{max_concurrent,enabled}``
+        # at :757-759; the spec'd ``ServicesConfig`` mock does not auto-expose
+        # the ``service_tool`` sub-config (Pydantic-v2 instance field, not in
+        # ``dir(ServicesConfig)``'s class-level scan). Add it explicitly so
+        # the bootstrap tests can construct the manager.
+        config.services.service_tool = MagicMock()
+        config.services.service_tool.max_concurrent = 10
+        config.services.service_tool.enabled = True
 
         config.agents = MagicMock(spec=AgentsConfig)
         config.agents.directory = "./agents"
@@ -556,47 +566,87 @@ class TestWebFetchBootstrapIntegration:
 
         # ``InstanceManager.__init__`` reads these sub-configs directly;
         # ``MagicMock(spec=Config)`` does not auto-create them.
-        config.skill_evolution = MagicMock(spec=SkillEvolutionConfig)
+        # ``skill_evolution`` is read at line 1214/1568/1669/1872 and its
+        # ``selector_model`` field is read at line 1582 — the spec'd mock
+        # does not auto-expose the Pydantic v2 instance field, so we set
+        # it explicitly. The block at 1214/1568/1669 only runs if
+        # ``skill_evolution is not None``; a bare MagicMock is truthy so
+        # we need the sub-attributes wired.
+        config.skill_evolution = MagicMock()
+        config.skill_evolution.selector_model = "gpt-4"
         config.language = MagicMock(spec=LanguageConfig)
         config.language.check_enabled = False
+        # ``InstanceManager.__init__`` also reads ``config.blueprint``
+        # (line 1266: ``getattr(self.config.blueprint, "embedding_model", None)``)
+        # and ``config.slash_commands`` (line 1429: ``slash_cfg = self.config.slash_commands``
+        # followed by ``.enabled/.escape_prefix/.min_interval_s/.state_ttl_s/.max_state_per_instance``).
+        # The spec'd ``Config`` mock does not auto-expose Pydantic v2 instance
+        # fields, so we wire them explicitly.
+        config.blueprint = MagicMock()
+        config.blueprint.embedding_model = None
+        config.slash_commands = MagicMock()
+        config.slash_commands.enabled = True
+        config.slash_commands.escape_prefix = "//"
+        config.slash_commands.min_interval_s = 0.5
+        config.slash_commands.state_ttl_s = 3600
+        config.slash_commands.max_state_per_instance = 16
+        # ``config.persistence.maintenance_check_interval_minutes`` is read at
+        # line 2925 inside ``initialize()`` (not ``__init__``) — but the bootstrap
+        # fixture calls ``__init__`` which itself is fine; the failure surfaces
+        # only when ``initialize()`` runs. Still, we set it to keep the mock
+        # self-consistent for any test that calls ``initialize()``.
+        config.persistence.maintenance_check_interval_minutes = 60
 
         return config
 
     @pytest.fixture
     def instance_manager_with_repo(self, bootstrap_engine, bootstrap_repo, mock_config):
         """Create InstanceManager with in-memory DB and test repository."""
+        import os
         from unittest.mock import patch, MagicMock
         from asyncio import Future
 
-        # Patch database engine creation to use our in-memory engine
-        with patch("daemon.manager.create_engine_from_config") as mock_create_engine, \
-             patch("daemon.manager.get_checkpointer") as mock_checkpointer, \
-             patch("daemon.migrations.runner.MigrationRunner") as mock_migration:
+        # The user's shell may have ``MCP_DISABLE_BUILT_IN_WEBFETCH=true``
+        # set to suppress the live daemon's webfetch registration. The
+        # bootstrap path checks this env var BEFORE the schema-drift
+        # logic, so the test would silently skip webfetch and the
+        # ``test_schema_drift_removes_stale_flag`` assertion would fail
+        # with a confusing message. Clear it for the duration of the
+        # fixture; restore on teardown.
+        _saved_disable = os.environ.pop("MCP_DISABLE_BUILT_IN_WEBFETCH", None)
+        try:
+            # Patch database engine creation to use our in-memory engine
+            with patch("daemon.manager.create_engine_from_config") as mock_create_engine, \
+                 patch("daemon.manager.get_checkpointer") as mock_checkpointer, \
+                 patch("daemon.migrations.runner.MigrationRunner") as mock_migration:
 
-            mock_create_engine.return_value = bootstrap_engine
-            async_mock = MagicMock()
-            async_mock.return_value = None
-            mock_checkpointer.return_value = async_mock
+                mock_create_engine.return_value = bootstrap_engine
+                async_mock = MagicMock()
+                async_mock.return_value = None
+                mock_checkpointer.return_value = async_mock
 
-            # Create mock migration runner
-            mock_runner_instance = MagicMock()
-            mock_runner_instance.run_pending_migrations.return_value = []
-            mock_migration.return_value = mock_runner_instance
+                # Create mock migration runner
+                mock_runner_instance = MagicMock()
+                mock_runner_instance.run_pending_migrations.return_value = []
+                mock_migration.return_value = mock_runner_instance
 
-            # Import here to avoid circular dependencies
-            from daemon.manager import InstanceManager
+                # Import here to avoid circular dependencies
+                from daemon.manager import InstanceManager
 
-            # Create manager
-            manager = InstanceManager(mock_config)
+                # Create manager
+                manager = InstanceManager(mock_config)
 
-            # Override the MCP server repository with our test repo
-            manager._mcp_server_repository = bootstrap_repo
+                # Override the MCP server repository with our test repo
+                manager._mcp_server_repository = bootstrap_repo
 
-            yield manager
+                yield manager
 
-            # Cleanup
-            if hasattr(manager, "_shutting_down"):
-                manager._shutting_down = True
+                # Cleanup
+                if hasattr(manager, "_shutting_down"):
+                    manager._shutting_down = True
+        finally:
+            if _saved_disable is not None:
+                os.environ["MCP_DISABLE_BUILT_IN_WEBFETCH"] = _saved_disable
 
     def test_bootstrap_creates_webfetch_server(self, instance_manager_with_repo):
         """Test that bootstrap creates webfetch server in DB with is_builtin=True."""

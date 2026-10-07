@@ -1126,6 +1126,12 @@ class TestSharedContextHints:
         # Two unrelated files — neither matches the query.
         (context_dir / "alpha-topic_20260601_000000.md").write_text("## Answer\nalpha stuff\n")
         (context_dir / "beta-topic_20260602_000000.md").write_text("## Answer\nbeta stuff\n")
+        # Pin distinct mtimes: on coarse-mtime filesystems both writes can
+        # land in the same tick, making "most recent" undefined and the
+        # fallback tie-break glob-order-dependent (flaky).
+        import os as _os
+        _t = (context_dir / "alpha-topic_20260601_000000.md").stat().st_mtime
+        _os.utime(context_dir / "beta-topic_20260602_000000.md", (_t + 10, _t + 10))
 
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             monkeypatch.delenv("HEURISTIC_MATCH_SHARED_MD_FILES_DEBUG", raising=False)

@@ -272,9 +272,47 @@ make_fixture() { # <dir> [port] — sets up FIX + REPO + HOME + stages vA/vB
     mkdir -p "$repo/scripts/upgrade" "$repo/agents/leader" \
              "$repo/daemon/migrations/versions" \
              "$repo/frontend/dist/frontend/browser" \
+             "$repo/plugins/opendesign" \
+             "$repo/daemon/plugin_subsystem" \
              "$home/agents-ensemble" "$sbx" \
              "$fix/releases"
     cp "$UPGRADE_DIR/lib.sh"     "$repo/scripts/upgrade/lib.sh"
+
+    # Stub plugins/ payload — stage.sh:275 precondition ([ ! -d $REPO_ROOT/plugins ])
+    # refuses FAIL-CLOSED (exit 78) without it; same trap that bit
+    # tests/test_release_journal.sh pre-dbd37dbac. Dict-style `plugin:`
+    # section (avoids AttributeError in the predicate's
+    # `manifest.get("plugin").get("name")`); schema_version matches
+    # the released opendesign pin (1.0.3).
+    printf 'plugin:\n  name: opendesign\nschema_version: 1.0.3\n' \
+        > "$repo/plugins/opendesign/MANIFEST.yaml"
+    # Stub predicate module — promote_plugin_staleness_check (lib.sh:2020,
+    # called from promote.sh:222) refuses FAIL-CLOSED with
+    # `plugin-staleness-unreadable` when the predicate module is absent.
+    # The supervision-e2e suite calls promote.sh sandbox (E2/E3/E4 at
+    # :418/:493/:554) so this stub keeps the gate green in the FAKE_REPO.
+    cat > "$repo/daemon/plugin_subsystem/promote_staleness.py" <<'PYEOF'
+#!/usr/bin/env python3
+"""Stub promote-staleness predicate (FAKE_REPO fixture only).
+
+Unconditionally returns FRESH so the unit-test preflight gate passes.
+Mirrors the real daemon/plugin_subsystem/promote_staleness.py exit
+contract (rc=0 fresh → lib.sh logs `plugin-staleness: PLUGIN-STALENESS=
+fresh plugin=<name>` and proceeds).
+"""
+import sys
+
+def main() -> int:
+    plugin_dir = sys.argv[1] if len(sys.argv) > 1 else ""
+    name = plugin_dir.rstrip("/").split("/")[-1] if plugin_dir else "unknown"
+    print(f"PLUGIN-STALENESS=fresh plugin={name}")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+PYEOF
+    chmod +x "$repo/daemon/plugin_subsystem/promote_staleness.py"
+
     cp "$UPGRADE_DIR/stage.sh"   "$repo/scripts/upgrade/stage.sh"
     cp "$UPGRADE_DIR/promote.sh" "$repo/scripts/upgrade/promote.sh"
     cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$repo/scripts/stop-ensemble.sh"

@@ -133,7 +133,44 @@ fi
 mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \
          "$FAKE_REPO/daemon/migrations/versions" \
          "$FAKE_REPO/frontend/dist/frontend/browser" \
+         "$FAKE_REPO/plugins/opendesign" \
+         "$FAKE_REPO/daemon/plugin_subsystem" \
          "$FAKE_HOME/agents-ensemble"
+
+# Stub plugins/ payload — stage.sh:275 precondition ([ ! -d $REPO_ROOT/plugins ])
+# refuses FAIL-CLOSED (exit 78) without it; same trap that bit
+# tests/test_release_journal.sh pre-dbd37dbac. Dict-style `plugin:`
+# section (avoids AttributeError in the predicate's
+# `manifest.get("plugin").get("name")`); schema_version matches
+# the released opendesign pin (1.0.3).
+printf 'plugin:\n  name: opendesign\nschema_version: 1.0.3\n' \
+    > "$FAKE_REPO/plugins/opendesign/MANIFEST.yaml"
+# Stub predicate module — promote_plugin_staleness_check (lib.sh:2020,
+# called from promote.sh:222) refuses FAIL-CLOSED with
+# `plugin-staleness-unreadable` when the predicate module is absent.
+# The supervision-journal suite calls promote.sh sandbox (J1/J2/J3 at
+# :271/:321/:375) so this stub keeps the gate green in the FAKE_REPO.
+cat > "$FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py" <<'PYEOF'
+#!/usr/bin/env python3
+"""Stub promote-staleness predicate (FAKE_REPO fixture only).
+
+Unconditionally returns FRESH so the unit-test preflight gate passes.
+Mirrors the real daemon/plugin_subsystem/promote_staleness.py exit
+contract (rc=0 fresh → lib.sh logs `plugin-staleness: PLUGIN-STALENESS=
+fresh plugin=<name>` and proceeds).
+"""
+import sys
+
+def main() -> int:
+    plugin_dir = sys.argv[1] if len(sys.argv) > 1 else ""
+    name = plugin_dir.rstrip("/").split("/")[-1] if plugin_dir else "unknown"
+    print(f"PLUGIN-STALENESS=fresh plugin={name}")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+PYEOF
+chmod +x "$FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py"
 
 cp "$UPGRADE_DIR/lib.sh"        "$FAKE_REPO/scripts/upgrade/lib.sh"
 cp "$UPGRADE_DIR/promote.sh"    "$FAKE_REPO/scripts/upgrade/promote.sh"

@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Acme Analytics — sub-second analytics for product teams</title>
+  <style>
+    :root {
+      --bg:        oklch(99% 0.002 240);
+      --surface:   oklch(100% 0 0);
+      --fg:        oklch(14% 0.012 250);
+      --muted:     oklch(50% 0.012 250);
+      --subtle:    oklch(72% 0.008 250);
+      --border:    oklch(92% 0.005 250);
+      --accent:     oklch(14% 0.012 250);
+
+      --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+      --font-body:    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+      --font-mono:    ui-monospace, "JetBrains Mono", "IBM Plex Mono", Menlo, monospace;
+
+      --container: 1180px;
+      --gutter:    clamp(20px, 4vw, 48px);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+    body {
+      font-family: var(--font-body);
+      color: var(--fg);
+      background: var(--bg);
+      font-size: 16px;
+      line-height: 1.5;
+      font-feature-settings: "ss01", "cv11";
+      min-height: 100vh;
+    }
+    a { color: inherit; }
+    ::selection { background: var(--fg); color: var(--bg); }
+
+    /* ─── nav ─── */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: color-mix(in oklab, var(--bg) 88%, transparent);
+      backdrop-filter: saturate(160%) blur(10px);
+      -webkit-backdrop-filter: saturate(160%) blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: var(--container);
+      margin: 0 auto;
+      padding: 18px var(--gutter);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+    .brand {
+      font-family: var(--font-display);
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      font-size: 15px;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand-mark {
+      width: 18px; height: 18px;
+      border: 1.5px solid var(--fg);
+      border-radius: 4px;
+      display: inline-block;
+      position: relative;
+    }
+    .brand-mark::after {
+      content: "";
+      position: absolute;
+      inset: 3px;
+      background: var(--fg);
+      border-radius: 1px;
+    }
+    .nav-links {
+      display: flex;
+      gap: 28px;
+      font-size: 14px;
+    }
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      transition: color 120ms ease;
+    }
+    .nav-links a:hover { color: var(--fg); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 16px;
+      font-family: var(--font-body);
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: -0.005em;
+      border-radius: 8px;
+      border: 1px solid var(--fg);
+      background: var(--fg);
+      color: var(--bg);
+      cursor: pointer;
+      text-decoration: none;
+      transition: transform 120ms ease, background 120ms ease;
+    }
+    .btn:hover { transform: translateY(-1px); }
+    .btn-outline {
+      background: transparent;
+      color: var(--fg);
+    }
+    .btn-outline:hover {
+      background: var(--fg);
+      color: var(--bg);
+    }
+    .btn:focus-visible {
+      outline: 2px solid var(--fg);
+      outline-offset: 2px;
+    }
+
+    /* ─── hero ─── */
+    .hero {
+      max-width: var(--container);
+      margin: 0 auto;
+      padding: clamp(72px, 12vw, 144px) var(--gutter) clamp(56px, 9vw, 96px);
+    }
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 28px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .eyebrow .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--fg);
+      display: inline-block;
+    }
+    .hero-kpi {
+      font-family: var(--font-display);
+      font-size: clamp(80px, 14vw, 184px);
+      font-weight: 600;
+      letter-spacing: -0.045em;
+      line-height: 0.92;
+      color: var(--fg);
+      font-variant-numeric: tabular-nums;
+      text-wrap: balance;
+    }
+    .hero-kpi-unit {
+      font-size: 0.32em;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: -0.01em;
+      margin-left: 0.18em;
+      vertical-align: 0.55em;
+    }
+    .hero-lede {
+      max-width: 620px;
+      margin-top: 32px;
+      font-size: clamp(16px, 1.35vw, 19px);
+      color: var(--muted);
+      line-height: 1.55;
+      text-wrap: pretty;
+    }
+    .hero-cta {
+      margin-top: 40px;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .hero-cta .secondary {
+      color: var(--muted);
+      font-size: 13px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.02em;
+    }
+    .hero-meta {
+      margin-top: clamp(56px, 8vw, 96px);
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, max-content));
+      gap: clamp(32px, 6vw, 64px);
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--subtle);
+    }
+    .hero-meta span strong {
+      color: var(--fg);
+      font-weight: 500;
+      margin-right: 10px;
+    }
+
+    /* ─── features ─── */
+    .section {
+      max-width: var(--container);
+      margin: 0 auto;
+      padding: clamp(48px, 8vw, 96px) var(--gutter);
+    }
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 32px;
+      margin-bottom: 32px;
+    }
+    .section-head h2 {
+      font-family: var(--font-display);
+      font-size: clamp(26px, 3.4vw, 38px);
+      font-weight: 600;
+      letter-spacing: -0.025em;
+      line-height: 1.1;
+      text-wrap: balance;
+    }
+    .section-head .section-note {
+      font-size: 14px;
+      color: var(--muted);
+      max-width: 320px;
+    }
+    .section-eyebrow {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 14px;
+      display: block;
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+    .feature-tile {
+      background: var(--bg);
+      padding: 32px 26px;
+      min-height: 220px;
+      display: flex;
+      flex-direction: column;
+    }
+    .feature-num {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      color: var(--subtle);
+      margin-bottom: auto;
+    }
+    .feature-tile h3 {
+      font-family: var(--font-display);
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      margin-bottom: 10px;
+      margin-top: 32px;
+    }
+    .feature-tile p {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.55;
+      text-wrap: pretty;
+    }
+
+    /* ─── pricing ─── */
+    .pricing-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+    .tier {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 32px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+      background: var(--bg);
+    }
+    .tier.featured {
+      background: var(--fg);
+      color: var(--bg);
+      border-color: var(--fg);
+    }
+    .tier-name {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .tier.featured .tier-name { color: rgba(255,255,255,0.55); }
+    .tier-price {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .tier-price .amount {
+      font-family: var(--font-display);
+      font-size: 46px;
+      font-weight: 600;
+      letter-spacing: -0.025em;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+    }
+    .tier-price .unit {
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .tier.featured .tier-price .unit { color: rgba(255,255,255,0.6); }
+    .tier-features {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      font-size: 14px;
+    }
+    .tier-features li {
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+    }
+    .tier-features li::before {
+      content: "—";
+      color: var(--subtle);
+      font-weight: 400;
+      flex: 0 0 auto;
+    }
+    .tier.featured .tier-features li::before {
+      color: rgba(255,255,255,0.45);
+    }
+    .tier-cta { margin-top: auto; padding-top: 8px; }
+    .tier .btn { width: 100%; }
+    .tier.featured .btn-outline {
+      border-color: var(--bg);
+      color: var(--bg);
+    }
+    .tier.featured .btn-outline:hover {
+      background: var(--bg);
+      color: var(--fg);
+    }
+
+    /* ─── footer ─── */
+    footer {
+      border-top: 1px solid var(--border);
+      margin-top: clamp(48px, 6vw, 80px);
+    }
+    .footer-inner {
+      max-width: var(--container);
+      margin: 0 auto;
+      padding: 56px var(--gutter) 36px;
+      display: grid;
+      grid-template-columns: 2.2fr 1fr 1fr 1fr;
+      gap: 32px;
+    }
+    .footer-brand {
+      font-family: var(--font-display);
+      font-weight: 600;
+      font-size: 15px;
+      margin-bottom: 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .footer-tag {
+      font-size: 13px;
+      color: var(--muted);
+      max-width: 280px;
+      line-height: 1.55;
+    }
+    .footer-col h4 {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--subtle);
+      margin-bottom: 18px;
+      font-weight: 500;
+    }
+    .footer-col ul { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+    .footer-col a {
+      color: var(--fg);
+      text-decoration: none;
+      font-size: 14px;
+      transition: color 120ms ease;
+    }
+    .footer-col a:hover { color: var(--muted); }
+    .footer-bottom {
+      max-width: var(--container);
+      margin: 0 auto;
+      padding: 22px var(--gutter);
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: var(--muted);
+      font-family: var(--font-mono);
+      letter-spacing: 0.02em;
+      gap: 16px;
+    }
+
+    /* ─── responsive ─── */
+    @media (max-width: 960px) {
+      .features-grid { grid-template-columns: repeat(2, 1fr); }
+      .pricing-grid { grid-template-columns: 1fr; }
+      .tier.featured { order: -1; }
+      .footer-inner { grid-template-columns: 1fr 1fr; }
+      .footer-tag { max-width: none; }
+      .section-head { flex-direction: column; align-items: start; }
+      .hero-meta {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 20px 32px;
+      }
+    }
+    @media (max-width: 560px) {
+      .features-grid { grid-template-columns: 1fr; }
+      .footer-inner { grid-template-columns: 1fr; }
+      .nav-links { display: none; }
+      .footer-bottom { flex-direction: column; align-items: start; gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="nav" data-od-id="nav" aria-label="Primary">
+    <div class="nav-inner">
+      <a href="#" class="brand" data-od-id="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        Acme Analytics
+      </a>
+      <div class="nav-links">
+        <a href="#features" data-od-id="nav-link-features">Features</a>
+        <a href="#pricing" data-od-id="nav-link-pricing">Pricing</a>
+        <a href="#docs" data-od-id="nav-link-docs">Docs</a>
+        <a href="#changelog" data-od-id="nav-link-changelog">Changelog</a>
+      </div>
+      <a href="#start" class="btn" data-od-id="nav-cta">Get started</a>
+    </div>
+  </nav>
+
+  <main>
+    <section class="hero" data-od-id="hero">
+      <div class="eyebrow" data-od-id="hero-eyebrow">
+        <span class="dot" aria-hidden="true"></span>
+        Analytics · v3.2 · shipped March 2026
+      </div>
+      <h1 class="hero-kpi" data-od-id="hero-kpi">
+        47<span class="hero-kpi-unit">ms</span>
+      </h1>
+      <p class="hero-lede" data-od-id="hero-lede">
+        Median query latency across <strong style="color:var(--fg);font-weight:500">9.4B daily events</strong> — fast enough that dashboards refresh before a tab click finishes.
+      </p>
+      <div class="hero-cta">
+        <a href="#start" class="btn" data-od-id="hero-cta-primary">Start free</a>
+        <span class="secondary">No card · 5M events/mo on the free tier</span>
+      </div>
+      <dl class="hero-meta" data-od-id="hero-meta">
+        <span><strong>p99</strong>184 ms</span>
+        <span><strong>Retention</strong>90 d</span>
+        <span><strong>Regions</strong>6</span>
+        <span><strong>Uptime</strong>99.98%</span>
+      </dl>
+    </section>
+
+    <section id="features" class="section" data-od-id="features">
+      <div class="section-head">
+        <div>
+          <span class="section-eyebrow">What's in the box</span>
+          <h2>Four primitives, one event store.</h2>
+        </div>
+        <p class="section-note">Everything you need to ship a production analytics surface — without standing up a warehouse.</p>
+      </div>
+      <div class="features-grid">
+        <article class="feature-tile" data-od-id="feature-tile-sql">
+          <div class="feature-num">01 / SQL</div>
+          <h3>ANSI SQL, not a DSL</h3>
+          <p>Joins, window functions, CTEs against an event table. The query you wrote in dev is the query that runs in prod.</p>
+        </article>
+        <article class="feature-tile" data-od-id="feature-tile-realtime">
+          <div class="feature-num">02 / Stream</div>
+          <h3>Live dashboards</h3>
+          <p>Charts re-render in under a second as new events land. Webhooks, ingest API, or CSV — all stream into the same model.</p>
+        </article>
+        <article class="feature-tile" data-od-id="feature-tile-alerts">
+          <div class="feature-num">03 / Watch</div>
+          <h3>Anomaly alerts</h3>
+          <p>Define a metric, set a band. Slack or PagerDuty the moment the value leaves it — no thresholds to babysit.</p>
+        </article>
+        <article class="feature-tile" data-od-id="feature-tile-export">
+          <div class="feature-num">04 / Export</div>
+          <h3>Audit-ready outputs</h3>
+          <p>Every query is logged. Pipe results to CSV, Parquet, or straight into S3. SOC 2 Type II, GDPR-ready by default.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="pricing" class="section" data-od-id="pricing">
+      <div class="section-head">
+        <div>
+          <span class="section-eyebrow">Pricing</span>
+          <h2>Three tiers. No seat math.</h2>
+        </div>
+        <p class="section-note">Per-event billing. Every plan includes unlimited dashboards, alerts, and team members.</p>
+      </div>
+      <div class="pricing-grid">
+        <div class="tier" data-od-id="pricing-tier-free">
+          <div>
+            <div class="tier-name">Free</div>
+            <div class="tier-price">
+              <span class="amount">$0</span>
+              <span class="unit">/ month</span>
+            </div>
+          </div>
+          <ul class="tier-features">
+            <li>5M events / month</li>
+            <li>14-day retention</li>
+            <li>3 dashboards</li>
+            <li>Community support</li>
+          </ul>
+          <div class="tier-cta">
+            <a href="#start" class="btn btn-outline" data-od-id="pricing-cta-free">Start free</a>
+          </div>
+        </div>
+        <div class="tier featured" data-od-id="pricing-tier-pro">
+          <div>
+            <div class="tier-name">Pro · most teams pick this</div>
+            <div class="tier-price">
+              <span class="amount">$49</span>
+              <span class="unit">/ month + usage</span>
+            </div>
+          </div>
+          <ul class="tier-features">
+            <li>100M events / month included</li>
+            <li>90-day retention</li>
+            <li>Unlimited dashboards</li>
+            <li>Email support · 1 business day</li>
+          </ul>
+          <div class="tier-cta">
+            <a href="#trial" class="btn btn-outline" data-od-id="pricing-cta-pro">Start 14-day trial</a>
+          </div>
+        </div>
+        <div class="tier" data-od-id="pricing-tier-scale">
+          <div>
+            <div class="tier-name">Scale</div>
+            <div class="tier-price">
+              <span class="amount">Custom</span>
+              <span class="unit">annual contract</span>
+            </div>
+          </div>
+          <ul class="tier-features">
+            <li>Unlimited events</li>
+            <li>Custom retention</li>
+            <li>SOC 2 + DPA</li>
+            <li>Dedicated CSM</li>
+          </ul>
+          <div class="tier-cta">
+            <a href="#contact" class="btn btn-outline" data-od-id="pricing-cta-scale">Talk to sales</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer data-od-id="footer">
+    <div class="footer-inner">
+      <div>
+        <div class="footer-brand"><span class="brand-mark" aria-hidden="true"></span>Acme Analytics</div>
+        <p class="footer-tag">Sub-second analytics for product teams. Built in Berlin since 2022.</p>
+      </div>
+      <div class="footer-col">
+        <h4>Product</h4>
+        <ul>
+          <li><a href="#" data-od-id="footer-product-features">Features</a></li>
+          <li><a href="#" data-od-id="footer-product-pricing">Pricing</a></li>
+          <li><a href="#" data-od-id="footer-product-changelog">Changelog</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Resources</h4>
+        <ul>
+          <li><a href="#" data-od-id="footer-resources-docs">Docs</a></li>
+          <li><a href="#" data-od-id="footer-resources-api">API reference</a></li>
+          <li><a href="#" data-od-id="footer-resources-status">Status</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Company</h4>
+        <ul>
+          <li><a href="#" data-od-id="footer-company-about">About</a></li>
+          <li><a href="#" data-od-id="footer-company-security">Security</a></li>
+          <li><a href="#" data-od-id="footer-company-contact">Contact</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 Acme Analytics GmbH</span>
+      <span>Berlin · Remote · SOC 2 Type II</span>
+    </div>
+  </footer>
+</body>
+</html>

@@ -170,6 +170,9 @@ def make_send_message_manager(*, status: str) -> MagicMock:
         side_effect=lambda iid: revive_counts.get(iid, 0)
     )
     manager.note_agent_tool_revive = MagicMock(side_effect=_note_revive)
+    # compare_tools builder HARD-REQUIRES config.llm.allowed_models to be a
+    # real list (VisionModelNotAllowedError otherwise) — mirror _make_manager.
+    manager.config.llm.allowed_models = ["agentic", "coding", "vision"]
     return manager
 
 

@@ -293,9 +293,9 @@ class TestUpdateServerEnv:
             # The pool is not "running" — call the private seam so
             # the env-forward assertion is direct (not blocked by
             # the warmup-running guard in the public ``acquire``).
-            asyncio.get_event_loop().run_until_complete(
-                pool._create_pooled_connection(SERVER_NAME)
-            )
+            # Python 3.14 removed the implicit per-thread event loop —
+            # use asyncio.run (fresh loop) instead of get_event_loop().
+            asyncio.run(pool._create_pooled_connection(SERVER_NAME))
 
         # The new env was forwarded to StdioServerParameters.
         mock_params.assert_called_once()

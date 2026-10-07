@@ -217,7 +217,7 @@ class TestProbeEquivalenceWithCanonicalGhostFilter:
 
 
 def _build_pause_db_sync_mock(captured: dict, engine: Engine) -> MagicMock:
-    def _mock(engine_, write_guard, *, tree_ids, paused_at_iso, paused_instances_data, suspension_reason=None):
+    def _mock(engine_, write_guard, *, tree_ids, paused_at_iso, paused_instances_data, suspension_reason=None, originator_instance_id=None):
         updated_ids = [iid for iid, _agent in paused_instances_data]
         updated_set = set(updated_ids)
         # Perform the REAL status flip for the updated ids so a

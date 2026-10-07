@@ -4509,7 +4509,12 @@ class InstanceManager:
                 # added XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS /
                 # DBUS_SYSTEM_BUS_ADDRESS to the allowlist for bus
                 # discovery on session-env Linux hosts — non-secret
-                # F2-fence-neutral; ENSEMBLE_UPGRADE_LIVE stays stripped.)
+                # F2-fence-neutral; ENSEMBLE_UPGRADE_LIVE is not in the
+                # ALLOWLIST (ambient stays stripped). When THIS gate fires
+                # (verified arm) the extras DO forward it via the
+                # explicit-extra merge below — Option D threads the merged
+                # dict into the transient unit verbatim via --setenv
+                # (ruling R3); the unverified path forwards nothing.)
                 if _uj.is_verified_arm(op):
                     argv_ext, env_ext = _uj._verified_arm_extras(op)
                     argv = argv + argv_ext
@@ -4540,12 +4545,16 @@ class InstanceManager:
             child_pid, _spawn_mode_note = _uj.spawn_executor(
                 argv, install_dir, extra_env, run_id=run_id
             )
-            # r-f82e fix cycle 1: log the ACTUAL spawn mode — scope unit
-            # name when scope, legacy text otherwise. Pre-cycle-1 log
-            # always said "(daemonized, start_new_session)" which was
-            # stale under scope mode. The note is computed inside
-            # spawn_executor from the SAME detection result, so we
-            # consume it directly (no second detection here).
+            # Option D (Stage-2.2a): log the ACTUAL spawn mode — the
+            # transient-service unit name when the service branch fired,
+            # the legacy text otherwise (mode notes carry the branch
+            # detail: in-flight / fast-exit / journal-truth). The note is
+            # computed inside spawn_executor from the SAME detection
+            # result, so we consume it directly (no second detection
+            # here). Under Option D the payload runs INSIDE a transient
+            # systemd unit (neither our pgid nor our cgroup); the logged
+            # pid is the systemd-run --wait CLIENT, which the reaper's
+            # waitpid observes to the UNIT's exit.
             logger.info(
                 "[system-execution] fired %s executor run_id=%s pid=%s %s",
                 kind, run_id, child_pid, _spawn_mode_note,
@@ -4586,6 +4595,26 @@ class InstanceManager:
                     "[system-execution] pending_op owner update failed: %s", exc
                 )
             return True
+        except _uj.ExecutorSystemdUnavailable as exc:
+            # Option D loud refusal (ruling R6, architecture-recommendation.md
+            # §5.3 :115): the host is unit-managed but the transient executor
+            # unit could not be started. spawn_executor has ALREADY journaled
+            # the ``refusal`` event carrying reason=executor-systemd-unavailable
+            # (which reconcile_pending_op treats as terminal — the armed op
+            # closes as refused and the wake sweep notifies the arming
+            # instance). There is deliberately NO legacy setsid fallback
+            # here: a silent fallback would re-open the kill class this
+            # commission exists to close. The marker stays consumed (one
+            # shot per armed op); the pending_op is already closed as
+            # refused by the journal write inside the spawn seam.
+            logger.warning(
+                "[system-execution] LOUD REFUSAL — executor systemd transient "
+                "unit unavailable for run_id=%s (%s): %s — nothing spawned, "
+                "NO legacy fallback (kill-class guard); journal token "
+                "executor-systemd-unavailable recorded",
+                run_id, kind, exc,
+            )
+            return False
         except Exception as exc:
             logger.warning(
                 "[system-execution] drain failed for %s: %s — the journal "
@@ -7431,6 +7460,79 @@ class InstanceManager:
         # AND whose ``images`` no longer carries a ref entry is left
         # untouched. Subsequent runs no-op.
         self._migrate_overloaded_image_refs_rows()
+
+        # ── Slice ⑥ drift_events index parity (2026-10-07, v0.18.0 fix) ──
+        # The v0.18.0 release shipped the DriftEvent SQLModel
+        # (``daemon/plugin_subsystem/drift_event_publisher.py``) without
+        # ``__table_args__`` Index declarations AND shipped the SQLite
+        # companion migration
+        # (``daemon/migrations/versions/20261007_000001_create_drift_events.sql``)
+        # with three CREATE INDEX statements. The migration comment
+        # claimed "both dialects converge" — FALSE on PostgreSQL because:
+        #
+        #   1. SQLModel.metadata.create_all() is a no-op for tables that
+        #      already exist (existing PG databases skip emit entirely),
+        #      AND it can only emit indexes declared in the model's
+        #      ``__table_args__`` (the model had zero — they were never
+        #      going to land on a fresh PG DB either).
+        #   2. ``MigrationRunner.run_pending_migrations`` is a NO-OP on
+        #      non-SQLite engines (``runner.py:721-726``); the schema
+        #      migrations ledger is intentionally a no-op on PG.
+        # Net: live PG had the table + PK + NOT NULL constraints and
+        # ZERO of the three indexes (pg_indexes confirmed PK only).
+        #
+        # This block is the explicit PG ensure path. ``CREATE INDEX IF
+        # NOT EXISTS`` is idempotent — present indexes are clean no-ops
+        # (Postgres reports ``0`` rows-affected); missing indexes are
+        # built. Fresh PG databases also get the indexes via the
+        # model's new ``__table_args__`` declaration (single canonical
+        # name set; this block + ``__table_args__`` agree byte-for-byte,
+        # pinned by ``tests/migration/test_drift_events_index_parity
+        # .py::test_model_and_migration_agree_on_index_names``).
+        #
+        # The names MUST stay byte-identical to the DriftEvent model's
+        # ``__table_args__`` AND to the SQLite migration's CREATE INDEX
+        # statements (the dual-driver contract — decisions.md D2 is
+        # "table exists + index name matches"). Renaming any index
+        # here without updating both sides is rejected by the parity
+        # test.
+        #
+        # SQLite counterpart:
+        # ``daemon/migrations/versions/20261007_000001_create_drift_events.sql``.
+        # Runs every daemon startup on PG only; SQLite never reaches
+        # this list (gated by ``is_postgres`` at the call site).
+        drift_index_statements = (
+            # ix_drift_events_plugin — backs DriftEventRepository.list_unresolved(plugin=…)
+            # AND .latest_for_plugin(plugin) WHERE plugin=? predicates.
+            (
+                "CREATE INDEX IF NOT EXISTS ix_drift_events_plugin "
+                "ON drift_events(plugin)"
+            ),
+            # ix_drift_events_plugin_divergence — composite, backs the
+            # engine's DELETE-WHERE resolution predicate
+            # (DriftEventRepository.resolve: WHERE plugin=? AND
+            # divergence_id=?) AND any future composite reads.
+            (
+                "CREATE INDEX IF NOT EXISTS ix_drift_events_plugin_divergence "
+                "ON drift_events(plugin, divergence_id)"
+            ),
+            # ix_drift_events_observed_at — backs
+            # DriftEventRepository.list_unresolved's ORDER BY
+            # observed_at walk (oldest-first verdicts; engine sweepers).
+            (
+                "CREATE INDEX IF NOT EXISTS ix_drift_events_observed_at "
+                "ON drift_events(observed_at)"
+            ),
+        )
+        with self._engine.begin() as conn:
+            for stmt in drift_index_statements:
+                conn.execute(text(stmt))
+        logger.info(
+            "_ensure_postgres_columns: drift_events index ensure complete "
+            "(ix_drift_events_plugin, ix_drift_events_plugin_divergence, "
+            "ix_drift_events_observed_at — CREATE INDEX IF NOT EXISTS is "
+            "idempotent)"
+        )
 
     def _migrate_overloaded_image_refs_rows(self) -> None:
         """One-time migration: move refs out of ``images`` into

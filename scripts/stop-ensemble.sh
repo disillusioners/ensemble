@@ -315,6 +315,52 @@ ESC_PHYS="$(_ere_escape "$PHYS_DIR")"
 
 _log() { printf 'stop-ensemble: %s\n' "$*"; }
 
+# _run_bounded <budget_s> [--] <cmd> [args...] — same algorithm as
+# scripts/upgrade/lib.sh:2573 (2.2b, upgrade-resilience 2026-10-07):
+# background the command, race a TERM→KILL watchdog, collapse 137/143
+# to 124 (GNU `timeout(1)` convention). Stop-ensemble.sh is a LEAF
+# script and intentionally does NOT source lib.sh (no journal access,
+# no `set -e` script-wide discipline, no system-defaults), so the
+# helper is duplicated locally rather than refactoring the script to
+# source lib.sh. Identical contract: NEVER aborts the script on a 124;
+# caller-side MUST capture with `|| rc=$?` so a bounded timeout falls
+# THROUGH to the next recovery step.
+#
+# Cite: §9 manual-push reproduction + incident ④ — the unbounded
+# `systemctl stop` at line ~530 was the ④ culprit (pre-flip freeze).
+_run_bounded() {
+    local timeout_s="$1"; shift
+    [ "${1:-}" = "--" ] && shift
+    local pid watcher rc=0 TERM_GRACE_S=5
+    "$@" &
+    pid=$!
+    (
+        sleep "$timeout_s" 2>/dev/null
+        kill -TERM "$pid" 2>/dev/null
+        sleep "$TERM_GRACE_S" 2>/dev/null
+        kill -KILL "$pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    watcher=$!
+    if wait "$pid" 2>/dev/null; then
+        rc=0
+    else
+        rc=$?
+    fi
+    case "$rc" in
+        137|143) rc=124 ;;
+    esac
+    kill -KILL "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    return "$rc"
+}
+
+# STOP_SCRIPT_BUDGET_S — bound for the `systemctl stop` invocation
+# below (2.2b). stop-ensemble.sh has no journal access (it is a leaf
+# script with no daemon side-channel); on timeout we log loudly to
+# stderr + continue. Default 120s is generous; a healthy unit stop
+# completes in <2s. Env-overridable for sandbox drills + tests.
+STOP_SCRIPT_BUDGET_S="${STOP_SCRIPT_BUDGET_S:-120}"
+
 # ── Candidate collection ────────────────────────────────────────────────────
 # pids are printed one per line, deduped, SELF and our parent excluded.
 
@@ -527,11 +573,28 @@ if [ -n "$SU_UNIT" ]; then
     fi
     _log "unit-owned stop: systemctl stop $SU_UNIT (intentional stop — Restart= respawn suppressed; verifying UNIT STATE, not pids — b″)"
     SC_ERR="$(mktemp /tmp/.ensemble-stop-sc.XXXXXX)"
-    if ! "$SYSTEMCTL_BIN" stop "$SU_UNIT" 2>"$SC_ERR"; then
+    # 2.2b (upgrade-resilience 2026-10-07) — bound the `systemctl stop`
+    # (incident ④ culprit — the pre-flip freeze on this site is what
+    # first surfaced the unbounded-wait family). Bounded at
+    # STOP_SCRIPT_BUDGET_S (default 120s); on timeout: loud stderr +
+    # fall through to the EXISTING bounded re-verify loop (:583-590)
+    # and the SIGKILL escalation (:591-603) — that machinery already
+    # handles a still-running unit. The daemon must never sit stopped
+    # forever: if everything fails, the existing exit 1 at :606-607
+    # beats an infinite stall. DRY_RUN (:571-574) stays untouched.
+    if _run_bounded "$STOP_SCRIPT_BUDGET_S" -- "$SYSTEMCTL_BIN" stop "$SU_UNIT" 2>"$SC_ERR"; then
+        :  # success — fall through to the bounded re-verify loop below
+    else
+        ssbrc=$?
         SC_FIRST="$(head -n1 "$SC_ERR" 2>/dev/null)"
         rm -f "$SC_ERR"
-        _log "systemctl stop $SU_UNIT FAILED (${SC_FIRST:-no stderr}) — NOT falling back to pid TERMs under a live unit (a respawn would false-succeed the stop; b″) — failing loud"
-        exit 1
+        if [ "$ssbrc" = "124" ]; then
+            printf 'stop-ensemble: WARN: systemctl stop %s TIMED OUT (budget=%ss); child SIGTERM->SIGKILL sent — falling through to the bounded re-verify loop (an undying unit will then escalate to kill + exit 1)\n' \
+                "$SU_UNIT" "$STOP_SCRIPT_BUDGET_S" >&2
+        else
+            _log "systemctl stop $SU_UNIT FAILED (${SC_FIRST:-no stderr}) — NOT falling back to pid TERMs under a live unit (a respawn would false-succeed the stop; b″) — failing loud"
+            exit 1
+        fi
     fi
     rm -f "$SC_ERR"
     WAITED=0

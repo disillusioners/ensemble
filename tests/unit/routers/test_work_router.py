@@ -645,6 +645,9 @@ class TestSerialization:
             # payloads).
             "outcome",
             "mission_ref",
+            # completion_gate flag on JobResponse (additive; surfaced in
+            # jobs_crud.py:356 from WorkRecord.completion_gate_escalated).
+            "completion_gate_escalated",
         }
         # Phase 4 partial collapse: report Task surfaces as
         # ``kind="report"`` (the legacy ``"turn"`` is gone — turns

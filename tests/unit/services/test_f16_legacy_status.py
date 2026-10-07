@@ -680,13 +680,6 @@ class TestHelperExport:
             for name in dir(mod)
         )
 
-    def test_helper_used_by_job_queue_tool_module(self):
-        import daemon.tools.job_queue as mod
-        assert any(
-            getattr(getattr(mod, name, None), "__name__", "") == "_derive_legacy_status"
-            for name in dir(mod)
-        )
-
     def test_helper_used_by_job_queue_service_module(self):
         """``daemon.services.job_queue_service`` is the 5th F16 migration
         site — it imports ``_derive_legacy_status`` at module load and

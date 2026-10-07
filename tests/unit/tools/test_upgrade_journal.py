@@ -850,6 +850,424 @@ class TestReconcilePendingOp:
         assert uj.journal_path(install).read_bytes() == before
 
 
+# ── reconcile_pending_op — cause ① (upgrade-resilience 2026-10-07) ───────────
+#
+# Cause ①: a clean pre-mutation exit-78 was mislabelled
+# "executor died pre-open". The live evidence was a tool ``refusal``
+# (``upgrade_tools._refusal`` → ``_journal_refusal_event`` at
+# ``upgrade_tools.py:1268``) followed by a reaper ``executor_exit``
+# with exit_code=78 (``upgrade_journal_sweep.py:1776``). Both are
+# observability-only, no flip, no in_flight; the pipeline is over.
+# The reconcile fell through the no-terminal-event branch because
+# ``refusal`` and ``executor_exit`` were not in ``_TERMINAL_EVENTS``.
+#
+# Fix: both events added to ``_TERMINAL_EVENTS`` (the 6 → 8
+# cardinality change). The terminal-evidence branch at
+# ``upgrade_journal.py:1591-1618`` now fires for the clean
+# pre-mutation exit; the no-evidence branch at :1619-1651 keeps the
+# genuine-orphan semantics.
+#
+# These tests pin BOTH directions:
+# (a) cause ①: refusal + executor_exit pair classifies TERMINAL,
+#     NOT "expired, executor died pre-open" — and does so WITHOUT
+#     waiting the full RECONCILE_GRACE_S;
+# (b) regression: a genuine orphan (no terminal evidence at all)
+#     still falls through to the no-evidence branch and clears as
+#     expired (covered by the existing
+#     ``test_expired_past_grace_cleared_as_died_pre_open`` above —
+#     the assertion is still "expired" in note; the cause ① fix did
+#     not change the no-evidence branch's outcome, only its wording).
+
+
+class TestReconcilePendingOpCause1:
+    """Cause ① pin: a tool refusal + reaper executor_exit pair must
+    close the pending_op via the terminal-evidence branch — the
+    pipeline is over, no expiry wait, no "died pre-open" mislabel.
+
+    The pair in the live journal (2026-10-07 06:45:43Z → 06:46:34Z)
+    was exit_code=78 with refusal=target-quarantined. The sweep at
+    07:04:05Z and 07:25:19Z mislabelled both runs. After the fix,
+    the FIRST sweep (T+~18 min, well within RECONCILE_GRACE_S) must
+    close the op as terminal, NOT wait for expiry.
+    """
+
+    def _arm_promote_future(self, install: Path) -> str:
+        """Arm a promote op whose expires_at is in the future (well
+        past the default 600s); the cause ① case had the sweep fire
+        at T+~18 min and the fix must NOT wait RECONCILE_GRACE_S=600s.
+        """
+        op = PendingOp(
+            run_id="r-cause1-1",
+            kind="promote",
+            env="demo",
+            target="1.2.3",
+            owner_pid=os.getpid(),
+            # Far in the future — the no-evidence branch would NOT
+            # fire (we are not past expires_at + grace). If the
+            # terminal branch is broken, this test hangs/fails.
+            expires_at=uj.iso_plus(uj.now_iso(), 24 * 3600),
+        )
+        uj.write_pending_op(install, op)
+        return op.run_id
+
+    def test_refusal_plus_executor_exit_closes_as_terminal(
+        self, install: Path
+    ) -> None:
+        """The live 2026-10-07 06:45:43Z + 06:46:34Z shape: a tool
+        refusal followed by a reaper executor_exit(exit_code=78)
+        pre-mutation. Reconcile classifies TERMINAL (NOT expired).
+
+        This is the cause ① acceptance pin — without the fix the
+        sweep would have fallen through to the no-evidence branch
+        and waited RECONCILE_GRACE_S before the mislabel appeared.
+        """
+        self._arm_promote_future(install)
+        # Live journal shape (truncated to the relevant fields):
+        #   2026-10-07T06:45:43Z  refusal  target-quarantined
+        #   2026-10-07T06:46:34Z  executor_exit  exit_code=78
+        uj.journal_history_append(
+            install,
+            "refusal",
+            "system_upgrade REFUSED — reason=target-quarantined: ...",
+        )
+        uj.journal_history_append(
+            install,
+            "executor_exit",
+            "run_id=r-cause1-1 pid=12345 exit_code=78 argv=[...] upgrade.log tail:\n...",
+        )
+
+        note = uj.reconcile_pending_op(install)
+        # Cause ① acceptance: terminal classification, NOT expired.
+        assert note is not None
+        assert "expired" not in note, (
+            f"cause ① regression: refusal+executor_exit must NOT classify "
+            f"as expired; got note={note!r}"
+        )
+        assert "terminal" in note, (
+            f"cause ① regression: note must surface terminal classification; "
+            f"got note={note!r}"
+        )
+        # The terminal-evidence branch closes the op and journals a
+        # ``sweep`` closure event referencing the matching event name.
+        assert uj.read_pending_op(install) is None
+        events = [e["event"] for e in journal_read(install)["history"]]
+        assert "sweep" in events  # closure journaled
+        # The most recent sweep closure references the terminal event
+        # that closed it (executor_exit is the latest terminal in
+        # this scenario).
+        sweep_entries = [
+            e for e in journal_read(install)["history"] if e["event"] == "sweep"
+        ]
+        assert any(
+            "executor_exit" in (e.get("detail") or "") for e in sweep_entries
+        ), f"cause ① closure sweep must reference the terminal event; got {sweep_entries!r}"
+
+    def test_refusal_alone_closes_as_terminal(self, install: Path) -> None:
+        """Edge: refusal WITHOUT executor_exit. The tool arm failed
+        before the executor was spawned (e.g. a precondition refusal
+        in the tool lane). Still terminal — the pipeline is over.
+        """
+        self._arm_promote_future(install)
+        uj.journal_history_append(
+            install,
+            "refusal",
+            "system_upgrade REFUSED — reason=cooldown-active: ...",
+        )
+
+        note = uj.reconcile_pending_op(install)
+        assert note is not None
+        assert "expired" not in note
+        assert "terminal" in note
+        assert uj.read_pending_op(install) is None
+
+    def test_executor_exit_alone_closes_as_terminal(self, install: Path) -> None:
+        """Edge: executor_exit WITHOUT a paired refusal (e.g. the
+        tool arm succeeded but the executor's preflight produced
+        exit-78 before any refusal was journaled). Still terminal
+        — the reaper observed the child exit, the pipeline is over.
+        """
+        self._arm_promote_future(install)
+        uj.journal_history_append(
+            install,
+            "executor_exit",
+            "run_id=r-cause1-1 pid=12345 exit_code=78 argv=[...] upgrade.log tail:\n...",
+        )
+
+        note = uj.reconcile_pending_op(install)
+        assert note is not None
+        assert "expired" not in note
+        assert "terminal" in note
+        assert uj.read_pending_op(install) is None
+
+    def test_refusal_before_armed_does_not_close(
+        self, install: Path
+    ) -> None:
+        """Regression: a refusal from a previous run (pre-armed) must
+        NOT close a fresh op. Mirrors ``_terminal_event_after``'s
+        TS-scope (``entry.ts >= armed_at``). Without the TS check,
+        the cause ① fix would over-close unrelated fresh ops that
+        happen to share a journal.
+        """
+        # Journal a refusal from "an hour ago" — clearly pre-armed.
+        uj.journal_history_append(
+            install, "refusal", "an OLD refusal"
+        )
+        data = journal_read(install)
+        data["history"][-1]["ts"] = uj.iso_plus(uj.now_iso(), -3600)
+        journal_write(install, data)
+
+        self._arm_promote_future(install)  # armed AFTER the refusal
+        # No in_flight, no post-armed terminal — must fall through
+        # to the no-evidence branch BUT the future expires_at means
+        # the no-evidence branch is also a no-op.
+        note = uj.reconcile_pending_op(install)
+        assert note is None
+        assert uj.read_pending_op(install) is not None
+
+    def test_regression_genuine_orphan_still_clears_as_expired(
+        self, install: Path
+    ) -> None:
+        """Regression: a genuine orphan — no refusal, no executor_exit,
+        no commit/rollback/etc — must still clear via the no-evidence
+        branch (cause ① fix only changed WHICH events count as
+        terminal; it did NOT change the no-evidence semantics).
+
+        The existing ``test_expired_past_grace_cleared_as_died_pre_open``
+        pins the assertion. This test re-pins it under the new wording
+        ("no executor evidence") to make the cause ① fix's
+        scope-of-change explicit in the test file.
+        """
+        # Arm a promote op already past expiry (2*RECONCILE_GRACE_S).
+        # No refusal, no executor_exit, no terminal event of any kind.
+        op = PendingOp(
+            run_id="r-cause1-orphan",
+            kind="promote",
+            env="demo",
+            target="1.2.3",
+            owner_pid=os.getpid(),
+            expires_at=uj.iso_plus(uj.now_iso(), -2 * uj.RECONCILE_GRACE_S),
+        )
+        uj.write_pending_op(install, op)
+        note = uj.reconcile_pending_op(install)
+        # The genuine-orphan branch is the no-evidence branch.
+        # Wording changed in the cause ① fix from
+        # "executor died pre-open" to "no executor evidence" — but
+        # the assertion target ("expired" + the closure happening) is
+        # preserved.
+        assert note is not None
+        assert "expired" in note
+        assert uj.read_pending_op(install) is None
+        events = [e["event"] for e in journal_read(install)["history"]]
+        assert "sweep" in events
+        # The closure sweep detail names the genuine-orphan shape
+        # (cause ① fix reworded the mislabel).
+        sweep_entries = [
+            e for e in journal_read(install)["history"] if e["event"] == "sweep"
+        ]
+        assert any(
+            "no executor evidence" in (e.get("detail") or "")
+            or "genuine orphan" in (e.get("detail") or "")
+            for e in sweep_entries
+        ), f"genuine-orphan closure sweep must carry the cause ① reword; got {sweep_entries!r}"
+
+
+# ── reconcile_pending_op — boot_sweep_commit_and_continue (upgrade-resilience
+#    2026-10-07, dev2 d9d07bf0c) ───────────────────────────────────────────────
+#
+# dev2's d9d07bf0c added the boot-sweep commit-and-continue path at
+# ``launcher.sh:925-1042``: a verified-flip txn is committed and the
+# boot sweep continues, journaling ``boot_sweep_commit_and_continue``.
+# Without this kind in ``uj._TERMINAL_EVENTS``, a pending_op surviving
+# such a boot wedged the next tool-armed promote with
+# ``pipeline-busy`` until ``expires_at + RECONCILE_GRACE_S`` — a
+# real (not theoretical) gap.
+#
+# Fix: ``boot_sweep_commit_and_continue`` added to
+# ``uj._TERMINAL_EVENTS`` (8→9). The terminal-evidence branch at
+# ``upgrade_journal.py:1609-1625`` now closes the op immediately on
+# this event — pipeline NOT busy, NO expired-grace wait.
+#
+# These tests mirror ``TestReconcilePendingOpCause1``'s style — arm
+# an op whose expires_at is in the future (well past grace), journal
+# the terminal event, assert classification+closure; no wait.
+
+
+class TestReconcilePendingOpBootSweep:
+    """Cause ② pin — dev2's d9d07bf0c boot-sweep commit-and-continue
+    must close the op via the terminal-evidence branch, NOT the
+    expired-grace wait.
+
+    Live evidence: a fresh armed promote observed a stale pending_op
+    from the previous arm with a journal carrying only
+    ``boot_sweep_commit_and_continue`` (no ``commit``, no
+    ``refusal``, no ``executor_exit``). The reconcile's terminal
+    filter missed the kind; the op wedged until
+    ``expires_at + RECONCILE_GRACE_S`` with ``pipeline-busy``.
+
+    The new kind is structurally ``commit``-equivalent: verified-flip
+    txn closed, no live evidence, pipeline over. Membership in
+    ``uj._TERMINAL_EVENTS`` is the precise remedy.
+    """
+
+    def _arm_promote_future(self, install: Path, *, run_id: str = "r-bsweep-1") -> str:
+        """Arm a promote op whose expires_at is in the future — the
+        no-evidence branch would NOT fire (we are not past
+        expires_at + grace). If the terminal branch is broken, this
+        test would hang the full grace window before the no-evidence
+        branch finally classifies as expired.
+        """
+        op = PendingOp(
+            run_id=run_id,
+            kind="promote",
+            env="demo",
+            target="1.2.3",
+            owner_pid=os.getpid(),
+            expires_at=uj.iso_plus(uj.now_iso(), 24 * 3600),
+        )
+        uj.write_pending_op(install, op)
+        return op.run_id
+
+    def test_boot_sweep_commit_and_continue_closes_as_terminal(
+        self, install: Path
+    ) -> None:
+        """The 2026-10-07 dev2 d9d07bf0c shape: a verified-flip txn
+        closed-and-continued by the boot sweep (``launcher.sh:925-1042``)
+        with the journal carrying ``boot_sweep_commit_and_continue``
+        after armed_at. Reconcile classifies TERMINAL (NOT expired,
+        NOT pipeline-busy) — pipeline not wedged, no wait.
+
+        Without the fix, the reconcile's terminal filter missed the
+        kind (was only 8-member), the op survived until
+        ``expires_at + RECONCILE_GRACE_S``, and the next tool-armed
+        promote saw ``pipeline-busy`` for that whole interval.
+        """
+        self._arm_promote_future(install)
+        # Live journal shape (d9d07bf0c, dev2 boot sweep):
+        #   <ts>  boot_sweep_commit_and_continue  verified-flip commit
+        #         at launcher.sh:925-1042; txn closed and boot continued.
+        uj.journal_history_append(
+            install,
+            "boot_sweep_commit_and_continue",
+            "verified-flip txn closed at launcher.sh:925-1042; "
+            "boot sweep continued (dev2 d9d07bf0c)",
+        )
+
+        note = uj.reconcile_pending_op(install)
+        # Cause ② acceptance: terminal classification, NOT expired.
+        assert note is not None
+        assert "expired" not in note, (
+            f"cause ② regression: boot_sweep_commit_and_continue must NOT "
+            f"classify as expired; got note={note!r}"
+        )
+        assert "terminal" in note, (
+            f"cause ② regression: note must surface terminal classification; "
+            f"got note={note!r}"
+        )
+        # The terminal-evidence branch closes the op and journals a
+        # ``sweep`` closure event referencing the matching event name.
+        assert uj.read_pending_op(install) is None
+        events = [e["event"] for e in journal_read(install)["history"]]
+        assert "sweep" in events  # closure journaled
+        # The most recent sweep closure references the terminal event
+        # that closed it (boot_sweep_commit_and_continue is the only
+        # terminal in this scenario).
+        sweep_entries = [
+            e for e in journal_read(install)["history"] if e["event"] == "sweep"
+        ]
+        assert any(
+            "boot_sweep_commit_and_continue" in (e.get("detail") or "")
+            for e in sweep_entries
+        ), (
+            f"cause ② closure sweep must reference boot_sweep_commit_and_continue; "
+            f"got {sweep_entries!r}"
+        )
+
+    def test_boot_sweep_event_before_armed_does_not_close(
+        self, install: Path
+    ) -> None:
+        """Regression: a ``boot_sweep_commit_and_continue`` from a
+        previous boot (pre-armed) must NOT close a fresh op. Mirrors
+        ``_terminal_event_after``'s TS-scope (``entry.ts >= armed_at``).
+        Without the TS check, the cause ② fix would over-close
+        unrelated fresh ops that happen to share a journal.
+        """
+        # Journal a boot_sweep_commit_and_continue from "an hour ago" —
+        # clearly pre-armed.
+        uj.journal_history_append(
+            install,
+            "boot_sweep_commit_and_continue",
+            "an OLD boot sweep commit (previous boot cycle)",
+        )
+        data = journal_read(install)
+        data["history"][-1]["ts"] = uj.iso_plus(uj.now_iso(), -3600)
+        journal_write(install, data)
+
+        self._arm_promote_future(install)  # armed AFTER the boot event
+        # No in_flight, no post-armed terminal — must fall through
+        # to the no-evidence branch BUT the future expires_at means
+        # the no-evidence branch is also a no-op.
+        note = uj.reconcile_pending_op(install)
+        assert note is None
+        assert uj.read_pending_op(install) is not None
+
+    def test_boot_sweep_closes_pipeline_busy_pending_op(
+        self, install: Path
+    ) -> None:
+        """End-to-end shape of the live gap: a fresh op is armed while
+        a STALE op from a prior arm is still pending. The boot sweep
+        journals ``boot_sweep_commit_and_continue`` for the stale op.
+        The reconcile closes the stale op immediately (no wait) so the
+        pipeline is NOT busy.
+
+        This pins the exact failure mode the fix addresses — without
+        the kind in ``_TERMINAL_EVENTS``, this stale op would wedge
+        the next tool-armed promote for the full grace window.
+        """
+        # Stale op from a previous arm (expires_at far in the future
+        # so the no-evidence branch never fires; the boot sweep
+        # committed-and-continued in the interim).
+        stale = PendingOp(
+            run_id="r-bsweep-stale",
+            kind="promote",
+            env="demo",
+            target="0.9.0",
+            owner_pid=99999,  # dead pid — reaper sweep wouldn't catch it
+            expires_at=uj.iso_plus(uj.now_iso(), 24 * 3600),
+        )
+        uj.write_pending_op(install, stale)
+        # Boot sweep fires during the same boot cycle (the live gap
+        # shape — the prior flip txn was verified, the sweep commits
+        # it and continues with the new env).
+        uj.journal_history_append(
+            install,
+            "boot_sweep_commit_and_continue",
+            "verified-flip txn closed; env is current; boot continues",
+        )
+
+        # The first reconcile pass clears the stale op (cause ② fix):
+        note = uj.reconcile_pending_op(install)
+        assert note is not None and "terminal" in note
+        assert "expired" not in note
+        assert uj.read_pending_op(install) is None
+
+        # Now a fresh arm can take the pipeline without waiting for
+        # the stale op's expires_at + RECONCILE_GRACE_S — that is the
+        # exact gap the fix closes.
+        fresh = PendingOp(
+            run_id="r-bsweep-fresh",
+            kind="promote",
+            env="demo",
+            target="1.0.0",
+            owner_pid=os.getpid(),
+            expires_at=uj.iso_plus(uj.now_iso(), 600),
+        )
+        uj.write_pending_op(install, fresh)
+        assert uj.read_pending_op(install) is not None
+        # The fresh arm is NOT silently reaped by the prior closure —
+        # it persists, ready for the executor to take it.
+        assert uj.read_pending_op(install).run_id == "r-bsweep-fresh"
+
+
 # ── lib.sh interop — both directions ─────────────────────────────────────────
 
 
@@ -947,17 +1365,19 @@ class TestExecutorSpawn:
     ) -> None:
         """Spawn a REAL harmless fixture script via spawn_executor and verify
         (a) the child env contains the allowlist ONLY (poison vars absent),
-        (b) process-group behavior — MODE-AWARE (r-f82e fix cycle 2):
-            - LEGACY (start_new_session=True): the child leads its own group,
-              distinct from THIS test process's group.
-            - SCOPE (systemd-run --user/--scope, start_new_session=False on
-              the daemon side): the systemd-run wrapper stays in OUR group
-              (no setsid on daemon side; systemd-run is the new session
-              leader via --scope). Direct evidence of engagement = the bash
-              payload inside the scope inherits the wrapper's pgid (= our
-              pgid), so its self-reported PGID log line equals our pgid
-              rather than its own pid.
-        (c) stdio lands in <install>/data/upgrade.log."""
+        (b) process-group behavior — LEGACY branch (start_new_session=True):
+            the child leads its own group, distinct from THIS test
+            process's group.
+        (c) stdio lands in <install>/data/upgrade.log.
+
+        Option D note: this test pins the LEGACY branch end-to-end (the
+        byte-identical setsid path — non-Linux/no-systemd portability, doc
+        §5.1.5). The detector seam is FORCED to 'legacy' so the test is
+        deterministic and never mints a real transient unit in CI; the
+        service branch's spawn semantics are pinned hermetically in
+        test_upgrade_executor_systemd_service.py, and a REAL transient-unit
+        end-to-end smoke exists as the env-gated
+        test_real_service_branch_end_to_end (opt-in)."""
         install = tmp_path / "install"
         (install / "releases").mkdir(parents=True)
         dump_path = tmp_path / "child-env.txt"
@@ -981,49 +1401,29 @@ class TestExecutorSpawn:
         ):
             monkeypatch.setenv(key, val)
 
-        # r-f82e fix cycle 2 (review-cycle-2 fixback): detect the mode via the
-        # SAME seam spawn_executor uses (_scope_detect_fn), so the test follows
-        # the host (legacy vs scope branch) without any platform branching.
-        env = uj.executor_env({"RUN_ID": "r-spawn"})
-        use_scope, _bus_kind = uj._scope_detect_fn(env)
+        # Force the LEGACY branch deterministically (byte-identity pin —
+        # see the docstring for the Option D division of labor).
+        monkeypatch.setattr(
+            uj, "_service_detect_fn",
+            lambda env=None: (
+                uj.SERVICE_BRANCH_LEGACY, "",
+                "test-forced legacy (byte-identity pin)",
+            ),
+        )
 
         pid, mode_note = uj.spawn_executor(
             ["bash", str(script)], install, {"RUN_ID": "r-spawn"},
             run_id="r-spawn",
         )
-        # spawn_executor returns (pid, mode_note) derived from the SAME
-        # detection call — the test follows the host via the returned
-        # note instead of re-running _scope_detect_fn. The detector's
-        # answer is observable end-to-end via the pgid assertions below.
-        if use_scope:
-            assert mode_note == "scope=ensemble-upgrade-r-spawn", (
-                f"scope mode: mode_note must carry run_id, got {mode_note!r}"
-            )
-        else:
-            assert mode_note == "(daemonized, start_new_session)", (
-                f"legacy mode: mode_note must be the legacy text, got {mode_note!r}"
-            )
+        assert mode_note == "(daemonized, start_new_session)", (
+            f"legacy mode: mode_note must be the legacy text, got {mode_note!r}"
+        )
         try:
-            # (b) process-group independence — mode-aware.
+            # (b) process-group independence — LEGACY semantics.
             child_pgid = os.getpgid(pid)
-            if use_scope:
-                # SCOPE mode: systemd-run wrapper is started with
-                # start_new_session=False (no setsid on the daemon side;
-                # systemd-run is the new session leader via --scope). The
-                # wrapper stays in OUR process group; the bash payload
-                # executes inside the scope cgroup but inherits our pgid.
-                assert child_pgid == os.getpgrp(), (
-                    "scope mode: executor wrapper must stay in our process group "
-                    "(start_new_session=False on daemon side)"
-                )
-                assert child_pgid != pid, (
-                    "scope mode: executor wrapper must NOT be its own session/group "
-                    "leader \u2014 systemd-run is the new session leader via --scope"
-                )
-            else:
-                # LEGACY mode: byte-identical to pre-r-f82e behavior.
-                assert child_pgid == pid, "executor must be its own group leader"
-                assert child_pgid != os.getpgrp(), "executor must leave our group"
+            # LEGACY mode: byte-identical to pre-r-f82e behavior.
+            assert child_pgid == pid, "executor must be its own group leader"
+            assert child_pgid != os.getpgrp(), "executor must leave our group"
 
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline and not dump_path.is_file():
@@ -1045,22 +1445,11 @@ class TestExecutorSpawn:
                 if ln.startswith("PGID=")
             ]
             assert pgid_line, "no PGID line in upgrade.log"
-            if use_scope:
-                # SCOPE mode direct evidence: the bash payload's self-reported
-                # PGID equals our pgid (it inherits the systemd-run wrapper's
-                # pgid). If the wrapper accidentally fell through to legacy,
-                # bash would be its own session leader and report its own pid.
-                assert pgid_line[0] == f"PGID={os.getpgrp()}", (
-                    f"scope mode: bash payload must inherit systemd-run pgid "
-                    f"(= our pgid {os.getpgrp()}); got {pgid_line[0]!r} \u2014 "
-                    "scope wrapper did not engage at runtime"
-                )
-            else:
-                # LEGACY mode: bash is its own session leader; pgid == pid.
-                assert pgid_line[0] == f"PGID={child_pgid}", (
-                    f"legacy mode: bash payload pgid ({pgid_line[0]!r}) must "
-                    f"equal child_pgid ({child_pgid})"
-                )
+            # LEGACY mode: bash is its own session leader; pgid == pid.
+            assert pgid_line[0] == f"PGID={child_pgid}", (
+                f"legacy mode: bash payload pgid ({pgid_line[0]!r}) must "
+                f"equal child_pgid ({child_pgid})"
+            )
         finally:
             # Reap the disowned child (spawn_executor deliberately does not).
             try:
@@ -1070,6 +1459,96 @@ class TestExecutorSpawn:
             try:
                 os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
+                pass
+
+    def test_real_service_branch_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OPT-IN real-transient-unit smoke (ENSEMBLE_UPGRADE_E2E_SERVICE=1):
+        spawn a fixture payload through the REAL service branch on this
+        host (requires Linux + systemd + a reachable bus) and verify the
+        Option D invariants for real:
+        - mode note names the unit (service=ensemble-upgrade-<run_id>);
+        - the payload's env was threaded via --setenv (INSTALL_DIR/RUN_ID
+          present, poisons absent);
+        - the payload runs in a systemd-OWNED session (its self-reported
+          PGID == its own pid — neither our group nor the client's);
+        - its stdio landed in <install>/data/upgrade.log via the append:
+          unit properties.
+        Skipped by default so hermetic CI never touches host systemd."""
+        if not os.environ.get("ENSEMBLE_UPGRADE_E2E_SERVICE"):
+            pytest.skip("set ENSEMBLE_UPGRADE_E2E_SERVICE=1 to run the real unit smoke")
+        if sys.platform != "linux" or not Path("/run/systemd/system").exists():
+            pytest.skip("host is not Linux+systemd")
+        install = tmp_path / "install"
+        (install / "releases").mkdir(parents=True)
+        dump_path = tmp_path / "svc-child-env.txt"
+        script = tmp_path / "svc-dump.sh"
+        script.write_text(
+            "#!/bin/bash\n"
+            "printf 'PGID=%s\\nPID=%s\\n' \"$(ps -o pgid= -p $$ | tr -d ' ')\" \"$$\"\n"
+            f"env | sort > {dump_path}\n"
+            f"printf 'PGID=%s\\nPID=%s\\n' \"$(ps -o pgid= -p $$ | tr -d ' ')\" \"$$\" >> {dump_path}\n"
+            "echo service-branch-executor-line\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        monkeypatch.setenv("INSTALL_DIR", str(install))
+        monkeypatch.delenv("ENSEMBLE_UPGRADE_LIVE", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        # REAL detector — this test exists to exercise it for real.
+        branch, _bus, _reason = uj._service_detect_fn(uj.executor_env({}))
+        if branch != uj.SERVICE_BRANCH_SERVICE:
+            pytest.skip(f"host detector says {branch!r} ({_reason}); no unit possible")
+        run_id = f"r-e2e-{os.getpid()}"
+        pid, note = uj.spawn_executor(
+            ["bash", str(script)], install, {"RUN_ID": run_id}, run_id=run_id,
+        )
+        try:
+            assert f"service=ensemble-upgrade-{run_id}" in note, note
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline and not dump_path.is_file():
+                time.sleep(0.1)
+            assert dump_path.is_file(), "fixture payload never ran inside the unit"
+            child_env = {}
+            for line in dump_path.read_text(encoding="utf-8").splitlines():
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    child_env[k] = v
+            assert child_env.get("INSTALL_DIR") == str(install)
+            assert child_env.get("RUN_ID") == run_id
+            assert "OPENAI_API_KEY" not in child_env
+            assert "ENSEMBLE_UPGRADE_LIVE" not in child_env
+            # systemd-owned session: payload pgid == its own pid (the
+            # PGID=/PID= lines were appended into the dump by the fixture).
+            pgid_line = next(
+                ln for ln in dump_path.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("PGID=")
+            )
+            pid_line = next(
+                ln for ln in dump_path.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("PID=")
+            )
+            assert pgid_line == f"PGID={pid_line.split('=', 1)[1]}", (
+                f"payload must run in a systemd-owned session (pgid==pid); "
+                f"got {pgid_line!r} vs {pid_line!r}"
+            )
+            log_text = (install / "data" / "upgrade.log").read_text(
+                encoding="utf-8", errors="replace")
+            assert "service-branch-executor-line" in log_text, (
+                "payload stdout must land in upgrade.log via the append: property"
+            )
+        finally:
+            # The client (--wait) may have already exited (fast fixture);
+            # the unit payload is short and self-collects (--collect).
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except OSError:
                 pass
 
     def test_static_no_bash_process_registry_reference(self) -> None:

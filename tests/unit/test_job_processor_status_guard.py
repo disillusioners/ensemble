@@ -75,7 +75,7 @@ class MockJob:
         project_id: str = "project-1",
         queue_id: str = "queue-1",
         status: str = AdmissionState.ACTIVE.value,
-        job_type: str = "message",  # Must be 'message' to trigger the status guard code path
+        job_type: str = "task",  # 'task' reaches the DB status guard; 'message' jobs are W1-skipped in the ACTIVE loop (D11)
     ):
         self.job_id = job_id
         self.agent_id = agent_id
@@ -283,9 +283,10 @@ class TestStatusStrEnumGuard:
             mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
         )
 
-        # Create a PROCESSING MESSAGE job with instance_id
-        # job_type='message' is required to trigger the status guard code path
-        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="message")
+        # Create an ACTIVE TASK job with instance_id.
+        # job_type='task': since D11 the ACTIVE-admission loop W1-skips
+        # 'message' jobs before the status guard — only task jobs reach it.
+        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="task")
         job.instance_id = "test-instance-id"
 
         # Mock DB returning instance with string status (the bug scenario)
@@ -328,7 +329,7 @@ class TestStatusStrEnumGuard:
         )
 
         # Create a PROCESSING MESSAGE job with instance_id
-        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="message")
+        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="task")
         job.instance_id = "test-instance-id"
 
         # Mock DB returning instance with enum status
@@ -365,7 +366,7 @@ class TestStatusStrEnumGuard:
         )
 
         # Create a PROCESSING MESSAGE job with instance_id
-        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="message")
+        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="task")
         job.instance_id = "test-instance-id"
 
         # Mock DB returning instance with error string status
@@ -403,7 +404,7 @@ class TestStatusStrEnumGuard:
         )
 
         # Create a PROCESSING MESSAGE job with instance_id
-        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="message")
+        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="task")
         job.instance_id = "test-instance-id"
 
         # Mock DB returning instance with error enum status

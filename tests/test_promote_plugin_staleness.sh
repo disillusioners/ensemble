@@ -13,23 +13,43 @@
 # matrix is exercised HERE through the REAL lib.sh function and the REAL
 # promote.sh.
 #
-# MATRIX (the dispatch minimum — all four + escalation):
-#   (1) fresh            → gate passes (rc 0), no override consumed
-#   (2) fresh + override → passes identically (override unused)
-#   (3) stale            → REFUSES exit 78 with the predicate's reason
-#                          token (pin-stale / staleness-unknown /
-#                          divergence-unresolved / alarm-owner-escalation)
-#   (4) stale + override → gate passes; the override is JOURNALED on the
-#                          install dir (plugin_staleness_override record)
-#   (5) escalation row   → unowned alarm beyond N days ⇒ refuses with
-#                          alarm-owner-escalation; inside the window it
-#                          does NOT add an escalation refusal
-#   (6) no plugins tree  → gate passes (no spurious block on a
-#                          plugin-less repo)
-#   (7) e2e promote.sh   → stale fixture refuses 78 with the plugin
-#                          token in stderr + journal; with the flag the
-#                          promote gets PAST the plugin gate (refuses
-#                          later for an unrelated, non-plugin reason)
+# MATRIX (the dispatch minimum — slice-⑥ baseline + allow-stale flip
+# 2026-10-07 default + STRICT opt-in):
+#   (1) fresh                         → gate passes (rc 0), no override
+#                                       consumed
+#   (2) fresh + override              → passes identically (override
+#                                       unused)
+#   (3) stale default                 → PROCEEDS rc 0 + journaled
+#                                       `plugin_staleness_observed` with
+#                                       the predicate's reason token
+#                                       (default; allow-stale flip)
+#   (4) stale + override              → PROCEEDS rc 0 + journaled
+#                                       `plugin_staleness_override`
+#                                       (audit-continuity back-compat —
+#                                       the OLD slice-⑥ event kind;
+#                                       distinct from the default
+#                                       observed event)
+#   (5) escalation default            → PROCEEDS rc 0 + journaled
+#                                       observed (default behavior);
+#                                       inside-window does NOT add an
+#                                       escalation refusal since the
+#                                       predicate no longer fails open
+#   (5a) escalation + STRICT          → refuses 78 + journals
+#                                       `refusal` event with the
+#                                       predicate's code token
+#   (6) no plugins tree               → gate passes (no spurious block
+#                                       on a plugin-less repo)
+#   (7a) e2e stale default            → PROCEEDS + journaled observed
+#                                       on the install dir
+#   (7b) e2e stale + --allow-stale    → PROCEEDS + journaled override
+#   (7c) e2e stale + --block-on-stale → refuses 78 + journaled refusal
+#                                       on the install dir
+#   (8) unevaluable gate              → refuses 78 (fail-closed on
+#                                       predicate unmissing; allow-stale
+#                                       flip keeps this loud — stale
+#                                       pins are the steady state,
+#                                       unknown tooling is NOT)
+#   (9) fresh default                 → no observed event journaled
 #
 # SANDBOX discipline (test-strategy.md §5.5): zero side effects outside
 # mktemp dirs; HOME overridden so no live/demo install dir can resolve;
@@ -69,6 +89,14 @@ assert_contains() {
     case "$haystack" in
         *"$needle"*) _pass ;;
         *) _fail "$name" "contains '$needle'" "$haystack" ;;
+    esac
+}
+
+assert_not_contains() {
+    local name="$1" needle="$2" haystack="$3"
+    case "$haystack" in
+        *"$needle"*) _fail "$name" "does NOT contain '$needle'" "$haystack" ;;
+        *) _pass ;;
     esac
 }
 
@@ -183,18 +211,49 @@ out="$(_run_gate "$FRESH_REPO" 1)"
 rc=$?
 assert_eq "fresh+override rc" "0" "$rc"
 
-section "(3) stale — refuses 78 with the predicate token"
-out="$(_run_gate "$STALE_REPO" 0)"
+section "(3) stale default — PROCEEDS + journals plugin_staleness_observed"
+# Fresh install dir per case so the journal is isolated (default
+# observe-and-proceed needs an install dir to durably land the
+# observed event — the helper is gated on `[ -d "$INSTALL_DIR" ]`).
+STALE_DEFAULT_INSTALL="$FIXTURE/install-stale-default"
+mkdir -p "$STALE_DEFAULT_INSTALL"
+out="$(
+    { export PLUGIN_STALENESS_PLUGINS_ROOT="$STALE_REPO/plugins"
+    export PLUGIN_STALENESS_PYTHON="$PRED_PY"
+    export PROMOTE_STALENESS_OVERRIDE="0"
+    export PROMOTE_STRICT_STALENESS="0"
+    export INSTALL_DIR="$STALE_DEFAULT_INSTALL"
+    SCRIPT_DIR="$UPGRADE_DIR"
+    # shellcheck disable=SC1090
+    . "$UPGRADE_DIR/lib.sh"
+    promote_plugin_staleness_check
+    } 2>&1
+)"
 rc=$?
-assert_eq "stale rc" "78" "$rc"
-assert_contains "stale token" "pin-stale" "$out"
+assert_eq "stale default rc" "0" "$rc"
+# The gate's external surface is the OBSERVED warn + the journaled
+# `plugin_staleness_observed` event (the predicate's raw output is
+# consumed inside the function and is NOT in the gate's stdout —
+# that's by design, to avoid leaking predicate internals into the
+# operator's stdout when the default observe-and-proceed is taken).
+case "$out" in
+    *"PLUGIN-STALENESS OBSERVED"*) _pass "stale default warns observed" ;;
+    *) _fail "stale default warns observed" "PLUGIN-STALENESS OBSERVED" "$out" ;;
+esac
+journal="$(cat "$STALE_DEFAULT_INSTALL/releases/state.json" 2>/dev/null || true)"
+assert_contains "stale default journals observed event" "plugin_staleness_observed" "$journal"
+assert_contains "stale default journaled predicate code" "pin-stale" "$journal"
+assert_contains "stale default journaled plugin name" "plugin=$STALE_REPO/plugins/demo" "$journal"
+assert_not_contains "stale default does NOT journal override" "plugin_staleness_override" "$journal"
 
-section "(4) stale + override — passes AND journals the override"
+section "(4) stale + override — passes AND journals the override (NOT the observed)"
 OVERRIDE_INSTALL="$FIXTURE/install-override"
+mkdir -p "$OVERRIDE_INSTALL"
 out="$(
     { export PLUGIN_STALENESS_PLUGINS_ROOT="$STALE_REPO/plugins"
     export PLUGIN_STALENESS_PYTHON="$PRED_PY"
     export PROMOTE_STALENESS_OVERRIDE="1"
+    export PROMOTE_STRICT_STALENESS="0"
     export INSTALL_DIR="$OVERRIDE_INSTALL"
     SCRIPT_DIR="$UPGRADE_DIR"
     # shellcheck disable=SC1090
@@ -210,22 +269,132 @@ journal="$(cat "$OVERRIDE_INSTALL/releases/state.json" 2>/dev/null || true)"
 assert_contains "override journaled" "plugin_staleness_override" "$journal"
 assert_contains "override journal token" "pin-stale" "$journal"
 assert_contains "override journal operator_accepted" "operator_accepted=true" "$journal"
+# Audit-continuity invariant: when the EXPLICIT override path is
+# taken, the journal records the OLD plugin_staleness_override event
+# kind — NOT the new plugin_staleness_observed default. Operators
+# grepping the journal can distinguish "operator explicitly accepted
+# the stale promote" from "stale observed unattended".
+assert_not_contains "override path does NOT journal observed" "plugin_staleness_observed" "$journal"
 
-section "(5) unowned-alarm escalation"
-out="$(_run_gate "$ESCALATE_REPO" 0)"
+section "(3a) stale + STRICT env — refuses 78 + journals refusal"
+STALE_STRICT_INSTALL="$FIXTURE/install-stale-strict"
+mkdir -p "$STALE_STRICT_INSTALL"
+# Run via subprocess so `_freshness_refuse`'s `exit 78` doesn't
+# terminate the test harness shell. The subprocess's stdout is the
+# captured value (the refuse helper doesn't print), the stderr
+# captures the WARN line. The harness reads $? AFTER the
+# substitution to get the subprocess rc.
+cat >"$FIXTURE/strict-runner.sh" <<RUNNER
+#!/bin/bash
+set +e
+export PLUGIN_STALENESS_PLUGINS_ROOT="$STALE_REPO/plugins"
+export PLUGIN_STALENESS_PYTHON="$PRED_PY"
+export PROMOTE_STALENESS_OVERRIDE="0"
+export PROMOTE_STRICT_STALENESS="1"
+export INSTALL_DIR="$STALE_STRICT_INSTALL"
+export SCRIPT_DIR="$UPGRADE_DIR"
+# shellcheck disable=SC1090
+. "$UPGRADE_DIR/lib.sh"
+promote_plugin_staleness_check
+RUNNER
+chmod +x "$FIXTURE/strict-runner.sh"
+set +e
+strict_rc=0
+bash "$FIXTURE/strict-runner.sh" 2>/tmp/stale-strict.err
+strict_rc=$?
+set -u
+strict_err="$(cat /tmp/stale-strict.err 2>/dev/null || true)"
+assert_eq "stale+strict rc" "78" "$strict_rc"
+assert_contains "stale+strict warns strict mode" "strict staleness mode" "$strict_err"
+assert_contains "stale+strict carries predicate code" "pin-stale" "$strict_err"
+strict_journal="$(cat "$STALE_STRICT_INSTALL/releases/state.json" 2>/dev/null || true)"
+assert_contains "stale+strict journals refusal event" '"event":"refusal"' "$strict_journal"
+assert_contains "stale+strict refusal carries code" "pin-stale" "$strict_journal"
+# Strict must NOT also emit the observed/override events on the
+# refusal path.
+assert_not_contains "stale+strict does NOT journal observed" "plugin_staleness_observed" "$strict_journal"
+assert_not_contains "stale+strict does NOT journal override" "plugin_staleness_override" "$strict_journal"
+
+section "(5) unowned-alarm escalation default — PROCEEDS + journals observed"
+# Fresh install dirs so the journal lands durably.
+ESC_DEFAULT_INSTALL="$FIXTURE/install-escalate-default"
+ESC_FRESH_INSTALL="$FIXTURE/install-escalate-fresh-default"
+mkdir -p "$ESC_DEFAULT_INSTALL" "$ESC_FRESH_INSTALL"
+out="$(
+    { export PLUGIN_STALENESS_PLUGINS_ROOT="$ESCALATE_REPO/plugins"
+    export PLUGIN_STALENESS_PYTHON="$PRED_PY"
+    export PROMOTE_STALENESS_OVERRIDE="0"
+    export PROMOTE_STRICT_STALENESS="0"
+    export INSTALL_DIR="$ESC_DEFAULT_INSTALL"
+    SCRIPT_DIR="$UPGRADE_DIR"
+    # shellcheck disable=SC1090
+    . "$UPGRADE_DIR/lib.sh"
+    promote_plugin_staleness_check
+    } 2>&1
+)"
 rc=$?
-assert_eq "escalated rc" "78" "$rc"
-assert_contains "escalation token" "alarm-owner-escalation" "$out"
-out="$(_run_gate "$ESCALATE_FRESH_REPO" 0)"
-rc=$?
-# inside the window: no ESCALATION refusal — but the OPEN divergence
-# itself still refuses (divergence-unresolved)
-assert_eq "inside-window rc" "78" "$rc"
+assert_eq "escalated default rc" "0" "$rc"
 case "$out" in
-    *"alarm-owner-escalation"*) _fail "inside-window escalation" "no alarm-owner-escalation" "$out" ;;
-    *) _pass ;;
+    *"PLUGIN-STALENESS OBSERVED"*) _pass "escalated default warns observed" ;;
+    *) _fail "escalated default warns observed" "PLUGIN-STALENESS OBSERVED" "$out" ;;
 esac
-assert_contains "inside-window still flags the open divergence" "divergence-unresolved" "$out"
+esc_journal="$(cat "$ESC_DEFAULT_INSTALL/releases/state.json" 2>/dev/null || true)"
+assert_contains "escalated default journals observed" "plugin_staleness_observed" "$esc_journal"
+assert_contains "escalated default journaled code" "alarm-owner-escalation" "$esc_journal"
+
+# inside-window: the OPEN divergence itself still flags (and is
+# journaled as observed); the predicate does not add an escalation
+# refusal — the gate cannot know which token to grep, so it picks
+# the first one (per the existing capture discipline).
+out="$(
+    { export PLUGIN_STALENESS_PLUGINS_ROOT="$ESCALATE_FRESH_REPO/plugins"
+    export PLUGIN_STALENESS_PYTHON="$PRED_PY"
+    export PROMOTE_STALENESS_OVERRIDE="0"
+    export PROMOTE_STRICT_STALENESS="0"
+    export INSTALL_DIR="$ESC_FRESH_INSTALL"
+    SCRIPT_DIR="$UPGRADE_DIR"
+    # shellcheck disable=SC1090
+    . "$UPGRADE_DIR/lib.sh"
+    promote_plugin_staleness_check
+    } 2>&1
+)"
+rc=$?
+assert_eq "inside-window default rc" "0" "$rc"
+case "$out" in
+    *"PLUGIN-STALENESS OBSERVED"*) _pass "inside-window default warns observed" ;;
+    *) _fail "inside-window default" "PLUGIN-STALENESS OBSERVED warn" "$out" ;;
+esac
+inside_journal="$(cat "$ESC_FRESH_INSTALL/releases/state.json" 2>/dev/null || true)"
+assert_contains "inside-window default journals observed" "plugin_staleness_observed" "$inside_journal"
+
+section "(5a) unowned-alarm escalation + STRICT — refuses 78"
+ESC_STRICT_INSTALL="$FIXTURE/install-escalate-strict"
+mkdir -p "$ESC_STRICT_INSTALL"
+cat >"$FIXTURE/escalate-strict-runner.sh" <<RUNNER
+#!/bin/bash
+set +e
+export PLUGIN_STALENESS_PLUGINS_ROOT="$ESCALATE_REPO/plugins"
+export PLUGIN_STALENESS_PYTHON="$PRED_PY"
+export PROMOTE_STALENESS_OVERRIDE="0"
+export PROMOTE_STRICT_STALENESS="1"
+export INSTALL_DIR="$ESC_STRICT_INSTALL"
+export SCRIPT_DIR="$UPGRADE_DIR"
+# shellcheck disable=SC1090
+. "$UPGRADE_DIR/lib.sh"
+promote_plugin_staleness_check
+RUNNER
+chmod +x "$FIXTURE/escalate-strict-runner.sh"
+set +e
+esc_strict_rc=0
+bash "$FIXTURE/escalate-strict-runner.sh" 2>/tmp/escalate-strict.err
+esc_strict_rc=$?
+set -u
+esc_strict_err="$(cat /tmp/escalate-strict.err 2>/dev/null || true)"
+assert_eq "escalation+strict rc" "78" "$esc_strict_rc"
+assert_contains "escalation+strict warns strict mode" "strict staleness mode" "$esc_strict_err"
+esc_strict_journal="$(cat "$ESC_STRICT_INSTALL/releases/state.json" 2>/dev/null || true)"
+assert_contains "escalation+strict journals refusal" '"event":"refusal"' "$esc_strict_journal"
+assert_contains "escalation+strict refusal code" "alarm-owner-escalation" "$esc_strict_journal"
 
 section "(6) no plugins tree — gate passes (no spurious block)"
 out="$(_run_gate "$FIXTURE/empty-repo" 0)"
@@ -245,6 +414,7 @@ UNEVAL_OUT="$(
         export REPO_ROOT="/nonexistent"
         export PATH="/nonexistent"
         export PROMOTE_STALENESS_OVERRIDE="0"
+        export PROMOTE_STRICT_STALENESS="0"
         export INSTALL_DIR="$FIXTURE/install-nopython"
         SCRIPT_DIR="$UPGRADE_DIR"
         # shellcheck disable=SC1090
@@ -257,9 +427,62 @@ assert_eq "unevaluable rc" "78" "$UNEVAL_RC"
 assert_contains "unevaluable token" "plugin-staleness-unreadable" "$UNEVAL_OUT"
 assert_contains "unevaluable carries the detail" "no python with PyYAML" "$UNEVAL_OUT"
 
+section "(8a) unevaluable + STRICT — still refuses 78 (strict does NOT bypass unevaluable)"
+# The allow-stale flip keeps the unevaluable gate fail-closed (only
+# an actual STALE verdict flips the default — unknown tooling stays
+# loud). The OVERRIDE flag is the ONLY way through an unevaluable gate;
+# STRICT is irrelevant (no predicate output to be strict about).
+UNEVAL_STRICT_OUT="$(
+    {
+        export PLUGIN_STALENESS_PLUGINS_ROOT="$FRESH_REPO/plugins"
+        export PLUGIN_STALENESS_PYTHON="$FIXTURE/no-such-python"
+        export REPO_ROOT="/nonexistent"
+        export PATH="/nonexistent"
+        export PROMOTE_STALENESS_OVERRIDE="0"
+        export PROMOTE_STRICT_STALENESS="1"
+        export INSTALL_DIR="$FIXTURE/install-nopython-strict"
+        SCRIPT_DIR="$UPGRADE_DIR"
+        # shellcheck disable=SC1090
+        . "$UPGRADE_DIR/lib.sh"
+        promote_plugin_staleness_check
+    } 2>&1
+)"
+UNEVAL_STRICT_RC=$?
+assert_eq "unevaluable+strict rc" "78" "$UNEVAL_STRICT_RC"
+assert_contains "unevaluable+strict token" "plugin-staleness-unreadable" "$UNEVAL_STRICT_OUT"
+
+section "(9) fresh default — NO plugin_staleness_observed journaled"
+# Sanity check: the new event kind must NOT fire for fresh pins. The
+# fresh case is the steady-state steady — emitting an observed event
+# for every fresh promote would pollute the audit trail.
+FRESH_DEFAULT_INSTALL="$FIXTURE/install-fresh-default"
+mkdir -p "$FRESH_DEFAULT_INSTALL"
+out="$(
+    { export PLUGIN_STALENESS_PLUGINS_ROOT="$FRESH_REPO/plugins"
+    export PLUGIN_STALENESS_PYTHON="$PRED_PY"
+    export PROMOTE_STALENESS_OVERRIDE="0"
+    export PROMOTE_STRICT_STALENESS="0"
+    export INSTALL_DIR="$FRESH_DEFAULT_INSTALL"
+    SCRIPT_DIR="$UPGRADE_DIR"
+    # shellcheck disable=SC1090
+    . "$UPGRADE_DIR/lib.sh"
+    promote_plugin_staleness_check
+    } 2>&1
+)"
+rc=$?
+assert_eq "fresh default rc" "0" "$rc"
+assert_contains "fresh default verdict line" "PLUGIN-STALENESS=fresh" "$out"
+case "$out" in
+    *"PLUGIN-STALENESS OBSERVED"*) _fail "fresh default" "no PLUGIN-STALENESS OBSERVED" "$out" ;;
+    *) _pass "fresh default does not emit OBSERVED warn" ;;
+esac
+fresh_journal="$(cat "$FRESH_DEFAULT_INSTALL/releases/state.json" 2>/dev/null || true)"
+assert_not_contains "fresh default does NOT journal observed" "plugin_staleness_observed" "$fresh_journal"
+assert_not_contains "fresh default does NOT journal override" "plugin_staleness_override" "$fresh_journal"
+
 # ─── (7) End-to-end through the REAL promote.sh ──────────────────────────────
 
-section "(7) promote.sh e2e — stale refuses 78; override gets past the plugin gate"
+section "(7a) promote.sh e2e stale default — plugin gate PROCEEDS + journals observed"
 
 # The demo target resolves its install dir as $HOME/agents-ensemble-demo
 # (resolve_env D-FA4.6 rules — INSTALL_DIR is a SANDBOX-only override), so
@@ -315,17 +538,46 @@ E2E_HOME="$FIXTURE/home"
 _make_install_fixture "$E2E_HOME" "v9.9.9"
 e2e_out="$(_run_promote "$FIXTURE/repo-stale")"
 e2e_rc=$?
-assert_eq "e2e stale rc" "78" "$e2e_rc"
-assert_contains "e2e stale token" "pin-stale" "$e2e_out"
+# After the allow-stale flip, the plugin gate PROCEEDS by default.
+# The downstream preflight stages (e.g. integrity of the stub
+# release, missing manifest.json) WILL refuse 78 — that's expected
+# and INTENTIONAL here (the test fixture is deliberately minimal;
+# the assertion is that the refusal is NOT a plugin-staleness
+# refusal, i.e. the plugin gate was successfully passed).
+case "$e2e_out" in
+    *"PLUGIN-STALENESS OBSERVED"*) _pass "e2e stale default emits OBSERVED warn" ;;
+    *) _fail "e2e stale default" "PLUGIN-STALENESS OBSERVED warn" "$e2e_out" ;;
+esac
+case "$e2e_out" in
+    *"pin-stale"*)
+        if printf '%s' "$e2e_out" | grep -q "PLUGIN-STALENESS OBSERVED"; then
+            _pass "e2e stale default got past the plugin gate (observed warn present)"
+        else
+            _fail "e2e stale default" "plugin gate passed via observe-and-proceed" "$e2e_out"
+        fi
+        ;;
+    *) _pass "e2e stale default got past the plugin gate (no pin-stale in output)" ;;
+esac
+journal1="$(cat "$E2E_HOME/agents-ensemble-demo/releases/state.json" 2>/dev/null || true)"
+assert_contains "e2e stale default journals observed event" "plugin_staleness_observed" "$journal1"
+assert_contains "e2e stale default journaled code" "pin-stale" "$journal1"
+assert_not_contains "e2e stale default does NOT journal override" "plugin_staleness_override" "$journal1"
+# Use e2e_rc to avoid shellcheck unused-var warning.
+[ "$e2e_rc" = "0" ] || [ "$e2e_rc" = "78" ] || _fail "e2e stale default rc sanity" "0 or 78 (downstream refusal)" "$e2e_rc"
 
+section "(7b) promote.sh e2e stale + --allow-stale-plugins — PROCEEDS + journals override (audit-continuity)"
 # second fixture home so the override run has a virgin journal
 E2E_HOME2="$FIXTURE/home2"
 _make_install_fixture "$E2E_HOME2" "v9.9.9"
 e2e_out="$(_run_promote_home "$FIXTURE/repo-stale" "$E2E_HOME2" --allow-stale-plugins)"
 e2e_rc=$?
-# The override let it PAST the plugin gate: the refusal (if any) must
-# NOT be a plugin-staleness token — the promote proceeds to the next
-# preflight stage (integrity of the stub release, etc.).
+# The explicit override lets it PAST the plugin gate: the refusal
+# (if any, from later preflight stages like the stub release's
+# integrity) must NOT be a plugin-staleness token.
+case "$e2e_out" in
+    *"PLUGIN-STALENESS OVERRIDE"*) _pass "e2e override emits OVERRIDE warn (audit-continuity)" ;;
+    *) _fail "e2e override" "PLUGIN-STALENESS OVERRIDE warn" "$e2e_out" ;;
+esac
 case "$e2e_out" in
     *"pin-stale"*)
         if printf '%s' "$e2e_out" | grep -q "PLUGIN-STALENESS OVERRIDE"; then
@@ -334,10 +586,38 @@ case "$e2e_out" in
             _fail "e2e override" "plugin gate passed via override" "$e2e_out"
         fi
         ;;
-    *) _pass "e2e override got past the plugin gate" ;;
+    *) _pass "e2e override got past the plugin gate (no pin-stale in output)" ;;
 esac
 journal2="$(cat "$E2E_HOME2/agents-ensemble-demo/releases/state.json" 2>/dev/null || true)"
-assert_contains "e2e override journaled" "plugin_staleness_override" "$journal2"
+assert_contains "e2e override journals override event" "plugin_staleness_override" "$journal2"
+# Audit-continuity invariant: explicit override → OLD override event,
+# NOT the new observed event. Operators grepping the journal can
+# distinguish "operator explicitly accepted stale" from "stale
+# observed unattended".
+assert_not_contains "e2e override does NOT journal observed" "plugin_staleness_observed" "$journal2"
+
+section "(7c) promote.sh e2e stale + --block-on-stale — refuses 78 + journals refusal"
+# third fixture home so the strict run has a virgin journal
+E2E_HOME3="$FIXTURE/home3"
+_make_install_fixture "$E2E_HOME3" "v9.9.9"
+# Strict refuses at the gate — subshell wrapper so we can capture the
+# rc without the script bailing out.
+e2e_strict_rc="$(
+    { _run_promote_home "$FIXTURE/repo-stale" "$E2E_HOME3" --block-on-stale; } >/tmp/e2e-strict.out 2>&1
+    echo $?
+)"
+e2e_strict_out="$(cat /tmp/e2e-strict.out)"
+assert_eq "e2e strict rc" "78" "$e2e_strict_rc"
+case "$e2e_strict_out" in
+    *"strict staleness mode"*) _pass "e2e strict warns strict mode" ;;
+    *) _fail "e2e strict" "strict staleness mode warn" "$e2e_strict_out" ;;
+esac
+assert_contains "e2e strict predicate code" "pin-stale" "$e2e_strict_out"
+journal3="$(cat "$E2E_HOME3/agents-ensemble-demo/releases/state.json" 2>/dev/null || true)"
+assert_contains "e2e strict journals refusal event" '"event":"refusal"' "$journal3"
+assert_contains "e2e strict refusal code" "pin-stale" "$journal3"
+assert_not_contains "e2e strict does NOT journal observed" "plugin_staleness_observed" "$journal3"
+assert_not_contains "e2e strict does NOT journal override" "plugin_staleness_override" "$journal3"
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 

@@ -46,52 +46,24 @@ def repository(engine):
     return SQLModelMcpServerRepository(engine)
 
 
-# Shared engine for router tests (to avoid SQLite threading issues)
-_router_engine = None
-_router_repository = None
-
-
-def get_router_engine():
-    """Get or create shared engine for router tests."""
-    global _router_engine, _router_repository
-    if _router_engine is None:
-        _router_engine = create_engine(
-            "sqlite:///test_mcp_servers.db",
-            echo=False,
-            connect_args={"check_same_thread": False},
-        )
-        SQLModel.metadata.create_all(_router_engine)
-        _router_repository = SQLModelMcpServerRepository(_router_engine)
-    return _router_engine, _router_repository
-
-
-def reset_router_database():
-    """Reset the shared router database."""
-    global _router_engine, _router_repository
-    if _router_engine is not None:
-        # Delete all rows from mcp_servers table
-        with SQLModelSession(_router_engine) as session:
-            session.exec("DELETE FROM mcp_servers")
-            session.commit()
-        _router_engine.dispose()
-        _router_engine = None
-        _router_repository = None
-
-
+# Per-test router engine fixture (uses tmp_path to avoid CWD-relative file artifact).
+# Replaces the previous module-level _router_engine/_router_repository singleton that
+# created test_mcp_servers.db in CWD — that file re-staled on every mcp_servers schema
+# migration (create_all never alters columns), see QUARANTINE row 2026-10-02
+# (test_mcp_server_crud.py stale-fixture).
 @pytest.fixture(scope="function")
-def router_engine_and_repo():
-    """Fixture that provides shared engine and repository for router tests."""
-    from sqlalchemy import text
-    engine, repo = get_router_engine()
-    # Clean up before test
-    with SQLModelSession(engine) as session:
-        session.exec(text("DELETE FROM mcp_servers"))
-        session.commit()
-    yield engine, repo
-    # Clean up after test
-    with SQLModelSession(engine) as session:
-        session.exec(text("DELETE FROM mcp_servers"))
-        session.commit()
+def router_engine_and_repo(tmp_path):
+    """Per-test router engine backed by a tmp_path SQLite file (avoids CWD fixture)."""
+    db_path = tmp_path / "test_mcp_servers.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        echo=False,
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    repository = SQLModelMcpServerRepository(engine)
+    yield engine, repository
+    engine.dispose()
 
 
 @pytest.fixture

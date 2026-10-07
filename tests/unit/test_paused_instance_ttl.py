@@ -738,6 +738,7 @@ class TestPausedAtField:
             paused_at_iso,
             paused_instances_data,
             suspension_reason=None,  # kwarg added by ask_questions pause-cascade fix; not asserted here
+            originator_instance_id=None,
         ):
             captured["pause_calls"].append(
                 {"tree_ids": list(tree_ids), "paused_at_iso": paused_at_iso,
