@@ -225,23 +225,19 @@ def build_router() -> APIRouter:
         if isinstance(resolved, Response):
             return resolved
         # Filesystem / project_scoped: stat already happened in
-        # the service. tmp_images: re-read the sidecar (the
-        # service resolved the size; the head only needs type +
-        # length).
+        # the service. tmp_images: REWORK 2026-10-07 (m4) — the
+        # service's ``_resolve_tmp_images`` now uses
+        # ``stat_with_meta`` (no blob read at resolve time),
+        # so the HEAD handler can return content_type + size
+        # WITHOUT re-opening the store. The ``Content-Length``
+        # is the fstat'd size; the blob is read on the GET
+        # path only.
         if resolved.root_type == "tmp_images":
-            service = _resolve_service(request)
-            from daemon.services.tmp_image_store import TmpImageNotFound
-            try:
-                _data, content_type, _sha = service._tmp_image_store.open_with_meta(
-                    rel_path.strip()
-                )
-            except (TmpImageNotFound, Exception):
-                return _uniform_404()
             return Response(
                 status_code=200,
                 headers={
                     **_HARDENING_HEADERS,
-                    "Content-Type": content_type,
+                    "Content-Type": resolved.content_type,
                     "Content-Length": str(resolved.size_bytes),
                 },
             )
@@ -263,14 +259,21 @@ def build_router() -> APIRouter:
             return resolved
 
         if resolved.root_type == "tmp_images":
+            # REWORK 2026-10-07 (m4): the public
+            # ``LiveViewsService.open_tmp_image`` is the
+            # seam — the router no longer reaches into the
+            # service's private ``_tmp_image_store``. The
+            # service catches store errors and returns None;
+            # we collapse None to the uniform 404.
             service = _resolve_service(request)
-            from daemon.services.tmp_image_store import TmpImageNotFound
-            try:
-                data, content_type, _sha = service._tmp_image_store.open_with_meta(
-                    rel_path.strip()
-                )
-            except (TmpImageNotFound, Exception):
+            open_result = (
+                service.open_tmp_image(rel_path.strip())
+                if service is not None
+                else None
+            )
+            if open_result is None:
                 return _uniform_404()
+            data, content_type, _sha = open_result
             return Response(
                 content=data,
                 media_type=content_type,

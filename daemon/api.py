@@ -1090,10 +1090,11 @@ async def lifespan(app: FastAPI):
     # tool factory can read it via ``manager.live_views_service``
     # (mirrors the tmp_image_store injection shape; the manager
     # is the canonical seam tools reach shared per-app state
-    # through). Lazy direct attribute write is safe — the
-    # InstanceManager exposes the service through a public
-    # property; the backing field is a normal instance attr.
-    manager._live_views_service = live_views_service
+    # through). REWORK 2026-10-07 (m4): the lifespan used to
+    # write the private ``_live_views_service`` field directly;
+    # the public ``set_live_views_service`` setter is the same
+    # wire with a name that survives grep + review.
+    manager.set_live_views_service(live_views_service)
     daemon_logger.info(
         f"[LiveViews] subsystem ready: enabled={config.live_views.enabled} "
         f"roots={live_views_service.root_names() or '[]'}"

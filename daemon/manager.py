@@ -2755,6 +2755,22 @@ class InstanceManager:
         """
         return self._live_views_service
 
+    def set_live_views_service(
+        self, service: "LiveViewsService | None"
+    ) -> None:
+        """Inject the shared :class:`LiveViewsService` post-construction.
+
+        REWORK 2026-10-07 (m4): the lifespan previously wrote
+        the private ``_live_views_service`` field directly. The
+        public setter is the same one-line wire with a name that
+        survives grep and code review (the prior private-attr
+        write looked like a typo in the call site). Idempotent;
+        the lifespan calls it exactly once at boot, but a
+        second call replaces the service reference (testing
+        seam only — production boot calls it once).
+        """
+        self._live_views_service = service
+
     @property
     def credential_manager(self):
         """Public read-only access to the shared :class:`CredentialManager`.

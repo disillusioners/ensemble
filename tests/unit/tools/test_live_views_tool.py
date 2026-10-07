@@ -214,3 +214,112 @@ class TestReturnType:
         result = view_link.invoke({"root_name": "nope", "path": "x"})
         assert isinstance(result, str)
         assert result.startswith("Error: ")
+
+
+# ===========================================================================
+# Group 5 — Visibility matrix (REWORK 2026-10-07, M1)
+# ===========================================================================
+
+
+class TestVisibilityMatrix:
+    """REWORK 2026-10-07 (M1, user refinement #1):
+    ``view-views`` is in ``PRIVILEGED_TOOL_CATEGORIES`` so
+    the empty-allow inherit universe must NOT auto-grant
+    ``view_link``. The three commissioned users (ari, leader,
+    designer) opt in via ``tools.allow: ["view-views"]`` in
+    their meta.json.
+
+    This test pins the FULL matrix:
+
+    * empty-allow agent → ``view_link`` is NOT in the
+      resolved tools (R-SR16 default-deny on a privileged
+      category);
+    * ari / leader / designer → ``view_link`` IS in the
+      resolved tools (their meta.json carries the explicit
+      ``view-views`` opt-in);
+    * non-commissioned agents (worker, jober, watcher) →
+      ``view_link`` is NOT in the resolved tools (no
+      explicit allow entry; the privileged strip
+      applies).
+
+    Mirrors the pattern at
+    ``tests/unit/tools/test_upgrade_registration.py::
+    TestRealAgentResolution`` so the matrix pin sits
+    alongside the other category-grant pins.
+    """
+
+    @pytest.fixture
+    def tools_by_agent(self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        import daemon.registry as dr
+        from daemon.registry import AgentRegistry
+        from daemon.tools.instance import create_instance_tools
+        from unittest.mock import MagicMock
+
+        REPO_ROOT = Path(__file__).resolve().parents[3]
+        registry = AgentRegistry(REPO_ROOT / "agents")
+        registry.discover()
+        monkeypatch.setattr(dr, "_registry", registry)
+
+        def _build(agent_id: str) -> dict[str, object]:
+            manager = MagicMock(name="InstanceManager")
+            manager.config.daemon.port = 0
+            manager.config.llm.allowed_models = []
+            tools = create_instance_tools(
+                manager, f"inst-{agent_id}", agent_id
+            )
+            return {getattr(t, "name", "?"): t for t in tools}
+
+        return _build
+
+    def test_empty_allow_agent_does_not_get_view_link(
+        self, tools_by_agent
+    ):
+        # Empty allow list = inherit non-privileged universe;
+        # the privileged ``view-views`` category is NOT
+        # auto-granted.
+        by_name = tools_by_agent("worker")
+        assert "view_link" not in by_name, (
+            "empty-allow (non-allow) agent must NOT see view_link "
+            "— privileged-category default-deny regression"
+        )
+
+    def test_ari_resolves_view_link(self, tools_by_agent):
+        # ari is a commissioned user (M1 allow-list addition).
+        by_name = tools_by_agent("ari")
+        assert "view_link" in by_name, (
+            "ari must resolve view_link via the M1 "
+            "tools.allow: [view-views] opt-in"
+        )
+
+    def test_leader_resolves_view_link(self, tools_by_agent):
+        # leader is a commissioned user (M1 allow-list addition).
+        by_name = tools_by_agent("leader")
+        assert "view_link" in by_name, (
+            "leader must resolve view_link via the M1 "
+            "tools.allow: [view-views] opt-in"
+        )
+
+    def test_designer_resolves_view_link(self, tools_by_agent):
+        # designer's entry pre-existed (the schema-visibility
+        # allow from Phase 1); the M1 change raised the
+        # category to privileged so the empty-allow universe
+        # stops auto-granting it.
+        by_name = tools_by_agent("designer")
+        assert "view_link" in by_name, (
+            "designer must still resolve view_link "
+            "(schema-visibility entry from Phase 1)"
+        )
+
+    @pytest.mark.parametrize("agent_id", ["worker", "jober", "watcher"])
+    def test_non_commissioned_agents_dont_get_view_link(
+        self, tools_by_agent, agent_id: str
+    ):
+        # Non-commissioned agents (no M1 allow-list addition).
+        # The privileged-category strip applies.
+        by_name = tools_by_agent(agent_id)
+        assert "view_link" not in by_name, (
+            f"{agent_id} must NOT see view_link — no allow entry; "
+            f"privileged-category default-deny"
+        )
