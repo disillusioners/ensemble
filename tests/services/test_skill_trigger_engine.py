@@ -652,6 +652,11 @@ class TestSeedDefaultTriggers:
             "periodic_scan",
             "task_count_scan",
             "low_usefulness",
+            # Slice ⑥ (plugin subsystem, REC §1.2 comp 7 + the ③ probe
+            # doc's mandated seed entry): drift-event trigger reading
+            # the drift_events table through the engine's
+            # drift_event_repo.
+            "drift_event_observed",
         }
         for trigger in DEFAULT_TRIGGERS:
             assert "condition_type" in trigger

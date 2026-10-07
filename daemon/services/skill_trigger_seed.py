@@ -110,6 +110,32 @@ DEFAULT_TRIGGERS: list[dict[str, Any]] = [
         # etc.) so we don't skip straight to ``evolve_fix``.
         "action": "analyze",
     },
+    {
+        # Slice ⑥ (plugin subsystem): drift-event trigger.  The
+        # condition body follows the ③ probe doc's Path-A example:
+        # the engine's ``drift_event_observed`` branch reads the
+        # ``drift_events`` table (populated by the sync-runner's
+        # drift-event publisher, CON §5 verbatim payload) and
+        # fires when a FRESH UNRESOLVED event matching the filter
+        # exists.  ``min_divergence_id`` is a noise floor (older
+        # already-dispositioned ids stay resolved = row deleted);
+        # ``max_age_days`` is the freshness window ("the rule
+        # fires when the alarm is fresh").
+        #
+        # Per-plugin for v1 (probe doc open question): one trigger
+        # row per plugin, ``plugin`` naming the plugin.  The
+        # schema accommodates the future cross-plugin sweep
+        # (``plugin: "*"`` walks every plugin's events); v1
+        # defers it.
+        "name": "drift_event_observed",
+        "condition_type": "drift_event_observed",
+        "condition_json": {
+            "plugin": "opendesign",
+            "min_divergence_id": 1,
+            "max_age_days": 14,
+        },
+        "action": "analyze",
+    },
 ]
 
 

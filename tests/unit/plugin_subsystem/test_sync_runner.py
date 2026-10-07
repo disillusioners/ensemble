@@ -771,15 +771,28 @@ class TestDriftEventPayload:
             "observed_tag": "open-design-v0.24.1",
         }
 
-    def test_emit_drift_event_is_a_noop_stub(self, caplog):
+    def test_emit_drift_event_routes_through_the_configured_sink(self, caplog):
+        # Slice ⑥ REPLACED the ③ no-op stub: the emission now routes
+        # through the configured drift-event sink (log-only default —
+        # the structured log line survives; DB-backed when the daemon
+        # boot configures the publisher).  The DB-backed lane is
+        # pinned by test_drift_event_publisher.py; this test pins the
+        # default-sink observability.
         import logging
-        with caplog.at_level(logging.INFO, logger="daemon.plugin_subsystem.sync_runner"):
+
+        from daemon.plugin_subsystem.drift_event_publisher import (
+            reset_drift_event_publisher,
+        )
+
+        reset_drift_event_publisher()
+        with caplog.at_level(logging.INFO):
             emit_drift_event(
                 "opendesign", "snapshot_with_drift_alarm",
                 {"id": 1, "files": ["x"], "delta": "y", "rationale": "z", "pinning_test": "p"},
                 "v0.0.1",
             )
-        # Logs the payload shape for the slice ⑥ wirer
+        # Logs the payload shape (the ③ line format, preserved by the
+        # log-only default sink)
         assert any("drift_event_emitted" in r.message for r in caplog.records), (
             f"expected drift_event_emitted log line; got: {[r.message for r in caplog.records]}"
         )
