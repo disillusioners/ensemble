@@ -657,8 +657,15 @@ class SyncRunner:
                     "re-apply or drop, update the log either way (CON §2)"
                 ),
                 "pinning_test": (
+                    # Slice ⑥ fix: the class here must match the REAL
+                    # collected test id (TestSnapshotClassDrift, test
+                    # file test_sync_runner.py) — the ③ template named
+                    # TestSyncSnapshotDrift, which does not exist, so
+                    # every sync-emitted pointer dangled the moment a
+                    # real pull appended it (caught by the reviewer's
+                    # referential-integrity guard on the ⑥ real pull).
                     f"tests/unit/plugin_subsystem/test_sync_runner.py::"
-                    f"TestSyncSnapshotDrift::test_drift_alarm_at_{target_class}"
+                    f"TestSnapshotClassDrift::test_drift_alarm_at_{target_class}"
                 ),
                 # CON §5 register-entry shape carries `status`; a
                 # sync-emitted alarm is by definition unresolved

@@ -165,18 +165,21 @@ snapshot_with_drift_alarm:
       rationale: "Pre-registered divergence point: future sync will surface the upstream delta; re-apply (port upstream changes into the Python Mode-P compose Provider at slice ⑤ — provider reads contracts-mirror primary, daemon-copy fallback per OQ7) or drop (decline the upstream change with a manifest rationale)"
       upstream_ref: "od-resource-layer.md#1.B"
       pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_1_daemon_system_two_tree_drift"
+      status: "registered"
     - id: 2
       files: ["snapshot_with_drift_alarm/prompts/daemon/media-contract.ts"]
       delta: "daemon media-contract.ts is the full module (~33KB); contracts mirror is the API subset (~9.8KB); upstream two-tree drift"
       rationale: "Pre-registered divergence point: media contract shell-out (image/video/audio) diverges; future sync will surface the upstream delta; re-apply or drop (Mode-P Provider reads contracts-mirror primary per OQ7)"
       upstream_ref: "od-resource-layer.md#1.B"
       pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_2_daemon_media_contract_two_tree_drift"
+      status: "registered"
     - id: 3
       files: ["snapshot_with_drift_alarm/prompts/daemon/core-slim.ts"]
       delta: "daemon core-slim.ts (438 lines) has NO contracts mirror; the contracts package cannot receive the slim charter (asymmetry documented at od-resource-layer §1.B)"
       rationale: "Pre-registered asymmetry: core-slim lives daemon-only; OQ7 disposition confirms the asymmetry — the Mode-P Provider reads the daemon copy directly when no contracts mirror is available. Future sync will not surface a contracts-side delta to track; this entry exists to mark the asymmetry so a future contributor does not 'fix' it by adding a mirror"
       upstream_ref: "od-resource-layer.md#1.B (core-slim contracts-mirror absence)"
       pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_3_daemon_core_slim_contracts_mirror_absence"
+      status: "registered"
     - id: 4
       files:
         - "snapshot_with_drift_alarm/prompts/daemon/directions.ts"
@@ -186,6 +189,23 @@ snapshot_with_drift_alarm:
       rationale: "Pre-registered divergence points: 3 files where the daemon/contracts two-tree drift is real; future sync will surface upstream deltas; re-apply or drop per CON §2 rule"
       upstream_ref: "od-resource-layer.md#1.B"
       pinning_test: "tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_register_entry_4_three_files_two_tree_drift"
+      status: "registered"
+
+    - id: 5
+      files:
+        - "snapshot_with_drift_alarm/runtime/html-injection-points.ts"
+        - "snapshot_with_drift_alarm/runtime/membership-concurrency-limit.ts"
+        - "snapshot_with_drift_alarm/runtime/model-window-limit.ts"
+        - "snapshot_with_drift_alarm/runtime/od-next-capability.ts"
+        - "snapshot_with_drift_alarm/runtime/preview-build-focus.ts"
+        - "snapshot_with_drift_alarm/runtime/preview-guards.ts"
+        - "snapshot_with_drift_alarm/runtime/preview-observability.ts"
+        - "snapshot_with_drift_alarm/runtime/preview-runtime-state.ts"
+      delta: "slice-⑥ real same-tag pull (2026-10-07): +8/~0/-0 — the 8 upstream packages/contracts/src/runtime/ files not vendored at ⑤ landed through the sync-runner"
+      rationale: "The pull IS the re-apply disposition (CON §2: re-apply or drop, update the log either way). Files landed byte-faithful to the pin (gate bar 1 green) and are hash-registered (HASHES 29→37, gate bar 2). Entry annotated from the sync-emitted status=open to resolved by this operator disposition — the sole-writer route (declare -> sync -> hash-register) completed the runtime/ membership."
+      upstream_ref: "open-design-v0.23.0 packages/contracts/src/runtime/ (8 files, sync-runner real pull)"
+      pinning_test: "tests/unit/plugin_subsystem/test_sync_runner.py::TestSnapshotClassDrift::test_drift_alarm_at_snapshot_with_drift_alarm"
+      status: "resolved"
 
 # own_outright: AUTHORED at slice ⑤ (REC §4.1 rows 3+4). REC §4.1
 # assigned Turn-3 / compose-brief orchestration + lint/parse5 ports to

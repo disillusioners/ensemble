@@ -285,3 +285,122 @@ declaring `opendesign.list_systems` (CON §6) at
 proves skill↔tree references and pin-visible-at-load end-to-end
 (REC §4.3 row ④).  The skills-section addition is the ONLY other
 manifest change; everything else is byte-exact to slice ②.
+
+---
+
+## 8. Slice-⑤ provenance — runtime-subtree membership extension (reviewer-owed row)
+
+**Date:** 2026-10-07 (row authored at slice ⑥; event is slice ⑤)
+**Event:** developer-side vendored-class membership extension of
+`snapshot_with_drift_alarm/` — `runtime/deck-protocol.ts` +
+`runtime/deck-stage-fallback.ts` vendored at the SAME pin
+(`open-design-v0.23.0`), `snapshot_with_drift_alarm/HASHES.sha256`
+27 → 29 entries. This is the "CURATION provenance row" the slice-⑤
+review ruling declared the real debt (register adjudication:
+byte-faithful same-pin membership additions are NOT divergences —
+no divergence-register entries were owed for this event).
+
+**Why the two files exist:** the slice-⑤ F1 fix — the contracts
+`deck-framework.ts` imports `../runtime/deck-protocol.js`; the
+DECK_KIND prompt embeds `DECK_PROTOCOL_V1_INLINE_RUNTIME`, so the
+runtime subtree (part of the same pinned contracts package) is
+required for the extracted TS to evaluate. Only these two files were
+required; the remaining 8 upstream `packages/contracts/src/runtime/`
+files were NOT vendored (see §9 for the slice-⑥ completion of that
+membership via the sanctioned sync route).
+
+**Sole-writer disposition:** CON §5 names the sync-runner the ONLY
+writer of the class subtrees; the sync-runner did not exist on the
+⑤ branch (it merges at ⑥). The ⑤ ruling accepted this edit as a
+pre-⑥ DISCLOSED TRANSITION edit because all four of its conditions
+held — the same four bars the slice-⑥ sole-writer gate
+(`daemon/plugin_subsystem/sole_writer_gate.py`) now mechanizes:
+
+| Bar | Evidence for this event |
+|---|---|
+| 1. SHA-byte-faithful to the pin | both files' bytes = the pinned upstream blobs (`246e6f6d…` / `d701d30e…` at `open-design-v0.23.0`); verified by the ⑤ byte-equality fixture corpus |
+| 2. hash-registered | both files carry `HASHES.sha256` rows (27 → 29; count reconciled in `test_snapshot_class_byte_fidelity.py`) |
+| 3. manifest↔HASHES↔tree consistent | the manifest's `snapshot_with_drift_alarm.paths` declares `snapshot_with_drift_alarm/runtime/`; the reader validates ok @1.0.2 |
+| 4. disclosed | this row (previously: commit message + manifest path comment + test count only) |
+
+**From ⑥ onward (binding):** ALL vendored-class membership changes
+route EXCLUSIVELY through the sync-runner — plugin #2 must NEVER
+hand-edit a class subtree. The sole-writer gate enforces this
+mechanically (hand-edit detection + disclosure trail).
+
+---
+
+## 9. Slice-⑥ provenance — real same-tag sync pull: runtime/ membership completed
+
+**Date:** 2026-10-07 (slice ⑥ real-pull process gate, reviewer carry-forward #9)
+**Command:** `sync("opendesign", "snapshot_with_drift_alarm", upstream_repo=
+/home/nea/opt/open-design, plugin_dir=plugins/opendesign, dry_run=False)`
+at the SAME pin `open-design-v0.23.0` — the first REAL (non-dry) sync on
+the real plugin tree.
+
+**What landed:** the 8 upstream `packages/contracts/src/runtime/` files
+that slice ⑤ deliberately did not vendor (only the 2 deck-framework
+imports were required then): `html-injection-points.ts`,
+`membership-concurrency-limit.ts`, `model-window-limit.ts`,
+`od-next-capability.ts`, `preview-build-focus.ts`, `preview-guards.ts`,
+`preview-observability.ts`, `preview-runtime-state.ts`. Diff:
+`+8/~0/-0` — additions only; the pre-existing 29 files were byte-touched
+by NOTHING (`removed=0, changed=0` verified against the pre-pull SHA
+snapshot).
+
+**Route (the sanctioned sole-writer flow, first live exercise):**
+manifest `upstream_paths` already declared `packages/contracts/src/runtime/`
+(slice ⑤) → sync-runner real pull (atomic stage + rename; HASHES.sha256
+preserved verbatim) → hash-registration of the +8 (the ruling's bar-2
+step; HASHES 29 → 37; count reconciled in
+`test_snapshot_class_byte_fidelity.py`) → the sync appended register
+entry **id=5** (`status: "open"` emitted) → operator disposition
+(**re-apply** — the pull itself is the re-apply) annotated onto id=5
+with `status: "resolved"`.
+
+**Deviations from the carry-forward's literal text (findings, not silent
+edits):**
+
+1. **"expect no_change" did NOT hold pre-pull.** The ⑤ tree vendored 2
+   of 10 declared runtime files, so the same-tag diff was +8 (alarmed),
+   not zero. The real pull COMPLETED the membership; post-pull re-syncs
+   are true no-ops (dry and real — the idempotence assertion holds
+   post-completion). The end state is the ideal gate state: tree ==
+   pin∩declared exactly.
+2. **"register +1 only if real divergence — none expected" — one entry
+   WAS appended (id=5), and it is NOT a divergence** per the ⑤ register
+   adjudication (byte-faithful pin-faithful files; a membership
+   completion, not an upstream delta). The sync-runner's
+   alarm-on-nonempty-diff semantics conflate membership-completion with
+   drift — FLAGGED for the reviewer (a membership completion ideally
+   records a provenance event, not a CON §2 re-apply-or-drop debt).
+3. **copy_freely was NOT pulled.** Its same-tag diff is +1: the PNG
+   (`prompt-templates/image/notion-team-dashboard-live-artifact.preview.png`,
+   finding F-3 above). A real pull would land it and OVERRIDE the
+   recorded slice-② exclusion — the sync-runner honors no
+   parity-boundary exclusions (FLAGGED finding: parity rows are
+   invisible to the sync path). copy_freely stays at the ② state;
+   the exclusion remains the documented truth.
+4. **The ③ sync-emitted `pinning_test` template named a nonexistent
+   test class** (`TestSyncSnapshotDrift` vs the real
+   `TestSnapshotClassDrift`) — latent until the first real append;
+   caught by the reviewer's referential-integrity guard on this pull
+   and fixed in ⑥ (template + this entry's pointer).
+
+**6-assertion evidence (the gate):**
+
+| # | Assertion | Result |
+|---|---|---|
+| a | landed-tree ≡ diff_summary per-file SHA | 37/37 files blob-SHA-identical to the pin; 0 mismatches |
+| b | HASHES preserved + absent from summary | preserved verbatim through the rename; sha256sum -c clean (37/37); never in diff_summary |
+| c | register +1 only if real divergence | +1 (id=5) — membership completion, not a divergence; disposition landed (resolved); deviation documented above |
+| d | idempotence: re-sync ⇒ no_change | real + dry re-syncs both `no_change` |
+| e | crash-injection windows | covered in-suite: `TestSyncAtomicity` (mid-pull whole-or-nothing) + `TestRenameAsideAtomicity` (W3) — green |
+| f | pinning_test referential integrity | guard green post-fix (the ③ dangling-pointer bug closed) |
+
+**Promote-gate note (honest end state):** the pin
+`open-design-v0.23.0` is 16 days old as of this pull — the slice-⑥
+predicate (`pin age > 14d ⇒ refuse`) REFUSES promotes for the current
+tree state until the pin is refreshed via a real newer-tag sync, or the
+operator takes the journaled `--allow-stale-plugins` override. That is
+the gate working as designed: staleness is now VISIBLE at promote.

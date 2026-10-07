@@ -1050,8 +1050,10 @@ class TestRealPluginSync:
         # AUTHORED at slice ⑤; the prior slice-③ state was declared-
         # not-authored with no attribution).
         assert decl.own_outright.get("attribution"), "own_outright attribution rows required at slice ⑤"
-        # 4 SEEDED divergence-register entries (unchanged from slice ③)
-        assert len(decl.divergence_register) == 4
+        # 4 SEEDED entries (slice ③) + 1 REAL entry (slice ⑥: the real
+        # same-tag sync-runner pull completed the runtime/ membership and
+        # the sync appended id=5 — status resolved by operator disposition)
+        assert len(decl.divergence_register) == 5
         for entry in decl.divergence_register:
             assert "id" in entry
             assert "files" in entry

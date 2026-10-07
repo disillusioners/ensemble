@@ -177,7 +177,11 @@ class TestSnapshotClassByteFidelity:
         assert len(vendored) == len(recorded), (
             f"vendored file count {len(vendored)} != manifest entries {len(recorded)}"
         )
-        assert len(recorded) == 29, (
+        # 29 (slice ⑤) -> 37 (slice ⑥): the real same-tag sync-runner pull
+        # completed the runtime/ membership (+8 upstream files, byte-faithful
+        # to the pin, hash-registered via the sanctioned bar-2 step — see
+        # CURATION.md section 9 and MANIFEST.yaml register entry id=5).
+        assert len(recorded) == 37, (
             f"snapshot-class hash manifest must carry 29 entries "
             f"(10 daemon + 17 contracts + 2 runtime per slice-⑤ F1 vendoring); "
             f"got {len(recorded)}"
