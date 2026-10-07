@@ -973,14 +973,29 @@ class TestA4ToolCallPairingSnapToBoundary:
         )
 
     @pytest.mark.asyncio
-    async def test_mid_tool_execution_corpus_respects_kept_cap(self):
-        """History ENDS with a ToolMessage (agent died mid-tool-
-        execution; AIMessage that produced it was never returned).
-        The walk must respect ``kept >= 1`` — the final ToolMessage
-        stays in the tail as the terminal message. The next LLM
-        invoke will see an orphan, but the D1 pairing-synthesizer
-        in instance_messaging is the documented remediation (out
-        of scope for this commission)."""
+    async def test_mid_tool_execution_corpus_walk_only_advances_through_consecutive_tools(
+        self,
+    ):
+        """History ends with a ToolMessage whose AIMessage never
+        returned (mid-tool-execution orphan). Iteration-2 amendment
+        scope: the iteration-2 fix applies only to the
+        tail-ALL-ToolMessages case (N=2 ``[AI, Tool]``, N=3
+        ``[AI, Tool, Tool]``, etc.). For an orphan in the MIDDLE
+        of a HumanMessage-bearing tail, the A4 walk does NOT
+        advance (it only fires on consecutive ToolMessages at
+        the cut boundary). The orphan stays in the tail as the
+        terminal message. The D1 pairing-synthesizer in
+        instance_messaging is the documented remediation (out
+        of scope for this commission).
+
+        This test pins the AMENDED scope of the iteration-2 fix:
+        the walk handles tail-all-ToolMessages, not mid-tail
+        orphans. The mid-tail orphan case is acknowledged out of
+        scope; the floor does not produce an API-invalid history
+        in this shape (the HumanMessage at the cut is valid
+        on its own; the orphan ToolMessage in the tail is the
+        known residual that the D1 synthesizer handles).
+        """
         from langchain_core.messages import ToolMessage
 
         config = make_compaction_config(
@@ -988,10 +1003,14 @@ class TestA4ToolCallPairingSnapToBoundary:
             threshold=0.01,
         )
         # 3 messages, all injected, ending with a ToolMessage
-        # (orphan — no AIMessage). ceil(3/2)=2; natural cut: drop
-        # [0,1], keep [2]. The walk would advance because idx 2 is
-        # a ToolMessage, but kept=1 cap blocks it. Final
-        # ToolMessage stays in the tail.
+        # orphan. The walk checks corpus[1] (idx 1 of the
+        # nominal tail) — HumanMessage — and breaks. The
+        # orphan at idx 2 stays in the tail. Iteration-2
+        # amendment does NOT cover this case (the walk only
+        # advances through consecutive ToolMessages at the cut
+        # boundary, not into the middle of a Human-bearing
+        # tail). The D1 pairing-synthesizer handles this
+        # residual.
         msgs = [
             HumanMessage(
                 content="user-0", id="m-0",
@@ -1016,14 +1035,17 @@ class TestA4ToolCallPairingSnapToBoundary:
         assert result.compaction_type == (
             COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
         )
-        # kept >= 1 invariant — at least the notice + 1 tail
-        # message survive. messages_after = 1 (notice) + kept;
-        # kept in [1, ceil(3/2)=2] range.
-        assert result.messages_after >= 2, (
-            "kept>=1 invariant: the final ToolMessage must remain "
-            "in the tail as the terminal message even though its "
-            "AIMessage is missing — the D1 pairing-synthesizer is "
-            "the documented remediation"
+        # The walk does NOT advance (corpus[1] is HumanMessage,
+        # not a ToolMessage). kept=2, dropped=1.
+        # messages_after = 1 (notice) + 2 (Human@1 + orphan
+        # ToolMessage) = 3.
+        assert result.messages_after == 3, (
+            "mid-tail orphan: the walk does NOT advance past a "
+            "HumanMessage at the cut. The orphan ToolMessage "
+            "stays in the tail. Iteration-2 amendment only handles "
+            "tail-ALL-ToolMessages; this case is acknowledged out "
+            "of scope and the D1 pairing-synthesizer is the "
+            "documented remediation."
         )
         # messages_before = 3, messages_after <= messages_before + 1
         # (only the notice is added)
@@ -1058,31 +1080,37 @@ class TestA4ToolCallPairingSnapToBoundary:
         """The pairing-integrity assertion helper itself: for
         every ToolMessage in the corpus, the AIMessage bearing
         the matching ``tool_call_id`` is in the SAME partition
-        relative to the nominal cut (``ceil(N/2)``). The A4 snap
-        guarantees this by advancing the cut past consecutive
-        ToolMessages at the boundary, so the pairing holds at
-        the (post-snap) cut; the worst case for the partition
-        check is the NOMINAL cut (the A4-fix-correct cut is
-        further along, so the check is conservative).
+        relative to the POST-SNAP cut. The A4 snap + iteration-2
+        amendment guarantee this by walking the cut forward
+        through consecutive ToolMessages at the natural-cut
+        boundary (all the way to the end for the
+        tail-all-ToolMessages case, where the floor emits a
+        notice-only replacement).
 
         Invariant: the helper returns ``None`` (no orphan) on a
         pairing-clean corpus, and raises ``AssertionError`` on a
         pairing-broken corpus. The fixture exercises both
         branches.
 
-        The clean corpus: 4 messages. ceil(4/2)=2 → drop [0,1],
-        keep [2,3]. The AIMessage at idx 2 is in the retained
-        partition; its ToolMessage at idx 3 is also retained.
-        SAME PARTITION → no orphan.
+        The clean corpus: 4 messages. ceil(4/2)=2 nominal cut.
+        No consecutive ToolMessages at the cut, so the walk
+        does not advance. Both the AIMessage and the ToolMessage
+        land in the retained tail (idx 2, 3). SAME PARTITION
+        → no orphan.
 
-        The broken corpus: 2 messages. ceil(2/2)=1 → drop
-        [AIMessage at 0], keep [ToolMessage at 1]. The pair
-        straddles the nominal cut (worst case). This is exactly
-        the orphan shape the A4 snap is supposed to prevent
-        (with ``kept >= 1`` cap, the walk can't advance without
-        emptying the tail, so this IS a hard orphan — a 2-message
-        tool-call-pairing corpus is unsalvageable by the snap; the
-        pairing-synthesizer is the documented remediation).
+        The broken corpus: 4 messages with the AIMessage at idx
+        2 and the ToolMessage at idx 3 in the DROPPED head (0, 1)
+        AND a separate orphan ToolMessage at idx 3 of the tail
+        (corpus[2]=ToolMessage, corpus[3]=ToolMessage too).
+        Wait — rephrase: the broken shape is a pair straddling
+        the cut AFTER the walk advances. We construct a corpus
+        where the AIMessage is in the dropped head AND the
+        ToolMessage is in the retained tail, AND the walk does
+        NOT advance (because something non-ToolMessage sits at
+        the natural cut). The AIMessage@1 (tool_calls), no
+        ToolMessage match, but a non-ToolMessage at corpus[1].
+        Walk does not advance. The AIMessage@1 is in dropped,
+        the ToolMessage@2 is in retained → orphan.
         """
         from langchain_core.messages import AIMessage, ToolMessage
 
@@ -1091,7 +1119,9 @@ class TestA4ToolCallPairingSnapToBoundary:
         )
 
         # Pairing-clean: 4 messages, AIMessage+ToolMessage pair
-        # both in the retained tail (post-cut).
+        # both in the retained tail (post-cut, walk does not
+        # advance because corpus[2] is AIMessage, not a
+        # ToolMessage).
         clean_corpus = [
             HumanMessage(content="u-0", id="h-0"),
             HumanMessage(content="u-1", id="h-1"),
@@ -1106,15 +1136,33 @@ class TestA4ToolCallPairingSnapToBoundary:
         # Should not raise.
         helper(clean_corpus)
 
-        # Pairing-broken: 2 messages, AIMessage dropped /
-        # ToolMessage retained (the orphan shape the A4 snap is
-        # supposed to prevent — for N=2, ``kept >= 1`` cap blocks
-        # the walk, so the orphan is hard).
+        # Pairing-broken: AIMessage@1 (tool_calls) in dropped
+        # head, ToolMessage@2 (tool_call_id=call-1) in retained
+        # tail. The natural cut is at idx 2 (ceil(4/2)=2);
+        # corpus[2] is ToolMessage, so the walk ADVANCES past it
+        # (post_snap_cut=3). Now ToolMessage@2 is in dropped, no
+        # orphan. The walk then checks corpus[3] (also a
+        # ToolMessage), advances (post_snap_cut=4 = n). All four
+        # messages dropped, no orphan. The helper accepts.
+        #
+        # To produce a TRUE pairing-broken corpus, we need the
+        # walk to NOT advance past a ToolMessage. Construct:
+        #   idx 0: HumanMessage
+        #   idx 1: AIMessage(tool_calls=[X])  ← dropped
+        #   idx 2: HumanMessage  ← non-ToolMessage; walk STOPS here
+        #   idx 3: ToolMessage(tool_call_id=X)  ← retained
+        # The AIMessage is in dropped, the ToolMessage in
+        # retained → orphan. The walk correctly identifies this
+        # at the natural cut: corpus[2] is HumanMessage, walk
+        # does not advance, both messages land on different
+        # sides of the cut.
         broken_corpus = [
+            HumanMessage(content="u-0", id="h-0"),
             AIMessage(
                 content="", id="ai-0",
                 tool_calls=[{"name": "x", "args": {}, "id": "call-1"}],
             ),
+            HumanMessage(content="u-1", id="h-1"),
             ToolMessage(
                 content="orphan-result", id="tm-0",
                 tool_call_id="call-1",
@@ -1131,16 +1179,22 @@ class TestA4ToolCallPairingSnapToBoundary:
 
         For every ToolMessage in the corpus, an AIMessage bearing
         the matching ``tool_call_id`` must be in the SAME partition
-        relative to the nominal cut (``ceil(N/2)``). The A4 snap
-        guarantees this by advancing the cut past consecutive
-        ToolMessages at the boundary, so the pairing holds at the
-        (post-snap) cut; the worst case for the partition check
-        is the NOMINAL cut (the A4-fix-correct cut is further
-        along, so the check is conservative).
+        relative to the POST-SNAP cut. The A4 snap (iteration 1)
+        + iteration-2 amendment guarantees this by walking the
+        cut forward through consecutive ToolMessages at the
+        natural-cut boundary — INCLUDING all the way to the end
+        of the corpus when every candidate retained message is
+        an orphaned ToolMessage (notice-only replacement).
+
+        The helper mirrors the floor's snap logic exactly so the
+        test fixture is a faithful reproduction of the runtime
+        behavior.
 
         Used by:
           * ``test_tool_call_pair_straddling_cut_advances_safely``
             (the load-bearing regression test)
+          * ``TestA4Iteration2NoticeOnlyReplacement`` tests
+            (N=2 / N=3 tail-all-ToolMessages)
           * any future test that wants to pin pairing integrity
 
         Args:
@@ -1150,11 +1204,22 @@ class TestA4ToolCallPairingSnapToBoundary:
         Raises:
             AssertionError: when a ToolMessage is in one partition
                 (dropped/retained) while its matching AIMessage is
-                in the other — the A4 snap failed to keep the
-                pair together.
+                in the other — the A4 snap + iteration-2 amendment
+                failed to keep the pair together.
         """
         n = len(original_corpus)
+        # Compute the POST-SNAP cut. Mirror the floor's logic:
+        # nominal = ceil(N/2); advance through consecutive
+        # ToolMessages at the boundary. Iteration-2 amendment:
+        # no upper cap — the walk goes all the way to N if every
+        # message from the nominal cut onward is a ToolMessage.
         nominal_cut = math.ceil(n / 2)
+        post_snap_cut = nominal_cut
+        while post_snap_cut < n:
+            from daemon.compaction import _is_tool_message
+            if not _is_tool_message(original_corpus[post_snap_cut]):
+                break
+            post_snap_cut += 1
         for i, msg in enumerate(original_corpus):
             tcid = getattr(msg, "tool_call_id", None)
             if not tcid:
@@ -1180,8 +1245,8 @@ class TestA4ToolCallPairingSnapToBoundary:
                 # remediation; this helper does not assert against
                 # that case. Skip.
                 continue
-            in_dropped_msg = i < nominal_cut
-            in_dropped_ai = matching_ai_idx < nominal_cut
+            in_dropped_msg = i < post_snap_cut
+            in_dropped_ai = matching_ai_idx < post_snap_cut
             assert in_dropped_msg == in_dropped_ai, (
                 f"orphan ToolMessage at index {i} "
                 f"(tool_call_id={tcid!r}); its AIMessage at index "
@@ -1189,7 +1254,8 @@ class TestA4ToolCallPairingSnapToBoundary:
                 f"{'DROPPED' if in_dropped_ai else 'RETAINED'} "
                 f"partition while the ToolMessage is in the "
                 f"{'DROPPED' if in_dropped_msg else 'RETAINED'} "
-                f"partition - A4 snap failed"
+                f"partition - A4 snap (post-snap cut={post_snap_cut}) "
+                f"failed"
             )
 
 
@@ -1320,4 +1386,221 @@ class TestIProactiveSkipCounterAndEscalationWrite:
             f"the 3rd consecutive skip must write the "
             f"compaction_escalation_until metadata; update_calls="
             f"{update_calls}"
+        )
+
+
+# =============================================================================
+# A4 iteration-2 amendment — notice-only replacement for the
+# tail-all-ToolMessages hard-orphan case
+# =============================================================================
+# Reviewer finding (iteration 2): iteration 1's `kept >= 1` cap
+# produced an API-invalid history `[notice, orphaned ToolMessage]`
+# in the N=2 `[AI(tool_calls), Tool]` case — the floor would
+# CAUSE the 2013 tool-call-pairing failure it exists to prevent
+# (the exact failure shape this commission eliminates).
+#
+# Iteration-2 amendment: when the snap walk would consume the
+# ENTIRE remaining tail (every candidate retained message is an
+# orphaned ToolMessage), let it — emit a notice-only replacement
+# (replacement_messages = [notice], 0 retained originals). The
+# notice alone is API-valid (single HumanMessage) and non-empty
+# by construction. The seam persists it via the standard
+# Variant A/B path; `compacted_ids` covers all dropped originals
+# (the union rule carries them through, no silent-loss guard
+# trip).
+
+
+class TestA4Iteration2NoticeOnlyReplacement:
+    """Iteration-2 amendment: tail-all-ToolMessages → notice-only
+    replacement. The replacement is API-valid (single HumanMessage
+    history) and non-empty by construction."""
+
+    @pytest.mark.asyncio
+    async def test_n2_ai_tool_pair_emits_notice_only(self):
+        """N=2 ``[AIMessage(tool_calls=[X]), ToolMessage(tool_call_id=X)]``
+        is the load-bearing regression for iteration 2. The walk
+        advances through the ToolMessage (kept=0, dropped=2);
+        the floor emits a notice-only replacement. Non-empty
+        (the notice), API-valid (single HumanMessage), no
+        orphan anywhere, ``compacted_ids`` covers both
+        originals."""
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+        )
+        # 2 messages, both injected (so the all-injected gate
+        # fires and the floor runs). ceil(2/2)=1 nominal cut.
+        # Walk: corpus[1] = ToolMessage → advance. snap_adjust=1.
+        # dropped=2, kept=0. Notice-only.
+        msgs = [
+            AIMessage(
+                content="", id="m-0",
+                tool_calls=[{"name": "x", "args": {}, "id": "call-1"}],
+                additional_kwargs={"injected_message": True},
+            ),
+            ToolMessage(
+                content="result", id="m-1",
+                tool_call_id="call-1",
+                additional_kwargs={"injected_message": True},
+            ),
+        ]
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(
+            make_compaction_context(config, msgs)
+        )
+        assert result is not None
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        )
+        # Notice-only shape: 0 retained originals, messages_after
+        # = 1 (the notice alone).
+        assert result.messages_after == 1, (
+            f"iteration-2 amendment: N=2 tail-all-ToolMessages "
+            f"must emit a notice-only replacement (kept=0); got "
+            f"messages_after={result.messages_after}"
+        )
+        # The replacement is non-empty (the notice is the only
+        # non-RemoveMessage entry; both originals are dropped).
+        non_drops = [
+            m for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage)
+        ]
+        assert len(non_drops) == 1
+        assert non_drops[0].additional_kwargs.get("context_kind") == (
+            COMPACTION_NOTICE_CONTEXT_KIND
+        )
+        # Two RemoveMessages (one per original); the seam's
+        # pre-write guard sees: snapshot = 2 ids, replacement =
+        # 1 notice (new id) + 2 RemoveMessages; compacted_ids
+        # = both originals. The guard accepts.
+        remove_count = sum(
+            1 for m in result.replacement_messages
+            if isinstance(m, RemoveMessage)
+        )
+        assert remove_count == 2
+        # compacted_ids covers BOTH originals
+        assert result.compacted_ids is not None
+        assert "m-0" in result.compacted_ids
+        assert "m-1" in result.compacted_ids
+        # No orphan: pairing-integrity helper accepts this shape
+        # (both messages in the dropped head, none in the tail).
+        TestA4ToolCallPairingSnapToBoundary._assert_no_orphan_tool_message(
+            msgs
+        )
+
+    @pytest.mark.asyncio
+    async def test_n3_ai_tool_tool_emits_notice_only(self):
+        """N=3 ``[AIMessage(tool_calls), ToolMessage, ToolMessage]``
+        (two adjacent orphan ToolMessages). Walk advances
+        through both. dropped=3, kept=0. Notice-only."""
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+        )
+        msgs = [
+            AIMessage(
+                content="", id="m-0",
+                tool_calls=[{"name": "x", "args": {}, "id": "call-1"}],
+                additional_kwargs={"injected_message": True},
+            ),
+            ToolMessage(
+                content="result-1", id="m-1",
+                tool_call_id="call-1",
+                additional_kwargs={"injected_message": True},
+            ),
+            ToolMessage(
+                content="result-2", id="m-2",
+                tool_call_id="call-2",
+                additional_kwargs={"injected_message": True},
+            ),
+        ]
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(
+            make_compaction_context(config, msgs)
+        )
+        assert result is not None
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        )
+        # Walk advances past both ToolMessages; dropped=3,
+        # kept=0. Notice-only.
+        assert result.messages_after == 1
+        non_drops = [
+            m for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage)
+        ]
+        assert len(non_drops) == 1
+        assert non_drops[0].additional_kwargs.get("context_kind") == (
+            COMPACTION_NOTICE_CONTEXT_KIND
+        )
+        # compacted_ids covers all 3 originals
+        assert result.compacted_ids is not None
+        for mid in ("m-0", "m-1", "m-2"):
+            assert mid in result.compacted_ids, (
+                f"compacted_ids must cover {mid} in the N=3 "
+                f"tail-all-ToolMessages case"
+            )
+
+    @pytest.mark.asyncio
+    async def test_n1_single_tool_message_emits_notice_only(self):
+        """N=1, single ToolMessage (the AIMessage that produced
+        it was never returned — already-invalid input). The
+        iteration-2 amendment's walk advances past the lone
+        ToolMessage (post_snap_cut = 1 = N), so the floor
+        emits a notice-only replacement. This is strictly
+        BETTER than the iteration-1 behavior of keeping the
+        orphan in the tail — iteration 1 would have produced
+        ``[notice, lone orphan]`` (API-invalid), iteration 2
+        produces ``[notice]`` (API-valid).
+
+        The original spec said N=1 "stays under the existing
+        no-drop rule (input was already invalid; floor doesn't
+        worsen it)". The iteration-2 walk happens to cover
+        N=1 too because the loop condition is `post_snap_cut
+        < n` and the lone ToolMessage at corpus[0] is a
+        ToolMessage. The walk advances, kept=0, dropped=1.
+        This is a strict improvement over the iteration-1
+        no-drop behavior — the floor now produces an
+        API-valid history in this case.
+        """
+        from langchain_core.messages import ToolMessage
+
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.01,
+        )
+        msgs = [
+            ToolMessage(
+                content="lone-orphan", id="m-0",
+                tool_call_id="missing-aimessage",
+                additional_kwargs={"injected_message": True},
+            ),
+        ]
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(
+            make_compaction_context(config, msgs)
+        )
+        # N=1, single ToolMessage: the walk advances past the
+        # lone ToolMessage; the floor emits a notice-only
+        # replacement. API-valid (single HumanMessage history).
+        assert result is not None
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        )
+        assert result.messages_after == 1, (
+            "N=1 tail-all-ToolMessages: notice-only replacement "
+            "(strict improvement over iteration-1's "
+            "[notice, orphan] history)"
+        )
+        non_drops = [
+            m for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage)
+        ]
+        assert len(non_drops) == 1
+        assert non_drops[0].additional_kwargs.get("context_kind") == (
+            COMPACTION_NOTICE_CONTEXT_KIND
         )

@@ -2300,15 +2300,26 @@ class ContextCompactor:
     # Variant A/B path will persist as a REAL SHRINK. The floor of
     # the compaction ladder.
     #
-    # Retained-count rule (PIN — A4 reviewer amendment):
+    # Retained-count rule (PIN — A4 reviewer amendment, iteration 2):
     #   NOMINAL: kept = ceil(N/2), dropped = floor(N/2)
-    #   AMENDED (post-A4 snap-to-boundary): kept >= ceil(N/2) is the
+    #   AMENDED (post-A4 snap-to-boundary): kept = ceil(N/2) is the
     #     NOMINAL target; the A4 snap may reduce ``kept`` by a bounded
     #     number of messages (one per consecutive ToolMessage at the
     #     cut boundary) so an AIMessage(tool_calls) + ToolMessage
-    #     pair lands either FULLY dropped or FULLY retained. NEVER
-    #     below 1. The HumanMessage-only corpora (the 639-message
-    #     incident replica) snap ZERO messages — the pinned
+    #     pair lands either FULLY dropped or FULLY retained.
+    #   FLOOR (iteration 2 amendment): kept >= 0 (NOT 1) — when
+    #     the entire nominal tail is a sequence of orphaned
+    #     ToolMessages (N=2 ``[AI, Tool]``, N=3 ``[AI, Tool, Tool]``,
+    #     etc.), the floor drops them all and emits a notice-only
+    #     replacement. The notice alone is API-valid (single
+    #     HumanMessage) and non-empty by construction. Iteration 1
+    #     capped kept at 1, which produced the API-invalid
+    #     ``[notice, orphaned ToolMessage]`` history that 400s
+    #     on the next invoke with the 2013 NON-RETRYABLE error —
+    #     that is the exact failure shape this commission exists
+    #     to eliminate. Iteration 2 removes the cap.
+    #   The HumanMessage-only corpora (the 639-message incident
+    #     replica) snap ZERO messages — the pinned
     #     639 → 320 (kept) + 1 (notice) = 321 messages_after
     #     expectation is UNCHANGED.
     # The corpus is the FULL message channel (selectable + hoisted +
@@ -2422,19 +2433,68 @@ class ContextCompactor:
         #      corpus; it advances at most until it hits a non-
         #      ToolMessage (or the kept>=1 cap).
         #
-        # Subtlety — mid-tool-execution history: if the FINAL
-        # message of the corpus is itself a ToolMessage (e.g. the
-        # agent died mid-tool-execution and the history ends with
-        # a result whose AIMessage was never returned), the walk
-        # cannot drop it (kept >= 1 cap), so it stays in the tail
-        # as the terminal message. The next LLM invoke will see
-        # an orphan ToolMessage and the pairing-synthesizer (D1
-        # seam in ``daemon/services/instance_messaging.py``) is
-        # the documented remediation — that seam is unchanged in
-        # this commission.
+        # A4 REVIEWER FIX (iteration 1) — snap-to-boundary walk +
+        # iteration-2 AMENDMENT — drop the kept>=1 cap when the
+        # entire retained tail would be orphaned ToolMessages.
+        #
+        # Iteration 1 introduced ``max_snap = kept - 1`` to cap the
+        # walk so at least one message remained in the tail. The
+        # intent was right but the invariant was WRONG: the
+        # correct invariant is that the replacement must be
+        # non-empty AND API-valid. The notice alone guarantees
+        # non-emptiness (a single-HumanMessage history is valid;
+        # the floor always injects it). Retaining an orphaned
+        # ToolMessage to satisfy ``kept >= 1`` is strictly worse
+        # than retaining nothing — it produces an API-invalid
+        # history (``[notice, orphaned ToolMessage]``) that 400s
+        # on the NEXT invoke with ``tool call result does not
+        # follow tool call (2013)`` NON-RETRYABLE. The error
+        # state on reactivation sends the SAME invalid history →
+        # deterministic brick. That is the exact failure shape
+        # this commission exists to eliminate; "last effort
+        # ALWAYS succeeds" is violated in that corner.
+        #
+        # Iteration 2 amendment: the walk advances freely past
+        # ToolMessages at the cut. If the ENTIRE retained tail is
+        # a sequence of orphaned ToolMessages (N=2 ``[AI, Tool]``,
+        # N=3 ``[AI, Tool, Tool]``, etc.), the walk consumes them
+        # all and the floor emits a notice-only replacement
+        # (``replacement_messages = [notice]``, 0 retained
+        # originals). The result is API-valid by construction
+        # (notice-only is a single-HumanMessage history) and
+        # non-empty by construction (the notice is always
+        # present). ``compacted_ids`` covers all dropped
+        # originals — the union rule in
+        # ``_build_last_effort_replacement`` carries them
+        # through, and the seam's pre-write guard sees the
+        # notice as the only new id (allowed under the sentinel
+        # recipe).
+        #
+        # Guardrails retained from iteration 1:
+        #   1. The walk is bounded — it never scans the entire
+        #      corpus; it advances only while consecutive
+        #      ToolMessages sit at the natural cut.
+        #   2. The 639-message HumanMessage-only incident replica
+        #      snaps ZERO messages — the pinned
+        #      ``639 -> 320 (kept) + 1 (notice) = 321
+        #      messages_after`` expectation is UNCHANGED.
+        #   3. The walk still stops on the FIRST non-ToolMessage
+        #      at the cut boundary (so a sequence like
+        #      ``[AI, Tool, Tool, Human]`` advances past the AI
+        #      and the first Tool, stops at the Human, and the
+        #      Human lands in the retained tail — no orphan, the
+        #      floor produces a normal replacement).
+        #
+        # AMENDED retained-count rule (PIN, iteration 2):
+        #   NOMINAL: kept = ceil(N/2)
+        #   AMENDED: kept = ceil(N/2) - bounded_pairing_snap_adjustment
+        #   FLOOR: kept >= 0 (NOT 1) — when the entire nominal
+        #     tail is orphaned ToolMessages, the floor drops them
+        #     all and emits a notice-only replacement.
+        #   The notice alone keeps the history API-valid and
+        #   non-empty.
         snap_adjust = 0
-        max_snap = kept - 1  # keep at least 1 in the tail
-        while snap_adjust < max_snap:
+        while dropped + snap_adjust < n:
             candidate_idx = dropped + snap_adjust
             candidate = corpus[candidate_idx]
             if not _is_tool_message(candidate):
@@ -2443,13 +2503,30 @@ class ContextCompactor:
         if snap_adjust > 0:
             dropped = dropped + snap_adjust
             kept = n - dropped
-            logger.warning(
-                "[Compaction][obs] floor tool-call-pairing snap: "
-                "advanced cut by %d message(s) to keep tool_call "
-                "pairs intact; kept=%d, dropped=%d (n=%d, "
-                "amended retained-count rule)",
-                snap_adjust, kept, dropped, n,
-            )
+            if kept == 0:
+                # Notice-only replacement: the entire nominal tail
+                # was a sequence of orphaned ToolMessages. The
+                # notice is the only retained message; it is
+                # API-valid on its own (single HumanMessage) and
+                # non-empty by construction. ``compacted_ids`` is
+                # the union of dropped originals (set below) and
+                # passes the seam's pre-write guard.
+                logger.warning(
+                    "[Compaction][obs] floor tool-call-pairing snap: "
+                    "advanced cut by %d message(s); nominal tail was "
+                    "ALL orphaned ToolMessages, floor emits "
+                    "notice-only replacement (kept=0, n=%d, "
+                    "amended retained-count rule iteration-2)",
+                    snap_adjust, n,
+                )
+            else:
+                logger.warning(
+                    "[Compaction][obs] floor tool-call-pairing snap: "
+                    "advanced cut by %d message(s) to keep tool_call "
+                    "pairs intact; kept=%d, dropped=%d (n=%d, "
+                    "amended retained-count rule)",
+                    snap_adjust, kept, dropped, n,
+                )
         head_to_drop = corpus[:dropped]
         tail_to_keep = corpus[dropped:]
 
