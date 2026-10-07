@@ -476,7 +476,7 @@ class TestOrphanSweepPruneHappyPath:
         checkpointer.list_thread_ids = AsyncMock(return_value=[opx_1, opx_2])
         instance_repo = MagicMock()
         # Empty instance list → BOTH threads are orphans.
-        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.list = MagicMock(return_value=([], 0, False))
 
         job = CheckpointCleanupJob(
             config=PersistenceConfig(),
@@ -534,7 +534,7 @@ class TestOrphanSweepPruneNeverRaise:
             return_value=[opx_fail, opx_ok],
         )
         instance_repo = MagicMock()
-        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.list = MagicMock(return_value=([], 0, False))
 
         job = CheckpointCleanupJob(
             config=PersistenceConfig(),

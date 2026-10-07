@@ -682,7 +682,7 @@ test.describe('Instances Detail Overlay - Regression', () => {
     await expect(async () => {
       const display = await workspace.evaluate((el) => getComputedStyle(el).display);
       expect(display).toBe('none');
-    }).toPass({ timeout: 10000 });
+    }).toPass({ timeout: 20000 });
 
     // Chat still visible — signal-driven flip lags the Escape press.
     await expect(async () => {

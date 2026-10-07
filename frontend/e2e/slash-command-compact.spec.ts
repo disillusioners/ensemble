@@ -368,7 +368,7 @@ test.describe('/compact slash-command UX (Phase 2)', () => {
     await sendCommand(page, '/compact');
     await page.waitForSelector(`${CARD}[data-command-phase="fallback_applied"]`, { timeout: 60000 });
     await expect(page.locator(CARD)).toContainText(
-      'Compaction timed out partway — kept the summarized sections, trimmed the un-summarized older section',
+      'Compaction timed out partway — kept the summaries that completed, trimmed the messages that could not be summarized',
     );
     await expect(page.locator(CARD)).toContainText('budget_exhausted');
     await expect(page.locator(CARD)).toContainText('100,000 → 40,000 tokens');
