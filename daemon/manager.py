@@ -4509,12 +4509,7 @@ class InstanceManager:
                 # added XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS /
                 # DBUS_SYSTEM_BUS_ADDRESS to the allowlist for bus
                 # discovery on session-env Linux hosts — non-secret
-                # F2-fence-neutral; ENSEMBLE_UPGRADE_LIVE is not in the
-                # ALLOWLIST (ambient stays stripped). When THIS gate fires
-                # (verified arm) the extras DO forward it via the
-                # explicit-extra merge below — Option D threads the merged
-                # dict into the transient unit verbatim via --setenv
-                # (ruling R3); the unverified path forwards nothing.)
+                # F2-fence-neutral; ENSEMBLE_UPGRADE_LIVE stays stripped.)
                 if _uj.is_verified_arm(op):
                     argv_ext, env_ext = _uj._verified_arm_extras(op)
                     argv = argv + argv_ext
@@ -4545,16 +4540,12 @@ class InstanceManager:
             child_pid, _spawn_mode_note = _uj.spawn_executor(
                 argv, install_dir, extra_env, run_id=run_id
             )
-            # Option D (Stage-2.2a): log the ACTUAL spawn mode — the
-            # transient-service unit name when the service branch fired,
-            # the legacy text otherwise (mode notes carry the branch
-            # detail: in-flight / fast-exit / journal-truth). The note is
-            # computed inside spawn_executor from the SAME detection
-            # result, so we consume it directly (no second detection
-            # here). Under Option D the payload runs INSIDE a transient
-            # systemd unit (neither our pgid nor our cgroup); the logged
-            # pid is the systemd-run --wait CLIENT, which the reaper's
-            # waitpid observes to the UNIT's exit.
+            # r-f82e fix cycle 1: log the ACTUAL spawn mode — scope unit
+            # name when scope, legacy text otherwise. Pre-cycle-1 log
+            # always said "(daemonized, start_new_session)" which was
+            # stale under scope mode. The note is computed inside
+            # spawn_executor from the SAME detection result, so we
+            # consume it directly (no second detection here).
             logger.info(
                 "[system-execution] fired %s executor run_id=%s pid=%s %s",
                 kind, run_id, child_pid, _spawn_mode_note,
@@ -4595,26 +4586,6 @@ class InstanceManager:
                     "[system-execution] pending_op owner update failed: %s", exc
                 )
             return True
-        except _uj.ExecutorSystemdUnavailable as exc:
-            # Option D loud refusal (ruling R6, architecture-recommendation.md
-            # §5.3 :115): the host is unit-managed but the transient executor
-            # unit could not be started. spawn_executor has ALREADY journaled
-            # the ``refusal`` event carrying reason=executor-systemd-unavailable
-            # (which reconcile_pending_op treats as terminal — the armed op
-            # closes as refused and the wake sweep notifies the arming
-            # instance). There is deliberately NO legacy setsid fallback
-            # here: a silent fallback would re-open the kill class this
-            # commission exists to close. The marker stays consumed (one
-            # shot per armed op); the pending_op is already closed as
-            # refused by the journal write inside the spawn seam.
-            logger.warning(
-                "[system-execution] LOUD REFUSAL — executor systemd transient "
-                "unit unavailable for run_id=%s (%s): %s — nothing spawned, "
-                "NO legacy fallback (kill-class guard); journal token "
-                "executor-systemd-unavailable recorded",
-                run_id, kind, exc,
-            )
-            return False
         except Exception as exc:
             logger.warning(
                 "[system-execution] drain failed for %s: %s — the journal "
@@ -7506,7 +7477,7 @@ class InstanceManager:
             # AND .latest_for_plugin(plugin) WHERE plugin=? predicates.
             (
                 "CREATE INDEX IF NOT EXISTS ix_drift_events_plugin "
-                "ON drift_events (plugin)"
+                "ON drift_events(plugin)"
             ),
             # ix_drift_events_plugin_divergence — composite, backs the
             # engine's DELETE-WHERE resolution predicate
@@ -7514,14 +7485,14 @@ class InstanceManager:
             # divergence_id=?) AND any future composite reads.
             (
                 "CREATE INDEX IF NOT EXISTS ix_drift_events_plugin_divergence "
-                "ON drift_events (plugin, divergence_id)"
+                "ON drift_events(plugin, divergence_id)"
             ),
             # ix_drift_events_observed_at — backs
             # DriftEventRepository.list_unresolved's ORDER BY
             # observed_at walk (oldest-first verdicts; engine sweepers).
             (
                 "CREATE INDEX IF NOT EXISTS ix_drift_events_observed_at "
-                "ON drift_events (observed_at)"
+                "ON drift_events(observed_at)"
             ),
         )
         with self._engine.begin() as conn:
