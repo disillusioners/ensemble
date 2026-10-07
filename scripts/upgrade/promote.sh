@@ -38,10 +38,17 @@
 #   TARGET=live ADDITIONALLY requires BOTH the ENSEMBLE_UPGRADE_LIVE=1
 #   guard env AND the explicit --f2-verified-closed operator flag
 #   (MINOR-4b: a second factor, not a replacement — see the F2 gate).
-#   --allow-stale-plugins overrides the plugin-staleness predicate
-#   (REC comp 13, slice ⑥: pin age > 14d / unresolved divergence /
-#   unowned-alarm escalation ⇒ refuse) — argv-only, JOURNALED on the
-#   install dir, mirrors --allow-stale-stage.
+#   --allow-stale-plugins explicitly records the slice-⑥ override on
+#   the install dir (audit-continuity back-compat — coincides with the
+#   new default since the 2026-10-07 allow-stale flip; see lib.sh
+#   _plugin_staleness_journal_override). argv-only, mirrors
+#   --allow-stale-stage.
+#   --block-on-stale opts BACK INTO the slice-⑥ refuse-on-stale
+#   behavior (PROMOTE_STRICT_STALENESS=1). Without it, stale plugins
+#   journal `plugin_staleness_observed` and the promote PROCEEDS
+#   (ratified 2026-10-07 default — stale pins are the steady state,
+#   not a promote-blocking anomaly). STRICT wins over OVERRIDE on
+#   conflict (strict is the "loud failure" choice).
 #
 # EXIT CODES: 0 committed · 1 rolled back (env recovered, promote failed) ·
 # 78 refusal (preflight/halt/cooldown/cap/quarantine/integrity/busy/live/
@@ -82,13 +89,24 @@ while [ $i -lt ${#args[@]} ]; do
             ;;
         --allow-stale-plugins)
             # Slice ⑥ (REC comp 13): argv-only override for the
-            # plugin-staleness predicate (pin age / unresolved
-            # divergence / unowned-alarm escalation). Journaled on
-            # the install dir by the predicate helper (one entry per
-            # reason token, operator_accepted=true). Mirrors
-            # --allow-stale-stage (argv-only, refused at the gate,
-            # audited on accept).
+            # plugin-staleness predicate. Since the 2026-10-07
+            # allow-stale flip this coincides with the DEFAULT
+            # (stale pins are the steady state; the predicate's
+            # verdict is journaled and the promote PROCEEDS).
+            # Keeping the flag as audit-continuity back-compat:
+            # when an operator explicitly passes it, the journal
+            # records the OLD `plugin_staleness_override` event
+            # (operator_accepted=true) — distinct from the
+            # unattended `plugin_staleness_observed` default.
             PROMOTE_STALENESS_OVERRIDE=1
+            ;;
+        --block-on-stale)
+            # Allow-stale flip 2026-10-07 changed the default to
+            # observe-and-proceed. This flag opts BACK INTO the
+            # slice-⑥ refuse-on-stale behavior (stale ⇒ exit 78
+            # refusal journaled). Opt-in only — strict wins over
+            # override on conflict.
+            PROMOTE_STRICT_STALENESS=1
             ;;
         -h|--help) sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "promote: unknown flag '$arg' — set VERSION=<ver> env or use --help" >&2; exit 78 ;;
@@ -182,14 +200,25 @@ promote_entry_check "$VERSION"
 # (before 1f opens the journal txn; before any stop/flip mutation).
 supervision_preflight
 
-# 1d-ter. Plugin-staleness predicate (REC comp 13, slice ⑥): pin age
-# > 14d OR unresolved divergence OR unowned-alarm escalation ⇒ refuse
-# (exit 78, journaled reason token). Fail-closed: an unevaluable gate
-# refuses; a repo with no plugins/ passes trivially (no spurious
-# blocks on plugin-less promotes). Override: --allow-stale-plugins
-# (argv-only, journaled — the stage.sh freshness-guard discipline).
-# Runs BEFORE integrity so staleness is visible at the earliest
-# refusal point, and BEFORE any stop/flip mutation.
+# 1d-ter. Plugin-staleness predicate (REC comp 13, slice ⑥ — default
+# FLIPPED 2026-10-07 to observe-and-proceed). Predicate output:
+#   - fresh  ⇒ proceed (rc=0).
+#   - stale  ⇒ DEFAULT (no strict, no override): journal
+#     plugin_staleness_observed + PROCEED.
+#   - stale  + PROMOTE_STRICT_STALENESS=1 (env) / --block-on-stale
+#     (argv, opt-in): refuse exit 78 (slice-⑥ blocking restored;
+#     journaled as a `refusal` event with the predicate's code).
+#   - stale  + PROMOTE_STALENESS_OVERRIDE=1 (env) / --allow-stale-plugins
+#     (argv, audit-continuity back-compat): journal
+#     plugin_staleness_override + PROCEED.
+#   - STRICT wins OVER OVERRIDE on conflict (strict = "loud failure").
+#   - predicate unevaluable (no python, no module, predicate crash) ⇒
+#     refuse exit 78 unless overridden (fail-closed — unknown tooling
+#     is LOUD; stale pins are the steady state).
+# A repo with no plugins/ passes trivially (no spurious blocks on
+# plugin-less promotes). Runs BEFORE integrity so staleness is
+# visible at the earliest refusal point, and BEFORE any stop/flip
+# mutation.
 promote_plugin_staleness_check
 
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest

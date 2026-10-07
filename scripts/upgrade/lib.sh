@@ -1906,9 +1906,31 @@ _freshness_refuse() {
 # DB, no daemon. A repo with NO plugins/ dir passes trivially (the
 # gate must not spuriously block plugin-less promotes).
 #
-# OVERRIDE: --allow-stale-plugins sets PROMOTE_STALENESS_OVERRIDE=1
-# (argv-only, mirrors --allow-stale-stage); every overridden refusal
-# is JOURNALED on the install dir (reason token + operator_accepted).
+# TRIAGE OUTCOMES (default changed at allow-stale flip 2026-10-07 —
+# stale pins are the steady state, NOT a promote-blocking anomaly):
+#   - predicate FRESH ⇒ proceed (rc=0).
+#   - predicate STALE ⇒ DEFAULT: journal `plugin_staleness_observed`
+#     + PROCEED (rc=0). STRICT (PROMOTE_STRICT_STALENESS=1 env or
+#     --block-on-stale argv, opt-in): refuse exit 78 (slice-⑥
+#     blocking restored — journaled as a `refusal` event with the
+#     predicate's code token). OVERRIDE (PROMOTE_STALENESS_OVERRIDE=1
+#     env or --allow-stale-plugins argv, audit-continuity back-compat):
+#     journal `plugin_staleness_override` + PROCEED. STRICT wins over
+#     OVERRIDE on conflict (strict is the "loud failure" choice).
+#   - predicate UNEVALUABLE (no interpreter, no module, predicate
+#     crash) ⇒ refuse exit 78 unless overridden (fail-closed — unknown
+#     tooling is LOUD; stale pins are the steady state).
+#
+# OVERRIDE / STRICT (argv-only, mirrors --allow-stale-stage argv-only
+# discipline): --allow-stale-plugins sets PROMOTE_STALENESS_OVERRIDE=1;
+# --block-on-stale sets PROMOTE_STRICT_STALENESS=1. Every override and
+# every observed event is JOURNALED on the install dir (reason token +
+# operator_accepted). The `plugin_staleness_observed` event is
+# JOURNAL-ONLY — explicitly NOT mapped in
+# daemon/tools/upgrade_journal.py:ALERT_KIND_BY_EVENT (stale is no
+# longer a refusal/rollback/halt-class event). The only SSE-mapped kinds
+# the gate may emit remain halt/refusal/rollback/sweep_rollback/
+# quarantine.
 #
 # IMPLEMENTATION NOTE: the predicate is a stdlib+PyYAML-only Python
 # module (daemon/plugin_subsystem/promote_staleness.py) invoked by
@@ -1919,9 +1941,10 @@ _freshness_refuse() {
 # unreadable) unless overridden — an unevaluable gate is a refused
 # gate, never a silent pass.
 #
-# Exit-code contract of THIS function: returns 0 = fresh/overridden;
-# every refusal path exits 78 itself (the promote_entry_check caller
-# convention — L11 tidier).
+# Exit-code contract of THIS function: returns 0 = fresh/observed/
+# overridden; every refusal path (strict refuse; unevaluable refuse)
+# exits 78 itself (the promote_entry_check caller convention — L11
+# tidier).
 
 _plugin_staleness_journal_override() {
     local reason="$1" detail="$2"
@@ -1932,6 +1955,30 @@ _plugin_staleness_journal_override() {
         "$detail (reason=$reason operator_accepted=true)" \
         >/dev/null 2>&1 \
         || _warn "plugin-staleness override journal append FAILED (best-effort) — override is taken but the audit trail is incomplete; reason=$reason"
+}
+
+# _plugin_staleness_journal_observed <plugin> <reasons_concat> — best-
+# effort journal append for a STALE verdict accepted under the new
+# default (allow-stale flip 2026-10-07 — stale pins are the steady
+# state, NOT a promote-blocking anomaly; the event is JOURNALED for
+# audit but the promote PROCEEDS unless strict mode opts back in).
+# Idempotent and unlocked (same durable-landing discipline as
+# _plugin_staleness_journal_override: journal_init first, then plain
+# journal_history_append). The new event kind
+# `plugin_staleness_observed` is journal-ONLY — explicitly NOT mapped
+# in daemon/tools/upgrade_journal.py:ALERT_KIND_BY_EVENT (stale is no
+# longer a refusal/rollback/halt-class event). STRICT refusals and
+# UNEVALUABLE refusals still flow through _freshness_refuse → `refusal`
+# (SSE-mapped).
+_plugin_staleness_journal_observed() {
+    local plugin="$1" reasons="$2"
+    if [ -d "${INSTALL_DIR:-}" ]; then
+        journal_init >/dev/null 2>&1 || true
+    fi
+    journal_history_append "plugin_staleness_observed" \
+        "plugin=$plugin reasons=$reasons" \
+        >/dev/null 2>&1 \
+        || _warn "plugin-staleness observed journal append FAILED (best-effort) — observed is taken but the audit trail is incomplete; plugin=$plugin"
 }
 
 promote_plugin_staleness_check() {
@@ -2040,17 +2087,35 @@ promote_plugin_staleness_check() {
         if [ "$rc" -ne 3 ] || [ -z "$code" ]; then
             code="plugin-staleness-unreadable"
         fi
-        if [ "${PROMOTE_STALENESS_OVERRIDE:-0}" = "1" ]; then
+        if [ "${PROMOTE_STRICT_STALENESS:-0}" = "1" ]; then
+            # Strict mode (opt-in to slice-⑥ blocking, 2026-10-07 flip
+            # flipped the DEFAULT — strict is the explicit "loud failure"
+            # choice now). The OVERRIDE flag does NOT bypass strict:
+            # strict and override are orthogonal, strict wins on
+            # conflict.
+            _freshness_refuse "$code" \
+                "promote refused (strict staleness mode): plugin $pdir failed the plugin-staleness predicate (rc=$rc): $(printf '%s\n' "$out" | head -n 8 | tr '\n' ' ') " \
+                "Strict staleness is an OPT-IN to the slice-⑥ refuse-on-stale behavior (PROMOTE_STRICT_STALENESS=1 env or --block-on-stale argv). " \
+                "Remedies, in order: " \
+                "  1) fix the named condition (refresh the pin via a real sync; land the divergence disposition; assign alarm_owner) " \
+                "  2) drop the strict env/argv to fall back to the default (stale observed + journaled, promote proceeds)"
+            # _freshness_refuse exits 78 — never reached.
+        elif [ "${PROMOTE_STALENESS_OVERRIDE:-0}" = "1" ]; then
             _warn "PLUGIN-STALENESS OVERRIDE: $pdir is stale ($code) — proceeding (operator accepted; journaled)"
             _plugin_staleness_journal_override "$code" \
                 "override: $pdir failed the plugin-staleness predicate (rc=$rc): $(printf '%s\n' "$out" | head -n 8 | tr '\n' ' ')"
             continue
         fi
-        _freshness_refuse "$code" \
-            "promote refused: plugin $pdir failed the plugin-staleness predicate (rc=$rc): $(printf '%s\n' "$out" | head -n 8 | tr '\n' ' ') " \
-            "Remedies, in order: " \
-            "  1) fix the named condition (refresh the pin via a real sync; land the divergence disposition; assign alarm_owner) " \
-            "  2) pass --allow-stale-plugins to override (JOURNALED on the install dir; unsafe on real rungs)"
+        # DEFAULT (allow-stale flip 2026-10-07): stale pins are the
+        # steady state. The predicate's verdict is JOURNALED for audit
+        # via `plugin_staleness_observed` and the promote PROCEEDS
+        # (return 0 at the function end). STRICT (above) opts back
+        # into the slice-⑥ blocking. OVERRIDE (above) is the explicit
+        # audit-continuity back-compat — it journaled the OLD
+        # `plugin_staleness_override` event on the install dir.
+        _warn "PLUGIN-STALENESS OBSERVED: $pdir is stale ($code) — proceeding (default; journaled for audit)"
+        _plugin_staleness_journal_observed "$pdir" \
+            "$(printf '%s\n' "$out" | tr '\n' '|')"
     done
     return 0
 }
