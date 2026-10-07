@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "plugins-convention/manifest.schema.json",
   "title": "Plugin Manifest v1",
-  "description": "Plugin Subsystem v1 manifest vocabulary (MANIFEST.yaml). Additive epoch 1.0.2 (CON \u00a78). FROZEN surface per .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md \u00a72. Unknown fields are refused by construction (additionalProperties: false at every level). Division of labor: THIS SCHEMA expresses vocabulary SHAPE (types, enums, allowed keys); policy checks whose refusal codes are semantically demanded by the validation matrix (kebab name, alarm_owner presence, parity section presence, divergence-entry well-formedness, fence completeness, tag-only pins) live in daemon/plugin_subsystem/manifest_reader.py and deliberately carry no structural constraint here, so the dedicated code always wins over a generic structural code. Epoch history: 1.0.0 (slice \u2460+\u2460\u2460 baseline: schema + 3-class vocab); 1.0.1 (slice \u2463 lift: admits the new top-level ``skills`` section per CON \u00a76 plugin-skill declaration; ADDITIVE on no frozen surface \u2014 no field removed, no enum tightened, no section renamed); 1.0.2 (slice \u2465 lift: C\u2192B element + ports section + own_outright.attribution; ADDITIVE on no frozen surface \u2014 no field removed, no enum tightened, no section renamed).",
+  "description": "Plugin Subsystem v1 manifest vocabulary (MANIFEST.yaml). Additive epoch 1.0.3 (CON \u00a78). FROZEN surface per .agents/shared/planning/plugin-subsystem/v1-interface-contracts.md \u00a72. Unknown fields are refused by construction (additionalProperties: false at every level). Division of labor: THIS SCHEMA expresses vocabulary SHAPE (types, enums, allowed keys); policy checks whose refusal codes are semantically demanded by the validation matrix (kebab name, alarm_owner presence, parity section presence, divergence-entry well-formedness, fence completeness, tag-only pins) live in daemon/plugin_subsystem/manifest_reader.py and deliberately carry no structural constraint here, so the dedicated code always wins over a generic structural code. Epoch history: 1.0.0 (slice \u2460+\u2460\u2460 baseline: schema + 3-class vocab); 1.0.1 (slice \u2463 lift: admits the new top-level ``skills`` section per CON \u00a76 plugin-skill declaration; ADDITIVE on no frozen surface \u2014 no field removed, no enum tightened, no section renamed); 1.0.2 (slice \u2464 lift: C\u2192B element + ports section + own_outright.attribution; ADDITIVE on no frozen surface \u2014 no field removed, no enum tightened, no section renamed); 1.0.3 (slice \u2465 lift: divergence_register entry optional ``status`` disposition enum (registered/open/resolved, CON \u00a75 entry shape); ADDITIVE on no frozen surface \u2014 no field removed, no enum tightened, no section renamed).",
   "type": "object",
   "required": ["schema_version", "plugin"],
   "additionalProperties": false,
@@ -10,7 +10,7 @@
     "schema_version": {
       "type": "string",
       "minLength": 1,
-      "description": "SemVer. Plugin #1 authors against the literal \"1.0.0\". 1.0.x = additive only; the validator accepts the 1.0.x family and refuses anything else until the runner carries the newer schema. Current additive epoch: 1.0.2 (C\u2192B element + ports section + own_outright.attribution, slice \u2465)."
+      "description": "SemVer. Plugin #1 authors against the literal \"1.0.0\". 1.0.x = additive only; the validator accepts the 1.0.x family and refuses anything else until the runner carries the newer schema. Current additive epoch: 1.0.3 (divergence_register entry status enum, slice \u2465)."
     },
     "plugin": {
       "type": "object",
@@ -164,7 +164,7 @@
             "type": "object",
             "required": [],
             "additionalProperties": false,
-            "description": "Numbered, exhaustive. Required fields {id, files, delta, rationale, pinning_test} enforced semantically (divergence_entry_malformed); upstream_ref is the one optional field per the CON \u00a72 vocabulary. ADDITIVE 1.0.x (slice \u2465): optional ``status`` carries the disposition state (CON \u00a75 entry shape) \u2014 see the status property description.",
+            "description": "Numbered, exhaustive. Required fields {id, files, delta, rationale, pinning_test} enforced semantically (divergence_entry_malformed); upstream_ref is the one optional field per the CON \u00a72 vocabulary. ADDITIVE 1.0.3 (slice \u2465): optional ``status`` carries the disposition state (CON \u00a75 entry shape) \u2014 see the status property description.",
             "properties": {
               "id": { "type": "integer" },
               "files": {
@@ -185,7 +185,7 @@
       "type": "object",
       "required": ["paths"],
       "additionalProperties": false,
-      "description": "Ensemble-authored, never synced, invisible to the sync-runner. Deliberately carries NO alarm_owner (authored locally \u2014 there is nothing upstream to alarm on) and NO divergence_register; declaring either here is a vocabulary refusal by construction. ADDITIVE 1.0.2 (slice \u2465): an optional ``attribution`` array carries license-carried-from metadata for any own_outright subtree that ports from a permissive upstream source (e.g. Apache-2.0 \u00a74(d) attribution obligation). Schema-level shape only \u2014 the semantic check on attribution rows lives in manifest_reader.",
+      "description": "Ensemble-authored, never synced, invisible to the sync-runner. Deliberately carries NO alarm_owner (authored locally \u2014 there is nothing upstream to alarm on) and NO divergence_register; declaring either here is a vocabulary refusal by construction. ADDITIVE 1.0.2 (slice \u2464): an optional ``attribution`` array carries license-carried-from metadata for any own_outright subtree that ports from a permissive upstream source (e.g. Apache-2.0 \u00a74(d) attribution obligation). Schema-level shape only \u2014 the semantic check on attribution rows lives in manifest_reader.",
       "properties": {
         "paths": {
           "type": "array",
@@ -193,7 +193,7 @@
         },
         "attribution": {
           "type": "array",
-          "description": "ADDITIVE 1.0.2 (slice \u2465). Per-subtree attribution metadata for own_outright content that ports from a permissive upstream source. Each entry documents the upstream license, source, and rationale. Schema-level shape only; semantic check (SPDX id, license-carried-from token present, etc.) lives in manifest_reader.",
+          "description": "ADDITIVE 1.0.2 (slice \u2464). Per-subtree attribution metadata for own_outright content that ports from a permissive upstream source. Each entry documents the upstream license, source, and rationale. Schema-level shape only; semantic check (SPDX id, license-carried-from token present, etc.) lives in manifest_reader.",
           "items": {
             "type": "object",
             "required": ["path", "license_carried_from", "upstream_source", "rationale"],
@@ -293,7 +293,7 @@
       "type": "object",
       "required": [],
       "additionalProperties": false,
-      "description": "ADDITIVE 1.0.2 (slice \u2465). Reference surface for the plugin's Port declarations (CON \u00a73 FROZEN Port data-contract schema). The actual Port data contracts live in Python code at daemon/plugin_subsystem/<plugin>/ports.py; this manifest section carries ONLY the reference (port_id + version + adapter_id + consumers + capability_tags) so a reviewer can see the surface at a glance and so the schema-CI runner can validate without re-encoding the schemas. The frozen Port schema surface (inputs_schema / outputs_schema / errors.envelope) is NOT duplicated here \u2014 duplicated YAML would inflate the manifest past the 64 KB hard-cap (CON \u00a71) by the time 4 ports \u00d7 4 large fields are present. When absent, the plugin has no declared Ports (C-path resource-only plugins without Ports).",
+      "description": "ADDITIVE 1.0.2 (slice \u2464). Reference surface for the plugin's Port declarations (CON \u00a73 FROZEN Port data-contract schema). The actual Port data contracts live in Python code at daemon/plugin_subsystem/<plugin>/ports.py; this manifest section carries ONLY the reference (port_id + version + adapter_id + consumers + capability_tags) so a reviewer can see the surface at a glance and so the schema-CI runner can validate without re-encoding the schemas. The frozen Port schema surface (inputs_schema / outputs_schema / errors.envelope) is NOT duplicated here \u2014 duplicated YAML would inflate the manifest past the 64 KB hard-cap (CON \u00a71) by the time 4 ports \u00d7 4 large fields are present. When absent, the plugin has no declared Ports (C-path resource-only plugins without Ports).",
       "properties": {
         "entries": {
           "type": "array",

@@ -233,6 +233,30 @@ rc=$?
 assert_eq "plugin-less rc" "0" "$rc"
 assert_contains "plugin-less log" "no plugins tree" "$out"
 
+section "(8) unevaluable gate — refuse carries the PyYAML detail (audit trail reconstructable)"
+# Force the no-interpreter path: PLUGIN_STALENESS_PYTHON dead, REPO_ROOT
+# dead (kills the .venv candidate), PATH dead (kills the python3/python
+# fallbacks). The refuse WARN line must carry the detail fragment — the
+# review confirmed $localdetail expanded EMPTY here (audit-trail hole).
+UNEVAL_OUT="$(
+    {
+        export PLUGIN_STALENESS_PLUGINS_ROOT="$FRESH_REPO/plugins"
+        export PLUGIN_STALENESS_PYTHON="$FIXTURE/no-such-python"
+        export REPO_ROOT="/nonexistent"
+        export PATH="/nonexistent"
+        export PROMOTE_STALENESS_OVERRIDE="0"
+        export INSTALL_DIR="$FIXTURE/install-nopython"
+        SCRIPT_DIR="$UPGRADE_DIR"
+        # shellcheck disable=SC1090
+        . "$UPGRADE_DIR/lib.sh"
+        promote_plugin_staleness_check
+    } 2>&1
+)"
+UNEVAL_RC=$?
+assert_eq "unevaluable rc" "78" "$UNEVAL_RC"
+assert_contains "unevaluable token" "plugin-staleness-unreadable" "$UNEVAL_OUT"
+assert_contains "unevaluable carries the detail" "no python with PyYAML" "$UNEVAL_OUT"
+
 # ─── (7) End-to-end through the REAL promote.sh ──────────────────────────────
 
 section "(7) promote.sh e2e — stale refuses 78; override gets past the plugin gate"

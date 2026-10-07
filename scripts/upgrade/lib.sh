@@ -1991,11 +1991,11 @@ promote_plugin_staleness_check() {
         if [ "${PROMOTE_STALENESS_OVERRIDE:-0}" = "1" ]; then
             _warn "PLUGIN-STALENESS OVERRIDE: predicate cannot run — proceeding (operator accepted; journaled)"
             _plugin_staleness_journal_override plugin-staleness-unreadable \
-                "override: predicate unevaluable ($localdetail)"
+                "override: predicate unevaluable ($detail)"
             return 0
         fi
         _freshness_refuse plugin-staleness-unreadable \
-            "plugin-staleness check cannot run: $localdetail. " \
+            "plugin-staleness check cannot run: $detail. " \
             "The gate refuses FAIL-CLOSED when it cannot evaluate (a silent pass would make staleness invisible — the exact failure this predicate exists to kill). " \
             "Remedies, in order: " \
             "  1) run promote from a session with python3 + PyYAML on PATH " \

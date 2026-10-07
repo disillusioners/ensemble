@@ -50,10 +50,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Protocol
 
-from sqlmodel import Field, SQLModel, Session, select
+from sqlmodel import Field, SQLModel, Session, select  # SQLModel Session: .exec() select helper
 from sqlalchemy import Column, String, Text, delete as sa_delete
 from sqlalchemy.engine import Engine
-from sqlmodel import Session  # SQLModel Session: .exec() select helper
 
 from daemon.repositories.infra.types import JSONBType
 
