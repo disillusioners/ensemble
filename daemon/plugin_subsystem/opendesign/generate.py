@@ -16,9 +16,10 @@ fallback when the mirror is absent (OQ7 disposition).
 
 **Tier-1 LLM client.** The adapter constructs an
 ``openai.OpenAI(api_key=..., base_url=...)`` per call from the
-``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` / ``OPENAI_MODEL`` env vars
-(the project's existing LLM config; same lane the daemon already
-uses, NOT a new client stack). Streaming is OFF by default; the
+``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` / ``OPENAI_MODEL_VISION``
+env vars (the project's existing LLM config; same lane the daemon
+already uses, NOT a new client stack; the model is the purpose-bound
+design-generation knob, not the default-pool chat model). Streaming is OFF by default; the
 non-streaming call surfaces ``finish_reason`` + ``usage`` to the
 caller — the live failure mode that the MCP lane cannot distinguish
 (``finish_reason=length`` indistinguishable from ``finish_reason=stop``
@@ -542,7 +543,10 @@ def _build_openai_client(env: Optional[Mapping[str, str]] = None):
 
     - ``OPENAI_BASE_URL`` (the tier-1 proxy URL).
     - ``OPENAI_API_KEY`` (the API key).
-    - ``OPENAI_MODEL`` (the model identifier; default ``vision``).
+    - ``OPENAI_MODEL_VISION`` (the design-generation model; default
+      ``vision``). The daemon's default-pool chat model env var
+      (``OPENAI_MODEL``) is deliberately NEVER read here — see the
+      comment at the resolution site.
 
     Failures (missing keys, import errors) surface as
     ``byok_not_configured`` so the calling agent sees a typed error.
@@ -550,7 +554,15 @@ def _build_openai_client(env: Optional[Mapping[str, str]] = None):
     src = env if env is not None else os.environ
     base_url = src.get("OPENAI_BASE_URL")
     api_key = src.get("OPENAI_API_KEY")
-    model = src.get("OPENAI_MODEL", "vision")
+    # 2026-10-07 designer-model-vision fix: the generation model is the
+    # PURPOSE-BOUND design knob (OPENAI_MODEL_VISION; .env sets it to
+    # ``vision`` — the BYOK design-generation model on the user's
+    # llm-supervisor-proxy), NEVER the daemon's default-pool chat
+    # model (OPENAI_MODEL). The previous resolution read OPENAI_MODEL,
+    # so the live v0.18.0 designer debut generated on ``agentic``
+    # (settings-page-redesign/design/OD-LANE-FAILURE.md — the "upstream
+    # timeout" attribution was wrong-model, not upstream capacity).
+    model = src.get("OPENAI_MODEL_VISION", "vision")
     if not base_url or not api_key:
         raise RuntimeError(
             "byok_not_configured: OPENAI_BASE_URL and OPENAI_API_KEY must be set "
