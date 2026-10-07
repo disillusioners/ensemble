@@ -162,6 +162,7 @@ __all__ = [
     "emit_drift_event",
     "LOCALLY_OWNED_FILENAMES",
     "DEFAULT_GIT_REMOTE_NAME",
+    "SYNC_TRAIL_FILENAME",
     "UpstreamContentIncompleteError",
 ]
 
@@ -203,6 +204,12 @@ LOCALLY_OWNED_FILENAMES: Tuple[str, ...] = ("HASHES.sha256",)
 # Default git remote name used by ``git ls-remote`` for the tag-missing
 # check. Match upstream's typical convention; override per-call.
 DEFAULT_GIT_REMOTE_NAME = "origin"
+
+# Slice ⑥: the sync-trail filename (plugin-root sibling of
+# MANIFEST.yaml — NOT inside a class subtree; the sync-runner is the
+# sole writer of the class subtrees, and the trail is the runner's own
+# record).  The promote-staleness predicate reads it (REC comp 13).
+SYNC_TRAIL_FILENAME = "sync_trail.jsonl"
 
 
 # ─── types ────────────────────────────────────────────────────────────────────
@@ -340,7 +347,37 @@ class SyncRunner:
         plugin_dir: Optional[Path] = None,
         dry_run: bool = True,
     ) -> SyncResult:
-        """One sync call.  See module docstring for the frozen contract."""
+        """One sync call.  See module docstring for the frozen contract.
+
+        Slice ⑥: every completed sync (dry-run or real, any action
+        incl. refusals) appends its result to the plugin's
+        ``sync_trail.jsonl`` (slice ⑥ trail — the promote-staleness
+        predicate's data source; REC comp 13 "consumes the
+        sync_result directly").  Trail writing is best-effort and
+        never alters the returned result.
+        """
+        result = self._sync_impl(
+            plugin=plugin,
+            target_class=target_class,
+            upstream_repo=upstream_repo,
+            upstream_tag=upstream_tag,
+            plugin_dir=plugin_dir,
+            dry_run=dry_run,
+        )
+        self._record_sync_trail(plugin=plugin, plugin_dir=plugin_dir, result=result)
+        return result
+
+    def _sync_impl(
+        self,
+        plugin: str,
+        target_class: str,
+        *,
+        upstream_repo: Optional[str] = None,
+        upstream_tag: Optional[str] = None,
+        plugin_dir: Optional[Path] = None,
+        dry_run: bool = True,
+    ) -> SyncResult:
+        """The pre-⑥ sync body (unchanged semantics)."""
         if target_class == "own_outright":
             # CON §5: "sync into own_outright/ ⇒ refuse" — the hard
             # rule (REC §1.4, no override flag exists).  This is the
@@ -620,9 +657,22 @@ class SyncRunner:
                     "re-apply or drop, update the log either way (CON §2)"
                 ),
                 "pinning_test": (
+                    # Slice ⑥ fix: the class here must match the REAL
+                    # collected test id (TestSnapshotClassDrift, test
+                    # file test_sync_runner.py) — the ③ template named
+                    # TestSyncSnapshotDrift, which does not exist, so
+                    # every sync-emitted pointer dangled the moment a
+                    # real pull appended it (caught by the reviewer's
+                    # referential-integrity guard on the ⑥ real pull).
                     f"tests/unit/plugin_subsystem/test_sync_runner.py::"
-                    f"TestSyncSnapshotDrift::test_drift_alarm_at_{target_class}"
+                    f"TestSnapshotClassDrift::test_drift_alarm_at_{target_class}"
                 ),
+                # CON §5 register-entry shape carries `status`; a
+                # sync-emitted alarm is by definition unresolved
+                # until the operator lands the re-apply-or-drop
+                # disposition (status vocabulary: registered /
+                # open / resolved — see the ⑥ predicate).
+                "status": "open",
             }
             if not dry_run:
                 _append_divergence_register(
@@ -757,6 +807,67 @@ class SyncRunner:
             raise ManifestReaderError(validation.refusal)
         assert validation.declaration is not None  # noqa: S101 - invariant of ok=True
         return validation.declaration
+
+    def _record_sync_trail(
+        self,
+        *,
+        plugin: str,
+        plugin_dir: Optional[Path],
+        result: SyncResult,
+    ) -> None:
+        """Append one trail line for a completed sync (slice ⑥).
+
+        The trail (``<plugin_dir>/sync_trail.jsonl``) is the
+        promote-staleness predicate's data source (REC comp 13:
+        the predicate "consumes the sync_result directly").  Each
+        line is a JSON object::
+
+            {"recorded_at": "<iso-utc>", "sync_result": {…frozen
+            CON §5 shape…}}
+
+        Best-effort and never-raising: a trail-write failure logs a
+        warning and leaves the returned SyncResult untouched (the
+        sync itself already completed; the gate prefers a missing
+        line to a crashed sync, and ``staleness-unknown`` is the
+        predicate's fail-closed answer to a trail that cannot be
+        read).
+
+        Dry-run and real pulls are BOTH recorded (a dry-run is a
+        truthful sync_result; refusal actions are recorded too) —
+        the predicate consumes the latest line whose action is a
+        completed pull verdict (``clean_pulled`` / ``alarmed`` /
+        ``no_change``) so a refused-early line never masquerades as
+        staleness evidence.
+        """
+        if plugin_dir is None:
+            # No plugin dir ⇒ no trail home (the sync itself
+            # refuses this shape upstream of the trail; nothing to
+            # record against).
+            return
+        try:
+            import json
+
+            trail_path = Path(plugin_dir) / SYNC_TRAIL_FILENAME
+            line = json.dumps(
+                {
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "sync_result": result.as_dict(),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            with open(trail_path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception as exc:  # noqa: BLE001 - best-effort trail
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "sync_trail_write_failed (best-effort; sync result "
+                "unaffected): plugin=%s dir=%s: %s",
+                plugin,
+                plugin_dir,
+                exc,
+            )
 
     def _refuse(
         self,
@@ -1073,6 +1184,14 @@ class _ClassDiff:
     modified: int
     removed: int
     example_files: List[str] = field(default_factory=list)
+    # Slice ⑥ (sole-writer gate): the FULL per-file identities behind
+    # the counts, so the gate can match each delta file against its
+    # disclosure channel (parity-boundary rows / sync trail).  Additive
+    # on the ③ shape — the counts and the capped example list are
+    # unchanged.
+    added_files: List[str] = field(default_factory=list)
+    modified_files: List[str] = field(default_factory=list)
+    removed_files: List[str] = field(default_factory=list)
 
 
 def _safe_join_under(base: Path, relpath: str) -> Path:
@@ -1228,6 +1347,9 @@ def _compute_class_diff(
     modified = 0
     removed = 0
     examples: List[str] = []
+    added_files: List[str] = []
+    modified_files: List[str] = []
+    removed_files: List[str] = []
 
     # Added / modified (upstream has; we may or may not).
     # Compare the local file's git blob SHA-1 (computed in
@@ -1260,6 +1382,7 @@ def _compute_class_diff(
             ) from exc
         if not local_path.is_file():
             added += 1
+            added_files.append(rel)
             examples.append(rel)
             continue
         try:
@@ -1276,11 +1399,13 @@ def _compute_class_diff(
             # silent-skip; the "added" counting is the
             # truthful diff for the operator).
             added += 1
+            added_files.append(rel)
             examples.append(rel)
             continue
         local_blob_sha = _git_blob_sha1(local_bytes)
         if local_blob_sha != blob_sha:
             modified += 1
+            modified_files.append(rel)
             if len(examples) < 10:
                 examples.append(rel)
 
@@ -1339,9 +1464,18 @@ def _compute_class_diff(
             local_seen.add(rel)
             if rel not in upstream_files:
                 removed += 1
+                removed_files.append(rel)
                 if len(examples) < 10:
                     examples.append(rel)
-    return _ClassDiff(added=added, modified=modified, removed=removed, example_files=examples)
+    return _ClassDiff(
+        added=added,
+        modified=modified,
+        removed=removed,
+        example_files=examples,
+        added_files=added_files,
+        modified_files=modified_files,
+        removed_files=removed_files,
+    )
 
 
 def _clean_pull_atomic(
@@ -1587,30 +1721,34 @@ def emit_drift_event(
     entry: Mapping[str, Any],
     observed_tag: str,
 ) -> None:
-    """Emit a drift event for slice ⑥ to consume.
+    """Emit a drift event into the tier-1 trigger-engine lane.
 
-    **Probe decision (slice ③/⑥ OQ per REC §9):** the payload is
-    emitted in CON §5's VERBATIM shape — ``{plugin, class,
-    divergence_id, files, delta, rationale, pinning_test, observed_at,
-    observed_tag}`` — keyed on the divergence_id.  The trigger
-    engine is rule-based and does not currently accept ad-hoc
-    events; slice ⑥ will either (a) add a new ``condition_type`` to
-    :mod:`daemon.services.skill_trigger_seed` and have the engine
-    treat each emitted drift entry as a candidate against that
-    condition, OR (b) land a dedicated drift-event store the
-    resolver polls.  No trigger-engine EDIT happens in ③.
+    **Slice ⑥ wire-up (probe decision per REC §9):** the payload is
+    the CON §5 VERBATIM shape — ``{plugin, class, divergence_id,
+    files, delta, rationale, pinning_test, observed_at,
+    observed_tag}`` — keyed on the divergence_id, built by
+    :func:`build_drift_event_payload` (the single source of truth
+    for the shape).  The payload is handed to the configured
+    drift-event sink:
 
-    For ③ this function is a NO-OP STUB that records the event
-    shape in the call site (via a dedicated log line) so the slice
-    ⑥ wire-up can be the smallest possible change.  Tests assert
-    the payload shape via :func:`build_drift_event_payload`.
+    - DEFAULT (library context): :class:`~daemon.plugin_subsystem.\
+drift_event_publisher.LogOnlyDriftEventSink` — the slice-③ stub
+      behavior preserved (structured log line, no DB).
+    - Daemon runtime: the boot-wired
+      :class:`~daemon.plugin_subsystem.drift_event_publisher.DriftEventPublisher`
+      persists the row into ``drift_events``; the engine's
+      ``drift_event_observed`` condition reads the same table
+      (probe option (a): DB-backed, resolution deletes the row).
+
+    The signature stays stable from ③:
+    ``emit_drift_event(plugin, target_class, entry, observed_tag)``
+    returning ``None``.  Emission is NEVER-RAISES: a sink failure
+    is logged, the (already completed) sync result is unaffected.
     """
     payload = build_drift_event_payload(plugin, target_class, entry, observed_tag)
-    import logging
-    logging.getLogger(__name__).info(
-        "drift_event_emitted (slice ③ stub; slice ⑥ wires the trigger engine): %s",
-        payload,
-    )
+    from daemon.plugin_subsystem.drift_event_publisher import emit_drift_event_safe
+
+    emit_drift_event_safe(payload)
 
 
 def build_drift_event_payload(

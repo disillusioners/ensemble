@@ -1890,6 +1890,172 @@ _freshness_refuse() {
     _refuse "$token" "$@"
 }
 
+# ═══════════════ Plugin-staleness promote predicate (slice ⑥) ═══════════════
+#
+# promote_plugin_staleness_check — REC §1.2 component 13
+# (promote_staleness_check): pin age > N days OR unresolved divergence
+# ⇒ refuse; unowned drift alarms escalate to the same refusal after
+# escalation days (CON §5: "unowned for escalation days ⇒ block
+# promote"). Wired into promote.sh preflight (before integrity, before
+# any mutation — the same fail-closed family as the freshness guards).
+#
+# DATA SOURCE: the plugin tree under $REPO_ROOT/plugins (each dir with
+# a MANIFEST.yaml): the predicate consumes the sync-runner's trail
+# (sync_trail.jsonl — the sync_result directly, per the ③ probe doc)
+# + the manifest's divergence-register statuses. OFFLINE — no git, no
+# DB, no daemon. A repo with NO plugins/ dir passes trivially (the
+# gate must not spuriously block plugin-less promotes).
+#
+# OVERRIDE: --allow-stale-plugins sets PROMOTE_STALENESS_OVERRIDE=1
+# (argv-only, mirrors --allow-stale-stage); every overridden refusal
+# is JOURNALED on the install dir (reason token + operator_accepted).
+#
+# IMPLEMENTATION NOTE: the predicate is a stdlib+PyYAML-only Python
+# module (daemon/plugin_subsystem/promote_staleness.py) invoked by
+# FILE PATH (not ``-m``) so promote-time needs no package import and
+# no venv: the first of $PLUGIN_STALENESS_PYTHON / $REPO_ROOT/.venv/
+# bin/python / python3 / python that executes wins. A python that
+# cannot run the predicate refuses FAIL-CLOSED (plugin-staleness-
+# unreadable) unless overridden — an unevaluable gate is a refused
+# gate, never a silent pass.
+#
+# Exit-code contract of THIS function: returns 0 = fresh/overridden;
+# every refusal path exits 78 itself (the promote_entry_check caller
+# convention — L11 tidier).
+
+_plugin_staleness_journal_override() {
+    local reason="$1" detail="$2"
+    if [ -d "${INSTALL_DIR:-}" ]; then
+        journal_init >/dev/null 2>&1 || true
+    fi
+    journal_history_append "plugin_staleness_override" \
+        "$detail (reason=$reason operator_accepted=true)" \
+        >/dev/null 2>&1 \
+        || _warn "plugin-staleness override journal append FAILED (best-effort) — override is taken but the audit trail is incomplete; reason=$reason"
+}
+
+promote_plugin_staleness_check() {
+    local plugins_root="${PLUGIN_STALENESS_PLUGINS_ROOT:-}"
+    if [ -z "$plugins_root" ]; then
+        local repo_root_guess="${REPO_ROOT:-}"
+        if [ -z "$repo_root_guess" ]; then
+            repo_root_guess="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)" || repo_root_guess=""
+        fi
+        [ -z "$repo_root_guess" ] && repo_root_guess="$PWD"
+        plugins_root="$repo_root_guess/plugins"
+    fi
+    # No plugins tree ⇒ nothing to check; a fresh-state promote on a
+    # plugin-less repo must NOT block (the gate is plugin-scoped).
+    if [ ! -d "$plugins_root" ]; then
+        _log "plugin-staleness: no plugins tree at $plugins_root — gate passes (nothing to check)"
+        return 0
+    fi
+
+    # Collect plugin dirs carrying a manifest (fail-closed on unreadable
+    # manifests is the PREDICATE's job — manifest-unreadable token).
+    local plugin_dirs=""
+    local d
+    for d in "$plugins_root"/*/; do
+        [ -d "$d" ] || continue
+        if [ -f "${d}MANIFEST.yaml" ]; then
+            plugin_dirs="$plugin_dirs ${d%/}"
+        fi
+    done
+    if [ -z "$plugin_dirs" ]; then
+        _log "plugin-staleness: no manifest-bearing plugin dirs under $plugins_root — gate passes"
+        return 0
+    fi
+
+    # Resolve the interpreter (see IMPLEMENTATION NOTE above).
+    local py="" cand
+    if [ -n "${PLUGIN_STALENESS_PYTHON:-}" ] && [ -x "${PLUGIN_STALENESS_PYTHON}" ]; then
+        py="$PLUGIN_STALENESS_PYTHON"
+    fi
+    if [ -z "$py" ]; then
+        for cand in \
+            "${REPO_ROOT:-/nonexistent}/.venv/bin/python" \
+            "$(command -v python3 2>/dev/null || true)" \
+            "$(command -v python 2>/dev/null || true)"
+        do
+            if [ -n "$cand" ] && [ -x "$cand" ]; then
+                if "$cand" -c "import yaml" >/dev/null 2>&1; then
+                    py="$cand"
+                    break
+                fi
+            fi
+        done
+    fi
+    if [ -z "$py" ]; then
+        # Fail-closed: an unevaluable gate refuses (overridable).
+        local detail="no python with PyYAML available (tried PLUGIN_STALENESS_PYTHON, $REPO_ROOT/.venv/bin/python, python3, python)"
+        if [ "${PROMOTE_STALENESS_OVERRIDE:-0}" = "1" ]; then
+            _warn "PLUGIN-STALENESS OVERRIDE: predicate cannot run — proceeding (operator accepted; journaled)"
+            _plugin_staleness_journal_override plugin-staleness-unreadable \
+                "override: predicate unevaluable ($detail)"
+            return 0
+        fi
+        _freshness_refuse plugin-staleness-unreadable \
+            "plugin-staleness check cannot run: $detail. " \
+            "The gate refuses FAIL-CLOSED when it cannot evaluate (a silent pass would make staleness invisible — the exact failure this predicate exists to kill). " \
+            "Remedies, in order: " \
+            "  1) run promote from a session with python3 + PyYAML on PATH " \
+            "  2) set PLUGIN_STALENESS_PYTHON=<interpreter with PyYAML> " \
+            "  3) pass --allow-stale-plugins to override (JOURNALED on the install dir; unsafe on real rungs)"
+    fi
+
+    local pred="$(
+        cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd
+    )"
+    pred="$pred/../../daemon/plugin_subsystem/promote_staleness.py"
+    if [ ! -f "$pred" ]; then
+        # SCRIPT_DIR-based resolution failed (sourced from elsewhere);
+        # fall back to the REPO_ROOT-relative location.
+        pred="${REPO_ROOT:-}/daemon/plugin_subsystem/promote_staleness.py"
+    fi
+    if [ ! -f "$pred" ]; then
+        if [ "${PROMOTE_STALENESS_OVERRIDE:-0}" = "1" ]; then
+            _warn "PLUGIN-STALENESS OVERRIDE: predicate module not found — proceeding (operator accepted; journaled)"
+            _plugin_staleness_journal_override plugin-staleness-unreadable \
+                "override: predicate module not found (looked next to lib.sh and at $REPO_ROOT/daemon/plugin_subsystem/)"
+            return 0
+        fi
+        _freshness_refuse plugin-staleness-unreadable \
+            "plugin-staleness predicate module not found (looked next to lib.sh and at ${REPO_ROOT:-?}/daemon/plugin_subsystem/promote_staleness.py). " \
+            "The gate refuses FAIL-CLOSED when it cannot evaluate. " \
+            "Remedy: run promote from the repo checkout (scripts/upgrade/promote.sh), or pass --allow-stale-plugins to override (JOURNALED)."
+    fi
+
+    local pdir out rc code
+    for pdir in $plugin_dirs; do
+        out="$("$py" "$pred" "$pdir" 2>&1)"
+        rc=$?
+        if [ "$rc" -eq 0 ]; then
+            _log "plugin-staleness: $(printf '%s' "$out" | tail -n 1)"
+            continue
+        fi
+        # First reported token (the predicate prints code=<token> per
+        # reason); a crash (rc not in {0,3}) maps to the unreadable
+        # token so the journal taxonomy stays greppable.
+        code="$(printf '%s\n' "$out" | sed -n 's/.*code=\([a-z0-9-]*\).*/\1/p' | head -n 1)"
+        if [ "$rc" -ne 3 ] || [ -z "$code" ]; then
+            code="plugin-staleness-unreadable"
+        fi
+        if [ "${PROMOTE_STALENESS_OVERRIDE:-0}" = "1" ]; then
+            _warn "PLUGIN-STALENESS OVERRIDE: $pdir is stale ($code) — proceeding (operator accepted; journaled)"
+            _plugin_staleness_journal_override "$code" \
+                "override: $pdir failed the plugin-staleness predicate (rc=$rc): $(printf '%s\n' "$out" | head -n 8 | tr '\n' ' ')"
+            continue
+        fi
+        _freshness_refuse "$code" \
+            "promote refused: plugin $pdir failed the plugin-staleness predicate (rc=$rc): $(printf '%s\n' "$out" | head -n 8 | tr '\n' ' ') " \
+            "Remedies, in order: " \
+            "  1) fix the named condition (refresh the pin via a real sync; land the divergence disposition; assign alarm_owner) " \
+            "  2) pass --allow-stale-plugins to override (JOURNALED on the install dir; unsafe on real rungs)"
+    done
+    return 0
+}
+
+
 # _verify_artifact_provenance <artifact_abs_path> — verify provenance matches
 # the current tree. Refuses (exit 78) with a distinct reason token unless
 # STAGE_FRESHNESS_OVERRIDE=1. Token + override journaling in one place so

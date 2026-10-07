@@ -34,6 +34,20 @@ matching the ``DEFAULT_TRIGGERS`` catalogue from
   condition reads ``skill_usage_records`` (the agent-judged
   score is not denormalized onto the ``Skill`` row), so it
   needs the ``SkillUsageRepository`` — see ``__init__``.
+* ``drift_event_observed`` — a fresh UNRESOLVED drift
+  event exists in the ``drift_events`` table matching the
+  condition filter (``plugin``, ``min_divergence_id``,
+  ``max_age_days``).  Slice ⑥ (plugin subsystem, REC §1.2
+  comp 7): the sync-runner's drift-event publisher persists
+  CON §5 verbatim payloads; this condition is the
+  trigger-side consumer (probe doc Path A).  Unlike the
+  other six this condition is NOT skill-scoped — the
+  candidate set is the drift events themselves (see
+  ``_get_skills_for_trigger``); a fired candidate surfaces
+  as a flag with an EMPTY ``skill_id`` so the skill-centric
+  Tier-2 consumer skips it (drift analysis/escalation is the
+  promote gate's + operator's lane in v1; the engine result
+  is the observation surface).
 
 Unknown ``condition_type`` values are skipped with a
 warning — the engine never raises on an unknown rule.
@@ -65,6 +79,47 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+
+class _DriftCandidate:
+    """Candidate wrapper so a drift event can ride the per-skill
+    evaluation loop.
+
+    The engine's loop is (trigger, candidate) shaped; for
+    ``drift_event_observed`` the candidates are drift-event rows,
+    not skills.  The wrapper carries:
+
+    - ``id``: ALWAYS empty string — the skill-centric Tier-2
+      consumer skips flags with an empty ``skill_id`` (drift
+      analysis is not a skill-analysis job in v1).
+    - ``name``: human-readable label for the flagged entry.
+    - ``event``: the underlying drift-event row (``to_payload()``
+      available); the condition + reason builders read it.
+
+    Deliberately NOT a Skill — ``isinstance`` checks against skill
+    models stay false; the branch discriminator is
+    ``hasattr(candidate, "drift_event")``.
+    """
+
+    __slots__ = ("event", "name")
+
+    def __init__(self, event: Any) -> None:
+        self.event = event
+        payload = getattr(event, "to_payload", None)
+        label = ""
+        if callable(payload):
+            p = payload()
+            label = (
+                f"plugin-drift:{p.get('plugin', '?')}"
+                f"#{p.get('divergence_id', '?')}"
+            )
+        self.name = label
+
+    @property
+    def id(self) -> str:  # noqa: A003 - mirrors the Skill row attribute
+        # Empty on purpose: the Tier-2 consumer skips empty
+        # skill_ids (see module docstring, drift branch).
+        return ""
 
 
 # ============================================================
@@ -106,6 +161,7 @@ class SkillTriggerEngine:
         trigger_repo: Any,
         metrics_service: Any,
         usage_repo: Any = None,
+        drift_event_repo: Any = None,
     ) -> None:
         """Store the trigger repo, metrics service, and usage repo.
 
@@ -132,6 +188,13 @@ class SkillTriggerEngine:
             if usage_repo is not None
             else getattr(metrics_service, "usage_repo", None)
         )
+        # Slice ⑥: the drift-event store (duck-typed
+        # DriftEventRepository — ``list_unresolved(plugin=...)``).
+        # ``None`` (default) leaves the ``drift_event_observed``
+        # condition INERT (no candidates ⇒ never fires) so older
+        # call sites stay compatible; the daemon boot wiring passes
+        # the real repository.
+        self.drift_event_repo = drift_event_repo
 
     # --------------------------------------------------------
     # Public API
@@ -199,9 +262,19 @@ class SkillTriggerEngine:
                         f"{exc}"
                     )
                     continue
-                stats = await self.metrics_service.get_skill_stats(
-                    skill.id
-                )
+                if isinstance(skill, _DriftCandidate):
+                    # Drift candidates are not skills — there are
+                    # no skill stats to fetch, and the flagged
+                    # entry carries the CON §5 verbatim payload in
+                    # ``drift_event`` with an EMPTY ``skill_id``
+                    # (the skill-centric Tier-2 consumer skips it;
+                    # the engine result is the drift observation
+                    # surface in v1).
+                    stats: dict[str, Any] = {}
+                else:
+                    stats = await self.metrics_service.get_skill_stats(
+                        skill.id
+                    )
                 flagged.append(
                     {
                         "skill_id": skill.id,
@@ -212,6 +285,11 @@ class SkillTriggerEngine:
                             trigger, skill, stats
                         ),
                         "stats": stats,
+                        **(
+                            {"drift_event": skill.event.to_payload()}
+                            if isinstance(skill, _DriftCandidate)
+                            else {}
+                        ),
                     }
                 )
 
@@ -262,8 +340,33 @@ class SkillTriggerEngine:
             List of :class:`Skill` instances (active only,
             across all projects).
         """
-        del trigger, project_id  # Reserved for future scoping.
+        del project_id  # Reserved for future scoping.
         from daemon.repositories.skill.repository import SkillRepository
+
+        # Slice ⑥: drift-event triggers are NOT skill-scoped — the
+        # candidates ARE the unresolved drift events (the probe
+        # doc: "the engine treats each emitted drift entry as a
+        # candidate against that condition").  Without a wired
+        # drift store the condition is inert (no candidates).
+        if (
+            getattr(trigger, "condition_type", "")
+            == "drift_event_observed"
+        ):
+            drift_repo = getattr(self, "drift_event_repo", None)
+            if drift_repo is None:
+                return []
+            condition = (
+                dict(trigger.condition_json)
+                if getattr(trigger, "condition_json", None)
+                else {}
+            )
+            plugin_filter = condition.get("plugin") or None
+            if plugin_filter == "*":
+                plugin_filter = None  # future cross-plugin sweep
+            events = await asyncio.to_thread(
+                drift_repo.list_unresolved, plugin_filter
+            )
+            return [_DriftCandidate(e) for e in events]
 
         # The metrics service holds the skill repo reference;
         # we route through it so the engine stays decoupled
@@ -329,6 +432,23 @@ class SkillTriggerEngine:
         # honored. Cheap (one indexed point lookup). Run via
         # ``asyncio.to_thread`` so the sync repo call doesn't
         # block the event loop.
+        condition = (
+            dict(trigger.condition_json)
+            if getattr(trigger, "condition_json", None)
+            else {}
+        )
+        ctype = getattr(trigger, "condition_type", "")
+
+        if ctype == "drift_event_observed":
+            # Drift candidates are NOT skills — ``skill`` here is a
+            # ``_DriftCandidate`` wrapping a drift-event row; the
+            # skill re-fetch below would harmlessly miss (no skill
+            # with that id) but skipping it keeps the drift lane
+            # DB-chatty-free and the intent explicit.
+            return self._eval_drift_event_observed(
+                getattr(skill, "event", skill), condition
+            )
+
         skill_repo = self.metrics_service.skill_repo
         fresh_skill = await asyncio.to_thread(
             skill_repo.get, getattr(skill, "id", "")
@@ -337,13 +457,6 @@ class SkillTriggerEngine:
             # Skill was deleted between list and eval — skip.
             return False
         skill = fresh_skill
-
-        condition = (
-            dict(trigger.condition_json)
-            if getattr(trigger, "condition_json", None)
-            else {}
-        )
-        ctype = getattr(trigger, "condition_type", "")
 
         if ctype == "low_completion_rate":
             return self._eval_low_completion_rate(skill, condition)
@@ -567,6 +680,69 @@ class SkillTriggerEngine:
         age = now - last_used
         return age.days >= interval_days
 
+    @staticmethod
+    def _eval_drift_event_observed(
+        event: Any,
+        condition: dict[str, Any],
+    ) -> bool:
+        """Fire when the drift event matches the filter and is fresh.
+
+        Slice ⑥ (probe doc Path A): the candidate is a drift-event
+        row already plugin-filtered at candidate resolution
+        (``_get_skills_for_trigger``); this evaluator applies the
+        remaining condition fields:
+
+        - ``min_divergence_id`` (default 1): noise floor — the
+          event's ``divergence_id`` must be at or above it.
+        - ``max_age_days`` (default 14): the freshness window —
+          the rule "fires when the alarm is fresh" (probe doc).
+          ``observed_at`` is ISO-8601 UTC (payload verbatim);
+          unparseable timestamps fail CLOSED (no fire) with a
+          warning — silence is not freshness.
+
+        Unresolved-ness needs no check here: candidates come from
+        ``list_unresolved`` (resolution deletes the row).
+
+        Args:
+            event: Drift-event row (``plugin``/``divergence_id``/
+                ``observed_at`` attributes; ``to_payload()``).
+            condition: Trigger ``condition_json``.
+
+        Returns:
+            ``True`` iff the event matches the filter and is fresh.
+        """
+        min_divergence_id = int(
+            condition.get("min_divergence_id", 1) or 1
+        )
+        max_age_days = int(condition.get("max_age_days", 14) or 14)
+
+        divergence_id = int(
+            getattr(event, "divergence_id", 0) or 0
+        )
+        if divergence_id < min_divergence_id:
+            return False
+
+        observed_raw = getattr(event, "observed_at", None)
+        if not observed_raw:
+            return False
+        try:
+            observed_at = datetime.fromisoformat(
+                str(observed_raw).replace("Z", "+00:00")
+            )
+        except (ValueError, TypeError):
+            logger.warning(
+                "SkillTriggerEngine: could not parse drift event "
+                f"observed_at {observed_raw!r} "
+                f"(plugin={getattr(event, 'plugin', '?')} "
+                f"divergence_id={divergence_id})"
+            )
+            return False
+        now = datetime.now(timezone.utc)
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        age_days = (now - observed_at).days
+        return age_days <= max_age_days
+
     async def _eval_low_usefulness(
         self,
         skill: Any,
@@ -784,5 +960,26 @@ class SkillTriggerEngine:
                 f"{ctype}: {name} — avg usefulness "
                 f"{avg_str}/10 over {count_str} scored usages "
                 f"below threshold {threshold}"
+            )
+        if ctype == "drift_event_observed":
+            # The "candidate" is a drift event, not a skill — the
+            # reason uses the CON §5 verbatim payload fields (probe
+            # doc: "the trigger name + reason use the verbatim
+            # payload fields").
+            event = getattr(skill, "event", None)
+            if event is not None and callable(
+                getattr(event, "to_payload", None)
+            ):
+                p = event.to_payload()
+                return (
+                    f"{ctype}: plugin={p.get('plugin', '?')} "
+                    f"divergence_id={p.get('divergence_id', '?')} "
+                    f"class={p.get('class', '?')} "
+                    f"observed_at={p.get('observed_at', '?')} "
+                    f"observed_tag={p.get('observed_tag', '?')} "
+                    f"— delta: {p.get('delta', '')}"
+                )
+            return (
+                f"{ctype}: {name} — drift event (payload unavailable)"
             )
         return f"{ctype}: {name} — unknown condition"

@@ -577,6 +577,16 @@ class InstanceManager:
             MaintenanceRun,
         )
 
+        # Slice ⑥ (plugin subsystem): register the drift_events
+        # model with ``SQLModel.metadata`` BEFORE ``create_all`` so
+        # the table is created on BOTH drivers (snapshot precedent
+        # for brand-new tables — no _ensure_postgres_columns
+        # mirror). The SQLite-side canonical DDL lives at
+        # ``daemon/migrations/versions/20261007_000001_create_drift_events.sql``.
+        from .plugin_subsystem.drift_event_publisher import (  # noqa: F401
+            DriftEvent,
+        )
+
         SQLModel.metadata.create_all(self._engine)
 
         # Run file-based migrations using MigrationRunner
@@ -1726,9 +1736,25 @@ class InstanceManager:
                 evolution_service=None,  # back-ref set below
                 agent_id_resolver=_resolve_agent_meta,
             )
+            # Slice ⑥ (plugin subsystem): drift-event store + boot
+            # wiring for the publisher seam.  Library callers keep
+            # the log-only default; the daemon persists.  The
+            # engine's ``drift_event_observed`` condition reads the
+            # ``drift_events`` table through this repository.
+            from daemon.plugin_subsystem.drift_event_publisher import (
+                DriftEventPublisher,
+                DriftEventRepository,
+                configure_drift_event_publisher,
+            )
+
+            _drift_event_repo = DriftEventRepository(self._engine)
+            configure_drift_event_publisher(
+                DriftEventPublisher(_drift_event_repo)
+            )
             self._skill_trigger_engine = SkillTriggerEngine(
                 trigger_repo=self._skill_trigger_repo,
                 metrics_service=self._skill_metrics_service,
+                drift_event_repo=_drift_event_repo,
             )
 
             # Skill Evolution Phase 3: injection service (depends

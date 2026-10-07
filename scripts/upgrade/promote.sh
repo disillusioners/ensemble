@@ -38,9 +38,14 @@
 #   TARGET=live ADDITIONALLY requires BOTH the ENSEMBLE_UPGRADE_LIVE=1
 #   guard env AND the explicit --f2-verified-closed operator flag
 #   (MINOR-4b: a second factor, not a replacement — see the F2 gate).
+#   --allow-stale-plugins overrides the plugin-staleness predicate
+#   (REC comp 13, slice ⑥: pin age > 14d / unresolved divergence /
+#   unowned-alarm escalation ⇒ refuse) — argv-only, JOURNALED on the
+#   install dir, mirrors --allow-stale-stage.
 #
 # EXIT CODES: 0 committed · 1 rolled back (env recovered, promote failed) ·
-# 78 refusal (preflight/halt/cooldown/cap/quarantine/integrity/busy/live) ·
+# 78 refusal (preflight/halt/cooldown/cap/quarantine/integrity/busy/live/
+# plugin-staleness) ·
 # 75 gate-unreachable class is handled internally by rollback.
 #
 # ABORT-LANE POLICY (B4): every post-stop abort (stop/swap/flip failure)
@@ -71,11 +76,21 @@ while [ $i -lt ${#args[@]} ]; do
             ;;
         --f2-verified-closed)
             # MINOR-4b (P2.3 review cycle 1): explicit operator flag —
-            # TARGET=live additionally requires it (see the F2 gate after
-            # require_live_guard). No value; presence is the attestation.
+            # TARGET=live additionally requires it (see the F2 gate).
+            # No value; presence is the attestation.
             F2_VERIFIED_CLOSED=1
             ;;
-        -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --allow-stale-plugins)
+            # Slice ⑥ (REC comp 13): argv-only override for the
+            # plugin-staleness predicate (pin age / unresolved
+            # divergence / unowned-alarm escalation). Journaled on
+            # the install dir by the predicate helper (one entry per
+            # reason token, operator_accepted=true). Mirrors
+            # --allow-stale-stage (argv-only, refused at the gate,
+            # audited on accept).
+            PROMOTE_STALENESS_OVERRIDE=1
+            ;;
+        -h|--help) sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "promote: unknown flag '$arg' — set VERSION=<ver> env or use --help" >&2; exit 78 ;;
     esac
     i=$((i + 1))
@@ -166,6 +181,16 @@ promote_entry_check "$VERSION"
 # explicit-unit exit-78 refusal + the §6 DUAL_FIGHT fault check — PRE-TXN
 # (before 1f opens the journal txn; before any stop/flip mutation).
 supervision_preflight
+
+# 1d-ter. Plugin-staleness predicate (REC comp 13, slice ⑥): pin age
+# > 14d OR unresolved divergence OR unowned-alarm escalation ⇒ refuse
+# (exit 78, journaled reason token). Fail-closed: an unevaluable gate
+# refuses; a repo with no plugins/ passes trivially (no spurious
+# blocks on plugin-less promotes). Override: --allow-stale-plugins
+# (argv-only, journaled — the stage.sh freshness-guard discipline).
+# Runs BEFORE integrity so staleness is visible at the earliest
+# refusal point, and BEFORE any stop/flip mutation.
+promote_plugin_staleness_check
 
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
 # fields + no-.env invariant. Same-version re-promote verifies once.
