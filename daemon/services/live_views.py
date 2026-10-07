@@ -486,13 +486,18 @@ class LiveViewsService:
         entry,
     ) -> ResolvedTarget:
         # The TmpImageStore is the substrate. ``rel_path`` is the
-        # bare 32-hex image id; the store's stat_with_meta /
-        # open_with_meta supply the sidecar-MIME. We delegate
-        # the resolve to the store — the same shape that
-        # ``daemon/routers/tmp_images.py:387`` uses, so a
+        # bare 32-hex image id; the store's stat_with_meta
+        # (REWORK 2026-10-07 m4) returns ``(size, content_type,
+        # sha)`` without reading the blob — the router layer
+        # does the single read at request time. The sidecar
+        # MIME is the only thing that survives from the
+        # pre-M4 shape (architect risk #7 — NEVER
+        # extension-guessed); the resolve is stat-based, not
+        # blob-based, so the ``daemon/routers/tmp_images.py``
+        # precedent only carries the MIME contract. A
         # ``/views/tmp-images/<id>`` URL and a
-        # ``/api/tmp_images/<id>`` URL both serve the same bytes
-        # with the same sidecar-MIME.
+        # ``/api/tmp_images/<id>`` URL still serve the same
+        # bytes with the same sidecar-MIME.
         if self._tmp_image_store is None:
             # The lifespan did not wire the store (unwritable
             # data dir, etc.) — uniform 404.

@@ -122,7 +122,7 @@ The service was never wired into the manager. This should not happen in producti
 
 Likely causes, in order of frequency:
 1. The root is `disabled: false` (operator disabled it).
-2. The file's extension is not in the root's `allowed_extensions` (uniform 404 by design — see `daemon/services/live_views.py:280-286`).
+2. The file's extension is not in the root's `allowed_extensions` (uniform 404 by design — see `daemon/services/live_views.py:603-609`).
 3. The file is a symlink whose target escapes the resolved root (the containment check fires; uniform 404).
 4. The file's path traverses a `..` segment (the shape check fires; uniform 404).
 5. The file is larger than the 32 MiB soft cap (uniform 404; the cap protects against accidentally serving a multi-GB log).
@@ -132,7 +132,7 @@ Likely causes, in order of frequency:
 
 ### 3.4 A specific URL returns the wrong MIME
 
-`/views/<root>/<rel>` uses an explicit extension→MIME map (see `daemon/services/live_views.py:87-109`). Anything not in the map returns `application/octet-stream`. The map is **closed** — the daemon never consults the host `mimetypes` registry (`/etc/mime.types`): a packager who maps an agent-authored extension to `text/html` would let the browser execute the result on the daemon origin. The safe default for any extension outside the closed map is `application/octet-stream` (the spec's allowed fallback). If a deployment needs a new MIME for a common artifact, add it to `_EXT_TO_MIME` and file a PR.
+`/views/<root>/<rel>` uses an explicit extension→MIME map (see `daemon/services/live_views.py:97-119`). Anything not in the map returns `application/octet-stream`. The map is **closed** — the daemon never consults the host `mimetypes` registry (`/etc/mime.types`): a packager who maps an agent-authored extension to `text/html` would let the browser execute the result on the daemon origin. The safe default for any extension outside the closed map is `application/octet-stream` (the spec's allowed fallback). If a deployment needs a new MIME for a common artifact, add it to `_EXT_TO_MIME` and file a PR.
 
 The exception is `/views/tmp-images/<id>` — that path uses the sidecar MIME (architect risk #7), not the extension. The blob is extensionless on disk; the sidecar is the only source of truth.
 
