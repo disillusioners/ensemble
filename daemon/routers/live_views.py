@@ -124,11 +124,34 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
         size = st.st_size
         if size > max_bytes:
             return None
-        # Read in one shot when the file fits; bounded by
-        # ``size`` so an intervening growth above the cap
-        # never escapes.
+        # Read in a loop until we have ``size`` bytes or hit
+        # EOF (``b""``). Single-shot ``os.read(fd, size)`` is
+        # not guaranteed to return the full file on every
+        # kernel / fs — short reads DO happen (large files,
+        # pipes, some network filesystems), and returning
+        # truncated bytes would silently ship a 404-corrupt
+        # file to the browser. The cap is ``size`` itself
+        # (the fstat-confirmed current size), so an
+        # intervening growth above the cap never escapes;
+        # the loop terminates either at EOF (clean) or
+        # after reading exactly ``size`` bytes (cap).
         try:
-            return os.read(fd, size)
+            chunks: list[bytes] = []
+            remaining = size
+            while remaining > 0:
+                buf = os.read(fd, remaining)
+                if not buf:
+                    # EOF before we hit ``size`` — the file
+                    # was truncated under us (rare; only
+                    # possible when another writer is
+                    # racing). Return what we have; the
+                    # router treats ``None`` as the only
+                    # hard-fail signal and a short read
+                    # is still bytes the caller can serve.
+                    break
+                chunks.append(buf)
+                remaining -= len(buf)
+            return b"".join(chunks)
         except OSError:
             return None
     finally:

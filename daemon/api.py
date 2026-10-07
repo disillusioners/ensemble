@@ -1020,7 +1020,7 @@ async def lifespan(app: FastAPI):
     # ─────────────────────────────────────────────────────────────
     # live-view subsystem (Phase 1, 2026-10-07) — build the
     # LiveViewsService NOW (after the manager is alive so the
-    # project-resolver closures can read the live project repo,
+    # project-resolver closure can read the live project repo,
     # and after the tmp_image_store is wired so the ``tmp-images``
     # root can delegate to the existing substrate). The router
     # is constructed in create_app() with the same service
@@ -1031,36 +1031,13 @@ async def lifespan(app: FastAPI):
     # ─────────────────────────────────────────────────────────────
     from daemon.services.live_views import LiveViewsService
 
-    def _resolve_project_workdir_for_instance(instance_id: str | None) -> str | None:
-        """Return the main_directory of the project owning ``instance_id``.
-
-        Used to anchor the ``designer-artifact`` root. ``None`` on
-        missing instance, missing project row, or the instance
-        being project-less. Fail-closed — the router collapses
-        None to a uniform 404 (no path / no project-id leak).
-        """
-        if not instance_id:
-            return None
-        try:
-            instance_meta = manager._instance_repository.get(instance_id)
-        except Exception:
-            return None
-        if instance_meta is None or not instance_meta.project_id:
-            return None
-        try:
-            project = manager._project_repository.get(instance_meta.project_id)
-        except Exception:
-            return None
-        if project is None or not project.main_directory:
-            return None
-        return project.main_directory
-
     def _resolve_project_workdir_by_shortname(shortname: str | None) -> str | None:
         """Return the main_directory of the project matching ``shortname``.
 
-        Used to anchor the project-scoped ``planning`` root. The
-        shortname is the FIRST URL segment after ``/views/planning/``
-        — it MUST be a registered project shortname (any
+        Used to anchor the project-scoped ``planning`` and
+        ``designer-artifact`` roots (REWORK 2026-10-07, M2). The
+        shortname is the FIRST URL segment after the root — it
+        MUST be a registered project shortname (any
         ``Project.shortnames`` entry). Unknown / unregistered /
         empty shortname → ``None`` → uniform 404.
 
@@ -1073,7 +1050,17 @@ async def lifespan(app: FastAPI):
             return None
         try:
             project = manager._project_repository.get_by_shortname(shortname)
-        except Exception:
+        except Exception as exc:
+            # DEBUG breadcrumb: shortname resolver is the
+            # SOLE project-context seam after the M2 rework
+            # (the per-instance variant is gone). Silent
+            # swallow here would mask a misconfigured
+            # project repo; log at DEBUG so prod is quiet
+            # and dev / repro can see the failure.
+            daemon_logger.debug(
+                f"[LiveViews] shortname resolver failed for "
+                f"{shortname!r}: {type(exc).__name__}: {exc}"
+            )
             return None
         if project is None or not project.main_directory:
             return None
@@ -1082,7 +1069,6 @@ async def lifespan(app: FastAPI):
     live_views_service = LiveViewsService(
         config=config.live_views,
         tmp_image_store=tmp_image_store,
-        project_workdir_resolver=_resolve_project_workdir_for_instance,
         project_workdir_by_shortname_resolver=_resolve_project_workdir_by_shortname,
     )
     app.state.live_views_service = live_views_service

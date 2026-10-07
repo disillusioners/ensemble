@@ -304,17 +304,18 @@ class LiveViewsService:
         *,
         config: "LiveViewsConfig",
         tmp_image_store: "TmpImageStore | None" = None,
-        project_workdir_resolver: Callable[[str], str | None] | None = None,
         project_workdir_by_shortname_resolver: Callable[[str], str | None] | None = None,
     ) -> None:
         self._config = config
         self._tmp_image_store = tmp_image_store
-        # Resolvers are passed in by the lifespan (avoids a hard
-        # dependency on the manager here). Each returns the project
-        # main_directory (or None) for the caller's project / for
-        # the supplied shortname. None on unknown project /
-        # missing repo row.
-        self._project_workdir_resolver = project_workdir_resolver
+        # Resolver is passed in by the lifespan (avoids a hard
+        # dependency on the manager here). It returns the project
+        # main_directory (or None) for the supplied shortname.
+        # None on unknown project / missing repo row. Only the
+        # shortname variant survives — the per-instance
+        # ``project_workdir_resolver`` was removed in the
+        # REWORK 2026-10-07 (M2) when ``designer-artifact``
+        # moved from filesystem-typed to project_scoped.
         self._project_workdir_by_shortname_resolver = (
             project_workdir_by_shortname_resolver
         )
@@ -397,12 +398,7 @@ class LiveViewsService:
         # ``designer-artifact`` root is no longer filesystem-typed
         # — it is project_scoped now so the URL pattern
         # ``/views/designer-artifact/<shortname>/<rel>`` resolves
-        # by shortname lookup, exactly like ``planning``. The
-        # per-instance ``project_workdir_resolver`` argument is
-        # still honored here for OPERATOR-supplied filesystem roots
-        # that need per-instance workdir resolution (the
-        # ``designer-artifact`` special case is GONE — those
-        # requests now flow through ``_resolve_project_scoped``).
+        # by shortname lookup, exactly like ``planning``.
         if entry.path and not Path(entry.path).is_absolute():
             # Refuse relative paths that did not get resolved by a
             # project context. An operator who configured a

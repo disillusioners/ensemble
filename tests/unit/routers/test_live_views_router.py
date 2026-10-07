@@ -721,3 +721,68 @@ class TestFdReadNoFollow:
 
         target = tmp_path / "nope.txt"
         assert _fd_read(target, max_bytes=1024) is None
+
+    def test_short_os_read_loops_until_eof(
+        self, tmp_path: pathlib.Path
+    ):
+        """The fd-read loop must tolerate short ``os.read`` returns.
+
+        ``os.read`` is not guaranteed to deliver all ``size``
+        bytes in one call (pipes, large files, some
+        filesystems). The single-shot form silently shipped
+        truncated bytes; the looped form reads until EOF or
+        until the fstat-confirmed size is fully consumed.
+
+        Mocks ``os.read`` to return a short chunk first, then
+        an empty chunk (EOF). The real file is longer than the
+        short chunk (10 bytes vs 5). The mock's accumulated
+        output (``b"short"``) is what the helper MUST return
+        after the loop sees the EOF break — the single-shot
+        form would also return ``b"short"`` (the first mock
+        value), so the return value alone does not
+        distinguish. The call-count assertion pins the loop
+        shape: single-shot would call ``os.read`` exactly
+        once; the loop must call it at least twice (the
+        short chunk + the EOF probe).
+        """
+        from unittest.mock import patch
+
+        from daemon.routers.live_views import _fd_read
+
+        target = tmp_path / "loop.txt"
+        target.write_bytes(b"0123456789")  # 10 bytes; mock returns 5+EOF
+        with patch("os.read", side_effect=[b"short", b""]) as mock_read:
+            data = _fd_read(target, max_bytes=10 * 1024 * 1024)
+        # Loop terminated on EOF, returned the accumulated
+        # short chunk. The single-shot form would also
+        # return ``b"short"`` (the first mock value) — the
+        # call-count assertion is what pins the loop.
+        assert data == b"short"
+        assert mock_read.call_count >= 2, (
+            f"partial-read loop must call os.read at least twice "
+            f"(short chunk + EOF probe); got {mock_read.call_count}"
+        )
+
+    def test_short_os_read_loops_until_size(
+        self, tmp_path: pathlib.Path
+    ):
+        """The loop must terminate on full-size reads, not
+        loop forever.
+
+        When each ``os.read`` returns exactly the requested
+        chunk, the loop hits the ``remaining == 0`` branch
+        and returns the joined buffer. The chunks sum to
+        the file size, so the helper returns the full file
+        content. This pins the happy-path loop shape against
+        a refactor that drops the ``remaining -= len(buf)``
+        decrement.
+        """
+        from unittest.mock import patch
+
+        from daemon.routers.live_views import _fd_read
+
+        target = tmp_path / "loop2.txt"
+        target.write_bytes(b"abcdefgh")
+        with patch("os.read", side_effect=[b"abcd", b"efgh"]):
+            data = _fd_read(target, max_bytes=10 * 1024 * 1024)
+        assert data == b"abcdefgh"

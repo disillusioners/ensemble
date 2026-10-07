@@ -92,6 +92,20 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8079/views/livez
 
 The `/views/livez` route is gated by the same uniform-404 envelope as everything else; a `200` response is a positive signal, a `404` is ambiguous (it could be "disabled" or "not wired") — check the daemon log for the `[LiveViews] subsystem ready:` line in the latter case.
 
+### 2.6 `required_rel_subpath` — the per-root subpath gate (M3)
+
+`project_scoped` roots may declare a `required_rel_subpath` list to pin the URL's rel path to a specific sub-tree under the per-project `entry.path` directory. The gate is enforced at resolve time in `daemon/services/live_views.py:452-467` as a contiguous sliding-window match over the rel's `/`-separated parts. Three shapes are valid:
+
+* `required_rel_subpath: []` (empty list — default) — the gate is **skipped**. The rel may name any path under the per-project `entry.path` tree. The seeded `planning` root uses this shape (it serves the whole `.agents/shared/planning/` subtree).
+* `required_rel_subpath: [""]` (or any list containing an empty string) — **misconfiguration**. The resolver treats this as a uniform-404 root with no useful service, because an empty element can never match a real path segment. Operators hitting a uniform 404 on a `project_scoped` root with a non-empty `required_rel_subpath` should grep the running config for empty subpath entries.
+* `required_rel_subpath: ["design", "mockups"]` (populated, non-empty) — the gate fires. The rel's `/`-separated parts must contain the configured sequence as a CONTIGUOUS subsequence. The seeded `designer-artifact` root uses this shape; examples:
+  * `feat/design/mockups/landing.html` — passes (parts `design`+`mockups` are adjacent).
+  * `feat/random.html` — uniform 404 (`design`+`mockups` not present).
+  * `feat/Design/mockups/landing.html` — uniform 404 (case-sensitive; segment comparison is exact).
+  * `feat/design/extra/mockups/landing.html` — uniform 404 (the required sequence must be CONTIGUOUS, not just present).
+
+The gate exists to make a per-root URL namespace (`designer-artifact` ≠ `planning`) actually mean what it says: an operator cannot accidentally expose the parent planning tree under the `designer-artifact` name. A uniform 404 on a `project_scoped` root that LOOKS well-formed is the symptom; the config is the cure.
+
 ## 3. Troubleshooting
 
 ### 3.1 `/views/livez` returns 404 in dev
@@ -112,8 +126,9 @@ Likely causes, in order of frequency:
 3. The file is a symlink whose target escapes the resolved root (the containment check fires; uniform 404).
 4. The file's path traverses a `..` segment (the shape check fires; uniform 404).
 5. The file is larger than the 32 MiB soft cap (uniform 404; the cap protects against accidentally serving a multi-GB log).
-6. The root is `designer-artifact` (REWORK 2026-10-07 M2: project-scoped) and the URL's project shortname is not a registered `Project.shortnames` entry (uniform 404; check the project's shortnames list). Or the rel path is not under `*/design/mockups/*` (M3: the resolver enforces the mockups subtree prefix; uniform 404).
-7. The root is `planning` and the URL's project shortname is not a registered `Project.shortnames` entry (uniform 404; check the project's shortnames list).
+6. The root is `project_scoped` with a non-empty `required_rel_subpath` (M3 subpath gate) and the rel path does not contain the configured sequence as a contiguous subsequence. See §2.6 for the three valid shapes (`[]` = gate skipped, `[""]` = misconfig uniform-404, populated list = sliding-window segment gate). The most common incident is `[""]` — an operator typoed a single-segment list; the resolver treats it as no-match and uniform-404s the whole root. Symptom: a `project_scoped` root with a `required_rel_subpath` in config returns 404 on EVERY URL, even the canonical example path. Cure: correct the config (use a populated list like `["design", "mockups"]` for the seeded `designer-artifact` shape) and restart. The implementation lives at `daemon/services/live_views.py:452-467`.
+7. The root is `designer-artifact` (REWORK 2026-10-07 M2: project-scoped) and the URL's project shortname is not a registered `Project.shortnames` entry (uniform 404; check the project's shortnames list). Or the rel path is not under `*/design/mockups/*` (M3: the resolver enforces the mockups subtree prefix; uniform 404).
+8. The root is `planning` and the URL's project shortname is not a registered `Project.shortnames` entry (uniform 404; check the project's shortnames list).
 
 ### 3.4 A specific URL returns the wrong MIME
 

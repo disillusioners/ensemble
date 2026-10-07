@@ -3,7 +3,7 @@
 Phase 1 of the live-view subsystem (2026-10-07). The tool is the
 AGENT-FACING minting surface: given a root-name + relative path,
 return a URL an agent can drop into a spec / implement-brief /
-chat message. The HTTP route family at ``/views/<root>/<rel>`` is
+chat message. The HTTP route family at ``/views/<root>/<path>`` is
 the OTHER side of the same coin — the tool mints, the route serves.
 
 DESIGN DECISIONS (cross-referenced in the report):
@@ -25,7 +25,7 @@ DESIGN DECISIONS (cross-referenced in the report):
   the user-driven visibility decision, NOT a tool-side
   capability flag — the same convention as the public-by-obscurity
   file-serving shape of ``image_get``.
-* **URL base resolution.** Path-relative ``/views/<root>/<rel>``
+* **URL base resolution.** Path-relative ``/views/<root>/<path>``
   by default; fully-qualified ``<external_base_url>/views/...``
   when ``config.live_views.external_base_url`` is set. The
   default is the safe one because the daemon has no canonical
@@ -59,11 +59,11 @@ Live-view subsystem URL minter.
 
 view_link() returns a URL for a (root-name, relative-path) pair
 in the live-view subsystem. The same URL is served by the
-GET/HEAD ``/views/<root>/<rel>`` HTTP route family; the tool is
+GET/HEAD ``/views/<root>/<path>`` HTTP route family; the tool is
 the agent-facing minting surface. Read-only — no filesystem or
 database side effects.
 
-URL base: path-relative ``/views/<root>/<rel>`` when
+URL base: path-relative ``/views/<root>/<path>`` when
 ``live_views.external_base_url`` is unset (the default —
 recommended for behind-OAuth-proxy deployments); fully-qualified
 ``<external_base_url>/views/...`` when set. Unknown / disabled
@@ -126,7 +126,7 @@ def create_live_view_tools(manager: "InstanceManager", current_instance_id: str)
           without a per-instance workdir binding.
         * ``planning`` — every project's
           ``.agents/shared/planning/`` tree. URL shape:
-          ``/views/planning/<project_shortname>/<rel>``.
+          ``/views/planning/<project_shortname>/<path>``.
         * ``tmp-images`` — the daemon tmp-image substrate
           (sidecar-MIME; blobs are extensionless). URL
           shape: ``/views/tmp-images/<32hex>``.
@@ -147,12 +147,26 @@ def create_live_view_tools(manager: "InstanceManager", current_instance_id: str)
             root_name: The registered root name (e.g.
                 ``"designer-artifact"``, ``"planning"``,
                 ``"tmp-images"``).
-            path: The relative path under the root. For
-                ``designer-artifact`` / ``tmp-images``, this
-                is the full relative path or bare 32-hex id.
-                For ``planning``, the first path segment is
-                the project shortname and the rest is the
-                path under that project's planning tree.
+            path: The relative path under the root. Shape
+                depends on the root:
+
+                * ``designer-artifact`` — REWORK 2026-10-07
+                  (M2): the root is project_scoped, so the
+                  path is ``<project_shortname>/<feature>/design/mockups/<file>``,
+                  i.e. the project shortname + the row's
+                  ``path`` value verbatim (e.g.
+                  ``"ens/feat/design/mockups/landing.html"``).
+                  The M3 ``required_rel_subpath``
+                  (``["design", "mockups"]``) is enforced
+                  server-side — passing a path missing the
+                  trailing ``design/mockups/`` segment yields
+                  a uniform 404.
+                * ``planning`` — the first path segment is the
+                  project shortname and the rest is the path
+                  under that project's planning tree
+                  (e.g. ``"ens/feat/plan.md"``).
+                * ``tmp-images`` — the bare 32-hex image id
+                  (sidecar-MIME; blobs are extensionless).
 
         Returns:
             The canonical URL string on success. On any

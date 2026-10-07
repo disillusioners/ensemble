@@ -99,7 +99,7 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_four(self) -> None:
+    def test_privileged_categories_is_exactly_five(self) -> None:
         """The default-deny set is exactly five entries —
         ``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
         and ``view-views``.
