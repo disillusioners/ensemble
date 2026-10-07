@@ -485,6 +485,48 @@ _js_quarantine() {
     _js_journal_update "$jp" "quarantined" "$new"
 }
 
+# _js_history_has_intent_flip <journal> <target> — returns 0 iff the journal
+# history contains an `intent_flip` event whose `detail` names <target>
+# (2.2c, upgrade-resilience 2026-10-07). The shell twin's BOOT-side
+# evidence check for the boot_sweep_commit_and_continue branch:
+# promote.sh emits intent_flip AFTER both integrity verifications
+# (CURRENT drift + TARGET match) pass, BEFORE any mutation, so its
+# presence in history proves the operator passed preflight + the
+# intent+integrity contract. The walker is intentionally narrow:
+# matches on the JSON `event` field being exactly "intent_flip" AND
+# the detail carrying the `target $VERSION` substring
+# (`preflight: intentional promote target $VERSION — …`) — the
+# fingerprint is unambiguous because promote's emit uses the exact
+# string shape. No fuzzy match — a missing target leaves the boot at
+# the conservative halt gates.
+#
+# History entries are {ts,event,detail}; `_js_json_sub` extracts the
+# array as raw text. We DO NOT parse JSON in shell (fragile); instead
+# we use a `case` glob with the conjunction of the two substrings.
+# Both substrings must appear in the SAME history array; false
+# positives require a hand-edit that puts both strings in the array —
+# the operator's intentionality is the sole producer (per the
+# writer-side comment in promote.sh).
+_js_history_has_intent_flip() {
+    local jp="$1" target="$2" json hist pattern
+    [ -n "$target" ] || return 1
+    json="$(_js_journal_read "$jp")" || return 1
+    hist="$(_js_json_sub "$json" "history")"
+    case "$hist" in
+        ''|null|\[\]) return 1 ;;
+    esac
+    # Build the conjunction pattern in a variable (case-glob expansion
+    # of inline literal escapes is fragile; a variable keeps the `*` and
+    # the `\"` stable). The pattern requires the array to carry BOTH
+    # the event-kind literal AND the `target <VERSION>` substring —
+    # promote's emit prefix is byte-identical (see promote.sh 2.2c).
+    pattern='*"event":"intent_flip"*target '"$target"'*'
+    case "$hist" in
+        $pattern) return 0 ;;
+    esac
+    return 1
+}
+
 # ── rollback.lock.d — mkdir-lock, D5 protocol (self-contained) ─────────────
 # mkdir IS the atomic acquire (portable; no flock on stock macOS). Contents:
 # owner (pid), heartbeat (epoch). Stale: heartbeat older than
@@ -924,14 +966,81 @@ _journal_sweep() {
 
     local rc=0
     if [ "$flipped" = "true" ]; then
+        # 2.2c — read `prev` ONCE at the entry of the flipped=true branch
+        # so BOTH the new boot_sweep_commit_and_continue evidence check
+        # AND the existing sweep-rollback gate below can use it without
+        # re-declaring (bash forbids `local prev` in the same function
+        # twice).
+        local prev
+        prev="$(_js_json_field "$json" "previous" 2>/dev/null)" || prev=""
+        # ── 2.2c boot_sweep_commit_and_continue (B5, upgrade-resilience
+        # 2026-10-07) ───────────────────────────────────────────────────
+        # Operator declares a release NOT rollback-compatible explicitly
+        # by setting ``rollback_safe:"false"`` in the release manifest
+        # (the deliberate-incompatibility declaration; D-FA4.5 governs
+        # schema-drift). When a flipped txn exists for that target AND
+        # the operator's preflight emitted an `intent_flip` history
+        # event (proof that BOTH CURRENT drift detection + TARGET
+        # integrity matched BEFORE the flip — the only producer is
+        # promote.sh post-preflight, no other call site), the sweep
+        # COMMITS AND CONTINUES at the flipped release instead of
+        # sweep-rollbacking (which would point `current` at an
+        # explicitly-incompatible previous release — a strictly worse
+        # outcome than booting the verified-and-declared target).
+        #
+        # Decision gates (ALL must hold; partial credit takes the
+        # conservative halt path):
+        #   (a) `intent_flip` history event for this txn target —
+        #       writer side: promote.sh 2.2c emit, post-integrity /
+        #       pre-mutation. Its presence is the sole proof of the
+        #       operator's intentionality + the preflight passing.
+        #   (b) txn flipped:true (real OR kill-window-healed — both
+        #       prove the atomic flip completed; the symlink evidence
+        #       at :916-923 already normalized that).
+        #   (c) previous release's manifest rollback_safe is EXPLICITLY
+        #       "false" — a deliberate operator declaration of
+        #       incompatibility. Missing/unreadable manifest stays
+        #       conservative-halt (cannot prove the rollback is safe).
+        #
+        # If evidence is insufficient (no intent_flip, missing manifest,
+        # unreadable anything): existing halt gates + rollback path
+        # UNTOUCHED — the new branch ONLY fires when ALL gates hold.
+        #
+        # Mutations performed (atomic temp+mv each, D4):
+        #   - journal current → target (the committed release)
+        #   - journal in_flight → null (close the txn)
+        #   - history append: boot_sweep_commit_and_continue
+        #     (target/prev/age/evidence detail)
+        # NOT mutated: pending_op (Python reconciler owns that field;
+        # the shell twin does not fight dev1's lane — if pending_op
+        # exists, it stays as-is for the daemon's reconcile to clear).
+        # NOT done: sweep-rollback, quarantine, counter+cooldown arming.
+        # The cap/cooldown are anti-flapping responses to BAD outcomes;
+        # a successful-and-declared flip is not a bad outcome.
+        if [ -n "$prev" ] && [ "$prev" != "null" ] \
+           && _js_history_has_intent_flip "$journal" "$target" \
+           && _js_manifest_field "$install_dir" "$prev" "rollback_safe" 2>/dev/null \
+             | grep -q '^false$'; then
+            # All three gates hold — COMMIT AND CONTINUE.
+            _notify_once "sweep-commit" \
+                "sweep-commit-and-continue: stale flipped $kind txn (target=$target, prev=$prev) — operator declared previous rollback_safe:false AND preflight emitted intent_flip evidence; commit+continue at target (NOT sweep-rollback)"
+            _js_journal_update "$journal" "current" "\"$target\"" \
+                || { _log "WARN: journal sweep: commit-and-continue journal current update FAILED — boot proceeds on existing current"; _js_lock_release "$install_dir"; return 0; }
+            _js_journal_update "$journal" "in_flight" "null" \
+                || { _log "WARN: journal sweep: commit-and-continue in_flight clear FAILED — boot proceeds"; rc=1; }
+            _js_history_append "$journal" "boot_sweep_commit_and_continue" \
+                "sweep: flipped $kind txn (target=$target, prev=$prev, owner pid ${owner:-?}, age ${age}s) committed and continued — intent_flip evidence + prev rollback_safe:false (operator-declared incompatibility); boot proceeds at target" \
+                || { _log "WARN: journal sweep: commit-and-continue history append FAILED — boot proceeds"; rc=1; }
+            _log "BOOT-SWEEP COMMIT-AND-CONTINUE: stale flipped $kind txn (age ${age}s, target=$target, prev=$prev) — operator declared prev rollback_safe:false + preflight emitted intent_flip evidence; boot proceeds at target (NOT sweep-rollback; txn closed, counter NOT incremented, no cooldown)"
+            _js_lock_release "$install_dir"
+            return 0
+        fi
         # ── Sweep-rollback (ADR-012 / ADR-024 / D-FA4.2) ────────────────────
         # Flip-first ordering: if we die mid-sequence the next start re-runs
         # the sweep on the same stale txn; every step is idempotent except
         # the counter increment (which can only over-count — conservative,
         # anti-flapping direction). Journal-first would strand the env on
         # the orphaned flip — exactly what D-FA4.2 forbids.
-        local prev
-        prev="$(_js_json_field "$json" "previous" 2>/dev/null)" || prev=""
         case "$prev" in ''|null)
             _notify_once "sweep-halt" \
                 "HALT-FOR-HUMAN: stale flipped $kind txn (target=${target:-?}) but journal has no previous release — cannot sweep-rollback; boot proceeds on current; see $install_dir/releases/state.json"

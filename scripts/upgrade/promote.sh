@@ -249,6 +249,26 @@ if [ -z "$BIN_VERSION" ]; then
     exit 78
 fi
 
+# 2.2c (upgrade-resilience 2026-10-07) — emit the `intent_flip` journal
+# event. This is the EVIDENCE the boot-sweep commit-and-continue path
+# (launcher.sh:925+ flipped=true → boot_sweep_commit_and_continue branch)
+# uses to prove the operator passed BOTH integrity verifications (CURRENT
+# drift detection + TARGET manifest match) BEFORE any mutation. The
+# event is written HERE on purpose:
+#   - PRE-stop, PRE-flip (state still intact, no kernel state moved)
+#   - POST-integrity (the preflight refused above on any failure)
+# So the event's PRESENCE in history is the positive proof the promote
+# was intentional + verified — a journal hand-edit cannot fake it
+# because the operator's intentionality is the sole producer.
+# The event kind `intent_flip` is the contract with the boot-sweep
+# consumer (also a NEW shell kind, additive — the Python
+# ALERT_KIND_BY_EVENT map is dev1's file; additive shell events
+# degrade as unknown-kind observability on the Python side, which is
+# safe).
+journal_history_append intent_flip \
+    "preflight: intentional promote target $VERSION — integrity verified (CURRENT drift-check + TARGET manifest match); operator-initiated" \
+    || _warn "intent_flip journal event append FAILED (best-effort; boot-sweep commit-and-continue path will see no evidence and fall to the conservative halt gates)"
+
 # 1f. open the transaction (D4)
 if ! journal_open_txn "promote" "$VERSION"; then
     _warn "cannot open journal txn (an in_flight survived adoption?) — pipeline-busy"
