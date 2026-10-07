@@ -21,7 +21,24 @@
 --     field name verbatim.
 --   - ``files`` is JSON (list of strings) via JSONBType on the model —
 --     same dual-dialect JSON treatment as ``skill_triggers.condition_json``.
---   - Index names match the model declaration so both dialects converge.
+--   - Index names MUST stay byte-identical to the DriftEvent model's
+--     ``__table_args__`` declaration (the canonical source) AND to the
+--     idempotent ``CREATE INDEX IF NOT EXISTS`` block in
+--     ``EnsembleManager._ensure_postgres_columns`` (manager.py). The
+--     dual-driver contract (decisions.md D2) is "table exists + index
+--     name matches". The ``tests/migration/test_drift_events_index_parity
+--     .py`` test suite fails if any of the three names drift.
+--   - Prior versions of this header falsely claimed "both dialects
+--     converge" via the SQLModel ``__table_args__`` path alone — that
+--     was never true: SQLModel.metadata.create_all() is a no-op for
+--     tables that already exist (existing PG databases were never
+--     touched by create_all), AND the model at the time had zero
+--     ``__table_args__`` declarations. The fix (2026-10-07): add the
+--     declarations to the model AND add the idempotent CREATE INDEX IF
+--     NOT EXISTS block to ``_ensure_postgres_columns``. Fresh PG
+--     databases get the indexes via ``create_all`` (model side);
+--     existing PG databases get them at next boot via the ensure
+--     block.
 
 -- UP
 

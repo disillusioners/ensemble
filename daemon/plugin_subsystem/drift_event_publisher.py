@@ -51,7 +51,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Protocol
 
 from sqlmodel import Field, SQLModel, Session, select  # SQLModel Session: .exec() select helper
-from sqlalchemy import Column, String, Text, delete as sa_delete
+from sqlalchemy import Column, Index, String, Text, delete as sa_delete
 from sqlalchemy.engine import Engine
 
 from daemon.repositories.infra.types import JSONBType
@@ -94,6 +94,30 @@ class DriftEvent(SQLModel, table=True):
     """
 
     __tablename__ = "drift_events"
+    # Index names MUST stay byte-identical to the SQLite companion
+    # migration at
+    # ``daemon/migrations/versions/20261007_000001_create_drift_events.sql``
+    # AND to the idempotent ``CREATE INDEX IF NOT EXISTS`` block in
+    # ``EnsembleManager._ensure_postgres_columns`` (manager.py). The
+    # fresh-PG path (``SQLModel.metadata.create_all``) emits these
+    # via ``__table_args__``; existing PG databases pick them up via
+    # the ensure block at boot. Tests in
+    # ``tests/migration/test_drift_events_index_parity.py`` fail if
+    # the names drift out of sync — the contract is "model names
+    # canonical; migration + ensure block agree". The composite
+    # ``ix_drift_events_plugin_divergence`` backs the engine's
+    # ``DELETE FROM drift_events WHERE plugin=? AND divergence_id=?``
+    # resolution predicate (drift_event_publisher.DriftEventRepository
+    # .resolve); ``ix_drift_events_plugin`` backs the
+    # ``WHERE plugin=?`` reads (latest_for_plugin / plugin-scoped
+    # list_unresolved); ``ix_drift_events_observed_at`` backs the
+    # engine's ``ORDER BY observed_at`` walk in
+    # ``DriftEventRepository.list_unresolved`` / engine sweepers.
+    __table_args__ = (
+        Index("ix_drift_events_plugin", "plugin"),
+        Index("ix_drift_events_plugin_divergence", "plugin", "divergence_id"),
+        Index("ix_drift_events_observed_at", "observed_at"),
+    )
 
     id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
