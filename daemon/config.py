@@ -2166,7 +2166,20 @@ class LiveViewsRootConfig(BaseModel):
         validator gets a single actionable error pointing at
         the field + the type-specific reason.
 
-        Rules:
+        A root with ``enabled=False`` SKIPS the shape checks
+        below: a disabled root never resolves, so the
+        ``type``/``path``/``required_rel_subpath`` shape is
+        moot. This restores the documented ``{enabled: false}``
+        disable shorthand (see ``_seed_phase1_roots`` docstring
+        above) that ``LiveViewsRootConfig()`` defaults to
+        ``type='filesystem'`` + ``path=None`` — a combination
+        the strict rules would otherwise reject at boot. The
+        shorthand is canonical: operators use it to disable a
+        single seeded root without writing a full type/path
+        triple.
+
+        Rules (enabled roots only — disabled roots skip
+        everything below):
 
         * ``filesystem`` / ``project_scoped`` roots MUST have
           a non-empty ``path``. Empty / missing → fail loud.
@@ -2182,6 +2195,13 @@ class LiveViewsRootConfig(BaseModel):
           strings; an empty element can never match a real
           path segment and would uniformly 404 the whole root.
         """
+        # Disabled root: skip all shape checks. A root that
+        # never resolves cannot have a "wrong" path/type/subpath
+        # — the operator's intent is the disable, not the shape.
+        # This is the documented ``{enabled: false}`` shorthand
+        # from the _seed_phase1_roots docstring.
+        if not self.enabled:
+            return self
         if self.type in ("filesystem", "project_scoped"):
             if not self.path or not self.path.strip():
                 raise ValueError(

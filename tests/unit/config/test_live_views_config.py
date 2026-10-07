@@ -1,4 +1,4 @@
-"""Unit tests for ``LiveViewsRootConfig`` (HARDENING M11).
+"""Unit tests for ``LiveViewsRootConfig`` (HARDENING M11 + M11 carry).
 
 The validator on ``LiveViewsRootConfig`` is the loud-fail-at-load
 gate the M11 hardening added: a structurally invalid root entry
@@ -9,6 +9,13 @@ type, or an empty segment in the subpath) must raise a
 of these at request time and serve the uniform 404, but a config
 that boots with a broken root is operationally worse than one that
 refuses to boot. First release has no legacy configs to break.
+
+The M11 carry exception: ``LiveViewsRootConfig(enabled=False)``
+SKIPS every shape check above (a disabled root never resolves, so
+its shape is moot). This is the canonical operator-override-model
+disable shorthand documented in the ``_seed_phase1_roots``
+docstring (``{enabled: false}`` disables a single seeded root).
+The pin lives in ``TestDisabledRootShortHand`` below.
 
 Test env: ``uv`` not on PATH; the convention is
 ``/home/nea/ensemble-src/.venv/bin/python -m pytest`` from the
@@ -145,6 +152,75 @@ class TestRequiredRelSubpathGating:
             path=".agents/shared/planning",
             required_rel_subpath=["design", "mockups"],
         )
+
+
+# ── disabled-root shorthand gate (M11 carry) ─────────────────────
+
+
+class TestDisabledRootShortHand:
+    """``LiveViewsRootConfig(enabled=False)`` MUST load cleanly —
+    the documented operator-override-model disable shorthand
+    (``_seed_phase1_roots`` docstring: ``{enabled: false}``
+    disables a single seeded root). The default field values
+    are ``type='filesystem'`` + ``path=None``; without the
+    carry-through, the M11 validator would hard-fail this
+    construction at boot, breaking the disable-shorthand the
+    docstring itself documents.
+
+    The fix is a one-line early-return at the top of
+    ``_validate_root_shape``: a disabled root never resolves,
+    so its shape is moot. ENABLED roots still go through every
+    M11 rule unchanged — this is the pin.
+    """
+
+    def test_disabled_filesystem_default_shorthand_loads(self):
+        # The default-args shape (the canonical
+        # ``{enabled: false}`` disable from the
+        # _seed_phase1_roots docstring at config.py:2266-2271):
+        # type='filesystem', path=None, required_rel_subpath=None.
+        # This is the live reproduction of the M11 carry bug.
+        cfg = LiveViewsRootConfig(enabled=False)
+        assert cfg.enabled is False
+        assert cfg.type == "filesystem"
+        assert cfg.path is None
+        assert cfg.required_rel_subpath is None
+
+    def test_disabled_project_scoped_without_path_loads(self):
+        # ``type='project_scoped'`` with ``path=None`` is also
+        # an enabled-root failure (path-required rule); with
+        # the disable shorthand, it must also load.
+        cfg = LiveViewsRootConfig(
+            type="project_scoped", path=None, enabled=False
+        )
+        assert cfg.enabled is False
+        assert cfg.type == "project_scoped"
+        assert cfg.path is None
+
+    def test_disabled_tmp_images_with_path_loads(self):
+        # The opposite direction: ``tmp_images`` with a path
+        # would fail the path-must-be-unset rule for enabled
+        # roots. The disable shorthand bypasses that too —
+        # which is correct, because a disabled root's shape
+        # is irrelevant (it never resolves).
+        cfg = LiveViewsRootConfig(
+            type="tmp_images", path="/should/not/matter", enabled=False
+        )
+        assert cfg.enabled is False
+        assert cfg.type == "tmp_images"
+
+    def test_disabled_root_with_empty_subpath_segment_loads(self):
+        # The required_rel_subpath empty-segment rule also
+        # applies only to enabled roots. A disabled root
+        # with a structurally-broken subpath is harmless
+        # (never resolves) and must load.
+        cfg = LiveViewsRootConfig(
+            type="project_scoped",
+            path=".agents/shared/planning",
+            required_rel_subpath=["design", ""],
+            enabled=False,
+        )
+        assert cfg.enabled is False
+        assert cfg.required_rel_subpath == ["design", ""]
 
 
 # ── LiveViewsConfig integration: seeded defaults still load ──────
