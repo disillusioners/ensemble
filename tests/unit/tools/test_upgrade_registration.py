@@ -99,17 +99,21 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_three(self) -> None:
-        """The default-deny set is exactly three entries —
-        ``system_upgrade``, ``system-log``, ``ens-db`` — the trio of
-        daemon-internal authority categories.
+    def test_privileged_categories_is_exactly_four(self) -> None:
+        """The default-deny set is exactly five entries —
+        ``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
+        and ``view-views``.
 
         ``service`` was REMOVED from this set by user override
         2026-09-16 (D4 reversed; see
         ``.agents/shared/planning/service-tool/decisions.md`` §D4
         override note): the category is now default-enabled for any
         agent whose effective toolset can include ``bash`` or
-        ``proc``. Adding a category here is a deliberate trust
+        ``proc``. ``ens-env`` joined per the W4 leader decision
+        2026-10-02. ``view-views`` joined per the REWORK 2026-10-07
+        (M1, user refinement #1) — the read-only ``view_link`` URL
+        minter is RESTRICTED first-release (ari + leader + designer
+        only). Adding a category here is a deliberate trust
         decision, and this pin makes silent additions visible
         (D18/A14 — same-PR pin updates; this is pin file 1 of 3)."""
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
@@ -117,6 +121,9 @@ class TestStaticRegistrationChecklist:
             "system-log",
             "ens-db",
             "ens-env",  # W4 (leader decision 2026-10-02) — key-returning tool
+            # REWORK 2026-10-07 (M1): view_link is restricted first-release;
+            # only ari / leader / designer opt in via tools.allow.
+            "view-views",
         })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

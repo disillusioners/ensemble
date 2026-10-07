@@ -140,13 +140,14 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly four entries
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly five entries
         (the daemon-internal authority trio ``system_upgrade``,
         ``system-log``, ``ens-db`` plus ``ens-env`` per the W4
-        leader decision 2026-10-02). The attestation category is
-        opt-in-only by convention (fail-closed authz), NOT because
-        it is privileged — D7 sub-question RESOLVED-by-leader:
-        NOT privileged. Adding ``attestation`` to
+        leader decision 2026-10-02 and ``view-views`` per the
+        REWORK 2026-10-07 M1 user refinement). The attestation
+        category is opt-in-only by convention (fail-closed authz),
+        NOT because it is privileged — D7 sub-question RESOLVED-
+        by-leader: NOT privileged. Adding ``attestation`` to
         ``PRIVILEGED_TOOL_CATEGORIES`` would be a regression (it
         would force every opt-in path to use the privileged-default-deny
         seam, which attestation does NOT need).
@@ -158,18 +159,23 @@ class TestStaticRegistrationChecklist:
         PR as the privilege promotion (D18 same-PR pin update). D4
         Option A (2026-09-15) had previously added ``service`` (pin
         file 2 of 3 — A14 triple-pin discovery); the 2026-09-16
-        override drops back to the trio."""
+        override drops back to the trio. REWORK 2026-10-07 (M1) adds
+        ``view-views`` (the read-only ``view_link`` URL minter;
+        user decision: restricted first-release visibility to
+        ari + leader + designer)."""
         assert ATTESTATION_CATEGORY not in PRIVILEGED_TOOL_CATEGORIES
         # W1-P2 (D18 same-PR pin update): the exact-equality pin is
         # updated in the same PR as the privilege promotion. The
         # mechanism is "silent additions visible" — promoting a new
         # category without bumping this pin would trip a regression
-        # here. W4 (leader decision 2026-10-02) adds ``ens-env``.
+        # here. W4 (leader decision 2026-10-02) adds ``ens-env``;
+        # REWORK 2026-10-07 (M1) adds ``view-views``.
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
             "ens-db",
             "ens-env",
+            "view-views",
         })
 
 

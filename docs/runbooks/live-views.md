@@ -26,11 +26,11 @@ The URL is "public-by-obscurity" the same way `/api/tmp_images/<id>` already is 
 
 * **Route family:** `GET /views/<root>/<rel>` and `HEAD /views/<root>/<rel>`. No POST, no DELETE, no LIST. Unknown root / unknown path / traversal / extension-not-allowed / torn sidecar / subsystem-off all return a uniform `404 {"error": "view not found"}` envelope (no body that distinguishes the cases, nosniff on every response).
 * **Three seed roots** (config-driven; operator may add or disable any via `live_views.roots` in `config.yaml` + restart):
-  * `designer-artifact` — filesystem, rooted at the calling instance's project workdir. The canonical mockup subdir (`.agents/shared/planning/{feature}/design/mockups/`). The root-name `designer-artifact` triggers project-workdir resolution at the router layer.
+  * `designer-artifact` — project-scoped (REWORK 2026-10-07, M2). URL shape: `/views/designer-artifact/<project_shortname>/<feature>/design/mockups/<file>`. The first path segment after the root is the project shortname (must be a registered `Project.shortnames` entry), exactly like `planning`. The canonical mockups subtree is the `<project_workdir>/.agents/shared/planning/<feature>/design/mockups/` template; the resolver enforces the `*/design/mockups/*` shape by construction (M3) so the URL cannot serve arbitrary planning files under the `designer-artifact` name.
   * `planning` — project-scoped. URL shape: `/views/planning/<project_shortname>/<rel>`. The first path segment after the root is the project shortname (must be a registered `Project.shortnames` entry). The root is the per-project `.agents/shared/planning/` subtree.
   * `tmp-images` — delegates to the per-app `TmpImageStore` substrate. MIME comes from the sidecar record (architect risk #7 — NEVER extension-guessed). 32-hex image id only.
-* **`view_link` tool** — agent-facing URL minter. Default-open universe (in `KNOWN_TOOL_NAMES`); explicit allow entry on `agents/designer/meta.json` for schema visibility. Returns path-relative URLs by default; fully-qualified when `config.live_views.external_base_url` is set.
-* **Designer write-through** — the design artifacts table contract (`agents/designer/skills-template/design-strategy.md:71`) gains a `view_url` column populated via `view_link('designer-artifact', <row.path>)`. The LLM writes the column; the tool is the surface.
+* **`view_link` tool** — agent-facing URL minter. **RESTRICTED first-release visibility (REWORK 2026-10-07, M1, user refinement #1).** The `view-views` category is in `PRIVILEGED_TOOL_CATEGORIES` (empty-allow agents do NOT get the tool); the three commissioned users (ari, leader, designer) opt in via `tools.allow: ["view-views"]` in their meta.json. The tool name stays in `KNOWN_TOOL_NAMES` (inventory, not the gate). Returns path-relative URLs by default; fully-qualified when `config.live_views.external_base_url` is set. Route stays general; extensibility is per-agent allow entries + per-root config.
+* **Designer write-through** — the design artifacts table contract (`agents/designer/skills-template/design-strategy.md:71`) gains a `view_url` column populated via `view_link('designer-artifact', f"{shortname}/{<row.path>}")` (REWORK 2026-10-07, M2 — the first URL segment is the project shortname, the rest is the row's `path` value, e.g. `view_link('designer-artifact', "ens/feat/design/mockups/landing.html")`). The LLM writes the column; the tool is the surface.
 
 **Out of v1 scope** (Phase 2 candidates, not in this slice):
 * FE WebView rendering of served content
@@ -47,9 +47,9 @@ The URL is "public-by-obscurity" the same way `/api/tmp_images/<id>` already is 
 live_views:
   enabled: true
   roots:
-    designer-artifact:                  # existing — left in place
-      type: filesystem
-      path: .agents/shared/planning    # (resolved against the caller's project workdir)
+    designer-artifact:                  # existing — project_scoped (REWORK M2)
+      type: project_scoped
+      path: .agents/shared/planning
       enabled: true
     planning:                            # existing — left in place
       type: project_scoped
@@ -112,7 +112,7 @@ Likely causes, in order of frequency:
 3. The file is a symlink whose target escapes the resolved root (the containment check fires; uniform 404).
 4. The file's path traverses a `..` segment (the shape check fires; uniform 404).
 5. The file is larger than the 32 MiB soft cap (uniform 404; the cap protects against accidentally serving a multi-GB log).
-6. The root is `designer-artifact` and the calling instance has no project workdir (uniform 404; the service requires a project to resolve the relative path).
+6. The root is `designer-artifact` (REWORK 2026-10-07 M2: project-scoped) and the URL's project shortname is not a registered `Project.shortnames` entry (uniform 404; check the project's shortnames list). Or the rel path is not under `*/design/mockups/*` (M3: the resolver enforces the mockups subtree prefix; uniform 404).
 7. The root is `planning` and the URL's project shortname is not a registered `Project.shortnames` entry (uniform 404; check the project's shortnames list).
 
 ### 3.4 A specific URL returns the wrong MIME

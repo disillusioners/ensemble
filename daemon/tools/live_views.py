@@ -8,19 +8,23 @@ the OTHER side of the same coin — the tool mints, the route serves.
 
 DESIGN DECISIONS (cross-referenced in the report):
 
-* **Default-open universe.** ``view_link`` is in
-  ``KNOWN_TOOL_NAMES`` so any agent with an empty / non-empty
-  ``tools.allow`` that does not explicitly DENY the
-  ``view_link`` / ``view-views`` category picks it up. Per the
-  Phase 1 brief, no per-agent meta.json edits are required
-  beyond an explicit entry on the designer's already-exhaustive
-  allow list (so the designer sees it in the schema).
+* **RESTRICTED first-release visibility (REWORK 2026-10-07, M1,
+  user refinement #1).** ``view_link`` is in ``KNOWN_TOOL_NAMES``
+  (inventory, NOT the gate) AND its ``view-views`` category is in
+  ``PRIVILEGED_TOOL_CATEGORIES`` (the gate). The empty-allow
+  inherit universe must NOT auto-grant it. The three
+  commissioned users (ari, leader, designer) opt in explicitly
+  via ``tools.allow: ["view-views"]`` in their meta.json. The
+  designer-side entry pre-existed; the ari + leader entries are
+  the REWORK additions. Route stays general, extensibility =
+  per-agent allow entries + per-root config (not a code change).
 * **Read-only.** The tool mints URLs; it does NOT touch the
   filesystem, the database, or any service beyond the
   per-app ``LiveViewsService`` registry. The
-  ``PRIVILEGED_TOOL_CATEGORIES`` set is unchanged — this is a
-  public-by-obscurity file-serving shape, the same convention
-  as ``image_get`` (the sister substrate tool).
+  ``view-views`` category's presence in the privileged set is
+  the user-driven visibility decision, NOT a tool-side
+  capability flag — the same convention as the public-by-obscurity
+  file-serving shape of ``image_get``.
 * **URL base resolution.** Path-relative ``/views/<root>/<rel>``
   by default; fully-qualified ``<external_base_url>/views/...``
   when ``config.live_views.external_base_url`` is set. The
@@ -112,15 +116,32 @@ def create_live_view_tools(manager: "InstanceManager", current_instance_id: str)
         config.yaml + restart):
 
         * ``designer-artifact`` — the canonical
-          ``.agents/shared/planning/{feature}/design/mockups/``
-          subtree of the calling instance's project. URL
-          shape: ``/views/designer-artifact/<rel>``.
+          ``<project_workdir>/.agents/shared/planning/<feature>/design/mockups/``
+          subtree of the project the URL names. URL shape:
+          ``/views/designer-artifact/<project_shortname>/<feature>/design/mockups/<file>``
+          (project-scoped; the first URL segment after the
+          root is the project shortname, exactly like
+          ``planning``). REWORK 2026-10-07 (M2): the root is
+          project_scoped so an anonymous browser hit resolves
+          without a per-instance workdir binding.
         * ``planning`` — every project's
           ``.agents/shared/planning/`` tree. URL shape:
           ``/views/planning/<project_shortname>/<rel>``.
         * ``tmp-images`` — the daemon tmp-image substrate
           (sidecar-MIME; blobs are extensionless). URL
           shape: ``/views/tmp-images/<32hex>``.
+
+        Visibility (REWORK 2026-10-07, M1). The
+        ``view-views`` category is RESTRICTED at the gate
+        (privileged entry; empty-allow agents do NOT get
+        this tool). The commissioned users are ari, leader,
+        and designer — they carry ``view-views`` in their
+        ``tools.allow``. Other agents calling this tool get
+        a typed ``"Error: tool not in this agent's allow
+        list"`` envelope from the tool-resolver layer
+        (returned upstream of this function — by the time
+        the code below runs, the agent is already one of
+        the three).
 
         Args:
             root_name: The registered root name (e.g.

@@ -202,6 +202,21 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # meta.json entry) remains the only access path; privileged
     # default-deny makes that structural instead of conventional.
     "ens-env",
+    # REWORK 2026-10-07 (M1, user refinement #1): ``view-views``
+    # is the read-only ``view_link`` URL-minter category. The tool
+    # is a public-by-obscurity URL minter (no FS / DB side effects
+    # at the tool surface), but the user's first-release
+    # visibility decision (Discord, 2026-10-07) is RESTRICTED:
+    # only the three commissioned users (ari, leader, designer)
+    # opt in via ``tools.allow: ["view-views"]``. The empty-allow
+    # inherit universe must NOT auto-grant it; making the
+    # category privileged makes that structural instead of
+    # conventional. The designer-side schema entry in
+    # ``agents/designer/meta.json`` plus the new ari/leader
+    # entries are the only access paths. KNOWN_TOOL_NAMES still
+    # carries the tool name (inventory, not the gate); the gate
+    # is the privileged-category strip + per-agent allow entry.
+    "view-views",
 })
 
 

@@ -112,9 +112,9 @@ intentional historical records.
 
 **Surface**:
 - `GET/HEAD /views/<root>/<rel>` route family. Read-only. Uniform 404 envelope on every miss (no path disclosure, nosniff on every response).
-- `view_link` tool — agent-facing URL minter. Default-open universe (in `KNOWN_TOOL_NAMES`); explicit allow entry on `agents/designer/meta.json`. Path-relative URLs by default; fully-qualified when `live_views.external_base_url` is set.
-- Three seed roots: `designer-artifact` (filesystem, project-anchored), `planning` (project-scoped via shortname), `tmp-images` (sidecar-MIME, delegates to `TmpImageStore`).
-- Designer write-through: the design artifacts table contract (`agents/designer/skills-template/design-strategy.md:71`) gains a `view_url` column populated via `view_link('designer-artifact', <row.path>)`. LLM writes the column; the tool is the surface.
+- `view_link` tool — agent-facing URL minter. **RESTRICTED first-release visibility (REWORK 2026-10-07, M1, user refinement #1):** the `view-views` category is in `PRIVILEGED_TOOL_CATEGORIES`; only ari + leader + designer opt in via `tools.allow: ["view-views"]`. Empty-allow agents do NOT get the tool. Path-relative URLs by default; fully-qualified when `live_views.external_base_url` is set.
+- Three seed roots: `designer-artifact` (REWORK M2: project-scoped via shortname, mockups-subtree-enforced per M3), `planning` (project-scoped via shortname), `tmp-images` (sidecar-MIME, delegates to `TmpImageStore`).
+- Designer write-through: the design artifacts table contract (`agents/designer/skills-template/design-strategy.md:71`) gains a `view_url` column populated via `view_link('designer-artifact', f"{shortname}/{<row.path>}")` (REWORK M2 — the first URL segment is the project shortname). LLM writes the column; the tool is the surface.
 
 **Key docs**:
 - `docs/runbooks/live-views.md` — operator runbook (edge rule, config knobs, troubleshooting, security notes).
