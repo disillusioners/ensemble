@@ -67,7 +67,48 @@ FAKE_HOME="$FIXTURE/home"
 mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \
          "$FAKE_REPO/daemon/migrations/versions" \
          "$FAKE_REPO/frontend/dist/frontend/browser" \
+         "$FAKE_REPO/plugins/opendesign" \
+         "$FAKE_REPO/daemon/plugin_subsystem" \
          "$FAKE_HOME/agents-ensemble"
+
+# Stub plugins/ payload — f7db75ed4 added stage.sh's
+# `[ ! -d "$REPO_ROOT/plugins" ]` precondition (line 275) without
+# updating this fixture, so every stage.sh call refused (exit 78) and
+# 86 downstream assertions failed. Mirror test_stage_plugins_tree.sh's
+# single-plugin MANIFEST shape: plugin.name as a DICT (avoids
+# AttributeError in the predicate's `manifest.get("plugin").get("name")`)
+# and no class sections (avoids evidence-line checks — keeps the
+# predicate in the trivially-FRESH path).
+printf 'plugin:\n  name: opendesign\nschema_version: 1.0.3\n' \
+    > "$FAKE_REPO/plugins/opendesign/MANIFEST.yaml"
+
+# Stub predicate module — promote_plugin_staleness_check (lib.sh, added
+# by 55dd7f78c) refuses FAIL-CLOSED with `plugin-staleness-unreadable`
+# when the predicate module is absent (the FAKE_REPO has no daemon
+# tree). With a stub here, the predicate returns FRESH and the gate
+# proceeds — same exit contract as the real predicate (rc=0 fresh,
+# rc=3 stale; lib.sh only inspects the first token + rc).
+cat > "$FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py" <<'PYEOF'
+#!/usr/bin/env python3
+"""Stub promote-staleness predicate (FAKE_REPO fixture only).
+
+Unconditionally returns FRESH so the unit-test preflight gate passes.
+Mirrors the real daemon/plugin_subsystem/promote_staleness.py exit
+contract (rc=0 fresh → lib.sh logs `plugin-staleness: PLUGIN-STALENESS=
+fresh plugin=<name>` and proceeds).
+"""
+import sys
+
+def main() -> int:
+    plugin_dir = sys.argv[1] if len(sys.argv) > 1 else ""
+    name = plugin_dir.rstrip("/").split("/")[-1] if plugin_dir else "unknown"
+    print(f"PLUGIN-STALENESS=fresh plugin={name}")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+PYEOF
+chmod +x "$FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py"
 
 # Fake LIVE install under the fake HOME (PORT staged only) so the live target
 # RESOLVES and the guard — not the port-resolution failure — is what refuses.
@@ -1530,7 +1571,8 @@ git -C "$FAKE_REPO" checkout -q "$SBX_V1" 2>/dev/null
 FAKE_REPO_DROP="$FIXTURE/fake-repo-drop"
 rm -rf "$FAKE_REPO_DROP"
 for d in scripts/upgrade agents/leader frontend/dist/frontend/browser \
-         daemon/migrations/versions; do
+         daemon/migrations/versions plugins/opendesign \
+         daemon/plugin_subsystem; do
     mkdir -p "$FAKE_REPO_DROP/$d"
 done
 cp "$FAKE_REPO/scripts/upgrade/"*.sh "$FAKE_REPO_DROP/scripts/upgrade/"
@@ -1543,6 +1585,14 @@ chmod +x "$FAKE_REPO_DROP/launcher.sh"
 # the load-bearing line — destructive DDL makes the rider refuse on unset
 printf 'CREATE TABLE x (id int);\nDROP TABLE x;\n' \
     > "$FAKE_REPO_DROP/daemon/migrations/versions/20260101_000001_destructive.sql"
+# Mirror the FAKE_REPO plugins/ + stub-predicate pattern — stage.sh:275
+# precondition + promote_plugin_staleness_check both fire on this fixture
+# (the rider runs DROP_STAGE which triggers stage.sh and exercises the
+# full preflight path).
+printf 'plugin:\n  name: opendesign\nschema_version: 1.0.3\n' \
+    > "$FAKE_REPO_DROP/plugins/opendesign/MANIFEST.yaml"
+cp "$FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py" \
+   "$FAKE_REPO_DROP/daemon/plugin_subsystem/promote_staleness.py"
 git -C "$FAKE_REPO_DROP" init -q
 git -C "$FAKE_REPO_DROP" add -A 2>/dev/null
 git -C "$FAKE_REPO_DROP" -c user.email=t@t -c user.name=t commit -qm fixture
