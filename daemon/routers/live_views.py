@@ -31,11 +31,26 @@ SECURITY MODEL (architect ruling, 2026-10-07):
 The router does NOT do content conversion (no markdown→HTML, no
 image resize). Phase 1 is the primitive; FE WebView + on-the-fly
 conversion is Phase 2 (not in this slice).
+
+TOCTOU CONTAINMENT (REWORK 2026-10-07, M4): the service does a
+``realpath``-based containment check + a stat-based size cap on
+the resolved path. Between the service resolve and the router
+read, a window exists where the final-component file could be
+swapped for a symlink, or grown past the cap. The router
+mitigates both with an fd-based read: ``os.open`` with
+``O_NOFOLLOW`` (the symlink-swap attempt is rejected by the
+open call, not by a post-read comparison) → ``os.fstat`` (the
+cap is re-checked against the fstat, not the prior stat) →
+``os.read`` (we read up to the fstat size, capping any
+intervening growth). The same shape is used in
+``daemon/routers/tmp_images.py`` for the sidecar-MIME
+substrate.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
@@ -55,6 +70,72 @@ _HARDENING_HEADERS: dict[str, str] = {
     "X-Content-Type-Options": "nosniff",
     "Cache-Control": "private, max-age=60",
 }
+
+
+def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
+    """Read ``path`` via ``os.open`` + ``O_NOFOLLOW`` + ``os.fstat``.
+
+    REWORK 2026-10-07 (M4): the prior ``Path.read_bytes()`` form
+    opened the file a SECOND time, after the service had already
+    resolved + stat'd it. The window between the two opens was
+    the TOCTOU race:
+
+    * final-component symlink swap — the service's
+      ``realpath`` containment check at ``live_views.py:527-534``
+      ran against the ORIGINAL (regular-file) path; a swap
+      immediately before the second open turns the file into a
+      symlink, and ``read_bytes`` would follow it.
+    * size-cap race — a file that grew past the cap between the
+      service's stat and the second open would be served at
+      the new (over-cap) size.
+
+    The fd-based form closes both:
+
+    * ``O_NOFOLLOW`` refuses to follow a final-component
+      symlink at OPEN time (kernel-level); the open fails
+      with ``ELOOP`` and we return ``None`` (uniform 404).
+    * ``fstat`` after open reports the CURRENT size; we
+      re-check against the cap and read up to that
+      (capped) size — any intervening growth above the
+      fstat is truncated to the cap, not served.
+
+    Returns ``None`` on any open / fstat / over-cap / read
+    error. The router collapses ``None`` to the uniform
+    404 — never a stack trace, never a path-disclosure
+    log line at WARNING. The same shape is used in
+    ``daemon/routers/tmp_images.py`` for the sidecar-MIME
+    substrate.
+    """
+    try:
+        # ``O_NOFOLLOW`` is the load-bearing flag. A symlink
+        # final component triggers ``ELOOP`` here, not at a
+        # post-read check.
+        fd = os.open(
+            os.fspath(path),
+            os.O_RDONLY | os.O_NOFOLLOW,
+        )
+    except OSError:
+        return None
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return None
+        size = st.st_size
+        if size > max_bytes:
+            return None
+        # Read in one shot when the file fits; bounded by
+        # ``size`` so an intervening growth above the cap
+        # never escapes.
+        try:
+            return os.read(fd, size)
+        except OSError:
+            return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _uniform_404() -> Response:
@@ -200,12 +281,22 @@ def build_router() -> APIRouter:
                 },
             )
 
-        # Filesystem / project_scoped: serve the bytes.
-        try:
-            file_bytes = resolved.on_disk_path.read_bytes()
-        except OSError:
-            # Vanishingly rare (concurrent unlink, etc.) — uniform
-            # 404, no stack trace leak.
+        # Filesystem / project_scoped: serve the bytes. REWORK
+        # 2026-10-07 (M4): fd-based read with ``O_NOFOLLOW`` →
+        # ``fstat`` → size-cap re-check → ``os.read`` (capped to
+        # the fstat size). Closes the final-component symlink-
+        # swap race AND the size-cap race that the prior
+        # ``Path.read_bytes()`` shape exposed (the second open
+        # could see a different file than the service's resolve
+        # + stat + size-check saw).
+        from daemon.services.live_views import _MAX_SERVED_BYTES
+
+        file_bytes = _fd_read(resolved.on_disk_path, _MAX_SERVED_BYTES)
+        if file_bytes is None:
+            # Vanishingly rare (concurrent swap, concurrent
+            # unlink, race that the kernel rejected at
+            # ``O_NOFOLLOW`` open time, etc.) — uniform 404, no
+            # stack trace leak.
             return _uniform_404()
         return Response(
             content=file_bytes,

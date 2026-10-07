@@ -10,6 +10,7 @@ headers, and method whitelist.
 
 from __future__ import annotations
 
+import os
 import pathlib
 from typing import Callable
 
@@ -482,3 +483,67 @@ class TestLivez:
         c = TestClient(app)
         resp = c.get("/views/livez")
         assert resp.status_code == 404
+
+
+# ===========================================================================
+# Group 7 — fd-based read (REWORK 2026-10-07, M4) — O_NOFOLLOW + fstat
+# ===========================================================================
+
+
+class TestFdReadNoFollow:
+    """REWORK 2026-10-07 (M4): the helper that backs the GET path
+    for filesystem + project_scoped roots. The fd-based read
+    with ``O_NOFOLLOW`` closes the final-component symlink-swap
+    race that the prior ``Path.read_bytes()`` shape exposed.
+
+    The kernel rejects the open with ``ELOOP`` when the final
+    component is a symlink; the helper returns ``None`` and the
+    router collapses to the uniform 404 (never a stack trace,
+    never a path-disclosure log line). The service's
+    realpath-based containment check still runs FIRST — these
+    tests verify the second layer, the one that closes the
+    race window between service-resolve and router-read.
+    """
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink only")
+    def test_final_component_symlink_returns_none(self, tmp_path: pathlib.Path):
+        from daemon.routers.live_views import _fd_read
+
+        outside = tmp_path / "outside.txt"
+        outside.write_text("SECRET")
+        target = tmp_path / "leak.txt"
+        try:
+            target.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink not supported here")
+        # The O_NOFOLLOW open refuses to follow the final-
+        # component symlink; the helper returns None.
+        assert _fd_read(target, max_bytes=10 * 1024 * 1024) is None
+
+    def test_regular_file_reads_bytes(self, tmp_path: pathlib.Path):
+        from daemon.routers.live_views import _fd_read
+
+        target = tmp_path / "regular.txt"
+        target.write_bytes(b"BYTES")
+        data = _fd_read(target, max_bytes=10 * 1024 * 1024)
+        assert data == b"BYTES"
+
+    def test_oversize_file_returns_none(self, tmp_path: pathlib.Path):
+        from daemon.routers.live_views import _fd_read
+
+        target = tmp_path / "big.bin"
+        target.write_bytes(b"x" * 16)
+        # Cap at 8 bytes → over-cap → None.
+        assert _fd_read(target, max_bytes=8) is None
+        # Exact cap → not over.
+        data = _fd_read(target, max_bytes=16)
+        assert data == b"x" * 16
+        # Below cap → not over.
+        data = _fd_read(target, max_bytes=64)
+        assert data == b"x" * 16
+
+    def test_missing_file_returns_none(self, tmp_path: pathlib.Path):
+        from daemon.routers.live_views import _fd_read
+
+        target = tmp_path / "nope.txt"
+        assert _fd_read(target, max_bytes=1024) is None
