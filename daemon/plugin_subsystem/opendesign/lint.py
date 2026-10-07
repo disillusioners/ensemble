@@ -150,6 +150,34 @@ class OdLint:
     )
 
     @classmethod
+    def lint_dict(cls, raw: Mapping[str, Any]) -> Dict[str, Any]:
+        """Dict-entrypoint form of :meth:`lint` (factory convention).
+
+        The plugin tool factory hands every adapter the tool-kwargs
+        DICT (the Port's ``inputs_schema`` shape); ``lint_dict``
+        unpacks ``html`` (required string) + optional ``kind`` and
+        delegates to :meth:`lint`. Non-object / non-string inputs fall
+        into the documented ``fail-1`` empty-HTML verdict shape rather
+        than raising — the linter's verdict payload is always the
+        Port's ``outputs_schema``.
+        """
+        if not isinstance(raw, Mapping):
+            return {
+                "verdict": "fail-1",
+                "fail_count": 1,
+                "failures": [
+                    {
+                        "rule_id": "EOF",
+                        "message": "input must be a JSON object",
+                        "line": 0,
+                    }
+                ],
+            }
+        html = raw.get("html")
+        kind = raw.get("kind")
+        return cls.lint(html if isinstance(html, str) else "", kind if isinstance(kind, str) else None)
+
+    @classmethod
     def lint(cls, html: str, kind: Optional[str] = None) -> Dict[str, Any]:
         """Run the 16-regex family + parse5 EOF gate on ``html``.
 

@@ -67,7 +67,7 @@ plugin:
   # compose_brief, save, lint}.v1) is the concrete dispatch. The
   # entrypoint (≤200-line tripwire alarm 220 / refuse 300) is the
   # Port's ``compose_dict`` / ``execute_dict`` / ``save_dict`` /
-  # ``lint`` callable; the actual files are well under the tripwire
+  # ``lint_dict`` callable; the actual files are well under the tripwire
   # (the longest, generate.py, is <800 lines, with gates as the bulk).
   execution_mode: "lifted-symbol"
   lifted_symbol: "task.od.generate"
@@ -119,9 +119,17 @@ snapshot_with_drift_alarm:
   paths:
     - "snapshot_with_drift_alarm/prompts/daemon/"
     - "snapshot_with_drift_alarm/prompts/contracts/"
+    # Slice-⑤ F1 fix: the contracts deck-framework.ts imports
+    # '../runtime/deck-protocol.js' — the runtime subtree is part of
+    # the same pinned contracts package and is required for the
+    # DECK_FRAMEWORK_DIRECTIVE template to evaluate (the deck-kind
+    # prompt embeds DECK_PROTOCOL_V1_INLINE_RUNTIME). Vendored at the
+    # same tag; HASHES.sha256 carries both files.
+    - "snapshot_with_drift_alarm/runtime/"
   upstream_paths:
     - "apps/daemon/src/prompts/"
     - "packages/contracts/src/prompts/"
+    - "packages/contracts/src/runtime/"
   # alarm_owner: required by CON §2.  Prompt code churns actively
   # (od-resource-layer §0: 106 commits in 7wk for contracts); the
   # owner is the prompt-Port maintenance role (the slice ⑤ B-element

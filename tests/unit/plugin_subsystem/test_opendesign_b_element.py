@@ -460,6 +460,109 @@ class TestOdGenerateCompletenessGates:
         assert result["error"]["code"] == "truncation_detected"
 
 
+class TestUpstreamStreamClosedPinning:
+    """Pinning tests for the ``upstream_stream_closed`` rung (slice-⑤
+    fix loop 3, held fold-in 2 — the known gap the wiring state recorded:
+    the envelope-collapse branch had ZERO pinning tests and could regress
+    silently).
+
+    ``upstream_stream_closed`` fires on RESPONSE-SHAPE COLLAPSE only:
+    reading ``response.choices[0].finish_reason/.message`` raises
+    IndexError / AttributeError (empty choices, missing attributes —
+    the empty-choices / 0B-thinking-only cousin from the live 2/2
+    smoke). It is DISTINCT from ``truncation_detected`` (a non-stop or
+    missing finish_reason on a WELL-SHAPED response) — this class pins
+    both sides of that boundary so the ladder can't drift.
+    """
+
+    def test_empty_choices_collapses_to_upstream_stream_closed(self, env, fake_client_factory):
+        """choices=[] → IndexError on [0] → upstream_stream_closed."""
+
+        class _Resp:
+            choices = []  # the collapse: no choices at all
+
+        class _Comps:
+            def create(self, **kwargs):
+                return _Resp()
+
+        class _Chat:
+            completions = _Comps()
+
+        class _Client:
+            chat = _Chat()
+
+        fake_client_factory(lambda env: (_Client(), "vision"))
+        result = OdGenerate.execute(
+            GenerateInput(prompt="x", kind="prototype"),
+            env=env,
+        )
+        assert result["truncated"] is True
+        assert result["error"]["code"] == "upstream_stream_closed"
+        assert result["finish_reason"] == "other"
+        assert result["error"]["details"]["model"] == "vision"
+
+    def test_response_without_choices_attr_collapses(self, env, fake_client_factory):
+        """A response object with NO ``choices`` attribute (the cousin of
+        the empty-choices shape) → AttributeError → upstream_stream_closed."""
+
+        class _Resp:
+            pass  # no .choices at all
+
+        class _Comps:
+            def create(self, **kwargs):
+                return _Resp()
+
+        class _Chat:
+            completions = _Comps()
+
+        class _Client:
+            chat = _Chat()
+
+        fake_client_factory(lambda env: (_Client(), "vision"))
+        result = OdGenerate.execute(
+            GenerateInput(prompt="x", kind="prototype"),
+            env=env,
+        )
+        assert result["truncated"] is True
+        assert result["error"]["code"] == "upstream_stream_closed"
+
+    def test_missing_finish_reason_is_truncation_not_stream_closed(self, env, fake_client_factory):
+        """Boundary pin: a WELL-SHAPED response whose finish_reason is
+        None/absent is ``truncation_detected`` (coerced finish_reason),
+        NOT upstream_stream_closed — the two rungs must not drift into
+        each other."""
+
+        class _Msg:
+            content = "<!doctype html><html><head></head><body>x</body></html>"
+
+        class _Choice:
+            finish_reason = None  # missing
+            message = _Msg()
+
+        class _Resp:
+            choices = [_Choice()]
+            usage = None
+
+        class _Comps:
+            def create(self, **kwargs):
+                return _Resp()
+
+        class _Chat:
+            completions = _Comps()
+
+        class _Client:
+            chat = _Chat()
+
+        fake_client_factory(lambda env: (_Client(), "vision"))
+        result = OdGenerate.execute(
+            GenerateInput(prompt="x", kind="prototype"),
+            env=env,
+        )
+        assert result["truncated"] is True
+        assert result["error"]["code"] == "truncation_detected"
+        assert result["finish_reason"] == "other"
+
+
 class TestOdGenerateInputValidation:
     def test_missing_prompt_refused(self, env, fake_client_factory):
         """The prompt_composition_failed error code is returned when prompt is empty."""

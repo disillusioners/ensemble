@@ -67,6 +67,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from daemon.plugin_subsystem.opendesign.ts_prompt_eval import TsPromptEvalError
+
 __all__ = ["OdGenerate", "GenerateInput", "GenerateOutput"]
 
 logger = logging.getLogger(__name__)
@@ -197,58 +199,106 @@ def _read_prompt_file(relpath: str) -> str:
 # 1 daemon-only fallback (core-slim is daemon-only per divergence
 # register entry id=3 — the contracts mirror has no slim charter).
 #
-# NOTE: the upstream prompt files are compiled JS strings
-# (``dist/vendor/od-contracts/src/prompts/<name>.js``) in the installed
-# MCP shim. The vendored snapshot in this repo is the **TypeScript
-# source** (``.ts``) because the contracts package ships source. The
-# Python adapter strips TypeScript ``export const`` wrappers via a
-# simple regex to extract the string body. This is a no-op for the
-# ``.js`` files when the operator overrides ``OD_PROMPTS_ROOT``.
-_TS_STRING_RE = re.compile(
-    r"^export\s+const\s+(?P<name>[A-Z_][A-Z0-9_]*)\s*[:=]\s*(?P<quote>['\"`])"
-    r"(?P<body>.*?)"
-    r"(?P=quote)\s*[;\n]",
-    re.MULTILINE | re.DOTALL,
-)
+# Extraction (slice-⑤ F1 fix): the vendored snapshot is the TypeScript
+# source and the compose chain must embed the RUNTIME string TypeScript
+# would evaluate it to. The former ``_TS_STRING_RE`` regex stopped at
+# the first closing backtick (including escaped ``\\``` INSIDE the
+# literals), truncating every prompt and degrading the deck kind to the
+# raw TS blob. :mod:`daemon.plugin_subsystem.opendesign.ts_prompt_eval`
+# replaces it with a real scanner + bounded evaluator (escapes decoded,
+# ``${…}`` substitutions resolved, mirrored builders for the upstream
+# compose functions); the byte-equality corpus
+# (``test_opendesign_prompt_extraction.py``) proves it against
+# node-evaluated fixtures. Failures are LOUD
+# (:class:`TsPromptEvalError` → ``prompt_composition_failed``
+# envelope) — never a raw-source fallback.
+
+
+def _read_prompt_module(relpath: str) -> str:
+    """Read a vendored TS module source by module key.
+
+    Same resolution as :func:`_read_prompt_file` for the prompts-tree
+    keys (``contracts/<key>`` primary, ``daemon/<key>`` fallback); the
+    ``runtime/`` subtree (vendored at slice ⑤'s F1 fix from the pinned
+    contracts package) lives BESIDE ``prompts/`` —
+    ``snapshot_with_drift_alarm/runtime/<key>`` — per the manifest's
+    ``snapshot_with_drift_alarm.paths`` entry.
+    """
+    if relpath.startswith("runtime/"):
+        root = _default_prompts_root().parent / "runtime"
+        candidate = root / relpath[len("runtime/") :]
+        if candidate.exists():
+            try:
+                return candidate.read_text(encoding="utf-8")
+            except OSError as exc:  # pragma: no cover - defensive
+                logger.debug("od.generate: failed to read %s (%s)", candidate, exc)
+        return ""
+    return _read_prompt_file(relpath)
+
+
+_PROMPT_SOURCE: Optional["TsPromptSource"] = None
+
+
+def _prompt_source() -> "TsPromptSource":
+    """Process-wide :class:`TsPromptSource` (module cache per process)."""
+    global _PROMPT_SOURCE
+    if _PROMPT_SOURCE is None:
+        from daemon.plugin_subsystem.opendesign.ts_prompt_eval import TsPromptSource
+
+        _PROMPT_SOURCE = TsPromptSource(reader=_read_prompt_module)
+    return _PROMPT_SOURCE
 
 
 def _extract_ts_string(source: str, symbol_name: str) -> str:
-    """Extract a ``export const NAME = '…'`` body from a TypeScript source string.
+    """Extract a symbol's runtime string from a single TS source.
 
-    The vendored snapshot's prompt files are TypeScript
-    (``export const OFFICIAL_DESIGNER_PROMPT = `…`;``); the upstream
-    MCP shim's compiled JS uses ``module.exports.NAME = '…'`` instead.
-    Both forms have the same surface — find the matching symbol and
-    return its body.
-
-    Used by :func:`_compose_system_prompt` so the vendored snapshot
-    can be the source of truth regardless of the upstream file
-    format. Falls back to the raw source when no match is located (a
-    degraded but working path — the model receives the TypeScript source
-    verbatim and the gates still run).
+    Thin delegate to
+    :func:`daemon.plugin_subsystem.opendesign.ts_prompt_eval.extract_symbol_from_source`
+    (kept as a module-level name for callers/tests that target the
+    extraction surface directly). Raises :class:`TsPromptEvalError` on
+    absent symbols or unsupported constructs — loud, never a raw-source
+    fallback.
     """
-    if not source:
-        return ""
-    m = _TS_STRING_RE.search(source)
-    if m and m.group("name") == symbol_name:
-        return m.group("body")
-    # Try alternate forms — the upstream ``module.exports.NAME = "…"``
-    # JS shape and the inline ``const NAME = "…"`` shape.
-    for pat in (
-        rf"module\.exports\.(?P<name>{symbol_name})\s*=\s*['\"`]" r"(?P<body>.*?)" r"['\"`]\s*;",
-        rf"const\s+(?P<name>{symbol_name})\s*=\s*['\"`]" r"(?P<body>.*?)" r"['\"`]\s*;",
-        rf"export\s+const\s+(?P<name>{symbol_name})\s*[:=]\s*['\"`]" r"(?P<body>.*?)" r"['\"`]\s*[;\n]",
-    ):
-        for m in re.finditer(pat, source, re.DOTALL):
-            if m.group("name") == symbol_name:
-                return m.group("body")
-    return source  # degraded: return raw source
+    from daemon.plugin_subsystem.opendesign.ts_prompt_eval import (
+        extract_symbol_from_source,
+    )
+
+    return extract_symbol_from_source(source, symbol_name)
 
 
 def _read_symbol(relpath: str, symbol_name: str) -> str:
-    """Read a vendored prompt and extract the named exported string constant."""
-    raw = _read_prompt_file(relpath)
-    return _extract_ts_string(raw, symbol_name)
+    """Read a vendored prompt and return the symbol's runtime string.
+
+    The module-level evaluator resolves template escapes, ``${…}``
+    substitutions and the mirrored upstream builders. Raises
+    :class:`TsPromptEvalError` (loud) when a present source cannot be
+    evaluated faithfully; absent sources degrade to ``""`` per the
+    documented missing-snapshot behavior.
+    """
+    from daemon.plugin_subsystem.opendesign.ts_prompt_eval import (
+        TsPromptEvalError,
+        _AbsentModule,
+    )
+
+    try:
+        return _prompt_source().symbol_string(relpath, symbol_name)
+    except _AbsentModule:
+        # Missing vendored file — documented graceful degradation (the
+        # compose chain proceeds without that part; the gates still run).
+        logger.warning(
+            "od.generate: vendored prompt module %s is absent; "
+            "composing without it",
+            relpath,
+        )
+        return ""
+    except TsPromptEvalError as exc:
+        logger.error(
+            "od.generate: prompt extraction failed for %s::%s: %s",
+            relpath,
+            symbol_name,
+            exc,
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +610,19 @@ class OdGenerate:
                 finish_reason="other",
             )
 
-        system_prompt = cls._COMPOSER(args)
+        # Compose (F1: extraction is loud — a vendored source that cannot
+        # be evaluated faithfully surfaces as a typed envelope instead of
+        # a truncated / raw-blob prompt riding into the LLM call).
+        try:
+            system_prompt = cls._COMPOSER(args)
+        except TsPromptEvalError as exc:
+            logger.error("od.generate: prompt composition failed: %s", exc)
+            return cls._error_envelope(
+                "prompt_composition_failed",
+                f"vendored prompt extraction failed: {exc}",
+                details=None,
+                finish_reason="other",
+            )
 
         # Make the LLM call (non-streaming; surface finish_reason +
         # usage). The retry discipline is the openai SDK's

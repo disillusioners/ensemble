@@ -159,7 +159,8 @@ plan.
 | `1.0.0` | ①, ② | Initial schema + 3-class vocabulary + frozen refusal set | (baseline) |
 | `1.0.1` | ③ | `snapshot_with_drift_alarm.upstream_paths` (per-class upstream path mapping; optional — absent falls back to the strip-class-prefix heuristic) | NEW `snapshot_with_drift_alarm.upstream_paths` (per-class, optional); no existing field changes; no enum tightening; no section rename |
 | `1.0.1` | ④ | Admits the top-level `skills` section (CON §6 plugin-skill declaration) | NEW `skills.entries[]` (top-level, optional); no existing field changes; no enum tightening; no section rename |
+| `1.0.2` | ⑤ | `integration_path: "B"` (per-capability Port tool family) + `execution_mode: "lifted-symbol"` + the top-level `ports` reference section + `own_outright.attribution` | NEW `ports[]` (top-level, optional) + NEW `own_outright.attribution[]` + plugin-level `integration_path`/`execution_mode`/`lifted_symbol`/`entrypoint`/`ipc_version` values; no existing field removed; no enum tightened (both new enum members were already in the frozen set); no section renamed |
 
-`plugins/opendesign/MANIFEST.yaml` declares `1.0.1` from slice ③ onward;
-the reader still accepts the whole `1.0.x` family, so `1.0.0` declarations
-remain valid.
+`plugins/opendesign/MANIFEST.yaml` declares `1.0.2` from slice ⑤ onward
+(`1.0.1` from slices ③–④); the reader still accepts the whole `1.0.x`
+family, so `1.0.0` declarations remain valid.

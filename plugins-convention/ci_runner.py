@@ -5,23 +5,24 @@ vocabulary zone); this wrapper adds only argv plumbing + exit code so shell
 test-packs / promote gates can invoke it without importing Python modules.
 
 The tripwire (slice ② carry-forward 4) lives in
-``daemon.plugin_subsystem.entrypoint_tripwire`` and is invoked as a
-sibling CI step.  Two invocation modes:
+``daemon.plugin_subsystem.entrypoint_tripwire`` and runs by DEFAULT since
+the slice-⑤ F1-round-3 fix: plugin #1 (opendesign) is a B-path plugin with
+real ``adapter/`` files, so the original default-off rationale ("would
+surface missing findings on every C-path plugin we ship at slice ②") no
+longer holds — a default-off tripwire let the ≤200-line entrypoint guard
+silently rot. Verified before the flip: ``run_tripwire`` returns
+``not_applicable`` (not ``missing``) for non-B/non-lifted-symbol plugins,
+so C-path plugins stay clean. Invocation modes:
 
-  - default: run schema-CI (manifest validation) over ``plugins_root``;
-    exit 0 = all manifests valid, 1 = at least one refusal, 2 = usage
-    error. The entrypoint tripwire is NOT run by default here because it
-    requires B-path plugins with real ``adapter/`` files (slice ⑤) and
-    would surface ``missing`` findings on every C-path plugin we ship
-    at slice ②.
-  - ``--with-entrypoint-tripwire``: also run the entrypoint tripwire
-    and fold its REFUSE findings into the exit code (alarms remain in
-    the JSON report but do NOT fail the run — they are a "block promote
-    after N days" signal, not a same-build gate, per CON §2).
+  - default: run schema-CI AND the entrypoint tripwire; tripwire REFUSE
+    findings fold into the exit code (alarms remain in the JSON report
+    but do NOT fail the run — they are a "block promote after N days"
+    signal, not a same-build gate, per CON §2).
+  - ``--no-entrypoint-tripwire``: skip the tripwire (schema-CI only).
 
 Usage:
     python plugins-convention/ci_runner.py <plugins_root>
-    python plugins-convention/ci_runner.py <plugins_root> --with-entrypoint-tripwire
+    python plugins-convention/ci_runner.py <plugins_root> --no-entrypoint-tripwire
 """
 
 from __future__ import annotations
@@ -65,16 +66,17 @@ def main() -> int:
     )
     parser.add_argument("plugins_root", help="directory containing plugin trees (e.g. plugins/)")
     parser.add_argument(
-        "--with-entrypoint-tripwire",
+        "--no-entrypoint-tripwire",
         action="store_true",
-        help="also run the ≤200-line entrypoint tripwire (CON §2; slice ② carry-forward 4)",
+        help="skip the ≤200-line entrypoint tripwire (runs by DEFAULT since the "
+        "slice-⑤ fix; pass this only for schema-CI-only invocations)",
     )
     args = parser.parse_args()
 
     plugins_root = Path(args.plugins_root)
     report = _schema_ci_run(plugins_root)
 
-    if args.with_entrypoint_tripwire:
+    if not args.no_entrypoint_tripwire:
         declarations = _discover_declarations(plugins_root)
         tripwire = run_tripwire(declarations)
         report["entrypoint_tripwire"] = tripwire

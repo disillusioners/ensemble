@@ -38,7 +38,7 @@ MCP server were absent).
 → the adapter class (an explicit import binding). The factory looks
 up the class by ``adapter_id`` and dispatches to the appropriate
 ``<ClassName>.execute_dict`` / ``compose_dict`` / ``save_dict`` /
-``lint`` callable per the stable per-capability convention.
+``lint_dict`` callable per the stable per-capability convention.
 """
 
 from __future__ import annotations
@@ -87,8 +87,9 @@ __all__ = [
 #
 # Plugin #1 (opendesign) ships with four adapters; the slice-⑤
 # opendesign B-element implements each as a class-level static
-# ``execute_dict`` / ``compose_dict`` / ``save_dict`` / ``lint``
-# entrypoint.
+# ``execute_dict`` / ``compose_dict`` / ``save_dict`` / ``lint_dict``
+# entrypoint (all dict-shaped — F1-round-3 fix moved lint from the
+# string-shaped ``lint`` to the dict convention).
 
 ADAPTER_CLASS_TABLE: Dict[str, type] = {
     "opendesign.generate.v1": OdGenerate,
@@ -157,17 +158,25 @@ def _adapter_callable(adapter_cls: type, port: Port) -> Callable[..., Dict[str, 
 
     Convention: adapters expose ``<ClassName>.execute_dict(raw: dict,
     ...)`` for the ``execute`` family and ``compose_dict`` /
-    ``save_dict`` for the pure-function families. The factory picks
-    the right callable based on the ``adapter_id`` (a stable
-    one-callable-per-class convention; per-capability method names
-    are stable for the v1 surface).
+    ``save_dict`` / ``lint_dict`` for the pure-function families — every
+    entrypoint takes the tool-kwargs DICT (the Port's ``inputs_schema``
+    shape). The factory picks the right callable based on the
+    ``adapter_id`` (a stable one-callable-per-class convention;
+    per-capability method names are stable for the v1 surface).
     """
     # Map adapter_id → method name on the adapter class.
     method_map = {
         "opendesign.generate.v1": "execute_dict",
         "opendesign.compose_brief.v1": "compose_dict",
         "opendesign.save.v1": "save_dict",
-        "opendesign.lint.v1": "lint",
+        # F1-round-3 fix: the lint adapter's entrypoint is ``lint_dict``
+        # (dict → verdict payload). The former ``lint`` mapping handed the
+        # raw kwargs DICT to ``OdLint.lint(html: str, ...)`` — the
+        # isinstance(html, str) guard failed on every invocation and the
+        # tool always returned the fail-1 "empty HTML passed to lint"
+        # verdict (the round-1 factory test asserted only key-presence and
+        # passed while the tool was broken).
+        "opendesign.lint.v1": "lint_dict",
     }
     method_name = method_map.get(port.adapter_id)
     if method_name is None:

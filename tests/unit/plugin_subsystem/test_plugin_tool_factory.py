@@ -161,16 +161,69 @@ class TestToolInvocationRouting:
         assert "[page brief]" in result["prompt"]
         assert "test prompt" in result["prompt"]
 
-    def test_lint_invokes_lint(self):
+    def test_lint_invokes_lint_dict(self):
+        """F1-round-3 fix: the lint tool routes through ``OdLint.lint_dict``
+        (dict entrypoint) and returns REAL verdicts — the prior mapping
+        handed the kwargs DICT to ``OdLint.lint(html: str)`` and every
+        invocation collapsed to the fail-1 empty-HTML verdict. The
+        round-1 version of this test asserted only key-presence and
+        passed while the tool was broken (vacuous — banned for this
+        surface)."""
         ports, _ = validate_ports(declared_opendesign_ports())
         ln_port = next(p for p in ports if p.port_id == "od.lint")
         tools = build_tools_for_port(ln_port)
         tool = tools[0]
-        result = tool.invoke({"html": "<!doctype html><html><head></head><body>OK</body></html>"})
-        assert "verdict" in result
-        # Lint verdict may be fail-2 due to missing meta tags; the route
-        # landed correctly (the lint result has the schema's keys).
-        assert "fail_count" in result
+        good_html = (
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n"
+            "<meta charset=\"utf-8\">\n"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+            "<title>Probe</title>\n<style>body{margin:0}</style>\n</head>\n"
+            "<body>\n<main><p>Hello</p></main>\n</body>\n</html>"
+        )
+        result = tool.invoke({"html": good_html})
+        # REAL verdict: a structurally complete, rule-clean document PASSES.
+        assert result == {"verdict": "pass", "fail_count": 0, "failures": []}
+
+        # REAL verdict: a rule-violating document fails with the right
+        # rule ids (missing doctype/html/head/title/body + a TODO marker).
+        bad_html = "<p>no structure here TODO</p>"
+        result = tool.invoke({"html": bad_html})
+        assert result["verdict"] == "fail-3"  # 7+ structural failures
+        rule_ids = {f["rule_id"] for f in result["failures"]}
+        assert {"R1", "R2", "R3", "R4", "R5", "R6", "R16"} <= rule_ids
+        assert result["fail_count"] == len(result["failures"])
+
+        # REAL verdict: the empty-HTML guard keeps its documented shape.
+        result = tool.invoke({"html": ""})
+        assert result["verdict"] == "fail-1"
+        assert result["failures"][0]["rule_id"] == "EOF"
+        assert result["failures"][0]["message"] == "empty HTML passed to lint"
+
+    def test_lint_tool_truncation_marker_is_fail_4_halt(self):
+        """R14 (truncation marker) through the REAL factory lane → fail-4
+        (the halt verdict that must never ride into a brief)."""
+        ports, _ = validate_ports(declared_opendesign_ports())
+        ln_port = next(p for p in ports if p.port_id == "od.lint")
+        tool = build_tools_for_port(ln_port)[0]
+        truncated = (
+            "<!doctype html><html><head>"
+            "<meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>t</title>"
+            "<style>body{margin:0}</style></head><body>"
+            "<!-- Generation timed out before completion -->"
+            "</body></html>"
+        )
+        result = tool.invoke({"html": truncated})
+        assert result["verdict"] == "fail-4"
+        assert [f["rule_id"] for f in result["failures"]] == ["R14"]
+
+    def test_lint_dict_rejects_non_object_input(self):
+        """``OdLint.lint_dict`` keeps the documented verdict shape for
+        non-object input (never raises through the factory lane)."""
+        result = OdLint.lint_dict(["not", "a", "dict"])
+        assert result["verdict"] == "fail-1"
+        assert result["failures"][0]["message"] == "input must be a JSON object"
 
     def test_generate_invokes_execute_dict_with_env_forwarded(self):
         ports, _ = validate_ports(declared_opendesign_ports())
@@ -213,34 +266,132 @@ class TestToolInvocationRouting:
         finally:
             OdGenerate._CLIENT_FACTORY = saved_factory
 
+    def test_generate_full_success_through_factory_lane(self):
+        """Sweep (F1-round-3): a COMPLETE generate response through the
+        REAL factory tool returns the success ``outputs_schema`` shape —
+        the routing carries compose → call → gates → output end-to-end."""
+        ports, _ = validate_ports(declared_opendesign_ports())
+        gen_port = next(p for p in ports if p.port_id == "od.generate")
+        tool = build_tools_for_port(gen_port)[0]
+        complete_html = (
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n"
+            "<meta charset=\"utf-8\">\n"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+            "<title>Probe</title>\n<style>body{margin:0}</style>\n</head>\n"
+            "<body>\n<main><p>Hello</p></main>\n</body>\n</html>"
+        )
+
+        class _Msg:
+            content = complete_html
+
+        class _Choice:
+            finish_reason = "stop"
+            message = _Msg()
+
+        class _Usage:
+            prompt_tokens = 10
+            completion_tokens = 20
+            total_tokens = 30
+
+        class _Resp:
+            choices = [_Choice()]
+            usage = _Usage()
+
+        class _Comps:
+            def create(self, **kwargs):
+                # The composed system prompt must be the FULL vendored
+                # runtime strings (F1: no truncation riding into the call).
+                assert "## Direction library — infer and bind by default" in kwargs["messages"][0]["content"]
+                return _Resp()
+
+        class _Chat:
+            completions = _Comps()
+
+        class _Client:
+            chat = _Chat()
+
+        saved_factory = OdGenerate._CLIENT_FACTORY
+        OdGenerate._CLIENT_FACTORY = staticmethod(lambda _env: (_Client(), "vision"))
+        try:
+            result = tool.invoke({"prompt": "landing page", "kind": "prototype"})
+        finally:
+            OdGenerate._CLIENT_FACTORY = saved_factory
+        assert result["html"] == complete_html
+        assert result["finish_reason"] == "stop"
+        assert result["truncated"] is False
+        assert result["usage"]["total_tokens"] == 30
+
+    def test_designer_step3_lint_gate_exercisable_via_factory_lane(self):
+        """The designer's Step-3 quality gate (workflow.md step 3: run
+        ``od.lint`` on every generated page; a ``fail`` verdict never
+        rides into the developer's brief) is EXERCISABLE through the
+        real factory-built tools: generate-shaped output → lint tool →
+        gate decision from the ACTUAL verdict payload.
+
+        The A1 live-failure shape (mid-CSS truncation: no closing tags)
+        must FAIL the gate; the complete document must PASS it.
+        """
+        ports, _ = validate_ports(declared_opendesign_ports())
+        ln_port = next(p for p in ports if p.port_id == "od.lint")
+        lint_tool = build_tools_for_port(ln_port)[0]
+
+        complete_html = (
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n"
+            "<meta charset=\"utf-8\">\n"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+            "<title>Probe</title>\n<style>body{margin:0}</style>\n</head>\n"
+            "<body>\n<main><p>Hello</p></main>\n</body>\n</html>"
+        )
+        a1_truncated = (
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n"
+            "<meta charset=\"utf-8\">\n<title>Probe</title>\n<style>\n"
+            "body { margin: 0; display: flex;"  # cut mid-CSS, no closes
+        )
+
+        def gate(html: str) -> tuple[str, bool]:
+            verdict = lint_tool.invoke({"html": html})
+            # The gate decision is the VERDICT STRING, exactly as the
+            # designer workflow consumes it.
+            ok = verdict["verdict"] == "pass"
+            return verdict["verdict"], ok
+
+        assert gate(complete_html) == ("pass", True)
+        verdict, ok = gate(a1_truncated)
+        assert ok is False
+        assert verdict.startswith("fail-")
+        # The truncation signature is the EOF gate (unbalanced html/head/body).
+        rule_ids = {f["rule_id"] for f in lint_tool.invoke({"html": a1_truncated})["failures"]}
+        assert "EOF" in rule_ids
+
     def test_save_invokes_save_dict_with_project_root_forwarded(self):
-        """``od.save`` requires ``project_root``; the factory forwards from kwargs."""
+        """``od.save`` requires ``project_root``; the factory forwards it
+        into the closure and the save REALLY writes the canonical file
+        (real-verdict sweep: the prior version asserted only that the
+        payload had a 'path' or 'error' key)."""
         import tempfile
+        from pathlib import Path
 
         ports, _ = validate_ports(declared_opendesign_ports())
         sv_port = next(p for p in ports if p.port_id == "od.save")
-        tools = build_tools_for_port(sv_port)
-        tool = tools[0]
-
         with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            tools = build_tools_for_port(sv_port, project_root=project_root)
+            tool = tools[0]
+            html = (
+                "<!doctype html><html><head><title>t</title></head>"
+                "<body><p>OK</p></body></html>"
+            )
             result = tool.invoke({
-                "html": "<!doctype html><html><head></head><body>OK</body></html>",
+                "html": html,
                 "feature_slug": "demo-tool-factory",
                 "page_slug": "test",
             })
-            # When project_root defaults to cwd, the save writes under
-            # the cwd's .agents tree. The save adapter doesn't accept
-            # project_root through the tool surface, so it falls back
-            # to Path.cwd(). We don't assert the file location here —
-            # we assert the routing succeeded (output schema present).
-            assert "path" in result or "error" in result
-
-            # Clean up if it landed under the worktree.
-            from pathlib import Path
-            target = Path.cwd() / ".agents/shared/planning/demo-tool-factory"
-            if target.exists():
-                import shutil
-                shutil.rmtree(target)
+            # REAL verdict: the canonical file exists on disk with the
+            # exact bytes handed to the tool.
+            assert "path" in result, f"save returned error payload: {result}"
+            written = project_root / result["path"] if not Path(result["path"]).is_absolute() else Path(result["path"])
+            assert written.is_file()
+            assert written.read_text(encoding="utf-8") == html
 
 
 class TestNoInspectShadowing:
