@@ -2626,7 +2626,7 @@ _run_bounded() {
 # floor/cap), the parent's derived budget silently under-covers the
 # child's legitimate worst-case → premature SIGKILL → flip against a
 # still-live daemon (the review finding this fix closes). The
-# tests/test_bounded_subprocess_waits.sh sync-guard case D5 runs BOTH
+# tests/test_bounded_subprocess_waits.sh sync-guard case D8 runs BOTH
 # resolvers over the same fixtures and asserts identical output.
 #
 # Precedence (mirrors the child at stop-ensemble.sh:113, 292-307 + 270-289):
@@ -2894,7 +2894,7 @@ stop_via_stop_script() {
         # _derive_parent_stop_budget). The fixed 120 default at
         # lib.sh:94 was the prior shape; the fixed-constant coupling
         # was the review finding. The derived value at WAIT_S=70 is
-        # 225s; at WAIT_S=600 (the cap) it's 750s — both cover the
+        # 225s; at WAIT_S=600 (the cap) it's 755s — both cover the
         # child's legitimate worst-case runtime with the +20s margin
         # (see _derive_parent_stop_budget for the composition).
         local eff_budget stop_rc=0
