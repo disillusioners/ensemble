@@ -2054,6 +2054,7 @@ Branch `fix/tool-pairing-full-history-heal` @ `86c1bc041` (worktree `/home/nea/e
 | `job_queue_full` | `timeout 300 bash test/packs/job_queue_full_unit_test.sh` | `tests/job_queue/` (2046, xdist -n auto) | <80s | _registered 2026-10-08_ | ⏳ pending first run |
 | `dev_sh_static` | `timeout 60 bash test/packs/dev_sh_static_unit_test.sh` | `grep -F --timeout-graceful-shutdown 10 dev.sh` (Core #4 invariant, no pytest) | <10s | _registered 2026-10-08_ | ⏳ pending first run |
 | `pairing_heal_boot_smoke` | `timeout 300 bash test/packs/pairing_heal_boot_smoke_mock_test.sh` | daemon @15800 + PG @15810 + mock-LLM @15820 (Core #2/#3 insulation, banner + livez + readyz + clean SIGTERM + ports freed; RED = finding, base-attribute) | ~60s | _registered 2026-10-08_ | ⏳ pending first run |
+| `tool_pairing_original_symptom` (G3) | `timeout 300 bash test/packs/tool_pairing_original_symptom_mock_test.sh` | `tests/integration/test_tool_pairing_original_symptom.py` (4: S1 symptom repro W1-disabled / S2 W1 pre-heal clean delivery / S3 W2 heal-once+retry / S4 bounded reraise full chain; in-process strict-gateway fake LLM, no ports, no daemon) | <15s | **2026-10-08 PASS (4 passed, 1.24s, pack exit 0)** | ✅ pass |
 
 Port fence: 15800 / 15810 / 15820 are lane-disposable (no live ensemble binds them). 5432 / 8079 / 8088 / 15432 / 15433 NEVER touched. PG16 (`/usr/lib/postgresql/16/bin`) on Linux host — NOT the macOS `/opt/homebrew/opt/postgresql@14/bin` path.
 
