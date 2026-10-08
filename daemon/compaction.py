@@ -1735,8 +1735,7 @@ def emergency_truncate(
     # is idempotent with the W1 full-history guard at the next
     # dispatch (synthesized ids are deterministic), so a re-heal
     # at the next dispatch is safe. See
-    # ``daemon.tool_pairing_history.validate_and_heal_messages`` for
-    # the contract.
+    # ``daemon.tool_pairing_history.validate_and_heal_messages`` for the contract.
     from .tool_pairing_history import validate_and_heal_messages as _validate_and_heal
     _w3_heal_report = _validate_and_heal(truncated, instance_short="emergency_truncate")
     if _w3_heal_report.synthesized or _w3_heal_report.removed_orphan_indices:
