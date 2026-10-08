@@ -224,27 +224,19 @@ class TestProactiveCompactionPreservesInjection:
     @pytest.mark.asyncio
     async def test_all_unanswered_injections_skip_with_anti_refire_stamp(self):
         """When every message is an UNANSWERED bare injection,
-        compaction falls through to the 50%-tail floor per the
-        COMPACTION NEVER-BLOCKED contract (Verdict A,
-        fix/compaction-never-blocked @ c600af60d).
+        compaction falls through to the all-injected skip path.
+        Iteration 3 (C1 REVIEWER): under-budget + not-force →
+        pre-commission stamp-only skip semantics (the budget
+        predicate is the regression guard against silent
+        history loss on under-budget contexts).
 
-        **OLD expectation** (pre-Phase-2): the engine returned a
-        STAMPED no-op result (NOT ``None``) so the 60s dedup
-        engaged on the next dispatch — empty
-        ``replacement_messages``, ``compaction_type="skipped_injections_dominate"``.
-
-        **NEW expectation** (post-Phase-2): the all-injected skip
-        falls through to the 50%-tail last-effort floor. The engine
-        returns a real shrink — non-empty
-        ``replacement_messages`` (drop list + notice + retained
-        tail), ``compaction_type="tail_truncation_last_effort"``,
-        ``compacted_at`` set so the 60s dedup still engages.
-
-        Migrated from the pre-anti-refire pin (``result is None``);
-        the hoisting fix keeps this skip firing for
-        permanent/unanswered injections only — answered notes would
-        make the pool non-empty (see the hoisting test module).
-        """
+        **OLD expectation** (pre-Phase-2): stamp-only no-op,
+        empty ``replacement_messages``.
+        **Iteration-2 expectation**: floor engaged, real shrink.
+        **Iteration-3 expectation** (C1 budget predicate):
+        under-budget + not-force → stamp-only. The 5 small
+        injection messages in this test are well under the
+        200-token window's 80% threshold."""
         compactor = _make_compactor()
         msgs = [
             HumanMessage(
@@ -262,13 +254,19 @@ class TestProactiveCompactionPreservesInjection:
         assert result is not None
         # OLD: assert result.replacement_messages == []
         # OLD: assert result.compaction_type == "skipped_injections_dominate"
-        # NEW: floor engaged, real shrink.
-        assert len(result.replacement_messages) > 0, (
-            "floor result must carry replacement_messages (real shrink)"
+        # Iteration-2: floor engaged, real shrink.
+        # Iteration-3 (C1): under-budget + not-force → stamp-only
+        # (regression guard against silent history loss on
+        # under-budget contexts).
+        assert result.compaction_type == "skipped_injections_dominate", (
+            "C1 fix: under-budget + not-force + all-injected → "
+            "pre-commission stamp-only skip (no shrinkage, no "
+            "message drops, 60s dedup stamp persists). The floor is "
+            "reserved for over-budget shrinks."
         )
-        assert result.compaction_type == "tail_truncation_last_effort", (
-            "all-injected skip must fall through to the 50%-tail floor"
-        )
+        # No drops — the C1 budget predicate is what protects
+        # under-budget contexts from silent history loss
+        assert result.replacement_messages == []
         # Anti-refire stamp still set.
         assert result.compacted_at is not None
 

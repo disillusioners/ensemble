@@ -78,13 +78,28 @@ def make_compaction_config(**overrides: Any) -> CompactionConfigModel:
     """CompactionConfig with the never-blocked defaults (proactive
     enabled, escalate after 3). Mirror test_proactive_compaction_fix_p1
     helper.
+
+    Iteration-3 (REVIEWER C1) update: the C1 budget predicate routes
+    under-budget skip conditions to the pre-commission stamp-only
+    skip semantics. Many tests in this file want the FLOOR to
+    fire (which only happens over-budget OR under force=True).
+    The helper takes an optional ``force_over_budget=True`` flag
+    that sets a tiny 100-token context window so the budget
+    predicate (``total > threshold``) is satisfied for any
+    non-trivial corpus. Tests that exercise the under-budget
+    stamp-only path (e.g. ``TestBFallbackLayerEngagesInOrder``)
+    set the default and rely on small corpora to stay under
+    budget.
     """
+    force_over_budget = overrides.pop("force_over_budget", False)
     defaults: dict[str, Any] = {
         "enabled": True,
         "threshold": 0.80,
         "recent_message_window": 10,
         "min_recent_window": 3,
-        "context_window_overrides": {},
+        "context_window_overrides": (
+            {"gpt-4o": 100} if force_over_budget else {}
+        ),
         "context_window_default": 0,
         "target_ratio": 0.40,
         "model": "",
@@ -112,6 +127,49 @@ def make_messages(n: int, content_prefix: str = "M") -> list:
         cls = HumanMessage if i % 2 == 0 else AIMessage
         out.append(cls(content=f"{content_prefix} {i}", id=f"m-{i}"))
     return out
+
+
+class _FakeRepo:
+    """Minimal in-memory fake of the InstanceRepository surface
+    used by the C2 escalation tests. Exposes ONLY ``get`` +
+    ``update`` (the legacy test-fixture shim) — NOT
+    ``set_metadata_many`` / ``set_metadata`` (the production
+    atomic helpers). The C2 fix routes through the atomic
+    helpers when present, so this fake's absence of those
+    methods forces the shim path, which is what the
+    pre-C2-regression tests were actually exercising.
+
+    The ``instance_metadata`` attribute on the row is the
+    JSONB-column shape; the ``metadata`` attribute is a
+    dict-typed legacy fallback the reader accepts (the C2
+    reader reads ``instance_metadata`` first).
+    """
+
+    def __init__(self, initial_metadata: dict | None = None):
+        # The row's instance_metadata (JSONB column) and
+        # metadata (legacy fallback) — both start as the
+        # initial_metadata dict so the C2 reader sees what
+        # the shim writes.
+        self.row = MagicMock()
+        self.row.status = "running"
+        self.row.metadata = dict(initial_metadata or {})
+        self.row.instance_metadata = dict(initial_metadata or {})
+        self.update_calls: list[tuple] = []
+        self.set_metadata_many_calls: list[dict] = []
+        self.set_metadata_calls: list[tuple] = []
+        self.delete_metadata_calls: list[tuple] = []
+
+    def get(self, iid):
+        return self.row
+
+    def update(self, *args, **kwargs):
+        self.update_calls.append((args, kwargs))
+        if "metadata" in kwargs:
+            # Shim path — sync the legacy ``metadata`` attr too
+            # so the reader's legacy-fallback (if the JSONB
+            # column is missing) sees the same content.
+            self.row.metadata = dict(kwargs["metadata"])
+            self.row.instance_metadata = dict(kwargs["metadata"])
 
 
 def make_injected_messages(n: int, content_prefix: str = "INJ") -> list:
@@ -243,6 +301,7 @@ class TestBFallbackLayerEngagesInOrder:
         from datetime import datetime, timezone
 
         config = make_compaction_config(
+            force_over_budget=True,
             min_messages_before_compaction=2,
             threshold=0.01,
         )
@@ -265,10 +324,19 @@ class TestBFallbackLayerEngagesInOrder:
 
     @pytest.mark.asyncio
     async def test_all_injected_falls_through_to_floor(self):
-        """All-injected (selectable=0) → floor (last-effort)."""
+        """All-injected (selectable=0) AND over-budget → floor
+        (last-effort). Under-budget + not-force takes the
+        pre-commission stamp-only path (the C1 budget predicate
+        protects under-budget contexts from silent history loss).
+        """
         config = make_compaction_config(
             min_messages_before_compaction=2,
             threshold=0.01,
+            # Tiny window so the C1 budget predicate (``total >
+            # threshold``) is satisfied: 6 small messages will
+            # exceed 1% of 50 tokens (1 token = ~4 chars). The
+            # all-injected gate + budget predicate → floor.
+            context_window_overrides={"gpt-4o": 50},
         )
         messages = make_injected_messages(5)  # all injected
         compactor = ContextCompactor(config, {})
@@ -280,10 +348,11 @@ class TestBFallbackLayerEngagesInOrder:
 
     @pytest.mark.asyncio
     async def test_min_messages_falls_through_to_floor(self):
-        """Selectable below min_messages → floor."""
+        """Selectable below min_messages AND over-budget → floor."""
         config = make_compaction_config(
             min_messages_before_compaction=10,
             threshold=0.01,
+            context_window_overrides={"gpt-4o": 50},
         )
         # 5 regular messages (below 10) → min-messages gate fires →
         # floor.
@@ -293,6 +362,89 @@ class TestBFallbackLayerEngagesInOrder:
         )
         assert result is not None
         assert result.compaction_type == COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+
+    @pytest.mark.asyncio
+    async def test_under_budget_all_injected_returns_stamp_only_no_drops(
+        self,
+    ):
+        """C1 REVIEWER iteration-3 regression guard: under-budget
+        + not-force + all-injected → pre-commission stamp-only
+        skip semantics. ZERO messages dropped, no persistence,
+        60s dedup stamp persists. The 6-msg/48-token context
+        (0.04% of budget) reproducer from the reviewer finding
+        no longer destroys history."""
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.80,  # DEFAULT (high)
+        )
+        # 6 small injected messages: 48 chars ≈ 12 tokens. With
+        # default window 128k for gpt-4o, the threshold is
+        # ~102400 tokens; the 12-token corpus is 0.01% of budget.
+        messages = make_injected_messages(6)
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(
+            make_compaction_context(config, messages)
+        )
+        # Under-budget + not-force → stamp-only (NOT floor).
+        assert result is not None
+        assert result.compaction_type == "skipped_injections_dominate", (
+            "C1 fix: under-budget + not-force + all-injected must "
+            "fall through to the pre-commission stamp-only skip "
+            "semantics; the floor is reserved for over-budget "
+            "shrinks. Under-budget destruction of 3 of 6 messages "
+            "is a silent history loss with no budget justification."
+        )
+        # No drops
+        assert result.replacement_messages == [], (
+            "C1 fix: under-budget skip must NOT carry any "
+            "RemoveMessages — the floor's silent-halving behavior "
+            "is precisely the regression this guard prevents"
+        )
+        # Messages unchanged
+        assert result.messages_before == 6
+        assert result.messages_after == 6
+        # Anti-refire stamp persists
+        assert result.compacted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_under_budget_min_messages_returns_stamp_only_no_drops(
+        self,
+    ):
+        """C1 regression for the min-messages path."""
+        config = make_compaction_config(
+            min_messages_before_compaction=100,  # big so 5 trips it
+            threshold=0.80,
+        )
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(
+            make_compaction_context(config, make_messages(5))
+        )
+        # Under-budget + not-force → stamp-only
+        assert result is not None
+        assert result.compaction_type == "skipped_below_min_messages"
+        assert result.replacement_messages == []
+        assert result.messages_before == 5
+        assert result.messages_after == 5
+
+    @pytest.mark.asyncio
+    async def test_under_budget_but_force_overrides_to_floor(self):
+        """C1 + force semantics: under-budget + force=True → floor
+        (operator asked explicitly; the force flag is a hard
+        override on the budget predicate)."""
+        config = make_compaction_config(
+            min_messages_before_compaction=100,
+            threshold=0.80,
+        )
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(
+            make_compaction_context(config, make_messages(5)),
+            force=True,
+        )
+        # Force bypasses the under-budget stamp-only path →
+        # the floor runs (operator explicit).
+        assert result is not None
+        assert result.compaction_type == COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        assert result.replacement_messages != []
 
 
 # =============================================================================
@@ -309,6 +461,7 @@ class TestCIncidentBlockingConditionsFallThrough:
     async def test_signature1_all_injected_unanswered_engages_floor(self):
         """Signature 1: all-injected + unanswered → floor (NOT stamp-only)."""
         config = make_compaction_config(
+            force_over_budget=True,
             min_messages_before_compaction=2,
             threshold=0.01,
         )
@@ -396,6 +549,7 @@ class TestDLastEffortOn639MessageSyntheticReplica:
     @pytest.mark.asyncio
     async def test_floor_lands_on_639_message_injected_dominated(self):
         config = make_compaction_config(
+            force_over_budget=True,
             min_messages_before_compaction=2,
             threshold=0.01,
         )
@@ -439,50 +593,115 @@ class TestDLastEffortOn639MessageSyntheticReplica:
 
     @pytest.mark.asyncio
     async def test_floor_lands_on_1_message_corpus(self):
-        """Edge case: N=1. kept=1, dropped=0. Defensive no-drop."""
-        config = make_compaction_config()
-        messages = [HumanMessage(content="only", id="only-0")]
-        compactor = ContextCompactor(config, {})
-        result = await compactor.compact_state(
-            make_compaction_context(config, messages)
-        )
-        assert result is not None
-        # N=1, kept=1, dropped=0 → messages_after = 1 (notice) + 1 (tail)
-        assert result.messages_after == 2
-        # No RemoveMessages (dropped=0)
-        drops = [
-            m for m in result.replacement_messages
-            if isinstance(m, RemoveMessage)
-        ]
-        assert len(drops) == 0
+        """Edge case: N=1 single orphan ToolMessage + over-budget.
+        Iteration 2 amendment: the snap walk advances all the way
+        (the lone ToolMessage is a tail-all-ToolMessages), so
+        kept=0 and the floor emits a NOTICE-ONLY replacement
+        (replacement_messages = [notice], 0 retained originals).
+        The notice alone is API-valid and non-empty by
+        construction. messages_after = 1 (the notice).
 
-    @pytest.mark.asyncio
-    async def test_floor_lands_on_2_message_corpus(self):
-        """N=2 (even). kept=1, dropped=1."""
-        config = make_compaction_config()
-        messages = make_messages(2)
+        Iteration 3 (C1): the over-budget predicate is what makes
+        the floor fire on a 1-message corpus. With a tiny window
+        (10 tokens) and a 50-char content (~12 tokens), the budget
+        predicate (``total > 0.80 * 10 = 8 tokens``) is satisfied
+        and the min-messages skip falls through to the floor.
+        """
+        from langchain_core.messages import ToolMessage
+
+        config = make_compaction_config(
+            # Tiny window so a single 50-char ToolMessage exceeds
+            # 80% of the budget.
+            context_window_overrides={"gpt-4o": 10},
+        )
+        messages = [
+            ToolMessage(
+                content="x" * 50,  # ~12 tokens, > 80% of 10
+                id="only-0",
+                tool_call_id="missing-aimessage",
+            ),
+        ]
         compactor = ContextCompactor(config, {})
         result = await compactor.compact_state(
             make_compaction_context(config, messages)
         )
+        # Floor engages (over-budget + min-messages skip path)
         assert result is not None
-        # N=2, kept=ceil(2/2)=1, dropped=1
-        assert result.messages_after == 2  # notice + 1 tail
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        )
+        # N=1 + tail-all-ToolMessages (iteration 2 amendment):
+        # notice-only replacement. messages_after = 1.
+        assert result.messages_after == 1, (
+            "N=1 over-budget: notice-only replacement (iteration-2 "
+            "amendment), messages_after=1 (the notice alone)"
+        )
+        # No RemoveMessages? Actually N=1 with the snap walk
+        # advancing all the way, dropped=1 → 1 RemoveMessage + the
+        # notice. Wait — let me re-check. kept=0 means tail_to_keep
+        # is empty; replacement = [RemoveMessage*drop, notice, *tail]
+        # = [RemoveMessage, notice]. So 1 RemoveMessage.
         drops = [
             m for m in result.replacement_messages
-            if isinstance(m, RemoveMessage)
+            if type(m).__name__ == "RemoveMessage"
         ]
         assert len(drops) == 1
 
     @pytest.mark.asyncio
-    async def test_floor_retains_most_recent_messages(self):
-        """The retained tail is the LAST N messages of the corpus
-        (chronological order, not the first)."""
-        config = make_compaction_config()
-        messages = make_messages(5)  # m-0, m-1, m-2, m-3, m-4
+    async def test_floor_lands_on_2_message_corpus(self):
+        """N=2 (even), over-budget. kept=1, dropped=1."""
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        config = make_compaction_config(
+            context_window_overrides={"gpt-4o": 10},
+        )
+        messages = [
+            AIMessage(
+                content="x" * 50, id="m-0",
+                tool_calls=[{"name": "x", "args": {}, "id": "call-1"}],
+            ),
+            ToolMessage(
+                content="result", id="m-1", tool_call_id="call-1",
+            ),
+        ]
         compactor = ContextCompactor(config, {})
         result = await compactor.compact_state(
             make_compaction_context(config, messages)
+        )
+        # N=2 tail-all-ToolMessages + over-budget → iteration-2
+        # amendment: notice-only replacement (kept=0, dropped=2).
+        assert result is not None
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        )
+        assert result.messages_after == 1, (
+            "N=2 tail-all-ToolMessages: kept=0, dropped=2, "
+            "messages_after=1 (notice only)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_floor_retains_most_recent_messages(self):
+        """The retained tail is the LAST N messages of the corpus
+        (chronological order, not the first). 5 messages, over-budget."""
+        from langchain_core.messages import HumanMessage
+
+        config = make_compaction_config(
+            context_window_overrides={"gpt-4o": 10},
+        )
+        # 5 messages with enough content to exceed 8 tokens
+        # (80% of 10). make_messages produces small content; pad.
+        messages = [
+            HumanMessage(content="x" * 20, id=f"m-{i}")
+            for i in range(5)
+        ]
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(
+            make_compaction_context(config, messages)
+        )
+        # Floor engages
+        assert result is not None
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
         )
         # The retained tail is the LAST 3 (m-2, m-3, m-4)
         # All have re-id'd ids of the form "last-effort-<uuid>"
@@ -491,7 +710,7 @@ class TestDLastEffortOn639MessageSyntheticReplica:
             if not isinstance(m, RemoveMessage)
             and m.id and m.id.startswith("last-effort-")
         ]
-        # The non-notice messages are exactly the kept ones
+        # The non-notice kept messages are exactly 3
         non_notice_kept = [
             m for m in kept if not m.additional_kwargs.get("context_kind")
         ]
@@ -500,7 +719,7 @@ class TestDLastEffortOn639MessageSyntheticReplica:
         # And the drops are the first 2 (m-0, m-1)
         drops = [
             m for m in result.replacement_messages
-            if isinstance(m, RemoveMessage)
+            if type(m).__name__ == "RemoveMessage"
         ]
         assert len(drops) == 2
         drop_ids = {m.id for m in drops}
@@ -542,11 +761,19 @@ class TestENoticeWordingAndInjectionMechanics:
     def test_notice_conveys_trimmed_context_semantic(self):
         """The notice tells the LLM that earlier context was compacted
         by trimming (not summarization) — pins the semantic
-        distinction from the brief."""
+        distinction from the brief. Iteration-3 (REVIEWER minor)
+        softened the drop claim: the notice now says "MAY have
+        been trimmed" (the floor's drop count is not always
+        strictly "the earlier half" — N=1 lands no drops, the
+        notice-only path drops all orphans, etc.)."""
         # Must mention trimming
         assert "trimming" in COMPACTION_NOTICE_TEXT.lower() or "trim" in COMPACTION_NOTICE_TEXT.lower()
-        # Must mention the drop (so the LLM knows the older half is gone)
-        assert "dropped" in COMPACTION_NOTICE_TEXT.lower()
+        # Must mention the prioritized-latest guidance (this is the
+        # load-bearing signal for the LLM; the drop claim is no
+        # longer "the earlier half has been DROPPED" — that's
+        # only true on the non-notice-only floor path).
+        assert "prioritize" in COMPACTION_NOTICE_TEXT.lower()
+        assert "latest" in COMPACTION_NOTICE_TEXT.lower()
 
     def test_notice_conveys_prioritize_latest_semantic(self):
         """The notice tells the LLM to prioritize the latest messages."""
@@ -599,6 +826,7 @@ class TestFExistingTestPackStaysGreen:
         passes — the floor's compacted_at stamp engages the 60s
         dedup just like the old stamp-only path did."""
         config = make_compaction_config(
+            force_over_budget=True,
             min_messages_before_compaction=2,
             threshold=0.01,
         )
@@ -645,6 +873,7 @@ class TestGRequiredPathCannotBeSkipped:
         reactive (95% pre-call) trigger. The Phase-2 floor change
         benefits both paths in one place."""
         config = make_compaction_config(
+            force_over_budget=True,
             min_messages_before_compaction=2,
             threshold=0.01,
         )
@@ -669,10 +898,23 @@ class TestGRequiredPathCannotBeSkipped:
         config = make_compaction_config(
             min_messages_before_compaction=100,  # big so 5 trips it
             threshold=0.99,
+            # C1: force over-budget so the min-messages skip
+            # path falls through to the floor (the under-budget
+            # case is the pre-commission stamp-only path; the
+            # C1 test covers that separately).
+            force_over_budget=True,
         )
         compactor = ContextCompactor(config, {})
+        # Pad messages to exceed 80% of the tiny 100-token window.
+        # 5 messages × 100 chars ≈ 85 tokens (estimate); 99% of 100
+        # is 99. Bump content to 200 chars each (~34 tokens × 5
+        # = 170 tokens) so the total clearly exceeds 99 and the
+        # over-budget predicate fires.
+        big_messages = [
+            HumanMessage(content="x" * 200, id=f"m-{i}") for i in range(5)
+        ]
         result = await compactor.compact_state(
-            make_compaction_context(config, make_messages(5))
+            make_compaction_context(config, big_messages)
         )
         assert result is not None
         assert result.compaction_type == COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
@@ -906,6 +1148,12 @@ class TestA4ToolCallPairingSnapToBoundary:
         config = make_compaction_config(
             min_messages_before_compaction=2,
             threshold=0.01,
+            # C1 iteration-3: budget predicate requires
+            # over-budget OR force=True for the floor to fire.
+            # The 6 small messages fit easily under the default
+            # 128k gpt-4o window; force a tiny window so the
+            # budget predicate is satisfied.
+            force_over_budget=True,
         )
         # 6 messages, ALL bare-flag injected notes (so
         # ``selectable=0`` -> the all-injected gate fires -> the
@@ -999,6 +1247,7 @@ class TestA4ToolCallPairingSnapToBoundary:
         from langchain_core.messages import ToolMessage
 
         config = make_compaction_config(
+            force_over_budget=True,
             min_messages_before_compaction=2,
             threshold=0.01,
         )
@@ -1059,6 +1308,7 @@ class TestA4ToolCallPairingSnapToBoundary:
         is UNCHANGED. This is the A4 fix's load-bearing regression
         guard for the spec."""
         config = make_compaction_config(
+            force_over_budget=True,
             min_messages_before_compaction=2,
             threshold=0.01,
         )
@@ -1333,27 +1583,13 @@ class TestIProactiveSkipCounterAndEscalationWrite:
             ESCALATION_UNTIL_KEY,
         )
 
+        # C2 fix (REVIEWER iteration-3) — the test-fixture repo
+        # exposes ONLY ``get`` + ``update`` (NOT
+        # ``set_metadata_many``); this forces the shim path the
+        # pre-C2-regression tests were exercising.
+        repo = _FakeRepo(initial_metadata={})
         mgr = MagicMock()
-        mgr._instance_repository.get = MagicMock(
-            return_value=MagicMock(
-                status="running",
-                metadata={},  # empty baseline
-            )
-        )
-        # Capture the update calls
-        update_calls: list[tuple] = []
-
-        def _capture_update(*args, **kwargs):
-            update_calls.append((args, kwargs))
-            if "metadata" in kwargs:
-                mgr._instance_repository.get.return_value.metadata = (
-                    kwargs["metadata"]
-                )
-            return None
-
-        mgr._instance_repository.update = MagicMock(
-            side_effect=_capture_update
-        )
+        mgr._instance_repository = repo
         mgr._compactor = MagicMock()
         mgr._compactor._trigger_window = MagicMock(return_value=1_000_000)
         mgr._compactor.compact_state = AsyncMock(return_value=None)
@@ -1371,21 +1607,299 @@ class TestIProactiveSkipCounterAndEscalationWrite:
         # baseline; the second-and-onward skips compare against
         # it). This is the growth-baseline semantics documented
         # on ``_record_proactive_skip``.
-        svc._last_seen_message_count["inst-esc-1"] = 5
+        # F2 iteration-3: the growth check fires ONLY when
+        # current > prev. A 5-message corpus with baseline=5
+        # resets the counter (no growth). Use baseline=3 and
+        # make the fixture return 5 messages per skip so the
+        # 3rd skip sees 5 > 3 and writes the metadata.
+        svc._last_seen_message_count["inst-esc-1"] = 3
         # Three consecutive non-quiescent skips (the default
-        # threshold). On the 3rd, the helper checks ``new_count
-        # < threshold``; new_count=3, threshold=3 -> NOT less
-        # than -> set escalation metadata.
+        # threshold). On the 3rd, the counter has incremented
+        # to 3 (>= threshold), the growth check sees 5 > 3 →
+        # set escalation metadata.
         for _ in range(3):
             await svc._maybe_compact_context("inst-esc-1", graph, {})
-        # The 3rd skip wrote the metadata
+        # The 3rd skip wrote the metadata (the shim path's
+        # update() is called with a (positional, kwargs) tuple;
+        # the kwargs dict has the metadata dict under the
+        # 'metadata' key).
         assert any(
-            ESCALATION_UNTIL_KEY in (kw.get("metadata") or {})
-            for _args, kw in update_calls
+            ESCALATION_UNTIL_KEY in kw.get("metadata", {})
+            for _args, kw in repo.update_calls
         ), (
             f"the 3rd consecutive skip must write the "
             f"compaction_escalation_until metadata; update_calls="
-            f"{update_calls}"
+            f"{repo.update_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_proactive_skip_resets_counter_on_non_growing_streak(
+        self,
+    ):
+        """F2 REVIEWER iteration-3 fix: a NON-growing streak
+        (current message count <= baseline) RESETS the counter
+        and does NOT escalate. The prior iteration's code only
+        checked baseline existence, so a stable non-quiescent
+        instance would escalate after 3 skips. The docstring
+        promised the opposite; this test pins the corrected
+        behavior."""
+        from daemon.services._escalation_metadata import (
+            ESCALATION_UNTIL_KEY,
+        )
+
+        # C2 fix — the test-fixture repo exposes ONLY ``get`` +
+        # ``update`` (NOT ``set_metadata_many``); forces the shim
+        # path.
+        repo = _FakeRepo(initial_metadata={})
+        mgr = MagicMock()
+        mgr._instance_repository = repo
+        mgr._compactor = MagicMock()
+        mgr._compactor._trigger_window = MagicMock(return_value=1_000_000)
+        mgr._compactor.compact_state = AsyncMock(return_value=None)
+        mgr.message_metadata_repo = None
+        svc, _ = _build_service(manager=mgr)
+        # Baseline: 50 messages (set by the operator's first
+        # success). Subsequent non-quiescent skips see a STABLE
+        # 50 messages (no growth).
+        svc._last_seen_message_count["inst-stable"] = 50
+        # Fire 5 non-quiescent skips with a STABLE message count
+        # (50) — the counter should reset to 0 on each skip (no
+        # growth, so no escalation). The threshold is 3; the
+        # test fires more than threshold iterations to verify
+        # the counter NEVER reaches 3.
+        graph = MagicMock()
+        graph.aget_state = AsyncMock(
+            return_value=MagicMock(
+                values={"messages": make_messages(50)},
+                next=("agent",),  # non-quiescent
+            )
+        )
+        for _ in range(5):
+            await svc._maybe_compact_context("inst-stable", graph, {})
+        # The counter must remain 0 (reset on every non-growing
+        # skip) — NOT 5 (which would mean the counter persisted
+        # and the threshold was checked).
+        assert svc._consecutive_proactive_skips.get("inst-stable") == 0, (
+            "F2 fix: non-growing streak must reset the counter, "
+            "not persist it. The prior code escalated after 3 "
+            "skips regardless of growth; the corrected code resets "
+            "the counter on every non-growing skip."
+        )
+        # No metadata was written (the threshold was never reached
+        # on a GROWING streak).
+        assert not any(
+            ESCALATION_UNTIL_KEY in kw.get("metadata", {})
+            for _args, kw in repo.update_calls
+        ), (
+            "non-growing streak must NOT write escalation metadata"
+        )
+
+    @pytest.mark.asyncio
+    async def test_proactive_skip_escalates_on_growing_streak(self):
+        """F2 + C2: a GROWING streak (current > baseline) hits
+        threshold and writes the escalation metadata via the
+        C2-correct write path (set_metadata_many on the real-repo
+        contract; ``metadata=`` kwarg on the test-fixture shim).
+        """
+        from daemon.services._escalation_metadata import (
+            ESCALATION_UNTIL_KEY,
+        )
+
+        # C2 fix — test-fixture repo (shim path)
+        repo = _FakeRepo(initial_metadata={})
+        mgr = MagicMock()
+        mgr._instance_repository = repo
+        mgr._compactor = MagicMock()
+        mgr._compactor._trigger_window = MagicMock(return_value=1_000_000)
+        mgr._compactor.compact_state = AsyncMock(return_value=None)
+        mgr.message_metadata_repo = None
+        svc, _ = _build_service(manager=mgr)
+        # Baseline: 49 messages
+        svc._last_seen_message_count["inst-growing"] = 49
+        graph = MagicMock()
+
+        async def _state_with_growing_count(_config):
+            # Each call returns a state with one more message
+            # than the previous, simulating a growing
+            # conversation. Starts at 50 (immediately > baseline
+            # 49, so the first skip already sees growth).
+            _state_with_growing_count.n = getattr(
+                _state_with_growing_count, "n", 49
+            ) + 1
+            return MagicMock(
+                values={
+                    "messages": make_messages(
+                        _state_with_growing_count.n
+                    )
+                },
+                next=("agent",),
+            )
+        graph.aget_state = AsyncMock(side_effect=_state_with_growing_count)
+        for _ in range(3):
+            await svc._maybe_compact_context("inst-growing", graph, {})
+        # The 3rd skip wrote the metadata
+        assert any(
+            ESCALATION_UNTIL_KEY in kw.get("metadata", {})
+            for _args, kw in repo.update_calls
+        ), (
+            f"growing streak must write the "
+            f"compaction_escalation_until metadata; update_calls="
+            f"{repo.update_calls}"
+        )
+
+
+# =============================================================================
+# C2 (REVIEWER iteration-3) — REAL-row smoke probe
+# =============================================================================
+# The pre-iteration-3 reader used ``getattr(instance, "metadata")``,
+# which on a real SQLModel ``Instance`` row returns the SQLAlchemy
+# ``MetaData()`` class object (NOT the JSONB column). The fix reads
+# ``instance_metadata``. This test uses a REAL
+# ``daemon.repositories.instance.models.Instance`` row (no MagicMock
+# for the instance-side read) to prove the fix is correct. The
+# 5-line probe is cheap because Instance construction does not
+# touch the DB (it builds a SQLAlchemy Pydantic model in memory).
+
+
+class TestC2RealInstanceRow:
+    """C2 fix: ``is_proactive_escalation_active`` reads the
+    ``instance_metadata`` JSONB column on a REAL Instance row
+    (NOT the SQLAlchemy MetaData class object the pre-fix code
+    accidentally read)."""
+
+    def test_real_instance_row_with_instance_metadata_set(self):
+        from datetime import datetime, timedelta, timezone
+        from daemon.repositories.instance.models import Instance
+        from daemon.services._escalation_metadata import (
+            ESCALATION_UNTIL_KEY,
+            is_proactive_escalation_active,
+        )
+
+        # Construct a REAL Instance row (in-memory, no DB hit).
+        # The row's ``metadata`` attribute is the SQLAlchemy
+        # ``MetaData()`` class object (NOT a dict) — this is the
+        # exact shape the pre-fix code accidentally read.
+        inst = Instance(
+            instance_id="inst-c2-probe",
+            agent_id="ari",
+            agent_dir="./agents/ari",
+            status="running",
+        )
+        # Sanity: the SQLAlchemy MetaData class object is NOT a
+        # dict; this is the bug class the C2 fix addresses.
+        assert not isinstance(inst.metadata, dict), (
+            "sanity: the SQLAlchemy MetaData class object is NOT "
+            "a dict; this is the bug class the C2 fix addresses"
+        )
+        # C2 fix: set the JSONB column directly.
+        future = (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        ).isoformat()
+        inst.instance_metadata = {ESCALATION_UNTIL_KEY: future}
+        # The reader sees the future timestamp and returns True.
+        assert is_proactive_escalation_active(inst) is True, (
+            "C2 fix: the reader must see the JSONB column "
+            "compaction_escalation_until, not the SQLAlchemy "
+            "MetaData() class object"
+        )
+        # Past timestamp → False
+        inst.instance_metadata = {
+            ESCALATION_UNTIL_KEY: (
+                datetime.now(timezone.utc) - timedelta(hours=1)
+            ).isoformat()
+        }
+        assert is_proactive_escalation_active(inst) is False
+        # Empty column → False
+        inst.instance_metadata = {}
+        assert is_proactive_escalation_active(inst) is False
+
+    def test_set_proactive_escalation_metadata_routes_through_set_metadata_many(
+        self,
+    ):
+        """C2 fix: the writer routes through
+        ``InstanceRepository.set_metadata_many`` (atomic,
+        dialect-aware). The test-fixture shim path (legacy
+        ``update`` with ``metadata=`` kwarg) is exercised by the
+        OTHER tests in this file; this test pins that the
+        ``set_metadata_many`` path is taken when the repository
+        exposes the atomic helper (the production case)."""
+        from datetime import datetime, timedelta, timezone
+        from daemon.repositories.instance.models import Instance
+        from daemon.services._escalation_metadata import (
+            ESCALATION_UNTIL_KEY,
+            set_proactive_escalation_metadata,
+        )
+
+        inst = Instance(
+            instance_id="inst-c2-write",
+            agent_id="ari",
+            agent_dir="./agents/ari",
+            status="running",
+        )
+        # Pre-populate the JSONB column with a real key
+        inst.instance_metadata = {"existing_key": "existing_value"}
+
+        class _Repo:
+            """Minimal fake with the canonical InstanceRepository
+            surface. ``set_metadata_many`` writes via a dict
+            (in-memory simulation of the dialect-aware UPDATE).
+            The C2 fix MUST take this path (not the legacy
+            ``update`` shim) because the production
+            ``InstanceRepository.update`` REJECTS
+            ``instance_metadata=`` as a kwarg.
+            """
+
+            def __init__(self, inst):
+                self.inst = inst
+                self.set_metadata_many_calls: list[dict] = []
+                self.update_calls: list[tuple] = []
+
+            def get(self, iid):
+                return self.inst
+
+            def set_metadata_many(self, iid, updates):
+                self.set_metadata_many_calls.append(dict(updates))
+                merged = dict(self.inst.instance_metadata or {})
+                merged.update(updates)
+                self.inst.instance_metadata = merged
+
+            def update(self, *args, **kwargs):
+                # This path MUST NOT be called by the C2 fix
+                # (the production repository rejects this
+                # kwarg). The test asserts it WASN'T.
+                self.update_calls.append((args, kwargs))
+
+        repo = _Repo(inst)
+        future = (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        ).isoformat()
+        set_proactive_escalation_metadata(
+            repo,
+            "inst-c2-write",
+            until=future,
+            threshold=3,
+            prev_message_count=50,
+            skip_count=3,
+        )
+        # The C2 fix routed through set_metadata_many (the
+        # atomic helper), NOT the legacy update shim.
+        assert len(repo.set_metadata_many_calls) == 1, (
+            "C2 fix: the writer must call set_metadata_many "
+            "(the production InstanceRepository atomic helper). "
+            f"update_calls={repo.update_calls}"
+        )
+        assert repo.update_calls == [], (
+            "C2 fix: the legacy update(instance_id, "
+            "instance_metadata=...) path is REJECTED by the "
+            "production repository's write guard; the writer "
+            "must NOT use it"
+        )
+        # The JSONB column carries the new key
+        assert inst.instance_metadata[ESCALATION_UNTIL_KEY] == future
+        # The pre-existing key is preserved
+        assert (
+            inst.instance_metadata["existing_key"]
+            == "existing_value"
         )
 
 
@@ -1427,6 +1941,7 @@ class TestA4Iteration2NoticeOnlyReplacement:
         from langchain_core.messages import AIMessage, ToolMessage
 
         config = make_compaction_config(
+            force_over_budget=True,
             min_messages_before_compaction=2,
             threshold=0.01,
         )
@@ -1498,6 +2013,7 @@ class TestA4Iteration2NoticeOnlyReplacement:
         from langchain_core.messages import AIMessage, ToolMessage
 
         config = make_compaction_config(
+            force_over_budget=True,
             min_messages_before_compaction=2,
             threshold=0.01,
         )
@@ -1570,6 +2086,7 @@ class TestA4Iteration2NoticeOnlyReplacement:
         from langchain_core.messages import ToolMessage
 
         config = make_compaction_config(
+            force_over_budget=True,
             min_messages_before_compaction=2,
             threshold=0.01,
         )

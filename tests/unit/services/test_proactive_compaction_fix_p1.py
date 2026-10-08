@@ -697,13 +697,13 @@ class TestT4NumeratorBudgetAntiRefire:
         empty ``replacement_messages``) for the all-injected case.
         The seam persisted ONLY the stamp, the context never shrank.
 
-        **NEW expectation** (post-Phase-2): the all-injected skip falls
-        through to the 50%-tail last-effort floor
-        (``compaction_type="tail_truncation_last_effort"``, NON-empty
-        ``replacement_messages``). The seam persists a REAL shrink.
-        The 60s dedup still engages because the result carries
-        ``compacted_at`` — the dedup behavior is preserved.
-        """
+        **Iteration-2 expectation**: floor engaged.
+        **Iteration-3 expectation** (C1 REVIEWER budget predicate):
+        under-budget + not-force → pre-commission stamp-only
+        skip semantics (the budget predicate is the regression
+        guard against silent history loss on under-budget
+        contexts). This test's 5 small injected messages are
+        well under 80% of the default 128k gpt-4o window."""
         config = make_compaction_config(
             min_messages_before_compaction=2,
             threshold=0.01,  # very low so we'd otherwise trigger
@@ -711,33 +711,36 @@ class TestT4NumeratorBudgetAntiRefire:
         messages = _make_injected_messages(5)  # all injected
         compactor = ContextCompactor(config, {})
         result = await compactor.compact_state(_make_context(config, messages))
-        # Floor returns a real shrink — engine result is NON-None.
+        # Floor returns a STAMPED no-op OR a real shrink; the engine
+        # result is non-None (60s dedup engages on the next dispatch).
         assert result is not None, (
-            "floor: engine must return a result (real shrink) — NOT None"
+            "anti-refire: engine must return a STAMPED no-op, NOT None"
         )
-        # OLD: assert result.compaction_type == "skipped_injections_dominate"
-        # NEW: floor engaged
-        assert result.compaction_type == "tail_truncation_last_effort", (
-            "all-injected skip must fall through to the 50%-tail floor "
-            "(Phase-2 hardening, Verdict A framing)."
+        # C1: under-budget + not-force + all-injected → stamp-only
+        assert result.compaction_type == "skipped_injections_dominate", (
+            "C1 fix: under-budget + not-force + all-injected → "
+            "pre-commission stamp-only skip (no shrinkage, no "
+            "message drops, 60s dedup stamp persists). The floor "
+            "is reserved for over-budget shrinks."
         )
-        # OLD: assert result.replacement_messages == []
-        # NEW: replacement_messages is NON-empty (real shrink, not stamp-only)
-        assert len(result.replacement_messages) > 0, (
-            "floor result must carry replacement_messages so the seam's "
-            "standard Variant A/B path persists a real shrink."
-        )
+        # No drops (the C1 budget predicate is what protects
+        # under-budget contexts from silent history loss)
+        assert result.replacement_messages == []
+        # Anti-refire stamp still set (dedup behavior is preserved)
+        assert result.compacted_at is not None
         # Anti-refire stamp still set — the 60s dedup is preserved.
         assert result.compacted_at is not None
 
     @pytest.mark.asyncio
     async def test_min_messages_anti_refire_stamps_compacted_at(self):
-        """min_messages skip path: floor + 60s dedup still engage.
+        """min_messages skip path: 60s dedup still engages.
 
         COMPACTION NEVER-BLOCKED (Verdict A). **OLD expectation**
         (pre-Phase-2): ``compaction_type="skipped_below_min_messages"``,
-        stamp-only. **NEW expectation**: falls through to
-        ``tail_truncation_last_effort`` floor, real shrink lands.
+        stamp-only. **Iteration-2 expectation**: floor engaged.
+        **Iteration-3 expectation** (C1): under-budget + not-force
+        → pre-commission stamp-only (the budget predicate is
+        the regression guard against silent history loss).
         """
         config = make_compaction_config(
             min_messages_before_compaction=10,
@@ -748,12 +751,16 @@ class TestT4NumeratorBudgetAntiRefire:
             _make_context(config, make_messages(5))
         )
         assert result is not None
-        # OLD: assert result.compaction_type == "skipped_below_min_messages"
-        # NEW: floor engaged
-        assert result.compaction_type == "tail_truncation_last_effort"
-        # NEW: non-empty replacement (real shrink, not stamp-only)
-        assert len(result.replacement_messages) > 0
+        # C1: under-budget + not-force + min-messages skip →
+        # pre-commission stamp-only
+        assert result.compaction_type == "skipped_below_min_messages", (
+            "C1 fix: under-budget + not-force + min-messages skip → "
+            "pre-commission stamp-only (no shrinkage, no message "
+            "drops, 60s dedup stamp persists)"
+        )
+        assert result.replacement_messages == []
         # Anti-refire stamp still set.
+        assert result.compacted_at is not None
         assert result.compacted_at is not None
 
     @pytest.mark.asyncio

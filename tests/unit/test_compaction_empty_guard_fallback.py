@@ -801,7 +801,7 @@ class TestCompactionEmptyLLMResponseErrorEscapesTimeoutExcepts:
         # We expect AT LEAST one call inside the ``compact_state``
         # ``except Exception`` handler — the auto-path contract.
         assert any(
-            2700 <= line <= 3050 for line in truncate_call_lines
+            3050 <= line <= 3350 for line in truncate_call_lines
         ), (
             f"_truncate_fallback must be called inside the outer "
             f"except Exception handler; got call sites at lines "

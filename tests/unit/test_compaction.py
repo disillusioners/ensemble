@@ -901,19 +901,20 @@ class TestCompactState:
             "guarantee is that the engine always produces something "
             "the seam can persist."
         )
-        # OLD: assert result.compaction_type == "skipped_below_min_messages"
-        # NEW: floor engaged
-        assert result.compaction_type == "tail_truncation_last_effort", (
-            "min-messages skip must fall through to the 50%-tail floor "
-            "(Phase-2 hardening, Verdict A framing)."
+        # C1 fix: under-budget + not-force + min-messages skip →
+        # pre-commission stamp-only (regression guard against
+        # silent history loss).
+        assert result.compaction_type == "skipped_below_min_messages", (
+            "C1 fix: under-budget + not-force + min-messages skip → "
+            "pre-commission stamp-only skip (no shrinkage, no "
+            "message drops, 60s dedup stamp persists). The floor is "
+            "reserved for over-budget shrinks."
         )
-        # OLD: assert result.replacement_messages == []   (stamp-only)
-        # NEW: replacement_messages is NON-empty (drop list + notice + tail)
-        assert len(result.replacement_messages) > 0, (
-            "floor result must carry replacement_messages so the seam's "
-            "standard Variant A/B path persists a real shrink (not just "
-            "a stamp)."
-        )
+        # No drops (the C1 guard)
+        assert result.replacement_messages == []
+        # Messages unchanged
+        assert result.messages_before == 5
+        assert result.messages_after == 5
         # Anti-refire stamp still set — the 60s dedup is preserved.
         assert result.compacted_at, "anti-refire stamp must be set"
 
