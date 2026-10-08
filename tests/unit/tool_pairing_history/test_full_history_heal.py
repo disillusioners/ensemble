@@ -72,6 +72,15 @@ Fixture map:
         leaves both pairs intact — count-duplicates are NOT
         detected as violations per W1(c).
 
+    FIX 3 — ``TestOrderInvertedToolMessageBeforeIssuer``
+        Order-inverted shape: a ``ToolMessage`` whose issuing
+        ``AIMessage`` appears LATER in the list. Pre-FIX 3 the
+        probe flagged it but the healer's global issued-set kept
+        the TM (detected-but-unhealable). FIX 3 scopes the
+        issued-set to AIMessages at indices BEFORE each TM; the
+        misplaced TM is now removed as an orphan. Probe and
+        healer agree.
+
     PROBE / W1 HOT-PATH GATE — ``TestHasPairingViolations``
         The cheap pre-flight probe returns False on healthy
         histories (no allocation) and True on poisoned histories.
@@ -104,6 +113,7 @@ from daemon.tool_pairing_history import (
     PARTNER_SYNTH_TEXT,
     ToolPairingHealReport,
     _build_next_non_tool_after,
+    _is_partner_synth,
     dedupe_incoming_tool_call_ids,
     has_pairing_violations,
     validate_and_heal_messages,
@@ -315,6 +325,124 @@ class TestAdjacencyTrap:
 
 
 # ---------------------------------------------------------------------------
+# FIX 3 — order-inverted (TM-before-issuer) shape
+# ---------------------------------------------------------------------------
+
+
+class TestOrderInvertedToolMessageBeforeIssuer:
+    """FIX 3: probe/healer agreement on the order-inverted shape.
+
+    The 2013-bricking bug class also includes a shape where a
+    ``ToolMessage`` appears in the history BEFORE its issuing
+    ``AIMessage``. Count-pairing is valid (the same ``tool_call_id``
+    IS issued by an AIMessage SOMEWHERE in the list) but the gateway
+    still rejects because the order is wrong: the TM has no
+    IMMEDIATELY-adjacent issuing AIMessage to attach to, and a
+    later AIMessage's call would be unbacked by an adjacent TM
+    block.
+
+    Pre-FIX 3 the probe flagged this shape (backward scan finds no
+    earlier AIMessage(tc) for the TM) but the healer's Phase 2
+    used a GLOBAL issued-set, so the TM was NOT removed
+    (detected-but-unhealable). The strict gateway then 2013-rejected
+    on the next dispatch, the W2 retry healed nothing (the same
+    issue), and the instance bricked.
+
+    FIX 3 scopes the issued-set to AIMessages at indices BEFORE
+    each TM. The TM is now an orphan (no earlier issuer) and is
+    removed by Phase 2. Probe and healer agree.
+    """
+
+    def test_tm_before_issuer_is_flagged_by_probe(self):
+        msgs: list = [
+            HumanMessage(content="hi"),
+            # TM appears BEFORE its issuing AIMessage (order-inverted).
+            ToolMessage(content="r_a", tool_call_id="call_a", name="tool"),
+            AIMessage(content="", tool_calls=[_tc("call_a")]),
+            HumanMessage(content="next"),
+        ]
+        # The probe MUST flag the TM-before-issuer shape.
+        assert has_pairing_violations(msgs) is True
+
+    def test_tm_before_issuer_is_removed_by_healer(self):
+        msgs: list = [
+            HumanMessage(content="hi"),
+            ToolMessage(content="r_a", tool_call_id="call_a", name="tool"),
+            AIMessage(content="", tool_calls=[_tc("call_a")]),
+            HumanMessage(content="next"),
+        ]
+
+        # The original TM is non-synth (not a partner-synth).
+        original_tm = msgs[1]
+        assert not _is_partner_synth(original_tm)
+
+        report = validate_and_heal_messages(msgs, instance_short="iid-oinv")
+
+        # The orphan TM (no earlier AIMessage(tc) issued its tc_id) was
+        # removed by Phase 2.
+        assert len(report.removed_orphan_indices) >= 1, (
+            f"TM-before-issuer must be removed as orphan; "
+            f"removed_orphan_indices={report.removed_orphan_indices}"
+        )
+        # The remaining history contains NO ORIGINAL (non-synth)
+        # ToolMessage(call_a) — the misplaced one was removed. A
+        # partner-synth placeholder may exist (Phase 1 synthesizes
+        # one for the now-unanswered AIMessage at the end), but the
+        # ORIGINAL TM is gone.
+        remaining_original_tm_call_a = [
+            m for m in msgs
+            if isinstance(m, ToolMessage)
+            and m.tool_call_id == "call_a"
+            and not _is_partner_synth(m)
+        ]
+        assert remaining_original_tm_call_a == [], (
+            f"original TM(call_a) must be removed; still in msgs: "
+            f"{[m.tool_call_id for m in remaining_original_tm_call_a]}"
+        )
+
+        # Post-state: probe clean. The remaining AIMessage(call_a) at
+        # the end (or wherever it ended up) has a partner-synth
+        # placeholder from Phase 1, so adjacency is satisfied; no
+        # orphan TMs; order is valid.
+        assert has_pairing_violations(msgs) is False, (
+            f"post-heal history must be probe-clean; msgs="
+            f"{[(type(m).__name__, getattr(m, 'tool_call_id', None), _is_partner_synth(m)) for m in msgs]}"
+        )
+
+    def test_tm_before_issuer_with_intervening_aimessage_other(self):
+        """A more complex order-inverted shape: TM, intervening
+        AIMessage (no tc_ids), then the issuer. Same outcome — the
+        ORIGINAL TM is removed as orphan (a partner-synth
+        placeholder for the AIMessage's unanswered tool call may
+        remain, but no original TM(call_a) survives).
+        """
+        msgs: list = [
+            HumanMessage(content="hi"),
+            ToolMessage(content="r_a", tool_call_id="call_a", name="tool"),
+            # Intervening AIMessage with no tool_calls — does not
+            # issue call_a, so the TM remains an orphan.
+            AIMessage(content="intervening — no tool_calls"),
+            AIMessage(content="", tool_calls=[_tc("call_a")]),
+            HumanMessage(content="next"),
+        ]
+        assert has_pairing_violations(msgs) is True
+
+        report = validate_and_heal_messages(msgs, instance_short="iid-oinv2")
+        # The TM was removed.
+        assert len(report.removed_orphan_indices) >= 1
+        # No ORIGINAL (non-synth) TM(call_a) remains.
+        assert [
+            m for m in msgs
+            if isinstance(m, ToolMessage)
+            and m.tool_call_id == "call_a"
+            and not _is_partner_synth(m)
+        ] == []
+        # Post-heal: probe clean (the AIMessage at the end gets a
+        # synthesized partner in Phase 1).
+        assert has_pairing_violations(msgs) is False
+
+
+# ---------------------------------------------------------------------------
 # DEFENSIVE — duplicate tool_call_id (W1(c) clarification)
 # ---------------------------------------------------------------------------
 
@@ -402,9 +530,13 @@ class TestHasPairingViolations:
     """The cheap O(n) pre-flight probe.
 
     Hot-path gate: validate_and_heal_messages runs ONLY when this
-    probe returns True. The probe is a single tight loop with no
-    allocations — for healthy histories it inspects every message
-    but does NOT construct any new objects.
+    probe returns True. The probe is a single O(n) walk that
+    precomputes an O(n) auxiliary set of issued tool_call_ids once,
+    then performs an O(1) set lookup per ToolMessage for the orphan
+    check — the older O(n²) ``msgs_list[:i]`` slice + walk was
+    replaced when FIX 2 landed. For healthy histories the probe
+    inspects every message but does NOT construct any heal
+    artifacts.
     """
 
     def test_probe_false_on_healthy_history(self):
@@ -444,6 +576,21 @@ class TestHasPairingViolations:
         msgs = [
             ToolMessage(content="orphan", tool_call_id="orphan_id", name="tool"),
             HumanMessage(content="hi"),
+        ]
+        assert has_pairing_violations(msgs) is True
+
+    def test_probe_true_on_tm_before_issuer(self):
+        """FIX 3: order-inverted shape — TM appears BEFORE its
+        issuing AIMessage. Count-pairing is valid (somewhere in the
+        list the same tc_id IS issued) but the gateway rejects
+        because the TM has no earlier issuer. The probe MUST flag
+        this shape; the healer's Phase 2 (FIX 3 prefix scoping)
+        must remove the TM.
+        """
+        msgs = [
+            HumanMessage(content="hi"),
+            ToolMessage(content="r_a", tool_call_id="call_a", name="tool"),
+            AIMessage(content="", tool_calls=[_tc("call_a")]),
         ]
         assert has_pairing_violations(msgs) is True
 

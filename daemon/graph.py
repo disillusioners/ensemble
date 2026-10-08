@@ -488,21 +488,25 @@ def _ensure_full_history_pairing(
         design-rejected at :287-289. The chosen gating pattern is:
 
           * Always run the cheap O(n) ``has_pairing_violations`` probe
-            (no allocations, single tight loop over the message list).
-            For a 1k-msg history this is a few µs; for a 10k-msg
-            history it is sub-millisecond. The probe is dominated by
-            Python type checks, no DB / no I/O / no locks.
+            (O(n) time, O(n) auxiliary set of issued tool_call_ids
+            precomputed once per probe call — a single tight loop over
+            the message list with one O(1) set lookup per ToolMessage
+            for the orphan check). For a 1k-msg history this is a few
+            µs; for a 10k-msg history it is sub-millisecond. The probe
+            is dominated by Python type checks, no DB / no I/O / no
+            locks.
           * ONLY when the probe returns ``True`` (a real violation is
             present) does the full ``validate_and_heal_messages`` run.
             The full scan mutates in place and returns a report the
             caller threads into the C2 return so the heal is persisted
             on the next checkpoint superstep.
           * On the happy path (no violations), the cost is the probe
-            alone — no allocations, no log lines, no message
-            construction. The probe is a non-mutating, no-side-effect
-            validator that integrates cleanly with the existing
-            O(1) tail-only guard (the tail guard still fires when its
-            trigger condition matches; the full scan catches the rest).
+            alone — only the O(n) auxiliary set is allocated, no log
+            lines, no message construction. The probe is a
+            non-mutating, no-side-effect validator that integrates
+            cleanly with the existing O(1) tail-only guard (the tail
+            guard still fires when its trigger condition matches; the
+            full scan catches the rest).
 
     This helper does NOT persist anything. The caller persists
     synthesized ``ToolMessage``s by appending them to the C2 return
@@ -521,10 +525,16 @@ def _ensure_full_history_pairing(
         A :class:`ToolPairingHealReport` describing the heal. Empty
         report on the happy path.
     """
-    # Happy-path probe: a single O(n) walk with no allocations.
-    # ``has_pairing_violations`` short-circuits on the FIRST
-    # violation found, so for healthy histories it inspects every
-    # message; for poisoned histories it returns on the first hit.
+    # Happy-path probe: a single O(n) walk that allocates an O(n)
+    # auxiliary set of issued tool_call_ids (precomputed once), with
+    # an O(1) set lookup per ToolMessage for the orphan check. The
+    # older no-allocation claim was true only for the AIMessage
+    # adjacency path; the orphan path used to slice ``msgs_list[:i]``
+    # per ToolMessage (O(n²) worst case) until FIX 2 replaced the
+    # slice with the precomputed set. ``has_pairing_violations``
+    # short-circuits on the FIRST violation found, so for healthy
+    # histories it inspects every message; for poisoned histories it
+    # returns on the first hit.
     if not messages or not has_pairing_violations(messages):
         return ToolPairingHealReport(scanned_count=len(messages) if messages else 0)
 
@@ -9020,7 +9030,7 @@ def create_agent_node(
                 # Closes the 2013-bricking bug class (incident 03d7657f)
                 # where mid-history pairing violations survived the
                 # pre-existing O(1) tail-only helpers. Runs an O(n)
-                # probe (no allocations on the happy path); only the
+                # probe (O(n) auxiliary set on the happy path); only the
                 # full heal when a violation is detected. See the
                 # ``_ensure_full_history_pairing`` docstring for the
                 # cost justification.
@@ -9104,15 +9114,30 @@ def create_agent_node(
                     lambda: current_llm.invoke(full_messages)
                 )
             except ToolPairingInvalidError as _w2_second_exc:
-                # Second failure — give up and reraise the original
-                # so the existing error path / non-retryable upstream
+                # Second failure — give up. Raise the second
+                # exception (the more recent one — the gateway
+                # rejected the healed payload too) with the
+                # ORIGINAL first invocation's exception as
+                # ``__cause__`` via ``from`` so maximal diagnostics
+                # are preserved on the chain:
+                #   - The primary raised exception is
+                #     ``_w2_second_exc`` (the most recent rejection,
+                #     which carries the post-heal signature).
+                #   - ``__cause__`` is ``_w2_pairing_exc`` (the
+                #     original gateway rejection, with the full
+                #     pre-heal signature chain still attached).
+                #   - ``_w2_pairing_exc.original`` /
+                #     ``_w2_second_exc.original`` still expose the
+                #     underlying ``openai.BadRequestError`` for
+                #     forensic access.
+                # The existing error path / non-retryable upstream
                 # pipeline takes over (terminal as shipped pre-W2).
                 logger.error(
                     f"[ToolPairing:FULL] W2 reactive heal did not "
                     f"resolve pairing-invalid for {instance_short} "
                     f"after heal-once retry; reraising"
                 )
-                raise _w2_second_exc from _w2_second_exc.__cause__
+                raise _w2_second_exc from _w2_pairing_exc
         except ContextLengthExceededError:
             if compactor is None or graph_ref is None or graph_ref[0] is None:
                 logger.warning('[LLM] Context length exceeded (no compactor available)')
@@ -9437,49 +9462,81 @@ def create_agent_node(
                     f"{len(_post_compact_heal.synthesized)} "
                     f"removed={len(_post_compact_heal.removed_message_ids)}"
                 )
-            response = await loop.run_in_executor(
-                None,
-                lambda: current_llm.invoke(compact_messages)
-            )
-        except ToolPairingInvalidError as _w2_compact_pairing_exc:
-            # W2 mirror on the post-compaction invoke — same
-            # heal-once retry contract as the primary dispatch site
-            # (:9034). Compact-massempaction may have left a stale
-            # pairing violation the per-group snap did not cover
-            # (the snap targets the 50%-tail floor boundary only).
-            # Heal on the compacted payload and re-invoke ONCE; second
-            # failure reraises and the existing error path takes
-            # over.
-            logger.warning(
-                f"[ToolPairing:FULL] W2 reactive heal on post-compaction "
-                f"for {instance_short} after gateway rejection signature="
-                f"{_w2_compact_pairing_exc.signature!r}"
-            )
-            _w2_compact_report = _ensure_full_history_pairing(
-                compact_messages, instance_short,
-            )
-            if _w2_compact_report.synthesized:
-                pairing_synthesized_msgs.extend(
-                    _w2_compact_report.synthesized
-                )
-            if _w2_compact_report.removed_message_ids:
-                pairing_remove_sentinels.extend(
-                    RemoveMessage(id=mid)
-                    for mid in _w2_compact_report.removed_message_ids
-                )
+            # LLM invoke (post-compaction). Mirrors the primary
+            # dispatch site's structure (W1 heal on the payload, then
+            # invoke inside an INNER ``try/except`` so a
+            # ``ToolPairingInvalidError`` raised by the post-compaction
+            # invoke is caught HERE — Python ``except`` clauses only
+            # catch exceptions raised in the try BODY, and a sibling
+            # ``except ToolPairingInvalidError`` at the same level as
+            # this CLE handler is unreachable for exceptions raised
+            # inside the handler. Compaction may have left a stale
+            # pairing violation the per-group snap in :1904-1965 does
+            # not cover (the snap targets the 50%-tail floor boundary
+            # only); the W1 probe above handles the common case, this
+            # W2 inner-try handles the strict-gateway-still-rejects
+            # case the probe missed.
             loop = asyncio.get_running_loop()
             try:
                 response = await loop.run_in_executor(
                     None,
                     lambda: current_llm.invoke(compact_messages)
                 )
-            except ToolPairingInvalidError as _w2_compact_second_exc:
-                logger.error(
-                    f"[ToolPairing:FULL] W2 post-compaction heal did "
-                    f"not resolve pairing-invalid for {instance_short}; "
-                    f"reraising"
+            except ToolPairingInvalidError as _w2_compact_pairing_exc:
+                # W2 reactive heal on the post-compaction payload —
+                # same heal-once retry contract as the primary dispatch
+                # site (:9101-9114). Heal on ``compact_messages`` and
+                # re-invoke ONCE; second failure reraises and the
+                # existing error path takes over.
+                logger.warning(
+                    f"[ToolPairing:FULL] W2 reactive heal on post-compaction "
+                    f"for {instance_short} after gateway rejection signature="
+                    f"{_w2_compact_pairing_exc.signature!r}"
                 )
-                raise _w2_compact_second_exc from _w2_compact_second_exc.__cause__
+                _w2_compact_report = _ensure_full_history_pairing(
+                    compact_messages, instance_short,
+                )
+                if _w2_compact_report.synthesized:
+                    pairing_synthesized_msgs.extend(
+                        _w2_compact_report.synthesized
+                    )
+                if _w2_compact_report.removed_message_ids:
+                    pairing_remove_sentinels.extend(
+                        RemoveMessage(id=mid)
+                        for mid in _w2_compact_report.removed_message_ids
+                    )
+                try:
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: current_llm.invoke(compact_messages)
+                    )
+                except ToolPairingInvalidError as _w2_compact_second_exc:
+                    # Second failure — raise the second exception
+                    # (the more recent one — the gateway rejected
+                    # the post-heal payload too) with the ORIGINAL
+                    # first invocation's exception as ``__cause__``
+                    # via ``from``. Mirrors the primary site's
+                    # FIX 4 alignment (:9111-9128) so both W2
+                    # catch sites behave identically:
+                    #   - Primary raise: the second
+                    #     ``ToolPairingInvalidError`` (most recent
+                    #     rejection signature).
+                    #   - ``__cause__``: the original first
+                    #     ``ToolPairingInvalidError`` (the
+                    #     pre-heal signature).
+                    #   - The original ``BadRequestError``s are
+                    #     still accessible via ``.original`` on
+                    #     either exception for forensic access.
+                    # The existing error path / non-retryable
+                    # upstream pipeline takes over (terminal as
+                    # shipped pre-W2). Maximal diagnostics
+                    # preserved.
+                    logger.error(
+                        f"[ToolPairing:FULL] W2 post-compaction heal did "
+                        f"not resolve pairing-invalid for {instance_short}; "
+                        f"reraising"
+                    )
+                    raise _w2_compact_second_exc from _w2_compact_pairing_exc
         except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError,
                 BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError, MalformedLLMResponseError, IndexError,
                 httpx.TimeoutException) as e:

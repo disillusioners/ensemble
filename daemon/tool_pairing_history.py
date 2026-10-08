@@ -61,8 +61,9 @@ Performance gating (W1 design rationale):
     enqueue-seam tail-guard). The hot-path cost is bounded by:
 
       * Always run the cheap O(n) ``has_pairing_violations`` probe
-        (no allocations, single tight loop). On healthy histories
-        the cost is the probe alone.
+        (O(n) time, O(n) auxiliary set of issued tool_call_ids
+        precomputed once per probe call). On healthy histories the
+        cost is the probe alone.
       * ONLY when the probe returns ``True`` (a real violation
         is present) does the full ``validate_and_heal_messages``
         run. The full scan mutates in place and returns a report
@@ -388,14 +389,15 @@ def validate_and_heal_messages(
         i += 1
 
     # Phase 2: orphan removal — TMs whose tc_id has no AIMessage(tc)
-    # anywhere in the resulting history. After Phase 1's adjacency
-    # fix, every AIMessage(tc) has its adjacent block covering its
-    # tc_ids. The remaining orphan TMs are those whose tc_id is not
-    # issued by any AIMessage in the rebuilt list. This catches TMs
-    # stranded by a synthesis (a TM that was originally paired with
-    # an AIMessage, but the synthesized partner earlier in the
-    # history now satisfies the AIMessage and the original TM has
-    # no remaining AIMessage to pair with).
+    # at any EARLIER index in the resulting history. After Phase 1's
+    # adjacency fix, every AIMessage(tc) has its adjacent block
+    # covering its tc_ids. The remaining orphan TMs are those whose
+    # tc_id is not issued by any earlier AIMessage in the rebuilt
+    # list. This catches TMs stranded by a synthesis (a TM that was
+    # originally paired with an AIMessage, but the synthesized
+    # partner earlier in the history now satisfies the AIMessage and
+    # the original TM has no remaining AIMessage to pair with) AND
+    # order-inverted TMs (TM-before-issuer — see FIX 3 below).
     #
     # Guard: if the list has NO ``AIMessage``s at all (every
     # message is a ``ToolMessage``), there are no pairing semantics
@@ -403,24 +405,38 @@ def validate_and_heal_messages(
     # orphan removal in that case to preserve the at-least-one-
     # message contract callers (notably ``emergency_truncate``) rely
     # on when collapsing a long tool-result-only history.
+    #
+    # FIX 3: the issued-set is now a LEFT-TO-RIGHT PREFIX (built
+    # incrementally as we walk ``new_list``), NOT a global set
+    # precomputed in a separate pass. A TM is removed iff its
+    # ``tc_id`` is NOT in the prefix at the TM's position — i.e.
+    # no earlier ``AIMessage(tc)`` issued it. This closes the
+    # probe/healer mismatch on the order-inverted shape
+    # (TM-before-issuer): the previous global set kept the TM
+    # because a LATER ``AIMessage`` in the list issued the same
+    # ``tc_id``; with prefix scoping the misplaced TM has no
+    # earlier issuer and is removed as an orphan. Semantically
+    # consistent with the "orphaned TM → remove" heal op and
+    # aligned with the probe's same "before" semantic.
     has_any_aimessage = any(
         isinstance(m, AIMessage) for m in new_list
     )
-    issued_tc_ids: set[str] = set()
-    for m in new_list:
-        if isinstance(m, AIMessage):
-            for tc_id in _extract_tool_call_ids(m):
-                if tc_id:
-                    issued_tc_ids.add(tc_id)
 
     final_list: list[BaseMessage] = []
     if has_any_aimessage:
+        issued_tc_ids: set[str] = set()  # prefix: AIMessages at indices < current
         for m in new_list:
             if isinstance(m, ToolMessage):
                 tc_id = getattr(m, "tool_call_id", None)
                 if tc_id and tc_id not in issued_tc_ids:
+                    # Order-inverted TM — no earlier AIMessage(tc)
+                    # issued this tc_id. Remove as orphan.
                     report.removed_orphan_indices.append(len(final_list))
                     continue
+            elif isinstance(m, AIMessage):
+                for tc_id in _extract_tool_call_ids(m):
+                    if tc_id:
+                        issued_tc_ids.add(tc_id)
             final_list.append(m)
     else:
         # All-ToolMessages history — keep as-is, no pairing semantics.
@@ -471,7 +487,10 @@ def has_pairing_violations(messages: Iterable[BaseMessage]) -> bool:
         ``ToolMessage`` (the load-bearing strict-gateway rule);
       * any non-partner-synth ``ToolMessage`` carries a
         ``tool_call_id`` with no matching ``AIMessage(tool_calls=[...])``
-        anywhere in the history.
+        at any EARLIER index (the "before" semantic — a
+        ``ToolMessage`` whose issuing ``AIMessage`` appears LATER in
+        the list IS flagged, because strict gateways reject the
+        order-inverted shape even though the count-pairing is valid).
 
     NOTE: count-duplicates are NOT reported here (per W1(c)
     clarification — strict gateways accept them as long as each
@@ -500,40 +519,60 @@ def has_pairing_violations(messages: Iterable[BaseMessage]) -> bool:
 
     next_non_tool_after = _build_next_non_tool_after(msgs_list)
 
+    # Single left-to-right pass with a PREFIX issued-set: at index
+    # ``i``, ``issued_tc_ids`` contains every ``tool_call_id`` issued
+    # by an ``AIMessage`` at an index < ``i``. This replaces the old
+    # O(n) ``msgs_list[:i]`` slice + per-AIMessage ``_extract_tool_call_ids``
+    # walk inside the orphan check (which made the probe worst-case
+    # O(n²) on histories with many ToolMessages) and the old global
+    # issued-set (which had the FIX 3 mismatch — a TM whose issuer
+    # appears LATER in the list would not be flagged as an orphan
+    # because the later AIMessage's tc_id was in the global set).
+    #
+    # The "before" semantic aligns the probe with the healer's
+    # Phase 2, which also scopes its issued-set to AIMessages at
+    # earlier indices (FIX 3). Order-inverted TMs (TM-before-issuer)
+    # are flagged here AND removed by the healer.
+    issued_tc_ids: set[str] = set()
+
     for i, msg in enumerate(msgs_list):
         if isinstance(msg, AIMessage):
             ai_tc_ids = _extract_tool_call_ids(msg)
-            if not ai_tc_ids:
-                continue
-            block_end = next_non_tool_after[i]
-            block_tc_ids: set[str] = set()
-            for k in range(i + 1, block_end):
-                tm = msgs_list[k]
-                if isinstance(tm, ToolMessage):
-                    tc_id = getattr(tm, "tool_call_id", None)
+            if ai_tc_ids:
+                block_end = next_non_tool_after[i]
+                block_tc_ids: set[str] = set()
+                for k in range(i + 1, block_end):
+                    tm = msgs_list[k]
+                    if isinstance(tm, ToolMessage):
+                        tc_id = getattr(tm, "tool_call_id", None)
+                        if tc_id:
+                            block_tc_ids.add(tc_id)
+                # Adjacency check: every tc_id in the AIMessage must
+                # appear in the IMMEDIATELY-adjacent ToolMessage block.
+                for tc_id in ai_tc_ids:
+                    if tc_id not in block_tc_ids:
+                        return True
+                # Add this AIMessage's tc_ids to the prefix issued
+                # set so subsequent TMs can find them. Done AFTER
+                # the adjacency check; the adjacency check is
+                # independent of the issued set (it reads the next
+                # block, not the prefix).
+                for tc_id in ai_tc_ids:
                     if tc_id:
-                        block_tc_ids.add(tc_id)
-            # Adjacency check: every tc_id in the AIMessage must
-            # appear in the IMMEDIATELY-adjacent ToolMessage block.
-            for tc_id in ai_tc_ids:
-                if tc_id not in block_tc_ids:
-                    return True
+                        issued_tc_ids.add(tc_id)
         elif isinstance(msg, ToolMessage):
             if _is_partner_synth(msg):
                 continue
             tc_id = getattr(msg, "tool_call_id", None)
             if not tc_id:
                 continue
-            # Orphan — TM with no AIMessage(tc) anywhere in the list.
-            # Walk back through the list to find any AIMessage(tc)
-            # that issued this tc_id.
-            issued = False
-            for prev in msgs_list[:i]:
-                if isinstance(prev, AIMessage):
-                    if tc_id in _extract_tool_call_ids(prev):
-                        issued = True
-                        break
-            if not issued:
+            # Orphan — TM with no AIMessage(tc) at any EARLIER index
+            # that issued this tc_id. O(1) lookup against the prefix
+            # issued set; no slicing, no per-TM linear walk. The
+            # "earlier" semantic (NOT "anywhere in the history")
+            # matches the healer's Phase 2 scoping so the probe and
+            # the healer agree on the order-inverted shape.
+            if tc_id not in issued_tc_ids:
                 return True
     return False
 
