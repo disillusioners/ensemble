@@ -90,11 +90,16 @@ export interface LiveViewDialogData {
  *    daemon-side hardening and the FE matcher cannot touch
  *    the ensemble app.
  *
- *  - The iframe ``src`` is bound via ``DomSanitizer`` (the
- *    standard Angular escape hatch) so the sanitizer is
- *    not bypassed. The dialog trusts the matcher to have
- *    rejected non-live-view URLs; the sanitizer is the
- *    belt-and-braces against an accidental widening.
+ *  - The iframe ``src`` is bound via ``DomSanitizer`` using
+ *    the ``bypassSecurityTrustResourceUrl`` escape hatch.
+ *    That call DOES bypass the sanitizer's built-in checks —
+ *    the bypass wraps ONLY matcher-validated
+ *    same-origin-relative paths, per the established
+ *    codebase pattern for trusted-resource binding. The
+ *    matcher is the security boundary here; the explicit
+ *    bypass is what lets the already-validated value reach
+ *    the iframe at all (belt-and-braces against an
+ *    accidental widening of the matcher).
  *
  * KEYBOARD ACCESSIBILITY:
  *

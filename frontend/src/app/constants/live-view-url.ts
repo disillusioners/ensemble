@@ -47,7 +47,13 @@
  *   - Whitespace, control characters, or NUL bytes anywhere.
  *   - Empty string / non-string inputs (defensive — typed as
  *     ``unknown``-in / ``string``-out to match the consumer's
- *     contract from ``HTMLAnchorElement.href``).
+ *     contract: the consumer reads the RAW attribute via
+ *     ``HTMLAnchorElement.getAttribute('href')``, not the
+ *     resolved ``.href`` property. NOTE: a future "alignment"
+ *     of this mismatch — switching to resolved ``.href`` —
+ *     would make every URL absolute and silently kill all
+ *     chips (the matcher only accepts origin-relative paths);
+ *     the raw read is the stricter, intentional choice).
  *
  * The function is **pure** — no DOM, no Angular, no IO. It is
  * unit-tested as a pure-function truth table (per the
@@ -183,6 +189,7 @@ export function parseLiveViewUrl(href: unknown): ParsedLiveViewUrl | null {
   // (``/^[a-z][a-z0-9-]{0,62}$/``) which forbids a leading
   // dot, so by the time we get here the root segment is
   // guaranteed to start with a lowercase letter.
+  // ``@`` in relPath is allowed ON PURPOSE — mirrors the daemon's ``is_well_formed_rel_path``, which also permits it.
   const segments = relPath.split('/');
   for (const segment of segments) {
     if (segment === '' || segment === '.' || segment === '..') {
