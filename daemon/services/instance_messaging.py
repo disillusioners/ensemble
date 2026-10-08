@@ -1518,20 +1518,35 @@ class InstanceMessagingService:
           skip is still recorded in the counter (so a subsequent
           attempt with a baseline can compare), but no escalation
           fires.
-        * Once a baseline exists, escalation fires ONLY when:
+        * Once a baseline exists (the operator's first success set
+          ``prev``), escalation fires ONLY when:
           (a) ``new_count >= threshold`` (the streak is long enough), AND
           (b) ``current_message_count > prev_message_count`` (the
               context is actually growing — the brief's
               "while context keeps growing" clause).
-        * If ``current_message_count`` is ``None`` (status-reject
-          skip, where no state read is available) OR equals
-          ``prev_message_count`` (non-growing streak), the counter
-          RESETS to 0 — a stable non-quiescent instance with no
-          growth does NOT escalate. The reset is the implementation
+        * If ``current_message_count`` is provided and the count
+          did NOT grow (``current <= prev``), the streak is
+          non-growing → the counter RESETS to 0 and the method
+          returns WITHOUT escalating. This is the implementation
           of the docstring's promise: "non-growing streak does NOT
           escalate". The prior iteration's code only checked
           baseline existence, so a stable non-quiescent instance
           would escalate after 3 skips. That bug is fixed here.
+        * If ``current_message_count`` is ``None`` (status-reject
+          skip, where no state read is available) OR the
+          ``current_message_count`` is provided but ``prev`` is
+          still ``None`` (the first non-quiescent skip after a
+          successful compaction, before the next success
+          re-records the baseline), the growth check is
+          INCONCLUSIVE — the counter PERSISTS (does not reset)
+          and the threshold alone gates escalation. The status-
+          reject path doesn't have access to the message count;
+          we accept the loss of the growth signal on that path
+          in exchange for keeping the counter monotonic across
+          non-quiescent + status-reject skips. This is the
+          corrected iteration-3 semantics (the prior docstring
+          claimed the counter resets on ``current_message_count
+          is None``; the code never did that).
         * A growing streak that reaches N escalates regardless of
           the exact current-vs-previous delta (the growth check is
           binary; the brief said "while context keeps growing").
@@ -1688,9 +1703,12 @@ class InstanceMessagingService:
             # function; if the test exercises it via direct
             # sync invocation, asyncio.to_thread is a no-op
             # (returns a Future immediately) and the test can
-            # ``.result()`` it. We keep the call site ASYNC-aware
-            # by exposing a separate async wrapper
-            # (see ``_set_proactive_escalation_async`` below).
+            # ``.result()`` it. The sync write is the documented
+            # best-effort path (the brief's \"sync DB call is
+            # best-effort\" — the failure mode is a logged
+            # DEBUG, not a crash). The C2 fix routes the write
+            # through ``set_metadata_many`` on the production
+            # ``InstanceRepository`` (atomic, dialect-aware).
             set_proactive_escalation_metadata(
                 self._manager._instance_repository,
                 instance_id,
