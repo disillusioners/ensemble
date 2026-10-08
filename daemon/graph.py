@@ -23,6 +23,14 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk
+
+from .tool_pairing_history import (
+    PARTNER_SYNTH_TEXT,
+    ToolPairingHealReport,
+    dedupe_incoming_tool_call_ids,
+    has_pairing_violations,
+    validate_and_heal_messages,
+)
 from typing import Any, Callable, ClassVar, Mapping, NamedTuple, Optional, cast
 from dataclasses import dataclass, field, replace as _replace
 from datetime import datetime, timezone
@@ -113,6 +121,7 @@ from .llm_error_classifier import (
     ContextLengthExceededError,
     MalformedLLMResponseError,
     TIMEOUT_EXCEPTIONS,
+    ToolPairingInvalidError,
     TRANSIENT_EXCEPTIONS,
     TransientAPIError,
     _truncate_error,
@@ -307,6 +316,21 @@ def _frame_injected_report(content: str) -> str:
 # the "D1 entry-seam pairing tail-guard (wc-wake-report-integrity, T6)"
 # comment site in ``daemon/services/instance_messaging.py``; keep the
 # two ends cross-referenced when either changes.
+#
+# W5 (fix/tool-pairing-full-history-heal): this in-graph tail-only guard
+# is COMPLEMENTED by :func:`_ensure_full_history_pairing` (defined later
+# in this module, wired at the primary dispatch FIRST
+# ``current_llm.invoke(...)`` site; the W2 catch runs the heal
+# separately on the retry path, not at an invoke site). The tail-only
+# guard covers the trailing poisoned-state shape (the original use
+# case); the full-history guard covers the mid-history violations the
+# tail-only guard cannot see (the 03d7657f forensic shape). Both run
+# together at the LLM dispatch boundary — the
+# full-history guard runs FIRST (cheaper, O(n) probe + conditional
+# O(n) heal), then ``_ensure_tool_result_pairing`` runs for the
+# trailing drain semantics (its R1 deterministic id format overlaps
+# with the full-history guard's ``partner-synth-{tc_id}`` format, so
+# re-heals across the two ends stay idempotent).
 
 _TOOL_PAIRING_MAX_TRAVERSAL = 8
 _TOOL_PAIRING_PLACEHOLDER_TEXT = (
@@ -439,6 +463,114 @@ def _ensure_tool_result_pairing(
         )
 
     return synthesized
+
+
+def _ensure_full_history_pairing(
+    messages: list[BaseMessage],
+    instance_short: str = "",
+) -> ToolPairingHealReport:
+    """Probe + heal tool-call pairing across the FULL message history.
+
+    Closes the 2013-bricking bug class (incident 03d7657f) where
+    mid-history pairing violations survived the pre-existing
+    O(1) tail-only helpers
+    (:func:`_ensure_tool_result_pairing`,
+    :func:`daemon.services.instance_messaging._heal_poisoned_checkpoint_tail`).
+    The forensic scenario minted one real mid-history defect:
+    an unanswered ``tool_call_id`` (``call_8ed9e1771dca``) — one
+    AIMessage(tc) whose ToolMessage never arrived (interrupted-
+    mid-tool shape, 1c/0r). The originally-cited "duplicate
+    ``tool_call_id`` (``call_01a0fcefec43``)" was a 12-char-prefix
+    grouping false positive — the two calls share only their
+    first 12 hex chars, NOT their full ids. The duplicate-tc_id
+    class is NOT a brick-class defect (strict gateways accept
+    count-duplicates when each AIMessage has its own adjacent
+    block); the W1(c) NOTE in
+    :mod:`daemon.tool_pairing_history` documents the count-vs-
+    adjacency distinction and the producer-side guard that
+    handles dup-id prevention at the COMMIT boundary.
+
+    Performance gating (W1 design rationale):
+        The LLM dispatch hot path is performance-sensitive — every
+        ``current_llm.invoke(full_messages)`` site ships messages to
+        the provider. An unbounded O(n) scan per invoke was
+        design-rejected at the original brainstorming (see the
+        ADR / design discussion; the original rejection cite was
+        at line 287 in earlier revisions). The chosen gating
+        pattern is:
+
+          * Always run the cheap O(n) ``has_pairing_violations`` probe
+            (O(n) time, O(n) auxiliary memory in a ROLLING prefix
+            set of issued tool_call_ids + the precomputed
+            ``_build_next_non_tool_after`` array — the set is
+            NOT precomputed in a separate pass; it grows as the
+            left-to-right walk encounters each AIMessage and
+            resets to empty when a non-AIMessage, non-ToolMessage
+            (e.g. HumanMessage) bounds the block-ownership region.
+            The probe is one O(1) set lookup per ToolMessage for
+            the orphan check + a bounded scan of the immediately-
+            adjacent ToolMessage block per AIMessage for the
+            adjacency check. For a 1k-msg history this is a few
+            µs; for a 10k-msg history it is sub-millisecond. The
+            probe is dominated by Python type checks, no DB / no
+            I/O / no locks.
+          * ONLY when the probe returns ``True`` (a real violation is
+            present) does the full ``validate_and_heal_messages`` run.
+            The full scan mutates in place and returns a report the
+            caller threads into the C2 return so the heal is persisted
+            on the next checkpoint superstep.
+          * On the happy path (no violations), the cost is the probe
+            alone — only the O(n) auxiliary set is allocated, no log
+            lines, no message construction. The probe is a
+            non-mutating, no-side-effect validator that integrates
+            cleanly with the existing O(1) tail-only guard (the tail
+            guard still fires when its trigger condition matches; the
+            full scan catches the rest).
+
+    This helper does NOT persist anything. The caller persists
+    synthesized ``ToolMessage``s by appending them to the C2 return
+    list and removals by threading ``RemoveMessage`` sentinels into
+    the same return. See ``_process_message_with_tracking`` /
+    ``agent_node`` return-assembly for the persistence pattern.
+
+    Args:
+        messages: LLM-bound ``full_messages`` (or any other list
+            carrying the conversation history). Mutated in place
+            when a violation is detected.
+        instance_short: Short instance id for log lines. Empty string
+            accepted (used by unit tests).
+
+    Returns:
+        A :class:`ToolPairingHealReport` describing the heal. Empty
+        report on the happy path.
+    """
+    # Happy-path probe: a single O(n) left-to-right walk with a
+    # ROLLING prefix set of tool_call_ids (the set of tc_ids issued
+    # by AIMessages at indices < current). The set is NOT
+    # precomputed in a separate pass — it grows as we encounter
+    # each AIMessage and resets to empty when a non-AIMessage,
+    # non-ToolMessage (e.g. HumanMessage) bounds the block-
+    # ownership region. Per ToolMessage the orphan check is a
+    # single O(1) set lookup against the current rolling set;
+    # per AIMessage the adjacency check scans the immediately-
+    # adjacent ToolMessage block (bounded by the precomputed
+    # ``_build_next_non_tool_after`` array). The older O(n) slice
+    # + per-AIMessage ``_extract_tool_call_ids`` walk inside the
+    # orphan check made the probe worst-case O(n²); the rolling
+    # set + bounded-block scan keep it O(n) time, O(n) auxiliary
+    # memory (the prefix set + the ``_build_next_non_tool_after``
+    # array). ``has_pairing_violations`` short-circuits on the
+    # FIRST violation found, so for healthy histories it
+    # inspects every message; for poisoned histories it returns
+    # on the first hit.
+    if not messages or not has_pairing_violations(messages):
+        return ToolPairingHealReport(scanned_count=len(messages) if messages else 0)
+
+    # Heal path: full scan + in-place mutation. The report carries
+    # the operational summary so the caller can build persistence
+    # actions (synthesized list → C2 outgoing; removed ids →
+    # RemoveMessage sentinels).
+    return validate_and_heal_messages(messages, instance_short=instance_short)
 
 
 class ReportInjectionSlot:
@@ -3011,6 +3143,21 @@ async def _maybe_pre_terminal_repair(
 
     loop = asyncio.get_running_loop()
     try:
+        # W1: full-history pairing heal on the re-invocation payload
+        # too — the repair surgery may have left a stale violation in
+        # mid-history (the surgery targeted a different defect class).
+        # Probe-only O(n) walk; full heal only when the probe flags a
+        # real violation. See ``_ensure_full_history_pairing``.
+        _repair_full_heal = _ensure_full_history_pairing(
+            new_full_messages, instance_short,
+        )
+        if _repair_full_heal.synthesized or _repair_full_heal.removed_message_ids:
+            logger.warning(
+                f"[ToolPairing:FULL] repair re-invoke heal for "
+                f"{instance_short}: synthesized="
+                f"{len(_repair_full_heal.synthesized)} "
+                f"removed={len(_repair_full_heal.removed_message_ids)}"
+            )
         new_response = await loop.run_in_executor(
             None, lambda: current_llm.invoke(new_full_messages)
         )
@@ -3869,7 +4016,8 @@ class SessionState(MessagesState):
     # → ``agent_node``). Set by ``agent_repair_ghost`` when the durable
     # budget is exhausted; consumed (and cleared to ``None``) by
     # ``agent`` on its NEXT invocation. Mirrors the loop class's
-    # response-substitution precedent (graph.py:6847-6848): the
+    # response-substitution precedent (the ``response = _durable_loop.terminal_message``
+    # pattern in :func:`_maybe_durable_loop_repair`): the
     # terminal SUBSTITUTES the agent_node's response so NO LLM invoke
     # fires and the plain-AIMessage fall-through in ``should_continue``
     # routes to END with the terminal as ``messages[-1]`` — cycle-kill:
@@ -7828,7 +7976,8 @@ def create_agent_repair_ghost_node(
         # this field via response-substitution (graph.py::agent_node
         # near top of the closure body) — mirroring the loop class's
         # ``response = _durable_loop.terminal_message`` precedent
-        # (graph.py:6847-6848). The terminal SUBSTITUTES the LLM
+        # (the ``response = _durable_loop.terminal_message`` pattern in
+        # :func:`_maybe_durable_loop_repair`). The terminal SUBSTITUTES the LLM
         # response, so NO LLM invoke fires, the terminal is the final
         # visible message (``messages[-1]``), and
         # ``should_continue``'s plain-AIMessage fall-through routes to
@@ -8043,7 +8192,8 @@ def create_agent_node(
         # ``create_agent_repair_ghost_node`` exhaustion branch). The
         # unconditional ``agent_repair_ghost → agent`` edge then routes
         # here. Mirror the loop class's response-substitution precedent
-        # (graph.py:6847-6848 — ``response = _durable_loop.terminal_message``):
+        # (the ``response = _durable_loop.terminal_message`` pattern in
+        # :func:`_maybe_durable_loop_repair` —
         # APPEND the stashed terminal as this node's emitted message —
         # different mechanism from the loop precedent's `response = ...`
         # substitution, same cycle-kill: ``messages[-1]`` is a plain
@@ -8069,8 +8219,9 @@ def create_agent_node(
         _pending_ghost_terminal = state.get("pending_repair_ghost_terminal")
         if _pending_ghost_terminal is not None:
             # Carrier co-occurrence impossible by construction — when this
-            # early return fires, the loop-substitution (graph.py:6847-6848)
-            # and pre-terminal-intercept (graph.py:7141) paths below are
+            # early return fires, the loop-substitution (the
+            # ``response = _durable_loop.terminal_message`` pattern in
+            # :func:`_maybe_durable_loop_repair`) and pre-terminal-intercept (graph.py:7141) paths below are
             # unreachable (the carrier is set ONLY on ghost-rung budget
             # exhaustion, mutually exclusive with the other rungs).
             _ghost_terminal_budget = int(
@@ -8244,6 +8395,13 @@ def create_agent_node(
         # poisoned state tail (unanswered ``AIMessage(tool_calls)``
         # after a daemon restart) would replay forever.
         pairing_synthesized_msgs: list[ToolMessage] = []
+        # W1 heal removes orphan ``ToolMessage``s whose block-ownership
+        # rule fires and synthesizes placeholders; duplicate
+        # ``AIMessage(tool_calls)`` call-sites are NOT removed
+        # (W1(c) — strict gateways accept count-dups with own
+        # adjacent blocks); W4 ``dedupe_incoming_tool_call_ids``
+        # prevents dup-ids at the commit boundary.
+        pairing_remove_sentinels: list[RemoveMessage] = []
         if injection_slot is not None:
             pending_list = injection_slot.get(instance_id)
             if pending_list:
@@ -8895,6 +9053,28 @@ def create_agent_node(
                 if _precall_outcome.rebuilt_payload is not None:
                     full_messages = _precall_outcome.rebuilt_payload
 
+                # ── W1: Full-history tool-call pairing guard ─────────
+                # Closes the 2013-bricking bug class (incident 03d7657f)
+                # where mid-history pairing violations survived the
+                # pre-existing O(1) tail-only helpers. Runs an O(n)
+                # probe (O(n) auxiliary set on the happy path); only the
+                # full heal when a violation is detected. See the
+                # ``_ensure_full_history_pairing`` docstring for the
+                # cost justification.
+                case_id = instance_short or "?"
+                _pairing_heal_report = _ensure_full_history_pairing(
+                    full_messages, case_id,
+                )
+                if _pairing_heal_report.synthesized:
+                    pairing_synthesized_msgs.extend(
+                        _pairing_heal_report.synthesized
+                    )
+                if _pairing_heal_report.removed_message_ids:
+                    pairing_remove_sentinels.extend(
+                        RemoveMessage(id=mid)
+                        for mid in _pairing_heal_report.removed_message_ids
+                    )
+
                 # Use run_in_executor to avoid blocking the event loop.
                 # This allows SSE streaming to continue while LLM processes.
                 loop = asyncio.get_running_loop()
@@ -8902,6 +9082,127 @@ def create_agent_node(
                     None,
                     lambda: current_llm.invoke(full_messages)
                 )
+        except ToolPairingInvalidError as _w2_pairing_exc:
+            # ── W2: Reactive 2013-class recovery (heal-once retry) ──
+            # Closes the 2013-bricking bug class (incident 03d7657f)
+            # when the proactive W1 guard missed a violation that the
+            # gateway happened to flag. The classifier
+            # (``daemon/llm_error_classifier.py``) raised THIS exception
+            # specifically on the pairing-invalid signatures — generic
+            # BadRequestError keeps the existing non-retryable path.
+            #
+            # One-shot protocol:
+            #   1. Run full-history heal on ``full_messages`` (in-place
+            #      mutation). The W1 helper handles synthesis + orphan
+            #      removal + duplicate dedup in one scan.
+            #   2. Track the synthesized messages and removed ids so the
+            #      C2 return persists them (matches the proactive W1
+            #      persistence pattern — checkpoint is healed in the
+            #      same superstep).
+            #   3. Re-invoke the LLM ONCE with the healed payload. A
+            #      second failure reraises the original
+            #      ``ToolPairingInvalidError`` so the existing error
+            #      path takes over — NEVER an unbounded retry.
+            logger.warning(
+                f"[ToolPairing:FULL] W2 reactive heal for {instance_short} "
+                f"after gateway rejection signature="
+                f"{_w2_pairing_exc.signature!r}"
+            )
+            _w2_report = _ensure_full_history_pairing(
+                full_messages, instance_short,
+            )
+            if _w2_report.synthesized:
+                pairing_synthesized_msgs.extend(_w2_report.synthesized)
+            if _w2_report.removed_message_ids:
+                pairing_remove_sentinels.extend(
+                    RemoveMessage(id=mid)
+                    for mid in _w2_report.removed_message_ids
+                )
+            if (
+                not _w2_report.synthesized
+                and not _w2_report.removed_message_ids
+            ):
+                # Defensive: the gateway flagged a pairing-invalid
+                # signature but the validator found NOTHING to heal.
+                # The signature may be a sibling shape whose fix lives
+                # outside our full-history scan (e.g. a duplicate
+                # AIMessage without a redundant ToolMessage). Bounded
+                # by ONE retry even here — the second failure will
+                # raise and the existing path takes over.
+                logger.warning(
+                    f"[ToolPairing:FULL] W2 reactive heal found no "
+                    f"healable violation for {instance_short} — "
+                    f"single retry proceeds without state change"
+                )
+            loop = asyncio.get_running_loop()
+            try:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: current_llm.invoke(full_messages)
+                )
+            except ToolPairingInvalidError as _w2_second_exc:
+                # Second failure — give up. Raise the second
+                # exception (the more recent one — the gateway
+                # rejected the healed payload too) with the
+                # ORIGINAL first invocation's exception as
+                # ``__cause__`` via ``from`` so maximal diagnostics
+                # are preserved on the chain:
+                #   - The primary raised exception is
+                #     ``_w2_second_exc`` (the most recent rejection,
+                #     which carries the post-heal signature).
+                #   - ``__cause__`` is ``_w2_pairing_exc`` (the
+                #     original gateway rejection, with the full
+                #     pre-heal signature chain still attached).
+                #   - ``_w2_pairing_exc.original`` /
+                #     ``_w2_second_exc.original`` still expose the
+                #     underlying ``openai.BadRequestError`` for
+                #     forensic access.
+                # The existing error path / non-retryable upstream
+                # pipeline takes over (terminal as shipped pre-W2).
+                #
+                # ┌────────────────────────────────────────────────────┐
+                # │ TRANSIENT ESCAPE PATH (accepted; documented)      │
+                # │                                                    │
+                # │ The W2 inner-try catches ONLY                       │
+                # │ ``ToolPairingInvalidError``. A transient raised     │
+                # │ inside the W2 retry-invoke body (a 2013-then-       │
+                # │ transient sequence: first invoke raises the        │
+                # │ pairing exception → W2 catch runs → heal → retry    │
+                # │ invoke raises a different, transient exception) is  │
+                # │ NOT a ``ToolPairingInvalidError`` → escapes the     │
+                # │ inner try uncaught → propagates out of the W2      │
+                # │ catch handler body → propagates out of the entire  │
+                # │ outer try statement. Python ``except`` clauses     │
+                # │ only match exceptions raised in the immediately-   │
+                # │ enclosing try body; sibling clauses (the            │
+                # │ ``ContextLengthExceededError`` clause, the          │
+                # │ transient-tuple clause, and the generic            │
+                # │ ``Exception`` clause) are NOT consulted for         │
+                # │ exceptions raised inside a handler body. Only the  │
+                # │ task-level error path (LangGraph node wrapper /    │
+                # │ task processor) catches the propagated transient.   │
+                # │                                                    │
+                # │ Why accepted: the probability of a 2013-then-      │
+                # │ transient sequence inside the W2 retry window is   │
+                # │ low (the gateway that just 2013-rejected is more   │
+                # │ likely to keep rejecting than to time out), the   │
+                # │ W2 inner-try does not disturb the outer transient │
+                # │ tuple's handling of try-BODY-raised transients    │
+                # │ (handler-raised transients were never its         │
+                # │ concern), and building new retry machinery here  │
+                # │ would couple the W2 bounded-retry contract to a   │
+                # │ transient budget the design explicitly rejects    │
+                # │ (heal-once + retry-once, NEVER more — see FIX 1). │
+                # │ The task-level error path still catches the       │
+                # │ propagated transient if it bypasses the W2        │
+                # │ handler.                                         │
+                # └────────────────────────────────────────────────────┘
+                logger.error(
+                    f"[ToolPairing:FULL] W2 reactive heal did not "
+                    f"resolve pairing-invalid for {instance_short} "
+                    f"after heal-once retry; reraising"
+                )
+                raise _w2_second_exc from _w2_pairing_exc
         except ContextLengthExceededError:
             if compactor is None or graph_ref is None or graph_ref[0] is None:
                 logger.warning('[LLM] Context length exceeded (no compactor available)')
@@ -9207,10 +9508,141 @@ def create_agent_node(
             # Use run_in_executor to avoid blocking the event loop after compaction
             # Continue with the same LLM that was being used (may be vision or standard)
             loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: current_llm.invoke(compact_messages)
+            # W1: full-history pairing heal on the post-compaction
+            # payload too — compaction may have produced a stale
+            # boundary violation (orphaned ToolMessage at the new head)
+            # that the per-group snap in
+            # :func:`daemon.compaction._snap_orphan_tool_messages_at_cut`
+            # does not cover.
+            # Probe-only O(n) walk; full heal only when the probe
+            # flags a real violation.
+            _post_compact_heal = _ensure_full_history_pairing(
+                compact_messages, instance_short,
             )
+            if (
+                _post_compact_heal.synthesized
+                or _post_compact_heal.removed_message_ids
+            ):
+                logger.warning(
+                    f"[ToolPairing:FULL] post-compaction heal for "
+                    f"{instance_short}: synthesized="
+                    f"{len(_post_compact_heal.synthesized)} "
+                    f"removed={len(_post_compact_heal.removed_message_ids)}"
+                )
+            # LLM invoke (post-compaction). Mirrors the primary
+            # dispatch site's structure (W1 heal on the payload, then
+            # invoke inside an INNER ``try/except`` so a
+            # ``ToolPairingInvalidError`` raised by the post-compaction
+            # invoke is caught HERE — Python ``except`` clauses only
+            # catch exceptions raised in the try BODY, and a sibling
+            # ``except ToolPairingInvalidError`` at the same level as
+            # this CLE handler is unreachable for exceptions raised
+            # inside the handler. Compaction may have left a stale
+            # pairing violation the per-group snap in
+            # :func:`daemon.compaction._snap_orphan_tool_messages_at_cut`
+            # does not cover; the W1 probe above handles the common case,
+            # this W2 inner-try handles the strict-gateway-still-rejects
+            # case the probe missed. See the NOTE at
+            # ``daemon/compaction.py:1750-1757`` for the W3 snap vs
+            # 50%-tail floor distinction.
+            loop = asyncio.get_running_loop()
+            try:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: current_llm.invoke(compact_messages)
+                )
+            except ToolPairingInvalidError as _w2_compact_pairing_exc:
+                # W2 reactive heal on the post-compaction payload —
+                # same heal-once retry contract as the primary dispatch
+                # site (:func:`daemon.graph.create_agent_node`'s primary
+                # W2 inner-try). Heal on ``compact_messages`` and
+                # re-invoke ONCE; second failure reraises and the
+                # existing error path takes over.
+                logger.warning(
+                    f"[ToolPairing:FULL] W2 reactive heal on post-compaction "
+                    f"for {instance_short} after gateway rejection signature="
+                    f"{_w2_compact_pairing_exc.signature!r}"
+                )
+                _w2_compact_report = _ensure_full_history_pairing(
+                    compact_messages, instance_short,
+                )
+                if _w2_compact_report.synthesized:
+                    pairing_synthesized_msgs.extend(
+                        _w2_compact_report.synthesized
+                    )
+                if _w2_compact_report.removed_message_ids:
+                    pairing_remove_sentinels.extend(
+                        RemoveMessage(id=mid)
+                        for mid in _w2_compact_report.removed_message_ids
+                    )
+                try:
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: current_llm.invoke(compact_messages)
+                    )
+                except ToolPairingInvalidError as _w2_compact_second_exc:
+                    # Second failure — raise the second exception
+                    # (the more recent one — the gateway rejected
+                    # the post-heal payload too) with the ORIGINAL
+                    # first invocation's exception as ``__cause__``
+                    # via ``from``. Mirrors the primary W2 inner-try's
+                    # FIX 4 alignment (the ``raise ... from ...`` chain
+                    # documented in the primary site's TRANSIENT ESCAPE
+                    # PATH rationale above) so both W2 catch sites
+                    # behave identically:
+                    #   - Primary raise: the second
+                    #     ``ToolPairingInvalidError`` (most recent
+                    #     rejection signature).
+                    #   - ``__cause__``: the original first
+                    #     ``ToolPairingInvalidError`` (the
+                    #     pre-heal signature).
+                    #   - The original ``BadRequestError``s are
+                    #     still accessible via ``.original`` on
+                    #     either exception for forensic access.
+                    # The existing error path / non-retryable
+                    # upstream pipeline takes over (terminal as
+                    # shipped pre-W2). Maximal diagnostics
+                    # preserved.
+                    #
+                    # ┌────────────────────────────────────────────┐
+                    # │ TRANSIENT ESCAPE PATH (accepted; documented)│
+                    # │                                            │
+                    # │ Same escape path as the primary W2 site.   │
+                    # │ The post-compaction W2 inner-try catches    │
+                    # │ ONLY ``ToolPairingInvalidError``. A        │
+                    # │ transient raised inside the W2 retry       │
+                    # │ invoke body (a 2013-then-transient          │
+                    # │ sequence inside the CLE handler) escapes   │
+                    # │ the inner try uncaught → propagates out    │
+                    # │ of the W2 catch handler body → out of the   │
+                    # │ CLE clause → out of the entire             │
+                    # │ outer try statement. Sibling clauses        │
+                    # │ (the ContextLengthExceededError clause, the  │
+                    # │ transient-tuple clause, and the generic      │
+                    # │ Exception clause) are NOT consulted for     │
+                    # │ handler-body raises. Only the task-level    │
+                    # │ error path catches the propagated transient. │
+                    # │                                            │
+                    # │ The W2 inner-try does not disturb the      │
+                    # │ outer transient tuple's handling of        │
+                    # │ try-BODY-raised transients past the CLE    │
+                    # │ handler boundary (handler-raised           │
+                    # │ transients were never its concern), the     │
+                    # │ task-level error path still catches it,     │
+                    # │ and building new retry machinery here would  │
+                    # │ couple the W2 bounded contract to a         │
+                    # │ transient budget the design rejects.        │
+                    # │ Accepted — see the primary W2 site's full   │
+                    # │ TRANSIENT ESCAPE PATH rationale in the      │
+                    # │ comment block at the top of                  │
+                    # │ :func:`daemon.graph.create_agent_node`.      │
+                    # └────────────────────────────────────────────┘
+                    logger.error(
+                        f"[ToolPairing:FULL] W2 post-compaction heal did "
+                        f"not resolve pairing-invalid for {instance_short}; "
+                        f"reraising"
+                    )
+                    raise _w2_compact_second_exc from _w2_compact_pairing_exc
         except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError,
                 BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError, MalformedLLMResponseError, IndexError,
                 httpx.TimeoutException) as e:
@@ -9529,6 +9961,55 @@ def create_agent_node(
             _repair_surgery_prefix = _pre_terminal_outcome.surgery_prefix
         elif _durable_loop is not None:
             _repair_surgery_prefix = _durable_loop.surgery_prefix
+
+        # ── W4: Producer guard — atomic-commit feasibility & defensive path ──
+        #
+        # 03d7657f forensic re-check (commission correction 2026-10-08):
+        # the originally-cited "duplicate tool_call_id
+        # call_01a0fcefec43" was a 12-char-prefix grouping FALSE
+        # POSITIVE — call_01a0fcefacc228e8 and call_01a0fcefacc228e9
+        # are DISTINCT valid calls (job_get and get_mission). The
+        # incident's ONLY real defect was the unanswered
+        # call_8ed9e1771dca (interrupted-mid-tool shape, 1c/0r
+        # mid-history).
+        #
+        # W4 RE-SCOPE: producer work now focuses on the
+        # interrupted-mid-tool shape — assess atomic/deferred commit
+        # at the F2/node boundary; W1 synthesis remains the residual
+        # net. Dup-id re-mint has NO proven occurrence — we do NOT
+        # spend investigation budget pinning it.
+        #
+        # ATOMIC-COMMIT FEASIBILITY ASSESSMENT: atomic commit at the
+        # LangGraph node boundary is NOT feasible without a separate
+        # ``aupdate_state`` round-trip (LangGraph commits whatever
+        # the node returns in the same superstep, AFTER any guard
+        # runs). The interrupted-mid-tool producer (an AIMessage(tc)
+        # committed at one LangGraph step, ToolMessage intended for
+        # a follow-up step that never ran) cannot be prevented at the
+        # producer boundary — by the time we know the ToolMessage
+        # is missing, the AIMessage has already been checkpointed.
+        # W1's full-history heal (see :func:`_ensure_full_history_pairing`)
+        # covers the next
+        # dispatch with a synthesized placeholder immediately after
+        # the issuing AIMessage; W2's reactive recovery covers the
+        # rare case where the gateway still rejects after W1 (e.g.
+        # adjacency-violation shapes W1 didn't detect). W1 synthesis
+        # suffices as the residual net.
+        #
+        # DEFENSIVE PATH (W1(c) clarification): the dup-id guard
+        # ``dedupe_incoming_tool_call_ids`` is preserved here as a
+        # cheap defensive measure. Strict gateways accept count-
+        # duplicates as long as each AIMessage has its own adjacent
+        # block, so the guard is not load-bearing — but if an LLM
+        # REGENERATION / RETRY / REPLAY ever re-mints an already-
+        # answered ``tool_call_id`` (rare but possible if the
+        # provider loses determinism), this guard re-ids the colliding
+        # entries at the commit boundary so the gateway never sees a
+        # count-duplicate that could mask an adjacency violation.
+        if isinstance(response, AIMessage) and getattr(response, "tool_calls", None):
+            response, _w4_reid_count = dedupe_incoming_tool_call_ids(
+                response, messages, instance_short=instance_short,
+            )
         if _repair_surgery_prefix is not None:
             _repair_channel = list(_repair_surgery_prefix)
             if pairing_synthesized_msgs:
@@ -9557,6 +10038,7 @@ def create_agent_node(
             else:
                 _kept_pairing = []
             outgoing = [
+                *pairing_remove_sentinels,
                 *_repair_channel,
                 *_kept_pairing,
                 *injected_msgs,
@@ -9565,6 +10047,7 @@ def create_agent_node(
             ]
         elif _precall_outcome.outgoing_prefix is not None:
             outgoing: list[BaseMessage] = [
+                *pairing_remove_sentinels,
                 *_precall_outcome.outgoing_prefix,
                 *pairing_synthesized_msgs,
                 response,
@@ -9575,9 +10058,11 @@ def create_agent_node(
                 injected_msgs
                 or injected_report_msgs
                 or pairing_synthesized_msgs
+                or pairing_remove_sentinels
             ):
                 outgoing = (
-                    list(pairing_synthesized_msgs)
+                    list(pairing_remove_sentinels)
+                    + list(pairing_synthesized_msgs)
                     + list(injected_msgs)
                     + list(injected_report_msgs)
                     + outgoing  # response stays last (matches pre-F2 :3391-3395)
@@ -9846,13 +10331,36 @@ def build_instance_llms(
         llm_with_tools = llm_standard_chat.bind_tools(tools)
     llm_standard = llm_standard_chat.bind_tools(tools)
 
-    # Wrap with error classification and retry if config provided
-    if retry_config:
-        # CRITICAL: classify errors BEFORE retry so they can be caught
-        llm_with_tools = classify_llm_errors(llm_with_tools)
-        if llm_standard is not llm_with_tools:
-            llm_standard = classify_llm_errors(llm_standard)
+    # CRITICAL — classify errors BEFORE any retry/cooldown layer so
+    # the agent_node W2 catch (the primary ``except ToolPairingInvalidError``
+    # site in :func:`daemon.graph.create_agent_node` and its post-
+    # compaction W2 inner-try inside the
+    # ``ContextLengthExceededError`` handler)
+    # can intercept the ToolPairingInvalidError the classifier
+    # raises for the 2013 signature. The classify_llm_errors
+    # wrapping is INDEPENDENT of ``retry_config`` — the W2 wiring
+    # is a separate concern from the transient-retry budget.
+    # Pre-round-2-fix the wrapping lived inside the ``if retry_config:``
+    # block, so a caller passing ``retry_config=None`` silently
+    # dropped W2 (a raw ``BadRequestError`` would propagate past
+    # the W2 catch, which is keyed on ``ToolPairingInvalidError``).
+    # The transient/timeout retry/tenacity wiring below REMAINS
+    # gated on ``retry_config`` (it's the budget knob, not the
+    # classifier knob).
+    llm_with_tools = classify_llm_errors(llm_with_tools)
+    if llm_standard is not llm_with_tools:
+        llm_standard = classify_llm_errors(llm_standard)
 
+    # Wrap with tenacity retry + failover if config provided. This
+    # is the transient/timeout budget — SEPARATE from the
+    # classifier wiring above. The classifier runs INSIDE the
+    # retry scope, but tenacity does NOT retry
+    # ToolPairingInvalidError (it is not a TRANSIENT_EXCEPTIONS
+    # member — the W2 catch is the bounded retry for that
+    # exception class). Only the TRANSIENT/timeout budget is
+    # controlled here; the W2 budget is owned by the W2 catch
+    # itself.
+    if retry_config:
         transient_attempts = retry_config.get("transient_attempts", 8)
         timeout_attempts = retry_config.get("timeout_attempts", 3)
         primary_url = llm_config_with_headers.get("base_url", "")

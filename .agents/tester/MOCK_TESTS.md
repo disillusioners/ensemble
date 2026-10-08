@@ -651,3 +651,55 @@ Reproduces the ORIGINAL incident shape from mission f27e2d15 on a synthetic SQLi
 - **Teardown**: port 15540 free, 0 pgdata dirs, 0 leftover postgres on 1554x; repo porcelain unchanged
 - **Report**: RESULTS/2026-09-27-dry-run-projection-v32-verification.md
 - **Artifacts**: /tmp/ens-probe-v32/summary-20260927T122043Z.json + logs/run-20260927T122043Z.log (ephemeral; copied into RESULTS narrative)
+
+
+---
+
+## Mock Test: tool-pairing original-symptom closure (G3, incident 03d7657f)
+
+### Metadata
+- **Created**: 2026-10-08
+- **Script**: `test/packs/tool_pairing_original_symptom_mock_test.sh` (header modeled on `wc_wake_d1_w5_pairing_unit_test.sh`; body runs a new pytest file `tests/integration/test_tool_pairing_original_symptom.py`)
+- **Language**: Python (pytest, in-process fake LLM)
+- **Status**: ACTIVE
+- **Commission gate**: G3 — original-symptom closure (mock fidelity MANDATORY)
+
+### Configuration
+- **Timeout**: 240 s script-internal + `timeout 300` outer (dual-layer)
+- **Service Port**: n/a — in-process (no daemon boot)
+- **Mock Ports**: n/a — recommended implementation is an in-process strict-gateway fake LLM subclass. IF (and only if) the in-process path cannot faithfully reproduce the gateway error shape, an HTTP strict-gateway on port **10089** is permitted (OpenAI-compatible `/v1/chat/completions`), with full port cleanup.
+- **Cleanup**: pure in-process; pytest fixtures dispose everything. HTTP variant must kill port-10089 listeners before/after.
+
+### What It Tests
+The exact 03d7657f forensic shape: a conversation history poisoned with an UNANSWERED `tool_call` MID-LIST (~position 148 of ~600; here scaled but shape-accurate) reaching the LLM gateway. Strict-gateway mock MUST genuinely validate call→result **immediate adjacency** (not count-pairing): for every AIMessage with `tool_calls`, the immediately-following non-sentinel message(s) must be ToolMessages whose `tool_call_id`s exactly match those tool_calls in order; orphan ToolMessages, unanswered calls, dup ids, or interleave-by-non-tool ⇒ reject with a 2013-shaped `BadRequestError` body (the canonical 2013 signature — mirror `tests/unit/tool_pairing_history/test_w2_wiring.py:74` `_make_pairing_invalid_bad_request`).
+
+Drives the REAL `daemon.graph.create_agent_node` via the same harness pattern as `test_w2_wiring.py` (fake LLM as first positional arg; `compactor=None`, `graph_ref=[None]`).
+
+### Test Scenarios
+1. **S1 — symptom reproduction (healing DISABLED)**: monkeypatch `daemon.graph.has_pairing_violations` to `lambda m: False` (W1 probe disabled; document the exact monkeypatch target by reading `daemon/graph.py:566`). Poisoned history → `agent_node` invoke → strict mock raises the 2013-shaped error. **Assert the rejection fires** (this PROVES the pre-fix brick: without W1, the gateway rejects). No silent pass.
+2. **S2 — W1 pre-heal delivery (healing enabled, default)**: same poisoned history → strict mock receives a CLEAN payload (assert via the mock's captured incoming messages: `has_pairing_violations(received) == False`, orphan AI removed, sentinels inserted per contract) → returns `AIMessage("OK")`. Invocation count == 1.
+3. **S3 — W2 heal-once + single retry (late poison)**: strict mock in fail-once-then-succeed mode (first call raises 2013-shaped `BadRequestError` on a *post-W1* violation; second accepts). Assert: invocation count == 2, second payload valid, node returns OK, pipeline completes — NO NON-RETRYABLE brick.
+4. **S4 — W2 bounded reraise**: strict mock ALWAYS rejects. Assert: invocation count == 2 (heal-once + invoke-once bound), final exception is `ToolPairingInvalidError` with `__cause__` chain preserved (full-chain reraise per W2 contract), and the error is classified as the pairing-signature (NOT a transient) — assert via `daemon.llm_error_classifier` classification of the terminal error.
+
+### Success Criteria
+- [x] S1: poisoned payload rejected by strict mock with healing off (pre-fix symptom proven)
+- [x] S2: W1 delivers a valid payload, single invoke, OK response
+- [x] S3: W2 recovers in exactly 2 invocations
+- [x] S4: bounded reraise, full chain, pairing-signature classification
+- [x] Zero port bindings (in-process) or all mock ports freed
+- [x] Pack exits 0 under dual-layer timeout
+
+### Implementation Notes
+- The strict-gateway fake LLM is a real class (NOT a bare MagicMock) so `invoke`/`ainvoke` runs the adjacency walk on every call; capture every received messages list for post-assertions.
+- Adjacency algorithm: scan messages; for each AIMessage with tool_calls: the next message(s) — skipping ONLY `partner-synth-`/`pairing-synth-` SystemMessage sentinels — must be exactly the matching ToolMessages in order. Any deviation ⇒ 2013-shaped raise.
+- Poisoned history builder: ~600 messages, alternating System/Human; insert `AIMessage(tool_calls=[X])` at position ~148 followed by ~250 unrelated messages (NO ToolMessage for X anywhere). This is the forensic shape.
+- Reuse `_tc`-style helpers from `test_w2_wiring.py` and the `_make_pairing_invalid_bad_request` 2013 body builder.
+- Register the pack in `.agents/tester/PACKS.md` (the gate section created by the pack-creator worker) and flip this spec's Status → IMPLEMENTED/ACTIVE after the run.
+- Commit pathspec-only: the new pytest file + pack script + the two .agents/tester docs.
+
+### Last Run
+- **Date**: 2026-10-08T18:35Z (single official run: `timeout 300 bash test/packs/tool_pairing_original_symptom_mock_test.sh`)
+- **Worker Instance**: Worker (G3 mock-test commission, `fix/tool-pairing-full-history-heal` @ 86c1bc041 worktree)
+- **Result**: **PASS** — 4 passed, 9 warnings, pytest 1.24s, pack exit 0 (dual-layer timeout: `timeout 240s` pytest outer + `--timeout=210` per-test; both far from binding)
+- **Quick Fixes**: none needed — all four scenarios passed on the first execution (a pre-flight direct pytest run also passed 4/4 in 1.83s; the official captured run is the pack run)
+- **Report**: implementation notes — (1) monkeypatch target documented: the graph calls `has_pairing_violations` AS IMPORTED INTO `daemon.graph` (`daemon/graph.py:31` import, `:566` probe call inside `_ensure_full_history_pairing` def `:468`; the probe serves BOTH the agent-node W1 site `~:9049` and the W2 reactive-heal site `~:9107`, so one patch disables both heals — S1 therefore asserts 2 invocations with every received payload still poisoned and the rejection surfacing terminally). (2) S2 spec wording deviation pinned to the real contract: the W1 heal op for a mid-list unanswered call is SYNTHESIZE-PARTNER (placeholder `ToolMessage` id `partner-synth-{tc_id}` adjacent to the issuing AI), NOT orphan-AI removal (see `daemon/tool_pairing_history.py` heal ops; pinned in the test docstring). (3) S3's first rejection is call-count-based on an adjacency-clean post-W1 payload — the documented W2 motivating case ("gateway flags a violation the proactive W1 heal did not cover"). (4) Classification seam is production-faithful: the raw fake raises the canonical 2013 `BadRequestError` and the REAL `daemon.graph.classify_llm_errors` wrap converts it → `ToolPairingInvalidError` → W2 catch (mirrors `TestClassifierToW2Seam`). Registered in `.agents/tester/PACKS.md` under the TOOL-PAIRING FULL-HISTORY HEAL GATE section.

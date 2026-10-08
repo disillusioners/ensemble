@@ -1,68 +1,61 @@
 #!/usr/bin/env bash
-# Test Pack: compaction_unit_test — Compaction and idle timeout unit tests
+# Test Pack: compaction_unit_test — Compaction-only (single-file) unit suite.
 #
-# Authoritative compaction-scoped test list for the NEVER-BLOCKED
-# commission (fix/compaction-never-blocked @ c600af60d, see
-# ``docs/agent-prompt-writing-guide.md`` for pathspec discipline).
-# The pack is the single source of truth the tester runs against
-# — its 22-file breadth is the implementer's verified scope; any
-# narrower run is a SUBSET and must not be reported as the
-# commission's compaction-suite count.
+# Scope: tests/unit/test_compaction.py (130 tests). The pairing-heal branch
+# pins compaction-related unit assertions on a single-file narrow surface:
+# the canonical test_compaction.py module that drives the on-disk
+# compaction engine behavior (truncate-floor, model config, layered
+# summary, model_config surface, etc.).
 #
-# Iteration-3 (REVIEWER MINOR-3) added the 16 files beyond the
-# original 6 — each one is either directly compaction-related
-# (e.g. test_compact_executor, test_proactive_compaction_fix_*,
-# test_compaction_never_blocked) or the supporting graph /
-# classifier / response-validation / find-near-instance harness
-# that the compaction tests depend on. The iteration-3
-# implementer's FULL-suite run reported 781 passed in 43.22s;
-# this pack reproduces that count.
+# This is the PARTNER narrow pack for the broader 22-file `compaction`
+# suite from the NEVER-BLOCKED commission (a separate gate on
+# fix/compaction-never-blocked). Here we only prove the core
+# test_compaction.py module is wired correctly on this branch.
 #
-# Timeout: 3 minutes (180s) — leaves headroom for the 22-file
-# breadth (the 43.22s run is the median; CI variance is ~2x).
+# Branch pin: fix/tool-pairing-full-history-heal @ 86c1bc041.
+# Base: latest @ 9be991d56.
+#
+# TEST-ENV ONLY. No production code changes, no daemon boot, no ports.
+# No external services.
+#
+# Dual-layer timeout (per test-pack skill):
+#   - Layer 1 (command-level): caller wraps with `timeout 240`
+#   - Layer 2 (script-internal): `timeout 210s` on the pytest process
+#     (130 tests; <90s observed in calibration, 210s is a margin-rich
+#     safety net).
+#
+# Exit codes (per test-pack skill):
+#   0   PASS
+#   1   FAIL
+#   124 TIMEOUT
 set -euo pipefail
+IFS=$'\n\t'
+export PATH="/home/nea/.local/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-echo "=== Test Pack: compaction_unit_test (22-file authoritative breadth) ==="
-
 cd "$PROJECT_DIR"
 
-timeout 180s .venv/bin/pytest \
+echo "=== Test Pack: compaction_unit_test (test_compaction.py, 130 tests) ==="
+
+# Layer 2 (script-internal): 210s hard cap on the pytest process.
+timeout 210s .venv/bin/pytest \
   tests/unit/test_compaction.py \
-  tests/unit/test_compaction_never_blocked.py \
-  tests/unit/test_compaction_empty_guard_fallback.py \
-  tests/unit/test_compaction_multimodal.py \
-  tests/unit/test_compaction_model_config.py \
-  tests/unit/tools/test_inner_soul_compaction.py \
-  tests/unit/services/test_proactive_compaction_fix_p1.py \
-  tests/unit/services/test_proactive_compaction_fix_p1b.py \
-  tests/unit/services/test_proactive_compaction_fix_p2.py \
-  tests/unit/services/test_proactive_compaction_symptom_acceptance.py \
-  tests/unit/services/test_compact_executor.py \
-  tests/unit/services/test_compact_fired_watchers_deliver_before_compact.py \
-  tests/unit/services/test_compact_executor_revive_brick_e2e.py \
-  tests/unit/services/test_compact_executor_defect1_pause_resume_lifecycle.py \
-  tests/services/test_instance_messaging_compaction_guard.py \
-  tests/unit/services/test_injected_notes_hoisting.py \
-  tests/unit/services/test_injected_notes_hoisting_sweep_gaps.py \
-  tests/test_injection_compaction.py \
-  tests/unit/test_find_near_instance.py \
-  tests/unit/test_graph_retry_integration.py \
-  tests/unit/test_llm_error_classifier.py \
-  tests/unit/test_response_validation.py \
-  --tb=line -q 2>&1
+  --tb=short -q \
+  --override-ini="addopts=" \
+  --timeout=210 \
+  -p no:cacheprovider 2>&1
+RC=$?
 
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 124 ]; then
+if [ "$RC" -eq 124 ]; then
   echo "RESULT: TIMEOUT"
   exit 124
-elif [ $EXIT_CODE -eq 0 ]; then
+elif [ "$RC" -eq 0 ]; then
   echo "RESULT: PASS"
   exit 0
 else
   echo "RESULT: FAIL"
+  echo "Exit: $RC"
   exit 1
 fi

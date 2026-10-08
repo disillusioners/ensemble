@@ -429,6 +429,75 @@ class MalformedLLMResponseError(Exception):
         )
 
 
+class ToolPairingInvalidError(Exception):
+    """Raised when the LLM gateway rejects a request whose history
+    violates tool-call pairing (the 2013 brick class, incident 03d7657f).
+
+    The error class wraps the upstream ``openai.BadRequestError`` (or
+    its textual sibling) so callers can introspect the original cause
+    via ``.original``. Deliberately NOT a subclass of
+    ``openai.BadRequestError`` (so it does not slip into a generic
+    BadRequestError catch by accident) and NOT a member of
+    ``TRANSIENT_EXCEPTIONS`` (tenacity never auto-retries it; the
+    agent_node W2 wrapper owns the bounded retry instead).
+
+    The classifier (``daemon/llm_error_classifier.py``) detects the
+    pairing-invalid signatures and raises this exception. The agent_node
+    W2 site catches it specifically, runs a full-history pairing heal
+    on the LLM-bound payload, and re-invokes the LLM ONCE with the
+    healed messages. A second failure reraises and the existing error
+    path takes over — never an unbounded retry loop.
+
+    SIGNATURES — the canonical corpus-derived set; extend ONLY with
+    forensics evidence. Adding patterns here MUST be paired with a
+    test that reproduces the new shape end-to-end. The current set
+    (canonical 2013 + three sibling shapes) is listed verbatim from
+    the :attr:`SIGNATURES` tuple below as the single source of truth:
+
+      * "tool call result does not follow tool call" (2013, canonical)
+      * "messages with role 'tool' must be a response to a preceeding
+        message with 'tool_calls'" (sibling — single-quote variant)
+      * "messages with role \\"tool\\" must be a response to a
+        preceeding message with \\"tool_calls\\"" (sibling —
+        double-quote variant)
+      * "invalid parameter: messages with role 'tool'" (sibling —
+        anthropic parameter-prefix variant)
+    """
+
+    #: Canonical signatures — case-insensitive substrings. Listed in
+    #: :attr:`ToolPairingInvalidError.SIGNATURES` so both the
+    #: classifier and the tests reference a single source.
+    SIGNATURES: tuple[str, ...] = (
+        "tool call result does not follow tool call",
+        "messages with role 'tool' must be a response to a preceeding message with 'tool_calls'",
+        "messages with role \"tool\" must be a response to a preceeding message with \"tool_calls\"",
+        "invalid parameter: messages with role 'tool'",
+    )
+
+    def __init__(self, original: BaseException, signature: str):
+        self.original = original
+        self.signature = signature
+        super().__init__(
+            f"Tool-pairing-invalid response from gateway (signature={signature!r}): "
+            f"{type(original).__name__}: {original}"
+        )
+
+
+def _matches_pairing_invalid(msg: str) -> str | None:
+    """Return the matched signature string if ``msg`` is pairing-invalid.
+
+    Case-insensitive substring match against
+    :attr:`ToolPairingInvalidError.SIGNATURES`. Returns ``None`` on
+    no match — the caller treats ``None`` as "not a pairing-invalid
+    shape, use the existing BadRequestError path".
+    """
+    lowered = msg.lower()
+    for sig in ToolPairingInvalidError.SIGNATURES:
+        if sig.lower() in lowered:
+            return sig
+    return None
+
+
 # Exceptions that with_retry should catch and retry — server/connection errors
 TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     # Wrapper exception from classifier for retryable status codes
@@ -921,6 +990,21 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
             if 'context_length_exceeded' in error_str or 'maximum context length' in error_str:
                 logger.warning(f"[LLM] Context length exceeded (non-retryable), triggering compaction: {_truncate_error(e)}")
                 raise ContextLengthExceededError(e) from e
+            # W2: tool-pairing-shaped invalid-params (2013 brick class).
+            # The full-history pairing heal in ``daemon/graph.py`` (W1)
+            # covers the proactive path; this branch gives the REACTIVE
+            # recovery a single retry that runs the heal and re-invokes.
+            # The wrapper is NOT a TRANSIENT_EXCEPTIONS member — tenacity
+            # does NOT auto-retry it. The agent_node catch (graph.py)
+            # owns the bounded retry.
+            _pairing_sig = _matches_pairing_invalid(str(e))
+            if _pairing_sig is not None:
+                logger.warning(
+                    f"[LLM] Tool-pairing-invalid (signature={_pairing_sig!r}); "
+                    f"reactive W2 heal-once retry will fire at agent_node: "
+                    f"{_truncate_error(e)}"
+                )
+                raise ToolPairingInvalidError(e, _pairing_sig) from e
             logger.error(f"[LLM] BadRequestError (non-retryable): {_truncate_error(e)}")
             raise  # Other BadRequestErrors (genuine bugs) — pass through
         except openai.APIStatusError as e:

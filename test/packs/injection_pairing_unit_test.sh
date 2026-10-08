@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Test Pack: llm_error_classifier_unit_test — LLM error classifier unit suite.
+# Test Pack: injection_pairing_unit_test — Injection tool-pairing unit suite.
 #
-# Scope: tests/unit/test_llm_error_classifier.py (125 tests). The
-# classify-error module that routes transient vs permanent failures into
-# the graph retry chain. Companion to graph_retry: while
-# test_graph_retry_integration.py covers the wiring, this pack isolates
-# the classifier's classification surface end-to-end.
+# Scope: tests/unit/graph/test_injection_tool_pairing.py (30 tests). The
+# injection-edge tool-pairing layer (R1+R2 module): deterministic
+# placeholder ids (R1) and the CLE-mirror regression for the poisoned
+# tail rebuild (R2). Both live inside test_injection_tool_pairing.py —
+# the canonical injection-edge pairing surface.
 #
 # Branch pin: fix/tool-pairing-full-history-heal @ 86c1bc041.
 # Base: latest @ 9be991d56.
@@ -16,8 +16,6 @@
 # Dual-layer timeout (per test-pack skill):
 #   - Layer 1 (command-level): caller wraps with `timeout 240`
 #   - Layer 2 (script-internal): `timeout 210s` on the pytest process
-#     (125 tests; <90s observed in calibration, 210s is a margin-rich
-#     safety net).
 #
 # Exit codes (per test-pack skill):
 #   0   PASS
@@ -32,11 +30,11 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 cd "$PROJECT_DIR"
 
-echo "=== Test Pack: llm_error_classifier_unit_test (test_llm_error_classifier.py, 125 tests) ==="
+echo "=== Test Pack: injection_pairing_unit_test (test_injection_tool_pairing.py, 30 tests) ==="
 
 # Layer 2 (script-internal): 210s hard cap on the pytest process.
 timeout 210s .venv/bin/pytest \
-  tests/unit/test_llm_error_classifier.py \
+  tests/unit/graph/test_injection_tool_pairing.py \
   --tb=short -q \
   --override-ini="addopts=" \
   --timeout=210 \
